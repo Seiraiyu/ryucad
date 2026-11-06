@@ -183,6 +183,39 @@ fn inside_other(body: &Body, a: FaceId, b: FaceId) -> bool {
 
 /// The fault two faces of a body make, if any.
 fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
+    let t0 = std::time::Instant::now();
+    let u0 = m.spent();
+    let r = pair_inner(body, a, b, m);
+    if std::env::var_os("RYUKEI_PROBE").is_some() {
+        eprintln!(
+            "probe pair {:?} {:?} {} {} shared_e={} shared_v={} {:.3}s {} units -> {:?}",
+            a, b,
+            kind(&body.surfaces[body.faces[a].surface]),
+            kind(&body.surfaces[body.faces[b].surface]),
+            shared_edges(body, a, b).len(),
+            shared_vertices(body, a, b).len(),
+            t0.elapsed().as_secs_f64(),
+            m.spent() - u0,
+            r
+        );
+    }
+    r
+}
+
+fn kind(s: &Surface) -> &'static str {
+    match s {
+        Surface::Plane(_) => "plane",
+        Surface::Pipe(p) if p.rail().is_some() => "pipe/rail",
+        Surface::Pipe(_) => "pipe/foot",
+        Surface::Nurbs(_) => "nurbs",
+        Surface::Sphere(_) => "sphere",
+        Surface::Torus(_) => "torus",
+        Surface::Cylinder(_) => "cylinder",
+        _ => "other",
+    }
+}
+
+fn pair_inner(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
     // Faces tangent along an edge they share can't be traced there: they
     // are certified apart beside it, and only traced if that fails.
     let shared = shared_edges(body, a, b);

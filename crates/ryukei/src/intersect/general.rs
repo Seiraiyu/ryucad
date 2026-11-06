@@ -55,6 +55,14 @@ use std::rc::Rc;
 
 type Iv = Interval;
 
+macro_rules! probe {
+    () => {
+        if std::env::var_os("RYUKEI_PROBE").is_some() {
+            eprintln!("probe general.rs:{}", line!());
+        }
+    };
+}
+
 /// The fractions a cell is split at, one per attempt: off the dyadic
 /// fractions symmetric problems put their curves through, and different
 /// from each other so a crossing on a face's edge moves off it.
@@ -657,7 +665,7 @@ impl<'a> Tracer<'a> {
                 self.surfaces[1],
                 &self.region,
                 if self.shift > 0.0 {
-                    1.0 - self.shift
+                    if std::env::var_os("RYUKEI_FIX_B").is_some() { 0.411 } else { 1.0 - self.shift }
                 } else {
                     0.0
                 },
@@ -705,7 +713,7 @@ impl<'a> Tracer<'a> {
                 break;
             }
             if round == MAX_ROUNDS {
-                return Err(Failure::Uncertain);
+                { probe!(); return Err(Failure::Uncertain); }
             }
             let first_new = self.leaves.len();
             for &li in &again {
@@ -729,7 +737,7 @@ impl<'a> Tracer<'a> {
     /// wider parameter, and subdivides both halves.
     fn split_pair(&mut self, cells: [Cell; 2], depth: u32) -> Result<(), Failure> {
         if depth >= MAX_DEPTH {
-            return Err(Failure::Uncertain);
+            { probe!(); return Err(Failure::Uncertain); }
         }
         let mut best = (0, 0, -1.0);
         let boxes = [0, 1].map(|k| self.sheets[k].jet_box(cells[k]));
@@ -778,13 +786,13 @@ impl<'a> Tracer<'a> {
         // sweep, along its path) would otherwise put their cells' sides
         // together where the curve crosses.
         let fraction = if k == 1 && self.shift > 0.0 {
-            1.0 - self.split
+            if std::env::var_os("RYUKEI_FIX_B").is_some() { 0.488_281_25 } else { 1.0 - self.split }
         } else {
             self.split
         };
         let m = lo + (hi - lo) * fraction;
         if m <= lo || m >= hi {
-            return Err(Failure::Uncertain);
+            { probe!(); return Err(Failure::Uncertain); }
         }
         for half in [[lo, m], [m, hi]] {
             let mut c = cells;
@@ -812,7 +820,7 @@ impl<'a> Tracer<'a> {
             return Ok(());
         }
         if self.leaves.len() >= MAX_LEAVES {
-            return Err(Failure::Uncertain);
+            { probe!(); return Err(Failure::Uncertain); }
         }
         if self.simple(cells, &pa, &pb) {
             self.leaves.push(Leaf {
@@ -825,7 +833,7 @@ impl<'a> Tracer<'a> {
         if depth >= MAX_DEPTH || (depth >= TANGENT_DEPTH && self.near_tangency(cells)?) {
             self.singular += 1;
             if self.singular > MAX_SINGULAR {
-                return Err(Failure::Uncertain);
+                { probe!(); return Err(Failure::Uncertain); }
             }
             self.leaves.push(Leaf {
                 cells,
@@ -1037,7 +1045,7 @@ impl<'a> Tracer<'a> {
         let mut per_leaf: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (c, x) in self.crossings.iter().enumerate() {
             if x.found_by.len() > 2 {
-                return Err(Failure::Uncertain);
+                { probe!(); return Err(Failure::Uncertain); }
             }
             for &l in &x.found_by {
                 per_leaf.entry(l).or_default().push(c);
@@ -1047,7 +1055,7 @@ impl<'a> Tracer<'a> {
             match found.len() {
                 0 => {}
                 2 => arcs.push([found[0], found[1]]),
-                _ => return Err(Failure::Uncertain),
+                _ => { probe!(); return Err(Failure::Uncertain) }
             }
         }
         let clusters = self.clusters()?;
@@ -1067,12 +1075,12 @@ impl<'a> Tracer<'a> {
                 // A transversal branch can't be told from the curve it
                 // would leave.
                 Some(k) if matches!(clusters[k].1, Settled::Curve(_)) => {
-                    return Err(Failure::Uncertain);
+                    { probe!(); return Err(Failure::Uncertain); }
                 }
                 Some(k) => {
                     at_cluster.insert(c, k);
                 }
-                None => return Err(Failure::Uncertain),
+                None => { probe!(); return Err(Failure::Uncertain) }
             }
         }
         let mut next: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -1130,7 +1138,7 @@ impl<'a> Tracer<'a> {
             }
             let (chain, closed) = walk(arcs[k][0], k, &mut used);
             if !closed {
-                return Err(Failure::Uncertain);
+                { probe!(); return Err(Failure::Uncertain); }
             }
             let points = chain.iter().map(|&i| self.crossings[i].point).collect();
             out.branches.push(Traced {
@@ -1264,7 +1272,7 @@ impl<'a> Tracer<'a> {
             back
         };
         if params.len() < 2 {
-            return Err(Failure::Uncertain);
+            { probe!(); return Err(Failure::Uncertain); }
         }
         // Every part of the cluster's cells of the first surface outside
         // the strip apart from the second surface.
@@ -1314,7 +1322,7 @@ impl<'a> Tracer<'a> {
             self.meter,
         ) != Some(true)
         {
-            return Err(Failure::Uncertain);
+            { probe!(); return Err(Failure::Uncertain); }
         }
         Ok(TangentTrace { params, closed })
     }
@@ -1365,7 +1373,7 @@ impl<'a> Tracer<'a> {
                 }
                 h /= 2.0;
                 if h < step / 1024.0 {
-                    return Err(Failure::Uncertain);
+                    { probe!(); return Err(Failure::Uncertain); }
                 }
             };
             if !inside(y) {
@@ -1377,7 +1385,7 @@ impl<'a> Tracer<'a> {
                     pts.push(y);
                     return Ok((pts, false));
                 }
-                return Err(Failure::Uncertain);
+                { probe!(); return Err(Failure::Uncertain); }
             }
             if pts.len() > 3 && self.sheets[0].point(y[0], y[1]).distance(start) <= 1.5 * h {
                 return Ok((pts, true));
@@ -1450,7 +1458,7 @@ impl<'a> Tracer<'a> {
             x[k] >= lo - size && x[k] <= hi + size
         });
         if !near {
-            return Err(Failure::Uncertain);
+            { probe!(); return Err(Failure::Uncertain); }
         }
         for half in [2.0 * size, size, size / 4.0, size / 16.0, 1e-8, 1e-10] {
             let around: [[f64; 2]; 4] = x.map(|v| [v - half, v + half]);
@@ -1462,7 +1470,7 @@ impl<'a> Tracer<'a> {
                 let c = self.leaves[i].cells;
                 let b = [c[0][0], c[0][1], c[1][0], c[1][1]];
                 if !tan.none_but(b, around, 12, self.meter) {
-                    return Err(Failure::Uncertain);
+                    { probe!(); return Err(Failure::Uncertain); }
                 }
             }
             let p = self.sheets[0].point(x[0], x[1]);
@@ -1470,7 +1478,7 @@ impl<'a> Tracer<'a> {
             if p.distance(q) <= LINEAR_RESOLUTION {
                 return Ok(p);
             }
-            return Err(Failure::Uncertain);
+            { probe!(); return Err(Failure::Uncertain); }
         }
         Err(Failure::Uncertain)
     }
@@ -1552,6 +1560,14 @@ impl Face<'_> {
             if e.iter().any(|&v| signed(v)) {
                 return Ok(());
             }
+            if std::env::var_os("RYUKEI_PROBE_DEEP").is_some() && depth % 8 == 0 && depth >= 16 {
+                let w = |v: Iv| v.hi() - v.lo();
+                eprintln!(
+                    "probe deep d={} side={} param={} at={} m={:?} xw={:?} e_w={:?} em_w={:?} jac_w={:?} k={:?}",
+                    depth, self.side, self.param, self.at, m, x.map(|[a, b]| b - a),
+                    e.map(w), em.map(w), jac.map(|r| r.map(w)), krawczyk3(*em, *jac, x)
+                );
+            }
             match krawczyk3(*em, *jac, x) {
                 Some(false) => return Ok(()),
                 Some(true) => {
@@ -1561,8 +1577,59 @@ impl Face<'_> {
                 None => {}
             }
         }
+        if depth == FACE_DEPTH && std::env::var_os("RYUKEI_INFLATE").is_some() {
+            if let Some((r, b)) = self.inflated(x) {
+                let Some(r) = r else {
+                    return Ok(());
+                };
+                let inside = |p: [f64; 3], b: [[f64; 2]; 3]| (0..3).all(|k| b[k][0] <= p[k] && p[k] <= b[k][1]);
+                if !out.iter().any(|&(q, ob)| inside(r, ob) || inside(q, b)) {
+                    if std::env::var_os("RYUKEI_PROBE").is_some() {
+                        eprintln!("probe inflated r={r:?} w={:?}", b.map(|[a, c]| c - a));
+                    }
+                    out.push((r, b));
+                }
+                return Ok(());
+            }
+        }
         if depth == FACE_DEPTH {
-            return Err(Failure::Uncertain);
+            if std::env::var_os("RYUKEI_PROBE").is_some() {
+                let q = self.params(m);
+                let ja = self.sheets[0].jets_at(q[0], q[1]);
+                let jb = self.sheets[1].jets_at(q[2], q[3]);
+                let pa = [ja[0].v, ja[1].v, ja[2].v];
+                let pb = [jb[0].v, jb[1].v, jb[2].v];
+                let n = |j: &JVec<f64>| {
+                    let (u, v) = ([j[0].d[0], j[1].d[0], j[2].d[0]], [j[0].d[1], j[1].d[1], j[2].d[1]]);
+                    let c = [u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]];
+                    let l = crate::math::sqrt(c[0]*c[0]+c[1]*c[1]+c[2]*c[2]);
+                    c.map(|x| x / l)
+                };
+                let (na, nb) = (n(&ja), n(&jb));
+                let cr = [na[1]*nb[2]-na[2]*nb[1], na[2]*nb[0]-na[0]*nb[2], na[0]*nb[1]-na[1]*nb[0]];
+                let [ca, cb] = self.cells(x);
+                let wa = self.sheets[0].jet_box(ca).map(|p| (0..3).map(|i| p[i].v.hi() - p[i].v.lo()).fold(0.0, f64::max));
+                let wb = self.sheets[1].jet_box(cb).map(|p| (0..3).map(|i| p[i].v.hi() - p[i].v.lo()).fold(0.0, f64::max));
+                eprintln!("probe enc wa={wa:?} wb={wb:?} cells={ca:?} {cb:?}");
+                if let (Some((e0, jac)), Some((em, _))) = (self.enclose(x), self.enclose(m.map(|v| [v, v]))) {
+                    let w = |v: Iv| v.hi() - v.lo();
+                    eprintln!(
+                        "probe sys e={:?} em={:?} jac_w={:?} jac_mid={:?} k={:?}",
+                        e0.map(w), em.map(|v| (v.lo(), w(v))),
+                        jac.map(|r| r.map(w)),
+                        jac.map(|r| r.map(|v| (v.lo() + v.hi()) / 2.0)),
+                        krawczyk3(em, jac, x)
+                    );
+                }
+                eprintln!(
+                    "probe face side={} param={} at={} params={:?} gap={:e} sin={:e} width={:?} pa={:?}",
+                    self.side, self.param, self.at, q,
+                    crate::math::sqrt((pa[0]-pb[0])*(pa[0]-pb[0])+(pa[1]-pb[1])*(pa[1]-pb[1])+(pa[2]-pb[2])*(pa[2]-pb[2])),
+                    crate::math::sqrt(cr[0]*cr[0]+cr[1]*cr[1]+cr[2]*cr[2]),
+                    x.map(|[a, b]| b - a), pa,
+                );
+            }
+            { probe!(); return Err(Failure::Uncertain); }
         }
         let spread = |k: usize| {
             let w = x[k][1] - x[k][0];
@@ -1577,7 +1644,7 @@ impl Face<'_> {
         let [lo, hi] = x[k];
         let mid = (lo + hi) / 2.0;
         if mid <= lo || mid >= hi {
-            return Err(Failure::Uncertain);
+            { probe!(); return Err(Failure::Uncertain); }
         }
         for half in [[lo, mid], [mid, hi]] {
             let mut y = x;
@@ -1585,6 +1652,65 @@ impl Face<'_> {
             self.search(y, depth + 1, budget, out)?;
         }
         Ok(())
+    }
+
+    /// A box round the Newton root of a box too small for Krawczyk's test
+    /// to contract (rounding in `E` at a point, times the inverse
+    /// Jacobian, wider than the box): grown from that spread until the
+    /// test certifies one crossing in it (epsilon-inflation).
+    fn inflated(&self, x: [[f64; 2]; 3]) -> Option<(Option<[f64; 3]>, [[f64; 2]; 3])> {
+        let mut r: [f64; 3] = x.map(|[a, b]| (a + b) / 2.0);
+        let mid = |v: Iv| (v.lo() + v.hi()) / 2.0;
+        let inv = |jm: [[Iv; 3]; 3]| -> Option<[[f64; 3]; 3]> {
+            let m = jm.map(|row| row.map(mid));
+            let cof = |r0: usize, r1: usize, c0: usize, c1: usize| m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0];
+            let det = m[0][0] * cof(1, 2, 1, 2) - m[0][1] * cof(1, 2, 0, 2) + m[0][2] * cof(1, 2, 0, 1);
+            if det == 0.0 || !det.is_finite() {
+                return None;
+            }
+            Some([
+                [cof(1, 2, 1, 2), -cof(0, 2, 1, 2), cof(0, 1, 1, 2)],
+                [-cof(1, 2, 0, 2), cof(0, 2, 0, 2), -cof(0, 1, 0, 2)],
+                [cof(1, 2, 0, 1), -cof(0, 2, 0, 1), cof(0, 1, 0, 1)],
+            ]
+            .map(|row| row.map(|v| v / det)))
+        };
+        // Newton's method from the middle, not held to the box.
+        for _ in 0..20 {
+            let (em, jm) = self.enclose(r.map(|v| [v, v]))?;
+            let y = inv(jm)?;
+            let e = em.map(mid);
+            let next: [f64; 3] = core::array::from_fn(|k| r[k] - (0..3).map(|j| y[k][j] * e[j]).sum::<f64>());
+            if next == r {
+                break;
+            }
+            r = next;
+        }
+        let (em, jm) = self.enclose(r.map(|v| [v, v]))?;
+        let y = inv(jm)?;
+        let spread: [f64; 3] = core::array::from_fn(|k| {
+            (0..3)
+                .map(|j| y[k][j].abs() * em[j].lo().abs().max(em[j].hi().abs()))
+                .sum::<f64>()
+        });
+        let mut grow = 2.0;
+        for _ in 0..12 {
+            // Round the root, and holding the whole box.
+            let b: [[f64; 2]; 3] = core::array::from_fn(|k| {
+                let h = (grow * spread[k]).max(4.0 * f64::EPSILON * r[k].abs().max(1.0));
+                let h = h.max(r[k] - x[k][0]).max(x[k][1] - r[k]);
+                [r[k] - h, r[k] + h]
+            });
+            let c: [f64; 3] = b.map(|[lo, hi]| (lo + hi) / 2.0);
+            let (at, _) = self.enclose(c.map(|v| [v, v]))?;
+            let (_, jac) = self.enclose(b)?;
+            if krawczyk3(at, jac, b) == Some(true) {
+                let inside = (0..3).all(|k| x[k][0] <= r[k] && r[k] < x[k][1]);
+                return Some((inside.then_some(r), b));
+            }
+            grow *= 4.0;
+        }
+        None
     }
 
     /// The crossing in a box certified to hold one, by Newton's method

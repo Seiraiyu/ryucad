@@ -61,6 +61,21 @@ fn meet(
 ) -> Result<crate::intersect::SurfaceHit, crate::intersect::Failure> {
     use crate::geom::Surface;
     let footed = |s: &Surface| matches!(s, Surface::Pipe(p) if p.rail().is_none());
+    if std::env::var_os("RYUKEI_PROBE_MEET").is_some() {
+        let t0 = std::time::Instant::now();
+        let u0 = meter.spent();
+        let r = crate::intersect::surface_surface_in(a, b, region, meter);
+        eprintln!(
+            "probe meet {:.3}s {} units -> {:?}",
+            t0.elapsed().as_secs_f64(),
+            meter.spent() - u0,
+            r.as_ref().map(|h| match h {
+                crate::intersect::SurfaceHit::Meet { branches, points } => (branches.len(), points.len()),
+                _ => (usize::MAX, 0),
+            })
+        );
+        return r;
+    }
     match (a, b) {
         (Surface::Pipe(_), Surface::Pipe(_)) => Err(crate::intersect::Failure::Unsupported),
         _ if footed(a) || footed(b) => crate::intersect::pipe_surface_in(a, b, region, meter),
