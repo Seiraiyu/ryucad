@@ -313,6 +313,8 @@ impl Equations {
         fresh.new_part.clone_from(&self.new_part);
         fresh.new_name.clone_from(&self.new_name);
         fresh.new_value.clone_from(&self.new_value);
+        // A write still on its way is still on its way.
+        fresh.saving = self.saving;
         for mine in self.rows.iter().filter(|r| r.field.dirty()) {
             let now = fresh.rows.iter_mut().find(|r| r.place == mine.place);
             let theirs = now
@@ -473,5 +475,19 @@ mod tests {
         assert_eq!(again.rows[2].field.text, "wall * 2");
         assert_eq!(again.filter, Filter::Project);
         assert_eq!(again.project_revision, "r2");
+    }
+
+    /// A read asked for before something was typed, or before a write
+    /// went, and answered after: the answer is laid over the table as it
+    /// is, so neither the typing nor the write in flight is lost.
+    #[test]
+    fn a_late_reload_keeps_what_was_typed_and_the_write_in_flight() {
+        let mut e = Equations::from_list(&listed("4 mm", "r1"), "mm");
+        e.rows[0].field.text = "6 mm".into();
+        e.saving = Some(Some(0));
+        let again = e.reloaded(&listed("4 mm", "r1"), "mm", false);
+        assert_eq!(again.rows[0].field.text, "6 mm");
+        assert_eq!(again.saving, Some(Some(0)));
+        assert!(again.request(0).is_some());
     }
 }
