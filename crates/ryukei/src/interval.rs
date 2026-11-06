@@ -160,6 +160,25 @@ fn up(x: f64) -> f64 {
     }
 }
 
+/// `(x + y).hi()` for intervals whose upper ends are `a` and `b`, by the
+/// rule [`Add`] applies: the round-to-nearest sum stepped up by [`up`].
+/// For bounds that are sums and products of non-negative terms, where only
+/// the upper ends are wanted, this is the same float without the lower
+/// ends' work (#308).
+pub(crate) fn add_up(a: f64, b: f64) -> f64 {
+    up(a + b)
+}
+
+/// `(x * y).hi()` for intervals whose upper ends are `a` and `b`, each
+/// either a point at least zero or made from such points by [`add_up`] and
+/// [`mul_up`] (so its lower end is at least `-TINY` and its upper end at
+/// least `TINY` when its lower end is below zero): [`Mul`] then takes the
+/// product of the upper ends, stepped up by [`up`], whatever their signs'
+/// cases, and the same float for infinities and NaN.
+pub(crate) fn mul_up(a: f64, b: f64) -> f64 {
+    up(a * b)
+}
+
 fn min4(v: [f64; 4]) -> f64 {
     v[0].min(v[1]).min(v[2]).min(v[3])
 }
