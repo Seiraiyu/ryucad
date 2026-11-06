@@ -1362,6 +1362,15 @@ pub(crate) mod tests {
             .unwrap()
             .to_owned();
         let me = Some(me.as_str());
+        // A person's window writes the model in Direct edit.
+        call_live(
+            &mut s,
+            &mut live,
+            me,
+            "participant.mode",
+            json!({"mode": "edit"}),
+        )
+        .unwrap();
         let v = call_live(
             &mut s,
             &mut live,

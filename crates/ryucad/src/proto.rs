@@ -1828,6 +1828,20 @@ impl Request {
         )
     }
 
+    /// The modes a human participant must be in to send this request:
+    /// annotation writes need `annotate` or `edit`, every other write
+    /// `edit`; `None` for a request that writes nothing.
+    pub fn needs(&self) -> Option<&'static [crate::live::Mode]> {
+        use crate::live::Mode;
+        if self.annotates() {
+            Some(&[Mode::Annotate, Mode::Edit])
+        } else if self.mutates() {
+            Some(&[Mode::Edit])
+        } else {
+            None
+        }
+    }
+
     /// Whether the request writes only annotations: what View mode
     /// refuses and Annotate allows. `annotation.apply` writes the model.
     pub fn annotates(&self) -> bool {

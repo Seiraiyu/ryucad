@@ -95,193 +95,204 @@ pub fn answer_live(
     // A daemon keeps what its writes change, for the log and for undo;
     // undo and redo log themselves.
     let (method, params) = (req.method(), req.params());
+    // A human's window writes only in the mode that allows it (design
+    // 374, question 198); agents, and connections that said no hello,
+    // write as they always have.
+    let refused = match (live.as_deref(), me, req.needs()) {
+        (Some(l), Some(me), Some(needs)) => match l.get(me) {
+            Ok(p) if p.kind == live::Kind::Human && !needs.contains(&p.view.mode) => Some(
+                Error::new(
+                    Code::ParticipantMode,
+                    format!(
+                        "{} is in {} mode: {method} needs {}",
+                        p.name,
+                        p.view.mode.as_str(),
+                        needs
+                            .iter()
+                            .map(|m| m.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" or ")
+                    ),
+                )
+                .with("participant", &p.id)
+                .with("mode", p.view.mode)
+                .with("needs", needs),
+            ),
+            _ => None,
+        },
+        _ => None,
+    };
     let logs_itself = matches!(req, Request::Undo { .. } | Request::Redo { .. });
-    let files_before = match (&live, mutates && !logs_itself) {
+    let files_before = match (&live, mutates && !logs_itself && refused.is_none()) {
         (Some(_), true) => Some(session.files()),
         _ => None,
     };
-    let result = match req {
-        Request::MeshGet {
-            part,
-            feature,
-            features,
-            quality,
-            transfer: Some(t @ (Transfer::Binary | Transfer::Compact)),
-            rev,
-        } => session.at(rev.as_deref()).and_then(|(commit, s)| {
-            let only = wanted(feature.as_deref(), &features);
-            let compact = t == Transfer::Compact;
-            let mut a = mesh_binary(s, &part, only.as_ref(), quality.as_deref(), compact)?;
-            a.result = versioned(noted(Ok(a.result), commit))?;
-            Ok(a)
-        }),
-        Request::Render {
-            part,
-            camera,
-            participant,
-            view,
-            width,
-            height,
-            highlight,
-            edges,
-            labels,
-            sketches,
-            datums,
-            rev,
-            frame,
-            compare,
-            hidden,
-            origin,
-            appearance,
-            section,
-            explode,
-            fraction,
-        } => {
-            // A named view brings the planes and the explode it saved,
-            // unless the request names its own.
-            let named = match (&camera, view.as_deref()) {
-                (None, Some(v)) if StandardView::named(v).is_none() => {
-                    let focus = live
-                        .as_deref()
-                        .and_then(|l| l.get(participant.as_deref()?).ok()?.view.focus.clone());
-                    let at = crate::views::part_for(session, part.as_deref(), focus.as_ref())?;
-                    Some(crate::views::named_saved(session, at.as_ref(), v)?)
-                }
-                _ => None,
-            };
-            let saved_sections = named.as_ref().map(|s| s.sections.clone());
-            let explode = match &named {
-                Some(saved) => explode.or_else(|| {
-                    Some(
-                        saved
-                            .explode
-                            .as_ref()
-                            .map_or_else(String::new, |s| s.explode.to_string()),
-                    )
-                }),
-                None => explode,
-            };
-            let fraction = fraction.or(named
-                .as_ref()
-                .and_then(|s| s.explode.as_ref())
-                .map(|s| s.fraction));
-            // The participant's shown explode, unless one is named.
-            let shown = match live.as_deref_mut() {
-                Some(l) if explode.is_none() => {
-                    let who = l.view_target(participant.as_deref(), me)?;
-                    l.get(&who)?.view.explode.clone()
-                }
-                _ => None,
-            };
-            if let Some(f) = fraction
-                && !(0.0..=1.0).contains(&f)
-            {
-                return Err(Error::new(
-                    Code::InvalidParam,
-                    "an explode's fraction is from 0 (assembled) to 1 (exploded)",
-                )
-                .with("fraction", f));
-            }
-            let explode = match (explode, shown) {
-                (Some(e), _) if e.is_empty() => None,
-                (Some(e), _) => Some(DrawExplode {
-                    shown: None,
-                    id: e,
-                    fraction: fraction.unwrap_or(1.0),
-                }),
-                (None, Some(s)) => Some(DrawExplode {
-                    shown: Some(s.part),
-                    id: s.explode.to_string(),
-                    fraction: fraction.unwrap_or(s.fraction),
-                }),
-                (None, None) => None,
-            };
-            // What the participant's window cuts away, as it hides.
-            let sections = match (section, saved_sections) {
-                (Some(args), _) => crate::section::resolve_all(session, &args, "/section")?,
-                (None, Some(saved)) => saved,
-                (None, None) => match live.as_deref_mut() {
-                    Some(l) => {
-                        let who = l.view_target(participant.as_deref(), me)?;
-                        l.get(&who)?.view.sections.clone()
-                    }
-                    None => Vec::new(),
-                },
-            };
-            // What the participant's window hides, else the one human's
-            // (where an agent's `hide` went), else the caller's.
-            let hidden = match hidden {
-                Some(refs) => crate::visibility::reach_all(session, &refs)?,
-                None => match live.as_deref_mut() {
-                    Some(l) => {
-                        let who = l.view_target(participant.as_deref(), me)?;
-                        l.get(&who)?.view.hidden.clone()
-                    }
-                    None => Default::default(),
-                },
-            };
-            let target = participant.as_deref().map(|p| (p, live.as_deref()));
-            // A participant's render shows what their window shows.
-            let part = part.or_else(|| {
-                let l = live.as_deref()?;
-                Some(
-                    l.get(participant.as_deref()?)
-                        .ok()?
-                        .view
-                        .focus
-                        .as_ref()?
-                        .to_string(),
-                )
-            });
-            let shown = match live.as_deref() {
-                Some(l) => l
-                    .participants()
-                    .flat_map(|p| p.highlights.clone())
-                    .collect(),
-                None => Vec::new(),
-            };
-            let ask = RenderAsk {
+    let result = if let Some(e) = refused {
+        Err(e)
+    } else {
+        match req {
+            Request::MeshGet {
+                part,
+                feature,
+                features,
+                quality,
+                transfer: Some(t @ (Transfer::Binary | Transfer::Compact)),
+                rev,
+            } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+                let only = wanted(feature.as_deref(), &features);
+                let compact = t == Transfer::Compact;
+                let mut a = mesh_binary(s, &part, only.as_ref(), quality.as_deref(), compact)?;
+                a.result = versioned(noted(Ok(a.result), commit))?;
+                Ok(a)
+            }),
+            Request::Render {
                 part,
                 camera,
+                participant,
                 view,
-                width: width.unwrap_or(800),
-                height: height.unwrap_or(600),
+                width,
+                height,
                 highlight,
-                edges: edges.unwrap_or(true),
-                labels: labels.unwrap_or(false),
-                sketches: sketches.unwrap_or(true),
-                datums: datums.unwrap_or(true),
+                edges,
+                labels,
+                sketches,
+                datums,
                 rev,
                 frame,
                 compare,
                 hidden,
                 origin,
-                appearance: appearance.unwrap_or(true),
-                sections,
+                appearance,
+                section,
                 explode,
-            };
-            render_noting(session, target, shown, ask)
-        }
-        Request::Export {
-            part,
-            rev,
-            format,
-            out,
-            schema,
-            unit,
-            time_stamp,
-            file_name,
-            chord,
-            angle,
-            max_edge,
-            ascii,
-            brep,
-            mesh,
-            pipe_tolerance,
-            skip_failing,
-        } => crate::export::export(
-            session,
-            crate::export::Ask {
+                fraction,
+            } => {
+                // A named view brings the planes and the explode it saved,
+                // unless the request names its own.
+                let named = match (&camera, view.as_deref()) {
+                    (None, Some(v)) if StandardView::named(v).is_none() => {
+                        let focus = live
+                            .as_deref()
+                            .and_then(|l| l.get(participant.as_deref()?).ok()?.view.focus.clone());
+                        let at = crate::views::part_for(session, part.as_deref(), focus.as_ref())?;
+                        Some(crate::views::named_saved(session, at.as_ref(), v)?)
+                    }
+                    _ => None,
+                };
+                let saved_sections = named.as_ref().map(|s| s.sections.clone());
+                let explode = match &named {
+                    Some(saved) => explode.or_else(|| {
+                        Some(
+                            saved
+                                .explode
+                                .as_ref()
+                                .map_or_else(String::new, |s| s.explode.to_string()),
+                        )
+                    }),
+                    None => explode,
+                };
+                let fraction = fraction.or(named
+                    .as_ref()
+                    .and_then(|s| s.explode.as_ref())
+                    .map(|s| s.fraction));
+                // The participant's shown explode, unless one is named.
+                let shown = match live.as_deref_mut() {
+                    Some(l) if explode.is_none() => {
+                        let who = l.view_target(participant.as_deref(), me)?;
+                        l.get(&who)?.view.explode.clone()
+                    }
+                    _ => None,
+                };
+                if let Some(f) = fraction
+                    && !(0.0..=1.0).contains(&f)
+                {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        "an explode's fraction is from 0 (assembled) to 1 (exploded)",
+                    )
+                    .with("fraction", f));
+                }
+                let explode = match (explode, shown) {
+                    (Some(e), _) if e.is_empty() => None,
+                    (Some(e), _) => Some(DrawExplode {
+                        shown: None,
+                        id: e,
+                        fraction: fraction.unwrap_or(1.0),
+                    }),
+                    (None, Some(s)) => Some(DrawExplode {
+                        shown: Some(s.part),
+                        id: s.explode.to_string(),
+                        fraction: fraction.unwrap_or(s.fraction),
+                    }),
+                    (None, None) => None,
+                };
+                // What the participant's window cuts away, as it hides.
+                let sections = match (section, saved_sections) {
+                    (Some(args), _) => crate::section::resolve_all(session, &args, "/section")?,
+                    (None, Some(saved)) => saved,
+                    (None, None) => match live.as_deref_mut() {
+                        Some(l) => {
+                            let who = l.view_target(participant.as_deref(), me)?;
+                            l.get(&who)?.view.sections.clone()
+                        }
+                        None => Vec::new(),
+                    },
+                };
+                // What the participant's window hides, else the one human's
+                // (where an agent's `hide` went), else the caller's.
+                let hidden = match hidden {
+                    Some(refs) => crate::visibility::reach_all(session, &refs)?,
+                    None => match live.as_deref_mut() {
+                        Some(l) => {
+                            let who = l.view_target(participant.as_deref(), me)?;
+                            l.get(&who)?.view.hidden.clone()
+                        }
+                        None => Default::default(),
+                    },
+                };
+                let target = participant.as_deref().map(|p| (p, live.as_deref()));
+                // A participant's render shows what their window shows.
+                let part = part.or_else(|| {
+                    let l = live.as_deref()?;
+                    Some(
+                        l.get(participant.as_deref()?)
+                            .ok()?
+                            .view
+                            .focus
+                            .as_ref()?
+                            .to_string(),
+                    )
+                });
+                let shown = match live.as_deref() {
+                    Some(l) => l
+                        .participants()
+                        .flat_map(|p| p.highlights.clone())
+                        .collect(),
+                    None => Vec::new(),
+                };
+                let ask = RenderAsk {
+                    part,
+                    camera,
+                    view,
+                    width: width.unwrap_or(800),
+                    height: height.unwrap_or(600),
+                    highlight,
+                    edges: edges.unwrap_or(true),
+                    labels: labels.unwrap_or(false),
+                    sketches: sketches.unwrap_or(true),
+                    datums: datums.unwrap_or(true),
+                    rev,
+                    frame,
+                    compare,
+                    hidden,
+                    origin,
+                    appearance: appearance.unwrap_or(true),
+                    sections,
+                    explode,
+                };
+                render_noting(session, target, shown, ask)
+            }
+            Request::Export {
                 part,
                 rev,
                 format,
@@ -298,13 +309,33 @@ pub fn answer_live(
                 mesh,
                 pipe_tolerance,
                 skip_failing,
-            },
-        ),
-        Request::Rebuild { part, rev } => session.at(rev.as_deref()).and_then(|(commit, s)| {
-            rebuild(s, part.as_deref(), commit.as_deref())
-                .map_err(|e| noted(Err(e), commit).expect_err("an error"))
-        }),
-        req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
+            } => crate::export::export(
+                session,
+                crate::export::Ask {
+                    part,
+                    rev,
+                    format,
+                    out,
+                    schema,
+                    unit,
+                    time_stamp,
+                    file_name,
+                    chord,
+                    angle,
+                    max_edge,
+                    ascii,
+                    brep,
+                    mesh,
+                    pipe_tolerance,
+                    skip_failing,
+                },
+            ),
+            Request::Rebuild { part, rev } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+                rebuild(s, part.as_deref(), commit.as_deref())
+                    .map_err(|e| noted(Err(e), commit).expect_err("an error"))
+            }),
+            req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
+        }
     };
     // A stale annotation's revision says so in the answer.
     let notes = std::mem::take(&mut session.rev_warnings);
@@ -9306,6 +9337,112 @@ pub(crate) mod tests {
         assert_eq!(e.code, Code::Usage);
     }
 
+    #[test]
+    fn a_humans_writes_are_refused_outside_their_mode_and_an_agents_never() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let mut live = Live::new();
+        let h = live.hello(live::Kind::Human, Some("Dana"), None).unwrap();
+        let add =
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 1, "y": 1, "z": 1}});
+        let note = json!({"pins": [], "comment": "here"});
+        let e = call_live(&mut s, &mut live, Some(&h), "feature.add", add.clone()).unwrap_err();
+        assert_eq!(e.code, Code::ParticipantMode);
+        assert_eq!(e.details["mode"], "view");
+        assert_eq!(e.details["needs"], json!(["edit"]));
+        let e = call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "annotation.create",
+            note.clone(),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["needs"], json!(["annotate", "edit"]));
+        // Reading is never refused.
+        call_live(&mut s, &mut live, Some(&h), "part.list", json!({})).unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "annotate"}),
+        )
+        .unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "annotation.create",
+            note.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            call_live(&mut s, &mut live, Some(&h), "feature.add", add.clone())
+                .unwrap_err()
+                .code,
+            Code::ParticipantMode
+        );
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "edit"}),
+        )
+        .unwrap();
+        call_live(&mut s, &mut live, Some(&h), "feature.add", add.clone()).unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "annotation.create",
+            note.clone(),
+        )
+        .unwrap();
+        // An agent writes in any mode, and with no hello.
+        let a = live.hello(live::Kind::Agent, Some("bot"), None).unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&a),
+            "participant.mode",
+            json!({"mode": "view"}),
+        )
+        .unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&a),
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 2}}),
+        )
+        .unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 3}}),
+        )
+        .unwrap();
+        // Undo is a write.
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "annotate"}),
+        )
+        .unwrap();
+        assert_eq!(
+            call_live(&mut s, &mut live, Some(&h), "undo", json!({}))
+                .unwrap_err()
+                .code,
+            Code::ParticipantMode
+        );
+    }
+
     /// Every queued notification of `sub`, as JSON.
     fn drained(sub: &crate::notify::Subscriber) -> Vec<Value> {
         sub.drain()
@@ -9353,7 +9490,7 @@ pub(crate) mod tests {
             r["session"]["participants"],
             json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": [],
                     "camera": null, "highlights": [], "compare": null, "focus": null, "hidden": [],
-                    "sections": [], "explode": null}])
+                    "sections": [], "explode": null, "mode": "view"}])
         );
         let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
         assert_eq!(list, r["session"]);
@@ -9879,6 +10016,15 @@ pub(crate) mod tests {
         )
         .unwrap()["participant"]
             .clone();
+        // A person's window writes the model in Direct edit.
+        call_live(
+            &mut s,
+            &mut live,
+            human.as_str(),
+            "participant.mode",
+            json!({"mode": "edit"}),
+        )
+        .unwrap();
         call_live(
             &mut s,
             &mut live,
@@ -9939,6 +10085,15 @@ pub(crate) mod tests {
             .unwrap()
             .to_owned();
         let h = Some(human.as_str());
+        // A person's window writes the model in Direct edit.
+        call_live(
+            &mut s,
+            &mut live,
+            h,
+            "participant.mode",
+            json!({"mode": "edit"}),
+        )
+        .unwrap();
         let radius = |s: &mut Session| {
             call(s, "feature.show", json!({"part": "p", "id": "s"}))
                 .map(|v| v["params"]["radius"]["value"].clone())
