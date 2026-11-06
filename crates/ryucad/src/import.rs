@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+pub mod convert;
 mod plan;
 mod update;
 

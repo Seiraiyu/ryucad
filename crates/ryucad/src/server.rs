@@ -811,6 +811,20 @@ fn dispatch(
                 solid,
             },
         ),
+        Request::ImportConvert {
+            part,
+            feature,
+            reference,
+            expected_revision,
+        } => crate::import::convert::convert(
+            session,
+            crate::import::convert::Ask {
+                part,
+                feature,
+                reference,
+                expected: expected_revision,
+            },
+        ),
         // A rebuild's report is written as text: `answer_live` handles it.
         Request::Rebuild { .. } => Err(Error::new(Code::Internal, "rebuild answers as text")),
         Request::Inspect {
@@ -4407,7 +4421,7 @@ fn feature_list(session: &mut Session, part: &str) -> Result<Value> {
 /// come apart, as the JSON text of the report's `occurrences` (#533: the
 /// root's 100,000 took about 450 MiB as a `Value` tree), for
 /// [`object_text`] to write into the report's text.
-fn part_report(
+pub(crate) fn part_report(
     session: &mut Session,
     id: &Id,
     occurrences: bool,

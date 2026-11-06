@@ -1051,6 +1051,20 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         solid: bool,
     },
+    /// Sets an import feature's mode (`feature`), or every import feature
+    /// of `part`'s: a healed solid, or with `reference` a reference
+    /// (design 364). One logged, undoable change; answers the part's
+    /// rebuild and `converted`.
+    #[serde(rename = "import.convert")]
+    ImportConvert {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feature: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reference: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Writes a part or an assembly as a file: at the working files, a Git
     /// revision `rev`, or a release `label:<L>`; in `format` (`step`,
     /// `stl`, `3mf`, `usda`, `usdc`, `usdz`), else the one `out`'s
@@ -1667,6 +1681,7 @@ impl Request {
                 | Request::ExplodeDelete { .. }
                 | Request::ReleasePropose { dry_run: false, .. }
                 | Request::Import { dry_run: false, .. }
+                | Request::ImportConvert { .. }
                 | Request::ReleaseObsolete { .. }
                 | Request::ReleaseSync { .. }
                 | Request::SketchEdit { .. }

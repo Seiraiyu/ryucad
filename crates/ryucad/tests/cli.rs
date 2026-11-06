@@ -1135,6 +1135,7 @@ fn every_protocol_method_has_a_command() {
         ("appearance.set", &["colour"]),
         ("appearance.clear", &["colour"]),
         ("import", &["import"]),
+        ("import.convert", &["import", "convert"]),
         ("export", &["export"]),
         ("rebuild", &["rebuild"]),
         ("inspect", &["inspect"]),
