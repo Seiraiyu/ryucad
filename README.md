@@ -1,5 +1,13 @@
 # ryucad
 
+<p><sub>竜 <i>ryū</i> — dragon</sub></p>
+
+[![Latest release](https://img.shields.io/github/v/release/Seiraiyu/ryucad?sort=semver&label=release)](https://github.com/Seiraiyu/ryucad/releases/latest)
+[![CI](https://github.com/Seiraiyu/ryucad/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Seiraiyu/ryucad/actions/workflows/ci.yml)
+[![Rust 1.99](https://img.shields.io/badge/rust-1.99-orange?logo=rust)](rust-toolchain.toml)
+[![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-blue)](#install)
+[![Downloads](https://img.shields.io/github/downloads/Seiraiyu/ryucad/total)](https://github.com/Seiraiyu/ryucad/releases)
+
 **CAD for AI agents to drive.** Agents model through a CLI and a JSON-RPC session; people watch, point and judge in a live viewer. Underneath is **ryukei**, a B-rep kernel written from scratch in Rust for large assemblies and identical results on every platform. The long-term target is Parasolid-level capability.
 
 <p align="center">
@@ -45,7 +53,7 @@ This is `ryucad-app` running on a Mac while the agent works, and nobody touched 
 
 ### Parts
 
-- **Parametric features:** sketches with a 2D constraint solver, then extrude, revolve, holes (counterbored, countersunk, drilled), linear, circular and mirror patterns, fillets, chamfers and booleans between solids.
+- **Parametric features:** sketches with a 2D constraint solver, then extrude, revolve, sweeps along paths and lofts, holes (counterbored, countersunk, drilled), linear, circular and mirror patterns, fillets, chamfers, shells, offsets, mirrors, splits and booleans between solids.
 - **Parameters and equations:** expressions with units, per part or project-wide, listed and edited as one table.
 - **Reference geometry:** datum planes, axes and points (offset, at an angle, midplane, through three points, normal to a path and more), paths along edges and sketch curves, and helices.
 - **Recompute:** each result is keyed by a hash of its inputs, so an edit rebuilds only what it reaches, and a disk cache keeps results between sessions.
@@ -55,7 +63,7 @@ This is `ryucad-app` running on a Mac while the agent works, and nobody touched 
 - **Instances and mates:** fastened, revolute, slider, cylindrical, planar and ball, solved by `ryumate`, which reports each body's freedom and any redundant or conflicting mates.
 - **Patterns, exploded views and section planes.** Explodes are saved in Git beside the assembly; section planes belong to a person's window or a render.
 - **Interference and clearance** between every pair of instances.
-- **Scale:** 1,000 mates over 1,001 occurrences solve in 36 ms when their poses hold and 61 ms from poses a degree off. The 10,000-part benchmark (100,000 occurrences, 107,500 files) answers through a daemon over a warm cache in 6.5 to 6.8 s, and an edit reaches a subscriber in 119 to 287 ms. Both are on cox-worker-3 (Intel Core Ultra 5 250K Plus, 18 threads). Orbiting 100,000 occurrences still runs at about 12 fps there, short of its 60 fps bar (#237).
+- **Scale:** 1,000 mates over 1,001 occurrences solve in 36 ms when their poses hold and 61 ms from poses a degree off. The 10,000-part benchmark (100,000 occurrences, 107,500 files) answers through a daemon over a warm cache in 6.5 to 6.8 s, and an edit reaches a subscriber in 119 to 287 ms. Both are on cox-worker-3 (Intel Core Ultra 5 250K Plus, 18 threads). Orbiting 100,000 occurrences in the app runs at 235 to 250 fps (median frame 4.0 to 4.3 ms, worst 15.3 ms) on bc2 (NVIDIA GeForce RTX 5060, Intel Core Ultra 5 250K Plus), over its 60 fps bar (#237).
 
 ### Measure, mass and looks
 
@@ -120,7 +128,7 @@ curl -fsSL https://github.com/Seiraiyu/ryucad/releases/latest/download/install.s
 irm https://github.com/Seiraiyu/ryucad/releases/latest/download/install.ps1 | iex
 ```
 
-Set `RYUCAD_VERSION=v0.8.0` to install a particular version, `RYUCAD_HOME` to install somewhere other than `~/.ryucad`, `RYUCAD_NO_MODIFY_PATH=1` to leave your shell profile alone, and `RYUCAD_NO_APP=1` to install the command only (servers, CI). `ryucad open [folder]` opens a project in the app, or brings its window forward.
+Set `RYUCAD_VERSION=v0.8.2` to install a particular version, `RYUCAD_HOME` to install somewhere other than `~/.ryucad`, `RYUCAD_NO_MODIFY_PATH=1` to leave your shell profile alone, and `RYUCAD_NO_APP=1` to install the command only (servers, CI). `ryucad open [folder]` opens a project in the app, or brings its window forward.
 
 <details>
 <summary>Uninstall</summary>
@@ -154,14 +162,14 @@ Every command answers one JSON document: `{"ok", "result" | "error", "warnings"}
 
 | Layer | Crates | What it is |
 |---|---|---|
-| Kernel | `ryukei`, `ryu-math` | The B-rep kernel. It has analytic surfaces and rational NURBS, extrusions, revolutions, sweeps, offsets and pipes, and certified intersections of every pair. On top of those: booleans with any number of tools, fillets and chamfers with their corners, sweeps along paths and lofts, offsets and shells, healing, tolerant modelling, sheet bodies, sheet-metal unfolding and refolding, measurement with bounds, certified watertight tessellation, and work budgets with cancellation. All deterministic, from `ryu-math`'s portable `libm` |
+| Kernel | `ryukei`, `ryu-math` | The B-rep kernel. It has analytic surfaces and rational NURBS, extrusions, revolutions, sweeps, offsets and pipes, and certified intersections of every pair. On top of those: booleans with any number of tools, fillets and chamfers with their corners, sweeps along paths and lofts, offsets and shells, healing, tolerant modelling, sheet bodies and fill, sheet-metal flanges, unfolding and refolding, silhouettes, measurement with bounds, certified watertight tessellation, and work budgets with cancellation. All deterministic, from `ryu-math`'s portable `libm` |
 | Exchange | `ryustep`, `ryu-part21`, `ryuformats` | STEP both ways, and STL, 3MF and USD (usda, usdc, usdz) |
 | Solvers | `ryusketch`, `ryumate` | The 2D sketch solver and the assembly mate solver, by block decomposition, with freedom and redundancy reported |
 | Application | `ryucad`, `ryucad-doc`, `ryu-doc`, `ryu-session` | Projects of feature files, the agent CLI, the per-project session daemon (participants, notifications, activity and undo), recompute and the disk cache, Git integration, renders and `doctor` |
 | App | `ryucad-app` | The live viewer |
 | PDM | `ryupdm` | Local PDM: properties, releases, BOMs, where-used, approvals, dependencies |
 | Electronics | `ryueda`, `ryusch`, `ryudfm`, `ryu-board`, `ryu-copper` | Electronics CAD, schematics, and board DFM |
-| Testing | `ryukei-testkit`, `ryukei-bench`, `step-hunt`, `fuzz/` | Seeded property tests, golden hashes on every platform, 32 fuzz targets, corpora of real files, and head-to-head comparisons with OCCT and SMLib |
+| Testing | `ryukei-testkit`, `ryukei-bench`, `step-hunt`, `fuzz/` | Seeded property tests, golden hashes on every platform, 34 fuzz targets, corpora of real files, and head-to-head comparisons with OCCT and SMLib |
 
 The default build has no C++ dependency; OCCT and SMLib appear only behind features of `ryukei-bench`. Design documents and roadmaps live in the Coxswain planning project `ryucad-ryukei`, not in this repo.
 
@@ -178,8 +186,9 @@ The default build has no C++ dependency; OCCT and SMLib appear only behind featu
 | [v0.5.0](https://github.com/Seiraiyu/ryucad/releases/tag/v0.5.0), [v0.5.1](https://github.com/Seiraiyu/ryucad/releases/tag/v0.5.1) | 2026-10-26 | Solids, fillets, chamfers, holes and patterns as features. STEP bodies both ways and healing. Assemblies, mates and the disk cache. Local PDM: properties, releases, tags and the commit guard |
 | [v0.6.0](https://github.com/Seiraiyu/ryucad/releases/tag/v0.6.0) | 2026-10-27 | Intersections of every surface, sweeps along paths and lofts. Interference. STEP import and re-import of parts and assemblies |
 | [v0.7.0](https://github.com/Seiraiyu/ryucad/releases/tag/v0.7.0) | 2026-10-30 | Booleans and blends on every surface, offset surfaces. STEP export; STL, 3MF and USD. The daemon at scale, the shared cache's client, agents on worktrees. Measure, mass and materials, views and the navigation cube, appearance. BOMs, item numbers and where-used. The first ryueda and ryudfm crates |
-| [v0.7.1](https://github.com/Seiraiyu/ryucad/releases/tag/v0.7.1), [v0.7.2](https://github.com/Seiraiyu/ryucad/releases/tag/v0.7.2) | 2026-10-31 – 11-01 | Bug fixes from v0.7.0's end-to-end tests and the first `step-hunt` campaign |
-| [v0.8.0](https://github.com/Seiraiyu/ryucad/releases/tag/v0.8.0) | 2026-11 | The new app: tiles, the command palette, keymaps, feedback, forms, onboarding and accessibility. Sections and exploded views, project parameters and equations, datums, paths and helices, usdc and usdz. Offset bodies and shells, sheet bodies, sheet-metal unfold and refold, tolerant booleans and blends, bounded work and cancellation. Approval rules and multi-repo dependencies. The edit at scale. ryueda's schematic engine |
+| [v0.7.1](https://github.com/Seiraiyu/ryucad/releases/tag/v0.7.1) – [v0.7.3](https://github.com/Seiraiyu/ryucad/releases/tag/v0.7.3) | 2026-10-31 – 11-03 | Bug fixes from v0.7.0's end-to-end tests and the first `step-hunt` campaign |
+| [v0.8.0](https://github.com/Seiraiyu/ryucad/releases/tag/v0.8.0) | 2026-11-04 | The new app: tiles, the command palette, keymaps, feedback, forms, onboarding and accessibility. Sections and exploded views, project parameters and equations, datums, paths and helices, usdc and usdz. Offset bodies and shells, sheet bodies, sheet-metal unfold and refold, tolerant booleans and blends, bounded work and cancellation. Approval rules and multi-repo dependencies. The edit at scale. ryueda's schematic engine |
+| [v0.8.1](https://github.com/Seiraiyu/ryucad/releases/tag/v0.8.1), [v0.8.2](https://github.com/Seiraiyu/ryucad/releases/tag/v0.8.2) | 2026-11-05 – 06 | Bug fixes from v0.8.0's end-to-end tests and the burn-down: healing of KiCad and board STEP models, interference, export (skipping failing features, cancels, named solids), sound USD BrepArrays, and the daemon's memory, warm start and frame rate at scale |
 
 Each release is tested end to end on a Mac, Linux and Windows before it is tagged. v0.8.0-pre.1 passed 319 of 322 scenario steps on davids-m4 (Apple M4, #380) and failed 5 of 321 on seiraiyu2 (AMD Ryzen 9 9955HX, Windows 11, #381). The failures are filed and burnt down in v0.8.x.
 
@@ -187,10 +196,10 @@ Each release is tested end to end on a Mac, Linux and Windows before it is tagge
 
 | Layer | Working on | Then |
 |---|---|---|
-| ryukei | Projection and hidden lines (10), sheet-metal flanges (11), sheet bodies' operators (12), tolerant offsets (14), robustness and speed (15) | Draft and face tweaks (9), direct editing (13) |
-| ryucad | Sweeps and lofts as features (14); shell, thicken, mirror and split (15); the STEP bug finder's next campaigns (12) | Drawings (9), sheet metal (16), draft (17), surfaces (18) |
+| ryukei | Hidden lines and sections (10), robustness and speed (15) | Draft and face tweaks (9), direct editing (13) |
+| ryucad | Shell, thicken, mirror and split in the app (15), sheet metal (16), annotations (19), STEP reference import (21) | Drawings (9), draft (17), surfaces (18), redline markup (20) |
 | ryupdm | | Teams and hosting (6), release packages (7) |
-| ryueda | The schematic spike (1) | The formatter, the live session and app, the first board, routing, outputs |
+| ryueda | The schematic formatter (2), part data (6) | The live session and app, Git, the first board, routing, outputs |
 | ryudfm | The copper engine (1) | Rules and waivers, fabrication and assembly checks |
 
 Roadmaps are plans, not commitments, and versions aren't assigned ahead of time.
