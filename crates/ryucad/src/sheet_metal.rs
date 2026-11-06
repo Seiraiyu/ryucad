@@ -3,6 +3,7 @@
 //! edge flanges on straight edges of one; the kernel's refusals in the
 //! agent's terms; and the sheet metal report ([`report`]).
 
+pub mod report;
 pub mod section;
 
 use crate::doc::id::Id;
@@ -452,11 +453,16 @@ fn flange_origins(id: &Id, key: OpKey, target: &Built, flanges: &[EdgeFlange], m
 }
 
 /// What a flange reads of its founder that shapes no body of the
-/// founder's own: its radius and relief as written. Its input hash adds
-/// them. `None` for anything else.
+/// founder's own: its radius and relief, by value (a parameter the
+/// founder's radius reads is the flange's input too, and the flange's
+/// file names no such parameter). Its input hash adds them. `None` for
+/// anything else.
 pub fn founder_settings(part: &Part, f: &Feature) -> Option<Value> {
     let b = founder(part, &f.flange()?.target)?;
-    Some(json!({"radius": b.radius.text(), "relief": b.relief.to_json()}))
+    Some(json!({
+        "radius_m": format!("{:?}", b.radius.meters()),
+        "relief": format!("{:?}", kernel_relief(&b.relief)),
+    }))
 }
 
 use crate::doc::files::Obj;

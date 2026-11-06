@@ -891,6 +891,18 @@ pub enum Request {
     /// principal moments and axes; per part, its solids, material and
     /// mass. `tolerance` is the relative agreement the integration
     /// reaches (1e-9).
+    /// A solid read as sheet metal, as the part shows it: its thickness,
+    /// flanges and bend table, each bend's allowance worked out to its
+    /// developed length. `solid` is the part's one sheet metal solid
+    /// unless named.
+    #[serde(rename = "sheet.get")]
+    SheetGet {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        solid: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     #[serde(rename = "mass")]
     Mass {
         of: String,

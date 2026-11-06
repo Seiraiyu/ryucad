@@ -638,6 +638,9 @@ fn dispatch(
             instances,
             below,
         } => crate::clearance::run(session, &part, &instances, below.as_deref()),
+        Request::SheetGet { part, solid, rev } => {
+            crate::sheet_metal::report::get(session, &part, solid.as_deref(), rev.as_deref())
+        }
         Request::Mass { of, tolerance, rev } => {
             crate::mass::run(session, &of, tolerance, rev.as_deref())
         }

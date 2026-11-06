@@ -304,6 +304,15 @@ enum Command {
         #[arg(long, value_name = "LENGTH")]
         below: Option<String>,
     },
+    /// A solid read as sheet metal: its thickness, flanges and bend table,
+    /// each bend's developed length (the part's one sheet metal solid unless
+    /// named).
+    Sheet {
+        part: String,
+        solid: Option<String>,
+        #[command(flatten)]
+        rev: RevArg,
+    },
     /// Mass properties of a part or assembly, a solid (<part>/<solid>) or an occurrence
     /// (<assembly>/<instance>/…): volume, area, centre of mass, and where every part has a
     /// material in materials.json, mass and inertia.
@@ -3386,6 +3395,11 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Equations { part, all, rev } => Request::EquationsList {
             part: part.clone(),
             all: *all,
+            rev: rev.rev.clone(),
+        },
+        Command::Sheet { part, solid, rev } => Request::SheetGet {
+            part: part.clone(),
+            solid: solid.clone(),
             rev: rev.rev.clone(),
         },
         Command::Mass { of, tolerance, rev } => Request::Mass {

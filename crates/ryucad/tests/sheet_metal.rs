@@ -6,6 +6,7 @@
 //! checks, the self-intersection check among them.
 
 use ryucad::doc::id::Id;
+use ryucad::error::Code;
 use ryucad::proto::Request;
 use ryucad::server::handle;
 use ryucad::session::Session;
@@ -313,4 +314,54 @@ fn refusals_are_in_the_agents_terms() {
     let e = failed(&mut s, "i");
     assert_eq!(e["details"]["reason"], "out_of_slab", "{e}");
     assert!(e["details"]["entities"][0]["reference"].is_string(), "{e}");
+}
+
+#[test]
+fn the_sheet_report_gives_the_thickness_and_bend_table() {
+    let (_dir, mut s, rim, _) = plated();
+    // A plate: its thickness, no bends.
+    let v = must(&mut s, "sheet.get", json!({"part": "p"}));
+    assert_eq!((v["schema"].as_u64(), v["solid"].as_str(), v["state"].as_str()),
+               (Some(1), Some("plate"), Some("folded")), "{v}");
+    assert!((v["thickness_m"].as_f64().unwrap() - 1.5e-3).abs() < 1e-12, "{v}");
+    assert_eq!(v["bends"], json!([]));
+    assert_eq!(v["tree"], true);
+    // A flange: one bend, its developed length θ (r + k t).
+    add(&mut s, json!({"type": "flange", "id": "f", "edges": [rim], "angle": "90 deg", "length": "20 mm"}));
+    let v = must(&mut s, "sheet.get", json!({"part": "p", "solid": "plate"}));
+    let b = &v["bends"][0];
+    assert!((b["radius_m"].as_f64().unwrap() - 1e-3).abs() < 1e-12, "{v}");
+    assert!((b["angle_deg"].as_f64().unwrap() - 90.0).abs() < 1e-9, "{v}");
+    let want = Q * (1e-3 + 0.44 * 1.5e-3);
+    assert!((b["developed_m"].as_f64().unwrap() - want).abs() < 1e-12, "{v}");
+    assert_eq!(v["allowance_from"], "plate");
+    // Its bend face resolves as any face does.
+    let r = b["bend"].as_str().unwrap();
+    must(&mut s, "measure", json!({"entities": [r]}));
+    // By a deduction: 2 (r + t) tan(θ / 2) - bd.
+    must(&mut s, "feature.edit", json!({"part": "p", "id": "plate", "allowance": {"deduction": "2.4 mm"}}));
+    let v = must(&mut s, "sheet.get", json!({"part": "p"}));
+    let want = 2.0 * (1e-3 + 1.5e-3) - 2.4e-3;
+    assert!((v["bends"][0]["developed_m"].as_f64().unwrap() - want).abs() < 1e-12, "{v}");
+}
+
+#[test]
+fn the_sheet_report_refuses_what_isnt_sheet_metal() {
+    let (_dir, mut s) = project();
+    add(&mut s, json!({"type": "box", "id": "blk", "params": {"x": 40, "y": 30, "z": 2}}));
+    add(&mut s, json!({"type": "cylinder", "id": "boss", "params": {"radius": 3, "height": 10},
+                       "placement": {"origin": [20, 15, 0]}, "operation": "join", "targets": ["blk"]}));
+    let e = call(&mut s, "sheet.get", json!({"part": "p"})).unwrap_err();
+    assert_eq!(e.code, Code::SheetMetalFailed, "{e}");
+    // Two solids and none named.
+    // A thin box, so recognition reads it as a plate (a cube's edges are
+    // sharp bends).
+    add(&mut s, json!({"type": "box", "id": "other", "params": {"x": 10, "y": 10, "z": 1},
+                       "placement": {"origin": [100, 0, 0]}}));
+    let e = call(&mut s, "sheet.get", json!({"part": "p"})).unwrap_err();
+    assert_eq!(e.code, Code::InvalidParam, "{e}");
+    // A plain box is a plate as far as recognition goes: no base flange
+    // gives it an allowance.
+    let v = must(&mut s, "sheet.get", json!({"part": "p", "solid": "other"}));
+    assert_eq!(v["allowance"], Value::Null, "{v}");
 }

@@ -1115,6 +1115,7 @@ fn every_protocol_method_has_a_command() {
         ("interference", &["interference"]),
         ("measure", &["measure"]),
         ("mass", &["mass"]),
+        ("sheet.get", &["sheet"]),
         ("clearance", &["clearance"]),
         ("deps.add", &["deps", "add"]),
         ("deps.fetch", &["deps", "fetch"]),
@@ -3562,6 +3563,8 @@ fn sheet_metal_from_the_cli() {
     assert_eq!(r["feature"]["ends"][0]["setback"]["m"], 0.005, "{r}");
     assert_eq!(r["feature"]["inherited"], json!(["radius", "relief"]), "{r}");
     p.ok(&["rebuild", "p"]);
+    let v = p.ok(&["sheet", "p", "plate"]);
+    assert_eq!(v["bends"].as_array().unwrap().len(), 1, "{v}");
     // Its angle and position edited, then put back: the default position
     // is written as nothing again.
     p.ok(&["feature", "edit", "p", "f", "--angle", "80deg", "--position", "bend_outside"]);
