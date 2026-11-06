@@ -58,7 +58,7 @@ type Iv = Interval;
 /// The fractions a cell is split at, one per attempt: off the dyadic
 /// fractions symmetric problems put their curves through, and different
 /// from each other so a crossing on a face's edge moves off it.
-const SPLITS: [f64; 3] = [0.499_023_437_5, 0.471_191_406_25, 0.523_681_640_625];
+pub(super) const SPLITS: [f64; 3] = [0.499_023_437_5, 0.471_191_406_25, 0.523_681_640_625];
 
 /// The most times a pair may be split.
 const MAX_DEPTH: u32 = 48;
@@ -416,6 +416,7 @@ pub(crate) fn trace(
         for (attempt, split) in SPLITS.into_iter().enumerate() {
             let mut tracer = Tracer::new([a, b], region, split, m);
             tracer.shift = CELL_SHIFTS[attempt];
+            tracer.attempt = attempt;
             match tracer.run() {
                 Err(Failure::Uncertain) if tracer.singular <= MAX_SINGULAR => continue,
                 other => return other,
@@ -537,6 +538,8 @@ struct Tracer<'a> {
     split: f64,
     /// How the first cells are cut ([`cells_off`]).
     shift: f64,
+    /// Which of [`SPLITS`] this is, for the second surface's own.
+    attempt: usize,
     leaves: Vec<Leaf>,
     singular: usize,
     crossings: Vec<Crossing>,
@@ -585,7 +588,26 @@ fn exact_poles(s: &Surface) -> Vec<(usize, f64)> {
 
 /// The first cells' shift on each attempt: the surfaces' own pieces
 /// twice (with two of [`SPLITS`]), then cut off them.
-const CELL_SHIFTS: [f64; 3] = [0.0, 0.0, 0.293];
+pub(super) const CELL_SHIFTS: [f64; 3] = [0.0, 0.0, 0.293];
+
+/// The fractions the second surface is split at, one per attempt. The
+/// first two attempts split it as the first surface (what settles there
+/// stays as it was); the attempt off the surfaces' pieces splits it unlike
+/// the first and unlike its mirror `1 - f`, so that neither two sides of
+/// one sweep (sharing a parameter) nor two mirrored fillets of a corner
+/// (`θ_B = -θ_A`) put the curve on both surfaces' cell sides at once.
+const SECOND_SPLITS: [f64; 3] = [SPLITS[0], SPLITS[1], 0.488_281_25];
+
+/// The shifts of the second surface's first cells, likewise.
+const SECOND_SHIFTS: [f64; 3] = [0.0, 0.0, 0.411];
+
+pub(super) fn second_fraction(attempt: usize) -> f64 {
+    SECOND_SPLITS[attempt]
+}
+
+pub(super) fn second_shift(attempt: usize) -> f64 {
+    SECOND_SHIFTS[attempt]
+}
 
 impl<'a> Tracer<'a> {
     fn new(surfaces: [&'a Surface; 2], region: &Box3, split: f64, meter: &'a Meter<'a>) -> Self {
@@ -595,6 +617,7 @@ impl<'a> Tracer<'a> {
             region: region.grow(LINEAR_RESOLUTION),
             split,
             shift: 0.0,
+            attempt: 0,
             leaves: Vec::new(),
             singular: 0,
             crossings: Vec::new(),
@@ -653,15 +676,7 @@ impl<'a> Tracer<'a> {
         let firsts = [
             cells_off(self.surfaces[0], &self.region, self.shift),
             // The second moved differently, as it is split differently.
-            cells_off(
-                self.surfaces[1],
-                &self.region,
-                if self.shift > 0.0 {
-                    1.0 - self.shift
-                } else {
-                    0.0
-                },
-            ),
+            cells_off(self.surfaces[1], &self.region, second_shift(self.attempt)),
         ];
         // The first pairs: cells whose enclosures meet.
         let mut boxes: Vec<Vec<Option<Box3>>> = Vec::with_capacity(2);
@@ -773,12 +788,12 @@ impl<'a> Tracer<'a> {
         }
         let (k, d, _) = best;
         let [lo, hi] = cells[k][d];
-        // On the attempt off the surfaces' pieces the second surface is
-        // split elsewhere too: surfaces sharing a parameter (sides of one
-        // sweep, along its path) would otherwise put their cells' sides
-        // together where the curve crosses.
-        let fraction = if k == 1 && self.shift > 0.0 {
-            1.0 - self.split
+        // The second surface is split elsewhere: surfaces sharing a
+        // parameter (sides of one sweep, along its path), or mirrored
+        // (two fillets of a corner), would otherwise put their cells'
+        // sides together where the curve crosses.
+        let fraction = if k == 1 {
+            second_fraction(self.attempt)
         } else {
             self.split
         };

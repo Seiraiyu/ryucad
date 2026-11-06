@@ -234,3 +234,25 @@ fn apart_within_gives_up_when_halted() {
         None
     );
 }
+
+#[test]
+fn the_second_surface_is_split_neither_as_the_first_nor_its_mirror() {
+    // On the attempt off the surfaces' pieces; the first two split both
+    // surfaces alike, as they always have.
+    for (attempt, &f) in super::SPLITS.iter().enumerate() {
+        let g = super::second_fraction(attempt);
+        let (s, t) = (super::CELL_SHIFTS[attempt], super::second_shift(attempt));
+        if s > 0.0 {
+            assert!(
+                (g - f).abs() > 1e-3 && (g - (1.0 - f)).abs() > 1e-3,
+                "{attempt}: {f} {g}"
+            );
+            assert!(
+                (t - s).abs() > 1e-3 && (t - (1.0 - s)).abs() > 1e-3,
+                "{attempt}: {s} {t}"
+            );
+        } else {
+            assert_eq!((g, t), (f, 0.0), "{attempt}");
+        }
+    }
+}
