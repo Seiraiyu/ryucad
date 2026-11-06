@@ -247,6 +247,59 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
+        // A sheet metal feature's allowance and relief each on a line
+        // (`allowance = k_factor 0.44`, `relief = obround 1 mm × 1.5 mm`), a
+        // flange's edges on one line, each end on its own
+        // (`ends[plate/<hex>] = setback 5 mm, relief tear 0.5 mm`).
+        Some("ryucad.feature")
+            if matches!(
+                o.get("type").and_then(Value::as_str),
+                Some("base_flange" | "flange")
+            ) =>
+        {
+            fn relief_text(r: &Value) -> String {
+                let kind = r.get("kind").and_then(Value::as_str).unwrap_or_default();
+                match (r.get("width"), r.get("depth")) {
+                    (Some(w), Some(d)) => format!("{kind} {} × {}", scalar(w), scalar(d)),
+                    (Some(w), None) => format!("{kind} {}", scalar(w)),
+                    _ => kind.to_owned(),
+                }
+            }
+            if let Some(Value::Object(a)) = rest.remove("allowance") {
+                let text: Vec<String> = a.iter().map(|(k, x)| format!("{k} {}", scalar(x))).collect();
+                lines.push(format!("allowance = {}", text.join(", ")));
+            }
+            if let Some(r) = rest.remove("relief") {
+                lines.push(format!("relief = {}", relief_text(&r)));
+            }
+            if let Some(Value::Array(edges)) = rest.remove("edges") {
+                let text: Vec<String> = edges
+                    .iter()
+                    .map(|e| match e.get("edge") {
+                        Some(x) => format!(
+                            "{} (side {})",
+                            reference(x).unwrap_or_else(|| scalar(x)),
+                            reference(&e["side"]).unwrap_or_else(|| scalar(&e["side"]))
+                        ),
+                        None => reference(e).unwrap_or_else(|| scalar(e)),
+                    })
+                    .collect();
+                lines.push(format!("edges = {}", text.join(", ")));
+            }
+            if let Some(Value::Array(ends)) = rest.remove("ends") {
+                for e in &ends {
+                    let v = reference(&e["vertex"]).unwrap_or_else(|| scalar(&e["vertex"]));
+                    let mut parts = Vec::new();
+                    if let Some(s) = e.get("setback") {
+                        parts.push(format!("setback {}", scalar(s)));
+                    }
+                    if let Some(r) = e.get("relief") {
+                        parts.push(format!("relief {}", relief_text(r)));
+                    }
+                    lines.push(format!("ends[{v}] = {}", parts.join(", ")));
+                }
+            }
+        }
         // A shell's or offset's face groups, each on one line:
         // `faces[0] = 4 mm: base/<hex>, base/<hex>`.
         Some("ryucad.feature")
@@ -1931,6 +1984,26 @@ mod tests {
                  target = h\n"
             )
         );
+    }
+
+    #[test]
+    fn sheet_metal_features_textconv_one_line_a_field() {
+        let n = |k: u8| format!("{k:032x}");
+        let v = json!({"format": 11, "kind": "ryucad.feature", "type": "flange", "target": "plate",
+                       "edges": [{"feature": "plate", "name": n(1)},
+                                 {"edge": {"feature": "plate", "name": n(2)}, "side": {"feature": "plate", "name": n(3)}}],
+                       "angle": "90 deg", "length": "20 mm",
+                       "ends": [{"vertex": {"feature": "plate", "name": n(4)}, "setback": "5 mm",
+                                 "relief": {"kind": "obround", "width": "1 mm", "depth": "1.5 mm"}}]});
+        let t = text(v.clone());
+        assert!(t.contains(&format!("edges = plate/{}, plate/{} (side plate/{})", n(1), n(2), n(3))), "{t}");
+        assert!(t.contains(&format!("ends[plate/{}] = setback 5 mm, relief obround 1 mm × 1.5 mm", n(4))), "{t}");
+        let v = json!({"format": 11, "kind": "ryucad.feature", "type": "base_flange", "sketch": "s",
+                       "thickness": "1.5 mm", "radius": "1 mm", "allowance": {"deduction": "2.4 mm"},
+                       "relief": {"kind": "tear", "width": "0.5 mm"}});
+        let t = text(v.clone());
+        assert!(t.contains("allowance = deduction 2.4 mm"), "{t}");
+        assert!(t.contains("relief = tear 0.5 mm"), "{t}");
     }
 
     #[test]
