@@ -4,6 +4,7 @@ description = "What every ryu product's files are written in: canonical JSON, ID
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 ryu-math = { path = "../ryu-math" }
