@@ -1206,6 +1206,189 @@ fn lofts_section(golden: &mut Golden) {
     );
 }
 
+/// Surface sweeps and planar faces (ryucad 18.A): an extruded arc, a
+/// revolved dome, an open line swept along a bend, two chains lofted, a
+/// square's planar face; every body bit for bit on one thread and four,
+/// each a sheet checking clean; then renders of them from in front and
+/// behind (a sheet's back tinted) and cut by a section through them
+/// (never capped).
+fn surfaces_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("surfaces");
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+    call(&mut session, "part.create", json!({"part": "su"}));
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("su");
+        call(s, "feature.add", f);
+    };
+    let sketch =
+        |s: &mut ryucad::session::Session, id: &str, plane: &str, ops: serde_json::Value| {
+            add(s, json!({"type": "sketch", "id": id, "plane": plane}));
+            call(
+                s,
+                "sketch.edit",
+                json!({"part": "su", "sketch": id, "ops": ops}),
+            );
+        };
+    sketch(
+        &mut session,
+        "arc",
+        "xy",
+        json!([
+            {"op": "add", "id": "o", "type": "point", "at": [0, 0]},
+            {"op": "add", "id": "p", "type": "point", "at": [10, 0]},
+            {"op": "add", "id": "q", "type": "point", "at": [0, 10]},
+            {"op": "add", "id": "a1", "type": "arc", "center": "o", "start": "p", "end": "q"}
+        ]),
+    );
+    add(
+        &mut session,
+        json!({"type": "extrude", "id": "wall", "sketch": "arc", "surface": true,
+               "extent": {"type": "blind", "length": "20 mm"}}),
+    );
+    sketch(
+        &mut session,
+        "dome",
+        "zx",
+        json!([
+            {"op": "add", "id": "o", "type": "point", "at": [0, -25]},
+            {"op": "add", "id": "p", "type": "point", "at": [0, -17]},
+            {"op": "add", "id": "q", "type": "point", "at": [8, -25]},
+            {"op": "add", "id": "a1", "type": "arc", "center": "o", "start": "q", "end": "p"},
+            {"op": "add", "id": "ax", "type": "line", "start": "o", "end": "q", "construction": true}
+        ]),
+    );
+    add(
+        &mut session,
+        json!({"type": "revolve", "id": "cap", "sketch": "dome", "axis": "ax",
+               "angle": "full", "surface": true}),
+    );
+    sketch(
+        &mut session,
+        "sq",
+        "xy",
+        json!([
+            {"op": "add", "id": "p1", "type": "point", "at": [20, 0]},
+            {"op": "add", "id": "p2", "type": "point", "at": [30, 0]},
+            {"op": "add", "id": "p3", "type": "point", "at": [30, 10]},
+            {"op": "add", "id": "p4", "type": "point", "at": [20, 10]},
+            {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}
+        ]),
+    );
+    add(
+        &mut session,
+        json!({"type": "planar", "id": "pad", "sketch": "sq"}),
+    );
+    // An open line swept up and round a bend.
+    sketch(
+        &mut session,
+        "band",
+        "xy",
+        json!([
+            {"op": "add", "id": "a", "type": "point", "at": [38, 0]},
+            {"op": "add", "id": "b", "type": "point", "at": [42, 0]},
+            {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}
+        ]),
+    );
+    sketch(
+        &mut session,
+        "bend",
+        "zx",
+        json!([
+            {"op": "add", "id": "a", "type": "point", "at": [0, 40]},
+            {"op": "add", "id": "b", "type": "point", "at": [10, 40]},
+            {"op": "add", "id": "c", "type": "point", "at": [10, 55]},
+            {"op": "add", "id": "e", "type": "point", "at": [25, 55]},
+            {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"},
+            {"op": "add", "id": "a1", "type": "arc", "center": "c", "start": "b", "end": "e"}
+        ]),
+    );
+    add(
+        &mut session,
+        json!({"type": "path", "id": "pb", "segments": ["su/bend/l1", "su/bend/a1"]}),
+    );
+    add(
+        &mut session,
+        json!({"type": "sweep", "id": "ribbon", "sketch": "band", "path": "su/pb",
+               "surface": true}),
+    );
+    // Two chains lofted: a line on xy and one 10 mm above, drawn back.
+    sketch(
+        &mut session,
+        "la",
+        "xy",
+        json!([
+            {"op": "add", "id": "a", "type": "point", "at": [-20, 0]},
+            {"op": "add", "id": "b", "type": "point", "at": [-10, 0]},
+            {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}
+        ]),
+    );
+    add(
+        &mut session,
+        json!({"type": "plane", "id": "up", "by": "offset", "from": "xy", "distance": "10 mm"}),
+    );
+    sketch(
+        &mut session,
+        "lb",
+        "su/up",
+        json!([
+            {"op": "add", "id": "a", "type": "point", "at": [-8, 0]},
+            {"op": "add", "id": "b", "type": "point", "at": [-20, 2]},
+            {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}
+        ]),
+    );
+    add(
+        &mut session,
+        json!({"type": "loft", "id": "skin", "sections": ["la", "lb"], "surface": true}),
+    );
+    let part = Id::parse("su", "part").unwrap();
+    let p = session.project().part(&part).unwrap().clone();
+    let mut answers = Vec::new();
+    for threads in [1, 4] {
+        let r = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| rebuild_part(&p));
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        let mut lines = Vec::new();
+        for (id, o) in &r.features {
+            let o = o.as_ref().unwrap();
+            for (solid, b) in o.solids() {
+                assert_eq!(b.body.kind(), ryukei::topo::BodyKind::Sheet, "{id}");
+                assert_eq!(ryukei::check::check_intersections(&b.body), [], "{id}");
+                lines.push(format!("{id} {solid} {}", b.hash));
+            }
+        }
+        lines.push(r.hash.clone());
+        answers.push(lines);
+    }
+    assert_eq!(answers[0], answers[1], "one thread and four");
+    for l in &answers[0] {
+        s.str(l);
+    }
+    renders(
+        &mut s,
+        dir.path(),
+        session,
+        vec![
+            json!({"part": "su", "view": "iso"}),
+            json!({"part": "su", "view": "back_bottom_left"}),
+            json!({"part": "su", "view": "iso", "section": [{"plane": "zx", "offset": 5}]}),
+        ],
+    );
+}
+
 /// An assembly of the showcase twice and a plate, exploded: its explode
 /// as `explode.list` resolves it, and renders all the way, half way, by a
 /// turn, and of a named view that saved it.
@@ -3759,4 +3942,5 @@ sections! {
     paths => paths_section(&mut golden),
     sweeps_along => sweeps_along_section(&mut golden),
     lofts => lofts_section(&mut golden),
+    surfaces => surfaces_section(&mut golden),
 }
