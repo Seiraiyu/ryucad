@@ -168,6 +168,23 @@ pub enum Request {
     /// Every source of parts, and each catalogue's state on this machine.
     #[serde(rename = "parts.sources")]
     PartsSources {},
+    /// Sets the project's sourcing in `parts.json`: `assembly` (`jlcpcb`,
+    /// `null` for none), `build_quantity` (`null` for 1), `sources` (the
+    /// whole list, `[]` for none), severities by supply code (`null` for
+    /// the default). Nothing given answers it as it is.
+    #[serde(rename = "parts.configure")]
+    PartsConfigure {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assembly: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        build_quantity: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sources: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        severity: serde_json::Map<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// The records a key names (`lcsc:C1525`, `mpn:<part number>`,
     /// `library:<reference>`). Catalogues never fetch per part, so
     /// `refresh` says how to refresh one and `offline` changes nothing.
@@ -723,6 +740,7 @@ impl Request {
                 | Request::ErcWaive { .. }
                 | Request::ErcConfigure { .. }
                 | Request::LintConfigure { .. }
+                | Request::PartsConfigure { .. }
                 | Request::Layout { .. }
                 | Request::LayoutPlace { .. }
                 | Request::Undo { .. }

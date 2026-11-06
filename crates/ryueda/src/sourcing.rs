@@ -3,10 +3,11 @@
 //! many boards a build makes, the sources searches ask, and supply
 //! findings' severities. `parts.configure` writes it.
 
-use crate::error::Code;
+use crate::error::{Code, Error, Result};
 use crate::fault::Fault;
 use crate::project::Project;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub const KIND: &str = "ryueda.parts";
@@ -102,6 +103,113 @@ impl Config {
 /// (a fault of the project).
 pub fn config(p: &Project) -> Config {
     p.parts.item.clone().unwrap_or_default()
+}
+
+fn bad(param: &str, msg: String) -> Error {
+    Error::new(Code::InvalidParam, msg).with("param", param)
+}
+
+/// `parts.configure`: one logged change guarded by the project's revision,
+/// `parts.json` deleted when it holds nothing. `null` (or `none`,
+/// `default`) puts a field back; nothing given writes nothing and answers
+/// the sourcing as it is.
+pub fn configure(
+    session: &mut crate::session::Session,
+    assembly: Option<&Value>,
+    build_quantity: Option<&Value>,
+    sources: Option<&[String]>,
+    severity: &serde_json::Map<String, Value>,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    crate::server::check_revision("the project", &p.revision, expected)?;
+    p.parts.item.as_ref().map_err(|e| e.clone())?;
+    let mut c = config(p);
+    match assembly {
+        None => {}
+        Some(Value::Null) => c.assembly = None,
+        Some(Value::String(s)) if s == "none" => c.assembly = None,
+        Some(v) => {
+            c.assembly = Some(serde_json::from_value(v.clone()).map_err(|_| {
+                bad(
+                    "assembly",
+                    format!("{v} isn't an assembly house: jlcpcb or none"),
+                )
+            })?)
+        }
+    }
+    match build_quantity {
+        None => {}
+        Some(Value::Null) => c.build_quantity = None,
+        Some(Value::String(s)) if s == "default" => c.build_quantity = None,
+        Some(v) => match v.as_u64().or_else(|| v.as_str()?.parse().ok()) {
+            Some(n) if n >= 1 => c.build_quantity = (n != 1).then_some(n),
+            _ => {
+                return Err(bad(
+                    "build_quantity",
+                    format!("{v} isn't a whole number of boards, 1 or more"),
+                ));
+            }
+        },
+    }
+    if let Some(s) = sources {
+        let known = crate::parts::sources_known();
+        for name in s {
+            if !known.contains(&name.as_str()) {
+                return Err(bad(
+                    "sources",
+                    format!("{name} isn't a source: {}", known.join(", ")),
+                )
+                .with("sources", &known));
+            }
+        }
+        c.sources = s.to_vec();
+    }
+    for (name, v) in severity {
+        if !SUPPLY_CODES.iter().any(|x| code_name(*x) == *name) {
+            return Err(bad(
+                &format!("severity/{name}"),
+                format!("{name} isn't a supply finding"),
+            )
+            .with(
+                "codes",
+                SUPPLY_CODES
+                    .iter()
+                    .map(|x| code_name(*x))
+                    .collect::<Vec<_>>(),
+            ));
+        }
+        match v {
+            Value::Null => {
+                c.severity.remove(name);
+            }
+            Value::String(s) if s == "default" => {
+                c.severity.remove(name);
+            }
+            v => {
+                let level: crate::erc::Level = serde_json::from_value(v.clone()).map_err(|_| {
+                    bad(
+                        &format!("severity/{name}"),
+                        format!("{v} isn't error, warning, off or default"),
+                    )
+                })?;
+                c.severity.insert(name.clone(), level);
+            }
+        }
+    }
+    if c != config(p) {
+        let mut w = crate::write::Writes::default();
+        if c == Config::default() {
+            w.delete(crate::project::PARTS.to_owned());
+        } else {
+            w.0.push((
+                crate::project::PARTS.to_owned(),
+                Some(crate::doc::to_string(&c, KIND, FORMAT)),
+            ));
+        }
+        crate::write::commit(session, "parts.json", w)?;
+    }
+    Ok(json!({"config": c, "revision": session.project().revision}))
 }
 
 #[cfg(test)]

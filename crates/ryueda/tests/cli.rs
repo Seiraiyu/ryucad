@@ -35,6 +35,8 @@ fn ryueda(run: &Path) -> Command {
     cmd.env("RYUEDA_RUNTIME_DIR", run)
         .env("RYUEDA_IDLE_TIMEOUT", "60")
         .env("RYUEDA_CONFIG_DIR", run.with_file_name("config"))
+        // A parts cache of the test's own: no catalogue this machine holds.
+        .env("RYUEDA_CACHE_DIR", run.with_file_name("cache"))
         // Random IDs a fixed sequence, the same in process and through a
         // daemon.
         .env("RYUEDA_ID_SEED", "cli")
@@ -409,6 +411,7 @@ fn every_protocol_method_has_a_command() {
         ("parts.sync", &["parts", "sync"]),
         ("parts.sources", &["parts", "sources"]),
         ("parts.show", &["parts", "show"]),
+        ("parts.configure", &["parts", "configure"]),
         ("import.kicad", &["import", "kicad"]),
         ("rail.add", &["rail", "add"]),
         ("rail.edit", &["rail", "edit"]),
@@ -2521,7 +2524,7 @@ fn parts_from_the_cli() {
         keys(&p.ok(&["parts", "search", "--like", "top/r1"])),
         keys(&like)
     );
-    p.fails(&["parts", "search", "--in", "jlc"], "invalid_param", 1);
+    p.fails(&["parts", "search", "--in", "digikey"], "invalid_param", 1);
     p.fails(&["parts", "search", "colour=red"], "invalid_param", 1);
     p.fails(
         &["parts", "search", "capacitance=lots"],
@@ -2530,4 +2533,63 @@ fn parts_from_the_cli() {
     );
     p.fails(&["parts", "search", "valve"], "invalid_param", 1);
     p.fails(&["parts", "search", "--like", "nope"], "not_found", 1);
+}
+
+#[test]
+fn parts_configure_from_the_cli() {
+    let p = Pair::projects();
+    let v = p.ok(&["parts", "configure"]);
+    assert_eq!(v["config"], json!({}));
+    let v = p.ok(&[
+        "parts",
+        "configure",
+        "--assembly",
+        "jlcpcb",
+        "--build-quantity",
+        "10",
+        "--source",
+        "library",
+        "--source",
+        "jlc",
+        "--severity",
+        "part_extended=error",
+    ]);
+    assert_eq!(
+        v["config"],
+        json!({"assembly": "jlcpcb", "build_quantity": 10,
+               "sources": ["library", "jlc"], "severity": {"part_extended": "error"}})
+    );
+    assert!(p.direct.join("board/parts.json").is_file());
+    let e = p.fails(
+        &["parts", "configure", "--severity", "pin_conflict=off"],
+        "invalid_param",
+        1,
+    );
+    assert_eq!(e["details"]["param"], "severity/pin_conflict");
+    p.fails(
+        &["parts", "configure", "--build-quantity", "0"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &["parts", "configure", "--source", "digikey"],
+        "invalid_param",
+        1,
+    );
+    let v = p.ok(&[
+        "parts",
+        "configure",
+        "--assembly",
+        "none",
+        "--build-quantity",
+        "default",
+        "--no-sources",
+        "--severity",
+        "part_extended=default",
+    ]);
+    assert_eq!(v["config"], json!({}));
+    assert!(
+        !p.direct.join("board/parts.json").exists(),
+        "nothing set, no file"
+    );
 }

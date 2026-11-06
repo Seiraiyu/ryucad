@@ -609,6 +609,30 @@ enum PartsCmd {
         #[arg(long)]
         offline: bool,
     },
+    /// The project's sourcing (parts.json): the assembly house, how many
+    /// boards a build makes, the sources searches ask, supply findings'
+    /// severities. Nothing given shows it.
+    Configure {
+        /// jlcpcb, or none.
+        #[arg(long)]
+        assembly: Option<String>,
+        /// Boards a build makes (1 or more), or default.
+        #[arg(long)]
+        build_quantity: Option<String>,
+        /// A source a search without --in asks, in order; repeat for
+        /// more. Replaces the list.
+        #[arg(long = "source", conflicts_with = "no_sources")]
+        sources: Vec<String>,
+        /// Searches without --in ask the library alone again.
+        #[arg(long)]
+        no_sources: bool,
+        /// CODE=error|warning|off|default for a supply finding; repeat
+        /// for more.
+        #[arg(long, value_parser = pair)]
+        severity: Vec<(String, String)>,
+        #[command(flatten)]
+        expect: Expect,
+    },
     /// Every source of parts, and each catalogue's state on this machine:
     /// when it was synced, how many parts, whether it is stale.
     Sources,
@@ -1353,6 +1377,29 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             source: source.clone(),
         },
         Command::Parts(PartsCmd::Sources) => Request::PartsSources {},
+        Command::Parts(PartsCmd::Configure {
+            assembly,
+            build_quantity,
+            sources,
+            no_sources,
+            severity,
+            expect,
+        }) => Request::PartsConfigure {
+            assembly: assembly.as_deref().map(|a| json!(a)),
+            build_quantity: build_quantity
+                .as_deref()
+                .map(|b| b.parse::<u64>().map_or_else(|_| json!(b), |n| json!(n))),
+            sources: if *no_sources {
+                Some(Vec::new())
+            } else {
+                (!sources.is_empty()).then(|| sources.clone())
+            },
+            severity: severity
+                .iter()
+                .map(|(k, v)| (k.clone(), json!(v)))
+                .collect(),
+            expected_revision: expect.expect.clone(),
+        },
         Command::Parts(PartsCmd::Show {
             key,
             refresh,

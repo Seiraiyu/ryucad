@@ -379,6 +379,20 @@ fn dispatch(
             let cats = session.catalogues()?;
             crate::parts::show(session.project(), &key, refresh, &cats)
         }
+        Request::PartsConfigure {
+            assembly,
+            build_quantity,
+            sources,
+            severity,
+            expected_revision,
+        } => crate::sourcing::configure(
+            session,
+            assembly.as_ref(),
+            build_quantity.as_ref(),
+            sources.as_deref(),
+            &severity,
+            expected_revision.as_deref(),
+        ),
         Request::PartsSources {} => {
             let cats = session.catalogues()?;
             crate::parts::sources(session.project(), &cats)
