@@ -541,11 +541,13 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
             format!("{} {id} makes no body of its own", f.type_name()),
         )
         .with("feature", id)),
-        Feature::Extrude(_) | Feature::Revolve(_) | Feature::Hole(_) => Err(Error::new(
-            Code::Internal,
-            format!("{} {id} is built from its sketch", f.type_name()),
-        )
-        .with("feature", id)),
+        Feature::Extrude(_) | Feature::Revolve(_) | Feature::Hole(_) | Feature::Planar(_) => {
+            Err(Error::new(
+                Code::Internal,
+                format!("{} {id} is built from its sketch", f.type_name()),
+            )
+            .with("feature", id))
+        }
         Feature::Sweep(_) => Err(Error::new(
             Code::Internal,
             format!("sweep {id} is built from its profile and path"),
@@ -606,7 +608,14 @@ fn build_sweep(
         },
         _ => unreachable!("a sweep"),
     };
-    let (valid, keys) = crate::profile::profile(&part.id, sketch, solved, loops)
+    // A surface sweep takes its sketch's loops and open chains, and
+    // founds the sheet they sweep (ryucad 18).
+    let of = if f.surface() {
+        crate::profile::surface
+    } else {
+        crate::profile::profile
+    };
+    let (valid, keys) = of(&part.id, sketch, solved, loops)
         .map_err(|e| e.with("feature", id).with("sketch", sketch))?;
     let key = op_key(&part.id, id);
     let made = match f {
@@ -860,6 +869,15 @@ fn sweep_error(id: &Id, ty: &str, e: ryukei::Error, keys: &Keys, axis: Option<&I
             let msg = format!("{seg} crosses or touches the axis");
             (Code::ProfileInvalid, msg, entities)
         }
+        ryukei::Error::InvalidSweep(SweepError::ChainOnAxis { segment }) => {
+            let seg = keys.segments[&segment.0].clone();
+            let mut entities = vec![seg.clone()];
+            entities.extend(axis.cloned());
+            let msg = format!(
+                "{seg} lies along the axis: a surface revolve's chain may end on it, never run along it"
+            );
+            (Code::ProfileInvalid, msg, entities)
+        }
         ryukei::Error::InvalidSweep(SweepError::ShortSpan | SweepError::BadAngle) => (
             Code::InvalidExtent,
             "the sweep is too short".to_owned(),
@@ -1062,6 +1080,7 @@ fn build_body(
             (Feature::Mirror(m), _) => crate::body::mirror_copy(part, solids, id, m, before),
             (Feature::Sweep(w), _) => crate::along::build(part, id, w, before, run),
             (Feature::Loft(l), _) => crate::loft::build(part, id, l, before, run),
+            (Feature::Planar(x), _) => crate::profile::planar(part, id, x, before),
             (_, Some((h, (solved, _)))) => {
                 crate::hole::tool(part, id, h, solved, &bodies, before).map(|(b, _)| b)
             }

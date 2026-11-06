@@ -1960,6 +1960,13 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
         Feature::Path(x) => crate::path::report(part, x),
         Feature::Sweep(w) => crate::along::feature_report(part, w),
         Feature::Loft(l) => crate::loft::feature_report(part, l),
+        Feature::Planar(x) => {
+            let mut v = x.fields();
+            if let crate::doc::sweep::Source::Face(g) = &x.profile.source {
+                v["profile"]["face"] = json!(g.text(part));
+            }
+            v
+        }
         Feature::Instance(i) => i.fields(),
         Feature::Import(i) => i.fields(),
         Feature::Mate(m) => {
@@ -2316,20 +2323,22 @@ const SKETCH: [&str; 5] = ["plane", "placement", "face", "face_origin", "face_x"
 
 /// The fields a primitive, an extrude, a revolve and a boolean take.
 const PRIMITIVE: [&str; 4] = ["params", "placement", "operation", "targets"];
-const EXTRUDE: [&str; 6] = [
+const EXTRUDE: [&str; 7] = [
     "sketch",
     "loops",
     "extent",
     "reverse",
+    "surface",
     "operation",
     "targets",
 ];
-const REVOLVE: [&str; 7] = [
+const REVOLVE: [&str; 8] = [
     "sketch",
     "loops",
     "axis",
     "angle",
     "symmetric",
+    "surface",
     "operation",
     "targets",
 ];
@@ -3355,6 +3364,47 @@ fn sweep_from(
     Ok(f)
 }
 
+/// A planar face from `current`'s fields (none for a new one) with what
+/// was given laid over them: its profile's sketch or face, and loops.
+fn planar_from(current: Option<Value>, given: &Given, part: &Id) -> Result<Feature> {
+    let bad = |param: &str, msg: &str| Error::new(Code::InvalidParam, msg).with("param", param);
+    let mut profile = current
+        .and_then(|v| v.get("profile").cloned())
+        .unwrap_or_else(|| json!({}));
+    let f = &given.fields;
+    match (&f.sketch, &f.face) {
+        (Some(_), Some(_)) => {
+            return Err(bad(
+                "face",
+                "a planar face's profile is a sketch or a planar face, not both",
+            ));
+        }
+        (Some(sk), None) => profile = json!({"sketch": sk}),
+        (None, Some(face)) => profile = json!({"face": geom_json(face, part, "/profile/face")?}),
+        (None, None) => {}
+    }
+    if profile.as_object().is_none_or(|o| o.is_empty()) {
+        return Err(bad(
+            "sketch",
+            "a planar face fills closed loops: name a sketch (sketch) or a planar face (face)",
+        ));
+    }
+    match &f.loops {
+        Some(l) if l.is_empty() => {
+            if let Some(o) = profile.as_object_mut() {
+                o.remove("loops");
+            }
+        }
+        Some(l) => profile["loops"] = json!(l),
+        None => {}
+    }
+    let v = json!({"profile": profile});
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let p = crate::doc::sweep::Planar::from_fields(&mut o)?;
+    o.finish()?;
+    Ok(Feature::Planar(Box::new(p)))
+}
+
 /// A geometric reference given as text in `part`, as a file holds it;
 /// `at` is its pointer for errors.
 pub(crate) fn geom_json(t: &str, part: &Id, at: &str) -> Result<Value> {
@@ -3722,7 +3772,7 @@ fn check_up_to(
 }
 
 /// Every feature type `feature.add` makes.
-const FEATURE_TYPES: [&str; 21] = [
+const FEATURE_TYPES: [&str; 22] = [
     "box",
     "cylinder",
     "cone",
@@ -3733,6 +3783,7 @@ const FEATURE_TYPES: [&str; 21] = [
     "revolve",
     "sweep",
     "loft",
+    "planar",
     "boolean",
     "fillet",
     "chamfer",
@@ -3908,6 +3959,10 @@ fn feature_add(
         "loft" => {
             given.only(ty, &crate::doc::sweep::LOFT_FIELDS)?;
             crate::loft::from_given(None, &given.fields, p, unit, &env)?
+        }
+        "planar" => {
+            given.only(ty, &crate::doc::sweep::PLANAR_FIELDS)?;
+            planar_from(None, &given, &pid)?
         }
         "boolean" => {
             given.only(ty, &BOOLEAN)?;
@@ -4172,6 +4227,14 @@ fn feature_edit(
                 given.only("loft", &crate::doc::sweep::LOFT_FIELDS)?;
                 let f = crate::loft::from_given(Some(&l), &given.fields, p, unit, &p.env)?;
                 check_sweep(p, &list, &fid, &f)?;
+                f
+            }
+            Feature::Planar(x) => {
+                given.only("planar", &crate::doc::sweep::PLANAR_FIELDS)?;
+                let f = planar_from(Some(x.fields()), &given, &pid)?;
+                if !f.profiles().is_empty() {
+                    check_sweep(p, &list, &fid, &f)?;
+                }
                 f
             }
             f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {

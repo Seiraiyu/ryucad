@@ -99,6 +99,10 @@ pub struct FeatureFields {
     /// direction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
+    /// Sweep the profile's loops and open chains into a sheet of its own
+    /// (an extrude, revolve, sweep or loft; ryucad 18); false a solid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<bool>,
     /// A revolve's axis: a line of its sketch, or a straight edge as
     /// `<part>/<feature>/<name>`. A circular pattern's: `x`, `y`, `z`, or
     /// an edge or face as `<part>/<feature>/<name>`.
