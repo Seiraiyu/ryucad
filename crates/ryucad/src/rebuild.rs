@@ -41,6 +41,10 @@ pub struct Built {
     pub origins: Arc<Origins>,
     /// BLAKE3 of the body's dump: equal hashes mean bit-identical bodies.
     pub hash: String,
+    /// A reference import's body (design 364): the file's topology as a
+    /// sheet, checked only by `check_topology`. Nothing may change it:
+    /// [`target`] refuses it to every feature that would.
+    pub reference: bool,
 }
 
 /// Where each entity of a body came from, by name, each distinct origin
@@ -1973,6 +1977,36 @@ pub(crate) fn finish(
         journal,
         origins: Arc::new(origins.into()),
         hash,
+        reference: false,
+    })
+}
+
+/// Checks a reference body's topology (the only check a reference passes:
+/// design 364) and hashes it as [`finish`] does.
+pub(crate) fn finish_reference(
+    id: &Id,
+    (body, journal): (Body, Journal),
+    origins: impl Into<Origins>,
+) -> Result<Built> {
+    let faults = ryukei::check::check_topology(&body);
+    if !faults.is_empty() {
+        return Err(Error::new(
+            Code::Internal,
+            format!("import {id}: the kernel built a reference whose topology doesn't hold"),
+        )
+        .with("feature", id)
+        .with(
+            "faults",
+            faults.iter().map(|x| format!("{x:?}")).collect::<Vec<_>>(),
+        ));
+    }
+    let hash = blake3::hash(body.dump().as_bytes()).to_hex()[..32].to_owned();
+    Ok(Built {
+        body,
+        journal,
+        origins: Arc::new(origins.into()),
+        hash,
+        reference: true,
     })
 }
 
