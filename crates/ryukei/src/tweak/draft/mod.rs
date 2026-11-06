@@ -5,4 +5,5 @@
 //! else a sweep of a straight profile along the hinge in the binormal
 //! frame of the pull.
 
+pub(crate) mod hinge;
 pub(crate) mod surface;
