@@ -435,6 +435,22 @@ struct CompArgs {
     /// supplier=sku (LCSC=C25741); repeat for more. Replaces the list.
     #[arg(long = "offer", value_parser = pair)]
     offers: Vec<(String, String)>,
+    /// resistor, capacitor, inductor, ferrite_bead, diode, led,
+    /// transistor, regulator, ic, crystal, connector, switch, fuse or
+    /// other; "" for the one the prefix gives.
+    #[arg(long)]
+    category: Option<String>,
+    /// Another maker's part it may be bought as: MAKER:MPN; repeat for
+    /// more. One with a part number already listed replaces it.
+    #[arg(long = "alternate", value_name = "MAKER:MPN")]
+    alternates: Vec<String>,
+    /// Take the alternate of this part number off; repeat for more.
+    #[arg(long = "remove-alternate", value_name = "MPN")]
+    remove_alternates: Vec<String>,
+    /// An offer for an alternate: its part number, then supplier=sku;
+    /// repeat for more.
+    #[arg(long = "alternate-offer", num_args = 2, value_names = ["MPN", "SUPPLIER=SKU"])]
+    alternate_offers: Vec<String>,
     /// A footprint (<id>, or lib/<alias>/footprint/<id>), pins mapped to
     /// the pads of their numbers; repeat for more, the default first.
     /// Replaces the list.
@@ -473,6 +489,43 @@ impl CompArgs {
             ),
             (None, true) => None,
         };
+        let alternates = self
+            .alternates
+            .iter()
+            .map(|t| {
+                let (maker, mpn) = t
+                    .split_once(':')
+                    .filter(|(a, b)| !a.trim().is_empty() && !b.trim().is_empty())
+                    .ok_or_else(|| {
+                        Error::new(Code::Usage, format!("--alternate is MAKER:MPN, not {t:?}"))
+                    })?;
+                Ok(ryueda::libcomp::Alternate {
+                    manufacturer: maker.trim().to_owned(),
+                    mpn: mpn.trim().to_owned(),
+                    offers: Vec::new(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let alternate_offers = self
+            .alternate_offers
+            .chunks(2)
+            .map(|pair| {
+                let (supplier, sku) = pair[1].split_once('=').ok_or_else(|| {
+                    Error::new(
+                        Code::Usage,
+                        format!(
+                            "--alternate-offer's offer is supplier=sku, not {:?}",
+                            pair[1]
+                        ),
+                    )
+                })?;
+                Ok(ryueda::libcmd::AlternateOffer {
+                    mpn: pair[0].clone(),
+                    supplier: supplier.to_owned(),
+                    sku: sku.to_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(ryueda::libcmd::CompFields {
             symbol: self.symbol.clone(),
             prefix: self.prefix.clone(),
@@ -492,6 +545,12 @@ impl CompArgs {
                     .collect()
             }),
             footprints,
+            category: self.category.clone(),
+            alternates: None,
+            remove_alternates: (!self.remove_alternates.is_empty())
+                .then(|| self.remove_alternates.clone()),
+            add_alternates: (!alternates.is_empty()).then_some(alternates),
+            alternate_offers: (!alternate_offers.is_empty()).then_some(alternate_offers),
         })
     }
 }

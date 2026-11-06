@@ -762,6 +762,62 @@ fn footprints_and_library_components_from_the_cli() {
     let text = fs::read_to_string(p.direct.join("board/library/components/r_100k.json")).unwrap();
     assert!(text.contains("\"format\": 1"), "{text}");
     p.ok(&["libcomp", "edit", "r_100k", "--unset-param", "capacitance"]);
+    let shown = p.ok(&["libcomp", "show", "r_100k"]);
+    assert_eq!(
+        (&shown["category"], &shown["category_inferred"]),
+        (&json!("resistor"), &json!(true))
+    );
+    let alt = p.ok(&[
+        "libcomp",
+        "edit",
+        "r_100k",
+        "--category",
+        "resistor",
+        "--alternate",
+        "Vishay:CRCW0402100KFKED",
+        "--alternate-offer",
+        "CRCW0402100KFKED",
+        "Mouser=71-CRCW0402100KFKED",
+    ]);
+    assert_eq!(
+        alt["libcomp"]["alternates"],
+        json!([{"manufacturer": "Vishay", "mpn": "CRCW0402100KFKED",
+                "offers": [{"supplier": "Mouser", "sku": "71-CRCW0402100KFKED"}]}])
+    );
+    assert_eq!(alt["category_inferred"], json!(false));
+    let at = p.direct.join("board/library/components/r_100k.json");
+    assert!(fs::read_to_string(&at).unwrap().contains("\"format\": 2"));
+    p.fails(
+        &[
+            "libcomp",
+            "edit",
+            "r_100k",
+            "--alternate",
+            "Yageo:RC0402FR-07100KL",
+        ],
+        "duplicate_id",
+        1,
+    );
+    p.fails(
+        &["libcomp", "edit", "r_100k", "--category", "valve"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &["libcomp", "edit", "r_100k", "--alternate", "no-colon"],
+        "usage",
+        2,
+    );
+    p.ok(&[
+        "libcomp",
+        "edit",
+        "r_100k",
+        "--category",
+        "",
+        "--remove-alternate",
+        "CRCW0402100KFKED",
+    ]);
+    assert!(fs::read_to_string(&at).unwrap().contains("\"format\": 1"));
     // The symbol's pins are the component's now.
     let e = p.fails(
         &[
