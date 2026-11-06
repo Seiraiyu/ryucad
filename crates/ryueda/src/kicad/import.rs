@@ -240,6 +240,8 @@ fn component(props: &[(String, String)], symbol: LibRef, footprints: Vec<Use>) -
         ("Mouser", &["mouser", "mouserpn", "mouserpartnumber"]),
     ];
     let mut c = LibComp {
+        category: None,
+        alternates: Vec::new(),
         symbol,
         prefix: "U".to_owned(),
         value: String::new(),

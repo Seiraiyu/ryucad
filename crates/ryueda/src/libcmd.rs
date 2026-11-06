@@ -595,6 +595,8 @@ pub fn libcomp_create(
             .with("param", "symbol")
     })?;
     let mut c = crate::libcomp::LibComp {
+        category: None,
+        alternates: Vec::new(),
         symbol: lib_ref(symbol, ObjKind::Symbol)?,
         prefix: String::new(),
         value: String::new(),
