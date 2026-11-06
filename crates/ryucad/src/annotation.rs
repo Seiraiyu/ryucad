@@ -4,6 +4,8 @@
 //! requests that list, make, answer and close them. Nothing here acts on
 //! an annotation by itself: every change is a request someone sent.
 
+pub mod propose;
+
 use crate::activity::Files;
 use crate::doc::annotation::check_id;
 pub use crate::doc::annotation::{
