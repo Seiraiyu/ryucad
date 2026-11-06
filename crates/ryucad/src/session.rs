@@ -26,7 +26,7 @@ use crate::doc::id::Id;
 use crate::doc::project::{Part, Project};
 use crate::error::{Error, Result};
 use crate::rebuild::PartResult;
-use ryu_session::fresh::{Changes, Stamps, Watch, WatchStats, read_dir};
+use ryu_session::fresh::{Bytes, Changes, Stamps, Watch, WatchStats, read_dir};
 use ryu_session::job::Job;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -135,6 +135,11 @@ pub struct Session {
     /// the models and verdicts kept, the files kept open): counted again
     /// only when one of them moves.
     fixed_key: Option<[u64; 7]>,
+    /// Where this session's writes go (see [`Sink`]).
+    sink: Sink,
+    /// Warnings the revision a request named gives its answer (a stale
+    /// `annotation:<id>`), taken by `server::answer_live`.
+    pub(crate) rev_warnings: Vec<Value>,
 }
 
 /// How a revision names another worktree's working files:
@@ -145,6 +150,21 @@ pub const WORKTREE: &str = "worktree:";
 /// The path a `worktree:<path>` revision names, if it is one.
 pub fn worktree_path(rev: &str) -> Option<&Path> {
     rev.strip_prefix(WORKTREE).map(Path::new)
+}
+
+/// Where a session's writes go: the folder, or, for a capture session
+/// ([`Session::capturing`]), a record of the files a request would have
+/// written, read back by the session as if they were on disk.
+#[derive(Clone, Debug, Default)]
+enum Sink {
+    #[default]
+    Disk,
+    Capture {
+        /// Each file written (`None`: deleted), by relative path.
+        writes: BTreeMap<String, Option<Bytes>>,
+        /// Written since the last reload.
+        pending: Vec<String>,
+    },
 }
 
 /// A daemon's watch of its project, or why it has none, and what it
@@ -224,6 +244,8 @@ impl Session {
             fixed_key: None,
             job: Job::default(),
             heal_budget: heal_budget(),
+            sink: Sink::Disk,
+            rev_warnings: Vec::new(),
         };
         Ok(s)
     }
@@ -426,6 +448,8 @@ impl Session {
             fixed_key: None,
             job: from.job.clone(),
             heal_budget: from.heal_budget,
+            sink: Sink::Disk,
+            rev_warnings: Vec::new(),
         })
     }
 
@@ -535,6 +559,118 @@ impl Session {
         &self.project
     }
 
+    /// `path` relative to the project, with `/`.
+    fn rel(&self, path: &Path) -> String {
+        crate::doc::source::relative(self.root(), path)
+    }
+
+    /// Writes a JSON document in canonical form: the folder's file, or a
+    /// capture session's record of it. Every handler writes project files
+    /// through the session (`annotation::tests` checks the sources), so a
+    /// request run in a capture session writes nothing.
+    pub fn write_json(&mut self, path: &Path, v: &Value) -> Result<()> {
+        self.write_bytes(path, crate::doc::canonical::to_string(v).as_bytes())
+    }
+
+    /// [`Session::write_json`] of bytes.
+    pub fn write_bytes(&mut self, path: &Path, bytes: &[u8]) -> Result<()> {
+        let rel = self.rel(path);
+        match &mut self.sink {
+            Sink::Disk => crate::doc::source::write_atomic(path, bytes),
+            Sink::Capture { writes, pending } => {
+                writes.insert(rel.clone(), Some(Bytes::from(bytes)));
+                pending.push(rel);
+                Ok(())
+            }
+        }
+    }
+
+    /// Deletes a project file (and, on disk, the folders under `parts/`
+    /// it leaves empty); one already gone is no error.
+    pub fn remove_file(&mut self, path: &Path) -> Result<()> {
+        let rel = self.rel(path);
+        let root = self.root().to_path_buf();
+        match &mut self.sink {
+            Sink::Disk => match fs::metadata(path) {
+                Ok(_) => crate::doc::project::remove_file(&root, path),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(Error::io(path, &e)),
+            },
+            Sink::Capture { writes, pending } => {
+                writes.insert(rel.clone(), None);
+                pending.push(rel);
+                Ok(())
+            }
+        }
+    }
+
+    /// A project file's bytes as this session has them: a capture's write
+    /// first, else as last read. `None` for a file there isn't.
+    pub fn read_file(&self, path: &Path) -> Option<Bytes> {
+        if let Sink::Capture { writes, .. } = &self.sink
+            && let Some(w) = writes.get(&self.rel(path))
+        {
+            return w.clone();
+        }
+        self.stamps.shared(path)
+    }
+
+    /// [`Session::read_file`] as text; `io` naming the path when there is
+    /// no such file or it isn't UTF-8.
+    pub fn read_text(&self, path: &Path) -> Result<String> {
+        let bytes = self.read_file(path).ok_or_else(|| {
+            Error::new(
+                crate::error::Code::Io,
+                format!("{} doesn't exist", path.display()),
+            )
+            .with("path", path)
+        })?;
+        String::from_utf8(bytes.to_vec()).map_err(|_| {
+            Error::new(
+                crate::error::Code::Io,
+                format!("{} isn't UTF-8", path.display()),
+            )
+            .with("path", path)
+        })
+    }
+
+    pub fn has_file(&self, path: &Path) -> bool {
+        self.read_file(path).is_some()
+    }
+
+    /// The project's revision as this session's files give it.
+    pub fn project_revision(&self) -> Result<String> {
+        crate::config::project_revision_from(&|name: &str| {
+            Ok(self.read_file(&self.root().join(name)).map(|b| b.to_vec()))
+        })
+    }
+
+    /// `conflict` unless the project is at `expected`.
+    pub fn check_project_revision(&self, expected: Option<&str>) -> Result<String> {
+        crate::config::check_revision_is(self.project_revision()?, expected)
+    }
+
+    /// A capture session over `files`: requests run in it check and build
+    /// as over those files, and what they write is kept
+    /// ([`Session::captured`]) and read back, never put on disk.
+    pub(crate) fn capturing(&self, files: Files) -> Result<Session> {
+        let mut s = self.over(files)?;
+        s.sink = Sink::Capture {
+            writes: BTreeMap::new(),
+            pending: Vec::new(),
+        };
+        Ok(s)
+    }
+
+    /// What a capture session's requests wrote: each file's bytes, or
+    /// `None` for a deletion.
+    pub(crate) fn captured(&self) -> BTreeMap<String, Option<Bytes>> {
+        match &self.sink {
+            Sink::Capture { writes, .. } => writes.clone(),
+            Sink::Disk => BTreeMap::new(),
+        }
+    }
+
     /// Brings the session up to date with the files. Returns whether the
     /// project was reloaded.
     pub fn refresh(&mut self) -> Result<bool> {
@@ -544,37 +680,75 @@ impl Session {
     /// [`Session::refresh`], returning the files that changed (relative,
     /// with `/`) and how: `created`, `modified` or `deleted`.
     pub fn refresh_changes(&mut self) -> Result<Vec<(String, &'static str)>> {
+        if let Sink::Capture { writes, pending } = &mut self.sink {
+            let mut paths = std::mem::take(pending);
+            if paths.is_empty() {
+                return Ok(Vec::new());
+            }
+            paths.sort();
+            paths.dedup();
+            let mut files = self.stamps.snapshot().as_ref().clone();
+            let mut changes = Vec::new();
+            for p in &paths {
+                match &writes[p] {
+                    Some(b) => {
+                        let how = if files.contains_key(p) {
+                            "modified"
+                        } else {
+                            "created"
+                        };
+                        files.insert(p.clone(), Arc::clone(b));
+                        changes.push((p.clone(), how));
+                    }
+                    None => {
+                        if files.remove(p).is_some() {
+                            changes.push((p.clone(), "deleted"));
+                        }
+                    }
+                }
+            }
+            self.stamps = Stamps::frozen(&self.project.root, files.clone());
+            self.project.reload_from(&files, &paths)?;
+            self.after_change();
+            return Ok(changes);
+        }
         if self.frozen {
             return Ok(Vec::new());
         }
         let changes = self.scan()?;
         if !changes.is_empty() {
-            self.epoch += 1;
             let paths: Vec<String> = changes.iter().map(|(p, _)| p.clone()).collect();
             let held = Held {
                 root: &self.project.root.clone(),
                 stamps: &self.stamps,
             };
             self.project.reload_from(&held, &paths)?;
-            let live = &self.project.parts;
-            // An assembly's key is its revision, then its children's.
-            self.store.results.retain(|id, (key, _)| {
-                live.get(id)
-                    .is_some_and(|p| key.split('+').next() == Some(p.revision.as_str()))
-            });
-            self.store.caches.retain(|id, _| live.contains_key(id));
-            self.store.budget.changed();
-            let current = |id: &Id, key: &str| {
-                live.get(id)
-                    .is_some_and(|p| key.split('+').next() == Some(p.revision.as_str()))
-            };
-            self.store.models.retain(|id, (key, _)| current(id, key));
-            self.store
-                .summaries
-                .retain(|id, (key, ..)| current(id, key));
-            self.store.budget.retain(|id| live.contains_key(id));
+            self.after_change();
         }
         Ok(changes)
+    }
+
+    /// What a change to the files lets go: the results their writes made
+    /// stale, from the folder or a capture alike.
+    fn after_change(&mut self) {
+        self.epoch += 1;
+        let live = &self.project.parts;
+        // An assembly's key is its revision, then its children's.
+        self.store.results.retain(|id, (key, _)| {
+            live.get(id)
+                .is_some_and(|p| key.split('+').next() == Some(p.revision.as_str()))
+        });
+        self.store.caches.retain(|id, _| live.contains_key(id));
+        self.store.budget.changed();
+        let current = |id: &Id, key: &str| {
+            live.get(id)
+                .is_some_and(|p| key.split('+').next() == Some(p.revision.as_str()))
+        };
+        self.store.models.retain(|id, (key, _)| current(id, key));
+        self.store
+            .summaries
+            .retain(|id, (key, ..)| current(id, key));
+        self.store.budget.retain(|id| live.contains_key(id));
     }
 
     /// How many times the files have changed under this session.
@@ -1627,6 +1801,54 @@ mod tests {
         .unwrap();
         write_json(&feature_path(root, &id("p"), &id("a")), &sphere("1 mm")).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_capture_session_keeps_writes_and_reads_them_back() {
+        let dir = project();
+        let root = dir.path();
+        let s = Session::open(root).unwrap();
+        let before = std::fs::read_dir(root.join("parts/p/features"))
+            .unwrap()
+            .count();
+        let mut c = s.capturing(s.snapshot()).unwrap();
+        let f = feature_path(root, &id("p"), &id("a"));
+        c.write_json(&f, &sphere("7 mm")).unwrap();
+        let made = root.join("parts/p/features/n.json");
+        c.write_json(&made, &sphere("2 mm")).unwrap();
+        // Read back before and after the reload, from the capture alone.
+        assert_eq!(
+            c.read_file(&made).as_deref(),
+            Some(crate::doc::canonical::to_string(&sphere("2 mm")).as_bytes())
+        );
+        c.reload().unwrap();
+        assert!(c.snapshot().contains_key("parts/p/features/n.json"));
+        c.remove_file(&made).unwrap();
+        c.reload().unwrap();
+        assert!(!c.snapshot().contains_key("parts/p/features/n.json"));
+        let w = c.captured();
+        assert_eq!(w["parts/p/features/n.json"], None);
+        assert_eq!(
+            w["parts/p/features/a.json"].as_deref(),
+            Some(crate::doc::canonical::to_string(&sphere("7 mm")).as_bytes())
+        );
+        // Nothing reached the folder.
+        assert_eq!(
+            std::fs::read_dir(root.join("parts/p/features"))
+                .unwrap()
+                .count(),
+            before
+        );
+        assert!(!made.exists());
+        assert_ne!(
+            std::fs::read(&f).unwrap(),
+            w["parts/p/features/a.json"].as_deref().unwrap()
+        );
+        // The project the capture read changed with it.
+        assert_ne!(
+            c.project().part(&id("p")).unwrap().revision,
+            s.project().part(&id("p")).unwrap().revision
+        );
     }
 
     #[test]

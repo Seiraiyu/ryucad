@@ -635,7 +635,12 @@ pub fn user(name: &str) -> Value {
 /// Refuses to write the project's own settings when the caller's view of
 /// them is out of date; returns the revision they are at.
 pub fn check_project_revision(root: &Path, expected: Option<&str>) -> Result<String> {
-    let rev = project_revision(root)?;
+    check_revision_is(project_revision(root)?, expected)
+}
+
+/// Refuses with `conflict` unless the project's revision `rev` is
+/// `expected`; gives the revision.
+pub fn check_revision_is(rev: String, expected: Option<&str>) -> Result<String> {
     match expected {
         Some(e) if e != rev => Err(Error::new(
             Code::Conflict,
@@ -649,19 +654,29 @@ pub fn check_project_revision(root: &Path, expected: Option<&str>) -> Result<Str
 
 /// A project revision: a hash of the files that hold the project's own
 /// settings, the manifest, ryupdm's settings, the material library, the
-/// lock and the project's parameters if there are any. Each piece is length-prefixed, and the optional ones
-/// are tagged.
+/// lock and the project's parameters if there are any. Each piece is
+/// length-prefixed, and the optional ones are tagged.
 pub fn project_revision(root: &Path) -> Result<String> {
-    use crate::doc::materials::MATERIALS;
-    use crate::doc::project::{MANIFEST, PDM_CONFIG};
-    let read = |name: &str| {
+    project_revision_from(&|name: &str| {
         let path = root.join(name);
         match std::fs::read(&path) {
             Ok(b) => Ok(Some(b)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && name != MANIFEST => Ok(None),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && name != crate::doc::project::MANIFEST =>
+            {
+                Ok(None)
+            }
             Err(e) => Err(Error::io(&path, &e)),
         }
-    };
+    })
+}
+
+/// [`project_revision`] over files `read` gives (`None` for one there
+/// isn't), by name relative to the project.
+pub fn project_revision_from(read: &dyn Fn(&str) -> Result<Option<Vec<u8>>>) -> Result<String> {
+    use crate::doc::materials::MATERIALS;
+    use crate::doc::project::{MANIFEST, PDM_CONFIG};
     let mut h = blake3::Hasher::new();
     let mut piece = |bytes: &[u8]| {
         h.update(&(bytes.len() as u64).to_le_bytes());
