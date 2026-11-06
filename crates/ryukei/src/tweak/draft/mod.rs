@@ -9,6 +9,25 @@ pub(crate) mod hinge;
 pub(crate) mod report;
 pub(crate) mod surface;
 
+/// A drafted face, as the engine reads it: its hinge, what the hinge
+/// lies on, its pull and signed angle.
+#[derive(Clone, Debug)]
+pub(crate) struct Drafted {
+    pub(crate) hinge: hinge::HingeCurve,
+    pub(crate) on: HingeOn,
+    pub(crate) pull: crate::geom::UnitVector3,
+    pub(crate) angle: f64,
+}
+
+/// What a hinge lies on.
+#[derive(Clone, Debug)]
+pub(crate) enum HingeOn {
+    /// The neutral plane.
+    Plane(crate::geom::Surface),
+    /// The face's parting-line edges.
+    Edges(Vec<crate::topo::EdgeId>),
+}
+
 /// What a draft made of each face: its least and greatest angle from
 /// its pull (radians, positive along the pull's side the draft tilts
 /// to), certified. Exactly the angle asked for wherever the hinge is

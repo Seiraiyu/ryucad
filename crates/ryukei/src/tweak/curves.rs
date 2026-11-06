@@ -25,7 +25,7 @@ pub(crate) fn offset_classes(
         .iter()
         .map(|(&e, &c)| {
             let to = match c {
-                Class::Kept | Class::Carried => (oc::Class::Kept, 0.0),
+                Class::Kept | Class::Carried | Class::Hinge => (oc::Class::Kept, 0.0),
                 Class::Closing => (oc::Class::Closing, 0.0),
                 Class::Moved => {
                     let f = body.loops[body.fins[fins(body, e)[0]].loop_].face;
@@ -175,7 +175,7 @@ pub(crate) fn curves(
                 at: plan.body.edges[e].name,
             })?;
             let g = match class[&e] {
-                Class::Carried => EdgeGeo::One(carried(plan, e)?),
+                Class::Carried | Class::Hinge => EdgeGeo::One(carried(plan, e)?),
                 Class::Moved => {
                     let f = plan.face_of(plan.fins(e)[0]);
                     match plan.motion[&f] {
@@ -275,7 +275,7 @@ mod tests {
                     let p = c.curve.point((c.range[0] + c.range[1]) / 2.0);
                     assert!((p.z - 0.5).abs() < 1e-9, "{p:?}");
                 }
-                Class::Moved => unreachable!(),
+                Class::Moved | Class::Hinge => unreachable!(),
             }
         }
     }

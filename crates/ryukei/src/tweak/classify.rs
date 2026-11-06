@@ -6,7 +6,7 @@ use crate::offset::classify::{fins, normal};
 use crate::topo::{Body, EdgeId, FaceId, FinId, VertexId};
 use crate::{Error, TweakCase, TweakError};
 use rayon::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Samples along an edge at which tangency is judged, ends included.
 const SAMPLES: usize = 17;
@@ -30,6 +30,10 @@ pub(crate) enum Class {
     /// The branch of its faces' new surfaces' intersection nearest where
     /// its middle goes.
     Closing,
+    /// A parting line's edge: it lies on its faces and their drafts, and
+    /// stays, its curve carried past its ends for a vertex sliding along
+    /// it.
+    Hinge,
 }
 
 /// The face a fin lies on.
@@ -73,18 +77,35 @@ pub(crate) fn tangent(body: &Body, e: EdgeId) -> Result<bool, Error> {
     }
 }
 
-/// Every inner edge's class, in parallel, in the order of the edges'
-/// names; `TangencyBroken` (the least-named edge first) where a tangent
-/// pair's faces would part.
+/// Every inner edge's class with no parting line.
+#[cfg(test)]
 pub(crate) fn classes(
     body: &Body,
     motion: &BTreeMap<FaceId, Motion>,
+) -> Result<BTreeMap<EdgeId, Class>, Error> {
+    classes_with(body, motion, &BTreeSet::new())
+}
+
+/// Every inner edge's class, in parallel, in the order of the edges'
+/// names, `hinges` (a parting line's edges) `Hinge` first;
+/// `TangencyBroken` (the least-named edge first) where a tangent pair's
+/// faces would part.
+pub(crate) fn classes_with(
+    body: &Body,
+    motion: &BTreeMap<FaceId, Motion>,
+    hinges: &BTreeSet<EdgeId>,
 ) -> Result<BTreeMap<EdgeId, Class>, Error> {
     let mut edges: Vec<EdgeId> = body.edges().filter(|&e| !body.is_laminar(e)).collect();
     edges.sort_by_key(|&e| body.edges[e].name);
     edges
         .par_iter()
-        .map(|&e| class(body, motion, e).map(|c| (e, c)))
+        .map(|&e| {
+            if hinges.contains(&e) {
+                Ok((e, Class::Hinge))
+            } else {
+                class(body, motion, e).map(|c| (e, c))
+            }
+        })
         .collect::<Vec<_>>()
         .into_iter()
         .collect()
@@ -107,6 +128,13 @@ fn class(body: &Body, motion: &BTreeMap<FaceId, Motion>, e: EdgeId) -> Result<Cl
         } else {
             Class::Closing
         }),
+        (Some(a @ Motion::Draft { .. }), Some(b @ Motion::Draft { .. })) if a == b => {
+            Ok(if tangent(body, e)? {
+                Class::Moved
+            } else {
+                Class::Closing
+            })
+        }
         _ => {
             if tangent(body, e)? {
                 Err(TweakError::TangencyBroken { edge: edge.name }.into())
@@ -158,6 +186,32 @@ mod tests {
         let motion = b.faces().map(|f| (f, m)).collect();
         let c = classes(&b, &motion).unwrap();
         assert!(c.values().all(|&x| x == Class::Moved));
+    }
+
+    #[test]
+    fn drafted_walls_close_at_their_corners_and_hinge_edges_stay() {
+        let (b, _) = primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+        let pull = crate::geom::UnitVector3::exact(Vector3::new(0.0, 0.0, 1.0)).unwrap();
+        let d = Motion::Draft { pull, angle: 0.05 };
+        let walls = [
+            FaceRole::PlusX,
+            FaceRole::MinusX,
+            FaceRole::PlusY,
+            FaceRole::MinusY,
+        ];
+        let motion: BTreeMap<_, _> = walls.iter().map(|&r| (face(&b, r), d)).collect();
+        let c = classes(&b, &motion).unwrap();
+        let count = |k: Class| c.values().filter(|&&x| x == k).count();
+        // 4 corners between walls, 4 round the top, 4 round the bottom.
+        assert_eq!(count(Class::Closing), 12);
+        // The bottom's edges as a parting line: hinges.
+        let bottom = face(&b, FaceRole::MinusZ);
+        let hinges: BTreeSet<_> = b
+            .loop_fins(b.face_loops(bottom).next().unwrap())
+            .map(|f| b.fins[f].edge)
+            .collect();
+        let c = classes_with(&b, &motion, &hinges).unwrap();
+        assert_eq!(c.values().filter(|&&x| x == Class::Hinge).count(), 4);
     }
 
     #[test]

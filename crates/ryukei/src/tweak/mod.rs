@@ -165,7 +165,7 @@ fn offset_faces_in(
         &Changes {
             motion,
             surface,
-            senses: BTreeMap::new(),
+            ..Changes::default()
         },
         meter,
     )
@@ -336,7 +336,7 @@ fn rigidly(
         &Changes {
             motion,
             surface,
-            senses: BTreeMap::new(),
+            ..Changes::default()
         },
         meter,
     )

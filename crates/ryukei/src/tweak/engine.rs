@@ -1,7 +1,7 @@
 //! The tweak engine: the offset's local build, its plan given motions.
 
 use super::Motion;
-use super::classify::{Class, classes};
+use super::classify::{Class, classes_with};
 use super::{curves, extend, vertices};
 use crate::geom::Surface;
 use crate::name::{Event, Journal, Name, OpKey};
@@ -18,6 +18,11 @@ pub(crate) struct Changes {
     pub(crate) motion: BTreeMap<FaceId, Motion>,
     pub(crate) surface: BTreeMap<FaceId, Surface>,
     pub(crate) senses: BTreeMap<FaceId, Sense>,
+    /// Each drafted face's hinge (a draft's only).
+    #[allow(dead_code)] // read from plan 9.B Task 10
+    pub(crate) drafts: BTreeMap<FaceId, super::draft::Drafted>,
+    /// The parting line's edges, which stay where they are.
+    pub(crate) hinges: BTreeSet<crate::topo::EdgeId>,
 }
 
 /// The tweaked body and its journal, or the refusal, under `meter`.
@@ -36,7 +41,7 @@ fn built(
     changes: &Changes,
     meter: &Meter,
 ) -> Result<(Body, Journal), Error> {
-    let class = classes(body, &changes.motion)?;
+    let class = classes_with(body, &changes.motion, &changes.hinges)?;
     let surface = body
         .faces()
         .map(|f| {
@@ -84,7 +89,7 @@ fn kept_changes(
         changed.insert(body.faces[*f].name);
     }
     for (&e, &c) in class {
-        if c != Class::Kept {
+        if c != Class::Kept && c != Class::Hinge {
             changed.insert(body.edges[e].name);
         }
     }
@@ -156,7 +161,7 @@ mod tests {
         let changes = Changes {
             motion: BTreeMap::from([(top, Motion::Rigid(up))]),
             surface: BTreeMap::from([(top, b.surfaces[b.faces[top].surface].transformed(&up))]),
-            senses: BTreeMap::new(),
+            ..Changes::default()
         };
         // unmetered: a unit test.
         let (o, j) = run(OpKey(8), &b, &changes, &crate::work::Meter::free()).unwrap();
