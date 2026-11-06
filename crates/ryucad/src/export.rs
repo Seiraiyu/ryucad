@@ -606,7 +606,7 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
             })
         }
         Options::Stl { unit, mesh, ascii } => {
-            let scene = meshed(s, &walk.scene, &mesh)?;
+            let scene = meshed(s, &walk.scene, &mesh, &mut result)?;
             triangles(&mut result, &scene);
             result["unit"] = json!(unit.as_str());
             result["mesh"] = mesh.report();
@@ -621,7 +621,7 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
             })
         }
         Options::ThreeMf { unit, mesh } => {
-            let scene = meshed(s, &walk.scene, &mesh)?;
+            let scene = meshed(s, &walk.scene, &mesh, &mut result)?;
             triangles(&mut result, &scene);
             result["unit"] = json!(unit.as_str());
             result["mesh"] = mesh.report();
@@ -647,10 +647,44 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
             mesh,
             pipe_tolerance,
         } => {
+            // A reference has no BrepArray: it is written as its mesh, so
+            // an export without meshes would write nothing of it.
+            let references: Vec<String> = walk
+                .scene
+                .products
+                .iter()
+                .flat_map(|p| &p.solids)
+                .filter(|x| x.built.reference)
+                .map(|x| format!("{}/{}", x.part, x.founder))
+                .collect();
+            if mesh.is_none()
+                && let Some(r) = references.first()
+            {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "{r} is a reference import, which USD holds only as a mesh: export with meshes, or convert it to a solid"
+                    ),
+                )
+                .with("param", "mesh")
+                .with("solid", r));
+            }
             let meshes = mesh
                 .as_ref()
-                .map(|m| meshed(s, &walk.scene, m))
+                .map(|m| meshed(s, &walk.scene, m, &mut result))
                 .transpose()?;
+            if brep {
+                warn(
+                    &mut result,
+                    references
+                        .iter()
+                        .map(|r| {
+                            json!({"code": "export_reference_mesh_only", "solid": r,
+                                   "message": format!("{r} is a reference import: written as its mesh alone, with no BrepArray")})
+                        })
+                        .collect(),
+                );
+            }
             if let Some(scene) = &meshes {
                 triangles(&mut result, scene);
             }
@@ -722,6 +756,7 @@ fn usd_model(scene: &Scene, meshes: Option<&ryuformats::Scene>) -> ryuformats::u
                 .iter()
                 .enumerate()
                 .map(|(i, x)| ryuformats::usd::stage::Solid {
+                    brep: !x.built.reference,
                     name: x.founder.to_string(),
                     body: Arc::clone(
                         bodies
@@ -757,7 +792,41 @@ fn triangles(result: &mut Value, scene: &ryuformats::Scene) {
 /// whatever the occurrences, through the session's mesh cache.
 /// `export_too_large` for a body past ryukei's triangle budget,
 /// `export_mesh_faults` naming every face that wouldn't mesh.
-fn meshed(s: &mut Session, scene: &Scene, opts: &MeshOptions) -> Result<ryuformats::Scene> {
+/// `warnings` added to the answer's `warnings`.
+fn warn(result: &mut Value, warnings: Vec<Value>) {
+    if warnings.is_empty() {
+        return;
+    }
+    if !result["warnings"].is_array() {
+        result["warnings"] = json!([]);
+    }
+    result["warnings"]
+        .as_array_mut()
+        .expect("an array")
+        .extend(warnings);
+}
+
+/// The scene meshed ([`meshed_with`]), a reference's holes warned of in
+/// `result`.
+fn meshed(
+    s: &mut Session,
+    scene: &Scene,
+    opts: &MeshOptions,
+    result: &mut Value,
+) -> Result<ryuformats::Scene> {
+    let (scene, warnings) = meshed_with(s, scene, opts)?;
+    warn(result, warnings);
+    Ok(scene)
+}
+
+/// The scene with every solid meshed, and `reference_faces_unmeshed`
+/// warnings for references whose faces the mesh left out: a reference is
+/// written with its holes, where a solid's faults refuse the export.
+fn meshed_with(
+    s: &mut Session,
+    scene: &Scene,
+    opts: &MeshOptions,
+) -> Result<(ryuformats::Scene, Vec<Value>)> {
     let solids: Vec<(&Product, &Solid)> = scene
         .products
         .iter()
@@ -770,6 +839,7 @@ fn meshed(s: &mut Session, scene: &Scene, opts: &MeshOptions) -> Result<ryuforma
             .export_all_for(&builts, &opts.params, crate::server::mesh_budget(), &job)?;
     let mut meshes: BTreeMap<&str, Arc<ryukei::mesh::BodyMesh>> = BTreeMap::new();
     let mut faults = Vec::new();
+    let mut warnings = Vec::new();
     for ((p, x), m) in solids.iter().zip(&made) {
         let mesh = match &m.mesh {
             Ok(mesh) => mesh,
@@ -795,7 +865,17 @@ fn meshed(s: &mut Session, scene: &Scene, opts: &MeshOptions) -> Result<ryuforma
             Err(e) => return Err(e.clone()),
         };
         if meshes.insert(&x.built.hash, Arc::clone(mesh)).is_none() {
-            faults.extend(fault_report(x, &p.rev, mesh));
+            if x.built.reference {
+                let display = crate::mesh::DisplayMesh {
+                    params: opts.params,
+                    mesh: Ok(Arc::clone(mesh)),
+                };
+                warnings.extend(crate::mesh::unmeshed_warning(
+                    &x.part, &x.founder, &x.built, &display,
+                ));
+            } else {
+                faults.extend(fault_report(x, &p.rev, mesh));
+            }
         }
     }
     if !faults.is_empty() {
@@ -837,7 +917,7 @@ fn meshed(s: &mut Session, scene: &Scene, opts: &MeshOptions) -> Result<ryuforma
                 .collect(),
         })
         .collect();
-    Ok(ryuformats::Scene { products })
+    Ok((ryuformats::Scene { products }, warnings))
 }
 
 /// Each face of `x`'s mesh ryukei couldn't mesh: its part, revision,
@@ -1461,6 +1541,83 @@ pub(crate) mod tests {
         );
         // No seamed body was written for it.
         assert!(!String::from_utf8_lossy(&out).contains("ryukei:seam"));
+    }
+
+    #[test]
+    fn a_reference_exports_as_meshes_with_usd_saying_so() {
+        use crate::doc::import::Mode;
+        let bytes = crate::import::tests::occt("box_ap214.stp");
+        let (_d, mut s) = crate::import::tests::with_import_as(
+            &bytes,
+            Some(("part 2", "part 2")),
+            Some(Mode::Reference),
+        );
+        for format in ["stl", "3mf", "usda"] {
+            let (v, out) = exported(&mut s, json!({"part": "p", "format": format})).unwrap();
+            assert!(!out.is_empty(), "{format}: {v}");
+        }
+        // USD writes it as a mesh alone, and says so.
+        let (v, out) = exported(&mut s, json!({"part": "p", "format": "usda"})).unwrap();
+        let w = v["warnings"].as_array().unwrap();
+        assert!(
+            w.iter().any(|w| w["code"] == "export_reference_mesh_only"),
+            "{v}"
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("BrepArray"), "a BrepArray of a reference");
+        assert!(text.contains("ryucad:faceName"));
+        // Without meshes there is nothing to write for it.
+        let e = answered(
+            &mut s,
+            json!({"part": "p", "format": "usda", "mesh": false}),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(e.code, Code::InvalidParam);
+        assert_eq!(e.details["solid"], "p/i");
+    }
+
+    #[test]
+    fn a_references_mesh_faults_are_warnings() {
+        use crate::doc::import::Mode;
+        let bytes = crate::import::tests::occt("box_ap214.stp");
+        let (_d, mut s) = crate::import::tests::with_import_as(
+            &bytes,
+            Some(("part 2", "part 2")),
+            Some(Mode::Reference),
+        );
+        let p = Id::parse("p", "part").unwrap();
+        let r = s.rebuilt(&p).unwrap();
+        let b = r
+            .features
+            .iter()
+            .find_map(|(_, o)| o.as_ref().ok()?.solid(&Id::parse("i", "feature").unwrap()))
+            .unwrap()
+            .clone();
+        let params = ryukei::mesh::MeshParams::new(1e-4, 0.3);
+        let mut m = ryukei::mesh::tessellate(&b.body, &params).unwrap();
+        m.faults.push(ryukei::mesh::FaceFault {
+            face: b.body.faces().next().unwrap(),
+            kind: ryukei::mesh::MeshFaultKind::BadDomain,
+        });
+        let display = crate::mesh::DisplayMesh {
+            params,
+            mesh: Ok(Arc::new(m.clone())),
+        };
+        let w =
+            crate::mesh::unmeshed_warning(&p, &Id::parse("i", "feature").unwrap(), &b, &display)
+                .unwrap();
+        assert_eq!(w["code"], "reference_faces_unmeshed");
+        // A solid's faults stay `export_mesh_faults`.
+        let solid = Solid {
+            part: p.clone(),
+            founder: Id::parse("i", "feature").unwrap(),
+            built: Arc::new(crate::rebuild::Built {
+                reference: false,
+                ..b.clone()
+            }),
+        };
+        assert_eq!(fault_report(&solid, &Rev::Working, &m).len(), 1);
     }
 
     #[test]
