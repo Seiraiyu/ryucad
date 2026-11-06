@@ -466,7 +466,7 @@ pub fn save(
         Error::new(Code::InvalidParam, e.message.clone())
             .with("pointer", e.details["pointer"].clone())
     })?;
-    crate::doc::project::write_json(&path(session, &pid, &eid), &file.to_json())?;
+    session.write_json(&path(session, &pid, &eid), &file.to_json())?;
     session.reload()?;
     let mut v = entry(session, &pid, &eid);
     v["replaced"] = json!(replaced);
@@ -488,7 +488,7 @@ pub fn delete(
         .ok()
         .filter(|e| p.explodes.contains_key(e))
         .ok_or_else(|| not_found(session, &pid, explode))?;
-    crate::doc::project::remove_file(session.root(), &path(session, &pid, &eid))?;
+    session.remove_file(&path(session, &pid, &eid))?;
     session.reload()?;
     let revision = session.project().part(&pid)?.revision.clone();
     Ok(json!({"part": pid, "explode": eid, "revision": revision}))

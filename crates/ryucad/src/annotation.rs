@@ -282,6 +282,93 @@ pub(crate) mod tests {
     use crate::server::tests::{call, fresh};
     use serde_json::json;
 
+    /// Every project write a handler makes goes through the session, so a
+    /// request run in a capture session writes nothing (design 374). The
+    /// free functions are left to code with no session: these files,
+    /// none of which a proposable request reaches, and lines marked
+    /// `// no session:`.
+    #[test]
+    fn proposable_handlers_write_through_the_session() {
+        const FREE: [(&str, &str); 9] = [
+            (
+                "activity.rs",
+                "undo and redo write their own entries' files",
+            ),
+            ("cli.rs", "the CLI's --out files"),
+            ("drivers.rs", "Git's attributes, config and hooks"),
+            ("review.rs", "the review client's renders"),
+            ("export.rs", "an export's --out"),
+            ("doctor.rs", "doctor's repairs"),
+            ("validate.rs", "merge resolutions"),
+            ("worktree.rs", "a worktree's recorded name"),
+            ("import/plan.rs", "an import's files, written in parallel"),
+        ];
+        let free_names = [
+            "write_json(",
+            "write_atomic(",
+            "write_atomic_with(",
+            "remove_file(",
+            "fs::write(",
+            "remove_dir_all(",
+        ];
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut bad = Vec::new();
+        let mut walk = vec![src.clone()];
+        while let Some(dir) = walk.pop() {
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                let p = e.path();
+                let rel = p
+                    .strip_prefix(&src)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if p.is_dir() {
+                    // The cache's entries and the benchmark's projects
+                    // aren't project files a request writes.
+                    if rel != "cache" && rel != "bench" {
+                        walk.push(p);
+                    }
+                    continue;
+                }
+                if !rel.ends_with(".rs") || FREE.iter().any(|(f, _)| *f == rel) {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&p).unwrap();
+                // Up to the tests module, not a lone `#[cfg(test)]` item.
+                let end = ["\n#[cfg(test)]\nmod ", "\n#[cfg(test)]\npub(crate) mod "]
+                    .iter()
+                    .filter_map(|m| text.find(m))
+                    .min()
+                    .unwrap_or(text.len());
+                let body = &text[..end];
+                let lines: Vec<&str> = body.lines().collect();
+                for (i, line) in lines.iter().enumerate() {
+                    let code = line.split("//").next().unwrap();
+                    for name in free_names {
+                        let mut from = 0;
+                        while let Some(k) = code[from..].find(name) {
+                            let at = from + k;
+                            from = at + name.len();
+                            let before = &code[..at];
+                            let method = before.ends_with('.');
+                            let defined = before.trim_end().ends_with("fn");
+                            let marked = line.contains("// no session:")
+                                || (i > 0 && lines[i - 1].contains("// no session:"));
+                            if !(method || defined || marked) {
+                                bad.push(format!("{rel}:{}: {}", i + 1, line.trim()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "write through the session:\n{}",
+            bad.join("\n")
+        );
+    }
+
     /// A part `plate` with a box `slab`, and one of its faces' references.
     pub(crate) fn plate() -> (tempfile::TempDir, crate::session::Session, String) {
         let (dir, mut s) = fresh();

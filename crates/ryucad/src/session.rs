@@ -576,6 +576,7 @@ impl Session {
     pub fn write_bytes(&mut self, path: &Path, bytes: &[u8]) -> Result<()> {
         let rel = self.rel(path);
         match &mut self.sink {
+            // no session: the session's own write to the folder
             Sink::Disk => crate::doc::source::write_atomic(path, bytes),
             Sink::Capture { writes, pending } => {
                 writes.insert(rel.clone(), Some(Bytes::from(bytes)));
@@ -592,6 +593,7 @@ impl Session {
         let root = self.root().to_path_buf();
         match &mut self.sink {
             Sink::Disk => match fs::metadata(path) {
+                // no session: the session's own removal from the folder
                 Ok(_) => crate::doc::project::remove_file(&root, path),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(e) => Err(Error::io(path, &e)),

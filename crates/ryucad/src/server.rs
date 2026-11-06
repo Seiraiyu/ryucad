@@ -48,6 +48,7 @@ pub fn init(root: &Path, default_unit: Option<Unit>) -> Result<Value> {
         .with("path", root));
     }
     let m = Manifest::new(default_unit.unwrap_or(Unit::Mm));
+    // no session: there is no project to open until init has run
     write_json(&manifest, &m.to_json())?;
     crate::drivers::write_attributes(root)?;
     Ok(json!({"root": root, "default_unit": m.default_unit}))
@@ -1323,7 +1324,7 @@ fn dispatch(
                 key.as_deref(),
                 scope,
             )?;
-            v["project_revision"] = json!(config::project_revision(session.root())?);
+            v["project_revision"] = json!(session.project_revision()?);
             Ok(v)
         }
         Request::ConfigSet {
@@ -1335,17 +1336,17 @@ fn dispatch(
             let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
             let v = match config::validate(&key, &value, scope)? {
                 config::Scope::Project => {
-                    config::check_project_revision(session.root(), expected_revision.as_deref())?;
+                    session.check_project_revision(expected_revision.as_deref())?;
                     let unit = Unit::parse(value.as_str().expect("validated")).expect("validated");
                     // The rest of the manifest (the project's ID) stays.
                     let m = Manifest {
                         default_unit: unit,
                         ..session.project().manifest.clone()
                     };
-                    write_json(&session.root().join(MANIFEST), &m.to_json())?;
+                    session.write_json(&session.root().join(MANIFEST), &m.to_json())?;
                     session.reload()?;
                     let mut v = config::get(unit, Some(&key), None)?;
-                    v["project_revision"] = json!(config::project_revision(session.root())?);
+                    v["project_revision"] = json!(session.project_revision()?);
                     v
                 }
                 config::Scope::User => config::set_user(&key, value)?,
@@ -1826,7 +1827,7 @@ fn part_create(session: &mut Session, part: &str, kind: Option<&str>) -> Result<
         );
     }
     crate::pdm::check_not_retired(session.root(), &id)?;
-    write_json(
+    session.write_json(
         &part_path(session.root(), &id),
         &PartFile {
             kind,
@@ -1871,7 +1872,23 @@ fn part_delete(session: &mut Session, part: &str, expected: Option<&str>) -> Res
         .with("instances", users));
     }
     let dir = part_dir(session.root(), &id);
-    fs::remove_dir_all(&dir).map_err(|e| Error::io(&dir, &e))?;
+    let mine = format!("parts/{id}/");
+    let files: Vec<String> = session
+        .snapshot()
+        .keys()
+        .filter(|p| p.starts_with(&mine))
+        .cloned()
+        .collect();
+    for rel in files {
+        let at = rel
+            .split('/')
+            .fold(session.root().to_path_buf(), |p, s| p.join(s));
+        session.remove_file(&at)?;
+    }
+    if dir.exists() {
+        // no session: what the files leave on disk (empty folders, stray files) goes too
+        fs::remove_dir_all(&dir).map_err(|e| Error::io(&dir, &e))?;
+    }
     // A daemon sees its own removal whatever file events say (#263).
     crate::doc::source::note_written(&dir);
     session.reload()?;
@@ -2211,7 +2228,7 @@ pub(crate) fn save(
     order: Vec<Id>,
 ) -> Result<String> {
     for (id, f) in writes {
-        write_json(&feature_path(session.root(), part, id), &f.to_json())?;
+        session.write_json(&feature_path(session.root(), part, id), &f.to_json())?;
     }
     // A part the write makes the assembly place takes the next item number;
     // one it no longer places loses its own.
@@ -2224,15 +2241,13 @@ pub(crate) fn save(
     let after = ryupdm::items::placed_by(&order, feature);
     let whole = order.iter().all(|f| feature(f).is_some());
     let items = ryupdm::items::assigned(&items, &ryupdm::items::placed(p), &after, whole);
-    write_json(
-        &part_path(session.root(), part),
-        &PartFile {
-            kind: part_kind(p),
-            features: order,
-            items,
-        }
-        .to_json(),
-    )?;
+    let file = PartFile {
+        kind: part_kind(p),
+        features: order,
+        items,
+    }
+    .to_json();
+    session.write_json(&part_path(session.root(), part), &file)?;
     session.reload()?;
     // What the working files place from other projects may have changed.
     if crate::deps::keep_lock(session)? {
@@ -4300,7 +4315,7 @@ fn feature_delete(
     // feature with no file.
     save(session, &pid, &[], list)?;
     let path = feature_path(session.root(), &pid, &fid);
-    crate::doc::source::remove_file(&path)?;
+    session.remove_file(&path)?;
     session.reload()?;
     let assemblies = crate::mate::keep_current(session, &assemblies)?;
     let revision = &session.project().part(&pid)?.revision;

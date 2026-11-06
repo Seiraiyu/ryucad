@@ -16,7 +16,6 @@
 use crate::assembly::{Pin, Pinned};
 use crate::doc::assembly::Rev;
 use crate::doc::id::Id;
-use crate::doc::project::write_json;
 use crate::error::{Code, Error, Result};
 use crate::proto::VersionInfo;
 use crate::server::{check_revision, part_id};
@@ -272,7 +271,7 @@ fn write(session: &mut Session, record: &Record) -> Result<Value> {
     let at = path
         .split('/')
         .fold(session.root().to_path_buf(), |p, s| p.join(s));
-    write_json(&at, &record.to_json())?;
+    session.write_json(&at, &record.to_json())?;
     session.reload()?;
     let (_, releases) = history(session)?;
     let s = state::derive(&session.files(), record.part(), &releases);
@@ -1177,7 +1176,7 @@ pub(crate) mod tests {
         let mut v: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         v["format"] = json!(2);
         v["approvals"] = json!([]);
-        write_json(&path, &v).unwrap();
+        crate::doc::project::write_json(&path, &v).unwrap();
         let e = propose(&mut s).unwrap_err();
         assert_eq!(e.code, Code::FormatTooNew);
         let got = call(&mut s, "props.get", json!({"part": "p"})).unwrap();
