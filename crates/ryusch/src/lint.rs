@@ -33,6 +33,15 @@ pub const EXTRA_BENDS: usize = 3;
 /// What share of a sheet's area (per mille) may be ink before it is
 /// dense.
 pub const DENSITY: i64 = 300;
+
+/// Per mille of a sheet's 10 mm cells holding ink below which
+/// `sch_paper_fit` judges a sheet larger than its series' smallest paper
+/// too empty: under the least of the references' fills, ivconverter's 115
+/// (`measure.py`, plan 2.A's Task 1; the others 164 to 336).
+pub const FILL_MIN: i64 = 100;
+
+/// The cell `fill` counts in, as `measure.py` does: 10 mm.
+pub const CELL: Nm = 10_000_000;
 /// A signal running more than this far right to left is against the flow.
 pub const AGAINST: Nm = 4 * GRID;
 /// An idiom's part further than this from the part it serves is drawn
@@ -296,6 +305,33 @@ pub const RULES: &[Rule] = &[
         fix: "Turn the part so its pin faces the wire (orient X 0|90|180|270), or move it (beside X Y left|right|above|below).",
         evidence: "Round 1 found wires wrapping parts that the score didn't name (F19). In round 2's blind review (plan 1.D, three judges a pair) no rubric criterion covers this rule alone.",
     },
+    Rule {
+        code: "sch_paper_fit",
+        weight: 5,
+        unit: "a sheet",
+        what: "A sheet on paper larger than its drawing needs: a smaller paper of the project's series would hold it, or it fills under 100 per mille of its 10 mm cells on paper larger than the series' smallest.",
+        why: "A small drawing on a large sheet prints small and reads as empty; the reader zooms and pans for what one smaller page would show at once.",
+        fix: "Lay the sheet out again so paper fit chooses (layout --relayout BLOCK/SHEET), or pin a smaller paper (paper SHEET a4).",
+        evidence: "The references fill 115 to 336 per mille of their drawing area's 10 mm cells and draw on the smallest paper that holds them: the buck, the front end's three sheets on A4, Mitayi-Pico-D1 on A3, the ESP32-PoE on A2 (measure.py, plan 2.A's Task 1). In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the reference on all four circuits on paper fit, 3 to 0.",
+    },
+    Rule {
+        code: "sch_function_split",
+        weight: 6,
+        unit: "a function",
+        what: "One function's parts (a recognised circuit, a dense IC with its satellites and guests, a connector and its breakout) are in more than one region, or some in none.",
+        why: "A reader finds a function by its titled region; split, its parts read as two functions, or one is missing from where the title says it is.",
+        fix: "Name its region with all of them (region TITLE X...), as the finding's fix says.",
+        evidence: "Design 348's regions: the references group each function on its own part of the sheet (Mitayi-Pico-D1's USB, regulator and RP2040 corners; the ESP32-PoE's Ethernet panel). In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the reference on all four circuits on grouping by function, 3 to 0.",
+    },
+    Rule {
+        code: "sch_region_untitled",
+        weight: 2,
+        unit: "a region",
+        what: "A region titled Misc: nothing in it names its function.",
+        why: "A region's title is what a reader scans for; Misc says nothing about what the parts do.",
+        fix: "Give it a title (region rename REGION TITLE), or a function property to its main component.",
+        evidence: "Design 348: every region is titled by its function. The references title their panels (the ESP32-PoE's ETHERNET, Mitayi-Pico-D1's power and USB blocks).",
+    },
 ];
 
 /// How much a finding counts: a rule's lint, warned of, or an error that
@@ -447,10 +483,84 @@ pub struct Score {
     pub wire_nm: Nm,
     /// Ink per sheet area, per mille.
     pub density: i64,
+    /// The box of everything drawn over the drawing area, per mille.
+    pub extent: i64,
+    /// The share of the drawing area's 10 mm cells holding ink, per mille.
+    pub fill: i64,
     pub findings: usize,
     /// Preferences that took rules out of play on the sheet.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+}
+
+/// Everything sheet `sid` draws that takes room: parts' extents, text,
+/// labels and wire segments.
+fn ink_boxes(block: &Block, layout: &crate::layout::Layout, sid: &str) -> Vec<Rect> {
+    let mut out = Vec::new();
+    for part in &block.parts {
+        let Some(x) = layout.placed.get(&part.key).filter(|x| x.sheet == sid) else {
+            continue;
+        };
+        out.push(Shape::of(part, Place::new(x.at, x.rotation, x.mirror)).extent);
+        if let Some(fields) = layout.text.get(&part.key) {
+            for (field, value) in [("refdes", &part.refdes), ("value", &part.value)] {
+                if let Some(at) = fields.get(field) {
+                    out.push(text::boxes(&[value.as_str()], *at)[0]);
+                }
+            }
+        }
+    }
+    for list in layout.labels.values() {
+        for l in list.iter().filter(|l| l.sheet == sid) {
+            out.push(label::label_box(l.kind, &l.text, l.at, l.side));
+        }
+    }
+    for by_sheet in layout.routes.values() {
+        for run in by_sheet.get(sid).into_iter().flatten() {
+            for w in run.windows(2) {
+                out.push(Rect::new(w[0], w[1]));
+            }
+        }
+    }
+    out
+}
+
+/// The share of sheet `sid`'s drawing area's whole 10 mm cells that a
+/// part, a text, a label or a wire touches, per mille (as `measure.py`).
+pub fn fill(block: &Block, layout: &crate::layout::Layout, sid: &str) -> i64 {
+    let area = block.area_in(layout, sid);
+    let (nx, ny) = (area[0] / CELL, area[1] / CELL);
+    if nx <= 0 || ny <= 0 {
+        return 0;
+    }
+    let mut cells: BTreeSet<(Nm, Nm)> = BTreeSet::new();
+    for b in ink_boxes(block, layout, sid) {
+        let (x0, x1) = ((b.min[0] / CELL).max(0), (b.max[0] / CELL).min(nx - 1));
+        let (y0, y1) = ((b.min[1] / CELL).max(0), (b.max[1] / CELL).min(ny - 1));
+        for i in x0..=x1 {
+            for j in y0..=y1 {
+                cells.insert((i, j));
+            }
+        }
+    }
+    cells.len() as i64 * 1000 / (nx * ny)
+}
+
+/// The box of everything sheet `sid` draws, over its drawing area, per
+/// mille.
+pub fn extent(block: &Block, layout: &crate::layout::Layout, sid: &str) -> i64 {
+    let area = Rect::new([0, 0], block.area_in(layout, sid));
+    let Some(b) = ink_boxes(block, layout, sid)
+        .into_iter()
+        .reduce(Rect::union)
+    else {
+        return 0;
+    };
+    let clipped = Rect::new(
+        [b.min[0].max(area.min[0]), b.min[1].max(area.min[1])],
+        [b.max[0].min(area.max[0]), b.max[1].min(area.max[1])],
+    );
+    (clipped.area() * 1000 / area.area().max(1)) as i64
 }
 
 /// The lint of a laid out block, sheet by sheet: findings in a fixed
@@ -1425,6 +1535,115 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             x.severity = severity;
             x.points = units(x) * weight;
             for p in [why, set].into_iter().flatten() {
+        // Paper fit (plan 2.A): a smaller paper would hold the drawing, or
+        // it is too empty for paper larger than the series' smallest.
+        let sheet = &layout.sheets[sid];
+        let sheet_fill = fill(block, layout, sid);
+        let sheet_extent = extent(block, layout, sid);
+        if !sheet.pinned
+            && let Some(now) = block.paper_of(sheet)
+            && let Some(at) = block.papers.iter().position(|p| p == now)
+            && let Some(drawn) = ink_boxes(block, layout, sid)
+                .into_iter()
+                .reduce(Rect::union)
+        {
+            let need = 2 * crate::place::MARGIN + 2 * GRID;
+            let smaller = block.papers[..at]
+                .iter()
+                .find(|p| drawn.width() + need <= p.area[0] && drawn.height() + need <= p.area[1]);
+            let empty = at > 0 && sheet_fill < FILL_MIN;
+            if smaller.is_some() || empty {
+                let to = smaller.unwrap_or(&block.papers[0]);
+                let why = match smaller {
+                    Some(p) => format!("{} would hold it", p.size),
+                    None => format!("it fills {sheet_fill} per mille, under {FILL_MIN}"),
+                };
+                found.push(
+                    f(
+                        "sch_paper_fit",
+                        format!(
+                            "sheet {sid} is on {} though {why} (fill {sheet_fill} per mille)",
+                            now.size
+                        ),
+                        vec![sid.clone()],
+                        json!({
+                            "size": now.size,
+                            "smaller": to.size,
+                            "fill": sheet_fill,
+                            "extent": sheet_extent,
+                            "fix": format!("layout --relayout {}/{sid}", block.name),
+                        }),
+                    )
+                    .fixed(vec![vec![Instruction::Paper {
+                        sheet: sid.clone(),
+                        size: to.size.clone(),
+                        orientation: None,
+                    }]]),
+                );
+            }
+        }
+        // Regions (plan 2.A): one function in one region; every region
+        // titled.
+        let region_of = layout.region_of();
+        if let Ok(r) = crate::instr::resolve(block) {
+            for g in crate::region::propose(block, &out.idioms, &r) {
+                if !matches!(
+                    g.basis,
+                    crate::region::Basis::Topology
+                        | crate::region::Basis::Ic
+                        | crate::region::Basis::Connector
+                ) {
+                    continue;
+                }
+                let here: Vec<&str> = g
+                    .parts
+                    .iter()
+                    .map(|p| block.parts[*p].key.as_str())
+                    .filter(|k| layout.placed.get(*k).is_some_and(|x| &x.sheet == sid))
+                    .collect();
+                if here.is_empty() {
+                    continue;
+                }
+                let homes: BTreeSet<Option<&&str>> =
+                    here.iter().map(|k| region_of.get(k)).collect();
+                if homes.len() > 1 || homes.contains(&None) {
+                    let shown: Vec<String> =
+                        g.parts.iter().map(|p| part_shown(block, *p)).collect();
+                    found.push(
+                        f(
+                            "sch_function_split",
+                            format!(
+                                "{}'s parts ({}) are in {} regions{}",
+                                g.title,
+                                shown.join(", "),
+                                homes.iter().filter(|h| h.is_some()).count(),
+                                if homes.contains(&None) {
+                                    ", some in none"
+                                } else {
+                                    ""
+                                }
+                            ),
+                            here.iter().map(|k| (*k).to_owned()).collect(),
+                            json!({"function": g.title}),
+                        )
+                        .fixed(vec![vec![Instruction::Region {
+                            title: g.title.clone(),
+                            parts: here.iter().map(|k| (*k).to_owned()).collect(),
+                        }]]),
+                    );
+                }
+            }
+        }
+        for (id, g) in layout.regions.iter().filter(|(_, g)| &g.sheet == sid) {
+            if g.title == "Misc" {
+                found.push(f(
+                    "sch_region_untitled",
+                    format!("region {id} is titled Misc: give it its function's title"),
+                    vec![id.clone()],
+                    json!({"fix": format!("region rename {id} TITLE")}),
+                ));
+            }
+        }
                 x.message.push_str(&format!(" ({p})"));
                 x.prefs.push(p);
             }
@@ -1471,6 +1690,8 @@ fn wired_to_another(runs: &[Vec<[Nm; 2]>], at: route::Node, ends: &[route::Node]
                 grew = true;
             }
         }
+            extent: sheet_extent,
+            fill: sheet_fill,
         if !grew {
             break;
         }
@@ -1670,6 +1891,75 @@ mod tests {
         // Every signal's wires taken away and each pin labelled instead.
         let wired: Vec<String> = out
             .layout
+
+    #[test]
+    fn paper_and_region_rules_teach_fit_and_function() {
+        use crate::input::Paper;
+        use crate::layout::{Orientation, Region};
+        let mut block = crate::testing::regions_block();
+        let a4 = Paper {
+            size: "a4".into(),
+            orientation: Orientation::Landscape,
+            area: [277_000_000, 190_000_000],
+        };
+        let a3 = Paper {
+            size: "a3".into(),
+            orientation: Orientation::Landscape,
+            area: [400_000_000, 277_000_000],
+        };
+        block.sheet = a3.area;
+        block.papers = vec![a4, a3];
+        let mut out = crate::engine::lay_out(&block).unwrap();
+        let (found, _) = lint(&block, &out);
+        assert!(
+            !found.iter().any(|f| matches!(
+                f.code,
+                "sch_paper_fit" | "sch_function_split" | "sch_region_untitled"
+            )),
+            "{found:#?}"
+        );
+        let f = fill(&block, &out.layout, "s1");
+        assert!(f > 0 && f <= 1000);
+        // On A3 by hand, it would fit A4: sch_paper_fit, fixed by a relayout.
+        out.layout.sheets.get_mut("s1").unwrap().size = None;
+        let (found, _) = lint(&block, &out);
+        let fit = found
+            .iter()
+            .find(|f| f.code == "sch_paper_fit")
+            .expect("paper fit");
+        assert!(fit.message.contains("a4"), "{}", fit.message);
+        // A buck's inductor outside its region: its function is split.
+        let mut split = crate::engine::lay_out(&block).unwrap();
+        let conv = split
+            .layout
+            .regions
+            .iter()
+            .find(|(_, r)| r.title.ends_with("converter"))
+            .map(|(id, _)| id.clone())
+            .unwrap();
+        split
+            .layout
+            .regions
+            .get_mut(&conv)
+            .unwrap()
+            .parts
+            .retain(|k| k != "l1");
+        split.layout.regions.insert(
+            "r9".into(),
+            Region {
+                sheet: "s1".into(),
+                at: [0, 0],
+                frame: Rect::new([0, 0], [1, 1]),
+                title: "Misc".into(),
+                named: false,
+                parts: vec!["l1".into()],
+            },
+        );
+        let (found, _) = lint(&block, &split);
+        assert!(found.iter().any(|f| f.code == "sch_function_split"));
+        assert!(found.iter().any(|f| f.code == "sch_region_untitled"));
+    }
+
             .routes
             .keys()
             .filter(|k| b.net(k).is_some_and(|n| b.nets[n].kind == NetKind::Signal))

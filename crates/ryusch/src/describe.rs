@@ -220,6 +220,8 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
             "orientation": sheet.orientation.or(paper.map(|p| p.orientation)),
             "pinned": sheet.pinned,
             "area_mm": [mm(area[0]), mm(area[1])],
+            "extent": crate::lint::extent(block, layout, sid),
+            "fill": crate::lint::fill(block, layout, sid),
         });
         sheets.push(json!({
             "paper": paper,
