@@ -953,3 +953,43 @@ fn a_tilted_pad_under_a_spline_round_holds_the_rounded_end() {
         );
     }
 }
+
+/// Two 10 mm blocks, the second standing on the first's top, sides flush,
+/// sunk `d` into it, both turned by `turn` about x: the first, and the
+/// second placed.
+fn sunk_blocks(d: f64, turn: f64) -> (Body, Body, Rigid) {
+    let s = 0.01;
+    let x = Vector3::new(1.0, 0.0, 0.0).normalize().unwrap();
+    let r = Rigid::rotation(x, turn);
+    let a = primitive::block(OpKey(1), s, s, s, &r).unwrap().0;
+    let b = primitive::block(OpKey(2), s, s, s, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    (a, b, r.then_after(&at(0.0, 0.0, s - d)))
+}
+
+#[test]
+fn blocks_sunk_into_each_other_by_less_than_a_touch_meet_in_nothing() {
+    // Issue #558: blocks with flush sides sunk 30 to 80 nm into each
+    // other were `Uncertain`. Their corners cluster into one vertex each
+    // (within a touch's reach), but the edge of one's top and the line
+    // where the other's bottom meets its side stayed two edges between
+    // those vertices, which the split couldn't order; turned, at one
+    // resolution apart, an edge was fitted onto the other's plane as a
+    // spline its line's crossings couldn't settle; and in a debug build
+    // the slab between them, two faces sharing every edge, failed the
+    // check (`NotOutward`). They meet only within the tolerances now: the
+    // intersection is empty, both ways round, square and turned.
+    for turn in [0.0, PI / 6.0] {
+        for d in [0.0, 10e-9, 20e-9, 30e-9, 50e-9, 80e-9] {
+            let (a, b, place) = sunk_blocks(d, turn);
+            let i = run(BooleanOp::Intersect, &a, &[(&b, place)]);
+            assert_eq!(i.faces().count(), 0, "turn {turn} d {d}");
+        }
+        // Past the reach of a touch, the slab is a solid.
+        let (a, b, place) = sunk_blocks(2e-6, turn);
+        let i = run(BooleanOp::Intersect, &a, &[(&b, place)]);
+        let v = volume(&i);
+        assert!((v - 2e-10).abs() <= 1e-3 * 2e-10, "turn {turn}: {v}");
+    }
+}
