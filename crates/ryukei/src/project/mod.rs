@@ -16,6 +16,7 @@ mod events;
 mod folds;
 mod hidden;
 mod items;
+mod pieces;
 mod silhouette;
 mod trim;
 mod view;
