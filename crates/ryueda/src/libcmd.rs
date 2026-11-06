@@ -450,6 +450,22 @@ pub struct CompFields {
     /// The whole list: `[{supplier, sku}]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offers: Option<Vec<crate::libcomp::Offer>>,
+    /// One of the categories (`resistor`, `capacitor`, …); `""` puts it
+    /// back to the one the prefix gives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// The whole list of alternates, replacing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternates: Option<Vec<crate::libcomp::Alternate>>,
+    /// Alternates to take off, by part number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remove_alternates: Option<Vec<String>>,
+    /// Alternates to add; one with a part number already listed replaces it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add_alternates: Option<Vec<crate::libcomp::Alternate>>,
+    /// Offers for alternates, each naming its alternate's part number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternate_offers: Option<Vec<AlternateOffer>>,
     /// The whole list, the default first: `[{footprint, pins?}]`, each
     /// footprint `<id>` or `lib/<alias>/footprint/<id>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -462,6 +478,15 @@ pub struct FootprintArg {
     pub footprint: String,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub pins: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+/// An offer for one of a component's alternates.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlternateOffer {
+    pub mpn: String,
+    pub supplier: String,
+    pub sku: String,
 }
 
 /// A request's object reference as a file's: no `library` for this
@@ -526,6 +551,66 @@ fn fill(c: &mut crate::libcomp::LibComp, f: &CompFields) -> Result<()> {
             })
             .collect::<Result<_>>()?;
     }
+    if let Some(cat) = &f.category {
+        c.category = match cat.as_str() {
+            "" => None,
+            s => Some(crate::libcomp::Category::parse(s).ok_or_else(|| {
+                Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "{s} isn't a category: {}",
+                        crate::libcomp::Category::names().join(", ")
+                    ),
+                )
+                .with("param", "category")
+            })?),
+        };
+    }
+    if let Some(all) = &f.alternates {
+        c.alternates = all.clone();
+    }
+    for mpn in f.remove_alternates.iter().flatten() {
+        let before = c.alternates.len();
+        c.alternates.retain(|a| &a.mpn != mpn);
+        if c.alternates.len() == before {
+            return Err(Error::new(
+                Code::NotFound,
+                format!("no alternate has part number {mpn}"),
+            )
+            .with("param", "remove_alternates")
+            .with("mpn", mpn));
+        }
+    }
+    for a in f.add_alternates.iter().flatten() {
+        match c.alternates.iter_mut().find(|x| x.mpn == a.mpn) {
+            Some(x) => *x = a.clone(),
+            None => c.alternates.push(a.clone()),
+        }
+    }
+    for o in f.alternate_offers.iter().flatten() {
+        let a = c
+            .alternates
+            .iter_mut()
+            .find(|x| x.mpn == o.mpn)
+            .ok_or_else(|| {
+                Error::new(
+                    Code::NotFound,
+                    format!(
+                        "no alternate has part number {}; add the alternate first",
+                        o.mpn
+                    ),
+                )
+                .with("param", "alternate_offers")
+                .with("mpn", &o.mpn)
+            })?;
+        let offer = crate::libcomp::Offer {
+            supplier: o.supplier.clone(),
+            sku: o.sku.clone(),
+        };
+        if !a.offers.contains(&offer) {
+            a.offers.push(offer);
+        }
+    }
     if c.prefix.is_empty() || !c.prefix.chars().all(|ch| ch.is_ascii_alphabetic()) {
         return Err(Error::new(
             Code::InvalidParam,
@@ -557,10 +642,13 @@ fn comp_json(lib: &Library, id: &Id) -> Result<Value> {
         .item
         .as_ref()
         .map_err(|e| e.clone().with("reference", &at))?;
+    let (category, inferred) = c.category();
     Ok(json!({
         "reference": at,
         "path": lib.path(ObjKind::Libcomp, id),
         "libcomp": c,
+        "category": category,
+        "category_inferred": inferred,
         "faults": fault::list(&l.faults),
         "revision": lib.revision,
     }))
@@ -684,6 +772,7 @@ pub fn libcomp_list(p: &Project, library: Option<&str>) -> Result<Value> {
                     v["value"] = json!(c.value);
                     v["mpn"] = json!(c.mpn);
                     v["footprints"] = json!(c.footprints.len());
+                    v["category"] = json!(c.category().0);
                 }
                 Err(e) => v["error"] = json!(e),
             }
@@ -727,4 +816,50 @@ pub fn libcomp_delete(
         "deleted": at,
         "revision": session.project().library(SELF)?.revision,
     }))
+}
+
+#[cfg(test)]
+mod part_data_tests {
+    use super::*;
+    use crate::libcomp::Category;
+
+    fn fields(v: Value) -> CompFields {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn fields_set_categories_and_alternates() {
+        let mut c = crate::libcomp::tests::r_100k();
+        let f = fields(json!({
+            "category": "resistor",
+            "add_alternates": [{"manufacturer": "Vishay", "mpn": "CRCW0402100KFKED"}],
+            "alternate_offers": [{"mpn": "CRCW0402100KFKED", "supplier": "Mouser", "sku": "71-CRCW0402100KFKED"}]
+        }));
+        fill(&mut c, &f).unwrap();
+        assert_eq!(c.category, Some(Category::Resistor));
+        assert_eq!(c.alternates[0].offers.len(), 1);
+        // The same again changes nothing.
+        fill(&mut c, &f).unwrap();
+        assert_eq!((c.alternates.len(), c.alternates[0].offers.len()), (1, 1));
+        fill(
+            &mut c,
+            &fields(json!({"category": "", "remove_alternates": ["CRCW0402100KFKED"]})),
+        )
+        .unwrap();
+        assert_eq!((c.category, c.alternates.len()), (None, 0));
+        for (bad, code) in [
+            (json!({"category": "valve"}), Code::InvalidParam),
+            (json!({"remove_alternates": ["X"]}), Code::NotFound),
+            (
+                json!({"alternate_offers": [{"mpn": "X", "supplier": "LCSC", "sku": "C1"}]}),
+                Code::NotFound,
+            ),
+        ] {
+            assert_eq!(
+                fill(&mut c, &fields(bad.clone())).unwrap_err().code,
+                code,
+                "{bad}"
+            );
+        }
+    }
 }
