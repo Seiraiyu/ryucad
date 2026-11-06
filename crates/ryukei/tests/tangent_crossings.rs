@@ -2,7 +2,8 @@
 //! the fillets of a twisted loft's cap edges are pipes footed on the
 //! caps, and two of them meet at a ball corner touching tangentially at
 //! the corner triangle's vertex and again where their tubes' tops meet.
-//! Release only (`cargo test -p ryukei --release --test
+//! Each pair meets within 1 s on one thread with `RYUKEI_BARS=1`, ten
+//! times looser without. Release only (`cargo test -p ryukei --release --test
 //! tangent_crossings`).
 
 use ryukei::blend::{BlendKind, EdgeBlend, blend};
@@ -110,7 +111,16 @@ fn footed_pipes_at_a_ball_corner_meet_through_their_tangent_points() {
     for (x, y) in pairs {
         let [sx, sy] = [x, y].map(|f| b.surface(b.face(f).unwrap().surface).unwrap());
         let region = face_box(&b, x).union(&face_box(&b, y));
+        let t = std::time::Instant::now();
         let hit = surface_surface(sx, sy, &region).unwrap_or_else(|e| panic!("{x:?} {y:?}: {e:?}"));
+        let secs = t.elapsed().as_secs_f64();
+        eprintln!("{x:?} {y:?} met in {secs:.3} s");
+        let bar = if std::env::var_os("RYUKEI_BARS").is_some() {
+            1.0
+        } else {
+            10.0
+        };
+        assert!(secs < bar, "{x:?} {y:?}: {secs} s");
         let SurfaceHit::Meet { branches, .. } = hit else {
             panic!("{x:?} {y:?}: coincident")
         };
