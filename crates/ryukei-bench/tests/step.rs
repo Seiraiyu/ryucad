@@ -468,7 +468,16 @@ fn pinned_corpus_builds_as_references() {
                     .unwrap();
                     unmeshed += m.faults.len();
                 }
-                Err(e) => wrong.push(format!("{name} #{}: {e:?}", r.representation)),
+                // A shape the file doesn't let ryustep read as geometry at
+                // all is refused as healing refuses it, and only where it is
+                // listed.
+                Err(e) => {
+                    let refused = PINNED_REFUSED.iter().any(|x| x.0 == name);
+                    let healed = opened.body(k, &opts()).result.is_ok();
+                    if !refused || healed {
+                        wrong.push(format!("{name} #{}: {e:?}", r.representation));
+                    }
+                }
             }
         }
         println!(
@@ -479,6 +488,14 @@ fn pinned_corpus_builds_as_references() {
     println!("references built in {seconds:.1} s on one thread");
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
+
+/// Pinned files whose bodies are refused before a reference is built, with
+/// why: what the file gives can't be read as geometry at all, as healing
+/// reads it too (`pinned.txt` heals none of their bodies).
+const PINNED_REFUSED: &[(&str, &str)] = &[(
+    "occt/screw.step",
+    "a spindle torus (InvalidGeometry Degenerate; step.md's Limits)",
+)];
 
 /// Each `heals` line of `pinned.txt`: the file's path in the cache.
 fn pinned_files() -> Vec<String> {
