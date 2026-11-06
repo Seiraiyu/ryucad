@@ -73,6 +73,8 @@ pub enum Role {
     SheetMetal(SheetMetalRole),
     /// An entity of a thickened sheet (see [`crate::offset::thicken`]).
     Thicken(ThickenRole),
+    /// An entity of a fill (see [`crate::fill`]).
+    Fill(FillRole),
 }
 
 /// The faces of the primitives.
@@ -165,6 +167,32 @@ pub enum ThickenRole {
     /// An edge of the walls along a laminar vertex's normal: its parent is
     /// the vertex.
     Normal,
+}
+
+/// The entities of a fill (see [`crate::fill::fill`]). Ordinals are
+/// parents as [`Name::from_u128`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FillRole {
+    /// A stand-in for side `i`: its parents are `i` and the boundary
+    /// edge's name where the side is one. A side that is one laminar
+    /// edge has this name.
+    Side,
+    /// A half of a side split at its middle: its parents are the side's
+    /// stand-in and 0 (the first half) or 1.
+    Half,
+    /// A face: its parents are the corner it holds (as an ordinal), none
+    /// for a fill of one face.
+    Patch,
+    /// An inner edge from a side's middle to the centre: its parent is the
+    /// side's stand-in.
+    Inner,
+    /// A corner: its parents are the stand-ins of the sides arriving and
+    /// leaving.
+    Corner,
+    /// A side's middle: its parent is the side's stand-in.
+    Middle,
+    /// The centre; it has no parents.
+    Centre,
 }
 
 /// The entities of the sheet-metal operations (see [`crate::sheet_metal`]).
@@ -296,6 +324,7 @@ impl Role {
             Self::Sheet(r) => [14, r as u8],
             Self::SheetMetal(r) => [15, r as u8],
             Self::Thicken(r) => [16, r as u8],
+            Self::Fill(r) => [17, r as u8],
         }
     }
 }
@@ -392,6 +421,15 @@ impl fmt::Display for Role {
                 ThickenRole::Back => "thicken-back",
                 ThickenRole::Wall => "thicken-wall",
                 ThickenRole::Normal => "thicken-normal",
+            }),
+            Self::Fill(r) => f.write_str(match r {
+                FillRole::Side => "fill-side",
+                FillRole::Half => "fill-half",
+                FillRole::Patch => "fill-patch",
+                FillRole::Inner => "fill-inner",
+                FillRole::Corner => "fill-corner",
+                FillRole::Middle => "fill-middle",
+                FillRole::Centre => "fill-centre",
             }),
         }
     }
@@ -618,6 +656,17 @@ mod tests {
             SheetMetalRole::Cut,
         ] {
             roles.push(Role::SheetMetal(r));
+        }
+        for r in [
+            FillRole::Side,
+            FillRole::Half,
+            FillRole::Patch,
+            FillRole::Inner,
+            FillRole::Corner,
+            FillRole::Middle,
+            FillRole::Centre,
+        ] {
+            roles.push(Role::Fill(r));
         }
         let mut codes: Vec<[u8; 2]> = roles.iter().map(|r| r.code()).collect();
         codes.sort_unstable();

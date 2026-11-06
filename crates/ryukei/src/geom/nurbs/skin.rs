@@ -23,12 +23,63 @@ pub(crate) type Net = Vec<Hom<Vector3>>;
 /// Returns the shared knot vector and each curve's control points. Fails
 /// with `Degenerate` for no curves.
 pub(crate) fn compatible(curves: &[NurbsCurve]) -> Result<(KnotVector, Vec<Net>), Error> {
+    let (knots, nets, _) = compatible_mapped(curves, 1)?;
+    Ok((knots, nets))
+}
+
+/// How [`compatible_mapped`] reparameterized one curve: its own clamped
+/// domain `[a, b]` mapped affinely onto `[0, 1]`, then each Bézier piece
+/// `[u0, u1]` of that by its Möbius factor `rho` (1 for a polynomial
+/// piece, where nothing moves).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CompatMap {
+    pub(crate) domain: [f64; 2],
+    pub(crate) pieces: Vec<([f64; 2], f64)>,
+}
+
+impl CompatMap {
+    /// The curve's own parameter at the compatible one `u` (in `[0, 1]`):
+    /// within its piece, local `σ` is the point the curve had at local
+    /// `x = ρσ / (1 - σ + ρσ)`, then the affine map back.
+    pub(crate) fn to_curve(&self, u: f64) -> f64 {
+        let [a, b] = self.domain;
+        let k = self
+            .pieces
+            .iter()
+            .position(|&([_, u1], _)| u <= u1)
+            .unwrap_or(self.pieces.len() - 1);
+        let ([u0, u1], rho) = self.pieces[k];
+        let sigma = ((u - u0) / (u1 - u0)).clamp(0.0, 1.0);
+        let x = if rho == 1.0 {
+            sigma
+        } else {
+            rho * sigma / (1.0 - sigma + rho * sigma)
+        };
+        let s = u0 + x * (u1 - u0);
+        if s <= 0.0 {
+            a
+        } else if s >= 1.0 {
+            b
+        } else {
+            a + s * (b - a)
+        }
+    }
+}
+
+/// [`compatible`] at degree `floor` at least, with each curve's
+/// [`CompatMap`]. `compatible` is this with a floor of 1, bit for bit.
+pub(crate) fn compatible_mapped(
+    curves: &[NurbsCurve],
+    floor: usize,
+) -> Result<(KnotVector, Vec<Net>, Vec<CompatMap>), Error> {
     let q = curves
         .iter()
         .map(NurbsCurve::degree)
         .max()
-        .ok_or(Error::Degenerate)?;
+        .ok_or(Error::Degenerate)?
+        .max(floor);
     let mut forms: Vec<(Vec<f64>, Vec<Hom<Vector3>>)> = Vec::with_capacity(curves.len());
+    let mut maps: Vec<CompatMap> = Vec::with_capacity(curves.len());
     for c in curves {
         let (flat, mut hom) = elevated(c, q);
         let (a, b) = (flat[0], flat[flat.len() - 1]);
@@ -48,9 +99,13 @@ pub(crate) fn compatible(curves: &[NurbsCurve]) -> Result<(KnotVector, Vec<Net>)
         // neighbours sharing their joint; each is scaled from the weights
         // as they were.
         let before: Vec<f64> = hom.iter().map(|h| h.w).collect();
+        let mut ends: Vec<f64> = flat.clone();
+        ends.dedup();
+        let mut pieces = Vec::with_capacity(ends.len() - 1);
         for piece in 0..(hom.len() - 1) / q {
             let w = &before[piece * q..=(piece + 1) * q];
             let rho = math::pow(w[0] / w[q], 1.0 / q as f64);
+            pieces.push(([ends[piece], ends[piece + 1]], rho));
             let mut scale = 1.0 / w[0];
             for (i, h) in hom[piece * q..=(piece + 1) * q].iter_mut().enumerate() {
                 h.w = w[i] * scale;
@@ -61,6 +116,10 @@ pub(crate) fn compatible(curves: &[NurbsCurve]) -> Result<(KnotVector, Vec<Net>)
             hom[(piece + 1) * q].w = 1.0;
         }
         forms.push((flat, hom));
+        maps.push(CompatMap {
+            domain: [a, b],
+            pieces,
+        });
     }
     let breaks = |flat: &[f64]| -> Vec<f64> {
         let mut out: Vec<f64> = flat[q + 1..flat.len() - q - 1].to_vec();
@@ -81,7 +140,7 @@ pub(crate) fn compatible(curves: &[NurbsCurve]) -> Result<(KnotVector, Vec<Net>)
     let flat = forms[0].0.clone();
     debug_assert!(forms.iter().all(|(f, _)| *f == flat));
     let knots = KnotVector::clamped_flat(q, &flat);
-    Ok((knots, forms.into_iter().map(|(_, h)| h).collect()))
+    Ok((knots, forms.into_iter().map(|(_, h)| h).collect(), maps))
 }
 
 /// Solves `m x = rhs` (rows of four right-hand sides) by Gaussian
