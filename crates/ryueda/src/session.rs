@@ -15,6 +15,9 @@ pub struct Session {
     stamps: Stamps,
     /// What a long request's lock-free work made, taken by its answer.
     pub(crate) prepared: Option<Result<serde_json::Value>>,
+    /// This machine's catalogues, opened once and kept while their
+    /// indexes stand.
+    catalogues: Option<crate::parts::Catalogues>,
 }
 
 /// `rel` (relative to the project, with `/`) as a path under `root`.
@@ -42,7 +45,20 @@ impl Session {
             project,
             stamps,
             prepared: None,
+            catalogues: None,
         })
+    }
+
+    /// This machine's catalogues as of now: those opened before, unless
+    /// synced again since.
+    pub fn catalogues(&mut self) -> Result<crate::parts::Catalogues> {
+        let now = crate::parts::now();
+        let c = match &self.catalogues {
+            Some(c) => c.refreshed(now),
+            None => crate::parts::Catalogues::here()?,
+        };
+        self.catalogues = Some(c.clone());
+        Ok(c)
     }
 
     pub fn root(&self) -> &Path {

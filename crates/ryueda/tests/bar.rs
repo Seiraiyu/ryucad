@@ -111,11 +111,11 @@ fn a_search_of_ten_thousand_library_components_is_within_its_bar() {
         .num_threads(1)
         .build()
         .unwrap();
-    one.install(|| ryueda::parts::search(&p, &search).unwrap());
+    one.install(|| ryueda::parts::search(&p, &search, &Default::default()).unwrap());
     let mut worst = Duration::ZERO;
     for _ in 0..5 {
         let start = Instant::now();
-        let v = one.install(|| ryueda::parts::search(&p, &search).unwrap());
+        let v = one.install(|| ryueda::parts::search(&p, &search, &Default::default()).unwrap());
         worst = worst.max(start.elapsed());
         assert!(!v["results"].as_array().unwrap().is_empty());
     }

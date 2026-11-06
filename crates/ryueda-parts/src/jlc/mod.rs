@@ -45,5 +45,6 @@ pub const CONNECTOR: crate::catalogue::Connector = crate::catalogue::Connector {
     attribution: ATTRIBUTION,
     base,
     open,
+    fetched_at: |root| Some(index::read(root).ok()??.meta.fetched_at),
     sync: sync::sync,
 };

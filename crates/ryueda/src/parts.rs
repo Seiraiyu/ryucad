@@ -17,9 +17,148 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-/// The sources this ryueda searches, in the order a search without `in`
-/// asks them.
-pub const SOURCES: [&str; 1] = [Library::NAME];
+/// The sources this ryueda searches: the library, then each catalogue.
+pub fn sources_known() -> Vec<&'static str> {
+    std::iter::once(Library::NAME).chain(catalogues()).collect()
+}
+
+/// `parts.max_age`'s default: 7 days.
+pub const MAX_AGE: u64 = 7 * 24 * 3600;
+
+type Shared = ryueda_parts::catalogue::Shared;
+
+/// This machine's catalogues as a request reads them: where the parts
+/// cache is, now, and `parts.max_age`. Cheap to clone (a loaded catalogue
+/// is shared); `Default` reads no catalogue at all.
+#[derive(Clone, Default)]
+pub struct Catalogues {
+    /// The parts cache; `None` for none.
+    pub root: Option<std::path::PathBuf>,
+    pub now: u64,
+    pub max_age: u64,
+    /// Each connector's catalogue once opened, by name (`None`: not synced).
+    loaded: std::sync::Arc<std::sync::Mutex<BTreeMap<&'static str, Option<Shared>>>>,
+}
+
+impl Catalogues {
+    pub fn at(root: &std::path::Path, now: u64, max_age: u64) -> Catalogues {
+        Catalogues {
+            root: Some(root.to_path_buf()),
+            now,
+            max_age,
+            loaded: Default::default(),
+        }
+    }
+
+    /// The machine's: the parts cache, now, and `parts.max_age` from the
+    /// preferences (or `RYUEDA_PARTS_MAX_AGE`).
+    /// With no cache folder to be found (no home), no catalogue.
+    pub fn here() -> Result<Catalogues> {
+        Ok(match cache_root() {
+            Ok(root) => Catalogues::at(&root, now(), max_age()),
+            Err(_) => Catalogues {
+                now: now(),
+                max_age: max_age(),
+                ..Default::default()
+            },
+        })
+    }
+
+    /// This, as of `now`, letting go of each catalogue synced again since
+    /// it was opened (reading only what says when).
+    pub fn refreshed(&self, now: u64) -> Catalogues {
+        let mut loaded = self.loaded.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(root) = &self.root {
+            loaded.retain(|name, c| {
+                let Some(conn) = ryueda_parts::catalogue::connector(name) else {
+                    return false;
+                };
+                (conn.fetched_at)(&root.join(conn.name)) == c.as_ref().map(|c| c.fetched_at())
+            });
+        }
+        drop(loaded);
+        Catalogues {
+            now,
+            ..self.clone()
+        }
+    }
+
+    /// Connector `name`'s catalogue, if this machine has synced it.
+    pub fn get(&self, name: &str) -> Result<Option<Shared>> {
+        let Some(conn) = ryueda_parts::catalogue::connector(name) else {
+            return Ok(None);
+        };
+        let mut loaded = self.loaded.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(c) = loaded.get(conn.name) {
+            return Ok(c.clone());
+        }
+        let c = match &self.root {
+            Some(r) => (conn.open)(&r.join(conn.name))?,
+            None => None,
+        };
+        loaded.insert(conn.name, c.clone());
+        Ok(c)
+    }
+
+    /// The synced catalogues whose keys an offer of `supplier` names.
+    pub fn for_supplier(&self, supplier: &str) -> Result<Vec<Shared>> {
+        let mut out = Vec::new();
+        for conn in ryueda_parts::catalogue::for_supplier(supplier) {
+            out.extend(self.get(conn.name)?);
+        }
+        Ok(out)
+    }
+
+    /// A catalogue's state (`{name, kind, state, fetched_at, age_s, stale,
+    /// parts, created, attribution, sync}`), and a `parts_cache_stale`
+    /// warning where it is missing or past `max_age`.
+    pub fn state(&self, name: &str) -> Result<(Value, Option<Value>)> {
+        let sync = format!("ryueda parts sync {name}");
+        let attribution = ryueda_parts::catalogue::connector(name).map_or("", |c| c.attribution);
+        let Some(c) = self.get(name)? else {
+            return Ok((
+                json!({"name": name, "kind": "catalogue", "state": "missing", "sync": sync}),
+                Some(json!({
+                    "code": Code::PartsCacheStale, "source": name, "reason": "missing",
+                    "message": format!("this machine has no {name} catalogue; run {sync}"),
+                    "command": sync,
+                })),
+            ));
+        };
+        let age = self.now.saturating_sub(c.fetched_at());
+        let stale = age > self.max_age;
+        let v = json!({
+            "name": name, "kind": "catalogue", "state": "synced",
+            "fetched_at": c.fetched_at(), "age_s": age, "stale": stale, "parts": c.parts(),
+            "created": c.created(), "attribution": attribution, "sync": sync,
+        });
+        let warn = stale.then(|| {
+            json!({
+                "code": Code::PartsCacheStale, "source": name, "reason": "old",
+                "age_s": age, "max_age_s": self.max_age,
+                "message": format!("the {name} catalogue is {} days old; run {sync}", age / 86_400),
+                "command": sync,
+            })
+        });
+        Ok((v, warn))
+    }
+}
+
+/// `parts.max_age` (seconds): `RYUEDA_PARTS_MAX_AGE`, else the
+/// preferences, else [`MAX_AGE`].
+pub fn max_age() -> u64 {
+    std::env::var("RYUEDA_PARTS_MAX_AGE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .or_else(|| {
+            ryu_session::prefs::Preferences::<crate::Eda>::load()
+                .ok()?
+                .values
+                .get("parts.max_age")?
+                .as_u64()
+        })
+        .unwrap_or(MAX_AGE)
+}
 
 /// The most results an answer gives, however many are asked for.
 pub const MAX_LIMIT: usize = 1000;
@@ -152,29 +291,33 @@ fn like_of(p: &Project, text: &str) -> Result<(Category, Vec<Condition>)> {
 /// `parts.search`: the asked sources' results in order, each source's
 /// ranked by conditions met, stock and key, at most `limit` in all, with
 /// the faults of what didn't load.
-pub fn search(p: &Project, s: &Search) -> Result<Value> {
+pub fn search(p: &Project, s: &Search, cats: &Catalogues) -> Result<Value> {
+    let known = sources_known();
+    let default = default_sources(p);
+    let asked: Vec<&str> = if s.sources.is_empty() {
+        default.iter().map(String::as_str).collect()
+    } else {
+        s.sources.iter().map(String::as_str).collect()
+    };
     let mut sources: Vec<String> = Vec::new();
-    for name in s
-        .sources
-        .iter()
-        .map(String::as_str)
-        .chain(s.sources.is_empty().then_some(Library::NAME))
-    {
-        if !SOURCES.contains(&name) {
+    for name in asked {
+        if !known.contains(&name) {
             return Err(Error::new(
                 Code::InvalidParam,
                 format!(
                     "{name} isn't a source this ryueda searches: {}",
-                    SOURCES.join(", ")
+                    known.join(", ")
                 ),
             )
             .with("param", "in")
-            .with("sources", SOURCES));
+            .with("sources", &known));
         }
         if !sources.iter().any(|x| x == name) {
             sources.push(name.to_owned());
         }
     }
+    // The library first: its answers are the project's own.
+    sources.sort_by_key(|n| n != Library::NAME);
     let mut cat = s.category.as_deref().map(category).transpose()?;
     let mut conditions: Vec<Condition> = s
         .conditions
@@ -200,9 +343,18 @@ pub fn search(p: &Project, s: &Search) -> Result<Value> {
     let (records, faults) = library_records(p);
     let library = Library::new(records);
     let mut results: Vec<Hit> = Vec::new();
+    let (mut states, mut warnings) = (Vec::new(), Vec::new());
     for name in &sources {
         if name == Library::NAME {
             results.extend(library.search(&q, &Call::default())?);
+            states.push(json!({"name": Library::NAME, "kind": "files"}));
+            continue;
+        }
+        let (state, warn) = cats.state(name)?;
+        states.push(state);
+        warnings.extend(warn);
+        if let Some(c) = cats.get(name)? {
+            results.extend(c.search(&q, &Call::default())?);
         }
     }
     results.truncate(q.limit);
@@ -217,8 +369,15 @@ pub fn search(p: &Project, s: &Search) -> Result<Value> {
             "like": s.like,
         },
         "results": results,
+        "sources": states,
+        "warnings": warnings,
         "faults": fault::list(&faults),
     }))
+}
+
+/// The sources a search without `in` asks: the library.
+fn default_sources(_p: &Project) -> Vec<String> {
+    vec![Library::NAME.to_owned()]
 }
 
 /// UTC seconds now; `RYUEDA_NOW` sets it, for tests.
@@ -418,5 +577,92 @@ mod tests {
                 .fetched_at,
             5_000
         );
+    }
+
+    /// A catalogue synced from the fixture site into `dir`, at 5,000.
+    pub(crate) fn synced(dir: &std::path::Path) {
+        let fake = ryueda_parts::jlc::testing::fake("2026-11-06T11:33:30+00:00");
+        sync_with(
+            &fake,
+            ryueda_parts::jlc::testing::BASE,
+            dir,
+            "jlc",
+            5_000,
+            &Default::default(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn searches_take_the_catalogue_after_the_library_and_say_how_old_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        synced(dir.path());
+        let (_p, p) = crate::netlist::tests::project(&[]);
+        let fresh = Catalogues::at(dir.path(), 5_100, MAX_AGE);
+        let s = Search {
+            category: Some("capacitor".into()),
+            conditions: vec!["capacitance=100nF".into()],
+            sources: vec!["jlc".into(), "library".into()],
+            stock: Some(10),
+            ..Default::default()
+        };
+        let v = search(&p, &s, &fresh).unwrap();
+        assert_eq!(
+            v["query"]["in"],
+            json!(["library", "jlc"]),
+            "the library first"
+        );
+        assert_eq!(v["results"][0]["key"], "C1525");
+        assert_eq!(
+            v["results"][0]["attribution"],
+            ryueda_parts::jlc::ATTRIBUTION
+        );
+        assert_eq!(v["sources"][0]["name"], "library");
+        assert_eq!(v["sources"][1]["fetched_at"], 5_000);
+        assert!(v["warnings"].as_array().unwrap().is_empty());
+        let old = Catalogues::at(dir.path(), 5_000 + MAX_AGE + 1, MAX_AGE);
+        let w = &search(&p, &s, &old).unwrap()["warnings"][0];
+        assert_eq!(
+            (w["code"].as_str(), w["reason"].as_str()),
+            (Some("parts_cache_stale"), Some("old"))
+        );
+        let none = Catalogues::at(&dir.path().join("empty"), 5_000, MAX_AGE);
+        let v = search(&p, &s, &none).unwrap();
+        assert_eq!(v["warnings"][0]["reason"], "missing");
+        assert_eq!(v["warnings"][0]["command"], "ryueda parts sync jlc");
+        assert!(
+            v["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["source"] == "library")
+        );
+        let e = search(
+            &p,
+            &Search {
+                sources: vec!["digikey".into()],
+                ..Default::default()
+            },
+            &fresh,
+        )
+        .unwrap_err();
+        assert_eq!(e.details["sources"], json!(["library", "jlc"]));
+        // The library alone, as 6.A searched: no catalogue read, no warning.
+        let v = search(&p, &Search::default(), &Catalogues::default()).unwrap();
+        assert!(v["warnings"].as_array().unwrap().is_empty());
+        // A new sync is seen by a refreshed copy.
+        let kept = fresh.clone();
+        assert!(kept.get("jlc").unwrap().is_some());
+        sync_with(
+            &ryueda_parts::jlc::testing::fake("x"),
+            ryueda_parts::jlc::testing::BASE,
+            dir.path(),
+            "jlc",
+            7_000,
+            &Default::default(),
+        )
+        .unwrap();
+        let again = kept.refreshed(7_001);
+        assert_eq!(again.state("jlc").unwrap().0["fetched_at"], 7_000);
     }
 }

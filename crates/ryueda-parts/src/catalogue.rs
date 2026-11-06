@@ -50,6 +50,9 @@ pub struct Connector {
     pub attribution: &'static str,
     pub base: fn() -> String,
     pub open: fn(&Path) -> Result<Option<Shared>>,
+    /// When the index in that folder was synced, reading only what says
+    /// so (`None`: none there): how a session sees a new sync.
+    pub fetched_at: fn(&Path) -> Option<u64>,
     pub sync: fn(&dyn Fetch, &str, &Path, u64, &Call, Progress) -> Result<Synced>,
 }
 
@@ -83,5 +86,6 @@ mod tests {
         assert!(names("DigiKey").is_empty());
         let dir = tempfile::tempdir().unwrap();
         assert!((CONNECTORS[0].open)(dir.path()).unwrap().is_none());
+        assert!((CONNECTORS[0].fetched_at)(dir.path()).is_none());
     }
 }

@@ -71,10 +71,22 @@ impl ryu_session::prefs::Schema for Eda {
     /// The one preference so far: how often a watched daemon checks the
     /// files.
     fn accepts(name: &str, value: &serde_json::Value) -> bool {
-        name == "daemon.poll_ms" && value.as_u64().is_some_and(|n| (10..=10_000).contains(&n))
+        match name {
+            "daemon.poll_ms" => value.as_u64().is_some_and(|n| (10..=10_000).contains(&n)),
+            // Seconds a downloaded catalogue serves before searches warn:
+            // an hour to a year.
+            "parts.max_age" => value
+                .as_u64()
+                .is_some_and(|n| (3_600..=365 * 86_400).contains(&n)),
+            _ => false,
+        }
     }
 
     fn default_of(name: &str) -> Option<serde_json::Value> {
-        (name == "daemon.poll_ms").then(|| serde_json::json!(250))
+        match name {
+            "daemon.poll_ms" => Some(serde_json::json!(250)),
+            "parts.max_age" => Some(serde_json::json!(crate::parts::MAX_AGE)),
+            _ => None,
+        }
     }
 }

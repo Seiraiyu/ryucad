@@ -362,7 +362,10 @@ fn dispatch(
             Some(made) => made,
             None => crate::parts::sync(&source, job),
         },
-        Request::PartsSearch { search } => crate::parts::search(session.project(), &search),
+        Request::PartsSearch { search } => {
+            let cats = session.catalogues()?;
+            crate::parts::search(session.project(), &search, &cats)
+        }
         Request::LibcompDelete {
             libcomp,
             expected_revision,
