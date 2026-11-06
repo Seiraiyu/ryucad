@@ -5,6 +5,7 @@ pub mod appearance;
 pub mod assembly;
 pub mod blend;
 pub mod body;
+pub mod sheet_metal;
 pub mod datum;
 pub mod deps;
 pub mod explode;

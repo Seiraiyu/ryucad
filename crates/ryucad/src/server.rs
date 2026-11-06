@@ -1983,9 +1983,12 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Fillet(_) | Feature::Chamfer(_) => blend_report(part, f),
-        Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
-            crate::body::report(part, f)
-        }
+        Feature::Shell(_)
+        | Feature::Offset(_)
+        | Feature::Mirror(_)
+        | Feature::Split(_)
+        | Feature::BaseFlange(_)
+        | Feature::Flange(_) => crate::body::report(part, f),
         Feature::Hole(h) => hole_report(part, h),
         Feature::Pattern(x) => pattern_report(part, x),
         Feature::Revolve(r) => {
@@ -4134,6 +4137,12 @@ fn feature_edit(
                 let ty = f.type_name();
                 given.only(ty, crate::doc::body::request_fields(ty))?;
                 crate::body::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
+            }
+            f @ (Feature::BaseFlange(_) | Feature::Flange(_)) => {
+                return Err(Error::new(
+                    Code::Internal,
+                    format!("{} isn't edited through the protocol yet", f.type_name()),
+                ));
             }
             Feature::Pattern(x) => {
                 given.only("pattern", &PATTERN)?;

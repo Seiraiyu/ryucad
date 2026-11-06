@@ -14,6 +14,7 @@ use super::mate::{InstancePattern, Mate};
 use super::path::PathFeature;
 use super::pattern::Pattern;
 use super::reference::Reference;
+use super::sheet_metal::{BaseFlange, Flange};
 use super::sketch::Sketch;
 use super::solid::{Boolean, Combine};
 use super::sweep::{Extrude, Loft, Revolve, Sweep};
@@ -68,9 +69,10 @@ pub const MANIFEST_FORMAT: u64 = 3;
 /// patterns, 5 imports, 6 instances of other projects' parts, 7 datums and
 /// the geometric references new with them (a whole feature, a sketch's
 /// entity, a plane where an axis went), 8 sweeps along a path (ryucad 14),
-/// 9 shells and offsets, 10 mirrors and splits. A feature is written at the lowest
+/// 9 shells and offsets, 10 mirrors and splits, 11 base flanges and
+/// flanges. A feature is written at the lowest
 /// format that holds it, so one with only literals stays 1.
-pub const FEATURE_FORMAT: u64 = super::body::MIRROR_FORMAT;
+pub const FEATURE_FORMAT: u64 = super::sheet_metal::FORMAT;
 
 pub const PROJECT_KIND: &str = "ryucad.project";
 pub const PART_KIND: &str = "ryucad.part";
@@ -183,6 +185,10 @@ pub enum Feature {
     Mirror(Box<Mirror>),
     /// A solid split by a plane.
     Split(Box<Split>),
+    /// A sheet metal solid founded from a sketch, with its settings.
+    BaseFlange(Box<BaseFlange>),
+    /// Bends and flanges on straight edges of a sheet metal solid.
+    Flange(Box<Flange>),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -524,12 +530,22 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
                 out.extend(super::path::expression_strings(k, x));
             }
             ("groups", g) => out.extend(super::blend::expression_strings(g)),
+            (k @ ("allowance" | "relief" | "ends" | "setback" | "length"), x) => {
+                out.extend(super::sheet_metal::expression_strings(k, x));
+            }
             ("thickness", Value::String(s)) => out.push(s),
             ("faces", g) => out.extend(super::body::expression_strings(g)),
             ("diameter", Value::String(s)) => out.push(s),
             ("distance", Value::String(s)) => out.push(s),
             ("a" | "b" | "axis" | "direction" | "direction2", c @ Value::Object(_)) => {
                 out.extend(super::mate::expression_strings(c));
+            }
+            // A base flange's bent section's depth is a plain length; a
+            // hole's is an object (and "through_all" a word).
+            ("depth", Value::String(s)) => {
+                if s != "through_all" {
+                    out.push(s);
+                }
             }
             (k @ ("counterbore" | "countersink" | "depth" | "bottom"), x) => {
                 out.extend(super::hole::expression_strings(k, x));
@@ -639,6 +655,12 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if matches!(
+        v.get("type").and_then(Value::as_str),
+        Some("base_flange" | "flange")
+    ) {
+        return super::sheet_metal::FORMAT;
+    }
     if matches!(
         v.get("type").and_then(Value::as_str),
         Some("sweep" | "loft")
@@ -795,6 +817,8 @@ pub fn feature_acts(v: &Value) -> Acts {
             out.founds = v.get("keep").and_then(Value::as_str) != Some("behind");
             out.acts_on = ids(v.get("target"));
         }
+        Some("base_flange") => out.founds = true,
+        Some("flange") => out.acts_on = ids(v.get("target")),
         Some("shell" | "offset") => out.acts_on = ids(v.get("target")),
         _ => {}
     }
@@ -831,7 +855,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, shell, offset, mirror, split"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, shell, offset, mirror, split, base_flange, flange"),
     )
     .with("type", s)
 }
@@ -861,11 +885,16 @@ impl Feature {
             Feature::Offset(_) => "offset",
             Feature::Mirror(_) => "mirror",
             Feature::Split(_) => "split",
+            Feature::BaseFlange(_) => "base_flange",
+            Feature::Flange(_) => "flange",
         }
     }
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
+        if matches!(self, Feature::BaseFlange(_) | Feature::Flange(_)) {
+            return super::sheet_metal::FORMAT;
+        }
         if matches!(self, Feature::Mirror(_) | Feature::Split(_)) {
             return super::body::MIRROR_FORMAT;
         }
@@ -902,6 +931,7 @@ impl Feature {
             Feature::Sweep(_) | Feature::Loft(_) => super::sweep::FORMAT,
             Feature::Shell(_) | Feature::Offset(_) => super::body::FORMAT,
             Feature::Mirror(_) | Feature::Split(_) => super::body::MIRROR_FORMAT,
+            Feature::BaseFlange(_) | Feature::Flange(_) => super::sheet_metal::FORMAT,
         }
     }
 
@@ -937,6 +967,8 @@ impl Feature {
             Feature::Offset(o) => o.fields(),
             Feature::Mirror(m) => m.fields(),
             Feature::Split(s) => s.fields(),
+            Feature::BaseFlange(b) => b.fields(),
+            Feature::Flange(f) => f.fields(),
         }
     }
 
@@ -961,6 +993,10 @@ impl Feature {
             "offset" => Feature::Offset(Box::new(Offset::from_fields(&mut o, default, env)?)),
             "mirror" => Feature::Mirror(Box::new(Mirror::from_fields(&mut o)?)),
             "split" => Feature::Split(Box::new(Split::from_fields(&mut o)?)),
+            "base_flange" => Feature::BaseFlange(Box::new(BaseFlange::from_fields(
+                &mut o, default, env,
+            )?)),
+            "flange" => Feature::Flange(Box::new(Flange::from_fields(&mut o, default, env)?)),
             "hole" => Feature::Hole(Hole::from_fields(&mut o, default, env)?),
             "pattern" => Feature::Pattern(Pattern::from_fields(&mut o, default, env)?),
             "instance" => Feature::Instance(Instance::from_fields(&mut o)?),
@@ -1003,6 +1039,8 @@ impl Feature {
             Feature::Loft(l) => Some(&l.combine),
             // An import always founds its own solid.
             Feature::Import(_) => Some(&NEW),
+            // A base flange always founds its own solid.
+            Feature::BaseFlange(_) => Some(&NEW),
             Feature::Mirror(m) => Some(&m.combine),
             Feature::Sketch(_)
             | Feature::Boolean(_)
@@ -1017,7 +1055,8 @@ impl Feature {
             | Feature::Path(_)
             | Feature::Shell(_)
             | Feature::Offset(_)
-            | Feature::Split(_) => None,
+            | Feature::Split(_)
+            | Feature::Flange(_) => None,
         }
     }
 
@@ -1043,6 +1082,7 @@ impl Feature {
             Feature::Shell(s) => vec![&s.target],
             Feature::Offset(o) => vec![&o.target],
             Feature::Split(s) => vec![&s.target],
+            Feature::Flange(f) => vec![&f.target],
             f => f
                 .combine()
                 .map_or(Vec::new(), |c| c.targets.iter().collect()),
@@ -1165,6 +1205,7 @@ impl Feature {
             Feature::Chamfer(c) => c.references(),
             Feature::Shell(s) => s.references(),
             Feature::Offset(o) => o.references(),
+            Feature::Flange(f) => f.references(),
             _ => self
                 .geometry()
                 .into_iter()
@@ -1228,6 +1269,7 @@ impl Feature {
             Feature::Hole(h) => vec![&h.sketch],
             Feature::Sweep(w) => w.profile.sketch().into_iter().collect(),
             Feature::Loft(l) => l.sketches(),
+            Feature::BaseFlange(b) => vec![&b.sketch],
             _ => Vec::new(),
         }
     }
@@ -1244,6 +1286,22 @@ impl Feature {
     pub fn sweep(&self) -> Option<&Sweep> {
         match self {
             Feature::Sweep(w) => Some(w),
+            _ => None,
+        }
+    }
+
+    /// The base flange, if it is one.
+    pub fn base_flange(&self) -> Option<&BaseFlange> {
+        match self {
+            Feature::BaseFlange(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// The edge flange, if it is one.
+    pub fn flange(&self) -> Option<&Flange> {
+        match self {
+            Feature::Flange(f) => Some(f),
             _ => None,
         }
     }
@@ -1499,6 +1557,55 @@ mod tests {
                 ("/faces/0/thickness".to_owned(), "2 * t".to_owned()),
                 ("/thickness".to_owned(), "t".to_owned())
             ]
+        );
+    }
+
+    #[test]
+    fn sheet_metal_features_are_format_11_and_say_what_they_do_to_solids() {
+        let id = |s: &str| Id::parse(s, "feature").unwrap();
+        let v = json!({"format": 11, "kind": FEATURE_KIND, "type": "base_flange", "sketch": "s",
+                       "thickness": "1.5 mm", "radius": "1 mm",
+                       "allowance": {"k_factor": "0.44"}});
+        let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!((f.type_name(), f.format()), ("base_flange", 11));
+        assert_eq!(feature_format(&v), 11);
+        assert_eq!(f.to_json(), v);
+        assert!(f.founds() && f.targets().is_empty());
+        assert_eq!(f.profiles(), [&id("s")]);
+        assert_eq!(feature_acts(&v), Acts { founds: true, ..Acts::default() });
+        let n = "0123456789abcdef0123456789abcdef";
+        let m = "fedcba9876543210fedcba9876543210";
+        let v = json!({"format": 11, "kind": FEATURE_KIND, "type": "flange", "target": "plate",
+                       "edges": [{"feature": "plate", "name": n}], "angle": "90 deg",
+                       "length": "20 mm",
+                       "ends": [{"vertex": {"feature": "plate", "name": m}, "setback": "5 mm"}]});
+        let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!((f.type_name(), f.format()), ("flange", 11));
+        assert!(!f.founds() && f.combine().is_none());
+        assert_eq!(f.targets(), [&id("plate")]);
+        let roles: Vec<String> = f.references().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(roles, ["edges.0", "ends.0.vertex"]);
+        assert_eq!(f.geometry_reads(), [&id("plate")]);
+        assert_eq!(
+            feature_acts(&v),
+            Acts { founds: false, acts_on: vec![id("plate")], consumes: vec![] }
+        );
+        // Every quantity is an expression an equations table lists.
+        let fields: Vec<String> = expression_fields(&v).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(fields, ["/angle", "/ends/0/setback", "/length"]);
+        let b = json!({"format": 11, "kind": FEATURE_KIND, "type": "base_flange", "sketch": "s",
+                       "thickness": "t", "radius": "r", "depth": "40 mm",
+                       "allowance": {"deduction": "2.4 mm"},
+                       "relief": {"kind": "obround", "width": "1 mm", "depth": "1.5 mm"}});
+        let fields: Vec<String> = expression_fields(&b).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(
+            fields,
+            ["/allowance/deduction", "/depth", "/radius", "/relief/depth", "/relief/width",
+             "/thickness"]
+        );
+        assert_eq!(
+            feature_names(&b).into_iter().collect::<Vec<_>>(),
+            ["r", "t"]
         );
     }
 

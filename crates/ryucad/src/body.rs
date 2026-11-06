@@ -541,6 +541,9 @@ pub fn from_given(
 /// as `<part>/<solid>/<name>`. A mirror or split: its fields with the
 /// plane as text (a split's flip and keep always).
 pub fn report(part: &Id, f: &Feature) -> Value {
+    if f.base_flange().is_some() || f.flange().is_some() {
+        return f.to_json();
+    }
     match f {
         Feature::Mirror(m) => {
             let mut v = m.fields();

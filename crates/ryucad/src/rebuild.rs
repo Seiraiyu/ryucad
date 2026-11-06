@@ -536,7 +536,9 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Shell(_)
         | Feature::Offset(_)
         | Feature::Mirror(_)
-        | Feature::Split(_) => Err(Error::new(
+        | Feature::Split(_)
+        | Feature::BaseFlange(_)
+        | Feature::Flange(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} makes no body of its own", f.type_name()),
         )
