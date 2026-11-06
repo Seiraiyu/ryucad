@@ -270,13 +270,7 @@ mod tests {
     use crate::testing;
 
     fn sheet(l: &mut Layout, id: &str) {
-        l.sheets.insert(
-            id.into(),
-            Sheet {
-                name: id.into(),
-                at: [0, 0],
-            },
-        );
+        l.sheets.insert(id.into(), Sheet::new(id.into(), [0, 0]));
     }
 
     fn put(l: &mut Layout, key: &str, s: &str) {

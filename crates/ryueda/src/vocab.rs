@@ -395,6 +395,23 @@ impl Names<'_> {
                     Side::Right => "right",
                 }
             ),
+            Instruction::Region { title, parts: l } => {
+                format!("region {} {}", Self::quote(title), parts(l))
+            }
+            Instruction::RegionNone { parts: l } => format!("region none {}", parts(l)),
+            Instruction::Paper {
+                sheet,
+                size,
+                orientation,
+            } => format!(
+                "paper {} {size}{}",
+                Self::quote(sheet),
+                match orientation {
+                    Some(ryusch::layout::Orientation::Landscape) => " landscape",
+                    Some(ryusch::layout::Orientation::Portrait) => " portrait",
+                    None => "",
+                }
+            ),
         }
     }
 }

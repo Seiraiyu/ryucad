@@ -29,13 +29,9 @@ impl Drawing {
             ..Block::default()
         };
         let mut layout = Layout::default();
-        layout.sheets.insert(
-            "s1".into(),
-            LayoutSheet {
-                name: "Sheet 1".into(),
-                at: [0, 0],
-            },
-        );
+        layout
+            .sheets
+            .insert("s1".into(), LayoutSheet::new("Sheet 1".into(), [0, 0]));
         Drawing { block, layout }
     }
 

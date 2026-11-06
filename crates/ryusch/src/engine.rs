@@ -90,13 +90,8 @@ impl<'a> State<'a> {
             self.sheets.len() as Nm * (self.block.sheet[0] + SHEET_GAP),
             0,
         ];
-        self.sheets.push((
-            id.to_owned(),
-            Sheet {
-                name: name.to_owned(),
-                at,
-            },
-        ));
+        self.sheets
+            .push((id.to_owned(), Sheet::new(name.to_owned(), at)));
         self.sheets.len() - 1
     }
 
@@ -3078,10 +3073,7 @@ mod tests {
         let mut prev = lay(&b).layout;
         prev.sheets.insert(
             "s9".into(),
-            crate::layout::Sheet {
-                name: "Empty".into(),
-                at: [0, 0],
-            },
+            crate::layout::Sheet::new("Empty".into(), [0, 0]),
         );
         let mut again = b.clone();
         again.previous = Some(prev);

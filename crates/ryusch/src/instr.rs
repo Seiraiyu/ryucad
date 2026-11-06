@@ -305,6 +305,10 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
                 }
                 r.shift.push((parts.clone(), *side, *steps));
             }
+            // plan 2.A Task 7 (regions) and Task 16 (paper).
+            Instruction::Region { .. }
+            | Instruction::RegionNone { .. }
+            | Instruction::Paper { .. } => {}
             Instruction::Group { .. } => {
                 for &p in &parts {
                     if let Some(other) = grouped.get(&p) {
@@ -778,6 +782,10 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
             }
         }
         Instruction::Idiom { .. } | Instruction::Flow { .. } => true,
+        // plan 2.A Task 7 (regions) and Task 16 (paper).
+        Instruction::Region { .. } | Instruction::RegionNone { .. } | Instruction::Paper { .. } => {
+            false
+        }
     }
 }
 
@@ -848,10 +856,7 @@ mod tests {
         let mut layout = Layout::default();
         layout.sheets.insert(
             "s1".into(),
-            crate::layout::Sheet {
-                name: "Sheet 1".into(),
-                at: [0, 0],
-            },
+            crate::layout::Sheet::new("Sheet 1".into(), [0, 0]),
         );
         let put = |l: &mut Layout, k: &str, at: [i64; 2]| {
             l.placed.insert(
