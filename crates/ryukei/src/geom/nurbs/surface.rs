@@ -9,7 +9,8 @@ use crate::geom::{
     Box3, Point3, PrincipalCurvatures, Projection, Rigid, SurfaceEval, UnitVector3, Vector3,
 };
 use crate::{Error, NurbsError};
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 /// One of a surface's two parameter directions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -498,14 +499,23 @@ impl NurbsSurface {
     /// [`crate::tol::LINEAR_RESOLUTION`] of the true global minimum. Of
     /// minima that close to each other the lowest `(u, v)` wins; periodic
     /// parameters are in `[start, start + period)`.
+    ///
+    /// A projection is a function of the surface and the point alone, so
+    /// it is kept in a process-wide table by the surface's id and the
+    /// point's bits ([`projected`]): healing projects the same edge
+    /// samples onto a face several times (its gaps, its pcurve's gap and
+    /// fit), half of the Voron Switchwire Stealthburner's 134,709 (#551).
+    /// A kept projection is the one made, so the same bits.
     pub fn project(&self, p: Point3) -> Projection<(f64, f64), Point3> {
-        let feet = self.minima(p.to_vector(), true);
-        let (param, v, distance) = nearest(&feet);
-        Projection {
-            param,
-            point: Point3::ORIGIN + v,
-            distance,
-        }
+        projected(self.id, p, || {
+            let feet = self.minima(p.to_vector(), true);
+            let (param, v, distance) = nearest(&feet);
+            Projection {
+                param,
+                point: Point3::ORIGIN + v,
+                distance,
+            }
+        })
     }
 
     /// The distance from `p` to the surface: [`NurbsSurface::project`]'s.
@@ -975,4 +985,60 @@ mod tests {
             Err(Error::OutsideSizeBox)
         );
     }
+}
+
+/// A projection's key: the surface's id and the point's bits.
+type Key = (u64, [u64; 3]);
+
+type Projected = Projection<(f64, f64), Point3>;
+
+/// Shards of the projections table, by a mix of the key.
+const SHARDS: usize = 16;
+
+/// The most projections a shard's young generation holds (about 80 bytes
+/// each, so the table holds at most about 40 MiB).
+const YOUNG: usize = 16_384;
+
+/// A shard's projections in two generations, as the Taylor cells' table
+/// keeps its cells: `young` takes what is made or found in `old`; when
+/// `young` is full it becomes `old` and the old one goes. Which
+/// projections are kept changes no result, only how often one is made.
+#[derive(Default)]
+struct Shard {
+    young: HashMap<Key, Projected>,
+    old: HashMap<Key, Projected>,
+}
+
+impl Shard {
+    fn keep(&mut self, key: Key, value: Projected) {
+        if self.young.len() >= YOUNG {
+            self.old = core::mem::take(&mut self.young);
+        }
+        self.young.insert(key, value);
+    }
+}
+
+static TABLE: LazyLock<[Mutex<Shard>; SHARDS]> =
+    LazyLock::new(|| core::array::from_fn(|_| Mutex::new(Shard::default())));
+
+/// Surface `id`'s projection of `p`, from the table, or made by `make` and
+/// kept there.
+fn projected(id: u64, p: Point3, make: impl FnOnce() -> Projected) -> Projected {
+    let key = (id, [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]);
+    let mix = (key.0 ^ key.1[0] ^ key.1[1].rotate_left(21) ^ key.1[2].rotate_left(42))
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let shard = &TABLE[(mix >> 60) as usize % SHARDS];
+    {
+        let mut s = shard.lock().expect("unpoisoned");
+        if let Some(&x) = s.young.get(&key) {
+            return x;
+        }
+        if let Some(x) = s.old.remove(&key) {
+            s.keep(key, x);
+            return x;
+        }
+    }
+    let made = make();
+    shard.lock().expect("unpoisoned").keep(key, made);
+    made
 }

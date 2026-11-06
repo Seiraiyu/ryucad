@@ -969,8 +969,39 @@ impl NurbsSurface {
 
 #[cfg(test)]
 mod tests {
-    use crate::geom::{Frame, KnotVector, NurbsSurface, Plane, Point3, Sphere, Surface, Torus};
+    use crate::geom::{
+        Frame, KnotVector, NurbsSurface, Plane, Point3, Projection, Sphere, Surface, Torus,
+    };
     use core::f64::consts::{FRAC_PI_2, TAU};
+
+    /// #551: a projection kept in the table is the one made: projecting a
+    /// point again, on this surface or a clone of it, gives its bits, and
+    /// both are the search's own nearest foot.
+    #[test]
+    fn a_kept_projection_is_the_one_made() {
+        let s = sphere();
+        let twin = s.clone();
+        for k in 0..64 {
+            let a = f64::from(k) * 0.37;
+            let p = Point3::new(1.7 * a.cos(), 0.9 * a.sin(), 0.3 * f64::from(k % 7) - 0.8);
+            let first = s.project(p);
+            let fresh = super::super::project::nearest(&s.minima(p.to_vector(), true));
+            let bits = |x: Projection<(f64, f64), Point3>| {
+                [
+                    x.param.0, x.param.1, x.point.x, x.point.y, x.point.z, x.distance,
+                ]
+                .map(f64::to_bits)
+            };
+            let made = Projection {
+                param: fresh.0,
+                point: Point3::ORIGIN + fresh.1,
+                distance: fresh.2,
+            };
+            assert_eq!(bits(first), bits(made));
+            assert_eq!(bits(s.project(p)), bits(first));
+            assert_eq!(bits(twin.project(p)), bits(first));
+        }
+    }
 
     fn sphere() -> NurbsSurface {
         let s = Surface::Sphere(Sphere::new(Frame::WORLD, 2.0).unwrap());
