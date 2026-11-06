@@ -58,6 +58,32 @@ pub(super) type Found = (Curve2, [f64; 2], f64);
 /// Each face's pcurves, by loop and use. A lone vertex's loop has none.
 pub(super) type Pcurves = Vec<Vec<Vec<Found>>>;
 
+/// Each face's pcurves by loop and use, a use with none where none was
+/// found without fitting: a reference's (see [`super::reference`]).
+#[allow(dead_code)] // used by heal::reference (Task 2)
+pub(super) type MaybePcurves = Vec<Vec<Vec<Option<Found>>>>;
+
+/// A use's pcurve where one is found without fitting: exact, else the
+/// file's, each mapped and pinned at the edge's ends as [`one`] maps them,
+/// but neither screened nor certified. `None` where neither fits at 17
+/// samples: the mesher then projects the edge's samples, as it does for
+/// any fin without a pcurve.
+#[allow(dead_code)] // used by heal::reference (Task 2)
+pub(super) fn unfitted(s: &Shape, f: &Face, u: &Use) -> Option<Found> {
+    let e = &s.edges[u.edge];
+    let surface = &s.surfaces[f.surface];
+    let curve = &s.curves[e.curve];
+    let tol = tolerance(s, f, u);
+    if let Some((c2, map)) = pcurve::exact(surface, curve, e.interval, tol) {
+        let map = pinned(surface, curve, e.interval, tol, &c2, map);
+        return Some((c2, map, 0.0));
+    }
+    let c2 = &s.curves2[u.pcurve?];
+    let map = file_map(surface, curve, e.interval, c2, tol)?;
+    let map = pinned(surface, curve, e.interval, tol, c2, map);
+    Some((c2.clone(), map, 0.0))
+}
+
 pub(super) fn pcurves(s: &Shape, names: &Names, m: &Meter) -> Result<Pcurves, Error> {
     let faces: Vec<usize> = (0..s.faces.len()).collect();
     m.par_map(&faces, |m, &k| {

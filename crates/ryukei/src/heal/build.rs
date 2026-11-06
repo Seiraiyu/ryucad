@@ -2,7 +2,7 @@
 //! named, checked.
 
 use super::names::Names;
-use super::pcurves::Pcurves;
+use super::pcurves::{Found, MaybePcurves, Pcurves};
 use super::{HealOptions, HealReport, Loop, Shape};
 use crate::check::{self, Fault};
 use crate::layout::{self, BuildError, Layout, Plan};
@@ -75,7 +75,7 @@ pub(super) fn assemble(
     solids: Option<&[SolidFaces]>,
 ) -> Result<Body, Error> {
     let order = Order::new(names);
-    let layout = lay_out(s, names, &order, pcurves);
+    let layout = lay_out(s, names, &order, &|k, l, i| Some(&pcurves[k][l][i]));
     let fail = |e: BuildError| failure(s, names, &order, e);
     let plan = Plan::new(&layout).map_err(fail)?;
     // Solids in the order of their outer shells' least face, each with
@@ -120,7 +120,25 @@ pub(super) fn assemble_sheet(
     pcurves: &Pcurves,
 ) -> Result<Body, Error> {
     let order = Order::new(names);
-    let layout = lay_out(s, names, &order, pcurves);
+    let layout = lay_out(s, names, &order, &|k, l, i| Some(&pcurves[k][l][i]));
+    let built =
+        layout::build_sheet(&layout, key, ROLE).map_err(|e| failure(s, names, &order, e))?;
+    Ok(named(built, names, &order))
+}
+
+/// The shape built as a sheet as [`assemble_sheet`] builds it, each use
+/// with the pcurve found for it, or none: a reference's (see
+/// [`super::reference`]). Not checked: a reference passes
+/// [`check::check_topology`] alone.
+#[allow(dead_code)] // used by heal::reference (Task 2)
+pub(super) fn assemble_reference(
+    key: OpKey,
+    s: &Shape,
+    names: &Names,
+    pcurves: &MaybePcurves,
+) -> Result<Body, Error> {
+    let order = Order::new(names);
+    let layout = lay_out(s, names, &order, &|k, l, i| pcurves[k][l][i].as_ref());
     let built =
         layout::build_sheet(&layout, key, ROLE).map_err(|e| failure(s, names, &order, e))?;
     Ok(named(built, names, &order))
@@ -308,7 +326,12 @@ impl Order {
 /// that: a pcurve's image there is as far from the vertex as both
 /// together), each face's loops in the order of the least name on them,
 /// each loop starting at its least-named edge.
-fn lay_out(s: &Shape, names: &Names, order: &Order, pcurves: &Pcurves) -> Layout {
+fn lay_out<'p>(
+    s: &Shape,
+    names: &Names,
+    order: &Order,
+    pcurve: &dyn Fn(usize, usize, usize) -> Option<&'p Found>,
+) -> Layout {
     let mut out = Layout {
         surfaces: s.surfaces.clone(),
         curves: s.curves.clone(),
@@ -334,16 +357,20 @@ fn lay_out(s: &Shape, names: &Names, order: &Order, pcurves: &Pcurves) -> Layout
                         let i = (first + m) % list.len();
                         let u = list[i];
                         let e = &s.edges[u.edge];
-                        let (c2, map, bound) = &pcurves[k][l][i];
-                        edge_tol[u.edge] = edge_tol[u.edge].max(f.tolerance).max(*bound);
+                        let found = pcurve(k, l, i);
+                        let bound = found.map_or(0.0, |x| x.2);
+                        edge_tol[u.edge] = edge_tol[u.edge].max(f.tolerance).max(bound);
                         for v in [e.start, e.end] {
                             vertex_tol[v] = vertex_tol[v].max(f.tolerance);
                         }
-                        out.curves2.push(c2.clone());
+                        let pcurve = found.map(|(c2, map, _)| {
+                            out.curves2.push(c2.clone());
+                            (out.curves2.len() - 1, *map)
+                        });
                         arcs.push(layout::Use {
                             edge: order.epos[u.edge],
                             sense: u.sense,
-                            pcurve: Some((out.curves2.len() - 1, *map)),
+                            pcurve,
                         });
                     }
                     loops.push((names.edges[list[first].edge], layout::Boundary::Arcs(arcs)));
