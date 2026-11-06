@@ -17,5 +17,7 @@ mod trim;
 mod view;
 
 pub use curve::{Image, ImageCurve, ImageMap, project_curve};
+#[allow(unused_imports)] // used from Task 11
+pub(crate) use silhouette::silhouettes_in;
 pub use silhouette::{Silhouette, Silhouettes, silhouettes, silhouettes_with};
 pub use view::View;
