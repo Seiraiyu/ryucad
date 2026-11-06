@@ -147,6 +147,29 @@ pub fn is_in(files: &Files, change: &Change) -> bool {
         .all(|(p, w)| files.get(p).map(|b| b.to_vec()) == bytes_of(w))
 }
 
+/// Whether `a`'s change is in `files`: every file it writes is so, or an
+/// annotation whose change stands on it (its `after`, at any depth) is
+/// applied, having written its files over `a`'s.
+pub fn applied(all: &BTreeMap<Id, Annotation>, a: &Annotation, files: &Files) -> bool {
+    fn go(
+        all: &BTreeMap<Id, Annotation>,
+        a: &Annotation,
+        files: &Files,
+        seen: &mut BTreeSet<Id>,
+    ) -> bool {
+        let Some(c) = &a.change else { return false };
+        if !seen.insert(a.id.clone()) {
+            return false;
+        }
+        is_in(files, c)
+            || all.values().any(|x| {
+                x.change.as_ref().is_some_and(|xc| xc.after.contains(&a.id))
+                    && go(all, x, files, seen)
+            })
+    }
+    go(all, a, files, &mut BTreeSet::new())
+}
+
 /// `files` with `change`'s writes laid over them.
 pub fn lay(files: &mut Files, change: &Change) {
     for (p, w) in &change.writes {
@@ -178,8 +201,11 @@ pub fn chain<'a>(
             return;
         }
         let Some(x) = all.get(id) else { return };
-        let Some(c) = &x.change else { return };
-        if !x.status.is_open() || is_in(files, c) {
+        if x.change.is_none() {
+            return;
+        }
+        let c = x.change.as_ref().expect("a change");
+        if !x.status.is_open() || applied(all, x, files) {
             return;
         }
         for before in &c.after {
@@ -221,10 +247,10 @@ pub fn derive(
     }
     if let Some(c) = &a.change {
         let working = session.snapshot();
-        let applied = is_in(&working, c);
+        let all = readable(all);
+        let applied = applied(&all, a, &working);
         d.applied = Some(applied);
         if !applied {
-            let all = readable(all);
             let mut seen = working.clone();
             for before in chain(&all, a, &working) {
                 lay(&mut seen, before.change.as_ref().expect("in a chain"));
@@ -352,6 +378,31 @@ pub fn taken(session: &Session) -> BTreeSet<String> {
         .keys()
         .map(|id| id.to_string())
         .collect()
+}
+
+/// Annotation `id` as the files hold it, checked against `expect` (its
+/// file's BLAKE3): `annotation_not_found`, its file's own error, or
+/// `conflict`.
+pub fn one(session: &Session, id: &str, expect: Option<&str>) -> Result<Annotation> {
+    let missing = || {
+        Error::new(Code::AnnotationNotFound, format!("no annotation {id}")).with("annotation", id)
+    };
+    let id = check_id(id).map_err(|_| missing())?;
+    let rel = crate::doc::annotation::rel(&id);
+    let files = session.snapshot();
+    let bytes = files.get(&rel).ok_or_else(missing)?;
+    if let Some(e) = expect
+        && hash(bytes) != e
+    {
+        return Err(Error::new(
+            Code::Conflict,
+            format!("annotation {id} changed since you read it; read it again and retry"),
+        )
+        .with("annotation", &id)
+        .with("expected", e)
+        .with("actual", hash(bytes)));
+    }
+    read_all(&files).remove(&id).expect("listed")
 }
 
 #[cfg(test)]

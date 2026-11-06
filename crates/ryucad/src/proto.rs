@@ -1384,6 +1384,20 @@ pub enum Request {
         #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
         author: Option<String>,
     },
+    /// Writes an annotation's proposed change, after every open change it
+    /// stands on that isn't applied yet, if every file each touches is
+    /// still the bytes it saw (`annotation_stale` otherwise), and closes
+    /// each `done` (`applied: true`) unless `keep_open`.
+    #[serde(rename = "annotation.apply")]
+    AnnotationApply {
+        id: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        keep_open: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect: Option<String>,
+        #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+    },
     /// Shows an exploded view in a participant's window (`participant`,
     /// else the one human, else the caller), `fraction` of the way through
     /// (1 by default; alone, it moves the one shown), or none with `off`.
@@ -1691,6 +1705,7 @@ impl Request {
                 | Request::ExplodeSave { .. }
                 | Request::ExplodeDelete { .. }
                 | Request::AnnotationPropose { .. }
+                | Request::AnnotationApply { .. }
                 | Request::ReleasePropose { dry_run: false, .. }
                 | Request::Import { dry_run: false, .. }
                 | Request::ReleaseObsolete { .. }

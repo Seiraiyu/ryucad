@@ -1161,6 +1161,15 @@ pub(crate) fn dispatch(
             &steps,
             expected_revision.as_deref(),
         ),
+        Request::AnnotationApply {
+            id,
+            keep_open,
+            expect,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::propose::apply(session, &id, keep_open, expect.as_deref(), &by)
+        }
         Request::AnnotationPropose {
             request,
             comment,

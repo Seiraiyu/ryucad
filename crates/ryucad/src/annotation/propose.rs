@@ -5,7 +5,7 @@
 //! would have written is kept in the annotation; `annotation:<id>` names
 //! the files with it laid over; `annotation.apply` writes it.
 
-use super::{Annotation, By, Change, hash, is_in, lay, read_all, readable};
+use super::{Annotation, By, Change, chain, hash, lay, read_all, readable};
 use crate::activity::Files;
 use crate::doc::id::Id;
 use crate::error::{Code, Error, Result};
@@ -20,7 +20,7 @@ pub fn mine<'a>(all: &'a BTreeMap<Id, Annotation>, by: &By, files: &Files) -> Ve
     let mut left: Vec<&Annotation> = all
         .values()
         .filter(|a| a.by == *by && a.status.is_open())
-        .filter(|a| a.change.as_ref().is_some_and(|c| !is_in(files, c)))
+        .filter(|a| a.change.is_some() && !super::applied(all, a, files))
         .collect();
     left.sort_by(|a, b| (&a.at, &a.id).cmp(&(&b.at, &b.id)));
     let mut out: Vec<&Annotation> = Vec::new();
@@ -48,13 +48,29 @@ pub fn mine<'a>(all: &'a BTreeMap<Id, Annotation>, by: &By, files: &Files) -> Ve
 /// `by`'s draft: the working files with `by`'s open changes laid over
 /// them in order.
 pub fn draft(session: &Session, by: &By) -> Files {
+    laid(session, by).0
+}
+
+/// [`draft`], and the changes it laid: each of [`mine`] whose files are,
+/// as the ones before leave them, the bytes it saw. A stale change isn't
+/// laid (it would put back bytes someone has since changed), and nothing
+/// proposed over the draft stands on it.
+pub fn laid(session: &Session, by: &By) -> (Files, Vec<Annotation>) {
     let working = session.snapshot();
     let all = readable(&read_all(&working));
     let mut files = working.clone();
+    let mut out = Vec::new();
     for a in mine(&all, by, &working) {
-        lay(&mut files, a.change.as_ref().expect("a change"));
+        let c = a.change.as_ref().expect("a change");
+        if c.base
+            .iter()
+            .all(|(p, b)| files.get(p).map(|x| hash(x)) == *b)
+        {
+            lay(&mut files, c);
+            out.push(a.clone());
+        }
     }
-    files
+    (files, out)
 }
 
 /// The requests a person's edit may be proposed as: model edits only, a
@@ -118,13 +134,7 @@ pub fn propose(
         .cloned()
         .unwrap_or_else(|| json!({}));
     let inner = crate::proto::Request::from_rpc(&method, Some(params.clone()))?;
-    let working = session.snapshot();
-    let all = readable(&read_all(&working));
-    let earlier: Vec<Annotation> = super::propose::mine(&all, &ask.by, &working)
-        .into_iter()
-        .cloned()
-        .collect();
-    let drafted = draft(session, &ask.by);
+    let (drafted, earlier) = laid(session, &ask.by);
     let mut capture = session.capturing(drafted.clone())?;
     let pins = super::pins_from(&mut capture, &ask.pins)?;
     let answer = crate::server::dispatch(&mut capture, live, me, inner)?;
@@ -192,6 +202,92 @@ pub fn propose(
     super::save(session, &a)?;
     let all = read_all(&session.snapshot());
     Ok(json!({"annotation": super::entry(session, &all, &a), "answer": answer}))
+}
+
+/// `annotation.apply`.
+pub fn apply(
+    session: &mut Session,
+    id: &str,
+    keep_open: bool,
+    expect: Option<&str>,
+    by: &By,
+) -> Result<Value> {
+    let a = super::one(session, id, expect)?;
+    if a.change.is_none() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("annotation {id} proposes no change"),
+        )
+        .with("annotation", id));
+    };
+    let working = session.snapshot();
+    if super::applied(&readable(&read_all(&working)), &a, &working) {
+        return Err(Error::new(
+            Code::OperationNoEffect,
+            format!("annotation {id}'s change is in the working files already"),
+        )
+        .with("annotation", id));
+    }
+    let all = readable(&read_all(&working));
+    let mut steps: Vec<Annotation> = chain(&all, &a, &working).into_iter().cloned().collect();
+    steps.push(a.clone());
+    // Every step checked against the files as the steps before leave
+    // them, before anything is written.
+    let mut files = working.clone();
+    for step in &steps {
+        let c = step.change.as_ref().expect("a change");
+        let moved: Vec<Value> = c
+            .base
+            .iter()
+            .filter(|(p, b)| files.get(*p).map(|x| hash(x)) != **b)
+            .map(|(p, b)| json!({"path": p, "base": b, "now": files.get(p).map(|x| hash(x))}))
+            .collect();
+        if !moved.is_empty() {
+            return Err(Error::new(
+                Code::AnnotationStale,
+                format!(
+                    "annotation {}'s change no longer applies: {} file(s) moved since it was proposed; make the edit yourself and resolve it with a note",
+                    step.id,
+                    moved.len()
+                ),
+            )
+            .with("annotation", &step.id)
+            .with("files", moved));
+        }
+        lay(&mut files, c);
+    }
+    let root = session.root().to_path_buf();
+    let path = |rel: &str| rel.split('/').fold(root.clone(), |p, s| p.join(s));
+    for step in &steps {
+        for (rel, w) in &step.change.as_ref().expect("a change").writes {
+            match w {
+                Some(v) => session.write_json(&path(rel), v)?,
+                None => session.remove_file(&path(rel))?,
+            }
+        }
+    }
+    let at = super::now();
+    for step in &steps {
+        let mut s = step.clone();
+        if !keep_open {
+            s.status = crate::doc::annotation::Status::Done;
+            s.claimed_by = None;
+            s.resolution = Some(crate::doc::annotation::Resolution {
+                by: by.clone(),
+                at: at.clone(),
+                note: None,
+                applied: true,
+            });
+        }
+        super::save(session, &s)?;
+    }
+    session.reload()?;
+    // What the working files place from other projects may have moved.
+    if crate::deps::keep_lock(session)? {
+        session.reload()?;
+    }
+    let applied: Vec<&Id> = steps.iter().map(|s| &s.id).collect();
+    Ok(json!({"applied": applied, "keep_open": keep_open}))
 }
 
 #[cfg(test)]
@@ -618,5 +714,86 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::AnnotationNotFound);
+    }
+    /// Annotation `id` as listings give it.
+    fn listed(s: &mut Session, id: &str) -> Value {
+        let a = crate::annotation::one(s, id, None).unwrap();
+        let all = crate::annotation::read_all(&s.snapshot());
+        crate::annotation::entry(s, &all, &a)
+    }
+
+    fn propose_edit(s: &mut Session, params: Value) -> String {
+        let v = call(
+            s,
+            "annotation.propose",
+            json!({
+            "request": {"method": "feature.edit", "params": params}}),
+        )
+        .unwrap();
+        v["annotation"]["id"].as_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn apply_writes_the_chain_first_then_closes_each() {
+        let (dir, mut s) = twin();
+        let a = propose_edit(
+            &mut s,
+            json!({"part": "plate", "id": "slab", "params": {"y": 30}}),
+        );
+        let b = propose_edit(
+            &mut s,
+            json!({"part": "plate", "id": "slab", "params": {"z": 8}}),
+        );
+        let v = call(&mut s, "annotation.apply", json!({"id": b})).unwrap();
+        assert_eq!(v["applied"], json!([a, b]));
+        let slab: Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("parts/plate/features/slab.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(slab["params"]["y"], "30 mm");
+        assert_eq!(slab["params"]["z"], "8 mm");
+        for id in [&a, &b] {
+            let x = listed(&mut s, id);
+            assert_eq!(x["status"], "done");
+            assert_eq!(x["resolution"]["applied"], true);
+            assert_eq!(x["applied"], true);
+        }
+    }
+
+    #[test]
+    fn a_stale_change_is_refused_and_keep_open_keeps_it_open() {
+        let (_dir, mut s) = twin();
+        let a = propose_edit(
+            &mut s,
+            json!({"part": "plate", "id": "slab", "params": {"y": 30}}),
+        );
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "plate", "id": "slab", "params": {"z": 6}}),
+        )
+        .unwrap();
+        let e = call(&mut s, "annotation.apply", json!({"id": a})).unwrap_err();
+        assert_eq!(e.code, Code::AnnotationStale);
+        assert_eq!(
+            e.details["files"][0]["path"],
+            "parts/plate/features/slab.json"
+        );
+        let b = propose_edit(
+            &mut s,
+            json!({"part": "plate", "id": "slab", "params": {"x": 60}}),
+        );
+        call(
+            &mut s,
+            "annotation.apply",
+            json!({"id": b, "keep_open": true}),
+        )
+        .unwrap();
+        let x = listed(&mut s, &b);
+        assert_eq!(x["status"], "open");
+        assert_eq!(x["applied"], true);
+        // Applied already: nothing left to apply.
+        let e = call(&mut s, "annotation.apply", json!({"id": b})).unwrap_err();
+        assert_eq!(e.code, Code::OperationNoEffect);
     }
 }
