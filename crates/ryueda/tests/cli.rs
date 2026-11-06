@@ -1025,6 +1025,12 @@ impl Pair {
             "100k",
             "--footprint",
             "lib/passives/footprint/r_0402",
+            "--manufacturer",
+            "Yageo",
+            "--mpn",
+            "RC0402FR-07100KL",
+            "--offer",
+            "LCSC=C25741",
         ]);
         p
     }
