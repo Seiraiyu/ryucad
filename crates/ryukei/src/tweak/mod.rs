@@ -8,6 +8,7 @@
 #![allow(dead_code, unused_imports)]
 
 pub(crate) mod classify;
+pub(crate) mod curves;
 pub(crate) mod motion;
 
 pub(crate) use motion::Motion;

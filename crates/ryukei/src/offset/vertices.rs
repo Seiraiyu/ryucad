@@ -215,7 +215,7 @@ pub(super) fn normal_out(plan: &Plan, fin: FinId) -> Vector3 {
 }
 
 /// The parameter of an edge's end.
-pub(super) fn end_param(plan: &Plan, e: EdgeId, at_end: bool) -> f64 {
+pub(crate) fn end_param(plan: &Plan, e: EdgeId, at_end: bool) -> f64 {
     plan.body.edges[e].interval[usize::from(at_end)]
 }
 
