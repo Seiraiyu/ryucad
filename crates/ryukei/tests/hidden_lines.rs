@@ -327,3 +327,60 @@ fn one_thread_and_eight_draw_alike() {
     };
     assert_eq!(run(1), run(8));
 }
+
+/// A pin pressed through a plate (bodies that interfere, as ryucad's
+/// `interference` takes a press fit to be meant): the pin's visibility
+/// changes where it pierces the plate's faces, where no image curve
+/// crosses it.
+#[test]
+fn a_pin_through_a_plate_is_hidden_inside_it_and_behind_its_bottom() {
+    let (plate, _) = primitive::block(OpKey(14), 0.03, 0.03, 0.01, &Rigid::IDENTITY).unwrap();
+    let (pin, _) = primitive::cylinder(OpKey(15), 0.003, 0.03, &Rigid::IDENTITY).unwrap();
+    let placed = [
+        at(&plate),
+        Placed {
+            body: &pin,
+            place: Rigid::translation(Vector3::new(0.015, 0.015, -0.01)),
+        },
+    ];
+    let moved = pin
+        .transformed(&Rigid::translation(Vector3::new(0.015, 0.015, -0.01)))
+        .unwrap();
+    let bodies = [&plate, &moved];
+    let p = sees(&placed, &look(Vector3::new(1.0, -1.0, 1.0)));
+    // Each silhouette ruling of the pin, where (x - 15 mm) = (y - 15 mm) =
+    // ±3/√2 mm, runs 10 mm below the plate, where a ray towards (1, -1, 1)
+    // reaches the plate's bottom inside it and leaves by its top or a side
+    // (behind two faces: at z = -10 mm it meets z = 0 at (27.1, 7.1) mm or
+    // (22.9, 2.9) mm), 10 mm inside it (behind the one it leaves by) and
+    // 10 mm above it (seen).
+    let rulings: Vec<&Piece> = p
+        .pieces
+        .iter()
+        .filter(|q| matches!(q.source, Source::Silhouette { body: 1, .. }))
+        .collect();
+    let mut by: [[f64; 3]; 2] = [[0.0; 3]; 2];
+    let mut faces = Vec::new();
+    for q in &rulings {
+        let Source::Silhouette { face, ordinal, .. } = q.source else {
+            unreachable!()
+        };
+        if !faces.contains(&(face, ordinal)) {
+            faces.push((face, ordinal));
+        }
+        let r = faces.iter().position(|&f| f == (face, ordinal)).unwrap();
+        let k = match q.visibility {
+            Visibility::Visible => 0,
+            Visibility::Hidden(1) => 1,
+            Visibility::Hidden(2) => 2,
+            other => panic!("{other:?}: {q:?}"),
+        };
+        by[r][k] += length(&p, &bodies, q);
+    }
+    assert_eq!(faces.len(), 2, "{rulings:?}");
+    for lengths in by {
+        for l in lengths {
+            assert!((l - 0.01).abs() < 1e-9, "{by:?}");
+        }
+    }
+}

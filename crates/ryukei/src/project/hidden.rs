@@ -1,12 +1,14 @@
 //! Hidden lines (design 326, phase 3): every edge and silhouette of
 //! several placed bodies, cut wherever its visibility may change (its
-//! image's crossings with every other image curve, its folds, its ends),
-//! each piece judged by one certified ray towards the viewer: how many
-//! faces it crosses in front of the piece.
+//! image's crossings with every other image curve, its folds, its ends,
+//! where it passes through another placed body's face), each piece
+//! judged by one certified ray towards the viewer: how many faces it
+//! crosses in front of the piece.
 
 use super::events::events;
 use super::items::{Item, items};
 use super::pieces::{Span, cut, link};
+use super::pierce::{Stretch, piercings};
 use super::rays::{Ray, Scene, judge};
 use super::{ImageCurve, Silhouettes, View, silhouettes_in};
 use crate::Error;
@@ -186,7 +188,30 @@ fn project(
     let met: Vec<(&ImageCurve, f64)> = (0..imgs.len())
         .map(|g| (image(g), item(g).tolerance))
         .collect();
-    let ev = events(&met, m);
+    let mut ev = events(&met, m);
+    // Where a curve passes through another body (a press fit), its
+    // visibility changes with no image event.
+    let stretches: Vec<Stretch> = (0..imgs.len())
+        .map(|g| {
+            let it = item(g);
+            Stretch {
+                curve: &it.curve,
+                // A point image is one stretch, judged from its nearer
+                // end: nothing to cut.
+                range: if matches!(image(g).image, super::Image::Point(_)) {
+                    [0.0, 0.0]
+                } else {
+                    image(g).range
+                },
+                body: it.body,
+                tolerance: it.tolerance,
+            }
+        })
+        .collect();
+    for (g, p) in piercings(&stretches, &bodies, m).into_iter().enumerate() {
+        ev.cuts[g].extend(p.cuts);
+        ev.unsure[g].extend(p.unsure);
+    }
     let mut spans: Vec<Span> = Vec::new();
     let mut first = Vec::with_capacity(imgs.len() + 1);
     for g in 0..imgs.len() {
