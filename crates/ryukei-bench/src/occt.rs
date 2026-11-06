@@ -93,6 +93,14 @@ mod ffi {
         fn offset_shape(s: &Shape, d: f64) -> Result<UniquePtr<Shape>>;
         fn thicken_sheet(s: &Shape, d: f64) -> Result<UniquePtr<Shape>>;
         fn thick_solid(s: &Shape, open: &[f64], thickness: f64) -> Result<UniquePtr<Shape>>;
+        fn filling(
+            s: &Shape,
+            tangent: &[f64],
+            spec: &[u32],
+            data: &[f64],
+            count: u32,
+            scale: f64,
+        ) -> Result<Vec<f64>>;
         fn intersect_faces(
             a: &Shape,
             pa: &[f64],
@@ -454,6 +462,51 @@ impl Solid {
             .map(Self)
             .map_err(|e| e.to_string())
     }
+}
+
+/// What OCCT's fill measured: the face's area, its G0 and G1 errors
+/// (`BRepFill_Filling::G0Error`, `G1Error`), and the seconds it built in.
+#[derive(Clone, Copy, Debug)]
+pub struct Filled {
+    pub area: f64,
+    pub g0: f64,
+    pub g1: f64,
+    pub seconds: f64,
+}
+
+/// A fill with `BRepFill_Filling`: for each of `tangent`, the edge of
+/// `sheet` nearest it met tangentially on its face, then `free` curves
+/// (each over its range, scaled by `scale` about the origin: OCCT's STEP
+/// reader works in millimetres) met in position, in that order round the
+/// boundary.
+pub fn fill(
+    sheet: Option<&Solid>,
+    tangent: &[Point3],
+    free: &[(ryukei::geom::Curve, [f64; 2])],
+    scale: f64,
+) -> Result<Filled, String> {
+    let mut curves = crate::BenchCurves::default();
+    for (c, r) in free {
+        curves.push(c, *r).map_err(|e| e.to_string())?;
+    }
+    let pts: Vec<f64> = tangent.iter().flat_map(|p| [p.x, p.y, p.z]).collect();
+    let empty = ffi::make_compound();
+    let s = sheet.map_or(&*empty, |s| &*s.0);
+    let v = ffi::filling(
+        s,
+        &pts,
+        &curves.spec,
+        &curves.data,
+        free.len() as u32,
+        scale,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(Filled {
+        area: v[0],
+        g0: v[1],
+        g1: v[2],
+        seconds: v[3],
+    })
 }
 
 /// Where `a`'s face nearest `pa` and `b`'s nearest `pb` meet, by

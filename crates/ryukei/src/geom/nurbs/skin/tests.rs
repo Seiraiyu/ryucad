@@ -63,6 +63,30 @@ fn compatible_curves_are_the_same_curves_with_unit_end_weights() {
 }
 
 #[test]
+fn compatible_maps_find_each_curves_own_parameter() {
+    // A rational cubic, and a rational quarter arc cut off its knots so
+    // its end weights aren't 1: the Möbius factors move both parameters.
+    let quarter = arc(2.0, 1.0);
+    let part = quarter.part([0.2, 0.7]).unwrap();
+    let curves = [cubic(0.0), part];
+    let (knots, nets, maps) = compatible_mapped(&curves, 4).unwrap();
+    assert_eq!(knots.degree(), 4);
+    for ((c, h), m) in curves.iter().zip(&nets).zip(&maps) {
+        let r = rebuilt(&knots, h);
+        for i in 0..=32 {
+            let u = i as f64 / 32.0;
+            assert!(r.point(u).distance(c.point(m.to_curve(u))) <= 1e-12, "{u}");
+        }
+        assert_eq!(m.to_curve(0.0), c.domain()[0]);
+        assert_eq!(m.to_curve(1.0), c.domain()[1]);
+    }
+    // A floor of 1 is `compatible`, bit for bit.
+    let (k1, n1) = compatible(&curves).unwrap();
+    let (k2, n2, _) = compatible_mapped(&curves, 1).unwrap();
+    assert_eq!((k1, n1), (k2, n2));
+}
+
+#[test]
 fn skins_pass_through_their_sections() {
     let curves = [arc(1.0, 0.0), arc(2.0, 1.0), arc(1.5, 3.0)];
     let (knots, nets) = compatible(&curves).unwrap();
