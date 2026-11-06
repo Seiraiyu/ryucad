@@ -46,6 +46,40 @@ pub const VOCABULARY: [(&str, Kind, &str); 13] = [
     ("mounting", Kind::Mounting, "smd"),
 ];
 
+/// How sources spell each vocabulary name, letters and digits only in
+/// lower case (`Voltage - Rated` is `voltagerated`). One table for KiCad
+/// import and every adapter, so a part from any source has the same
+/// names. Bare `voltage`, `current` and `power` are left out: on a
+/// regulator they mean its output, not a rating.
+const SPELLINGS: [(&str, &[&str]); 13] = [
+    ("resistance", &["resistance"]),
+    ("capacitance", &["capacitance"]),
+    ("inductance", &["inductance"]),
+    ("voltage_rating", &["voltagerating", "voltagerated", "ratedvoltage", "voltageratingdc"]),
+    ("current_rating", &["currentrating", "currentrated", "ratedcurrent"]),
+    ("power_rating", &["powerrating", "powerrated", "ratedpower", "powerwatts"]),
+    ("frequency", &["frequency"]),
+    ("tolerance", &["tolerance"]),
+    ("temperature_coefficient", &["temperaturecoefficient", "tempco"]),
+    ("dielectric", &["dielectric", "dielectricmaterial", "temperaturecharacteristic"]),
+    ("package", &["package", "packagecase", "casepackage"]),
+    ("operating_temperature", &["operatingtemperature", "operatingtemperaturerange", "temperaturerange"]),
+    ("mounting", &["mounting", "mountingtype"]),
+];
+
+/// The vocabulary name a source's parameter name stands for, if any.
+pub fn name_for(source_name: &str) -> Option<&'static str> {
+    let squashed: String = source_name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    SPELLINGS
+        .iter()
+        .find(|(_, s)| s.contains(&squashed.as_str()))
+        .map(|(n, _)| *n)
+}
+
 pub const DIELECTRICS: [&str; 8] = ["C0G", "X5R", "X6S", "X7R", "X7S", "X8R", "Y5V", "Z5U"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -310,5 +344,28 @@ mod tests {
         assert_eq!(quantity("4.7 uH", Dim::INDUCTANCE), Dec::new(47, -7));
         assert_eq!(quantity("0 V", Dim::VOLTAGE), Some(Dec::ZERO));
         assert_eq!(quantity("3.3 A", Dim::VOLTAGE), None);
+    }
+
+    #[test]
+    fn sources_spellings_map_onto_the_vocabulary() {
+        for (spelt, name) in [
+            ("Voltage - Rated", "voltage_rating"),
+            ("Voltage Rating", "voltage_rating"),
+            ("Rated Current", "current_rating"),
+            ("Capacitance", "capacitance"),
+            ("Package / Case", "package"),
+            ("Tolerance", "tolerance"),
+            ("Temperature Coefficient", "temperature_coefficient"),
+            ("Operating Temperature", "operating_temperature"),
+            ("Mounting Type", "mounting"),
+        ] {
+            assert_eq!(name_for(spelt), Some(name), "{spelt}");
+        }
+        for (name, _, _) in VOCABULARY {
+            assert_eq!(name_for(name), Some(name), "{name} maps to itself");
+        }
+        for other in ["Colour", "Voltage", "Power", "ki_keywords", ""] {
+            assert_eq!(name_for(other), None, "{other}");
+        }
     }
 }
