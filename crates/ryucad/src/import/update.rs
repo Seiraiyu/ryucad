@@ -227,7 +227,10 @@ pub fn plan(
         };
     // Import features: the new hash, the product as it is now, and the
     // bodies a product gained where a part holds all its old ones.
-    let mut held: BTreeMap<(Id, Option<usize>), Vec<u32>> = BTreeMap::new();
+    // Each held group's bodies, and the mode its first feature (in part
+    // and list order) has, which a body the product gained takes.
+    let mut held: BTreeMap<(Id, Option<usize>), (Vec<u32>, Option<crate::doc::import::Mode>)> =
+        BTreeMap::new();
     for (p, fid, i) in &features {
         let group = match &i.product {
             Some(r) => def_of(r).map(Some),
@@ -241,10 +244,14 @@ pub fn plan(
             file: file.clone(),
             product,
             body: i.body,
-            mode: None,
+            // An updated feature keeps its own mode.
+            mode: i.mode,
         };
         if let Some(g) = group {
-            held.entry((p.clone(), g)).or_default().push(i.body);
+            held.entry((p.clone(), g))
+                .or_insert_with(|| (Vec::new(), i.mode))
+                .0
+                .push(i.body);
         }
         if new != *i {
             entry(&mut planned, p, PartKind::Part, group.flatten());
@@ -252,7 +259,7 @@ pub fn plan(
             pl.features.push((fid.clone(), Feature::Import(new)));
         }
     }
-    for ((p, g), mut have) in held {
+    for ((p, g), (mut have, mode)) in held {
         have.sort_unstable();
         let complete = have.iter().enumerate().all(|(n, b)| *b as usize == n);
         let now = plan::bodies(opened, g);
@@ -272,7 +279,7 @@ pub fn plan(
         let extra = plan::import_features(
             file,
             product,
-            None,
+            mode,
             &plan::body_names(opened, g),
             have.len()..now,
             &mut taken,
@@ -910,6 +917,83 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Products `A-1`, `B-1` and with `more` `C-1` as roots of a flat file,
+    /// a block each, `A-1` with two blocks when `more`.
+    fn products(more: bool) -> Vec<u8> {
+        use ryukei::geom::{Rigid, Vector3};
+        let block = |x: f64| {
+            let at = Rigid::translation(Vector3::new(x, 0.0, 0.0));
+            ryukei::primitive::block(ryukei::name::OpKey(1), 0.01, 0.01, 0.01, &at)
+                .unwrap()
+                .0
+        };
+        let product = |id: &str, bodies| ryustep::Product {
+            id: id.into(),
+            name: id.into(),
+            bodies,
+            ..Default::default()
+        };
+        let mut v = vec![
+            product(
+                "A-1",
+                if more {
+                    vec![block(0.0), block(0.03)]
+                } else {
+                    vec![block(0.0)]
+                },
+            ),
+            product("B-1", vec![block(0.0)]),
+        ];
+        if more {
+            v.push(product("C-1", vec![block(0.0)]));
+        }
+        crate::import::tests::written(v)
+    }
+
+    /// Each part's import features' modes, in list order (`None` for none).
+    fn modes(dir: &std::path::Path) -> std::collections::BTreeMap<String, Vec<Option<String>>> {
+        ["a-1", "b-1", "c-1"]
+            .into_iter()
+            .filter(|p| dir.join(format!("parts/{p}")).is_dir())
+            .map(|p| {
+                let m = listed(dir, p)
+                    .into_iter()
+                    .map(|(_, f)| f["mode"].as_str().map(str::to_owned))
+                    .collect();
+                (p.to_owned(), m)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_update_keeps_modes_and_new_products_take_the_default() {
+        let r = || Some("reference".to_owned());
+        for solid in [false, true] {
+            let (src, path) = outside(&products(false));
+            let (dir, mut s) = fresh();
+            call(&mut s, "import", json!({"path": path})).unwrap();
+            drop(src);
+            // A-1's part converted to a solid by hand.
+            let a = dir.path().join("parts/a-1/features");
+            for f in std::fs::read_dir(&a).unwrap() {
+                let f = f.unwrap().path();
+                let mut v: Value =
+                    serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+                v.as_object_mut().unwrap().remove("mode");
+                v["format"] = json!(5);
+                crate::doc::project::write_json(&f, &v).unwrap();
+            }
+            s.reload().unwrap();
+            let v = update(&mut s, &products(true), json!({"solid": solid})).unwrap();
+            let m = modes(dir.path());
+            // A-1 kept solid, its new body too; B-1 kept a reference.
+            assert_eq!(m["a-1"], [None, None], "{v}");
+            assert_eq!(m["b-1"], [r()], "{v}");
+            // A new product takes the update's mode.
+            assert_eq!(m["c-1"], [if solid { None } else { r() }], "{v}");
+        }
     }
 
     #[test]
