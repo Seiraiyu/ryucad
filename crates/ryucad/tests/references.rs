@@ -362,3 +362,58 @@ fn a_reference_measures_as_its_faces_and_its_area() {
         json!({"entities": [format!("p/r/{top}"), "p/b"]}),
     );
 }
+
+#[test]
+fn a_closed_reference_weighs_from_its_mesh_and_an_open_one_is_refused() {
+    let (_dir, mut s) = project();
+    must(
+        &mut s,
+        "materials.set",
+        json!({"name": "steel", "density": "7850 kg/m^3", "default": true}),
+    );
+    let m = must(&mut s, "mass", json!({"of": "p/r"}));
+    assert_eq!(m["reference"], true, "{m}");
+    // Within the reference's bound of the healed solid's volume.
+    let healed = must(
+        &mut s,
+        "import.convert",
+        json!({"part": "p", "feature": "r"}),
+    );
+    assert_eq!(healed["converted"], json!(["r"]));
+    let h = must(&mut s, "mass", json!({"of": "p/r"}));
+    assert!(h.get("reference").is_none(), "{h}");
+    let (rv, rb) = (
+        m["volume"]["m3"].as_f64().unwrap(),
+        m["volume"]["bound_m3"].as_f64().unwrap(),
+    );
+    let hv = h["volume"]["m3"].as_f64().unwrap();
+    assert!((rv - hv).abs() <= rb, "{m} {h}");
+    // An open reference: a NIST PMI surface model's sheet.
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut o = Session::open(dir.path()).unwrap();
+    let v = must(
+        &mut o,
+        "import",
+        json!({"path": corpus("nist_ctc_04_asme1_rd.stp"), "part": "o"}),
+    );
+    let sheet = v["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| {
+            let part = p["part"].as_str().unwrap().to_owned();
+            p["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|f| f["reference"]["laminar"].as_u64().unwrap_or(0) > 0)
+                .map(move |f| format!("{part}/{}", f["id"].as_str().unwrap()))
+                .collect::<Vec<_>>()
+        })
+        .next()
+        .unwrap_or_else(|| panic!("no open reference in {v}"));
+    let e = call(&mut o, "mass", json!({"of": sheet})).unwrap_err();
+    assert_eq!(e.code, ryucad::error::Code::ReferenceNotSolid, "{e:?}");
+    assert_eq!(e.details["reason"], "open");
+}
