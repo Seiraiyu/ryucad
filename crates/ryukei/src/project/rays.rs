@@ -1,7 +1,8 @@
 //! Certified rays towards the viewer (design 326, phase 3): how many
 //! faces of the placed bodies lie in front of a point.
 
-use super::View;
+use super::hidden::Visibility;
+use super::{Image, ImageCurve, View};
 use crate::geom::{Box3, Curve, Line, Point2, Point3};
 use crate::intersect::broad::BoxTree;
 use crate::intersect::{
@@ -162,6 +163,62 @@ impl<'a> Scene<'a> {
     }
 }
 
+/// Where along a piece rays are cast, in order.
+const FRACTIONS: [f64; 5] = [0.5, 1.0 / 3.0, 2.0 / 3.0, 0.25, 0.75];
+
+/// The visibility of the piece `image` of `curve` (its stretch
+/// `image.range`), from rays at [`FRACTIONS`] along it: the first
+/// certified count, or for a `flagged` piece two certified counts that
+/// agree (any that disagree are `Uncertain`). A point image is judged
+/// from its end nearest the viewer, leniently.
+#[allow(dead_code)] // used from Task 11
+pub(super) fn judge(
+    scene: &Scene,
+    curve: &Curve,
+    image: &ImageCurve,
+    ray: &Ray,
+    flagged: bool,
+    m: &Meter,
+) -> Visibility {
+    let [r0, r1] = image.range;
+    if let Image::Point(_) = image.image {
+        let (a, b) = (curve.point(r0), curve.point(r1));
+        let p = if scene.view.depth(a) >= scene.view.depth(b) {
+            a
+        } else {
+            b
+        };
+        let lenient = Ray {
+            lenient: true,
+            ..*ray
+        };
+        return match scene.count(p, &lenient, m) {
+            Count::Settled(n) => Visibility::of(n),
+            Count::Unsure => Visibility::Uncertain,
+        };
+    }
+    let mut seen: Option<u32> = None;
+    let mut settled = 0;
+    for f in FRACTIONS {
+        let p = curve.point(r0 + (r1 - r0) * f);
+        match scene.count(p, ray, m) {
+            Count::Settled(n) if !flagged => return Visibility::of(n),
+            Count::Settled(n) => {
+                if seen.is_some_and(|s| s != n) {
+                    return Visibility::Uncertain;
+                }
+                seen = Some(n);
+                settled += 1;
+            }
+            Count::Unsure => {}
+        }
+    }
+    match seen {
+        Some(n) if settled >= 2 => Visibility::of(n),
+        _ => Visibility::Uncertain,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +287,46 @@ mod tests {
             ..ray
         };
         assert_eq!(scene.count(p, &lenient, &m), Count::Settled(0));
+    }
+
+    #[test]
+    fn a_piece_behind_a_block_is_hidden_and_one_in_front_visible() {
+        use crate::project::{Visibility, project_curve};
+        let (b, _) = primitive::block(OpKey(3), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+        let v = View::new(Vector3::new(0.0, -1.0, 0.0), Vector3::new(0.0, 0.0, 1.0)).unwrap();
+        let bodies = [&b];
+        let scene = Scene::new(&v, &bodies);
+        // unmetered: a unit test
+        let m = Meter::free();
+        let ray = Ray {
+            body: 1,
+            own: &[],
+            skip_own: 0.0,
+            near: 1e-6,
+            lenient: false,
+        };
+        let judge_at = |y: f64, flagged: bool| {
+            let l = Curve::Line(
+                Line::new(Point3::new(0.002, y, 0.005), Vector3::new(1.0, 0.0, 0.0)).unwrap(),
+            );
+            let ic = project_curve(&l, [0.0, 0.006], &v).unwrap().remove(0);
+            judge(&scene, &l, &ic, &ray, flagged, &m)
+        };
+        assert_eq!(judge_at(0.02, false), Visibility::Hidden(2));
+        assert_eq!(judge_at(0.02, true), Visibility::Hidden(2));
+        assert_eq!(judge_at(-0.01, false), Visibility::Visible);
+        // Along the view, judged from its nearer end: in front of the block.
+        let along = Curve::Line(
+            Line::new(
+                Point3::new(0.005, -0.03, 0.005),
+                Vector3::new(0.0, 1.0, 0.0),
+            )
+            .unwrap(),
+        );
+        let ic = project_curve(&along, [0.0, 0.02], &v).unwrap().remove(0);
+        assert_eq!(
+            judge(&scene, &along, &ic, &ray, false, &m),
+            Visibility::Visible
+        );
     }
 }
