@@ -161,6 +161,49 @@ pub enum Request {
         #[serde(default, flatten)]
         search: crate::parts::Search,
     },
+    /// Downloads a catalogue into this machine's parts cache: long, in
+    /// phase `fetch`, cancelled between files.
+    #[serde(rename = "parts.sync")]
+    PartsSync { source: String },
+    /// Every source of parts, and each catalogue's state on this machine.
+    #[serde(rename = "parts.sources")]
+    PartsSources {},
+    /// Syncs each catalogue the placed parts' offers draw on that is
+    /// missing or past `parts.max_age`, or every one with `force`: long,
+    /// as `parts.sync` is.
+    #[serde(rename = "parts.refresh")]
+    PartsRefresh {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
+    },
+    /// Sets the project's sourcing in `parts.json`: `assembly` (`jlcpcb`,
+    /// `null` for none), `build_quantity` (`null` for 1), `sources` (the
+    /// whole list, `[]` for none), severities by supply code (`null` for
+    /// the default). Nothing given answers it as it is.
+    #[serde(rename = "parts.configure")]
+    PartsConfigure {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assembly: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        build_quantity: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sources: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        severity: serde_json::Map<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// The records a key names (`lcsc:C1525`, `mpn:<part number>`,
+    /// `library:<reference>`). Catalogues never fetch per part, so
+    /// `refresh` says how to refresh one and `offline` changes nothing.
+    #[serde(rename = "parts.show")]
+    PartsShow {
+        key: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        refresh: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        offline: bool,
+    },
     /// KiCad 6 to 9 libraries (`.kicad_sym` files, `.pretty` and
     /// `.3dshapes` folders, by absolute path) into this project's
     /// library, or with `into` a library project's it names.
@@ -585,7 +628,13 @@ pub enum Request {
     /// The project loaded from nothing: every file's faults and every
     /// design's ERC; `check_failed` on any error.
     #[serde(rename = "check")]
-    Check {},
+    Check {
+        /// Stay off the network: check never fetches (its supply findings
+        /// read the catalogues this machine holds), so it changes nothing
+        /// yet.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        offline: bool,
+    },
     #[serde(rename = "activity.log")]
     ActivityLog {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -620,6 +669,15 @@ pub enum Request {
     },
     #[serde(rename = "daemon.status")]
     DaemonStatus {},
+    /// Cancels the caller's running long request named `token` (the
+    /// connection's participant's, or on a connection that said no hello
+    /// the agent `as`'s). Answered without waiting for the request.
+    #[serde(rename = "request.cancel")]
+    RequestCancel {
+        token: String,
+        #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
     #[serde(rename = "daemon.shutdown")]
     DaemonShutdown {},
 }
@@ -696,6 +754,7 @@ impl Request {
                 | Request::ErcWaive { .. }
                 | Request::ErcConfigure { .. }
                 | Request::LintConfigure { .. }
+                | Request::PartsConfigure { .. }
                 | Request::Layout { .. }
                 | Request::LayoutPlace { .. }
                 | Request::Undo { .. }
@@ -717,6 +776,26 @@ impl ryu_session::client::Call for Request {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_requests_are_named_and_cancelled_by_token() {
+        use ryu_session::Serve;
+        assert_eq!(crate::Eda::LONG, ["parts.sync", "parts.refresh"]);
+        let r = Request::from_rpc(
+            "request.cancel",
+            Some(json!({"token": "t1", "as": "agent"})),
+        )
+        .unwrap();
+        assert!(!r.mutates());
+        assert!(matches!(
+            <crate::Eda as Serve>::control(&r),
+            ryu_session::daemon::Control::Cancel { ref token, ref name }
+                if token == "t1" && name.as_deref() == Some("agent")
+        ));
+        let topics =
+            ryu_session::notify::topics::<crate::notify::Topic>(&["progress".to_owned()]).unwrap();
+        assert_eq!(topics, [crate::notify::Topic::Progress]);
+    }
 
     #[test]
     fn the_same_build_may_have_another_target() {

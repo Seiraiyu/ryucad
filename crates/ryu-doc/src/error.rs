@@ -684,6 +684,31 @@ pub enum Code {
     /// ryueda ERC: a maker part number with no supplier offer, on a
     /// library component's first choice or an alternate (a warning).
     PartUnsourced,
+    /// ryueda: a source of part data didn't answer (a connection refused,
+    /// a call quiet for 60 s, a server error). Not the agent's fault.
+    PartsSourceUnreachable,
+    /// ryueda: a source answered what ryueda can't take: an answer shape
+    /// it doesn't read (`field` names what), a format it doesn't know (a
+    /// catalogue's `version`), or refused keys.
+    PartsSourceRefused,
+    /// ryueda: no source has the part asked for (`parts show`,
+    /// `libcomp create --from`).
+    PartsNotFound,
+    /// ryueda: a catalogue this machine holds is older than
+    /// `parts.max_age`, or missing (`reason`): a warning.
+    PartsCacheStale,
+    /// ryueda supply: a supplier's record of an offer names another maker
+    /// part number than the library component (a warning).
+    PartsMismatch,
+    /// ryueda supply: fewer in stock than the build takes, at every
+    /// offer's source with data (a warning).
+    PartOutOfStock,
+    /// ryueda supply: an assembly house's Extended part, with that house
+    /// the project's assembly house (a warning).
+    PartExtended,
+    /// ryueda supply: no source holds a record of any of a placed part's
+    /// offers (a warning).
+    PartNoData,
 }
 
 impl Code {
@@ -702,6 +727,7 @@ impl Code {
             | Code::ReviewFailed
             | Code::CacheRemoteUnreachable
             | Code::DependencyFetchFailed
+            | Code::PartsSourceUnreachable
             | Code::Cancelled => 4,
             _ => 1,
         }
@@ -762,6 +788,19 @@ mod tests {
         assert_eq!(json!(Code::PartUnsourced), json!("part_unsourced"));
         assert_eq!(Code::ParameterInvalid.exit_code(), 1);
         assert_eq!(Code::PartUnsourced.exit_code(), 1);
+        for (code, name, exit) in [
+            (Code::PartsSourceUnreachable, "parts_source_unreachable", 4),
+            (Code::PartsSourceRefused, "parts_source_refused", 1),
+            (Code::PartsNotFound, "parts_not_found", 1),
+            (Code::PartsCacheStale, "parts_cache_stale", 1),
+            (Code::PartsMismatch, "parts_mismatch", 1),
+            (Code::PartOutOfStock, "part_out_of_stock", 1),
+            (Code::PartExtended, "part_extended", 1),
+            (Code::PartNoData, "part_no_data", 1),
+        ] {
+            assert_eq!(json!(code), json!(name));
+            assert_eq!(code.exit_code(), exit, "{name}");
+        }
     }
 
     #[test]

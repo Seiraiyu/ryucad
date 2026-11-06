@@ -111,14 +111,68 @@ fn a_search_of_ten_thousand_library_components_is_within_its_bar() {
         .num_threads(1)
         .build()
         .unwrap();
-    one.install(|| ryueda::parts::search(&p, &search).unwrap());
+    one.install(|| ryueda::parts::search(&p, &search, &Default::default()).unwrap());
     let mut worst = Duration::ZERO;
     for _ in 0..5 {
         let start = Instant::now();
-        let v = one.install(|| ryueda::parts::search(&p, &search).unwrap());
+        let v = one.install(|| ryueda::parts::search(&p, &search, &Default::default()).unwrap());
         worst = worst.max(start.elapsed());
         assert!(!v["results"].as_array().unwrap().is_empty());
     }
     println!("a search over 10,000 library components on one thread: {worst:?} at worst of five");
     assert!(worst < bar(Duration::from_millis(50)), "{worst:?}");
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: cargo test -p ryueda --release --test bar"
+)]
+fn the_jlc_catalogue_searches_under_its_bar() {
+    // The catalogue's size: jlcparts' totalComponents as plan 387's live
+    // run measured it (2026-11-06); RYUEDA_JLC_PARTS sets another.
+    let n: usize = std::env::var("RYUEDA_JLC_PARTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(370_668);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("jlc");
+    let recs = ryueda_parts::jlc::testing::seeded(n);
+    ryueda_parts::jlc::index::write_next(&root, &recs, 1, "seeded").unwrap();
+    ryueda_parts::jlc::index::swap(&root).unwrap();
+    drop(recs);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    pool.install(|| {
+        use ryueda_parts::source::Source;
+        let jlc = ryueda_parts::jlc::Jlc::open(&root).unwrap().unwrap();
+        let q = ryueda_parts::query::Query {
+            category: Some(ryueda_parts::category::Category::Capacitor),
+            conditions: ["capacitance=100nF", "voltage_rating>=16V", "package=0402"]
+                .iter()
+                .map(|c| ryueda_parts::query::Condition::parse(c).unwrap())
+                .collect(),
+            stock: Some(1000),
+            basic: true,
+            limit: 20,
+        };
+        let t = Instant::now();
+        let first = jlc.search(&q, &Default::default()).unwrap();
+        let load = t.elapsed();
+        assert!(!first.is_empty(), "the seeded catalogue has 100 nF 0402 parts");
+        let worst = (0..5)
+            .map(|_| {
+                let t = Instant::now();
+                jlc.search(&q, &Default::default()).unwrap();
+                t.elapsed()
+            })
+            .max()
+            .unwrap();
+        println!(
+            "jlc search over {n} parts on one thread: first (loading capacitors) {load:?}, worst of five after {worst:?}"
+        );
+        assert!(worst <= bar(Duration::from_millis(500)), "{worst:?}");
+    });
 }
