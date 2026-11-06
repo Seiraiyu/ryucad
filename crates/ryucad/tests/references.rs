@@ -264,3 +264,59 @@ fn a_mate_and_a_sketch_on_a_reference_survive_its_conversion() {
     let rig = must(&mut s, "rebuild", json!({"part": "rig"}));
     assert_eq!(rig["parts"][0]["failed"], 0, "{rig}");
 }
+
+/// The path of the committed corpus's file `name` (ryustep's).
+fn corpus(name: &str) -> String {
+    format!(
+        "{}/../ryustep/tests/corpus/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+#[test]
+fn check_warns_of_a_reference_and_never_runs_the_intersection_check_on_it() {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    // NIST CTC 01's body heals and checks clean as a solid; as a reference
+    // it must check without findings that fail.
+    let v = must(
+        &mut s,
+        "import",
+        json!({"path": corpus("nist_ctc_01_asme1_rd.stp"), "part": "q"}),
+    );
+    assert_eq!(v["parts"][0]["features"][0]["mode"], "reference", "{v}");
+    let v = must(&mut s, "check", json!({"part": "q"}));
+    assert_eq!(v["passed"], true, "{v}");
+    for f in v["findings"].as_array().unwrap() {
+        assert_eq!(f["severity"], "warning", "{f}");
+        assert!(f["code"].as_str().unwrap().starts_with("reference_"), "{f}");
+    }
+}
+
+#[test]
+fn interference_of_references_is_unchecked_until_21d() {
+    let (_dir, mut s) = project();
+    must(
+        &mut s,
+        "part.create",
+        json!({"part": "rig", "kind": "assembly"}),
+    );
+    for id in ["a", "c"] {
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "rig", "type": "instance", "id": id, "of": "p", "fixed": true}),
+        );
+    }
+    let v = must(&mut s, "check", json!({"part": "rig"}));
+    let codes: Vec<&str> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    // The two references overlap where they stand: the kernel's boolean
+    // takes no sheet, so the pairs with a reference side can't be checked.
+    assert!(codes.contains(&"cannot_check"), "{v}");
+}

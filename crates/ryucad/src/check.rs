@@ -24,7 +24,7 @@ use ryu_session::job::Phase;
 use serde_json::{Value, json};
 
 /// Every finding's code and severity: `doctor`'s issues keep their own.
-pub const CODES: [(&str, &str); 9] = [
+pub const CODES: [(&str, &str); 13] = [
     ("feature_failed", "error"),
     ("assembly_unsolved", "error"),
     ("faces_intersect", "error"),
@@ -34,6 +34,10 @@ pub const CODES: [(&str, &str); 9] = [
     ("unmerged_path", "error"),
     ("instance_obsolete", "warning"),
     ("instances_interfere", "warning"),
+    ("reference_faces_unmeshed", "warning"),
+    ("reference_faces_dropped", "warning"),
+    ("reference_faces_split", "warning"),
+    ("reference_unoriented", "warning"),
 ];
 
 fn severity(code: &str) -> &'static str {
@@ -58,6 +62,9 @@ fn body_findings(
     mesh: &crate::mesh::DisplayMesh,
     job: &ryu_session::job::Job,
 ) -> Result<Vec<Value>> {
+    if b.reference {
+        return Ok(reference_findings(part, feature, b, mesh));
+    }
     use ryukei::check::Fault;
     let name = |f| b.body.face(f).expect("live").name.to_string();
     let (mut crossing, mut unchecked) = (Vec::new(), Vec::new());
@@ -129,6 +136,25 @@ fn body_findings(
         out.push(f);
     }
     Ok(out)
+}
+
+/// A reference's findings: its faces the mesher left out, as a warning
+/// ([`crate::mesh::unmeshed_warning`]). A reference is never checked for
+/// intersections (design 364): it is the file's topology, and nothing
+/// models on it.
+fn reference_findings(
+    part: &Id,
+    feature: &Id,
+    b: &Built,
+    mesh: &crate::mesh::DisplayMesh,
+) -> Vec<Value> {
+    let Some(w) = crate::mesh::unmeshed_warning(part, feature, b, mesh) else {
+        return Vec::new();
+    };
+    let message = w["message"].as_str().unwrap_or_default().to_owned();
+    let mut f = finding("reference_faces_unmeshed", part, feature, message);
+    f["faces"] = w["faces"].clone();
+    vec![f]
 }
 
 /// `feature_failed` for feature `fid` of part `id`, if `r`, its result,
@@ -357,6 +383,18 @@ pub fn run(
                     w["message"].as_str().unwrap_or_default().to_owned(),
                 );
                 f["rev"] = w["rev"].clone();
+                findings.push(f);
+            }
+            // What a reference's import couldn't lay out or orient.
+            if let Some(code) = w["code"].as_str()
+                && code.starts_with("reference_")
+                && let Some(fid) = w["feature"]
+                    .as_str()
+                    .and_then(|f| Id::parse(f, "feature").ok())
+            {
+                let message = w["message"].as_str().unwrap_or_default().to_owned();
+                let mut f = finding(code, id, &fid, message);
+                f["faces"] = w["faces"].clone();
                 findings.push(f);
             }
         }
