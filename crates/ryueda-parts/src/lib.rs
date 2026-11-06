@@ -14,3 +14,4 @@ pub mod dec;
 pub mod param;
 pub mod category;
 pub mod record;
+pub mod query;
