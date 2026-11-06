@@ -209,6 +209,7 @@ fn row(block: &Block, parts: &[&Cluster]) -> Cluster {
     Cluster {
         members,
         idiom: None,
+        frame: 0,
     }
 }
 

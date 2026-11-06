@@ -1,7 +1,7 @@
 //! Clusters: parts placed together, rigidly, as one. A part alone is a
 //! cluster of one; an idiom or a `group` instruction makes larger ones.
 
-use crate::geom::{Place, Point, Rect};
+use crate::geom::{Nm, Place, Point, Rect};
 use crate::input::{Block, NetKind, PartKind};
 use crate::layout::{IdiomKind, LabelKind};
 use crate::shape::Shape;
@@ -12,6 +12,11 @@ pub struct Cluster {
     pub members: Vec<(usize, Place)>,
     /// The idiom it draws, if it is one.
     pub idiom: Option<IdiomKind>,
+    /// A region's margin (`region::FRAME`), or 0 for an ordinary
+    /// cluster. A framed cluster is a whole region placed on its sheet:
+    /// its room is its members' with a label on every pin whose net
+    /// leaves it, grown by the margin, with the title band on top.
+    pub frame: Nm,
 }
 
 impl Cluster {
@@ -19,6 +24,7 @@ impl Cluster {
         Cluster {
             members: vec![(part, place)],
             idiom: None,
+            frame: 0,
         }
     }
 
@@ -138,6 +144,31 @@ impl Cluster {
                 }
             }
         }
+        if self.frame > 0 {
+            let inside: std::collections::BTreeSet<usize> =
+                self.members.iter().map(|(p, _)| *p).collect();
+            for (p, place) in self.places(origin) {
+                let shape = Shape::of(&block.parts[p], place);
+                for (k, pin) in block.parts[p].pins.iter().enumerate() {
+                    let Some(n) = pin.drawn_net() else { continue };
+                    let leaves = block.nets[n].kind == NetKind::Signal
+                        && block.parts.iter().enumerate().any(|(q, part)| {
+                            !inside.contains(&q) && part.pins.iter().any(|x| x.nets().contains(&n))
+                        });
+                    if leaves {
+                        let at = shape.pins[k];
+                        r = r.union(crate::label::label_box(
+                            LabelKind::Net,
+                            &block.label_text(p, k),
+                            at.end,
+                            at.side,
+                        ));
+                    }
+                }
+            }
+            r = r.grow(self.frame);
+            r.max[1] += crate::region::TITLE;
+        }
         r
     }
 
@@ -155,5 +186,44 @@ pub fn is_connector(block: &Block, part: usize) -> bool {
             matches!(prefix.as_str(), "J" | "P" | "CN" | "CON") && block.parts[part].pins.len() >= 2
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::GRID;
+    use crate::input::NetKind;
+    use crate::testing::{net, resistor};
+
+    #[test]
+    fn a_framed_cluster_reserves_its_frame_and_title() {
+        // R2 beside it on both nets: both leave the cluster.
+        let block = Block {
+            parts: vec![
+                resistor("r1", "R1", "10k", [Some(0), Some(1)]),
+                resistor("r2", "R2", "10k", [Some(0), Some(1)]),
+            ],
+            nets: vec![
+                net("a", "A", NetKind::Signal),
+                net("b", "B", NetKind::Signal),
+            ],
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let bare = Cluster::single(0, Place::new([0, 0], 0, false));
+        let mut framed = bare.clone();
+        framed.frame = crate::region::FRAME;
+        let r = bare.room_labelled(&block, [0, 0], |_| true);
+        let f = framed.room_labelled(&block, [0, 0], |_| false);
+        assert_eq!(f.min, [r.min[0] - 2 * GRID, r.min[1] - 2 * GRID]);
+        assert_eq!(
+            f.max,
+            [
+                r.max[0] + 2 * GRID,
+                r.max[1] + 2 * GRID + crate::region::TITLE
+            ],
+            "labels on every net leaving it, its margin, its title band"
+        );
     }
 }
