@@ -412,6 +412,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             return *t;
         }
         prev.and_then(|l| l.placed.get(&block.parts[p].key))
+    named_regions(&mut st, r);
             .map_or_else(|| default_turn(block, p), |x| (x.rotation, x.mirror))
     };
     // Every part's own cluster (a kept part where it is), joined by
@@ -1414,6 +1415,69 @@ fn drawn(prev: Option<&Layout>) -> BTreeMap<String, Vec<Rect>> {
         for (s, runs) in sheets {
             for run in runs {
                 for w in run.windows(2) {
+/// Over a previous layout, the `region` instructions hold: each named
+/// region holds exactly its parts as placed (made where the layout has no
+/// region so titled), its parts leaving any other region; `region none`
+/// takes parts out of named regions.
+fn named_regions(st: &mut State, r: &instr::Resolved) {
+    let block = st.block;
+    for (title, set) in &r.regions {
+        let keys: Vec<String> = set
+            .iter()
+            .filter(|p| st.place[**p].is_some())
+            .map(|p| block.parts[*p].key.clone())
+            .collect();
+        let Some(first) = set.iter().copied().find(|p| st.place[*p].is_some()) else {
+            continue;
+        };
+        for (_, g) in st.regions.iter_mut() {
+            g.parts.retain(|k| !keys.contains(k));
+        }
+        let (s, place, _) = st.place[first].expect("placed");
+        let sid = st.sheets[s].0.clone();
+        match st
+            .regions
+            .iter_mut()
+            .find(|(_, g)| g.named && &g.title == title)
+        {
+            Some((_, g)) => {
+                g.parts = keys;
+                g.parts.sort();
+            }
+            None => {
+                let n = st
+                    .regions
+                    .iter()
+                    .filter_map(|(id, _)| id.strip_prefix('r')?.parse::<u64>().ok())
+                    .max()
+                    .unwrap_or(0);
+                let mut parts = keys;
+                parts.sort();
+                st.regions.push((
+                    format!("r{}", n + 1),
+                    crate::layout::Region {
+                        sheet: sid,
+                        at: place.at,
+                        frame: Rect::new([0, 0], [0, 0]),
+                        title: title.clone(),
+                        named: true,
+                        parts,
+                    },
+                ));
+            }
+        }
+    }
+    let none: Vec<String> = r
+        .no_region
+        .iter()
+        .map(|p| block.parts[*p].key.clone())
+        .collect();
+    for (_, g) in st.regions.iter_mut().filter(|(_, g)| g.named) {
+        g.parts.retain(|k| !none.contains(k));
+    }
+    st.regions.retain(|(_, g)| !g.parts.is_empty());
+}
+
                     out.entry(s.clone())
                         .or_default()
                         .push(Rect::new(w[0], w[1]).grow(GRID / 2));

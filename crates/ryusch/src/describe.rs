@@ -65,6 +65,7 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
                 .map(move |p| (*p, (i.kind.as_str(), anchor.clone())))
         })
         .collect();
+    let region_of = layout.region_of();
     let mut sheets = Vec::new();
     for (sid, sheet) in &layout.sheets {
         let placed: Vec<(usize, Shape)> = block
@@ -144,6 +145,7 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
                 if x.held {
                     v["held"] = json!(true);
                 }
+                v["region"] = json!(region_of.get(part.key.as_str()));
                 if !part.value.is_empty() {
                     v["value"] = json!(part.value);
                 }
@@ -192,7 +194,27 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
             nets.push(v);
         }
         let score = scores.iter().find(|s| &s.sheet == sid);
+        let regions: Vec<Value> = layout
+            .regions
+            .iter()
+            .filter(|(_, r)| &r.sheet == sid)
+            .map(|(id, r)| {
+                let f = r.frame_on_sheet();
+                json!({
+                    "id": id,
+                    "title": r.title,
+                    "named": r.named,
+                    "parts": r
+                        .parts
+                        .iter()
+                        .map(|k| block.part(k).map_or(k.clone(), |p| crate::lint::part_shown(block, p)))
+                        .collect::<Vec<_>>(),
+                    "box_mm": [mm(f.min[0]), mm(f.min[1]), mm(f.max[0]), mm(f.max[1])],
+                })
+            })
+            .collect();
         sheets.push(json!({
+            "regions": regions,
             "sheet": sid,
             "name": sheet.name,
             "canvas_mm": [mm(sheet.at[0]), mm(sheet.at[1])],

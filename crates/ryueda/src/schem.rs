@@ -463,7 +463,35 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
         });
     }
     let net_of = |n: Option<&Node>| n.and_then(node_key).and_then(|k| index.get(&k).copied());
-    let room_for = widest(&layers(p, &b.id));
+    let all_layers = layers(p, &b.id);
+    let room_for = widest(&all_layers);
+    // What a component does, for its region's title: its `function`
+    // parameter, else the first that its first layer's levels give
+    // (each instance from the innermost, the block, the project).
+    let mut outer: Vec<&crate::props::Properties> = Vec::new();
+    if let Some(first) = all_layers.first() {
+        for iid in first.path.iter().rev() {
+            if let Some(inst) = p
+                .conn
+                .blocks
+                .values()
+                .find_map(|bf| bf.instances.get(iid))
+                .and_then(|i| i.item.as_ref().ok())
+            {
+                outer.push(&inst.properties);
+            }
+        }
+    }
+    if let Ok(own) = &b.block.item {
+        outer.push(&own.properties);
+    }
+    outer.push(&p.manifest.properties);
+    let function_of = |c: &crate::conn::Component| -> String {
+        std::iter::once(&c.parameters)
+            .chain(outer.iter().copied())
+            .find_map(|l| l.get("function").cloned())
+            .unwrap_or_default()
+    };
     let mut parts = Vec::new();
     let mut of = Vec::new();
     for (cid, c) in &b.components {
@@ -546,7 +574,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
                         },
                         refdes: label,
                         value: value.clone(),
-                        function: String::new(),
+                        function: function_of(c),
                         graphics,
                         pins,
                     });
@@ -566,8 +594,8 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
                     key: cid.to_string(),
                     kind: PartKind::Symbol { prefix },
                     refdes,
+                    function: function_of(c),
                     value,
-                    function: String::new(),
                     graphics,
                     pins,
                 });

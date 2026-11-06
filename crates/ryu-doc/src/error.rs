@@ -672,6 +672,20 @@ pub enum Code {
     /// mirrored (`solid`) are in the details. A combined copy's boolean
     /// refuses as `boolean_failed`.
     MirrorFailed,
+    /// ryueda: an instruction naming a region (`region:<id>`) the layout
+    /// no longer has, kept until released (a warning).
+    RegionUnresolved,
+    /// ryueda: paper fit grew a sheet one size to hold an edit; the sheet
+    /// and both sizes are in the details (a warning).
+    SheetResized,
+    /// ryueda lint: a sheet on paper larger than what holds it, or too
+    /// empty for its paper.
+    SchPaperFit,
+    /// ryueda lint: one function's parts (a recognised circuit, an IC's
+    /// satellites, a connector's breakout) in more than one region.
+    SchFunctionSplit,
+    /// ryueda lint: a region with no title of its own (`Misc`).
+    SchRegionUntitled,
 }
 
 impl Code {
@@ -827,6 +841,11 @@ mod tests {
         );
         assert_eq!(json!(Code::OdbInfoMissing), json!("odb_info_missing"));
         assert_eq!(json!(Code::LayoutStale), json!("layout_stale"));
+        assert_eq!(json!(Code::RegionUnresolved), json!("region_unresolved"));
+        assert_eq!(json!(Code::SheetResized), json!("sheet_resized"));
+        assert_eq!(json!(Code::SchPaperFit), json!("sch_paper_fit"));
+        assert_eq!(json!(Code::SchFunctionSplit), json!("sch_function_split"));
+        assert_eq!(json!(Code::SchRegionUntitled), json!("sch_region_untitled"));
         assert_eq!(json!(Code::LayoutConflict), json!("layout_conflict"));
         assert_eq!(json!(Code::SchBypassApart), json!("sch_bypass_apart"));
         assert_eq!(json!(Code::SchJog), json!("sch_jog"));

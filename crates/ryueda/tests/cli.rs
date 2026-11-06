@@ -2361,3 +2361,56 @@ fn schematics_from_the_cli() {
         None
     );
 }
+
+/// Plan 2.A's regions: describe gives each sheet's regions, `region
+/// rename` makes a lasting named region, and two regions naming one part
+/// are refused.
+#[test]
+fn regions_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&["layout", "--relayout", "sensor"]);
+    let d = p.ok(&["describe", "--block", "sensor"]);
+    let regions = d["blocks"][0]["sheets"][0]["regions"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(!regions.is_empty(), "{d}");
+    let id = regions[0]["id"].as_str().unwrap().to_owned();
+    p.ok(&[
+        "place",
+        "sensor",
+        &format!("region rename {id} \"Sensor core\""),
+    ]);
+    let list = p.ok(&["place", "sensor", "--list"]);
+    assert!(
+        list["instructions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("region \"Sensor core\" ")),
+        "{list}"
+    );
+    let d = p.ok(&["describe", "--block", "sensor"]);
+    assert!(
+        d["blocks"][0]["sheets"][0]["regions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["title"] == "Sensor core" && r["named"] == true),
+        "{d}"
+    );
+    let refused = p.fails(
+        &["place", "sensor", "region Other U1", "region Again U1"],
+        "instruction_conflict",
+        1,
+    );
+    assert!(
+        refused["message"].as_str().unwrap().contains("two regions"),
+        "{refused}"
+    );
+    let (code, _) = p.run_in(&p.daemon, "board", &["undo"]);
+    assert_eq!(code, 0);
+}

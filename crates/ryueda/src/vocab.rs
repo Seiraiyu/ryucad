@@ -82,6 +82,9 @@ impl Names<'_> {
 
     /// The part key (or a component's, naming all its units) `text` names.
     pub fn part(&self, text: &str) -> Result<String> {
+        if let Some(r) = text.strip_prefix("region:") {
+            return self.region(r).map(|id| format!("region:{id}"));
+        }
         if let Some(p) = text.strip_prefix("port:") {
             let block = self.b.block.item.as_ref().map_err(|e| e.clone())?;
             return block
@@ -118,11 +121,53 @@ impl Names<'_> {
         if let [one] = drawn.as_slice() {
             return Ok((*one).to_owned());
         }
+        // A region's title on the block's layout.
+        if let Ok(id) = self.region(text) {
+            return Ok(format!("region:{id}"));
+        }
         Err(not_found(
             "part (by designator, unit, instance, port: or as drawn)",
             text,
             self.b,
         ))
+    }
+
+    /// The region `text` names on the block's layout: an ID (`r3`), else
+    /// a title one region has.
+    pub fn region(&self, text: &str) -> Result<String> {
+        let regions = match &self.b.layout {
+            Some(Ok(l)) => &l.regions,
+            _ => {
+                return Err(Error::new(
+                    Code::NotFound,
+                    format!("block {} has no layout, so no region {text}", self.b.id),
+                ));
+            }
+        };
+        if regions.contains_key(text) {
+            return Ok(text.to_owned());
+        }
+        let titled: Vec<&String> = regions
+            .iter()
+            .filter(|(_, r)| r.title == text)
+            .map(|(id, _)| id)
+            .collect();
+        if let [one] = titled.as_slice() {
+            return Ok((*one).clone());
+        }
+        let list: Vec<String> = regions
+            .iter()
+            .map(|(id, r)| format!("{id} ({})", r.title))
+            .collect();
+        Err(Error::new(
+            Code::NotFound,
+            format!(
+                "block {} has no region {text}; its regions are {}",
+                self.b.id,
+                list.join(", ")
+            ),
+        )
+        .with("regions", list))
     }
 
     /// The pin `text` (`U3.VDD`, `U3.4`) names: `<part key>/<number>`.
@@ -426,6 +471,12 @@ pub enum Said {
         from: String,
         to: String,
     },
+    /// `region rename R TITLE`: a region (by ID) given a title, as a
+    /// lasting `region` instruction over its parts.
+    RenameRegion {
+        region: String,
+        title: String,
+    },
 }
 
 /// What `release` names: a part (every instruction naming it), one
@@ -461,6 +512,8 @@ pub const FORMS: &[&str] = &[
     "flow X... reversed",
     "shift X... up|down|left|right STEPS (a move only)",
     "release X...|ID|net:N",
+    "region TITLE X... | region none X... | region rename REGION TITLE (X may be a region)",
+    "paper SHEET SIZE [landscape|portrait]",
 ];
 
 impl Names<'_> {
@@ -506,6 +559,57 @@ impl Names<'_> {
                     out.push(self.released(x)?);
                 }
                 return Ok(Said::Release(out));
+            }
+            "region" if rest.first().is_some_and(|w| w == "rename") => {
+                let [_, region, title] = rest else {
+                    return Err(usage(text, "region rename REGION TITLE"));
+                };
+                return Ok(Said::RenameRegion {
+                    region: self.region(region)?,
+                    title: title.clone(),
+                });
+            }
+            "region" if rest.first().is_some_and(|w| w == "none") => Instruction::RegionNone {
+                parts: many(&rest[1..])?,
+            },
+            "region" => {
+                let Some((title, x)) = rest.split_first() else {
+                    return Err(usage(text, form));
+                };
+                Instruction::Region {
+                    title: title.clone(),
+                    parts: many(x)?,
+                }
+            }
+            "paper" => {
+                let (sheet, size, orientation) = match rest {
+                    [s, z] => (s, z, None),
+                    [s, z, o] => (
+                        s,
+                        z,
+                        Some(match o.as_str() {
+                            "landscape" => ryusch::layout::Orientation::Landscape,
+                            "portrait" => ryusch::layout::Orientation::Portrait,
+                            _ => return Err(usage(text, form)),
+                        }),
+                    ),
+                    _ => return Err(usage(text, form)),
+                };
+                // A sheet's name reads as its ID.
+                let sheet = match &self.b.layout {
+                    Some(Ok(l)) => l
+                        .sheets
+                        .iter()
+                        .find(|(id, x)| *id == sheet || x.name == *sheet)
+                        .map(|(id, _)| id.clone()),
+                    _ => None,
+                }
+                .unwrap_or_else(|| sheet.clone());
+                Instruction::Paper {
+                    sheet,
+                    size: size.clone(),
+                    orientation,
+                }
             }
             "sheet" if rest.first().is_some_and(|w| w == "rename") => {
                 let [_, from, to] = rest else {

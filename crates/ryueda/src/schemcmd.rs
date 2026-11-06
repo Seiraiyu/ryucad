@@ -339,6 +339,32 @@ pub fn place(
                 }
             }
             Said::RenameSheet { from, to } => renames.push((i, from, to)),
+            Said::RenameRegion { region, title } => {
+                // A lasting `region <title> <its parts now>`, replacing a
+                // region instruction that names only its parts.
+                let parts: Vec<String> = match &b.layout {
+                    Some(Ok(l)) => l.regions.get(&region).map(|r| r.parts.clone()),
+                    _ => None,
+                }
+                .unwrap_or_default();
+                let within: Vec<String> = lasting
+                    .iter()
+                    .filter(|(_, ins)| {
+                        matches!(ins, Instruction::Region { parts: named, .. }
+                            if named.iter().all(|k| parts.contains(k)))
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in within {
+                    lasting.remove(&id);
+                    released.push(id);
+                }
+                let ins = Instruction::Region { title, parts };
+                let id = ryusch::layout::next_id(lasting.keys());
+                lasting.insert(id.clone(), ins);
+                added.push(id.clone());
+                batch.push((id, text.clone()));
+            }
             Said::Do(Instruction::Shift { .. }) => {
                 return Err(
                     Error::new(Code::InvalidParam, "shift is a move: give it with --move")
@@ -369,10 +395,10 @@ pub fn place(
                 move_list.push(ins);
                 batch.push((format!("move {}", i + 1), text.clone()));
             }
-            Said::Release(_) | Said::RenameSheet { .. } => {
+            Said::Release(_) | Said::RenameSheet { .. } | Said::RenameRegion { .. } => {
                 return Err(Error::new(
                     Code::InvalidParam,
-                    "release and sheet rename are instructions, not moves",
+                    "release, sheet rename and region rename are instructions, not moves",
                 )
                 .with("move", i));
             }
