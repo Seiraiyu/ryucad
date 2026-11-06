@@ -252,6 +252,62 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
+        // A sheet metal feature's allowance and relief each on a line
+        // (`allowance = k_factor 0.44`, `relief = obround 1 mm × 1.5 mm`), a
+        // flange's edges on one line, each end on its own
+        // (`ends[plate/<hex>] = setback 5 mm, relief tear 0.5 mm`).
+        Some("ryucad.feature")
+            if matches!(
+                o.get("type").and_then(Value::as_str),
+                Some("base_flange" | "flange")
+            ) =>
+        {
+            fn relief_text(r: &Value) -> String {
+                let kind = r.get("kind").and_then(Value::as_str).unwrap_or_default();
+                match (r.get("width"), r.get("depth")) {
+                    (Some(w), Some(d)) => format!("{kind} {} × {}", scalar(w), scalar(d)),
+                    (Some(w), None) => format!("{kind} {}", scalar(w)),
+                    _ => kind.to_owned(),
+                }
+            }
+            if let Some(Value::Object(a)) = rest.remove("allowance") {
+                let text: Vec<String> = a
+                    .iter()
+                    .map(|(k, x)| format!("{k} {}", scalar(x)))
+                    .collect();
+                lines.push(format!("allowance = {}", text.join(", ")));
+            }
+            if let Some(r) = rest.remove("relief") {
+                lines.push(format!("relief = {}", relief_text(&r)));
+            }
+            if let Some(Value::Array(edges)) = rest.remove("edges") {
+                let text: Vec<String> = edges
+                    .iter()
+                    .map(|e| match e.get("edge") {
+                        Some(x) => format!(
+                            "{} (side {})",
+                            reference(x).unwrap_or_else(|| scalar(x)),
+                            reference(&e["side"]).unwrap_or_else(|| scalar(&e["side"]))
+                        ),
+                        None => reference(e).unwrap_or_else(|| scalar(e)),
+                    })
+                    .collect();
+                lines.push(format!("edges = {}", text.join(", ")));
+            }
+            if let Some(Value::Array(ends)) = rest.remove("ends") {
+                for e in &ends {
+                    let v = reference(&e["vertex"]).unwrap_or_else(|| scalar(&e["vertex"]));
+                    let mut parts = Vec::new();
+                    if let Some(s) = e.get("setback") {
+                        parts.push(format!("setback {}", scalar(s)));
+                    }
+                    if let Some(r) = e.get("relief") {
+                        parts.push(format!("relief {}", relief_text(r)));
+                    }
+                    lines.push(format!("ends[{v}] = {}", parts.join(", ")));
+                }
+            }
+        }
         // A shell's or offset's face groups, each on one line:
         // `faces[0] = 4 mm: base/<hex>, base/<hex>`.
         Some("ryucad.feature")
@@ -372,6 +428,99 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 for (f, hash) in &results {
                     last.push(format!("results.{f} = {}", scalar(hash)));
                 }
+            }
+        }
+        Some(crate::doc::annotation::KIND) => {
+            let who = |b: &Value| {
+                format!(
+                    "{} ({})",
+                    b["participant"].as_str().unwrap_or_default(),
+                    b["kind"].as_str().unwrap_or_default()
+                )
+            };
+            for key in ["by", "claimed_by"] {
+                match rest.remove(key) {
+                    Some(b @ Value::Object(_)) => lines.push(format!("{key} = {}", who(&b))),
+                    Some(Value::Null) => lines.push(format!("{key} = none")),
+                    _ => {}
+                }
+            }
+            if let Some(Value::Array(pins)) = rest.remove("pins") {
+                for (i, p) in pins.iter().enumerate() {
+                    let at = p["point_m"]
+                        .as_array()
+                        .map(|a| a.iter().map(scalar).collect::<Vec<_>>().join(", "));
+                    let what = p["ref"].as_str().or(p["part"].as_str()).unwrap_or_default();
+                    lines.push(match at {
+                        Some(at) => format!("pin {} = {what} at {at}", i + 1),
+                        None => format!("pin {} = {what}", i + 1),
+                    });
+                }
+            }
+            match rest.remove("change") {
+                Some(Value::Object(c)) => {
+                    let mut line = format!(
+                        "change = {}",
+                        c.get("request")
+                            .and_then(|r| r["method"].as_str())
+                            .unwrap_or_default()
+                    );
+                    if c.get("rough") == Some(&Value::Bool(true)) {
+                        line.push_str(" (rough)");
+                    }
+                    let after: Vec<String> = c
+                        .get("after")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .map(scalar)
+                        .collect();
+                    if !after.is_empty() {
+                        line.push_str(&format!(", after {}", after.join(", ")));
+                    }
+                    lines.push(line);
+                    if let Some(Value::Object(w)) = c.get("writes") {
+                        let paths: Vec<&str> = w.keys().map(String::as_str).collect();
+                        lines.push(format!("change.writes = {}", paths.join(", ")));
+                    }
+                    if let Some(r) = c.get("request") {
+                        last.push(format!(
+                            "change.request = {}",
+                            crate::doc::canonical::to_string(r)
+                        ));
+                    }
+                }
+                Some(Value::Null) => lines.push("change = none".to_owned()),
+                _ => {}
+            }
+            if let Some(Value::Object(replies)) = rest.remove("replies") {
+                for (id, r) in &replies {
+                    lines.push(format!(
+                        "reply {id} = {} {}: {}",
+                        who(&r["by"]),
+                        r["at"].as_str().unwrap_or_default(),
+                        r["text"].as_str().unwrap_or_default()
+                    ));
+                }
+            }
+            if let Some(r) = rest.remove("resolution") {
+                lines.push(match r {
+                    Value::Null => "resolution = none".to_owned(),
+                    r => format!(
+                        "resolution = {} {}{}{}",
+                        who(&r["by"]),
+                        r["at"].as_str().unwrap_or_default(),
+                        if r["applied"] == true {
+                            ", applied"
+                        } else {
+                            ""
+                        },
+                        r["note"]
+                            .as_str()
+                            .map(|n| format!(": {n}"))
+                            .unwrap_or_default()
+                    ),
+                });
             }
         }
         _ => {}
@@ -1291,7 +1440,43 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
     if let Some(d) = lock_changes(from, to) {
         v["deps"] = d;
     }
+    if let Some(a) = annotation_changes(from, to) {
+        v["annotations"] = a;
+    }
     v
+}
+
+/// Annotations added, removed and changed (by JSON pointer), by ID;
+/// `None` when none differs. A file that doesn't read is compared as
+/// its bytes' JSON, or not at all.
+fn annotation_changes(from: &Files, to: &Files) -> Option<Value> {
+    let of = |files: &Files| -> BTreeMap<String, Option<Value>> {
+        files
+            .iter()
+            .filter(|(p, _)| crate::doc::annotation::is_annotation_path(p))
+            .map(|(p, _)| {
+                let id = p["annotations/".len()..p.len() - ".json".len()].to_owned();
+                (id, json_at(files, p))
+            })
+            .collect()
+    };
+    let (a, b) = (of(from), of(to));
+    let added: Vec<&String> = b.keys().filter(|k| !a.contains_key(*k)).collect();
+    let removed: Vec<&String> = a.keys().filter(|k| !b.contains_key(*k)).collect();
+    let mut changed = Map::new();
+    for (id, x) in &a {
+        if let Some(y) = b.get(id)
+            && x != y
+        {
+            let mut list = Vec::new();
+            changes("", x.as_ref(), y.as_ref(), &mut list);
+            changed.insert(id.clone(), json!(list));
+        }
+    }
+    if added.is_empty() && removed.is_empty() && changed.is_empty() {
+        return None;
+    }
+    Some(json!({"added": added, "removed": removed, "changed": changed}))
 }
 
 /// What changed in `ryucad.lock`, by label: `{added, removed, changed}`,
@@ -1914,6 +2099,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_annotation_reads_a_line_per_field_pin_and_reply() {
+        let v = json!({"kind": "ryucad.annotation", "format": 1, "id": "aaaaaaaaaa",
+                       "by": {"participant": "dave (window 1)", "kind": "human"},
+                       "at": "2026-11-05T14:02:11Z", "status": "open", "claimed_by": null,
+                       "pins": [{"ref": "plate/slab/9f", "point_m": [0.01, 0, 0]},
+                                {"part": "plate", "point_m": [0, 0, 0.005]}],
+                       "comment": "Move this hole", "view": null,
+                       "change": {"request": {"method": "feature.edit", "params": {}},
+                                  "rough": true,
+                                  "base": {"parts/plate/features/a.json": null},
+                                  "writes": {"parts/plate/features/a.json": {}},
+                                  "after": ["bbbbbbbbbb"]},
+                       "replies": {"r1": {"by": {"participant": "agent", "kind": "agent"},
+                                          "at": "2026-11-05T14:05:00Z", "text": "On it."}},
+                       "resolution": null});
+        let text =
+            String::from_utf8(textconv(crate::doc::canonical::to_string(&v).as_bytes())).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "ryucad.annotation (format 1)");
+        for want in [
+            "by = dave (window 1) (human)",
+            "comment = Move this hole",
+            "pin 1 = plate/slab/9f at 0.01, 0, 0",
+            "pin 2 = plate at 0, 0, 0.005",
+            "change = feature.edit (rough), after bbbbbbbbbb",
+            "change.writes = parts/plate/features/a.json",
+            "reply r1 = agent (agent) 2026-11-05T14:05:00Z: On it.",
+            "status = open",
+        ] {
+            assert!(lines.contains(&want), "{want:?} in\n{text}");
+        }
+    }
+
+    #[test]
+    fn diff_lists_annotations_at_the_top() {
+        let a = |status: &str| json!({"kind": "ryucad.annotation", "id": "aaaaaaaaaa", "status": status});
+        let mut from = Files::new();
+        let mut to = Files::new();
+        let put = |f: &mut Files, p: &str, v: Value| {
+            f.insert(
+                p.to_owned(),
+                crate::doc::canonical::to_string(&v).into_bytes().into(),
+            );
+        };
+        put(&mut from, "annotations/aaaaaaaaaa.json", a("open"));
+        put(&mut to, "annotations/aaaaaaaaaa.json", a("done"));
+        put(&mut to, "annotations/bbbbbbbbbb.json", a("open"));
+        put(&mut from, "annotations/cccccccccc.json", a("open"));
+        let v = structural(&from, &to, &Options::default(), &Default::default());
+        assert_eq!(v["annotations"]["added"], json!(["bbbbbbbbbb"]));
+        assert_eq!(v["annotations"]["removed"], json!(["cccccccccc"]));
+        assert_eq!(
+            v["annotations"]["changed"]["aaaaaaaaaa"][0]["at"],
+            "/status"
+        );
+        assert!(
+            structural(&from, &from, &Options::default(), &Default::default())
+                .get("annotations")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn mirrors_and_splits_read_a_line_per_field() {
         let v = json!({"format": 10, "kind": "ryucad.feature", "type": "mirror", "solid": "half",
                        "plane": {"feature": "mid"}, "operation": "join", "targets": ["half"]});
@@ -1938,6 +2186,54 @@ mod tests {
                  target = h\n"
             )
         );
+    }
+
+    #[test]
+    fn sheet_metal_features_textconv_one_line_a_field() {
+        let n = |k: u8| format!("{k:032x}");
+        let v = json!({"format": 11, "kind": "ryucad.feature", "type": "flange", "target": "plate",
+                       "edges": [{"feature": "plate", "name": n(1)},
+                                 {"edge": {"feature": "plate", "name": n(2)}, "side": {"feature": "plate", "name": n(3)}}],
+                       "angle": "90 deg", "length": "20 mm",
+                       "ends": [{"vertex": {"feature": "plate", "name": n(4)}, "setback": "5 mm",
+                                 "relief": {"kind": "obround", "width": "1 mm", "depth": "1.5 mm"}}]});
+        let t = text(v.clone());
+        assert!(
+            t.contains(&format!(
+                "edges = plate/{}, plate/{} (side plate/{})",
+                n(1),
+                n(2),
+                n(3)
+            )),
+            "{t}"
+        );
+        assert!(
+            t.contains(&format!(
+                "ends[plate/{}] = setback 5 mm, relief obround 1 mm × 1.5 mm",
+                n(4)
+            )),
+            "{t}"
+        );
+        let v = json!({"format": 11, "kind": "ryucad.feature", "type": "base_flange", "sketch": "s",
+                       "thickness": "1.5 mm", "radius": "1 mm", "allowance": {"deduction": "2.4 mm"},
+                       "relief": {"kind": "tear", "width": "0.5 mm"}});
+        let t = text(v.clone());
+        assert!(t.contains("allowance = deduction 2.4 mm"), "{t}");
+        assert!(t.contains("relief = tear 0.5 mm"), "{t}");
+    }
+
+    #[test]
+    fn a_flanges_changes_are_by_field() {
+        let n = |k: u8| format!("{k:032x}");
+        let before = json!({"format": 11, "kind": "ryucad.feature", "type": "flange", "target": "plate",
+                            "edges": [{"feature": "plate", "name": n(1)}], "angle": "90 deg", "length": "20 mm"});
+        let mut after = before.clone();
+        after["angle"] = json!("80 deg");
+        after["ends"] = json!([{"vertex": {"feature": "plate", "name": n(2)}, "setback": "5 mm"}]);
+        let mut out = Vec::new();
+        changes("", Some(&before), Some(&after), &mut out);
+        let pointers: Vec<&str> = out.iter().map(|c| c["at"].as_str().unwrap()).collect();
+        assert_eq!(pointers, ["/angle", "/ends"]);
     }
 
     #[test]

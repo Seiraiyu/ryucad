@@ -234,33 +234,8 @@ pub fn profile(
         Error::new(Code::Internal, "a sketch frame that isn't one").with("kernel", format!("{e:?}"))
     })?;
     let valid = ValidProfile::new(Profile { frame, loops: out })
-        .map_err(|e| profile_fault(sketch, &keys, e))?;
+        .map_err(|e| sketch_invalid(sketch, &keys, e))?;
     Ok((valid, keys))
-}
-
-/// A kernel's refusal of a sketch's profile, in the sketch's terms.
-fn profile_fault(sketch: &Id, keys: &Keys, e: ryukei::Error) -> Error {
-    match e {
-        ryukei::Error::InvalidProfile(p) => {
-            let entities = keys.of_fault(&p);
-            Error::new(
-                Code::ProfileInvalid,
-                format!(
-                    "sketch {sketch}: {} ({})",
-                    describe(&p),
-                    entities
-                        .iter()
-                        .map(Id::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            )
-            .with("entities", &entities)
-            .with("kernel", format!("{p:?}"))
-        }
-        e => Error::new(Code::ProfileInvalid, format!("sketch {sketch}: {e}"))
-            .with("kernel", format!("{e:?}")),
-    }
 }
 
 /// The surface profile of a solved sketch (ryucad 18): its closed loops,
@@ -376,7 +351,7 @@ pub fn surface(
         Error::new(Code::Internal, "a sketch frame that isn't one").with("kernel", format!("{e:?}"))
     })?;
     let valid = ValidProfile::surface(Profile { frame, loops }, chains)
-        .map_err(|e| profile_fault(sketch, &keys, e))?;
+        .map_err(|e| sketch_invalid(sketch, &keys, e))?;
     Ok((valid, keys))
 }
 
@@ -775,6 +750,32 @@ pub fn origins(
         }
     }
     out
+}
+
+/// The kernel's refusal of a profile, in the sketch's terms:
+/// `profile_invalid` naming the entities `keys` gives for its fault.
+pub(crate) fn sketch_invalid(sketch: &Id, keys: &Keys, e: ryukei::Error) -> Error {
+    match e {
+        ryukei::Error::InvalidProfile(p) => {
+            let entities = keys.of_fault(&p);
+            Error::new(
+                Code::ProfileInvalid,
+                format!(
+                    "sketch {sketch}: {} ({})",
+                    describe(&p),
+                    entities
+                        .iter()
+                        .map(Id::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+            .with("entities", &entities)
+            .with("kernel", format!("{p:?}"))
+        }
+        e => Error::new(Code::ProfileInvalid, format!("sketch {sketch}: {e}"))
+            .with("kernel", format!("{e:?}")),
+    }
 }
 
 #[cfg(test)]

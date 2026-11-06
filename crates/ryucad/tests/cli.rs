@@ -55,6 +55,9 @@ impl Pair {
             .args(args)
             .env("RYUCAD_RUNTIME_DIR", &self.run)
             .env("RYUCAD_IDLE_TIMEOUT", "60")
+            // Annotations' IDs and times alike both ways.
+            .env("RYUCAD_ID_SEED", "cli")
+            .env("RYUCAD_NOW", "2026-11-05T14:02:11Z")
             .env("RYUCAD_CONFIG_DIR", self.run.with_file_name("config"))
             .env("RYUCAD_CACHE_DIR", root.with_extension("cache"))
             .stdout(std::process::Stdio::piped())
@@ -71,6 +74,9 @@ impl Pair {
             .args(args)
             .env("RYUCAD_RUNTIME_DIR", &self.run)
             .env("RYUCAD_IDLE_TIMEOUT", "60")
+            // Annotations' IDs and times alike both ways.
+            .env("RYUCAD_ID_SEED", "cli")
+            .env("RYUCAD_NOW", "2026-11-05T14:02:11Z")
             .env("RYUCAD_CONFIG_DIR", self.run.with_file_name("config"))
             // Each project its own disk cache, as two machines would have.
             .env("RYUCAD_CACHE_DIR", root.with_extension("cache"));
@@ -1115,6 +1121,7 @@ fn every_protocol_method_has_a_command() {
         ("interference", &["interference"]),
         ("measure", &["measure"]),
         ("mass", &["mass"]),
+        ("sheet.get", &["sheet"]),
         ("clearance", &["clearance"]),
         ("deps.add", &["deps", "add"]),
         ("deps.fetch", &["deps", "fetch"]),
@@ -1163,6 +1170,19 @@ fn every_protocol_method_has_a_command() {
         ("explode.save", &["explode", "save"]),
         ("explode.delete", &["explode", "delete"]),
         ("explode.show", &["explode", "show"]),
+        ("participant.mode", &["mode"]),
+        ("annotation.create", &["annotations", "add"]),
+        ("annotation.propose", &["annotations", "propose"]),
+        ("annotation.list", &["annotations", "list"]),
+        ("annotation.show", &["annotations", "show"]),
+        ("annotation.reply", &["annotations", "reply"]),
+        ("annotation.claim", &["annotations", "claim"]),
+        ("annotation.apply", &["annotations", "apply"]),
+        ("annotation.resolve", &["annotations", "resolve"]),
+        ("annotation.reject", &["annotations", "reject"]),
+        ("annotation.reopen", &["annotations", "reopen"]),
+        ("annotation.edit", &["annotations", "edit"]),
+        ("annotation.delete", &["annotations", "delete"]),
         ("section.set", &["section"]),
         ("highlight.set", &["highlight"]),
         ("highlight.clear", &["highlight"]),
@@ -3517,6 +3537,219 @@ fn shells_and_offsets_from_the_cli() {
     let (_, v) = p.run_in(&p.daemon, "", &["feature", "show", "box", "sh"]);
     assert_eq!(v["result"]["direction"], "inward", "{v}");
     assert_eq!(v["result"]["open"], json!([top]), "{v}");
+}
+
+#[test]
+fn sheet_metal_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--plane", "xy",
+    ]);
+    let mut ops = Vec::new();
+    for (i, at) in [[0, 0], [60, 0], [60, 40], [0, 40]].into_iter().enumerate() {
+        ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    for i in 1..=4 {
+        ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                        "start": format!("p{i}"), "end": format!("p{}", i % 4 + 1)}));
+    }
+    p.ok(&[
+        "sketch",
+        "edit",
+        "p",
+        "s",
+        &serde_json::to_string(&ops).unwrap(),
+    ]);
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "base_flange",
+        "--id",
+        "plate",
+        "--sketch",
+        "s",
+        "--thickness",
+        "1.5mm",
+        "--radius",
+        "1mm",
+        "--k-factor",
+        "0.44",
+        "--relief",
+        "rectangular",
+        "--relief-width",
+        "1mm",
+        "--relief-depth",
+        "0.5mm",
+    ]);
+    assert_eq!(r["feature"]["relief"]["kind"], "rectangular", "{r}");
+    let body = p.ok(&["inspect", "p", "plate"])["bodies"][0].clone();
+    let at = |q: [f64; 3]| -> String {
+        body["vertices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| (0..3).all(|k| (v["point"][k].as_f64().unwrap() - q[k] * 1e-3).abs() < 1e-9))
+            .map(|v| v["name"].as_str().unwrap().to_owned())
+            .unwrap()
+    };
+    let (a, b) = (at([60.0, 0.0, 1.5]), at([60.0, 40.0, 1.5]));
+    let edge = body["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| (e["start"] == a && e["end"] == b) || (e["start"] == b && e["end"] == a))
+        .map(|e| format!("p/plate/{}", e["name"].as_str().unwrap()))
+        .unwrap();
+    let corner = format!("p/plate/{b}");
+    // A flange set back 5 mm at one end, taking the founder's relief.
+    let setback = format!("{corner}=5mm");
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "flange",
+        "--id",
+        "f",
+        "--edge",
+        &edge,
+        "--angle",
+        "90deg",
+        "--length",
+        "20mm",
+        "--end-setback",
+        &setback,
+    ]);
+    assert_eq!(r["feature"]["target"], "plate", "{r}");
+    assert_eq!(r["feature"]["ends"][0]["setback"]["m"], 0.005, "{r}");
+    assert_eq!(
+        r["feature"]["inherited"],
+        json!(["radius", "relief"]),
+        "{r}"
+    );
+    p.ok(&["rebuild", "p"]);
+    let v = p.ok(&["sheet", "p", "plate"]);
+    assert_eq!(v["bends"].as_array().unwrap().len(), 1, "{v}");
+    // Its angle and position edited, then put back: the default position
+    // is written as nothing again.
+    p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "f",
+        "--angle",
+        "80deg",
+        "--position",
+        "bend_outside",
+    ]);
+    let show = p.ok(&["feature", "show", "p", "f"]);
+    assert_eq!(show["position"], "bend_outside", "{show}");
+    p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "f",
+        "--angle",
+        "90deg",
+        "--position",
+        "material_inside",
+    ]);
+    let file = std::fs::read_to_string(p.direct.join("parts/p/features/f.json")).unwrap();
+    assert!(!file.contains("position"), "{file}");
+    // The end's relief its own, then no ends, then no relief: the kernel
+    // refuses at rebuild.
+    let relief = format!("{corner}=tear,0.5mm");
+    p.ok(&["feature", "edit", "p", "f", "--end-relief", &relief]);
+    p.ok(&["rebuild", "p"]);
+    p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "f",
+        "--no-ends",
+        "--setback",
+        "5mm",
+        "--relief",
+        "none",
+    ]);
+    let (code, v) = p.both_from("", &["rebuild", "p"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("rebuild_failed")),
+        "{v}"
+    );
+    let f = v["error"]["details"]["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == "f")
+        .unwrap()
+        .clone();
+    assert_eq!(f["error"]["code"], "sheet_metal_failed", "{f}");
+    assert_eq!(f["error"]["details"]["reason"], "relief_needed", "{f}");
+    // A bent section of an open chain, with a deduction.
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "z", "--plane", "zx",
+    ]);
+    let mut ops = Vec::new();
+    for (i, at) in [[0, 0], [20, 0], [20, 25], [45, 25]]
+        .into_iter()
+        .enumerate()
+    {
+        ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    for i in 1..=3 {
+        ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                        "start": format!("p{i}"), "end": format!("p{}", i + 1)}));
+    }
+    p.ok(&[
+        "sketch",
+        "edit",
+        "p",
+        "z",
+        &serde_json::to_string(&ops).unwrap(),
+    ]);
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "base_flange",
+        "--id",
+        "zb",
+        "--sketch",
+        "z",
+        "--thickness",
+        "1mm",
+        "--radius",
+        "2mm",
+        "--deduction",
+        "2.4mm",
+        "--depth",
+        "30mm",
+    ]);
+    assert_eq!(r["feature"]["depth"]["m"], 0.03, "{r}");
+    assert_eq!(r["feature"]["allowance"]["deduction"]["m"], 0.0024, "{r}");
+    // A flange with no target of two sheet metal solids: one of the two is
+    // named, or it is refused.
+    p.fails(
+        &[
+            "feature", "add", "p", "flange", "--id", "g", "--edge", &edge, "--angle", "90deg",
+            "--length", "10mm",
+        ],
+        "invalid_param",
+        1,
+    );
+    // The daemon logged the last write it made: undo takes the Z away. The
+    // two folders part here (undo is the daemon's), so nothing is
+    // compared after it.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["feature", "list", "p"]);
+    assert!(!v.to_string().contains("\"zb\""), "{v}");
 }
 
 #[test]
@@ -5976,4 +6209,158 @@ fn credential_helpers_are_told_not_to_prompt() {
     assert!(env.contains("GIT_TERMINAL_PROMPT=0"), "{env}");
     let message = v["error"]["message"].as_str().unwrap();
     assert!(message.contains(&format!("git ls-remote {url}")), "{v}");
+}
+
+#[test]
+fn annotations_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=40", "--param", "y=20", "--param",
+        "z=10",
+    ]);
+    let body = p.ok(&["inspect", "p"])["bodies"][0].clone();
+    let face = format!("p/b/{}", body["faces"][0]["name"].as_str().unwrap());
+    let c = p.ok(&[
+        "annotations",
+        "add",
+        &face,
+        "--comment",
+        "Move this face 5 mm",
+        "--point",
+        "1,2,10",
+    ]);
+    let comment = c["annotation"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        c["annotation"]["pins"][0]["point_m"],
+        json!([0.001, 0.002, 0.01])
+    );
+    // Three proposals, stacked: each stands on the one before.
+    let req = |y: u32| {
+        json!({"method": "feature.edit", "params": {"part": "p", "id": "b", "params": {"y": y}}})
+            .to_string()
+    };
+    let a = p.ok(&[
+        "annotations",
+        "propose",
+        "--request",
+        &req(25),
+        "--comment",
+        "wider",
+    ]);
+    let b = p.ok(&[
+        "annotations",
+        "propose",
+        "--request",
+        &req(30),
+        "--pin",
+        &face,
+    ]);
+    let r = p.ok(&["annotations", "propose", "--request", &req(35), "--rough"]);
+    let (a, b, r) = (
+        a["annotation"]["id"].as_str().unwrap().to_owned(),
+        b["annotation"]["id"].as_str().unwrap().to_owned(),
+        r["annotation"]["id"].as_str().unwrap().to_owned(),
+    );
+    assert_eq!(
+        p.ok(&["annotations", "show", &b])["annotation"]["change"]["after"],
+        json!([a])
+    );
+    let list = p.ok(&["annotations", "list", "--open"]);
+    assert_eq!(list["annotations"].as_array().unwrap().len(), 4);
+    // A proposal is a revision: diff and render it.
+    let rev = format!("annotation:{a}");
+    let d = p.ok(&["diff", "--from", "working", "--to", &rev, "--model"]);
+    assert_eq!(d["parts"]["p"]["features"]["b"]["status"], "changed", "{d}");
+    p.ok(&[
+        "render",
+        "p",
+        "--rev",
+        &rev,
+        "--compare",
+        "working",
+        "--out",
+        "a.png",
+        "--size",
+        "160x120",
+    ]);
+    // Apply the middle one: its chain first.
+    let v = p.ok(&["annotations", "apply", &b]);
+    assert_eq!(v["applied"], json!([a, b]));
+    // One undoable change: undone, the model and both annotations are
+    // back; redone, the daemon's project is the other's again.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, f) = p.run_in(&p.daemon, "", &["feature", "show", "p", "b"]);
+    assert_eq!(f["result"]["params"]["y"]["value"], "20 mm", "{f}");
+    let (_, l) = p.run_in(&p.daemon, "", &["annotations", "list", "--status", "done"]);
+    assert_eq!(l["result"]["annotations"], json!([]), "{l}");
+    let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0, "{v}");
+    // The last no longer applies once the model moves under it.
+    p.ok(&["feature", "edit", "p", "b", "--param", "z=12"]);
+    let e = p.fails(&["annotations", "apply", &r], "annotation_stale", 1);
+    assert_eq!(e["details"]["files"][0]["path"], "parts/p/features/b.json");
+    // Two agents can't both claim one.
+    p.ok(&["--as", "a1", "annotations", "claim", &comment]);
+    p.fails(
+        &["--as", "a2", "annotations", "claim", &comment],
+        "annotation_claimed",
+        1,
+    );
+    p.ok(&[
+        "--as",
+        "a1",
+        "annotations",
+        "reply",
+        &comment,
+        "Moved it 5 mm.",
+    ]);
+    p.ok(&[
+        "--as",
+        "a1",
+        "annotations",
+        "resolve",
+        &comment,
+        "--note",
+        "done",
+    ]);
+    p.ok(&["annotations", "reopen", &comment]);
+    p.fails(&["annotations", "reject", &r], "usage", 2);
+    p.ok(&[
+        "annotations",
+        "reject",
+        &r,
+        "--reason",
+        "Stale: I made the edit myself",
+    ]);
+    let shown = p.ok(&["annotations", "show", &comment]);
+    assert_eq!(shown["annotation"]["replies"].as_object().unwrap().len(), 2);
+    assert_eq!(
+        p.ok(&["annotations", "list", "--status", "rejected"])["annotations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn modes_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    // Through the daemon an agent's mode is set and shown; in process
+    // there is no live session to hold it.
+    let (code, v) = p.run_in(&p.daemon, "", &["mode", "annotate"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["mode"], "annotate");
+    let (code, v) = p.run_in(&p.direct, "", &["mode", "annotate"]);
+    assert_eq!(code, 1, "{v}");
+    assert_eq!(v["error"]["code"], "no_live_session");
+    // An agent's mode refuses nothing.
+    let (code, v) = p.run_in(&p.daemon, "", &["mode", "view"]);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["part", "create", "q"]);
+    assert_eq!(code, 0, "{v}");
 }

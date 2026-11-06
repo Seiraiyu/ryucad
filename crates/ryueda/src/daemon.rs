@@ -25,6 +25,9 @@ impl ryu_session::Serve for Eda {
     type Session = Session;
     type Request = Request;
     type Version = VersionInfo;
+    /// Part catalogues' downloads: progress in phase `fetch`, cancelled
+    /// between files, their work done with the lock released.
+    const LONG: &'static [&'static str] = &["parts.sync", "parts.refresh"];
 
     fn version() -> VersionInfo {
         VersionInfo::current()
@@ -42,6 +45,10 @@ impl ryu_session::Serve for Eda {
         match req {
             Request::DaemonStatus {} => Control::Status,
             Request::DaemonShutdown {} => Control::Shutdown,
+            Request::RequestCancel { token, name } => Control::Cancel {
+                token: token.clone(),
+                name: name.clone(),
+            },
             Request::Subscribe { topics } => Control::Subscribe(topics.clone()),
             Request::SessionHello {
                 kind, participant, ..
@@ -58,9 +65,19 @@ impl ryu_session::Serve for Eda {
         me: Option<&str>,
         root: &Path,
         req: Request,
-        _: &ryu_session::job::Job,
+        job: &ryu_session::job::Job,
     ) -> Result<Answer> {
-        crate::server::handle_safely(session, Some(live), me, root, req)
+        crate::server::handle_job(session, Some(live), me, root, req, job)
+    }
+
+    fn prepare(
+        session: &mut Option<Session>,
+        _: &Live<Eda>,
+        _: Option<&str>,
+        req: &Request,
+        job: &ryu_session::job::Job,
+    ) -> Option<ryu_session::Prepared<Session>> {
+        crate::server::prepare(session, req, job)
     }
 
     fn settle(session: &mut Option<Session>, live: &mut Live<Eda>, root: &Path) {

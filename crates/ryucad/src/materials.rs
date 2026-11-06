@@ -2,10 +2,8 @@
 //! and `materials.delete`, each write one logged, undoable change guarded
 //! by the project's revision. See [`crate::doc::materials`] for the file.
 
-use crate::config;
 use crate::doc::id::Id;
 use crate::doc::materials::{self, MATERIALS, Material, Materials, check_colour, check_name};
-use crate::doc::project::{remove_file, write_json};
 use crate::error::{Code, Error, Result};
 use crate::session::Session;
 use crate::units::Quantity;
@@ -66,19 +64,19 @@ pub fn list(session: &Session) -> Result<Value> {
     Ok(json!({
         "materials": materials,
         "default": lib.default,
-        "project_revision": config::project_revision(session.root())?,
+        "project_revision": session.project_revision()?,
     }))
 }
 
 fn save(session: &mut Session, lib: &Materials) -> Result<Value> {
     let path = session.root().join(MATERIALS);
     if lib.materials.is_empty() {
-        remove_file(session.root(), &path)?;
+        session.remove_file(&path)?;
     } else {
-        write_json(&path, &lib.to_json())?;
+        session.write_json(&path, &lib.to_json())?;
     }
     session.reload()?;
-    Ok(json!(config::project_revision(session.root())?))
+    Ok(json!(session.project_revision()?))
 }
 
 /// Adds or replaces material `name`; `default` makes it the library's
@@ -91,7 +89,7 @@ pub fn set(
     default: bool,
     expected: Option<&str>,
 ) -> Result<Value> {
-    config::check_project_revision(session.root(), expected)?;
+    session.check_project_revision(expected)?;
     check_name(name)?;
     let density = Quantity::density(density)?;
     let colour = colour.map(check_colour).transpose()?;
@@ -111,7 +109,7 @@ pub fn set(
 /// names it; the default goes with it, and the file with its last
 /// material.
 pub fn delete(session: &mut Session, name: &str, expected: Option<&str>) -> Result<Value> {
-    config::check_project_revision(session.root(), expected)?;
+    session.check_project_revision(expected)?;
     let mut lib = library(session)?;
     if !lib.materials.contains_key(name) {
         return Err(

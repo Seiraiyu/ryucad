@@ -39,11 +39,13 @@ impl ryu_session::Product for Cad {
         into.insert("hidden".into(), json!(view.hidden));
         into.insert("sections".into(), json!(view.sections));
         into.insert("explode".into(), json!(view.explode));
+        into.insert("mode".into(), json!(view.mode));
     }
 }
 
 pub mod activity;
 pub mod along;
+pub mod annotation;
 pub mod appearance;
 pub mod assembly;
 #[cfg(feature = "bench")]
@@ -102,6 +104,7 @@ pub mod review;
 pub mod section;
 pub mod server;
 pub mod session;
+pub mod sheet_metal;
 pub mod sketch;
 pub mod sketch_view;
 pub mod solid;

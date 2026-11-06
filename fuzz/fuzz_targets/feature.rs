@@ -2,15 +2,18 @@
 //! writes back canonically and reads back equal, or give a structured
 //! error. Loaded, it is built as feature `f` of a part after boxes `b`
 //! and `c`, a rectangle sketch `s`, a sketch `t` on `b`'s top with a lone
-//! point, a pocket `k` cut from `b`'s top and an import `m` of a seeded
-//! body ryustep wrote (`imports/seeded.step`, products `s0` to `s7`,
-//! which an import `f` may select too; assemblies place the part without
-//! it), so its references resolve
+//! point, an open L sketch `u`, a pocket `k` cut from `b`'s top and an
+//! import `m` of a seeded body ryustep wrote (`imports/seeded.step`,
+//! products `s0` to `s7`, which an import `f` may select too; assemblies
+//! place the part without it), so its references resolve
 //! against real faces, edges and vertices, its operations act on real
 //! solids, its fillets and chamfers (seeded with `b`'s edges) round real
 //! edges, its holes drill at `t`'s point, its patterns repeat `k`, and
 //! its shells and offsets (seeded with `b`'s faces) hollow and grow `b`, and
-//! its mirrors and splits copy and divide `b`:
+//! its mirrors and splits copy and divide `b`, its base flanges make
+//! plates of `s` and bent sections of `u` (an open L, so its radius
+//! bends a corner), and its flanges bend and flange `b`'s
+//! edges:
 //! building must succeed or give a structured error, every body it leaves
 //! must pass the checks, cross or overlap itself nowhere and mesh with no
 //! faults, and a sketch that solves must solve to finite
@@ -94,6 +97,14 @@ fn base() -> &'static [(Id, Feature)] {
                         "l2": {"type": "line", "start": "p2", "end": "p3"},
                         "l3": {"type": "line", "start": "p3", "end": "p4"},
                         "l4": {"type": "line", "start": "p4", "end": "p1"}}}"#;
+        let u = r#"{"format": 2, "kind": "ryucad.feature", "type": "sketch", "plane": "xy",
+                    "constraints": {},
+                    "entities": {
+                        "p1": {"type": "point", "m": [0.04, 0.0]},
+                        "p2": {"type": "point", "m": [0.03, 0.0]},
+                        "p3": {"type": "point", "m": [0.03, 0.01]},
+                        "l1": {"type": "line", "start": "p1", "end": "p2"},
+                        "l2": {"type": "line", "start": "p2", "end": "p3"}}}"#;
         let c = r#"{"format": 1, "kind": "ryucad.feature", "type": "box",
                     "params": {"x": "8 mm", "y": "8 mm", "z": "8 mm"},
                     "placement": {"origin": ["16 mm", "4 mm", "2 mm"],
@@ -116,6 +127,7 @@ fn base() -> &'static [(Id, Feature)] {
             (id("c"), read(c)),
             (id("s"), read(s)),
             (id("t"), read(t)),
+            (id("u"), read(u)),
             (id("k"), read(k)),
         ]
     })
@@ -172,6 +184,7 @@ fn part(f: Feature) -> Part {
             id("c"),
             id("s"),
             id("t"),
+            id("u"),
             id("k"),
             id("m"),
             id("f"),

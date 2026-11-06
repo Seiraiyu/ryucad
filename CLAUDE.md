@@ -187,12 +187,14 @@ What each phase decided is recorded per area under `docs/claude/`, imported here
 - @docs/claude/ryucad-sketches.md — sketch features, sweeps, references, recompute, sketches in the app
 - @docs/claude/ryucad-git.md — diff, check, merge, the compare view and conflict panel
 - @docs/claude/ryucad-solids.md — solids, fillets, chamfers, holes, patterns
+- @docs/claude/ryucad-sheet-metal.md — sheet metal: base and edge flanges, the bend table
 - @docs/claude/ryucad-assemblies.md — assemblies, mates, scale, interference
 - @docs/claude/ryucad-step.md — STEP import, re-import and export
 - @docs/claude/ryucad-scale.md — the benchmark project, file events, the memory budget, the window at scale
 - @docs/claude/ryucad-formats.md — export formats: the scene, STL, 3MF, USD, and their references
 - @docs/claude/ryucad-reference.md — geometric references, the resolver, datum planes, axes and points and their uses
 - @docs/claude/ryucad-surfaces.md — sheets in the model, surface sweeps, planar faces
+- @docs/claude/ryucad-annotations.md — annotations: files, proposed changes and their capture, annotation revisions, apply, the lifecycle, participant modes
 - @docs/claude/ryupdm.md — the PDM data model and local PDM
 - @docs/claude/ryupdm-review.md — hosted review
 - @docs/claude/shared-crates.md — ryu-math, ryu-doc, ryu-session
