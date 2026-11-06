@@ -1210,6 +1210,44 @@ fn loops_that_cross_have_no_direction() {
     );
 }
 
+#[test]
+fn a_ring_narrower_than_its_samples_sagitta_keeps_its_loops() {
+    // A tube whose wall is 39 µm round circles of 2.8 mm (a Voron 2.4's
+    // NEMA17 stepper, #240), its bore's vertex a third of a sample step
+    // round from its outside's: at 16 samples a circle the bore's middle
+    // lies outside the outside's polygon, so the loops seemed to cross and
+    // healing refused them. They are judged again on denser samples.
+    use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    let (outer, inner, h) = (2.8448e-3, 2.80543e-3, 1e-3);
+    let rod = primitive::cylinder(OpKey(1), outer, h, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let bore = primitive::cylinder(OpKey(2), inner, 3.0 * h, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let turn = Rigid::rotation(
+        crate::geom::UnitVector3::Z,
+        0.555, // about 31.8 degrees
+    )
+    .then_after(&Rigid::translation(Vector3::new(0.0, 0.0, -h)));
+    let tube = boolean(
+        OpKey(3),
+        BooleanOp::Subtract,
+        &rod,
+        &[Tool {
+            key: ToolKey(1),
+            body: &bore,
+            place: turn,
+        }],
+    )
+    .unwrap()
+    .0;
+    let s = plain(&tube);
+    let (h, _, report) = heal_ok(&s);
+    assert_eq!(h.counts(), tube.counts());
+    assert_eq!(report.reversed, []);
+}
+
 /// Face `k` of a shape turned over: its sense and every loop reversed.
 fn turn_face(s: &mut Shape, k: usize) {
     s.faces[k].sense = s.faces[k].sense.flipped();
