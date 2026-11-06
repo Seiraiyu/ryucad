@@ -251,7 +251,7 @@ The design is document 213 in the Coxswain planning project `ryucad-ryukei`; thi
   - `full.yml` is the gate, the whole workspace's.
   - Per target: the golden hashes (`-p ryudfm --test determinism`), a build with `RYUDFM_COMMIT`, `ryudfm version` checked for the target, version and commit, `scripts/smoke-ryudfm.sh`, then an archive.
   - `workflow_dispatch` is a dry run: everything but publishing. The targets are ryucad's.
-- **What a release holds.** `ryudfm-<version>-<target>.tar.gz` (`.zip` on Windows), each a folder holding only `ryudfm`, with `SHA256SUMS`, `install-ryudfm.sh` and `install-ryudfm.ps1`.
+- **What a release holds.** `ryudfm-<version>-<target>.tar.gz` (`.zip` on Windows), each a folder holding `ryudfm` with the repository's `LICENSE` and `NOTICE`, with `SHA256SUMS`, `install-ryudfm.sh` and `install-ryudfm.ps1`.
   - Notes are generated from the ryudfm tag before it.
   - It is never GitHub's latest release (`--latest=false`), and never carries `install.sh` or `install.ps1`; the test checks both.
   - The viewer joins the archives from 0.2.0, as design 173 says, when design 169 has decided it.

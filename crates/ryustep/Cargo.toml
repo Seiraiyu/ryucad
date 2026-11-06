@@ -4,6 +4,7 @@ description = "STEP (ISO 10303) reading and writing for the ryukei kernel"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 rayon = "1"

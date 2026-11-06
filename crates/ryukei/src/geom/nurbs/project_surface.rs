@@ -12,6 +12,7 @@
 //! points on the domain's boundary are those of its boundary curves.
 
 use super::KnotVector;
+use super::bezier::BezierCurve;
 use super::eval::Spline;
 use super::project::{Foot, Signs, binom, creases, distinct, in_period, signs};
 use super::refine::Hom;
@@ -36,6 +37,133 @@ const MAX_STEPS: u32 = 32;
 /// Below this fraction of the largest product term a coefficient counts
 /// as zero.
 const ZERO: f64 = 1e-12;
+
+/// What every projection onto a surface reads and no point changes, built
+/// once per surface ([`NurbsSurface::prep`]): rebuilding it each time (four
+/// boundary splines refined to Bézier form by knot insertion, every
+/// patch's net copied, each crease line clamped and refined again) was
+/// most of a projection's cost on files' splines (#551). The same values
+/// in the same order, so every projection gives the same bits.
+#[derive(Clone)]
+pub(crate) struct Prep {
+    /// Each patch's net, in [`NurbsSurface::patches`]' order.
+    nets: Vec<Grid<Hom<Vector3>>>,
+    /// Each clamped boundary curve: the curve, its Bézier pieces, the
+    /// fixed `u` or `v`, and which way is into the domain.
+    edges: Vec<Boundary>,
+    /// Each crease line ([`creases`]) of the surface clamped across it:
+    /// its direction, its knot, the line and its pieces, in the order the
+    /// directions and the knots come.
+    creases: Vec<Crease>,
+    /// The surface clamped along each direction that has creases.
+    clamped: [Option<NurbsSurface>; 2],
+}
+
+/// A crease line of a surface, for [`Prep`]: its direction, its knot, the
+/// line and its Bézier pieces.
+#[derive(Clone)]
+struct Crease {
+    dir: Direction,
+    knot: f64,
+    line: Spline<Vector3>,
+    pieces: Vec<BezierCurve<Vector3>>,
+}
+
+/// A clamped boundary curve of a surface, for [`Prep`].
+#[derive(Clone)]
+struct Boundary {
+    curve: Spline<Vector3>,
+    pieces: Vec<BezierCurve<Vector3>>,
+    fixed_u: Option<f64>,
+    fixed_v: Option<f64>,
+    inward: f64,
+}
+
+impl Prep {
+    pub(crate) fn of(s: &NurbsSurface) -> Self {
+        let nets = s
+            .patches()
+            .iter()
+            .map(|patch| Grid {
+                rows: patch.degrees[0] + 1,
+                cols: patch.degrees[1] + 1,
+                c: patch.pts.clone(),
+            })
+            .collect();
+        let [nu, nv] = s.counts();
+        let [ku, kv] = s.knots();
+        let hom = |i: usize, j: usize| s.hom(i, j);
+        let [[u0, u1], [v0, v1]] = s.domain();
+        let mut edges = Vec::new();
+        let mut boundary = |curve: Spline<Vector3>, fixed_u, fixed_v, inward| {
+            let pieces = curve.pieces();
+            edges.push(Boundary {
+                curve,
+                pieces,
+                fixed_u,
+                fixed_v,
+                inward,
+            });
+        };
+        if !ku.is_periodic() {
+            for (i, u, inward) in [(0, u0, 1.0), (nu - 1, u1, -1.0)] {
+                boundary(
+                    spline(kv, (0..nv).map(|j| hom(i, j)).collect()),
+                    Some(u),
+                    None,
+                    inward,
+                );
+            }
+        }
+        if !kv.is_periodic() {
+            for (j, v, inward) in [(0, v0, 1.0), (nv - 1, v1, -1.0)] {
+                boundary(
+                    spline(ku, (0..nu).map(|i| hom(i, j)).collect()),
+                    None,
+                    Some(v),
+                    inward,
+                );
+            }
+        }
+        let mut creases_out = Vec::new();
+        let mut clamped: [Option<NurbsSurface>; 2] = [None, None];
+        for dir in [Direction::U, Direction::V] {
+            let d = dir as usize;
+            let creases = creases(&s.knots()[d]);
+            if creases.is_empty() {
+                continue;
+            }
+            let c = s.clamped_along(dir);
+            let deg = c.knots()[d].degree();
+            let [nu, nv] = c.counts();
+            for k in creases {
+                let Some(last) = c.knots()[d].flat().iter().rposition(|&x| x == k) else {
+                    continue;
+                };
+                let row = last - deg;
+                let pts = match dir {
+                    Direction::U => (0..nv).map(|j| c.hom(row, j)).collect(),
+                    Direction::V => (0..nu).map(|i| c.hom(i, row)).collect(),
+                };
+                let iso = spline(&c.knots()[1 - d], pts);
+                let pieces = iso.pieces();
+                creases_out.push(Crease {
+                    dir,
+                    knot: k,
+                    line: iso,
+                    pieces,
+                });
+            }
+            clamped[d] = Some(c);
+        }
+        Self {
+            nets,
+            edges,
+            creases: creases_out,
+            clamped,
+        }
+    }
+}
 
 /// A tensor-product Bernstein polynomial, coefficients row-major: row `i`
 /// along `u`, column `j` along `v`.
@@ -601,25 +729,9 @@ impl NurbsSurface {
         out: &mut Vec<(f64, f64)>,
         rejected: &mut Vec<(f64, f64)>,
     ) {
-        let [nu, nv] = self.counts();
-        let [ku, kv] = self.knots();
-        let hom = |i: usize, j: usize| self.hom(i, j);
-        let [[u0, u1], [v0, v1]] = self.domain();
-        let mut edges = Vec::new();
-        if !ku.is_periodic() {
-            for (i, u, inward) in [(0, u0, 1.0), (nu - 1, u1, -1.0)] {
-                let s = spline(kv, (0..nv).map(|j| hom(i, j)).collect());
-                edges.push((s, Some(u), None, inward));
-            }
-        }
-        if !kv.is_periodic() {
-            for (j, v, inward) in [(0, v0, 1.0), (nv - 1, v1, -1.0)] {
-                let s = spline(ku, (0..nu).map(|i| hom(i, j)).collect());
-                edges.push((s, None, Some(v), inward));
-            }
-        }
-        for (s, fixed_u, fixed_v, inward) in edges {
-            for (t, ..) in s.minima(&s.pieces(), p, prune) {
+        for b in &self.prep().edges {
+            let (fixed_u, fixed_v, inward) = (b.fixed_u, b.fixed_v, b.inward);
+            for (t, ..) in b.curve.minima(&b.pieces, p, prune) {
                 let (u, v) = (fixed_u.unwrap_or(t), fixed_v.unwrap_or(t));
                 let e = self.eval(u, v);
                 let r = e.point.to_vector() - p;
@@ -654,42 +766,26 @@ impl NurbsSurface {
             .iter()
             .map(|&(u, v)| dist(self.point(u, v).to_vector()))
             .fold(f64::INFINITY, f64::min);
+        let prep = self.prep();
         let mut found = Vec::new();
-        for dir in [Direction::U, Direction::V] {
-            let d = dir as usize;
-            let creases = creases(&self.knots()[d]);
-            if creases.is_empty() {
+        for c in &prep.creases {
+            let (dir, k) = (c.dir, c.knot);
+            let feet = c.line.minima(&c.pieces, p, prune);
+            if feet.is_empty() {
                 continue;
             }
-            let c = self.clamped_along(dir);
-            let deg = c.knots()[d].degree();
-            let [nu, nv] = c.counts();
-            for k in creases {
-                let Some(last) = c.knots()[d].flat().iter().rposition(|&x| x == k) else {
-                    continue;
-                };
-                let row = last - deg;
-                let pts = match dir {
-                    Direction::U => (0..nv).map(|j| c.hom(row, j)).collect(),
-                    Direction::V => (0..nu).map(|i| c.hom(i, row)).collect(),
-                };
-                let iso = spline(&c.knots()[1 - d], pts);
-                let feet = iso.minima(&iso.pieces(), p, prune);
-                if feet.is_empty() {
-                    continue;
-                }
-                let near = feet.iter().map(|f| dist(f.1)).fold(f64::INFINITY, f64::min);
-                best = best.min(near);
-                found.push((dir, k, feet, near));
-            }
+            let near = feet.iter().map(|f| dist(f.1)).fold(f64::INFINITY, f64::min);
+            best = best.min(near);
+            found.push((dir, k, feet, near));
         }
-        let mut clamped: [Option<NurbsSurface>; 2] = [None, None];
         for (dir, k, feet, near) in found {
             if prune && near > best + LINEAR_RESOLUTION {
                 continue;
             }
             let d = dir as usize;
-            let c = clamped[d].get_or_insert_with(|| self.clamped_along(dir));
+            let c = prep.clamped[d]
+                .as_ref()
+                .expect("a direction with creases is clamped");
             let [lo, hi] = c.domain()[d];
             // The halves either side, for the one-sided derivatives: at
             // a periodic seam, the clamped surface's two ends.
@@ -740,21 +836,13 @@ impl NurbsSurface {
         let periods = self.periods();
         let clamped = [periods.0.is_none(), periods.1.is_none()];
         let mut best_corner = (f64::INFINITY, domain[0][0], domain[1][0]);
-        let nets: Vec<Grid<Hom<Vector3>>> = self
-            .patches()
-            .iter()
-            .map(|patch| Grid {
-                rows: patch.degrees[0] + 1,
-                cols: patch.degrees[1] + 1,
-                c: patch.pts.clone(),
-            })
-            .collect();
+        let nets = &self.prep().nets;
         if prune {
             // Every patch corner is a point of the surface. Newton's method
             // from the nearest gives a tight bound before any patch is
             // searched, so that most are pruned at once.
             let mut seed = (f64::INFINITY, (0.0, 0.0));
-            for (patch, net) in self.patches().iter().zip(&nets) {
+            for (patch, net) in self.patches().iter().zip(nets) {
                 let [[u0, u1], [v0, v1]] = patch.range;
                 for (i, u) in [(0, u0), (net.rows - 1, u1)] {
                     for (j, v) in [(0, v0), (net.cols - 1, v1)] {
@@ -771,9 +859,10 @@ impl NurbsSurface {
         let mut exhausted = false;
         'patches: for (patch, net) in self.patches().iter().zip(nets) {
             let range = &patch.range;
-            if prune && hull_distance(&net, p) > bound + LINEAR_RESOLUTION {
+            if prune && hull_distance(net, p) > bound + LINEAR_RESOLUTION {
                 continue;
             }
+            let net = net.clone();
             let [(gu, zu), (gv, zv)] = stationary(&net, p);
             let root = Node {
                 range: *range,
@@ -896,8 +985,43 @@ impl NurbsSurface {
 
 #[cfg(test)]
 mod tests {
-    use crate::geom::{Frame, KnotVector, NurbsSurface, Plane, Point3, Sphere, Surface, Torus};
+    use crate::geom::{
+        Frame, KnotVector, NurbsSurface, Plane, Point3, Projection, Sphere, Surface, Torus,
+    };
     use core::f64::consts::{FRAC_PI_2, TAU};
+
+    /// #551: a projection kept in the table is the one made: projecting a
+    /// point again, on this surface or a clone of it, gives its bits, and
+    /// both are the search's own nearest foot.
+    #[test]
+    fn a_kept_projection_is_the_one_made() {
+        let s = sphere();
+        let twin = s.clone();
+        for k in 0..64 {
+            let a = f64::from(k) * 0.37;
+            let p = Point3::new(
+                1.7 * crate::math::cos(a),
+                0.9 * crate::math::sin(a),
+                0.3 * f64::from(k % 7) - 0.8,
+            );
+            let first = s.project(p);
+            let fresh = super::super::project::nearest(&s.minima(p.to_vector(), true));
+            let bits = |x: Projection<(f64, f64), Point3>| {
+                [
+                    x.param.0, x.param.1, x.point.x, x.point.y, x.point.z, x.distance,
+                ]
+                .map(f64::to_bits)
+            };
+            let made = Projection {
+                param: fresh.0,
+                point: Point3::ORIGIN + fresh.1,
+                distance: fresh.2,
+            };
+            assert_eq!(bits(first), bits(made));
+            assert_eq!(bits(s.project(p)), bits(first));
+            assert_eq!(bits(twin.project(p)), bits(first));
+        }
+    }
 
     fn sphere() -> NurbsSurface {
         let s = Surface::Sphere(Sphere::new(Frame::WORLD, 2.0).unwrap());

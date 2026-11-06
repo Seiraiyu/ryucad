@@ -122,7 +122,7 @@ jobs:
           x=""
           [ "$RUNNER_OS" = Windows ] && x=".exe"
           mkdir -p "dist/$NAME"
-          cp "target/$TARGET/release/ryueda$x" "dist/$NAME/"
+          cp "target/$TARGET/release/ryueda$x" LICENSE NOTICE "dist/$NAME/"
       - name: smoke test
         shell: bash
         run: |

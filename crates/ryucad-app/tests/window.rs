@@ -4912,6 +4912,81 @@ fn a_lofts_weight_and_a_sweeps_twist_are_edited_from_their_forms() {
     assert_eq!(shown["twist"]["value"], "90 deg");
 }
 
+#[test]
+fn a_shells_thickness_and_a_splits_flip_are_edited_from_their_forms() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_shell_and_split();
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        loaded(a)
+            && ["sh", "sp"].iter().all(|f| {
+                a.opened().ws.model.parts["p"]
+                    .feature(f)
+                    .is_some_and(|f| f.hash.is_some())
+            })
+    });
+    h.step();
+    h.get_by_label("sh (shell)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| f.shell.is_some())
+    });
+    h.step();
+    let thickness = h.get_by_role_and_label(egui::accesskit::Role::TextInput, "thickness");
+    thickness.set_text_value_accesskit("1.5 mm");
+    h.step();
+    h.get_by_label("Apply").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
+    });
+    let shown = p.ok(&["feature", "show", "p", "sh"]);
+    assert_eq!(shown["thickness"]["value"], "1.5 mm");
+    h.get_by_label("sp (split)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| f.split.is_some())
+    });
+    h.step();
+    // Its plane is shown; its report gives both sides to paint.
+    h.get_by_label("yz");
+    assert_eq!(split_sides(&h), ["behind", "front"]);
+    h.get_by_label("flip the plane").click();
+    h.step();
+    h.get_by_label("Apply").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
+    });
+    let shown = p.ok(&["feature", "show", "p", "sp"]);
+    assert_eq!(shown["flip"], true);
+}
+
+/// The sides split `sp`'s report gives, behind first.
+fn split_sides(h: &Harness<'static, App>) -> Vec<String> {
+    let ws = &h.state().opened().ws;
+    ws.model.parts["p"]
+        .feature("sp")
+        .and_then(|f| f.body.as_ref())
+        .map(|b| b.sides.iter().map(|s| s.side.clone()).collect())
+        .unwrap_or_default()
+}
+
 /// Where the window draws datum `reference`, as its picker lays it out.
 fn mark(h: &Harness<'static, App>, reference: &str) -> ryucad_app::core::datums::Mark {
     let model = &h.state().opened().ws.model;

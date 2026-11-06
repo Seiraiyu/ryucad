@@ -681,6 +681,28 @@ impl View {
                 }
             }
         }
+        // A split chosen: each side whole in its tint, over the faces it
+        // cut; an offset: the faces its groups move, with its fills.
+        if let Some((part, id)) = &chosen
+            && let Some(b) = ws
+                .model
+                .parts
+                .get(part)
+                .and_then(|p| p.feature(id))
+                .and_then(|f| f.body.as_ref())
+        {
+            for side in &b.sides {
+                let key = (part.clone(), side.solid.clone());
+                let c = linear(crate::core::bodies::tint(&side.side));
+                faces.extend((0..picker.faces(&key)).map(|i| (key.clone(), i, c)));
+            }
+            let c = linear(style::CHOSEN);
+            for r in &b.moved {
+                if let Some(Place::Face(k, i)) = picker.place(r) {
+                    faces.push((k, i, c));
+                }
+            }
+        }
         // A compare's new and changed faces, over the chosen feature so
         // choosing one still shows what changed in it.
         if let Some(c) = &ws.compare {
@@ -749,6 +771,63 @@ impl View {
             lines,
             over: frame_lines,
         }
+    }
+
+    /// What a shell, offset, mirror or split chosen in the tree adds to
+    /// the scene: a shell's opening (the edges between the faces it made
+    /// and the rest) dashed in the chosen colour, a mirror's or split's
+    /// plane as a datum plane is drawn, its square added to `glass`.
+    fn body_overlay(
+        &mut self,
+        ws: &Workspace,
+        pr: &Projector,
+        px: [u32; 2],
+        scale: f64,
+        bounds: Option<([f64; 3], [f64; 3])>,
+        mut glass: Vec<crate::core::datums::GlassCorner>,
+    ) -> (
+        Vec<crate::core::sketch::Corner>,
+        Vec<crate::core::datums::GlassCorner>,
+    ) {
+        use crate::core::bodies;
+        let mut lines = Vec::new();
+        let Some((part, id)) = self.chosen.clone() else {
+            return (lines, glass);
+        };
+        let Some(b) = ws
+            .model
+            .parts
+            .get(&part)
+            .and_then(|p| p.feature(&id))
+            .and_then(|f| f.body.clone())
+        else {
+            return (lines, glass);
+        };
+        let size = [f64::from(px[0]), f64::from(px[1])];
+        if b.kind == "shell"
+            && let Some(made) = ws
+                .made
+                .as_ref()
+                .filter(|m| m.feature == (part.clone(), id.clone()))
+        {
+            let picker = self.picker(ws);
+            let rims: Vec<Vec<[f64; 3]>> = made
+                .rims
+                .iter()
+                .flat_map(|((p, s), es)| es.iter().map(move |e| format!("{p}/{s}/{e}")))
+                .filter_map(|r| match picker.place(&r) {
+                    Some(Place::Edge(ps)) => Some(ps),
+                    _ => None,
+                })
+                .collect();
+            lines.extend(bodies::rim_overlay(&rims, style::CHOSEN, pr, size, scale));
+        }
+        if let Some(m) = b.plane_mark(&part, &id, bounds) {
+            let (l, g) = bodies::plane_overlay(&m, pr, size, scale);
+            lines.extend(l);
+            glass.extend(g);
+        }
+        (lines, glass)
     }
 
     /// The frames of the mate chosen in the tree, as both its connectors
@@ -1902,6 +1981,7 @@ impl View {
             );
             (lines, glass)
         };
+        let (body_lines, glass) = self.body_overlay(ws, pr, px, f64::from(ppp), bounds, glass);
         let scene = self
             .scene
             .get_or_insert_with(|| Scene::new(&rs.device, &rs.adapter));
@@ -1943,6 +2023,7 @@ impl View {
                 f64::from(ppp),
             ));
         }
+        overlay.extend(body_lines);
         // The origin's axes and planes, a tenth of the model's size.
         if self.origin {
             let length = match bounds {

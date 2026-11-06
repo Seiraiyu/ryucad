@@ -1,6 +1,6 @@
-// ryucad's 21 CAD glyphs (design 199, Fonts and icons; design 297 adds
-// the datum and path glyphs, design 323 the sweep and loft glyphs), on
-// Phosphor's
+// ryucad's 25 CAD glyphs (design 199, Fonts and icons; design 297 adds
+// the datum and path glyphs, design 323 the sweep and loft glyphs, design
+// 327 the shell, offset, mirror and split glyphs), on Phosphor's
 // 256-unit grid with its 16-unit stroke, round caps and joins. Each glyph
 // is a list of strokes: `l` a polyline, `e` an ellipse (cx, cy, rx, ry),
 // `a` an arc of one (cx, cy, rx, ry, from, to: degrees clockwise from +x,
@@ -148,6 +148,31 @@ const GLYPHS = {
     { e: [128, 64, 64, 20] },
     { l: [[40, 208], [64, 64]] },
     { l: [[216, 176], [192, 64]] },
+  ],
+  shell: [
+    ...box(40, 128, 144, 88, 56, -56),
+    { l: [[72, 120], [108, 84], [208, 84], [172, 120], [72, 120]] },
+  ],
+  offset: [
+    { l: [[96, 104], [160, 104], [160, 168], [96, 168], [96, 104]], w: 10 },
+    { l: [[96, 56], [160, 56]] },
+    { a: [160, 104, 48, 48, 270, 360] },
+    { l: [[208, 104], [208, 168]] },
+    { a: [160, 168, 48, 48, 0, 90] },
+    { l: [[160, 216], [96, 216]] },
+    { a: [96, 168, 48, 48, 90, 180] },
+    { l: [[48, 168], [48, 104]] },
+    { a: [96, 104, 48, 48, 180, 270] },
+  ],
+  "mirror-body": [
+    ...dashes(128, 24, 236, 40, 20, 12),
+    { l: [[104, 48], [32, 48], [32, 120], [72, 152], [72, 208], [104, 208]] },
+    { l: [[152, 48], [224, 48], [224, 120], [184, 152], [184, 208], [152, 208]] },
+  ],
+  split: [
+    ...box(56, 80, 136, 48, 40, -32),
+    ...box(24, 184, 136, 48, 40, -32),
+    ...[16, 64, 112, 160, 208].map((x) => ({ l: [[x, 140], [x + 28, 140]], w: 10 })),
   ],
 };
 

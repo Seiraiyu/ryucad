@@ -328,6 +328,7 @@ fn dispatch(
         Request::LibcompList { library } => {
             libcmd::libcomp_list(session.project(), library.as_deref())
         }
+        Request::PartsSearch { search } => crate::parts::search(session.project(), &search),
         Request::LibcompDelete {
             libcomp,
             expected_revision,

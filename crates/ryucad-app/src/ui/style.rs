@@ -18,6 +18,10 @@ pub const SELECTED: Rgb = [0.50, 0.67, 1.0];
 pub const HOVER: Rgb = [0.52, 0.86, 1.0];
 /// The feature chosen in the tree.
 pub const CHOSEN: Rgb = [0.62, 0.68, 0.79];
+/// A split chosen in the tree: the side behind its plane, which its
+/// target keeps, and the side in front, the solid it founds.
+pub const SPLIT_BEHIND: Rgb = [0.86, 0.62, 0.30];
+pub const SPLIT_FRONT: Rgb = [0.55, 0.40, 0.80];
 /// A frame's x, y and z axes, as CAD draws them: red, green, blue.
 pub const AXES: [Rgb; 3] = [[0.85, 0.20, 0.20], [0.20, 0.65, 0.25], [0.20, 0.40, 0.90]];
 
@@ -622,13 +626,13 @@ mod tests {
     /// simulated protanopia, deuteranopia and tritanopia: the selection,
     /// hover and chosen colours against each other and every colour
     /// below; each group's colours against each other (compare's, the
-    /// sketch states', the participants'); and each against every
+    /// sketch states', a split's two sides', the participants'); and each against every
     /// viewport background and the model's own colour, which they paint
     /// over. CIEDE2000 at least 10 for every pair.
     #[test]
     fn colours_stay_apart_for_colour_blind_eyes() {
         use ryucad::render as r;
-        let groups: [(&str, Vec<(&str, Rgb)>); 4] = [
+        let groups: [(&str, Vec<(&str, Rgb)>); 5] = [
             (
                 "selection",
                 vec![("selected", SELECTED), ("hover", HOVER), ("chosen", CHOSEN)],
@@ -650,6 +654,10 @@ mod tests {
                     ("over", r::SKETCH_OVER),
                     ("failing", r::SKETCH_FAILING),
                 ],
+            ),
+            (
+                "split",
+                vec![("behind", SPLIT_BEHIND), ("front", SPLIT_FRONT)],
             ),
             (
                 "participants",

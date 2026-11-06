@@ -4,6 +4,7 @@ description = "Finds STEP import, healing and round-trip bugs by driving a ryuca
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

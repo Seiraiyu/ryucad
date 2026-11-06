@@ -672,6 +672,18 @@ pub enum Code {
     /// mirrored (`solid`) are in the details. A combined copy's boolean
     /// refuses as `boolean_failed`.
     MirrorFailed,
+    /// ryueda: a library component's parameter in the part vocabulary
+    /// whose value doesn't read as its name's type (`capacitance` that
+    /// isn't a capacitance): a warning on the component, with its pointer,
+    /// and in ERC once per placed library component. In a search
+    /// condition the value is `invalid_quantity` instead.
+    ParameterInvalid,
+    /// ryueda ERC: a placed component whose library component has no
+    /// maker part number (a warning).
+    PartUnidentified,
+    /// ryueda ERC: a maker part number with no supplier offer, on a
+    /// library component's first choice or an alternate (a warning).
+    PartUnsourced,
     /// The kernel refused a sheet metal feature: a body that isn't sheet
     /// metal (recognition's refusal), or an edge flange it can't make.
     /// Its `reason` (the kernel's refusal in snake case), the kernel's
@@ -749,6 +761,15 @@ pub type Result<T, E = Error> = core::result::Result<T, E>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn part_data_codes() {
+        assert_eq!(json!(Code::ParameterInvalid), json!("parameter_invalid"));
+        assert_eq!(json!(Code::PartUnidentified), json!("part_unidentified"));
+        assert_eq!(json!(Code::PartUnsourced), json!("part_unsourced"));
+        assert_eq!(Code::ParameterInvalid.exit_code(), 1);
+        assert_eq!(Code::PartUnsourced.exit_code(), 1);
+    }
 
     #[test]
     fn shell_and_offset_codes() {
