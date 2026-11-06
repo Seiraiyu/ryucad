@@ -1859,30 +1859,56 @@ mod tests {
     /// floating: the judges don't fault a label on a net that leaves.
     #[test]
     fn a_label_on_a_net_leaving_the_sheet_doesnt_float_its_part() {
-        use crate::layout::Instruction;
+        use crate::layout::{IdiomChoice, Instruction, Label, LabelKind};
         let mut block = crate::testing::regions_block();
-        // Put J1 on a sheet of its own: D+ leaves U1's sheet.
-        block.instructions.insert(
-            "i1".into(),
-            Instruction::Sheet {
-                parts: vec!["j1".into()],
-                sheet: "Connectors".into(),
-            },
-        );
         block.parts.push(crate::testing::resistor(
             "r5",
             "R5",
             "33",
             [Some(6), Some(1)],
         ));
+        // J1 (no jumper of a pull idiom here) on a sheet of its own: D+
+        // leaves U1's and R5's.
         block.instructions.insert(
-            "i2".into(),
-            Instruction::Net {
-                net: "dp".into(),
-                style: crate::layout::NetStyle::Label,
+            "i1".into(),
+            Instruction::Idiom {
+                parts: vec!["j1".into(), "r5".into()],
+                kind: IdiomChoice::None,
             },
         );
-        let out = crate::engine::lay_out(&block).unwrap();
+        block.instructions.insert(
+            "i2".into(),
+            Instruction::Sheet {
+                parts: vec!["j1".into()],
+                sheet: "Connectors".into(),
+            },
+        );
+        let mut out = crate::engine::lay_out(&block).unwrap();
+        let l = &mut out.layout;
+        let sheet = l.placed["r5"].sheet.clone();
+        assert_ne!(l.placed["j1"].sheet, sheet, "D+ leaves R5's sheet");
+        // R5's D+ pin reaching its net by its own label alone.
+        let p = block.part("r5").unwrap();
+        let x = &l.placed["r5"];
+        let end = crate::shape::Shape::of(
+            &block.parts[p],
+            crate::geom::Place::new(x.at, x.rotation, x.mirror),
+        )
+        .pins[0]
+            .end;
+        if let Some(by) = l.routes.get_mut("dp") {
+            by.remove(&sheet);
+        }
+        let labels = l.labels.entry("dp".into()).or_default();
+        labels.retain(|x| x.on != "r5/1");
+        labels.push(Label {
+            sheet: sheet.clone(),
+            at: end,
+            side: crate::geom::Side::Up,
+            kind: LabelKind::Net,
+            on: "r5/1".into(),
+            text: "D+".into(),
+        });
         let (found, _) = lint(&block, &out);
         assert!(
             !found

@@ -3284,9 +3284,15 @@ fn place_labels_in(
                     if !matches!(block.parts[q].kind, PartKind::Symbol { .. }) {
                         return None;
                     }
-                    let e = st.shape(q).expect("placed").pins[l].end;
-                    ((e[0] - pin.end[0]).abs() + (e[1] - pin.end[1]).abs() <= LOCAL_REACH)
-                        .then(|| route::node_of(e))
+                    let at = st.shape(q).expect("placed").pins[l];
+                    let e = at.end;
+                    let near = (e[0] - pin.end[0]).abs() + (e[1] - pin.end[1]).abs() <= LOCAL_REACH;
+                    near.then(|| {
+                        let b =
+                            label::label_box(LabelKind::Net, &block.label_text(q, l), e, at.side);
+                        boxes.insert(route::node_of(e), b);
+                        route::node_of(e)
+                    })
                 })
                 .collect();
             if tree.is_empty() {
@@ -3296,7 +3302,15 @@ fn place_labels_in(
                 continue;
             };
             let run = route::run_of(&path);
-            if route::length(&run) <= LOCAL_REACH && field.mark(n, &run).is_ok() {
+            // Plan 2.A: a wire arriving through the label its target pin
+            // is to carry would leave that label nowhere to go but over
+            // it (a hard rule broken on every try); the pins take labels.
+            let through_label = path.last().and_then(|t| boxes.get(t)).is_some_and(|b| {
+                let inner = b.grow(-1);
+                run.windows(2)
+                    .any(|w| Rect::new(w[0], w[1]).overlaps(&inner))
+            });
+            if !through_label && route::length(&run) <= LOCAL_REACH && field.mark(n, &run).is_ok() {
                 routes.entry(n).or_default().push(run);
                 done.insert(i);
             }
@@ -3333,6 +3347,8 @@ fn place_labels_in(
         let kept = prev_runs.get(&n).map(|r| (r, &net_pins));
         let name = &block.label_text(p, k);
         let fits = |field: &Field, stub: &[Point], at: Point, side: Side| -> bool {
+            // Each target's label as it would stand straight out of its pin.
+            let mut boxes: BTreeMap<route::Node, Rect> = BTreeMap::new();
             if !field.clear_label(label::label_box(kind, name, at, side)) {
                 return false;
             }
