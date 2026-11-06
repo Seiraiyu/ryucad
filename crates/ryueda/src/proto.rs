@@ -161,6 +161,10 @@ pub enum Request {
         #[serde(default, flatten)]
         search: crate::parts::Search,
     },
+    /// Downloads a catalogue into this machine's parts cache: long, in
+    /// phase `fetch`, cancelled between files.
+    #[serde(rename = "parts.sync")]
+    PartsSync { source: String },
     /// KiCad 6 to 9 libraries (`.kicad_sym` files, `.pretty` and
     /// `.3dshapes` folders, by absolute path) into this project's
     /// library, or with `into` a library project's it names.
@@ -731,8 +735,11 @@ mod tests {
     fn long_requests_are_named_and_cancelled_by_token() {
         use ryu_session::Serve;
         assert_eq!(crate::Eda::LONG, ["parts.sync", "parts.refresh"]);
-        let r = Request::from_rpc("request.cancel", Some(json!({"token": "t1", "as": "agent"})))
-            .unwrap();
+        let r = Request::from_rpc(
+            "request.cancel",
+            Some(json!({"token": "t1", "as": "agent"})),
+        )
+        .unwrap();
         assert!(!r.mutates());
         assert!(matches!(
             <crate::Eda as Serve>::control(&r),

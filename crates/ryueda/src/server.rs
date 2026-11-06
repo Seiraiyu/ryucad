@@ -358,6 +358,10 @@ fn dispatch(
         Request::LibcompList { library } => {
             libcmd::libcomp_list(session.project(), library.as_deref())
         }
+        Request::PartsSync { source } => match session.prepared.take() {
+            Some(made) => made,
+            None => crate::parts::sync(&source, job),
+        },
         Request::PartsSearch { search } => crate::parts::search(session.project(), &search),
         Request::LibcompDelete {
             libcomp,

@@ -406,6 +406,7 @@ fn every_protocol_method_has_a_command() {
         ("libcomp.list", &["libcomp", "list"]),
         ("libcomp.delete", &["libcomp", "delete"]),
         ("parts.search", &["parts", "search"]),
+        ("parts.sync", &["parts", "sync"]),
         ("import.kicad", &["import", "kicad"]),
         ("rail.add", &["rail", "add"]),
         ("rail.edit", &["rail", "edit"]),
@@ -460,6 +461,7 @@ fn every_protocol_method_has_a_command() {
         ("session.hello", &["participants"]),
         ("participant.list", &["participants"]),
         ("subscribe", &["watch"]),
+        ("request.cancel", &["cancel"]),
         ("daemon.status", &["daemon", "status"]),
         ("daemon.shutdown", &["daemon", "stop"]),
     ];

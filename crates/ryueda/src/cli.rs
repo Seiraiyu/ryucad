@@ -295,6 +295,8 @@ enum Command {
     Undo { entry: Option<u64> },
     /// Redo your latest undo, or the entry given.
     Redo { entry: Option<u64> },
+    /// Cancel a running long request by its token (through the daemon).
+    Cancel { token: String },
     /// Wait for the daemon's notifications.
     Watch {
         /// project, participants, activity; all when none.
@@ -588,6 +590,26 @@ enum PartsCmd {
         #[arg(long)]
         offline: bool,
     },
+    /// Download a catalogue into this machine's parts cache, replacing
+    /// the one there once it is whole. A long request: --token names it
+    /// for `ryueda cancel`, --progress prints its progress on stderr.
+    Sync {
+        /// The catalogue's name (`ryueda parts sources` lists them).
+        source: String,
+        #[command(flatten)]
+        long: LongArgs,
+    },
+}
+
+/// What a long request takes.
+#[derive(Args)]
+struct LongArgs {
+    /// A name for `ryueda cancel` (one is made when left out).
+    #[arg(long)]
+    token: Option<String>,
+    /// Print progress on stderr as it goes.
+    #[arg(long)]
+    progress: bool,
 }
 
 #[derive(Subcommand)]
@@ -1305,6 +1327,13 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             libcomp: libcomp.clone(),
             expected_revision: expect.expect.clone(),
         },
+        Command::Parts(PartsCmd::Sync { source, .. }) => Request::PartsSync {
+            source: source.clone(),
+        },
+        Command::Cancel { token } => Request::RequestCancel {
+            token: token.clone(),
+            name: None,
+        },
         Command::Parts(PartsCmd::Search {
             terms,
             sources,
@@ -1908,19 +1937,82 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             )
         }
         cmd => {
-            let req = request(cmd, &here)?.expect("every other command is a request");
+            let mut req = request(cmd, &here)?.expect("every other command is a request");
+            if let Request::RequestCancel { name, .. } = &mut req {
+                *name = participant(cli);
+            }
             let root = find_root(&here)?;
+            let long = long_ask(cmd);
+            let print = long.as_ref().is_some_and(|a| a.progress);
             if !no_daemon(cli) {
-                match client::request(&root, &req, participant(cli).as_deref()) {
+                let sent = match &long {
+                    Some(ask) => client::request_noting(
+                        &root,
+                        &req,
+                        participant(cli).as_deref(),
+                        ask,
+                        &mut |p| progress_line(print, p),
+                    ),
+                    None => client::request(&root, &req, participant(cli).as_deref()),
+                };
+                match sent {
                     Ok(answer) => return answer.and_then(|a: Answer| deliver(cmd, &here, a)),
                     // Never delivered, so running it here is safe.
                     Err(e) => warnings.push(format!("{}; ran in process", e.message)),
                 }
             }
             let me = participant(cli);
-            server::handle_safely(&mut None, None, me.as_deref(), &root, req)
+            // In process a long request reports its progress and can't be
+            // cancelled: nothing else can reach it.
+            let job = match &long {
+                Some(ask) => ryu_session::job::Job::new(
+                    ask.token.as_deref().unwrap_or("cli"),
+                    me.as_deref().unwrap_or("agent"),
+                    &req.method(),
+                    Default::default(),
+                )
+                .with_line(Box::new(move |p: &Value| progress_line(print, p))),
+                None => ryu_session::job::Job::default(),
+            };
+            server::handle_job(&mut None, None, me.as_deref(), &root, req, &job)
                 .and_then(|a| deliver(cmd, &here, a))
         }
+    }
+}
+
+/// A token for one CLI request: its process and the time, unique enough
+/// among one participant's requests (ryucad's `cancel::token`).
+fn cli_token() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    format!("cli-{}-{nanos:08x}", std::process::id())
+}
+
+/// What a long request's command asks of its job: always a token.
+fn long_ask(cmd: &Command) -> Option<ryu_session::job::Ask> {
+    let long = match cmd {
+        Command::Parts(PartsCmd::Sync { long, .. }) => long,
+        _ => return None,
+    };
+    Some(ryu_session::job::Ask {
+        progress: long.progress,
+        token: Some(long.token.clone().unwrap_or_else(cli_token)),
+    })
+}
+
+/// A progress line on stderr, when asked for: `fetch: 3/40 files
+/// (components-res-001.jsonl.gz)`.
+fn progress_line(print: bool, p: &Value) {
+    if print && p.get("end").is_none() {
+        eprintln!(
+            "{}: {}/{} {} ({})",
+            p["phase"].as_str().unwrap_or(""),
+            p["done"],
+            p["total"],
+            p["unit"].as_str().unwrap_or(""),
+            p["item"].as_str().unwrap_or("")
+        );
     }
 }
 
