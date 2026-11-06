@@ -9,3 +9,5 @@
 //! source.
 
 pub use ryu_doc::error;
+
+pub mod dec;
