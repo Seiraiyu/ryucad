@@ -605,9 +605,81 @@ pub fn sync(source: &str, job: &ryu_session::job::Job) -> Result<Value> {
     )
 }
 
+/// `parts.refresh` of catalogues `names`: each synced again (from `base`,
+/// else its own site) when missing, past `max_age` or `force`d; the rest
+/// listed as fresh.
+#[allow(clippy::too_many_arguments)]
+pub fn refresh_these(
+    names: &[&str],
+    fetch: &dyn ryueda_parts::fetch::Fetch,
+    base: &str,
+    cache: &std::path::Path,
+    now: u64,
+    max_age: u64,
+    force: bool,
+    job: &ryu_session::job::Job,
+) -> Result<Value> {
+    let cats = Catalogues::at(cache, now, max_age);
+    let (mut synced, mut fresh) = (Vec::new(), Vec::new());
+    for name in names {
+        let (state, stale) = cats.state(name)?;
+        if force || stale.is_some() {
+            let from = if base.is_empty() {
+                base_of(name)
+            } else {
+                base.to_owned()
+            };
+            synced.push(sync_with(fetch, &from, cache, name, now, job)?);
+        } else {
+            fresh.push(
+                json!({"source": name, "fetched_at": state["fetched_at"], "age_s": state["age_s"]}),
+            );
+        }
+    }
+    Ok(json!({"synced": synced, "fresh": fresh, "force": force}))
+}
+
+/// `parts.refresh` of the catalogues the placed parts' offers draw on.
+#[allow(clippy::too_many_arguments)]
+pub fn refresh_with(
+    p: &Project,
+    fetch: &dyn ryueda_parts::fetch::Fetch,
+    base: &str,
+    cache: &std::path::Path,
+    now: u64,
+    max_age: u64,
+    force: bool,
+    job: &ryu_session::job::Job,
+) -> Result<Value> {
+    refresh_these(
+        &catalogues_placed(p),
+        fetch,
+        base,
+        cache,
+        now,
+        max_age,
+        force,
+        job,
+    )
+}
+
+/// `parts.refresh` on this machine: each connector from its own site.
+pub fn refresh(names: &[&str], force: bool, job: &ryu_session::job::Job) -> Result<Value> {
+    refresh_these(
+        names,
+        &crate::net::Https::new(),
+        "",
+        &cache_root()?,
+        now(),
+        max_age(),
+        force,
+        job,
+    )
+}
+
 /// The lock-free work of a long parts request, if `req` is one.
 pub fn prepare(
-    _session: &mut crate::session::Session,
+    session: &mut crate::session::Session,
     req: &crate::proto::Request,
     job: &ryu_session::job::Job,
 ) -> Option<Box<dyn FnOnce() -> Result<Value> + Send>> {
@@ -615,6 +687,13 @@ pub fn prepare(
         crate::proto::Request::PartsSync { source } => {
             let (source, job) = (source.clone(), job.clone());
             Some(Box::new(move || sync(&source, &job)))
+        }
+        // What the placed parts draw on is found under the lock; the
+        // syncs run without it.
+        crate::proto::Request::PartsRefresh { force } => {
+            let names = catalogues_placed(session.project());
+            let (force, job) = (*force, job.clone());
+            Some(Box::new(move || refresh(&names, force, &job)))
         }
         _ => None,
     }
@@ -868,5 +947,64 @@ pub(crate) mod tests {
         assert_eq!(v["records"][0]["key"], first.key);
         let v = show(&p, &format!("mpn:{}", first.mpn), false, &cats).unwrap();
         assert_eq!(v["records"][0]["source"], "library");
+    }
+
+    #[test]
+    fn refresh_syncs_only_what_the_placed_parts_need() {
+        // The test library's r_100k, placed, has an LCSC offer.
+        let (_d, p) = crate::netlist::tests::project(&[]);
+        assert_eq!(catalogues_placed(&p), ["jlc"]);
+        let cache = tempfile::tempdir().unwrap();
+        let fake = ryueda_parts::jlc::testing::fake("2026-11-06T11:33:30+00:00");
+        let base = ryueda_parts::jlc::testing::BASE;
+        let job = ryu_session::job::Job::default();
+        let v = refresh_with(&p, &fake, base, cache.path(), 5_000, MAX_AGE, false, &job).unwrap();
+        assert_eq!(v["synced"][0]["source"], "jlc", "missing: synced");
+        let v = refresh_with(&p, &fake, base, cache.path(), 5_100, MAX_AGE, false, &job).unwrap();
+        assert_eq!(
+            (
+                v["synced"].as_array().unwrap().len(),
+                v["fresh"][0]["source"].as_str()
+            ),
+            (0, Some("jlc"))
+        );
+        let v = refresh_with(
+            &p,
+            &fake,
+            base,
+            cache.path(),
+            5_000 + MAX_AGE + 1,
+            MAX_AGE,
+            false,
+            &job,
+        )
+        .unwrap();
+        assert_eq!(
+            v["synced"][0]["fetched_at"],
+            5_000 + MAX_AGE + 1,
+            "old: synced"
+        );
+        let v = refresh_with(
+            &p,
+            &fake,
+            base,
+            cache.path(),
+            9_999_999,
+            MAX_AGE,
+            true,
+            &job,
+        )
+        .unwrap();
+        assert_eq!(v["synced"][0]["fetched_at"], 9_999_999, "--force");
+        let bare_r = json!({"kind": "ryueda.libcomp", "format": 1, "symbol": {"id": "r"}, "prefix": "R",
+                            "footprints": [{"footprint": {"id": "r_0402_1005metric"}}]});
+        let (_e, bare) =
+            crate::netlist::tests::project(&[("library/components/r_100k.json", bare_r)]);
+        let v = refresh_with(&bare, &fake, base, cache.path(), 9_000, MAX_AGE, true, &job).unwrap();
+        assert_eq!(
+            v["synced"],
+            json!([]),
+            "nothing placed draws on a catalogue"
+        );
     }
 }

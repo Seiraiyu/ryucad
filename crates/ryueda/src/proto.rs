@@ -168,6 +168,14 @@ pub enum Request {
     /// Every source of parts, and each catalogue's state on this machine.
     #[serde(rename = "parts.sources")]
     PartsSources {},
+    /// Syncs each catalogue the placed parts' offers draw on that is
+    /// missing or past `parts.max_age`, or every one with `force`: long,
+    /// as `parts.sync` is.
+    #[serde(rename = "parts.refresh")]
+    PartsRefresh {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
+    },
     /// Sets the project's sourcing in `parts.json`: `assembly` (`jlcpcb`,
     /// `null` for none), `build_quantity` (`null` for 1), `sources` (the
     /// whole list, `[]` for none), severities by supply code (`null` for

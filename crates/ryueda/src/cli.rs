@@ -638,6 +638,15 @@ enum PartsCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Sync each catalogue the placed parts' offers draw on that is
+    /// missing or older than parts.max_age (every one with --force): a
+    /// long request, as sync is.
+    Refresh {
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        long: LongArgs,
+    },
     /// Every source of parts, and each catalogue's state on this machine:
     /// when it was synced, how many parts, whether it is stale.
     Sources,
@@ -1382,6 +1391,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             source: source.clone(),
         },
         Command::Parts(PartsCmd::Sources) => Request::PartsSources {},
+        Command::Parts(PartsCmd::Refresh { force, .. }) => Request::PartsRefresh { force: *force },
         Command::Parts(PartsCmd::Configure {
             assembly,
             build_quantity,
@@ -2076,7 +2086,7 @@ fn cli_token() -> String {
 /// What a long request's command asks of its job: always a token.
 fn long_ask(cmd: &Command) -> Option<ryu_session::job::Ask> {
     let long = match cmd {
-        Command::Parts(PartsCmd::Sync { long, .. }) => long,
+        Command::Parts(PartsCmd::Sync { long, .. } | PartsCmd::Refresh { long, .. }) => long,
         _ => return None,
     };
     Some(ryu_session::job::Ask {

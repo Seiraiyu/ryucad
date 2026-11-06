@@ -393,6 +393,13 @@ fn dispatch(
             &severity,
             expected_revision.as_deref(),
         ),
+        Request::PartsRefresh { force } => match session.prepared.take() {
+            Some(made) => made,
+            None => {
+                let names = crate::parts::catalogues_placed(session.project());
+                crate::parts::refresh(&names, force, job)
+            }
+        },
         Request::PartsSources {} => {
             let cats = session.catalogues()?;
             crate::parts::sources(session.project(), &cats)

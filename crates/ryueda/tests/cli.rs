@@ -409,6 +409,7 @@ fn every_protocol_method_has_a_command() {
         ("libcomp.delete", &["libcomp", "delete"]),
         ("parts.search", &["parts", "search"]),
         ("parts.sync", &["parts", "sync"]),
+        ("parts.refresh", &["parts", "refresh"]),
         ("parts.sources", &["parts", "sources"]),
         ("parts.show", &["parts", "show"]),
         ("parts.configure", &["parts", "configure"]),
