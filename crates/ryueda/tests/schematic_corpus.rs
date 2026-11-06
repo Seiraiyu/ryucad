@@ -411,9 +411,10 @@ fn a_release_lays_out_again_what_it_placed() {
     );
 }
 
+/// Issue #414.
 /// `layout --dry-run --render` draws what laying a block out would write
 /// (1.C's 13.8 left it): the same picture as rendering after the real
-/// layout.
+/// layout, its regions' frames too (plan 2.A).
 #[test]
 fn a_layout_dry_run_renders() {
     let dir = tempfile::tempdir().unwrap();
@@ -447,6 +448,11 @@ fn a_layout_dry_run_renders() {
     assert_eq!(
         std::fs::read(board.join("dry.svg")).unwrap(),
         std::fs::read(board.join("real.svg")).unwrap()
+    );
+    let dry = std::fs::read_to_string(board.join("dry.svg")).unwrap();
+    assert!(
+        dry.contains("stroke-dasharray"),
+        "regions' frames are drawn"
     );
     // A picture is of one block: a design's layout with --render is refused.
     let v = ryueda_envelope(&board, &["layout", "--dry-run", "--render", "x.svg"]);
