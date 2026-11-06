@@ -5030,6 +5030,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryueda-parts"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "rayon",
+ "ryu-doc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ryuformats"
 version = "0.0.0"
 dependencies = [
