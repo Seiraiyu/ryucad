@@ -31,6 +31,7 @@ pub(crate) mod split;
 pub mod sweep;
 pub mod tol;
 pub mod topo;
+pub mod tweak;
 pub mod work;
 
 pub use error::{
