@@ -285,4 +285,25 @@ mod tests {
         assert!(b.moved.is_empty());
         assert!(drawn(Some("shell")) && drawn(Some("split")) && !drawn(Some("fillet")));
     }
+
+    #[test]
+    fn a_shells_rims_are_drawn_as_bands() {
+        use ryucad::view::{Camera, Projection};
+        let camera = Camera {
+            eye: [0.0, -10.0, 0.0],
+            target: [0.0; 3],
+            up: [0.0, 0.0, 1.0],
+            projection: Projection::Orthographic { height: 2.0 },
+        };
+        let pr = Projector::new(&camera, 1.0, [0.0; 3], 1.0);
+        let colour = crate::ui::style::CHOSEN;
+        let rim = vec![[-0.5, 0.0, 0.0], [0.0, 0.0, 0.5], [0.5, 0.0, 0.0]];
+        let bands = rim_overlay(std::slice::from_ref(&rim), colour, &pr, [200.0, 200.0], 1.0);
+        assert!(!bands.is_empty());
+        assert_eq!(bands.len() % 3, 0, "triangles");
+        assert!(bands.iter().all(|(_, c)| *c == colour));
+        // A rim of one point draws nothing, and nothing draws nothing.
+        assert!(rim_overlay(&[vec![[0.0; 3]]], colour, &pr, [200.0, 200.0], 1.0).is_empty());
+        assert!(rim_overlay(&[], colour, &pr, [200.0, 200.0], 1.0).is_empty());
+    }
 }

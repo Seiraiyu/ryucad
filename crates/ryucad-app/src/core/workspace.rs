@@ -3971,3 +3971,66 @@ fn import_request(path: &str, update: Option<String>, dry_run: bool) -> Request 
 fn absolute(path: &str) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// A body of an inspect answer: faces by name and origin, edges by the
+    /// faces they bound.
+    fn body(solid: &str, faces: &[(&str, &str)], edges: &[(&str, [&str; 2])]) -> Value {
+        json!({
+            "solid": solid,
+            "faces": faces.iter().map(|(n, f)| json!({"name": n, "origin": {"feature": f}}))
+                .collect::<Vec<_>>(),
+            "edges": edges.iter().map(|(n, fs)| json!({"name": n, "faces": fs}))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    fn a_shells_rims_are_the_edges_between_made_and_unmade_faces() {
+        let key = ("p".to_owned(), "sh".to_owned());
+        // An open shell: walls `w1`, `w2` and floor `fl` the shell made, the
+        // outside `o1`, `o2` the box's, the opening's edges `r1`, `r2`
+        // between them; `e1` joins two made faces, `e2` two unmade ones.
+        let open = body(
+            "b",
+            &[
+                ("w1", "sh"),
+                ("w2", "sh"),
+                ("fl", "sh"),
+                ("o1", "b"),
+                ("o2", "b"),
+            ],
+            &[
+                ("r1", ["w1", "o1"]),
+                ("r2", ["o2", "w2"]),
+                ("e1", ["w1", "fl"]),
+                ("e2", ["o1", "o2"]),
+            ],
+        );
+        // A closed shell: its cavity's faces meet only each other.
+        let cavity = body(
+            "c",
+            &[("i1", "sh"), ("i2", "sh"), ("o3", "c")],
+            &[("e3", ["i1", "i2"]), ("e4", ["o3", "o3"])],
+        );
+        // A body the shell made nothing of.
+        let other = body("d", &[("x", "d")], &[("e5", ["x", "x"])]);
+        let v = json!({"bodies": [open, cavity, other]});
+        let m = Made::from_inspect(&key, "r1", &v);
+        let names = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<BTreeSet<_>>();
+        let b = ("p".to_owned(), "b".to_owned());
+        let c = ("p".to_owned(), "c".to_owned());
+        assert_eq!(m.faces[&b], names(&["w1", "w2", "fl"]));
+        assert_eq!(m.faces[&c], names(&["i1", "i2"]));
+        assert!(!m.faces.contains_key(&("p".to_owned(), "d".to_owned())));
+        assert_eq!(m.rims[&b], names(&["r1", "r2"]));
+        // The cavity has no opening, so no rim.
+        assert!(!m.rims.contains_key(&c));
+        assert_eq!(m.rims.len(), 1);
+        assert_eq!((m.feature, m.revision.as_str()), (key, "r1"));
+    }
+}

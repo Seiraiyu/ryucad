@@ -1672,6 +1672,16 @@ impl Form {
                 let g = self.blend.as_mut()?.groups.get_mut(i)?;
                 g.sizes.iter_mut().find(|(key, _)| key == k).map(|(_, f)| f)
             }
+            // A shell's or offset's group by its whole pointer, since the
+            // top-level `thickness` and `distance` share the last step.
+            ["faces", i, "thickness"] => {
+                let i: usize = i.parse().ok()?;
+                Some(&mut self.shell.as_mut()?.groups.get_mut(i)?.quantity)
+            }
+            ["faces", i, "distance"] => {
+                let i: usize = i.parse().ok()?;
+                Some(&mut self.offset.as_mut()?.groups.get_mut(i)?.quantity)
+            }
             [side @ ("a" | "b"), "offset", rest @ ..] => {
                 let m = self.mate.as_mut()?;
                 let o = if *side == "a" { &mut m.a } else { &mut m.b };
@@ -2690,6 +2700,35 @@ mod tests {
         let m = f.mate.as_ref().unwrap();
         assert!(m.a.rotate.error.is_some() && m.b.rotate.error.is_none());
         assert!(m.b.origin[1].error.is_none() && f.error.is_none());
+    }
+
+    /// A shell's or offset's group refused by its whole pointer lands on
+    /// the group's quantity, not the top-level field sharing its last step.
+    #[test]
+    fn a_shell_or_offset_groups_refusal_lands_on_the_group() {
+        use ryucad::error::Code;
+        let refused = |p: &str| Error::new(Code::InvalidParam, "no").with("pointer", p);
+        let face = "p/b/".to_owned() + &"b".repeat(32);
+        let shell = json!({"id": "sh", "type": "shell", "revision": "r1", "target": "b",
+                           "thickness": {"value": "2 mm", "m": 0.002},
+                           "faces": [{"thickness": {"value": "4 mm", "m": 0.004}, "faces": [face]}]});
+        let mut f = Form::from_show("p", &shell);
+        f.refuse(refused("/faces/0/thickness"));
+        let s = f.shell.as_ref().unwrap();
+        assert!(s.groups[0].quantity.error.is_some());
+        assert!(s.thickness.error.is_none() && f.error.is_none());
+        // The top-level pointer still lands on the top-level field.
+        f.refuse(refused("/thickness"));
+        let s = f.shell.as_ref().unwrap();
+        assert!(s.thickness.error.is_some() && s.groups[0].quantity.error.is_none());
+        let offset = json!({"id": "o", "type": "offset", "revision": "r1", "target": "b",
+                            "distance": {"value": "1 mm", "m": 0.001},
+                            "faces": [{"distance": {"value": "3 mm", "m": 0.003}, "faces": [face]}]});
+        let mut f = Form::from_show("p", &offset);
+        f.refuse(refused("/faces/0/distance"));
+        let o = f.offset.as_ref().unwrap();
+        assert!(o.groups[0].quantity.error.is_some());
+        assert!(o.distance.error.is_none() && f.error.is_none());
     }
 
     /// Revert puts back the value a refusal was about, so the refusal goes
