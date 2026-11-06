@@ -77,6 +77,7 @@ pub mod hole;
 pub mod import;
 pub mod inspect;
 pub mod interference;
+pub mod kind;
 pub mod live;
 pub mod loft;
 pub mod mass;
