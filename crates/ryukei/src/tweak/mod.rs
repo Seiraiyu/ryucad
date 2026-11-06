@@ -92,6 +92,82 @@ fn move_faces_in(
     rigidly(key, body, motion, meter)
 }
 
+/// Faces moved along their outward normals, each by its own distance
+/// (positive outwards); with `tangent`, tangent neighbours by the same.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OffsetFacesSpec {
+    pub faces: Vec<(Name, f64)>,
+    pub tangent: bool,
+}
+
+/// `body` with `spec`'s faces offset, the rest staying: their edges and
+/// vertices found again on the offsets. Distances are finite and zero or
+/// at least `10 × LINEAR_RESOLUTION` either way.
+pub fn offset_faces(
+    key: OpKey,
+    body: &Body,
+    spec: &OffsetFacesSpec,
+) -> Result<(Body, Journal), Error> {
+    offset_faces_with(key, body, spec, &Work::unlimited())
+}
+
+/// [`offset_faces`] under `work`.
+pub fn offset_faces_with(
+    key: OpKey,
+    body: &Body,
+    spec: &OffsetFacesSpec,
+    work: &Work,
+) -> Result<(Body, Journal), Error> {
+    crate::work::run(work, |meter| offset_faces_in(key, body, spec, meter))
+}
+
+fn offset_faces_in(
+    key: OpKey,
+    body: &Body,
+    spec: &OffsetFacesSpec,
+    meter: &Meter,
+) -> Result<(Body, Journal), Error> {
+    let faces = resolve(body, spec.faces.iter().map(|&(n, _)| n))?;
+    let mut motion: BTreeMap<FaceId, Motion> = BTreeMap::new();
+    for (&f, &(_, d)) in faces.iter().zip(&spec.faces) {
+        if !d.is_finite() {
+            return Err(TweakError::NotFinite.into());
+        }
+        if !crate::offset::classify::usable(d) {
+            return Err(TweakError::BadDistance.into());
+        }
+        if d != 0.0 {
+            motion.insert(f, Motion::Offset(d));
+        }
+    }
+    if motion.is_empty() {
+        return Ok((body.clone(), Journal::new()));
+    }
+    let motion = if spec.tangent {
+        chain::grow(body, motion)?
+    } else {
+        motion
+    };
+    let mut surface = BTreeMap::new();
+    for (&f, m) in &motion {
+        let Motion::Offset(d) = *m else {
+            unreachable!("faces offset")
+        };
+        let s = crate::offset::classify::offset_surface(body, f, d).map_err(engine::translate)?;
+        surface.insert(f, s);
+    }
+    engine::run(
+        key,
+        body,
+        &Changes {
+            motion,
+            surface,
+            senses: BTreeMap::new(),
+        },
+        meter,
+    )
+}
+
 /// The faces `names` names, in order: `NoFaces` for none, `NoSuchFace`
 /// for a name no face has, `DuplicateFace` for one named twice.
 pub(crate) fn resolve(

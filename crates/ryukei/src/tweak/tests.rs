@@ -144,3 +144,45 @@ fn moving_a_top_beside_its_fillet_needs_the_tangent_option() {
     assert_eq!(crate::check::check(&o), []);
     assert_eq!(o.faces().count(), b.faces().count());
 }
+
+#[test]
+fn two_neighbouring_faces_offset_keep_their_sharp_edge() {
+    let b = block();
+    let spec = OffsetFacesSpec {
+        faces: vec![(face(FaceRole::PlusZ), 0.1), (face(FaceRole::PlusX), 0.2)],
+        tangent: false,
+    };
+    let (o, _) = offset_faces(T, &b, &spec).unwrap();
+    assert_eq!((o.faces().count(), o.edges().count()), (6, 12));
+    assert_eq!(crate::check::check(&o), []);
+    let far = o
+        .vertices()
+        .map(|v| o.vertices[v].point)
+        .fold(crate::geom::Point3::ORIGIN, |a, p| {
+            if p.x + p.z > a.x + a.z { p } else { a }
+        });
+    assert!(
+        far.distance(crate::geom::Point3::new(1.2, far.y, 0.5)) < 1e-9,
+        "{far:?}"
+    );
+}
+
+#[test]
+fn offsets_are_checked_as_offsets_are() {
+    let b = block();
+    let spec = |d| OffsetFacesSpec {
+        faces: vec![(face(FaceRole::PlusZ), d)],
+        tangent: false,
+    };
+    assert_eq!(
+        refusal(offset_faces(T, &b, &spec(1e-9))),
+        TweakError::BadDistance
+    );
+    assert_eq!(
+        refusal(offset_faces(T, &b, &spec(f64::INFINITY))),
+        TweakError::NotFinite
+    );
+    let (o, j) = offset_faces(T, &b, &spec(0.0)).unwrap();
+    assert_eq!(crate::codec::encode_body(&o), crate::codec::encode_body(&b));
+    assert!(j.events().is_empty());
+}
