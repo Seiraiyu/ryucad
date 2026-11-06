@@ -162,6 +162,7 @@ pub fn part_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
     if (foot.revert || keys.revert) && dirty {
         for prop in &mut p.props {
             prop.field.text.clone_from(&prop.field.read);
+            prop.field.error = None;
         }
         p.error = None;
     }

@@ -25,7 +25,7 @@ use crate::doc::assembly::Rev;
 use crate::doc::files::{Feature, PartKind};
 use crate::doc::id::Id;
 use crate::doc::materials::check_colour;
-use crate::doc::project::{part_dir, remove_file, write_json};
+use crate::doc::project::part_dir;
 use crate::error::{Code, Error, Result};
 use crate::rebuild::Built;
 use crate::server::{check_revision, part_id, part_kind};
@@ -728,11 +728,9 @@ fn write(
 ) -> Result<Value> {
     let at = part_dir(session.root(), part).join(APPEARANCE);
     if file.is_empty() {
-        if at.exists() {
-            remove_file(session.root(), &at)?;
-        }
+        session.remove_file(&at)?;
     } else {
-        write_json(&at, &file.to_json())?;
+        session.write_json(&at, &file.to_json())?;
     }
     session.reload()?;
     let p = session.project().part(part)?;

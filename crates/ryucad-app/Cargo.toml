@@ -4,6 +4,7 @@ description = "The ryucad desktop app: watch, point at and adjust what agents bu
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 # Thumbnails are named by the BLAKE3 of their project's path.

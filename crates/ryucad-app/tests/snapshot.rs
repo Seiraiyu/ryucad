@@ -502,6 +502,59 @@ fn a_chosen_loft_looks_as_it_did() {
     looks_as_it_did(&adapter, &px, "lofts");
 }
 
+/// A split chosen as the window draws it: the box behind the yz plane in
+/// one tint, the solid it founds in front in the other, and the plane as
+/// a datum plane is drawn.
+#[test]
+fn a_chosen_split_looks_as_it_did() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::named("snapshot").with_shell_and_split();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(60), |ws| ws.idle()
+        && ws.model.meshes.len() == 2));
+    let b = ws.model.parts["p"]
+        .feature("sp")
+        .unwrap()
+        .body
+        .clone()
+        .unwrap();
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.015);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    let faces: Vec<scene::PaintedFace> = b
+        .sides
+        .iter()
+        .flat_map(|s| {
+            let key = ("p".to_owned(), s.solid.clone());
+            let c = scene::linear(ryucad_app::core::bodies::tint(&s.side));
+            (0..picker.faces(&key)).map(move |i| (key.clone(), i, c))
+        })
+        .collect();
+    let mark = b.plane_mark("p", "sp", Some((lo, hi))).unwrap();
+    let (overlay, glass) =
+        ryucad_app::core::bodies::plane_overlay(&mark, &pr, [f64::from(W), f64::from(H)], 1.0);
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: theme::BACKGROUND,
+        light: scene::light(&camera),
+        edges: true,
+        faces: &faces,
+        overlay: &overlay,
+        glass: &glass,
+    };
+    scene.render(&device, &queue, [W, H], &list);
+    let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
+    looks_as_it_did(&adapter, &px, "split");
+}
+
 /// Compares `px` with `tests/snapshots/<name>-lavapipe.png` on lavapipe,
 /// or only checks something was drawn on other adapters.
 /// The part in steel blue, the base's top red, the boss translucent: the

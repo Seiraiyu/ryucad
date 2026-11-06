@@ -2177,6 +2177,7 @@ fn tools_appearance_colours_a_face_and_ctrl_z_undoes_it() {
         h.state().opened().ws.appearance.target(),
         Some(face.as_str())
     );
+    let before = h.state().opened().ws.appearance.typed.clone();
     // Typed, and written once Enter is pressed.
     h.get_by_label("Hex").click();
     h.step();
@@ -2203,6 +2204,13 @@ fn tools_appearance_colours_a_face_and_ctrl_z_undoes_it() {
     frames(&mut h, |a| {
         !file.exists() && a.opened().ws.model.looks.is_empty()
     });
+    // The open window reads its target again: the old colour (#577).
+    frames(&mut h, |a| a.opened().ws.appearance.typed == before);
+    h.step();
+    assert_eq!(
+        h.get_by_label("Hex").value().as_deref(),
+        Some(before.as_str())
+    );
     // An opacity dragged previews on the model, written when let go.
     h.state_mut().opened_mut().ws.appearance.chosen = 1;
     h.state_mut()
@@ -3886,6 +3894,91 @@ fn a_section_plane_is_dragged_by_its_arrow_and_written_once() {
     }
 }
 
+/// The window's own participant, as the session reports it.
+fn human(p: &Project) -> serde_json::Value {
+    p.ok(&["participants"])["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["kind"] == "human")
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_named_view_restores_its_planes_and_explode_and_save_keeps_them() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    p.ok(&[
+        "explode",
+        "save",
+        "frame",
+        "apart",
+        "--steps",
+        r#"[{"instances": ["b2"], "translate": [0, 0, 30]}]"#,
+    ]);
+    // An agent cuts three ways, explodes half way and saves it all.
+    p.ok(&["camera", "--view", "iso", "--part", "frame"]);
+    p.ok(&["section", "xy"]);
+    p.ok(&["section", "yz", "--add"]);
+    p.ok(&["section", "zx", "--add"]);
+    p.ok(&[
+        "explode",
+        "show",
+        "apart",
+        "--part",
+        "frame",
+        "--fraction",
+        "0.5",
+    ]);
+    p.ok(&["view", "save", "frame", "cutaway"]);
+    p.ok(&["section", "--off"]);
+    p.ok(&["explode", "show", "--off"]);
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    frames(&mut h, |a| a.opened().ws.views.camera("cutaway").is_some());
+    // Restored by the window: its participant has the planes and explode.
+    {
+        let o = h.state_mut().opened_mut();
+        o.view.restore_view(&mut o.ws, "cutaway");
+    }
+    let t0 = Instant::now();
+    loop {
+        let me = human(&p);
+        if me["sections"].as_array().is_some_and(|s| s.len() == 3) {
+            assert_eq!(me["explode"]["explode"], "apart", "{me}");
+            assert_eq!(me["explode"]["fraction"], 0.5, "{me}");
+            break;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(30),
+            "never restored: {me}"
+        );
+        h.step();
+    }
+    frames(&mut h, |a| a.opened().ws.sections.planes.len() == 3);
+    // Save view… from the window keeps them, with its camera exactly.
+    turned(&mut h);
+    h.run_steps(2);
+    let c = h.state().opened().view.nav.camera.clone();
+    h.state_mut().opened_mut().ws.save_view("kept", &c);
+    frames(&mut h, |a| a.opened().ws.views.camera("kept").is_some());
+    let saved = p.ok(&["view", "list", "frame"]);
+    let kept = saved["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["view"] == "kept")
+        .cloned()
+        .unwrap();
+    assert_eq!(kept["camera"]["eye"], serde_json::json!(c.eye), "{kept}");
+    assert_eq!(kept["sections"].as_array().map(Vec::len), Some(3), "{kept}");
+    assert_eq!(kept["explode"]["fraction"], 0.5, "{kept}");
+}
+
 #[test]
 fn an_explode_is_chosen_and_played_from_its_tile() {
     let _one = one_at_a_time();
@@ -4267,6 +4360,16 @@ fn a_form_marks_checks_applies_on_enter_and_reverts_on_esc() {
         radius.error.is_some() && form.error.is_none(),
         "{:?} {:?}",
         radius,
+        form.error
+    );
+    // Revert puts the value back and the refusal goes with it (#532).
+    h.get_by_label("Revert").click();
+    h.run_steps(2);
+    let form = h.state().opened().ws.form.clone().unwrap();
+    let radius = form.params.iter().find(|x| x.name == "radius").unwrap();
+    assert!(
+        !form.dirty() && radius.error.is_none() && form.error.is_none(),
+        "{radius:?} {:?}",
         form.error
     );
 }
@@ -4758,6 +4861,30 @@ fn empty_tiles_say_what_fills_them() {
     h.get_by_label("ryucad compare HEAD");
 }
 
+/// #559: the Releases tile in a project with no parts says what fills
+/// it, with an agent line and Copy, as the tree and History do.
+#[test]
+fn releases_with_no_parts_say_what_fills_them() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new();
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        matches!(a.screen, ryucad_app::ui::app::Screen::Opened(_)) && a.opened().ws.idle()
+    });
+    show_tab(&mut h, "releases");
+    h.run_steps(3);
+    h.get_by_label("No parts to release yet");
+    // The tree's own line shows too; the tile adds one of its own.
+    assert_eq!(
+        h.query_all_by_label("ryucad part create bracket").count(),
+        2
+    );
+    h.get_by_label("Set up PDM");
+}
+
 /// The start window as it draws, to `target/start/start.png`, for a PR
 /// to compare with `design/app/png/start` by eye (not asserted: recent
 /// projects are whatever this run's tests opened). A project opened and
@@ -4876,6 +5003,81 @@ fn a_lofts_weight_and_a_sweeps_twist_are_edited_from_their_forms() {
     });
     let shown = p.ok(&["feature", "show", "p", "w"]);
     assert_eq!(shown["twist"]["value"], "90 deg");
+}
+
+#[test]
+fn a_shells_thickness_and_a_splits_flip_are_edited_from_their_forms() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_shell_and_split();
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        loaded(a)
+            && ["sh", "sp"].iter().all(|f| {
+                a.opened().ws.model.parts["p"]
+                    .feature(f)
+                    .is_some_and(|f| f.hash.is_some())
+            })
+    });
+    h.step();
+    h.get_by_label("sh (shell)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| f.shell.is_some())
+    });
+    h.step();
+    let thickness = h.get_by_role_and_label(egui::accesskit::Role::TextInput, "thickness");
+    thickness.set_text_value_accesskit("1.5 mm");
+    h.step();
+    h.get_by_label("Apply").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
+    });
+    let shown = p.ok(&["feature", "show", "p", "sh"]);
+    assert_eq!(shown["thickness"]["value"], "1.5 mm");
+    h.get_by_label("sp (split)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| f.split.is_some())
+    });
+    h.step();
+    // Its plane is shown; its report gives both sides to paint.
+    h.get_by_label("yz");
+    assert_eq!(split_sides(&h), ["behind", "front"]);
+    h.get_by_label("flip the plane").click();
+    h.step();
+    h.get_by_label("Apply").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
+    });
+    let shown = p.ok(&["feature", "show", "p", "sp"]);
+    assert_eq!(shown["flip"], true);
+}
+
+/// The sides split `sp`'s report gives, behind first.
+fn split_sides(h: &Harness<'static, App>) -> Vec<String> {
+    let ws = &h.state().opened().ws;
+    ws.model.parts["p"]
+        .feature("sp")
+        .and_then(|f| f.body.as_ref())
+        .map(|b| b.sides.iter().map(|s| s.side.clone()).collect())
+        .unwrap_or_default()
 }
 
 /// Where the window draws datum `reference`, as its picker lays it out.

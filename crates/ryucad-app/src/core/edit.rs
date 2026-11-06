@@ -1061,6 +1061,222 @@ impl LoftForm {
     }
 }
 
+/// Strings of a list as `feature.show` gives them.
+fn texts(v: &Value) -> Vec<String> {
+    v.as_array().into_iter().flatten().map(text).collect()
+}
+
+/// One group of a shell's or offset's faces: its own thickness or
+/// distance, and its faces, each one a checkbox to take it out (adding
+/// one is an agent's work), as a fillet's edges are.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FaceGroup {
+    pub quantity: Field,
+    pub faces: Picks,
+}
+
+/// A shell's or offset's groups as `feature.show` gives them, each
+/// group's quantity under `key` (`thickness` or `distance`).
+fn face_groups(v: &Value, key: &str) -> Vec<FaceGroup> {
+    v["faces"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(|(i, g)| FaceGroup {
+            quantity: Field::new(&format!("{key} (group {})", i + 1), text(&g[key])),
+            faces: Picks::new(&format!("faces (group {})", i + 1), texts(&g["faces"])),
+        })
+        .collect()
+}
+
+fn groups_dirty(groups: &[FaceGroup]) -> bool {
+    groups.iter().any(|g| g.quantity.dirty() || g.faces.dirty())
+}
+
+fn revert_groups(groups: &mut [FaceGroup]) {
+    for g in groups {
+        g.quantity.text.clone_from(&g.quantity.read);
+        g.faces.chosen.clone_from(&g.faces.read);
+    }
+}
+
+/// The groups as `feature.edit` takes them: every one, whole, as typed; a
+/// group left with no faces goes.
+fn groups_json(groups: &[FaceGroup], key: &str) -> Value {
+    let out: Vec<Value> = groups
+        .iter()
+        .filter(|g| !g.faces.chosen.is_empty())
+        .map(|g| {
+            let mut v = json!({"faces": g.faces.chosen});
+            v[key] = json!(g.quantity.text.trim());
+            v
+        })
+        .collect();
+    json!(out)
+}
+
+/// A shell's form (design 327): its target shown; its thickness and
+/// direction edited; its open faces and its groups' faces each a checkbox
+/// to take out, its groups' thicknesses edited.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShellForm {
+    pub target: String,
+    pub thickness: Field,
+    /// `inward` or `outward`.
+    pub direction: Choice,
+    pub open: Picks,
+    pub groups: Vec<FaceGroup>,
+}
+
+impl ShellForm {
+    /// From a `feature.show` of a shell.
+    fn from_show(v: &Value) -> ShellForm {
+        let direction = v["direction"].as_str().unwrap_or("inward").to_owned();
+        ShellForm {
+            target: text(&v["target"]),
+            thickness: Field::new("thickness", text(&v["thickness"])),
+            direction: Choice::new("direction", &["inward", "outward"], direction),
+            open: Picks::new("open faces", texts(&v["open"])),
+            groups: face_groups(v, "thickness"),
+        }
+    }
+
+    fn fields(&self) -> impl Iterator<Item = &Field> {
+        std::iter::once(&self.thickness).chain(self.groups.iter().map(|g| &g.quantity))
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.thickness.dirty()
+            || self.direction.dirty()
+            || self.open.dirty()
+            || groups_dirty(&self.groups)
+    }
+
+    fn revert(&mut self) {
+        self.thickness.text.clone_from(&self.thickness.read);
+        self.direction.chosen.clone_from(&self.direction.read);
+        self.open.chosen.clone_from(&self.open.read);
+        revert_groups(&mut self.groups);
+    }
+
+    /// What changed, as `feature.edit` takes it: the thickness typed, the
+    /// direction chosen, the open faces left (none: `[]`), the groups
+    /// whole.
+    fn given(&self, out: &mut FeatureFields) {
+        if self.thickness.dirty() {
+            out.thickness = Some(json!(self.thickness.text.trim()));
+        }
+        if self.direction.dirty() {
+            out.direction = Some(self.direction.chosen.clone());
+        }
+        if self.open.dirty() {
+            out.open = Some(self.open.chosen.clone());
+        }
+        if groups_dirty(&self.groups) {
+            out.faces = Some(groups_json(&self.groups, "thickness"));
+        }
+    }
+}
+
+/// An offset's form (design 327): its target shown; its distance edited;
+/// its groups' distances edited and their faces each a checkbox to take
+/// out. `OffsetForm` is a mate connector's (question 148).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BodyOffsetForm {
+    pub target: String,
+    pub distance: Field,
+    pub groups: Vec<FaceGroup>,
+}
+
+impl BodyOffsetForm {
+    /// From a `feature.show` of an offset.
+    fn from_show(v: &Value) -> BodyOffsetForm {
+        BodyOffsetForm {
+            target: text(&v["target"]),
+            distance: Field::new("distance", text(&v["distance"])),
+            groups: face_groups(v, "distance"),
+        }
+    }
+
+    fn fields(&self) -> impl Iterator<Item = &Field> {
+        std::iter::once(&self.distance).chain(self.groups.iter().map(|g| &g.quantity))
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.distance.dirty() || groups_dirty(&self.groups)
+    }
+
+    fn revert(&mut self) {
+        self.distance.text.clone_from(&self.distance.read);
+        revert_groups(&mut self.groups);
+    }
+
+    fn given(&self, out: &mut FeatureFields) {
+        if self.distance.dirty() {
+            out.distance = Some(json!(self.distance.text.trim()));
+        }
+        if groups_dirty(&self.groups) {
+            out.faces = Some(groups_json(&self.groups, "distance"));
+        }
+    }
+}
+
+/// A mirror's form (design 327): the solid it copies and its plane shown,
+/// never changed here; its operation and targets are the form's own, as
+/// an extrude's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MirrorForm {
+    pub solid: String,
+    pub plane: String,
+}
+
+/// A split's form (design 327): its target and plane shown; whether its
+/// plane is flipped and which sides it keeps edited.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SplitForm {
+    pub target: String,
+    pub plane: String,
+    pub flip: Flag,
+    /// `both` or `behind`.
+    pub keep: Choice,
+}
+
+impl SplitForm {
+    fn from_show(v: &Value) -> SplitForm {
+        let flip = v["flip"] == true;
+        let keep = v["keep"].as_str().unwrap_or("both").to_owned();
+        SplitForm {
+            target: text(&v["target"]),
+            plane: text(&v["plane"]),
+            flip: Flag {
+                name: "flip".to_owned(),
+                read: flip,
+                chosen: flip,
+            },
+            keep: Choice::new("keep", &["both", "behind"], keep),
+        }
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.flip.dirty() || self.keep.dirty()
+    }
+
+    fn revert(&mut self) {
+        self.flip.chosen = self.flip.read;
+        self.keep.chosen.clone_from(&self.keep.read);
+    }
+
+    fn given(&self, out: &mut FeatureFields) {
+        if self.flip.dirty() {
+            out.flip = Some(self.flip.chosen);
+        }
+        if self.keep.dirty() {
+            out.keep = Some(self.keep.chosen.clone());
+        }
+    }
+}
+
 /// The form for one feature.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Form {
@@ -1101,6 +1317,14 @@ pub struct Form {
     pub sweep: Option<SweepForm>,
     /// A loft's closing and tangents' weights.
     pub loft: Option<LoftForm>,
+    /// A shell's thickness, direction, open faces and groups.
+    pub shell: Option<ShellForm>,
+    /// An offset's distance and groups.
+    pub offset: Option<BodyOffsetForm>,
+    /// A mirror's solid and plane, shown.
+    pub mirror: Option<MirrorForm>,
+    /// A split's flip and what it keeps.
+    pub split: Option<SplitForm>,
     /// An instance's revision (`working` or a label) and whether it is
     /// fixed; its pose is the placement, its origin in [`Form::unit`].
     pub rev: Option<Choice>,
@@ -1202,8 +1426,10 @@ impl Form {
         let p = pose.as_ref().unwrap_or(&v["placement"]);
         let strings =
             |v: &Value| -> Vec<String> { v.as_array().into_iter().flatten().map(text).collect() };
-        let acts = matches!(ty.as_str(), "extrude" | "revolve" | "sweep" | "loft")
-            || v["params"].is_object() && v["placement"].is_object();
+        let acts = matches!(
+            ty.as_str(),
+            "extrude" | "revolve" | "sweep" | "loft" | "mirror"
+        ) || v["params"].is_object() && v["placement"].is_object();
         let operation = acts.then(|| {
             let read = v["operation"].as_str().unwrap_or("new").to_owned();
             Choice::new("operation", &["new", "join", "cut", "intersect"], read)
@@ -1237,6 +1463,13 @@ impl Form {
         let datum = crate::core::datums::kind_of(&ty).map(|_| DatumForm::from_show(v));
         let sweep = (ty == "sweep").then(|| SweepForm::from_show(v));
         let loft = (ty == "loft").then(|| LoftForm::from_show(v));
+        let shell = (ty == "shell").then(|| ShellForm::from_show(v));
+        let offset = (ty == "offset").then(|| BodyOffsetForm::from_show(v));
+        let mirror = (ty == "mirror").then(|| MirrorForm {
+            solid: text(&v["solid"]),
+            plane: text(&v["plane"]),
+        });
+        let split = (ty == "split").then(|| SplitForm::from_show(v));
         Form {
             part: part.to_owned(),
             feature: text(&v["id"]),
@@ -1260,6 +1493,10 @@ impl Form {
             datum,
             sweep,
             loft,
+            shell,
+            offset,
+            mirror,
+            split,
             rev: instance.then(|| {
                 let read = match v["rev"]["label"].as_str() {
                     Some(l) => l.to_owned(),
@@ -1342,6 +1579,8 @@ impl Form {
             .chain(self.datum.iter().flat_map(DatumForm::fields))
             .chain(self.sweep.iter().flat_map(SweepForm::fields))
             .chain(self.loft.iter().flat_map(LoftForm::fields))
+            .chain(self.shell.iter().flat_map(ShellForm::fields))
+            .chain(self.offset.iter().flat_map(BodyOffsetForm::fields))
     }
 
     /// Every field, to place errors and keep what was typed.
@@ -1386,6 +1625,14 @@ impl Form {
         if let Some(l) = &mut self.loft {
             out.extend(l.start.iter_mut().chain(&mut l.end).map(|t| &mut t.weight));
         }
+        if let Some(s) = &mut self.shell {
+            out.push(&mut s.thickness);
+            out.extend(s.groups.iter_mut().map(|g| &mut g.quantity));
+        }
+        if let Some(o) = &mut self.offset {
+            out.push(&mut o.distance);
+            out.extend(o.groups.iter_mut().map(|g| &mut g.quantity));
+        }
         out
     }
 
@@ -1424,6 +1671,16 @@ impl Form {
                 let i: usize = i.parse().ok()?;
                 let g = self.blend.as_mut()?.groups.get_mut(i)?;
                 g.sizes.iter_mut().find(|(key, _)| key == k).map(|(_, f)| f)
+            }
+            // A shell's or offset's group by its whole pointer, since the
+            // top-level `thickness` and `distance` share the last step.
+            ["faces", i, "thickness"] => {
+                let i: usize = i.parse().ok()?;
+                Some(&mut self.shell.as_mut()?.groups.get_mut(i)?.quantity)
+            }
+            ["faces", i, "distance"] => {
+                let i: usize = i.parse().ok()?;
+                Some(&mut self.offset.as_mut()?.groups.get_mut(i)?.quantity)
             }
             [side @ ("a" | "b"), "offset", rest @ ..] => {
                 let m = self.mate.as_mut()?;
@@ -1483,6 +1740,9 @@ impl Form {
             || self.datum.as_ref().is_some_and(DatumForm::dirty)
             || self.sweep.as_ref().is_some_and(SweepForm::dirty)
             || self.loft.as_ref().is_some_and(LoftForm::dirty)
+            || self.shell.as_ref().is_some_and(ShellForm::dirty)
+            || self.offset.as_ref().is_some_and(BodyOffsetForm::dirty)
+            || self.split.as_ref().is_some_and(SplitForm::dirty)
     }
 
     /// Everything typed or chosen goes back as it was read.
@@ -1538,6 +1798,19 @@ impl Form {
         }
         if let Some(l) = &mut self.loft {
             l.revert();
+        }
+        if let Some(s) = &mut self.shell {
+            s.revert();
+        }
+        if let Some(o) = &mut self.offset {
+            o.revert();
+        }
+        if let Some(s) = &mut self.split {
+            s.revert();
+        }
+        // A refusal was about a value now put back (#532).
+        for f in self.fields_mut() {
+            f.error = None;
         }
         self.error = None;
     }
@@ -1598,6 +1871,15 @@ impl Form {
         }
         if let Some(l) = &self.loft {
             l.given(&mut out);
+        }
+        if let Some(s) = &self.shell {
+            s.given(&mut out);
+        }
+        if let Some(o) = &self.offset {
+            o.given(&mut out);
+        }
+        if let Some(s) = &self.split {
+            s.given(&mut out);
         }
         Ok(out)
     }
@@ -1801,6 +2083,112 @@ impl DimForm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shells_thickness_direction_open_faces_and_groups_are_edited() {
+        let (a, b, c) = (
+            "p/b/".to_owned() + &"a".repeat(32),
+            "p/b/".to_owned() + &"b".repeat(32),
+            "p/b/".to_owned() + &"c".repeat(32),
+        );
+        let shown = json!({"id": "sh", "type": "shell", "revision": "r1", "target": "b",
+                           "thickness": {"value": "2 mm", "m": 0.002}, "direction": "inward",
+                           "open": [a],
+                           "faces": [{"thickness": {"value": "4 mm", "m": 0.004}, "faces": [b, c]}]});
+        let mut f = Form::from_show("p", &shown);
+        let s = f.shell.as_ref().unwrap();
+        assert_eq!(s.target, "b");
+        assert_eq!(
+            (s.thickness.read.as_str(), s.direction.read.as_str()),
+            ("2 mm", "inward")
+        );
+        assert_eq!(s.open.read, std::slice::from_ref(&a));
+        assert_eq!(s.groups[0].quantity.read, "4 mm");
+        assert_eq!(s.groups[0].faces.read, [b.clone(), c.clone()]);
+        // A shell names its target: no operation, no targets.
+        assert!(f.operation.is_none() && f.targets.is_none());
+        assert!(!f.dirty());
+        let s = f.shell.as_mut().unwrap();
+        s.thickness.text = "3 mm".into();
+        s.direction.chosen = "outward".into();
+        s.open.toggle(&a);
+        s.groups[0].faces.toggle(&b);
+        let g = given(&f);
+        assert_eq!(g.thickness, Some(json!("3 mm")));
+        assert_eq!(g.direction.as_deref(), Some("outward"));
+        // Taking out the last open face writes none.
+        assert_eq!(g.open, Some(Vec::<String>::new()));
+        assert_eq!(g.faces, Some(json!([{"thickness": "4 mm", "faces": [c]}])));
+        f.revert();
+        assert!(!f.dirty());
+        // A group left with no faces goes; only what changed is sent.
+        let s = f.shell.as_mut().unwrap();
+        s.groups[0].faces.chosen.clear();
+        let g = given(&f);
+        assert_eq!(g.faces, Some(json!([])));
+        assert_eq!((g.thickness, g.direction, g.open), (None, None, None));
+    }
+
+    #[test]
+    fn an_offsets_distance_and_groups_are_edited() {
+        let a = "p/b/".to_owned() + &"a".repeat(32);
+        let shown = json!({"id": "o", "type": "offset", "revision": "r1", "target": "b",
+                           "distance": {"value": "-1 mm", "m": -0.001},
+                           "faces": [{"distance": {"value": "2 mm", "m": 0.002}, "faces": [a]}]});
+        let mut f = Form::from_show("p", &shown);
+        let o = f.offset.as_ref().unwrap();
+        assert_eq!(
+            (o.target.as_str(), o.distance.read.as_str()),
+            ("b", "-1 mm")
+        );
+        assert_eq!(o.groups[0].quantity.name, "distance (group 1)");
+        let o = f.offset.as_mut().unwrap();
+        o.groups[0].quantity.text = "wall".into();
+        let g = given(&f);
+        assert_eq!(g.distance, None);
+        assert_eq!(g.faces, Some(json!([{"distance": "wall", "faces": [a]}])));
+        // An offset with no groups and its distance edited.
+        let shown = json!({"id": "o", "type": "offset", "revision": "r1", "target": "b",
+                           "distance": {"value": "1 mm", "m": 0.001}});
+        let mut f = Form::from_show("p", &shown);
+        assert!(f.offset.as_ref().unwrap().groups.is_empty());
+        f.offset.as_mut().unwrap().distance.text = "0.5 mm".into();
+        assert_eq!(given(&f).distance, Some(json!("0.5 mm")));
+    }
+
+    #[test]
+    fn a_mirrors_operation_is_edited_and_its_solid_and_plane_shown() {
+        let shown = json!({"id": "m", "type": "mirror", "revision": "r1", "solid": "half",
+                           "plane": "yz", "operation": "join", "targets": ["half"]});
+        let mut f = Form::from_show("p", &shown);
+        let m = f.mirror.as_ref().unwrap();
+        assert_eq!((m.solid.as_str(), m.plane.as_str()), ("half", "yz"));
+        assert_eq!(f.operation.as_ref().unwrap().read, "join");
+        assert_eq!(f.targets.as_ref().unwrap().read, ["half"]);
+        f.operation.as_mut().unwrap().chosen = "new".into();
+        let g = given(&f);
+        assert_eq!(g.operation.as_deref(), Some("new"));
+        assert_eq!((g.plane, g.solid), (None, None));
+    }
+
+    #[test]
+    fn a_splits_flip_and_keep_are_edited_and_its_plane_shown() {
+        let shown = json!({"id": "sp", "type": "split", "revision": "r1", "target": "b",
+                           "plane": "p/cut", "flip": false, "keep": "both"});
+        let mut f = Form::from_show("p", &shown);
+        let s = f.split.as_ref().unwrap();
+        assert_eq!((s.target.as_str(), s.plane.as_str()), ("b", "p/cut"));
+        assert_eq!((s.flip.read, s.keep.read.as_str()), (false, "both"));
+        assert!(f.operation.is_none() && f.targets.is_none());
+        let s = f.split.as_mut().unwrap();
+        s.flip.chosen = true;
+        s.keep.chosen = "behind".into();
+        let g = given(&f);
+        assert_eq!((g.flip, g.keep.as_deref()), (Some(true), Some("behind")));
+        f.revert();
+        let g = given(&f);
+        assert_eq!((g.flip, g.keep), (None, None));
+    }
 
     #[test]
     fn a_foreign_instance_offers_only_its_dependencys_labels() {
@@ -2312,6 +2700,59 @@ mod tests {
         let m = f.mate.as_ref().unwrap();
         assert!(m.a.rotate.error.is_some() && m.b.rotate.error.is_none());
         assert!(m.b.origin[1].error.is_none() && f.error.is_none());
+    }
+
+    /// A shell's or offset's group refused by its whole pointer lands on
+    /// the group's quantity, not the top-level field sharing its last step.
+    #[test]
+    fn a_shell_or_offset_groups_refusal_lands_on_the_group() {
+        use ryucad::error::Code;
+        let refused = |p: &str| Error::new(Code::InvalidParam, "no").with("pointer", p);
+        let face = "p/b/".to_owned() + &"b".repeat(32);
+        let shell = json!({"id": "sh", "type": "shell", "revision": "r1", "target": "b",
+                           "thickness": {"value": "2 mm", "m": 0.002},
+                           "faces": [{"thickness": {"value": "4 mm", "m": 0.004}, "faces": [face]}]});
+        let mut f = Form::from_show("p", &shell);
+        f.refuse(refused("/faces/0/thickness"));
+        let s = f.shell.as_ref().unwrap();
+        assert!(s.groups[0].quantity.error.is_some());
+        assert!(s.thickness.error.is_none() && f.error.is_none());
+        // The top-level pointer still lands on the top-level field.
+        f.refuse(refused("/thickness"));
+        let s = f.shell.as_ref().unwrap();
+        assert!(s.thickness.error.is_some() && s.groups[0].quantity.error.is_none());
+        let offset = json!({"id": "o", "type": "offset", "revision": "r1", "target": "b",
+                            "distance": {"value": "1 mm", "m": 0.001},
+                            "faces": [{"distance": {"value": "3 mm", "m": 0.003}, "faces": [face]}]});
+        let mut f = Form::from_show("p", &offset);
+        f.refuse(refused("/faces/0/distance"));
+        let o = f.offset.as_ref().unwrap();
+        assert!(o.groups[0].quantity.error.is_some());
+        assert!(o.distance.error.is_none() && f.error.is_none());
+    }
+
+    /// Revert puts back the value a refusal was about, so the refusal goes
+    /// with it, on a plain field and on a group's size alike (#532).
+    #[test]
+    fn revert_clears_the_refusals_on_its_fields() {
+        use ryucad::error::Code;
+        let refused = |p: &str| Error::new(Code::InvalidParam, "no").with("pointer", p);
+        let v = json!({"id": "f", "type": "fillet", "revision": "r1", "groups": [
+            {"radius": {"value": "2 mm", "m": 0.002}, "edges": ["p/b/aa"]}
+        ]});
+        let mut f = Form::from_show("p", &v);
+        f.blend.as_mut().unwrap().groups[0].sizes[0].1.text = "-1 mm".into();
+        f.refuse(refused("/groups/0/radius"));
+        assert!(
+            f.blend.as_ref().unwrap().groups[0].sizes[0]
+                .1
+                .error
+                .is_some()
+        );
+        f.revert();
+        assert!(!f.dirty());
+        assert!(f.fields().all(|x| x.error.is_none()));
+        assert!(f.error.is_none());
     }
 
     #[test]

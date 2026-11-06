@@ -386,7 +386,7 @@ pub fn renumber(
             ));
         }
     };
-    crate::doc::project::write_json(
+    session.write_json(
         &crate::doc::project::part_path(session.root(), &id),
         &crate::doc::files::PartFile { items: new, ..file }.to_json(),
     )?;

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ryu-math", "crates/ryu-board", "crates/ryu-copper", "crates/ryudfm", "crates/ryukei", "crates/ryukei-bench", "crates/ryukei-testkit", "crates/ryusketch", "crates/ryumate", "crates/ryu-part21", "crates/ryustep", "crates/ryuformats", "crates/ryu-doc", "crates/ryu-session", "crates/ryucad-doc", "crates/ryupdm", "crates/ryucad", "crates/ryucad-app", "crates/ryueda", "crates/ryusch", "crates/step-hunt"]
+members = ["crates/ryu-math", "crates/ryu-board", "crates/ryu-copper", "crates/ryudfm", "crates/ryukei", "crates/ryukei-bench", "crates/ryukei-testkit", "crates/ryusketch", "crates/ryumate", "crates/ryu-part21", "crates/ryustep", "crates/ryuformats", "crates/ryu-doc", "crates/ryu-session", "crates/ryucad-doc", "crates/ryupdm", "crates/ryucad", "crates/ryucad-app", "crates/ryueda", "crates/ryueda-parts", "crates/ryusch", "crates/step-hunt"]
 exclude = ["fuzz"]
 
 [workspace.package]
@@ -9,6 +9,7 @@ exclude = ["fuzz"]
 version = "0.0.0"
 edition = "2024"
 repository = "https://github.com/seiraiyu/ryucad"
+license = "Apache-2.0"
 
 # Exact reference arithmetic dominates test time; optimize it even in dev.
 [profile.dev.package.num-bigint]

@@ -80,6 +80,11 @@ enum Command {
     /// maker and supplier part numbers.
     #[command(subcommand)]
     Libcomp(LibcompCmd),
+    /// Find parts by category and typed parameters
+    /// (capacitance=100nF voltage_rating>=16V package=0402) in the
+    /// project's libraries.
+    #[command(subcommand)]
+    Parts(PartsCmd),
     /// Create, edit, show, list or delete functional blocks: their
     /// names, ports and buses.
     #[command(subcommand)]
@@ -144,8 +149,13 @@ enum Command {
         action: Option<LintCmd>,
     },
     /// Load the project from nothing and report every file's faults and
-    /// every design's ERC; fails (check_failed) on any error.
-    Check,
+    /// every design's ERC, and supply findings from the catalogues this
+    /// machine holds; fails (check_failed) on any error.
+    Check {
+        /// Stay off the network (check never fetches).
+        #[arg(long)]
+        offline: bool,
+    },
     /// Lay out a design's schematics (the project's one design, or
     /// --design), or one --block, over their layout files, writing those
     /// that change.
@@ -290,6 +300,8 @@ enum Command {
     Undo { entry: Option<u64> },
     /// Redo your latest undo, or the entry given.
     Redo { entry: Option<u64> },
+    /// Cancel a running long request by its token (through the daemon).
+    Cancel { token: String },
     /// Wait for the daemon's notifications.
     Watch {
         /// project, participants, activity; all when none.
@@ -410,7 +422,14 @@ enum FootprintCmd {
 /// A library component's fields; an edit keeps those left out.
 #[derive(Args)]
 struct CompArgs {
-    /// <id>, or lib/<alias>/symbol/<id>.
+    /// Take maker, part number, description, datasheet, category and
+    /// supplier number from a part record (lcsc:C1525, mpn:...); never its
+    /// parameters. Fields given win.
+    #[arg(long, value_name = "SOURCE:KEY")]
+    from: Option<String>,
+    /// <id>, or lib/<alias>/symbol/<id>. With --from, the one the
+    /// library's components of the record's category and package use most
+    /// when left out.
     #[arg(long)]
     symbol: Option<String>,
     /// The reference designator's letters: R, C, U.
@@ -435,6 +454,22 @@ struct CompArgs {
     /// supplier=sku (LCSC=C25741); repeat for more. Replaces the list.
     #[arg(long = "offer", value_parser = pair)]
     offers: Vec<(String, String)>,
+    /// resistor, capacitor, inductor, ferrite_bead, diode, led,
+    /// transistor, regulator, ic, crystal, connector, switch, fuse or
+    /// other; "" for the one the prefix gives.
+    #[arg(long)]
+    category: Option<String>,
+    /// Another maker's part it may be bought as: MAKER:MPN; repeat for
+    /// more. One with a part number already listed replaces it.
+    #[arg(long = "alternate", value_name = "MAKER:MPN")]
+    alternates: Vec<String>,
+    /// Take the alternate of this part number off; repeat for more.
+    #[arg(long = "remove-alternate", value_name = "MPN")]
+    remove_alternates: Vec<String>,
+    /// An offer for an alternate: its part number, then supplier=sku;
+    /// repeat for more.
+    #[arg(long = "alternate-offer", num_args = 2, value_names = ["MPN", "SUPPLIER=SKU"])]
+    alternate_offers: Vec<String>,
     /// A footprint (<id>, or lib/<alias>/footprint/<id>), pins mapped to
     /// the pads of their numbers; repeat for more, the default first.
     /// Replaces the list.
@@ -473,7 +508,45 @@ impl CompArgs {
             ),
             (None, true) => None,
         };
+        let alternates = self
+            .alternates
+            .iter()
+            .map(|t| {
+                let (maker, mpn) = t
+                    .split_once(':')
+                    .filter(|(a, b)| !a.trim().is_empty() && !b.trim().is_empty())
+                    .ok_or_else(|| {
+                        Error::new(Code::Usage, format!("--alternate is MAKER:MPN, not {t:?}"))
+                    })?;
+                Ok(ryueda::libcomp::Alternate {
+                    manufacturer: maker.trim().to_owned(),
+                    mpn: mpn.trim().to_owned(),
+                    offers: Vec::new(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let alternate_offers = self
+            .alternate_offers
+            .chunks(2)
+            .map(|pair| {
+                let (supplier, sku) = pair[1].split_once('=').ok_or_else(|| {
+                    Error::new(
+                        Code::Usage,
+                        format!(
+                            "--alternate-offer's offer is supplier=sku, not {:?}",
+                            pair[1]
+                        ),
+                    )
+                })?;
+                Ok(ryueda::libcmd::AlternateOffer {
+                    mpn: pair[0].clone(),
+                    supplier: supplier.to_owned(),
+                    sku: sku.to_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(ryueda::libcmd::CompFields {
+            from: self.from.clone(),
             symbol: self.symbol.clone(),
             prefix: self.prefix.clone(),
             value: self.value.clone(),
@@ -492,8 +565,111 @@ impl CompArgs {
                     .collect()
             }),
             footprints,
+            category: self.category.clone(),
+            alternates: None,
+            remove_alternates: (!self.remove_alternates.is_empty())
+                .then(|| self.remove_alternates.clone()),
+            add_alternates: (!alternates.is_empty()).then_some(alternates),
+            alternate_offers: (!alternate_offers.is_empty()).then_some(alternate_offers),
         })
     }
+}
+
+#[derive(Subcommand)]
+enum PartsCmd {
+    /// Parts by category and conditions: name=value, name>=value,
+    /// name<=value or name~text, each name in the part vocabulary.
+    Search {
+        /// A category first if wanted (capacitor), then conditions.
+        terms: Vec<String>,
+        /// Where to search, in order: library (the default). Repeat for
+        /// more.
+        #[arg(long = "in", value_name = "SOURCE")]
+        sources: Vec<String>,
+        /// At least this many in stock.
+        #[arg(long)]
+        stock: Option<u64>,
+        /// JLC Basic (or Preferred) parts only.
+        #[arg(long)]
+        basic: bool,
+        /// How many results (20 by default, 1000 at most).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Search with this component's category and parameters: <id>,
+        /// lib/<alias>/libcomp/<id>, or a placed <block>/<component>.
+        #[arg(long)]
+        like: Option<String>,
+        /// Stay off the network.
+        #[arg(long)]
+        offline: bool,
+    },
+    /// The records a key names: <source>:<key> (lcsc:C1525), mpn:<part
+    /// number> for every source, or library:<reference>.
+    Show {
+        key: String,
+        /// Say how to refresh what the record came from.
+        #[arg(long)]
+        refresh: bool,
+        /// Stay off the network.
+        #[arg(long)]
+        offline: bool,
+    },
+    /// The project's sourcing (parts.json): the assembly house, how many
+    /// boards a build makes, the sources searches ask, supply findings'
+    /// severities. Nothing given shows it.
+    Configure {
+        /// jlcpcb, or none.
+        #[arg(long)]
+        assembly: Option<String>,
+        /// Boards a build makes (1 or more), or default.
+        #[arg(long)]
+        build_quantity: Option<String>,
+        /// A source a search without --in asks, in order; repeat for
+        /// more. Replaces the list.
+        #[arg(long = "source", conflicts_with = "no_sources")]
+        sources: Vec<String>,
+        /// Searches without --in ask the library alone again.
+        #[arg(long)]
+        no_sources: bool,
+        /// CODE=error|warning|off|default for a supply finding; repeat
+        /// for more.
+        #[arg(long, value_parser = pair)]
+        severity: Vec<(String, String)>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Sync each catalogue the placed parts' offers draw on that is
+    /// missing or older than parts.max_age (every one with --force): a
+    /// long request, as sync is.
+    Refresh {
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        long: LongArgs,
+    },
+    /// Every source of parts, and each catalogue's state on this machine:
+    /// when it was synced, how many parts, whether it is stale.
+    Sources,
+    /// Download a catalogue into this machine's parts cache, replacing
+    /// the one there once it is whole. A long request: --token names it
+    /// for `ryueda cancel`, --progress prints its progress on stderr.
+    Sync {
+        /// The catalogue's name (`ryueda parts sources` lists them).
+        source: String,
+        #[command(flatten)]
+        long: LongArgs,
+    },
+}
+
+/// What a long request takes.
+#[derive(Args)]
+struct LongArgs {
+    /// A name for `ryueda cancel` (one is made when left out).
+    #[arg(long)]
+    token: Option<String>,
+    /// Print progress on stderr as it goes.
+    #[arg(long)]
+    progress: bool,
 }
 
 #[derive(Subcommand)]
@@ -1211,6 +1387,76 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             libcomp: libcomp.clone(),
             expected_revision: expect.expect.clone(),
         },
+        Command::Parts(PartsCmd::Sync { source, .. }) => Request::PartsSync {
+            source: source.clone(),
+        },
+        Command::Parts(PartsCmd::Sources) => Request::PartsSources {},
+        Command::Parts(PartsCmd::Refresh { force, .. }) => Request::PartsRefresh { force: *force },
+        Command::Parts(PartsCmd::Configure {
+            assembly,
+            build_quantity,
+            sources,
+            no_sources,
+            severity,
+            expect,
+        }) => Request::PartsConfigure {
+            assembly: assembly.as_deref().map(|a| json!(a)),
+            build_quantity: build_quantity
+                .as_deref()
+                .map(|b| b.parse::<u64>().map_or_else(|_| json!(b), |n| json!(n))),
+            sources: if *no_sources {
+                Some(Vec::new())
+            } else {
+                (!sources.is_empty()).then(|| sources.clone())
+            },
+            severity: severity
+                .iter()
+                .map(|(k, v)| (k.clone(), json!(v)))
+                .collect(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Parts(PartsCmd::Show {
+            key,
+            refresh,
+            offline,
+        }) => Request::PartsShow {
+            key: key.clone(),
+            refresh: *refresh,
+            offline: *offline,
+        },
+        Command::Cancel { token } => Request::RequestCancel {
+            token: token.clone(),
+            name: None,
+        },
+        Command::Parts(PartsCmd::Search {
+            terms,
+            sources,
+            stock,
+            basic,
+            limit,
+            like,
+            offline,
+        }) => {
+            // A first word with no operator in it is the category.
+            let (category, conditions) = match terms.split_first() {
+                Some((first, rest)) if !first.contains(['=', '<', '>', '~']) => {
+                    (Some(first.clone()), rest.to_vec())
+                }
+                _ => (None, terms.clone()),
+            };
+            Request::PartsSearch {
+                search: ryueda::parts::Search {
+                    category,
+                    conditions,
+                    sources: sources.clone(),
+                    stock: *stock,
+                    basic: *basic,
+                    limit: *limit,
+                    like: like.clone(),
+                    offline: *offline,
+                },
+            }
+        }
         Command::Block(BlockCmd::Create {
             name,
             id,
@@ -1544,7 +1790,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 .collect(),
             expected_revision: expect.expect.clone(),
         },
-        Command::Check => Request::Check {},
+        Command::Check { offline } => Request::Check { offline: *offline },
         Command::Layout {
             design,
             block,
@@ -1785,19 +2031,82 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             )
         }
         cmd => {
-            let req = request(cmd, &here)?.expect("every other command is a request");
+            let mut req = request(cmd, &here)?.expect("every other command is a request");
+            if let Request::RequestCancel { name, .. } = &mut req {
+                *name = participant(cli);
+            }
             let root = find_root(&here)?;
+            let long = long_ask(cmd);
+            let print = long.as_ref().is_some_and(|a| a.progress);
             if !no_daemon(cli) {
-                match client::request(&root, &req, participant(cli).as_deref()) {
+                let sent = match &long {
+                    Some(ask) => client::request_noting(
+                        &root,
+                        &req,
+                        participant(cli).as_deref(),
+                        ask,
+                        &mut |p| progress_line(print, p),
+                    ),
+                    None => client::request(&root, &req, participant(cli).as_deref()),
+                };
+                match sent {
                     Ok(answer) => return answer.and_then(|a: Answer| deliver(cmd, &here, a)),
                     // Never delivered, so running it here is safe.
                     Err(e) => warnings.push(format!("{}; ran in process", e.message)),
                 }
             }
             let me = participant(cli);
-            server::handle_safely(&mut None, None, me.as_deref(), &root, req)
+            // In process a long request reports its progress and can't be
+            // cancelled: nothing else can reach it.
+            let job = match &long {
+                Some(ask) => ryu_session::job::Job::new(
+                    ask.token.as_deref().unwrap_or("cli"),
+                    me.as_deref().unwrap_or("agent"),
+                    &req.method(),
+                    Default::default(),
+                )
+                .with_line(Box::new(move |p: &Value| progress_line(print, p))),
+                None => ryu_session::job::Job::default(),
+            };
+            server::handle_job(&mut None, None, me.as_deref(), &root, req, &job)
                 .and_then(|a| deliver(cmd, &here, a))
         }
+    }
+}
+
+/// A token for one CLI request: its process and the time, unique enough
+/// among one participant's requests (ryucad's `cancel::token`).
+fn cli_token() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    format!("cli-{}-{nanos:08x}", std::process::id())
+}
+
+/// What a long request's command asks of its job: always a token.
+fn long_ask(cmd: &Command) -> Option<ryu_session::job::Ask> {
+    let long = match cmd {
+        Command::Parts(PartsCmd::Sync { long, .. } | PartsCmd::Refresh { long, .. }) => long,
+        _ => return None,
+    };
+    Some(ryu_session::job::Ask {
+        progress: long.progress,
+        token: Some(long.token.clone().unwrap_or_else(cli_token)),
+    })
+}
+
+/// A progress line on stderr, when asked for: `fetch: 3/40 files
+/// (components-res-001.jsonl.gz)`.
+fn progress_line(print: bool, p: &Value) {
+    if print && p.get("end").is_none() {
+        eprintln!(
+            "{}: {}/{} {} ({})",
+            p["phase"].as_str().unwrap_or(""),
+            p["done"],
+            p["total"],
+            p["unit"].as_str().unwrap_or(""),
+            p["item"].as_str().unwrap_or("")
+        );
     }
 }
 

@@ -66,7 +66,7 @@ pub fn list(session: &mut Session, ask: &Ask, rev: Option<&str>) -> Result<Value
     let mut v = json!({
         "rows": rows,
         "revisions": {
-            "project": crate::config::project_revision(session.root())?,
+            "project": session.project_revision()?,
             "parts": revisions,
         },
     });

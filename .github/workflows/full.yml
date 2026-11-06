@@ -123,6 +123,7 @@ jobs:
       - run: cargo test -p ryukei --release --test sheet_metal_bar -- --nocapture
       - run: cargo test -p ryukei --release --test thicken_props
       - run: cargo test -p ryukei --release --test sheet_blend_props
+      - run: cargo test -p ryukei --release --test fill_props
       - run: cargo test -p ryukei --release --test mirror
       - run: cargo test -p ryukei --release --test along
       - run: cargo test -p ryukei --release --test loft
@@ -140,6 +141,7 @@ jobs:
       - run: cargo test -p ryustep --release --test write
       - run: cargo test -p ryustep --release --test drill
       - run: cargo test -p ryustep --release --test checks
+      - run: cargo test -p ryustep --release --test reference
       - run: cargo test -p ryustep --release --test mass
       - run: cargo test -p ryustep --release --test cancel
       - run: cargo test -p ryucad --release --test bar -- --nocapture
@@ -276,6 +278,7 @@ jobs:
             cargo test -p ryukei-bench --features occt --release --test sheet_booleans -- --nocapture
             cargo test -p ryukei-bench --features occt --release --test thicken -- --nocapture
             cargo test -p ryukei-bench --features occt --release --test sheet_blends -- --nocapture
+            cargo test -p ryukei-bench --features occt --release --test fill -- --nocapture
             cargo test -p ryukei-bench --features usd --release --test usd -- --nocapture
             cargo test -p ryukei-bench --features occt,usd --release --test nurbs -- --skip race --nocapture
             cargo bench -p ryukei-bench --features occt,smlib --no-run

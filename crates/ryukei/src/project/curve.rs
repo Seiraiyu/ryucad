@@ -8,7 +8,7 @@
 //! range.
 
 use super::View;
-use crate::geom::{Circle2, Curve, Curve2, Ellipse2, Frame2, Line2, Point2, Point3, Vector3};
+use crate::geom::{Box2, Circle2, Curve, Curve2, Ellipse2, Frame2, Line2, Point2, Point3, Vector3};
 use crate::intersect::Failure;
 use crate::math;
 use crate::tol::{ANGULAR_RESOLUTION, LINEAR_RESOLUTION};
@@ -56,6 +56,46 @@ impl ImageCurve {
         match &self.image {
             Image::Point(p) => *p,
             Image::Curve { curve, map } => curve.point(map.apply(t)),
+        }
+    }
+
+    /// The 3D curve's parameter in this stretch whose image is at image
+    /// parameter `s`, clamped to the stretch: the map's inverse, affine or
+    /// the arc cosine on the half turn the stretch lies in. A point's
+    /// stretch gives its middle.
+    pub fn param_of(&self, s: f64) -> f64 {
+        let [t0, t1] = self.range;
+        let t = match &self.image {
+            Image::Point(_) => (t0 + t1) / 2.0,
+            Image::Curve {
+                map: ImageMap::Affine([a, b]),
+                ..
+            } => (s - a) / b,
+            Image::Curve {
+                map: ImageMap::Cosine { amplitude, phase },
+                ..
+            } => {
+                let k = (((t0 + t1) / 2.0 - phase) / PI).floor();
+                let c = (s / amplitude).clamp(-1.0, 1.0);
+                let w = if (k as i64).rem_euclid(2) == 0 {
+                    math::acos(c)
+                } else {
+                    math::acos(-c)
+                };
+                phase + k * PI + w
+            }
+        };
+        t.clamp(t0.min(t1), t0.max(t1))
+    }
+
+    /// A box holding the image of this stretch.
+    pub fn bounds(&self) -> Box2 {
+        match &self.image {
+            Image::Point(p) => Box2::from_point(*p),
+            Image::Curve { curve, map } => {
+                let [a, b] = self.range.map(|t| map.apply(t));
+                curve.bounds([a.min(b), a.max(b)])
+            }
         }
     }
 }
@@ -400,5 +440,55 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn param_of_inverts_every_map_on_its_stretch() {
+        let l = Curve::Line(
+            Line::new(Point3::new(0.1, 0.2, 0.3), Vector3::new(1.0, 1.0, 1.0)).unwrap(),
+        );
+        let f = Frame::new(
+            Point3::new(0.0, 0.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(0.6, 0.8, 0.0),
+        )
+        .unwrap();
+        let c = Curve::Circle(Circle::new(f, 0.5).unwrap());
+        for (curve, range) in [(&l, [-0.5, 2.0]), (&c, [0.0, TAU])] {
+            for piece in project_curve(curve, range, &askew())
+                .unwrap()
+                .into_iter()
+                .chain(project_curve(curve, range, &front()).unwrap())
+            {
+                let Image::Curve { map, .. } = &piece.image else {
+                    continue;
+                };
+                for i in 1..9 {
+                    let t = piece.range[0] + (piece.range[1] - piece.range[0]) * i as f64 / 9.0;
+                    let back = piece.param_of(map.apply(t));
+                    assert!((back - t).abs() <= 1e-10, "{t} came back as {back}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_images_bounds_hold_its_points() {
+        let f = Frame::new(
+            Point3::new(0.1, 0.0, 0.2),
+            Vector3::new(0.0, -1.0, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        let c = Curve::Circle(Circle::new(f, 0.5).unwrap());
+        for piece in project_curve(&c, [0.3, 2.0], &front()).unwrap() {
+            let b = piece.bounds();
+            for i in 0..=16 {
+                let p = piece
+                    .point(piece.range[0] + (piece.range[1] - piece.range[0]) * i as f64 / 16.0);
+                assert!(p.x >= b.min().x - 1e-15 && p.x <= b.max().x + 1e-15);
+                assert!(p.y >= b.min().y - 1e-15 && p.y <= b.max().y + 1e-15);
+            }
+        }
     }
 }

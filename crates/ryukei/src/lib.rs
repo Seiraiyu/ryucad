@@ -9,6 +9,7 @@ pub mod check;
 pub mod codec;
 mod error;
 pub mod euler;
+pub mod fill;
 pub mod geom;
 pub mod heal;
 pub mod intersect;
@@ -30,12 +31,13 @@ pub(crate) mod split;
 pub mod sweep;
 pub mod tol;
 pub mod topo;
+pub mod tweak;
 pub mod work;
 
 pub use error::{
-    BlendError, BooleanError, Error, FlangeSize, HealError, LoftError, MeasureError, NurbsError,
-    OffsetCase, OffsetError, ProfileError, RepairError, SheetError, SheetMetalError, SweepError,
-    TopologyError, ViewError,
+    BlendError, BooleanError, Error, FillError, FlangeSize, HealError, LoftError, MeasureError,
+    NurbsError, OffsetCase, OffsetError, ProfileError, RepairError, SheetError, SheetMetalError,
+    SweepError, TopologyError, TweakCase, TweakError, ViewError,
 };
 
 /// This kernel's version, for ryucad's `version` report and cache keys.

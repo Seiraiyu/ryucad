@@ -226,7 +226,7 @@ pub(crate) fn leaving(body: &Body, edge: EdgeId, v: VertexId) -> Option<(UnitVec
 }
 
 /// One face of an edge, read through its fin.
-struct Side<'a> {
+pub(crate) struct Side<'a> {
     body: &'a Body,
     fin: FinId,
     surface: &'a Surface,
@@ -234,7 +234,7 @@ struct Side<'a> {
 }
 
 impl<'a> Side<'a> {
-    fn of(body: &'a Body, fin: FinId) -> Self {
+    pub(crate) fn of(body: &'a Body, fin: FinId) -> Self {
         let face = &body.faces[body.loops[body.fins[fin].loop_].face];
         Self {
             body,
@@ -250,7 +250,7 @@ impl<'a> Side<'a> {
 
     /// The face's outward normal at the edge's parameter `t`, through its
     /// pcurve; zero where the surface has none.
-    fn normal(&self, t: f64) -> Vector3 {
+    pub(crate) fn normal(&self, t: f64) -> Vector3 {
         let uv = self.body.fin_uv(self.fin, t).expect("a fin with a pcurve");
         self.surface
             .normal(uv.x, uv.y)
@@ -272,7 +272,7 @@ impl<'a> Side<'a> {
     /// pipe's from its pcurve's parameters, any other surface's as `S_u ×
     /// S_v` normalized, from its enclosures over the box its pcurve covers
     /// there. `None` where it can't be certified.
-    fn normal_box(&self, r: [f64; 2], p: IVec3) -> Option<IVec3> {
+    pub(crate) fn normal_box(&self, r: [f64; 2], p: IVec3) -> Option<IVec3> {
         let uv_box = || {
             let pc = self.body.fins[self.fin].pcurve?;
             let (a, b) = (pc.param(r[0]), pc.param(r[1]));

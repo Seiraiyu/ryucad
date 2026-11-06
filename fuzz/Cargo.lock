@@ -2450,6 +2450,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "font8x8",
+ "getrandom 0.3.4",
  "gix",
  "interprocess",
  "libc",
@@ -2476,6 +2477,7 @@ name = "ryucad-doc"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "rayon",
  "ryu-doc",
  "ryukei",
  "ryusketch",
@@ -2519,11 +2521,23 @@ dependencies = [
  "ryu-math",
  "ryu-part21",
  "ryu-session",
+ "ryueda-parts",
  "ryusch",
  "serde",
  "serde_json",
  "subsetter",
  "ttf-parser",
+]
+
+[[package]]
+name = "ryueda-parts"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "rayon",
+ "ryu-doc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2558,6 +2572,7 @@ dependencies = [
  "ryucad-doc",
  "ryudfm",
  "ryueda",
+ "ryueda-parts",
  "ryuformats",
  "ryukei",
  "ryukei-testkit",

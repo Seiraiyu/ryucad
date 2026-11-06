@@ -55,6 +55,9 @@ impl Pair {
             .args(args)
             .env("RYUCAD_RUNTIME_DIR", &self.run)
             .env("RYUCAD_IDLE_TIMEOUT", "60")
+            // Annotations' IDs and times alike both ways.
+            .env("RYUCAD_ID_SEED", "cli")
+            .env("RYUCAD_NOW", "2026-11-05T14:02:11Z")
             .env("RYUCAD_CONFIG_DIR", self.run.with_file_name("config"))
             .env("RYUCAD_CACHE_DIR", root.with_extension("cache"))
             .stdout(std::process::Stdio::piped())
@@ -71,6 +74,9 @@ impl Pair {
             .args(args)
             .env("RYUCAD_RUNTIME_DIR", &self.run)
             .env("RYUCAD_IDLE_TIMEOUT", "60")
+            // Annotations' IDs and times alike both ways.
+            .env("RYUCAD_ID_SEED", "cli")
+            .env("RYUCAD_NOW", "2026-11-05T14:02:11Z")
             .env("RYUCAD_CONFIG_DIR", self.run.with_file_name("config"))
             // Each project its own disk cache, as two machines would have.
             .env("RYUCAD_CACHE_DIR", root.with_extension("cache"));
@@ -1163,6 +1169,19 @@ fn every_protocol_method_has_a_command() {
         ("explode.save", &["explode", "save"]),
         ("explode.delete", &["explode", "delete"]),
         ("explode.show", &["explode", "show"]),
+        ("participant.mode", &["mode"]),
+        ("annotation.create", &["annotations", "add"]),
+        ("annotation.propose", &["annotations", "propose"]),
+        ("annotation.list", &["annotations", "list"]),
+        ("annotation.show", &["annotations", "show"]),
+        ("annotation.reply", &["annotations", "reply"]),
+        ("annotation.claim", &["annotations", "claim"]),
+        ("annotation.apply", &["annotations", "apply"]),
+        ("annotation.resolve", &["annotations", "resolve"]),
+        ("annotation.reject", &["annotations", "reject"]),
+        ("annotation.reopen", &["annotations", "reopen"]),
+        ("annotation.edit", &["annotations", "edit"]),
+        ("annotation.delete", &["annotations", "delete"]),
         ("section.set", &["section"]),
         ("highlight.set", &["highlight"]),
         ("highlight.clear", &["highlight"]),
@@ -5873,4 +5892,158 @@ fn credential_helpers_are_told_not_to_prompt() {
     assert!(env.contains("GIT_TERMINAL_PROMPT=0"), "{env}");
     let message = v["error"]["message"].as_str().unwrap();
     assert!(message.contains(&format!("git ls-remote {url}")), "{v}");
+}
+
+#[test]
+fn annotations_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=40", "--param", "y=20", "--param",
+        "z=10",
+    ]);
+    let body = p.ok(&["inspect", "p"])["bodies"][0].clone();
+    let face = format!("p/b/{}", body["faces"][0]["name"].as_str().unwrap());
+    let c = p.ok(&[
+        "annotations",
+        "add",
+        &face,
+        "--comment",
+        "Move this face 5 mm",
+        "--point",
+        "1,2,10",
+    ]);
+    let comment = c["annotation"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        c["annotation"]["pins"][0]["point_m"],
+        json!([0.001, 0.002, 0.01])
+    );
+    // Three proposals, stacked: each stands on the one before.
+    let req = |y: u32| {
+        json!({"method": "feature.edit", "params": {"part": "p", "id": "b", "params": {"y": y}}})
+            .to_string()
+    };
+    let a = p.ok(&[
+        "annotations",
+        "propose",
+        "--request",
+        &req(25),
+        "--comment",
+        "wider",
+    ]);
+    let b = p.ok(&[
+        "annotations",
+        "propose",
+        "--request",
+        &req(30),
+        "--pin",
+        &face,
+    ]);
+    let r = p.ok(&["annotations", "propose", "--request", &req(35), "--rough"]);
+    let (a, b, r) = (
+        a["annotation"]["id"].as_str().unwrap().to_owned(),
+        b["annotation"]["id"].as_str().unwrap().to_owned(),
+        r["annotation"]["id"].as_str().unwrap().to_owned(),
+    );
+    assert_eq!(
+        p.ok(&["annotations", "show", &b])["annotation"]["change"]["after"],
+        json!([a])
+    );
+    let list = p.ok(&["annotations", "list", "--open"]);
+    assert_eq!(list["annotations"].as_array().unwrap().len(), 4);
+    // A proposal is a revision: diff and render it.
+    let rev = format!("annotation:{a}");
+    let d = p.ok(&["diff", "--from", "working", "--to", &rev, "--model"]);
+    assert_eq!(d["parts"]["p"]["features"]["b"]["status"], "changed", "{d}");
+    p.ok(&[
+        "render",
+        "p",
+        "--rev",
+        &rev,
+        "--compare",
+        "working",
+        "--out",
+        "a.png",
+        "--size",
+        "160x120",
+    ]);
+    // Apply the middle one: its chain first.
+    let v = p.ok(&["annotations", "apply", &b]);
+    assert_eq!(v["applied"], json!([a, b]));
+    // One undoable change: undone, the model and both annotations are
+    // back; redone, the daemon's project is the other's again.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, f) = p.run_in(&p.daemon, "", &["feature", "show", "p", "b"]);
+    assert_eq!(f["result"]["params"]["y"]["value"], "20 mm", "{f}");
+    let (_, l) = p.run_in(&p.daemon, "", &["annotations", "list", "--status", "done"]);
+    assert_eq!(l["result"]["annotations"], json!([]), "{l}");
+    let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0, "{v}");
+    // The last no longer applies once the model moves under it.
+    p.ok(&["feature", "edit", "p", "b", "--param", "z=12"]);
+    let e = p.fails(&["annotations", "apply", &r], "annotation_stale", 1);
+    assert_eq!(e["details"]["files"][0]["path"], "parts/p/features/b.json");
+    // Two agents can't both claim one.
+    p.ok(&["--as", "a1", "annotations", "claim", &comment]);
+    p.fails(
+        &["--as", "a2", "annotations", "claim", &comment],
+        "annotation_claimed",
+        1,
+    );
+    p.ok(&[
+        "--as",
+        "a1",
+        "annotations",
+        "reply",
+        &comment,
+        "Moved it 5 mm.",
+    ]);
+    p.ok(&[
+        "--as",
+        "a1",
+        "annotations",
+        "resolve",
+        &comment,
+        "--note",
+        "done",
+    ]);
+    p.ok(&["annotations", "reopen", &comment]);
+    p.fails(&["annotations", "reject", &r], "usage", 2);
+    p.ok(&[
+        "annotations",
+        "reject",
+        &r,
+        "--reason",
+        "Stale: I made the edit myself",
+    ]);
+    let shown = p.ok(&["annotations", "show", &comment]);
+    assert_eq!(shown["annotation"]["replies"].as_object().unwrap().len(), 2);
+    assert_eq!(
+        p.ok(&["annotations", "list", "--status", "rejected"])["annotations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn modes_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    // Through the daemon an agent's mode is set and shown; in process
+    // there is no live session to hold it.
+    let (code, v) = p.run_in(&p.daemon, "", &["mode", "annotate"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["mode"], "annotate");
+    let (code, v) = p.run_in(&p.direct, "", &["mode", "annotate"]);
+    assert_eq!(code, 1, "{v}");
+    assert_eq!(v["error"]["code"], "no_live_session");
+    // An agent's mode refuses nothing.
+    let (code, v) = p.run_in(&p.daemon, "", &["mode", "view"]);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["part", "create", "q"]);
+    assert_eq!(code, 0, "{v}");
 }

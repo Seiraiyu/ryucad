@@ -7,7 +7,7 @@
 //!
 //! An empty intersection is clear; so is one ryukei refuses as touching
 //! itself along an edge or at a point (bodies meeting where a mate puts
-//! them), reported as `touching`, as is one whose box is flat (faces the
+//! them), reported as `touching`, as is one whose box or mesh is flat (faces the
 //! two share, which hold no volume). A solid intersection is an
 //! interference, with its box, its volume estimated from its mesh at
 //! normal quality and the faces of each side it touches. Any other
@@ -193,6 +193,20 @@ fn flat(min: [f64; 3], max: [f64; 3]) -> bool {
     (0..3).any(|k| max[k] - min[k] < 10.0 * ryukei::tol::LINEAR_RESOLUTION)
 }
 
+/// Whether points lie within ten resolutions of one another along some
+/// direction: the result's mesh along one of its planar faces' normals.
+/// A face the two solids share holds no volume whichever way it lies, and
+/// its box is flat only when it lies square to an axis (#526).
+fn thin(points: &[Point3], normals: &[[f64; 3]]) -> bool {
+    normals.iter().any(|n| {
+        let along = points.iter().map(|p| p.x * n[0] + p.y * n[1] + p.z * n[2]);
+        let (lo, hi) = along.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), d| {
+            (lo.min(d), hi.max(d))
+        });
+        hi - lo < 10.0 * ryukei::tol::LINEAR_RESOLUTION
+    })
+}
+
 /// [`verdict`] for a request's `job`: a cancel stops the kernel inside the
 /// pair, and the pair answers the job's `cancelled` (never a verdict).
 pub fn verdict_for(a: &Body, b: &Body, rel: Rigid, job: &Job) -> Result<Verdict> {
@@ -247,7 +261,14 @@ pub fn verdict_for(a: &Body, b: &Body, rel: Rigid, job: &Job) -> Result<Verdict>
     }
     let bx = Box3::from_points(m.positions.iter().copied()).expect("a face has points");
     let (lo, hi) = (bx.min(), bx.max());
-    if flat([lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z]) {
+    let normals: Vec<[f64; 3]> = body
+        .faces()
+        .filter_map(|f| match body.surface(body.face(f)?.surface)? {
+            ryukei::geom::Surface::Plane(p) => Some(p.frame().z().get().to_array()),
+            _ => None,
+        })
+        .collect();
+    if flat([lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z]) || thin(&m.positions, &normals) {
         // Faces both sides hold (a file's tolerant bodies sharing a face):
         // the result holds no volume, so the pair touches (#523).
         return Ok(Verdict::Touching);
@@ -627,6 +648,81 @@ mod tests {
         assert!(flat(min, max));
         // A pad standing 2 µm into a board is an interference.
         assert!(!flat([0.0; 3], [1e-3, 1e-3, 2e-6]));
+    }
+
+    #[test]
+    fn a_shared_face_lying_askew_touches() {
+        // A face two solids share, tilted 30° about x: its box is wide every
+        // way, but along its normal it holds no volume (#526).
+        let (s, c) = (0.5, 0.75f64.sqrt());
+        let normal = [0.0, -s, c];
+        let at = |u: f64, v: f64, h: f64| Point3::new(u, v * c - h * s, v * s + h * c);
+        let square = [
+            at(0.0, 0.0, 0.0),
+            at(1e-3, 0.0, 0.0),
+            at(1e-3, 1e-3, 0.0),
+            at(0.0, 1e-3, 0.0),
+        ];
+        let (lo, hi) = (
+            Box3::from_points(square).unwrap().min(),
+            Box3::from_points(square).unwrap().max(),
+        );
+        assert!(!flat([lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z]));
+        assert!(thin(&square, &[normal]));
+        // The same tilted, 2 µm thick, is an interference.
+        let mut slab = square.to_vec();
+        slab.extend([at(0.0, 0.0, 2e-6), at(1e-3, 1e-3, 2e-6)]);
+        assert!(!thin(&slab, &[normal]));
+        // With no planar face, nothing is judged thin.
+        assert!(!thin(&square, &[]));
+    }
+
+    /// Two 10 mm blocks, the second standing on the first's top and sunk
+    /// `d` into it, its footprint `inset` in from each side, both turned
+    /// by `turn` about x: their verdict.
+    fn sunk(d: f64, turn: f64, inset: f64) -> Verdict {
+        use ryukei::geom::{UnitVector3, Vector3};
+        let side = 0.01;
+        let r = Rigid::rotation(UnitVector3::X, turn);
+        let key = |k: &[u8]| OpKey::from_bytes(k);
+        let (a, _) = ryukei::primitive::block(key(b"a"), side, side, side, &r).unwrap();
+        let foot = side - 2.0 * inset;
+        let (b, _) =
+            ryukei::primitive::block(key(b"b"), foot, foot, side, &Rigid::IDENTITY).unwrap();
+        let rel = r.then_after(&Rigid::translation(Vector3::new(inset, inset, side - d)));
+        verdict(&a, &b, rel)
+    }
+
+    #[test]
+    fn blocks_sunk_less_than_a_touch_are_never_unchecked() {
+        // #558: flush blocks sunk 30 to 80 nm into each other across a
+        // face turned 30° were left unchecked (`Uncertain`). Under a
+        // hundred nanometres they meet only within the bodies'
+        // tolerances: clear (or touching), never unchecked. (ryukei's
+        // `booleans` test takes them square too.)
+        let turn = std::f64::consts::PI / 6.0;
+        for (d, inset) in [
+            (10e-9, 0.0),
+            (30e-9, 0.0),
+            (50e-9, 0.0),
+            (80e-9, 0.0),
+            (50e-9, 1e-3),
+        ] {
+            let v = sunk(d, turn, inset);
+            assert!(
+                matches!(v, Verdict::Clear | Verdict::Touching),
+                "d {d} inset {inset}: {v:?}"
+            );
+        }
+        // Past the touch reach the overlap is an interference of the
+        // slab's volume.
+        match sunk(2e-6, turn, 0.0) {
+            Verdict::Interferes { volume_m3, .. } => {
+                let want = 1e-4 * 2e-6;
+                assert!((volume_m3 - want).abs() <= 1e-2 * want, "{volume_m3}");
+            }
+            v => panic!("{v:?}"),
+        }
     }
 
     #[test]

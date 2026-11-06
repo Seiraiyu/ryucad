@@ -4910,6 +4910,7 @@ dependencies = [
  "ctrlc",
  "divan",
  "font8x8",
+ "getrandom 0.3.4",
  "gix",
  "interprocess",
  "libc",
@@ -5020,6 +5021,7 @@ dependencies = [
  "ryu-math",
  "ryu-part21",
  "ryu-session",
+ "ryueda-parts",
  "ryusch",
  "serde",
  "serde_json",
@@ -5027,6 +5029,20 @@ dependencies = [
  "subsetter",
  "tempfile",
  "ttf-parser",
+ "ureq",
+]
+
+[[package]]
+name = "ryueda-parts"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "flate2",
+ "rayon",
+ "ryu-doc",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

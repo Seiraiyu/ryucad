@@ -53,6 +53,8 @@ pub fn write(dir: &Path, channels: usize, parts: usize) {
         "library/components/r.json",
         "ryueda.libcomp",
         json!({"symbol": {"id": "r"}, "prefix": "R", "value": "1k",
+               "manufacturer": "Yageo", "mpn": "RC0402FR-071KL",
+               "offers": [{"supplier": "LCSC", "sku": "C11702"}],
                "footprints": [{"footprint": {"id": "r_0402"}}]}),
     );
     put(

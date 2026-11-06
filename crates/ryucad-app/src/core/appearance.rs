@@ -236,6 +236,19 @@ impl Editor {
         self.error = None;
     }
 
+    /// Shows how its target is drawn `now` again (after an undo, or
+    /// another participant's change), keeping what it colours, unless a
+    /// change is being dragged (#577).
+    pub fn reread(&mut self, now: Face, theme: [f32; 3]) {
+        if !self.open || self.dragging.is_some() {
+            return;
+        }
+        let c = now.colour.unwrap_or(theme);
+        self.colour = c.map(|x| (x * 255.0).round() as u8);
+        self.opacity = now.opacity;
+        self.typed = self.hex();
+    }
+
     /// Takes the colour typed, if it is `#rrggbb`.
     pub fn take_typed(&mut self) -> bool {
         let t = self.typed.trim().trim_start_matches('#');
