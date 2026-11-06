@@ -14,12 +14,16 @@
 //! thickness, radius or length renames nothing.
 
 use crate::doc::id::Id;
+use crate::doc::sketch::{ConstraintType, Geometry};
 use crate::error::{Code, Error, Result};
+use crate::profile::{Keys, natural};
+use crate::sketch::Solved;
 use core::f64::consts::{PI, TAU};
-use ryukei::geom::{Circle2, Curve2, Frame2, Line2, Point2, Vector2};
+use ryukei::geom::{Circle2, Curve2, Frame, Frame2, Line2, Point2, Vector2};
 use ryukei::math;
 use ryukei::name::OpKey;
-use ryukei::sweep::{Segment, SegmentKey};
+use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile};
+use std::collections::BTreeMap;
 
 /// Directions within this many radians meet tangentially: the sketch
 /// solver holds tangency within `ANGLE_TOL` (1e-12).
@@ -232,6 +236,185 @@ pub fn offset(w: &Walked, t: f64, r: f64, on_left: bool) -> Result<Vec<Offset>> 
     }
     out.push(offset(&w.points[0], "end", &cap(moved[0].ends().0, drawn[0].ends().0)));
     Ok(out)
+}
+
+/// The sketch's one open chain, walked from its end first in natural
+/// order. Curves join where they share a point or their points are
+/// coincident. A chain that branches, a sketch with two chains, a closed
+/// loop or a circle are `profile_invalid`.
+pub fn walk(sketch: &Id, solved: &Solved) -> Result<Walked> {
+    let sk = &solved.sketch;
+    if let Some(l) = solved.report.loops.first() {
+        let ids: Vec<&Id> = l.iter().map(|(e, _)| e).collect();
+        return Err(refused(
+            format!("sketch {sketch} closes a loop: a bent section is one open chain of lines and arcs (a plate is a base flange with no depth)"),
+            &ids,
+        ));
+    }
+    let chains = &solved.report.open;
+    let [(entities, _)] = chains.as_slice() else {
+        let all: Vec<&Id> = chains.iter().flat_map(|(e, _)| e).collect();
+        return Err(refused(
+            format!("sketch {sketch} has {} open chains: a bent section is one", chains.len()),
+            &all,
+        ));
+    };
+    // Points joined by coincidence are one; each group named by its
+    // first point in natural order.
+    let mut group: BTreeMap<Id, Id> = BTreeMap::new();
+    let find = |g: &BTreeMap<Id, Id>, mut p: Id| {
+        while let Some(q) = g.get(&p).filter(|q| **q != p) {
+            p = q.clone();
+        }
+        p
+    };
+    for c in sk.constraints.values() {
+        if c.ty == ConstraintType::Coincident {
+            let (a, b) = (find(&group, c.entities[0].clone()), find(&group, c.entities[1].clone()));
+            if a != b {
+                let (lo, hi) = if natural(&a) <= natural(&b) { (a, b) } else { (b, a) };
+                group.insert(hi, lo);
+            }
+        }
+    }
+    let ends_of = |e: &Id| match &sk.entities[e].geometry {
+        Geometry::Line { start, end } | Geometry::Arc { start, end, .. } => {
+            Some((find(&group, start.clone()), find(&group, end.clone())))
+        }
+        _ => None,
+    };
+    let mut at: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+    for e in entities {
+        let (a, b) = ends_of(e).ok_or_else(|| refused(format!("{e} is a circle: a bent section is lines and arcs"), &[e]))?;
+        at.entry(a).or_default().push(e.clone());
+        at.entry(b).or_default().push(e.clone());
+    }
+    let mut ends: Vec<&Id> = at.iter().filter(|(_, c)| c.len() == 1).map(|(p, _)| p).collect();
+    if ends.len() != 2 || at.values().any(|c| c.len() > 2) {
+        let all: Vec<&Id> = entities.iter().collect();
+        return Err(refused(format!("sketch {sketch}'s chain branches: a bent section is one chain with two ends"), &all));
+    }
+    ends.sort_by(|a, b| natural(a).cmp(&natural(b)));
+    let point = |p: &Id| match sk.entities[p].geometry {
+        Geometry::Point { m } => Point2::new(m[0], m[1]),
+        _ => unreachable!("validated: curves join points"),
+    };
+    let mut here = ends[0].clone();
+    let mut prev: Option<Id> = None;
+    let mut out = Walked { pieces: Vec::new(), points: vec![here.clone()] };
+    while let Some(e) = at[&here].iter().find(|c| prev.as_ref() != Some(*c)).cloned() {
+        let (a, b) = ends_of(&e).expect("a line or an arc");
+        let forwards = a == here;
+        let piece = match &sk.entities[&e].geometry {
+            Geometry::Line { start, end } => Piece::Line { from: point(start), to: point(end) },
+            Geometry::Arc { center, start, end } => {
+                let c = point(center);
+                Piece::Arc { centre: c, radius: point(start).distance(c), from: point(start), to: point(end), ccw: true }
+            }
+            _ => unreachable!("lines and arcs"),
+        };
+        out.pieces.push((e.clone(), if forwards { piece } else { piece.reversed() }));
+        here = if forwards { b } else { a };
+        out.points.push(here.clone());
+        prev = Some(e);
+        if at[&here].len() == 1 {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// A bent section's profile: [`offset`]'s loop in the sketch's frame,
+/// keyed, and which entity or point each key came from (`keys`), with its
+/// role (`roles`).
+pub struct Section {
+    pub valid: ValidProfile,
+    pub keys: Keys,
+    pub roles: BTreeMap<u128, (Id, &'static str)>,
+}
+
+pub fn profile(part: &Id, sketch: &Id, solved: &Solved, w: &Walked, t: f64, r: f64, on_left: bool) -> Result<Section> {
+    let loop_ = offset(w, t, r, on_left)?;
+    let mut keys = Keys::default();
+    let mut roles = BTreeMap::new();
+    let segments = loop_
+        .into_iter()
+        .map(|o| {
+            let k = key(part, &o.at, o.role);
+            keys.segments.insert(k, o.at.clone());
+            roles.insert(k, (o.at, o.role));
+            Segment { key: SegmentKey(k), ..o.segment }
+        })
+        .collect();
+    let lk = key(part, &w.points[0], "loop");
+    keys.loops.insert(lk, w.points[0].clone());
+    let frame = Frame::from_rigid(&solved.frame).map_err(|e| {
+        Error::new(Code::Internal, "a sketch frame that isn't one").with("kernel", format!("{e:?}"))
+    })?;
+    let valid = ValidProfile::new(Profile { frame, loops: vec![Loop { key: LoopKey(lk), segments }] })
+        .map_err(|e| crate::profile::sketch_invalid(sketch, &keys, e))?;
+    Ok(Section { valid, keys, roles })
+}
+
+/// Where each entity of a bent section's extrusion came from, by the hex
+/// of its name, as [`crate::profile::origins`] gives an extrude's: a side
+/// from its chain entity and side (`{entity, side: inner | outer}`), its
+/// corner (`{corner, side}`) or its end's cap (`{end}`); a cap from its
+/// end of the depth; an edge or vertex from the segments either side.
+pub fn origins(key: ryukei::name::OpKey, feature: &Id, sketch: &Id, s: &Section) -> BTreeMap<String, serde_json::Value> {
+    use ryukei::name::{Name, Role, SweepRole as R};
+    use serde_json::json;
+    let derive = |role: R, parents: &[Name]| Name::derive(key, Role::Sweep(role), parents);
+    let of = |k: u128| -> serde_json::Value {
+        let (at, role) = &s.roles[&k];
+        match *role {
+            "inner" | "outer" => json!({"entity": at, "side": role}),
+            "corner_inner" => json!({"corner": at, "side": "inner"}),
+            "corner_outer" => json!({"corner": at, "side": "outer"}),
+            _ => json!({"end": at}),
+        }
+    };
+    let with = |mut v: serde_json::Value, extra: serde_json::Value| {
+        v["feature"] = json!(feature);
+        v["sketch"] = json!(sketch);
+        for (k, x) in extra.as_object().into_iter().flatten() {
+            v[k] = x.clone();
+        }
+        v
+    };
+    let mut out = BTreeMap::new();
+    for lump in s.valid.lumps() {
+        let outer = &lump.outer;
+        let stand = derive(R::Loop, &[Name::from_u128(outer.key.0)]);
+        let caps = [("start", derive(R::StartCap, &[stand])), ("end", derive(R::EndCap, &[stand]))];
+        for (end, cap) in caps {
+            out.insert(cap.to_string(), with(json!({}), json!({"cap": end})));
+        }
+        let n = outer.segments.len();
+        let stands: Vec<Name> = outer.segments.iter().map(|g| derive(R::Segment, &[Name::from_u128(g.key.0)])).collect();
+        for (k, g) in outer.segments.iter().enumerate() {
+            let side = derive(R::Side, &[stands[k]]);
+            out.insert(side.to_string(), with(of(g.key.0), json!({})));
+            for (end, cap) in caps {
+                out.insert(derive(R::CapEdge, &[cap, side]).to_string(), with(of(g.key.0), json!({"cap": end})));
+            }
+            let prev = outer.segments[(k + n - 1) % n].key.0;
+            let pair = [stands[(k + n - 1) % n], stands[k]];
+            let between = json!({"between": [of(prev), of(g.key.0)]});
+            for (role, extra) in [
+                (R::Lateral, json!({})),
+                (R::StartVertex, json!({"cap": "start"})),
+                (R::EndVertex, json!({"cap": "end"})),
+            ] {
+                let mut v = with(between.clone(), json!({}));
+                for (k, x) in extra.as_object().into_iter().flatten() {
+                    v[k] = x.clone();
+                }
+                out.insert(derive(role, &pair).to_string(), v);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

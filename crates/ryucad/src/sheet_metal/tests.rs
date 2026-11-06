@@ -1,0 +1,447 @@
+use std::collections::BTreeMap;
+use super::*;
+use crate::rebuild::{Built, finish};
+use ryukei::geom::Rigid;
+use ryukei::name::OpKey;
+use ryukei::topo::EntityId;
+use serde_json::json;
+
+fn id(s: &str) -> Id {
+    Id::parse(s, "feature").unwrap()
+}
+
+/// A 40 × 30 × 1.5 mm plate, as a base flange `plate` of part `p` would
+/// leave it, its origins its feature's.
+fn plate() -> Built {
+    let made = ryukei::primitive::block(OpKey(7), 0.04, 0.03, 0.0015, &Rigid::IDENTITY).unwrap();
+    let origins: crate::rebuild::Origins = crate::rebuild::names(&made.0)
+        .into_iter()
+        .map(|n| (n.to_string(), json!({"feature": "plate"})))
+        .collect();
+    finish(&id("plate"), "base_flange", made, origins).unwrap()
+}
+
+fn first(b: &Built, edge: bool) -> ryukei::name::Name {
+    let e = if edge {
+        EntityId::Edge(b.body.edges().next().unwrap())
+    } else {
+        EntityId::Vertex(b.body.vertices().next().unwrap())
+    };
+    b.body.name_of(e).unwrap()
+}
+
+#[test]
+fn a_kernel_refusal_names_what_it_names_with_a_hint() {
+    use ryukei::SheetMetalError as S;
+    let b = plate();
+    let part = Id::parse("p", "part").unwrap();
+    let (edge, vertex) = (first(&b, true), first(&b, false));
+    let e = refusal(&part, &id("f"), "flange", (&id("plate"), &b),
+                    ryukei::Error::InvalidSheetMetal(S::ReliefNeeded { edge, vertex }));
+    assert_eq!(e.code, Code::SheetMetalFailed);
+    assert_eq!(e.details["reason"], "relief_needed");
+    assert_eq!(e.details["solid"], "plate");
+    let entities = e.details["entities"].as_array().unwrap();
+    assert_eq!(entities[0]["role"], "edge");
+    assert_eq!(entities[0]["reference"], format!("p/plate/{edge}"));
+    assert_eq!(entities[0]["kind"], "edge");
+    assert_eq!(entities[0]["origin"], json!({"feature": "plate"}));
+    assert_eq!(entities[1]["role"], "vertex");
+    let hint = e.details["hint"].as_str().unwrap();
+    assert!(hint.contains(&format!("--end-relief p/plate/{vertex}=")), "{hint}");
+    // A fault after the flange's booleans: the inner reason, its
+    // entities named, not referenced (the flanged body is gone).
+    let inner = S::OutOfSlab { face: ryukei::name::Name::from_u128(5) };
+    let e = refusal(&part, &id("f"), "flange", (&id("plate"), &b),
+                    ryukei::Error::InvalidSheetMetal(S::NotSheetAfter { fault: Box::new(inner) }));
+    assert_eq!((e.details["reason"].as_str(), e.details["fault"].as_str()),
+               (Some("not_sheet_after"), Some("out_of_slab")));
+    assert_eq!(e.details["entities"][0]["role"], "fault.face");
+    assert!(e.details["entities"][0].get("reference").is_none());
+    assert!(e.details["entities"][0]["name"].is_string());
+    // A size, with which.
+    let e = refusal(&part, &id("f"), "flange", (&id("plate"), &b),
+                    ryukei::Error::InvalidSheetMetal(S::BadSize { what: ryukei::FlangeSize::Radius, edge }));
+    assert_eq!((e.details["reason"].as_str(), e.details["what"].as_str()),
+               (Some("bad_size"), Some("radius")));
+    // A boolean's refusal is boolean_failed, as a cut's.
+    let e = refusal(&part, &id("f"), "flange", (&id("plate"), &b),
+                    ryukei::Error::InvalidBoolean(ryukei::BooleanError::Uncertain { a: edge, b: vertex }));
+    assert_eq!(e.code, Code::BooleanFailed);
+    assert_eq!(e.details["feature"], "f");
+}
+
+#[test]
+fn every_kernel_reason_has_a_name() {
+    use ryukei::SheetMetalError as S;
+    let n = ryukei::name::Name::from_u128(1);
+    for (e, want) in [
+        (S::BadTolerance, "bad_tolerance"),
+        (S::NotSheet { face: n }, "not_sheet"),
+        (S::MixedThickness { faces: [n, n] }, "mixed_thickness"),
+        (S::OutOfSlab { face: n }, "out_of_slab"),
+        (S::NotRadial { face: n }, "not_radial"),
+        (S::SharpBend { edge: n }, "sharp_bend"),
+        (S::ConicalBend { face: n }, "conical_bend"),
+        (S::BendBlocked { bend: n, face: n }, "bend_blocked"),
+        (S::Disconnected, "disconnected"),
+        (S::BendLoop { bends: vec![n], faces: vec![n] }, "bend_loop"),
+        (S::NoSuchBend { name: n }, "no_such_bend"),
+        (S::NoSuchFace { name: n }, "no_such_face"),
+        (S::BadAllowance { bend: n }, "bad_allowance"),
+        (S::FlatOverlaps { faces: [n, n] }, "flat_overlaps"),
+        (S::FoldCollides { faces: [n, n] }, "fold_collides"),
+        (S::Uncertain { at: n }, "uncertain"),
+        (S::NoSuchEdge { name: n }, "no_such_edge"),
+        (S::NotAFlangeEdge { edge: n }, "not_a_flange_edge"),
+        (S::DuplicateFlange { edge: n }, "duplicate_flange"),
+        (S::FlangesMeet { vertex: n }, "flanges_meet"),
+        (S::ReliefNeeded { edge: n, vertex: n }, "relief_needed"),
+    ] {
+        assert_eq!(reason(&e).0, want);
+    }
+}
+
+use crate::rebuild::rebuild_part;
+use crate::solid::tests::part;
+use crate::units::Unit;
+use serde_json::Value;
+
+fn feature(mut v: Value) -> crate::doc::files::Feature {
+    v["kind"] = json!("ryucad.feature");
+    if v.get("format").is_none() {
+        v["format"] = json!(11);
+    }
+    crate::doc::files::Feature::from_json(&v, Unit::Mm, &crate::expr::Env::empty()).unwrap()
+}
+
+/// A sketch on xy of points `pts` (mm), joined in order by lines `l1`,
+/// `l2`, …, closed back to the first when `closed`.
+fn polyline(pts: &[[f64; 2]], closed: bool) -> crate::doc::files::Feature {
+    let mut entities = serde_json::Map::new();
+    for (i, p) in pts.iter().enumerate() {
+        entities.insert(format!("p{}", i + 1), json!({"type": "point", "m": [p[0] * 1e-3, p[1] * 1e-3]}));
+    }
+    let n = if closed { pts.len() } else { pts.len() - 1 };
+    for i in 0..n {
+        let j = (i + 1) % pts.len();
+        entities.insert(format!("l{}", i + 1),
+                        json!({"type": "line", "start": format!("p{}", i + 1), "end": format!("p{}", j + 1)}));
+    }
+    feature(json!({"format": 2, "type": "sketch", "plane": "xy", "entities": entities, "constraints": {}}))
+}
+
+/// The base flange `b` of the sketch `s`: `extra`'s fields over a 1.5 mm
+/// sheet with a 1 mm radius and a K-factor of 0.44.
+fn base_of(extra: Value) -> crate::doc::files::Feature {
+    let mut v = json!({"type": "base_flange", "sketch": "s", "thickness": "1.5 mm", "radius": "1 mm",
+                       "allowance": {"k_factor": "0.44"}});
+    for (k, x) in extra.as_object().unwrap() {
+        v[k] = x.clone();
+    }
+    feature(v)
+}
+
+fn built(p: &crate::doc::project::Part, f: &str) -> crate::error::Result<std::sync::Arc<Built>> {
+    let r = rebuild_part(p);
+    let (_, out) = r.features.iter().find(|(i, _)| i.as_str() == f).unwrap().clone();
+    out.map(|o| std::sync::Arc::new(o.solid(&id(f)).unwrap().clone()))
+}
+
+fn volume(b: &ryukei::topo::Body) -> f64 {
+    let m = ryukei::measure::mass(b, 1.0, &ryukei::measure::MassOptions::default()).unwrap();
+    m.volume.value() * 1e9
+}
+
+#[test]
+fn a_plate_is_its_sketch_extruded_by_its_thickness_and_named_as_an_extrude() {
+    let p = part(vec![("s", polyline(&[[0.0, 0.0], [60.0, 0.0], [60.0, 40.0], [0.0, 40.0]], true)),
+                      ("b", base_of(json!({})))]);
+    let b = built(&p, "b").unwrap();
+    assert!((volume(&b.body) - 60.0 * 40.0 * 1.5).abs() < 1e-9);
+    // Named as the same extrude is: the same op key and the sketch's keys.
+    let e = part(vec![("s", polyline(&[[0.0, 0.0], [60.0, 0.0], [60.0, 40.0], [0.0, 40.0]], true)),
+                      ("b", feature(json!({"format": 2, "type": "extrude", "sketch": "s",
+                                           "extent": {"type": "blind", "length": "1.5 mm"}})))]);
+    let x = built(&e, "b").unwrap();
+    assert_eq!(crate::rebuild::names(&b.body), crate::rebuild::names(&x.body));
+    // Its origins say it made them, from which sketch entity.
+    let side = b.origins.values().find(|o| o.get("entity").is_some()).unwrap();
+    assert_eq!(side["feature"], "b");
+    assert_eq!(side["sketch"], "s");
+    // Reversed, it lies below the sketch.
+    let p = part(vec![("s", polyline(&[[0.0, 0.0], [60.0, 0.0], [60.0, 40.0], [0.0, 40.0]], true)),
+                      ("b", base_of(json!({"reverse": true})))]);
+    let (lo, hi) = crate::inspect::body_extent(&built(&p, "b").unwrap().body).unwrap();
+    assert!((lo[2] + 0.0015).abs() < 1e-12 && hi[2].abs() < 1e-12);
+}
+
+#[test]
+fn a_bent_section_is_its_chain_offset_and_extruded_by_its_depth() {
+    // An L: from (40, 0) to the origin, then up; the material on its left.
+    let (t, r, d) = (1.5, 1.0, 20.0);
+    let p = part(vec![("s", polyline(&[[40.0, 0.0], [0.0, 0.0], [0.0, 30.0]], false)),
+                      ("b", base_of(json!({"depth": "20 mm"})))]);
+    let b = built(&p, "b").unwrap();
+    let area = t * ((40.0 - r) + (30.0 - r)) + core::f64::consts::FRAC_PI_2 * t * (r + t / 2.0);
+    let v = volume(&b.body);
+    assert!((v - area * d).abs() < 1e-6 * area * d, "{v} against {}", area * d);
+    // Recognized: one bend of the inner radius, a quarter turn.
+    let m = ryukei::sheet_metal::recognize(&b.body, &Default::default()).unwrap();
+    assert_eq!(m.bends.len(), 1);
+    assert!((m.bends[0].radius - 1e-3).abs() < 1e-12);
+    assert!((m.thickness - 1.5e-3).abs() < 1e-12);
+    // Symmetric about the sketch's plane.
+    let p = part(vec![("s", polyline(&[[40.0, 0.0], [0.0, 0.0], [0.0, 30.0]], false)),
+                      ("b", base_of(json!({"depth": "20 mm", "symmetric": true})))]);
+    let (lo, hi) = crate::inspect::body_extent(&built(&p, "b").unwrap().body).unwrap();
+    assert!((lo[2] + 0.01).abs() < 1e-12 && (hi[2] - 0.01).abs() < 1e-12);
+}
+
+#[test]
+fn a_bent_sections_names_last_across_its_sizes() {
+    let names = |t: &str, r: &str, y: f64| {
+        let p = part(vec![("s", polyline(&[[40.0, 0.0], [0.0, 0.0], [0.0, y]], false)),
+                          ("b", base_of(json!({"depth": "20 mm", "thickness": t, "radius": r})))]);
+        crate::rebuild::names(&built(&p, "b").unwrap().body)
+    };
+    let first = names("1.5 mm", "1 mm", 30.0);
+    assert_eq!(names("2 mm", "1 mm", 30.0), first);
+    assert_eq!(names("1.5 mm", "3 mm", 30.0), first);
+    assert_eq!(names("1.5 mm", "1 mm", 45.0), first);
+}
+
+#[test]
+fn base_flanges_that_cant_be_made_say_why() {
+    let poly = |pts: &[[f64; 2]], closed| polyline(pts, closed);
+    // A plate from a sketch with no closed loop.
+    let p = part(vec![("s", poly(&[[0.0, 0.0], [10.0, 0.0]], false)), ("b", base_of(json!({})))]);
+    assert_eq!(built(&p, "b").unwrap_err().code, Code::ProfileInvalid);
+    // A section from a sketch with no open chain, or two.
+    let p = part(vec![("s", poly(&[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]], true)),
+                      ("b", base_of(json!({"depth": "5 mm"})))]);
+    assert_eq!(built(&p, "b").unwrap_err().code, Code::ProfileInvalid);
+    // A corner whose bends eat a line.
+    let p = part(vec![("s", poly(&[[0.0, 10.0], [0.0, 0.0], [1.5, 0.0], [1.5, 10.0]], false)),
+                      ("b", base_of(json!({"depth": "5 mm"})))]);
+    let e = built(&p, "b").unwrap_err();
+    assert_eq!((e.code, e.details["entities"].clone()), (Code::ProfileInvalid, json!(["l2"])));
+    // A plate thinner across its sketch than its thickness isn't read as
+    // the sheet it says: recognition reads it as some other sheet (its
+    // thinnest way) and refuses its corners, or reads another thickness.
+    let p = part(vec![("s", poly(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]], true)),
+                      ("b", base_of(json!({"thickness": "5 mm"})))]);
+    let e = built(&p, "b").unwrap_err();
+    assert_eq!(e.code, Code::SheetMetalFailed, "{e}");
+    assert!(matches!(e.details["reason"].as_str(), Some("thickness_mismatch" | "sharp_bend")), "{e}");
+}
+
+use crate::solid::Solids;
+
+const PLATE: [[f64; 2]; 4] = [[0.0, 0.0], [60.0, 0.0], [60.0, 40.0], [0.0, 40.0]];
+
+/// The edge of `b` from `a` to `c` (mm), by name.
+fn edge_at(b: &ryukei::topo::Body, a: [f64; 3], c: [f64; 3]) -> ryukei::name::Name {
+    let near = |p: ryukei::geom::Point3, q: [f64; 3]| {
+        (p.x - q[0] * 1e-3).abs() < 1e-9 && (p.y - q[1] * 1e-3).abs() < 1e-9 && (p.z - q[2] * 1e-3).abs() < 1e-9
+    };
+    b.edges()
+        .find(|e| {
+            let x = b.edge(*e).unwrap();
+            let (s, t) = (b.vertex(x.start).unwrap().point, b.vertex(x.end).unwrap().point);
+            (near(s, a) && near(t, c)) || (near(s, c) && near(t, a))
+        })
+        .map(|e| b.name_of(EntityId::Edge(e)).unwrap())
+        .unwrap_or_else(|| panic!("no edge from {a:?} to {c:?}"))
+}
+
+/// The vertex of `b` at `a` (mm), by name.
+fn vertex_at(b: &ryukei::topo::Body, a: [f64; 3]) -> ryukei::name::Name {
+    b.vertices()
+        .find(|v| {
+            let p = b.vertex(*v).unwrap().point;
+            (p.x - a[0] * 1e-3).abs() < 1e-9 && (p.y - a[1] * 1e-3).abs() < 1e-9 && (p.z - a[2] * 1e-3).abs() < 1e-9
+        })
+        .map(|v| b.name_of(EntityId::Vertex(v)).unwrap())
+        .unwrap_or_else(|| panic!("no vertex at {a:?}"))
+}
+
+/// The plate's right top edge (x = 60, z = 1.5) and its two vertices.
+fn rim(b: &ryukei::topo::Body) -> (ryukei::name::Name, [ryukei::name::Name; 2]) {
+    let (a, c) = ([60.0, 0.0, 1.5], [60.0, 40.0, 1.5]);
+    (edge_at(b, a, c), [vertex_at(b, a), vertex_at(b, c)])
+}
+
+fn r(feature: &str, n: ryukei::name::Name) -> Value {
+    json!({"feature": feature, "name": n.to_string()})
+}
+
+fn plated() -> (crate::doc::project::Part, std::sync::Arc<Built>) {
+    let p = part(vec![("s", polyline(&PLATE, true)), ("plate", base_of(json!({})))]);
+    let b = built(&p, "plate").unwrap();
+    (p, b)
+}
+
+#[test]
+fn a_flanges_ends_are_its_vertices_and_its_settings_its_founders() {
+    let (_, b) = plated();
+    let (edge, [v0, v1]) = rim(&b.body);
+    let f = feature(json!({"type": "flange", "target": "plate", "edges": [r("plate", edge)],
+                           "angle": "90 deg", "length": "20 mm", "setback": "2 mm",
+                           "ends": [{"vertex": r("plate", v1), "setback": "5 mm",
+                                     "relief": {"kind": "rectangular", "width": "1 mm", "depth": "0.5 mm"}}]}));
+    let p = part(vec![("s", polyline(&PLATE, true)), ("plate", base_of(json!({}))), ("f", f)]);
+    let results = rebuild_part(&p);
+    let x = p.features[&id("f")].as_ref().unwrap().flange().unwrap();
+    let got = resolve(&p, &Solids::of(&p), &id("f"), x, &results).unwrap();
+    let k = &got.flanges[0];
+    assert_eq!(k.edge, edge);
+    assert!((k.radius - 1e-3).abs() < 1e-15, "the founder's radius");
+    assert!((k.angle - core::f64::consts::FRAC_PI_2).abs() < 1e-15);
+    // Which end is v1 is the edge's direction's business.
+    let e = b.body.edge(match b.body.by_name(edge) { Some(EntityId::Edge(e)) => e, _ => unreachable!() }).unwrap();
+    let at = if b.body.vertex(e.start).unwrap().name == v1 { 0 } else { 1 };
+    assert_eq!(k.setbacks[at], 5e-3);
+    assert_eq!(k.setbacks[1 - at], 2e-3);
+    assert_eq!(k.reliefs[at], ryukei::sheet_metal::Relief::Rectangular { width: 1e-3, depth: 5e-4 });
+    assert_eq!(k.reliefs[1 - at], ryukei::sheet_metal::Relief::None);
+    let _ = v0;
+}
+
+#[test]
+fn a_flange_says_what_it_cant_resolve() {
+    let (_, b) = plated();
+    let (edge, [v0, _]) = rim(&b.body);
+    let face = b.body.name_of(EntityId::Face(b.body.faces().next().unwrap())).unwrap();
+    let flange = |extra: Value| {
+        let mut v = json!({"type": "flange", "target": "plate", "edges": [r("plate", edge)],
+                           "angle": "90 deg", "length": "20 mm"});
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        feature(v)
+    };
+    let fails = |f, founder: crate::doc::files::Feature| {
+        let p = part(vec![("s", polyline(&PLATE, true)), ("plate", founder), ("f", f)]);
+        let results = rebuild_part(&p);
+        let x = p.features[&id("f")].as_ref().unwrap().flange().unwrap().clone();
+        resolve(&p, &Solids::of(&p), &id("f"), &x, &results).map(drop).unwrap_err()
+    };
+    // A face where an edge goes.
+    let e = fails(flange(json!({"edges": [r("plate", face)]})), base_of(json!({})));
+    assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+    // A vertex that isn't an end of an edge it flanges: a corner far away.
+    let far = vertex_at(&b.body, [0.0, 0.0, 0.0]);
+    let e = fails(flange(json!({"ends": [{"vertex": r("plate", far), "setback": "1 mm"}]})), base_of(json!({})));
+    assert_eq!((e.code, e.details["pointer"].as_str()), (Code::InvalidParam, Some("/ends/0/vertex")), "{e}");
+    let _ = v0;
+    // A solid founded by an extrude has no settings to give: the radius
+    // must be the flange's own.
+    let extrude = feature(json!({"format": 2, "type": "extrude", "sketch": "s",
+                                 "extent": {"type": "blind", "length": "1.5 mm"}}));
+    let e = fails(flange(json!({})), extrude);
+    assert_eq!((e.code, e.details["pointer"].as_str()), (Code::InvalidParam, Some("/radius")), "{e}");
+}
+
+fn with_flange(extra: Value) -> crate::doc::project::Part {
+    let (_, b) = plated();
+    let (edge, _) = rim(&b.body);
+    let mut v = json!({"type": "flange", "target": "plate", "edges": [r("plate", edge)],
+                       "angle": "90 deg", "length": "20 mm"});
+    for (k, x) in extra.as_object().unwrap() {
+        v[k] = x.clone();
+    }
+    part(vec![("s", polyline(&PLATE, true)), ("plate", base_of(json!({}))), ("f", feature(v))])
+}
+
+#[test]
+fn a_square_flange_makes_an_l_of_its_closed_form() {
+    // Material inside: the plate cut back by r + t, a quarter annulus, and
+    // a straight flange of the length to the outer mould less r + t.
+    let p = with_flange(json!({}));
+    let r = rebuild_part(&p);
+    let out = r.output(&id("f")).unwrap_or_else(|| panic!("{:?}", r.features));
+    let b = &out.solid(&id("plate")).unwrap().body;
+    let (w, a, t, rr, l) = (40.0, 60.0, 1.5, 1.0, 20.0);
+    let want = w * t * (a - (rr + t))
+        + w * core::f64::consts::FRAC_PI_4 * ((rr + t) * (rr + t) - rr * rr)
+        + w * t * (l - (rr + t));
+    let m = ryukei::measure::mass(b, 1.0, &ryukei::measure::MassOptions::default()).unwrap();
+    assert!(m.volume.holds(want * 1e-9, 1e-15), "{:?} against {want}", m.volume);
+    assert_eq!(ryukei::check::check_intersections(b), []);
+    // Recognized: one bend, the founder's radius.
+    let model = ryukei::sheet_metal::recognize(b, &Default::default()).unwrap();
+    assert_eq!(model.bends.len(), 1);
+    // The bend's and the flange's faces say which they are and whose.
+    let built = out.solid(&id("plate")).unwrap();
+    let parts: std::collections::BTreeSet<String> = built
+        .origins
+        .values()
+        .filter(|o| o["feature"] == "f")
+        .filter_map(|o| o["part"].as_str().map(str::to_owned))
+        .collect();
+    assert!(parts.contains("bend") && parts.contains("flange"), "{parts:?}");
+    let (edge, _) = rim(&built_of(&p, "plate").body);
+    assert!(built.origins.values().any(|o| o["flange_of"] == edge.to_string()));
+}
+
+fn built_of(p: &crate::doc::project::Part, f: &str) -> std::sync::Arc<Built> {
+    std::sync::Arc::new(rebuild_part(p).output(&id(f)).unwrap().solid(&id("plate")).unwrap().clone())
+}
+
+#[test]
+fn a_flanges_names_last_across_its_sizes() {
+    let names = |extra: Value| crate::rebuild::names(&built_of(&with_flange(extra), "f").body);
+    let first = names(json!({}));
+    for edit in [json!({"angle": "80 deg"}), json!({"length": "25 mm"}), json!({"radius": "2 mm"})] {
+        assert_eq!(names(edit.clone()), first, "{edit}: names moved");
+    }
+    // A setback cuts the base anew (the trim no longer runs the edge's
+    // whole length, and a relief adds faces), so the base's cut faces are
+    // others, and so are its end walls and edges at its set-back ends; the
+    // bend's cylinders and the flange's sides keep their names.
+    let own = |extra: Value| -> std::collections::BTreeSet<String> {
+        let b = built_of(&with_flange(extra), "f");
+        b.origins
+            .iter()
+            .filter(|(_, o)| o["feature"] == "f" && matches!(o["part"].as_str(), Some("bend" | "flange")))
+            .filter(|(n, _)| {
+                // The bend's cylinders (their axis along the edge, y) and
+                // the flange's sides (planes facing across it): the end
+                // walls, square to y, are cut anew by a setback.
+                let n = crate::doc::reference::parse_name(n).expect("a name");
+                let Some(EntityId::Face(f)) = b.body.by_name(n) else { return false };
+                let face = b.body.face(f).expect("a live face");
+                let surface = b.body.surface(face.surface).expect("its surface");
+                let along = surface.frame().map_or(0.0, |f| f.z().get().y.abs());
+                match surface {
+                    ryukei::geom::Surface::Cylinder(_) => along > 1.0 - 1e-9,
+                    ryukei::geom::Surface::Plane(_) => along < 1e-9,
+                    _ => false,
+                }
+            })
+            .map(|(n, _)| n.clone())
+            .collect()
+    };
+    let set = json!({"setback": "3 mm", "relief": {"kind": "rectangular", "width": "1 mm", "depth": "1 mm"}});
+    let (before, after) = (own(json!({})), own(set));
+    assert!(!before.is_empty());
+    assert!(before.is_subset(&after), "the bend's or flange's names moved: {before:?} against {after:?}");
+}
+
+#[test]
+fn the_founders_settings_key_a_flanges_result() {
+    let hash = |radius: &str| {
+        let (_, b) = plated();
+        let (edge, _) = rim(&b.body);
+        let f = feature(json!({"type": "flange", "target": "plate", "edges": [r("plate", edge)],
+                               "angle": "90 deg", "length": "20 mm"}));
+        let p = part(vec![("s", polyline(&PLATE, true)),
+                          ("plate", base_of(json!({"radius": radius}))), ("f", f.clone())]);
+        let before: BTreeMap<Id, crate::error::Result<crate::rebuild::Output>> =
+            rebuild_part(&p).features.into_iter().collect();
+        crate::rebuild::input_hash(&p, &Solids::of(&p), &id("f"), &f, &before, &crate::rebuild::Run::none())
+    };
+    // The plate is the same body either way; only the flange reads it.
+    assert_ne!(hash("1 mm"), hash("2 mm"));
+}
