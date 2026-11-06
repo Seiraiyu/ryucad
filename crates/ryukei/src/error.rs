@@ -637,6 +637,9 @@ pub enum ViewError {
     /// A face whose silhouette couldn't be traced, fitted or trimmed with
     /// a certificate.
     Uncertain { at: Name },
+    /// An edge whose image couldn't be certified: a spline stretch running
+    /// along the view that is neither a point nor a fold.
+    Image { at: Name },
 }
 
 impl fmt::Display for ViewError {
@@ -647,6 +650,9 @@ impl fmt::Display for ViewError {
             ),
             Self::Uncertain { at } => {
                 write!(f, "the silhouette of face {at} couldn't be certified")
+            }
+            Self::Image { at } => {
+                write!(f, "the image of edge {at} couldn't be certified")
             }
         }
     }
@@ -1379,6 +1385,16 @@ mod view_tests {
         assert_eq!(
             e.to_string(),
             format!("invalid view: the silhouette of face {at} couldn't be certified")
+        );
+    }
+
+    #[test]
+    fn an_edge_whose_image_cant_be_certified_is_named() {
+        let at = Name::from_u128(9);
+        let e: Error = ViewError::Image { at }.into();
+        assert_eq!(
+            e.to_string(),
+            format!("invalid view: the image of edge {at} couldn't be certified")
         );
     }
 }
