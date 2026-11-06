@@ -7,7 +7,8 @@
 //! import made, `0xfd` the material library, `0xfc` a named view (its
 //! sections and explode too), `0xfb` an appearance, `0xfa` an explode,
 //! `0xf9` a lock, `0xf8` a manifest's dependencies, `0xf7` a datum
-//! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft and `0xf2` a mirror or split. Merging must never panic, must give the same bytes twice,
+//! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft, `0xf2` a mirror or split and `0xf1` a
+//! planar face or a surface extrude. Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -576,6 +577,41 @@ fn edit_sweep(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// A planar face's or a surface extrude's edit: its profile's sketch or
+/// loops, an extrude's length, or the extrude made a solid's again.
+fn edit_surface(v: &mut Value, op: u8, arg: u8) {
+    let planar = v["type"] == "planar";
+    let o = v.as_object_mut().unwrap();
+    match op % 3 {
+        0 if planar => {
+            o.insert("profile".into(), json!({"sketch": format!("s{}", arg % 3)}));
+        }
+        0 => {
+            o.insert("sketch".into(), json!(format!("s{}", arg % 3)));
+        }
+        1 if planar => {
+            o.insert(
+                "profile".into(),
+                json!({"sketch": "s", "loops": [format!("l{}", arg % 4)]}),
+            );
+        }
+        1 => {
+            o.insert(
+                "extent".into(),
+                json!({"type": "blind", "length": format!("{} mm", 1 + arg % 20)}),
+            );
+        }
+        _ if planar => {
+            o.remove("profile");
+            o.insert("profile".into(), json!({"sketch": "s"}));
+        }
+        _ => {
+            o.remove("surface");
+            o.insert("format".into(), json!(2));
+        }
+    }
+}
+
 /// A loft's edit: a section added, taken off or swapped with the next, a
 /// section narrowed to a loop from a point, closed or opened, a tangent
 /// set, weighted or taken off.
@@ -743,9 +779,10 @@ fuzz_target!(|data: &[u8]| {
     // appearance (13), `0xfa` an explode (14), `0xf9` a lock (15), `0xf8`
     // a manifest's dependencies (16), `0xf7` a datum (17), `0xf6` a path
     // (18), `0xf5` a sweep (19), `0xf4` a shell (20), `0xf3` a loft
-    // (21), `0xf2` a mirror or split (22); every other byte picks as it
-    // did before them.
+    // (21), `0xf2` a mirror or split (22), `0xf1` a planar face or a
+    // surface extrude (23); every other byte picks as it did before them.
     let kind = match mode {
+        0xf1 => 23,
         0xf2 => 22,
         0xf3 => 21,
         0xf4 => 20,
@@ -809,6 +846,15 @@ fuzz_target!(|data: &[u8]| {
                 json!({"format": 10, "kind": "ryucad.feature", "type": "split", "target": "b",
                        "plane": {"feature": "d"}})
             }
+            // A planar face when the edits leave no odd byte over, else a
+            // surface extrude.
+            23 if rest.len() % 2 == 0 => {
+                json!({"format": 12, "kind": "ryucad.feature", "type": "planar",
+                       "profile": {"sketch": "s", "loops": ["l1"]}})
+            }
+            23 => json!({"format": 12, "kind": "ryucad.feature", "type": "extrude",
+                         "sketch": "s", "surface": true,
+                         "extent": {"type": "blind", "length": "20 mm"}}),
             22 => json!({"format": 10, "kind": "ryucad.feature", "type": "mirror", "solid": "b",
                          "plane": "yz", "operation": "join", "targets": ["b"]}),
             18 => json!({"format": 7, "kind": "ryucad.feature", "type": "path",
@@ -866,6 +912,7 @@ fuzz_target!(|data: &[u8]| {
             20 => edit_shell(v, op, arg),
             21 => edit_loft(v, op, arg),
             22 => edit_mirror(v, op, arg),
+            23 => edit_surface(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -967,6 +1014,18 @@ fuzz_target!(|data: &[u8]| {
                 assert!(
                     ["", "/thickness", "/direction", "/open", "/faces"].contains(&k.as_str()),
                     "conflicted inside a shell's value at {k}: {v}"
+                );
+            }
+        }
+        // A planar face's profile is one value: nothing conflicts inside
+        // it; a surface flag is a field of its own.
+        if kind == 23 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            for k in record(&v).keys() {
+                assert!(
+                    !k.starts_with("/profile/"),
+                    "conflicted inside a planar's profile at {k}: {v}"
                 );
             }
         }
