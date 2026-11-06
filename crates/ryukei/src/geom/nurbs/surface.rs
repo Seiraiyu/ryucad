@@ -26,6 +26,11 @@ pub enum Direction {
 /// Like [`super::NurbsCurve`], it builds and keeps its Bézier patches the
 /// first time they are needed; the cache takes no part in equality.
 ///
+/// It also keeps, built the first time it is projected onto, what every
+/// projection reads and no point changes (`project_surface::Prep`): the
+/// patches' nets, the boundary curves' and the crease lines' Bézier
+/// pieces. Neither cache takes part in equality or the `Debug` text.
+///
 /// Each surface made has an id of its own, shared by its clones, which
 /// keys an operation's table of enclosures (`memo::Enclosures`); like the
 /// cache, it takes no part in equality or the `Debug` text.
@@ -35,6 +40,7 @@ pub struct NurbsSurface {
     points: Box<[Vector3]>,
     weights: Box<[f64]>,
     patches: OnceLock<Box<[BezierPatch]>>,
+    prep: OnceLock<Box<super::project_surface::Prep>>,
     id: u64,
 }
 
@@ -89,6 +95,7 @@ impl NurbsSurface {
             points,
             weights,
             patches: OnceLock::new(),
+            prep: OnceLock::new(),
             id: next_id(),
         })
     }
@@ -350,6 +357,7 @@ impl NurbsSurface {
             points: hom.iter().map(|h| h.p).collect(),
             weights: hom.iter().map(|h| h.w).collect(),
             patches: OnceLock::new(),
+            prep: OnceLock::new(),
             id: next_id(),
         }
     }
@@ -477,6 +485,7 @@ impl NurbsSurface {
                 .collect(),
             weights: self.weights.clone(),
             patches: OnceLock::new(),
+            prep: OnceLock::new(),
             id: next_id(),
         }
     }
@@ -514,6 +523,12 @@ impl NurbsSurface {
                 distance,
             })
             .collect()
+    }
+
+    /// What every projection onto the surface reads, built once.
+    pub(crate) fn prep(&self) -> &super::project_surface::Prep {
+        self.prep
+            .get_or_init(|| Box::new(super::project_surface::Prep::of(self)))
     }
 
     /// The Bézier patches, row-major over the spans, built once.
