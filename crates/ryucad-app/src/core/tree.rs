@@ -367,6 +367,10 @@ pub fn type_icon(ty: &str, op: Option<&str>, form: Option<&str>) -> &'static str
         "path" | "helix" => "path",
         "sweep" => "sweep",
         "loft" => "loft",
+        "shell" => "shell",
+        "offset" => "offset",
+        "mirror" => "mirror-body",
+        "split" => "split",
         _ => "question",
     }
 }
@@ -400,6 +404,7 @@ pub fn feature_icon(f: &Feature, assembly: impl Fn(&str) -> bool) -> (&'static s
                 | "revolve"
                 | "sweep"
                 | "loft"
+                | "mirror"
                 | "box"
                 | "cylinder"
                 | "cone"
@@ -472,6 +477,10 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
             ("Hole (every form)", "hole", Tint::Plain),
             ("Sweep", "sweep", Tint::Plain),
             ("Loft", "loft", Tint::Plain),
+            ("Shell", "shell", Tint::Plain),
+            ("Offset", "offset", Tint::Plain),
+            ("Mirror", "mirror-body", Tint::Plain),
+            ("Split", "split", Tint::Plain),
             ("Linear pattern", "pattern-linear", Tint::Plain),
             ("Circular pattern", "pattern-circular", Tint::Plain),
             ("Mirror pattern", "flip-horizontal", Tint::Plain),
@@ -872,15 +881,21 @@ impl Builder<'_> {
                 .push(Badge::new("eye-slash", Tint::Weak, "hidden"));
         }
         let me = self.push(row, parent);
+        // A split that founded this solid is listed in its target's chain,
+        // this solid under it: its chain here starts after it.
         let chain: Vec<&Feature> = part
             .features
             .iter()
             .filter(|f| f.solids.iter().any(|s| s == solid))
+            .filter(|f| !(f.id == solid && f.solids.len() > 1))
             .collect();
         for f in chain {
             self.feature(part, f, depth + 1, Some(me));
             for t in &f.consumes {
                 self.solid(part, t, true, depth + 2, Some(me));
+            }
+            if f.id != solid && f.solids.contains(&f.id) && part.solid(&f.id).is_some() {
+                self.solid(part, &f.id, false, depth + 2, Some(me));
             }
         }
     }
@@ -1320,6 +1335,7 @@ mod tests {
             import: None,
             form: None,
             datum: None,
+            body: None,
         }
     }
 
@@ -1569,6 +1585,69 @@ mod tests {
     }
 
     #[test]
+    fn shells_offsets_mirrors_and_splits_take_their_glyphs_and_a_split_lists_its_solid() {
+        let mut m = Model::default();
+        m.apply_part(&json!({"part": "p", "revision": "r1", "features": [
+            {"id": "b", "type": "box", "ok": true, "hash": "1", "solids": ["b"]},
+            {"id": "s", "type": "shell", "ok": true, "hash": "2", "solids": ["b"]},
+            {"id": "o", "type": "offset", "ok": true, "hash": "3", "solids": ["b"]},
+            {"id": "sp", "type": "split", "ok": true, "hash": "4", "solids": ["b", "sp"],
+             "uses": ["d"]},
+            {"id": "f", "type": "fillet", "ok": true, "hash": "5", "solids": ["sp"]},
+            {"id": "m", "type": "mirror", "ok": true, "hash": "6", "solids": ["b"],
+             "operation": "intersect"},
+            {"id": "bad", "type": "mirror", "ok": false, "solids": ["b"], "operation": "join",
+             "error": {"code": "mirror_failed", "message": "it leaves the size box"}}],
+            "solids": [{"solid": "b", "ok": false, "features": ["b", "s", "o", "sp", "m", "bad"],
+                        "hash": "6", "error": {"code": "mirror_failed"}},
+                       {"solid": "sp", "ok": true, "features": ["sp", "f"], "hash": "5"}]}));
+        let (states, pdm) = (States::default(), BTreeMap::new());
+        let rows = rows(&source(&m, &states, &pdm));
+        let row = |id: &str| {
+            rows.iter()
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("{id}"))
+        };
+        assert_eq!(
+            ["s", "o", "sp", "m", "bad"].map(|f| row(&format!("feature:p/{f}")).icon),
+            ["shell", "offset", "split", "mirror-body", "mirror-body"]
+        );
+        // An intersecting mirror takes the intersect badge, as an extrude.
+        assert!(
+            row("feature:p/m")
+                .badges
+                .iter()
+                .any(|b| b.icon == "intersect")
+        );
+        let bad = row("feature:p/bad");
+        assert!(bad.failed && bad.tint == Tint::Danger);
+        assert!(bad.text.contains("mirror_failed"), "{}", bad.text);
+        // The split's solid is listed once, under the split in its
+        // target's chain, its chain after the split; every row once.
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(ids.len(), unique.len(), "{ids:?}");
+        assert_eq!(
+            texts(&rows, &Tree::default()),
+            [
+                "p",
+                "  b (solid): failed (mirror_failed), showing its last good state",
+                "    b (box)",
+                "    s (shell)",
+                "    o (offset)",
+                "    sp (split)",
+                "      uses d",
+                "      sp (solid)",
+                "        f (fillet)",
+                "    m (mirror, intersect)",
+                "    bad (mirror, join): failed (mirror_failed)",
+            ]
+        );
+    }
+
+    #[test]
     fn sweeps_and_lofts_take_their_glyphs_and_list_what_they_read() {
         let mut m = Model::default();
         m.apply_part(&json!({"part": "p", "revision": "r1", "features": [
@@ -1656,6 +1735,10 @@ mod tests {
             "helix",
             "sweep",
             "loft",
+            "shell",
+            "offset",
+            "mirror",
+            "split",
             "mystery",
         ] {
             for op in [
