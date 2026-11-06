@@ -19,7 +19,6 @@ pub(crate) struct Changes {
     pub(crate) surface: BTreeMap<FaceId, Surface>,
     pub(crate) senses: BTreeMap<FaceId, Sense>,
     /// Each drafted face's hinge (a draft's only).
-    #[allow(dead_code)] // read from plan 9.B Task 10
     pub(crate) drafts: BTreeMap<FaceId, super::draft::Drafted>,
     /// The parting line's edges, which stay where they are.
     pub(crate) hinges: BTreeSet<crate::topo::EdgeId>,
@@ -61,7 +60,7 @@ fn built(
         curves::offset_classes(body, &changes.motion, &class),
     );
     extend::extend(&mut plan, &class)?;
-    let geo = curves::curves(&plan, &class, meter)?;
+    let geo = curves::curves(&plan, &class, &changes.drafts, meter)?;
     let rails = curves::rails(&plan, meter)?;
     let vgeo = vertices::vertices(&plan, &class, &geo, &rails, meter)?;
     let side = Side {

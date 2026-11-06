@@ -4,9 +4,10 @@ use super::hinge::{HingeCurve, size_of};
 use crate::geom::{
     Cone, Curve, Frame, FrameLaw, Line, Plane, Point3, Surface, Sweep, UnitVector3, Vector3,
 };
-use crate::intersect::{extended_curve, face_box};
+use crate::intersect::{CurveHit, curve_surface_in, extended_curve, face_box};
+use crate::offset::edges::NewCurve;
 use crate::tol::LINEAR_RESOLUTION;
-use crate::topo::{Body, FaceId, Sense};
+use crate::topo::{Body, EdgeId, FaceId, Sense};
 use crate::work::Meter;
 use crate::{Error, TweakError};
 use std::sync::Arc;
@@ -214,6 +215,66 @@ fn swept(
     Ok((s, sense))
 }
 
+/// A tangent edge between faces drafted alike by `d`: the ruling through
+/// where it crosses their hinge, a line running the way the edge ran,
+/// reaching past both old ends by half the edge's length. `TangencyBroken`
+/// where the edge doesn't cross the hinge.
+pub(crate) fn ruling_edge(
+    body: &Body,
+    e: EdgeId,
+    d: &super::Drafted,
+    meter: &Meter,
+) -> Result<NewCurve, Error> {
+    let edge = &body.edges[e];
+    let broken = || -> Error { TweakError::TangencyBroken { edge: edge.name }.into() };
+    let curve = &body.curves[edge.curve];
+    let x = match &d.on {
+        super::HingeOn::Plane(plane) => {
+            let hits =
+                curve_surface_in(curve, edge.interval, plane, 10.0 * LINEAR_RESOLUTION, meter)
+                    .map_err(|_| TweakError::Uncertain { at: edge.name })?;
+            hits.iter()
+                .find_map(|h| match h {
+                    CurveHit::Point { point, .. } => Some(*point),
+                    CurveHit::On { .. } => None,
+                })
+                .ok_or_else(broken)?
+        }
+        super::HingeOn::Edges(on) => {
+            let ends = |h: EdgeId| [body.edges[h].start, body.edges[h].end];
+            [edge.start, edge.end]
+                .into_iter()
+                .find(|v| on.iter().any(|&h| ends(h).contains(v)))
+                .map(|v| body.vertices[v].point)
+                .ok_or_else(broken)?
+        }
+    };
+    let f = crate::tweak::classify::face_pair(body, e)[0];
+    let n = outward_at(body, f, x).ok_or_else(broken)?;
+    let hs = d.hinge.curve.project(x).param;
+    let t = d.hinge.curve.tangent(hs).ok_or_else(broken)?.get();
+    let turn = turned(t, n, d.pull.get(), d.angle).ok_or_else(broken)?;
+    let [p0, p1] = edge.interval.map(|s| curve.point(s));
+    let r = if (p1 - p0).dot(turn.ruling) < 0.0 {
+        -turn.ruling
+    } else {
+        turn.ruling
+    };
+    let dir = r.normalize().ok_or_else(broken)?;
+    let line = Line::from_unit(x, dir).map_err(|_| broken())?;
+    let along = |p: Point3| (p - x).dot(dir.get());
+    let half = 0.5 * p0.distance(p1) + 10.0 * LINEAR_RESOLUTION;
+    let [a, b] = [along(p0), along(p1)];
+    Ok(NewCurve {
+        curve: Curve::Line(line),
+        range: [a.min(b) - half, a.max(b) + half],
+        period: None,
+        tolerance: edge.tolerance.get(),
+        pcurves: [None, None],
+        reversed: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::hinge::neutral;
@@ -388,5 +449,56 @@ mod tests {
                 assert!((crate::math::asin(n.z) - 0.1).abs() < 1e-9, "{n:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_rounded_corners_tangent_edge_becomes_the_ruling_through_its_hinge() {
+        // unmetered: a unit test.
+        let m = Meter::free();
+        let (bx, _) = primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+        let mut f = [
+            Name::derive(K, Role::Face(FaceRole::PlusX), &[]),
+            Name::derive(K, Role::Face(FaceRole::PlusY), &[]),
+        ];
+        f.sort();
+        let corner = Name::derive(K, Role::Edge, &f);
+        let (b, _) = crate::blend::blend(
+            OpKey(13),
+            &bx,
+            &[crate::blend::EdgeBlend {
+                edge: corner,
+                kind: crate::blend::BlendKind::Fillet { radius: 0.1 },
+            }],
+        )
+        .unwrap();
+        // A vertical tangent edge between a wall and the fillet.
+        let wall = b
+            .faces()
+            .find(|&g| b.faces[g].name == f[0] || b.faces[g].name == f[1])
+            .unwrap();
+        let e = b
+            .face_loops(wall)
+            .flat_map(|l| b.loop_fins(l).map(|x| b.fins[x].edge).collect::<Vec<_>>())
+            .find(|&e| {
+                let [t0, t1] = b.edges[e].interval;
+                let c = &b.curves[b.edges[e].curve];
+                (c.point(t0).z - c.point(t1).z).abs() > 0.3
+                    && crate::tweak::classify::tangent(&b, e).unwrap_or(false)
+            })
+            .unwrap();
+        let g = crate::tweak::classify::face_pair(&b, e)[0];
+        let plane = plane_at(0.0);
+        let h = neutral(&b, g, &plane, &m).unwrap();
+        let d = super::super::Drafted {
+            hinge: h,
+            on: super::super::HingeOn::Plane(plane),
+            pull: up(),
+            angle: 0.05,
+        };
+        let c = ruling_edge(&b, e, &d, &m).unwrap();
+        let Curve::Line(l) = &c.curve else { panic!() };
+        // Through the edge's foot on z = 0, tilted 0.05 rad from z.
+        assert!(l.origin().z.abs() < 1e-12);
+        assert!((crate::math::acos(l.dir().get().z.abs()) - 0.05).abs() < 1e-12);
     }
 }

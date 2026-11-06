@@ -167,6 +167,7 @@ fn moved_rigidly(plan: &Plan, e: EdgeId, r: &crate::geom::Rigid) -> NewCurve {
 pub(crate) fn curves(
     plan: &Plan,
     class: &BTreeMap<EdgeId, Class>,
+    drafts: &BTreeMap<FaceId, super::draft::Drafted>,
     meter: &Meter,
 ) -> Result<BTreeMap<EdgeId, EdgeGeo>, Error> {
     meter
@@ -180,6 +181,12 @@ pub(crate) fn curves(
                     let f = plan.face_of(plan.fins(e)[0]);
                     match plan.motion[&f] {
                         Motion::Rigid(r) => EdgeGeo::One(moved_rigidly(plan, e, &r)),
+                        Motion::Draft { .. } => EdgeGeo::One(super::draft::surface::ruling_edge(
+                            plan.body,
+                            e,
+                            &drafts[&f],
+                            meter,
+                        )?),
                         _ => edges::edge(plan, e, meter)?,
                     }
                 }
@@ -256,7 +263,7 @@ mod tests {
         let class = super::super::classify::classes(&b, &motion).unwrap();
         let plan = plan_for(&b, &motion, &class);
         // unmetered: a unit test.
-        let geo = curves(&plan, &class, &Meter::free()).unwrap();
+        let geo = curves(&plan, &class, &BTreeMap::new(), &Meter::free()).unwrap();
         for (&e, g) in &geo {
             let EdgeGeo::One(c) = g else {
                 panic!("an edge opened")
@@ -288,7 +295,7 @@ mod tests {
         let class = super::super::classify::classes(&b, &motion).unwrap();
         let plan = plan_for(&b, &motion, &class);
         // unmetered: a unit test.
-        let geo = curves(&plan, &class, &Meter::free()).unwrap();
+        let geo = curves(&plan, &class, &BTreeMap::new(), &Meter::free()).unwrap();
         for (&e, g) in &geo {
             let EdgeGeo::One(c) = g else { panic!() };
             assert_eq!(c.range, b.edges[e].interval);

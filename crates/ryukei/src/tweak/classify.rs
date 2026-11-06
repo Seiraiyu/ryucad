@@ -86,6 +86,11 @@ pub(crate) fn classes(
     classes_with(body, motion, &BTreeSet::new())
 }
 
+/// The two faces of an edge.
+pub(crate) fn face_pair(body: &Body, e: EdgeId) -> [FaceId; 2] {
+    fins(body, e).map(|f| face_of(body, f))
+}
+
 /// Every inner edge's class, in parallel, in the order of the edges'
 /// names, `hinges` (a parting line's edges) `Hinge` first;
 /// `TangencyBroken` (the least-named edge first) where a tangent pair's
