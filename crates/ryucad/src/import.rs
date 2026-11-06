@@ -127,6 +127,60 @@ pub fn open_ahead<'a>(files: impl IntoIterator<Item = &'a ImportFile>) {
     }
 }
 
+/// How a solid-mode import heals: one place, which the dry run, `build`
+/// and `import convert` all read. ryucad 18 (design 388) makes it
+/// `Open::Sheet` here, for solid imports only; a reference reads only its
+/// tolerance cap.
+pub fn heal_options() -> ryukei::heal::HealOptions {
+    Default::default()
+}
+
+/// What a reference import reports beside its body: its file, product,
+/// `mode: reference`, and what the reference path did (counts, and the
+/// faces it split, dropped or kept unoriented by name with their STEP
+/// instances, for the warnings).
+pub fn reference_report(
+    i: &Import,
+    r: &ryukei::heal::ReferenceReport,
+    instances: &BTreeMap<Name, u64>,
+) -> Value {
+    let named = |names: &[Name]| -> Vec<Value> {
+        names
+            .iter()
+            .map(|n| {
+                let mut v = json!({"name": n.to_string()});
+                if let Some(k) = instances.get(n) {
+                    v["step"] = json!(format!("#{k}"));
+                }
+                v
+            })
+            .collect()
+    };
+    let tolerance = r.tolerances.iter().map(|(_, t)| *t).fold(0.0, f64::max);
+    let mut v = json!({
+        "file": i.file.path,
+        "body": i.body,
+        "mode": "reference",
+        "reference": {
+            "seams": r.seams.len(),
+            "poles": r.poles.len(),
+            "joined": r.joined.len(),
+            "split": r.split.len(),
+            "reversed": r.reversed.len(),
+            "turned": r.turned.len(),
+            "laminar": r.laminar.len(),
+            "tolerance_m": tolerance,
+            "split_faces": named(&r.split_faces),
+            "dropped_faces": named(&r.dropped_faces),
+            "unoriented": named(&r.unoriented),
+        },
+    });
+    if let Some(p) = &i.product {
+        v["product"] = product_json(p);
+    }
+    v
+}
+
 /// What an import feature reports beside its solid: its file, its
 /// product and what healing did, as counts.
 pub fn report(i: &Import, healed: &HealReport) -> Value {
@@ -166,6 +220,9 @@ pub fn written(i: &Import) -> Value {
     let mut v = json!({"file": i.file.path, "blake3": i.file.blake3, "body": i.body});
     if let Some(p) = &i.product {
         v["product"] = product_json(p);
+    }
+    if i.mode() == crate::doc::import::Mode::Reference {
+        v["mode"] = json!("reference");
     }
     v
 }
@@ -273,12 +330,15 @@ pub fn build(
     }
     let opened = opened(file).map_err(|e| unreadable(&i.file.path, &e).with("feature", id))?;
     let k = select(id, i, &opened)?;
+    if i.mode() == crate::doc::import::Mode::Reference {
+        return build_reference(part, id, i, &opened, k, run);
+    }
     let work = crate::work::work(run.job).with_budget(run.heal_budget);
     let read = opened.body_with(
         k,
         &ReadOptions {
             key: op_key(&part.id, id),
-            heal: Default::default(),
+            heal: heal_options(),
         },
         &work,
     );
@@ -299,6 +359,52 @@ pub fn build(
         .collect();
     let report = report(i, &healed);
     Ok((finish(id, "import", (body, journal), origins)?, report))
+}
+
+/// A reference import's body (design 364): the file's topology as a
+/// sheet, never healed, named as healing names it, under `heal.budget`
+/// and the request's cancel. Refused only where ryustep can't read the
+/// shape, or no face lays out (`import_failed`).
+fn build_reference(
+    part: &Part,
+    id: &Id,
+    i: &Import,
+    opened: &Opened,
+    k: usize,
+    run: &crate::rebuild::Run,
+) -> Result<(Built, Value)> {
+    let work = crate::work::work(run.job).with_budget(run.heal_budget);
+    let read = opened.reference_with(
+        k,
+        &ReadOptions {
+            key: op_key(&part.id, id),
+            heal: heal_options(),
+        },
+        &work,
+    );
+    let (body, report) = read.result.map_err(|e| match e {
+        ImportError::Work(w) => stopped(id, i, &w, (read.representation, &read.items), run.job),
+        e => failed(id, i, &e, &read.instances, &read.solids),
+    })?;
+    let step = |n: &Name| read.instances.get(n).map(|k| format!("#{k}"));
+    let origins: crate::rebuild::Origins = crate::rebuild::names(&body)
+        .into_iter()
+        .map(|n| {
+            let mut o = json!({"feature": id});
+            if let Some(s) = step(&n) {
+                o["step"] = json!(s);
+            }
+            (n.to_string(), o)
+        })
+        .collect();
+    let v = reference_report(i, &report, &read.instances);
+    // A reference changes nothing the file had: its journal is empty, as
+    // a mirror's is.
+    let journal = ryukei::name::Journal::new();
+    Ok((
+        crate::rebuild::finish_reference(id, (body, journal), origins)?,
+        v,
+    ))
 }
 
 /// A heal its work stopped: the request's `cancelled`, or
@@ -1390,6 +1496,15 @@ pub(crate) mod tests {
         bytes: &[u8],
         product: Option<(&str, &str)>,
     ) -> (tempfile::TempDir, crate::session::Session) {
+        with_import_as(bytes, product, None)
+    }
+
+    /// [`with_import`], the feature in `mode`.
+    pub(crate) fn with_import_as(
+        bytes: &[u8],
+        product: Option<(&str, &str)>,
+        mode: Option<crate::doc::import::Mode>,
+    ) -> (tempfile::TempDir, crate::session::Session) {
         use crate::doc::files::{Feature, PartFile};
         use crate::doc::project::{feature_path, part_path, write_atomic, write_json};
         let (dir, mut s) = crate::server::tests::fresh();
@@ -1402,7 +1517,10 @@ pub(crate) mod tests {
             &PartFile::new(vec![id("i")]).to_json(),
         )
         .unwrap();
-        let i = Feature::Import(import(&f, product, 0));
+        let i = Feature::Import(Import {
+            mode,
+            ..import(&f, product, 0)
+        });
         write_json(&feature_path(root, &p, &id("i")), &i.to_json()).unwrap();
         s.reload().unwrap();
         (dir, s)
@@ -1414,6 +1532,58 @@ pub(crate) mod tests {
             Ok(v) => v["parts"][0].clone(),
             Err(e) => e.details["parts"][0].clone(),
         }
+    }
+
+    #[test]
+    fn a_reference_import_builds_the_files_topology_with_healings_face_names() {
+        use crate::doc::import::Mode;
+        let bytes = occt("box_ap214.stp");
+        let (_dr, mut r) =
+            with_import_as(&bytes, Some(("part 2", "part 2")), Some(Mode::Reference));
+        let (_ds, mut s) = with_import(&bytes, Some(("part 2", "part 2")));
+        let fr = rebuild(&mut r)["features"][0].clone();
+        let fs = rebuild(&mut s)["features"][0].clone();
+        assert_eq!(fr["ok"], true, "{fr}");
+        assert_eq!(fr["import"]["mode"], "reference", "{fr}");
+        assert!(fr["import"].get("heal").is_none());
+        assert_eq!(fr["import"]["reference"]["dropped_faces"], json!([]));
+        assert!(fs["import"].get("mode").is_none(), "{fs}");
+        assert_eq!(fr["counts"], fs["counts"]);
+        // Face names are healing's: the same in both.
+        let names = |s: &mut crate::session::Session| -> Vec<String> {
+            let mut n: Vec<String> = faces(s).into_iter().map(|(n, _)| n).collect();
+            n.sort();
+            n
+        };
+        assert_eq!(names(&mut r), names(&mut s));
+        // Every entity still names its STEP instance.
+        for (_, f) in faces(&mut r) {
+            assert!(
+                f["origin"]["step"].as_str().unwrap().starts_with('#'),
+                "{f}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reference_import_stops_at_a_cancel() {
+        use crate::doc::import::Mode;
+        use std::sync::atomic::AtomicBool;
+        let bytes = occt("box_ap214.stp");
+        let (_d, s) = with_import_as(&bytes, Some(("part 2", "part 2")), Some(Mode::Reference));
+        let part = s
+            .project()
+            .part(&Id::parse("p", "part").unwrap())
+            .unwrap()
+            .clone();
+        let fid = id("i");
+        let Some(Ok(crate::doc::files::Feature::Import(i))) = part.features.get(&fid).cloned()
+        else {
+            unreachable!()
+        };
+        let job = ryu_session::job::Job::new("t", "p", "rebuild", Arc::new(AtomicBool::new(true)));
+        let e = build(&part, &fid, &i, &crate::rebuild::Run::with_job(&job)).unwrap_err();
+        assert_eq!(e.code, Code::Cancelled, "{e:?}");
     }
 
     /// The names of the faces of `p`'s one solid, with their plane's
