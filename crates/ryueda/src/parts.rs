@@ -479,9 +479,15 @@ pub fn show(p: &Project, key: &str, refresh: bool, cats: &Catalogues) -> Result<
     Ok(json!({"key": key, "records": records, "warnings": warnings, "notes": notes}))
 }
 
-/// The sources a search without `in` asks: the library.
-fn default_sources(_p: &Project) -> Vec<String> {
-    vec![Library::NAME.to_owned()]
+/// The sources a search without `in` asks: `parts.json`'s, else the
+/// library.
+fn default_sources(p: &Project) -> Vec<String> {
+    let c = crate::sourcing::config(p);
+    if c.sources.is_empty() {
+        vec![Library::NAME.to_owned()]
+    } else {
+        c.sources
+    }
 }
 
 /// UTC seconds now; `RYUEDA_NOW` sets it, for tests.
