@@ -12,6 +12,7 @@
 mod closed;
 mod curve;
 mod edge_on;
+mod events;
 mod folds;
 mod hidden;
 mod items;
