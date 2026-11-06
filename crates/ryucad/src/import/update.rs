@@ -752,7 +752,7 @@ mod tests {
     fn imported() -> (tempfile::TempDir, crate::session::Session) {
         let (src, path) = outside(&frame_version(1));
         let (dir, mut s) = fresh();
-        call(&mut s, "import", json!({"path": path})).unwrap();
+        call(&mut s, "import", json!({"solid": true, "path": path})).unwrap();
         drop(src);
         (dir, s)
     }
@@ -763,7 +763,7 @@ mod tests {
         extra: Value,
     ) -> crate::error::Result<Value> {
         let (_src, path) = outside(bytes);
-        let mut params = json!({"path": path, "update": "imports/frame.step"});
+        let mut params = json!({"solid": true, "path": path, "update": "imports/frame.step"});
         for (k, v) in extra.as_object().unwrap() {
             params[k] = v.clone();
         }
@@ -839,7 +839,7 @@ mod tests {
             )
             .unwrap();
         }
-        let e = call(s, "import", json!({"path": path, "into": p})).unwrap_err();
+        let e = call(s, "import", json!({"solid": true, "path": path, "into": p})).unwrap_err();
         let one = e.details["products"][product]["id"]
             .as_str()
             .unwrap()
@@ -847,7 +847,7 @@ mod tests {
         call(
             s,
             "import",
-            json!({"path": path, "into": p, "product": one}),
+            json!({"solid": true, "path": path, "into": p, "product": one}),
         )
         .unwrap();
     }
@@ -1000,7 +1000,7 @@ mod tests {
     fn a_flat_file_imported_whole_makes_the_assembly_its_new_version_adds() {
         let (_src, path) = outside(&two_roots());
         let (dir, mut s) = fresh();
-        call(&mut s, "import", json!({"path": path})).unwrap();
+        call(&mut s, "import", json!({"solid": true, "path": path})).unwrap();
         let v = update(&mut s, &roots(&["A-1", "B-1"], true), json!({})).unwrap();
         assert_eq!(created(&v), [("x-1".into(), "assembly".into())], "{v}");
         assert!(skipped(&v).is_empty(), "{v}");
@@ -1015,7 +1015,7 @@ mod tests {
         // gains an assembly (the limit): the assembly is named.
         let (_src, path) = outside(&roots(&["A-1"], false));
         let (_dir, mut s) = fresh();
-        call(&mut s, "import", json!({"path": path})).unwrap();
+        call(&mut s, "import", json!({"solid": true, "path": path})).unwrap();
         let v = update(&mut s, &roots(&["A-1"], true), json!({"dry_run": true})).unwrap();
         assert!(created(&v).is_empty(), "{v}");
         let w = skipped(&v);
@@ -1256,7 +1256,7 @@ mod tests {
             &mut live,
             None,
             "import",
-            json!({"path": path, "update": "imports/frame.step"}),
+            json!({"solid": true, "path": path, "update": "imports/frame.step"}),
         )
         .unwrap();
         let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
@@ -1410,7 +1410,12 @@ mod tests {
         let bytes = occt("box_ap214.stp");
         let (_src, path) = outside(&bytes);
         let (_dir, mut s) = fresh();
-        call(&mut s, "import", json!({"path": path, "part": "b"})).unwrap();
+        call(
+            &mut s,
+            "import",
+            json!({"solid": true, "path": path, "part": "b"}),
+        )
+        .unwrap();
         let v = call(&mut s, "inspect", json!({"part": "b"})).unwrap();
         let edges = v["bodies"][0]["edges"].as_array().unwrap().clone();
         // An edge whose ends are both at height z, by its vertices.
@@ -1445,7 +1450,7 @@ mod tests {
         let v = call(
             &mut s,
             "import",
-            json!({"path": same, "update": "imports/frame.step"}),
+            json!({"solid": true, "path": same, "update": "imports/frame.step"}),
         )
         .unwrap();
         assert_eq!(v["parts"], json!([]));
@@ -1457,7 +1462,7 @@ mod tests {
         let v = call(
             &mut s,
             "import",
-            json!({"path": taller_path, "update": "imports/frame.step", "dry_run": true}),
+            json!({"solid": true, "path": taller_path, "update": "imports/frame.step", "dry_run": true}),
         )
         .unwrap();
         // The fillet on the top edge would fail; the one below wouldn't.
@@ -1470,7 +1475,7 @@ mod tests {
         call(
             &mut s,
             "import",
-            json!({"path": taller_path, "update": "imports/frame.step"}),
+            json!({"solid": true, "path": taller_path, "update": "imports/frame.step"}),
         )
         .unwrap();
         let r = match call(&mut s, "rebuild", json!({"part": "b"})) {

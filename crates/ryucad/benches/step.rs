@@ -39,7 +39,7 @@ fn import_into_a_new_project(bencher: Bencher) {
             (dir, s)
         })
         .bench_local_values(|(dir, mut s)| {
-            let v = must(&mut s, "import", json!({"path": corpus()}));
+            let v = must(&mut s, "import", json!({"solid": true, "path": corpus()}));
             assert_eq!(v["parts"][0]["features"][0]["ok"], true, "{v}");
             (dir, s)
         });
@@ -49,13 +49,13 @@ fn import_into_a_new_project(bencher: Bencher) {
 fn reimport_unchanged(bencher: Bencher) {
     let dir = tempfile::tempdir().unwrap();
     let mut s = project(dir.path());
-    let v = must(&mut s, "import", json!({"path": corpus()}));
+    let v = must(&mut s, "import", json!({"solid": true, "path": corpus()}));
     let stored = v["file"]["path"].as_str().unwrap().to_owned();
     bencher.bench_local(|| {
         let v = must(
             &mut s,
             "import",
-            json!({"path": corpus(), "update": stored}),
+            json!({"solid": true, "path": corpus(), "update": stored}),
         );
         assert!(v.get("failing").is_none(), "{v}");
     });
@@ -65,7 +65,7 @@ fn reimport_unchanged(bencher: Bencher) {
 fn export_the_part(bencher: Bencher) {
     let dir = tempfile::tempdir().unwrap();
     let mut s = project(dir.path());
-    let v = must(&mut s, "import", json!({"path": corpus()}));
+    let v = must(&mut s, "import", json!({"solid": true, "path": corpus()}));
     let part = v["parts"][0]["part"].as_str().unwrap().to_owned();
     bencher.bench_local(|| {
         let params = json!({"part": part, "time_stamp": "2026-10-27T00:00:00"});

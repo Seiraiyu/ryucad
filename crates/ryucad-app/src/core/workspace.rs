@@ -3963,6 +3963,9 @@ fn import_request(path: &str, update: Option<String>, dry_run: bool) -> Request 
         dry_run,
         expected_revision: None,
         update,
+        // Until 21.C's "Convert to solids (heal)" box, the dialog heals as
+        // it did.
+        solid: true,
     }
 }
 

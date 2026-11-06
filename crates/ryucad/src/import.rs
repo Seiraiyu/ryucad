@@ -1972,7 +1972,12 @@ pub(crate) mod tests {
         (dir, path.to_string_lossy().into_owned())
     }
 
-    fn import_call(s: &mut crate::session::Session, params: Value) -> Result<Value> {
+    /// An import asking for solids, as every test written before design
+    /// 364 meant, unless `params` says otherwise.
+    fn import_call(s: &mut crate::session::Session, mut params: Value) -> Result<Value> {
+        if params.get("solid").is_none() {
+            params["solid"] = json!(true);
+        }
         crate::server::tests::call(s, "import", params)
     }
 
@@ -2059,8 +2064,11 @@ pub(crate) mod tests {
         let before = crate::session::files(&root).unwrap();
         let mut slot = Some(s);
         let ask = |dry: bool| {
-            crate::proto::Request::from_rpc("import", Some(json!({"path": path, "dry_run": dry})))
-                .unwrap()
+            crate::proto::Request::from_rpc(
+                "import",
+                Some(json!({"solid": true, "path": path, "dry_run": dry})),
+            )
+            .unwrap()
         };
         let mut run = |dry: bool, job: &Job| {
             crate::server::handle_job(&mut slot, None, None, &root, ask(dry), job)
@@ -2210,7 +2218,14 @@ pub(crate) mod tests {
         let root = dir.path();
         let before = crate::session::files(root).unwrap();
         let mut live = Live::new();
-        call_live(&mut s, &mut live, None, "import", json!({"path": path})).unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "import",
+            json!({"solid": true, "path": path}),
+        )
+        .unwrap();
         let log = call_live(&mut s, &mut live, None, "activity.log", json!({})).unwrap();
         let entry = &log["entries"][0];
         assert_eq!(entry["method"], "import", "{log}");

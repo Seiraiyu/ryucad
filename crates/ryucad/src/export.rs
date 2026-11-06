@@ -1449,7 +1449,7 @@ pub(crate) mod tests {
         // Imported again, each solid keeps its ID.
         let (_out, out) = outside(&bytes, "p.step");
         let (_dir2, mut s2) = fresh();
-        let v = call(&mut s2, "import", json!({"path": out})).unwrap();
+        let v = call(&mut s2, "import", json!({"solid": true, "path": out})).unwrap();
         let ids: Vec<&Value> = v["parts"][0]["features"]
             .as_array()
             .unwrap()
@@ -2529,7 +2529,7 @@ pub(crate) mod tests {
         let original = frame();
         let (_src, path) = outside(&original, "frame.step");
         let (dir, mut s) = fresh();
-        call(&mut s, "import", json!({"path": path})).unwrap();
+        call(&mut s, "import", json!({"solid": true, "path": path})).unwrap();
         // f-1 places its plate's part (f-1-body), s-1 and p-1. Exported
         // with the header the file had, it is the file, byte for byte.
         let export = |s: &mut Session, time_stamp: &str| {
@@ -2553,7 +2553,7 @@ pub(crate) mod tests {
         let v = call(
             &mut s,
             "import",
-            json!({"path": out, "update": "imports/frame.step"}),
+            json!({"solid": true, "path": out, "update": "imports/frame.step"}),
         )
         .unwrap();
         assert_ne!(v["file"]["blake3"], v["file"]["from"]);
@@ -2577,7 +2577,7 @@ pub(crate) mod tests {
         assert_eq!(names(&mut s), names_before);
         // Imported into another project, it makes the same parts.
         let (_dir2, mut s2) = fresh();
-        let v = call(&mut s2, "import", json!({"path": out})).unwrap();
+        let v = call(&mut s2, "import", json!({"solid": true, "path": out})).unwrap();
         let made: Vec<(&Value, &Value)> = v["parts"]
             .as_array()
             .unwrap()

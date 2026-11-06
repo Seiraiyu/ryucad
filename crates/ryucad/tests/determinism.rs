@@ -3015,8 +3015,11 @@ fn imported() -> (tempfile::TempDir, ryucad::session::Session) {
     let mut s = ryucad::session::Session::open(dir.path()).unwrap();
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../ryustep/tests/data/occt/spline_revolve.stp");
-    let req = ryucad::proto::Request::from_rpc("import", Some(serde_json::json!({"path": path})))
-        .unwrap();
+    let req = ryucad::proto::Request::from_rpc(
+        "import",
+        Some(serde_json::json!({"solid": true, "path": path})),
+    )
+    .unwrap();
     ryucad::server::handle(&mut s, req).unwrap();
     (dir, s)
 }
@@ -3129,7 +3132,7 @@ fn imports_section(golden: &mut Golden) {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../ryustep/tests/data/occt")
                 .join(f);
-            let params = serde_json::json!({"path": path});
+            let params = serde_json::json!({"solid": true, "path": path});
             let req = ryucad::proto::Request::from_rpc("import", Some(params)).unwrap();
             pool.install(|| ryucad::server::handle(&mut session, req))
                 .unwrap_or_else(|e| panic!("{f}: {e}"));
