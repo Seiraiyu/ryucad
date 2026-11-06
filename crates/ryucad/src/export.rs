@@ -594,8 +594,9 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                 time_stamp,
                 ..WriteOptions::default()
             };
-            let bytes =
-                ryustep::write(&step_model(&walk.scene), &opts).map_err(|e| walk.unwritable(e))?;
+            let passed = passed_references(&walk)?;
+            let bytes = ryustep::write_with(&step_model(&walk.scene), &passed, &opts)
+                .map_err(|e| walk.unwritable(e))?;
             result["time_stamp"] = json!(opts.time_stamp);
             result["schema"] = json!(schema_name);
             result["unit"] = json!(unit_name);
@@ -997,7 +998,13 @@ fn step_model(scene: &Scene) -> WriteModel {
             name: p.name.clone(),
             description: p.description.clone(),
             revision: p.revision.clone(),
-            bodies: p.solids.iter().map(|s| s.built.body.clone()).collect(),
+            // A reference is passed through as its file has it.
+            bodies: p
+                .solids
+                .iter()
+                .filter(|s| !s.built.reference)
+                .map(|s| s.built.body.clone())
+                .collect(),
             children: p
                 .children
                 .iter()
@@ -1007,10 +1014,75 @@ fn step_model(scene: &Scene) -> WriteModel {
                     id: c.usage.clone(),
                 })
                 .collect(),
-            names: p.solids.iter().map(|s| s.founder.to_string()).collect(),
+            names: p
+                .solids
+                .iter()
+                .filter(|s| !s.built.reference)
+                .map(|s| s.founder.to_string())
+                .collect(),
         })
         .collect();
     WriteModel { products }
+}
+
+/// Each reference solid's own representation, cut out of its imported
+/// file (as step-hunt cuts a body) and named by its founder, beside its
+/// product: a reference is written as the file had it, never healed or
+/// seamed (design 364). Each file is parsed once.
+fn passed_references(walk: &Walk) -> Result<Vec<ryustep::Passed>> {
+    let mut parsed: BTreeMap<String, Arc<ryustep::part21::File>> = BTreeMap::new();
+    let mut passed = Vec::new();
+    for (k, p) in walk.scene.products.iter().enumerate() {
+        for sol in p.solids.iter().filter(|s| s.built.reference) {
+            let Some((part, _, _)) = walk.built.get(&(sol.part.clone(), p.rev.clone())) else {
+                return Err(Error::new(
+                    Code::Internal,
+                    format!("export: {}/{} wasn't rebuilt", sol.part, sol.founder),
+                ));
+            };
+            let Some(Ok(crate::doc::files::Feature::Import(i))) = part.features.get(&sol.founder)
+            else {
+                return Err(Error::new(
+                    Code::Internal,
+                    format!(
+                        "export: {}/{} is a reference but no import",
+                        sol.part, sol.founder
+                    ),
+                ));
+            };
+            let Some(f) = part.imports.get(&i.file.path) else {
+                return Err(Error::new(
+                    Code::ImportFileMissing,
+                    format!("export: {} is missing", i.file.path),
+                ));
+            };
+            let unreadable = |e: &ryustep::StepError| crate::import::unreadable(&i.file.path, e);
+            let file = match parsed.get(&f.blake3) {
+                Some(x) => x.clone(),
+                None => {
+                    let x = Arc::new(ryustep::part21::parse(&f.bytes).map_err(|e| unreadable(&e))?);
+                    parsed.insert(f.blake3.clone(), x.clone());
+                    x
+                }
+            };
+            let opened = crate::import::opened(f).map_err(|e| unreadable(&e))?;
+            let n = crate::import::select(&sol.founder, i, &opened)?;
+            let h = &opened.held[n];
+            let instances = ryustep::part21::closure::cut(
+                &file,
+                h.representation,
+                h.context,
+                &h.items,
+                sol.founder.as_str(),
+            )
+            .map_err(|e| Error::new(Code::Internal, format!("export: {e}")))?;
+            passed.push(ryustep::Passed {
+                product: k,
+                instances,
+            });
+        }
+    }
+    Ok(passed)
 }
 
 /// The scene being built, walked from the part exported.
@@ -1353,6 +1425,42 @@ pub(crate) mod tests {
         let mut f = f;
         f["part"] = json!(part);
         call(s, "feature.add", f).unwrap();
+    }
+
+    #[test]
+    fn a_reference_exports_as_its_files_own_representation() {
+        use crate::doc::import::Mode;
+        let bytes = crate::import::tests::occt("box_ap214.stp");
+        let (_d, mut s) = crate::import::tests::with_import_as(
+            &bytes,
+            Some(("part 2", "part 2")),
+            Some(Mode::Reference),
+        );
+        let (_, out) = exported(
+            &mut s,
+            json!({"part": "p", "time_stamp": "2026-11-06T00:00:00"}),
+        )
+        .unwrap();
+        // The file's faces' instances, renumbered: the same reference read
+        // back under the same key, so the same names and body.
+        let o = opened(&out);
+        assert_eq!(o.held.len(), 1);
+        let key = crate::rebuild::op_key(
+            &Id::parse("p", "part").unwrap(),
+            &Id::parse("i", "feature").unwrap(),
+        );
+        let ro = ryustep::ReadOptions {
+            key,
+            heal: Default::default(),
+        };
+        let again = o.reference(0, &ro).result.unwrap().0;
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        assert_eq!(
+            blake3::hash(again.dump().as_bytes()).to_hex()[..32],
+            r["parts"][0]["solids"][0]["hash"]
+        );
+        // No seamed body was written for it.
+        assert!(!String::from_utf8_lossy(&out).contains("ryukei:seam"));
     }
 
     #[test]
