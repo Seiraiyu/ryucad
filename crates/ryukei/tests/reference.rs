@@ -6,7 +6,7 @@
 use ryukei::blend::blend;
 use ryukei::boolean::boolean;
 use ryukei::check::check_topology;
-use ryukei::geom::{Rigid, Vector3};
+use ryukei::geom::{Box3, Rigid, Vector3};
 use ryukei::heal::{HealOptions, ReferenceOptions, heal, reference, seamed};
 use ryukei::mesh::{MeshParams, tessellate};
 use ryukei::name::{Name, OpKey};
@@ -75,10 +75,14 @@ fn seeded_bodies_build_as_references_named_as_healed() {
         assert_eq!(report.split_faces, [], "body {i}");
         assert_eq!(report.dropped_faces, [], "body {i}");
         assert_eq!(report.unoriented, [], "body {i}");
-        let size = b
-            .faces()
-            .map(|f| ryukei::intersect::face_box(b, f))
-            .reduce(|x, y| x.union(&y))
+        // The box of its vertices (a face's box can be the whole size box),
+        // else of its faces.
+        let size = Box3::from_points(b.vertices().map(|v| b.vertex(v).unwrap().point))
+            .or_else(|| {
+                b.faces()
+                    .map(|f| ryukei::intersect::face_box(b, f))
+                    .reduce(|x, y| x.union(&y))
+            })
             .map(|x| (x.max() - x.min()).length())
             .unwrap();
         let m = tessellate(&r, &MeshParams::new(size * 1e-2, 0.5)).unwrap();

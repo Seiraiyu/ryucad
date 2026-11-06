@@ -5,7 +5,8 @@
 //! certifying ones: import names, each edge's uses (at most two: a sheet
 //! may leave one laminar), seams and poles out, loops and faces oriented
 //! (kept as the file has them where that can't be done), tolerances
-//! sampled at 17 points rather than certified and held to the cap,
+//! sampled at 65 points (grown for what lies between) rather than
+//! certified and held to the cap,
 //! pcurves exact or the file's but never fitted, and the layout built as
 //! a sheet (design 295). Sewing, tightening, certified gaps, collapsing,
 //! fitted pcurves, shell judging, self-union and [`crate::check::check`]
@@ -278,11 +279,20 @@ fn attempt(
     })
 }
 
-/// Samples along an edge for its sampled gap: 17 points.
-const SAMPLES: usize = 16;
+/// Intervals along an edge for its sampled gap: 65 points. A file's
+/// spline edge can pass through the surface at evenly spaced points and
+/// stray between them (NIST FTC 10's splines on cylinders lie on them at
+/// 17 even samples and 4.9e-7 m off halfway between), so a gap sampled at
+/// 17 points can miss what the mesher's samples see.
+const SAMPLES: usize = 64;
+
+/// How much a sampled gap is grown to cover what lies between samples:
+/// the sampled maximum of a smooth deviation is short of the true one by
+/// about its curvature times the spacing squared over eight.
+const UNSAMPLED: f64 = 1.5;
 
 /// Every edge's and vertex's tolerance grown to cover how far it lies
-/// from what it bounds: an edge from its faces' surfaces at 17 samples, a
+/// from what it bounds: an edge from its faces' surfaces at 65 samples, a
 /// vertex from its faces' surfaces and its edges' ends; uncertified, and
 /// held to `cap` (a tolerance the file gave stays as it is).
 fn tolerate(s: &mut Shape, cap: f64, m: &Meter) {
@@ -342,10 +352,11 @@ fn tolerate(s: &mut Shape, cap: f64, m: &Meter) {
                 .fold(on_faces, f64::max)
         })
         .collect();
-    // As healing covers a gap, with room for rounding, held to the cap.
+    // As healing covers a gap, with room for rounding, held to the cap; an
+    // edge's grown for what lies between its samples.
     let cover = |gap: f64| (gap * 1.0001 + 1e-12).min(cap);
     for (e, gap) in s.edges.iter_mut().zip(edge_gaps) {
-        e.tolerance = e.tolerance.max(cover(gap));
+        e.tolerance = e.tolerance.max(cover(gap * UNSAMPLED));
     }
     for (v, gap) in s.vertices.iter_mut().zip(vertex_gaps) {
         v.tolerance = v.tolerance.max(cover(gap));

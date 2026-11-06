@@ -316,3 +316,70 @@ fn pieces_touching_at_a_vertex_each_get_a_copy_of_it() {
     assert_eq!(r.vertices().count(), 16);
     assert_eq!(names.len(), 16);
 }
+
+#[test]
+fn a_gap_between_samples_is_covered() {
+    use crate::geom::{Curve, Cylinder, Frame, KnotVector, NurbsCurve, Point3, Surface};
+    use crate::topo::Sense;
+    // A degree 1 spline through 17 points of a quarter circle on a
+    // cylinder: on it at every one of the 17 even samples a gap once took,
+    // off it by the sagitta halfway between (NIST FTC 10's splines).
+    let n = 16;
+    let r = 0.01;
+    let step = core::f64::consts::FRAC_PI_2 / n as f64;
+    let points: Vec<Point3> = (0..=n)
+        .map(|i| {
+            let (s, c) = crate::math::sin_cos(step * i as f64);
+            Point3::new(r * c, r * s, 0.0)
+        })
+        .collect();
+    let knots: Vec<f64> = (0..=n).map(|i| i as f64 / n as f64).collect();
+    let mut mults = vec![1; n + 1];
+    mults[0] = 2;
+    mults[n] = 2;
+    let kv = KnotVector::clamped(1, &knots, &mults).unwrap();
+    let curve = Curve::Nurbs(std::sync::Arc::new(
+        NurbsCurve::new(kv, points.clone(), None).unwrap(),
+    ));
+    let mut s = Shape {
+        surfaces: vec![Surface::Cylinder(Cylinder::new(Frame::WORLD, r).unwrap())],
+        curves: vec![curve],
+        ..Shape::default()
+    };
+    for p in [points[0], points[n]] {
+        s.vertices.push(super::super::Vertex {
+            point: p,
+            tolerance: 0.0,
+            seam: false,
+        });
+    }
+    s.edges.push(super::super::Edge {
+        curve: 0,
+        interval: [0.0, 1.0],
+        start: 0,
+        end: 1,
+        tolerance: 0.0,
+    });
+    s.faces.push(super::super::Face {
+        surface: 0,
+        sense: Sense::Forward,
+        loops: vec![Loop::Edges(vec![Use {
+            edge: 0,
+            sense: Sense::Forward,
+            pcurve: None,
+        }])],
+        tolerance: 0.0,
+    });
+    let work = Work::unlimited();
+    crate::work::run(&work, |m| {
+        tolerate(&mut s, 1e-4, m);
+        Ok(())
+    })
+    .unwrap();
+    let sagitta = r * (1.0 - crate::math::cos(step / 2.0));
+    assert!(
+        s.edges[0].tolerance >= sagitta,
+        "{} < {sagitta}",
+        s.edges[0].tolerance
+    );
+}
