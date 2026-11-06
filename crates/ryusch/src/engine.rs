@@ -327,6 +327,15 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
         None => true,
         Some((a, _)) => !r.edge.contains_key(&a) && !i.parts.iter().any(|p| r.edge.contains_key(p)),
     });
+    // A part a `region` instruction names leaves an idiom whose other
+    // parts or anchor that region doesn't hold: the agent's region wins.
+    let named_region = |p: usize| r.regions.iter().position(|(_, set)| set.contains(&p));
+    idioms.retain(|i| {
+        let mut all: Vec<usize> = i.parts.clone();
+        all.extend(i.anchor.map(|(a, _)| a));
+        let first = named_region(all[0]);
+        all.iter().all(|p| named_region(*p) == first)
+    });
     // A part an instruction moves brings the idioms serving it: kept where
     // they were, they would hold it there. A part placed again for its
     // label alone goes by itself.
@@ -1113,6 +1122,14 @@ fn pack_regions(
     let pool: Vec<Cluster> = which.iter().map(|c| clusters[*c].clone()).collect();
     let edge_of: Vec<Option<Side>> = which.iter().map(|c| hints.edge.get(c).copied()).collect();
     let region_of = |c: &Cluster| {
+        // A named region taking any member takes the cluster.
+        let named = proposed.iter().position(|g| {
+            g.basis == crate::region::Basis::Named
+                && c.members.iter().any(|(p, _)| g.parts.contains(p))
+        });
+        if named.is_some() {
+            return named;
+        }
         let p = c.members.iter().map(|(p, _)| *p).find(|p| !is_port(*p))?;
         proposed.iter().position(|g| g.parts.contains(&p))
     };

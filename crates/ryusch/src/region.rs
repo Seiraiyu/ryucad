@@ -363,4 +363,62 @@ mod tests {
             "a function names its region"
         );
     }
+
+    #[test]
+    fn named_regions_are_kept_and_none_drops_a_part_back() {
+        use crate::layout::Instruction;
+        let mut block = crate::testing::regions_block();
+        block.instructions.insert(
+            "i1".into(),
+            Instruction::Region {
+                title: "Reset".into(),
+                parts: vec!["r1".into(), "j1".into()],
+            },
+        );
+        let out = crate::engine::lay_out(&block).unwrap();
+        let reset = out
+            .layout
+            .regions
+            .values()
+            .find(|r| r.title == "Reset")
+            .expect("the named region");
+        assert!(reset.named);
+        assert_eq!(reset.parts, ["j1", "r1"]);
+        // Taken by a named region, R1 leaves U1's.
+        assert!(
+            out.layout
+                .regions
+                .values()
+                .all(|r| r.title == "Reset" || !r.parts.contains(&"r1".to_string()))
+        );
+        // A region can be a subject: `sheet region:<id> S` moves its parts.
+        let id = out
+            .layout
+            .regions
+            .iter()
+            .find(|(_, r)| r.title == "F1")
+            .map(|(id, _)| id.clone())
+            .unwrap();
+        let mut moved = block.clone();
+        moved.previous = Some(out.layout.clone());
+        moved.moves = vec![Instruction::Sheet {
+            parts: vec![format!("region:{id}")],
+            sheet: "Filters".into(),
+        }];
+        let out2 = crate::engine::lay_out(&moved).unwrap();
+        let sheet_of = |k: &str| out2.layout.placed[k].sheet.clone();
+        assert_eq!(sheet_of("r9"), sheet_of("c9"));
+        assert_ne!(sheet_of("r9"), sheet_of("u1"));
+        // Two regions naming one part: refused.
+        let mut both = block.clone();
+        both.instructions.insert(
+            "i2".into(),
+            Instruction::Region {
+                title: "Other".into(),
+                parts: vec!["r1".into()],
+            },
+        );
+        let e = crate::engine::lay_out(&both).unwrap_err();
+        assert_eq!(e.code, "instruction_conflict");
+    }
 }

@@ -59,6 +59,17 @@ pub struct Resolved {
 /// The parts a subject names: the part keyed so, or every unit of the
 /// component keyed so, or a pin's part (`<part key>/<number>`).
 pub fn parts_named(block: &Block, subject: &str) -> Vec<usize> {
+    // A region of the previous layout (`region:<id>`): its parts.
+    if let Some(id) = subject.strip_prefix("region:") {
+        let mut out: Vec<usize> = block
+            .previous
+            .as_ref()
+            .and_then(|l| l.regions.get(id))
+            .map(|r| r.parts.iter().filter_map(|k| block.part(k)).collect())
+            .unwrap_or_default();
+        out.sort_by(|a, b| block.parts[*a].key.cmp(&block.parts[*b].key));
+        return out;
+    }
     if let Some((p, _)) = pin_named(block, subject) {
         return vec![p];
     }
@@ -147,6 +158,9 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
     let mut grouped: BTreeMap<usize, String> = BTreeMap::new();
     // Edge, beside and near each say where a part goes: one at most.
     let mut placed_by: BTreeMap<usize, String> = BTreeMap::new();
+    // Each part's `region` instruction, and `region none`'s.
+    let mut region_by: BTreeMap<usize, String> = BTreeMap::new();
+    let mut none_by: BTreeMap<usize, String> = BTreeMap::new();
     let all: Vec<(String, &Instruction, bool)> = block
         .instructions
         .iter()
@@ -164,12 +178,26 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
         // the instruction set aside.
         let mut missing = Vec::new();
         let mut parts: Vec<usize> = Vec::new();
+        let mut gone_regions = Vec::new();
         for s in ins.parts() {
             let found = parts_named(block, s);
             if found.is_empty() {
-                missing.push(s.clone());
+                match s.strip_prefix("region:") {
+                    Some(region) => gone_regions.push(region.to_owned()),
+                    None => missing.push(s.clone()),
+                }
             }
             parts.extend(found);
+        }
+        if !gone_regions.is_empty() {
+            for g in &gone_regions {
+                r.notes.push(Note {
+                    code: "region_unresolved".into(),
+                    message: format!("region {g} is gone: the instruction is kept"),
+                    details: json!({"instruction": id, "region": g}),
+                });
+            }
+            continue;
         }
         match ins {
             Instruction::Beside { of, .. } if parts_named(block, of).is_empty() => {
@@ -310,10 +338,41 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
                 }
                 r.shift.push((parts.clone(), *side, *steps));
             }
-            // plan 2.A Task 7 (regions) and Task 16 (paper).
-            Instruction::Region { .. }
-            | Instruction::RegionNone { .. }
-            | Instruction::Paper { .. } => {}
+            Instruction::Region { title, .. } => {
+                for &p in &parts {
+                    if let Some(other) = region_by.get(&p).or(none_by.get(&p)) {
+                        return Err(Refusal {
+                            code: "instruction_conflict",
+                            message: format!(
+                                "{} is in two regions: {other} and {id}",
+                                block.parts[p].key
+                            ),
+                            details: json!({"instructions": [other, id]}),
+                        });
+                    }
+                    region_by.insert(p, id.clone());
+                }
+                r.regions
+                    .push((title.clone(), parts.iter().copied().collect()));
+            }
+            Instruction::RegionNone { .. } => {
+                for &p in &parts {
+                    if let Some(other) = region_by.get(&p) {
+                        return Err(Refusal {
+                            code: "instruction_conflict",
+                            message: format!(
+                                "{} is in two regions: {other} and {id}",
+                                block.parts[p].key
+                            ),
+                            details: json!({"instructions": [other, id]}),
+                        });
+                    }
+                    none_by.insert(p, id.clone());
+                }
+                r.no_region.extend(parts.iter().copied());
+            }
+            // plan 2.A Task 16 (paper).
+            Instruction::Paper { .. } => {}
             Instruction::Group { .. } => {
                 for &p in &parts {
                     if let Some(other) = grouped.get(&p) {
@@ -787,10 +846,21 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
             }
         }
         Instruction::Idiom { .. } | Instruction::Flow { .. } => true,
-        // plan 2.A Task 7 (regions) and Task 16 (paper).
-        Instruction::Region { .. } | Instruction::RegionNone { .. } | Instruction::Paper { .. } => {
-            false
+        Instruction::Region { title, .. } => {
+            let keys: Vec<&str> = parts.iter().map(|p| block.parts[*p].key.as_str()).collect();
+            !keys.is_empty()
+                && layout.regions.values().any(|g| {
+                    &g.title == title && keys.iter().all(|k| g.parts.iter().any(|x| x == k))
+                })
         }
+        Instruction::RegionNone { .. } => parts.iter().all(|p| {
+            !layout
+                .regions
+                .values()
+                .any(|g| g.named && g.parts.contains(&block.parts[*p].key))
+        }),
+        // plan 2.A Task 16 (paper).
+        Instruction::Paper { .. } => false,
     }
 }
 
