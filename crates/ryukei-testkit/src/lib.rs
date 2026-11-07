@@ -22,6 +22,8 @@
 //!   (design 299), for the tolerant tests and fuzzing.
 //! - [`race`]: the bodies of the large-assembly STEP race.
 //! - [`nurbs_race`]: the bodies of the NURBS race (design 94, plan 8.F).
+//! - [`projection`]: hidden lines judged against a mesh (design 326), for
+//!   the projection tests, fuzzing and the OCCT comparison.
 //! - [`sheet_metal`]: sheet-metal parts extruded from bent strips.
 
 /// The work budget the blend, sweep and offset fuzz targets give each
@@ -163,6 +165,7 @@ pub mod mesh;
 pub mod nurbs;
 pub mod nurbs_race;
 pub mod offset_bytes;
+pub mod projection;
 pub mod race;
 pub mod sheet_bytes;
 pub mod sheet_metal;
