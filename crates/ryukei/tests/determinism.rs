@@ -3648,6 +3648,7 @@ sections! {
     bent => bent_section,
     silhouettes => silhouettes_section,
     hidden_lines => hidden_lines_section,
+    tweaks => tweaks_section,
 }
 
 /// Self-union (design 299, plan 14.C): two 4 m blocks crossing as one
@@ -4176,4 +4177,126 @@ fn hidden_lines_section(golden: &mut Golden) {
             }
         });
     }
+}
+
+/// Face tweaks (design 384, plan 9.A): a box's top raised and tilted, its
+/// top and a side offset, a hole moved across its plate, a rounded box's
+/// side offset with its tangent chain, and a top replaced by a tilted
+/// plane.
+fn tweaks_section(golden: &mut Golden) {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::{Frame, Plane, Point3, Surface, Vector3};
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::tweak::{
+        MoveSpec, OffsetFacesSpec, ReplaceSpec, move_faces, offset_faces, replace_faces,
+    };
+    let mut s = golden.section("tweaks");
+    let key = OpKey(0x7477_6b00);
+    let k = OpKey(0x7477_6b01);
+    let face = |r: FaceRole| Name::derive(key, Role::Face(r), &[]);
+    let turn = |c: Point3, axis: Vector3, angle: f64| {
+        let to = Rigid::translation(c.to_vector());
+        let back = Rigid::translation(-c.to_vector());
+        to.then_after(&Rigid::rotation(axis.normalize().unwrap(), angle).then_after(&back))
+    };
+    let moved = |faces: Vec<Name>, motion: Rigid| MoveSpec {
+        faces,
+        motion,
+        tangent: false,
+    };
+    let (b, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let top = face(FaceRole::PlusZ);
+    for motion in [
+        Rigid::translation(Vector3::new(0.0, 0.0, 0.1)),
+        turn(Point3::new(0.5, 0.3, 0.4), Vector3::new(0.0, 1.0, 0.0), 0.2),
+    ] {
+        let (o, j) = move_faces(k, &b, &moved(vec![top], motion)).unwrap();
+        hash_body(&mut s, &o, &j);
+    }
+    let out = OffsetFacesSpec {
+        faces: vec![(top, 0.05), (face(FaceRole::PlusX), -0.03)],
+        tangent: false,
+    };
+    let (o, j) = offset_faces(k, &b, &out).unwrap();
+    hash_body(&mut s, &o, &j);
+    // A plate with a through hole, the hole moved 0.2 along x.
+    let (plate, _) = primitive::block(key, 1.0, 1.0, 0.2, &Rigid::IDENTITY).unwrap();
+    let (pin, _) = primitive::cylinder(OpKey(0x7477_6b02), 0.1, 0.4, &Rigid::IDENTITY).unwrap();
+    let (drilled, _) = boolean(
+        OpKey(0x7477_6b03),
+        BooleanOp::Subtract,
+        &plate,
+        &[Tool {
+            key: ToolKey(1),
+            body: &pin,
+            place: Rigid::translation(Vector3::new(0.5, 0.5, -0.1)),
+        }],
+    )
+    .unwrap();
+    let wall: Vec<Name> = drilled
+        .faces()
+        .filter(|&f| {
+            let face = drilled.face(f).unwrap();
+            matches!(drilled.surface(face.surface).unwrap(), Surface::Cylinder(_))
+        })
+        .map(|f| drilled.face(f).unwrap().name)
+        .collect();
+    let along = Rigid::translation(Vector3::new(0.2, 0.0, 0.0));
+    let (o, j) = move_faces(k, &drilled, &moved(wall, along)).unwrap();
+    hash_body(&mut s, &o, &j);
+    // A box with every edge rounded to 0.1, one side offset 0.05 with its
+    // tangent chain (every face).
+    let sides = [
+        FaceRole::PlusX,
+        FaceRole::MinusX,
+        FaceRole::PlusY,
+        FaceRole::MinusY,
+        FaceRole::PlusZ,
+        FaceRole::MinusZ,
+    ];
+    let opposite = |a: FaceRole, c: FaceRole| {
+        matches!(
+            (a, c),
+            (FaceRole::PlusX, FaceRole::MinusX)
+                | (FaceRole::PlusY, FaceRole::MinusY)
+                | (FaceRole::PlusZ, FaceRole::MinusZ)
+        )
+    };
+    let mut blends = Vec::new();
+    for (i, &a) in sides.iter().enumerate() {
+        for &c in &sides[i + 1..] {
+            if !opposite(a, c) {
+                let mut f = [face(a), face(c)];
+                f.sort();
+                blends.push(ryukei::blend::EdgeBlend {
+                    edge: Name::derive(key, Role::Edge, &f),
+                    kind: ryukei::blend::BlendKind::Fillet { radius: 0.1 },
+                });
+            }
+        }
+    }
+    let (rounded, _) = ryukei::blend::blend(OpKey(0x7477_6b04), &b, &blends).unwrap();
+    let chain = OffsetFacesSpec {
+        faces: vec![(face(FaceRole::PlusX), 0.05)],
+        tangent: true,
+    };
+    let (o, j) = offset_faces(k, &rounded, &chain).unwrap();
+    hash_body(&mut s, &o, &j);
+    // The box's top replaced by a plane tilted 0.15 about its middle.
+    let tilt = turn(
+        Point3::new(0.5, 0.3, 0.4),
+        Vector3::new(0.0, 1.0, 0.0),
+        -0.15,
+    );
+    let tilted = Surface::Plane(Plane::new(Frame::WORLD))
+        .transformed(&tilt.then_after(&Rigid::translation(Vector3::new(0.0, 0.0, 0.4))));
+    let (o, j) = replace_faces(
+        k,
+        &b,
+        &ReplaceSpec {
+            faces: vec![(top, tilted)],
+        },
+    )
+    .unwrap();
+    hash_body(&mut s, &o, &j);
 }
