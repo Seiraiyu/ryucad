@@ -169,6 +169,7 @@ pub mod sheet_metal;
 pub mod sheet_metal_bytes;
 pub mod sweep_bytes;
 pub mod tolerant_bytes;
+pub mod tweak_bytes;
 
 pub use golden::{Golden, Section, unversioned};
 pub use lcg::Lcg;
