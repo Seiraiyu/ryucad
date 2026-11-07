@@ -22,3 +22,32 @@ The design is document 384 in the Coxswain planning project `ryucad-ryukei`; thi
 - **The report.** A plane's or cone's angle is exact; any other face's is certified over 8 × 8 cells of its parameter box, each the tighter of the enclosure of `S_u × S_v` and the mean value form of the angle's sine (its gradient's enclosure from the same jets), a cell wider than a milliradian quartered up to three times. On the spline wall's sweep (one angle all over) the plain enclosure gave 0.034 rad of spread, the mean value form 0.017, quartering under 2e-3 (the plan hoped for 1e-6). Every neutral-plane draft and every parting line square to the pull hold the angle exactly; a parting line climbing along the pull doesn't, and the report says by how much.
 - **Testing.** Unit tests per module (`tweak::draft::{surface, hinge, report}`, the classes and rulings, `tweak::tests`'s box and refusals); `tests/drafts.rs` (a box's walls about its bottom and middle as prismatoids, a boss and a hole as frusta, a sphere's band as a frustum, a rounded prism's walls with their corners by tangency, a parting line at a ledged box drafting both halves (a box united on a larger one: ryukei can't split a wall at its middle without the boolean merging it back), a spline wall's sweep against its report (release only, its own step in `full.yml`; 84 s in a debug build on cox-worker-1, an Intel Xeon E5-2650, shared, two test threads), names across angles, one thread and eight, refusals: a wall drafted past the opposite wall is refused `Uncertain` or by the engine); `tests/work.rs`'s `drafts_are_bounded` (342 units). No golden hash moved. Golden sections, property tests, fuzzing, OCCT references and the 1,000-hole bar are 9.C's.
 - **Limits.** A parting line turning a corner on one face; a draft about a plane crossing a face twice; tangent drafted faces whose edge runs along their hinge; whatever changes topology (a wall drafted past its neighbours: `EdgeVanishes`, `VertexSplits`, `SelfIntersecting`, `Uncertain`), ryukei 13's.
+
+## Hardening and references (decided in ryukei phase 9)
+
+The design is document 384 in the Coxswain planning project `ryucad-ryukei`; this is its plan 9.C (phase 5).
+
+- **Cases from bytes.** `ryukei_testkit::tweak_bytes::tweak_case` builds a case from bytes:
+  - The first byte chooses a body as `offset_bytes` makes it, plain or blended. The next 24 bytes choose the operation, and the rest the body.
+  - One or two of the body's faces take one of four operations:
+    - a move: a translation along an axis by 1 to 20% of the body's least side, or a turn of 0.01 or 0.05 rad about its middle;
+    - an offset, by the same steps;
+    - a replacement by the first face's own surface, turned about the middle of the face's box;
+    - a draft: a ±x, ±y or ±z pull; 0.01, 0.05 or 0.2 rad, either sign; a neutral plane through the box's middle or corner, or a parting line of one of the face's edges.
+  - `tangent` is either way.
+- **Property test.** `tests/tweak_props.rs` is release only, its own step in `full.yml`. It tries 64 seeds, and requires that:
+  - every result keeps the body's names;
+  - it passes `check` and `check_intersections` and meshes;
+  - its volume is within mass's bound, plus twice the chord times the area, of its mesh's at a thousandth of its size;
+  - a draft's faces' mesh normals lie within the report's angles;
+  - one thread and eight give the same dump;
+  - every refusal is `InvalidTweak`.
+
+  On bc2 (Intel Core Ultra 5 250K Plus, `RAYON_NUM_THREADS=4`, load 0.5 to 1.0, 2026-11-07), 44 seeds make a case: 24 built and 20 refused in 34.7 s. The refusals were `LoneVertex` 5, `EdgeVanishes` 3, `SelfIntersecting` 3, `Uncertain` 3, `FaceCollapses` 2, `NoHinge` 2, `HingeAlongPull` 1 and `TangencyBroken` 1.
+
+  `KNOWN_SLOW` is empty. `KNOWN_UNMESHED` lists seed 4, whose volume and angles aren't judged (#599). Seed 4 offsets a closed revolution's one face, which `offset_body` makes bit for bit alike. Its `Offset` face's box is about four times the base's, so the mesh estimate refuses it at a thousandth of that box.
+- **Fuzzing.** The `tweak` fuzz target runs each case under `fuzz_case`. It asks the same of every result, except mass and angles. It is in `fuzz.yml` at 6 GiB with a 600 s timeout. A three-minute smoke on bc2 made 6,370 runs with no crash. An hour on cox-worker-4 (AMD Opteron 6380, 8 threads, shared at a load of 7 to 13, 2026-11-07), from an empty corpus, made 15,392 runs. It ended with a corpus of 1,573 inputs, peaked at 987 MB, and found no crash, timeout or running out of memory.
+- **Goldens.** `tweaks` holds a box's top raised and tilted, its top and a side offset, a hole moved, a rounded box's side offset with its chain, and a top replaced. `drafts` holds a box's walls about its bottom and its middle, a boss, a hole, and a ledged box's parting line, with the reports' angles. The offsets' sections and ryucad's goldens are byte for byte as before.
+- **References.** `ryukei-bench`'s `drafts` test runs in the devcontainer with `--features occt`. It compares against OCCT's `BRepOffsetAPI_DraftAngle` (tangent propagation on) and `BRepOffset_MakeOffset` with `SetOffsetOnFace` (joined by intersection). OCCT's draft angle has ryukei's sign (`OCCT_SIGN` is 1). On cox-worker-2 (AMD Ryzen 7 9700X, 8 threads, OCCT 7.8.1, release, 2026-11-07), OCCT agrees with the closed form in all four draft cases and both face offsets: the box's walls about its bottom (0.227403012) and its middle (0.240053422), the boss (0.202836924), the hole (0.192371635), and the box's top raised (0.3) and raised with a side moved in (0.2619). Its drafted faces' angles are the 0.05 and 0.1 asked. SMLib has no draft and takes no part.
+- **The bar.** The plate is the booleans' race plate (40 × 25 × 0.5, 1,000 holes of 0.3), every wall drafted 1° about its bottom, on one thread. Three runs with `RYUKEI_BARS=1` on the same machine, after other work finished (load 1.0 to 3.1, the test's own), ran with `--test-threads=1`. ryukei took 1.060, 1.025 and 1.024 s on one thread (0.34 to 0.36 s on all eight), against OCCT's 1.165, 1.173 and 1.170 s: 0.87 to 0.91 times OCCT's time. Both volumes match the exact 354.475695381 within the mesh's bound. On bc2 (Intel Core Ultra 5 250K Plus) ryukei's side took 0.979 s.
+- **Fixes found.** None in the tweak engine. #599 (the offset mesher) is listed, not fixed here.
