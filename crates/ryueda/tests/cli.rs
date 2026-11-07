@@ -2887,3 +2887,44 @@ fn a_sync_is_cancelled_by_its_token_and_keeps_the_old_catalogue() {
     let (_, v) = p.run_in(&p.direct, "board", &["cancel", "sync1"]);
     assert_eq!(v["error"]["code"], "no_live_session");
 }
+
+/// `parts login` keeps keys owner-only beside the preferences, from
+/// stdin, and `parts logout` forgets them; neither says what they are.
+#[test]
+fn parts_login_keeps_keys_out_of_sight() {
+    let p = Pair::projects();
+    let mut cmd = p.command_in(&p.direct, "board", &["parts", "login", "digikey"]);
+    cmd.write_stdin("my-id\nmy-very-secret\n");
+    let (code, v) = parse(cmd.output().unwrap(), &p.direct);
+    assert_eq!(code, 0, "{v}");
+    assert!(!v.to_string().contains("my-very-secret"));
+    let file = p.run.with_file_name("config").join("parts-digikey.keys");
+    assert!(file.is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let v = p.ok(&["parts", "sources"]);
+    let dk = v["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "digikey")
+        .unwrap()
+        .clone();
+    assert_eq!(dk["keys"], "file");
+    let mut cmd = p.command_in(&p.direct, "board", &["parts", "login", "digikey"]);
+    cmd.write_stdin("only-one\n");
+    let (code, v) = parse(cmd.output().unwrap(), &p.direct);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("invalid_param"))
+    );
+    let (code, v) = p.run_in(&p.direct, "board", &["parts", "logout", "digikey"]);
+    assert_eq!((code, &v["result"]["removed"]), (0, &json!(true)));
+    assert!(!file.exists());
+}

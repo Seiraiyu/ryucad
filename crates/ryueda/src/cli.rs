@@ -621,6 +621,15 @@ enum PartsCmd {
         #[command(flatten)]
         long: LongArgs,
     },
+    /// Keep a distributor's keys on this machine, owner-only, beside the
+    /// preferences: its key values on stdin, one a line, in its order
+    /// (digikey: client ID, then client secret). Never in a project.
+    Login {
+        /// The distributor (`ryueda parts sources` lists them).
+        distributor: String,
+    },
+    /// Forget a distributor's keys kept on this machine.
+    Logout { distributor: String },
     /// The project's sourcing (parts.json): the assembly house, how many
     /// boards a build makes, the sources searches ask, supply findings'
     /// severities. Nothing given shows it.
@@ -2012,7 +2021,11 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             expected_revision: expect.expect.clone(),
         },
         Command::Design(DesignCmd::List) => Request::DesignList {},
-        Command::Version | Command::Init { .. } | Command::Watch { .. } | Command::Daemon(_) => {
+        Command::Version
+        | Command::Init { .. }
+        | Command::Watch { .. }
+        | Command::Daemon(_)
+        | Command::Parts(PartsCmd::Login { .. } | PartsCmd::Logout { .. }) => {
             return Ok(None);
         }
     }))
@@ -2047,6 +2060,23 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             daemon::run(&find_root(&here)?, idle).map(|()| Value::Null)
         }
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
+        // Keys go straight to the user's config folder: never through a
+        // daemon, a request or a log.
+        Command::Parts(PartsCmd::Login { distributor }) => {
+            let dir = ryu_session::prefs::config_dir::<ryueda::Eda>()?;
+            let mut values = Vec::new();
+            for line in std::io::stdin().lines() {
+                let line = line.map_err(|e| Error::io(std::path::Path::new("<stdin>"), &e))?;
+                if !line.trim().is_empty() {
+                    values.push(line.trim().to_owned());
+                }
+            }
+            ryueda::distributors::login(&dir, distributor, &values)
+        }
+        Command::Parts(PartsCmd::Logout { distributor }) => {
+            let dir = ryu_session::prefs::config_dir::<ryueda::Eda>()?;
+            ryueda::distributors::logout(&dir, distributor)
+        }
         Command::Daemon(DaemonCmd::Stop { all: true }) => client::stop_all(),
         Command::Daemon(DaemonCmd::Stop { all: false }) => client::stop(&find_root(&here)?),
         Command::Watch {
