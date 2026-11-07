@@ -29,6 +29,7 @@ pub mod lod;
 pub mod measure;
 pub mod merge;
 pub mod model;
+pub mod modes;
 pub mod nav;
 pub mod palette;
 pub mod params;

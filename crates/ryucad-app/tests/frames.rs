@@ -99,7 +99,7 @@ fn a_thousand_occurrences_draw_at_60_frames_a_second() {
         );
     }
     let p = project();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(300), |ws| ws.idle()
         && ws.model.drawn().count() == PINS + 1));
     let picker = Picker::new(&ws.model);

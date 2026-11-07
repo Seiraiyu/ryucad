@@ -31,6 +31,17 @@ fn window(p: &Project) -> Harness<'static, App> {
 
 /// A window `height` tall: the right tabs' lower sections need room.
 fn sized(p: &Project, height: f32) -> Harness<'static, App> {
+    let mut h = viewing_sized(p, height);
+    // Window tests that write ask for Direct edit, as every window was
+    // before ryucad 19.B; View and Annotate have tests of their own.
+    if let ryucad_app::ui::app::Screen::Opened(o) = &mut h.state_mut().screen {
+        o.ws.set_mode(ryucad_app::core::modes::Mode::Edit);
+    }
+    h
+}
+
+/// A window as it opens, in View.
+fn viewing_sized(p: &Project, height: f32) -> Harness<'static, App> {
     // Every window test shares the preferences: each window starts from
     // the default tiles, whatever the last one left. Set from a project
     // of its own: `p` may be damaged on purpose, and refuse the CLI.
@@ -47,6 +58,12 @@ fn sized(p: &Project, height: f32) -> Harness<'static, App> {
         .with_size(egui::vec2(1600.0, height))
         .wgpu()
         .build_eframe(move |cc| App::open(&cc.egui_ctx, Some(&root), ryucad()))
+}
+
+/// [`viewing_sized`] at the usual height.
+#[allow(dead_code)]
+fn viewing(p: &Project) -> Harness<'static, App> {
+    viewing_sized(p, 1000.0)
 }
 
 /// Opens the menu `menu` and clicks `item` in it (named after its text,

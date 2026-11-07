@@ -38,6 +38,9 @@ pub struct Person {
     pub sections: Vec<ryucad::section::Plane>,
     /// The exploded view their window shows.
     pub explode: Option<crate::core::explode::Shown>,
+    /// The mode their window is in (design 374): an agent's is shown,
+    /// never enforced.
+    pub mode: ryucad::live::Mode,
 }
 
 fn strings(v: &Value) -> Vec<String> {
@@ -82,6 +85,7 @@ impl Person {
             focus: v["focus"].as_str().map(str::to_owned),
             hidden: strings(&v["hidden"]),
             sections: serde_json::from_value(v["sections"].clone()).unwrap_or_default(),
+            mode: serde_json::from_value(v["mode"].clone()).unwrap_or_default(),
             explode: crate::core::explode::Shown::from_json(&v["explode"]),
         })
     }
@@ -148,6 +152,7 @@ mod tests {
             "camera": {"eye": [1.0, 0.0, 0.0], "target": [0.0, 0.0, 0.0], "up": [0.0, 0.0, 1.0],
                        "projection": {"perspective": {"fov_deg": 30.0}}},
             "highlights": [{"style": "pending", "label": "here", "entities": ["p/a/0123"]}],
+            "mode": "annotate",
         }}));
         let agent = people.get("p-00000002").unwrap();
         assert_eq!(
@@ -156,6 +161,11 @@ mod tests {
         );
         assert_eq!(agent.highlights[0].style, Style::Pending);
         assert_eq!(agent.camera.as_ref().unwrap().eye, [1.0, 0.0, 0.0]);
+        assert_eq!(agent.mode, ryucad::live::Mode::Annotate);
+        assert_eq!(
+            people.get("p-00000001").unwrap().mode,
+            ryucad::live::Mode::View
+        );
         assert_eq!(people.others("p-00000001").count(), 1);
         people.changed(&json!({"participant": {"id": "p-00000002"}, "left": true}));
         assert!(people.get("p-00000002").is_none());

@@ -45,6 +45,11 @@ const MESH_BATCH: usize = 256;
 #[derive(Clone, Debug, PartialEq)]
 enum Pending {
     Info,
+    /// This window's own `participant.mode`; the mode it was in before.
+    Mode(crate::core::modes::Mode),
+    /// A model edit sent as a proposal in Annotate: what its own answer
+    /// was for.
+    Proposal(Box<Pending>),
     Parts,
     Rebuild(String),
     /// A body's mesh, asked for at this hash.
@@ -320,6 +325,9 @@ pub fn camera_arg(c: &Camera) -> CameraArg {
 pub struct Workspace {
     pub root: PathBuf,
     pub link: Link,
+    /// The window's mode (design 374): View when it opens and whenever it
+    /// connects again; Annotate and Direct edit by the person's choice.
+    pub mode: crate::core::modes::Mode,
     pub model: Model,
     /// Parts whose reports are asked for and not yet answered.
     pub loading: BTreeSet<String>,
@@ -526,6 +534,7 @@ impl Workspace {
         let mut ws = Workspace {
             root: root.to_path_buf(),
             link,
+            mode: Default::default(),
             model: Model::default(),
             loading: BTreeSet::new(),
             wanted: Default::default(),
@@ -1747,7 +1756,42 @@ impl Workspace {
         }
     }
 
+    /// Sends `req`, as the window's mode allows: as it is, as a proposed
+    /// change (`annotation.propose`, its answer the request's own), or
+    /// not at all, its refusal answered where its answer would have gone
+    /// (a form's error, else an error card), saying which mode allows it.
     fn send(&mut self, req: Request, why: Pending) {
+        use crate::core::modes::{Gate, gate};
+        match gate(self.mode, &req) {
+            Gate::Send => self.send_now(req, why),
+            Gate::Propose => {
+                let request = json!({"method": req.method(), "params": req.params()});
+                let wrapped = Request::AnnotationPropose {
+                    request,
+                    comment: None,
+                    pins: Vec::new(),
+                    rough: false,
+                    author: None,
+                };
+                self.send_now(wrapped, Pending::Proposal(Box::new(why)));
+            }
+            Gate::Refuse(because) => {
+                let method = req.method();
+                let e = Error::new(Code::ParticipantMode, format!("{method}: {because}"))
+                    .with("mode", self.mode.as_str())
+                    .with("method", &method);
+                self.answer(why, Err(e));
+            }
+        }
+    }
+
+    /// What a control that writes by `method` does in the window's mode
+    /// (see `core::modes::control`).
+    pub fn control(&self, method: &str) -> crate::core::modes::Gate {
+        crate::core::modes::control(self.mode, method)
+    }
+
+    fn send_now(&mut self, req: Request, why: Pending) {
         let method = req.method();
         if !ryucad::daemon::LONG.contains(&method.as_str()) {
             let ticket = self.link.send(req);
@@ -1819,6 +1863,18 @@ impl Workspace {
         &self.link.participant
     }
 
+    /// Puts the window in `mode`: at once here, and for the daemon, which
+    /// refuses a human's writes their mode doesn't allow. Sent on the
+    /// request connection, so every request after it is judged in it.
+    pub fn set_mode(&mut self, mode: crate::core::modes::Mode) {
+        if mode == self.mode {
+            return;
+        }
+        let was = std::mem::replace(&mut self.mode, mode);
+        self.send(Request::ParticipantMode { mode }, Pending::Mode(was));
+        self.model.generation += 1;
+    }
+
     /// This window as the session knows it.
     pub fn myself(&self) -> Option<&Person> {
         self.people.get(&self.link.participant)
@@ -1878,6 +1934,7 @@ impl Workspace {
             part: key.0.clone(),
             feature: key.1.clone(),
             quality: None,
+            rev: None,
         };
         self.send(req, Pending::Sweep(key.clone(), revision));
     }
@@ -1932,6 +1989,7 @@ impl Workspace {
         let req = Request::FeatureShow {
             part: part.clone(),
             id: id.clone(),
+            rev: None,
         };
         self.send(req, Pending::Form(part, id, before));
     }
@@ -1959,6 +2017,7 @@ impl Workspace {
             part: part.clone(),
             sketch: sketch.clone(),
             quality: None,
+            rev: None,
         };
         self.send(req, Pending::Dim(part, sketch, constraint, before));
     }
@@ -1979,6 +2038,7 @@ impl Workspace {
         let req = Request::ParamList {
             part: Some(part.clone()),
             scope: None,
+            rev: None,
         };
         self.send(req, Pending::Params(part, before));
     }
@@ -2052,7 +2112,10 @@ impl Workspace {
     }
 
     fn read_props(&mut self, part: String, before: Option<Box<PartProps>>) {
-        let req = Request::PropsGet { part: part.clone() };
+        let req = Request::PropsGet {
+            part: part.clone(),
+            rev: None,
+        };
         self.send(req, Pending::Props(part, before));
     }
 
@@ -2502,6 +2565,9 @@ impl Workspace {
     fn reconnected(&mut self, link: Link) {
         self.people.reset(&link.session["participants"]);
         self.link = link;
+        // A reconnected window starts in View, as the daemon starts every
+        // participant: Direct edit isn't kept across a daemon's restart.
+        self.mode = Default::default();
         self.lost = false;
         self.lost_why = None;
         self.toasts
@@ -2713,6 +2779,23 @@ impl Workspace {
 
     fn answer(&mut self, why: Pending, answer: Result<Answer>) {
         match (why, answer) {
+            (Pending::Proposal(inner), r) => {
+                let r = r.map(|a| Answer {
+                    result: a.result["answer"].clone(),
+                    binary: None,
+                    raw: None,
+                });
+                if r.is_ok() {
+                    self.toasts
+                        .note("Suggested: the agent will see it", false, Instant::now());
+                }
+                self.answer(*inner, r);
+            }
+            (Pending::Mode(_), Ok(_)) => {}
+            (Pending::Mode(was), Err(e)) => {
+                self.mode = was;
+                self.fail(e);
+            }
             (Pending::Info, Ok(a)) => {
                 self.model.default_unit = a.result["default_unit"].as_str().unwrap_or("mm").into();
             }
@@ -3854,6 +3937,7 @@ impl Workspace {
                 part: key.0.clone(),
                 sketch: key.1.clone(),
                 quality: None,
+                rev: None,
             };
             self.send(req, Pending::Sketch(key, revision));
         }
@@ -3862,6 +3946,7 @@ impl Workspace {
                 part: key.0.clone(),
                 path: key.1.clone(),
                 quality: None,
+                rev: None,
             };
             self.send(req, Pending::Path(key, revision));
         }

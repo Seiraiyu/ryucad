@@ -34,7 +34,7 @@ fn the_model_is_drawn_with_its_edges_and_painted_faces() {
         return;
     };
     let p = Project::new().with_part();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.meshes.len() == 2));
     let picker = Picker::new(&ws.model);
@@ -109,7 +109,7 @@ fn colours_and_translucent_faces_draw() {
         return;
     };
     let p = Project::new().with_part();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.meshes.len() == 2));
     let picker = Picker::new(&ws.model);
@@ -208,7 +208,7 @@ fn hidden_edges_stay_hidden_close_up() {
         "z=2",
         "--origin=-20,-20,10",
     ]);
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.meshes.len() == 2));
     let picker = Picker::new(&ws.model);
@@ -259,7 +259,7 @@ fn sketches_show_on_faces_and_hide_behind_them() {
         return;
     };
     let p = Project::new().with_part().with_top_sketch();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     let key = ("p".to_owned(), "top".to_owned());
     let drawn = |ws: &Workspace, z: f64| {
         ws.model
@@ -319,7 +319,7 @@ fn a_compare_ghosts_what_is_gone() {
     };
     let p = Project::new().with_part().committed();
     p.ok(&["feature", "delete", "p", "boss"]);
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.meshes.len() == 1));
     p.ok(&["compare", "HEAD"]);
@@ -593,7 +593,7 @@ fn datum_planes_are_translucent_and_hide_behind_faces() {
         return;
     };
     let p = Project::new().with_part();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.meshes.len() == 2));
     let picker = Picker::new(&ws.model);
@@ -665,7 +665,7 @@ fn a_scene_past_the_largest_texture_is_drawn_shrunk_to_fit() {
     };
     let limit = device.limits().max_texture_dimension_2d;
     let p = Project::new().with_part();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.meshes.len() == 2));
     let picker = Picker::new(&ws.model);
@@ -710,7 +710,7 @@ fn a_painted_edge_hides_behind_faces_in_front_of_it() {
         return;
     };
     let p = Project::new().with_part();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.meshes.len() == 2));
     let picker = Picker::new(&ws.model);

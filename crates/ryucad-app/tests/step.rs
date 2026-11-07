@@ -25,7 +25,7 @@ fn occt(name: &str) -> PathBuf {
 #[test]
 fn a_file_is_planned_imported_updated_and_exported() {
     let p = Project::new();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle()));
     // Planned: nothing is written.
     ws.import = Some(Import::new());
@@ -153,7 +153,7 @@ fn a_file_is_planned_imported_updated_and_exported() {
 #[test]
 fn every_format_is_exported_by_the_daemon() {
     let p = Project::new().with_part();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.part("p").is_some()));
     let out = tempfile::tempdir().unwrap();
     let mut path = out.path().join("p.step").display().to_string();
