@@ -19,6 +19,7 @@ pub mod jlc;
 pub mod library;
 pub mod param;
 pub mod query;
+pub mod rate;
 pub mod record;
 pub mod source;
 pub mod time;
