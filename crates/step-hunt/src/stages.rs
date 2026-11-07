@@ -580,10 +580,13 @@ pub fn whole(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
         stage(&mut ran.stages, ryucad, home, "whole_ref_import", |r| {
             let dir = r.project("wr")?;
             let answer = r.cmd(&dir, &[OsStrRef::s("import"), OsStrRef::p(&case.path)])?;
-            if let Some(error) = first_error(&answer) {
-                return Err(failed_in(error, &case.path));
-            }
-            for (k, (root, _)) in roots(&made(&answer)).iter().enumerate() {
+            // A part that failed is its body case's `ref_import` finding,
+            // and its root can't be exported.
+            let tops: Vec<(String, Made)> = roots(&made(&answer))
+                .into_iter()
+                .filter(|(_, reach)| reach.values().all(|p| p.1 == p.2))
+                .collect();
+            for (k, (root, _)) in tops.iter().enumerate() {
                 r.export(&dir, root, &home.join(format!("ref-root-{k}.step")), "m")?;
             }
             Ok(())
