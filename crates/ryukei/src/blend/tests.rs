@@ -180,3 +180,17 @@ pub(crate) fn spline_faces(mut b: Body) -> Body {
     crate::pcurve::fill(&mut b).unwrap();
     b
 }
+
+#[test]
+fn two_pipes_meet_through_the_general_tracer() {
+    // Two fillets of a ball corner's cap edges, pipes footed on the cap
+    // (issue #177): `Unsupported` until plan 15.D.
+    let (a, b) = crate::testing::footed_corner_pair();
+    let region = crate::testing::footed_corner_region();
+    let m = crate::work::Meter::free(); // unmetered: a test
+    let hit = super::meet(&a, &b, &region, &m).expect("met");
+    let crate::intersect::SurfaceHit::Meet { branches, .. } = hit else {
+        panic!("coincident")
+    };
+    assert!(!branches.is_empty());
+}
