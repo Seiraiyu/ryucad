@@ -219,8 +219,12 @@ fn angle_ok(
     if diameter(xyz) < waive {
         return true;
     }
-    if !stretched {
-        return turn(b, range) <= angle;
+    // Waiving a direction only takes its term out of the sum, so a piece
+    // whose whole turn passes passes waived too: the surface at its middle
+    // is wanted only past that (#308: an evaluation per triangle tested).
+    let whole = turn(b, range);
+    if whole <= angle || !stretched {
+        return whole <= angle;
     }
     let e = surface.eval(
         0.5 * (range[0][0] + range[0][1]),
