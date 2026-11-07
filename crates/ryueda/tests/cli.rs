@@ -2625,7 +2625,7 @@ fn parts_from_the_cli() {
         keys(&p.ok(&["parts", "search", "--like", "top/r1"])),
         keys(&like)
     );
-    p.fails(&["parts", "search", "--in", "digikey"], "invalid_param", 1);
+    p.fails(&["parts", "search", "--in", "acme"], "invalid_param", 1);
     p.fails(&["parts", "search", "colour=red"], "invalid_param", 1);
     p.fails(
         &["parts", "search", "capacitance=lots"],
@@ -2673,7 +2673,7 @@ fn parts_configure_from_the_cli() {
         1,
     );
     p.fails(
-        &["parts", "configure", "--source", "digikey"],
+        &["parts", "configure", "--source", "acme"],
         "invalid_param",
         1,
     );

@@ -408,10 +408,14 @@ fn dispatch(
             let cats = session.catalogues()?;
             crate::parts::sources(session.project(), &cats)
         }
-        Request::PartsSearch { search } => {
-            let cats = session.catalogues()?;
-            crate::parts::search(session.project(), &search, &cats)
-        }
+        Request::PartsSearch { search } => match session.prepared.take() {
+            Some(made) => made,
+            None => {
+                let cats = session.catalogues()?;
+                let pl = crate::parts::plan(session.project(), &search, &cats)?;
+                crate::parts::finish(pl, &cats, job)
+            }
+        },
         Request::LibcompDelete {
             libcomp,
             expected_revision,

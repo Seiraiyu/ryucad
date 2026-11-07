@@ -582,8 +582,9 @@ enum PartsCmd {
     Search {
         /// A category first if wanted (capacitor), then conditions.
         terms: Vec<String>,
-        /// Where to search, in order: library (the default). Repeat for
-        /// more.
+        /// Where to search, in order: library (the default), a catalogue
+        /// (jlc) or a distributor (digikey, called live with your keys).
+        /// Repeat for more.
         #[arg(long = "in", value_name = "SOURCE")]
         sources: Vec<String>,
         /// At least this many in stock.
@@ -599,9 +600,11 @@ enum PartsCmd {
         /// lib/<alias>/libcomp/<id>, or a placed <block>/<component>.
         #[arg(long)]
         like: Option<String>,
-        /// Stay off the network.
+        /// Stay off the network: distributors are left out.
         #[arg(long)]
         offline: bool,
+        #[command(flatten)]
+        long: LongArgs,
     },
     /// The records a key names: <source>:<key> (lcsc:C1525), mpn:<part
     /// number> for every source, or library:<reference>.
@@ -1462,6 +1465,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             limit,
             like,
             offline,
+            ..
         }) => {
             // A first word with no operator in it is the category.
             let (category, conditions) = match terms.split_first() {
@@ -2112,7 +2116,11 @@ fn cli_token() -> String {
 /// What a long request's command asks of its job: always a token.
 fn long_ask(cmd: &Command) -> Option<ryu_session::job::Ask> {
     let long = match cmd {
-        Command::Parts(PartsCmd::Sync { long, .. } | PartsCmd::Refresh { long, .. }) => long,
+        Command::Parts(
+            PartsCmd::Sync { long, .. }
+            | PartsCmd::Refresh { long, .. }
+            | PartsCmd::Search { long, .. },
+        ) => long,
         _ => return None,
     };
     Some(ryu_session::job::Ask {

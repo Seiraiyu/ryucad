@@ -786,7 +786,10 @@ mod tests {
     #[test]
     fn long_requests_are_named_and_cancelled_by_token() {
         use ryu_session::Serve;
-        assert_eq!(crate::Eda::LONG, ["parts.sync", "parts.refresh"]);
+        assert_eq!(
+            crate::Eda::LONG,
+            ["parts.sync", "parts.refresh", "parts.search"]
+        );
         let r = Request::from_rpc(
             "request.cancel",
             Some(json!({"token": "t1", "as": "agent"})),
