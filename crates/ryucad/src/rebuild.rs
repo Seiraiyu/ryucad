@@ -149,6 +149,9 @@ pub struct Made {
     /// An import's report: its file, product and what healing did (see
     /// [`crate::import::report`]).
     pub import: Option<Arc<Value>>,
+    /// An unfold's flat: what a refold folds by and the flat pattern
+    /// reads (plan 16.B).
+    pub flat: Option<Arc<Flat>>,
     /// Its disk cache entry's size, once written or read: what the
     /// memory budget counts it by.
     pub encoded: std::sync::OnceLock<u64>,
@@ -194,6 +197,44 @@ impl Applied {
     }
 }
 
+/// An unfold's flat (plan 16.B): the kernel's flat map and pattern, and
+/// each bend it unfolded by the faces that named it, so a refold, the
+/// sheet report and the flat pattern read them from the unfold's result
+/// rather than unfolding again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Flat {
+    /// The unfold feature that made it.
+    pub unfold: Id,
+    pub map: ryukei::sheet_metal::FlatMap,
+    pub pattern: ryukei::sheet_metal::FlatPattern,
+    /// Each unfolded bend, in the flat map's order.
+    pub bends: Vec<FlatBend>,
+    /// Whether some bend of the solid was left folded.
+    pub partial: bool,
+}
+
+/// A bend an unfold unfolded: its name (its least face), its faces, and
+/// its allowance as a note writes it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlatBend {
+    pub name: Name,
+    pub inner: Vec<Name>,
+    pub outer: Vec<Name>,
+    /// `K0.44`, or `BA2.157` for a developed length in millimetres
+    /// ([`crate::sheet_metal::allowance::note`]).
+    pub allowance: String,
+}
+
+impl Flat {
+    /// The unfolded bend `face` (any of its inner or outer faces, or its
+    /// name) names.
+    pub fn bend_of(&self, face: Name) -> Option<&FlatBend> {
+        self.bends
+            .iter()
+            .find(|b| b.name == face || b.inner.contains(&face) || b.outer.contains(&face))
+    }
+}
+
 impl Made {
     pub fn new(solids: Vec<(Id, Arc<Built>)>) -> Made {
         let hash = match solids.as_slice() {
@@ -211,6 +252,7 @@ impl Made {
             hash,
             applied: None,
             import: None,
+            flat: None,
             encoded: Default::default(),
         }
     }
@@ -267,6 +309,14 @@ impl Output {
     pub fn applied(&self) -> Option<&Applied> {
         match self {
             Output::Solids(m) => m.applied.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// An unfold's flat, if the feature is an unfold that built.
+    pub fn flat(&self) -> Option<&Arc<Flat>> {
+        match self {
+            Output::Solids(m) => m.flat.as_ref(),
             _ => None,
         }
     }

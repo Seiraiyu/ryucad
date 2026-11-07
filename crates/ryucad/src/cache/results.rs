@@ -4,13 +4,16 @@
 //!
 //! A body-making feature's entry is its [`Made`]: each solid's founder
 //! and [`Built`] (the body, the journal, the origins as JSON, the hash),
-//! the hash, what it applied, if anything, and an import's report. A tool's entry is its own
+//! the hash, what it applied, if anything, an import's report, and an
+//! unfold's flat, written only when it has one (so every other entry keeps
+//! its bytes). A tool's entry is its own
 //! body's `Built`. Integers are little-endian, byte strings length-first.
 //! Anything that doesn't read back exactly is `None`: a miss.
 
 use crate::doc::id::Id;
 use crate::doc::solid::Operation;
-use crate::rebuild::{Applied, Built, Made};
+use crate::rebuild::{Applied, Built, Flat, FlatBend, Made};
+use ryukei::name::Name;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -79,6 +82,41 @@ impl<'a> Reader<'a> {
         (n.saturating_mul(8) <= self.0.len()).then_some(n)
     }
 
+    fn name(&mut self) -> Option<Name> {
+        let (n, rest) = self.0.split_first_chunk::<16>()?;
+        self.0 = rest;
+        Some(Name::from_u128(u128::from_le_bytes(*n)))
+    }
+
+    fn names(&mut self) -> Option<Vec<Name>> {
+        let n = self.count()?;
+        (0..n).map(|_| self.name()).collect()
+    }
+
+    fn flat(&mut self) -> Option<Flat> {
+        let unfold = self.id()?;
+        let map = ryukei::codec::decode_flat_map(self.bytes()?).ok()?;
+        let pattern = ryukei::codec::decode_flat_pattern(self.bytes()?).ok()?;
+        let n = self.count()?;
+        let mut bends = Vec::with_capacity(n);
+        for _ in 0..n {
+            bends.push(FlatBend {
+                name: self.name()?,
+                inner: self.names()?,
+                outer: self.names()?,
+                allowance: self.str()?.to_owned(),
+            });
+        }
+        let partial = self.flag()?;
+        Some(Flat {
+            unfold,
+            map,
+            pattern,
+            bends,
+            partial,
+        })
+    }
+
     fn built(&mut self) -> Option<Built> {
         let body = ryukei::codec::decode_body(self.bytes()?).ok()?;
         let journal = ryukei::codec::decode_journal(self.bytes()?).ok()?;
@@ -102,6 +140,31 @@ impl Writer {
     fn count(&mut self, n: usize) {
         self.0
             .extend_from_slice(&u32::try_from(n).expect("fewer than 2^32").to_le_bytes());
+    }
+
+    fn name(&mut self, n: Name) {
+        self.0.extend_from_slice(&n.to_u128().to_le_bytes());
+    }
+
+    fn names(&mut self, ns: &[Name]) {
+        self.count(ns.len());
+        for n in ns {
+            self.name(*n);
+        }
+    }
+
+    fn flat(&mut self, f: &Flat) {
+        self.str(f.unfold.as_str());
+        self.bytes(&ryukei::codec::encode_flat_map(&f.map));
+        self.bytes(&ryukei::codec::encode_flat_pattern(&f.pattern));
+        self.count(f.bends.len());
+        for b in &f.bends {
+            self.name(b.name);
+            self.names(&b.inner);
+            self.names(&b.outer);
+            self.str(&b.allowance);
+        }
+        self.flag(f.partial);
     }
 }
 
@@ -159,6 +222,10 @@ pub fn encode_made(m: &Made) -> Vec<u8> {
             w.bytes(&serde_json::to_vec(v.as_ref()).expect("JSON values serialize"));
         }
     }
+    // A flat only where there is one: every other entry keeps its bytes.
+    if let Some(f) = &m.flat {
+        w.flat(f);
+    }
     w.0
 }
 
@@ -197,6 +264,11 @@ pub fn decode_made(bytes: &[u8]) -> Option<Made> {
     } else {
         None
     };
+    let flat = if r.0.is_empty() {
+        None
+    } else {
+        Some(Arc::new(r.flat()?))
+    };
     r.end()?;
     // A reference's entry says so in its report; nothing else holds one
     // (nothing acts on a reference), so the bytes don't need to.
@@ -218,6 +290,7 @@ pub fn decode_made(bytes: &[u8]) -> Option<Made> {
         hash,
         applied,
         import,
+        flat,
         encoded: Default::default(),
     })
 }

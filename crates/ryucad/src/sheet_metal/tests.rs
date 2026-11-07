@@ -691,3 +691,88 @@ fn the_founders_settings_key_a_flanges_result() {
     // The plate is the same body either way; only the flange reads it.
     assert_ne!(hash("1 mm"), hash("2 mm"));
 }
+
+/// The plate flanged on its right top edge, 90° and 20 mm, then `extra`.
+fn flanged(extra: Vec<(&'static str, crate::doc::files::Feature)>) -> crate::doc::project::Part {
+    let (_, plate) = plated();
+    let (edge, _) = rim(&plate.body);
+    let mut fs = vec![
+        ("s", polyline(&PLATE, true)),
+        ("plate", base_of(json!({}))),
+        (
+            "f",
+            feature(
+                json!({"type": "flange", "target": "plate", "edges": [r("plate", edge)],
+                           "angle": "90 deg", "length": "20 mm"}),
+            ),
+        ),
+    ];
+    fs.extend(extra);
+    part(fs)
+}
+
+/// Feature `f`'s output in `p`'s rebuild.
+fn output_of(
+    p: &crate::doc::project::Part,
+    f: &str,
+) -> crate::error::Result<crate::rebuild::Output> {
+    rebuild_part(p)
+        .features
+        .into_iter()
+        .find(|(i, _)| i.as_str() == f)
+        .expect("listed")
+        .1
+}
+
+#[test]
+fn a_made_with_its_flat_goes_through_the_cache_and_one_without_keeps_its_bytes() {
+    use crate::cache::results::{decode_made, encode_made};
+    use crate::rebuild::{Flat, FlatBend, Made};
+    use std::sync::Arc;
+    let p = flanged(vec![]);
+    let folded = output_of(&p, "f")
+        .unwrap()
+        .solid(&id("plate"))
+        .unwrap()
+        .clone();
+    let model = ryukei::sheet_metal::recognize(&folded.body, &Default::default()).unwrap();
+    let u = ryukei::sheet_metal::unfold(
+        OpKey(1),
+        &folded.body,
+        &model,
+        &ryukei::sheet_metal::UnfoldSpec::all(ryukei::sheet_metal::Allowance::KFactor(0.44)),
+    )
+    .unwrap();
+    let b = &model.bends[0];
+    let flat = Flat {
+        unfold: id("u"),
+        map: u.map.clone(),
+        pattern: u.pattern.clone(),
+        bends: vec![FlatBend {
+            name: b.name,
+            inner: b.inner.clone(),
+            outer: b.outer.clone(),
+            allowance: "K0.44".into(),
+        }],
+        partial: false,
+    };
+    let plain = Made::new(vec![(id("plate"), Arc::new(folded))]);
+    let with = Made {
+        flat: Some(Arc::new(flat.clone())),
+        ..plain.clone()
+    };
+    let (a, b) = (encode_made(&plain), encode_made(&with));
+    // A flat is only ever appended: an entry without one is as it was.
+    assert!(b.len() > a.len() && b.starts_with(&a));
+    assert!(decode_made(&a).unwrap().flat.is_none());
+    let back = decode_made(&b).unwrap();
+    assert_eq!(back.flat.as_deref(), Some(&flat));
+    assert_eq!(encode_made(&back), b);
+    // Anything short of a whole flat, or past it, is a miss.
+    for n in [a.len() + 1, a.len() + 20, b.len() - 1] {
+        assert!(decode_made(&b[..n]).is_none(), "{n}");
+    }
+    let mut longer = b.clone();
+    longer.push(0);
+    assert!(decode_made(&longer).is_none());
+}
