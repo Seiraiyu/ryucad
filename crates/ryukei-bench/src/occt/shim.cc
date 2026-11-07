@@ -14,6 +14,13 @@
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepOffsetAPI_DraftAngle.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <GeomLProp_SLProps.hxx>
+#include <Geom_Surface.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pnt.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepFill_Filling.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
@@ -890,6 +897,104 @@ rust::Vec<double> face_areas(const Shape &s) {
     BRepGProp::SurfaceProperties(faces(i), a);
     out.push_back(a.Mass());
   }
+  return out;
+}
+
+// Faces of `s` drafted by `angle` from `pull` about the plane through
+// neutral[0..3] square to neutral[3..6], with BRepOffsetAPI_DraftAngle
+// (its Flag on: tangent faces join the draft). The faces are those
+// nearest each point of `faces` (x, y, z flattened), or with `cylinders`
+// every cylindrical face. `seconds` is the time Add and Build took,
+// leaving out finding the faces (nearest_face is quadratic in the count).
+std::unique_ptr<Shape> draft_angle(const Shape &s, rust::Slice<const double> faces,
+                                   bool cylinders, rust::Slice<const double> pull,
+                                   double angle, rust::Slice<const double> neutral,
+                                   double &seconds) {
+  try {
+    std::vector<TopoDS_Face> chosen;
+    if (cylinders) {
+      for (TopExp_Explorer ex(s.shape, TopAbs_FACE); ex.More(); ex.Next()) {
+        TopoDS_Face f = TopoDS::Face(ex.Current());
+        if (BRepAdaptor_Surface(f).GetType() == GeomAbs_Cylinder) {
+          chosen.push_back(f);
+        }
+      }
+    } else {
+      for (size_t k = 0; k + 2 < faces.size(); k += 3) {
+        chosen.push_back(nearest_face(s.shape, faces[k], faces[k + 1], faces[k + 2]));
+      }
+    }
+    gp_Dir dir(pull[0], pull[1], pull[2]);
+    gp_Pln plane(gp_Pnt(neutral[0], neutral[1], neutral[2]),
+                 gp_Dir(neutral[3], neutral[4], neutral[5]));
+    auto start = std::chrono::steady_clock::now();
+    BRepOffsetAPI_DraftAngle draft(s.shape);
+    for (const TopoDS_Face &f : chosen) {
+      draft.Add(f, dir, angle, plane, Standard_True);
+      if (!draft.AddDone()) {
+        throw std::runtime_error("BRepOffsetAPI_DraftAngle refused a face");
+      }
+    }
+    draft.Build();
+    seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    if (!draft.IsDone()) {
+      throw std::runtime_error("BRepOffsetAPI_DraftAngle failed");
+    }
+    return wrap(draft.Shape());
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("DraftAngle: ") + e.GetMessageString());
+  }
+}
+
+// The faces nearest each point of `faces` moved along their normals by
+// their own `distances`, the rest at zero, with BRepOffset_MakeOffset
+// (SetOffsetOnFace, joined by intersection: the faces' neighbours extend
+// or trim to the moved faces, as a tweak's edges close).
+std::unique_ptr<Shape> offset_on_faces(const Shape &s, rust::Slice<const double> faces,
+                                       rust::Slice<const double> distances) {
+  try {
+    BRepOffset_MakeOffset offset;
+    offset.Initialize(s.shape, 0.0, 1e-7, BRepOffset_Skin, Standard_False,
+                      Standard_False, GeomAbs_Intersection, Standard_False);
+    for (size_t k = 0; k < distances.size(); ++k) {
+      offset.SetOffsetOnFace(
+          nearest_face(s.shape, faces[3 * k], faces[3 * k + 1], faces[3 * k + 2]),
+          distances[k]);
+    }
+    offset.MakeOffsetShape();
+    if (!offset.IsDone()) {
+      throw std::runtime_error("BRepOffset_MakeOffset failed");
+    }
+    return wrap(offset.Shape());
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("MakeOffset: ") + e.GetMessageString());
+  }
+}
+
+// The outward normal of the face of `s` nearest (x, y, z), at the point
+// of its surface nearest that point: three numbers, or none where the
+// projection or the normal fails.
+rust::Vec<double> face_normal(const Shape &s, double x, double y, double z) {
+  rust::Vec<double> out;
+  TopoDS_Face f = nearest_face(s.shape, x, y, z);
+  Handle(Geom_Surface) surface = BRep_Tool::Surface(f);
+  GeomAPI_ProjectPointOnSurf proj(gp_Pnt(x, y, z), surface);
+  if (proj.NbPoints() == 0) {
+    return out;
+  }
+  double u, v;
+  proj.LowerDistanceParameters(u, v);
+  GeomLProp_SLProps props(surface, u, v, 1, 1e-9);
+  if (!props.IsNormalDefined()) {
+    return out;
+  }
+  gp_Dir n = props.Normal();
+  if (f.Orientation() == TopAbs_REVERSED) {
+    n.Reverse();
+  }
+  out.push_back(n.X());
+  out.push_back(n.Y());
+  out.push_back(n.Z());
   return out;
 }
 
