@@ -162,10 +162,9 @@ pub fn run(
     // alone, the answer is no mass at all. A reference import is weighed
     // from its mesh (or refused as one that doesn't close), whatever its
     // body's kind.
-    let (located, sheets): (Vec<Located>, Vec<Located>) =
-        located.into_iter().partition(|l| {
-            l.built.reference || l.built.body.kind() != ryukei::topo::BodyKind::Sheet
-        });
+    let (located, sheets): (Vec<Located>, Vec<Located>) = located
+        .into_iter()
+        .partition(|l| l.built.reference || l.built.body.kind() != ryukei::topo::BodyKind::Sheet);
     if located.is_empty() {
         let l = &sheets[0];
         return Err(crate::kind::wrong(
