@@ -14,9 +14,7 @@
 use crate::doc::canonical;
 use crate::doc::files::{Feature, ParametersFile, expression, rename_in_feature};
 use crate::doc::id::Id;
-use crate::doc::project::{
-    Part, Project, feature_path, parameters_path, project_parameters_path, write_json,
-};
+use crate::doc::project::{Part, Project, feature_path, parameters_path, project_parameters_path};
 use crate::error::{Code, Error, Result};
 use crate::expr::{self, Env};
 use crate::server::{check_revision, part_id};
@@ -197,7 +195,7 @@ pub fn list_project(session: &Session) -> Result<Value> {
     Ok(json!({
         "scope": "project",
         "parameters": parameters,
-        "project_revision": crate::config::project_revision(session.root())?,
+        "project_revision": session.project_revision()?,
     }))
 }
 
@@ -220,7 +218,7 @@ fn check(session: &Session, part: &Part, changed: &[String], env: &Env) -> Resul
 
 /// Writes the parameters file and reloads.
 fn save(session: &mut Session, part: &Id, file: &ParametersFile) -> Result<()> {
-    write_json(&parameters_path(session.root(), part), &file.to_json())?;
+    session.write_json(&parameters_path(session.root(), part), &file.to_json())?;
     session.reload()
 }
 
@@ -314,7 +312,7 @@ pub fn delete(
     file.parameters.remove(name);
     if file.parameters.is_empty() {
         let path = parameters_path(session.root(), &pid);
-        crate::doc::source::remove_file(&path)?;
+        session.remove_file(&path)?;
         session.reload()?;
     } else {
         save(session, &pid, &file)?;
@@ -365,14 +363,14 @@ pub fn rename(
             continue;
         }
         let path = feature_path(session.root(), &pid, fid);
-        let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, &e))?;
+        let text = session.read_text(&path)?;
         let mut v = canonical::parse(&text)?;
         if rename_in_feature(&mut v, from, &to) {
             writes.push((path, v));
         }
     }
     for (path, v) in &writes {
-        write_json(path, v)?;
+        session.write_json(path, v)?;
     }
     save(session, &pid, &renamed)?;
     list(session, part)
@@ -415,15 +413,13 @@ fn save_project(
         }
     }
     for (path, v) in writes {
-        write_json(path, v)?;
+        session.write_json(path, v)?;
     }
     let path = project_parameters_path(session.root());
     if file.parameters.is_empty() {
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|e| Error::io(&path, &e))?;
-        }
+        session.remove_file(&path)?;
     } else {
-        write_json(&path, &file.to_json())?;
+        session.write_json(&path, &file.to_json())?;
     }
     session.reload()?;
     let mut sketches = Vec::new();
@@ -452,7 +448,7 @@ pub fn set_project(
     values: Map<String, Value>,
     expected: Option<&str>,
 ) -> Result<Value> {
-    crate::config::check_project_revision(session.root(), expected)?;
+    session.check_project_revision(expected)?;
     if values.is_empty() {
         return Err(Error::new(
             Code::Usage,
@@ -499,7 +495,7 @@ pub fn set_project(
 /// `param.delete` of a project parameter nothing reads: no project
 /// parameter and no part. The file goes with its last parameter.
 pub fn delete_project(session: &mut Session, name: &str, expected: Option<&str>) -> Result<Value> {
-    crate::config::check_project_revision(session.root(), expected)?;
+    session.check_project_revision(expected)?;
     let project = session.project();
     let mut file = current_project(project)?;
     if !file.parameters.contains_key(name) {
@@ -548,7 +544,7 @@ pub fn rename_project(
     to: &str,
     expected: Option<&str>,
 ) -> Result<Value> {
-    crate::config::check_project_revision(session.root(), expected)?;
+    session.check_project_revision(expected)?;
     let project = session.project();
     let file = current_project(project)?;
     if !file.parameters.contains_key(from) {
@@ -612,7 +608,7 @@ pub fn rename_project(
                 continue;
             }
             let path = feature_path(&root, &p.id, fid);
-            let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, &e))?;
+            let text = session.read_text(&path)?;
             let mut v = canonical::parse(&text)?;
             if rename_in_feature(&mut v, from, &to) {
                 writes.push((path, v));
@@ -621,7 +617,7 @@ pub fn rename_project(
         for eid in p.explodes.keys() {
             let path = crate::doc::project::part_dir(&root, &p.id)
                 .join(crate::doc::explode::explode_file(eid));
-            let Ok(text) = std::fs::read_to_string(&path) else {
+            let Ok(text) = session.read_text(&path) else {
                 continue;
             };
             let Ok(mut v) = canonical::parse(&text) else {

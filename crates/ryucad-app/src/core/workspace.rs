@@ -746,20 +746,52 @@ impl Workspace {
         }
     }
 
-    /// Saves `camera` as named view `id` of the part shown (`view.save`).
+    /// Saves `camera` as named view `id` of the part shown (`view.save`),
+    /// with this window's section planes and explode: the camera is shared
+    /// at once, then saved from this window's participant (#576).
     pub fn save_view(&mut self, id: &str, camera: &Camera) {
         let Some(part) = self.views.part.clone() else {
             return;
         };
         self.views.error = None;
+        // The saved camera must be exactly this one, not the last shared.
+        self.camera_due = None;
+        self.camera_sent = Some(Instant::now());
+        self.camera_last = Some(camera.clone());
+        let share = Request::CameraSet {
+            camera: Some(camera_arg(camera)),
+            view: None,
+            fit: Vec::new(),
+            normal_to: None,
+            part: None,
+        };
+        self.send(share, Pending::Quiet);
         let req = Request::ViewSave {
             part: part.clone(),
             view: id.to_owned(),
-            camera: Some(camera_arg(camera)),
-            participant: None,
+            camera: None,
+            participant: Some(self.me().to_owned()),
             expected_revision: None,
         };
         self.send(req, Pending::ViewSaved(part));
+    }
+
+    /// Restores named view `id` of the part shown on this window's
+    /// participant (`camera.set` with the view): the daemon puts back its
+    /// camera, section planes and explode, which reach the window as they
+    /// reach an agent's (#576).
+    pub fn restore_named_view(&mut self, id: &str) {
+        let Some(part) = self.views.part.clone() else {
+            return;
+        };
+        let req = Request::CameraSet {
+            camera: None,
+            view: Some(id.to_owned()),
+            fit: Vec::new(),
+            normal_to: None,
+            part: Some(part),
+        };
+        self.send(req, Pending::Quiet);
     }
 
     /// Asks the daemon for a camera normal to `face` (its geometry is the
@@ -3201,6 +3233,9 @@ impl Workspace {
                 if n == self.looks_asked {
                     self.looks_read = crate::core::appearance::read(&a.result);
                     self.refresh_looks();
+                    // An open window shows its target as it is now.
+                    let now = self.look_of(self.appearance.target());
+                    self.appearance.reread(now, ryucad::render::SURFACE);
                 }
             }
             (Pending::AppearanceWritten, a) => {

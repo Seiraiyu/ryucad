@@ -64,15 +64,22 @@ pub fn about(ctx: &egui::Context, open: &mut bool, view: egui::Rect) {
         });
 }
 
+/// What the agents window says above its lines: how agents drive
+/// ryucad, and how they work through annotations.
+fn agents_text() -> String {
+    format!(
+        "Agents drive ryucad through its CLI: every command prints one JSON document, \
+         and everything this window does is a command too.\n\n{}",
+        ryucad::annotation::ETIQUETTE
+    )
+}
+
 pub fn agents(ctx: &egui::Context, open: &mut bool, root: &Path, view: egui::Rect) {
     window("Driving ryucad from an agent", view)
         .open(open)
         .resizable(false)
         .show(ctx, |ui| {
-            ui.label(
-                "Agents drive ryucad through its CLI: every command prints one JSON document, \
-                 and everything this window does is a command too.",
-            );
+            ui.label(agents_text());
             let lines = agent_lines(root);
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.monospace(&lines);
@@ -87,6 +94,10 @@ pub fn agents(ctx: &egui::Context, open: &mut bool, root: &Path, view: egui::Rec
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_agents_window_gives_the_annotation_etiquette() {
+        assert!(agents_text().contains(ryucad::annotation::ETIQUETTE));
+    }
 
     #[test]
     fn about_names_the_build_and_where_things_live() {

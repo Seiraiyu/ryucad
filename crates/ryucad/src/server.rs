@@ -48,6 +48,7 @@ pub fn init(root: &Path, default_unit: Option<Unit>) -> Result<Value> {
         .with("path", root));
     }
     let m = Manifest::new(default_unit.unwrap_or(Unit::Mm));
+    // no session: there is no project to open until init has run
     write_json(&manifest, &m.to_json())?;
     crate::drivers::write_attributes(root)?;
     Ok(json!({"root": root, "default_unit": m.default_unit}))
@@ -72,6 +73,37 @@ pub fn handle_live(
         .map(|a| a.result)
 }
 
+/// Why `me`, a human in a mode that doesn't allow it, may not send `req`
+/// (design 374, question 198); `None` for agents, connections that said
+/// no hello, and requests any mode may send.
+pub fn mode_refusal(live: Option<&Live>, me: Option<&str>, req: &Request) -> Option<Error> {
+    let method = req.method();
+    match (live, me, req.needs()) {
+        (Some(l), Some(me), Some(needs)) => match l.get(me) {
+            Ok(p) if p.kind == live::Kind::Human && !needs.contains(&p.view.mode) => Some(
+                Error::new(
+                    Code::ParticipantMode,
+                    format!(
+                        "{} is in {} mode: {method} needs {}",
+                        p.name,
+                        p.view.mode.as_str(),
+                        needs
+                            .iter()
+                            .map(|m| m.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" or ")
+                    ),
+                )
+                .with("participant", &p.id)
+                .with("mode", p.view.mode)
+                .with("needs", needs),
+            ),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// [`handle_live`], with any bytes the answer carries.
 pub fn answer_live(
     session: &mut Session,
@@ -94,12 +126,18 @@ pub fn answer_live(
     // A daemon keeps what its writes change, for the log and for undo;
     // undo and redo log themselves.
     let (method, params) = (req.method(), req.params());
+    // A human's window writes only in the mode that allows it (design
+    // 374, question 198); agents, and connections that said no hello,
+    // write as they always have.
+    let refused = mode_refusal(live.as_deref(), me, &req);
     let logs_itself = matches!(req, Request::Undo { .. } | Request::Redo { .. });
-    let files_before = match (&live, mutates && !logs_itself) {
+    let files_before = match (&live, mutates && !logs_itself && refused.is_none()) {
         (Some(_), true) => Some(session.files()),
         _ => None,
     };
+    let mut refused = refused;
     let result = match req {
+        _ if refused.is_some() => Err(refused.take().expect("checked")),
         Request::MeshGet {
             part,
             feature,
@@ -305,6 +343,26 @@ pub fn answer_live(
         }),
         req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
     };
+    // A stale annotation's revision says so in the answer.
+    let notes = std::mem::take(&mut session.rev_warnings);
+    let result = match result {
+        Ok(mut a) if !notes.is_empty() && a.raw.is_none() => {
+            let mut list = a
+                .result
+                .get("warnings")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for n in notes {
+                if !list.contains(&n) {
+                    list.push(n);
+                }
+            }
+            a.result["warnings"] = json!(list);
+            Ok(a)
+        }
+        r => r,
+    };
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
     {
         let files = activity::diff(&files_before, &session.files());
@@ -328,7 +386,7 @@ pub fn answer_live(
     result
 }
 
-fn dispatch(
+pub(crate) fn dispatch(
     session: &mut Session,
     live: Option<&mut Live>,
     me: Option<&str>,
@@ -638,6 +696,9 @@ fn dispatch(
             instances,
             below,
         } => crate::clearance::run(session, &part, &instances, below.as_deref()),
+        Request::SheetGet { part, solid, rev } => {
+            crate::sheet_metal::report::get(session, &part, solid.as_deref(), rev.as_deref())
+        }
         Request::Mass { of, tolerance, rev } => {
             crate::mass::run(session, &of, tolerance, rev.as_deref())
         }
@@ -770,7 +831,7 @@ fn dispatch(
         Request::FeatureShow { part, id } => {
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
             let p = session.project().part(&part)?;
-            let mut v = feature_report(&part, &fid, feature(p, &fid)?);
+            let mut v = feature_report(p, &fid, feature(p, &fid)?);
             // The revision it was read at: an edit made from it says so.
             v["revision"] = json!(p.revision);
             Ok(v)
@@ -1156,6 +1217,134 @@ fn dispatch(
             &steps,
             expected_revision.as_deref(),
         ),
+        Request::ParticipantMode { mode } => {
+            let live = live.ok_or_else(|| live::no_live_session("participant.mode"))?;
+            let id = live.caller(me);
+            live.set_mode(&id, mode)?;
+            Ok(json!({"participant": id, "mode": mode}))
+        }
+        Request::AnnotationApply {
+            id,
+            keep_open,
+            expect,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::propose::apply(session, &id, keep_open, expect.as_deref(), &by)
+        }
+        Request::AnnotationCreate {
+            pins,
+            comment,
+            camera,
+            with_view,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            let unit = session.project().manifest.default_unit;
+            let view = match (camera, with_view) {
+                (Some(c), _) => Some(c.resolve(unit)?.to_view_file()),
+                (None, true) => {
+                    let l = live
+                        .as_deref()
+                        .ok_or_else(|| live::no_live_session("annotation.create --view"))?;
+                    let camera = me
+                        .and_then(|m| l.get(m).ok())
+                        .and_then(|p| p.view.camera.clone())
+                        .ok_or_else(|| {
+                            Error::new(
+                                Code::InvalidParam,
+                                "your participant has no camera to keep (camera.set first)",
+                            )
+                        })?;
+                    Some(camera.to_view_file())
+                }
+                (None, false) => None,
+            };
+            crate::annotation::create(session, by, &pins, &comment, view)
+        }
+        Request::AnnotationList {
+            status,
+            part,
+            by,
+            open,
+        } => crate::annotation::list(session, &status, part.as_deref(), by.as_deref(), open),
+        Request::AnnotationShow { id } => crate::annotation::show(session, &id),
+        Request::AnnotationReply {
+            id,
+            text,
+            expect,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::reply(session, &id, &text, expect.as_deref(), by)
+        }
+        Request::AnnotationClaim { id, expect, author } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::claim(session, &id, expect.as_deref(), by)
+        }
+        Request::AnnotationResolve {
+            id,
+            note,
+            expect,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::close(session, &id, None, note.as_deref(), expect.as_deref(), by)
+        }
+        Request::AnnotationReject {
+            id,
+            reason,
+            expect,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::close(session, &id, Some(&reason), None, expect.as_deref(), by)
+        }
+        Request::AnnotationReopen { id, expect, .. } => {
+            crate::annotation::reopen(session, &id, expect.as_deref())
+        }
+        Request::AnnotationEdit {
+            id,
+            comment,
+            pins,
+            expect,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::edit(
+                session,
+                &id,
+                comment.as_deref(),
+                pins.as_deref(),
+                expect.as_deref(),
+                by,
+            )
+        }
+        Request::AnnotationDelete { id, expect, author } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::delete(session, &id, expect.as_deref(), by)
+        }
+        Request::AnnotationPropose {
+            request,
+            comment,
+            pins,
+            rough,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::propose::propose(
+                session,
+                live,
+                me,
+                crate::annotation::propose::Ask {
+                    request,
+                    comment,
+                    pins,
+                    rough,
+                    by,
+                },
+            )
+        }
         Request::ExplodeDelete {
             part,
             explode,
@@ -1339,7 +1528,7 @@ fn dispatch(
                 key.as_deref(),
                 scope,
             )?;
-            v["project_revision"] = json!(config::project_revision(session.root())?);
+            v["project_revision"] = json!(session.project_revision()?);
             Ok(v)
         }
         Request::ConfigSet {
@@ -1351,17 +1540,17 @@ fn dispatch(
             let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
             let v = match config::validate(&key, &value, scope)? {
                 config::Scope::Project => {
-                    config::check_project_revision(session.root(), expected_revision.as_deref())?;
+                    session.check_project_revision(expected_revision.as_deref())?;
                     let unit = Unit::parse(value.as_str().expect("validated")).expect("validated");
                     // The rest of the manifest (the project's ID) stays.
                     let m = Manifest {
                         default_unit: unit,
                         ..session.project().manifest.clone()
                     };
-                    write_json(&session.root().join(MANIFEST), &m.to_json())?;
+                    session.write_json(&session.root().join(MANIFEST), &m.to_json())?;
                     session.reload()?;
                     let mut v = config::get(unit, Some(&key), None)?;
-                    v["project_revision"] = json!(config::project_revision(session.root())?);
+                    v["project_revision"] = json!(session.project_revision()?);
                     v
                 }
                 config::Scope::User => config::set_user(&key, value)?,
@@ -1842,7 +2031,7 @@ fn part_create(session: &mut Session, part: &str, kind: Option<&str>) -> Result<
         );
     }
     crate::pdm::check_not_retired(session.root(), &id)?;
-    write_json(
+    session.write_json(
         &part_path(session.root(), &id),
         &PartFile {
             kind,
@@ -1887,7 +2076,23 @@ fn part_delete(session: &mut Session, part: &str, expected: Option<&str>) -> Res
         .with("instances", users));
     }
     let dir = part_dir(session.root(), &id);
-    fs::remove_dir_all(&dir).map_err(|e| Error::io(&dir, &e))?;
+    let mine = format!("parts/{id}/");
+    let files: Vec<String> = session
+        .snapshot()
+        .keys()
+        .filter(|p| p.starts_with(&mine))
+        .cloned()
+        .collect();
+    for rel in files {
+        let at = rel
+            .split('/')
+            .fold(session.root().to_path_buf(), |p, s| p.join(s));
+        session.remove_file(&at)?;
+    }
+    if dir.exists() {
+        // no session: what the files leave on disk (empty folders, stray files) goes too
+        fs::remove_dir_all(&dir).map_err(|e| Error::io(&dir, &e))?;
+    }
     // A daemon sees its own removal whatever file events say (#263).
     crate::doc::source::note_written(&dir);
     session.reload()?;
@@ -1953,7 +2158,8 @@ fn no_feature(part: &Part, id: &Id) -> Error {
 
 /// How a feature appears in output: every quantity as written and in
 /// meters, every reference as `<part>/<feature>/<name>`.
-pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
+pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
+    let part = &p.id;
     let mut v = match f {
         Feature::Primitive(p) => primitive_report(p),
         Feature::Sketch(s) => sketch_report(part, s),
@@ -2002,6 +2208,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
         Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
             crate::body::report(part, f)
         }
+        Feature::BaseFlange(_) | Feature::Flange(_) => crate::sheet_metal::report(p, f),
         Feature::Hole(h) => hole_report(part, h),
         Feature::Pattern(x) => pattern_report(part, x),
         Feature::Revolve(r) => {
@@ -2227,7 +2434,7 @@ pub(crate) fn save(
     order: Vec<Id>,
 ) -> Result<String> {
     for (id, f) in writes {
-        write_json(&feature_path(session.root(), part, id), &f.to_json())?;
+        session.write_json(&feature_path(session.root(), part, id), &f.to_json())?;
     }
     // A part the write makes the assembly place takes the next item number;
     // one it no longer places loses its own.
@@ -2240,15 +2447,13 @@ pub(crate) fn save(
     let after = ryupdm::items::placed_by(&order, feature);
     let whole = order.iter().all(|f| feature(f).is_some());
     let items = ryupdm::items::assigned(&items, &ryupdm::items::placed(p), &after, whole);
-    write_json(
-        &part_path(session.root(), part),
-        &PartFile {
-            kind: part_kind(p),
-            features: order,
-            items,
-        }
-        .to_json(),
-    )?;
+    let file = PartFile {
+        kind: part_kind(p),
+        features: order,
+        items,
+    }
+    .to_json();
+    session.write_json(&part_path(session.root(), part), &file)?;
     session.reload()?;
     // What the working files place from other projects may have changed.
     if crate::deps::keep_lock(session)? {
@@ -3458,6 +3663,7 @@ fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
             RevolveAxis::Ref(_) => (&r.loops, None),
         },
         Feature::Sweep(w) => (&w.profile.loops, None),
+        Feature::BaseFlange(b) => (&b.loops, None),
         _ => unreachable!("a sweep"),
     };
     let at = if f.sweep().is_some() { "/profile" } else { "" };
@@ -3716,6 +3922,9 @@ fn check_resolved(
         Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
             crate::body::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
+        Feature::BaseFlange(_) | Feature::Flange(_) => {
+            crate::sheet_metal::check(&proposed(p, order, &[(id, f)]), id, f, results)
+        }
         _ => Ok(()),
     }
 }
@@ -3911,6 +4120,25 @@ fn feature_add(
             }
         }
     }
+    if ty == "flange" && given.fields.target.is_none() && given.fields.targets.is_none() {
+        let before = solids_before(p, &list, at);
+        let sheet: Vec<Id> = before
+            .iter()
+            .filter(|s| crate::sheet_metal::founder(p, s).is_some())
+            .cloned()
+            .collect();
+        match (before.as_slice(), sheet.as_slice()) {
+            ([one], _) | (_, [one]) => given.fields.target = Some(one.to_string()),
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("a flange names the solid it acts on (target): the part has {} solids before it, {} of them founded by a base flange", before.len(), sheet.len()),
+                )
+                .with("param", "target")
+                .with("solids", before));
+            }
+        }
+    }
     let f = match ty {
         "sketch" => {
             given.only(ty, &SKETCH)?;
@@ -3952,6 +4180,11 @@ fn feature_add(
         "shell" | "offset" | "mirror" | "split" => {
             given.only(ty, crate::doc::body::request_fields(ty))?;
             crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
+        }
+        "base_flange" | "flange" => {
+            crate::sheet_metal::take_given(ty, &mut given.fields);
+            given.only(ty, crate::doc::sheet_metal::request_fields(ty))?;
+            crate::sheet_metal::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
         "hole" => {
             given.only(ty, &HOLE)?;
@@ -4025,8 +4258,9 @@ fn feature_add(
     let assemblies = crate::mate::current(session, &pid)?;
     save(session, &pid, &[(&fid, &f)], list)?;
     let assemblies = crate::mate::keep_current(session, &assemblies)?;
-    let revision = &session.project().part(&pid)?.revision;
-    let mut v = json!({"feature": feature_report(&pid, &fid, &f), "revision": revision});
+    let saved = session.project().part(&pid)?;
+    let revision = &saved.revision;
+    let mut v = json!({"feature": feature_report(saved, &fid, &f), "revision": revision});
     if !assemblies.is_empty() {
         v["assemblies"] = json!(assemblies);
     }
@@ -4158,6 +4392,12 @@ fn feature_edit(
                 given.only(ty, crate::doc::body::request_fields(ty))?;
                 crate::body::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
             }
+            f @ (Feature::BaseFlange(_) | Feature::Flange(_)) => {
+                let ty = f.type_name();
+                crate::sheet_metal::take_given(ty, &mut given.fields);
+                given.only(ty, crate::doc::sheet_metal::request_fields(ty))?;
+                crate::sheet_metal::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
+            }
             Feature::Pattern(x) => {
                 given.only("pattern", &PATTERN)?;
                 pattern_from(Some(&x), &given, &pid, unit, &p.env)?
@@ -4254,6 +4494,7 @@ fn feature_edit(
             f,
             Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_)
         ) && f.targets() != old.targets())
+        || ((f.base_flange().is_some() || f.flange().is_some()) && f != old)
         || f.source() != old.source()
     {
         check_references(session, &pid, &list, &fid, &f)?;
@@ -4273,8 +4514,9 @@ fn feature_edit(
     // solved (issue #155).
     let reached = crate::mate::reached(session.project(), &pid);
     let warnings = crate::mate::failing_warnings(session, &reached, "");
-    let revision = &session.project().part(&pid)?.revision;
-    let mut v = json!({"feature": feature_report(&pid, &fid, &f), "revision": revision});
+    let saved = session.project().part(&pid)?;
+    let revision = &saved.revision;
+    let mut v = json!({"feature": feature_report(saved, &fid, &f), "revision": revision});
     if !sketches.is_empty() {
         v["sketches"] = json!(sketches);
     }
@@ -4323,7 +4565,7 @@ fn feature_delete(
     // feature with no file.
     save(session, &pid, &[], list)?;
     let path = feature_path(session.root(), &pid, &fid);
-    crate::doc::source::remove_file(&path)?;
+    session.remove_file(&path)?;
     session.reload()?;
     let assemblies = crate::mate::keep_current(session, &assemblies)?;
     let revision = &session.project().part(&pid)?.revision;
@@ -4523,11 +4765,14 @@ pub(crate) fn part_report(
         .iter()
         .filter_map(|(fid, f)| {
             let f = f.as_ref().ok()?;
-            matches!(
-                f,
-                Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_)
-            )
-            .then(|| (fid.clone(), (f.type_name(), crate::body::report(id, f))))
+            let report = match f {
+                Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
+                    crate::body::report(id, f)
+                }
+                Feature::BaseFlange(_) | Feature::Flange(_) => crate::sheet_metal::report(part, f),
+                _ => return None,
+            };
+            Some((fid.clone(), (f.type_name(), report)))
         })
         .collect();
     // An import's file, hash, product and body, as written: shown
@@ -4814,6 +5059,7 @@ pub fn publish(live: &mut Live, session: &mut Session) {
     if !watched {
         // Noted only: a subscriber hears of what changes from now on.
         live.seen.pdm = None;
+        live.seen.annotations = None;
         live.seen.at = None;
         live.seen.parts = session
             .project()
@@ -4847,6 +5093,34 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         }
     }
     live.seen.pdm = Some(now);
+    // Annotations: each added, changed or removed, and each whose derived
+    // states moved with the model. Worked out only while anyone watches
+    // and the files moved, and only over annotations there are.
+    let all = crate::annotation::read_all(&session.snapshot());
+    let mut now = BTreeMap::new();
+    for (id, a) in &all {
+        let v = match a {
+            Ok(a) => crate::annotation::entry(session, &all, a),
+            Err(e) => json!({"id": id, "error": e}),
+        };
+        now.insert(id.to_string(), v);
+    }
+    if let Some(seen) = &live.seen.annotations {
+        let changed: Vec<&Value> = now
+            .iter()
+            .filter(|(k, v)| seen.get(*k) != Some(*v))
+            .map(|(_, v)| v)
+            .collect();
+        let removed: Vec<&String> = seen.keys().filter(|k| !now.contains_key(*k)).collect();
+        if !changed.is_empty() || !removed.is_empty() {
+            live.hub.send(
+                Topic::Annotations,
+                "annotation.changed",
+                &json!({"annotations": changed, "removed": removed}),
+            );
+        }
+    }
+    live.seen.annotations = Some(now);
     let mut revisions: BTreeMap<Id, String> = session
         .project()
         .parts
@@ -6698,6 +6972,14 @@ fn files_at(session: &mut Session, rev: &str) -> Result<(Value, activity::Files)
     if rev == "working" {
         return Ok((json!({"rev": rev}), session.snapshot()));
     }
+    if let Some((named, files, stale)) = session.annotation_files(rev)? {
+        if !stale.is_empty() {
+            session
+                .rev_warnings
+                .push(crate::session::stale_warning(rev, &stale));
+        }
+        return Ok((named, files));
+    }
     if let Some((w, files, _)) = session.worktree_files(rev)? {
         let named = json!({"rev": rev, "worktree": w.root, "branch": w.branch, "head": w.head});
         return Ok((named, files));
@@ -6874,6 +7156,140 @@ pub(crate) mod tests {
 
     pub(crate) fn call(s: &mut Session, method: &str, params: Value) -> Result<Value> {
         handle(s, Request::from_rpc(method, Some(params))?)
+    }
+
+    #[test]
+    fn sheet_metal_through_the_protocol() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "plane": "xy"}),
+        )
+        .unwrap();
+        let mut ops = Vec::new();
+        for (i, at) in [[0, 0], [60, 0], [60, 40], [0, 40]].into_iter().enumerate() {
+            ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
+            ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+        }
+        for i in 1..=4 {
+            ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                            "start": format!("p{i}"), "end": format!("p{}", i % 4 + 1)}));
+        }
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": ops}),
+        )
+        .unwrap();
+        // A plate; a bare K-factor is a number.
+        let r = call(&mut s, "feature.add", json!({"part": "p", "type": "base_flange", "id": "plate",
+            "sketch": "s", "thickness": "1.5 mm", "radius": "1 mm", "allowance": {"k_factor": 0.44}})).unwrap();
+        assert_eq!(r["feature"]["thickness"]["m"], 0.0015);
+        assert_eq!(r["feature"]["allowance"]["k_factor"]["value"], "0.44");
+        // The right top edge, by its vertices.
+        let body =
+            call(&mut s, "inspect", json!({"part": "p", "feature": "plate"})).unwrap()["bodies"][0]
+                .clone();
+        let at = |p: [f64; 3]| -> String {
+            body["vertices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| {
+                    (0..3).all(|k| (v["point"][k].as_f64().unwrap() - p[k] * 1e-3).abs() < 1e-9)
+                })
+                .map(|v| v["name"].as_str().unwrap().to_owned())
+                .unwrap()
+        };
+        let (a, b) = (at([60.0, 0.0, 1.5]), at([60.0, 40.0, 1.5]));
+        let edge = body["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| (e["start"] == a && e["end"] == b) || (e["start"] == b && e["end"] == a))
+            .map(|e| format!("p/plate/{}", e["name"].as_str().unwrap()))
+            .unwrap();
+        // A flange: its target filled in; its length through an extent, as
+        // the CLI's --length sends it; its radius its founder's.
+        let r = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "flange", "id": "f",
+            "edges": [edge], "angle": "90 deg", "extent": {"length": "20 mm"}}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["target"], "plate", "{r}");
+        assert_eq!(r["feature"]["length"]["m"], 0.02, "{r}");
+        assert_eq!(r["feature"]["radius"]["m"], 0.001, "{r}");
+        assert_eq!(
+            r["feature"]["inherited"],
+            json!(["radius", "relief"]),
+            "{r}"
+        );
+        assert_eq!(r["feature"]["edges"], json!([edge]), "{r}");
+        // An end set back with a relief, by vertex.
+        let corner = format!("p/plate/{b}");
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "f",
+            "ends": [{"vertex": corner, "setback": "5 mm",
+                      "relief": {"kind": "rectangular", "width": "1 mm", "depth": "0.5 mm"}}]}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["ends"][0]["vertex"], corner, "{r}");
+        let rb = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        assert_eq!(rb["parts"][0]["failed"], 0, "{rb}");
+        // Refusals made when written: a face where an edge goes, and an end
+        // no edge of it has.
+        let face = format!("p/plate/{}", body["faces"][0]["name"].as_str().unwrap());
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "f", "edges": [face]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+        let far = format!("p/plate/{}", at([0.0, 0.0, 0.0]));
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "f",
+            "ends": [{"vertex": far, "setback": "1 mm"}]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam, "{e}");
+        // What the kernel refuses only rebuild tells: set back with no relief.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "f", "ends": [],
+                                            "setback": "5 mm"}),
+        )
+        .unwrap();
+        let rb = call(&mut s, "rebuild", json!({"part": "p"}));
+        let e = rb.unwrap_err();
+        let f = &e.details["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "f")
+            .unwrap()["error"];
+        assert_eq!(
+            (f["code"].as_str(), f["details"]["reason"].as_str()),
+            (Some("sheet_metal_failed"), Some("relief_needed")),
+            "{f}"
+        );
+        // Deleting the base flange while the flange reads it.
+        let e = call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "p", "id": "plate"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::HasDependents, "{e}");
     }
 
     #[test]
@@ -9052,6 +9468,316 @@ pub(crate) mod tests {
         let e = call(&mut s, "daemon.status", json!({})).unwrap_err();
         assert_eq!(e.code, Code::Usage);
     }
+    #[test]
+    fn annotations_are_announced_with_their_derived_states() {
+        let (_dir, mut s, face) = crate::annotation::tests::plate();
+        let mut live = Live::new();
+        let sub = live.hub.subscribe("p-x", &[Topic::Annotations]);
+        // The first reading is what the subscription starts from.
+        crate::server::publish(&mut live, &mut s);
+        let id = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "annotation.create",
+            json!({"pins": [{"ref": face}], "comment": "here"}),
+        )
+        .unwrap()["annotation"]["id"]
+            .clone();
+        let notes = drained(&sub);
+        let n = notes
+            .iter()
+            .find(|v| v["method"] == "annotation.changed")
+            .expect("told");
+        assert_eq!(n["params"]["annotations"][0]["id"], id);
+        assert_eq!(n["params"]["annotations"][0]["outdated"], false);
+        // The model moving the pin away is news too.
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.delete",
+            json!({"part": "plate", "id": "slab"}),
+        )
+        .unwrap();
+        let notes = drained(&sub);
+        let n = notes
+            .iter()
+            .find(|v| v["method"] == "annotation.changed")
+            .expect("told");
+        assert_eq!(n["params"]["annotations"][0]["outdated"], true);
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "annotation.delete",
+            json!({"id": id}),
+        )
+        .unwrap();
+        let notes = drained(&sub);
+        let n = notes
+            .iter()
+            .find(|v| v["method"] == "annotation.changed")
+            .expect("told");
+        assert_eq!(n["params"]["removed"], json!([id]));
+    }
+
+    #[test]
+    fn a_participant_sets_its_own_mode() {
+        let (_dir, mut s) = fresh();
+        let mut live = Live::new();
+        let h = live.hello(live::Kind::Human, Some("Dana"), None).unwrap();
+        assert_eq!(live.get(&h).unwrap().view.mode, live::Mode::View);
+        let v = call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "annotate"}),
+        )
+        .unwrap();
+        assert_eq!(v, json!({"participant": h, "mode": "annotate"}));
+        assert_eq!(live.get(&h).unwrap().to_json()["mode"], "annotate");
+        // No request sets another's: an agent sets only its own.
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "participant.mode",
+            json!({"mode": "edit"}),
+        )
+        .unwrap();
+        assert_eq!(live.get(&h).unwrap().view.mode, live::Mode::Annotate);
+        let e = call(&mut s, "participant.mode", json!({"mode": "edit"})).unwrap_err();
+        assert_eq!(e.code, Code::NoLiveSession);
+        let e = call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "write"}),
+        )
+        .unwrap_err();
+        // An unknown mode is refused as any unknown variant is.
+        assert_eq!(e.code, Code::Usage);
+    }
+
+    #[test]
+    fn a_humans_writes_are_refused_outside_their_mode_and_an_agents_never() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let mut live = Live::new();
+        let h = live.hello(live::Kind::Human, Some("Dana"), None).unwrap();
+        let add =
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 1, "y": 1, "z": 1}});
+        let note = json!({"pins": [], "comment": "here"});
+        let e = call_live(&mut s, &mut live, Some(&h), "feature.add", add.clone()).unwrap_err();
+        assert_eq!(e.code, Code::ParticipantMode);
+        assert_eq!(e.details["mode"], "view");
+        assert_eq!(e.details["needs"], json!(["edit"]));
+        let e = call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "annotation.create",
+            note.clone(),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["needs"], json!(["annotate", "edit"]));
+        // Reading is never refused.
+        call_live(&mut s, &mut live, Some(&h), "part.list", json!({})).unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "annotate"}),
+        )
+        .unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "annotation.create",
+            note.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            call_live(&mut s, &mut live, Some(&h), "feature.add", add.clone())
+                .unwrap_err()
+                .code,
+            Code::ParticipantMode
+        );
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "edit"}),
+        )
+        .unwrap();
+        call_live(&mut s, &mut live, Some(&h), "feature.add", add.clone()).unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "annotation.create",
+            note.clone(),
+        )
+        .unwrap();
+        // An agent writes in any mode, and with no hello.
+        let a = live.hello(live::Kind::Agent, Some("bot"), None).unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&a),
+            "participant.mode",
+            json!({"mode": "view"}),
+        )
+        .unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&a),
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 2}}),
+        )
+        .unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 3}}),
+        )
+        .unwrap();
+        // Undo is a write.
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "annotate"}),
+        )
+        .unwrap();
+        assert_eq!(
+            call_live(&mut s, &mut live, Some(&h), "undo", json!({}))
+                .unwrap_err()
+                .code,
+            Code::ParticipantMode
+        );
+    }
+
+    #[test]
+    fn a_view_mode_humans_dependency_fetch_is_refused_before_it_fetches() {
+        use ryu_session::Serve;
+        let (_dir, s) = fresh();
+        let mut slot = Some(s);
+        let mut live = Live::new();
+        let h = live.hello(live::Kind::Human, Some("Dana"), None).unwrap();
+        let a = live.hello(live::Kind::Agent, Some("bot"), None).unwrap();
+        let add =
+            Request::from_rpc("deps.add", Some(json!({"url": "file:///nowhere/lib.git"}))).unwrap();
+        let job = Job::default();
+        // An agent's fetch is prepared without the lock; the human's isn't
+        // prepared at all, since `handle` refuses it.
+        assert!(crate::Cad::prepare(&mut slot, &live, Some(&a), &add, &job).is_some());
+        assert!(crate::Cad::prepare(&mut slot, &live, Some(&h), &add, &job).is_none());
+        let update = Request::from_rpc("deps.update", Some(json!({}))).unwrap();
+        assert!(crate::Cad::prepare(&mut slot, &live, Some(&h), &update, &job).is_none());
+        call_live(
+            slot.as_mut().unwrap(),
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "edit"}),
+        )
+        .unwrap();
+        assert!(crate::Cad::prepare(&mut slot, &live, Some(&h), &add, &job).is_some());
+    }
+
+    #[test]
+    fn an_export_never_writes_over_a_project_file_whoever_asks() {
+        // A human in View mode may export (the window does), so `out` may
+        // never be one of the project's files: export is never logged.
+        let (dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 1, "y": 1, "z": 1}}),
+        )
+        .unwrap();
+        for d in [
+            "releases/p",
+            "imports",
+            "annotations",
+            ".git",
+            "out",
+            "Parts/p",
+            "Imports",
+        ] {
+            std::fs::create_dir_all(dir.path().join(d)).unwrap();
+        }
+        // Windows can't make a folder whose name ends in a space or a dot,
+        // so `parts. /p` is made and judged only elsewhere.
+        if cfg!(not(windows)) {
+            std::fs::create_dir_all(dir.path().join("parts. /p")).unwrap();
+        }
+        let mut live = Live::new();
+        let h = live.hello(live::Kind::Human, Some("Dana"), None).unwrap();
+        let a = live.hello(live::Kind::Agent, Some("bot"), None).unwrap();
+        let export = |out: &std::path::Path| json!({"part": "p", "format": "stl", "out": out.to_str().unwrap()});
+        for rel in [
+            "ryucad.json",
+            ".gitattributes",
+            "parts/p/part.json",
+            "parts/p/features/b.json",
+            "parts/p/new.json",
+            "releases/p/A.json",
+            "imports/x.step",
+            "annotations/x.json",
+            ".git/config",
+            // Windows and macOS fold case, and Windows drops trailing dots
+            // and spaces: refused on every platform.
+            "RYUCAD.JSON",
+            "Parts/p/part.json",
+            "Imports/x.step",
+            "ryucad.json.",
+            "ryucad.json ",
+            "parts. /p/part.json",
+        ]
+        .into_iter()
+        .filter(|rel| cfg!(not(windows)) || !rel.starts_with("parts. "))
+        {
+            let out = dir.path().join(rel);
+            let before = std::fs::read(&out).ok();
+            for who in [Some(h.as_str()), Some(a.as_str()), None] {
+                let e = call_live(&mut s, &mut live, who, "export", export(&out)).expect_err(rel);
+                assert_eq!(e.code, Code::InvalidParam, "{rel}: {e:?}");
+                assert_eq!(e.details["param"], "out", "{rel}");
+            }
+            assert_eq!(std::fs::read(&out).ok(), before, "{rel} unchanged");
+        }
+        // Elsewhere in the project folder, or outside it, View may export.
+        let beside = tempfile::tempdir().unwrap();
+        for out in [
+            dir.path().join("p.stl"),
+            dir.path().join("out/p.stl"),
+            beside.path().join("p.stl"),
+        ] {
+            call_live(&mut s, &mut live, Some(&h), "export", export(&out)).unwrap();
+            assert!(out.exists(), "{}", out.display());
+        }
+    }
+
+    /// Every queued notification of `sub`, as JSON.
+    fn drained(sub: &crate::notify::Subscriber) -> Vec<Value> {
+        sub.drain()
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
 
     /// `call` with the daemon's live session, as participant `me`.
     pub(crate) fn call_live(
@@ -9092,7 +9818,7 @@ pub(crate) mod tests {
             r["session"]["participants"],
             json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": [],
                     "camera": null, "highlights": [], "compare": null, "focus": null, "hidden": [],
-                    "sections": [], "explode": null}])
+                    "sections": [], "explode": null, "mode": "view"}])
         );
         let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
         assert_eq!(list, r["session"]);
@@ -9618,6 +10344,15 @@ pub(crate) mod tests {
         )
         .unwrap()["participant"]
             .clone();
+        // A person's window writes the model in Direct edit.
+        call_live(
+            &mut s,
+            &mut live,
+            human.as_str(),
+            "participant.mode",
+            json!({"mode": "edit"}),
+        )
+        .unwrap();
         call_live(
             &mut s,
             &mut live,
@@ -9678,6 +10413,15 @@ pub(crate) mod tests {
             .unwrap()
             .to_owned();
         let h = Some(human.as_str());
+        // A person's window writes the model in Direct edit.
+        call_live(
+            &mut s,
+            &mut live,
+            h,
+            "participant.mode",
+            json!({"mode": "edit"}),
+        )
+        .unwrap();
         let radius = |s: &mut Session| {
             call(s, "feature.show", json!({"part": "p", "id": "s"}))
                 .map(|v| v["params"]["radius"]["value"].clone())

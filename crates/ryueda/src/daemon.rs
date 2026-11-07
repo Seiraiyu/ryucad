@@ -72,6 +72,8 @@ impl ryu_session::Serve for Eda {
 
     fn prepare(
         session: &mut Option<Session>,
+        _: &Live<Eda>,
+        _: Option<&str>,
         req: &Request,
         job: &ryu_session::job::Job,
     ) -> Option<ryu_session::Prepared<Session>> {

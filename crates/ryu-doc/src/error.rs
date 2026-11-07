@@ -709,6 +709,29 @@ pub enum Code {
     /// ryueda supply: no source holds a record of any of a placed part's
     /// offers (a warning).
     PartNoData,
+    /// The kernel refused a sheet metal feature: a body that isn't sheet
+    /// metal (recognition's refusal), or an edge flange it can't make.
+    /// Its `reason` (the kernel's refusal in snake case), the kernel's
+    /// text (`kernel`), the faces, edges, vertices and bends it names
+    /// (`entities`) and, where an agent can fix it, a `hint` are in the
+    /// details. A flange's boolean refuses as `boolean_failed`.
+    SheetMetalFailed,
+    /// No annotation by that ID in `annotations/`; the details name the
+    /// ID asked for.
+    AnnotationNotFound,
+    /// An annotation's proposed change no longer applies: a file it
+    /// touches isn't the bytes it saw. The details list each file
+    /// (`files`: `{path, base, now}`, BLAKE3s or null). Also a warning of
+    /// any answer read from a stale `annotation:<id>` revision.
+    AnnotationStale,
+    /// An annotation someone else has claimed (or, for `edit` and
+    /// `delete`, that its author can no longer change): the details name
+    /// who (`claimed_by`) and the annotation.
+    AnnotationClaimed,
+    /// A human participant's request its mode doesn't allow: writing the
+    /// model outside Direct edit, or annotating in View. The details give
+    /// the participant, its `mode` and the mode the request `needs`.
+    ParticipantMode,
     /// A feature that would change a reference import's body (a join,
     /// cut or intersect targeting it, a boolean, fillet, chamfer, shell,
     /// offset, split, hole, pattern or mirror acting on it): references
@@ -828,6 +851,25 @@ mod tests {
     }
 
     #[test]
+    fn annotation_codes_are_the_agents_to_fix() {
+        assert_eq!(
+            json!(Code::AnnotationNotFound),
+            json!("annotation_not_found")
+        );
+        assert_eq!(json!(Code::AnnotationStale), json!("annotation_stale"));
+        assert_eq!(json!(Code::AnnotationClaimed), json!("annotation_claimed"));
+        assert_eq!(json!(Code::ParticipantMode), json!("participant_mode"));
+        for c in [
+            Code::AnnotationNotFound,
+            Code::AnnotationStale,
+            Code::AnnotationClaimed,
+            Code::ParticipantMode,
+        ] {
+            assert_eq!(c.exit_code(), 1, "{c:?}");
+        }
+    }
+
+    #[test]
     fn reference_codes() {
         for (c, name) in [
             (Code::ReferenceBody, "reference_body"),
@@ -855,6 +897,12 @@ mod tests {
     fn mirror_code() {
         assert_eq!(json!(Code::MirrorFailed), json!("mirror_failed"));
         assert_eq!(Code::MirrorFailed.exit_code(), 1);
+    }
+
+    #[test]
+    fn sheet_metal_code() {
+        assert_eq!(json!(Code::SheetMetalFailed), json!("sheet_metal_failed"));
+        assert_eq!(Code::SheetMetalFailed.exit_code(), 1);
     }
 
     #[test]
