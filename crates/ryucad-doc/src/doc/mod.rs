@@ -1,6 +1,7 @@
 //! The project on disk: canonical JSON files for the project, its parts
 //! and their features. Pure data; nothing here calls ryukei.
 
+pub mod annotation;
 pub mod appearance;
 pub mod assembly;
 pub mod blend;
@@ -22,6 +23,7 @@ pub mod path;
 pub mod pattern;
 pub mod project;
 pub mod reference;
+pub mod sheet_metal;
 pub mod sketch;
 pub mod solid;
 pub mod sweep;

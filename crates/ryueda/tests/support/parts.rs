@@ -133,3 +133,27 @@ pub fn write(dir: &Path, n: usize, design: bool) {
         );
     }
 }
+
+/// What a catalogue holds for [`write`]'s offers (`(key, mpn, stock,
+/// basic)`): each library component with an offer `C<10000 + i>`, its part
+/// number as written but every seventh's another, Basic for even `i`, in
+/// stock `(i × 37) mod 500` but every fourth from the second short of a
+/// few boards' worth.
+pub fn lcsc_parts(n: usize) -> Vec<(String, String, u64, bool)> {
+    (0..n)
+        .filter(|i| i % 3 != 0 && i % 5 != 0)
+        .map(|i| {
+            let mpn = if i % 7 == 0 {
+                format!("PN-{i:05}-X")
+            } else {
+                format!("PN-{i:05}")
+            };
+            let stock = if i % 4 == 2 {
+                (i % 3) as u64
+            } else {
+                (i * 37 % 500) as u64
+            };
+            (format!("C{}", 10_000 + i), mpn, stock, i % 2 == 0)
+        })
+        .collect()
+}

@@ -684,6 +684,54 @@ pub enum Code {
     /// ryueda ERC: a maker part number with no supplier offer, on a
     /// library component's first choice or an alternate (a warning).
     PartUnsourced,
+    /// ryueda: a source of part data didn't answer (a connection refused,
+    /// a call quiet for 60 s, a server error). Not the agent's fault.
+    PartsSourceUnreachable,
+    /// ryueda: a source answered what ryueda can't take: an answer shape
+    /// it doesn't read (`field` names what), a format it doesn't know (a
+    /// catalogue's `version`), or refused keys.
+    PartsSourceRefused,
+    /// ryueda: no source has the part asked for (`parts show`,
+    /// `libcomp create --from`).
+    PartsNotFound,
+    /// ryueda: a catalogue this machine holds is older than
+    /// `parts.max_age`, or missing (`reason`): a warning.
+    PartsCacheStale,
+    /// ryueda supply: a supplier's record of an offer names another maker
+    /// part number than the library component (a warning).
+    PartsMismatch,
+    /// ryueda supply: fewer in stock than the build takes, at every
+    /// offer's source with data (a warning).
+    PartOutOfStock,
+    /// ryueda supply: an assembly house's Extended part, with that house
+    /// the project's assembly house (a warning).
+    PartExtended,
+    /// ryueda supply: no source holds a record of any of a placed part's
+    /// offers (a warning).
+    PartNoData,
+    /// The kernel refused a sheet metal feature: a body that isn't sheet
+    /// metal (recognition's refusal), or an edge flange it can't make.
+    /// Its `reason` (the kernel's refusal in snake case), the kernel's
+    /// text (`kernel`), the faces, edges, vertices and bends it names
+    /// (`entities`) and, where an agent can fix it, a `hint` are in the
+    /// details. A flange's boolean refuses as `boolean_failed`.
+    SheetMetalFailed,
+    /// No annotation by that ID in `annotations/`; the details name the
+    /// ID asked for.
+    AnnotationNotFound,
+    /// An annotation's proposed change no longer applies: a file it
+    /// touches isn't the bytes it saw. The details list each file
+    /// (`files`: `{path, base, now}`, BLAKE3s or null). Also a warning of
+    /// any answer read from a stale `annotation:<id>` revision.
+    AnnotationStale,
+    /// An annotation someone else has claimed (or, for `edit` and
+    /// `delete`, that its author can no longer change): the details name
+    /// who (`claimed_by`) and the annotation.
+    AnnotationClaimed,
+    /// A human participant's request its mode doesn't allow: writing the
+    /// model outside Direct edit, or annotating in View. The details give
+    /// the participant, its `mode` and the mode the request `needs`.
+    ParticipantMode,
 }
 
 impl Code {
@@ -702,6 +750,7 @@ impl Code {
             | Code::ReviewFailed
             | Code::CacheRemoteUnreachable
             | Code::DependencyFetchFailed
+            | Code::PartsSourceUnreachable
             | Code::Cancelled => 4,
             _ => 1,
         }
@@ -762,6 +811,38 @@ mod tests {
         assert_eq!(json!(Code::PartUnsourced), json!("part_unsourced"));
         assert_eq!(Code::ParameterInvalid.exit_code(), 1);
         assert_eq!(Code::PartUnsourced.exit_code(), 1);
+        for (code, name, exit) in [
+            (Code::PartsSourceUnreachable, "parts_source_unreachable", 4),
+            (Code::PartsSourceRefused, "parts_source_refused", 1),
+            (Code::PartsNotFound, "parts_not_found", 1),
+            (Code::PartsCacheStale, "parts_cache_stale", 1),
+            (Code::PartsMismatch, "parts_mismatch", 1),
+            (Code::PartOutOfStock, "part_out_of_stock", 1),
+            (Code::PartExtended, "part_extended", 1),
+            (Code::PartNoData, "part_no_data", 1),
+        ] {
+            assert_eq!(json!(code), json!(name));
+            assert_eq!(code.exit_code(), exit, "{name}");
+        }
+    }
+
+    #[test]
+    fn annotation_codes_are_the_agents_to_fix() {
+        assert_eq!(
+            json!(Code::AnnotationNotFound),
+            json!("annotation_not_found")
+        );
+        assert_eq!(json!(Code::AnnotationStale), json!("annotation_stale"));
+        assert_eq!(json!(Code::AnnotationClaimed), json!("annotation_claimed"));
+        assert_eq!(json!(Code::ParticipantMode), json!("participant_mode"));
+        for c in [
+            Code::AnnotationNotFound,
+            Code::AnnotationStale,
+            Code::AnnotationClaimed,
+            Code::ParticipantMode,
+        ] {
+            assert_eq!(c.exit_code(), 1, "{c:?}");
+        }
     }
 
     #[test]
@@ -776,6 +857,12 @@ mod tests {
     fn mirror_code() {
         assert_eq!(json!(Code::MirrorFailed), json!("mirror_failed"));
         assert_eq!(Code::MirrorFailed.exit_code(), 1);
+    }
+
+    #[test]
+    fn sheet_metal_code() {
+        assert_eq!(json!(Code::SheetMetalFailed), json!("sheet_metal_failed"));
+        assert_eq!(Code::SheetMetalFailed.exit_code(), 1);
     }
 
     #[test]

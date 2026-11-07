@@ -13,6 +13,7 @@ use ryucad::units::Unit;
 use ryucad::view::{CameraArg, ProjectionArg};
 use ryucad::{cancel, client, daemon, server};
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -90,6 +91,10 @@ enum Command {
     /// `camera --view` and `render --view` restore.
     #[command(subcommand)]
     View(ViewCmd),
+    /// Annotations: requests to the agent, pinned to the model, some
+    /// carrying a proposed change.
+    #[command(subcommand, long_about = ryucad::annotation::ETIQUETTE)]
+    Annotations(AnnotationsCmd),
     /// An assembly's exploded views: list, save, delete, or show one in a
     /// participant's window, part of the way through with --fraction.
     #[command(subcommand)]
@@ -302,6 +307,15 @@ enum Command {
         /// Pairs whose boxes come within this length (5 mm).
         #[arg(long, value_name = "LENGTH")]
         below: Option<String>,
+    },
+    /// A solid read as sheet metal: its thickness, flanges and bend table,
+    /// each bend's developed length (the part's one sheet metal solid unless
+    /// named).
+    Sheet {
+        part: String,
+        solid: Option<String>,
+        #[command(flatten)]
+        rev: RevArg,
     },
     /// Mass properties of a part or assembly, a solid (<part>/<solid>) or an occurrence
     /// (<assembly>/<instance>/…): volume, area, centre of mass, and where every part has a
@@ -537,6 +551,13 @@ enum Command {
         #[arg(long = "of", value_name = "PARTICIPANT")]
         of: Option<String>,
     },
+    /// Set this participant's mode: view, annotate or edit. A person's
+    /// window chooses its own; an agent's is shown to others, never
+    /// enforced.
+    Mode {
+        #[arg(value_enum)]
+        mode: ModeArg,
+    },
     /// Show a part or assembly in a participant's window (the one human's,
     /// else the caller's), or the project's model with --project; with
     /// neither, say what it shows.
@@ -552,7 +573,7 @@ enum Command {
     /// Wait for notifications from the project's daemon: what humans
     /// select, the model changing, and so on.
     Watch {
-        /// model, project, participants, activity, merge or pdm (all by default).
+        /// model, project, participants, activity, merge, pdm, progress or annotations (all by default).
         #[arg(long = "topic", value_name = "TOPIC")]
         topics: Vec<String>,
         /// Stop after this many notifications.
@@ -1094,7 +1115,12 @@ enum FeatureCmd {
     /// an offset (--target, --distance, --face-distance) of a solid; a
     /// mirror (--solid, --plane, --operation) of a whole solid, joined to
     /// it unless told otherwise; a split (--target, --plane, --flip,
-    /// --keep) of a solid by a plane; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
+    /// --keep) of a solid by a plane; a base flange (--sketch, --thickness,
+    /// --radius, --k-factor or --deduction, --relief, a bent section's
+    /// --depth) founding a sheet metal solid; an edge flange (--edge,
+    /// --side, --angle, --length, --measured, --position, --radius,
+    /// --relief, --setback, --end-setback, --end-relief) on its straight
+    /// edges; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
     /// countersink, --bottom) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
@@ -1414,6 +1440,113 @@ enum MaterialsCmd {
         name: String,
         /// Fail with `conflict` unless the project is still at this revision.
         #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ModeArg {
+    View,
+    Annotate,
+    Edit,
+}
+
+#[derive(Subcommand)]
+enum AnnotationsCmd {
+    /// Pin a comment to references (or, with --part and --point, to a bare point).
+    Add {
+        refs: Vec<String>,
+        #[arg(long)]
+        comment: String,
+        /// The clicked point, three quantities: on the one reference, or with --part.
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true)]
+        point: Option<[String; 3]>,
+        /// A bare point's part or assembly.
+        #[arg(long, requires = "point")]
+        part: Option<String>,
+        /// Keep this participant's camera with it.
+        #[arg(long)]
+        view: bool,
+    },
+    /// Propose a change: a request run over your draft, kept, not written.
+    Propose {
+        /// {"method": …, "params": …}
+        #[arg(long, value_name = "JSON")]
+        request: String,
+        #[arg(long)]
+        comment: Option<String>,
+        #[arg(long = "pin", value_name = "REF")]
+        pins: Vec<String>,
+        /// Where it should go roughly, not exactly (a freehand drag).
+        #[arg(long)]
+        rough: bool,
+    },
+    /// Every annotation, newest first, with whether it is outdated, stale or applied.
+    List {
+        #[arg(long = "status", value_name = "STATUS")]
+        status: Vec<String>,
+        #[arg(long)]
+        part: Option<String>,
+        #[arg(long, value_name = "NAME")]
+        by: Option<String>,
+        /// Open and in progress only.
+        #[arg(long)]
+        open: bool,
+    },
+    /// One annotation, its pins resolved and its change's files.
+    Show { id: String },
+    Reply {
+        id: String,
+        text: String,
+        #[arg(long, value_name = "BLAKE3")]
+        expect: Option<String>,
+    },
+    /// Mark it in progress, yours.
+    Claim {
+        id: String,
+        #[arg(long, value_name = "BLAKE3")]
+        expect: Option<String>,
+    },
+    /// Write its proposed change (after those it stands on) and mark it done.
+    Apply {
+        id: String,
+        #[arg(long)]
+        keep_open: bool,
+        #[arg(long, value_name = "BLAKE3")]
+        expect: Option<String>,
+    },
+    Resolve {
+        id: String,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long, value_name = "BLAKE3")]
+        expect: Option<String>,
+    },
+    Reject {
+        id: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, value_name = "BLAKE3")]
+        expect: Option<String>,
+    },
+    Reopen {
+        id: String,
+        #[arg(long, value_name = "BLAKE3")]
+        expect: Option<String>,
+    },
+    /// Its author changes the comment or pins while it is open and unclaimed.
+    Edit {
+        id: String,
+        #[arg(long)]
+        comment: Option<String>,
+        #[arg(long = "pin", value_name = "REF")]
+        pins: Vec<String>,
+        #[arg(long, value_name = "BLAKE3")]
+        expect: Option<String>,
+    },
+    Delete {
+        id: String,
+        #[arg(long, value_name = "BLAKE3")]
         expect: Option<String>,
     },
 }
@@ -2127,6 +2260,45 @@ struct FieldArgs {
     /// named by the split, the default) or behind (a trim).
     #[arg(long, value_name = "SIDES")]
     keep: Option<String>,
+    /// A base flange's K-factor, 0 to 1: its solid's bend allowance.
+    #[arg(long, value_name = "NUMBER", conflicts_with = "deduction")]
+    k_factor: Option<String>,
+    /// A base flange's bend deduction instead: how much shorter the flat
+    /// is than its flanges to their outer mould line.
+    #[arg(long, value_name = "LENGTH")]
+    deduction: Option<String>,
+    /// A sheet metal relief: none, rectangular, obround or tear, sized by
+    /// --relief-width and --relief-depth. A flange's "" takes its founder's.
+    #[arg(long, value_name = "KIND")]
+    relief: Option<String>,
+    #[arg(long, value_name = "LENGTH")]
+    relief_width: Option<String>,
+    #[arg(long, value_name = "LENGTH")]
+    relief_depth: Option<String>,
+    /// Where a flange's length is measured from: outer_mould (the default),
+    /// inner_mould or tangent.
+    #[arg(long, value_name = "FROM")]
+    measured: Option<String>,
+    /// Where a flange's bend sits against its edge: material_inside (the
+    /// default), material_outside or bend_outside.
+    #[arg(long, value_name = "POSITION")]
+    position: Option<String>,
+    /// A flange's setback at both ends of every edge.
+    #[arg(long, value_name = "LENGTH")]
+    setback: Option<String>,
+    /// The side face an edge of a flange folds towards: EDGE=FACE,
+    /// repeated (with --edge, which lists the edges).
+    #[arg(long = "side", value_name = "EDGE=FACE", value_parser = param)]
+    sides: Vec<(String, String)>,
+    /// An end vertex's own setback: VERTEX=LENGTH, repeated.
+    #[arg(long = "end-setback", value_name = "VERTEX=LENGTH", value_parser = param)]
+    end_setbacks: Vec<(String, String)>,
+    /// An end vertex's own relief: VERTEX=KIND[,WIDTH[,DEPTH]], repeated.
+    #[arg(long = "end-relief", value_name = "VERTEX=RELIEF", value_parser = param)]
+    end_reliefs: Vec<(String, String)>,
+    /// Give no end vertex a setback or relief of its own.
+    #[arg(long, conflicts_with_all = ["end_setbacks", "end_reliefs"])]
+    no_ends: bool,
 }
 
 /// Which `--segment`s each `--propagate` follows, in order, read from the
@@ -2419,6 +2591,36 @@ impl FieldArgs {
             },
             solid: self.solid.clone(),
             keep: self.keep.clone(),
+            allowance: self
+                .k_factor
+                .clone()
+                .map(|k| json!({"k_factor": k}))
+                .or_else(|| self.deduction.clone().map(|d| json!({"deduction": d}))),
+            relief: self.relief.as_deref().map(|k| match k {
+                "" => json!(""),
+                k => relief_json(
+                    k,
+                    self.relief_width.as_deref(),
+                    self.relief_depth.as_deref(),
+                ),
+            }),
+            length: None,
+            measured: self.measured.clone(),
+            position: self.position.clone(),
+            setback: self.setback.clone().map(Value::String),
+            sides: (!self.sides.is_empty()).then(|| {
+                json!(
+                    self.sides
+                        .iter()
+                        .map(|(e, s)| json!({"edge": e, "side": s}))
+                        .collect::<Vec<_>>()
+                )
+            }),
+            ends: if self.no_ends {
+                Some(json!([]))
+            } else {
+                ends_json(&self.end_setbacks, &self.end_reliefs)
+            },
         }
     }
 }
@@ -2531,6 +2733,46 @@ fn groups(s: &str) -> core::result::Result<Groups, String> {
 
 /// `REFERENCE=QUANTITY` pairs as face groups `[{<key>: Q, faces: [REFERENCE, ...]}]`:
 /// the faces of one quantity, as written, are one group, in the order first given.
+/// A relief as the protocol takes it.
+fn relief_json(kind: &str, width: Option<&str>, depth: Option<&str>) -> Value {
+    let mut v = json!({"kind": kind});
+    if let Some(w) = width {
+        v["width"] = json!(w);
+    }
+    if let Some(d) = depth {
+        v["depth"] = json!(d);
+    }
+    v
+}
+
+/// `--end-setback` and `--end-relief` as a flange's ends, one per vertex
+/// in the order first named; none given is `None` (the ends stay).
+fn ends_json(setbacks: &[(String, String)], reliefs: &[(String, String)]) -> Option<Value> {
+    if setbacks.is_empty() && reliefs.is_empty() {
+        return None;
+    }
+    let mut order: Vec<String> = Vec::new();
+    let mut ends: BTreeMap<String, Value> = BTreeMap::new();
+    let mut end = |v: &str, key: &str, x: Value| {
+        if !order.iter().any(|o| o == v) {
+            order.push(v.to_owned());
+        }
+        ends.entry(v.to_owned())
+            .or_insert_with(|| json!({"vertex": v}))[key] = x;
+    };
+    for (v, q) in setbacks {
+        end(v, "setback", json!(q));
+    }
+    for (v, r) in reliefs {
+        let mut parts = r.split(',');
+        let kind = parts.next().unwrap_or_default();
+        end(v, "relief", relief_json(kind, parts.next(), parts.next()));
+    }
+    Some(Value::Array(
+        order.iter().map(|v| ends[v].clone()).collect(),
+    ))
+}
+
 fn face_groups(pairs: &[(String, String)], key: &str) -> Value {
     let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
     for (face, q) in pairs {
@@ -2889,6 +3131,129 @@ fn request(cmd: &Command) -> Option<Request> {
             part: part.clone(),
         },
         Command::Materials(MaterialsCmd::List) => Request::MaterialsList {},
+        Command::Annotations(c) => {
+            use ryucad::proto::PinArg;
+            let refs = |r: &[String]| {
+                r.iter()
+                    .map(|r| PinArg {
+                        reference: Some(r.clone()),
+                        ..Default::default()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let author = None;
+            match c {
+                AnnotationsCmd::Add {
+                    refs: r,
+                    comment,
+                    point,
+                    part,
+                    view,
+                } => {
+                    let mut pins = refs(r);
+                    let point = point.clone().map(|p| p.map(Value::String));
+                    match (point, part, pins.len()) {
+                        (Some(p), Some(part), 0) => pins.push(PinArg {
+                            part: Some(part.clone()),
+                            point: Some(p),
+                            ..Default::default()
+                        }),
+                        (Some(p), None, 1) => pins[0].point = Some(p),
+                        (Some(_), _, _) => unreachable!("checked by annotations_usage"),
+                        (None, _, _) => {}
+                    }
+                    Request::AnnotationCreate {
+                        pins,
+                        comment: comment.clone(),
+                        camera: None,
+                        with_view: *view,
+                        author,
+                    }
+                }
+                AnnotationsCmd::Propose {
+                    request,
+                    comment,
+                    pins,
+                    rough,
+                } => {
+                    let request = serde_json::from_str(request).unwrap_or(Value::Null);
+                    Request::AnnotationPropose {
+                        request,
+                        comment: comment.clone(),
+                        pins: refs(pins),
+                        rough: *rough,
+                        author,
+                    }
+                }
+                AnnotationsCmd::List {
+                    status,
+                    part,
+                    by,
+                    open,
+                } => Request::AnnotationList {
+                    status: status.clone(),
+                    part: part.clone(),
+                    by: by.clone(),
+                    open: *open,
+                },
+                AnnotationsCmd::Show { id } => Request::AnnotationShow { id: id.clone() },
+                AnnotationsCmd::Reply { id, text, expect } => Request::AnnotationReply {
+                    id: id.clone(),
+                    text: text.clone(),
+                    expect: expect.clone(),
+                    author,
+                },
+                AnnotationsCmd::Claim { id, expect } => Request::AnnotationClaim {
+                    id: id.clone(),
+                    expect: expect.clone(),
+                    author,
+                },
+                AnnotationsCmd::Apply {
+                    id,
+                    keep_open,
+                    expect,
+                } => Request::AnnotationApply {
+                    id: id.clone(),
+                    keep_open: *keep_open,
+                    expect: expect.clone(),
+                    author,
+                },
+                AnnotationsCmd::Resolve { id, note, expect } => Request::AnnotationResolve {
+                    id: id.clone(),
+                    note: note.clone(),
+                    expect: expect.clone(),
+                    author,
+                },
+                AnnotationsCmd::Reject { id, reason, expect } => Request::AnnotationReject {
+                    id: id.clone(),
+                    reason: reason.clone(),
+                    expect: expect.clone(),
+                    author,
+                },
+                AnnotationsCmd::Reopen { id, expect } => Request::AnnotationReopen {
+                    id: id.clone(),
+                    expect: expect.clone(),
+                    author,
+                },
+                AnnotationsCmd::Edit {
+                    id,
+                    comment,
+                    pins,
+                    expect,
+                } => Request::AnnotationEdit {
+                    id: id.clone(),
+                    comment: comment.clone(),
+                    pins: (!pins.is_empty()).then(|| refs(pins)),
+                    expect: expect.clone(),
+                    author,
+                },
+                AnnotationsCmd::Delete { id, expect } => Request::AnnotationDelete {
+                    id: id.clone(),
+                    expect: expect.clone(),
+                    author,
+                },
+            }
+        }
         Command::View(ViewCmd::List { part }) => Request::ViewList { part: part.clone() },
         Command::Explode(ExplodeCmd::List { part }) => Request::ExplodeList { part: part.clone() },
         Command::Explode(ExplodeCmd::Save {
@@ -3285,6 +3650,11 @@ fn request(cmd: &Command) -> Option<Request> {
             all: *all,
             rev: rev.rev.clone(),
         },
+        Command::Sheet { part, solid, rev } => Request::SheetGet {
+            part: part.clone(),
+            solid: solid.clone(),
+            rev: rev.rev.clone(),
+        },
         Command::Mass { of, tolerance, rev } => Request::Mass {
             of: of.clone(),
             tolerance: *tolerance,
@@ -3527,6 +3897,13 @@ fn request(cmd: &Command) -> Option<Request> {
                 }
             }
         }
+        Command::Mode { mode } => Request::ParticipantMode {
+            mode: match mode {
+                ModeArg::View => ryucad::live::Mode::View,
+                ModeArg::Annotate => ryucad::live::Mode::Annotate,
+                ModeArg::Edit => ryucad::live::Mode::Edit,
+            },
+        },
         Command::Focus { part, project, of } => Request::ViewFocus {
             part: part.clone(),
             project: *project,
@@ -3675,6 +4052,41 @@ fn no_daemon(cli: &Cli) -> bool {
 }
 
 /// The agent participant to act as.
+/// Refusals of `ryucad annotations` the parser can't make: a point with
+/// no place, a request that isn't JSON.
+fn annotations_usage(c: &AnnotationsCmd) -> Result<()> {
+    match c {
+        AnnotationsCmd::Add {
+            refs,
+            point: Some(_),
+            part,
+            ..
+        } if !matches!((part.is_some(), refs.len()), (true, 0) | (false, 1)) => Err(Error::new(
+            Code::Usage,
+            "--point goes with one reference, or with --part and none",
+        )),
+        AnnotationsCmd::Propose { request, .. } => serde_json::from_str::<Value>(request)
+            .map(drop)
+            .map_err(|e| Error::new(Code::Usage, format!("--request isn't JSON: {e}"))),
+        _ => Ok(()),
+    }
+}
+
+/// An annotation request's author with no daemon: the agent `--as` (or
+/// `RYUCAD_PARTICIPANT`) names. A daemon takes the connection's
+/// participant instead.
+fn with_author(req: Request, me: Option<&str>) -> Request {
+    let Some(me) = me else { return req };
+    if !(req.annotates() || matches!(req, Request::AnnotationApply { .. })) {
+        return req;
+    }
+    let mut params = req.params();
+    if let Some(p) = params.as_object_mut() {
+        p.entry("as").or_insert_with(|| json!(me));
+    }
+    Request::from_rpc(&req.method(), Some(params)).unwrap_or(req)
+}
+
 fn participant(cli: &Cli) -> Option<String> {
     cli.as_name
         .clone()
@@ -3851,12 +4263,16 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             ryucad::doctor::repair(&root, repairs, &ryucad::doctor::Params::from_json(&params)?)
         }
         cmd => {
+            if let Command::Annotations(c) = cmd {
+                annotations_usage(c)?;
+            }
             let req = absolute_worktrees(
                 request(cmd).expect("every other command is a request"),
                 &here,
             )?;
             let root = find_root(&here)?;
             let me = participant(cli);
+            let req = with_author(req, me.as_deref());
             let method = req.method();
             // A long request has a token, which Ctrl+C cancels, and its
             // progress on stderr with --progress.
@@ -3950,6 +4366,9 @@ fn lift(cmd: &Command, mut result: Value, warnings: &mut Vec<String>) -> Value {
             | Command::Appearance { .. }
             | Command::Render { .. }
             | Command::Export { .. }
+            | Command::Diff { .. }
+            | Command::Inspect { .. }
+            | Command::Mesh { .. }
     ) {
         return result;
     }

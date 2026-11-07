@@ -35,6 +35,8 @@ fn ryueda(run: &Path) -> Command {
     cmd.env("RYUEDA_RUNTIME_DIR", run)
         .env("RYUEDA_IDLE_TIMEOUT", "60")
         .env("RYUEDA_CONFIG_DIR", run.with_file_name("config"))
+        // A parts cache of the test's own: no catalogue this machine holds.
+        .env("RYUEDA_CACHE_DIR", run.with_file_name("cache"))
         // Random IDs a fixed sequence, the same in process and through a
         // daemon.
         .env("RYUEDA_ID_SEED", "cli")
@@ -61,6 +63,8 @@ struct Pair {
     direct: PathBuf,
     daemon: PathBuf,
     run: PathBuf,
+    /// Variables every command, and so the daemon it starts, gets.
+    env: Vec<(String, String)>,
 }
 
 impl Pair {
@@ -77,16 +81,34 @@ impl Pair {
             daemon: daemon.canonicalize().unwrap(),
             run: dir.path().join("run"),
             _dir: dir,
+            env: Vec::new(),
         }
     }
 
-    fn run_in(&self, top: &Path, sub: &str, args: &[&str]) -> (i32, Value) {
+    /// [`Pair::new`] whose every command gets `env`.
+    fn with_env(env: &[(&str, &str)]) -> Pair {
+        let mut p = Pair::new();
+        p.env = env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        p
+    }
+
+    fn command_in(&self, top: &Path, sub: &str, args: &[&str]) -> Command {
         let mut cmd = ryueda(&self.run);
         cmd.current_dir(top.join(sub)).args(args);
+        for (k, v) in &self.env {
+            cmd.env(k, v);
+        }
         if top == self.direct {
             cmd.env("RYUEDA_NO_DAEMON", "1");
         }
-        parse(cmd.output().unwrap(), top)
+        cmd
+    }
+
+    fn run_in(&self, top: &Path, sub: &str, args: &[&str]) -> (i32, Value) {
+        parse(self.command_in(top, sub, args).output().unwrap(), top)
     }
 
     /// Runs `args` in `sub` both ways and returns the common answer.
@@ -406,6 +428,11 @@ fn every_protocol_method_has_a_command() {
         ("libcomp.list", &["libcomp", "list"]),
         ("libcomp.delete", &["libcomp", "delete"]),
         ("parts.search", &["parts", "search"]),
+        ("parts.sync", &["parts", "sync"]),
+        ("parts.refresh", &["parts", "refresh"]),
+        ("parts.sources", &["parts", "sources"]),
+        ("parts.show", &["parts", "show"]),
+        ("parts.configure", &["parts", "configure"]),
         ("import.kicad", &["import", "kicad"]),
         ("rail.add", &["rail", "add"]),
         ("rail.edit", &["rail", "edit"]),
@@ -460,6 +487,7 @@ fn every_protocol_method_has_a_command() {
         ("session.hello", &["participants"]),
         ("participant.list", &["participants"]),
         ("subscribe", &["watch"]),
+        ("request.cancel", &["cancel"]),
         ("daemon.status", &["daemon", "status"]),
         ("daemon.shutdown", &["daemon", "stop"]),
     ];
@@ -483,7 +511,10 @@ impl Pair {
     /// A design project `board` naming a library project `passives`, the
     /// same in both folders.
     fn projects() -> Pair {
-        let p = Pair::new();
+        Pair::projects_in(Pair::new())
+    }
+
+    fn projects_in(p: Pair) -> Pair {
         assert_eq!(p.run_in(&p.direct, "board", &["init"]).0, 0);
         assert_eq!(p.run_in(&p.direct, "passives", &["init", "--library"]).0, 0);
         for d in ["board", "passives"] {
@@ -1010,7 +1041,11 @@ impl Pair {
     /// component `r_100k` in the board's own library, on the library
     /// project's 0402 footprint.
     fn with_resistor() -> Pair {
-        let p = Pair::projects();
+        Pair::with_resistor_in(Pair::new())
+    }
+
+    fn with_resistor_in(p: Pair) -> Pair {
+        let p = Pair::projects_in(p);
         p.write("passives/library/footprints/r_0402.json", &r0402(STEP));
         p.write("passives/library/models/r_0402.step", STEP);
         p.ok(&["symbol", "create", "R", "--ops", RESISTOR]);
@@ -1517,13 +1552,16 @@ fn netlists_from_the_cli() {
     p.ok(&["erc", "configure", "--severity", "pin_unconnected=default"]);
     // With nothing left in it, erc.json goes.
     assert!(!p.direct.join("board/erc.json").exists());
-    // `check` reads every file and runs ERC on every design.
+    // `check` reads every file and runs ERC on every design. The one
+    // warning: its parts have LCSC offers and this machine has no
+    // catalogue to judge their supply by.
     let report = p.ok(&["check"]);
     assert_eq!(
         (&report["errors"], &report["warnings"]),
-        (&json!(0), &json!(0)),
+        (&json!(0), &json!(1)),
         "{report}"
     );
+    assert_eq!(report["supply"][0]["details"]["reason"], "missing");
     p.ok(&[
         "component",
         "add",
@@ -2517,7 +2555,7 @@ fn parts_from_the_cli() {
         keys(&p.ok(&["parts", "search", "--like", "top/r1"])),
         keys(&like)
     );
-    p.fails(&["parts", "search", "--in", "jlc"], "invalid_param", 1);
+    p.fails(&["parts", "search", "--in", "digikey"], "invalid_param", 1);
     p.fails(&["parts", "search", "colour=red"], "invalid_param", 1);
     p.fails(
         &["parts", "search", "capacitance=lots"],
@@ -2526,4 +2564,256 @@ fn parts_from_the_cli() {
     );
     p.fails(&["parts", "search", "valve"], "invalid_param", 1);
     p.fails(&["parts", "search", "--like", "nope"], "not_found", 1);
+}
+
+#[test]
+fn parts_configure_from_the_cli() {
+    let p = Pair::projects();
+    let v = p.ok(&["parts", "configure"]);
+    assert_eq!(v["config"], json!({}));
+    let v = p.ok(&[
+        "parts",
+        "configure",
+        "--assembly",
+        "jlcpcb",
+        "--build-quantity",
+        "10",
+        "--source",
+        "library",
+        "--source",
+        "jlc",
+        "--severity",
+        "part_extended=error",
+    ]);
+    assert_eq!(
+        v["config"],
+        json!({"assembly": "jlcpcb", "build_quantity": 10,
+               "sources": ["library", "jlc"], "severity": {"part_extended": "error"}})
+    );
+    assert!(p.direct.join("board/parts.json").is_file());
+    let e = p.fails(
+        &["parts", "configure", "--severity", "pin_conflict=off"],
+        "invalid_param",
+        1,
+    );
+    assert_eq!(e["details"]["param"], "severity/pin_conflict");
+    p.fails(
+        &["parts", "configure", "--build-quantity", "0"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &["parts", "configure", "--source", "digikey"],
+        "invalid_param",
+        1,
+    );
+    let v = p.ok(&[
+        "parts",
+        "configure",
+        "--assembly",
+        "none",
+        "--build-quantity",
+        "default",
+        "--no-sources",
+        "--severity",
+        "part_extended=default",
+    ]);
+    assert_eq!(v["config"], json!({}));
+    assert!(
+        !p.direct.join("board/parts.json").exists(),
+        "nothing set, no file"
+    );
+}
+
+#[path = "support/fake_jlc.rs"]
+mod fake_jlc;
+
+#[test]
+fn the_jlc_catalogue_from_the_cli() {
+    let site = fake_jlc::start("2026-11-06T11:33:30+00:00", std::time::Duration::ZERO);
+    let p = Pair::with_resistor_in(Pair::with_env(&[
+        ("RYUEDA_JLC_URL", &site.base),
+        ("RYUEDA_NOW", "1793964810"),
+    ]));
+    let v = p.ok(&["parts", "sources"]);
+    assert_eq!(v["sources"][1]["state"], "missing");
+    let v = p.ok(&["parts", "search", "capacitor", "--in", "jlc"]);
+    assert_eq!(v["warnings"][0]["reason"], "missing");
+    p.fails(&["parts", "show", "lcsc:C1525"], "parts_not_found", 1);
+    let v = p.ok(&["parts", "sync", "jlc"]);
+    assert_eq!(
+        (v["parts"].as_u64(), v["files"].as_u64()),
+        (Some(5), Some(5))
+    );
+    assert_eq!(v["fetched_at"], 1_793_964_810u64);
+    let v = p.ok(&[
+        "parts",
+        "search",
+        "capacitor",
+        "capacitance=100nF",
+        "--in",
+        "jlc",
+        "--basic",
+        "--stock",
+        "1000",
+    ]);
+    assert_eq!(v["results"][0]["key"], "C1525");
+    assert!(v["warnings"].as_array().unwrap().is_empty());
+    let v = p.ok(&["parts", "show", "lcsc:C1525"]);
+    assert_eq!(v["records"][0]["stock"], 1_200_000);
+    p.fails(&["parts", "show", "lcsc:C9"], "parts_not_found", 1);
+    // A component from the record: identifiers only, its parameters typed.
+    p.ok(&[
+        "libcomp",
+        "create",
+        "C 1u",
+        "--symbol",
+        "r",
+        "--prefix",
+        "C",
+        "--footprint",
+        "lib/passives/footprint/r_0402",
+        "--category",
+        "capacitor",
+        "--param",
+        "package=0402",
+    ]);
+    let v = p.ok(&[
+        "libcomp",
+        "create",
+        "100n",
+        "--from",
+        "lcsc:C1525",
+        "--param",
+        "capacitance=100 nF",
+    ]);
+    assert_eq!(v["libcomp"]["mpn"], "CL05B104KO5NNNC");
+    assert_eq!(v["libcomp"]["parameters"], json!({"capacitance": "100 nF"}));
+    let v = p.ok(&["libcomp", "edit", "100n", "--from", "lcsc:C1525"]);
+    assert_eq!(v["changed"], json!([]));
+    // Supply: two of C52923 (40 in stock, Extended), for 100 boards.
+    let v = p.ok(&[
+        "libcomp",
+        "create",
+        "placed",
+        "--id",
+        "placed",
+        "--from",
+        "lcsc:C52923",
+        "--param",
+        "capacitance=1 uF",
+    ]);
+    assert_eq!(
+        v["chose"]["symbol"]["reference"], "lib/self/symbol/r",
+        "{v}"
+    );
+    p.ok(&["block", "create", "Top", "--id", "top"]);
+    for i in 0..2 {
+        p.ok(&[
+            "component",
+            "add",
+            "top",
+            "--of",
+            "placed",
+            "--id",
+            &format!("c{i}"),
+        ]);
+    }
+    p.ok(&[
+        "design", "create", "Board", "--root", "top", "--id", "board",
+    ]);
+    p.ok(&[
+        "parts",
+        "configure",
+        "--assembly",
+        "jlcpcb",
+        "--build-quantity",
+        "100",
+    ]);
+    let (_, v) = p.both_in("board", &["check"]);
+    let report = if v["ok"] == true {
+        &v["result"]
+    } else {
+        &v["error"]["details"]["report"]
+    };
+    let codes: Vec<&str> = report["supply"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(codes, ["part_extended", "part_out_of_stock"], "{report}");
+    assert_eq!(report["supply"][1]["details"]["needed"], 200);
+    let v = p.ok(&["parts", "refresh"]);
+    assert_eq!(v["fresh"][0]["source"], "jlc");
+    let v = p.ok(&["parts", "refresh", "--force"]);
+    assert_eq!(v["synced"][0]["source"], "jlc");
+}
+
+#[test]
+fn a_sync_is_cancelled_by_its_token_and_keeps_the_old_catalogue() {
+    let fast = fake_jlc::start("2026-11-06T11:33:30+00:00", std::time::Duration::ZERO);
+    let slow = fake_jlc::start(
+        "2026-11-07T00:00:00+00:00",
+        std::time::Duration::from_millis(800),
+    );
+    let p = Pair::projects_in(Pair::with_env(&[("RYUEDA_JLC_URL", &slow.base)]));
+    // The catalogue there first, in process from the fast site.
+    let mut first = p.command_in(&p.direct, "board", &["parts", "sync", "jlc"]);
+    first.env("RYUEDA_JLC_URL", &fast.base);
+    assert_eq!(parse(first.output().unwrap(), &p.direct).0, 0);
+    let (_, before) = p.run_in(&p.daemon, "board", &["parts", "sources"]);
+    assert_eq!(
+        before["result"]["sources"][1]["created"],
+        "2026-11-06T11:33:30+00:00"
+    );
+    // Started without waiting: assert_cmd's commands only run to the end.
+    #[allow(deprecated)]
+    let mut running = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryueda"));
+    running
+        .current_dir(p.daemon.join("board"))
+        .args(["parts", "sync", "jlc", "--token", "sync1", "--progress"])
+        .env("RYUEDA_RUNTIME_DIR", &p.run)
+        .env("RYUEDA_IDLE_TIMEOUT", "60")
+        .env("RYUEDA_CONFIG_DIR", p.run.with_file_name("config"))
+        .env("RYUEDA_CACHE_DIR", p.run.with_file_name("cache"))
+        .env("RYUEDA_ID_SEED", "cli")
+        .env("RYUEDA_JLC_URL", &slow.base)
+        .env_remove("RYUEDA_NO_DAEMON")
+        .env_remove("RYUEDA_PARTICIPANT");
+    let running = running
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Once the manifest is in (so progress has begun), asked again until
+    // the daemon has the request: the whole sync takes five files' waits.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let start = std::time::Instant::now();
+    let v = loop {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let (code, v) = p.run_in(&p.daemon, "board", &["cancel", "sync1"]);
+        if code == 0 && v["result"]["cancelled"] == true {
+            break v;
+        }
+        assert!(start.elapsed().as_secs() < 3, "never cancelled: {v}");
+    };
+    assert_eq!(v["result"]["token"], "sync1");
+    let out = running.wait_with_output().unwrap();
+    let (code, v) = parse(out.clone(), &p.daemon);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (4, Some("cancelled")),
+        "{v}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("fetch: "), "progress on stderr: {stderr}");
+    let (_, after) = p.run_in(&p.daemon, "board", &["parts", "sources"]);
+    assert_eq!(
+        after["result"]["sources"][1]["created"],
+        "2026-11-06T11:33:30+00:00"
+    );
+    // In process there is nothing to cancel.
+    let (_, v) = p.run_in(&p.direct, "board", &["cancel", "sync1"]);
+    assert_eq!(v["error"]["code"], "no_live_session");
 }

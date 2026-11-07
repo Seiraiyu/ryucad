@@ -146,6 +146,19 @@ impl Remote {
         let mut q = self.queue();
         q.bytes += bytes.len() as u64;
         q.items.push_back((kind, key, bytes));
+        self.trim(&mut q);
+        if !q.writer {
+            q.writer = true;
+            let me = Arc::downgrade(self);
+            std::thread::spawn(move || write_behind(me));
+        }
+        drop(q);
+        self.queued.notify_all();
+    }
+
+    /// Drops the oldest entries while more than [`MAX_QUEUED`] bytes wait
+    /// (keeping the newest), with one note the first time.
+    fn trim(&self, q: &mut Queue) {
         while q.bytes > MAX_QUEUED && q.items.len() > 1 {
             let (_, _, old) = q.items.pop_front().expect("more than one");
             q.bytes -= old.len() as u64;
@@ -159,13 +172,6 @@ impl Remote {
                 );
             }
         }
-        if !q.writer {
-            q.writer = true;
-            let me = Arc::downgrade(self);
-            std::thread::spawn(move || write_behind(me));
-        }
-        drop(q);
-        self.queued.notify_all();
     }
 
     /// Waits up to `timeout` for every queued entry to be sent (or
@@ -588,8 +594,11 @@ fn write_behind(remote: Weak<Remote>) {
                 }
             }
             Err(e) => {
+                // Back at the front; what was queued while it was out may
+                // have filled the bound, which it must keep.
                 q.bytes += item.2.len() as u64;
                 q.items.push_front(item);
+                r.trim(&mut q);
                 r.failed(e);
             }
         }
@@ -799,11 +808,34 @@ pub(crate) mod tests {
     #[test]
     fn past_the_bound_the_oldest_are_dropped() {
         let fake = Fake::start();
-        fake.with(|s| s.fail = Some(500));
-        let r = Arc::new(Remote::new(options(&fake, Some(WRITE))));
+        // The first send stalls while the rest are queued, then fails: the
+        // entry it puts back must not take the queue past the bound. A
+        // long backoff keeps the writer from sending again before we look.
+        fake.with(|s| {
+            s.fail = Some(500);
+            s.delay = Duration::from_millis(300);
+        });
+        let r = Arc::new(Remote::new(Options {
+            backoff: Duration::from_secs(60),
+            ..options(&fake, Some(WRITE))
+        }));
         let big = vec![0u8; (MAX_QUEUED / 4) as usize];
-        for i in 0..6 {
-            r.send_later(Kind::Mesh, key(i), entry(&ME, &big));
+        let entries: Vec<_> = (0..6).map(|_| entry(&ME, &big)).collect();
+        let mut entries = entries.into_iter();
+        r.send_later(Kind::Mesh, key(0), entries.next().unwrap());
+        // The rest go while the first is out.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !r.queue().busy {
+            assert!(Instant::now() < deadline, "the writer never sent");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        for (i, e) in (1..).zip(entries) {
+            r.send_later(Kind::Mesh, key(i), e);
+        }
+        // Once the failure is recorded, the entry is back in the queue.
+        while r.stats()["problem"].is_null() {
+            assert!(Instant::now() < deadline, "the send never failed");
+            std::thread::sleep(Duration::from_millis(10));
         }
         let s = r.stats();
         assert!(s["queued_bytes"].as_u64().unwrap() <= MAX_QUEUED);
