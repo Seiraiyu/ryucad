@@ -156,6 +156,10 @@ required-features = ["occt"]
 name = "fill"
 required-features = ["occt"]
 
+[[test]]
+name = "drafts"
+required-features = ["occt"]
+
 # STL and 3MF read by OCCT and lib3mf (design 193, plan 8.A).
 [[test]]
 name = "formats"
