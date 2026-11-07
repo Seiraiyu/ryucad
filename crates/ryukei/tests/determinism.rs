@@ -3648,6 +3648,7 @@ sections! {
     bent => bent_section,
     silhouettes => silhouettes_section,
     hidden_lines => hidden_lines_section,
+    section_views => section_views_section,
     tweaks => tweaks_section,
     drafts => drafts_section,
 }
@@ -4175,6 +4176,100 @@ fn hidden_lines_section(golden: &mut Golden) {
                     "{:?}",
                     view(&all, v, &ViewOptions::default()).unwrap().pieces
                 ));
+            }
+        });
+    }
+}
+
+/// Sections and section views (plan 10.C): a block, a cylinder, a ball
+/// and a drilled plate cut by an axis plane and by a tilted one, each
+/// cut body, journal and cap hashed, and each cut body viewed from the
+/// side cut away and from a corner, on one thread and eight.
+fn section_views_section(golden: &mut Golden) {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::{Frame, Plane, Point3};
+    use ryukei::project::{Placed, View, ViewOptions, section, view};
+    let mut s = golden.section("section_views");
+    let plate = primitive::block(OpKey(0x6200), 0.04, 0.03, 0.01, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let pin = primitive::cylinder(OpKey(0x6201), 0.004, 0.02, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let drilled = boolean(
+        OpKey(0x6202),
+        BooleanOp::Subtract,
+        &plate,
+        &[Tool {
+            key: ToolKey(1),
+            body: &pin,
+            place: Rigid::translation(Vector3::new(0.02, 0.015, -0.005)),
+        }],
+    )
+    .unwrap()
+    .0;
+    let bodies = [
+        primitive::block(OpKey(0x6203), 0.02, 0.02, 0.02, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+        primitive::cylinder(OpKey(0x6204), 0.01, 0.02, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+        primitive::sphere(OpKey(0x6205), 0.01, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+        drilled,
+    ];
+    let planes = [
+        Plane::new(
+            Frame::new(
+                Point3::new(0.005, 0.005, 0.005),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            )
+            .unwrap(),
+        ),
+        Plane::new(
+            Frame::new(
+                Point3::new(0.004, 0.006, 0.003),
+                Vector3::new(1.0, 0.3, 0.2),
+                Vector3::new(0.0, 0.0, 1.0),
+            )
+            .unwrap(),
+        ),
+    ];
+    let corner = View::new(Vector3::new(1.0, -1.0, 1.0), Vector3::new(0.0, 0.0, 1.0)).unwrap();
+    for threads in [1, 8] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            for b in &bodies {
+                for (k, p) in planes.iter().enumerate() {
+                    let cut = section(OpKey(0x6210 + k as u128), b, p).unwrap();
+                    hash_body(&mut s, &cut.body, &cut.journal);
+                    s.str(&format!("{:?}", cut.faces));
+                    if cut.body.faces().next().is_none() {
+                        continue;
+                    }
+                    let n = p.frame().z().get();
+                    let up = if n.cross(Vector3::new(0.0, 0.0, 1.0)).length() > 0.1 {
+                        Vector3::new(0.0, 0.0, 1.0)
+                    } else {
+                        Vector3::new(0.0, 1.0, 0.0)
+                    };
+                    for v in [View::new(n, up).unwrap(), corner] {
+                        let placed = [Placed {
+                            body: &cut.body,
+                            place: Rigid::IDENTITY,
+                        }];
+                        s.str(&format!(
+                            "{:?}",
+                            view(&placed, &v, &ViewOptions::default()).unwrap().pieces
+                        ));
+                    }
+                }
             }
         });
     }
