@@ -6,6 +6,7 @@
 pub mod allowance;
 pub mod report;
 pub mod section;
+pub mod unfold;
 
 use crate::doc::id::Id;
 use crate::error::{Code, Error};
@@ -634,12 +635,24 @@ fn flange_origins(
         .collect()
 }
 
-/// What a flange reads of its founder that shapes no body of the
-/// founder's own: its radius and relief, by value (a parameter the
-/// founder's radius reads is the flange's input too, and the flange's
-/// file names no such parameter). Its input hash adds them. `None` for
-/// anything else.
+/// What a flange or unfold reads of its founder that shapes no body of
+/// the founder's own, by value: a flange's radius and relief, an unfold's
+/// allowance when it gives none (a parameter the founder's settings read
+/// is the feature's input too, and its file names no such parameter).
+/// Its input hash adds them. `None` for anything else.
 pub fn founder_settings(part: &Part, f: &Feature) -> Option<Value> {
+    if let Some(u) = f.unfold() {
+        if u.allowance.is_some() {
+            return None;
+        }
+        let b = founder(part, &u.target)?;
+        use crate::doc::sheet_metal::Allowance;
+        return Some(match &b.allowance {
+            Allowance::KFactor(k) => json!({"k_factor": format!("{:?}", k.number())}),
+            Allowance::Deduction(q) => json!({"deduction_m": format!("{:?}", q.meters())}),
+            Allowance::Length(q) => json!({"allowance_m": format!("{:?}", q.meters())}),
+        });
+    }
     let b = founder(part, &f.flange()?.target)?;
     Some(json!({
         "radius_m": format!("{:?}", b.radius.meters()),

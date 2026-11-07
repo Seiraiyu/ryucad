@@ -59,6 +59,19 @@ pub fn developed(a: &Allowance, r: f64, t: f64, theta: f64) -> Result<f64, Refus
     })
 }
 
+/// A bend's allowance as a note writes it: `K0.44`, or `BA2.157`, the
+/// developed length in millimetres to three decimals, trailing zeros
+/// dropped.
+pub fn note(k: &Kernel) -> String {
+    match k {
+        Kernel::KFactor(k) => format!("K{k}"),
+        Kernel::Length(ba) => {
+            let s = format!("{:.3}", ba * 1e3);
+            format!("BA{}", s.trim_end_matches('0').trim_end_matches('.'))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +114,13 @@ mod tests {
         assert_eq!(developed(&long, r, t, FRAC_PI_2), Err(Refused::TooLong));
         let a = Allowance::Length(q("3.1 mm", Field::Length(Unit::Mm)));
         assert_eq!(kernel(&a, r, t, PI), Ok(Kernel::Length(3.1 * 0.001)));
+    }
+
+    #[test]
+    fn notes_read_as_shops_write_them() {
+        assert_eq!(note(&Kernel::KFactor(0.44)), "K0.44");
+        assert_eq!(note(&Kernel::Length(2.1e-3)), "BA2.1");
+        assert_eq!(note(&Kernel::Length(2.0e-3)), "BA2");
+        assert_eq!(note(&Kernel::Length(2.15749e-3)), "BA2.157");
     }
 }

@@ -2341,10 +2341,14 @@ fn rebuild_with(
             crate::sheet_metal::flange(part, solids, id, x, before, run).map(solid),
             None,
         ),
-        Feature::Unfold(_) | Feature::Refold(_) => (
+        Feature::Unfold(u) => (
+            crate::sheet_metal::unfold::unfold(part, solids, id, u, before, run).map(solid),
+            None,
+        ),
+        Feature::Refold(_) => (
             Err(Error::new(
                 Code::Internal,
-                format!("{} {id} is built from 16.B's Task 6", f.type_name()),
+                format!("refold {id} is built from 16.B's Task 7"),
             )
             .with("feature", id)),
             None,
@@ -2423,8 +2427,9 @@ pub(crate) fn input_hash(
         x.update(now.map_or("missing", |f| f.blake3.as_str()).as_bytes());
         h = x.finalize();
     }
-    // A flange takes its founder's radius and relief, which shape no body
-    // of the founder's own, so the founder's result can't stand for them.
+    // A flange takes its founder's radius and relief, and an unfold its
+    // allowance, which shape no body of the founder's own, so the
+    // founder's result can't stand for them.
     if let Some(s) = crate::sheet_metal::founder_settings(part, f) {
         let mut x = blake3::Hasher::new();
         x.update(h.as_bytes());
