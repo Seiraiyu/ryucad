@@ -3888,7 +3888,15 @@ fn check_references(
 ) -> Result<()> {
     // A loft's sections are matched against the rebuild whatever they
     // reference, and what a feature acts on must be a solid (ryucad 18).
-    let reads_bodies = !crate::kind::bodies_read(f).is_empty();
+    // Only a feature whose file says so makes a sheet, so a part holding
+    // none needs no rebuild to judge what its features act on.
+    let may_hold_sheets = session
+        .project()
+        .part(part)?
+        .features
+        .values()
+        .any(|g| g.as_ref().is_ok_and(|g| g.surface()));
+    let reads_bodies = may_hold_sheets && !crate::kind::bodies_read(f).is_empty();
     let planar = matches!(f, Feature::Planar(_));
     if f.loft().is_none()
         && f.references().is_empty()
@@ -4718,11 +4726,6 @@ fn feature_list(session: &mut Session, part: &str) -> Result<Value> {
     Ok(json!({"part": p.id, "features": features, "orphans": p.orphans(), "revision": p.revision}))
 }
 
-/// A part's rebuild as agents and subscribers see it: each feature's
-/// status, hash and counts. With `occurrences`, an assembly's occurrences
-/// come apart, as the JSON text of the report's `occurrences` (#533: the
-/// root's 100,000 took about 450 MiB as a `Value` tree), for
-/// [`object_text`] to write into the report's text.
 /// A body's kind in a report: `kind`, and for a sheet how many
 /// `boundaries` it has and whether it is `closed`.
 fn kinds(v: &mut Value, b: &ryukei::topo::Body) {
@@ -4734,6 +4737,11 @@ fn kinds(v: &mut Value, b: &ryukei::topo::Body) {
     }
 }
 
+/// A part's rebuild as agents and subscribers see it: each feature's
+/// status, hash and counts. With `occurrences`, an assembly's occurrences
+/// come apart, as the JSON text of the report's `occurrences` (#533: the
+/// root's 100,000 took about 450 MiB as a `Value` tree), for
+/// [`object_text`] to write into the report's text.
 fn part_report(
     session: &mut Session,
     id: &Id,

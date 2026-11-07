@@ -375,9 +375,6 @@ fn two_daemons_share_one_disk_cache() {
         ["features", "tools", "meshes"].map(|k| s["kinds"][k]["entries"].as_u64().unwrap())
     };
     assert_eq!(kinds(&filled), [2, 1, 1], "{filled}");
-    // Writing b's cut checked its target is a solid (ryucad 18), which
-    // rebuilt the box in b's daemon: stop it, so what it holds is gone.
-    cli(&b, &run, &cache, &["daemon", "stop"]);
     // Their times put back an hour, so a read shows.
     let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
     for p in times(&cache).keys() {
