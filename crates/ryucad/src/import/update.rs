@@ -229,8 +229,7 @@ pub fn plan(
     // bodies a product gained where a part holds all its old ones.
     // Each held group's bodies, and the mode its first feature (in part
     // and list order) has, which a body the product gained takes.
-    let mut held: BTreeMap<(Id, Option<usize>), (Vec<u32>, Option<crate::doc::import::Mode>)> =
-        BTreeMap::new();
+    let mut held: BTreeMap<(Id, Option<usize>), Held> = BTreeMap::new();
     for (p, fid, i) in &features {
         let group = match &i.product {
             Some(r) => def_of(r).map(Some),
@@ -732,6 +731,9 @@ pub fn products_diff(path: &str, from: Option<&[u8]>, to: Option<&[u8]>) -> Valu
     }
     json!({"added": added, "removed": removed, "changed": changed})
 }
+
+/// A held group's bodies, and the mode its first feature has.
+type Held = (Vec<u32>, Option<crate::doc::import::Mode>);
 
 #[cfg(test)]
 mod tests {
