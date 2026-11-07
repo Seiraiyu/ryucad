@@ -234,3 +234,187 @@ fn apart_within_gives_up_when_halted() {
         None
     );
 }
+
+#[test]
+fn the_second_surface_is_split_neither_as_the_first_nor_its_mirror() {
+    // On the attempt off the surfaces' pieces; the first two split both
+    // surfaces alike, as they always have.
+    for (attempt, &f) in super::SPLITS.iter().enumerate() {
+        let g = super::second_fraction(attempt);
+        let (s, t) = (super::CELL_SHIFTS[attempt], super::second_shift(attempt));
+        if s > 0.0 {
+            assert!(
+                (g - f).abs() > 1e-3 && (g - (1.0 - f)).abs() > 1e-3,
+                "{attempt}: {f} {g}"
+            );
+            assert!(
+                (t - s).abs() > 1e-3 && (t - (1.0 - s)).abs() > 1e-3,
+                "{attempt}: {s} {t}"
+            );
+        } else {
+            assert_eq!((g, t), (f, 0.0), "{attempt}");
+        }
+    }
+}
+
+/// A face of the footed corner pair (issue #177) and two boxes of it
+/// the general tracer's search met side by side, too small for Krawczyk's
+/// test to contract (`E`'s rounding at a point, times the inverse
+/// Jacobian, is wider than they are). The crossing lies in the second.
+const CORNER_AT: f64 = -3.117_287_711_041_021_8;
+const CORNER_X: [[[f64; 2]; 3]; 2] = [
+    [
+        [0.167_789_468_676_068_42, 0.167_789_468_681_042_77],
+        [1.056_348_278_084_568_3, 1.056_348_278_094_517],
+        [-3.117_287_711_222_461_5, -3.117_287_711_041_021_8],
+    ],
+    [
+        [0.167_789_468_681_042_77, 0.167_789_468_686_017_16],
+        [1.056_348_278_084_568_3, 1.056_348_278_094_517],
+        [-3.117_287_711_222_461_5, -3.117_287_711_041_021_8],
+    ],
+];
+
+fn corner_face<'a>(a: &'a Surface, b: &'a Surface, m: &'a Meter<'a>) -> Face<'a> {
+    Face {
+        sheets: [Sheet::of(a), Sheet::of(b)],
+        meter: m,
+        side: 0,
+        param: 1,
+        at: CORNER_AT,
+        reach: [[f64::NEG_INFINITY, f64::INFINITY]; 3],
+    }
+}
+
+#[test]
+fn a_face_crossing_rounding_hides_is_certified_by_inflation() {
+    let (a, b) = crate::testing::footed_corner_pair();
+    let m = Meter::free(); // unmetered: a test
+    let face = corner_face(&a, &b, &m);
+    let x = CORNER_X[0];
+    let (em, jac) = face.enclose(x).unwrap();
+    let (at, _) = face
+        .enclose(x.map(|[lo, hi]| {
+            let c = (lo + hi) / 2.0;
+            [c, c]
+        }))
+        .unwrap();
+    assert_eq!(krawczyk3(at, jac, x), None, "{em:?}");
+    assert!(outgrown(&at, &jac, x));
+    let (r, b) = face.inflated(x).expect("certified");
+    // The box holds no crossing: the one its certified box holds lies
+    // beyond it.
+    assert!((0..3).all(|k| b[k][0] <= x[k][0] && x[k][1] <= b[k][1]));
+    assert!((0..3).all(|k| b[k][0] <= r[k] && r[k] <= b[k][1]));
+    assert!(!(0..3).all(|k| x[k][0] <= r[k] && r[k] < x[k][1]), "{r:?}");
+    let (at, _) = face
+        .enclose(b.map(|[lo, hi]| {
+            let c = (lo + hi) / 2.0;
+            [c, c]
+        }))
+        .unwrap();
+    let (_, jac) = face.enclose(b).unwrap();
+    assert_eq!(krawczyk3(at, jac, b), Some(true));
+}
+
+#[test]
+fn inflation_stays_within_the_faces_reach() {
+    let (a, b) = crate::testing::footed_corner_pair();
+    let m = Meter::free(); // unmetered: a test
+    let mut face = corner_face(&a, &b, &m);
+    let x = CORNER_X[0];
+    let (_, b) = face.inflated(x).expect("certified");
+    // The certified box reaches past `x`: held to `x`, inflation gives up
+    // (and splitting decides), as it does where an offset's loose
+    // enclosures, not rounding, make a box outgrown.
+    assert!((0..3).any(|k| b[k][0] < x[k][0] || x[k][1] < b[k][1]));
+    face.reach = x;
+    assert_eq!(face.inflated(x), None);
+    face.reach = b;
+    assert!(face.inflated(x).is_some());
+}
+
+#[test]
+fn neighbouring_boxes_claim_an_inflated_crossing_once() {
+    let (a, b) = crate::testing::footed_corner_pair();
+    let m = Meter::free(); // unmetered: a test
+    let face = corner_face(&a, &b, &m);
+    for order in [[0, 1], [1, 0]] {
+        let shared = Inflated::default();
+        let claims = order.map(|i| face.claim(CORNER_X[i], &shared).expect("certified"));
+        let [first, second] = claims;
+        // Both name the same root, and exactly one box (the second)
+        // holds it.
+        let roots: Vec<[f64; 3]> = shared.borrow().iter().map(|&(r, _)| r).collect();
+        assert!(roots.windows(2).all(|w| w[0] == w[1]), "{roots:?}");
+        let held = |c: &Claim, i: usize| (c.0.is_some(), i);
+        let mut by_box = [held(&first, order[0]), held(&second, order[1])];
+        by_box.sort_by_key(|&(_, i)| i);
+        assert_eq!(by_box, [(false, 0), (true, 1)], "{order:?}");
+    }
+}
+
+#[test]
+fn a_periodic_direction_cut_off_its_start_folds_its_end_onto_its_start() {
+    // A cylinder's first cells moved on by the third attempt's shifts end a
+    // period past where they start, beyond the domain's end: a crossing on
+    // the face there is the one on the face at their start (issue #177's
+    // footed corners found each such crossing twice and refused it).
+    let cyl =
+        Surface::Cylinder(Cylinder::new(frame((0.0, 0.0, 0.0), (0.0, 0.0, 1.0)), 0.7).unwrap());
+    let m = Meter::free(); // unmetered: a test
+    for side in 0..2 {
+        let mut t = Tracer::new([&cyl, &cyl], &region(), SPLITS[2], &m);
+        t.shift = CELL_SHIFTS[2];
+        t.attempt = 2;
+        let firsts = [
+            cells_off(&cyl, &t.region, t.shift),
+            cells_off(&cyl, &t.region, second_shift(2)),
+        ];
+        t.note_wraps(&firsts);
+        let [lo, hi] = t.wraps[side][0].expect("a whole period");
+        let [d0, _] = cyl.domain()[0];
+        assert!(lo > d0, "{side}: {lo}");
+        assert!((hi - lo - TAU).abs() < 1e-12, "{side}: {lo} {hi}");
+        assert_eq!(t.plane(side, 0, hi), t.plane(side, 0, lo), "{side}");
+        assert_eq!(t.wraps[side][1], None, "{side}");
+    }
+}
+
+#[test]
+fn a_footed_corners_tangencies_are_saddles_with_four_ends() {
+    // Two fillets of a ball corner's cap edges (issue #177) touch where the
+    // corner triangle's vertex is and again where their tubes' tops meet:
+    // both are saddles, two branches crossing at each.
+    let (a, b) = crate::testing::footed_corner_pair();
+    let region = crate::testing::footed_corner_region();
+    let m = Meter::free(); // unmetered: a test
+    let topo = trace(&a, &b, &region, &m).expect("traced");
+    assert!(topo.points.is_empty(), "{:?}", topo.points);
+    assert!(topo.tangents.is_empty());
+    on_both(&a, &b, &topo);
+    // The branches' ends, gathered where they coincide.
+    let mut ends: Vec<(Point3, usize)> = Vec::new();
+    for br in &topo.branches {
+        assert!(!br.closed);
+        for p in [br.points[0], *br.points.last().unwrap()] {
+            match ends.iter_mut().find(|(q, _)| q.distance(p) <= 1e-9) {
+                Some((_, n)) => *n += 1,
+                None => ends.push((p, 1)),
+            }
+        }
+    }
+    let meeting: Vec<_> = ends.iter().filter(|&&(_, n)| n > 1).collect();
+    assert_eq!(meeting.len(), 2, "{ends:?}");
+    for &&(p, n) in &meeting {
+        assert_eq!(n, 4, "{p:?}");
+        // Tangent there: the normals are parallel.
+        let fa = a.project(p);
+        let fb = b.project(p);
+        let (na, nb) = (
+            a.normal(fa.param.0, fa.param.1).unwrap(),
+            b.normal(fb.param.0, fb.param.1).unwrap(),
+        );
+        assert!(na.get().cross(nb.get()).length() < 1e-6, "{p:?}");
+    }
+}

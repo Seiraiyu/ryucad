@@ -466,12 +466,13 @@ impl Project {
             match in_part {
                 Some(id) => ids.insert(id),
                 // Git's attributes, ryupdm's settings and its release
-                // records, and the material library, define nothing
-                // ryucad builds.
+                // records, the material library and annotations define
+                // nothing ryucad builds.
                 None if path == ATTRIBUTES
                     || path == PDM_CONFIG
                     || path == super::materials::MATERIALS
-                    || path.starts_with(&format!("{RELEASES}/")) =>
+                    || path.starts_with(&format!("{RELEASES}/"))
+                    || path.starts_with(&format!("{}/", super::annotation::ANNOTATIONS)) =>
                 {
                     continue;
                 }

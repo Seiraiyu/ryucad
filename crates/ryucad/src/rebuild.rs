@@ -536,16 +536,19 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Shell(_)
         | Feature::Offset(_)
         | Feature::Mirror(_)
-        | Feature::Split(_) => Err(Error::new(
+        | Feature::Split(_)
+        | Feature::Flange(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} makes no body of its own", f.type_name()),
         )
         .with("feature", id)),
-        Feature::Extrude(_) | Feature::Revolve(_) | Feature::Hole(_) => Err(Error::new(
-            Code::Internal,
-            format!("{} {id} is built from its sketch", f.type_name()),
-        )
-        .with("feature", id)),
+        Feature::Extrude(_) | Feature::Revolve(_) | Feature::Hole(_) | Feature::BaseFlange(_) => {
+            Err(Error::new(
+                Code::Internal,
+                format!("{} {id} is built from its sketch", f.type_name()),
+            )
+            .with("feature", id))
+        }
         Feature::Sweep(_) => Err(Error::new(
             Code::Internal,
             format!("sweep {id} is built from its profile and path"),
@@ -2137,6 +2140,15 @@ fn rebuild_with(
             crate::body::build(part, solids, id, f, before, run).map(solid),
             None,
         ),
+        Feature::BaseFlange(b) => (
+            crate::sheet_metal::base_flange(part, id, b, before, run)
+                .map(|built| solid(Made::new(vec![(id.clone(), Arc::new(built))]))),
+            None,
+        ),
+        Feature::Flange(x) => (
+            crate::sheet_metal::flange(part, solids, id, x, before, run).map(solid),
+            None,
+        ),
         Feature::Split(x) => (
             build_split(part, solids, id, x, before, run).map(solid),
             None,
@@ -2209,6 +2221,15 @@ pub(crate) fn input_hash(
         x.update(h.as_bytes());
         let now = part.imports.get(&i.file.path);
         x.update(now.map_or("missing", |f| f.blake3.as_str()).as_bytes());
+        h = x.finalize();
+    }
+    // A flange takes its founder's radius and relief, which shape no body
+    // of the founder's own, so the founder's result can't stand for them.
+    if let Some(s) = crate::sheet_metal::founder_settings(part, f) {
+        let mut x = blake3::Hasher::new();
+        x.update(h.as_bytes());
+        x.update(b"ryucad.sheet_metal.settings\0");
+        x.update(crate::doc::canonical::to_string(&s).as_bytes());
         h = x.finalize();
     }
     // A pattern reads its seeds' own bodies and places too.
@@ -2396,6 +2417,7 @@ pub fn failure_kept(e: &Error) -> bool {
             | Code::ShellFailed
             | Code::OffsetFailed
             | Code::MirrorFailed
+            | Code::SheetMetalFailed
     )
 }
 

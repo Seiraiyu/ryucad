@@ -157,6 +157,20 @@ fn healing_is_bounded() {
 }
 
 #[test]
+fn a_reference_is_bounded() {
+    use ryukei::heal::{ReferenceOptions, reference, reference_with, seamed};
+    let body = drilled();
+    let shape = seamed(&body, 1e-7).unwrap();
+    let opts = ReferenceOptions::default();
+    let plain = reference(OpKey(7), &shape, &opts).unwrap().0;
+    let spent = bounded("reference", |w| reference_with(OpKey(7), &shape, &opts, w));
+    let w = Work::unlimited();
+    let with = reference_with(OpKey(7), &shape, &opts, &w).unwrap().0;
+    assert_eq!(with.dump(), plain.dump());
+    eprintln!("reference: {spent} units");
+}
+
+#[test]
 fn a_blend_is_bounded() {
     use ryukei::blend::{BlendKind, EdgeBlend, blend, blend_with};
     let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
@@ -195,6 +209,80 @@ fn offsets_and_shells_are_bounded() {
     };
     let spent = bounded("shell", |w| shell_with(OpKey(9), &cube, &hollow, w));
     eprintln!("shell: {spent} units");
+}
+
+#[test]
+fn tweaks_are_bounded() {
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::tweak::{
+        MoveSpec, OffsetFacesSpec, ReplaceSpec, move_faces_with, offset_faces_with,
+        replace_faces_with,
+    };
+    let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+    let top = Name::derive(OpKey(1), Role::Face(FaceRole::PlusZ), &[]);
+    let side = Name::derive(OpKey(1), Role::Face(FaceRole::PlusX), &[]);
+    let up = MoveSpec {
+        faces: vec![top],
+        motion: Rigid::translation(ryukei::geom::Vector3::new(0.0, 0.0, 0.002)),
+        tangent: false,
+    };
+    let spent = bounded("move_faces", |w| move_faces_with(OpKey(8), &cube, &up, w));
+    eprintln!("move_faces: {spent} units");
+    let out = OffsetFacesSpec {
+        faces: vec![(top, 0.001), (side, 0.002)],
+        tangent: false,
+    };
+    let spent = bounded("offset_faces", |w| {
+        offset_faces_with(OpKey(8), &cube, &out, w)
+    });
+    eprintln!("offset_faces: {spent} units");
+    let plane = ryukei::geom::Surface::Plane(ryukei::geom::Plane::new(
+        ryukei::geom::Frame::new(
+            ryukei::geom::Point3::new(0.0, 0.0, 0.012),
+            ryukei::geom::Vector3::new(0.0, 0.0, 1.0),
+            ryukei::geom::Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap(),
+    ));
+    let flush = ReplaceSpec {
+        faces: vec![(top, plane)],
+    };
+    let spent = bounded("replace_faces", |w| {
+        replace_faces_with(OpKey(8), &cube, &flush, w)
+    });
+    eprintln!("replace_faces: {spent} units");
+}
+
+#[test]
+fn drafts_are_bounded() {
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::tweak::{DraftFace, DraftSpec, Hinge, draft_with};
+    let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+    let walls = [
+        FaceRole::PlusX,
+        FaceRole::MinusX,
+        FaceRole::PlusY,
+        FaceRole::MinusY,
+    ]
+    .map(|r| Name::derive(OpKey(1), Role::Face(r), &[]));
+    let spec = DraftSpec {
+        pull: ryukei::geom::UnitVector3::exact(Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+        angle: 0.05,
+        hinge: Hinge::Neutral {
+            origin: ryukei::geom::Point3::ORIGIN,
+        },
+        faces: walls
+            .iter()
+            .map(|&face| DraftFace {
+                face,
+                angle: None,
+                flip: false,
+            })
+            .collect(),
+        tangent: false,
+    };
+    let spent = bounded("draft", |w| draft_with(OpKey(8), &cube, &spec, w));
+    eprintln!("draft: {spent} units");
 }
 
 #[test]
@@ -245,6 +333,51 @@ fn blending_a_sheet_is_bounded() {
         blend_with(OpKey(10), &open, &blends, w)
     });
     eprintln!("blend a sheet: {spent} units");
+}
+
+#[test]
+fn filling_is_bounded() {
+    use ryukei::fill::{FillBoundary, FillOptions, FillSide, fill_with};
+    use ryukei::geom::{Curve, Cylinder, Frame, KnotVector, NurbsCurve, Point3, Surface};
+    use ryukei::name::{Name, Role, SheetRole};
+    use std::sync::Arc;
+    // A quad tangent to a quarter cylinder sheet's side: the correction is
+    // fitted and every side's angle certified.
+    let cyl = Surface::Cylinder(Cylinder::new(Frame::WORLD, 1.0).unwrap());
+    let (sheet, _) = ryukei::sheet::from_surface(
+        OpKey(1),
+        &cyl,
+        [[0.0, core::f64::consts::FRAC_PI_2], [0.0, 1.0]],
+    )
+    .unwrap();
+    let face = Name::derive(OpKey(1), Role::Sheet(SheetRole::Face), &[]);
+    let side = Name::derive(OpKey(1), Role::Sheet(SheetRole::SideU1), &[face]);
+    let p = Point3::new;
+    let bezier = |pts: &[Point3]| {
+        let k = KnotVector::clamped(2, &[0.0, 1.0], &[3, 3]).unwrap();
+        FillSide::Curve {
+            curve: Curve::Nurbs(Arc::new(NurbsCurve::new(k, pts.to_vec(), None).unwrap())),
+            range: [0.0, 1.0],
+        }
+    };
+    let boundary = FillBoundary {
+        sides: vec![
+            FillSide::Edge {
+                body: &sheet,
+                edge: side,
+                tangent: true,
+            },
+            bezier(&[p(0.0, 1.0, 1.0), p(-0.5, 1.0, 1.0), p(-1.0, 0.5, 1.0)]),
+            bezier(&[p(-1.0, 0.5, 1.0), p(-1.2, 0.1, 0.5), p(-1.0, 0.5, 0.0)]),
+            bezier(&[p(-1.0, 0.5, 0.0), p(-0.5, 1.0, 0.0), p(0.0, 1.0, 0.0)]),
+        ],
+    };
+    let options = FillOptions {
+        tolerance: 1e-7,
+        angle: 0.01,
+    };
+    let spent = bounded("fill", |w| fill_with(OpKey(10), &boundary, &options, w));
+    eprintln!("fill: {spent} units");
 }
 
 /// A square of side `s` in `frame`, its loop keyed `lp` and its segments
@@ -416,6 +549,28 @@ fn silhouettes_are_bounded() {
     let v = View::new(Vector3::new(1.0, 0.2, 1.0), Vector3::new(0.0, 0.0, 1.0)).unwrap();
     let spent = bounded("silhouettes", |w| silhouettes_with(&torus, &v, w));
     eprintln!("silhouettes: {spent} units");
+}
+
+#[test]
+fn views_are_bounded() {
+    use ryukei::project::{Placed, View, ViewOptions, view_with};
+    let (block, _) = primitive::block(OpKey(13), 0.02, 0.02, 0.02, &Rigid::IDENTITY).unwrap();
+    let (ball, _) = primitive::sphere(OpKey(14), 0.005, &Rigid::IDENTITY).unwrap();
+    let placed = [
+        Placed {
+            body: &block,
+            place: Rigid::IDENTITY,
+        },
+        Placed {
+            body: &ball,
+            place: Rigid::translation(Vector3::new(0.01, 0.04, 0.01)),
+        },
+    ];
+    let v = View::new(Vector3::new(1.0, -2.0, 1.5), Vector3::new(0.0, 0.0, 1.0)).unwrap();
+    let spent = bounded("view", |w| {
+        view_with(&placed, &v, &ViewOptions::default(), w)
+    });
+    eprintln!("view: {spent} units");
 }
 
 /// A unit costs about the same time whichever surfaces it encloses

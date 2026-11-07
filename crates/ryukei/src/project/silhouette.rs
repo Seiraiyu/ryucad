@@ -57,26 +57,30 @@ pub fn silhouettes(body: &Body, view: &View) -> Result<Silhouettes, Error> {
 /// silhouette couldn't be certified; `Cancelled` and `BudgetExceeded` as
 /// every `_with` call.
 pub fn silhouettes_with(body: &Body, view: &View, work: &Work) -> Result<Silhouettes, Error> {
-    crate::work::run(work, |m| {
-        let faces: Vec<FaceId> = body.faces().collect();
-        let per = m.par_map(&faces, |m, &f| of_face(body, f, view, m));
-        let mut out = Silhouettes::default();
-        for (&f, r) in faces.iter().zip(per) {
-            let face = r.map_err(|_| {
-                Error::InvalidView(ViewError::Uncertain {
-                    at: body.faces[f].name,
-                })
-            })?;
-            if face.edge_on {
-                out.edge_on.push(f);
-            }
-            out.branches.extend(face.branches);
-            out.on_edges.extend(face.on_edges);
+    crate::work::run(work, |m| silhouettes_in(body, view, m))
+}
+
+/// [`silhouettes_with`] charging `m`, for a caller already under a meter
+/// (hidden lines, plan 10.B).
+pub(crate) fn silhouettes_in(body: &Body, view: &View, m: &Meter) -> Result<Silhouettes, Error> {
+    let faces: Vec<FaceId> = body.faces().collect();
+    let per = m.par_map(&faces, |m, &f| of_face(body, f, view, m));
+    let mut out = Silhouettes::default();
+    for (&f, r) in faces.iter().zip(per) {
+        let face = r.map_err(|_| {
+            Error::InvalidView(ViewError::Uncertain {
+                at: body.faces[f].name,
+            })
+        })?;
+        if face.edge_on {
+            out.edge_on.push(f);
         }
-        out.on_edges.sort();
-        out.on_edges.dedup();
-        Ok(out)
-    })
+        out.branches.extend(face.branches);
+        out.on_edges.extend(face.on_edges);
+    }
+    out.on_edges.sort();
+    out.on_edges.dedup();
+    Ok(out)
 }
 
 /// One face's share.
@@ -226,5 +230,18 @@ mod tests {
                 .x
         };
         assert!(key(&s.branches[0]) < key(&s.branches[1]));
+    }
+
+    #[test]
+    fn silhouettes_in_a_free_meter_are_the_public_ones() {
+        let (c, _) = primitive::cylinder(OpKey(3), 0.01, 0.03, &Rigid::IDENTITY).unwrap();
+        let v = View::new(Vector3::new(1.0, -2.0, 0.5), Vector3::new(0.0, 0.0, 1.0)).unwrap();
+        // unmetered: a unit test
+        let m = Meter::free();
+        assert_eq!(
+            silhouettes_in(&c, &v, &m).unwrap(),
+            silhouettes(&c, &v).unwrap()
+        );
+        assert!(m.spent() > 0);
     }
 }

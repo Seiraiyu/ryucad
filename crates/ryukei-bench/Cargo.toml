@@ -4,6 +4,7 @@ description = "Benchmarks for ryukei, and (behind `occt` and `smlib`) comparison
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 publish = false
 
 [features]
@@ -148,6 +149,11 @@ required-features = ["occt"]
 # Blends on sheets against OCCT's (plan 12.F).
 [[test]]
 name = "sheet_blends"
+required-features = ["occt"]
+
+# Fills against OCCT's BRepFill_Filling (plan 12.G).
+[[test]]
+name = "fill"
 required-features = ["occt"]
 
 # STL and 3MF read by OCCT and lib3mf (design 193, plan 8.A).

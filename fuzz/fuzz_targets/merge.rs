@@ -7,7 +7,8 @@
 //! import made, `0xfd` the material library, `0xfc` a named view (its
 //! sections and explode too), `0xfb` an appearance, `0xfa` an explode,
 //! `0xf9` a lock, `0xf8` a manifest's dependencies, `0xf7` a datum
-//! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft and `0xf2` a mirror or split. Merging must never panic, must give the same bytes twice,
+//! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft, `0xf2` a mirror or split, `0xf1` an annotation and `0xf0` a base
+//! flange or flange. Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -20,7 +21,8 @@
 //! only as the whole file, a path's segments only as the whole list, a
 //! sweep's profile only whole, its law only with its direction, a
 //! shell's open faces and groups only whole, a loft's sections only
-//! as the whole list, and a split's plane and flip only together.
+//! as the whole list, a split's plane and flip only together, and a
+//! base flange's allowance and relief only whole.
 
 #![no_main]
 
@@ -730,8 +732,120 @@ fn edit_mirror(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// A sheet metal feature's edits on either side: a base flange's
+/// thickness, radius, allowance (a K-factor or a deduction) and relief; a
+/// flange's angle, length, setback, edges (one added or taken out) and
+/// ends (one set back, given a relief, or taken out).
+fn edit_sheet_metal(v: &mut Value, op: u8, arg: u8) {
+    let r = |a: u8| json!({"feature": "b", "name": format!("{:032x}", a % 4)});
+    let reliefs = [
+        json!({"kind": "none"}),
+        json!({"kind": "rectangular", "width": "1 mm", "depth": "0.5 mm"}),
+        json!({"kind": "obround", "width": "1 mm", "depth": "1 mm"}),
+        json!({"kind": "tear", "width": "0.5 mm"}),
+    ];
+    let o = v.as_object_mut().unwrap();
+    let base = o.get("type") == Some(&json!("base_flange"));
+    match (base, op % 4) {
+        (true, 0) => {
+            o.insert("thickness".into(), json!(format!("{} mm", 1 + arg % 3)));
+        }
+        (true, 1) => {
+            o.insert("radius".into(), json!(format!("{} mm", 1 + arg % 4)));
+        }
+        (true, 2) if arg % 2 == 0 => {
+            o.insert("allowance".into(), json!({"k_factor": format!("0.{}", 3 + arg % 5)}));
+        }
+        (true, 2) => {
+            o.insert("allowance".into(), json!({"deduction": format!("{} mm", 1 + arg % 3)}));
+        }
+        (true, _) => {
+            o.insert("relief".into(), reliefs[usize::from(arg % 4)].clone());
+        }
+        (false, 0) => {
+            o.insert("angle".into(), json!(format!("{} deg", 45 + 15 * (arg % 4))));
+        }
+        (false, 1) => {
+            o.insert("setback".into(), json!(format!("{} mm", arg % 5)));
+        }
+        (false, 2) => {
+            let mut edges: Vec<Value> = o.get("edges").and_then(Value::as_array).cloned().unwrap_or_default();
+            let e = r(arg);
+            match edges.iter().position(|x| *x == e) {
+                Some(i) if edges.len() > 1 => {
+                    edges.remove(i);
+                }
+                Some(_) => {}
+                None => edges.push(e),
+            }
+            o.insert("edges".into(), json!(edges));
+        }
+        (false, _) => {
+            let mut ends: Vec<Value> = o.get("ends").and_then(Value::as_array).cloned().unwrap_or_default();
+            let v = r(arg / 4);
+            match ends.iter().position(|x| x["vertex"] == v) {
+                Some(i) => {
+                    ends.remove(i);
+                }
+                None => ends.push(json!({"vertex": v, "relief": reliefs[usize::from(arg % 4)].clone()})),
+            }
+            if ends.is_empty() {
+                o.remove("ends");
+            } else {
+                o.insert("ends".into(), json!(ends));
+            }
+        }
+    }
+}
+
 fn text(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
+}
+
+fn edit_annotation(v: &mut Value, op: u8, arg: u8) {
+    let o = v.as_object_mut().unwrap();
+    let who = |n: u8| json!({"participant": format!("p{}", n % 3), "kind": "agent"});
+    match op % 5 {
+        // A reply, numbered one past the largest, as ryucad numbers it.
+        0 => {
+            let replies = o.get_mut("replies").unwrap().as_object_mut().unwrap();
+            let n = replies
+                .keys()
+                .filter_map(|k| k[1..].parse::<u64>().ok())
+                .max()
+                .unwrap_or(0);
+            replies.insert(
+                format!("r{}", n + 1),
+                json!({"by": who(arg), "at": "2026-11-05T15:00:00Z", "text": format!("t{arg}")}),
+            );
+        }
+        1 => {
+            o.insert("status".into(), json!("in_progress"));
+            o.insert("claimed_by".into(), who(arg));
+            o.insert("resolution".into(), Value::Null);
+        }
+        2 => {
+            o.insert(
+                "status".into(),
+                json!(if arg % 2 == 0 { "done" } else { "rejected" }),
+            );
+            o.insert("claimed_by".into(), Value::Null);
+            o.insert(
+                "resolution".into(),
+                json!({"by": who(arg), "at": "2026-11-05T16:00:00Z",
+                                                 "note": format!("n{arg}"), "applied": false}),
+            );
+        }
+        3 => {
+            o.insert("comment".into(), json!(format!("c{arg}")));
+        }
+        _ => {
+            o.insert(
+                "pins".into(),
+                json!([{"part": "p", "point_m": [f64::from(arg), 0, 0]}]),
+            );
+        }
+    }
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -743,9 +857,12 @@ fuzz_target!(|data: &[u8]| {
     // appearance (13), `0xfa` an explode (14), `0xf9` a lock (15), `0xf8`
     // a manifest's dependencies (16), `0xf7` a datum (17), `0xf6` a path
     // (18), `0xf5` a sweep (19), `0xf4` a shell (20), `0xf3` a loft
-    // (21), `0xf2` a mirror or split (22); every other byte picks as it
+    // (21), `0xf2` a mirror or split (22), `0xf1` an annotation (23),
+    // `0xf0` a base flange or flange (24); every other byte picks as it
     // did before them.
     let kind = match mode {
+        0xf0 => 24,
+        0xf1 => 23,
         0xf2 => 22,
         0xf3 => 21,
         0xf4 => 20,
@@ -804,7 +921,23 @@ fuzz_target!(|data: &[u8]| {
                          "open": [{"feature": "b", "name": format!("{:032x}", 1)}],
                          "faces": [{"thickness": "4 mm",
                                     "faces": [{"feature": "b", "name": format!("{:032x}", 2)}]}]}),
+            23 => json!({"kind": "ryucad.annotation", "format": 1, "id": "aaaaaaaaaa",
+                         "by": {"participant": "dave", "kind": "human"},
+                         "at": "2026-11-05T14:02:11Z", "status": "open", "claimed_by": null,
+                         "pins": [{"ref": format!("p/b/{:032x}", 1)}],
+                         "comment": "move it", "view": null, "change": null,
+                         "replies": {"r1": {"by": {"participant": "agent", "kind": "agent"},
+                                            "at": "2026-11-05T14:05:00Z", "text": "ok"}},
+                         "resolution": null}),
             // A split when the edits leave no odd byte over, else a mirror.
+            // A base flange when the edits leave no odd byte over, else a
+            // flange.
+            24 if rest.len() % 2 == 0 => json!({"format": 11, "kind": "ryucad.feature",
+                "type": "base_flange", "sketch": "s", "thickness": "1.5 mm", "radius": "1 mm",
+                "allowance": {"k_factor": "0.44"}}),
+            24 => json!({"format": 11, "kind": "ryucad.feature", "type": "flange", "target": "b",
+                "edges": [{"feature": "b", "name": format!("{:032x}", 1)}], "angle": "90 deg",
+                "length": "20 mm"}),
             22 if rest.len() % 2 == 0 => {
                 json!({"format": 10, "kind": "ryucad.feature", "type": "split", "target": "b",
                        "plane": {"feature": "d"}})
@@ -866,6 +999,8 @@ fuzz_target!(|data: &[u8]| {
             20 => edit_shell(v, op, arg),
             21 => edit_loft(v, op, arg),
             22 => edit_mirror(v, op, arg),
+            23 => edit_annotation(v, op, arg),
+            24 => edit_sheet_metal(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -967,6 +1102,28 @@ fuzz_target!(|data: &[u8]| {
                 assert!(
                     ["", "/thickness", "/direction", "/open", "/faces"].contains(&k.as_str()),
                     "conflicted inside a shell's value at {k}: {v}"
+                );
+            }
+        }
+        // Every clean merge of annotations reads as one.
+        if kind == 23 {
+            let (merged, outcome) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            if outcome == Outcome::Clean {
+                let v: Value = serde_json::from_slice(&merged).expect("JSON");
+                ryucad::doc::annotation::Annotation::from_json(&v)
+                    .expect("a clean merge of annotations reads");
+            }
+        }
+        // A sheet metal feature's allowance and relief are one value each,
+        // never conflicting inside.
+        if kind == 24 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            for k in record(&v).keys() {
+                assert!(
+                    !k.starts_with("/allowance/") && !k.starts_with("/relief/") && !k.starts_with("/ends/")
+                        && !k.starts_with("/edges/"),
+                    "conflicted inside a sheet metal feature's value at {k}: {v}"
                 );
             }
         }

@@ -677,6 +677,54 @@ mod tests {
         assert!(!thin(&square, &[]));
     }
 
+    /// Two 10 mm blocks, the second standing on the first's top and sunk
+    /// `d` into it, its footprint `inset` in from each side, both turned
+    /// by `turn` about x: their verdict.
+    fn sunk(d: f64, turn: f64, inset: f64) -> Verdict {
+        use ryukei::geom::{UnitVector3, Vector3};
+        let side = 0.01;
+        let r = Rigid::rotation(UnitVector3::X, turn);
+        let key = |k: &[u8]| OpKey::from_bytes(k);
+        let (a, _) = ryukei::primitive::block(key(b"a"), side, side, side, &r).unwrap();
+        let foot = side - 2.0 * inset;
+        let (b, _) =
+            ryukei::primitive::block(key(b"b"), foot, foot, side, &Rigid::IDENTITY).unwrap();
+        let rel = r.then_after(&Rigid::translation(Vector3::new(inset, inset, side - d)));
+        verdict(&a, &b, rel)
+    }
+
+    #[test]
+    fn blocks_sunk_less_than_a_touch_are_never_unchecked() {
+        // #558: flush blocks sunk 30 to 80 nm into each other across a
+        // face turned 30° were left unchecked (`Uncertain`). Under a
+        // hundred nanometres they meet only within the bodies'
+        // tolerances: clear (or touching), never unchecked. (ryukei's
+        // `booleans` test takes them square too.)
+        let turn = std::f64::consts::PI / 6.0;
+        for (d, inset) in [
+            (10e-9, 0.0),
+            (30e-9, 0.0),
+            (50e-9, 0.0),
+            (80e-9, 0.0),
+            (50e-9, 1e-3),
+        ] {
+            let v = sunk(d, turn, inset);
+            assert!(
+                matches!(v, Verdict::Clear | Verdict::Touching),
+                "d {d} inset {inset}: {v:?}"
+            );
+        }
+        // Past the touch reach the overlap is an interference of the
+        // slab's volume.
+        match sunk(2e-6, turn, 0.0) {
+            Verdict::Interferes { volume_m3, .. } => {
+                let want = 1e-4 * 2e-6;
+                assert!((volume_m3 - want).abs() <= 1e-2 * want, "{volume_m3}");
+            }
+            v => panic!("{v:?}"),
+        }
+    }
+
     #[test]
     fn touching_and_apart_are_clear() {
         let (dir, mut s) = project();

@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Every ERC code with its default severity, in the order output lists
 /// them.
-pub const CODES: [(Code, Severity); 15] = [
+pub const CODES: [(Code, Severity); 18] = [
     (Code::PinConflict, Severity::Error),
     (Code::PowerUndriven, Severity::Error),
     (Code::PinUnconnected, Severity::Warning),
@@ -33,6 +33,9 @@ pub const CODES: [(Code, Severity); 15] = [
     (Code::PairUnmatched, Severity::Error),
     (Code::IntentConflict, Severity::Warning),
     (Code::LibraryFault, Severity::Error),
+    (Code::PartUnidentified, Severity::Warning),
+    (Code::PartUnsourced, Severity::Warning),
+    (Code::ParameterInvalid, Severity::Warning),
     (Code::WaiverUnused, Severity::Warning),
 ];
 
@@ -268,6 +271,7 @@ pub fn check_netlist(p: &Project, n: &Netlist) -> Vec<Finding> {
     pin_checks(&mut f, n);
     refdes_checks(&mut f, n);
     library_checks(&mut f, p, n);
+    identification_checks(&mut f, p, n);
     pair_checks(&mut f, p, n);
     let mut out = f.out;
     out.sort_by(|a, b| {
@@ -585,6 +589,156 @@ fn library_checks(f: &mut Found, p: &Project, n: &Netlist) {
     }
 }
 
+/// The library component an occurrence's `of` (`lib/<alias>/libcomp/<id>`)
+/// names, as loaded.
+pub(crate) fn placed_libcomp<'a>(
+    p: &'a Project,
+    of: &str,
+) -> Option<&'a crate::library::Loaded<crate::libcomp::LibComp>> {
+    let (alias, id) = of.strip_prefix("lib/")?.split_once("/libcomp/")?;
+    p.library(alias)
+        .ok()?
+        .components
+        .get(&Id::parse(id, "libcomp").ok()?)
+}
+
+/// A placed component's own parameters, if its file reads.
+fn component_parameters<'a>(
+    p: &'a Project,
+    o: &crate::netlist::Occurrence,
+) -> Option<&'a BTreeMap<String, String>> {
+    p.conn
+        .blocks
+        .get(&o.block)?
+        .components
+        .get(&o.component)?
+        .item
+        .as_ref()
+        .ok()
+        .map(|c| &c.parameters)
+}
+
+/// Whether `dnp` is among the parameters (the component's own first),
+/// with any value but `false`, `no` or `0`.
+fn dnp(params: [Option<&BTreeMap<String, String>>; 2]) -> bool {
+    params
+        .into_iter()
+        .flatten()
+        .find_map(|p| p.get("dnp"))
+        .is_some_and(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "no" | "0"))
+}
+
+/// part_unidentified, part_unsourced and parameter_invalid, from files
+/// alone (design 347): once per placed library component, naming it and
+/// the occurrences it covers. Parts marked `dnp` are neither identified
+/// nor sourced; connectors and other parts are asked for a part number
+/// only when `erc.json` sets part_unidentified's severity.
+/// A netlist's occurrences by library component.
+fn by_libcomp(n: &Netlist) -> BTreeMap<&str, Vec<&crate::netlist::Occurrence>> {
+    let mut by: BTreeMap<&str, Vec<&crate::netlist::Occurrence>> = BTreeMap::new();
+    for o in &n.occurrences {
+        by.entry(&o.of).or_default().push(o);
+    }
+    by
+}
+
+/// Whether occurrence `o` of library component `c` is marked `dnp`.
+fn is_dnp(p: &Project, o: &crate::netlist::Occurrence, c: &crate::libcomp::LibComp) -> bool {
+    dnp([component_parameters(p, o), Some(&c.parameters)])
+}
+
+/// The occurrences a netlist places of each library component that
+/// loads, `dnp` ones left out (none at all: the component left out).
+pub(crate) fn placed_by_libcomp<'a>(
+    p: &'a Project,
+    n: &'a Netlist,
+) -> Vec<(
+    &'a str,
+    &'a crate::libcomp::LibComp,
+    Vec<&'a crate::netlist::Occurrence>,
+)> {
+    by_libcomp(n)
+        .into_iter()
+        .filter_map(|(of, list)| {
+            let c = placed_libcomp(p, of)?.item.as_ref().ok()?;
+            let placed: Vec<_> = list.into_iter().filter(|o| !is_dnp(p, o, c)).collect();
+            (!placed.is_empty()).then_some((of, c, placed))
+        })
+        .collect()
+}
+
+fn identification_checks(f: &mut Found, p: &Project, n: &Netlist) {
+    let every_category = config(p).severity.contains_key("part_unidentified");
+    for (of, list) in by_libcomp(n) {
+        let Some(l) = placed_libcomp(p, of) else {
+            continue;
+        };
+        let Ok(c) = &l.item else { continue };
+        let invalid: Vec<Fault> = l
+            .faults
+            .iter()
+            .filter(|x| x.error.code == Code::ParameterInvalid)
+            .cloned()
+            .collect();
+        if !invalid.is_empty() {
+            let mut refs = vec![of.to_owned()];
+            refs.extend(list.iter().map(|o| o.reference.clone()));
+            f.add(
+                Code::ParameterInvalid,
+                None,
+                refs,
+                format!(
+                    "{of} has parameters that don't read: {}",
+                    invalid[0].error.message
+                ),
+                json!({"faults": fault::list(&invalid)}),
+            );
+        }
+        let placed: Vec<&crate::netlist::Occurrence> =
+            list.iter().copied().filter(|o| !is_dnp(p, o, c)).collect();
+        if placed.is_empty() {
+            continue;
+        }
+        let mut refs = vec![of.to_owned()];
+        refs.extend(placed.iter().map(|o| o.reference.clone()));
+        let named = placed
+            .iter()
+            .map(|o| o.refdes.clone().unwrap_or_else(|| o.reference.clone()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (category, _) = c.category();
+        if c.mpn.trim().is_empty() {
+            if every_category || !category.often_generic() {
+                f.add(
+                    Code::PartUnidentified,
+                    None,
+                    refs,
+                    format!("{of} has no maker part number; {named} place it"),
+                    json!({"libcomp": of, "category": category}),
+                );
+            }
+            continue;
+        }
+        let unsourced: Vec<&str> = std::iter::once((&c.mpn, &c.offers))
+            .chain(c.alternates.iter().map(|a| (&a.mpn, &a.offers)))
+            .filter(|(_, offers)| offers.is_empty())
+            .map(|(m, _)| m.as_str())
+            .collect();
+        if !unsourced.is_empty() {
+            f.add(
+                Code::PartUnsourced,
+                None,
+                refs,
+                format!(
+                    "{of}: no supplier offers {}; {named} place it",
+                    unsourced.join(", ")
+                ),
+                json!({"libcomp": of, "mpns": unsourced}),
+            );
+        }
+    }
+}
+
 fn pair_checks(f: &mut Found, p: &Project, n: &Netlist) {
     let ids: BTreeMap<&str, &FlatNet> = n.nets.iter().map(|x| (x.id.as_str(), x)).collect();
     for net in &n.nets {
@@ -897,21 +1051,26 @@ pub fn schematic_warnings(p: &Project) -> Vec<Fault> {
 /// `check`: the project loaded from nothing, every fault of every file
 /// it holds or names, and every design's ERC. Fails with `check_failed`
 /// (the report in its details) on any error a waiver doesn't accept.
-pub fn check(root: &std::path::Path) -> Result<Value> {
+pub fn check(root: &std::path::Path, cats: &crate::parts::Catalogues) -> Result<Value> {
     let p = Project::load(root)?;
     let faults = p.faults();
     let erc = erc(&p, None)?;
     let schematic = schematic_warnings(&p);
+    let supply = crate::supply::findings(&p, cats)?;
+    let supply_errors = supply.iter().filter(|f| f["severity"] == "error").count() as u64;
     let errors = faults.iter().filter(|f| f.is_error()).count() as u64
         + erc["errors"].as_u64().unwrap_or(0)
-        + schematic.iter().filter(|f| f.is_error()).count() as u64;
+        + schematic.iter().filter(|f| f.is_error()).count() as u64
+        + supply_errors;
     let warnings = faults.iter().filter(|f| !f.is_error()).count() as u64
         + erc["warnings"].as_u64().unwrap_or(0)
-        + schematic.iter().filter(|f| !f.is_error()).count() as u64;
+        + schematic.iter().filter(|f| !f.is_error()).count() as u64
+        + (supply.len() as u64 - supply_errors);
     let report = json!({
         "faults": fault::list(&faults),
         "erc": erc,
         "schematic": fault::list(&schematic),
+        "supply": supply,
         "errors": errors,
         "warnings": warnings,
     });
@@ -932,6 +1091,97 @@ mod tests {
 
     fn id(s: &str) -> Id {
         Id::parse(s, "test").unwrap()
+    }
+
+    #[test]
+    fn parts_must_be_identified_and_sourced() {
+        let lc = |extra: Value| {
+            let mut v = json!({"kind": "ryueda.libcomp", "format": 2, "symbol": {"id": "r"}, "prefix": "R",
+                               "footprints": [{"footprint": {"id": "r_0402_1005metric"}}]});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let placed = |of: &str, refdes: &str, params: Value| json!({"kind": "ryueda.component", "format": 1, "of": {"id": of}, "refdes": refdes, "parameters": params});
+        let mut files = vec![
+            ("library/components/bare.json", lc(json!({}))),
+            (
+                "library/components/half.json",
+                lc(json!({"manufacturer": "A", "mpn": "X1",
+                "alternates": [{"manufacturer": "B", "mpn": "X2", "offers": [{"supplier": "LCSC", "sku": "C9"}]}]})),
+            ),
+            ("library/components/jack.json", lc(json!({"prefix": "J"}))),
+            (
+                "library/components/bad.json",
+                lc(
+                    json!({"mpn": "X3", "offers": [{"supplier": "LCSC", "sku": "C8"}],
+                "parameters": {"capacitance": "lots"}}),
+                ),
+            ),
+            (
+                "blocks/top/components/r7.json",
+                placed("bare", "R7", json!({})),
+            ),
+            (
+                "blocks/top/components/r8.json",
+                placed("bare", "R8", json!({"dnp": "yes"})),
+            ),
+            (
+                "blocks/top/components/r9.json",
+                placed("half", "R9", json!({})),
+            ),
+            (
+                "blocks/top/components/j1.json",
+                placed("jack", "J1", json!({})),
+            ),
+            (
+                "blocks/top/components/r6.json",
+                placed("bad", "R6", json!({})),
+            ),
+        ];
+        let (_dir, p) = project(&files);
+        let found = check_design(&p, &id("d")).unwrap();
+        assert_eq!(
+            of(&found, Code::PartUnidentified),
+            [vec!["lib/self/libcomp/bare", "d:r7"]]
+        );
+        assert_eq!(
+            of(&found, Code::PartUnsourced),
+            [vec!["lib/self/libcomp/half", "d:r9"]]
+        );
+        let unsourced = found
+            .iter()
+            .find(|f| f.code == Code::PartUnsourced)
+            .unwrap();
+        assert_eq!(unsourced.details["mpns"], json!(["X1"]));
+        assert_eq!(
+            of(&found, Code::ParameterInvalid),
+            [vec!["lib/self/libcomp/bad", "d:r6"]]
+        );
+        assert!(
+            found
+                .iter()
+                .filter(|f| matches!(
+                    f.code,
+                    Code::PartUnidentified | Code::PartUnsourced | Code::ParameterInvalid
+                ))
+                .all(|f| f.severity == Severity::Warning)
+        );
+        // An explicit severity for part_unidentified judges connectors too.
+        files.push((
+            "erc.json",
+            json!({"kind": KIND, "format": 1, "severity": {"part_unidentified": "warning"}}),
+        ));
+        let (_dir, p) = project(&files);
+        let found = check_design(&p, &id("d")).unwrap();
+        assert_eq!(
+            of(&found, Code::PartUnidentified),
+            [
+                vec!["lib/self/libcomp/bare", "d:r7"],
+                vec!["lib/self/libcomp/jack", "d:j1"]
+            ]
+        );
     }
 
     #[test]

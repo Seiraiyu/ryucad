@@ -18,6 +18,7 @@ use crate::source::write_atomic;
 use crate::symbol::{self, Symbol};
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 /// The library and ID a request names an object of `kind` by: `<id>` in
 /// this project's library, or `lib/<alias>/<kind>/<id>`.
@@ -430,6 +431,12 @@ pub fn footprint_list(p: &Project, library: Option<&str>) -> Result<Value> {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompFields {
+    /// A part record (`lcsc:C1525`, `mpn:…`) whose identifiers to take:
+    /// maker, part number, description, datasheet, category and its
+    /// supplier offers, never its parameters (design 347). Fields given
+    /// win.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -450,6 +457,22 @@ pub struct CompFields {
     /// The whole list: `[{supplier, sku}]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offers: Option<Vec<crate::libcomp::Offer>>,
+    /// One of the categories (`resistor`, `capacitor`, …); `""` puts it
+    /// back to the one the prefix gives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// The whole list of alternates, replacing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternates: Option<Vec<crate::libcomp::Alternate>>,
+    /// Alternates to take off, by part number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remove_alternates: Option<Vec<String>>,
+    /// Alternates to add; one with a part number already listed replaces it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add_alternates: Option<Vec<crate::libcomp::Alternate>>,
+    /// Offers for alternates, each naming its alternate's part number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternate_offers: Option<Vec<AlternateOffer>>,
     /// The whole list, the default first: `[{footprint, pins?}]`, each
     /// footprint `<id>` or `lib/<alias>/footprint/<id>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -462,6 +485,15 @@ pub struct FootprintArg {
     pub footprint: String,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub pins: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+/// An offer for one of a component's alternates.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlternateOffer {
+    pub mpn: String,
+    pub supplier: String,
+    pub sku: String,
 }
 
 /// A request's object reference as a file's: no `library` for this
@@ -526,6 +558,66 @@ fn fill(c: &mut crate::libcomp::LibComp, f: &CompFields) -> Result<()> {
             })
             .collect::<Result<_>>()?;
     }
+    if let Some(cat) = &f.category {
+        c.category = match cat.as_str() {
+            "" => None,
+            s => Some(crate::libcomp::Category::parse(s).ok_or_else(|| {
+                Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "{s} isn't a category: {}",
+                        crate::libcomp::Category::names().join(", ")
+                    ),
+                )
+                .with("param", "category")
+            })?),
+        };
+    }
+    if let Some(all) = &f.alternates {
+        c.alternates = all.clone();
+    }
+    for mpn in f.remove_alternates.iter().flatten() {
+        let before = c.alternates.len();
+        c.alternates.retain(|a| &a.mpn != mpn);
+        if c.alternates.len() == before {
+            return Err(Error::new(
+                Code::NotFound,
+                format!("no alternate has part number {mpn}"),
+            )
+            .with("param", "remove_alternates")
+            .with("mpn", mpn));
+        }
+    }
+    for a in f.add_alternates.iter().flatten() {
+        match c.alternates.iter_mut().find(|x| x.mpn == a.mpn) {
+            Some(x) => *x = a.clone(),
+            None => c.alternates.push(a.clone()),
+        }
+    }
+    for o in f.alternate_offers.iter().flatten() {
+        let a = c
+            .alternates
+            .iter_mut()
+            .find(|x| x.mpn == o.mpn)
+            .ok_or_else(|| {
+                Error::new(
+                    Code::NotFound,
+                    format!(
+                        "no alternate has part number {}; add the alternate first",
+                        o.mpn
+                    ),
+                )
+                .with("param", "alternate_offers")
+                .with("mpn", &o.mpn)
+            })?;
+        let offer = crate::libcomp::Offer {
+            supplier: o.supplier.clone(),
+            sku: o.sku.clone(),
+        };
+        if !a.offers.contains(&offer) {
+            a.offers.push(offer);
+        }
+    }
     if c.prefix.is_empty() || !c.prefix.chars().all(|ch| ch.is_ascii_alphabetic()) {
         return Err(Error::new(
             Code::InvalidParam,
@@ -543,7 +635,9 @@ fn comp_faults(p: &Project, c: &crate::libcomp::LibComp) -> Vec<Fault> {
         .iter()
         .map(|u| p.footprint(SELF, &u.footprint))
         .collect();
-    c.check(p.symbol(SELF, &c.symbol), &footprints)
+    let mut out = c.check(p.symbol(SELF, &c.symbol), &footprints);
+    out.extend(c.check_data());
+    out
 }
 
 fn comp_json(lib: &Library, id: &Id) -> Result<Value> {
@@ -555,25 +649,227 @@ fn comp_json(lib: &Library, id: &Id) -> Result<Value> {
         .item
         .as_ref()
         .map_err(|e| e.clone().with("reference", &at))?;
+    let (category, inferred) = c.category();
     Ok(json!({
         "reference": at,
         "path": lib.path(ObjKind::Libcomp, id),
         "libcomp": c,
+        "category": category,
+        "category_inferred": inferred,
         "faults": fault::list(&l.faults),
         "revision": lib.revision,
     }))
 }
 
+/// The one record `from` names, from this machine's sources but the
+/// library: refused where none, or several, match.
+pub fn record_from(
+    p: &Project,
+    from: &str,
+    cats: &crate::parts::Catalogues,
+) -> Result<ryueda_parts::record::Record> {
+    let (mut recs, warnings, mut searched) = crate::parts::records_of(p, from, cats)?;
+    let library = ryueda_parts::library::Library::NAME;
+    recs.retain(|r| r.source != library);
+    searched.retain(|n| *n != library);
+    match recs.len() {
+        0 => Err(
+            Error::new(Code::PartsNotFound, format!("no source here has {from}"))
+                .with("key", from)
+                .with("searched", searched)
+                .with("warnings", warnings),
+        ),
+        1 => Ok(recs.remove(0)),
+        n => Err(Error::new(
+            Code::InvalidParam,
+            format!("{from} names {n} parts; name one by its key"),
+        )
+        .with("param", "from")
+        .with(
+            "keys",
+            recs.iter()
+                .map(|r| format!("{}:{}", r.source, r.key))
+                .collect::<Vec<_>>(),
+        )),
+    }
+}
+
+/// `f` with the record's identifiers where `f` doesn't give them.
+fn from_record(f: &CompFields, r: &ryueda_parts::record::Record) -> CompFields {
+    let mut out = f.clone();
+    let take = |given: &mut Option<String>, have: &str| {
+        if given.is_none() && !have.is_empty() {
+            *given = Some(have.to_owned());
+        }
+    };
+    take(&mut out.manufacturer, &r.manufacturer);
+    take(&mut out.mpn, &r.mpn);
+    take(&mut out.description, &r.description);
+    take(&mut out.datasheet, &r.datasheet);
+    if out.category.is_none() {
+        out.category = r.category.map(|c| c.as_str().to_owned());
+    }
+    if out.offers.is_none() && !r.offers.is_empty() {
+        out.offers = Some(r.offers.clone());
+    }
+    out
+}
+
+/// `have` with the offers of `record`'s suppliers (matched without regard
+/// to case, as `catalogue::for_supplier` matches them) replaced by the
+/// record's, where the first of them was, else after the rest; every
+/// other supplier's offers kept as they are.
+fn merged_offers(
+    have: &[ryueda_parts::record::Offer],
+    record: &[ryueda_parts::record::Offer],
+) -> Vec<ryueda_parts::record::Offer> {
+    let norm = |s: &str| s.trim().to_ascii_lowercase();
+    let theirs: Vec<String> = record.iter().map(|o| norm(&o.supplier)).collect();
+    let mut out = Vec::with_capacity(have.len() + record.len());
+    let mut placed = false;
+    for o in have {
+        if theirs.contains(&norm(&o.supplier)) {
+            if !placed {
+                out.extend(record.iter().cloned());
+                placed = true;
+            }
+        } else {
+            out.push(o.clone());
+        }
+    }
+    if !placed {
+        out.extend(record.iter().cloned());
+    }
+    out
+}
+
+/// `r`'s text read in library `alias`: `lib/<alias>/<kind>/<id>`.
+fn text_from(r: &crate::libcomp::LibRef, alias: &str, kind: ObjKind) -> String {
+    let alias = r.library.as_ref().map_or(alias, |a| a.as_str());
+    ref_text(alias, kind, &r.id)
+}
+
+/// What library components of `category` and `package` in every usable
+/// library use most: the symbol, the first footprint and the prefix
+/// (ties: the least), with how many use each.
+struct Proposed {
+    symbol: Option<(String, usize)>,
+    footprint: Option<(String, usize)>,
+    prefix: Option<(String, usize)>,
+}
+
+fn proposed(
+    p: &Project,
+    category: Option<crate::libcomp::Category>,
+    package: Option<&str>,
+) -> Proposed {
+    let mut symbols: BTreeMap<String, usize> = BTreeMap::new();
+    let mut footprints: BTreeMap<String, usize> = BTreeMap::new();
+    let mut prefixes: BTreeMap<String, usize> = BTreeMap::new();
+    for (alias, lib) in &p.libraries {
+        let Ok(lib) = lib else { continue };
+        for l in lib.components.values() {
+            let Ok(c) = &l.item else { continue };
+            if Some(c.category().0) != category {
+                continue;
+            }
+            let pkg = c.parameters.get("package").map(|x| x.trim().to_lowercase());
+            if package
+                .is_some_and(|want| pkg.as_deref() != Some(want.trim().to_lowercase().as_str()))
+            {
+                continue;
+            }
+            *symbols
+                .entry(text_from(&c.symbol, alias, ObjKind::Symbol))
+                .or_default() += 1;
+            if let Some(u) = c.footprints.first() {
+                *footprints
+                    .entry(text_from(&u.footprint, alias, ObjKind::Footprint))
+                    .or_default() += 1;
+            }
+            *prefixes.entry(c.prefix.clone()).or_default() += 1;
+        }
+    }
+    let best = |m: BTreeMap<String, usize>| {
+        m.into_iter()
+            .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+    };
+    Proposed {
+        symbol: best(symbols),
+        footprint: best(footprints),
+        prefix: best(prefixes),
+    }
+}
+
+/// What `libcomp create --from` and `edit --from` answer of the record.
+fn from_json(r: &ryueda_parts::record::Record) -> Value {
+    json!({
+        "key": format!("{}:{}", r.source, r.key),
+        "source": r.source,
+        "parameters": r.parameters,
+        "attribution": r.attribution,
+        "fetched_at": r.fetched_at,
+    })
+}
+
 /// `libcomp.create`: a library component, its ID made from `name` unless
-/// given, tying a symbol to its footprints.
+/// given, tying a symbol to its footprints. With `from`, a record's
+/// identifiers fill what isn't given, and a symbol, footprint and prefix
+/// left out are those the library's components of its category and
+/// package use most.
 pub fn libcomp_create(
     session: &mut Session,
     name: &str,
     id: Option<&str>,
     fields: &CompFields,
     expected: Option<&str>,
+    cats: &crate::parts::Catalogues,
 ) -> Result<Value> {
     let p = session.project();
+    let mut chose = serde_json::Map::new();
+    let mut from = None;
+    let filled;
+    let fields = match &fields.from {
+        None => fields,
+        Some(key) => {
+            let r = record_from(p, key, cats)?;
+            let mut f = from_record(fields, &r);
+            let pr = proposed(
+                p,
+                r.category,
+                r.parameters.get("package").map(String::as_str),
+            );
+            if f.symbol.is_none() {
+                let (sym, uses) = pr.symbol.clone().ok_or_else(|| {
+                    Error::new(
+                        Code::InvalidParam,
+                        "no library component of this category and package to take a symbol from; give --symbol",
+                    )
+                    .with("param", "symbol")
+                })?;
+                chose.insert("symbol".into(), json!({"reference": sym, "uses": uses}));
+                f.symbol = Some(sym);
+            }
+            if f.footprints.is_none()
+                && let Some((fp, uses)) = pr.footprint.clone()
+            {
+                chose.insert("footprint".into(), json!({"reference": fp, "uses": uses}));
+                f.footprints = Some(vec![FootprintArg {
+                    footprint: fp,
+                    pins: Default::default(),
+                }]);
+            }
+            if f.prefix.is_none()
+                && let Some((px, uses)) = pr.prefix.clone()
+            {
+                chose.insert("prefix".into(), json!({"prefix": px, "uses": uses}));
+                f.prefix = Some(px);
+            }
+            from = Some(from_json(&r));
+            filled = f;
+            &filled
+        }
+    };
     let lib = writable(p, SELF)?;
     check_revision("library self", &lib.revision, expected)?;
     let id = match id {
@@ -604,6 +900,8 @@ pub fn libcomp_create(
         manufacturer: String::new(),
         mpn: String::new(),
         offers: Vec::new(),
+        category: None,
+        alternates: Vec::new(),
         footprints: Vec::new(),
     };
     fill(&mut c, fields)?;
@@ -612,23 +910,40 @@ pub fn libcomp_create(
         return Err(refused(&format!("libcomp {id}"), &errors));
     }
     let path = lib.path(ObjKind::Libcomp, &id);
+    let bare = c.parameters.is_empty();
     save(
         session,
         &path,
         &c,
         crate::libcomp::KIND,
-        crate::libcomp::FORMAT,
+        crate::libcomp::format_of(&c),
     )?;
-    comp_json(session.project().library(SELF)?, &id)
+    let mut v = comp_json(session.project().library(SELF)?, &id)?;
+    if let Some(from) = from {
+        v["from"] = from;
+        v["chose"] = Value::Object(chose);
+        v["warnings"] = json!(if bare {
+            vec![json!({
+                "code": "parameter_missing_from",
+                "message": format!("{id} has no parameters: type them with --param (the record's are under from.parameters)"),
+            })]
+        } else {
+            Vec::new()
+        });
+    }
+    Ok(v)
 }
 
 /// `libcomp.edit`: the fields given replace the component's, its
-/// parameters merged.
+/// parameters merged. With `from`, each of a record's identifiers the
+/// fields don't give is taken where the component's differs (`changed`
+/// names them); with nothing to change, nothing is written.
 pub fn libcomp_edit(
     session: &mut Session,
     target: &str,
     fields: &CompFields,
     expected: Option<&str>,
+    cats: &crate::parts::Catalogues,
 ) -> Result<Value> {
     let p = session.project();
     let (alias, id) = self::target(target, ObjKind::Libcomp)?;
@@ -639,6 +954,65 @@ pub fn libcomp_edit(
         Error::new(Code::NotFound, format!("{at} isn't in the library")).with("reference", &at)
     })?;
     let mut c = loaded.item.clone().map_err(|e| e.with("reference", &at))?;
+    let (mut changed, mut from) = (Vec::new(), None);
+    let filled;
+    let fields = match &fields.from {
+        None => fields,
+        Some(key) => {
+            let r = record_from(p, key, cats)?;
+            let mut f = fields.clone();
+            let mut take =
+                |name: &'static str, given: &mut Option<String>, have: &str, now: &str| {
+                    if given.is_none() && !have.is_empty() && have != now {
+                        *given = Some(have.to_owned());
+                        changed.push(name);
+                    }
+                };
+            take(
+                "manufacturer",
+                &mut f.manufacturer,
+                &r.manufacturer,
+                &c.manufacturer,
+            );
+            take("mpn", &mut f.mpn, &r.mpn, &c.mpn);
+            take(
+                "description",
+                &mut f.description,
+                &r.description,
+                &c.description,
+            );
+            take("datasheet", &mut f.datasheet, &r.datasheet, &c.datasheet);
+            // Against the category the component has, inferred or not.
+            if f.category.is_none()
+                && let Some(rc) = r.category
+                && rc != c.category().0
+            {
+                f.category = Some(rc.as_str().to_owned());
+                changed.push("category");
+            }
+            if f.offers.is_none() && !r.offers.is_empty() {
+                let merged = merged_offers(&c.offers, &r.offers);
+                if merged != c.offers {
+                    f.offers = Some(merged);
+                    changed.push("offers");
+                }
+            }
+            changed.sort_unstable();
+            from = Some(from_json(&r));
+            let only_from = CompFields {
+                from: None,
+                ..fields.clone()
+            } == CompFields::default();
+            if changed.is_empty() && only_from {
+                let mut v = comp_json(lib, &id)?;
+                v["changed"] = json!(changed);
+                v["from"] = from.take().unwrap_or_default();
+                return Ok(v);
+            }
+            filled = f;
+            &filled
+        }
+    };
     fill(&mut c, fields)?;
     let errors = added_errors(&loaded.faults, &comp_faults(p, &c));
     if !errors.is_empty() {
@@ -650,9 +1024,14 @@ pub fn libcomp_edit(
         &path,
         &c,
         crate::libcomp::KIND,
-        crate::libcomp::FORMAT,
+        crate::libcomp::format_of(&c),
     )?;
-    comp_json(session.project().library(SELF)?, &id)
+    let mut v = comp_json(session.project().library(SELF)?, &id)?;
+    if let Some(from) = from {
+        v["changed"] = json!(changed);
+        v["from"] = from;
+    }
+    Ok(v)
 }
 
 /// `libcomp.show`: a library component of any library, with its faults.
@@ -680,6 +1059,7 @@ pub fn libcomp_list(p: &Project, library: Option<&str>) -> Result<Value> {
                     v["value"] = json!(c.value);
                     v["mpn"] = json!(c.mpn);
                     v["footprints"] = json!(c.footprints.len());
+                    v["category"] = json!(c.category().0);
                 }
                 Err(e) => v["error"] = json!(e),
             }
@@ -723,4 +1103,246 @@ pub fn libcomp_delete(
         "deleted": at,
         "revision": session.project().library(SELF)?.revision,
     }))
+}
+
+#[cfg(test)]
+mod part_data_tests {
+    use super::*;
+    use crate::libcomp::Category;
+
+    fn fields(v: Value) -> CompFields {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn fields_set_categories_and_alternates() {
+        let mut c = crate::libcomp::tests::r_100k();
+        let f = fields(json!({
+            "category": "resistor",
+            "add_alternates": [{"manufacturer": "Vishay", "mpn": "CRCW0402100KFKED"}],
+            "alternate_offers": [{"mpn": "CRCW0402100KFKED", "supplier": "Mouser", "sku": "71-CRCW0402100KFKED"}]
+        }));
+        fill(&mut c, &f).unwrap();
+        assert_eq!(c.category, Some(Category::Resistor));
+        assert_eq!(c.alternates[0].offers.len(), 1);
+        // The same again changes nothing.
+        fill(&mut c, &f).unwrap();
+        assert_eq!((c.alternates.len(), c.alternates[0].offers.len()), (1, 1));
+        fill(
+            &mut c,
+            &fields(json!({"category": "", "remove_alternates": ["CRCW0402100KFKED"]})),
+        )
+        .unwrap();
+        assert_eq!((c.category, c.alternates.len()), (None, 0));
+        for (bad, code) in [
+            (json!({"category": "valve"}), Code::InvalidParam),
+            (json!({"remove_alternates": ["X"]}), Code::NotFound),
+            (
+                json!({"alternate_offers": [{"mpn": "X", "supplier": "LCSC", "sku": "C1"}]}),
+                Code::NotFound,
+            ),
+        ] {
+            assert_eq!(
+                fill(&mut c, &fields(bad.clone())).unwrap_err().code,
+                code,
+                "{bad}"
+            );
+        }
+    }
+
+    /// A design project whose library holds the test library and `c_1u`,
+    /// a 0402 capacitor drawn with symbol `r` on footprint
+    /// `r_0402_1005metric`, open in a session.
+    pub(crate) fn session_with_capacitor() -> (tempfile::TempDir, Session) {
+        use crate::project::tests::{library_in, manifest};
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("board");
+        manifest(&board, crate::project::ProjectKind::Design, &[]);
+        library_in(&board);
+        let c = json!({
+            "kind": crate::libcomp::KIND, "format": 2,
+            "symbol": {"id": "r"}, "prefix": "C", "value": "1u", "category": "capacitor",
+            "parameters": {"package": "0402"},
+            "footprints": [{"footprint": {"id": "r_0402_1005metric"}}]
+        });
+        crate::source::write_atomic(
+            &board.join("library/components/c_1u.json"),
+            crate::canonical::to_string(&c),
+        )
+        .unwrap();
+        let s = Session::open(&board).unwrap();
+        (dir, s)
+    }
+
+    /// The fixture catalogue synced into a cache of its own.
+    pub(crate) fn synced_catalogue() -> (tempfile::TempDir, crate::parts::Catalogues) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::parts::tests::synced(dir.path());
+        let cats = crate::parts::Catalogues::at(dir.path(), 5_000, crate::parts::MAX_AGE);
+        (dir, cats)
+    }
+
+    #[test]
+    fn a_component_is_made_from_a_record_with_its_identifiers_only() {
+        let (_c, cats) = synced_catalogue();
+        let (_d, mut s) = session_with_capacitor();
+        let from = fields(json!({"from": "lcsc:C1525"}));
+        let v = libcomp_create(&mut s, "100n", None, &from, None, &cats).unwrap();
+        let c = &v["libcomp"];
+        assert_eq!(
+            (c["mpn"].as_str(), c["manufacturer"].as_str()),
+            (Some("CL05B104KO5NNNC"), Some("Samsung Electro-Mechanics"))
+        );
+        assert_eq!(c["offers"], json!([{"supplier": "LCSC", "sku": "C1525"}]));
+        assert_eq!(
+            (c["category"].as_str(), c["prefix"].as_str()),
+            (Some("capacitor"), Some("C"))
+        );
+        assert!(
+            c.get("parameters").is_none(),
+            "no source's parameters are written"
+        );
+        assert_eq!(
+            v["from"]["parameters"]["capacitance"], "100 nF",
+            "they are listed for the agent"
+        );
+        assert_eq!(v["from"]["attribution"], ryueda_parts::jlc::ATTRIBUTION);
+        assert_eq!(v["from"]["key"], "jlc:C1525");
+        assert_eq!(v["chose"]["symbol"]["reference"], "lib/self/symbol/r");
+        assert_eq!(v["chose"]["symbol"]["uses"], 1);
+        assert_eq!(
+            v["chose"]["footprint"]["reference"],
+            "lib/self/footprint/r_0402_1005metric"
+        );
+        assert_eq!(v["warnings"][0]["code"], "parameter_missing_from");
+        // Given fields win, and typed parameters are written.
+        let f2 = fields(json!({"from": "lcsc:C1525", "description": "Mine",
+                               "parameters": {"capacitance": "100 nF"}}));
+        let v = libcomp_create(&mut s, "100n b", None, &f2, None, &cats).unwrap();
+        assert_eq!(v["libcomp"]["description"], "Mine");
+        assert_eq!(v["libcomp"]["parameters"]["capacitance"], "100 nF");
+        assert!(v["warnings"].as_array().unwrap().is_empty());
+        let e = libcomp_create(
+            &mut s,
+            "x",
+            None,
+            &fields(json!({"from": "lcsc:C9"})),
+            None,
+            &cats,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::PartsNotFound);
+        // Nothing of the regulator's category and package to take a symbol from.
+        let e = libcomp_create(
+            &mut s,
+            "ldo",
+            None,
+            &fields(json!({"from": "lcsc:C5446"})),
+            None,
+            &cats,
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["param"]),
+            (Code::InvalidParam, &json!("symbol"))
+        );
+        // Without --from a symbol is still needed.
+        let e = libcomp_create(&mut s, "y", None, &CompFields::default(), None, &cats).unwrap_err();
+        assert_eq!(e.details["param"], "symbol");
+    }
+
+    #[test]
+    fn edit_from_reapplies_only_identifiers_that_differ() {
+        let (_c, cats) = synced_catalogue();
+        let (_d, mut s) = session_with_capacitor();
+        let f = fields(json!({"symbol": "r", "prefix": "C", "mpn": "OLD",
+                              "parameters": {"capacitance": "100 nF"}}));
+        libcomp_create(&mut s, "cap", Some("cap"), &f, None, &cats).unwrap();
+        let from = fields(json!({"from": "lcsc:C1525"}));
+        let v = libcomp_edit(&mut s, "cap", &from, None, &cats).unwrap();
+        assert_eq!(v["libcomp"]["mpn"], "CL05B104KO5NNNC");
+        assert_eq!(
+            v["libcomp"]["parameters"]["capacitance"], "100 nF",
+            "parameters stay the agent's"
+        );
+        assert_eq!(
+            v["changed"],
+            json!(["datasheet", "description", "manufacturer", "mpn", "offers"])
+        );
+        assert_eq!(v["from"]["attribution"], ryueda_parts::jlc::ATTRIBUTION);
+        let revision = s.project().library(SELF).unwrap().revision.clone();
+        let again = libcomp_edit(&mut s, "cap", &from, None, &cats).unwrap();
+        assert_eq!(again["changed"], json!([]));
+        assert_eq!(
+            s.project().library(SELF).unwrap().revision,
+            revision,
+            "nothing written"
+        );
+        // A field given wins over the record's.
+        let mine = fields(json!({"from": "lcsc:C1525", "description": "Mine"}));
+        let v = libcomp_edit(&mut s, "cap", &mine, None, &cats).unwrap();
+        assert_eq!(
+            (v["libcomp"]["description"].as_str(), &v["changed"]),
+            (Some("Mine"), &json!([]))
+        );
+    }
+
+    #[test]
+    fn edit_from_keeps_other_suppliers_offers() {
+        let (_c, cats) = synced_catalogue();
+        let (_d, mut s) = session_with_capacitor();
+        let f = fields(json!({"symbol": "r", "prefix": "C",
+                              "offers": [{"supplier": "DigiKey", "sku": "1276-1000-1-ND"},
+                                         {"supplier": "LCSC", "sku": "C1"}]}));
+        libcomp_create(&mut s, "cap", Some("cap"), &f, None, &cats).unwrap();
+        let v = libcomp_edit(
+            &mut s,
+            "cap",
+            &fields(json!({"from": "lcsc:C1525"})),
+            None,
+            &cats,
+        )
+        .unwrap();
+        let offers = &v["libcomp"]["offers"];
+        assert_eq!(offers[0]["supplier"], "DigiKey", "{offers}");
+        assert_eq!(offers[0]["sku"], "1276-1000-1-ND");
+        let lcsc: Vec<_> = offers
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|o| o["supplier"].as_str().unwrap().eq_ignore_ascii_case("lcsc"))
+            .collect();
+        assert_eq!(lcsc.len(), 1, "{offers}");
+        assert_eq!(lcsc[0]["sku"], "C1525");
+        assert!(
+            !v["changed"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("category")),
+            "the prefix already makes it a capacitor"
+        );
+    }
+
+    #[test]
+    fn merged_offers_replace_only_the_records_suppliers() {
+        use ryueda_parts::record::Offer;
+        let o = |s: &str, k: &str| Offer {
+            supplier: s.into(),
+            sku: k.into(),
+        };
+        let have = vec![
+            o("Mouser", "m"),
+            o("lcsc", "C1"),
+            o("LCSC ", "C2"),
+            o("DigiKey", "d"),
+        ];
+        assert_eq!(
+            merged_offers(&have, &[o("LCSC", "C9")]),
+            vec![o("Mouser", "m"), o("LCSC", "C9"), o("DigiKey", "d")]
+        );
+        assert_eq!(
+            merged_offers(&[o("Mouser", "m")], &[o("LCSC", "C9")]),
+            vec![o("Mouser", "m"), o("LCSC", "C9")]
+        );
+    }
 }

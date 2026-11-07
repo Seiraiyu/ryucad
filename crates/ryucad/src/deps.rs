@@ -441,7 +441,7 @@ fn name_from(url: &str, path: &str) -> Option<Id> {
 /// Writes `m` as the manifest, and reads the project again.
 fn save_manifest(session: &mut Session, m: &crate::doc::files::Manifest) -> Result<()> {
     let path = session.root().join(crate::doc::project::MANIFEST);
-    crate::doc::project::write_json(&path, &m.to_json())?;
+    session.write_json(&path, &m.to_json())?;
     session.reload()
 }
 
@@ -535,7 +535,7 @@ pub(crate) fn keep_lock(session: &mut Session) -> Result<bool> {
     };
     if lock.is_empty() {
         if p.lock.is_some() {
-            crate::doc::project::remove_file(session.root(), &path)?;
+            session.remove_file(&path)?;
             return Ok(true);
         }
         return Ok(false);
@@ -543,7 +543,7 @@ pub(crate) fn keep_lock(session: &mut Session) -> Result<bool> {
     if p.lock.as_ref().and_then(|l| l.as_ref().ok()) == Some(&lock) {
         return Ok(false);
     }
-    crate::doc::project::write_json(&path, &lock.to_json())?;
+    session.write_json(&path, &lock.to_json())?;
     Ok(true)
 }
 
@@ -559,7 +559,7 @@ pub fn add(
     expected: Option<&str>,
 ) -> Result<serde_json::Value> {
     use crate::doc::deps::{Dependency, path_fault, url_fault};
-    crate::config::check_project_revision(session.root(), expected)?;
+    session.check_project_revision(expected)?;
     if let Some(why) = url_fault(url) {
         return Err(invalid("url", why).with("url", url));
     }
@@ -651,7 +651,7 @@ pub fn add(
         "schema": SCHEMA,
         "dependency": {"name": name, "project": id, "url": url, "path": path},
         "fetched": {"url": url, "head": fetched.head, "release_branch": branch, "tip": tip},
-        "project_revision": crate::config::project_revision(session.root())?,
+        "project_revision": session.project_revision()?,
     }))
 }
 
@@ -804,7 +804,7 @@ pub fn update(
 ) -> Result<serde_json::Value> {
     use crate::doc::assembly::Rev;
     use serde_json::json;
-    crate::config::check_project_revision(session.root(), expected)?;
+    session.check_project_revision(expected)?;
     let fetched = if ask.offline {
         None
     } else {
@@ -986,8 +986,8 @@ pub fn update(
     for (path, bytes) in &writes {
         let at = session.root().join(path);
         match bytes {
-            Some(b) => crate::doc::source::write_atomic(&at, b)?,
-            None => crate::doc::project::remove_file(session.root(), &at)?,
+            Some(b) => session.write_bytes(&at, b)?,
+            None => session.remove_file(&at)?,
         }
     }
     session.reload()?;
@@ -995,7 +995,7 @@ pub fn update(
     if !assemblies.is_empty() {
         v["assemblies"] = json!(assemblies);
     }
-    v["project_revision"] = json!(crate::config::project_revision(session.root())?);
+    v["project_revision"] = json!(session.project_revision()?);
     Ok(v)
 }
 
@@ -1113,7 +1113,7 @@ pub fn remove(
     name: &str,
     expected: Option<&str>,
 ) -> Result<serde_json::Value> {
-    crate::config::check_project_revision(session.root(), expected)?;
+    session.check_project_revision(expected)?;
     let mut m = session.project().manifest.clone();
     let (id, d) = crate::doc::deps::find(&m.dependencies, name)?;
     let (id, d) = (id.clone(), d.clone());
@@ -1156,7 +1156,7 @@ pub fn remove(
     Ok(serde_json::json!({
         "schema": SCHEMA,
         "removed": {"name": d.name, "project": id},
-        "project_revision": crate::config::project_revision(session.root())?,
+        "project_revision": session.project_revision()?,
     }))
 }
 
@@ -1250,7 +1250,7 @@ pub fn list(session: &mut Session) -> Result<serde_json::Value> {
         }));
     }
     let mut v = json!({"schema": SCHEMA, "dependencies": out,
-                       "project_revision": crate::config::project_revision(session.root())?});
+                       "project_revision": session.project_revision()?});
     if let Err(e) = lock {
         v["lock_fault"] = json!(e);
     }

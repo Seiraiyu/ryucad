@@ -47,12 +47,13 @@ use crate::{BlendError, Error, TopologyError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
-/// Where two surfaces meet. Two pipes not at all (`Unsupported`: their
-/// tangent crossings at corners and trims are a limit). A pipe on an
-/// analytic anchor (an earlier fillet's) against anything by the pipe's
-/// own tracer, as blends always have. Any other pair (a pipe on a rail, a
-/// spline, a swept surface or an offset) by
-/// [`crate::intersect::surface_surface`].
+/// Where two surfaces meet. A pipe on an analytic anchor (an earlier
+/// fillet's) against an analytic surface by the pipe's own tracer, as
+/// blends always have; anything else (two pipes, a pipe against a spline,
+/// a swept surface or an offset, any pair with no pipe on an analytic
+/// anchor) by [`crate::intersect::surface_surface`], under the trace cap:
+/// the general tracer certifies their tangent crossings at ball corners
+/// and trims (#177, plan 15.D).
 fn meet(
     a: &crate::geom::Surface,
     b: &crate::geom::Surface,
@@ -60,12 +61,13 @@ fn meet(
     meter: &Meter,
 ) -> Result<crate::intersect::SurfaceHit, crate::intersect::Failure> {
     use crate::geom::Surface;
+    use crate::intersect::implicit::Implicit;
     let footed = |s: &Surface| matches!(s, Surface::Pipe(p) if p.rail().is_none());
-    match (a, b) {
-        (Surface::Pipe(_), Surface::Pipe(_)) => Err(crate::intersect::Failure::Unsupported),
-        _ if footed(a) || footed(b) => crate::intersect::pipe_surface_in(a, b, region, meter),
-        _ => crate::intersect::surface_surface_in(a, b, region, meter),
+    let analytic = |s: &Surface| Implicit::of(s).is_some();
+    if (footed(a) && analytic(b)) || (footed(b) && analytic(a)) {
+        return crate::intersect::pipe_surface_in(a, b, region, meter);
     }
+    crate::intersect::surface_surface_in(a, b, region, meter)
 }
 
 /// What a blend does to one edge.

@@ -10,7 +10,7 @@ ryucad is CAD built for AI agents to drive, not primarily for humans clicking in
 The project is in its early stages. What each roadmap has done and what comes next is in the Coxswain planning project `ryucad-ryukei` (`cox roadmap show`), never here.
 The roadmaps are designs 14 (ryukei), 20 (ryucad), 21 (ryupdm) and 257 (ryuplm), and design 23 lines them up.
 
-Above the kernel sit ryucad, the application (feature files in Git, the agent CLI, a live viewer humans watch but don't model in, assemblies at scale), and ryupdm, product data management (revisions, releases, where-used, BOM, hosted review). ryuplm extends ryupdm into PLM (items with no CAD, part numbers, documents, ECOs, change requests, compliance) in the same `ryupdm` crate and service; it extends the PDM business rather than replacing it, and the hosted product is branded ryuplm, "PLM and PDM". ryupdm and ryuplm are the likely business; ryukei and ryucad may be open sourced. Their roadmaps are designs 20 (ryucad), 21 (ryupdm) and 257 (ryuplm), design 23 lines them up, and design 22 is the business plan.
+Above the kernel sit ryucad, the application (feature files in Git, the agent CLI, a live viewer humans watch but don't model in, assemblies at scale), and ryupdm, product data management (revisions, releases, where-used, BOM, hosted review). ryuplm extends ryupdm into PLM (items with no CAD, part numbers, documents, ECOs, change requests, compliance) in the same `ryupdm` crate and service; it extends the PDM business rather than replacing it, and the hosted product is branded ryuplm, "PLM and PDM". ryupdm and ryuplm are the likely business, as the hosted service; everything in this repository is Apache-2.0 (see License below). Their roadmaps are designs 20 (ryucad), 21 (ryupdm) and 257 (ryuplm), design 23 lines them up, and design 22 is the business plan.
 
 ## Commands
 
@@ -178,6 +178,7 @@ What each phase decided is recorded per area under `docs/claude/`, imported here
 - @docs/claude/kernel-sheets.md — sheet bodies: kinds, laminar edges, the sheet operators, extraction
 - @docs/claude/kernel-sheet-metal.md — sheet metal: recognition, unfolding, flat patterns
 - @docs/claude/kernel-projection.md — projection: views, projected curves, silhouettes
+- @docs/claude/kernel-tweaks.md — face tweaks: moving, offsetting and replacing faces, and drafts
 - @docs/claude/ryucad-core.md — projects, units, rebuild, the agent CLI, the daemon, releases
 - @docs/claude/ryucad-session.md — participants, notifications, activity and undo, settings, meshes, renders, doctor
 - @docs/claude/ryucad-app.md — the desktop app
@@ -186,17 +187,20 @@ What each phase decided is recorded per area under `docs/claude/`, imported here
 - @docs/claude/ryucad-sketches.md — sketch features, sweeps, references, recompute, sketches in the app
 - @docs/claude/ryucad-git.md — diff, check, merge, the compare view and conflict panel
 - @docs/claude/ryucad-solids.md — solids, fillets, chamfers, holes, patterns
+- @docs/claude/ryucad-sheet-metal.md — sheet metal: base and edge flanges, the bend table
 - @docs/claude/ryucad-assemblies.md — assemblies, mates, scale, interference
 - @docs/claude/ryucad-step.md — STEP import, re-import and export
 - @docs/claude/ryucad-scale.md — the benchmark project, file events, the memory budget, the window at scale
 - @docs/claude/ryucad-formats.md — export formats: the scene, STL, 3MF, USD, and their references
 - @docs/claude/ryucad-reference.md — geometric references, the resolver, datum planes, axes and points and their uses
+- @docs/claude/ryucad-annotations.md — annotations: files, proposed changes and their capture, annotation revisions, apply, the lifecycle, participant modes
 - @docs/claude/ryupdm.md — the PDM data model and local PDM
 - @docs/claude/ryupdm-review.md — hosted review
 - @docs/claude/shared-crates.md — ryu-math, ryu-doc, ryu-session
 - @docs/claude/ryudfm.md — ryudfm: the board model and shapes (`ryu-board`), the ODB++ reader and corpus, projects, the CLI, renders and releases
 - @docs/claude/ryueda.md — ryueda projects, library projects, symbols, footprints, models, library components
 - @docs/claude/ryueda-schematic.md — ryueda schematics: properties and designator formats, the ryusch engine, layout files and their commands
+- @docs/claude/ryueda-parts.md — ryueda part data: the vocabulary, categories, alternates, library search, the parts cache and identification findings
 
 When a plan records what it decided, it edits or adds only its area's file under `docs/claude/`. It doesn't touch CLAUDE.md, except to add one import line here for a new area, and it never writes project status anywhere in the repo.
 
@@ -209,5 +213,7 @@ A ryucad model is a folder of canonical text feature files in a Git repo, one pe
 Don't assume an answer to these. Ask the user, or record the decision here once it's made:
 
 - When the MCP adapter over `proto` arrives.
-- Which parts are open source and which are paid.
-- License. Apache-2.0 is the lean (design 22), and ported SMLib code (Apache-2.0) rules out GPLv2-only.
+
+## License (decided 2026-11-06)
+
+Everything in this repository is Apache-2.0 (`LICENSE`, `NOTICE`; `license.workspace = true` in every crate), ryupdm's local PDM included, the owner's choice. What is paid is the hosted service and its signing trust, in the private `Seiraiyu/ryupdm-service`. Third-party files keep their own licences, named in `NOTICE`. Release archives carry `LICENSE` and `NOTICE`.

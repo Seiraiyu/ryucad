@@ -1,0 +1,31 @@
+[package]
+name = "ryueda-parts"
+description = "ryueda's part data: typed parameters, categories, part records and their terms, the source interface and the per-machine cache"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Cache keys: Rust only, no C or assembly.
+blake3 = { version = "1", features = ["pure"] }
+# Catalogues' gzipped files (6.B), through miniz_oxide: Rust only.
+flate2 = "1"
+# Searches judge records in parallel; answers are sorted, so the thread
+# count never shows.
+rayon = "1"
+# Electrical quantities read exactly, and the error type with every code.
+ryu-doc = { path = "../ryu-doc" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[features]
+# Fixtures in catalogues' own shapes, written by us, for ryueda's tests and
+# the fuzz target.
+testing = []
+
+[dev-dependencies]
+tempfile = "3"
+
+[[test]]
+name = "bytes"
+required-features = ["testing"]

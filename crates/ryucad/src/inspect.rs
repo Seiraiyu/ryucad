@@ -70,12 +70,21 @@ pub fn entities(body: &Body) -> Value {
         .map(|e| {
             let edge = body.edge(e).expect("live edge");
             let name = |v| body.vertex(v).expect("live vertex").name.to_string();
+            // The faces it bounds, one per fin round it, in the ring's
+            // order: two on a solid, one along a sheet's boundary.
+            let faces: Vec<String> = body
+                .edge_fins(e)
+                .filter_map(|f| body.loop_(body.fin(f)?.loop_))
+                .filter_map(|l| body.face(l.face))
+                .map(|f| f.name.to_string())
+                .collect();
             json!({
                 "name": edge.name.to_string(),
                 "curve": curve(body.curve(edge.curve).expect("live curve")),
                 "start": name(edge.start),
                 "end": name(edge.end),
                 "interval": edge.interval,
+                "faces": faces,
             })
         })
         .collect();
@@ -341,6 +350,23 @@ mod tests {
             json!({"min": [0.0, 0.0, 0.0], "max": [1.0, 2.0, 3.0]})
         );
         assert_eq!(v["faces"][0]["name"].as_str().unwrap().len(), 32);
+        // Each edge names the two faces it bounds, both among the faces.
+        let faces: Vec<&str> = v["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        for e in v["edges"].as_array().unwrap() {
+            let two: Vec<&str> = e["faces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| f.as_str().unwrap())
+                .collect();
+            assert_eq!(two.len(), 2, "{e}");
+            assert!(two[0] != two[1] && two.iter().all(|f| faces.contains(f)));
+        }
     }
 
     #[test]

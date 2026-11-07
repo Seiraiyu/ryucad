@@ -82,7 +82,7 @@ pub(crate) fn curves(
         .collect()
 }
 
-fn edge(plan: &Plan, e: EdgeId, meter: &crate::work::Meter) -> Result<EdgeGeo, Error> {
+pub(crate) fn edge(plan: &Plan, e: EdgeId, meter: &crate::work::Meter) -> Result<EdgeGeo, Error> {
     let body = plan.body;
     let edge = &body.edges[e];
     let at = edge.name;
@@ -492,7 +492,6 @@ fn closing(
     let edge = &body.edges[e];
     let at = edge.name;
     let faces = fins.map(|f| plan.face_of(f));
-    let ds = faces.map(|f| plan.d(f));
     let surfaces = faces.map(|f| &plan.surface[&f]);
     if surfaces.iter().any(|s| s.frame().is_none()) {
         return traced(plan, e, fins, meter);
@@ -500,12 +499,8 @@ fn closing(
     let curve = &body.curves[edge.curve];
     let [t0, t1] = edge.interval;
     let tm = (t0 + t1) / 2.0;
-    let reach = ds[0].abs().max(ds[1].abs());
-    let estimate = moved_point(
-        curve.point(tm),
-        [plan.normal(fins[0], tm), plan.normal(fins[1], tm)],
-        ds,
-    );
+    let reach = plan.reach_of(e);
+    let estimate = plan.goes(fins, curve.point(tm), tm);
     // Within two distances of the edge: the faces' offsets reach three.
     let grow = 2.0 * reach;
     let region = curve.bounds(edge.interval).grow(grow);
@@ -541,7 +536,7 @@ fn closing(
     // so the edge can run over the whole of it.
     let b = if edge.start == edge.end && b.curve.period().is_none() {
         let p = body.vertices[edge.start].point;
-        let at = moved_point(p, [plan.normal(fins[0], t0), plan.normal(fins[1], t0)], ds);
+        let at = plan.goes(fins, p, t0);
         let (s, _) = project_on(&b.curve, b.range, at);
         crate::intersect::reseamed(b, s)
     } else {
@@ -655,11 +650,11 @@ fn traced(
     let edge = &body.edges[e];
     let at = edge.name;
     let faces = fins.map(|f| plan.face_of(f));
-    let ds = faces.map(|f| plan.d(f));
     let surfaces = faces.map(|f| &plan.surface[&f]);
-    let curve = &body.curves[edge.curve];
+    let mut curve = &body.curves[edge.curve];
     let [t0, t1] = edge.interval;
-    let reach = ds[0].abs().max(ds[1].abs());
+    let reach = plan.reach_of(e);
+    let mut carried = None;
     let range = match curve {
         Curve::Line(_) => [t0 - 3.0 * reach, t1 + 3.0 * reach],
         Curve::Circle(c) if t1 - t0 < core::f64::consts::TAU => {
@@ -667,21 +662,36 @@ fn traced(
                 (3.0 * reach / c.radius()).min((core::f64::consts::TAU - (t1 - t0)) / 2.0 * 0.9);
             [t0 - m, t1 + m]
         }
+        // A drafted face's vertex slides along its hinge's rulings, so a
+        // spline edge there is carried on past its ends as a line is
+        // (plan 9.B): every other edge keeps its interval, bit for bit.
+        _ if faces
+            .iter()
+            .any(|&f| matches!(plan.motion_of(f), crate::tweak::Motion::Draft { .. })) =>
+        {
+            let m = [t0, t1].map(|t| {
+                let v = curve.eval(t).d1.length();
+                if v > 0.0 { 3.0 * reach / v } else { 0.0 }
+            });
+            match crate::intersect::extended_curve(curve, edge.interval, m) {
+                Some((c, r)) => {
+                    carried = Some(c);
+                    r
+                }
+                None => [t0, t1],
+            }
+        }
         _ => [t0, t1],
     };
+    if let Some(c) = &carried {
+        curve = c;
+    }
     let uv = |k: usize, t: f64| body.fin_uv(fins[k], t.clamp(t0, t1)).map(|p| [p.x, p.y]);
     let solve = |t: f64| -> Option<(Point3, Vector3, [[f64; 2]; 2])> {
         let c = curve.eval(t);
         let tan = c.d1.normalize()?.get();
         let tan_d = (c.d2 - tan * c.d2.dot(tan)) / c.d1.length();
-        let start = moved_point(
-            c.point,
-            [
-                plan.normal(fins[0], t.clamp(t0, t1)),
-                plan.normal(fins[1], t.clamp(t0, t1)),
-            ],
-            ds,
-        );
+        let start = plan.goes(fins, c.point, t.clamp(t0, t1));
         // Newton's method from `x`, at most `steps` steps: the parameters
         // and whether a step came within rounding of nothing.
         let newton = |mut x: [[f64; 2]; 2], steps: usize| -> Option<([[f64; 2]; 2], bool)> {

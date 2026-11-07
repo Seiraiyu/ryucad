@@ -66,6 +66,15 @@
 //! [`Open::Refuse`], the default, surface shells are healed as solids'
 //! are, as they always were.
 //!
+//! **References** (design 364). [`reference`] makes a body for display
+//! and reading geometry, never for modelling: the shape's topology as the
+//! file gives it, through healing's structural steps alone (names, each
+//! edge's uses, seams and poles, orientation), sampled tolerances and
+//! unfitted pcurves, built as a sheet. It passes
+//! [`crate::check::check_topology`] and nothing more. A piece the layout
+//! refuses is laid out face by face, and a face that fails alone is left
+//! out, so a reference is refused only when no face can be laid out.
+//!
 //! Healing knows nothing of any file format: an importer of any kind
 //! builds the same [`Shape`]. [`seamed`] goes the other way, a body as a
 //! file must describe it.
@@ -77,6 +86,7 @@ mod names;
 mod orient;
 mod pcurves;
 mod pieces;
+mod reference;
 pub(crate) mod seamed;
 mod sew;
 mod sewing;
@@ -85,6 +95,7 @@ mod tighten;
 mod unseam;
 
 pub use names::{Names as ImportNames, names as import_names};
+pub use reference::{ReferenceOptions, ReferenceReport, reference, reference_with};
 pub use seamed::{Origins, seamed, seamed_with_origins};
 pub use sewing::{SewOptions, sew};
 

@@ -2,6 +2,7 @@
 name = "ryukei-fuzz"
 version = "0.0.0"
 edition = "2024"
+license = "Apache-2.0"
 publish = false
 
 [package.metadata]
@@ -15,6 +16,7 @@ ryucad-doc = { path = "../crates/ryucad-doc", features = ["test-support"] }
 ryuformats = { path = "../crates/ryuformats" }
 ryudfm = { path = "../crates/ryudfm", features = ["testing"] }
 ryueda = { path = "../crates/ryueda" }
+ryueda-parts = { path = "../crates/ryueda-parts", features = ["testing"] }
 ryusch = { path = "../crates/ryusch", features = ["testing"] }
 ryukei = { path = "../crates/ryukei" }
 ryukei-testkit = { path = "../crates/ryukei-testkit" }
@@ -264,6 +266,13 @@ bench = false
 [[bin]]
 name = "sheet_metal"
 path = "fuzz_targets/sheet_metal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parts"
+path = "fuzz_targets/parts.rs"
 test = false
 doc = false
 bench = false

@@ -29,6 +29,8 @@ pub const SELF: &str = "self";
 pub const ERC: &str = "erc.json";
 /// The schematic lint's preferences, beside the manifest.
 pub const LINT: &str = "lint.json";
+/// The project's sourcing (design 347), beside the manifest.
+pub const PARTS: &str = "parts.json";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -389,6 +391,8 @@ pub struct Project {
     pub erc: Loaded<crate::erc::Config>,
     /// `lint.json`, read (the defaults when there is none) with its faults.
     pub lint: Loaded<ryusch::lint::Prefs>,
+    /// `parts.json`, read (the defaults when there is none) with its faults.
+    pub parts: Loaded<crate::sourcing::Config>,
 }
 
 /// The nearest folder at or above `start` holding a `ryueda.json`.
@@ -433,6 +437,7 @@ impl Project {
         let manifest = Manifest::read(&bytes)?;
         let erc = src.read(ERC)?;
         let lint = src.read(LINT)?;
+        let parts = src.read(PARTS)?;
         let mut conn = design::load(src)?;
         let mut h = blake3::Hasher::new();
         h.update(b"ryueda.project.1");
@@ -450,6 +455,11 @@ impl Project {
             h.update(b"ryueda.lint");
             design::piece(&mut h, l);
         }
+        // Likewise its sourcing.
+        if let Some(b) = &parts {
+            h.update(b"ryueda.parts");
+            design::piece(&mut h, b);
+        }
         let revision = h.finalize().to_hex()[..32].to_owned();
         let lint = match &lint {
             None => Loaded {
@@ -466,6 +476,31 @@ impl Project {
                     faults: crate::lint::check(&c)
                         .into_iter()
                         .map(|f| f.with("path", LINT))
+                        .collect(),
+                    item: Ok(c),
+                },
+                Err(e) => Loaded {
+                    item: Err(e),
+                    faults: Vec::new(),
+                },
+            },
+        };
+        let parts = match &parts {
+            None => Loaded {
+                item: Ok(crate::sourcing::Config::default()),
+                faults: Vec::new(),
+            },
+            Some(bytes) => match doc::read::<crate::sourcing::Config>(
+                bytes,
+                PARTS,
+                crate::sourcing::KIND,
+                crate::sourcing::FORMAT,
+            ) {
+                Ok(c) => Loaded {
+                    faults: c
+                        .check()
+                        .into_iter()
+                        .map(|f| f.with("path", PARTS))
                         .collect(),
                     item: Ok(c),
                 },
@@ -516,6 +551,7 @@ impl Project {
             conn: Connectivity::default(),
             erc,
             lint,
+            parts,
         };
         p.judge_components();
         conn.judge(&|r| p.libcomp(SELF, r).map(drop));
@@ -634,6 +670,7 @@ impl Project {
                 let faults = c
                     .check(symbol, &footprints)
                     .into_iter()
+                    .chain(c.check_data())
                     .map(|f| f.with("path", &path))
                     .collect();
                 found.push((alias.clone(), id.clone(), faults));
@@ -702,6 +739,13 @@ impl Project {
             });
         }
         out.extend(self.lint.faults.iter().cloned());
+        if let Err(e) = &self.parts.item {
+            out.push(Fault {
+                severity: Severity::Error,
+                error: e.clone().with("path", PARTS),
+            });
+        }
+        out.extend(self.parts.faults.iter().cloned());
         out.extend(self.conn.faults());
         out
     }
@@ -715,7 +759,7 @@ impl Project {
             return out;
         };
         out.push((MANIFEST.to_owned(), meta));
-        for file in [ERC, LINT] {
+        for file in [ERC, LINT, PARTS] {
             if let Ok(meta) = std::fs::metadata(root.join(file))
                 && meta.is_file()
             {

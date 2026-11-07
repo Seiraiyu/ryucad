@@ -1139,3 +1139,75 @@ fn a_daemon_syncs_its_writes_behind_the_answer() {
     assert_eq!(cli(&f, &["daemon", "stop"])["result"]["stopped"], true);
     assert!(f.root.join("parts/p/part.json").is_file());
 }
+
+#[test]
+fn a_human_writes_only_in_the_mode_that_allows_it() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    let conn = f.connect().unwrap();
+    let me = ask(
+        &conn,
+        &Request::SessionHello {
+            kind: ryucad::live::Kind::Human,
+            name: Some("Dana".into()),
+            participant: None,
+        },
+    )
+    .unwrap()["participant"]
+        .clone();
+    let add = Request::from_rpc(
+        "feature.add",
+        Some(serde_json::json!(
+        {"part": "p", "type": "box", "id": "b", "params": {"x": 1, "y": 1, "z": 1}})),
+    )
+    .unwrap();
+    let e = ask(&conn, &add).unwrap_err();
+    assert_eq!(e.code, ryucad::error::Code::ParticipantMode);
+    let r = cli(&f, &["participants"]);
+    let dana = r["result"]["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == me)
+        .unwrap()
+        .clone();
+    assert_eq!(dana["mode"], "view");
+    ask(
+        &conn,
+        &Request::ParticipantMode {
+            mode: ryucad::live::Mode::Edit,
+        },
+    )
+    .unwrap();
+    ask(&conn, &add).unwrap();
+    // Gone and back: a new connection starts in View again.
+    drop(conn);
+    f.wait_until(|| {
+        cli(&f, &["participants"])["result"]["participants"]
+            .as_array()
+            .unwrap()
+            .len()
+            == 1
+    });
+    let conn = f.connect().unwrap();
+    ask(
+        &conn,
+        &Request::SessionHello {
+            kind: ryucad::live::Kind::Human,
+            name: Some("Dana".into()),
+            participant: None,
+        },
+    )
+    .unwrap();
+    let edit = Request::from_rpc(
+        "feature.edit",
+        Some(serde_json::json!(
+        {"part": "p", "id": "b", "params": {"x": 2}})),
+    )
+    .unwrap();
+    assert_eq!(
+        ask(&conn, &edit).unwrap_err().code,
+        ryucad::error::Code::ParticipantMode
+    );
+    cli(&f, &["daemon", "stop"]);
+}

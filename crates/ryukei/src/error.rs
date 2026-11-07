@@ -73,6 +73,10 @@ pub enum Error {
     /// A body whose faces cross or overlap that couldn't be made valid:
     /// see [`crate::repair`].
     InvalidRepair(RepairError),
+    /// A boundary that can't be filled: see [`crate::fill`].
+    InvalidFill(FillError),
+    /// A face tweak that can't be made: see [`crate::tweak`].
+    InvalidTweak(TweakError),
 }
 
 /// Why a body isn't sheet metal, or why it can't be unfolded, naming the
@@ -508,6 +512,8 @@ impl fmt::Display for Error {
             Self::InvalidSheetMetal(e) => write!(f, "sheet metal: {e}"),
             Self::InvalidView(e) => write!(f, "invalid view: {e}"),
             Self::InvalidRepair(e) => write!(f, "can't repair: {e}"),
+            Self::InvalidFill(e) => write!(f, "can't fill: {e}"),
+            Self::InvalidTweak(e) => write!(f, "can't tweak: {e}"),
         }
     }
 }
@@ -571,6 +577,74 @@ impl fmt::Display for SheetError {
     }
 }
 
+/// Why a fill was refused (design 295, plan 12.G). Sides are numbered as
+/// the boundary lists them, from 0. Nothing is built when it is refused.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FillError {
+    /// Fewer than three sides.
+    TooFewSides,
+    /// A tolerance outside `[LINEAR_RESOLUTION, TOLERANCE_CAP]`, or an
+    /// angle outside `(0, π/2)`.
+    BadOptions,
+    /// A side's edge isn't an edge of its body.
+    NoSuchEdge { side: usize },
+    /// A side asked to meet its face tangentially, but its edge has two
+    /// faces (it isn't laminar), so which face is meant is unknown.
+    NotLaminar { side: usize },
+    /// The side's start is `gap` from the end of the side before it (side
+    /// 0: from the last side's end), more than the tolerance.
+    NotClosed { side: usize, gap: f64 },
+    /// A side of no length, or (`side` the one starting there) two sides
+    /// meeting at a cusp or tangentially at a corner; `None` for a loop
+    /// that encloses nothing or a patch whose weights reach zero.
+    Degenerate { side: Option<usize> },
+    /// A tangent side, or (`side` `None`) the patches' inner edges, whose
+    /// certified angle can't be brought within the limit: `angle` is the
+    /// largest sampled angle, in radians.
+    AngleTooLarge { side: Option<usize>, angle: f64 },
+    /// An angle that samples keep within the limit but no bound could
+    /// certify.
+    Uncertain { side: Option<usize> },
+}
+
+impl fmt::Display for FillError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let which = |side: &Option<usize>| match side {
+            Some(s) => format!("side {s}"),
+            None => "the inner edges".to_owned(),
+        };
+        match self {
+            Self::TooFewSides => f.write_str("a fill needs at least three sides"),
+            Self::BadOptions => f.write_str("the tolerance or the angle is out of range"),
+            Self::NoSuchEdge { side } => write!(f, "side {side}'s edge isn't in its body"),
+            Self::NotLaminar { side } => {
+                write!(f, "side {side} is tangent but its edge has two faces")
+            }
+            Self::NotClosed { side, gap } => {
+                write!(
+                    f,
+                    "side {side} starts {gap} m from the end of the side before it"
+                )
+            }
+            Self::Degenerate { side: Some(s) } => {
+                write!(
+                    f,
+                    "side {s} has no length or meets the side before it at a cusp or tangentially"
+                )
+            }
+            Self::Degenerate { side: None } => f.write_str("the boundary encloses nothing"),
+            Self::AngleTooLarge { side, angle } => {
+                write!(
+                    f,
+                    "{} can't be met within the angle: {angle} rad",
+                    which(side)
+                )
+            }
+            Self::Uncertain { side } => write!(f, "{}'s angle couldn't be certified", which(side)),
+        }
+    }
+}
+
 /// Why a self-union was refused (design 299), naming faces of the body
 /// it was given. Nothing is built when it is refused.
 #[derive(Clone, Debug, PartialEq)]
@@ -620,6 +694,153 @@ impl From<RepairError> for Error {
     }
 }
 
+impl From<FillError> for Error {
+    fn from(e: FillError) -> Self {
+        Self::InvalidFill(e)
+    }
+}
+
+/// Why a face tweak was refused (design 384), naming faces, edges and
+/// vertices by name. Nothing is built when one is refused. Tweaks keep
+/// the body's topology: whatever would need a face, edge or vertex made
+/// or taken away is refused here (ryukei 13 makes those).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TweakError {
+    /// The spec names no face.
+    NoFaces,
+    /// No face of the body has this name.
+    NoSuchFace { face: Name },
+    /// The face is named twice.
+    DuplicateFace { face: Name },
+    /// A motion, distance or surface that isn't finite.
+    NotFinite,
+    /// An offset under `10 × LINEAR_RESOLUTION` that isn't zero.
+    BadDistance,
+    /// The edge's faces are tangent along it, and the tweak would leave
+    /// them meeting at an angle: a blend beside a moved face can't stay a
+    /// blend. `tangent: true` brings tangent neighbours into the set.
+    TangencyBroken { edge: Name },
+    /// The edge's new faces don't meet between where its vertices go, or
+    /// its vertices come in the wrong order or within ten resolutions.
+    EdgeVanishes { edge: Name },
+    /// The vertex's edges' new curves don't pass through one point: it
+    /// would split into several.
+    VertexSplits { vertex: Name },
+    /// The face's new surface folds, or its loops would turn over.
+    FaceCollapses { face: Name },
+    /// An unchanged face whose surface would have to be carried past its
+    /// domain to meet its moved neighbours, and can't be.
+    ExtensionUnsupported { face: Name },
+    /// A replacement surface whose normal is within a hundredth of a
+    /// radian of square to the face's at its middle: which side is out is
+    /// unclear.
+    Ambiguous { face: Name },
+    /// A replacement of a face with a laminar edge (a sheet's boundary):
+    /// where the boundary goes on the new surface is undefined.
+    LaminarFace { face: Name },
+    /// A draft angle that isn't finite, or whose size lies outside
+    /// `[ANGULAR_RESOLUTION, π/2 - 0.01]`.
+    BadAngle,
+    /// The neutral plane doesn't cross the face.
+    NoHinge { face: Name },
+    /// The neutral plane crosses the face's box in more than one branch.
+    HingeAmbiguous { face: Name },
+    /// The face has none of the parting line's edges on its boundary, or
+    /// they aren't one chain.
+    HingeNotOnFace { face: Name },
+    /// The face's hinge, or its normal, runs within a hundredth of a
+    /// radian of the pull somewhere: the draft has no direction there.
+    HingeAlongPull { face: Name },
+    /// Two faces of the result meet away from the edges they share.
+    SelfIntersecting { faces: [Name; 2] },
+    /// A decision rounding left uncertain at the entity named.
+    Uncertain { at: Name },
+    /// The result would hold a tolerance past the cap at the entity
+    /// named: `needed` is what it would take.
+    ToleranceTooLarge { at: Name, needed: f64 },
+    /// What tweaks don't build yet, at the entity named.
+    Unsupported { at: Name, case: TweakCase },
+}
+
+/// The kinds of geometry [`TweakError::Unsupported`] refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TweakCase {
+    /// An edge whose faces are tangent in some places and not others.
+    PartlySmooth,
+    /// A face with a loop that is a lone vertex (a cone's apex).
+    LoneVertex,
+    /// An edge whose curve would have to be carried past its ends and
+    /// can't be (an ellipse or a periodic spline past a turn, a curve of
+    /// another kind).
+    CarriedCurve,
+    /// A parting line whose edges on one face lie on different curves
+    /// (a chain turning a corner): divide the face there first.
+    HingeChain,
+}
+
+impl fmt::Display for TweakCase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::PartlySmooth => "faces tangent in places only",
+            Self::LoneVertex => "a lone vertex",
+            Self::CarriedCurve => "a curve that can't be carried past its ends",
+            Self::HingeChain => "a parting line turning a corner on one face",
+        })
+    }
+}
+
+impl fmt::Display for TweakError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoFaces => f.write_str("no faces are named"),
+            Self::NoSuchFace { face } => write!(f, "no face {face}"),
+            Self::DuplicateFace { face } => write!(f, "face {face} is named twice"),
+            Self::NotFinite => f.write_str("a motion, distance or surface isn't finite"),
+            Self::BadDistance => f.write_str("a distance is under ten resolutions but not zero"),
+            Self::TangencyBroken { edge } => {
+                write!(f, "the faces tangent along edge {edge} would no longer be")
+            }
+            Self::EdgeVanishes { edge } => write!(f, "edge {edge} would vanish"),
+            Self::VertexSplits { vertex } => write!(f, "vertex {vertex} would split"),
+            Self::FaceCollapses { face } => write!(f, "face {face} would collapse"),
+            Self::ExtensionUnsupported { face } => {
+                write!(f, "face {face} can't be carried past its domain")
+            }
+            Self::Ambiguous { face } => {
+                write!(f, "the new surface of face {face} is square to it")
+            }
+            Self::LaminarFace { face } => write!(f, "face {face} has a laminar edge"),
+            Self::BadAngle => f.write_str(
+                "a draft angle isn't finite, or lies outside a resolution to a right angle less 0.01",
+            ),
+            Self::NoHinge { face } => write!(f, "the neutral plane doesn't cross face {face}"),
+            Self::HingeAmbiguous { face } => {
+                write!(f, "the neutral plane crosses face {face} more than once")
+            }
+            Self::HingeNotOnFace { face } => {
+                write!(f, "the parting line isn't one chain on face {face}")
+            }
+            Self::HingeAlongPull { face } => {
+                write!(f, "the hinge of face {face} runs along the pull")
+            }
+            Self::SelfIntersecting { faces } => {
+                write!(f, "faces {} and {} would cross", faces[0], faces[1])
+            }
+            Self::Uncertain { at } => write!(f, "uncertain at {at}"),
+            Self::ToleranceTooLarge { at, needed } => {
+                write!(f, "{at} would need a tolerance of {needed} m, past the cap")
+            }
+            Self::Unsupported { at, case } => write!(f, "{case} at {at}"),
+        }
+    }
+}
+
+impl From<TweakError> for Error {
+    fn from(e: TweakError) -> Self {
+        Self::InvalidTweak(e)
+    }
+}
+
 impl From<SheetError> for Error {
     fn from(e: SheetError) -> Self {
         Self::InvalidSheet(e)
@@ -637,6 +858,9 @@ pub enum ViewError {
     /// A face whose silhouette couldn't be traced, fitted or trimmed with
     /// a certificate.
     Uncertain { at: Name },
+    /// An edge whose image couldn't be certified: a spline stretch running
+    /// along the view that is neither a point nor a fold.
+    Image { at: Name },
 }
 
 impl fmt::Display for ViewError {
@@ -647,6 +871,9 @@ impl fmt::Display for ViewError {
             ),
             Self::Uncertain { at } => {
                 write!(f, "the silhouette of face {at} couldn't be certified")
+            }
+            Self::Image { at } => {
+                write!(f, "the image of edge {at} couldn't be certified")
             }
         }
     }
@@ -1379,6 +1606,70 @@ mod view_tests {
         assert_eq!(
             e.to_string(),
             format!("invalid view: the silhouette of face {at} couldn't be certified")
+        );
+    }
+
+    #[test]
+    fn an_edge_whose_image_cant_be_certified_is_named() {
+        let at = Name::from_u128(9);
+        let e: Error = ViewError::Image { at }.into();
+        assert_eq!(
+            e.to_string(),
+            format!("invalid view: the image of edge {at} couldn't be certified")
+        );
+    }
+}
+
+#[cfg(test)]
+mod tweak_error_tests {
+    use super::*;
+
+    #[test]
+    fn draft_refusals_name_their_face() {
+        let n = Name::from_u128(9);
+        for e in [
+            TweakError::NoHinge { face: n },
+            TweakError::HingeAmbiguous { face: n },
+            TweakError::HingeNotOnFace { face: n },
+            TweakError::HingeAlongPull { face: n },
+        ] {
+            let s = Error::from(e).to_string();
+            assert!(s.starts_with("can't tweak: "), "{s}");
+            assert!(s.contains(&n.to_string()), "{s}");
+        }
+        assert!(TweakError::BadAngle.to_string().contains("angle"));
+        let u = TweakError::Unsupported {
+            at: n,
+            case: TweakCase::HingeChain,
+        };
+        assert!(u.to_string().contains("parting line"), "{u}");
+    }
+
+    #[test]
+    fn tweak_errors_say_what_and_where() {
+        let n = Name::from_u128(7);
+        let e: Error = TweakError::VertexSplits { vertex: n }.into();
+        assert_eq!(
+            e,
+            Error::InvalidTweak(TweakError::VertexSplits { vertex: n })
+        );
+        assert!(e.to_string().starts_with("can't tweak: "), "{e}");
+        assert!(e.to_string().contains(&n.to_string()), "{e}");
+        let u = TweakError::Unsupported {
+            at: n,
+            case: TweakCase::CarriedCurve,
+        };
+        assert!(u.to_string().contains("carried"), "{u}");
+        let t = TweakError::ToleranceTooLarge {
+            at: n,
+            needed: 2e-4,
+        };
+        assert_ne!(
+            t,
+            TweakError::ToleranceTooLarge {
+                at: n,
+                needed: 3e-4
+            }
         );
     }
 }
