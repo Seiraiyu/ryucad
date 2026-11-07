@@ -85,4 +85,10 @@ rust::Vec<double> intersect_faces(const Shape &a, rust::Slice<const double> pa,
                                   const Shape &b, rust::Slice<const double> pb,
                                   uint32_t samples);
 
+// OCCT's exact hidden-line removal of `s` seen along -towards with `x`
+// to the right (view: towards then x, six numbers): the lengths of the
+// visible sharp, smooth (G1) and outline lines, then the hidden ones,
+// then the seconds HLRBRep_Algo and HLRBRep_HLRToShape took.
+rust::Vec<double> hlr(const Shape &s, rust::Slice<const double> view);
+
 } // namespace ryukei_occt
