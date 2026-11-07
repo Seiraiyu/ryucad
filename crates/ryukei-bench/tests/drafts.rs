@@ -318,3 +318,96 @@ fn offset_faces_against_occt() {
         }
     }
 }
+
+/// The booleans' race plate: 40 × 25 × 0.5 with a grid of 1,000 through
+/// holes of radius 0.3, made by both kernels.
+fn plate_1000() -> (Body, occt::Solid) {
+    let (cols, rows) = (40, 25);
+    let places: Vec<Rigid> = (0..rows)
+        .flat_map(|j| (0..cols).map(move |i| at(i as f64 + 0.5, j as f64 + 0.5, -0.25)))
+        .collect();
+    let (plate, _) =
+        primitive::block(K, f64::from(cols), f64::from(rows), 0.5, &Rigid::IDENTITY).unwrap();
+    let (pin, _) = primitive::cylinder(OpKey(0xbd5), 0.3, 1.0, &Rigid::IDENTITY).unwrap();
+    let tools: Vec<Tool> = places
+        .iter()
+        .enumerate()
+        .map(|(i, &place)| Tool {
+            key: ToolKey(i as u128 + 1),
+            body: &pin,
+            place,
+        })
+        .collect();
+    let (body, _) = boolean(OpKey(0xbd6), BooleanOp::Subtract, &plate, &tools).unwrap();
+    let solid = occt::Solid::new(
+        Primitive::Block([f64::from(cols), f64::from(rows), 0.5]),
+        &Rigid::IDENTITY,
+    );
+    let pins: Vec<occt::Solid> = places
+        .iter()
+        .map(|p| occt::Solid::new(Primitive::Cylinder { r: 0.3, h: 1.0 }, p))
+        .collect();
+    (body, solid.cut(&pins, false))
+}
+
+/// Design 384's bar: every hole's wall drafted 1° about the plate's
+/// bottom, on one thread, faster than OCCT's `DraftAngle` (its time
+/// taken in C++ around Add and Build). Asserted as it stands with
+/// `RYUKEI_BARS=1`, ten times looser otherwise. Where OCCT refuses, or
+/// its volume misses the closed form, the bar isn't judged (as the shell
+/// race, plan 14.D) and the test says so.
+#[test]
+fn drafting_1000_hole_walls_beats_occt_on_one_thread() {
+    let th = PI / 180.0;
+    let (body, solid) = plate_1000();
+    let walls = cylinders(&body);
+    assert_eq!(walls.len(), 1000);
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let t = Instant::now();
+    let (o, _, report) = one
+        .install(|| draft(OpKey(0xbd7), &body, &spec(&walls, th, 0.0)))
+        .expect("ryukei's draft");
+    let ryukei_s = t.elapsed().as_secs_f64();
+    assert_eq!(report.faces.len(), 1000);
+    let exact = 40.0 * 25.0 * 0.5 - 1000.0 * frustum(0.5, 0.3, 0.3 + 0.5 * math::tan(th));
+    let (v, slack) = ryukei_volume(&o, 1e-4);
+    assert!(
+        (v - exact).abs() <= slack + 1e-9,
+        "ryukei {v} against {exact}"
+    );
+    let t = Instant::now();
+    let all = rayon::ThreadPoolBuilder::new()
+        .build()
+        .unwrap()
+        .install(|| draft(OpKey(0xbd7), &body, &spec(&walls, th, 0.0)))
+        .expect("ryukei's draft");
+    let parallel_s = t.elapsed().as_secs_f64();
+    assert_eq!(all.0.dump(), o.dump());
+    let occt = solid.draft(&[], true, up(), OCCT_SIGN * th, Point3::ORIGIN, up());
+    let bars = std::env::var_os("RYUKEI_BARS").is_some();
+    match occt {
+        Ok((d, occt_s)) => {
+            let ov = d.volume();
+            let agrees = (ov - exact).abs() <= 1e-6 * exact;
+            println!(
+                "1,000 hole walls drafted: ryukei {ryukei_s:.3} s on one thread, {parallel_s:.3} s on all; OCCT {occt_s:.3} s ({:.2} times), its volume {ov:.9} against {exact:.9} ({})",
+                ryukei_s / occt_s,
+                if agrees {
+                    "agrees"
+                } else {
+                    "differs: the bar isn't judged"
+                }
+            );
+            if agrees {
+                let bar = if bars { occt_s } else { 10.0 * occt_s };
+                assert!(ryukei_s < bar, "ryukei {ryukei_s:.3} s against {bar:.3} s");
+            }
+        }
+        Err(e) => println!(
+            "1,000 hole walls drafted: ryukei {ryukei_s:.3} s on one thread, {parallel_s:.3} s on all; OCCT refused ({e}): the bar isn't judged"
+        ),
+    }
+}
