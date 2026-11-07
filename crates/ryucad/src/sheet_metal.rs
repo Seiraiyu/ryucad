@@ -3,6 +3,7 @@
 //! edge flanges on straight edges of one; the kernel's refusals in the
 //! agent's terms; and the sheet metal report ([`report`]).
 
+pub mod allowance;
 pub mod report;
 pub mod section;
 

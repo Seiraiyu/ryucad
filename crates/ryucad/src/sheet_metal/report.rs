@@ -6,7 +6,6 @@ use crate::doc::sheet_metal::Allowance;
 use crate::error::{Code, Error, Result};
 use crate::session::Session;
 use crate::solid::Solids;
-use core::f64::consts::PI;
 use ryukei::sheet_metal::{BendDirection, SheetOptions};
 use serde_json::{Value, json};
 
@@ -76,17 +75,10 @@ pub fn get(
         .map(|b| {
             let (developed, note) = match founder.map(|f| &f.allowance) {
                 None => (None, Some("no base flange founded the solid, so it has no allowance")),
-                Some(Allowance::KFactor(k)) => (Some(b.angle * (b.radius + k.number() * t)), None),
-                Some(Allowance::Deduction(bd)) if b.angle < PI - 1e-9 => {
-                    let ba = 2.0 * (b.radius + t) * ryukei::math::tan(b.angle / 2.0) - bd.meters();
-                    if ba > ryukei::tol::LINEAR_RESOLUTION {
-                        (Some(ba), None)
-                    } else {
-                        (None, Some("the deduction is longer than the bend's own length to its mould lines"))
-                    }
-                }
-                Some(Allowance::Deduction(_)) => (None, Some("a bend deduction is defined under a half turn: give this bend its allowance when unfolding")),
-                Some(Allowance::Length(q)) => (Some(q.meters()), None),
+                Some(a) => match super::allowance::developed(a, b.radius, t, b.angle) {
+                    Ok(ba) => (Some(ba), None),
+                    Err(e) => (None, Some(e.message())),
+                },
             };
             let mut v = json!({
                 "bend": at(&b.inner[0]),
