@@ -5,6 +5,9 @@ use super::{KnotVector, MAX_DEGREE};
 
 const W: usize = MAX_DEGREE + 1;
 
+/// The tables [`KnotVector::basis`] takes for degrees below it.
+const SMALL: usize = 8;
+
 /// The `degree + 1` basis functions that are nonzero on one knot span, and
 /// their first two derivatives, at one parameter.
 #[derive(Clone, Copy, Debug)]
@@ -33,13 +36,34 @@ impl KnotVector {
     /// parameter is wrapped into the domain first; a clamped one outside
     /// the domain extrapolates the end span.
     pub fn basis(&self, t: f64) -> Basis {
+        // The same arithmetic in either size: degrees up to 7 (most of
+        // what files hold) take tables of 8, not clearing the largest
+        // degree's 26 by 26 on every call (#308: about a tenth of mass's
+        // time on KiCad's Smolhaj model).
+        self.basis_to(t, 2)
+    }
+
+    /// [`Self::basis`] up to the `order`-th derivatives (at most 2), the
+    /// same bits for those: each order's sums run alone, after the lower
+    /// ones'. Higher orders read as zero. For callers that want the values
+    /// alone, or with first derivatives (#308).
+    pub(crate) fn basis_to(&self, t: f64, order: usize) -> Basis {
+        if self.degree() < SMALL {
+            self.basis_in::<SMALL>(t, order)
+        } else {
+            self.basis_in::<W>(t, order)
+        }
+    }
+
+    /// [`Self::basis_to`] with tables of `N`, more than the degree.
+    fn basis_in<const N: usize>(&self, t: f64, order: usize) -> Basis {
         let t = self.wrap(t);
         let span = self.span(t);
         let (u, p) = (self.flat(), self.degree());
         // ndu: basis functions in the upper triangle, knot differences in
         // the lower.
-        let mut ndu = [[0.0; W]; W];
-        let (mut left, mut right) = ([0.0; W], [0.0; W]);
+        let mut ndu = [[0.0; N]; N];
+        let (mut left, mut right) = ([0.0; N], [0.0; N]);
         ndu[0][0] = 1.0;
         for j in 1..=p {
             left[j] = t - u[span + 1 - j];
@@ -57,8 +81,8 @@ impl KnotVector {
         for j in 0..=p {
             ders[0][j] = ndu[j][p];
         }
-        let n = p.min(2);
-        let mut a = [[0.0; W]; 2];
+        let n = p.min(order.min(2));
+        let mut a = [[0.0; N]; 2];
         for r in 0..=p {
             let (mut s1, mut s2) = (0, 1);
             a[0][0] = 1.0;
@@ -111,6 +135,58 @@ mod tests {
     /// The NURBS Book, examples 2.3 and 2.4: U = {0,0,0,1,2,3,4,4,5,5,5}.
     fn book() -> KnotVector {
         KnotVector::clamped(2, &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[3, 1, 1, 1, 2, 3]).unwrap()
+    }
+
+    /// The small tables give the largest's bits (#308): degrees 1 to 7,
+    /// uneven knots, parameters across the domain and on knots.
+    #[test]
+    fn small_tables_give_the_same_bits() {
+        let mut x: u64 = 0x308;
+        let mut unit = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for p in 1..super::SMALL {
+            let mut ks = vec![0.0];
+            for _ in 0..6 {
+                let last = *ks.last().unwrap();
+                ks.push(last + 0.01 + unit());
+            }
+            let mut mults = vec![1; ks.len()];
+            mults[0] = p + 1;
+            *mults.last_mut().unwrap() = p + 1;
+            mults[3] = p.min(2);
+            let k = KnotVector::clamped(p, &ks, &mults).unwrap();
+            let [a, b] = k.domain();
+            let mut ts: Vec<f64> = (0..400).map(|_| a + (b - a) * unit()).collect();
+            ts.extend(ks.iter().copied());
+            for t in ts {
+                let (s, w) = (
+                    k.basis_in::<{ super::SMALL }>(t, 2),
+                    k.basis_in::<{ super::W }>(t, 2),
+                );
+                assert_eq!(s.span(), w.span());
+                for order in 0..2 {
+                    let o = k.basis_to(t, order);
+                    for d in 0..=order {
+                        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                        assert_eq!(
+                            bits(o.values(d)),
+                            bits(w.values(d)),
+                            "degree {p} at {t} to {order}"
+                        );
+                    }
+                }
+                for d in 0..3 {
+                    let bits = |b: &super::Basis| {
+                        b.values(d).iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+                    };
+                    assert_eq!(bits(&s), bits(&w), "degree {p} at {t}, order {d}");
+                }
+            }
+        }
     }
 
     #[test]

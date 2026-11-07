@@ -264,6 +264,19 @@ impl Surface {
         }
     }
 
+    /// The point and its first partial derivatives, as [`Self::eval`]
+    /// gives them, bit for bit: a spline skips its second derivatives
+    /// (#308: mass's quadrature takes nothing more).
+    pub(crate) fn eval_first(&self, u: f64, v: f64) -> (Point3, Vector3, Vector3) {
+        match self {
+            Self::Nurbs(n) => n.eval_first(u, v),
+            _ => {
+                let e = self.eval(u, v);
+                (e.point, e.du, e.dv)
+            }
+        }
+    }
+
     /// The point and its first and second partial derivatives.
     pub fn eval(&self, u: f64, v: f64) -> SurfaceEval {
         let zero = Vector3::ZERO;

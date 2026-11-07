@@ -239,9 +239,9 @@ impl<'a> Meshed<'a> {
             Sense::Reversed => -1.0,
         };
         let h = |uv: Point2| {
-            let e = surface.eval(uv.x, uv.y);
-            let n = e.du.cross(e.dv);
-            Moments::at(e.point - self.origin, n * sign, n.length())
+            let (point, du, dv) = surface.eval_first(uv.x, uv.y);
+            let n = du.cross(dv);
+            Moments::at(point - self.origin, n * sign, n.length())
         };
         let corners = &self.coarse.corners;
         let tris = &self.coarse.triangles[fm.triangles.start as usize..fm.triangles.end as usize];
