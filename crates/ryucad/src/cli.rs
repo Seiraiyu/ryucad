@@ -2658,6 +2658,10 @@ impl FieldArgs {
             } else {
                 ends_json(&self.end_setbacks, &self.end_reliefs)
             },
+            fixed_face: None,
+            only: None,
+            bends: None,
+            unfold: None,
         }
     }
 }

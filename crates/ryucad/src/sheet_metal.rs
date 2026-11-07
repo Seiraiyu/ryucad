@@ -701,6 +701,8 @@ pub fn from_given(
     let mut v = match current {
         Some(Feature::BaseFlange(b)) => b.fields(),
         Some(Feature::Flange(x)) => x.fields(),
+        Some(Feature::Unfold(u)) => u.fields(),
+        Some(Feature::Refold(x)) => x.fields(),
         _ => json!({}),
     };
     let o = v.as_object_mut().expect("fields are an object");
@@ -764,7 +766,12 @@ pub fn from_given(
         return Ok(Feature::BaseFlange(Box::new(b)));
     }
     match (&f.target, &f.targets) {
-        (Some(_), Some(_)) => return Err(Error::new(Code::Usage, "give a flange's target once")),
+        (Some(_), Some(_)) => {
+            return Err(Error::new(
+                Code::Usage,
+                format!("give a {ty}'s target once"),
+            ));
+        }
         (Some(t), None) => {
             o.insert("target".into(), json!(t));
         }
@@ -775,12 +782,68 @@ pub fn from_given(
             _ => {
                 return Err(Error::new(
                     Code::InvalidParam,
-                    format!("a flange acts on one target, not {}", ts.len()),
+                    format!("a {ty} acts on one target, not {}", ts.len()),
                 )
                 .with("param", "targets"));
             }
         },
         (None, None) => {}
+    }
+    if ty == "unfold" || ty == "refold" {
+        if let Some(t) = &f.fixed_face {
+            if t.is_empty() {
+                o.remove("fixed");
+            } else {
+                o.insert("fixed".into(), reference(t, "/fixed")?);
+            }
+        }
+        if let Some(only) = &f.only {
+            if only.is_empty() {
+                o.remove("only");
+            } else {
+                let refs = only
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| reference(t, &format!("/only/{i}")))
+                    .collect::<crate::error::Result<Vec<_>>>()?;
+                o.insert("only".into(), json!(refs));
+            }
+        }
+        if ty == "refold" {
+            if let Some(u) = &f.unfold {
+                o.insert("unfold".into(), json!(u));
+            }
+            let mut r = Obj::new(&v, "")?;
+            let x = crate::doc::sheet_metal::Refold::from_fields(&mut r)?;
+            r.finish()?;
+            return Ok(Feature::Refold(Box::new(x)));
+        }
+        put(o, "allowance", &f.allowance);
+        if let Some(bs) = &f.bends {
+            let Value::Array(bs) = bs else {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "an unfold's bends are a list of {bend, k_factor | deduction | allowance}",
+                )
+                .with("param", "bends"));
+            };
+            let mut out = Vec::with_capacity(bs.len());
+            for (i, b) in bs.iter().enumerate() {
+                let mut b = b.clone();
+                let t = text(&b["bend"], "bends")?;
+                b["bend"] = reference(&t, &format!("/bends/{i}/bend"))?;
+                out.push(b);
+            }
+            if out.is_empty() {
+                o.remove("bends");
+            } else {
+                o.insert("bends".into(), Value::Array(out));
+            }
+        }
+        let mut r = Obj::new(&v, "")?;
+        let x = crate::doc::sheet_metal::Unfold::from_fields(&mut r, unit, env)?;
+        r.finish()?;
+        return Ok(Feature::Unfold(Box::new(x)));
     }
     if let Some(es) = &f.edges {
         let refs = es
@@ -877,8 +940,9 @@ pub fn from_given(
 /// would leave it) that can't be read now: a base flange's sketch not a
 /// sketch before it, its loops or chain not a profile; a flange's
 /// references not resolving to the kinds it wants, its ends not its
-/// edges' vertices, no radius where its founder gives none. What the
-/// kernel makes of them only rebuild can tell.
+/// edges' vertices, no radius where its founder gives none; an unfold's
+/// references, bends, fixed face and allowances; a refold's unfold and
+/// bends. What the kernel makes of them only rebuild can tell.
 pub fn check(part: &Part, id: &Id, f: &Feature, results: &dyn Results) -> crate::error::Result<()> {
     match f {
         Feature::BaseFlange(b) => {
@@ -902,7 +966,21 @@ pub fn check(part: &Part, id: &Id, f: &Feature, results: &dyn Results) -> crate:
             .map_err(|e| e.with("feature", id).with("sketch", &b.sketch))
         }
         Feature::Flange(x) => resolve(part, &Solids::of(part), id, x, results).map(drop),
+        Feature::Unfold(u) => unfold::resolve(part, &Solids::of(part), id, u, results).map(drop),
+        Feature::Refold(x) => {
+            unfold::refold_resolve(part, &Solids::of(part), id, x, results).map(drop)
+        }
         _ => Ok(()),
+    }
+}
+
+/// A bend allowance as reports give it: its form and its quantity.
+fn allowance_report(a: &crate::doc::sheet_metal::Allowance) -> Value {
+    use crate::doc::sheet_metal::Allowance;
+    match a {
+        Allowance::KFactor(k) => json!({"k_factor": k.report()}),
+        Allowance::Deduction(q) => json!({"deduction": q.report()}),
+        Allowance::Length(q) => json!({"allowance": q.report()}),
     }
 }
 
@@ -936,13 +1014,7 @@ pub fn report(project_part: &Part, f: &Feature) -> Value {
                 v["depth"] = s.depth.report();
                 v["symmetric"] = json!(s.symmetric);
             }
-            v["allowance"] = match &b.allowance {
-                crate::doc::sheet_metal::Allowance::KFactor(k) => json!({"k_factor": k.report()}),
-                crate::doc::sheet_metal::Allowance::Deduction(q) => {
-                    json!({"deduction": q.report()})
-                }
-                crate::doc::sheet_metal::Allowance::Length(q) => json!({"allowance": q.report()}),
-            };
+            v["allowance"] = allowance_report(&b.allowance);
             v["relief"] = relief(&b.relief);
             v
         }
@@ -989,9 +1061,40 @@ pub fn report(project_part: &Part, f: &Feature) -> Value {
             }
             v
         }
-        _ => unreachable!("a base flange or a flange"),
+        Feature::Unfold(u) => {
+            let mut v = u.fields();
+            let mut inherited = Vec::new();
+            match (&u.allowance, founder(project_part, &u.target)) {
+                (Some(a), _) => v["allowance"] = allowance_report(a),
+                (None, Some(b)) => {
+                    v["allowance"] = allowance_report(&b.allowance);
+                    inherited.push("allowance");
+                }
+                (None, None) => v["allowance"] = Value::Null,
+            }
+            v["inherited"] = json!(inherited);
+            for (i, b) in u.bends.iter().enumerate() {
+                let mut x = allowance_report(&b.allowance);
+                x["bend"] = b.bend.to_json();
+                v["bends"][i] = x;
+            }
+            for (role, r) in u.references() {
+                let at = format!("/{}", role.replace('.', "/"));
+                *v.pointer_mut(&at).expect("its own reference") = json!(r.text(part));
+            }
+            v
+        }
+        Feature::Refold(x) => {
+            let mut v = x.fields();
+            for (role, r) in x.references() {
+                let at = format!("/{}", role.replace('.', "/"));
+                *v.pointer_mut(&at).expect("its own reference") = json!(r.text(part));
+            }
+            v
+        }
+        _ => unreachable!("a sheet metal feature"),
     }
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

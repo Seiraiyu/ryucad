@@ -1083,3 +1083,73 @@ fn refolds_that_cant_be_made_say_where() {
         json!("/only/0")
     );
 }
+
+/// Through the protocol, in `part` (made here): a 60 × 40 × 1.5 mm plate
+/// `plate` (K 0.44, rectangular reliefs 1 × 0.5 mm) with one flange `f`
+/// on its four top edges, 90° and 15 mm, set back 5 mm: a tray. Later
+/// tasks' tests share it.
+pub(crate) fn tray(s: &mut crate::session::Session, part: &str) {
+    use crate::server::tests::call;
+    call(s, "part.create", json!({"part": part})).unwrap();
+    call(
+        s,
+        "feature.add",
+        json!({"part": part, "type": "sketch", "id": "s", "plane": "xy"}),
+    )
+    .unwrap();
+    let mut ops = Vec::new();
+    for (i, at) in PLATE.iter().enumerate() {
+        ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    for i in 1..=4 {
+        ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                        "start": format!("p{i}"), "end": format!("p{}", i % 4 + 1)}));
+    }
+    call(
+        s,
+        "sketch.edit",
+        json!({"part": part, "sketch": "s", "ops": ops}),
+    )
+    .unwrap();
+    call(
+        s,
+        "feature.add",
+        json!({"part": part, "type": "base_flange", "id": "plate",
+        "sketch": "s", "thickness": "1.5 mm", "radius": "1 mm", "allowance": {"k_factor": "0.44"},
+        "relief": {"kind": "rectangular", "width": "1 mm", "depth": "0.5 mm"}}),
+    )
+    .unwrap();
+    let pid = Id::parse(part, "part").unwrap();
+    let b = s
+        .rebuilt(&pid)
+        .unwrap()
+        .output(&id("plate"))
+        .unwrap()
+        .solid(&id("plate"))
+        .unwrap()
+        .body
+        .clone();
+    let z = 1.5;
+    let corners = [
+        [0.0, 0.0, z],
+        [60.0, 0.0, z],
+        [60.0, 40.0, z],
+        [0.0, 40.0, z],
+    ];
+    let edges: Vec<String> = (0..4)
+        .map(|i| {
+            format!(
+                "{part}/plate/{}",
+                edge_at(&b, corners[i], corners[(i + 1) % 4])
+            )
+        })
+        .collect();
+    call(
+        s,
+        "feature.add",
+        json!({"part": part, "type": "flange", "id": "f", "target": "plate",
+        "edges": edges, "angle": "90 deg", "length": "15 mm", "setback": "5 mm"}),
+    )
+    .unwrap();
+}

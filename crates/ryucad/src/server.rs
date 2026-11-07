@@ -2215,9 +2215,9 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
         Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
             crate::body::report(part, f)
         }
-        Feature::BaseFlange(_) | Feature::Flange(_) => crate::sheet_metal::report(p, f),
-        Feature::Unfold(u) => u.fields(),
-        Feature::Refold(r) => r.fields(),
+        Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
+            crate::sheet_metal::report(p, f)
+        }
         Feature::Hole(h) => hole_report(part, h),
         Feature::Pattern(x) => pattern_report(part, x),
         Feature::Revolve(r) => {
@@ -4010,7 +4010,7 @@ fn check_resolved(
         Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
             crate::body::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
-        Feature::BaseFlange(_) | Feature::Flange(_) => {
+        Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
             crate::sheet_metal::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
         _ => Ok(()),
@@ -4209,7 +4209,10 @@ fn feature_add(
             }
         }
     }
-    if ty == "flange" && given.fields.target.is_none() && given.fields.targets.is_none() {
+    if matches!(ty, "flange" | "unfold" | "refold")
+        && given.fields.target.is_none()
+        && given.fields.targets.is_none()
+    {
         let before = solids_before(p, &list, at);
         let sheet: Vec<Id> = before
             .iter()
@@ -4221,7 +4224,7 @@ fn feature_add(
             _ => {
                 return Err(Error::new(
                     Code::InvalidParam,
-                    format!("a flange names the solid it acts on (target): the part has {} solids before it, {} of them founded by a base flange", before.len(), sheet.len()),
+                    format!("a {ty} names the solid it acts on (target): the part has {} solids before it, {} of them founded by a base flange", before.len(), sheet.len()),
                 )
                 .with("param", "target")
                 .with("solids", before));
@@ -4274,7 +4277,7 @@ fn feature_add(
             given.only(ty, crate::doc::body::request_fields(ty))?;
             crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
-        "base_flange" | "flange" => {
+        "base_flange" | "flange" | "unfold" | "refold" => {
             crate::sheet_metal::take_given(ty, &mut given.fields);
             given.only(ty, crate::doc::sheet_metal::request_fields(ty))?;
             crate::sheet_metal::from_given(ty, None, &given.fields, &pid, unit, &env)?
@@ -4485,13 +4488,10 @@ fn feature_edit(
                 given.only(ty, crate::doc::body::request_fields(ty))?;
                 crate::body::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
             }
-            Feature::Unfold(_) | Feature::Refold(_) => {
-                return Err(Error::new(
-                    Code::InvalidParam,
-                    "unfold and refold are added in 16.B's Task 8",
-                ));
-            }
-            f @ (Feature::BaseFlange(_) | Feature::Flange(_)) => {
+            f @ (Feature::BaseFlange(_)
+            | Feature::Flange(_)
+            | Feature::Unfold(_)
+            | Feature::Refold(_)) => {
                 let ty = f.type_name();
                 crate::sheet_metal::take_given(ty, &mut given.fields);
                 given.only(ty, crate::doc::sheet_metal::request_fields(ty))?;
@@ -4601,7 +4601,11 @@ fn feature_edit(
             f,
             Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_)
         ) && f.targets() != old.targets())
-        || ((f.base_flange().is_some() || f.flange().is_some()) && f != old)
+        || ((f.base_flange().is_some()
+            || f.flange().is_some()
+            || f.unfold().is_some()
+            || f.refold().is_some())
+            && f != old)
         || f.source() != old.source()
     {
         check_references(session, &pid, &list, &fid, &f)?;
@@ -4887,7 +4891,10 @@ pub(crate) fn part_report(
                 Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
                     crate::body::report(id, f)
                 }
-                Feature::BaseFlange(_) | Feature::Flange(_) => crate::sheet_metal::report(part, f),
+                Feature::BaseFlange(_)
+                | Feature::Flange(_)
+                | Feature::Unfold(_)
+                | Feature::Refold(_) => crate::sheet_metal::report(part, f),
                 _ => return None,
             };
             Some((fid.clone(), (f.type_name(), report)))
@@ -4936,6 +4943,11 @@ pub(crate) fn part_report(
                         && let Some(i) = &m.import
                     {
                         v["import"] = i.as_ref().clone();
+                    }
+                    if let crate::rebuild::Output::Solids(m) = o
+                        && let Some(f) = &m.flat
+                    {
+                        v["flat"] = crate::sheet_metal::unfold::summary(f);
                     }
                     if let Some(p) = &held
                         && let Some(Ok(Feature::Sweep(w))) = p.features.get(fid)
@@ -7415,6 +7427,109 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::HasDependents, "{e}");
+    }
+
+    #[test]
+    fn unfolds_and_refolds_through_the_protocol() {
+        let (_dir, mut s) = fresh();
+        crate::sheet_metal::tests::tray(&mut s, "p");
+        let sheet = call(&mut s, "sheet.get", json!({"part": "p"})).unwrap();
+        let bend = sheet["bends"][0]["bend"].as_str().unwrap().to_owned();
+        let side = sheet["flanges"][0]["sides"][0][0]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // An unfold: its target filled in, its fixed face written `fixed`,
+        // its allowance its founder's until it has its own.
+        let r = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "unfold", "id": "u",
+            "fixed_face": side, "bends": [{"bend": bend, "deduction": "2.2 mm"}]}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["target"], "plate", "{r}");
+        assert_eq!(r["feature"]["fixed"], side, "{r}");
+        assert_eq!(r["feature"]["bends"][0]["bend"], bend, "{r}");
+        assert_eq!(r["feature"]["bends"][0]["deduction"]["m"], 0.0022, "{r}");
+        assert_eq!(
+            r["feature"]["allowance"]["k_factor"]["value"], "0.44",
+            "{r}"
+        );
+        assert_eq!(r["feature"]["inherited"], json!(["allowance"]), "{r}");
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "u",
+            "allowance": {"k_factor": "0.5"}}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["inherited"], json!([]), "{r}");
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "u", "allowance": ""}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["inherited"], json!(["allowance"]), "{r}");
+        // The rebuild report gives the flat.
+        let rb = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let u = rb["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "u")
+            .unwrap()
+            .clone();
+        assert_eq!(u["flat"]["bends"], 4, "{u}");
+        assert_eq!(u["flat"]["partial"], false, "{u}");
+        assert!(u["flat"]["box_m"][1][0].as_f64().unwrap() > 0.06, "{u}");
+        // A refold, its unfold named.
+        let r = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "refold", "id": "rf", "unfold": "u", "only": [bend]}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["unfold"], "u", "{r}");
+        assert_eq!(r["feature"]["only"], json!([bend]), "{r}");
+        let rb = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        assert_eq!(rb["parts"][0]["failed"], 0, "{rb}");
+        // Refused when written: a side face where a bend goes; an unfold
+        // the refold doesn't fold by; the unfold deleted while the refold
+        // reads it.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "u", "only": [side]}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::InvalidParam, Some("/only/0")),
+            "{e}"
+        );
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "rf", "unfold": "f"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::InvalidParam, Some("/unfold")),
+            "{e}"
+        );
+        let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "u"})).unwrap_err();
+        assert_eq!(e.code, Code::HasDependents, "{e}");
+        // A field another type takes is refused.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "rf", "angle": "90 deg"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam, "{e}");
     }
 
     #[test]

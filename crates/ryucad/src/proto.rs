@@ -408,8 +408,9 @@ pub struct FeatureFields {
     /// Which sides a split keeps: `both` (the default) or `behind`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep: Option<String>,
-    /// A base flange's bend allowance: `{"k_factor": n}` or
-    /// `{"deduction": length}`.
+    /// A base flange's or unfold's bend allowance: `{"k_factor": n}`,
+    /// `{"deduction": length}` or (an unfold's) `{"allowance": length}`;
+    /// `""` drops an unfold's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowance: Option<Value>,
     /// A base flange's or flange's relief: `{"kind": none | rectangular |
@@ -438,6 +439,23 @@ pub struct FeatureFields {
     /// `{edge, side}`; `[]` takes every side away.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sides: Option<Value>,
+    /// An unfold's fixed face, a side face of the flange held still
+    /// (`<part>/<solid>/<name>`, written `fixed`); `""` for the kernel's
+    /// default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_face: Option<String>,
+    /// An unfold's or refold's bends, each by one of its faces; given,
+    /// they replace them all (`[]` for every bend).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only: Option<Vec<String>>,
+    /// An unfold's allowance overrides, replacing them all:
+    /// `[{"bend": "<part>/<solid>/<name>", "k_factor" | "deduction" |
+    /// "allowance": Q}]` (`[]` for none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bends: Option<Value>,
+    /// The unfold a refold folds back by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unfold: Option<String>,
 }
 
 impl FeatureFields {

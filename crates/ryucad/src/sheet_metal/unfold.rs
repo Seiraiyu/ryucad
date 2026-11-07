@@ -445,3 +445,15 @@ fn refold_origins(id: &Id, target: &Built, flat: &Flat, made: &(Body, Journal)) 
         })
         .collect()
 }
+
+/// An unfold's flat as the rebuild report gives it: how many bends it
+/// unfolded, whether some were left folded, and its pattern's box in its
+/// frame, in metres.
+pub fn summary(f: &Flat) -> serde_json::Value {
+    let (lo, hi) = (f.pattern.bounds.min(), f.pattern.bounds.max());
+    json!({
+        "bends": f.bends.len(),
+        "partial": f.partial,
+        "box_m": [[lo.x, lo.y], [hi.x, hi.y]],
+    })
+}
