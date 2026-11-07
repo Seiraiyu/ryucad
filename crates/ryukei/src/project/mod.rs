@@ -19,6 +19,7 @@ mod items;
 mod pieces;
 mod pierce;
 mod rays;
+mod section;
 mod silhouette;
 mod trim;
 mod view;
