@@ -2,12 +2,15 @@
 //! boolean, and the faces the cut makes (the cap a drawing hatches).
 
 use crate::Error;
+use crate::boolean::{BooleanOp, Tool, boolean_in};
 use crate::geom::{Box3, Frame, Plane, Point3, Rigid, Vector3};
 use crate::intersect::face_box;
+use crate::name::ToolKey;
 use crate::name::{Event, Journal, Name, OpKey};
 use crate::primitive;
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, FaceId};
+use crate::work::{Meter, Work};
 use std::collections::BTreeSet;
 
 /// What a section subtracts: a block whose base lies on the plane.
@@ -127,6 +130,64 @@ pub(crate) fn caps(body: &Body, journal: &Journal, base: Name) -> Vec<FaceId> {
         .collect()
 }
 
+/// The key the half-space is placed under in a section's boolean: its
+/// entities' names derive from the section's key and this.
+pub const SECTION_TOOL: ToolKey = ToolKey(0x5ec7_10c0);
+
+/// A body cut by a plane.
+#[derive(Clone, Debug)]
+pub struct Section {
+    /// What lies on and behind the plane (against its normal).
+    pub body: Body,
+    /// The boolean's journal: what happened to the body's names, and the
+    /// half-space's entities `Placed` under [`SECTION_TOOL`].
+    pub journal: Journal,
+    /// The faces lying on the plane that the cut made (the cap a drawing
+    /// hatches), in `FaceId` order. A sheet's section has none.
+    pub faces: Vec<FaceId>,
+}
+
+/// [`section_with`] with no cancel or budget.
+pub fn section(key: OpKey, body: &Body, plane: &Plane) -> Result<Section, Error> {
+    section_with(key, body, plane, &Work::unlimited())
+}
+
+/// `body` (a solid or a sheet) less what lies in front of `plane`, the
+/// side its frame's `z` points to (as ryucad's section planes point to
+/// what is cut away), through [`crate::boolean::boolean`]: every
+/// certificate of the boolean holds, and refusals are its
+/// (`Error::InvalidBoolean`), with `Cancelled` and `BudgetExceeded` as
+/// every `_with` call. A plane the body only touches, or lies wholly
+/// behind, gives the body as it is with an empty journal; one with the
+/// body wholly in front gives the empty body. Names are the boolean's:
+/// the body's entities keep theirs, the cap's are the half-space's base
+/// `Placed` under `key` and [`SECTION_TOOL`], split by what cut it.
+pub fn section_with(key: OpKey, body: &Body, plane: &Plane, work: &Work) -> Result<Section, Error> {
+    crate::work::run(work, |m| section_in(key, body, plane, m))
+}
+
+fn section_in(key: OpKey, body: &Body, plane: &Plane, m: &Meter) -> Result<Section, Error> {
+    let Some(h) = half_space(key, body, plane)? else {
+        return Ok(Section {
+            body: body.clone(),
+            journal: Journal::new(),
+            faces: Vec::new(),
+        });
+    };
+    let tool = Tool {
+        key: SECTION_TOOL,
+        body: &h.body,
+        place: Rigid::IDENTITY,
+    };
+    let (cut, journal) = boolean_in(key, BooleanOp::Subtract, body, &[tool], m)?;
+    let faces = caps(&cut, &journal, h.base);
+    Ok(Section {
+        body: cut,
+        journal,
+        faces,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +267,41 @@ mod tests {
         j.push(Event::Modified(name(5)));
         assert_eq!(caps(&b, &j, base), vec![faces[0], faces[2]]);
         assert_eq!(caps(&b, &Journal::new(), base), vec![]);
+    }
+
+    use crate::measure::{Entity, Properties, properties};
+
+    fn area(b: &crate::topo::Body, f: FaceId) -> f64 {
+        match properties(b, Entity::Face(f)).unwrap() {
+            Properties::Face { area, .. } => area.value(),
+            p => panic!("{p:?}"),
+        }
+    }
+
+    #[test]
+    fn a_block_cut_in_half_keeps_its_near_half_and_names_its_cap() {
+        let (b, _) = primitive::block(OpKey(1), 0.04, 0.03, 0.01, &Rigid::IDENTITY).unwrap();
+        let p = plane(Point3::new(0.01, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0));
+        let s = section(OpKey(3), &b, &p).unwrap();
+        assert_eq!(crate::check::check(&s.body), []);
+        assert_eq!(s.body.counts().faces, 6);
+        assert_eq!(s.faces.len(), 1);
+        assert!((area(&s.body, s.faces[0]) - 0.03 * 0.01).abs() < 1e-15);
+        for (_, v) in s.body.vertices.live() {
+            assert!(v.point.x <= 0.01 + 1e-15);
+        }
+    }
+
+    #[test]
+    fn planes_that_miss_keep_the_body_and_planes_behind_it_empty_it() {
+        let (b, _) = primitive::block(OpKey(1), 0.04, 0.03, 0.01, &Rigid::IDENTITY).unwrap();
+        let past = plane(Point3::new(0.0, 0.0, 0.02), Vector3::new(0.0, 0.0, 1.0));
+        let s = section(OpKey(3), &b, &past).unwrap();
+        assert_eq!(s.body.dump(), b.dump());
+        assert!(s.journal.is_empty() && s.faces.is_empty());
+        let behind = plane(Point3::new(0.0, 0.0, -0.01), Vector3::new(0.0, 0.0, 1.0));
+        let s = section(OpKey(3), &b, &behind).unwrap();
+        assert_eq!(s.body.faces().count(), 0);
+        assert!(s.faces.is_empty());
     }
 }

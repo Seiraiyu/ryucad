@@ -7,7 +7,8 @@
 //! and every curve's image is exact ([`project_curve`]). A silhouette is
 //! where a face's natural normal is square to the view
 //! ([`silhouettes`]). Hidden lines across placed bodies are
-//! [`view`]'s; sections are plan 10.C's.
+//! [`view`]'s. [`section`] cuts a body by a plane through the boolean,
+//! giving the faces the cut makes.
 
 mod closed;
 mod curve;
@@ -28,6 +29,7 @@ pub use curve::{Image, ImageCurve, ImageMap, project_curve};
 pub use hidden::{
     Class, Piece, Placed, Projection, Source, ViewOptions, Visibility, view, view_with,
 };
+pub use section::{SECTION_TOOL, Section, section, section_with};
 pub(crate) use silhouette::silhouettes_in;
 pub use silhouette::{Silhouette, Silhouettes, silhouettes, silhouettes_with};
 pub use view::View;
