@@ -12,6 +12,35 @@ use super::project::IMPORTS;
 use crate::error::Result;
 use serde_json::{Value, json};
 
+/// The feature format that holds `mode` (design 364). ryucad 16.A takes
+/// 11 and 18.A takes 12; a stage taking 13 first moves this one on.
+pub const MODE_FORMAT: u64 = 13;
+
+/// How an import builds its body: a reference (the file's topology, never
+/// healed, never changed) or a healed solid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Mode {
+    Reference,
+    Solid,
+}
+
+impl Mode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Reference => "reference",
+            Mode::Solid => "solid",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Mode> {
+        match s {
+            "reference" => Some(Mode::Reference),
+            "solid" => Some(Mode::Solid),
+            _ => None,
+        }
+    }
+}
+
 /// An import feature: which body of which file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Import {
@@ -22,6 +51,9 @@ pub struct Import {
     /// Which of the product's bodies (or of the bodies no product
     /// reaches), from 0 in instance order.
     pub body: u32,
+    /// `Some(Reference)` for a reference; `None` (no field, as every file
+    /// before design 364) is a healed solid, written with no field.
+    pub mode: Option<Mode>,
 }
 
 /// A file under `imports/` and the BLAKE3 of the bytes the feature was
@@ -105,6 +137,20 @@ pub fn import_path(v: &Value, at: &str) -> Result<String> {
 }
 
 impl Import {
+    /// Its mode: a solid unless it says reference.
+    pub fn mode(&self) -> Mode {
+        self.mode.unwrap_or(Mode::Solid)
+    }
+
+    /// The format it needs: [`MODE_FORMAT`] for a reference, else 5.
+    pub fn format(&self) -> u64 {
+        if self.mode() == Mode::Reference {
+            MODE_FORMAT
+        } else {
+            5
+        }
+    }
+
     /// Its fields in a feature file, besides the header.
     pub fn fields(&self) -> Value {
         let mut v = json!({
@@ -113,6 +159,9 @@ impl Import {
         });
         if let Some(p) = &self.product {
             v["product"] = p.to_json();
+        }
+        if self.mode() == Mode::Reference {
+            v["mode"] = json!("reference");
         }
         v
     }
@@ -139,10 +188,20 @@ impl Import {
             Some(p) => Some(ProductRef::from_json(&p, "/product")?),
         };
         let body = count(&o.take("body")?, "/body")?;
+        let mode = match o.take_opt("mode") {
+            None => None,
+            Some(m) => match m.as_str().and_then(Mode::parse) {
+                // `solid` reads as no field: a solid is written with none.
+                Some(Mode::Solid) => None,
+                Some(Mode::Reference) => Some(Mode::Reference),
+                None => return Err(invalid("/mode", "mode must be reference or solid")),
+            },
+        };
         Ok(Import {
             file: FileRef { path, blake3 },
             product,
             body,
+            mode,
         })
     }
 }
@@ -202,6 +261,40 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(f.to_json()["product"], json!({"id": "a", "name": "b"}));
+    }
+
+    #[test]
+    fn mode_reads_writes_and_needs_its_format() {
+        // No mode: a solid, format 5, byte for byte as before.
+        let f = read(file(json!({}))).unwrap();
+        let Feature::Import(i) = &f else {
+            unreachable!()
+        };
+        assert_eq!(i.mode, None);
+        assert_eq!(i.mode(), Mode::Solid);
+        assert_eq!(f.format(), 5);
+        assert!(f.to_json().get("mode").is_none());
+        // A reference: format 13, written back as read.
+        let v = file(json!({"mode": "reference", "format": MODE_FORMAT}));
+        let f = read(v.clone()).unwrap();
+        let Feature::Import(i) = &f else {
+            unreachable!()
+        };
+        assert_eq!(i.mode(), Mode::Reference);
+        assert_eq!(f.format(), MODE_FORMAT);
+        assert_eq!(f.to_json(), v);
+        assert_eq!(crate::doc::files::feature_format(&v), MODE_FORMAT);
+        // `solid` spelled out reads as a solid and writes as none.
+        let f = read(file(json!({"mode": "solid"}))).unwrap();
+        assert!(f.to_json().get("mode").is_none());
+        assert_eq!(f.format(), 5);
+        // Anything else is refused at its pointer.
+        for bad in [json!("mesh"), json!(1), json!(null)] {
+            let e = read(file(json!({"mode": bad}))).unwrap_err();
+            assert_eq!(e.code, Code::InvalidDocument);
+            assert_eq!(e.details["pointer"], "/mode");
+        }
+        const { assert!(FEATURE_FORMAT >= MODE_FORMAT) };
     }
 
     #[test]

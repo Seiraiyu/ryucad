@@ -8,7 +8,7 @@ compare b7ca6b113202173d
 datums bff5c99e6f5b57a2
 deps 009688e76b92122f
 deps_structure 5bdb14dac47749ae
-diff 353ec76c4f74c1bc
+diff 4bba07c288929592
 display 575d87fadbd3cdc4
 explodes 24f373106cb30113
 exports 1341c77f1539e1a3
@@ -28,6 +28,7 @@ patterns 3a2ccdd69e784d14
 pdm 634d72f32565f931
 placement ff1d621ede04abf2
 rebuild f95f3bea0fc4987d
+reference_imports 053f9feeef8ddca6
 references 29596b1cfa8e2715
 render 387f507012338386
 sections d437bb090894ce44
@@ -37,6 +38,7 @@ shells f3800f7b9ddd97f4
 sketch_drawing e5f5a6030ce660c2
 solids 155341c221a54a1d
 splits 4c49bc08f2bf98e7
+surfaces 2a1de81e9282eeca
 sweeps f3625ae39ba522e1
 sweeps_along 18f4200ce0067c4a
 units cff2b3b1f4c8db4a

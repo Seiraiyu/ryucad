@@ -59,6 +59,7 @@ pub fn of_stage(case: &Case, s: &Stage) -> Option<String> {
             sig
         }
         Outcome::Mismatch { what, .. } => format!("{st}/{what}"),
+        Outcome::Found { codes } => format!("{st}/{}", codes.join("+")),
         Outcome::Timeout => format!(
             "{st}/timeout/{}/{}",
             bucket(case.faces),

@@ -65,7 +65,7 @@ fn resolve<'a>(
             .with("solids", [target.as_str(), r.feature.as_str()]));
         }
     }
-    let built = crate::rebuild::target(part, solids, id, target, before)?;
+    let built = crate::rebuild::target_as(part, solids, id, "target", target, before)?;
     let face = |role: &str, r: &Reference| -> Result<Name> {
         let (_, e) = crate::reference::resolve(part, part.order(), id, role, r, before)?;
         match e {
@@ -722,7 +722,7 @@ pub fn mirror_copy(
 }
 
 /// The solid a mirror (feature `id`) copies, as it sees it: what
-/// [`crate::rebuild::target`] gives, its refusal naming the `solid` role.
+/// [`crate::rebuild::target_as`] gives, its refusal naming the `solid` role.
 fn source<'a>(
     part: &Part,
     solids: &Solids,
@@ -730,15 +730,7 @@ fn source<'a>(
     s: &Id,
     before: &'a dyn Results,
 ) -> Result<&'a Built> {
-    crate::rebuild::target(part, solids, id, s, before).map_err(|e| {
-        if e.code == Code::ReferenceWrongKind
-            && e.details.get("role").and_then(Value::as_str) == Some("targets")
-        {
-            crate::rebuild::not_a_solid(part, solids, id, "solid", s)
-        } else {
-            e
-        }
-    })
+    crate::rebuild::target_as(part, solids, id, "solid", s, before)
 }
 
 /// The key of the box a split (feature `id` of `part`) cuts with, from

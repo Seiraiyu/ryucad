@@ -1203,13 +1203,13 @@ const BOX_IMPORT: &str = "parts/b/features/body.json";
 /// `theirs` and 40 mm tall on `main`, and `theirs` merged in.
 fn reimported_both_ways() -> Repo {
     let r = Repo::new("");
-    r.ryucad(&["import", &box_step(&r, 30), "--part", "b"]);
+    r.ryucad(&["import", "--solid", &box_step(&r, 30), "--part", "b"]);
     r.commit("a box");
     r.git(&["checkout", "-q", "-b", "theirs"]);
-    r.ryucad(&["import", &box_step(&r, 50), "--update", BOX_STEP]);
+    r.ryucad(&["import", "--solid", &box_step(&r, 50), "--update", BOX_STEP]);
     r.commit("50 mm");
     r.git(&["checkout", "-q", "main"]);
-    r.ryucad(&["import", &box_step(&r, 40), "--update", BOX_STEP]);
+    r.ryucad(&["import", "--solid", &box_step(&r, 40), "--update", BOX_STEP]);
     r.commit("40 mm");
     r.preview_matches_merge("theirs");
     let (code, out) = r.git_status(&["merge", "--no-edit", "theirs"]);
@@ -1366,14 +1366,26 @@ fn doctor_codes(r: &Repo) -> Vec<String> {
 #[test]
 fn theirs_bytes_with_ours_pose_are_misplaced_until_repaired() {
     let r = Repo::new("");
-    r.ryucad(&["import", &assembly_step(&r, 60)]);
+    r.ryucad(&["import", "--solid", &assembly_step(&r, 60)]);
     r.commit("the pin at 60 mm");
     assert!((pin_y(&r) - 0.06).abs() < 1e-12);
     r.git(&["checkout", "-q", "-b", "theirs"]);
-    r.ryucad(&["import", &assembly_step(&r, 70), "--update", ASM_STEP]);
+    r.ryucad(&[
+        "import",
+        "--solid",
+        &assembly_step(&r, 70),
+        "--update",
+        ASM_STEP,
+    ]);
     r.commit("theirs: the pin at 70 mm");
     r.git(&["checkout", "-q", "main"]);
-    r.ryucad(&["import", &assembly_step(&r, 50), "--update", ASM_STEP]);
+    r.ryucad(&[
+        "import",
+        "--solid",
+        &assembly_step(&r, 50),
+        "--update",
+        ASM_STEP,
+    ]);
     r.commit("ours: the pin at 50 mm");
     let (code, out) = r.git_status(&["merge", "--no-edit", "theirs"]);
     assert_eq!(code, 1, "{out}");
@@ -1402,6 +1414,7 @@ fn theirs_bytes_with_ours_pose_are_misplaced_until_repaired() {
     // An update with the bytes in place moves nothing now.
     let dry = r.ryucad(&[
         "import",
+        "--solid",
         &assembly_step(&r, 70),
         "--update",
         ASM_STEP,
@@ -1413,7 +1426,7 @@ fn theirs_bytes_with_ours_pose_are_misplaced_until_repaired() {
 #[test]
 fn a_clean_merge_of_one_sides_bytes_and_the_others_pose_is_misplaced() {
     let r = Repo::new("");
-    r.ryucad(&["import", &assembly_step(&r, 70)]);
+    r.ryucad(&["import", "--solid", &assembly_step(&r, 70)]);
     r.commit("the pin at 70 mm");
     // The base is misplaced already (an earlier merge's doing): the pin
     // at 50 mm, the file at 70.
@@ -1423,11 +1436,23 @@ fn a_clean_merge_of_one_sides_bytes_and_the_others_pose_is_misplaced() {
     r.commit("the pin moved by hand");
     assert!(doctor_codes(&r).contains(&"import_misplaced".to_owned()));
     r.git(&["checkout", "-q", "-b", "theirs"]);
-    r.ryucad(&["import", &assembly_step(&r, 60), "--update", ASM_STEP]);
+    r.ryucad(&[
+        "import",
+        "--solid",
+        &assembly_step(&r, 60),
+        "--update",
+        ASM_STEP,
+    ]);
     r.commit("theirs: the pin at 60 mm");
     r.git(&["checkout", "-q", "main"]);
     // The same bytes again: only the pin moves, to 70 mm.
-    r.ryucad(&["import", &assembly_step(&r, 70), "--update", ASM_STEP]);
+    r.ryucad(&[
+        "import",
+        "--solid",
+        &assembly_step(&r, 70),
+        "--update",
+        ASM_STEP,
+    ]);
     r.commit("ours: the pin where its file has it");
     assert!((pin_y(&r) - 0.07).abs() < 1e-12);
     r.preview_matches_merge("theirs");

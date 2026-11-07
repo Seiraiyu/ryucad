@@ -44,6 +44,14 @@ fn judged(j: &Judged) -> String {
     }
 }
 
+/// Whether this run judged a ledger line's signature: the stage it names
+/// ran (`--stages ref` runs none of healing's, so their lines aren't fixed
+/// by it), or it is a case that wouldn't open, which any stage run settles.
+fn judged_here(ran: &Ran, sig: &str) -> bool {
+    let stage = sig.split('/').next().unwrap_or_default();
+    stage == "open" && !ran.stages.is_empty() || ran.stages.iter().any(|s| s.stage == stage)
+}
+
 /// The report: every case with its findings' states, sorted by case,
 /// then the groups by signature.
 pub fn report(
@@ -76,7 +84,7 @@ pub fn report(
             .iter()
             .any(|s| s.outcome == crate::stages::Outcome::Timeout);
         for (sig, j) in ledger.fixed(id, &r.findings) {
-            if !timed_out {
+            if !timed_out && judged_here(&r.ran, &sig) {
                 fixed.push(json!({"case": id, "signature": sig, "timed": crate::classify::is_timed(&sig), "was": j}));
             }
         }
@@ -102,6 +110,37 @@ pub fn report(
                    "members": members.iter().map(|(id, s)| json!({"case": id, "state": s})).collect::<Vec<_>>()})
         })
         .collect();
+    // Each source's cases passing each stage, against the ledger's
+    // `count` lines.
+    let mut tally: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
+    let mut of: BTreeMap<String, u64> = BTreeMap::new();
+    for r in records.values() {
+        let sources: std::collections::BTreeSet<&str> =
+            r.case.origins.iter().map(|o| o.source.as_str()).collect();
+        for src in sources {
+            *of.entry(src.to_owned()).or_default() += 1;
+            for s in &r.ran.stages {
+                let e = tally.entry((src.to_owned(), s.stage.clone())).or_default();
+                if s.outcome == crate::stages::Outcome::Ok {
+                    e.0 += 1;
+                }
+            }
+        }
+    }
+    let mut counts = Vec::new();
+    let mut regressed = Vec::new();
+    for ((src, stage), (passed, _)) in &tally {
+        let n = of[src];
+        let judged = ledger.judge_count(src, stage, *passed, n);
+        let v = json!({"source": src, "stage": stage, "passed": passed, "of": n, "judged": judged});
+        if judged == crate::ledger::Count::Regressed {
+            let recorded = ledger.counts[&(src.clone(), stage.clone())];
+            let mut r = v.clone();
+            r["recorded"] = json!(recorded.0);
+            regressed.push(r);
+        }
+        counts.push(v);
+    }
     let failed = records
         .values()
         .filter(|r| {
@@ -119,6 +158,8 @@ pub fn report(
         "failed": failed,
         "groups": groups,
         "fixed": fixed,
+        "counts": counts,
+        "count_regressed": regressed,
         "records": cases,
     })
 }
@@ -142,6 +183,22 @@ pub fn markdown(report: &Value, records: &BTreeMap<String, Record>) -> String {
         report["cases"],
         report["failed"],
     );
+    let counts = report["counts"].as_array().cloned().unwrap_or_default();
+    if !counts.is_empty() {
+        let _ = writeln!(out, "## Counts\n");
+        for c in &counts {
+            let _ = writeln!(
+                out,
+                "- count {} {}: {}/{} ({})",
+                c["source"].as_str().unwrap_or_default(),
+                c["stage"].as_str().unwrap_or_default(),
+                c["passed"],
+                c["of"],
+                c["judged"].as_str().unwrap_or_default()
+            );
+        }
+        let _ = writeln!(out);
+    }
     for g in report["groups"].as_array().into_iter().flatten() {
         let rep = &records[g["representative"].as_str().unwrap_or_default()];
         let _ = writeln!(
@@ -278,7 +335,10 @@ mod tests {
         .into_iter()
         .map(|r| (r.case.id.clone(), r))
         .collect();
-        let ledger = Ledger::parse("case aaaa #5 x/one\ncase dddd #6 x/three\n").unwrap();
+        let ledger = Ledger::parse(
+            "case aaaa #5 x/one\ncase dddd #6 import/three\ncase dddd #7 ref_mesh/four\n",
+        )
+        .unwrap();
         let v = report(
             &json!({"ryucad": "0.7.2", "commit": "abc"}),
             &records,
@@ -290,6 +350,8 @@ mod tests {
         assert_eq!(v["groups"][0]["representative"], "bbbb");
         assert_eq!(v["groups"][0]["new"], 1);
         assert_eq!(v["fixed"][0]["case"], "dddd");
+        // ref_mesh never ran for dddd, so its line isn't fixed by this run.
+        assert_eq!(v["fixed"].as_array().unwrap().len(), 1, "{}", v["fixed"]);
         let md = markdown(&v, &records);
         assert!(md.contains("## `x/one`"), "{md}");
         assert!(md.contains("- `aaaa` #5: s f.stp #7 Pin"), "{md}");

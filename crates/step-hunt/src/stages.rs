@@ -10,6 +10,15 @@
 //! the same bytes). A failed import is tried once more under another part ID
 //! (`key`).
 //!
+//! On a binary whose `import` takes `--solid` (design 364), every stage
+//! above asks for healed solids, so it judges healing as it always did,
+//! and a body case then runs the reference stages whatever the others
+//! gave: `ref_import` (the body as a reference), `ref_mesh` (`check`,
+//! which never fails on a reference: its `reference_*` findings are the
+//! stage's), `ref_export` (STEP, the file's own representation), and
+//! `ref_reimport` (the export imported again: the same counts and body)
+//! and `ref_fixpoint` (exported again: the same bytes).
+//!
 //! A whole file: `whole_import` (the file as an agent imports it),
 //! `whole_export` (each root), `whole_reimport` (each export imported
 //! again: the same parts, kinds and features as the root reached, up to
@@ -51,6 +60,11 @@ pub enum Outcome {
     Crash {
         exit: Option<i32>,
         stderr: String,
+    },
+    /// The stage answered, with findings of its own (a reference's
+    /// faces left out): a finding, but later stages run.
+    Found {
+        codes: Vec<String>,
     },
 }
 
@@ -115,19 +129,35 @@ impl Run<'_> {
     /// project and its one feature's counts. A feature that fails is the
     /// stage's failure, with what the instances it names lie on in `file`.
     fn import(&mut self, name: &str, file: &Path, part: &str) -> Step<(PathBuf, Value)> {
+        let solid = self.ryucad.modes;
+        self.import_as(name, file, part, solid)
+            .map(|(dir, counts, _)| (dir, counts))
+    }
+
+    /// [`Run::import`] healed with `solid` (on a binary that takes it),
+    /// else as a reference: the project, the feature's counts and its
+    /// solid's hash.
+    fn import_as(
+        &mut self,
+        name: &str,
+        file: &Path,
+        part: &str,
+        solid: bool,
+    ) -> Step<(PathBuf, Value, Value)> {
         let dir = self.project(name)?;
-        let v = self.cmd(
-            &dir,
-            &[
-                OsStrRef::s("import"),
-                OsStrRef::p(file),
-                OsStrRef::s("--part"),
-                OsStrRef::s(part),
-            ],
-        )?;
+        let mut args = vec![
+            OsStrRef::s("import"),
+            OsStrRef::p(file),
+            OsStrRef::s("--part"),
+            OsStrRef::s(part),
+        ];
+        if solid {
+            args.push(OsStrRef::s("--solid"));
+        }
+        let v = self.cmd(&dir, &args)?;
         let f = &v["parts"][0]["features"][0];
         if f["ok"] == true {
-            return Ok((dir, f["counts"].clone()));
+            return Ok((dir, f["counts"].clone(), f["hash"].clone()));
         }
         let error = if f["error"].is_null() {
             json!({"code": "no_feature", "message": "the import answered no feature", "details": v})
@@ -149,6 +179,9 @@ impl Run<'_> {
             OsStrRef::s("--into"),
             OsStrRef::s("body"),
         ];
+        if self.ryucad.modes {
+            args.push(OsStrRef::s("--solid"));
+        }
         if let Some(p) = product {
             args.extend([OsStrRef::s("--product"), OsStrRef::s(p)]);
         }
@@ -279,7 +312,7 @@ fn stage(
         Ok(()) => Outcome::Ok,
         Err(o) => o,
     };
-    let ok = outcome == Outcome::Ok;
+    let ok = matches!(outcome, Outcome::Ok | Outcome::Found { .. });
     stages.push(run.end(outcome));
     ok
 }
@@ -304,8 +337,83 @@ fn first_difference(a: &[u8], b: &[u8]) -> usize {
     line
 }
 
-/// Runs a body case's stages in `home`.
+/// Runs a body case's stages in `home`, then, on a binary that takes
+/// `--solid`, its reference stages.
 pub fn body(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
+    let mut ran = if ryucad.only_reference {
+        Ran {
+            stages: Vec::new(),
+            key: None,
+        }
+    } else {
+        solid_body(ryucad, case, home)
+    };
+    if ryucad.modes {
+        reference(ryucad, case, home, &mut ran.stages);
+    }
+    ran
+}
+
+/// A body case's reference stages (design 364), appended to `stages`.
+fn reference(ryucad: &Ryucad, case: &Case, home: &Path, stages: &mut Vec<Stage>) {
+    let mut r1 = PathBuf::new();
+    let (mut counts, mut hash) = (Value::Null, Value::Null);
+    let ok = stage(stages, ryucad, home, "ref_import", |r| {
+        (r1, counts, hash) = r.import_as("r1", &case.path, "ref", false)?;
+        Ok(())
+    }) && stage(stages, ryucad, home, "ref_mesh", |r| {
+        let v = r.cmd(&r1, &["check", "ref"])?;
+        let mut codes: Vec<String> = v["findings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|f| f["code"].as_str())
+            .filter(|c| c.starts_with("reference_"))
+            .map(str::to_owned)
+            .collect();
+        codes.sort_unstable();
+        codes.dedup();
+        if codes.is_empty() {
+            Ok(())
+        } else {
+            Err(Outcome::Found { codes })
+        }
+    }) && stage(stages, ryucad, home, "ref_export", |r| {
+        r.export(&r1, "ref", &home.join("ra.step"), "m").map(|_| ())
+    });
+    if !ok {
+        return;
+    }
+    let mut r2 = PathBuf::new();
+    let ok = stage(stages, ryucad, home, "ref_reimport", |r| {
+        let (dir, again, h) = r.import_as("r2", &home.join("ra.step"), "ref", false)?;
+        r2 = dir;
+        if again != counts || h != hash {
+            return Err(Outcome::Mismatch {
+                what: "hash".into(),
+                details: json!({"from": {"counts": counts, "hash": hash},
+                                "to": {"counts": again, "hash": h}}),
+            });
+        }
+        Ok(())
+    });
+    if ok {
+        stage(stages, ryucad, home, "ref_fixpoint", |r| {
+            let a = std::fs::read(home.join("ra.step")).unwrap_or_default();
+            let b = r.export(&r2, "ref", &home.join("rb").join("ra.step"), "m")?;
+            if a != b {
+                return Err(Outcome::Mismatch {
+                    what: "bytes".into(),
+                    details: json!({"a": body::case_id(&a), "b": body::case_id(&b), "line": first_difference(&a, &b)}),
+                });
+            }
+            Ok(())
+        });
+    }
+}
+
+/// A body case's stages healing it (every binary's).
+fn solid_body(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
     let mut stages = Vec::new();
     let mut key = None;
     let mut p1 = PathBuf::new();
@@ -456,8 +564,39 @@ fn same_structure(root: &str, reach: &Made, stem_a: &str, again: &Made, stem_b: 
     }
 }
 
-/// Runs a whole-file case's stages in `home`.
+/// Runs a whole-file case's stages in `home`, then, on a binary that
+/// takes `--solid`, `whole_ref_import`: the file imported whole as
+/// references and each root that built exported.
 pub fn whole(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
+    let mut ran = if ryucad.only_reference {
+        Ran {
+            stages: Vec::new(),
+            key: None,
+        }
+    } else {
+        solid_whole(ryucad, case, home)
+    };
+    if ryucad.modes {
+        stage(&mut ran.stages, ryucad, home, "whole_ref_import", |r| {
+            let dir = r.project("wr")?;
+            let answer = r.cmd(&dir, &[OsStrRef::s("import"), OsStrRef::p(&case.path)])?;
+            // A part that failed is its body case's `ref_import` finding,
+            // and its root can't be exported.
+            let tops: Vec<(String, Made)> = roots(&made(&answer))
+                .into_iter()
+                .filter(|(_, reach)| reach.values().all(|p| p.1 == p.2))
+                .collect();
+            for (k, (root, _)) in tops.iter().enumerate() {
+                r.export(&dir, root, &home.join(format!("ref-root-{k}.step")), "m")?;
+            }
+            Ok(())
+        });
+    }
+    ran
+}
+
+/// A whole-file case's stages healing it (every binary's).
+fn solid_whole(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
     let mut stages = Vec::new();
     let mut w1 = PathBuf::new();
     let mut first = Made::new();
@@ -469,7 +608,11 @@ pub fn whole(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
     let mut answer = Value::Null;
     let ok = stage(&mut stages, ryucad, home, "whole_import", |r| {
         w1 = r.project("w1")?;
-        answer = r.cmd(&w1, &[OsStrRef::s("import"), OsStrRef::p(&case.path)])?;
+        let mut args = vec![OsStrRef::s("import"), OsStrRef::p(&case.path)];
+        if ryucad.modes {
+            args.push(OsStrRef::s("--solid"));
+        }
+        answer = r.cmd(&w1, &args)?;
         first = made(&answer);
         Ok(())
     });
@@ -519,7 +662,11 @@ pub fn whole(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
             for (k, (root, reach)) in tops.iter().enumerate() {
                 let dir = r.project(&format!("w2-{k}"))?;
                 let file = home.join(format!("root-{k}.step"));
-                let answer = r.cmd(&dir, &[OsStrRef::s("import"), OsStrRef::p(&file)])?;
+                let mut args = vec![OsStrRef::s("import"), OsStrRef::p(&file)];
+                if ryucad.modes {
+                    args.push(OsStrRef::s("--solid"));
+                }
+                let answer = r.cmd(&dir, &args)?;
                 // Every part of the root built the first time: a feature
                 // failing now is the round trip's refusal, signed as one.
                 if let Some(error) = first_error(&answer) {

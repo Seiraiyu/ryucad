@@ -22,6 +22,8 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod reference;
+
 /// Mass properties already worked out, by body hash, density and
 /// tolerance.
 #[derive(Clone, Debug, Default)]
@@ -156,6 +158,25 @@ pub fn run(
         }
         (kind, l)
     };
+    // A sheet holds no volume: left out, said once each. Asked of sheets
+    // alone, the answer is no mass at all. A reference import is weighed
+    // from its mesh (or refused as one that doesn't close), whatever its
+    // body's kind.
+    let (located, sheets): (Vec<Located>, Vec<Located>) = located
+        .into_iter()
+        .partition(|l| l.built.reference || l.built.body.kind() != ryukei::topo::BodyKind::Sheet);
+    if located.is_empty() {
+        let l = &sheets[0];
+        return Err(crate::kind::wrong(
+            &l.solid,
+            "of",
+            &l.solid,
+            "sheet",
+            crate::kind::Want::Solid,
+        )
+        .with("of", of)
+        .with("hint", "measure gives a sheet's area"));
+    }
     let dens = densities(s, located.iter().map(|l| l.part.clone()))?;
     // Work out what the cache lacks in parallel, each body once.
     let wanted: Vec<(String, &Located, f64)> = located
@@ -176,17 +197,29 @@ pub fn run(
         ..MassOptions::default()
     };
     let refs = [of];
-    let made: Vec<(String, std::result::Result<MassProperties, ryukei::Error>)> = {
+    let made: Vec<(String, Result<MassProperties>)> = {
         use rayon::prelude::*;
         missing
             .par_iter()
-            .map(|(k, l, d)| (k.clone(), kernel::mass(&l.built.body, *d, &opts)))
+            .map(|(k, l, d)| {
+                // A reference is weighed from its mesh, when it closes.
+                let m = if l.built.reference {
+                    reference::weigh(&l.built, *d, &format!("{}/{}", l.part, l.solid))
+                } else {
+                    kernel::mass(&l.built.body, *d, &opts).map_err(|e| failed(e, &refs))
+                };
+                (k.clone(), m)
+            })
             .collect()
     };
     for (k, r) in made {
-        let m = r.map_err(|e| failed(e, &refs))?;
-        s.mass.found.insert(k, Arc::new(m));
+        s.mass.found.insert(k, Arc::new(r?));
     }
+    let references: std::collections::BTreeSet<&Id> = located
+        .iter()
+        .filter(|l| l.built.reference)
+        .map(|l| &l.part)
+        .collect();
     let shares: Vec<Share> = wanted
         .iter()
         .map(|(k, l, _)| Share {
@@ -200,6 +233,9 @@ pub fn run(
     v["of"] = json!(of);
     v["kind"] = json!(kind);
     v["solids"] = json!(shares.len());
+    if !references.is_empty() {
+        v["reference"] = json!(true);
+    }
     // Per part, in ID order.
     let mut rows: BTreeMap<&Id, (usize, Measured, Measured)> = BTreeMap::new();
     for sh in &shares {
@@ -211,11 +247,22 @@ pub fn run(
         e.2 = add(e.2, sh.props.mass);
     }
     let mut warnings = Vec::new();
+    for l in &sheets {
+        warnings.push(json!({
+            "code": "mass_sheet_skipped",
+            "part": l.part,
+            "solid": l.solid,
+            "message": format!("{}/{} is a sheet: it holds no volume, so it adds nothing", l.part, l.solid),
+        }));
+    }
     v["parts"] = rows
         .into_iter()
         .map(|(p, (n, vol, m))| {
             let (material, density) = &dens[p];
             let mut row = json!({"part": p, "solids": n, "volume": value(vol, Kind::Volume, unit)});
+            if references.contains(p) {
+                row["reference"] = json!(true);
+            }
             if let Some(name) = material {
                 row["material"] = json!(name);
             }

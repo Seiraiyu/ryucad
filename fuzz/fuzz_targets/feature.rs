@@ -3,7 +3,8 @@
 //! error. Loaded, it is built as feature `f` of a part after boxes `b`
 //! and `c`, a rectangle sketch `s`, a sketch `t` on `b`'s top with a lone
 //! point, an open L sketch `u`, a pocket `k` cut from `b`'s top and an
-//! import `m` of a seeded body ryustep wrote (`imports/seeded.step`,
+//! import `m` (a reference for inputs of odd length, on which nothing may
+//! act) of a seeded body ryustep wrote (`imports/seeded.step`,
 //! products `s0` to `s7`, which an import `f` may select too; assemblies
 //! place the part without it), so its references resolve
 //! against real faces, edges and vertices, its operations act on real
@@ -34,7 +35,11 @@
 //! A loft's bodies pass them too; seeds loft `s` to `c`'s front face
 //! (turned over to face along the loft), joined to `b` with a weighted
 //! start tangent, cut through `b` to its back face, and closed round
-//! both (a typed refusal).
+//! both (a typed refusal). Surface sweeps (ryucad 18) found sheets that
+//! pass them too: seeds sweep `s` as surfaces (an extrude, a revolve about
+//! its first line, a sweep along `b`'s edge, a loft of `s` to `t`, a
+//! typed refusal), a planar face of `s`, and a surface joined to `b` (a
+//! typed refusal).
 //! A mate or an instance pattern is built the same way, after instances
 //! `i1` (free) and `i2` (fixed) of `fz`: what it solves and places must be
 //! finite and sound too. Each assembly's interference and clearances are
@@ -154,24 +159,31 @@ fn seeded() -> &'static ryucad::doc::project::ImportFile {
     })
 }
 
-/// The import `m` of `s1`'s body (a cylinder) a part's `f` follows.
-fn import_m() -> Feature {
+/// The import `m` of `s1`'s body (a cylinder) a part's `f` follows: a
+/// healed solid, or with `reference` a reference (design 364).
+fn import_m(reference: bool) -> Feature {
+    let mode = if reference {
+        r#", "mode": "reference""#
+    } else {
+        ""
+    };
     let m = format!(
-        r#"{{"format": 5, "kind": "ryucad.feature", "type": "import", "body": 0,
+        r#"{{"format": {}, "kind": "ryucad.feature", "type": "import", "body": 0,
              "file": {{"path": "imports/seeded.step", "blake3": "{}"}},
-             "product": {{"id": "s1", "name": "s1"}}}}"#,
+             "product": {{"id": "s1", "name": "s1"}}{mode}}}"#,
+        if reference { 13 } else { 5 },
         seeded().blake3
     );
     Feature::from_json(&canonical::parse(&m).unwrap(), Unit::Mm, &Env::empty()).unwrap()
 }
 
-/// Part `fz`: the base, the import `m`, then `f`.
-fn part(f: Feature) -> Part {
+/// Part `fz`: the base, the import `m` (a reference when asked), then `f`.
+fn part(f: Feature, reference: bool) -> Part {
     let mut features: BTreeMap<Id, ryucad::error::Result<Feature>> = base()
         .iter()
         .map(|(i, x)| (i.clone(), Ok(x.clone())))
         .collect();
-    features.insert(id("m"), Ok(import_m()));
+    features.insert(id("m"), Ok(import_m(reference)));
     features.insert(id("f"), Ok(f));
     Part {
         id: Id::parse("fz", "part").unwrap(),
@@ -373,16 +385,36 @@ fuzz_target!(|data: &[u8]| {
         assemble(&written, true);
         return;
     }
-    let part = part(f);
+    // Inputs of odd length make the import `m` a reference: nothing may
+    // act on it, and its body checks only its topology.
+    let reference = data.len() % 2 == 1;
+    let acts_on_m = f.targets().iter().any(|t| t.as_str() == "m")
+        || f.source().is_some_and(|t| t.as_str() == "m");
+    let part = part(f, reference);
     let r = rebuild_part(&part);
     let me = id("f");
+    if reference {
+        if let Some(Output::Solids(m)) = r.output(&id("m")) {
+            for (_, b) in &m.solids {
+                assert!(b.reference);
+                assert_eq!(ryukei::check::check_topology(&b.body), []);
+            }
+        }
+        // A feature acting on a reference never builds: it is refused
+        // `reference_body`, or fails earlier on its own fields.
+        if acts_on_m {
+            if let Some(Ok(_)) = r.features.iter().find(|(i, _)| *i == me).map(|(_, o)| o) {
+                panic!("a feature acting on a reference built");
+            }
+        }
+    }
     match r.output(&me) {
         Some(Output::Solids(m)) => {
             let params = MeshParams {
                 max_triangles: 200_000,
                 ..MeshParams::new(2e-4, 0.5)
             };
-            for (_, b) in &m.solids {
+            for (_, b) in m.solids.iter().filter(|(_, b)| !b.reference) {
                 assert_eq!(check(&b.body), []);
                 for fault in check_intersections(&b.body) {
                     assert!(matches!(fault, Fault::CannotCheck { .. }), "{fault:?}");

@@ -186,7 +186,60 @@ impl NurbsSurface {
     }
 
     pub fn point(&self, u: f64, v: f64) -> Point3 {
-        self.eval(u, v).point
+        self.eval_to(u, v, 0).0
+    }
+
+    /// The point and its first partial derivatives, as [`Self::eval`]
+    /// gives them, bit for bit, without the second's work.
+    pub fn eval_first(&self, u: f64, v: f64) -> (Point3, Vector3, Vector3) {
+        self.eval_to(u, v, 1)
+    }
+
+    /// [`Self::eval`]'s point and, for `order` 1, its first partial
+    /// derivatives (zero for `order` 0): the same sums in the same order,
+    /// each running alone, so the same bits, without the higher orders'
+    /// basis functions and sums (#308: the mesher places every new point,
+    /// and mass integrates the coarse mesh, by these).
+    fn eval_to(&self, u: f64, v: f64, order: usize) -> (Point3, Vector3, Vector3) {
+        let (bu, bv) = (
+            self.knots[0].basis_to(u, order),
+            self.knots[1].basis_to(v, order),
+        );
+        let [p, q] = self.degrees();
+        let [nu, nv] = self.counts();
+        let n = order + 1;
+        let mut a = [[Vector3::ZERO; 2]; 2];
+        let mut w = [[0.0; 2]; 2];
+        for i in 0..=p {
+            let row = (bu.span() - p + i) % nu;
+            let mut ta = [Vector3::ZERO; 2];
+            let mut tw = [0.0; 2];
+            for j in 0..=q {
+                let idx = row * nv + (bv.span() - q + j) % nv;
+                let wi = self.weights[idx];
+                let pw = self.points[idx] * wi;
+                for l in 0..n {
+                    let nl = bv.values(l)[j];
+                    ta[l] += pw * nl;
+                    tw[l] += wi * nl;
+                }
+            }
+            for k in 0..n {
+                let nk = bu.values(k)[i];
+                for l in 0..n - k {
+                    a[k][l] += ta[l] * nk;
+                    w[k][l] += tw[l] * nk;
+                }
+            }
+        }
+        let w0 = w[0][0];
+        let s = a[0][0] / w0;
+        if order == 0 {
+            return (Point3::ORIGIN + s, Vector3::ZERO, Vector3::ZERO);
+        }
+        let su = (a[1][0] - s * w[1][0]) / w0;
+        let sv = (a[0][1] - s * w[0][1]) / w0;
+        (Point3::ORIGIN + s, su, sv)
     }
 
     /// The point and its partial derivatives up to second order (The NURBS
@@ -784,6 +837,60 @@ mod tests {
                 assert!(e.du.z.abs() <= 1e-15);
                 assert!(e.du.dot(Vector3::new(p.x, p.y, 0.0)).abs() <= 1e-14);
                 assert!(close(e.dv, Vector3::new(0.0, 0.0, 3.0), 1e-15));
+            }
+        }
+    }
+
+    /// `point` and `eval_first` are `eval`'s point and first derivatives
+    /// bit for bit (#308): degrees 1 to 9, rational and not, periodic and
+    /// clamped, at parameters across the domain and on knots.
+    #[test]
+    fn lower_orders_are_evals_bits() {
+        let mut x: u64 = 0x308_e7a1;
+        let mut unit = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for case in 0..40 {
+            let knots: [KnotVector; 2] = core::array::from_fn(|_| {
+                let p = 1 + (case % 9);
+                let ks = [0.0, 0.4 + unit(), 1.7 + unit(), 3.0];
+                KnotVector::clamped(p, &ks, &[p + 1, 1, p.min(2), p + 1]).unwrap()
+            });
+            let n = knots[0].control_count() * knots[1].control_count();
+            let points = (0..n)
+                .map(|_| Point3::new(unit() - 0.5, 2.0 * unit(), 1e-3 * unit()))
+                .collect();
+            let weights = (case % 2 == 0).then(|| (0..n).map(|_| 0.3 + 2.0 * unit()).collect());
+            let s = NurbsSurface::new(knots, points, weights).unwrap();
+            let [du, dv] = s.domain();
+            let mut uvs: Vec<(f64, f64)> = (0..60)
+                .map(|_| {
+                    (
+                        du[0] + (du[1] - du[0]) * unit(),
+                        dv[0] + (dv[1] - dv[0]) * unit(),
+                    )
+                })
+                .collect();
+            uvs.extend([
+                (du[0], dv[0]),
+                (du[1], dv[1]),
+                (s.knots[0].knots()[1], dv[0]),
+            ]);
+            let bits = |v: Vector3| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()];
+            for (u, v) in uvs {
+                let e = s.eval(u, v);
+                let (p, su, sv) = s.eval_first(u, v);
+                assert_eq!(
+                    bits(p.to_vector()),
+                    bits(e.point.to_vector()),
+                    "{case} at ({u}, {v})"
+                );
+                assert_eq!(bits(su), bits(e.du), "{case} at ({u}, {v})");
+                assert_eq!(bits(sv), bits(e.dv), "{case} at ({u}, {v})");
+                assert_eq!(bits(s.point(u, v).to_vector()), bits(e.point.to_vector()));
             }
         }
     }

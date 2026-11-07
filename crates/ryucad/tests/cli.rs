@@ -1142,6 +1142,7 @@ fn every_protocol_method_has_a_command() {
         ("appearance.set", &["colour"]),
         ("appearance.clear", &["colour"]),
         ("import", &["import"]),
+        ("import.convert", &["import", "convert"]),
         ("export", &["export"]),
         ("rebuild", &["rebuild"]),
         ("inspect", &["inspect"]),
@@ -4142,6 +4143,109 @@ fn sweeps_from_the_cli() {
 }
 
 #[test]
+fn surfaces_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "skin"]);
+    p.ok(&[
+        "feature", "add", "skin", "sketch", "--id", "s1", "--plane", "xy",
+    ]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "skin",
+        "s1",
+        r#"[{"op": "add", "id": "o", "type": "point", "at": [0, 0]},
+            {"op": "add", "id": "p", "type": "point", "at": [10, 0]},
+            {"op": "add", "id": "q", "type": "point", "at": [0, 10]},
+            {"op": "add", "id": "a1", "type": "arc", "center": "o", "start": "p", "end": "q"}]"#,
+    ]);
+    let v = p.ok(&[
+        "feature",
+        "add",
+        "skin",
+        "extrude",
+        "--sketch",
+        "s1",
+        "--loop",
+        "a1",
+        "--surface",
+        "--length",
+        "20",
+        "--id",
+        "wall",
+    ]);
+    assert_eq!(v["feature"]["surface"], true, "{v}");
+    let r = p.ok(&["rebuild", "skin"]);
+    assert_eq!(r["parts"][0]["solids"][0]["kind"], "sheet", "{r}");
+    // A cut of the wall is refused in the agent's terms.
+    let e = p.fails(
+        &[
+            "feature",
+            "add",
+            "skin",
+            "box",
+            "--param",
+            "x=1",
+            "--param",
+            "y=1",
+            "--param",
+            "z=1",
+            "--operation",
+            "cut",
+            "--target",
+            "wall",
+        ],
+        "wrong_body_kind",
+        1,
+    );
+    assert_eq!(e["details"]["solid"], "wall", "{e}");
+    // A planar face of a square.
+    p.ok(&[
+        "feature", "add", "skin", "sketch", "--id", "s6", "--plane", "xy",
+    ]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "skin",
+        "s6",
+        r#"[{"op": "add", "id": "p1", "type": "point", "at": [20, 0]},
+            {"op": "add", "id": "p2", "type": "point", "at": [30, 0]},
+            {"op": "add", "id": "p3", "type": "point", "at": [30, 10]},
+            {"op": "add", "id": "p4", "type": "point", "at": [20, 10]},
+            {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}]"#,
+    ]);
+    p.ok(&[
+        "feature", "add", "skin", "planar", "--sketch", "s6", "--id", "pad",
+    ]);
+    let m = p.ok(&["measure", "skin/pad"]);
+    let area = m["area"]["m2"].as_f64().unwrap();
+    assert!((area - 1e-4).abs() < 1e-12, "{m}");
+    // An edit keeps it a surface, until --surface false.
+    let v = p.ok(&["feature", "edit", "skin", "wall", "--length", "25"]);
+    assert_eq!(v["feature"]["surface"], true, "{v}");
+    let v = p.ok(&[
+        "feature", "edit", "skin", "pad", "--sketch", "s6", "--loop", "l1",
+    ]);
+    assert_eq!(
+        v["feature"]["profile"]["loops"],
+        serde_json::json!(["l1"]),
+        "{v}"
+    );
+    // The daemon logged the planar face, the wall's edit and the face's:
+    // three undos take the face away.
+    for _ in 0..3 {
+        let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+        assert_eq!(code, 0, "{v}");
+    }
+    let (_, l) = p.run_in(&p.daemon, "", &["feature", "list", "skin"]);
+    assert!(!l.to_string().contains("\"pad\""), "{l}");
+}
+
+#[test]
 fn lofts_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
@@ -5061,11 +5165,11 @@ fn imports_from_the_cli() {
     let beside = p.direct.parent().unwrap();
     fs::copy(occt.join("box_ap214.stp"), beside.join("box.stp")).unwrap();
     fs::write(beside.join("junk.step"), "not step").unwrap();
-    let dry = p.ok(&["import", "../box.stp", "--dry-run"]);
+    let dry = p.ok(&["import", "--solid", "../box.stp", "--dry-run"]);
     assert_eq!(dry["dry_run"], true);
     assert_eq!(dry["parts"][0]["features"][0]["ok"], true, "{dry}");
     assert!(!p.direct.join("imports").exists());
-    let made = p.ok(&["import", "../box.stp", "--part", "block"]);
+    let made = p.ok(&["import", "--solid", "../box.stp", "--part", "block"]);
     assert_eq!(made["file"]["path"], "imports/box.step");
     assert_eq!(made["parts"][0]["part"], "block");
     let built = p.ok(&["rebuild", "block"]);
@@ -5088,8 +5192,99 @@ fn imports_from_the_cli() {
         &format!("block/body/{edge}"),
     ]);
     p.ok(&["check", "block"]);
-    p.fails(&["import", "../junk.step"], "step_unreadable", 1);
+    p.fails(&["import", "--solid", "../junk.step"], "step_unreadable", 1);
     p.fails(&["feature", "add", "block", "import"], "invalid_param", 1);
+}
+
+/// A reference import (design 364) both ways: made by default, refused
+/// to a fillet with the hint to convert, measured, weighed and checked,
+/// exported as STEP, STL and USD (warning that USD holds it as a mesh),
+/// converted to a solid the fillet then builds on, undone through the
+/// daemon, and refused to convert back while a feature acts on it.
+#[test]
+fn reference_imports_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let occt = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/occt");
+    let beside = p.direct.parent().unwrap();
+    fs::copy(occt.join("box_ap214.stp"), beside.join("box.stp")).unwrap();
+    let made = p.ok(&["import", "../box.stp", "--part", "r"]);
+    let f = &made["parts"][0]["features"][0];
+    assert_eq!(f["mode"], "reference", "{made}");
+    let fid = f["id"].as_str().unwrap().to_owned();
+    let built = p.ok(&["rebuild", "r"]);
+    assert_eq!(built["parts"][0]["solids"][0]["reference"], true, "{built}");
+    let body = p.ok(&["inspect", "r", &fid]);
+    let edge = body["bodies"][0]["edges"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let edge = format!("r/{fid}/{edge}");
+    let fillet = [
+        "feature", "add", "r", "fillet", "--id", "f", "--radius", "1", "--edge", &edge,
+    ];
+    let e = p.fails(&fillet, "reference_body", 1);
+    assert_eq!(
+        e["details"]["hint"],
+        format!("ryucad import convert r/{fid}")
+    );
+    let solid = format!("r/{fid}");
+    let m = p.ok(&["measure", &solid]);
+    assert_eq!(m["reference"], true, "{m}");
+    p.ok(&[
+        "materials",
+        "set",
+        "steel",
+        "--density",
+        "7850 kg/m^3",
+        "--default",
+    ]);
+    let w = p.ok(&["mass", &solid]);
+    assert_eq!(w["reference"], true, "{w}");
+    p.ok(&["export", "r", "--out", "r.step"]);
+    p.ok(&["export", "r", "--out", "r.stl"]);
+    let (code, v) = p.both_from(
+        "",
+        &[
+            "export",
+            "r",
+            "--out",
+            "r.usda",
+            "--time-stamp",
+            "2026-11-07T00:00:00",
+        ],
+    );
+    assert_eq!(code, 0, "{v}");
+    assert!(
+        v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("as its mesh alone")),
+        "{v}"
+    );
+    p.ok(&["check", "r"]);
+    let c = p.ok(&["import", "convert", &solid]);
+    assert_eq!(c["converted"], serde_json::json!([fid]), "{c}");
+    p.ok(&fillet);
+    // Through the daemon: undo the fillet, then the conversion.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["rebuild", "r"]);
+    assert_eq!(
+        v["result"]["parts"][0]["solids"][0]["reference"], true,
+        "{v}"
+    );
+    // In process the fillet stands: converting back is refused.
+    let (_, v) = p.run_in(&p.direct, "", &["import", "convert", "r", "--reference"]);
+    assert_eq!(v["error"]["code"], "reference_body", "{v}");
+    assert_eq!(
+        v["error"]["details"]["acting"],
+        serde_json::json!(["f"]),
+        "{v}"
+    );
 }
 
 /// A heal budget too small for a body fails that body alone with
@@ -5103,7 +5298,7 @@ fn heal_budgets_from_the_cli() {
     let beside = p.direct.parent().unwrap();
     fs::copy(occt.join("box_ap214.stp"), beside.join("box.stp")).unwrap();
     p.ok(&["config", "set", "heal.budget", "1"]);
-    let (code, v) = p.both_from("", &["import", "../box.stp", "--part", "block"]);
+    let (code, v) = p.both_from("", &["import", "--solid", "../box.stp", "--part", "block"]);
     assert_eq!((code, &v["ok"]), (0, &Value::Bool(true)), "{v}");
     let f = &v["result"]["parts"][0]["features"][0];
     assert_eq!(f["ok"], false, "{v}");
@@ -5203,7 +5398,7 @@ fn exports_from_the_cli() {
     ]);
     assert_eq!((&v["schema"], &v["unit"]), (&json!("ap214"), &json!("m")));
     // What it wrote imports again: the box's six faces.
-    p.ok(&["import", "out/p.step", "--part", "q"]);
+    p.ok(&["import", "--solid", "out/p.step", "--part", "q"]);
     let built = p.ok(&["rebuild", "q"]);
     assert_eq!(built["parts"][0]["features"][0]["counts"]["faces"], 6);
     p.fails(&["export", "nope", "--out", "out/x.step"], "not_found", 1);
@@ -5237,7 +5432,7 @@ fn exports_skip_what_fails_from_the_cli() {
     fs::copy(occt.join("box_ap214.stp"), beside.join("box.stp")).unwrap();
     // A heal budget of one unit: the import's body fails.
     p.ok(&["config", "set", "heal.budget", "1"]);
-    let (code, _) = p.both_from("", &["import", "../box.stp", "--part", "block"]);
+    let (code, _) = p.both_from("", &["import", "--solid", "../box.stp", "--part", "block"]);
     assert_eq!(code, 0);
     p.ok(&["part", "create", "frame", "--assembly"]);
     p.ok(&[
@@ -5297,7 +5492,7 @@ fn exports_skip_what_fails_from_the_cli() {
         "heal.budget",
         &ryucad::import::DEFAULT_HEAL_BUDGET.to_string(),
     ]);
-    p.ok(&["import", "frame.step", "--part", "again"]);
+    p.ok(&["import", "--solid", "frame.step", "--part", "again"]);
 }
 
 #[test]
@@ -5483,7 +5678,7 @@ fn imported_assemblies_and_updates_from_the_cli() {
     let text = fs::read_to_string(occt.join("assembly.stp")).unwrap();
     fs::write(beside.join("asm.stp"), &text).unwrap();
     // XDE's assembly: a block placed twice and a pin.
-    let made = p.ok(&["import", "../asm.stp"]);
+    let made = p.ok(&["import", "--solid", "../asm.stp"]);
     let parts: Vec<(&str, &str)> = made["parts"]
         .as_array()
         .unwrap()
@@ -5506,6 +5701,7 @@ fn imported_assemblies_and_updates_from_the_cli() {
     fs::write(beside.join("asm2.stp"), &moved).unwrap();
     let dry = p.ok(&[
         "import",
+        "--solid",
         "../asm2.stp",
         "--update",
         "imports/asm.step",
@@ -5520,7 +5716,13 @@ fn imported_assemblies_and_updates_from_the_cli() {
         v["pose"]["origin_m"].clone()
     };
     assert_eq!(pose(&p), json!([0, 0.05, 0]));
-    p.ok(&["import", "../asm2.stp", "--update", "imports/asm.step"]);
+    p.ok(&[
+        "import",
+        "--solid",
+        "../asm2.stp",
+        "--update",
+        "imports/asm.step",
+    ]);
     assert_eq!(pose(&p), json!([0, 0.06, 0]));
     // Undone through the daemon (undo needs one), in one step: the bytes,
     // the hashes and the pose.
@@ -5533,7 +5735,13 @@ fn imported_assemblies_and_updates_from_the_cli() {
         text
     );
     p.fails(
-        &["import", "../asm2.stp", "--update", "imports/nothing.step"],
+        &[
+            "import",
+            "--solid",
+            "../asm2.stp",
+            "--update",
+            "imports/nothing.step",
+        ],
         "not_found",
         1,
     );

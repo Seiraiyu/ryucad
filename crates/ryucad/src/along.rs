@@ -38,12 +38,24 @@ pub struct Profile {
     pub entity: &'static str,
 }
 
-/// Resolves sweep `id`'s profile `s`, as `id` sees what it reads.
-pub fn profile(part: &Part, id: &Id, s: &Section, before: &dyn Results) -> Result<Profile> {
+/// Resolves sweep `id`'s profile `s`, as `id` sees what it reads: a
+/// surface profile (loops and open chains) with `surface`.
+pub fn profile(
+    part: &Part,
+    id: &Id,
+    s: &Section,
+    before: &dyn Results,
+    surface: bool,
+) -> Result<Profile> {
     match &s.source {
         Source::Sketch(sketch) => {
             let solved = crate::rebuild::sketch_input(part, id, sketch, before)?;
-            let (valid, keys) = crate::profile::profile(&part.id, sketch, solved, &s.loops)
+            let of = if surface {
+                crate::profile::surface
+            } else {
+                crate::profile::profile
+            };
+            let (valid, keys) = of(&part.id, sketch, solved, &s.loops)
                 .map_err(|e| e.with("feature", id).with("sketch", sketch))?;
             Ok(Profile {
                 valid,
@@ -56,8 +68,16 @@ pub fn profile(part: &Part, id: &Id, s: &Section, before: &dyn Results) -> Resul
             let GeomRef::Entity(r) = g else {
                 unreachable!("a face section is an entity, as read")
             };
-            let (valid, keys) =
-                crate::profile::of_face(part, part.order(), id, "profile", r, &s.loops, before)?;
+            let (valid, keys) = crate::profile::of_face(
+                part,
+                part.order(),
+                id,
+                "profile",
+                r,
+                &s.loops,
+                before,
+                surface,
+            )?;
             Ok(Profile {
                 valid,
                 keys,
@@ -131,7 +151,7 @@ pub fn build(part: &Part, id: &Id, w: &Sweep, before: &dyn Results, run: &Run) -
         owner: id,
         results: before,
     };
-    let p = profile(part, id, &w.profile, before)?;
+    let p = profile(part, id, &w.profile, before, w.surface)?;
     let path = crate::path::of_curve(&at, "path", &w.path)?;
     let law = law(&at, w)?;
     closing(id, w, &path)?;
@@ -353,6 +373,84 @@ pub fn origins(key: OpKey, part: &Id, p: &Profile, path: &PathMade) -> BTreeMap<
                     );
                 }
             }
+        }
+    }
+    // Open chains (ryucad 18), named as `ryukei::sweep::sheets` names a
+    // chain swept along a path: sides from their segment's and path
+    // segment's stand-ins, rails as cap edges or sections, laterals and
+    // vertices from the pair either side (the chain's ends by `ChainEnd`
+    // stand-ins) and their path segments.
+    for c in p.valid.chains() {
+        let ch = derive(R::Loop, &[Name::from_u128(c.key.0)]);
+        let ends = [0u128, 1].map(|e| derive(R::ChainEnd, &[ch, Name::from_u128(e)]));
+        let caps = [derive(R::StartCap, &[ch]), derive(R::EndCap, &[ch])];
+        let ids: Vec<Id> = c
+            .segments
+            .iter()
+            .map(|g| p.keys.segments[&g.key.0].clone())
+            .collect();
+        let stands: Vec<Name> = c
+            .segments
+            .iter()
+            .map(|g| derive(R::Segment, &[Name::from_u128(g.key.0)]))
+            .collect();
+        let n = ids.len();
+        for (i, e) in ids.iter().enumerate() {
+            let sides: Vec<Name> = paths
+                .iter()
+                .map(|(q, _)| derive(R::Side, &[stands[i], *q]))
+                .collect();
+            for (r, side) in sides.iter().enumerate() {
+                put(*side, json!({ent: e, "path_segment": paths[r].1}));
+                let next = (r + 1) % k;
+                put(
+                    derive(R::Section, &[*side, sides[next]]),
+                    json!({ent: e, "path_segments": [paths[r].1, paths[next].1]}),
+                );
+            }
+            put(
+                derive(R::CapEdge, &[caps[0], sides[0]]),
+                json!({ent: e, "cap": "start"}),
+            );
+            put(
+                derive(R::CapEdge, &[caps[1], sides[k - 1]]),
+                json!({ent: e, "cap": "end"}),
+            );
+        }
+        for i in 0..=n {
+            let before = if i == 0 { ends[0] } else { stands[i - 1] };
+            let after = if i == n { ends[1] } else { stands[i] };
+            let at = match i {
+                0 => json!({ent: ids[0], "chain_end": 0}),
+                i if i == n => json!({ent: ids[n - 1], "chain_end": 1}),
+                i => json!({"entities": [ids[i - 1], ids[i]]}),
+            };
+            let with = |k: &str, v: Value| {
+                let mut x = at.clone();
+                x[k] = v;
+                x
+            };
+            for (r, (q, text)) in paths.iter().enumerate() {
+                put(
+                    derive(R::Lateral, &[before, after, *q]),
+                    with("path_segment", json!(text)),
+                );
+                let prev = (r + k - 1) % k;
+                put(
+                    derive(R::JointVertex, &[before, after, paths[prev].0, *q]),
+                    with("path_segments", json!([paths[prev].1, text])),
+                );
+            }
+            put(
+                derive(R::StartVertex, &[before, after]),
+                with("cap", json!("start")),
+            );
+            put(
+                derive(R::EndVertex, &[before, after]),
+                with("cap", json!("end")),
+            );
+            put(derive(R::Vertex, &[before, after]), at.clone());
+            put(derive(R::Apex, &[before, after]), with("apex", json!(true)));
         }
     }
     out
@@ -586,6 +684,15 @@ pub fn from_given(
     if let Some(t) = &f.targets {
         o.insert("targets".into(), json!(t));
     }
+    match f.surface {
+        Some(true) => {
+            o.insert("surface".into(), json!(true));
+        }
+        Some(false) => {
+            o.remove("surface");
+        }
+        None => {}
+    }
     v["format"] = json!(crate::doc::sweep::FORMAT);
     v["kind"] = json!(crate::doc::files::FEATURE_KIND);
     v["type"] = json!("sweep");
@@ -619,7 +726,7 @@ pub fn described(part: &Part, id: &Id, w: &Sweep, results: &dyn Results) -> Opti
         owner: id,
         results,
     };
-    let p = profile(part, id, &w.profile, results).ok()?;
+    let p = profile(part, id, &w.profile, results, w.surface).ok()?;
     let path = crate::path::of_curve(&at, "path", &w.path).ok()?;
     Some(report(&part.id, &p, &path, w))
 }

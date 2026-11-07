@@ -115,6 +115,7 @@ fuzz_target!(|data: &[u8]| {
                 name: format!("s{s}"),
                 body: Arc::clone(body),
                 mesh: Some(Arc::clone(mesh)),
+                brep: true,
             });
         }
         leaves.push((p, u));

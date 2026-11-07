@@ -7,6 +7,10 @@
 //! healing that depends on the part ID does; `keyed2` answers two parts
 //! failing, of which only the second (`lid`) builds `--into` another part.
 //! As the real one, it refuses `init` in a folder holding a project.
+//! With `STEP_HUNT_FAKE_MODES` set, its `import --help` names `--solid`
+//! (a binary with reference imports), and with `unmeshed` there a
+//! reference's `check` finds `reference_faces_unmeshed`.
+//! `STEP_HUNT_FAKE_LOG` names a file each call's arguments are appended to.
 
 use std::path::PathBuf;
 
@@ -33,6 +37,26 @@ fn main() {
         args.remove(0);
     }
     let stage = std::env::var("STEP_HUNT_STAGE").unwrap_or_default();
+    if let Ok(log) = std::env::var("STEP_HUNT_FAKE_LOG") {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+            .expect("the log");
+        // One write a call, so parallel calls' lines don't interleave.
+        f.write_all(format!("{}\n", args.join(" ")).as_bytes())
+            .expect("logging");
+    }
+    let modes = std::env::var("STEP_HUNT_FAKE_MODES").unwrap_or_default();
+    if args.first().map(String::as_str) == Some("import") && args.iter().any(|a| a == "--help") {
+        if modes.is_empty() {
+            println!("Usage: ryucad import <FILE> [--part <PART>]");
+        } else {
+            println!("Usage: ryucad import <FILE> [--part <PART>] [--solid]");
+        }
+        std::process::exit(0);
+    }
     let fake = std::env::var("STEP_HUNT_FAKE").unwrap_or_default();
     let how = match fake.split_once(':') {
         Some((s, h)) if s == stage => h.to_owned(),
@@ -62,7 +86,7 @@ fn main() {
                 .position(|a| a == "--part")
                 .map_or("body".to_owned(), |k| args[k + 1].clone());
             let faces = if how == "counts" { 7 } else { 6 };
-            let mut feature = json!({"id": "body", "type": "import", "ok": true,
+            let mut feature = json!({"id": "body", "type": "import", "ok": true, "hash": "h",
                                      "counts": {"faces": faces, "edges": 12, "vertices": 8}});
             let into = args.iter().any(|a| a == "--into");
             let lid = args
@@ -84,6 +108,10 @@ fn main() {
         "check" if how == "fail" => refuse(
             "check_failed",
             json!({"findings": [{"code": "faces_intersect", "severity": "error"}]}),
+        ),
+        "check" if modes == "unmeshed" && args.get(1).is_some_and(|p| p == "ref") => answer(
+            json!({"passed": true, "findings": [{"code": "reference_faces_unmeshed",
+                                                  "severity": "warning"}]}),
         ),
         "check" => answer(json!({"passed": true, "findings": []})),
         "export" if how == "fail" => refuse("export_unrepresentable", json!({"reason": "pcurve"})),

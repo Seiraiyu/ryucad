@@ -248,7 +248,7 @@ fn check_pinned(files: Vec<(usize, String)>) {
         let dir = tempfile::tempdir().unwrap();
         ryucad::server::init(dir.path(), None).unwrap();
         let mut s = Session::open(dir.path()).unwrap();
-        let answer = call(&mut s, "import", json!({"path": path})).unwrap();
+        let answer = call(&mut s, "import", json!({"solid": true, "path": path})).unwrap();
         let built = built_parts(&mut s);
         let parts = answer["parts"].as_array().map_or(0, Vec::len);
         println!(
@@ -283,8 +283,13 @@ fn check_pinned(files: Vec<(usize, String)>) {
         let (mut new, mut passing, mut failing) = (Vec::new(), Vec::new(), 0);
         for part in &built {
             let step = out.path().join(format!("{part}.step"));
-            let moved = call(&mut s, "export", json!({"part": part, "out": step}))
-                .and_then(|_| call(&mut b, "import", json!({"path": step, "part": part})));
+            let moved = call(&mut s, "export", json!({"part": part, "out": step})).and_then(|_| {
+                call(
+                    &mut b,
+                    "import",
+                    json!({"solid": true, "path": step, "part": part}),
+                )
+            });
             let (back, here) = match moved {
                 Ok(_) => (counts(&mut b, part), counts(&mut s, part)),
                 // A part that can't be written or read again doesn't come

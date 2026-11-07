@@ -78,14 +78,19 @@ pub fn entities(body: &Body) -> Value {
                 .filter_map(|l| body.face(l.face))
                 .map(|f| f.name.to_string())
                 .collect();
-            json!({
+            let mut j = json!({
                 "name": edge.name.to_string(),
                 "curve": curve(body.curve(edge.curve).expect("live curve")),
                 "start": name(edge.start),
                 "end": name(edge.end),
                 "interval": edge.interval,
                 "faces": faces,
-            })
+            });
+            // A sheet's boundary edge (ryucad 18): written only when true.
+            if body.is_laminar(e) {
+                j["laminar"] = json!(true);
+            }
+            j
         })
         .collect();
     let vertices: Vec<Value> = body
@@ -299,6 +304,7 @@ pub fn body(f: &Feature, b: &Built) -> Value {
     }
     v["hash"] = json!(b.hash);
     v["counts"] = json!({"faces": c.faces, "edges": c.edges, "vertices": c.vertices});
+    v["kind"] = json!(crate::kind::name(&b.body));
     v["bounds"] = bounds(f, &b.body);
     v
 }

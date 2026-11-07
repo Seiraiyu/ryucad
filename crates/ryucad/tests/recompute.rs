@@ -94,7 +94,8 @@ fn rectangle(w: &str, h: &str, at: [f64; 2]) -> Value {
 /// up a line of `wl` on zx as `sw`; a circle `la` on xy lofted to a
 /// smaller one `lb` on a datum plane `dl` 10 mm above it as `lf` (circles:
 /// a loft of squares is four spline faces whose self-intersection check
-/// takes a debug build tens of seconds on every rebuild from nothing).
+/// takes a debug build tens of seconds on every rebuild from nothing); and
+/// a reference import of OCCT's box, which edits make a solid and back.
 fn project() -> (tempfile::TempDir, Session) {
     let dir = tempfile::tempdir().unwrap();
     ryucad::server::init(dir.path(), None).unwrap();
@@ -291,6 +292,36 @@ fn project() -> (tempfile::TempDir, Session) {
         &mut s,
         json!({"type": "loft", "id": "lf", "sections": ["la", "lb"]}),
     );
+    // A surface wall from an open chain, and a planar face of a circle.
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "swl", "plane": "xy"}),
+    );
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "swl", "ops": [
+            {"op": "add", "id": "a", "type": "point", "at": [60, 0]},
+            {"op": "add", "id": "b", "type": "point", "at": [70, 0]},
+            {"op": "add", "id": "c", "type": "point", "at": [70, 8]},
+            {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"},
+            {"op": "add", "id": "l2", "type": "line", "start": "b", "end": "c"}]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "extrude", "id": "wall", "sketch": "swl", "surface": true,
+               "extent": {"type": "blind", "length": "6 mm"}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "planar", "id": "pad", "sketch": "la"}),
+    );
+    // A reference import of OCCT's box, which edits convert and back.
+    let file = format!(
+        "{}/../ryustep/tests/data/occt/box_ap214.stp",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    must(&mut s, "import", json!({"path": file, "into": "p"}));
     (dir, s)
 }
 
@@ -303,7 +334,7 @@ fn mm(g: &mut Lcg, lo: u64, hi: u64) -> String {
 /// One random edit. Some are refused, or leave a feature failing; both
 /// must rebuild the same way however they are reached.
 fn edit(g: &mut Lcg, s: &mut Session) {
-    let (method, params) = match g.next_u64() % 23 {
+    let (method, params) = match g.next_u64() % 24 {
         0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
         1 => (
             "param.set",
@@ -357,6 +388,16 @@ fn edit(g: &mut Lcg, s: &mut Session) {
             "feature.edit",
             json!({"id": "row", "skip": if g.next_u64().is_multiple_of(2) { json!([]) } else { json!([1]) }}),
         ),
+        // The wall's height, or its chain's far end moved.
+        14 if g.next_u64().is_multiple_of(2) => (
+            "feature.edit",
+            json!({"id": "wall", "extent": {"length": mm(g, 3, 10)}}),
+        ),
+        14 => (
+            "sketch.edit",
+            json!({"sketch": "swl", "ops": [{"op": "move", "id": "c",
+                   "at": [70, 4 + g.next_u64() % 8]}]}),
+        ),
         15 => ("feature.edit", json!({"id": "d1", "distance": mm(g, 1, 9)})),
         // Built another way, and back.
         16 if g.next_u64().is_multiple_of(2) => (
@@ -409,6 +450,11 @@ fn edit(g: &mut Lcg, s: &mut Session) {
             } else {
                 json!({"id": "lf", "start_tangent": ""})
             },
+        ),
+        // The import made a healed solid, or a reference again.
+        23 => (
+            "import.convert",
+            json!({"reference": g.next_u64().is_multiple_of(2)}),
         ),
         _ => (
             "sketch.edit",

@@ -41,7 +41,14 @@ pub struct Report {
     pub loops: Vec<Vec<(Id, bool)>>,
     /// Curves that join but don't close, and the points where they stop.
     pub open: Vec<(Vec<Id>, Vec<Id>)>,
+    /// Each open chain walked end to end (curve and whether it is walked
+    /// backwards), or the points where it branches: `open`'s order.
+    pub paths: Vec<ChainWalk>,
 }
+
+/// An open chain walked end to end (each curve and whether it is walked
+/// backwards), or the points where it branches.
+pub type ChainWalk = std::result::Result<Vec<(Id, bool)>, Vec<Id>>;
 
 impl Report {
     fn new(r: &ryusketch::Report, index: &Index) -> Report {
@@ -83,6 +90,14 @@ impl Report {
                         ch.entities.iter().map(e).collect(),
                         ch.ends.iter().map(e).collect(),
                     )
+                })
+                .collect(),
+            paths: r
+                .paths
+                .iter()
+                .map(|p| match p {
+                    Ok(w) => Ok(w.iter().map(|s| (e(&s.entity), s.reversed)).collect()),
+                    Err(points) => Err(points.iter().map(e).collect()),
                 })
                 .collect(),
         }
@@ -1391,6 +1406,55 @@ pub(crate) mod tests {
             Feature::Sketch(s) => s,
             _ => unreachable!(),
         }
+    }
+
+    /// A sketch on xy of `ops`' adds (points `at` in millimetres, lines,
+    /// arcs and circles as `sketch.edit` adds them), no constraints,
+    /// solved.
+    pub(crate) fn solve_ops(ops: Value) -> Solved {
+        let mut entities = Map::new();
+        for op in ops.as_array().unwrap() {
+            let mut e = op.clone();
+            let o = e.as_object_mut().unwrap();
+            o.remove("op");
+            let id = o.remove("id").unwrap();
+            if let Some(at) = o.remove("at") {
+                let at: Vec<f64> = at
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|x| x.as_f64().unwrap() / 1000.0)
+                    .collect();
+                o.insert("m".into(), json!(at));
+            }
+            entities.insert(id.as_str().unwrap().to_owned(), e);
+        }
+        let v = json!({"format": 2, "kind": "ryucad.feature", "type": "sketch", "plane": "xy",
+                       "entities": entities, "constraints": {}});
+        let Feature::Sketch(s) =
+            Feature::from_json(&v, Unit::Mm, &Env::new(&BTreeMap::new())).unwrap()
+        else {
+            unreachable!()
+        };
+        solve(&id("s"), &s).unwrap()
+    }
+
+    #[test]
+    fn open_chains_come_with_their_walk_in_the_sketchs_ids() {
+        // An L of two lines: a1-a2-a3, the second drawn back.
+        let s = solve_ops(json!([
+            {"op": "add", "id": "a1", "type": "point", "at": [0, 0]},
+            {"op": "add", "id": "a2", "type": "point", "at": [10, 0]},
+            {"op": "add", "id": "a3", "type": "point", "at": [10, 5]},
+            {"op": "add", "id": "l1", "type": "line", "start": "a1", "end": "a2"},
+            {"op": "add", "id": "l2", "type": "line", "start": "a3", "end": "a2"}
+        ]));
+        let walk = s.report.paths[0].as_ref().unwrap();
+        let ids: Vec<(&str, bool)> = walk.iter().map(|(e, r)| (e.as_str(), *r)).collect();
+        assert!(
+            ids == [("l1", false), ("l2", true)] || ids == [("l2", false), ("l1", true)],
+            "{ids:?}"
+        );
     }
 
     #[test]

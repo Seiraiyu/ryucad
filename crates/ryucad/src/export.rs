@@ -541,6 +541,27 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
         ..Walk::default()
     };
     walk.product(s, &part, &rev)?;
+    // Sheets are written by every format in 18.C (STEP's surface models,
+    // STL's open meshes, 3MF's surface objects, USD's meshes); until then
+    // they are refused, never written wrong. A reference import is
+    // written as ryucad 21.B writes it.
+    for p in &walk.scene.products {
+        if let Some(x) = p
+            .solids
+            .iter()
+            .find(|x| !x.built.reference && x.built.body.kind() == ryukei::topo::BodyKind::Sheet)
+        {
+            return Err(crate::kind::wrong(
+                &p.part,
+                "export",
+                &x.founder,
+                "sheet",
+                crate::kind::Want::Solid,
+            )
+            .with("part", &p.part)
+            .with("hint", "exports write sheets from ryucad 18.C"));
+        }
+    }
     let failing: Vec<Value> = walk.failing.values().cloned().collect();
     if !failing.is_empty() && !ask.skip_failing {
         return Err(Error::new(
@@ -636,8 +657,9 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                 time_stamp,
                 ..WriteOptions::default()
             };
-            let bytes =
-                ryustep::write(&step_model(&walk.scene), &opts).map_err(|e| walk.unwritable(e))?;
+            let passed = passed_references(&walk)?;
+            let bytes = ryustep::write_with(&step_model(&walk.scene), &passed, &opts)
+                .map_err(|e| walk.unwritable(e))?;
             result["time_stamp"] = json!(opts.time_stamp);
             result["schema"] = json!(schema_name);
             result["unit"] = json!(unit_name);
@@ -647,7 +669,7 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
             })
         }
         Options::Stl { unit, mesh, ascii } => {
-            let scene = meshed(s, &walk.scene, &mesh)?;
+            let scene = meshed(s, &walk.scene, &mesh, &mut result)?;
             triangles(&mut result, &scene);
             result["unit"] = json!(unit.as_str());
             result["mesh"] = mesh.report();
@@ -662,7 +684,7 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
             })
         }
         Options::ThreeMf { unit, mesh } => {
-            let scene = meshed(s, &walk.scene, &mesh)?;
+            let scene = meshed(s, &walk.scene, &mesh, &mut result)?;
             triangles(&mut result, &scene);
             result["unit"] = json!(unit.as_str());
             result["mesh"] = mesh.report();
@@ -688,10 +710,44 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
             mesh,
             pipe_tolerance,
         } => {
+            // A reference has no BrepArray: it is written as its mesh, so
+            // an export without meshes would write nothing of it.
+            let references: Vec<String> = walk
+                .scene
+                .products
+                .iter()
+                .flat_map(|p| &p.solids)
+                .filter(|x| x.built.reference)
+                .map(|x| format!("{}/{}", x.part, x.founder))
+                .collect();
+            if mesh.is_none()
+                && let Some(r) = references.first()
+            {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "{r} is a reference import, which USD holds only as a mesh: export with meshes, or convert it to a solid"
+                    ),
+                )
+                .with("param", "mesh")
+                .with("solid", r));
+            }
             let meshes = mesh
                 .as_ref()
-                .map(|m| meshed(s, &walk.scene, m))
+                .map(|m| meshed(s, &walk.scene, m, &mut result))
                 .transpose()?;
+            if brep {
+                warn(
+                    &mut result,
+                    references
+                        .iter()
+                        .map(|r| {
+                            json!({"code": "export_reference_mesh_only", "solid": r,
+                                   "message": format!("{r} is a reference import: written as its mesh alone, with no BrepArray")})
+                        })
+                        .collect(),
+                );
+            }
             if let Some(scene) = &meshes {
                 triangles(&mut result, scene);
             }
@@ -763,6 +819,7 @@ fn usd_model(scene: &Scene, meshes: Option<&ryuformats::Scene>) -> ryuformats::u
                 .iter()
                 .enumerate()
                 .map(|(i, x)| ryuformats::usd::stage::Solid {
+                    brep: !x.built.reference,
                     name: x.founder.to_string(),
                     body: Arc::clone(
                         bodies
@@ -798,7 +855,41 @@ fn triangles(result: &mut Value, scene: &ryuformats::Scene) {
 /// whatever the occurrences, through the session's mesh cache.
 /// `export_too_large` for a body past ryukei's triangle budget,
 /// `export_mesh_faults` naming every face that wouldn't mesh.
-fn meshed(s: &mut Session, scene: &Scene, opts: &MeshOptions) -> Result<ryuformats::Scene> {
+/// `warnings` added to the answer's `warnings`.
+fn warn(result: &mut Value, warnings: Vec<Value>) {
+    if warnings.is_empty() {
+        return;
+    }
+    if !result["warnings"].is_array() {
+        result["warnings"] = json!([]);
+    }
+    result["warnings"]
+        .as_array_mut()
+        .expect("an array")
+        .extend(warnings);
+}
+
+/// The scene meshed ([`meshed_with`]), a reference's holes warned of in
+/// `result`.
+fn meshed(
+    s: &mut Session,
+    scene: &Scene,
+    opts: &MeshOptions,
+    result: &mut Value,
+) -> Result<ryuformats::Scene> {
+    let (scene, warnings) = meshed_with(s, scene, opts)?;
+    warn(result, warnings);
+    Ok(scene)
+}
+
+/// The scene with every solid meshed, and `reference_faces_unmeshed`
+/// warnings for references whose faces the mesh left out: a reference is
+/// written with its holes, where a solid's faults refuse the export.
+fn meshed_with(
+    s: &mut Session,
+    scene: &Scene,
+    opts: &MeshOptions,
+) -> Result<(ryuformats::Scene, Vec<Value>)> {
     let solids: Vec<(&Product, &Solid)> = scene
         .products
         .iter()
@@ -811,6 +902,7 @@ fn meshed(s: &mut Session, scene: &Scene, opts: &MeshOptions) -> Result<ryuforma
             .export_all_for(&builts, &opts.params, crate::server::mesh_budget(), &job)?;
     let mut meshes: BTreeMap<&str, Arc<ryukei::mesh::BodyMesh>> = BTreeMap::new();
     let mut faults = Vec::new();
+    let mut warnings = Vec::new();
     for ((p, x), m) in solids.iter().zip(&made) {
         let mesh = match &m.mesh {
             Ok(mesh) => mesh,
@@ -836,7 +928,17 @@ fn meshed(s: &mut Session, scene: &Scene, opts: &MeshOptions) -> Result<ryuforma
             Err(e) => return Err(e.clone()),
         };
         if meshes.insert(&x.built.hash, Arc::clone(mesh)).is_none() {
-            faults.extend(fault_report(x, &p.rev, mesh));
+            if x.built.reference {
+                let display = crate::mesh::DisplayMesh {
+                    params: opts.params,
+                    mesh: Ok(Arc::clone(mesh)),
+                };
+                warnings.extend(crate::mesh::unmeshed_warning(
+                    &x.part, &x.founder, &x.built, &display,
+                ));
+            } else {
+                faults.extend(fault_report(x, &p.rev, mesh));
+            }
         }
     }
     if !faults.is_empty() {
@@ -878,7 +980,7 @@ fn meshed(s: &mut Session, scene: &Scene, opts: &MeshOptions) -> Result<ryuforma
                 .collect(),
         })
         .collect();
-    Ok(ryuformats::Scene { products })
+    Ok((ryuformats::Scene { products }, warnings))
 }
 
 /// Each face of `x`'s mesh ryukei couldn't mesh: its part, revision,
@@ -1039,7 +1141,13 @@ fn step_model(scene: &Scene) -> WriteModel {
             name: p.name.clone(),
             description: p.description.clone(),
             revision: p.revision.clone(),
-            bodies: p.solids.iter().map(|s| s.built.body.clone()).collect(),
+            // A reference is passed through as its file has it.
+            bodies: p
+                .solids
+                .iter()
+                .filter(|s| !s.built.reference)
+                .map(|s| s.built.body.clone())
+                .collect(),
             children: p
                 .children
                 .iter()
@@ -1049,10 +1157,75 @@ fn step_model(scene: &Scene) -> WriteModel {
                     id: c.usage.clone(),
                 })
                 .collect(),
-            names: p.solids.iter().map(|s| s.founder.to_string()).collect(),
+            names: p
+                .solids
+                .iter()
+                .filter(|s| !s.built.reference)
+                .map(|s| s.founder.to_string())
+                .collect(),
         })
         .collect();
     WriteModel { products }
+}
+
+/// Each reference solid's own representation, cut out of its imported
+/// file (as step-hunt cuts a body) and named by its founder, beside its
+/// product: a reference is written as the file had it, never healed or
+/// seamed (design 364). Each file is parsed once.
+fn passed_references(walk: &Walk) -> Result<Vec<ryustep::Passed>> {
+    let mut parsed: BTreeMap<String, Arc<ryustep::part21::File>> = BTreeMap::new();
+    let mut passed = Vec::new();
+    for (k, p) in walk.scene.products.iter().enumerate() {
+        for sol in p.solids.iter().filter(|s| s.built.reference) {
+            let Some((part, _, _)) = walk.built.get(&(sol.part.clone(), p.rev.clone())) else {
+                return Err(Error::new(
+                    Code::Internal,
+                    format!("export: {}/{} wasn't rebuilt", sol.part, sol.founder),
+                ));
+            };
+            let Some(Ok(crate::doc::files::Feature::Import(i))) = part.features.get(&sol.founder)
+            else {
+                return Err(Error::new(
+                    Code::Internal,
+                    format!(
+                        "export: {}/{} is a reference but no import",
+                        sol.part, sol.founder
+                    ),
+                ));
+            };
+            let Some(f) = part.imports.get(&i.file.path) else {
+                return Err(Error::new(
+                    Code::ImportFileMissing,
+                    format!("export: {} is missing", i.file.path),
+                ));
+            };
+            let unreadable = |e: &ryustep::StepError| crate::import::unreadable(&i.file.path, e);
+            let file = match parsed.get(&f.blake3) {
+                Some(x) => x.clone(),
+                None => {
+                    let x = Arc::new(ryustep::part21::parse(&f.bytes).map_err(|e| unreadable(&e))?);
+                    parsed.insert(f.blake3.clone(), x.clone());
+                    x
+                }
+            };
+            let opened = crate::import::opened(f).map_err(|e| unreadable(&e))?;
+            let n = crate::import::select(&sol.founder, i, &opened)?;
+            let h = &opened.held[n];
+            let instances = ryustep::part21::closure::cut(
+                &file,
+                h.representation,
+                h.context,
+                &h.items,
+                sol.founder.as_str(),
+            )
+            .map_err(|e| Error::new(Code::Internal, format!("export: {e}")))?;
+            passed.push(ryustep::Passed {
+                product: k,
+                instances,
+            });
+        }
+    }
+    Ok(passed)
 }
 
 /// The scene being built, walked from the part exported.
@@ -1398,6 +1571,119 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_reference_exports_as_its_files_own_representation() {
+        use crate::doc::import::Mode;
+        let bytes = crate::import::tests::occt("box_ap214.stp");
+        let (_d, mut s) = crate::import::tests::with_import_as(
+            &bytes,
+            Some(("part 2", "part 2")),
+            Some(Mode::Reference),
+        );
+        let (_, out) = exported(
+            &mut s,
+            json!({"part": "p", "time_stamp": "2026-11-06T00:00:00"}),
+        )
+        .unwrap();
+        // The file's faces' instances, renumbered: the same reference read
+        // back under the same key, so the same names and body.
+        let o = opened(&out);
+        assert_eq!(o.held.len(), 1);
+        let key = crate::rebuild::op_key(
+            &Id::parse("p", "part").unwrap(),
+            &Id::parse("i", "feature").unwrap(),
+        );
+        let ro = ryustep::ReadOptions {
+            key,
+            heal: Default::default(),
+        };
+        let again = o.reference(0, &ro).result.unwrap().0;
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        assert_eq!(
+            blake3::hash(again.dump().as_bytes()).to_hex()[..32],
+            r["parts"][0]["solids"][0]["hash"]
+        );
+        // No seamed body was written for it.
+        assert!(!String::from_utf8_lossy(&out).contains("ryukei:seam"));
+    }
+
+    #[test]
+    fn a_reference_exports_as_meshes_with_usd_saying_so() {
+        use crate::doc::import::Mode;
+        let bytes = crate::import::tests::occt("box_ap214.stp");
+        let (_d, mut s) = crate::import::tests::with_import_as(
+            &bytes,
+            Some(("part 2", "part 2")),
+            Some(Mode::Reference),
+        );
+        for format in ["stl", "3mf", "usda"] {
+            let (v, out) = exported(&mut s, json!({"part": "p", "format": format})).unwrap();
+            assert!(!out.is_empty(), "{format}: {v}");
+        }
+        // USD writes it as a mesh alone, and says so.
+        let (v, out) = exported(&mut s, json!({"part": "p", "format": "usda"})).unwrap();
+        let w = v["warnings"].as_array().unwrap();
+        assert!(
+            w.iter().any(|w| w["code"] == "export_reference_mesh_only"),
+            "{v}"
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("BrepArray"), "a BrepArray of a reference");
+        assert!(text.contains("ryucad:faceName"));
+        // Without meshes there is nothing to write for it.
+        let e = answered(
+            &mut s,
+            json!({"part": "p", "format": "usda", "mesh": false}),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(e.code, Code::InvalidParam);
+        assert_eq!(e.details["solid"], "p/i");
+    }
+
+    #[test]
+    fn a_references_mesh_faults_are_warnings() {
+        use crate::doc::import::Mode;
+        let bytes = crate::import::tests::occt("box_ap214.stp");
+        let (_d, mut s) = crate::import::tests::with_import_as(
+            &bytes,
+            Some(("part 2", "part 2")),
+            Some(Mode::Reference),
+        );
+        let p = Id::parse("p", "part").unwrap();
+        let r = s.rebuilt(&p).unwrap();
+        let b = r
+            .features
+            .iter()
+            .find_map(|(_, o)| o.as_ref().ok()?.solid(&Id::parse("i", "feature").unwrap()))
+            .unwrap()
+            .clone();
+        let params = ryukei::mesh::MeshParams::new(1e-4, 0.3);
+        let mut m = ryukei::mesh::tessellate(&b.body, &params).unwrap();
+        m.faults.push(ryukei::mesh::FaceFault {
+            face: b.body.faces().next().unwrap(),
+            kind: ryukei::mesh::MeshFaultKind::BadDomain,
+        });
+        let display = crate::mesh::DisplayMesh {
+            params,
+            mesh: Ok(Arc::new(m.clone())),
+        };
+        let w =
+            crate::mesh::unmeshed_warning(&p, &Id::parse("i", "feature").unwrap(), &b, &display)
+                .unwrap();
+        assert_eq!(w["code"], "reference_faces_unmeshed");
+        // A solid's faults stay `export_mesh_faults`.
+        let solid = Solid {
+            part: p.clone(),
+            founder: Id::parse("i", "feature").unwrap(),
+            built: Arc::new(crate::rebuild::Built {
+                reference: false,
+                ..b.clone()
+            }),
+        };
+        assert_eq!(fault_report(&solid, &Rev::Working, &m).len(), 1);
+    }
+
+    #[test]
     fn mesh_options_are_literals_in_range() {
         let mm = units::Unit::Mm;
         let o = MeshOptions::read(None, None, None, mm).unwrap();
@@ -1491,7 +1777,7 @@ pub(crate) mod tests {
         // Imported again, each solid keeps its ID.
         let (_out, out) = outside(&bytes, "p.step");
         let (_dir2, mut s2) = fresh();
-        let v = call(&mut s2, "import", json!({"path": out})).unwrap();
+        let v = call(&mut s2, "import", json!({"solid": true, "path": out})).unwrap();
         let ids: Vec<&Value> = v["parts"][0]["features"]
             .as_array()
             .unwrap()
@@ -2571,7 +2857,7 @@ pub(crate) mod tests {
         let original = frame();
         let (_src, path) = outside(&original, "frame.step");
         let (dir, mut s) = fresh();
-        call(&mut s, "import", json!({"path": path})).unwrap();
+        call(&mut s, "import", json!({"solid": true, "path": path})).unwrap();
         // f-1 places its plate's part (f-1-body), s-1 and p-1. Exported
         // with the header the file had, it is the file, byte for byte.
         let export = |s: &mut Session, time_stamp: &str| {
@@ -2595,7 +2881,7 @@ pub(crate) mod tests {
         let v = call(
             &mut s,
             "import",
-            json!({"path": out, "update": "imports/frame.step"}),
+            json!({"solid": true, "path": out, "update": "imports/frame.step"}),
         )
         .unwrap();
         assert_ne!(v["file"]["blake3"], v["file"]["from"]);
@@ -2619,7 +2905,7 @@ pub(crate) mod tests {
         assert_eq!(names(&mut s), names_before);
         // Imported into another project, it makes the same parts.
         let (_dir2, mut s2) = fresh();
-        let v = call(&mut s2, "import", json!({"path": out})).unwrap();
+        let v = call(&mut s2, "import", json!({"solid": true, "path": out})).unwrap();
         let made: Vec<(&Value, &Value)> = v["parts"]
             .as_array()
             .unwrap()
