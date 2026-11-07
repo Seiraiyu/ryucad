@@ -24,6 +24,7 @@
 pub(crate) mod chain;
 pub(crate) mod classify;
 pub(crate) mod curves;
+pub mod draft;
 pub(crate) mod engine;
 pub(crate) mod extend;
 pub(crate) mod motion;
@@ -32,6 +33,9 @@ pub(crate) mod vertices;
 #[cfg(test)]
 mod tests;
 
+pub use draft::{
+    DraftFace, DraftReport, DraftSpec, FaceAngle, Hinge, MAX_ANGLE, draft, draft_with,
+};
 pub(crate) use motion::Motion;
 
 use crate::geom::Rigid;
@@ -162,7 +166,7 @@ fn offset_faces_in(
         &Changes {
             motion,
             surface,
-            senses: BTreeMap::new(),
+            ..Changes::default()
         },
         meter,
     )
@@ -333,7 +337,7 @@ fn rigidly(
         &Changes {
             motion,
             surface,
-            senses: BTreeMap::new(),
+            ..Changes::default()
         },
         meter,
     )

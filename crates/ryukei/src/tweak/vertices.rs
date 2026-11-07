@@ -160,12 +160,14 @@ fn vertex(
         })
         .collect();
     let x0 = nearest(&moved);
-    // The base curve: carried, then moved, then closing.
+    // The base curve: a hinge (which stays), carried, then moved, then
+    // closing.
     let rank = |x: &End| match class.get(&x.edge) {
-        Some(Class::Carried) => 0,
-        Some(Class::Moved) => 1,
-        Some(Class::Closing) => 2,
-        _ => 3,
+        Some(Class::Hinge) => 0,
+        Some(Class::Carried) => 1,
+        Some(Class::Moved) => 2,
+        Some(Class::Closing) => 3,
+        _ => 4,
     };
     let base = *ends
         .iter()
@@ -286,7 +288,7 @@ mod tests {
         let plan = curves::plan_for(&b, &motion, &class);
         // unmetered: a unit test.
         let m = Meter::free();
-        let geo = curves::curves(&plan, &class, &m).unwrap();
+        let geo = curves::curves(&plan, &class, &BTreeMap::new(), &m).unwrap();
         let rails = curves::rails(&plan, &m).unwrap();
         let vg = vertices(&plan, &class, &geo, &rails, &m).unwrap();
         assert_eq!(vg.len(), 8);

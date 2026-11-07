@@ -2528,6 +2528,40 @@ mod tests {
     }
 
     #[test]
+    fn an_imports_mode_is_one_line() {
+        let h = "ab".repeat(32);
+        let v = json!({"body": 0, "file": {"blake3": h, "path": "imports/b.step"}, "format": 13,
+                       "kind": "ryucad.feature", "type": "import", "mode": "reference"});
+        assert!(text(v).contains("\nmode = reference\n"));
+    }
+
+    #[test]
+    fn a_converted_import_diffs_by_its_mode() {
+        let h = "ab".repeat(32);
+        let solid = json!({"body": 0, "file": {"blake3": h, "path": "imports/b.step"},
+                           "format": 5, "kind": "ryucad.feature", "type": "import"});
+        let mut reference = solid.clone();
+        reference["mode"] = json!("reference");
+        reference["format"] = json!(13);
+        let d = feature(Some(&solid), Some(&reference), &Options::default());
+        assert_eq!(d["status"], "changed", "{d}");
+        let pointers: Vec<&Value> = d["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| &c["at"])
+            .collect();
+        assert!(pointers.contains(&&json!("/mode")), "{d}");
+        let mode = d["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["at"] == "/mode")
+            .unwrap();
+        assert_eq!(mode["to"], "reference", "{d}");
+    }
+
+    #[test]
     fn an_import_reads_as_its_file_product_and_body() {
         let h = "ab".repeat(32);
         let v = json!({"body": 1, "file": {"blake3": h, "path": "imports/bracket.step"},

@@ -9,9 +9,7 @@
 //! fixed, so the same body gives the same bytes whatever its instance
 //! numbers were and whatever file held it.
 
-use std::collections::HashMap;
-
-use ryu_part21::{File, Header, Instance, Param, Part, Record};
+use ryu_part21::{File, Header, Instance, Param, Part};
 
 /// The fixed header of a body file, naming the source's schemas.
 fn header(schemas: &[&str]) -> Header {
@@ -45,31 +43,6 @@ fn header(schemas: &[&str]) -> Header {
     }
 }
 
-fn refs(p: &Param, out: &mut Vec<u64>) {
-    match p {
-        Param::Ref(r) => out.push(*r),
-        Param::List(l) => l.iter().for_each(|x| refs(x, out)),
-        Param::Typed(_, v) => refs(v, out),
-        _ => {}
-    }
-}
-
-fn remap(p: &Param, ids: &HashMap<u64, u64>) -> Param {
-    match p {
-        Param::Ref(r) => Param::Ref(ids[r]),
-        Param::List(l) => Param::List(l.iter().map(|x| remap(x, ids)).collect()),
-        Param::Typed(n, v) => Param::Typed(n.clone(), Box::new(remap(v, ids))),
-        other => other.clone(),
-    }
-}
-
-fn remap_part(p: &Part, ids: &HashMap<u64, u64>) -> Part {
-    Part {
-        name: p.name.clone(),
-        params: p.params.iter().map(|x| remap(x, ids)).collect(),
-    }
-}
-
 /// The body file of representation `representation` (in `context`)
 /// holding `items`, from the parsed `file`. An error names an instance
 /// that names one the file lacks.
@@ -79,57 +52,7 @@ pub fn body_file(
     context: u64,
     items: &[u64],
 ) -> Result<Vec<u8>, String> {
-    let name: Box<str> = match file.get(representation).map(|i| &i.record) {
-        Some(Record::Simple(p)) => p.name.clone(),
-        Some(Record::Complex(_)) => "SHAPE_REPRESENTATION".into(),
-        None => return Err(format!("no instance #{representation}")),
-    };
-    let root = Part {
-        name,
-        params: vec![
-            Param::Str("".into()),
-            Param::List(items.iter().map(|&i| Param::Ref(i)).collect()),
-            Param::Ref(context),
-        ],
-    };
-    // Number what the root reaches, breadth first.
-    let mut ids: HashMap<u64, u64> = HashMap::new();
-    let mut order: Vec<u64> = Vec::new();
-    let mut found = Vec::new();
-    root.params.iter().for_each(|p| refs(p, &mut found));
-    let mut next = 0;
-    loop {
-        for r in found.drain(..) {
-            if let std::collections::hash_map::Entry::Vacant(e) = ids.entry(r) {
-                e.insert(order.len() as u64 + 2);
-                order.push(r);
-            }
-        }
-        let Some(&old) = order.get(next) else { break };
-        next += 1;
-        let inst = file
-            .get(old)
-            .ok_or_else(|| format!("#{old} is named but the file lacks it"))?;
-        for part in inst.record.parts() {
-            part.params.iter().for_each(|p| refs(p, &mut found));
-        }
-    }
-    let mut instances = vec![Instance {
-        id: 1,
-        record: Record::Simple(remap_part(&root, &ids)),
-    }];
-    for (k, old) in order.iter().enumerate() {
-        let record = match &file.get(*old).expect("found above").record {
-            Record::Simple(p) => Record::Simple(remap_part(p, &ids)),
-            Record::Complex(parts) => {
-                Record::Complex(parts.iter().map(|p| remap_part(p, &ids)).collect())
-            }
-        };
-        instances.push(Instance {
-            id: k as u64 + 2,
-            record,
-        });
-    }
+    let instances = ryu_part21::closure::cut(file, representation, context, items, "")?;
     let out = File {
         header: header(&file.header.schemas()),
         instances,

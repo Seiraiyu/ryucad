@@ -3307,8 +3307,11 @@ fn imported() -> (tempfile::TempDir, ryucad::session::Session) {
     let mut s = ryucad::session::Session::open(dir.path()).unwrap();
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../ryustep/tests/data/occt/spline_revolve.stp");
-    let req = ryucad::proto::Request::from_rpc("import", Some(serde_json::json!({"path": path})))
-        .unwrap();
+    let req = ryucad::proto::Request::from_rpc(
+        "import",
+        Some(serde_json::json!({"solid": true, "path": path})),
+    )
+    .unwrap();
     ryucad::server::handle(&mut s, req).unwrap();
     (dir, s)
 }
@@ -3421,7 +3424,7 @@ fn imports_section(golden: &mut Golden) {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../ryustep/tests/data/occt")
                 .join(f);
-            let params = serde_json::json!({"path": path});
+            let params = serde_json::json!({"solid": true, "path": path});
             let req = ryucad::proto::Request::from_rpc("import", Some(params)).unwrap();
             pool.install(|| ryucad::server::handle(&mut session, req))
                 .unwrap_or_else(|e| panic!("{f}: {e}"));
@@ -3445,6 +3448,112 @@ fn imports_section(golden: &mut Golden) {
                 for x in p.origin_m.iter().chain(&p.z).chain(&p.x) {
                     out.push(format!("{:016x}", x.to_bits()));
                 }
+            }
+        }
+        runs.push(out);
+    }
+    assert_eq!(runs[0], runs[1], "one thread and four");
+    for x in &runs[0] {
+        s.str(x);
+    }
+}
+
+/// Files OCCT wrote and the committed corpus's smallest NIST body, each
+/// imported as a reference (design 364): every reference's body hash,
+/// counts, its report's counts, its faces' names; its STEP export (the
+/// file's own representation passed through) and binary STL; `mass` of
+/// the closed ones and `measure` of each. Built on one thread and on four.
+/// The larger NIST bodies are left out: a debug build references them in
+/// seconds each.
+fn reference_imports_section(golden: &mut Golden) {
+    let mut s = golden.section("reference_imports");
+    let files = [
+        "../ryustep/tests/data/occt/box_ap214.stp",
+        "../ryustep/tests/data/occt/cylinder.stp",
+        "../ryustep/tests/data/occt/torus.stp",
+        "../ryustep/tests/data/occt/plate_hole.stp",
+        "../ryustep/tests/data/occt/nurbs_cylinder.stp",
+        "../ryustep/tests/data/occt/spline_revolve.stp",
+        "../ryustep/tests/corpus/nist_ctc_01_asme1_rd.stp",
+    ];
+    let mut runs = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        ryucad::server::init(dir.path(), None).unwrap();
+        let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+        let call = |session: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+            let req = ryucad::proto::Request::from_rpc(m, Some(p)).unwrap();
+            pool.install(|| ryucad::server::handle(session, req))
+        };
+        call(
+            &mut session,
+            "materials.set",
+            serde_json::json!({"name": "steel", "density": "7850 kg/m^3", "default": true}),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        for f in files {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f);
+            call(&mut session, "import", serde_json::json!({"path": path}))
+                .unwrap_or_else(|e| panic!("{f}: {e}"));
+        }
+        let parts: Vec<Id> = session.project().parts.keys().cloned().collect();
+        for part in &parts {
+            let r = pool.install(|| session.rebuilt(part).unwrap().clone());
+            assert_eq!(r.failed(), 0, "{part}: {:?}", r.features);
+            out.push(part.to_string());
+            for (id, o) in &r.features {
+                let o = o.as_ref().unwrap();
+                out.push(id.to_string());
+                if let ryucad::rebuild::Output::Solids(m) = o
+                    && let Some(rep) = &m.import
+                {
+                    out.push(rep["reference"].to_string());
+                }
+                for (solid, b) in o.solids() {
+                    assert!(b.reference, "{part}/{solid}");
+                    out.push(solid.to_string());
+                    out.push(b.hash.clone());
+                    let c = b.body.counts();
+                    out.push(format!("{} {} {}", c.faces, c.edges, c.vertices));
+                    let mut names: Vec<String> = b
+                        .body
+                        .faces()
+                        .map(|f| b.body.face(f).unwrap().name.to_string())
+                        .collect();
+                    names.sort();
+                    out.push(format!("{:x}", md(names.join(",").as_bytes())));
+                    let of = format!("{part}/{solid}");
+                    let v = call(
+                        &mut session,
+                        "measure",
+                        serde_json::json!({"entities": [of]}),
+                    )
+                    .unwrap();
+                    out.push(v["area"].to_string());
+                    match call(&mut session, "mass", serde_json::json!({"of": of})) {
+                        Ok(v) => out.push(format!("{} {}", v["volume"], v["mass"])),
+                        Err(e) => out.push(format!("{:?} {}", e.code, e.details["reason"])),
+                    }
+                }
+            }
+            for format in ["step", "stl"] {
+                let ask = ryucad::export::Ask {
+                    part: part.to_string(),
+                    format: Some(format.into()),
+                    time_stamp: Some("2026-11-06T00:00:00".into()),
+                    chord: (format == "stl").then(|| "0.05 mm".into()),
+                    angle: (format == "stl").then(|| "20 deg".into()),
+                    ..Default::default()
+                };
+                let a = pool
+                    .install(|| ryucad::export::export_stamped(&mut session, ask, "0.0.0"))
+                    .unwrap_or_else(|e| panic!("{part} {format}: {e}"));
+                out.push(format!("{:x}", md(&a.binary.unwrap())));
             }
         }
         runs.push(out);
@@ -4110,6 +4219,7 @@ sections! {
     interference => interference_section(&mut golden),
     measure => measure_section(&mut golden),
     imports => imports_section(&mut golden),
+    reference_imports => reference_imports_section(&mut golden),
     exports => exports_section(&mut golden),
     formats => formats_section(&mut golden),
     views => views_section(&mut golden),

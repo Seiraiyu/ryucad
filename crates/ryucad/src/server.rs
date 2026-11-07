@@ -858,6 +858,7 @@ pub(crate) fn dispatch(
             dry_run,
             expected_revision,
             update,
+            solid,
         } => crate::import::import(
             session,
             crate::import::Ask {
@@ -868,6 +869,21 @@ pub(crate) fn dispatch(
                 dry_run,
                 expected: expected_revision,
                 update,
+                solid,
+            },
+        ),
+        Request::ImportConvert {
+            part,
+            feature,
+            reference,
+            expected_revision,
+        } => crate::import::convert::convert(
+            session,
+            crate::import::convert::Ask {
+                part,
+                feature,
+                reference,
+                expected: expected_revision,
             },
         ),
         // A rebuild's report is written as text: `answer_live` handles it.
@@ -3886,6 +3902,21 @@ fn check_references(
     id: &Id,
     f: &Feature,
 ) -> Result<()> {
+    // Nothing may change a reference import's body, whether or not the
+    // feature references anything (a cut, a boolean). Only an import in
+    // reference mode makes one, so a part without one isn't rebuilt here.
+    if (!f.targets().is_empty() || f.source().is_some())
+        && session.project().part(part)?.features.values().any(|g| {
+            g.as_ref()
+                .ok()
+                .and_then(|g| g.import())
+                .is_some_and(|i| i.mode() == crate::doc::import::Mode::Reference)
+        })
+    {
+        let p = session.project().part(part)?.clone();
+        let results = session.rebuilt(part)?;
+        rebuild::check_not_reference(&proposed(&p, order, &[(id, f)]), id, f, results)?;
+    }
     // A loft's sections are matched against the rebuild whatever they
     // reference, and what a feature acts on must be a solid (ryucad 18).
     // Only a feature whose file says so makes a sheet, so a part holding
@@ -4742,7 +4773,7 @@ fn kinds(v: &mut Value, b: &ryukei::topo::Body) {
 /// come apart, as the JSON text of the report's `occurrences` (#533: the
 /// root's 100,000 took about 450 MiB as a `Value` tree), for
 /// [`object_text`] to write into the report's text.
-fn part_report(
+pub(crate) fn part_report(
     session: &mut Session,
     id: &Id,
     occurrences: bool,
@@ -5022,6 +5053,9 @@ fn part_report(
                 v["hash"] = json!(b.hash);
                 v["counts"] = counts(b);
                 kinds(&mut v, &b.body);
+                if b.reference {
+                    v["reference"] = json!(true);
+                }
             }
             if let Some(e) = s.error {
                 v["error"] = json!(e);
@@ -5479,10 +5513,15 @@ pub fn meshes(
     Ok(built
         .into_iter()
         .map(|(id, b)| {
-            let r = b.map(|(_, b)| mesh::Meshed {
-                body: b.body,
-                hash: b.hash,
-                mesh: made.next().expect("one mesh per built body"),
+            let r = b.map(|(_, b)| {
+                let mesh = made.next().expect("one mesh per built body");
+                let warning = mesh::unmeshed_warning(part, &id, &b, &mesh);
+                mesh::Meshed {
+                    body: b.body,
+                    hash: b.hash,
+                    mesh,
+                    warning,
+                }
             });
             (id, r)
         })
@@ -5950,6 +5989,7 @@ fn occurrences_at(session: &mut Session, rev: &str, part: &Id) -> Result<Occurre
                 body: sol.built.body.clone(),
                 hash: sol.built.hash.clone(),
                 mesh: m,
+                warning: None,
             };
             out.insert((path.clone(), sol.founder.clone()), (o.pose, m));
         }
@@ -6177,6 +6217,7 @@ fn render(
                         body: s.built.body.clone(),
                         hash: s.built.hash.clone(),
                         mesh: m,
+                        warning: None,
                     };
                     let key = (path.clone(), s.founder.clone());
                     let (whole, faces) = match theirs_occurrences.get(part) {
@@ -6654,6 +6695,7 @@ fn assembly_meshes(
                 body: s.built.body.clone(),
                 hash: s.built.hash.clone(),
                 mesh: m,
+                warning: None,
             };
             (label, Ok(m))
         })
@@ -6726,10 +6768,12 @@ fn mesh_get(
         );
     }
     let (pid, only, quality) = mesh_args(part, one_of(only)?, quality)?;
+    let mut warnings = Vec::new();
     let bodies: Vec<Value> = meshes(session, &pid, only.as_ref(), quality)?
         .into_iter()
         .map(|(id, r)| match r {
             Ok(m) => {
+                warnings.extend(m.warning.clone());
                 let mut v = mesh::to_json(&m.body, &m.mesh);
                 v["feature"] = json!(id);
                 v["hash"] = json!(m.hash);
@@ -6739,8 +6783,12 @@ fn mesh_get(
         })
         .collect();
     // Each body is a solid, by its founder (`feature`, as entity
-    // references name it).
-    Ok(json!({"part": pid, "quality": quality.as_str(), "bodies": bodies}))
+    // references name it); a reference's holes are warned of.
+    let mut v = json!({"part": pid, "quality": quality.as_str(), "bodies": bodies});
+    if !warnings.is_empty() {
+        v["warnings"] = json!(warnings);
+    }
+    Ok(v)
 }
 
 /// `inspect` of an assembly: each occurrence (or the one at path `only`)

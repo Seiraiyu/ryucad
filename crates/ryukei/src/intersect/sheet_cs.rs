@@ -97,23 +97,7 @@ pub(crate) fn norm_hi(a: IVec3) -> f64 {
 pub(crate) fn krawczyk3(at: [Iv; 3], jac: [[Iv; 3]; 3], cell: Box3p) -> Option<bool> {
     let p = Iv::point;
     let mid = |x: Iv| (x.lo() + x.hi()) / 2.0;
-    let m = jac.map(|r| r.map(mid));
-    let cof =
-        |r0: usize, r1: usize, c0: usize, c1: usize| m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0];
-    let det = m[0][0] * cof(1, 2, 1, 2) - m[0][1] * cof(1, 2, 0, 2) + m[0][2] * cof(1, 2, 0, 1);
-    if det == 0.0 || !det.is_finite() {
-        return None;
-    }
-    // The inverse of the middle Jacobian, by its adjugate.
-    let y = [
-        [cof(1, 2, 1, 2), -cof(0, 2, 1, 2), cof(0, 1, 1, 2)],
-        [-cof(1, 2, 0, 2), cof(0, 2, 0, 2), -cof(0, 1, 0, 2)],
-        [cof(1, 2, 0, 1), -cof(0, 2, 0, 1), cof(0, 1, 0, 1)],
-    ]
-    .map(|r| r.map(|x| x / det));
-    if y.iter().flatten().any(|x| !x.is_finite()) {
-        return None;
-    }
+    let y = inverse3(jac.map(|r| r.map(mid)))?;
     let x: [f64; 3] = cell.map(|[a, b]| (a + b) / 2.0);
     let boxes = [
         Iv::new(cell[0][0], cell[0][1])? - p(x[0]),
@@ -143,6 +127,28 @@ pub(crate) fn krawczyk3(at: [Iv; 3], jac: [[Iv; 3]; 3], cell: Box3p) -> Option<b
     } else {
         None
     }
+}
+
+/// The inverse of a 3×3 matrix by its adjugate over its determinant;
+/// `None` for a zero or non-finite determinant, or an entry that isn't
+/// finite.
+pub(crate) fn inverse3(m: [[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
+    let cof =
+        |r0: usize, r1: usize, c0: usize, c1: usize| m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0];
+    let det = m[0][0] * cof(1, 2, 1, 2) - m[0][1] * cof(1, 2, 0, 2) + m[0][2] * cof(1, 2, 0, 1);
+    if det == 0.0 || !det.is_finite() {
+        return None;
+    }
+    let y = [
+        [cof(1, 2, 1, 2), -cof(0, 2, 1, 2), cof(0, 1, 1, 2)],
+        [-cof(1, 2, 0, 2), cof(0, 2, 0, 2), -cof(0, 1, 0, 2)],
+        [cof(1, 2, 0, 1), -cof(0, 2, 0, 1), cof(0, 1, 0, 1)],
+    ]
+    .map(|r| r.map(|x| x / det));
+    if y.iter().flatten().any(|x| !x.is_finite()) {
+        return None;
+    }
+    Some(y)
 }
 
 /// Every place where `curve` over `[t0, t1]` meets `surface`, in

@@ -361,8 +361,9 @@ pub fn find_for(
     let mut local: HashMap<*const Built, Option<Box3>> = HashMap::new();
     for (i, o) in model.occurrences.iter().enumerate() {
         for s in &o.solids {
-            // A sheet shares no volume: interference pairs solids only.
-            if s.built.body.kind() != ryukei::topo::BodyKind::Solid {
+            // A sheet shares no volume: interference pairs solids only. A
+            // reference import is paired, and left unchecked, until 21.D.
+            if !s.built.reference && s.built.body.kind() != ryukei::topo::BodyKind::Solid {
                 continue;
             }
             let own = *local

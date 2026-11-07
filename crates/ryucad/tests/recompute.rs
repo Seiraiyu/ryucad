@@ -94,7 +94,8 @@ fn rectangle(w: &str, h: &str, at: [f64; 2]) -> Value {
 /// up a line of `wl` on zx as `sw`; a circle `la` on xy lofted to a
 /// smaller one `lb` on a datum plane `dl` 10 mm above it as `lf` (circles:
 /// a loft of squares is four spline faces whose self-intersection check
-/// takes a debug build tens of seconds on every rebuild from nothing).
+/// takes a debug build tens of seconds on every rebuild from nothing); and
+/// a reference import of OCCT's box, which edits make a solid and back.
 fn project() -> (tempfile::TempDir, Session) {
     let dir = tempfile::tempdir().unwrap();
     ryucad::server::init(dir.path(), None).unwrap();
@@ -315,6 +316,12 @@ fn project() -> (tempfile::TempDir, Session) {
         &mut s,
         json!({"type": "planar", "id": "pad", "sketch": "la"}),
     );
+    // A reference import of OCCT's box, which edits convert and back.
+    let file = format!(
+        "{}/../ryustep/tests/data/occt/box_ap214.stp",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    must(&mut s, "import", json!({"path": file, "into": "p"}));
     (dir, s)
 }
 
@@ -327,7 +334,7 @@ fn mm(g: &mut Lcg, lo: u64, hi: u64) -> String {
 /// One random edit. Some are refused, or leave a feature failing; both
 /// must rebuild the same way however they are reached.
 fn edit(g: &mut Lcg, s: &mut Session) {
-    let (method, params) = match g.next_u64() % 23 {
+    let (method, params) = match g.next_u64() % 24 {
         0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
         1 => (
             "param.set",
@@ -443,6 +450,11 @@ fn edit(g: &mut Lcg, s: &mut Session) {
             } else {
                 json!({"id": "lf", "start_tangent": ""})
             },
+        ),
+        // The import made a healed solid, or a reference again.
+        23 => (
+            "import.convert",
+            json!({"reference": g.next_u64().is_multiple_of(2)}),
         ),
         _ => (
             "sketch.edit",

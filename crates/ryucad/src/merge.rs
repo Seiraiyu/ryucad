@@ -1414,6 +1414,49 @@ mod tests {
         assert!(m.conflicts.is_empty());
     }
 
+    /// An import feature file, `mode` reference when asked, against the
+    /// file hashed `blake3`.
+    fn import_file(mode: Option<&str>, blake3: &str) -> Value {
+        let mut v = json!({"body": 0, "file": {"blake3": blake3, "path": "imports/b.step"},
+                           "format": 5, "kind": "ryucad.feature", "type": "import"});
+        if let Some(m) = mode {
+            v["mode"] = json!(m);
+            v["format"] = json!(13);
+        }
+        v
+    }
+
+    #[test]
+    fn an_imports_mode_merges_per_key() {
+        let h = "ab".repeat(32);
+        let base = import_file(None, &h);
+        let reference = import_file(Some("reference"), &h);
+        let clean = |b: &Value, o: &Value, t: &Value| {
+            let m = merge(Some(b), o, t);
+            assert!(m.is_clean(), "{:?}", m.conflicts);
+            m.value
+        };
+        // One side converts: taken, at the format that holds it.
+        assert_eq!(clean(&base, &base, &reference), reference);
+        assert_eq!(clean(&base, &reference, &base), reference);
+        // Both sides convert alike: taken.
+        assert_eq!(clean(&base, &reference, &reference), reference);
+        // One side converts to a reference, the other updates the file:
+        // both taken, at format 13.
+        let rehashed = import_file(None, &"cd".repeat(32));
+        let m = clean(&base, &reference, &rehashed);
+        assert_eq!(m["mode"], "reference");
+        assert_eq!(m["file"]["blake3"], "cd".repeat(32));
+        assert_eq!(m["format"], 13);
+        // Converted back to a solid on one side, kept on the other: the
+        // field goes, and the format with it. `mode` has two values only
+        // (a reference, or none), so two sides that both change it made
+        // the same change: `/mode` never conflicts.
+        let m = clean(&reference, &base, &reference);
+        assert!(m.get("mode").is_none(), "{m}");
+        assert_eq!(m["format"], 5);
+    }
+
     #[test]
     fn a_splits_plane_and_flip_are_one_value_and_a_mirrors_fields_merge_per_key() {
         let split = |extra: Value| {

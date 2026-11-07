@@ -295,8 +295,19 @@ fn edit_mate(v: &mut Value, op: u8, arg: u8) {
 }
 
 /// Applies edit `(op, arg)` to an import feature: the file re-imported
-/// (a new hash), another body, another product or none, or its ordinal.
+/// (a new hash), another body, another product or none, its ordinal, or
+/// its mode (a reference at format 13, else a solid with no field).
 fn edit_import(v: &mut Value, op: u8, arg: u8) {
+    if op % 5 == 4 {
+        if arg & 1 == 1 {
+            v["mode"] = json!("reference");
+            v["format"] = json!(13);
+        } else {
+            v.as_object_mut().unwrap().remove("mode");
+            v["format"] = json!(5);
+        }
+        return;
+    }
     match op % 4 {
         0 => v["file"]["blake3"] = json!(format!("{arg:064x}")),
         1 => v["body"] = json!(arg % 4),

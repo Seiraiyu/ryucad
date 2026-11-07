@@ -8,6 +8,7 @@
 case d2e1a1720f1f8bb9 limit import/import_failed/open_shell/CIRCLE nist_ctc_04's PMI sheet: open shells are refused until sheet bodies (ryukei phase 9)
 case e4a9bc29a4c13f7d limit import/import_failed/open_shell/LINE nist_ctc_05's PMI sheet: open shells are refused until sheet bodies (ryukei phase 9)
 case dacb323a3811e2c0 file import/import_failed/invalid_geometry/OFFSET_SURFACE OCCT's offset_sheet offsets a surface curving to a 0.57 mm radius by 1 mm, so it folds (step.md)
+case dacb323a3811e2c0 file ref_import/import_failed/invalid_geometry/OFFSET_SURFACE OCCT's offset_sheet folds, so its offset surface is refused as a reference too (step.md)
 
 # nist: step-hunt's first campaign (ryucad 12.B)
 case 00cf8bc5a999fc72 #301 check/slow/faces<1000/CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
@@ -71,6 +72,7 @@ case 7025b3d10e1ac344 #301 check/slow/faces<1000/CONICAL_SURFACE+CYLINDRICAL_SUR
 case 7d8a469957bfdcac #302 check/slow/faces<1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
 case a6e12b844e98574d #302 check/slow/faces<1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
 case bd7851f6519da23a #305 whole_import/slow/faces<1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
+case bf67ee770e7b607e limit ref_mesh/reference_faces_unmeshed a reference keeps the file's edges untightened and its pcurves unfitted, and some of FTC 07's faces then don't mesh at normal quality: they draw as holes (design 364, ryucad-step.md)
 case bf67ee770e7b607e #303 check/slow/faces<1000/B_SPLINE_SURFACE_WITH_KNOTS+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
 case bf67ee770e7b607e #308 volume/slow/faces<1000/B_SPLINE_SURFACE_WITH_KNOTS+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
 

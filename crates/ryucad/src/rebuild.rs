@@ -41,6 +41,10 @@ pub struct Built {
     pub origins: Arc<Origins>,
     /// BLAKE3 of the body's dump: equal hashes mean bit-identical bodies.
     pub hash: String,
+    /// A reference import's body (design 364): the file's topology as a
+    /// sheet, checked only by `check_topology`. Nothing may change it:
+    /// [`target`] refuses it to every feature that would.
+    pub reference: bool,
 }
 
 /// Where each entity of a body came from, by name, each distinct origin
@@ -454,15 +458,30 @@ impl PartResult {
             .map(|s| crate::mate::stale_warning(part, &s.moved));
         self.features
             .iter()
-            .filter_map(|(id, r)| {
-                let o = r.as_ref().ok()?;
+            .flat_map(|(id, r)| {
+                let Ok(o) = r.as_ref() else {
+                    return Vec::new();
+                };
                 if let Some(s) = o.sketch() {
-                    return s.stale.then(|| crate::sketch::stale_warning(id));
+                    return s
+                        .stale
+                        .then(|| crate::sketch::stale_warning(id))
+                        .into_iter()
+                        .collect();
                 }
-                let p = o.instance()?;
-                let pin = p.model.pin.as_ref()?;
-                pin.obsolete
-                    .then(|| crate::assembly::obsolete_warning(id, p))
+                if let Output::Solids(m) = o
+                    && let Some(rep) = &m.import
+                {
+                    return crate::import::reference_warnings(part, id, rep);
+                }
+                o.instance()
+                    .and_then(|p| {
+                        let pin = p.model.pin.as_ref()?;
+                        pin.obsolete
+                            .then(|| crate::assembly::obsolete_warning(id, p))
+                    })
+                    .into_iter()
+                    .collect()
             })
             .chain(stale)
             .collect()
@@ -972,8 +991,54 @@ pub fn target_as<'a>(
     };
     let out = crate::graph::input(part, id, view, before)?;
     let built = out.solid(t).expect("a solid's chain holds it");
+    if built.reference {
+        // Every role naming one target is `targets`, as `target` names it.
+        let role = if role == "target" { "targets" } else { role };
+        return Err(reference_body(&part.id, id, t, role));
+    }
     crate::kind::need(id, role, t, &built.body, crate::kind::Want::Solid)?;
     Ok(built)
+}
+
+/// `reference_body`: feature `id` of `part` would change solid `t`, a
+/// reference import's body, in its `role` (`targets`, `tools`, `solid`).
+pub fn reference_body(part: &Id, id: &Id, t: &Id, role: &str) -> Error {
+    Error::new(
+        Code::ReferenceBody,
+        format!(
+            "{id} would change {t}, a reference import: references are shown and read, never modelled on; convert it to a solid first"
+        ),
+    )
+    .with("feature", id)
+    .with("solid", t)
+    .with("role", role)
+    .with("hint", format!("ryucad import convert {part}/{t}"))
+}
+
+/// Refuses a feature (`id`, as the write leaves `p`) that would change a
+/// reference import's body, against the current rebuild `results`.
+pub fn check_not_reference(p: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result<()> {
+    let solids = Solids::of(p);
+    let tools: Vec<&Id> = match f {
+        Feature::Boolean(b) => b.tools.iter().collect(),
+        _ => Vec::new(),
+    };
+    let named = f
+        .targets()
+        .into_iter()
+        .filter(|t| !tools.contains(t))
+        .map(|t| (t, "targets"))
+        .chain(tools.iter().map(|t| (*t, "tools")))
+        .chain(f.source().map(|s| (s, "solid")));
+    for (t, role) in named {
+        if let Some(view) = solids.view(t, id)
+            && let Ok(out) = crate::graph::input(p, id, view, results)
+            && out.solid(t).is_some_and(|b| b.reference)
+        {
+            return Err(reference_body(&p.id, id, t, role));
+        }
+    }
+    Ok(())
 }
 
 /// `body_consumed`: feature `id` acts on solid `t`, which the boolean
@@ -2021,6 +2086,36 @@ pub(crate) fn finish(
         journal,
         origins: Arc::new(origins.into()),
         hash,
+        reference: false,
+    })
+}
+
+/// Checks a reference body's topology (the only check a reference passes:
+/// design 364) and hashes it as [`finish`] does.
+pub(crate) fn finish_reference(
+    id: &Id,
+    (body, journal): (Body, Journal),
+    origins: impl Into<Origins>,
+) -> Result<Built> {
+    let faults = ryukei::check::check_topology(&body);
+    if !faults.is_empty() {
+        return Err(Error::new(
+            Code::Internal,
+            format!("import {id}: the kernel built a reference whose topology doesn't hold"),
+        )
+        .with("feature", id)
+        .with(
+            "faults",
+            faults.iter().map(|x| format!("{x:?}")).collect::<Vec<_>>(),
+        ));
+    }
+    let hash = blake3::hash(body.dump().as_bytes()).to_hex()[..32].to_owned();
+    Ok(Built {
+        body,
+        journal,
+        origins: Arc::new(origins.into()),
+        hash,
+        reference: true,
     })
 }
 
