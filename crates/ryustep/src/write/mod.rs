@@ -196,11 +196,33 @@ pub(crate) struct Contexts {
     pub(crate) unit: f64,
 }
 
+/// A representation written as another file has it (a reference import's,
+/// design 364): `instances` as [`part21::closure::cut`] gives them
+/// (numbered from 1, the representation first), related without a
+/// transformation to product `product`'s own representation, so a reader
+/// takes its B-rep items as that product's. It keeps its own context, and
+/// with it its units and uncertainty.
+#[derive(Clone, Debug)]
+pub struct Passed {
+    pub product: usize,
+    pub instances: Vec<Instance>,
+}
+
 /// Writes `model` as a STEP file. Fails with
 /// [`WriteError::NotRepresentable`], naming the face, for a face that
 /// can't be cut open into a region of its surface or a pipe that can't
 /// be approximated within the tolerance.
 pub fn write(model: &WriteModel, opts: &WriteOptions) -> Result<Vec<u8>, WriteError> {
+    write_with(model, &[], opts)
+}
+
+/// [`write`], with `passed` representations written as their files have
+/// them, each beside its product's own.
+pub fn write_with(
+    model: &WriteModel,
+    passed: &[Passed],
+    opts: &WriteOptions,
+) -> Result<Vec<u8>, WriteError> {
     // Each body as a file must describe it, in parallel; the first body
     // that can't be fails, whatever the number of threads.
     let all: Vec<&Body> = model.products.iter().flat_map(|p| &p.bodies).collect();
@@ -311,6 +333,25 @@ pub fn write(model: &WriteModel, opts: &WriteOptions) -> Result<Vec<u8>, WriteEr
         };
         out.fill(rep, kind, vec![s(""), refs(items), r(cx.geometric)]);
         defs.push((definition, rep, origin, child_axes));
+    }
+    for p in passed {
+        let (_, rep, _, _) = defs[p.product];
+        // The cut renumbered after what is written so far.
+        let base = out.instances.len() as u64;
+        let ids: std::collections::HashMap<u64, u64> =
+            p.instances.iter().map(|i| (i.id, i.id + base)).collect();
+        for i in &p.instances {
+            let record = part21::closure::remap_record(&i.record, &ids);
+            out.instances.push(Instance {
+                id: i.id + base,
+                record,
+            });
+        }
+        // The cut's root is its first instance.
+        out.add(
+            "SHAPE_REPRESENTATION_RELATIONSHIP",
+            vec![s(""), s(""), r(1 + base), r(rep)],
+        );
     }
     for (k, p) in model.products.iter().enumerate() {
         for (n, c) in p.children.iter().enumerate() {

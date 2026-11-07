@@ -102,6 +102,37 @@ pub fn report(
                    "members": members.iter().map(|(id, s)| json!({"case": id, "state": s})).collect::<Vec<_>>()})
         })
         .collect();
+    // Each source's cases passing each stage, against the ledger's
+    // `count` lines.
+    let mut tally: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
+    let mut of: BTreeMap<String, u64> = BTreeMap::new();
+    for r in records.values() {
+        let sources: std::collections::BTreeSet<&str> =
+            r.case.origins.iter().map(|o| o.source.as_str()).collect();
+        for src in sources {
+            *of.entry(src.to_owned()).or_default() += 1;
+            for s in &r.ran.stages {
+                let e = tally.entry((src.to_owned(), s.stage.clone())).or_default();
+                if s.outcome == crate::stages::Outcome::Ok {
+                    e.0 += 1;
+                }
+            }
+        }
+    }
+    let mut counts = Vec::new();
+    let mut regressed = Vec::new();
+    for ((src, stage), (passed, _)) in &tally {
+        let n = of[src];
+        let judged = ledger.judge_count(src, stage, *passed, n);
+        let v = json!({"source": src, "stage": stage, "passed": passed, "of": n, "judged": judged});
+        if judged == crate::ledger::Count::Regressed {
+            let recorded = ledger.counts[&(src.clone(), stage.clone())];
+            let mut r = v.clone();
+            r["recorded"] = json!(recorded.0);
+            regressed.push(r);
+        }
+        counts.push(v);
+    }
     let failed = records
         .values()
         .filter(|r| {
@@ -119,6 +150,8 @@ pub fn report(
         "failed": failed,
         "groups": groups,
         "fixed": fixed,
+        "counts": counts,
+        "count_regressed": regressed,
         "records": cases,
     })
 }
@@ -142,6 +175,22 @@ pub fn markdown(report: &Value, records: &BTreeMap<String, Record>) -> String {
         report["cases"],
         report["failed"],
     );
+    let counts = report["counts"].as_array().cloned().unwrap_or_default();
+    if !counts.is_empty() {
+        let _ = writeln!(out, "## Counts\n");
+        for c in &counts {
+            let _ = writeln!(
+                out,
+                "- count {} {}: {}/{} ({})",
+                c["source"].as_str().unwrap_or_default(),
+                c["stage"].as_str().unwrap_or_default(),
+                c["passed"],
+                c["of"],
+                c["judged"].as_str().unwrap_or_default()
+            );
+        }
+        let _ = writeln!(out);
+    }
     for g in report["groups"].as_array().into_iter().flatten() {
         let rep = &records[g["representative"].as_str().unwrap_or_default()];
         let _ = writeln!(

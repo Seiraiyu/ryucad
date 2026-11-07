@@ -54,6 +54,10 @@ pub struct Solid {
     pub name: String,
     pub body: Arc<Body>,
     pub mesh: Option<Arc<BodyMesh>>,
+    /// Whether it gets a BrepArray when the stage writes them: a
+    /// reference import's body (ryucad's design 364) is written as its
+    /// mesh alone, which carries its faces' names itself.
+    pub brep: bool,
 }
 
 /// How to write a stage: its unit, whether solids get a BrepArray and a
@@ -114,7 +118,7 @@ pub fn layer(model: &Model, opts: &Options) -> Result<Layer, StageError> {
     let breps: Vec<Result<Option<Prim>, StageError>> = solids
         .par_iter()
         .map(|&(k, s)| {
-            if !opts.brep {
+            if !opts.brep || !model.products[k].solids[s].brep {
                 return Ok(None);
             }
             brep_array(
@@ -242,8 +246,14 @@ impl Writer<'_> {
                 && let Some(m) = &solid.mesh
             {
                 x.children.push(
-                    mesh_prim("mesh", &solid.body, m, self.opts.unit, !self.opts.brep)
-                        .map_err(names_error)?,
+                    mesh_prim(
+                        "mesh",
+                        &solid.body,
+                        m,
+                        self.opts.unit,
+                        !self.opts.brep || !solid.brep,
+                    )
+                    .map_err(names_error)?,
                 );
             }
             prim.children.push(x);
@@ -355,6 +365,7 @@ mod tests {
             name: name.into(),
             body: Arc::new(b),
             mesh: Some(Arc::new(m)),
+            brep: true,
         }
     }
 

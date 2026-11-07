@@ -20,7 +20,7 @@ pub mod write;
 
 pub use error::{ImportError, StepError, WriteError};
 pub use read::{Held, Imported, Model, Opened, ReadOptions, Referenced, open, read};
-pub use write::{Child, LengthUnit, Product, WriteModel, WriteOptions, write};
+pub use write::{Child, LengthUnit, Passed, Product, WriteModel, WriteOptions, write, write_with};
 
 /// This crate's version, which a released ryucad's cache identity names.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

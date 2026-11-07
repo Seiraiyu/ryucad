@@ -127,27 +127,13 @@ enum Command {
     /// Import a STEP file: store it in the project (imports/) and make a part of each
     /// product's bodies and an assembly of each product's children, add one product's
     /// bodies to a part with --into, or replace a file imported before with --update.
+    /// `import convert` turns a reference into a healed solid, or back.
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Import {
-        /// The STEP file (.step or .stp).
-        file: std::path::PathBuf,
-        /// The part or assembly to make of the file's one root.
-        #[arg(long)]
-        part: Option<String>,
-        /// Replace this imported file (imports/<name>.step) with the file's bytes, and
-        /// update what was made of it.
-        #[arg(long, value_name = "IMPORTED")]
-        update: Option<String>,
-        /// Add the bodies to this part instead of making parts.
-        #[arg(long, value_name = "PART")]
-        into: Option<String>,
-        /// With --into, the product whose bodies to add: its id, else its name.
-        #[arg(long)]
-        product: Option<String>,
-        /// Write nothing: say what it would store and make, and how each body heals.
-        #[arg(long)]
-        dry_run: bool,
+        #[command(subcommand)]
+        cmd: Option<ImportCmd>,
         #[command(flatten)]
-        expect: Expect,
+        args: ImportArgs,
     },
     /// Write a part or an assembly as a file: as the working files have it, as a Git
     /// revision has it (--rev), or as a release (--rev label:<L>). The daemon writes
@@ -1816,6 +1802,52 @@ struct Ops(Vec<Value>);
 struct Groups(Value);
 
 #[derive(Args)]
+struct ImportArgs {
+    /// The STEP file (.step or .stp).
+    #[arg(required = true)]
+    file: Option<std::path::PathBuf>,
+    /// The part or assembly to make of the file's one root.
+    #[arg(long)]
+    part: Option<String>,
+    /// Replace this imported file (imports/<name>.step) with the file's bytes, and
+    /// update what was made of it.
+    #[arg(long, value_name = "IMPORTED")]
+    update: Option<String>,
+    /// Add the bodies to this part instead of making parts.
+    #[arg(long, value_name = "PART")]
+    into: Option<String>,
+    /// With --into, the product whose bodies to add: its id, else its name.
+    #[arg(long)]
+    product: Option<String>,
+    /// Heal each body into a checked solid you can model on, rather than keep it as a
+    /// reference (shown, measured and mated to, never changed).
+    #[arg(long)]
+    solid: bool,
+    /// Write nothing: say what it would store and make, and what each body would be
+    /// (a reference, or with --solid how it heals).
+    #[arg(long)]
+    dry_run: bool,
+    #[command(flatten)]
+    expect: Expect,
+}
+
+#[derive(Subcommand)]
+enum ImportCmd {
+    /// Turn a reference import into a healed solid you can model on, or back with
+    /// --reference: one import feature (<part>/<feature>), or every one of a part. Face
+    /// names don't change.
+    Convert {
+        /// <part> or <part>/<feature>.
+        of: String,
+        /// Make it a reference again (nothing may act on it).
+        #[arg(long)]
+        reference: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Args)]
 struct BomShow {
     /// The part or assembly: the project's one root assembly if left out.
     part: Option<String>,
@@ -3460,26 +3492,55 @@ fn request(cmd: &Command) -> Option<Request> {
             quality: quality.clone(),
         },
         Command::Import {
-            file,
-            part,
-            update,
-            into,
-            product,
-            dry_run,
-            expect,
-        } => Request::Import {
-            // The daemon's folder isn't the caller's.
-            path: std::path::absolute(file)
-                .unwrap_or_else(|_| file.clone())
-                .to_string_lossy()
-                .into_owned(),
-            part: part.clone(),
-            into: into.clone(),
-            product: product.clone(),
-            dry_run: *dry_run,
-            expected_revision: expect.revision.clone(),
-            update: update.clone(),
-        },
+            cmd:
+                Some(ImportCmd::Convert {
+                    of,
+                    reference,
+                    expect,
+                }),
+            ..
+        } => {
+            let (part, feature) = match of.split_once('/') {
+                Some((p, f)) => (p.to_owned(), Some(f.to_owned())),
+                None => (of.clone(), None),
+            };
+            Request::ImportConvert {
+                part,
+                feature,
+                reference: *reference,
+                expected_revision: expect.revision.clone(),
+            }
+        }
+        Command::Import {
+            cmd: None,
+            args:
+                ImportArgs {
+                    file,
+                    part,
+                    update,
+                    into,
+                    product,
+                    solid,
+                    dry_run,
+                    expect,
+                },
+        } => {
+            let file = file.as_ref().expect("clap requires it");
+            Request::Import {
+                // The daemon's folder isn't the caller's.
+                path: std::path::absolute(file)
+                    .unwrap_or_else(|_| file.clone())
+                    .to_string_lossy()
+                    .into_owned(),
+                part: part.clone(),
+                into: into.clone(),
+                product: product.clone(),
+                dry_run: *dry_run,
+                expected_revision: expect.revision.clone(),
+                update: update.clone(),
+                solid: *solid,
+            }
+        }
         Command::Export {
             part,
             out,

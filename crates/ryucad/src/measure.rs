@@ -302,8 +302,14 @@ fn properties(l: &Located, unit: Unit) -> Result<Value> {
             "volume": value(volume, Kind::Volume, unit),
             "area": value(area, Kind::Area, unit),
         }),
-        // ryucad builds no sheets until ryucad 18.
-        Properties::Sheet { area } => json!({"area": value(area, Kind::Area, unit)}),
+        // A reference import's body (design 364): an area, no volume.
+        Properties::Sheet { area } => {
+            let mut v = json!({"area": value(area, Kind::Area, unit)});
+            if l.built.reference {
+                v["reference"] = json!(true);
+            }
+            v
+        }
     })
 }
 
@@ -682,6 +688,7 @@ pub fn run(session: &mut Session, entities: &[String], rev: Option<&str>) -> Res
                 // Several solids: their volumes and areas together.
                 let mut vols = Vec::new();
                 let mut areas = Vec::new();
+                let mut references = 0;
                 for l in one {
                     match kernel::properties(&l.built.body, Entity::Body)
                         .map_err(|e| failed(e, &refs))?
@@ -690,11 +697,22 @@ pub fn run(session: &mut Session, entities: &[String], rev: Option<&str>) -> Res
                             vols.push(volume);
                             areas.push(area);
                         }
+                        // A reference holds no volume: its area counts.
+                        Properties::Sheet { area } => {
+                            references += 1;
+                            areas.push(area);
+                        }
                         _ => unreachable!("a body's properties"),
                     }
                 }
-                json!({"volume": value(sum(vols), Kind::Volume, unit),
-                       "area": value(sum(areas), Kind::Area, unit)})
+                let mut v = json!({"area": value(sum(areas), Kind::Area, unit)});
+                if !vols.is_empty() {
+                    v["volume"] = value(sum(vols), Kind::Volume, unit);
+                }
+                if references > 0 {
+                    v["references"] = json!(references);
+                }
+                v
             };
             v["entity"] = json!(refs[0]);
             v["kind"] = json!(kind);
