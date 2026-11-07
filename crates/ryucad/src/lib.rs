@@ -103,6 +103,7 @@ pub mod review;
 pub mod section;
 pub mod server;
 pub mod session;
+pub mod sheet_metal;
 pub mod sketch;
 pub mod sketch_view;
 pub mod solid;

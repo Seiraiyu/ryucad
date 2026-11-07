@@ -34,7 +34,7 @@ fn imported(files: &[PathBuf]) -> (tempfile::TempDir, Session, Vec<Value>) {
     let mut s = Session::open(dir.path()).unwrap();
     let answers = files
         .iter()
-        .map(|f| call(&mut s, "import", json!({"path": f})).unwrap())
+        .map(|f| call(&mut s, "import", json!({"solid": true, "path": f})).unwrap())
         .collect();
     (dir, s, answers)
 }
@@ -98,7 +98,12 @@ fn exports_import_again(s: &mut Session, unrepresentable: &[&str]) {
         let dir = tempfile::tempdir().unwrap();
         init(dir.path(), None).unwrap();
         let mut t = Session::open(dir.path()).unwrap();
-        call(&mut t, "import", json!({"path": path, "part": pid})).unwrap();
+        call(
+            &mut t,
+            "import",
+            json!({"solid": true, "path": path, "part": pid}),
+        )
+        .unwrap();
         let (before, after) = (solids(s, &pid), solids(&mut t, &pid));
         assert_eq!(before.len(), after.len(), "{pid}");
         for (k, (a, b)) in before.iter().zip(&after).enumerate() {

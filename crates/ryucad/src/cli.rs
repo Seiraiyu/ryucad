@@ -13,6 +13,7 @@ use ryucad::units::Unit;
 use ryucad::view::{CameraArg, ProjectionArg};
 use ryucad::{cancel, client, daemon, server};
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -126,27 +127,13 @@ enum Command {
     /// Import a STEP file: store it in the project (imports/) and make a part of each
     /// product's bodies and an assembly of each product's children, add one product's
     /// bodies to a part with --into, or replace a file imported before with --update.
+    /// `import convert` turns a reference into a healed solid, or back.
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Import {
-        /// The STEP file (.step or .stp).
-        file: std::path::PathBuf,
-        /// The part or assembly to make of the file's one root.
-        #[arg(long)]
-        part: Option<String>,
-        /// Replace this imported file (imports/<name>.step) with the file's bytes, and
-        /// update what was made of it.
-        #[arg(long, value_name = "IMPORTED")]
-        update: Option<String>,
-        /// Add the bodies to this part instead of making parts.
-        #[arg(long, value_name = "PART")]
-        into: Option<String>,
-        /// With --into, the product whose bodies to add: its id, else its name.
-        #[arg(long)]
-        product: Option<String>,
-        /// Write nothing: say what it would store and make, and how each body heals.
-        #[arg(long)]
-        dry_run: bool,
+        #[command(subcommand)]
+        cmd: Option<ImportCmd>,
         #[command(flatten)]
-        expect: Expect,
+        args: ImportArgs,
     },
     /// Write a part or an assembly as a file: as the working files have it, as a Git
     /// revision has it (--rev), or as a release (--rev label:<L>). The daemon writes
@@ -306,6 +293,15 @@ enum Command {
         /// Pairs whose boxes come within this length (5 mm).
         #[arg(long, value_name = "LENGTH")]
         below: Option<String>,
+    },
+    /// A solid read as sheet metal: its thickness, flanges and bend table,
+    /// each bend's developed length (the part's one sheet metal solid unless
+    /// named).
+    Sheet {
+        part: String,
+        solid: Option<String>,
+        #[command(flatten)]
+        rev: RevArg,
     },
     /// Mass properties of a part or assembly, a solid (<part>/<solid>) or an occurrence
     /// (<assembly>/<instance>/…): volume, area, centre of mass, and where every part has a
@@ -1105,7 +1101,12 @@ enum FeatureCmd {
     /// an offset (--target, --distance, --face-distance) of a solid; a
     /// mirror (--solid, --plane, --operation) of a whole solid, joined to
     /// it unless told otherwise; a split (--target, --plane, --flip,
-    /// --keep) of a solid by a plane; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
+    /// --keep) of a solid by a plane; a base flange (--sketch, --thickness,
+    /// --radius, --k-factor or --deduction, --relief, a bent section's
+    /// --depth) founding a sheet metal solid; an edge flange (--edge,
+    /// --side, --angle, --length, --measured, --position, --radius,
+    /// --relief, --setback, --end-setback, --end-relief) on its straight
+    /// edges; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
     /// countersink, --bottom) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
@@ -1801,6 +1802,52 @@ struct Ops(Vec<Value>);
 struct Groups(Value);
 
 #[derive(Args)]
+struct ImportArgs {
+    /// The STEP file (.step or .stp).
+    #[arg(required = true)]
+    file: Option<std::path::PathBuf>,
+    /// The part or assembly to make of the file's one root.
+    #[arg(long)]
+    part: Option<String>,
+    /// Replace this imported file (imports/<name>.step) with the file's bytes, and
+    /// update what was made of it.
+    #[arg(long, value_name = "IMPORTED")]
+    update: Option<String>,
+    /// Add the bodies to this part instead of making parts.
+    #[arg(long, value_name = "PART")]
+    into: Option<String>,
+    /// With --into, the product whose bodies to add: its id, else its name.
+    #[arg(long)]
+    product: Option<String>,
+    /// Heal each body into a checked solid you can model on, rather than keep it as a
+    /// reference (shown, measured and mated to, never changed).
+    #[arg(long)]
+    solid: bool,
+    /// Write nothing: say what it would store and make, and what each body would be
+    /// (a reference, or with --solid how it heals).
+    #[arg(long)]
+    dry_run: bool,
+    #[command(flatten)]
+    expect: Expect,
+}
+
+#[derive(Subcommand)]
+enum ImportCmd {
+    /// Turn a reference import into a healed solid you can model on, or back with
+    /// --reference: one import feature (<part>/<feature>), or every one of a part. Face
+    /// names don't change.
+    Convert {
+        /// <part> or <part>/<feature>.
+        of: String,
+        /// Make it a reference again (nothing may act on it).
+        #[arg(long)]
+        reference: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Args)]
 struct BomShow {
     /// The part or assembly: the project's one root assembly if left out.
     part: Option<String>,
@@ -2245,6 +2292,45 @@ struct FieldArgs {
     /// named by the split, the default) or behind (a trim).
     #[arg(long, value_name = "SIDES")]
     keep: Option<String>,
+    /// A base flange's K-factor, 0 to 1: its solid's bend allowance.
+    #[arg(long, value_name = "NUMBER", conflicts_with = "deduction")]
+    k_factor: Option<String>,
+    /// A base flange's bend deduction instead: how much shorter the flat
+    /// is than its flanges to their outer mould line.
+    #[arg(long, value_name = "LENGTH")]
+    deduction: Option<String>,
+    /// A sheet metal relief: none, rectangular, obround or tear, sized by
+    /// --relief-width and --relief-depth. A flange's "" takes its founder's.
+    #[arg(long, value_name = "KIND")]
+    relief: Option<String>,
+    #[arg(long, value_name = "LENGTH")]
+    relief_width: Option<String>,
+    #[arg(long, value_name = "LENGTH")]
+    relief_depth: Option<String>,
+    /// Where a flange's length is measured from: outer_mould (the default),
+    /// inner_mould or tangent.
+    #[arg(long, value_name = "FROM")]
+    measured: Option<String>,
+    /// Where a flange's bend sits against its edge: material_inside (the
+    /// default), material_outside or bend_outside.
+    #[arg(long, value_name = "POSITION")]
+    position: Option<String>,
+    /// A flange's setback at both ends of every edge.
+    #[arg(long, value_name = "LENGTH")]
+    setback: Option<String>,
+    /// The side face an edge of a flange folds towards: EDGE=FACE,
+    /// repeated (with --edge, which lists the edges).
+    #[arg(long = "side", value_name = "EDGE=FACE", value_parser = param)]
+    sides: Vec<(String, String)>,
+    /// An end vertex's own setback: VERTEX=LENGTH, repeated.
+    #[arg(long = "end-setback", value_name = "VERTEX=LENGTH", value_parser = param)]
+    end_setbacks: Vec<(String, String)>,
+    /// An end vertex's own relief: VERTEX=KIND[,WIDTH[,DEPTH]], repeated.
+    #[arg(long = "end-relief", value_name = "VERTEX=RELIEF", value_parser = param)]
+    end_reliefs: Vec<(String, String)>,
+    /// Give no end vertex a setback or relief of its own.
+    #[arg(long, conflicts_with_all = ["end_setbacks", "end_reliefs"])]
+    no_ends: bool,
 }
 
 /// Which `--segment`s each `--propagate` follows, in order, read from the
@@ -2537,6 +2623,36 @@ impl FieldArgs {
             },
             solid: self.solid.clone(),
             keep: self.keep.clone(),
+            allowance: self
+                .k_factor
+                .clone()
+                .map(|k| json!({"k_factor": k}))
+                .or_else(|| self.deduction.clone().map(|d| json!({"deduction": d}))),
+            relief: self.relief.as_deref().map(|k| match k {
+                "" => json!(""),
+                k => relief_json(
+                    k,
+                    self.relief_width.as_deref(),
+                    self.relief_depth.as_deref(),
+                ),
+            }),
+            length: None,
+            measured: self.measured.clone(),
+            position: self.position.clone(),
+            setback: self.setback.clone().map(Value::String),
+            sides: (!self.sides.is_empty()).then(|| {
+                json!(
+                    self.sides
+                        .iter()
+                        .map(|(e, s)| json!({"edge": e, "side": s}))
+                        .collect::<Vec<_>>()
+                )
+            }),
+            ends: if self.no_ends {
+                Some(json!([]))
+            } else {
+                ends_json(&self.end_setbacks, &self.end_reliefs)
+            },
         }
     }
 }
@@ -2649,6 +2765,46 @@ fn groups(s: &str) -> core::result::Result<Groups, String> {
 
 /// `REFERENCE=QUANTITY` pairs as face groups `[{<key>: Q, faces: [REFERENCE, ...]}]`:
 /// the faces of one quantity, as written, are one group, in the order first given.
+/// A relief as the protocol takes it.
+fn relief_json(kind: &str, width: Option<&str>, depth: Option<&str>) -> Value {
+    let mut v = json!({"kind": kind});
+    if let Some(w) = width {
+        v["width"] = json!(w);
+    }
+    if let Some(d) = depth {
+        v["depth"] = json!(d);
+    }
+    v
+}
+
+/// `--end-setback` and `--end-relief` as a flange's ends, one per vertex
+/// in the order first named; none given is `None` (the ends stay).
+fn ends_json(setbacks: &[(String, String)], reliefs: &[(String, String)]) -> Option<Value> {
+    if setbacks.is_empty() && reliefs.is_empty() {
+        return None;
+    }
+    let mut order: Vec<String> = Vec::new();
+    let mut ends: BTreeMap<String, Value> = BTreeMap::new();
+    let mut end = |v: &str, key: &str, x: Value| {
+        if !order.iter().any(|o| o == v) {
+            order.push(v.to_owned());
+        }
+        ends.entry(v.to_owned())
+            .or_insert_with(|| json!({"vertex": v}))[key] = x;
+    };
+    for (v, q) in setbacks {
+        end(v, "setback", json!(q));
+    }
+    for (v, r) in reliefs {
+        let mut parts = r.split(',');
+        let kind = parts.next().unwrap_or_default();
+        end(v, "relief", relief_json(kind, parts.next(), parts.next()));
+    }
+    Some(Value::Array(
+        order.iter().map(|v| ends[v].clone()).collect(),
+    ))
+}
+
 fn face_groups(pairs: &[(String, String)], key: &str) -> Value {
     let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
     for (face, q) in pairs {
@@ -3336,26 +3492,55 @@ fn request(cmd: &Command) -> Option<Request> {
             quality: quality.clone(),
         },
         Command::Import {
-            file,
-            part,
-            update,
-            into,
-            product,
-            dry_run,
-            expect,
-        } => Request::Import {
-            // The daemon's folder isn't the caller's.
-            path: std::path::absolute(file)
-                .unwrap_or_else(|_| file.clone())
-                .to_string_lossy()
-                .into_owned(),
-            part: part.clone(),
-            into: into.clone(),
-            product: product.clone(),
-            dry_run: *dry_run,
-            expected_revision: expect.revision.clone(),
-            update: update.clone(),
-        },
+            cmd:
+                Some(ImportCmd::Convert {
+                    of,
+                    reference,
+                    expect,
+                }),
+            ..
+        } => {
+            let (part, feature) = match of.split_once('/') {
+                Some((p, f)) => (p.to_owned(), Some(f.to_owned())),
+                None => (of.clone(), None),
+            };
+            Request::ImportConvert {
+                part,
+                feature,
+                reference: *reference,
+                expected_revision: expect.revision.clone(),
+            }
+        }
+        Command::Import {
+            cmd: None,
+            args:
+                ImportArgs {
+                    file,
+                    part,
+                    update,
+                    into,
+                    product,
+                    solid,
+                    dry_run,
+                    expect,
+                },
+        } => {
+            let file = file.as_ref().expect("clap requires it");
+            Request::Import {
+                // The daemon's folder isn't the caller's.
+                path: std::path::absolute(file)
+                    .unwrap_or_else(|_| file.clone())
+                    .to_string_lossy()
+                    .into_owned(),
+                part: part.clone(),
+                into: into.clone(),
+                product: product.clone(),
+                dry_run: *dry_run,
+                expected_revision: expect.revision.clone(),
+                update: update.clone(),
+                solid: *solid,
+            }
+        }
         Command::Export {
             part,
             out,
@@ -3524,6 +3709,11 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Equations { part, all, rev } => Request::EquationsList {
             part: part.clone(),
             all: *all,
+            rev: rev.rev.clone(),
+        },
+        Command::Sheet { part, solid, rev } => Request::SheetGet {
+            part: part.clone(),
+            solid: solid.clone(),
             rev: rev.rev.clone(),
         },
         Command::Mass { of, tolerance, rev } => Request::Mass {

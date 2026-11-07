@@ -25,13 +25,15 @@ pub(crate) fn offset_classes(
         .iter()
         .map(|(&e, &c)| {
             let to = match c {
-                Class::Kept | Class::Carried => (oc::Class::Kept, 0.0),
+                Class::Kept | Class::Carried | Class::Hinge => (oc::Class::Kept, 0.0),
                 Class::Closing => (oc::Class::Closing, 0.0),
                 Class::Moved => {
                     let f = body.loops[body.fins[fins(body, e)[0]].loop_].face;
                     match motion[&f] {
                         Motion::Offset(d) => (oc::Class::Smooth, gap(body, e, d)),
-                        Motion::Rigid(_) | Motion::Replace => (oc::Class::Kept, 0.0),
+                        Motion::Rigid(_) | Motion::Replace | Motion::Draft { .. } => {
+                            (oc::Class::Kept, 0.0)
+                        }
                     }
                 }
             };
@@ -165,6 +167,7 @@ fn moved_rigidly(plan: &Plan, e: EdgeId, r: &crate::geom::Rigid) -> NewCurve {
 pub(crate) fn curves(
     plan: &Plan,
     class: &BTreeMap<EdgeId, Class>,
+    drafts: &BTreeMap<FaceId, super::draft::Drafted>,
     meter: &Meter,
 ) -> Result<BTreeMap<EdgeId, EdgeGeo>, Error> {
     meter
@@ -173,11 +176,17 @@ pub(crate) fn curves(
                 at: plan.body.edges[e].name,
             })?;
             let g = match class[&e] {
-                Class::Carried => EdgeGeo::One(carried(plan, e)?),
+                Class::Carried | Class::Hinge => EdgeGeo::One(carried(plan, e)?),
                 Class::Moved => {
                     let f = plan.face_of(plan.fins(e)[0]);
                     match plan.motion[&f] {
                         Motion::Rigid(r) => EdgeGeo::One(moved_rigidly(plan, e, &r)),
+                        Motion::Draft { .. } => EdgeGeo::One(super::draft::surface::ruling_edge(
+                            plan.body,
+                            e,
+                            &drafts[&f],
+                            meter,
+                        )?),
                         _ => edges::edge(plan, e, meter)?,
                     }
                 }
@@ -254,7 +263,7 @@ mod tests {
         let class = super::super::classify::classes(&b, &motion).unwrap();
         let plan = plan_for(&b, &motion, &class);
         // unmetered: a unit test.
-        let geo = curves(&plan, &class, &Meter::free()).unwrap();
+        let geo = curves(&plan, &class, &BTreeMap::new(), &Meter::free()).unwrap();
         for (&e, g) in &geo {
             let EdgeGeo::One(c) = g else {
                 panic!("an edge opened")
@@ -273,7 +282,7 @@ mod tests {
                     let p = c.curve.point((c.range[0] + c.range[1]) / 2.0);
                     assert!((p.z - 0.5).abs() < 1e-9, "{p:?}");
                 }
-                Class::Moved => unreachable!(),
+                Class::Moved | Class::Hinge => unreachable!(),
             }
         }
     }
@@ -286,7 +295,7 @@ mod tests {
         let class = super::super::classify::classes(&b, &motion).unwrap();
         let plan = plan_for(&b, &motion, &class);
         // unmetered: a unit test.
-        let geo = curves(&plan, &class, &Meter::free()).unwrap();
+        let geo = curves(&plan, &class, &BTreeMap::new(), &Meter::free()).unwrap();
         for (&e, g) in &geo {
             let EdgeGeo::One(c) = g else { panic!() };
             assert_eq!(c.range, b.edges[e].interval);

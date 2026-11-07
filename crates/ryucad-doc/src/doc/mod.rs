@@ -23,6 +23,7 @@ pub mod path;
 pub mod pattern;
 pub mod project;
 pub mod reference;
+pub mod sheet_metal;
 pub mod sketch;
 pub mod solid;
 pub mod sweep;

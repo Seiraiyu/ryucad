@@ -39,7 +39,7 @@
 
 use super::cells::{cells, cells_off};
 use super::pipe::Cell;
-use super::sheet_cs::krawczyk3;
+use super::sheet_cs::{inverse3, krawczyk3};
 use super::ss_trace::{TangentTrace, Topology, Traced};
 use super::{Failure, SLACK};
 use crate::geom::bound2::IVec3;
@@ -58,7 +58,7 @@ type Iv = Interval;
 /// The fractions a cell is split at, one per attempt: off the dyadic
 /// fractions symmetric problems put their curves through, and different
 /// from each other so a crossing on a face's edge moves off it.
-const SPLITS: [f64; 3] = [0.499_023_437_5, 0.471_191_406_25, 0.523_681_640_625];
+pub(super) const SPLITS: [f64; 3] = [0.499_023_437_5, 0.471_191_406_25, 0.523_681_640_625];
 
 /// The most times a pair may be split.
 const MAX_DEPTH: u32 = 48;
@@ -75,6 +75,10 @@ const FACE_DEPTH: u32 = 96;
 
 /// The most boxes one face's search may examine.
 const FACE_BOXES: usize = 1 << 14;
+
+/// How many times epsilon-inflation grows a box round a face's crossing
+/// before giving up ([`Face::inflated`]).
+const INFLATE_ROUNDS: usize = 16;
 
 /// How many rounds of splitting pairs with too many crossings a trace
 /// may take.
@@ -416,6 +420,7 @@ pub(crate) fn trace(
         for (attempt, split) in SPLITS.into_iter().enumerate() {
             let mut tracer = Tracer::new([a, b], region, split, m);
             tracer.shift = CELL_SHIFTS[attempt];
+            tracer.attempt = attempt;
             match tracer.run() {
                 Err(Failure::Uncertain) if tracer.singular <= MAX_SINGULAR => continue,
                 other => return other,
@@ -428,8 +433,10 @@ pub(crate) fn trace(
 /// How a cluster of singular pairs is settled.
 #[derive(Clone, Debug)]
 enum Settled {
-    /// One point where the surfaces touch (or where branches meet).
-    Point(Point3),
+    /// One point where the surfaces touch (or where branches meet), and
+    /// how many branch ends meet there: 0 at an isolated touch, 4 at a
+    /// saddle, where two branches cross ([`Tangency::cone`]).
+    Point { at: Point3, ends: usize },
     /// A curve along which they touch.
     Curve(TangentTrace),
 }
@@ -515,6 +522,14 @@ struct Leaf {
 /// folded onto its start).
 type Plane = (usize, usize, u64);
 
+/// Crossings certified by epsilon-inflation on one face plane: each
+/// Newton root and a box certified to hold it alone.
+type Inflated = std::cell::RefCell<Vec<([f64; 3], [[f64; 2]; 3])>>;
+
+/// What [`Face::claim`] decides of a box: the crossing it holds, if any,
+/// and the box certified to hold that crossing alone.
+type Claim = (Option<[f64; 3]>, [[f64; 2]; 3]);
+
 /// A crossing of the curve with a face.
 #[derive(Clone, Debug)]
 struct Crossing {
@@ -537,10 +552,18 @@ struct Tracer<'a> {
     split: f64,
     /// How the first cells are cut ([`cells_off`]).
     shift: f64,
+    /// Which of [`SPLITS`] this is, for the second surface's own.
+    attempt: usize,
     leaves: Vec<Leaf>,
     singular: usize,
     crossings: Vec<Crossing>,
     planes: BTreeMap<Plane, Vec<usize>>,
+    /// Each surface's periodic directions whose first cells span a whole
+    /// period: where they start and end, one plane.
+    wraps: [[Option<[f64; 2]>; 2]; 2],
+    /// The crossings epsilon-inflation certified, per face plane, shared
+    /// by every leaf's search there so neighbours claim each once.
+    inflated: BTreeMap<Plane, Inflated>,
     /// Each surface's poles: rows of a spline collapsed to one point
     /// exactly, as the parameter held and its value there.
     poles: [Vec<(usize, f64)>; 2],
@@ -585,7 +608,26 @@ fn exact_poles(s: &Surface) -> Vec<(usize, f64)> {
 
 /// The first cells' shift on each attempt: the surfaces' own pieces
 /// twice (with two of [`SPLITS`]), then cut off them.
-const CELL_SHIFTS: [f64; 3] = [0.0, 0.0, 0.293];
+pub(super) const CELL_SHIFTS: [f64; 3] = [0.0, 0.0, 0.293];
+
+/// The fractions the second surface is split at, one per attempt. The
+/// first two attempts split it as the first surface (what settles there
+/// stays as it was); the attempt off the surfaces' pieces splits it unlike
+/// the first and unlike its mirror `1 - f`, so that neither two sides of
+/// one sweep (sharing a parameter) nor two mirrored fillets of a corner
+/// (`θ_B = -θ_A`) put the curve on both surfaces' cell sides at once.
+const SECOND_SPLITS: [f64; 3] = [SPLITS[0], SPLITS[1], 0.488_281_25];
+
+/// The shifts of the second surface's first cells, likewise.
+const SECOND_SHIFTS: [f64; 3] = [0.0, 0.0, 0.411];
+
+pub(super) fn second_fraction(attempt: usize) -> f64 {
+    SECOND_SPLITS[attempt]
+}
+
+pub(super) fn second_shift(attempt: usize) -> f64 {
+    SECOND_SHIFTS[attempt]
+}
 
 impl<'a> Tracer<'a> {
     fn new(surfaces: [&'a Surface; 2], region: &Box3, split: f64, meter: &'a Meter<'a>) -> Self {
@@ -595,10 +637,13 @@ impl<'a> Tracer<'a> {
             region: region.grow(LINEAR_RESOLUTION),
             split,
             shift: 0.0,
+            attempt: 0,
             leaves: Vec::new(),
             singular: 0,
             crossings: Vec::new(),
             planes: BTreeMap::new(),
+            inflated: BTreeMap::new(),
+            wraps: [[None; 2]; 2],
             poles: surfaces.map(exact_poles),
             meter,
         }
@@ -653,16 +698,9 @@ impl<'a> Tracer<'a> {
         let firsts = [
             cells_off(self.surfaces[0], &self.region, self.shift),
             // The second moved differently, as it is split differently.
-            cells_off(
-                self.surfaces[1],
-                &self.region,
-                if self.shift > 0.0 {
-                    1.0 - self.shift
-                } else {
-                    0.0
-                },
-            ),
+            cells_off(self.surfaces[1], &self.region, second_shift(self.attempt)),
         ];
+        self.note_wraps(&firsts);
         // The first pairs: cells whose enclosures meet.
         let mut boxes: Vec<Vec<Option<Box3>>> = Vec::with_capacity(2);
         for (k, first) in firsts.iter().enumerate() {
@@ -725,6 +763,28 @@ impl<'a> Tracer<'a> {
         self.link()
     }
 
+    /// Notes each periodic direction whose first cells span a whole
+    /// period from where to where, so a face at their end is the plane at
+    /// their start ([`Self::plane`]): cut off the surface's pieces
+    /// ([`cells_off`]) they start past the domain's start, and end a
+    /// period on, beyond its end.
+    fn note_wraps(&mut self, firsts: &[Vec<Cell>; 2]) {
+        for (k, first) in firsts.iter().enumerate() {
+            let (pu, pv) = self.surfaces[k].periods();
+            for (d, p) in [pu, pv].into_iter().enumerate() {
+                let Some(p) = p else { continue };
+                let lo = first.iter().map(|c| c[d][0]).fold(f64::INFINITY, f64::min);
+                let hi = first
+                    .iter()
+                    .map(|c| c[d][1])
+                    .fold(f64::NEG_INFINITY, f64::max);
+                if hi - lo >= p * (1.0 - 1e-12) {
+                    self.wraps[k][d] = Some([lo, hi]);
+                }
+            }
+        }
+    }
+
     /// Splits the pair's cell whose points spread further, along its
     /// wider parameter, and subdivides both halves.
     fn split_pair(&mut self, cells: [Cell; 2], depth: u32) -> Result<(), Failure> {
@@ -773,12 +833,12 @@ impl<'a> Tracer<'a> {
         }
         let (k, d, _) = best;
         let [lo, hi] = cells[k][d];
-        // On the attempt off the surfaces' pieces the second surface is
-        // split elsewhere too: surfaces sharing a parameter (sides of one
-        // sweep, along its path) would otherwise put their cells' sides
-        // together where the curve crosses.
-        let fraction = if k == 1 && self.shift > 0.0 {
-            1.0 - self.split
+        // The second surface is split elsewhere: surfaces sharing a
+        // parameter (sides of one sweep, along its path), or mirrored
+        // (two fillets of a corner), would otherwise put their cells'
+        // sides together where the curve crosses.
+        let fraction = if k == 1 {
+            second_fraction(self.attempt)
         } else {
             self.split
         };
@@ -916,7 +976,14 @@ impl<'a> Tracer<'a> {
         let (d, p) = if param == 0 { (du, pu) } else { (dv, pv) };
         let at = match p {
             Some(p) if at == d[0] + p => d[0],
-            _ => at,
+            // The first cells moved on from the domain's start
+            // ([`cells_off`]) span a period from a shifted start, which
+            // is the same plane as their end.
+            Some(_) => match self.wraps[side][param] {
+                Some([start, end]) if at == end => start,
+                _ => at,
+            },
+            None => at,
         };
         (side, param, at.to_bits())
     }
@@ -940,11 +1007,13 @@ impl<'a> Tracer<'a> {
             side,
             param,
             at,
+            reach: free.map(|[lo, hi]| [lo - (hi - lo), hi + (hi - lo)]),
         };
         let mut roots = Vec::new();
         let mut budget = FACE_BOXES;
-        face.search(free, 0, &mut budget, &mut roots)?;
         let plane = self.plane(side, param, at);
+        let shared = self.inflated.entry(plane).or_default();
+        face.search(free, 0, &mut budget, &mut roots, shared)?;
         let mut out = Vec::with_capacity(roots.len());
         for (x, unique) in roots {
             let params = face.params(x);
@@ -1075,6 +1144,14 @@ impl<'a> Tracer<'a> {
                 None => return Err(Failure::Uncertain),
             }
         }
+        // A point of tangency takes exactly the ends its cone certifies.
+        for (k, (_, settled)) in clusters.iter().enumerate() {
+            if let Settled::Point { ends, .. } = *settled
+                && at_cluster.values().filter(|&&c| c == k).count() != ends
+            {
+                return Err(Failure::Uncertain);
+            }
+        }
         let mut next: Vec<Vec<usize>> = vec![Vec::new(); n];
         for (k, &[a, b]) in arcs.iter().enumerate() {
             next[a].push(k);
@@ -1107,13 +1184,13 @@ impl<'a> Tracer<'a> {
             let (chain, _) = walk(c, next[c][0], &mut used);
             let mut points: Vec<Point3> = chain.iter().map(|&i| self.crossings[i].point).collect();
             if let Some(&k) = at_cluster.get(&chain[0])
-                && let Settled::Point(p) = clusters[k].1
+                && let Settled::Point { at: p, .. } = clusters[k].1
             {
                 points.insert(0, p);
                 touched[k] = true;
             }
             if let Some(&k) = at_cluster.get(chain.last().expect("a chain has a start"))
-                && let Settled::Point(p) = clusters[k].1
+                && let Settled::Point { at: p, .. } = clusters[k].1
             {
                 points.push(p);
                 touched[k] = true;
@@ -1141,8 +1218,8 @@ impl<'a> Tracer<'a> {
         }
         for (k, (_, settled)) in clusters.into_iter().enumerate() {
             match settled {
-                Settled::Point(p) if !touched[k] => out.points.push(p),
-                Settled::Point(_) => {}
+                Settled::Point { at: p, .. } if !touched[k] => out.points.push(p),
+                Settled::Point { .. } => {}
                 Settled::Curve(c) => out.tangents.push(c),
             }
         }
@@ -1198,7 +1275,7 @@ impl<'a> Tracer<'a> {
             .into_values()
             .map(|m| {
                 let settled = match self.tangency(&m) {
-                    Ok(p) => Settled::Point(p),
+                    Ok((at, ends)) => Settled::Point { at, ends },
                     Err(_) => Settled::Curve(self.tangent_curve(&m)?),
                 };
                 Ok((m, settled))
@@ -1420,8 +1497,8 @@ impl<'a> Tracer<'a> {
     }
 
     /// The one point of tangency in a cluster of leaves, where the
-    /// surfaces touch.
-    fn tangency(&self, members: &[usize]) -> Result<Point3, Failure> {
+    /// surfaces touch, and how many branch ends meet there.
+    fn tangency(&self, members: &[usize]) -> Result<(Point3, usize), Failure> {
         let mut hull = self.leaves[members[0]].cells;
         for &i in members {
             let c = self.leaves[i].cells;
@@ -1467,10 +1544,20 @@ impl<'a> Tracer<'a> {
             }
             let p = self.sheets[0].point(x[0], x[1]);
             let q = self.sheets[1].point(x[2], x[3]);
-            if p.distance(q) <= LINEAR_RESOLUTION {
-                return Ok(p);
+            if p.distance(q) > LINEAR_RESOLUTION {
+                return Err(Failure::Uncertain);
             }
-            return Err(Failure::Uncertain);
+            // The cone, over the certified box or a smaller one round the
+            // same point that still certifies (so still holds it).
+            let ends = core::iter::once(half)
+                .chain([1e-8, 1e-10, 1e-12].into_iter().filter(|&h| h < half))
+                .find_map(|h| {
+                    let b: [[f64; 2]; 4] = x.map(|v| [v - h, v + h]);
+                    (h == half || tan.krawczyk(b) == Some(true))
+                        .then(|| tan.cone(b))
+                        .flatten()
+                });
+            return ends.map(|e| (p, e)).ok_or(Failure::Uncertain);
         }
         Err(Failure::Uncertain)
     }
@@ -1483,6 +1570,10 @@ struct Face<'a> {
     side: usize,
     param: usize,
     at: f64,
+    /// How far epsilon-inflation may grow a box ([`Self::inflated`]): the
+    /// face's own search box grown by its width each way, so a certified
+    /// box reaches no further than a neighbouring leaf's face.
+    reach: [[f64; 2]; 3],
 }
 
 impl Face<'_> {
@@ -1529,6 +1620,7 @@ impl Face<'_> {
         depth: u32,
         budget: &mut usize,
         out: &mut Vec<([f64; 3], [[f64; 2]; 3])>,
+        shared: &Inflated,
     ) -> Result<(), Failure> {
         *budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
         self.meter
@@ -1560,6 +1652,21 @@ impl Face<'_> {
                 }
                 None => {}
             }
+            // Rounding, not the box, decides: certify the crossing round
+            // Newton's root in a box grown until Krawczyk's test holds.
+            if outgrown(em, jac, x)
+                && let Some((root, b)) = self.claim(x, shared)
+            {
+                let holds = |p: [f64; 3], b: [[f64; 2]; 3]| {
+                    (0..3).all(|k| b[k][0] <= p[k] && p[k] <= b[k][1])
+                };
+                if let Some(r) = root
+                    && !out.iter().any(|&(q, ob)| holds(r, ob) || holds(q, b))
+                {
+                    out.push((r, b));
+                }
+                return Ok(());
+            }
         }
         if depth == FACE_DEPTH {
             return Err(Failure::Uncertain);
@@ -1582,9 +1689,108 @@ impl Face<'_> {
         for half in [[lo, mid], [mid, hi]] {
             let mut y = x;
             y[k] = half;
-            self.search(y, depth + 1, budget, out)?;
+            self.search(y, depth + 1, budget, out, shared)?;
         }
         Ok(())
+    }
+
+    /// A box certified to hold exactly one crossing, holding `x`, and the
+    /// crossing Newton's method (not held to `x`) converges to from `x`'s
+    /// middle: grown from the root's spread, the inverse Jacobian times
+    /// the enclosure of `E` there, until Krawczyk's test certifies it
+    /// (epsilon-inflation). `x` then holds no crossing but that one.
+    fn inflated(&self, x: [[f64; 2]; 3]) -> Option<([f64; 3], [[f64; 2]; 3])> {
+        let mid = |v: Iv| (v.lo() + v.hi()) / 2.0;
+        let within = |b: [[f64; 2]; 3]| {
+            (0..3).all(|k| self.reach[k][0] <= b[k][0] && b[k][1] <= self.reach[k][1])
+        };
+        let r = self.newton(x.map(|[a, b]| (a + b) / 2.0))?;
+        if !within(r.map(|v| [v, v])) {
+            return None;
+        }
+        let (em, jm) = self.enclose(r.map(|v| [v, v]))?;
+        let y = inverse3(jm.map(|row| row.map(mid)))?;
+        let spread: [f64; 3] = core::array::from_fn(|k| {
+            (0..3)
+                .map(|j| y[k][j].abs() * em[j].lo().abs().max(em[j].hi().abs()))
+                .sum::<f64>()
+        });
+        let mut grow = 2.0;
+        for _ in 0..INFLATE_ROUNDS {
+            self.meter
+                .charge(self.sheets[0].cost() + self.sheets[1].cost())
+                .ok()?;
+            let b: [[f64; 2]; 3] = core::array::from_fn(|k| {
+                let h = (grow * spread[k])
+                    .max(4.0 * f64::EPSILON * r[k].abs().max(1.0))
+                    .max(r[k] - x[k][0])
+                    .max(x[k][1] - r[k]);
+                [r[k] - h, r[k] + h]
+            });
+            // Grown past the face's reach, the box's width is the
+            // enclosures' looseness (an offset's hull over its cells), not
+            // rounding: leave the box to splitting.
+            if !within(b) {
+                return None;
+            }
+            let c = b.map(|[lo, hi]| (lo + hi) / 2.0);
+            let (at, _) = self.enclose(c.map(|v| [v, v]))?;
+            let (_, jac) = self.enclose(b)?;
+            if krawczyk3(at, jac, b) == Some(true) {
+                return Some((r, b));
+            }
+            grow *= 4.0;
+        }
+        None
+    }
+
+    /// Whether a box of the face holds a crossing, decided by a certified
+    /// box round it ([`Self::inflated`]) shared by every box judged on
+    /// this face plane: one already certified that holds all of `x`
+    /// decides it, and a new one whose root another certified box holds
+    /// takes that box's root (each holds one crossing, so it is the
+    /// same). The box holds the crossing when its root lies in it,
+    /// half-open as cells are, so boxes either side of a root never both
+    /// claim it or both disown it. `None` where no box is certified.
+    fn claim(&self, x: [[f64; 2]; 3], shared: &Inflated) -> Option<Claim> {
+        let within =
+            |p: &[f64; 3], b: &[[f64; 2]; 3]| (0..3).all(|k| b[k][0] <= p[k] && p[k] <= b[k][1]);
+        let holds = |b: &[[f64; 2]; 3]| (0..3).all(|k| b[k][0] <= x[k][0] && x[k][1] <= b[k][1]);
+        let inside = |r: &[f64; 3]| (0..3).all(|k| x[k][0] <= r[k] && r[k] < x[k][1]);
+        if let Some((r, b)) = shared.borrow().iter().find(|(_, b)| holds(b)) {
+            return Some((inside(r).then_some(*r), *b));
+        }
+        let (r, b) = self.inflated(x)?;
+        let known = shared
+            .borrow()
+            .iter()
+            .find(|(q, ob)| within(&r, ob) || within(q, &b))
+            .map(|&(q, _)| q);
+        let r = known.unwrap_or(r);
+        shared.borrow_mut().push((r, b));
+        Some((inside(&r).then_some(r), b))
+    }
+
+    /// Newton's method on the face's system from `start`, not held to any
+    /// box, until it stops moving (twenty steps at most).
+    fn newton(&self, start: [f64; 3]) -> Option<[f64; 3]> {
+        let mid = |v: Iv| (v.lo() + v.hi()) / 2.0;
+        let mut r = start;
+        for _ in 0..20 {
+            let (em, jm) = self.enclose(r.map(|v| [v, v]))?;
+            let y = inverse3(jm.map(|row| row.map(mid)))?;
+            let e = em.map(mid);
+            let next: [f64; 3] =
+                core::array::from_fn(|k| r[k] - (0..3).map(|j| y[k][j] * e[j]).sum::<f64>());
+            if !next.iter().all(|v| v.is_finite()) {
+                return None;
+            }
+            if next == r {
+                break;
+            }
+            r = next;
+        }
+        Some(r)
     }
 
     /// The crossing in a box certified to hold one, by Newton's method
@@ -1615,6 +1821,23 @@ impl Face<'_> {
         }
         p
     }
+}
+
+/// Whether rounding, not the box, decides a face's box: the inverse
+/// middle Jacobian times `E`'s enclosure at the box's middle is wider than
+/// a quarter of the box in some parameter, so Krawczyk's test can't
+/// contract it.
+fn outgrown(em: &[Iv; 3], jac: &[[Iv; 3]; 3], x: [[f64; 2]; 3]) -> bool {
+    let mid = |v: Iv| (v.lo() + v.hi()) / 2.0;
+    let Some(y) = inverse3(jac.map(|r| r.map(mid))) else {
+        return false;
+    };
+    (0..3).any(|k| {
+        let w: f64 = (0..3)
+            .map(|j| y[k][j].abs() * (em[j].hi() - em[j].lo()))
+            .sum();
+        w > 0.25 * (x[k][1] - x[k][0])
+    })
 }
 
 /// The system whose roots are where the surfaces are tangent:
@@ -1864,6 +2087,53 @@ impl Tangency<'_> {
             x = next;
         }
         x
+    }
+    /// How many branch ends meet at the point of tangency a box holds:
+    /// there the height of one surface over the other is `½ dᵀ H d` to
+    /// second order in A's parameters, `H = II_A - Jᵀ II_B J` the
+    /// difference of their second fundamental forms (along `N_B = B_s ×
+    /// B_t`), `J = (BᵀB)⁻¹ BᵀA` carrying A's parameter directions to B's
+    /// (the tangent planes agree there). Enclosed over the box (each term
+    /// holds its value at the point), scaled by `det(BᵀB)²` to need no
+    /// division: a certified negative determinant is a saddle (two
+    /// branches crossing, four ends), a positive one an isolated touch
+    /// (none), anything else `None`.
+    fn cone(&self, x: [[f64; 2]; 4]) -> Option<usize> {
+        let pa = self.sheets[0].jet_box_in([x[0], x[1]], self.table)?;
+        let pb = self.sheets[1].jet_box_in([x[2], x[3]], self.table)?;
+        let (au, av) = (partial(&pa, 0), partial(&pa, 1));
+        let (bs, bt) = (partial(&pb, 0), partial(&pb, 1));
+        let n = cross(bs, bt);
+        let ia = [second(&pa, 0), second(&pa, 1), second(&pa, 2)].map(|h| dot(n, h));
+        let ib = [second(&pb, 0), second(&pb, 1), second(&pb, 2)].map(|h| dot(n, h));
+        let (g00, g01, g11) = (dot(bs, bs), dot(bs, bt), dot(bt, bt));
+        let g = g00 * g11 - g01 * g01;
+        if g.lo() <= 0.0 {
+            return None;
+        }
+        // `M = adj(BᵀB) BᵀA`, so `J = M / det(BᵀB)`.
+        let r = [[dot(bs, au), dot(bs, av)], [dot(bt, au), dot(bt, av)]];
+        let m = [
+            [g11 * r[0][0] - g01 * r[1][0], g11 * r[0][1] - g01 * r[1][1]],
+            [g00 * r[1][0] - g01 * r[0][0], g00 * r[1][1] - g01 * r[0][1]],
+        ];
+        // `Mᵀ II_B M`, entry by entry.
+        let carried = |i: usize, j: usize| {
+            m[0][i] * (ib[0] * m[0][j] + ib[1] * m[1][j])
+                + m[1][i] * (ib[1] * m[0][j] + ib[2] * m[1][j])
+        };
+        let g2 = g * g;
+        let h00 = g2 * ia[0] - carried(0, 0);
+        let h01 = g2 * ia[1] - carried(0, 1);
+        let h11 = g2 * ia[2] - carried(1, 1);
+        let det = h00 * h11 - h01 * h01;
+        if det.hi() < 0.0 {
+            Some(4)
+        } else if det.lo() > 0.0 {
+            Some(0)
+        } else {
+            None
+        }
     }
 
     /// Krawczyk's test for a root of the system in a box: `Some(true)`

@@ -247,6 +247,62 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
+        // A sheet metal feature's allowance and relief each on a line
+        // (`allowance = k_factor 0.44`, `relief = obround 1 mm × 1.5 mm`), a
+        // flange's edges on one line, each end on its own
+        // (`ends[plate/<hex>] = setback 5 mm, relief tear 0.5 mm`).
+        Some("ryucad.feature")
+            if matches!(
+                o.get("type").and_then(Value::as_str),
+                Some("base_flange" | "flange")
+            ) =>
+        {
+            fn relief_text(r: &Value) -> String {
+                let kind = r.get("kind").and_then(Value::as_str).unwrap_or_default();
+                match (r.get("width"), r.get("depth")) {
+                    (Some(w), Some(d)) => format!("{kind} {} × {}", scalar(w), scalar(d)),
+                    (Some(w), None) => format!("{kind} {}", scalar(w)),
+                    _ => kind.to_owned(),
+                }
+            }
+            if let Some(Value::Object(a)) = rest.remove("allowance") {
+                let text: Vec<String> = a
+                    .iter()
+                    .map(|(k, x)| format!("{k} {}", scalar(x)))
+                    .collect();
+                lines.push(format!("allowance = {}", text.join(", ")));
+            }
+            if let Some(r) = rest.remove("relief") {
+                lines.push(format!("relief = {}", relief_text(&r)));
+            }
+            if let Some(Value::Array(edges)) = rest.remove("edges") {
+                let text: Vec<String> = edges
+                    .iter()
+                    .map(|e| match e.get("edge") {
+                        Some(x) => format!(
+                            "{} (side {})",
+                            reference(x).unwrap_or_else(|| scalar(x)),
+                            reference(&e["side"]).unwrap_or_else(|| scalar(&e["side"]))
+                        ),
+                        None => reference(e).unwrap_or_else(|| scalar(e)),
+                    })
+                    .collect();
+                lines.push(format!("edges = {}", text.join(", ")));
+            }
+            if let Some(Value::Array(ends)) = rest.remove("ends") {
+                for e in &ends {
+                    let v = reference(&e["vertex"]).unwrap_or_else(|| scalar(&e["vertex"]));
+                    let mut parts = Vec::new();
+                    if let Some(s) = e.get("setback") {
+                        parts.push(format!("setback {}", scalar(s)));
+                    }
+                    if let Some(r) = e.get("relief") {
+                        parts.push(format!("relief {}", relief_text(r)));
+                    }
+                    lines.push(format!("ends[{v}] = {}", parts.join(", ")));
+                }
+            }
+        }
         // A shell's or offset's face groups, each on one line:
         // `faces[0] = 4 mm: base/<hex>, base/<hex>`.
         Some("ryucad.feature")
@@ -2126,6 +2182,54 @@ mod tests {
     }
 
     #[test]
+    fn sheet_metal_features_textconv_one_line_a_field() {
+        let n = |k: u8| format!("{k:032x}");
+        let v = json!({"format": 11, "kind": "ryucad.feature", "type": "flange", "target": "plate",
+                       "edges": [{"feature": "plate", "name": n(1)},
+                                 {"edge": {"feature": "plate", "name": n(2)}, "side": {"feature": "plate", "name": n(3)}}],
+                       "angle": "90 deg", "length": "20 mm",
+                       "ends": [{"vertex": {"feature": "plate", "name": n(4)}, "setback": "5 mm",
+                                 "relief": {"kind": "obround", "width": "1 mm", "depth": "1.5 mm"}}]});
+        let t = text(v.clone());
+        assert!(
+            t.contains(&format!(
+                "edges = plate/{}, plate/{} (side plate/{})",
+                n(1),
+                n(2),
+                n(3)
+            )),
+            "{t}"
+        );
+        assert!(
+            t.contains(&format!(
+                "ends[plate/{}] = setback 5 mm, relief obround 1 mm × 1.5 mm",
+                n(4)
+            )),
+            "{t}"
+        );
+        let v = json!({"format": 11, "kind": "ryucad.feature", "type": "base_flange", "sketch": "s",
+                       "thickness": "1.5 mm", "radius": "1 mm", "allowance": {"deduction": "2.4 mm"},
+                       "relief": {"kind": "tear", "width": "0.5 mm"}});
+        let t = text(v.clone());
+        assert!(t.contains("allowance = deduction 2.4 mm"), "{t}");
+        assert!(t.contains("relief = tear 0.5 mm"), "{t}");
+    }
+
+    #[test]
+    fn a_flanges_changes_are_by_field() {
+        let n = |k: u8| format!("{k:032x}");
+        let before = json!({"format": 11, "kind": "ryucad.feature", "type": "flange", "target": "plate",
+                            "edges": [{"feature": "plate", "name": n(1)}], "angle": "90 deg", "length": "20 mm"});
+        let mut after = before.clone();
+        after["angle"] = json!("80 deg");
+        after["ends"] = json!([{"vertex": {"feature": "plate", "name": n(2)}, "setback": "5 mm"}]);
+        let mut out = Vec::new();
+        changes("", Some(&before), Some(&after), &mut out);
+        let pointers: Vec<&str> = out.iter().map(|c| c["at"].as_str().unwrap()).collect();
+        assert_eq!(pointers, ["/angle", "/ends"]);
+    }
+
+    #[test]
     fn a_shells_groups_read_on_a_line_each() {
         let (a, b) = (
             "0123456789abcdef0123456789abcdef",
@@ -2399,6 +2503,40 @@ mod tests {
                  form = revolute\n"
             )
         );
+    }
+
+    #[test]
+    fn an_imports_mode_is_one_line() {
+        let h = "ab".repeat(32);
+        let v = json!({"body": 0, "file": {"blake3": h, "path": "imports/b.step"}, "format": 13,
+                       "kind": "ryucad.feature", "type": "import", "mode": "reference"});
+        assert!(text(v).contains("\nmode = reference\n"));
+    }
+
+    #[test]
+    fn a_converted_import_diffs_by_its_mode() {
+        let h = "ab".repeat(32);
+        let solid = json!({"body": 0, "file": {"blake3": h, "path": "imports/b.step"},
+                           "format": 5, "kind": "ryucad.feature", "type": "import"});
+        let mut reference = solid.clone();
+        reference["mode"] = json!("reference");
+        reference["format"] = json!(13);
+        let d = feature(Some(&solid), Some(&reference), &Options::default());
+        assert_eq!(d["status"], "changed", "{d}");
+        let pointers: Vec<&Value> = d["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| &c["at"])
+            .collect();
+        assert!(pointers.contains(&&json!("/mode")), "{d}");
+        let mode = d["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["at"] == "/mode")
+            .unwrap();
+        assert_eq!(mode["to"], "reference", "{d}");
     }
 
     #[test]

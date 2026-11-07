@@ -240,3 +240,89 @@ fn a_replacement_square_to_its_face_is_ambiguous() {
         TweakError::Ambiguous { face: top }
     );
 }
+
+#[test]
+fn a_boxs_walls_drafted_about_its_bottom_lean_in_and_report_their_angle() {
+    use crate::geom::{Point3, UnitVector3};
+    let b = block();
+    let walls = [
+        FaceRole::PlusX,
+        FaceRole::MinusX,
+        FaceRole::PlusY,
+        FaceRole::MinusY,
+    ];
+    let spec = DraftSpec {
+        pull: UnitVector3::exact(Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+        angle: 0.05,
+        hinge: Hinge::Neutral {
+            origin: Point3::ORIGIN,
+        },
+        faces: walls
+            .iter()
+            .map(|&r| DraftFace {
+                face: face(r),
+                angle: None,
+                flip: false,
+            })
+            .collect(),
+        tangent: false,
+    };
+    let (o, _, report) = draft(T, &b, &spec).unwrap();
+    assert_eq!(crate::check::check(&o), []);
+    let t = 0.4 * crate::math::tan(0.05);
+    for p in o
+        .vertices()
+        .map(|v| o.vertices[v].point)
+        .filter(|p| p.z > 0.2)
+    {
+        assert!(
+            ((p.x - 0.5).abs() - (0.5 - t)).abs() < 1e-9
+                && ((p.y - 0.3).abs() - (0.3 - t)).abs() < 1e-9,
+            "{p:?}"
+        );
+    }
+    assert_eq!(report.faces.len(), 4);
+    for a in &report.faces {
+        assert!(
+            (a.least - 0.05).abs() < 1e-12 && (a.greatest - 0.05).abs() < 1e-12,
+            "{a:?}"
+        );
+    }
+}
+
+#[test]
+fn a_draft_checks_its_angle_and_faces() {
+    use crate::geom::{Point3, UnitVector3};
+    let b = block();
+    let wall = face(FaceRole::PlusX);
+    let top = face(FaceRole::PlusZ);
+    let spec = |angle: f64, face: Name| DraftSpec {
+        pull: UnitVector3::exact(Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+        angle,
+        hinge: Hinge::Neutral {
+            origin: Point3::new(0.0, 0.0, 0.2),
+        },
+        faces: vec![DraftFace {
+            face,
+            angle: None,
+            flip: false,
+        }],
+        tangent: false,
+    };
+    assert_eq!(
+        refusal(draft(T, &b, &spec(0.0, wall))),
+        TweakError::BadAngle
+    );
+    assert_eq!(
+        refusal(draft(T, &b, &spec(1.57, wall))),
+        TweakError::BadAngle
+    );
+    assert_eq!(
+        refusal(draft(T, &b, &spec(f64::NAN, wall))),
+        TweakError::BadAngle
+    );
+    assert_eq!(
+        refusal(draft(T, &b, &spec(0.05, top))),
+        TweakError::NoHinge { face: top }
+    );
+}

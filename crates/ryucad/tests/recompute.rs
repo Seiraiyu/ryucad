@@ -94,7 +94,8 @@ fn rectangle(w: &str, h: &str, at: [f64; 2]) -> Value {
 /// up a line of `wl` on zx as `sw`; a circle `la` on xy lofted to a
 /// smaller one `lb` on a datum plane `dl` 10 mm above it as `lf` (circles:
 /// a loft of squares is four spline faces whose self-intersection check
-/// takes a debug build tens of seconds on every rebuild from nothing).
+/// takes a debug build tens of seconds on every rebuild from nothing); and
+/// a reference import of OCCT's box, which edits make a solid and back.
 fn project() -> (tempfile::TempDir, Session) {
     let dir = tempfile::tempdir().unwrap();
     ryucad::server::init(dir.path(), None).unwrap();
@@ -291,6 +292,12 @@ fn project() -> (tempfile::TempDir, Session) {
         &mut s,
         json!({"type": "loft", "id": "lf", "sections": ["la", "lb"]}),
     );
+    // A reference import of OCCT's box, which edits convert and back.
+    let file = format!(
+        "{}/../ryustep/tests/data/occt/box_ap214.stp",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    must(&mut s, "import", json!({"path": file, "into": "p"}));
     (dir, s)
 }
 
@@ -303,7 +310,7 @@ fn mm(g: &mut Lcg, lo: u64, hi: u64) -> String {
 /// One random edit. Some are refused, or leave a feature failing; both
 /// must rebuild the same way however they are reached.
 fn edit(g: &mut Lcg, s: &mut Session) {
-    let (method, params) = match g.next_u64() % 23 {
+    let (method, params) = match g.next_u64() % 24 {
         0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
         1 => (
             "param.set",
@@ -409,6 +416,11 @@ fn edit(g: &mut Lcg, s: &mut Session) {
             } else {
                 json!({"id": "lf", "start_tangent": ""})
             },
+        ),
+        // The import made a healed solid, or a reference again.
+        23 => (
+            "import.convert",
+            json!({"reference": g.next_u64().is_multiple_of(2)}),
         ),
         _ => (
             "sketch.edit",
@@ -652,6 +664,126 @@ fn mirrors_and_splits_recompute_as_from_nothing() {
         let mut g = Lcg::new(seed);
         for step in 0..10 {
             mirror_edit(&mut g, &mut s);
+            let (one, eight) = (full(&s, 1), full(&s, 8));
+            let r = s.rebuilt(&part).unwrap();
+            let incremental = (r.hash.clone(), summary(r));
+            assert_eq!(incremental, one, "seed {seed}, step {step}");
+            assert_eq!(incremental, eight, "seed {seed}, step {step}");
+        }
+    }
+}
+
+/// Part `p`: a plate `plate` 60 × 40 mm, `t` thick with an inner radius
+/// `r` (parameters), and a flange `f` on its right top edge, an end of it
+/// set back with a relief.
+fn sheeted() -> (tempfile::TempDir, Session, String) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    must(
+        &mut s,
+        "param.set",
+        json!({"part": "p", "parameters": {"t": "1.5 mm", "r": "1 mm"}}),
+    );
+    let add = |s: &mut Session, f: Value| {
+        let mut f = f;
+        f["part"] = json!("p");
+        must(s, "feature.add", f)
+    };
+    add(&mut s, json!({"type": "sketch", "id": "s", "plane": "xy"}));
+    let mut ops = Vec::new();
+    for (i, at) in [[0, 0], [60, 0], [60, 40], [0, 40]].into_iter().enumerate() {
+        ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    for i in 1..=4 {
+        ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                        "start": format!("p{i}"), "end": format!("p{}", i % 4 + 1)}));
+    }
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "s", "ops": ops}),
+    );
+    add(
+        &mut s,
+        json!({"type": "base_flange", "id": "plate", "sketch": "s", "thickness": "t",
+                       "radius": "r", "allowance": {"k_factor": "0.44"},
+                       "relief": {"kind": "rectangular", "width": "1 mm", "depth": "0.5 mm"}}),
+    );
+    let b = must(&mut s, "inspect", json!({"part": "p", "feature": "plate"}))["bodies"][0].clone();
+    // The rim at x = 60 on top (z = t), and its far corner, by name.
+    let top = |e: &Value| {
+        let pt = |n: &Value| {
+            b["vertices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["name"] == *n)
+                .unwrap()["point"]
+                .clone()
+        };
+        let (a, c) = (pt(&e["start"]), pt(&e["end"]));
+        (a[0].as_f64().unwrap() - 0.06).abs() < 1e-12
+            && (c[0].as_f64().unwrap() - 0.06).abs() < 1e-12
+            && a[2].as_f64().unwrap() > 1e-4
+            && c[2].as_f64().unwrap() > 1e-4
+    };
+    let rim = b["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| top(e))
+        .unwrap();
+    let corner = format!("p/plate/{}", rim["end"].as_str().unwrap());
+    add(
+        &mut s,
+        json!({"type": "flange", "id": "f", "edges": [format!("p/plate/{}", rim["name"].as_str().unwrap())],
+                       "angle": "90 deg", "length": "20 mm",
+                       "ends": [{"vertex": corner, "setback": "4 mm"}]}),
+    );
+    (dir, s, corner)
+}
+
+/// One random edit of [`sheeted`]'s part.
+fn sheet_edit(g: &mut Lcg, s: &mut Session, corner: &str) {
+    let (method, params) = match g.next_u64() % 7 {
+        0 => ("param.set", json!({"parameters": {"t": mm(g, 1, 2)}})),
+        1 => ("param.set", json!({"parameters": {"r": mm(g, 1, 3)}})),
+        2 => (
+            "feature.edit",
+            json!({"id": "plate", "allowance": {"k_factor": "0.4"}}),
+        ),
+        3 => (
+            "feature.edit",
+            json!({"id": "f", "angle": if g.next_u64().is_multiple_of(2) { "90 deg" } else { "75 deg" }}),
+        ),
+        4 => ("feature.edit", json!({"id": "f", "length": mm(g, 10, 25)})),
+        5 => (
+            "feature.edit",
+            json!({"id": "plate", "relief": {"kind": "obround", "width": "1 mm", "depth": "1 mm"}}),
+        ),
+        _ => (
+            "feature.edit",
+            json!({"id": "f", "ends": [{"vertex": corner, "setback": mm(g, 0, 5)}]}),
+        ),
+    };
+    let mut params = params;
+    params["part"] = json!("p");
+    let _ = call(s, method, params);
+}
+
+#[test]
+fn sheet_metal_recomputes_as_from_nothing() {
+    for seed in [8, 9] {
+        let (_dir, mut s, corner) = sheeted();
+        let part = Id::parse("p", "part").unwrap();
+        let first = s.rebuilt(&part).unwrap();
+        assert_eq!(first.failed(), 0, "{:?}", summary(first));
+        let mut g = Lcg::new(seed);
+        for step in 0..10 {
+            sheet_edit(&mut g, &mut s, &corner);
             let (one, eight) = (full(&s, 1), full(&s, 8));
             let r = s.rebuilt(&part).unwrap();
             let incremental = (r.hash.clone(), summary(r));

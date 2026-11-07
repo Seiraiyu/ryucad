@@ -29,6 +29,8 @@ pub mod sheet;
 pub mod sheet_metal;
 pub(crate) mod split;
 pub mod sweep;
+#[cfg(test)]
+pub(crate) mod testing;
 pub mod tol;
 pub mod topo;
 pub mod tweak;

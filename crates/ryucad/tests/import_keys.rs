@@ -64,7 +64,10 @@ fn data(name: &str) -> String {
 )]
 fn nist_ctc_03_heals_under_its_own_part_id() {
     let d = project();
-    let import = run(d.path(), &["import", &data("nist_ctc_03_asme1_ap203.stp")]);
+    let import = run(
+        d.path(),
+        &["import", "--solid", &data("nist_ctc_03_asme1_ap203.stp")],
+    );
     assert_eq!(import["ok"], true, "{import:#}");
     assert!(
         !import["result"]["parts"].as_array().unwrap().is_empty(),
@@ -92,7 +95,7 @@ fn nist_ftc_10_s_own_export_heals_under_every_key() {
     let mut counts = std::collections::BTreeSet::new();
     for part in keys {
         let d = project();
-        let mut args = vec!["import", file.as_str()];
+        let mut args = vec!["import", "--solid", file.as_str()];
         if let Some(p) = &part {
             args.extend(["--part", p.as_str()]);
         }

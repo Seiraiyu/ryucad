@@ -383,19 +383,16 @@ mod lofts {
         );
     }
 
-    /// Every edge of the twisted loft: it builds, but its corners are balls
-    /// between pipes on curved splines, which touch tangentially at the
-    /// corner triangles' vertices where two intersection branches cross.
-    /// The check can't settle those pairs yet (issue #177, plan 8.F), and
-    /// nothing else.
+    /// Every edge of the twisted loft: it builds, and its corners' footed
+    /// pipes, which touch tangentially at the corner triangles' vertices
+    /// and where their tubes' tops meet, check clean (issue #177, plan
+    /// 15.D).
     #[test]
     #[cfg_attr(
         debug_assertions,
         ignore = "slow in a debug build: CI runs it in release"
     )]
-    fn a_twisted_loft_s_every_edge_checks_all_but_its_corners() {
-        use ryukei::check::Fault;
-        use ryukei::geom::Surface;
+    fn a_twisted_loft_s_every_edge_checks_clean() {
         let b = lofted(PI / 6.0);
         let all: Vec<Name> = b.edges().map(|e| b.edge(e).unwrap().name).collect();
         let (out, _) = blend(
@@ -405,47 +402,58 @@ mod lofts {
         )
         .unwrap();
         assert_eq!(check(&out), []);
-        let faults = check_intersections(&out);
-        assert_eq!(faults.len(), 8, "{faults:?}");
-        let pipe = |f| {
-            matches!(
-                out.surface(out.face(f).unwrap().surface),
-                Some(Surface::Pipe(_))
-            )
+        let t = std::time::Instant::now();
+        assert_eq!(check_intersections(&out), []);
+        let secs = t.elapsed().as_secs_f64();
+        let bar = if std::env::var_os("RYUKEI_BARS").is_some() {
+            10.0
+        } else {
+            100.0
         };
-        for f in faults {
-            let Fault::CannotCheck { a, b } = f else {
-                panic!("{f:?}")
-            };
-            assert!(pipe(a) && pipe(b));
-        }
+        eprintln!("every edge checked in {secs:.2} s");
+        assert!(secs < bar, "{secs} s");
     }
 
     /// The twisted loft's top rim: fillets between its curved sides and
-    /// its flat cap are pipes, which would trim each other at the cap's
-    /// corners where both touch the cap. Their crossing there is a tangent
-    /// one the intersectors can't settle yet (issue #177, plan 8.F), so it
-    /// is refused, naming the corner.
+    /// its flat cap are pipes footed on the cap, which trim each other at
+    /// the cap's corners, crossing tangentially where both touch the cap
+    /// (issue #177, plan 15.D). Each corner takes away a little more than
+    /// a straight rim's fillet would along the same length.
     #[test]
     #[cfg_attr(
         debug_assertions,
         ignore = "slow in a debug build: CI runs it in release"
     )]
-    fn a_twisted_loft_s_top_rim_is_refused_at_its_corners() {
+    fn a_twisted_loft_s_top_rim_trims_at_its_corners() {
         let b = lofted(PI / 6.0);
         let top = edges_between(&b, 1.0, 1.0);
-        let r = blend(
+        let r = 0.05;
+        let t = std::time::Instant::now();
+        let (out, _) = blend(
             K,
             &b,
-            &top.iter().map(|&e| fillet(e, 0.05)).collect::<Vec<_>>(),
+            &top.iter().map(|&e| fillet(e, r)).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let secs = t.elapsed().as_secs_f64();
+        eprintln!("top rim in {secs:.2} s");
+        assert_eq!(check(&out), []);
+        assert_eq!(check_intersections(&out), []);
+        let (before, after) = (volume(&b, 1e-4), volume(&out, 1e-4));
+        // Four edges of length 1, each losing at least the straight
+        // fillet's section (the faces meet at no more than a right angle
+        // across the twist) and at most 1.3 of it.
+        let cut = 4.0 * (1.0 - PI / 4.0) * r * r;
+        assert!(
+            after < before - 0.9 * cut && after > before - 1.3 * cut,
+            "{before} {after}"
         );
-        let Err(ryukei::Error::InvalidBlend(
-            ryukei::BlendError::Uncertain { at } | ryukei::BlendError::Unsupported { at },
-        )) = r
-        else {
-            panic!("{:?}", r.map(|_| ()))
+        let bar = if std::env::var_os("RYUKEI_BARS").is_some() {
+            5.0
+        } else {
+            50.0
         };
-        assert!(b.vertices().any(|v| b.vertex(v).unwrap().name == at));
+        assert!(secs < bar, "{secs} s");
     }
 
     /// A loft twisted by a sixth of a turn: its sides are curved splines.

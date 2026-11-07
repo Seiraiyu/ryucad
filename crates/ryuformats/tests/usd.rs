@@ -323,6 +323,7 @@ fn frame() -> Model {
             tessellate(&b, &MeshParams::new(1e-5, 0.26)).unwrap(),
         )),
         body: Arc::new(b),
+        brep: true,
     };
     let at = |x: f64| Rigid::translation(Vector3::new(x, 0.0, 0.01));
     Model {

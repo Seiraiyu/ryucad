@@ -89,6 +89,7 @@ impl<'a> Reader<'a> {
             journal,
             origins: Arc::new(crate::rebuild::Origins::from_raw(origins)?),
             hash: self.str()?.to_owned(),
+            reference: false,
         })
     }
 
@@ -191,12 +192,27 @@ pub fn decode_made(bytes: &[u8]) -> Option<Made> {
     } else {
         None
     };
-    let import = if r.flag()? {
+    let import: Option<Arc<serde_json::Value>> = if r.flag()? {
         Some(Arc::new(serde_json::from_slice(r.bytes()?).ok()?))
     } else {
         None
     };
     r.end()?;
+    // A reference's entry says so in its report; nothing else holds one
+    // (nothing acts on a reference), so the bytes don't need to.
+    let reference = import.as_ref().is_some_and(|v| v["mode"] == "reference");
+    let solids = if reference {
+        solids
+            .into_iter()
+            .map(|(id, b)| {
+                let mut b = Arc::try_unwrap(b).unwrap_or_else(|b| (*b).clone());
+                b.reference = true;
+                (id, Arc::new(b))
+            })
+            .collect()
+    } else {
+        solids
+    };
     Some(Made {
         solids,
         hash,
@@ -313,6 +329,43 @@ mod tests {
         let back = decode_built(&encode_built(tool)).unwrap();
         assert_eq!(back.body.dump(), tool.body.dump());
         assert_eq!(back.hash, tool.hash);
+    }
+
+    #[test]
+    fn a_references_entry_comes_back_a_reference() {
+        let body = ryukei::primitive::block(
+            ryukei::name::OpKey::from_bytes(b"t"),
+            0.01,
+            0.01,
+            0.01,
+            &ryukei::geom::Rigid::IDENTITY,
+        )
+        .unwrap()
+        .0;
+        let id = Id::parse("i", "feature").unwrap();
+        let mut b = crate::rebuild::finish_reference(
+            &id,
+            (body, Default::default()),
+            crate::rebuild::Origins::default(),
+        )
+        .unwrap();
+        assert!(b.reference);
+        let made = Made {
+            import: Some(Arc::new(json!({"mode": "reference"}))),
+            ..Made::new(vec![(id.clone(), Arc::new(b.clone()))])
+        };
+        let back = decode_made(&encode_made(&made)).unwrap();
+        assert!(back.solids[0].1.reference);
+        // The same entry without the report's mode is a solid's.
+        b.reference = false;
+        let plain = Made::new(vec![(id, Arc::new(b))]);
+        let back = decode_made(&encode_made(&plain)).unwrap();
+        assert!(!back.solids[0].1.reference);
+        // A reference's bytes are a solid's but for the report.
+        assert_eq!(
+            encode_built(&back.solids[0].1),
+            encode_built(&made.solids[0].1)
+        );
     }
 
     #[test]

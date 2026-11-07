@@ -1585,6 +1585,17 @@ fn edge_between(body: &serde_json::Value, solid: &str, a: [f64; 3], b: [f64; 3])
     format!("bl/{solid}/{}", e["name"].as_str().unwrap())
 }
 
+/// The name of the vertex of an `inspect` body at `p` (meters).
+fn vertex_name(body: &serde_json::Value, p: [f64; 3]) -> String {
+    body["vertices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| (0..3).all(|k| (v["point"][k].as_f64().unwrap() - p[k]).abs() < 1e-9))
+        .map(|v| v["name"].as_str().unwrap().to_owned())
+        .unwrap_or_else(|| panic!("no vertex at {p:?}"))
+}
+
 /// The circle edge of an `inspect` body of radius `r` about a centre at
 /// `c` (meters), as a reference into solid `solid` of part `bl`.
 fn circle_at(body: &serde_json::Value, solid: &str, c: [f64; 3], r: f64) -> String {
@@ -2005,6 +2016,82 @@ fn bodied() -> (tempfile::TempDir, ryucad::session::Session) {
         json!({"type": "split", "id": "trim", "target": "s", "plane": "sp/end",
         "keep": "behind"}),
     );
+    // Part `sm`: a plate with rectangular reliefs by default, a tray of four
+    // flanges set back 5 mm, one corner 8 mm; and a Z bent section with a
+    // deduction, one flange on its top edge.
+    call(&mut s, "part.create", json!({"part": "sm"}));
+    add(
+        &mut s,
+        "sm",
+        json!({"type": "sketch", "id": "s", "plane": "xy"}),
+    );
+    let mut ops = Vec::new();
+    for (i, at) in [[0, 0], [60, 0], [60, 40], [0, 40]].into_iter().enumerate() {
+        ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    for i in 1..=4 {
+        ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                        "start": format!("p{i}"), "end": format!("p{}", i % 4 + 1)}));
+    }
+    call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "sm", "sketch": "s", "ops": ops}),
+    );
+    add(
+        &mut s,
+        "sm",
+        json!({"type": "base_flange", "id": "plate", "sketch": "s",
+        "thickness": "1.5 mm", "radius": "1 mm", "allowance": {"k_factor": "0.44"},
+        "relief": {"kind": "rectangular", "width": "1 mm", "depth": "0.5 mm"}}),
+    );
+    let b = body(&mut s, "sm", "plate");
+    let z = 1.5;
+    let c = [
+        [0.0, 0.0, z],
+        [60.0, 0.0, z],
+        [60.0, 40.0, z],
+        [0.0, 40.0, z],
+    ];
+    let rims: Vec<String> = (0..4)
+        .map(|i| edge_between(&b, "plate", mm(c[i]), mm(c[(i + 1) % 4])).replace("bl/", "sm/"))
+        .collect();
+    let far = format!("sm/plate/{}", vertex_name(&b, mm(c[2])));
+    add(
+        &mut s,
+        "sm",
+        json!({"type": "flange", "id": "tray", "edges": rims, "angle": "90 deg",
+        "length": "15 mm", "setback": "5 mm", "ends": [{"vertex": far, "setback": "8 mm"}]}),
+    );
+    add(
+        &mut s,
+        "sm",
+        json!({"type": "sketch", "id": "zs", "plane": "xy"}),
+    );
+    let mut ops = Vec::new();
+    for (i, at) in [[100, 0], [120, 0], [120, 25], [145, 25]]
+        .into_iter()
+        .enumerate()
+    {
+        ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    for i in 1..=3 {
+        ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                        "start": format!("p{i}"), "end": format!("p{}", i + 1)}));
+    }
+    call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "sm", "sketch": "zs", "ops": ops}),
+    );
+    add(
+        &mut s,
+        "sm",
+        json!({"type": "base_flange", "id": "z", "sketch": "zs",
+        "thickness": "1 mm", "radius": "2 mm", "depth": "30 mm", "allowance": {"deduction": "2.4 mm"}}),
+    );
     (dir, s)
 }
 
@@ -2058,6 +2145,28 @@ fn mirrors_section(golden: &mut Golden) {
 
 fn splits_section(golden: &mut Golden) {
     bodied_section(golden, "splits", "sp");
+}
+
+fn sheet_metal_section(golden: &mut Golden) {
+    bodied_section(golden, "sheet_metal", "sm");
+}
+
+/// The sheet metal part's `sheet.get` answers for both solids, canonical.
+fn sheet_metal_report_section(golden: &mut Golden) {
+    let mut s = golden.section("sheet_metal_report");
+    let (_dir, mut session) = bodied();
+    for solid in ["plate", "z"] {
+        let v = ryucad::server::handle(
+            &mut session,
+            ryucad::proto::Request::from_rpc(
+                "sheet.get",
+                Some(serde_json::json!({"part": "sm", "solid": solid})),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        s.str(&ryucad::doc::canonical::to_string(&v));
+    }
 }
 
 /// How the swept part's sketch is drawn: `sketch.get` at each quality,
@@ -3015,8 +3124,11 @@ fn imported() -> (tempfile::TempDir, ryucad::session::Session) {
     let mut s = ryucad::session::Session::open(dir.path()).unwrap();
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../ryustep/tests/data/occt/spline_revolve.stp");
-    let req = ryucad::proto::Request::from_rpc("import", Some(serde_json::json!({"path": path})))
-        .unwrap();
+    let req = ryucad::proto::Request::from_rpc(
+        "import",
+        Some(serde_json::json!({"solid": true, "path": path})),
+    )
+    .unwrap();
     ryucad::server::handle(&mut s, req).unwrap();
     (dir, s)
 }
@@ -3129,7 +3241,7 @@ fn imports_section(golden: &mut Golden) {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../ryustep/tests/data/occt")
                 .join(f);
-            let params = serde_json::json!({"path": path});
+            let params = serde_json::json!({"solid": true, "path": path});
             let req = ryucad::proto::Request::from_rpc("import", Some(params)).unwrap();
             pool.install(|| ryucad::server::handle(&mut session, req))
                 .unwrap_or_else(|e| panic!("{f}: {e}"));
@@ -3153,6 +3265,112 @@ fn imports_section(golden: &mut Golden) {
                 for x in p.origin_m.iter().chain(&p.z).chain(&p.x) {
                     out.push(format!("{:016x}", x.to_bits()));
                 }
+            }
+        }
+        runs.push(out);
+    }
+    assert_eq!(runs[0], runs[1], "one thread and four");
+    for x in &runs[0] {
+        s.str(x);
+    }
+}
+
+/// Files OCCT wrote and the committed corpus's smallest NIST body, each
+/// imported as a reference (design 364): every reference's body hash,
+/// counts, its report's counts, its faces' names; its STEP export (the
+/// file's own representation passed through) and binary STL; `mass` of
+/// the closed ones and `measure` of each. Built on one thread and on four.
+/// The larger NIST bodies are left out: a debug build references them in
+/// seconds each.
+fn reference_imports_section(golden: &mut Golden) {
+    let mut s = golden.section("reference_imports");
+    let files = [
+        "../ryustep/tests/data/occt/box_ap214.stp",
+        "../ryustep/tests/data/occt/cylinder.stp",
+        "../ryustep/tests/data/occt/torus.stp",
+        "../ryustep/tests/data/occt/plate_hole.stp",
+        "../ryustep/tests/data/occt/nurbs_cylinder.stp",
+        "../ryustep/tests/data/occt/spline_revolve.stp",
+        "../ryustep/tests/corpus/nist_ctc_01_asme1_rd.stp",
+    ];
+    let mut runs = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        ryucad::server::init(dir.path(), None).unwrap();
+        let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+        let call = |session: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+            let req = ryucad::proto::Request::from_rpc(m, Some(p)).unwrap();
+            pool.install(|| ryucad::server::handle(session, req))
+        };
+        call(
+            &mut session,
+            "materials.set",
+            serde_json::json!({"name": "steel", "density": "7850 kg/m^3", "default": true}),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        for f in files {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f);
+            call(&mut session, "import", serde_json::json!({"path": path}))
+                .unwrap_or_else(|e| panic!("{f}: {e}"));
+        }
+        let parts: Vec<Id> = session.project().parts.keys().cloned().collect();
+        for part in &parts {
+            let r = pool.install(|| session.rebuilt(part).unwrap().clone());
+            assert_eq!(r.failed(), 0, "{part}: {:?}", r.features);
+            out.push(part.to_string());
+            for (id, o) in &r.features {
+                let o = o.as_ref().unwrap();
+                out.push(id.to_string());
+                if let ryucad::rebuild::Output::Solids(m) = o
+                    && let Some(rep) = &m.import
+                {
+                    out.push(rep["reference"].to_string());
+                }
+                for (solid, b) in o.solids() {
+                    assert!(b.reference, "{part}/{solid}");
+                    out.push(solid.to_string());
+                    out.push(b.hash.clone());
+                    let c = b.body.counts();
+                    out.push(format!("{} {} {}", c.faces, c.edges, c.vertices));
+                    let mut names: Vec<String> = b
+                        .body
+                        .faces()
+                        .map(|f| b.body.face(f).unwrap().name.to_string())
+                        .collect();
+                    names.sort();
+                    out.push(format!("{:x}", md(names.join(",").as_bytes())));
+                    let of = format!("{part}/{solid}");
+                    let v = call(
+                        &mut session,
+                        "measure",
+                        serde_json::json!({"entities": [of]}),
+                    )
+                    .unwrap();
+                    out.push(v["area"].to_string());
+                    match call(&mut session, "mass", serde_json::json!({"of": of})) {
+                        Ok(v) => out.push(format!("{} {}", v["volume"], v["mass"])),
+                        Err(e) => out.push(format!("{:?} {}", e.code, e.details["reason"])),
+                    }
+                }
+            }
+            for format in ["step", "stl"] {
+                let ask = ryucad::export::Ask {
+                    part: part.to_string(),
+                    format: Some(format.into()),
+                    time_stamp: Some("2026-11-06T00:00:00".into()),
+                    chord: (format == "stl").then(|| "0.05 mm".into()),
+                    angle: (format == "stl").then(|| "20 deg".into()),
+                    ..Default::default()
+                };
+                let a = pool
+                    .install(|| ryucad::export::export_stamped(&mut session, ask, "0.0.0"))
+                    .unwrap_or_else(|e| panic!("{part} {format}: {e}"));
+                out.push(format!("{:x}", md(&a.binary.unwrap())));
             }
         }
         runs.push(out);
@@ -3804,6 +4022,8 @@ sections! {
     offsets => offsets_section(&mut golden),
     mirrors => mirrors_section(&mut golden),
     splits => splits_section(&mut golden),
+    sheet_metal => sheet_metal_section(&mut golden),
+    sheet_metal_report => sheet_metal_report_section(&mut golden),
     holes => drilled_section(&mut golden, "holes", true),
     patterns => drilled_section(&mut golden, "patterns", false),
     sketch_drawing => sketch_drawing_section(&mut golden),
@@ -3816,6 +4036,7 @@ sections! {
     interference => interference_section(&mut golden),
     measure => measure_section(&mut golden),
     imports => imports_section(&mut golden),
+    reference_imports => reference_imports_section(&mut golden),
     exports => exports_section(&mut golden),
     formats => formats_section(&mut golden),
     views => views_section(&mut golden),

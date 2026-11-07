@@ -1,7 +1,7 @@
 //! The tweak engine: the offset's local build, its plan given motions.
 
 use super::Motion;
-use super::classify::{Class, classes};
+use super::classify::{Class, classes_with};
 use super::{curves, extend, vertices};
 use crate::geom::Surface;
 use crate::name::{Event, Journal, Name, OpKey};
@@ -18,6 +18,10 @@ pub(crate) struct Changes {
     pub(crate) motion: BTreeMap<FaceId, Motion>,
     pub(crate) surface: BTreeMap<FaceId, Surface>,
     pub(crate) senses: BTreeMap<FaceId, Sense>,
+    /// Each drafted face's hinge (a draft's only).
+    pub(crate) drafts: BTreeMap<FaceId, super::draft::Drafted>,
+    /// The parting line's edges, which stay where they are.
+    pub(crate) hinges: BTreeSet<crate::topo::EdgeId>,
 }
 
 /// The tweaked body and its journal, or the refusal, under `meter`.
@@ -36,7 +40,7 @@ fn built(
     changes: &Changes,
     meter: &Meter,
 ) -> Result<(Body, Journal), Error> {
-    let class = classes(body, &changes.motion)?;
+    let class = classes_with(body, &changes.motion, &changes.hinges)?;
     let surface = body
         .faces()
         .map(|f| {
@@ -56,7 +60,7 @@ fn built(
         curves::offset_classes(body, &changes.motion, &class),
     );
     extend::extend(&mut plan, &class)?;
-    let geo = curves::curves(&plan, &class, meter)?;
+    let geo = curves::curves(&plan, &class, &changes.drafts, meter)?;
     let rails = curves::rails(&plan, meter)?;
     let vgeo = vertices::vertices(&plan, &class, &geo, &rails, meter)?;
     let side = Side {
@@ -84,7 +88,7 @@ fn kept_changes(
         changed.insert(body.faces[*f].name);
     }
     for (&e, &c) in class {
-        if c != Class::Kept {
+        if c != Class::Kept && c != Class::Hinge {
             changed.insert(body.edges[e].name);
         }
     }
@@ -95,7 +99,8 @@ fn kept_changes(
         }
     }
     for (&v, g) in vgeo {
-        if g.points[0] != body.vertices[v].point {
+        let p = body.vertices[v].point;
+        if g.points[0] != p && !on_hinges(body, changes, v, g.points[0]) {
             changed.insert(body.vertices[v].name);
         }
     }
@@ -107,6 +112,25 @@ fn kept_changes(
         }
     }
     out
+}
+
+/// Whether vertex `v`, found at `x`, stays on its drafted faces' hinges:
+/// every changed face round it is drafted and `x` lies within resolution
+/// of where it was (found again on the drafted surfaces, it may differ by
+/// rounding alone). Other tweaks' vertices are judged by their bits.
+fn on_hinges(body: &Body, changes: &Changes, v: VertexId, x: crate::geom::Point3) -> bool {
+    let mut any = false;
+    for e in body.vertex_edges(v) {
+        for fin in body.edge_fins(e) {
+            let f = body.loops[body.fins[fin].loop_].face;
+            match changes.motion.get(&f) {
+                None => {}
+                Some(Motion::Draft { .. }) => any = true,
+                Some(_) => return false,
+            }
+        }
+    }
+    any && x.distance(body.vertices[v].point) <= crate::tol::LINEAR_RESOLUTION
 }
 
 /// The shared code's offset refusals as a tweak's.
@@ -156,7 +180,7 @@ mod tests {
         let changes = Changes {
             motion: BTreeMap::from([(top, Motion::Rigid(up))]),
             surface: BTreeMap::from([(top, b.surfaces[b.faces[top].surface].transformed(&up))]),
-            senses: BTreeMap::new(),
+            ..Changes::default()
         };
         // unmetered: a unit test.
         let (o, j) = run(OpKey(8), &b, &changes, &crate::work::Meter::free()).unwrap();

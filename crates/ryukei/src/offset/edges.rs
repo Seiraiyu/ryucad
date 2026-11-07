@@ -651,9 +651,10 @@ fn traced(
     let at = edge.name;
     let faces = fins.map(|f| plan.face_of(f));
     let surfaces = faces.map(|f| &plan.surface[&f]);
-    let curve = &body.curves[edge.curve];
+    let mut curve = &body.curves[edge.curve];
     let [t0, t1] = edge.interval;
     let reach = plan.reach_of(e);
+    let mut carried = None;
     let range = match curve {
         Curve::Line(_) => [t0 - 3.0 * reach, t1 + 3.0 * reach],
         Curve::Circle(c) if t1 - t0 < core::f64::consts::TAU => {
@@ -661,8 +662,30 @@ fn traced(
                 (3.0 * reach / c.radius()).min((core::f64::consts::TAU - (t1 - t0)) / 2.0 * 0.9);
             [t0 - m, t1 + m]
         }
+        // A drafted face's vertex slides along its hinge's rulings, so a
+        // spline edge there is carried on past its ends as a line is
+        // (plan 9.B): every other edge keeps its interval, bit for bit.
+        _ if faces
+            .iter()
+            .any(|&f| matches!(plan.motion_of(f), crate::tweak::Motion::Draft { .. })) =>
+        {
+            let m = [t0, t1].map(|t| {
+                let v = curve.eval(t).d1.length();
+                if v > 0.0 { 3.0 * reach / v } else { 0.0 }
+            });
+            match crate::intersect::extended_curve(curve, edge.interval, m) {
+                Some((c, r)) => {
+                    carried = Some(c);
+                    r
+                }
+                None => [t0, t1],
+            }
+        }
         _ => [t0, t1],
     };
+    if let Some(c) = &carried {
+        curve = c;
+    }
     let uv = |k: usize, t: f64| body.fin_uv(fins[k], t.clamp(t0, t1)).map(|p| [p.x, p.y]);
     let solve = |t: f64| -> Option<(Point3, Vector3, [[f64; 2]; 2])> {
         let c = curve.eval(t);

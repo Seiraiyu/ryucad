@@ -736,7 +736,7 @@ fn source<'a>(
         {
             crate::rebuild::not_a_solid(part, solids, id, "solid", s)
         } else {
-            e
+            crate::rebuild::retag(e, "solid")
         }
     })
 }

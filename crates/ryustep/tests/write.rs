@@ -1015,3 +1015,48 @@ fn fitted_pcurves_come_back_to_a_fixed_point_in_millimetres() {
     );
     assert_eq!(moved, Vec::<(String, String)>::new());
 }
+
+#[test]
+fn a_passed_representation_reads_back_as_its_products_body() {
+    let path = format!(
+        "{}/tests/data/occt/box_ap214.stp",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let bytes = std::fs::read(path).unwrap();
+    let file = ryustep::part21::parse(&bytes).unwrap();
+    let opened = ryustep::open(&bytes).unwrap();
+    let h = &opened.held[0];
+    let cut =
+        ryustep::part21::closure::cut(&file, h.representation, h.context, &h.items, "r").unwrap();
+    let model = WriteModel {
+        products: vec![Product {
+            id: "p".into(),
+            name: "p".into(),
+            ..Default::default()
+        }],
+    };
+    let o = opts(LengthUnit::Millimeter);
+    let passed = |instances| ryustep::Passed {
+        product: 0,
+        instances,
+    };
+    let out = ryustep::write_with(&model, &[passed(cut)], &o).unwrap();
+    let again = ryustep::open(&out).unwrap();
+    assert_eq!(again.held.len(), 1);
+    assert_eq!(again.held[0].definition, Some(0));
+    // The same reference, named the same, under one key.
+    let ro = ReadOptions {
+        key: OpKey::from_bytes(b"k"),
+        heal: Default::default(),
+    };
+    let a = opened.reference(0, &ro).result.unwrap().0;
+    let b = again.reference(0, &ro).result.unwrap().0;
+    assert_eq!(a.dump(), b.dump());
+    // Written again, the same bytes.
+    let file2 = ryustep::part21::parse(&out).unwrap();
+    let h2 = &again.held[0];
+    let cut2 = ryustep::part21::closure::cut(&file2, h2.representation, h2.context, &h2.items, "r")
+        .unwrap();
+    let out2 = ryustep::write_with(&model, &[passed(cut2)], &o).unwrap();
+    assert_eq!(out, out2);
+}

@@ -404,6 +404,36 @@ pub struct FeatureFields {
     /// Which sides a split keeps: `both` (the default) or `behind`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep: Option<String>,
+    /// A base flange's bend allowance: `{"k_factor": n}` or
+    /// `{"deduction": length}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowance: Option<Value>,
+    /// A base flange's or flange's relief: `{"kind": none | rectangular |
+    /// obround | tear, width?, depth?}`; `""` drops a flange's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relief: Option<Value>,
+    /// A flange's length (also read from an extent of only a length).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<Value>,
+    /// Where a flange's length is measured from: outer_mould, inner_mould
+    /// or tangent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured: Option<String>,
+    /// Where a flange's bend sits: material_inside, material_outside or
+    /// bend_outside.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<String>,
+    /// A flange's setback at both ends of every edge; `""` for none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setback: Option<Value>,
+    /// A flange's ends, each `{vertex, setback?, relief?}`, `[]` for none:
+    /// given, they replace them all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ends: Option<Value>,
+    /// The side face each named edge of a flange folds towards, each
+    /// `{edge, side}`; `[]` takes every side away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sides: Option<Value>,
 }
 
 impl FeatureFields {
@@ -868,6 +898,18 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         below: Option<String>,
     },
+    /// A solid read as sheet metal, as the part shows it: its thickness,
+    /// flanges and bend table, each bend's allowance worked out to its
+    /// developed length. `solid` is the part's one sheet metal solid
+    /// unless named.
+    #[serde(rename = "sheet.get")]
+    SheetGet {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        solid: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     /// Mass properties of a part or an assembly (its ID), a solid
     /// (`<part>/<solid>`) or an occurrence (`<asm>/<path>`): volume, area,
     /// centre of mass and, where every part has a material with a
@@ -1040,7 +1082,9 @@ pub enum Request {
     /// (`part` names the file's one root), or with `into` adds one
     /// product's bodies to a part. With `update`, the file's bytes
     /// replace that imported file and what was made of it follows.
-    /// `dry_run` answers the plan, writing nothing.
+    /// `dry_run` answers the plan, writing nothing. Bodies are kept as
+    /// references (the file's topology, shown and read, never changed)
+    /// unless `solid` asks for healed solids.
     #[serde(rename = "import")]
     Import {
         path: String,
@@ -1058,6 +1102,24 @@ pub enum Request {
         /// A file under `imports/` to replace: re-import.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         update: Option<String>,
+        /// Heal each body into a checked solid, instead of keeping it as
+        /// a reference (design 364).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        solid: bool,
+    },
+    /// Sets an import feature's mode (`feature`), or every import feature
+    /// of `part`'s: a healed solid, or with `reference` a reference
+    /// (design 364). One logged, undoable change; answers the part's
+    /// rebuild and `converted`.
+    #[serde(rename = "import.convert")]
+    ImportConvert {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feature: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reference: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
     },
     /// Writes a part or an assembly as a file: at the working files, a Git
     /// revision `rev`, or a release `label:<L>`; in `format` (`step`,
@@ -1817,6 +1879,7 @@ impl Request {
                 | Request::AnnotationDelete { .. }
                 | Request::ReleasePropose { dry_run: false, .. }
                 | Request::Import { dry_run: false, .. }
+                | Request::ImportConvert { .. }
                 | Request::ReleaseObsolete { .. }
                 | Request::ReleaseSync { .. }
                 | Request::SketchEdit { .. }

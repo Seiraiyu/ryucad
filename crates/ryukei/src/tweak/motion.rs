@@ -14,6 +14,15 @@ pub(crate) enum Motion {
     Rigid(Rigid),
     /// To its foot on its new surface.
     Replace,
+    /// Tilted to `angle` (signed, radians) from `pull` (the face's own,
+    /// after a flip or a parting line's side) about its hinge: to its
+    /// foot on its drafted surface, as a replacement. Two faces drafted
+    /// alike compare equal, which keeps their tangency (see
+    /// `tweak::classify`).
+    Draft {
+        pull: crate::geom::UnitVector3,
+        angle: f64,
+    },
 }
 
 impl Motion {
@@ -22,7 +31,7 @@ impl Motion {
     pub(crate) fn distance(&self) -> f64 {
         match self {
             Self::Offset(d) => *d,
-            Self::Rigid(_) | Self::Replace => 0.0,
+            Self::Rigid(_) | Self::Replace | Self::Draft { .. } => 0.0,
         }
     }
 }
@@ -40,7 +49,7 @@ pub(crate) fn apply(
     match m {
         Motion::Offset(d) => (p + n * *d, n),
         Motion::Rigid(r) => (r.apply_point(p), r.apply_vector(n)),
-        Motion::Replace => {
+        Motion::Replace | Motion::Draft { .. } => {
             let foot = new.project(p);
             let (u, v) = foot.param;
             let sign = if sense == Sense::Forward { 1.0 } else { -1.0 };
@@ -105,6 +114,31 @@ mod tests {
         assert_eq!(m, n);
         let (_, m) = apply(&Motion::Replace, &top, Sense::Reversed, p, n);
         assert_eq!(m, -n);
+    }
+
+    #[test]
+    fn a_draft_takes_the_foot_on_its_drafted_surface() {
+        // A wall at x = 1 drafted 0.1 rad about z = 0, pull +z: its plane
+        // through the hinge line, normal (cos, 0, sin).
+        let (s, c) = crate::math::sin_cos(0.1);
+        let wall = Surface::Plane(Plane::new(
+            Frame::new(
+                Point3::new(1.0, 0.0, 0.0),
+                Vector3::new(c, 0.0, s),
+                Vector3::new(0.0, 1.0, 0.0),
+            )
+            .unwrap(),
+        ));
+        let m = Motion::Draft {
+            pull: unit(0.0, 0.0, 1.0),
+            angle: 0.1,
+        };
+        assert_eq!(m.distance(), 0.0);
+        let p = Point3::new(1.0, 0.2, 0.3);
+        let (q, n) = apply(&m, &wall, Sense::Forward, p, Vector3::new(1.0, 0.0, 0.0));
+        let want = p - Vector3::new(c, 0.0, s) * (0.3 * s);
+        assert!(q.distance(want) < 1e-12, "{q:?}");
+        assert!((n - Vector3::new(c, 0.0, s)).length() < 1e-12);
     }
 
     #[test]
