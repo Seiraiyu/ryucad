@@ -254,6 +254,10 @@ fn refold_refused(id: &Id, at: &str, msg: String) -> Error {
         .with("pointer", at)
 }
 
+/// A refold's target as it sees it, its unfold's flat and the strips it
+/// folds (`None`: every one).
+type Folding<'a> = (&'a Built, Arc<Flat>, Option<Vec<Name>>);
+
 /// What refold `id` folds and by what: its target as it sees it and its
 /// unfold's flat, with the strips it folds. Its unfold must be an unfold
 /// of its target listed before it, with no refold of it between; each of
@@ -264,7 +268,7 @@ pub(crate) fn refold_resolve<'a>(
     id: &Id,
     x: &Refold,
     before: &'a dyn Results,
-) -> Result<(&'a Built, Arc<Flat>, Option<Vec<Name>>)> {
+) -> Result<Folding<'a>> {
     let target = &x.target;
     let u = &x.unfold;
     match part.features.get(u) {
