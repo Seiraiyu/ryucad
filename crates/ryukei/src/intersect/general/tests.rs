@@ -282,6 +282,7 @@ fn corner_face<'a>(a: &'a Surface, b: &'a Surface, m: &'a Meter<'a>) -> Face<'a>
         side: 0,
         param: 1,
         at: CORNER_AT,
+        reach: [[f64::NEG_INFINITY, f64::INFINITY]; 3],
     }
 }
 
@@ -314,6 +315,23 @@ fn a_face_crossing_rounding_hides_is_certified_by_inflation() {
         .unwrap();
     let (_, jac) = face.enclose(b).unwrap();
     assert_eq!(krawczyk3(at, jac, b), Some(true));
+}
+
+#[test]
+fn inflation_stays_within_the_faces_reach() {
+    let (a, b) = crate::testing::footed_corner_pair();
+    let m = Meter::free(); // unmetered: a test
+    let mut face = corner_face(&a, &b, &m);
+    let x = CORNER_X[0];
+    let (_, b) = face.inflated(x).expect("certified");
+    // The certified box reaches past `x`: held to `x`, inflation gives up
+    // (and splitting decides), as it does where an offset's loose
+    // enclosures, not rounding, make a box outgrown.
+    assert!((0..3).any(|k| b[k][0] < x[k][0] || x[k][1] < b[k][1]));
+    face.reach = x;
+    assert_eq!(face.inflated(x), None);
+    face.reach = b;
+    assert!(face.inflated(x).is_some());
 }
 
 #[test]

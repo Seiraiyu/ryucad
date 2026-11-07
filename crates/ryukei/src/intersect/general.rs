@@ -1007,6 +1007,7 @@ impl<'a> Tracer<'a> {
             side,
             param,
             at,
+            reach: free.map(|[lo, hi]| [lo - (hi - lo), hi + (hi - lo)]),
         };
         let mut roots = Vec::new();
         let mut budget = FACE_BOXES;
@@ -1569,6 +1570,10 @@ struct Face<'a> {
     side: usize,
     param: usize,
     at: f64,
+    /// How far epsilon-inflation may grow a box ([`Self::inflated`]): the
+    /// face's own search box grown by its width each way, so a certified
+    /// box reaches no further than a neighbouring leaf's face.
+    reach: [[f64; 2]; 3],
 }
 
 impl Face<'_> {
@@ -1696,7 +1701,13 @@ impl Face<'_> {
     /// (epsilon-inflation). `x` then holds no crossing but that one.
     fn inflated(&self, x: [[f64; 2]; 3]) -> Option<([f64; 3], [[f64; 2]; 3])> {
         let mid = |v: Iv| (v.lo() + v.hi()) / 2.0;
+        let within = |b: [[f64; 2]; 3]| {
+            (0..3).all(|k| self.reach[k][0] <= b[k][0] && b[k][1] <= self.reach[k][1])
+        };
         let r = self.newton(x.map(|[a, b]| (a + b) / 2.0))?;
+        if !within(r.map(|v| [v, v])) {
+            return None;
+        }
         let (em, jm) = self.enclose(r.map(|v| [v, v]))?;
         let y = inverse3(jm.map(|row| row.map(mid)))?;
         let spread: [f64; 3] = core::array::from_fn(|k| {
@@ -1716,6 +1727,12 @@ impl Face<'_> {
                     .max(x[k][1] - r[k]);
                 [r[k] - h, r[k] + h]
             });
+            // Grown past the face's reach, the box's width is the
+            // enclosures' looseness (an offset's hull over its cells), not
+            // rounding: leave the box to splitting.
+            if !within(b) {
+                return None;
+            }
             let c = b.map(|[lo, hi]| (lo + hi) / 2.0);
             let (at, _) = self.enclose(c.map(|v| [v, v]))?;
             let (_, jac) = self.enclose(b)?;
