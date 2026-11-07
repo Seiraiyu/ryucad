@@ -3648,6 +3648,8 @@ sections! {
     bent => bent_section,
     silhouettes => silhouettes_section,
     hidden_lines => hidden_lines_section,
+    tweaks => tweaks_section,
+    drafts => drafts_section,
 }
 
 /// Self-union (design 299, plan 14.C): two 4 m blocks crossing as one
@@ -4175,5 +4177,239 @@ fn hidden_lines_section(golden: &mut Golden) {
                 ));
             }
         });
+    }
+}
+
+/// Face tweaks (design 384, plan 9.A): a box's top raised and tilted, its
+/// top and a side offset, a hole moved across its plate, a rounded box's
+/// side offset with its tangent chain, and a top replaced by a tilted
+/// plane.
+fn tweaks_section(golden: &mut Golden) {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::{Frame, Plane, Point3, Surface, Vector3};
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::tweak::{
+        MoveSpec, OffsetFacesSpec, ReplaceSpec, move_faces, offset_faces, replace_faces,
+    };
+    let mut s = golden.section("tweaks");
+    let key = OpKey(0x7477_6b00);
+    let k = OpKey(0x7477_6b01);
+    let face = |r: FaceRole| Name::derive(key, Role::Face(r), &[]);
+    let turn = |c: Point3, axis: Vector3, angle: f64| {
+        let to = Rigid::translation(c.to_vector());
+        let back = Rigid::translation(-c.to_vector());
+        to.then_after(&Rigid::rotation(axis.normalize().unwrap(), angle).then_after(&back))
+    };
+    let moved = |faces: Vec<Name>, motion: Rigid| MoveSpec {
+        faces,
+        motion,
+        tangent: false,
+    };
+    let (b, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let top = face(FaceRole::PlusZ);
+    for motion in [
+        Rigid::translation(Vector3::new(0.0, 0.0, 0.1)),
+        turn(Point3::new(0.5, 0.3, 0.4), Vector3::new(0.0, 1.0, 0.0), 0.2),
+    ] {
+        let (o, j) = move_faces(k, &b, &moved(vec![top], motion)).unwrap();
+        hash_body(&mut s, &o, &j);
+    }
+    let out = OffsetFacesSpec {
+        faces: vec![(top, 0.05), (face(FaceRole::PlusX), -0.03)],
+        tangent: false,
+    };
+    let (o, j) = offset_faces(k, &b, &out).unwrap();
+    hash_body(&mut s, &o, &j);
+    // A plate with a through hole, the hole moved 0.2 along x.
+    let (plate, _) = primitive::block(key, 1.0, 1.0, 0.2, &Rigid::IDENTITY).unwrap();
+    let (pin, _) = primitive::cylinder(OpKey(0x7477_6b02), 0.1, 0.4, &Rigid::IDENTITY).unwrap();
+    let (drilled, _) = boolean(
+        OpKey(0x7477_6b03),
+        BooleanOp::Subtract,
+        &plate,
+        &[Tool {
+            key: ToolKey(1),
+            body: &pin,
+            place: Rigid::translation(Vector3::new(0.5, 0.5, -0.1)),
+        }],
+    )
+    .unwrap();
+    let wall: Vec<Name> = drilled
+        .faces()
+        .filter(|&f| {
+            let face = drilled.face(f).unwrap();
+            matches!(drilled.surface(face.surface).unwrap(), Surface::Cylinder(_))
+        })
+        .map(|f| drilled.face(f).unwrap().name)
+        .collect();
+    let along = Rigid::translation(Vector3::new(0.2, 0.0, 0.0));
+    let (o, j) = move_faces(k, &drilled, &moved(wall, along)).unwrap();
+    hash_body(&mut s, &o, &j);
+    // A box with every edge rounded to 0.1, one side offset 0.05 with its
+    // tangent chain (every face).
+    let sides = [
+        FaceRole::PlusX,
+        FaceRole::MinusX,
+        FaceRole::PlusY,
+        FaceRole::MinusY,
+        FaceRole::PlusZ,
+        FaceRole::MinusZ,
+    ];
+    let opposite = |a: FaceRole, c: FaceRole| {
+        matches!(
+            (a, c),
+            (FaceRole::PlusX, FaceRole::MinusX)
+                | (FaceRole::PlusY, FaceRole::MinusY)
+                | (FaceRole::PlusZ, FaceRole::MinusZ)
+        )
+    };
+    let mut blends = Vec::new();
+    for (i, &a) in sides.iter().enumerate() {
+        for &c in &sides[i + 1..] {
+            if !opposite(a, c) {
+                let mut f = [face(a), face(c)];
+                f.sort();
+                blends.push(ryukei::blend::EdgeBlend {
+                    edge: Name::derive(key, Role::Edge, &f),
+                    kind: ryukei::blend::BlendKind::Fillet { radius: 0.1 },
+                });
+            }
+        }
+    }
+    let (rounded, _) = ryukei::blend::blend(OpKey(0x7477_6b04), &b, &blends).unwrap();
+    let chain = OffsetFacesSpec {
+        faces: vec![(face(FaceRole::PlusX), 0.05)],
+        tangent: true,
+    };
+    let (o, j) = offset_faces(k, &rounded, &chain).unwrap();
+    hash_body(&mut s, &o, &j);
+    // The box's top replaced by a plane tilted 0.15 about its middle.
+    let tilt = turn(
+        Point3::new(0.5, 0.3, 0.4),
+        Vector3::new(0.0, 1.0, 0.0),
+        -0.15,
+    );
+    let tilted = Surface::Plane(Plane::new(Frame::WORLD))
+        .transformed(&tilt.then_after(&Rigid::translation(Vector3::new(0.0, 0.0, 0.4))));
+    let (o, j) = replace_faces(
+        k,
+        &b,
+        &ReplaceSpec {
+            faces: vec![(top, tilted)],
+        },
+    )
+    .unwrap();
+    hash_body(&mut s, &o, &j);
+}
+
+/// Drafts (design 384, plan 9.B): a box's walls about its bottom and its
+/// middle, a boss about its foot, a hole about the plate's bottom, and a
+/// ledged box's eight walls about its parting line; each body with its
+/// report's angles.
+fn drafts_section(golden: &mut Golden) {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::{Point3, Surface, UnitVector3, Vector3};
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::topo::Body;
+    use ryukei::tweak::{DraftFace, DraftSpec, Hinge, draft};
+    let mut s = golden.section("drafts");
+    let key = OpKey(0x6466_7400);
+    let k = OpKey(0x6466_7401);
+    let face = |r: FaceRole| Name::derive(key, Role::Face(r), &[]);
+    let spec = |faces: &[Name], angle: f64, hinge: Hinge| DraftSpec {
+        pull: UnitVector3::exact(Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+        angle,
+        hinge,
+        faces: faces
+            .iter()
+            .map(|&face| DraftFace {
+                face,
+                angle: None,
+                flip: false,
+            })
+            .collect(),
+        tangent: false,
+    };
+    let about = |z: f64| Hinge::Neutral {
+        origin: Point3::new(0.0, 0.0, z),
+    };
+    let faces_where = |b: &Body, pick: &dyn Fn(&Surface) -> bool| -> Vec<Name> {
+        let mut out: Vec<Name> = b
+            .faces()
+            .filter(|&f| pick(b.surface(b.face(f).unwrap().surface).unwrap()))
+            .map(|f| b.face(f).unwrap().name)
+            .collect();
+        out.sort();
+        out
+    };
+    let cylinders = |s: &Surface| matches!(s, Surface::Cylinder(_));
+    let vertical = |s: &Surface| match s {
+        Surface::Plane(p) => p.frame().z().get().z.abs() < 1e-12,
+        _ => false,
+    };
+    let walls = [
+        FaceRole::PlusX,
+        FaceRole::MinusX,
+        FaceRole::PlusY,
+        FaceRole::MinusY,
+    ]
+    .map(face)
+    .to_vec();
+    let at = |x: f64, y: f64, z: f64| Rigid::translation(Vector3::new(x, y, z));
+    let combine = |op: BooleanOp, a: &Body, t: &Body, place: Rigid| {
+        let tool = Tool {
+            key: ToolKey(1),
+            body: t,
+            place,
+        };
+        boolean(OpKey(0x6466_7403), op, a, &[tool]).unwrap().0
+    };
+    let (b, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let (plate, _) = primitive::block(key, 1.0, 1.0, 0.2, &Rigid::IDENTITY).unwrap();
+    let (boss, _) = primitive::cylinder(OpKey(0x6466_7402), 0.1, 0.15, &Rigid::IDENTITY).unwrap();
+    let (pin, _) = primitive::cylinder(OpKey(0x6466_7402), 0.1, 0.4, &Rigid::IDENTITY).unwrap();
+    let bossed = combine(BooleanOp::Unite, &plate, &boss, at(0.5, 0.5, 0.15));
+    let drilled = combine(BooleanOp::Subtract, &plate, &pin, at(0.5, 0.5, -0.1));
+    let (low, _) = primitive::block(key, 1.0, 0.6, 0.2, &Rigid::IDENTITY).unwrap();
+    let (high, _) = primitive::block(OpKey(0x6466_7404), 0.8, 0.4, 0.2, &Rigid::IDENTITY).unwrap();
+    let ledged = combine(BooleanOp::Unite, &low, &high, at(0.1, 0.1, 0.2));
+    let parting: Vec<Name> = ledged
+        .edges()
+        .filter(|&e| {
+            let edge = ledged.edge(e).unwrap();
+            let c = ledged.curve(edge.curve).unwrap();
+            let [t0, t1] = edge.interval;
+            (c.point(t0).z - 0.2).abs() < 1e-12 && (c.point(t1).z - 0.2).abs() < 1e-12
+        })
+        .map(|e| ledged.edge(e).unwrap().name)
+        .collect();
+    let cases = [
+        (&b, spec(&walls, 0.05, about(0.0))),
+        (&b, spec(&walls, 0.05, about(0.2))),
+        (
+            &bossed,
+            spec(&faces_where(&bossed, &cylinders), 0.1, about(0.2)),
+        ),
+        (
+            &drilled,
+            spec(&faces_where(&drilled, &cylinders), 0.1, about(0.0)),
+        ),
+        (
+            &ledged,
+            spec(
+                &faces_where(&ledged, &vertical),
+                0.05,
+                Hinge::PartingLine(parting),
+            ),
+        ),
+    ];
+    for (body, sp) in &cases {
+        let (o, j, report) = draft(k, body, sp).unwrap();
+        hash_body(&mut s, &o, &j);
+        for a in &report.faces {
+            s.u64(a.face.to_u128() as u64);
+            s.f64(a.least);
+            s.f64(a.greatest);
+        }
     }
 }

@@ -12,7 +12,7 @@
 
 use crate::{BenchBlend, BenchKind, BenchProfile, Primitive, Soup};
 use ryukei::boolean::BooleanOp;
-use ryukei::geom::{Point3, Rigid};
+use ryukei::geom::{Point3, Rigid, Vector3};
 
 #[cxx::bridge(namespace = "ryukei_occt")]
 mod ffi {
@@ -93,6 +93,18 @@ mod ffi {
         fn offset_shape(s: &Shape, d: f64) -> Result<UniquePtr<Shape>>;
         fn thicken_sheet(s: &Shape, d: f64) -> Result<UniquePtr<Shape>>;
         fn thick_solid(s: &Shape, open: &[f64], thickness: f64) -> Result<UniquePtr<Shape>>;
+        fn draft_angle(
+            s: &Shape,
+            faces: &[f64],
+            cylinders: bool,
+            pull: &[f64],
+            angle: f64,
+            neutral: &[f64],
+            seconds: &mut f64,
+        ) -> Result<UniquePtr<Shape>>;
+        fn offset_on_faces(s: &Shape, faces: &[f64], distances: &[f64])
+        -> Result<UniquePtr<Shape>>;
+        fn face_normal(s: &Shape, x: f64, y: f64, z: f64) -> Vec<f64>;
         fn filling(
             s: &Shape,
             tangent: &[f64],
@@ -461,6 +473,53 @@ impl Solid {
         ffi::thick_solid(&self.0, &pts, thickness)
             .map(Self)
             .map_err(|e| e.to_string())
+    }
+
+    /// The faces nearest `faces` (or with `cylinders` every cylindrical
+    /// face) drafted by `angle` from `pull` about the plane through
+    /// `origin` square to `normal`, with `BRepOffsetAPI_DraftAngle`
+    /// (tangent faces propagated): the result and the seconds OCCT took,
+    /// finding the faces left out.
+    pub fn draft(
+        &self,
+        faces: &[Point3],
+        cylinders: bool,
+        pull: Vector3,
+        angle: f64,
+        origin: Point3,
+        normal: Vector3,
+    ) -> Result<(Self, f64), String> {
+        let pts: Vec<f64> = faces.iter().flat_map(|p| [p.x, p.y, p.z]).collect();
+        let neutral = [origin.x, origin.y, origin.z, normal.x, normal.y, normal.z];
+        let mut seconds = 0.0;
+        ffi::draft_angle(
+            &self.0,
+            &pts,
+            cylinders,
+            &[pull.x, pull.y, pull.z],
+            angle,
+            &neutral,
+            &mut seconds,
+        )
+        .map(|s| (Self(s), seconds))
+        .map_err(|e| e.to_string())
+    }
+
+    /// The faces nearest each point moved along their normals by their
+    /// distances, the rest staying, with `BRepOffset_MakeOffset`
+    /// (`SetOffsetOnFace`, joined by intersection).
+    pub fn offset_faces(&self, faces: &[(Point3, f64)]) -> Result<Self, String> {
+        let pts: Vec<f64> = faces.iter().flat_map(|(p, _)| [p.x, p.y, p.z]).collect();
+        let d: Vec<f64> = faces.iter().map(|&(_, d)| d).collect();
+        ffi::offset_on_faces(&self.0, &pts, &d)
+            .map(Self)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The outward normal of the face nearest `p`, at `p`'s foot on it.
+    pub fn face_normal(&self, p: Point3) -> Option<Vector3> {
+        let n = ffi::face_normal(&self.0, p.x, p.y, p.z);
+        (n.len() == 3).then(|| Vector3::new(n[0], n[1], n[2]))
     }
 }
 

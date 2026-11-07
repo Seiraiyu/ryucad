@@ -46,6 +46,7 @@ fn occt() {
         "TKFillet",
         "TKBool",
         "TKOffset",
+        "TKFeat",
         "TKShHealing",
         "TKXSBase",
         "TKDE",
