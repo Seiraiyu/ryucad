@@ -2216,6 +2216,8 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
             crate::body::report(part, f)
         }
         Feature::BaseFlange(_) | Feature::Flange(_) => crate::sheet_metal::report(p, f),
+        Feature::Unfold(u) => u.fields(),
+        Feature::Refold(r) => r.fields(),
         Feature::Hole(h) => hole_report(part, h),
         Feature::Pattern(x) => pattern_report(part, x),
         Feature::Revolve(r) => {
@@ -4482,6 +4484,12 @@ fn feature_edit(
                 let ty = f.type_name();
                 given.only(ty, crate::doc::body::request_fields(ty))?;
                 crate::body::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
+            }
+            Feature::Unfold(_) | Feature::Refold(_) => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "unfold and refold are added in 16.B's Task 8",
+                ));
             }
             f @ (Feature::BaseFlange(_) | Feature::Flange(_)) => {
                 let ty = f.type_name();

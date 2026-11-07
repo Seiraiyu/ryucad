@@ -556,7 +556,9 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Offset(_)
         | Feature::Mirror(_)
         | Feature::Split(_)
-        | Feature::Flange(_) => Err(Error::new(
+        | Feature::Flange(_)
+        | Feature::Unfold(_)
+        | Feature::Refold(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} makes no body of its own", f.type_name()),
         )
@@ -2287,6 +2289,14 @@ fn rebuild_with(
         ),
         Feature::Flange(x) => (
             crate::sheet_metal::flange(part, solids, id, x, before, run).map(solid),
+            None,
+        ),
+        Feature::Unfold(_) | Feature::Refold(_) => (
+            Err(Error::new(
+                Code::Internal,
+                format!("{} {id} is built from 16.B's Task 6", f.type_name()),
+            )
+            .with("feature", id)),
             None,
         ),
         Feature::Split(x) => (
