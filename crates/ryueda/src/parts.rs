@@ -517,6 +517,32 @@ pub fn catalogues_placed(p: &Project) -> Vec<&'static str> {
     used.into_iter().collect()
 }
 
+/// The distributors the placed parts' offers draw on, over every design
+/// that flattens, by name.
+pub fn distributors_placed(p: &Project) -> Vec<&'static ryueda_parts::distributor::Distributor> {
+    let mut used: Vec<&'static ryueda_parts::distributor::Distributor> = Vec::new();
+    for design in p.conn.designs.keys() {
+        let Ok(n) = crate::netlist::flatten(p, design) else {
+            continue;
+        };
+        for (_, c, _) in crate::erc::placed_by_libcomp(p, &n) {
+            for o in c
+                .offers
+                .iter()
+                .chain(c.alternates.iter().flat_map(|a| &a.offers))
+            {
+                for d in ryueda_parts::distributor::for_supplier(&o.supplier) {
+                    if !used.iter().any(|u| u.name == d.name) {
+                        used.push(d);
+                    }
+                }
+            }
+        }
+    }
+    used.sort_by_key(|d| d.name);
+    used
+}
+
 /// `parts.sources`: every source this ryueda has, the library's count of
 /// library components and each catalogue's state on this machine, with
 /// the parts cache's folder (`null` where there is none).

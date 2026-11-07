@@ -14,9 +14,10 @@ pub const KIND: &str = "ryueda.parts";
 pub const FORMAT: u64 = 1;
 
 /// The supply findings `severity` may set.
-pub const SUPPLY_CODES: [Code; 6] = [
+pub const SUPPLY_CODES: [Code; 7] = [
     Code::PartOutOfStock,
     Code::PartExtended,
+    Code::PartLifecycle,
     Code::PartNoData,
     Code::PartsMismatch,
     Code::PartsCacheStale,

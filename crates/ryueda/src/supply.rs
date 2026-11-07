@@ -1,6 +1,6 @@
 //! Supply findings (design 347), in `check` as `source: supply`: from the
-//! catalogues this machine holds, never fetched, so never part of ERC's
-//! findings. Once per placed library component per design, naming it and
+//! catalogues and distributors' records this machine holds, never
+//! fetched, so never part of ERC's findings. Once per placed library component per design, naming it and
 //! the occurrences it covers (`dnp` ones left out), each carrying when
 //! its data was fetched and whose it is.
 
@@ -9,7 +9,7 @@ use crate::fault::Severity;
 use crate::parts::Catalogues;
 use crate::project::Project;
 use crate::sourcing::{Assembly, Config};
-use ryueda_parts::record::{Record, squash};
+use ryueda_parts::record::{Lifecycle, Record, squash};
 use ryueda_parts::source::Call;
 use serde_json::{Value, json};
 
@@ -37,6 +37,11 @@ fn choices(c: &crate::libcomp::LibComp, cats: &Catalogues) -> Result<Vec<Choice>
         for o in offers {
             for cat in cats.for_supplier(&o.supplier)? {
                 records.extend(cat.get(o.sku.trim(), &Call::default())?);
+            }
+            // A distributor's record as kept here (`parts show`, `parts
+            // refresh`): fresh within its time to live.
+            for d in ryueda_parts::distributor::for_supplier(&o.supplier) {
+                records.extend(cats.live.cached(d, &o.sku, cats.now));
             }
         }
         out.push(Choice {
@@ -78,7 +83,13 @@ pub fn findings_with(p: &Project, cats: &Catalogues, cfg: &Config) -> Result<Vec
     // Each catalogue the placed parts' offers draw on, stale or missing,
     // once; with none of them synced, nothing more to say.
     let used = crate::parts::catalogues_placed(p);
-    let mut any = false;
+    // A distributor the offers draw on counts where this machine has its
+    // keys: a part none of whose records is kept is then `part_no_data`,
+    // which `parts refresh` answers. Without keys, as without catalogues,
+    // there is nothing to judge by.
+    let mut any = crate::parts::distributors_placed(p)
+        .into_iter()
+        .any(|d| cats.live.keys(d).ok().flatten().is_some());
     for name in &used {
         let (_, stale) = cats.state(name)?;
         if let Some(w) = stale {
@@ -181,6 +192,40 @@ pub fn findings_with(p: &Project, cats: &Catalogues, cfg: &Config) -> Result<Vec
                     d,
                 );
             }
+            // A lifecycle any record states past active, the worst of them
+            // (6.C: distributors give it; catalogues don't).
+            if let Some(worst) = first
+                .records
+                .iter()
+                .filter(|r| r.lifecycle.is_some_and(|l| l != Lifecycle::Active))
+                .max_by_key(|r| rank(r.lifecycle))
+            {
+                let mut d = stamp(worst);
+                d["libcomp"] = json!(of);
+                d["design"] = json!(design);
+                d["lifecycle"] = json!(worst.lifecycle);
+                let active = ch[1..].iter().find_map(|a| {
+                    a.records
+                        .iter()
+                        .find(|r| r.lifecycle == Some(Lifecycle::Active))
+                        .map(|r| alternate(a, r))
+                });
+                let tail = active.as_ref().map_or(String::new(), |a| {
+                    format!("; alternate {} is active", a["mpn"].as_str().unwrap_or(""))
+                });
+                d["alternate"] = active.unwrap_or(Value::Null);
+                add(
+                    Code::PartLifecycle,
+                    refs.clone(),
+                    format!(
+                        "{of} ({}) is {} at {}{tail}",
+                        first.mpn,
+                        words(worst.lifecycle),
+                        worst.source
+                    ),
+                    d,
+                );
+            }
             // The assembly house's Basic/Extended flag, from the records
             // that state it.
             let flagged: Vec<&Record> =
@@ -215,6 +260,25 @@ pub fn findings_with(p: &Project, cats: &Catalogues, cfg: &Config) -> Result<Vec
         }
     }
     Ok(sorted(out))
+}
+
+/// How far past active a lifecycle is.
+fn rank(l: Option<Lifecycle>) -> u8 {
+    match l {
+        Some(Lifecycle::Obsolete) => 3,
+        Some(Lifecycle::LastTimeBuy) => 2,
+        Some(Lifecycle::NotRecommended) => 1,
+        _ => 0,
+    }
+}
+
+fn words(l: Option<Lifecycle>) -> &'static str {
+    match l {
+        Some(Lifecycle::Obsolete) => "obsolete",
+        Some(Lifecycle::LastTimeBuy) => "at last time buy",
+        Some(Lifecycle::NotRecommended) => "not recommended for new designs",
+        _ => "active",
+    }
 }
 
 /// Findings by code, then references, so the order never depends on a
@@ -386,6 +450,80 @@ mod tests {
         assert!(
             found.iter().all(|f| f["code"] == "parts_cache_stale"),
             "{found:?}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_findings_come_from_kept_distributor_records() {
+        let (_dir, p) = placed_project();
+        let (cfg, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let live = crate::distributors::tests::fake(
+            cfg.path(),
+            cache.path(),
+            std::sync::Arc::new(crate::distributors::NoNetwork),
+            2_000,
+        );
+        let cats = crate::parts::Catalogues::at(cache.path(), 2_000, crate::parts::MAX_AGE)
+            .with_live(live.clone());
+        let dk = ryueda_parts::distributor::distributor("digikey").unwrap();
+        // No keys here: DigiKey's offers say nothing, as before 6.C.
+        let found = findings(&p, &cats).unwrap();
+        assert!(
+            found.iter().all(|f| f["code"] == "parts_cache_stale"),
+            "{found:#?}"
+        );
+        crate::distributors::tests::logged_in(cfg.path());
+        // Keys, nothing kept: pc has no data.
+        let found = findings(&p, &cats).unwrap();
+        assert!(
+            found
+                .iter()
+                .any(|f| f["code"] == "part_no_data" && f["refs"][0] == "lib/self/libcomp/pc"),
+            "{found:#?}"
+        );
+        // A record kept at 1,000, obsolete.
+        let mut r = Record::new("digikey", "1-ND");
+        r.mpn = "PC".into();
+        r.stock = Some(10);
+        r.lifecycle = Some(Lifecycle::Obsolete);
+        r.fetched_at = Some(1_000);
+        r.attribution = "Data from DigiKey".into();
+        live.keep(dk, &[r]);
+        let found = findings(&p, &cats).unwrap();
+        let life: Vec<&Value> = found
+            .iter()
+            .filter(|f| f["code"] == "part_lifecycle")
+            .collect();
+        assert_eq!(life.len(), 1, "{found:#?}");
+        assert_eq!(life[0]["refs"][0], "lib/self/libcomp/pc");
+        assert_eq!(
+            (
+                life[0]["details"]["lifecycle"].as_str(),
+                life[0]["details"]["fetched_at"].as_u64()
+            ),
+            (Some("obsolete"), Some(1_000))
+        );
+        assert_eq!(life[0]["details"]["attribution"], "Data from DigiKey");
+        assert!(
+            life[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("PC) is obsolete at digikey")
+        );
+        assert!(
+            found
+                .iter()
+                .all(|f| f["code"] != "part_no_data" || f["refs"][0] != "lib/self/libcomp/pc")
+        );
+        // Past its day the record is gone, and so is the finding.
+        let later =
+            crate::parts::Catalogues::at(cache.path(), 1_000 + 86_401, crate::parts::MAX_AGE)
+                .with_live(live);
+        assert!(
+            findings(&p, &later)
+                .unwrap()
+                .iter()
+                .all(|f| f["code"] != "part_lifecycle")
         );
     }
 }
