@@ -4860,6 +4860,97 @@ fn imports_from_the_cli() {
     p.fails(&["feature", "add", "block", "import"], "invalid_param", 1);
 }
 
+/// A reference import (design 364) both ways: made by default, refused
+/// to a fillet with the hint to convert, measured, weighed and checked,
+/// exported as STEP, STL and USD (warning that USD holds it as a mesh),
+/// converted to a solid the fillet then builds on, undone through the
+/// daemon, and refused to convert back while a feature acts on it.
+#[test]
+fn reference_imports_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let occt = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/occt");
+    let beside = p.direct.parent().unwrap();
+    fs::copy(occt.join("box_ap214.stp"), beside.join("box.stp")).unwrap();
+    let made = p.ok(&["import", "../box.stp", "--part", "r"]);
+    let f = &made["parts"][0]["features"][0];
+    assert_eq!(f["mode"], "reference", "{made}");
+    let fid = f["id"].as_str().unwrap().to_owned();
+    let built = p.ok(&["rebuild", "r"]);
+    assert_eq!(built["parts"][0]["solids"][0]["reference"], true, "{built}");
+    let body = p.ok(&["inspect", "r", &fid]);
+    let edge = body["bodies"][0]["edges"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let edge = format!("r/{fid}/{edge}");
+    let fillet = [
+        "feature", "add", "r", "fillet", "--id", "f", "--radius", "1", "--edge", &edge,
+    ];
+    let e = p.fails(&fillet, "reference_body", 1);
+    assert_eq!(
+        e["details"]["hint"],
+        format!("ryucad import convert r/{fid}")
+    );
+    let solid = format!("r/{fid}");
+    let m = p.ok(&["measure", &solid]);
+    assert_eq!(m["reference"], true, "{m}");
+    p.ok(&[
+        "materials",
+        "set",
+        "steel",
+        "--density",
+        "7850 kg/m^3",
+        "--default",
+    ]);
+    let w = p.ok(&["mass", &solid]);
+    assert_eq!(w["reference"], true, "{w}");
+    p.ok(&["export", "r", "--out", "r.step"]);
+    p.ok(&["export", "r", "--out", "r.stl"]);
+    let (code, v) = p.both_from(
+        "",
+        &[
+            "export",
+            "r",
+            "--out",
+            "r.usda",
+            "--time-stamp",
+            "2026-11-07T00:00:00",
+        ],
+    );
+    assert_eq!(code, 0, "{v}");
+    assert!(
+        v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("as its mesh alone")),
+        "{v}"
+    );
+    p.ok(&["check", "r"]);
+    let c = p.ok(&["import", "convert", &solid]);
+    assert_eq!(c["converted"], serde_json::json!([fid]), "{c}");
+    p.ok(&fillet);
+    // Through the daemon: undo the fillet, then the conversion.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["rebuild", "r"]);
+    assert_eq!(
+        v["result"]["parts"][0]["solids"][0]["reference"], true,
+        "{v}"
+    );
+    // In process the fillet stands: converting back is refused.
+    let (_, v) = p.run_in(&p.direct, "", &["import", "convert", "r", "--reference"]);
+    assert_eq!(v["error"]["code"], "reference_body", "{v}");
+    assert_eq!(
+        v["error"]["details"]["acting"],
+        serde_json::json!(["f"]),
+        "{v}"
+    );
+}
+
 /// A heal budget too small for a body fails that body alone with
 /// `import_budget_exceeded`, both ways, warning with its code; the
 /// default heals it again.
