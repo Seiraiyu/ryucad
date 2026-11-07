@@ -262,9 +262,19 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
                 out = again;
             }
         }
-    } else if !out.crowded.is_empty() {
-        let again = out.crowded.clone();
-        out = attempt(block, &r, 0, &again);
+    } else {
+        // A part a move put where it stands is held there: never placed
+        // again for its labels (a shift that leaves one without room is
+        // refused below, not undone).
+        let again: BTreeSet<usize> = out
+            .crowded
+            .iter()
+            .copied()
+            .filter(|p| !r.moved.contains(p))
+            .collect();
+        if !again.is_empty() {
+            out = attempt(block, &r, 0, &again);
+        }
     }
     // A shift is applied as asked: one that leaves a hard rule broken (a
     // part over another's room, or off the sheet) is refused, naming it.
