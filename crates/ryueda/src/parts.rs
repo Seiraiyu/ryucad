@@ -610,31 +610,136 @@ pub fn records_of(
     Ok((out, warnings, names))
 }
 
-/// `parts.show`: the records `key` names, from this machine's sources. A
-/// catalogue refreshes by `parts sync`, so `refresh` only says so.
-pub fn show(p: &Project, key: &str, refresh: bool, cats: &Catalogues) -> Result<Value> {
-    let (records, warnings, searched) = records_of(p, key, cats)?;
-    if records.is_empty() {
-        return Err(
-            Error::new(Code::PartsNotFound, format!("no source here has {key}"))
-                .with("key", key)
-                .with("searched", &searched)
-                .with("warnings", &warnings),
-        );
+/// A `parts.show` worked out under the lock: the records the library,
+/// catalogues and kept distributor records give, and the distributors
+/// still to call.
+pub struct ShowPlan {
+    key: String,
+    k: ryueda_parts::source::Key,
+    refresh: bool,
+    offline: bool,
+    records: Vec<Record>,
+    warnings: Vec<Value>,
+    searched: Vec<&'static str>,
+    live: Vec<&'static ryueda_parts::distributor::Distributor>,
+}
+
+impl ShowPlan {
+    pub fn calls(&self) -> bool {
+        !self.live.is_empty()
     }
-    let notes: Vec<Value> = if refresh {
-        searched
-            .iter()
-            .filter(|n| **n != Library::NAME)
-            .map(|n| {
-                json!({"source": n, "reason": "catalogue",
-                       "message": format!("{n} is a catalogue: run ryueda parts sync {n} to refresh it")})
-            })
-            .collect()
-    } else {
-        Vec::new()
+}
+
+/// `parts.show`'s work under the lock. A distributor is called when it
+/// has no record kept for the key (always for `mpn:`), or with
+/// `refresh`, unless `offline`.
+pub fn show_plan(
+    p: &Project,
+    key: &str,
+    refresh: bool,
+    offline: bool,
+    cats: &Catalogues,
+) -> Result<ShowPlan> {
+    let (mut records, warnings, searched) = records_of(p, key, cats)?;
+    let k = ryueda_parts::source::Key::parse(key)?;
+    let mut live = Vec::new();
+    for name in &searched {
+        let Some(d) = ryueda_parts::distributor::distributor(name) else {
+            continue;
+        };
+        let kept = records.iter().any(|r| r.source == d.name);
+        if refresh {
+            records.retain(|r| r.source != d.name);
+        }
+        if !offline && (refresh || k.is_mpn() || !kept) {
+            live.push(d);
+        }
+    }
+    Ok(ShowPlan {
+        key: key.to_owned(),
+        k,
+        refresh,
+        offline,
+        records,
+        warnings,
+        searched,
+        live,
+    })
+}
+
+/// `parts.show`'s distributors called under `job`, then the answer: the
+/// records in source order, `parts_not_found` where there are none.
+pub fn show_finish(
+    mut pl: ShowPlan,
+    cats: &Catalogues,
+    job: &ryu_session::job::Job,
+) -> Result<Value> {
+    let stage = pl
+        .calls()
+        .then(|| job.begin(ryu_session::job::Phase::Fetch, "sources", pl.live.len()));
+    let call = Call {
+        cancel: job.kernel_cancel(),
+        deadline: None,
     };
-    Ok(json!({"key": key, "records": records, "warnings": warnings, "notes": notes}))
+    for d in std::mem::take(&mut pl.live) {
+        if let Some(s) = &stage {
+            s.step(|| d.name.to_owned())?;
+        }
+        let got = match cats.live.open(d) {
+            Ok(Some(src)) if pl.k.is_mpn() => src.by_mpn(&pl.k.key, &call),
+            Ok(Some(src)) => src.get(&pl.k.key, &call).map(|r| r.into_iter().collect()),
+            Ok(None) if pl.k.is_mpn() => Ok(Vec::new()),
+            Ok(None) => Err(crate::distributors::not_configured(d)),
+            Err(e) => Err(e),
+        };
+        match got {
+            Ok(rs) => {
+                cats.live.keep(d, &rs);
+                pl.records.extend(rs);
+            }
+            Err(e) => pl.warnings.push(failed(d.name, e)?),
+        }
+    }
+    drop(stage);
+    // Source order, as the key named them.
+    let order = |r: &Record| pl.searched.iter().position(|n| *n == r.source);
+    pl.records.sort_by_key(|r| order(r));
+    if pl.records.is_empty() {
+        return Err(Error::new(
+            Code::PartsNotFound,
+            format!("no source here has {}", pl.key),
+        )
+        .with("key", &pl.key)
+        .with("searched", &pl.searched)
+        .with("warnings", &pl.warnings));
+    }
+    let mut notes: Vec<Value> = Vec::new();
+    for n in &pl.searched {
+        if pl.refresh && catalogues().contains(n) {
+            notes.push(json!({"source": n, "reason": "catalogue",
+                "message": format!("{n} is a catalogue: run ryueda parts sync {n} to refresh it")}));
+        }
+        if pl.offline && ryueda_parts::distributor::distributor(n).is_some() {
+            notes.push(json!({"source": n, "reason": "offline",
+                "message": format!("{n} is called live; --offline gave only what this machine keeps")}));
+        }
+    }
+    Ok(json!({"key": pl.key, "records": pl.records, "warnings": pl.warnings, "notes": notes}))
+}
+
+/// `parts.show` in one go.
+pub fn show(
+    p: &Project,
+    key: &str,
+    refresh: bool,
+    offline: bool,
+    cats: &Catalogues,
+) -> Result<Value> {
+    show_finish(
+        show_plan(p, key, refresh, offline, cats)?,
+        cats,
+        &ryu_session::job::Job::default(),
+    )
 }
 
 /// The sources a search without `in` asks: `parts.json`'s, else the
@@ -843,6 +948,19 @@ pub fn prepare(
             };
             let job = job.clone();
             Some(Box::new(move || finish(planned, &cats, &job)))
+        }
+        crate::proto::Request::PartsShow {
+            key,
+            refresh,
+            offline,
+        } => {
+            let cats = session.catalogues().ok()?;
+            let planned = match show_plan(session.project(), key, *refresh, *offline, &cats) {
+                Ok(pl) if pl.calls() => pl,
+                _ => return None,
+            };
+            let job = job.clone();
+            Some(Box::new(move || show_finish(planned, &cats, &job)))
         }
         _ => None,
     }
@@ -1058,33 +1176,39 @@ pub(crate) mod tests {
         let cats = Catalogues::at(dir.path(), 5_000, MAX_AGE);
         let (_p, p) = crate::netlist::tests::project(&[]);
         for key in ["lcsc:C1525", "jlc:C1525", "mpn:cl05b104ko5nnnc"] {
-            let v = show(&p, key, false, &cats).unwrap();
+            let v = show(&p, key, false, false, &cats).unwrap();
             assert_eq!(v["records"][0]["mpn"], "CL05B104KO5NNNC", "{key}");
             assert_eq!(
                 v["records"][0]["attribution"],
                 ryueda_parts::jlc::ATTRIBUTION
             );
         }
-        let e = show(&p, "lcsc:C9", false, &cats).unwrap_err();
+        let e = show(&p, "lcsc:C9", false, false, &cats).unwrap_err();
         assert_eq!(
             (e.code, &e.details["searched"]),
             (Code::PartsNotFound, &json!(["jlc"]))
         );
         assert_eq!(
-            show(&p, "acme:1-ND", false, &cats).unwrap_err().code,
+            show(&p, "acme:1-ND", false, false, &cats).unwrap_err().code,
             Code::InvalidParam
+        );
+        // A distributor with no keys here: not found, saying why.
+        let e = show(&p, "digikey:1-ND", false, false, &cats).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["warnings"][0]["details"]["reason"]),
+            (Code::PartsNotFound, &json!("not_configured"))
         );
         assert_eq!(
-            show(&p, "C1525", false, &cats).unwrap_err().code,
+            show(&p, "C1525", false, false, &cats).unwrap_err().code,
             Code::InvalidParam
         );
-        let v = show(&p, "lcsc:C1525", true, &cats).unwrap();
+        let v = show(&p, "lcsc:C1525", true, false, &cats).unwrap();
         assert_eq!(
             v["notes"][0]["reason"], "catalogue",
             "a catalogue refreshes by parts sync"
         );
         let none = Catalogues::at(&dir.path().join("x"), 5_000, MAX_AGE);
-        let e = show(&p, "lcsc:C1525", false, &none).unwrap_err();
+        let e = show(&p, "lcsc:C1525", false, false, &none).unwrap_err();
         assert_eq!(e.details["warnings"][0]["reason"], "missing");
         // The library by its key, and by a part number it names.
         let lib = library_records(&p).0;
@@ -1092,9 +1216,9 @@ pub(crate) mod tests {
             .iter()
             .find(|r| !r.mpn.is_empty())
             .expect("a library component with a part number");
-        let v = show(&p, &format!("library:{}", first.key), false, &cats).unwrap();
+        let v = show(&p, &format!("library:{}", first.key), false, false, &cats).unwrap();
         assert_eq!(v["records"][0]["key"], first.key);
-        let v = show(&p, &format!("mpn:{}", first.mpn), false, &cats).unwrap();
+        let v = show(&p, &format!("mpn:{}", first.mpn), false, false, &cats).unwrap();
         assert_eq!(v["records"][0]["source"], "library");
     }
 
@@ -1199,7 +1323,7 @@ pub(crate) mod tests {
         assert_eq!(v["sources"][1]["state"], "configured");
         // Kept: a show needs no call.
         let calls = fake.sent().len();
-        let v = show(&p, "digikey:1276-1001-1-ND", false, &cats).unwrap();
+        let v = show(&p, "digikey:1276-1001-1-ND", false, false, &cats).unwrap();
         assert_eq!(v["records"][0]["mpn"], "CL05B104KO5NNNC");
         assert_eq!(fake.sent().len(), calls);
         // Offline: left out, with a note.
@@ -1253,5 +1377,45 @@ pub(crate) mod tests {
             ),
             (Some("parts_source_unreachable"), Some("digikey"))
         );
+    }
+
+    #[test]
+    fn a_distributors_part_is_shown_kept_and_shown_again_on_refresh() {
+        let (_c, _k, fake, cats) = live();
+        let (_p, p) = crate::netlist::tests::project(&[]);
+        let calls = |f: &ryueda_parts::fetch::Fake| {
+            f.sent()
+                .iter()
+                .filter(|r| r.url.contains("productdetails"))
+                .count()
+        };
+        let v = show(&p, "digikey:296-1234-1-ND", false, false, &cats).unwrap();
+        assert_eq!(
+            (v["records"][0]["lifecycle"].as_str(), calls(&fake)),
+            (Some("not_recommended"), 1)
+        );
+        show(&p, "digikey:296-1234-1-ND", false, false, &cats).unwrap();
+        assert_eq!(calls(&fake), 1, "kept a day");
+        show(&p, "digikey:296-1234-1-ND", true, false, &cats).unwrap();
+        assert_eq!(calls(&fake), 2, "refresh calls again");
+        // Offline: what is kept, with a note.
+        let v = show(&p, "digikey:296-1234-1-ND", true, true, &cats).unwrap_err();
+        assert_eq!(
+            v.code,
+            Code::PartsNotFound,
+            "refresh offline drops the kept record and calls nothing"
+        );
+        let v = show(&p, "digikey:296-1234-1-ND", false, true, &cats).unwrap();
+        assert_eq!(v["notes"][0]["reason"], "offline");
+        // A part number asks DigiKey live.
+        let v = show(&p, "mpn:CL05B104KO5NNNC", false, false, &cats).unwrap();
+        assert!(
+            v["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["source"] == "digikey")
+        );
+        assert!(show(&p, "digikey:nothing-ND", false, false, &cats).is_err());
     }
 }

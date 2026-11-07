@@ -788,7 +788,7 @@ mod tests {
         use ryu_session::Serve;
         assert_eq!(
             crate::Eda::LONG,
-            ["parts.sync", "parts.refresh", "parts.search"]
+            ["parts.sync", "parts.refresh", "parts.search", "parts.show"]
         );
         let r = Request::from_rpc(
             "request.cancel",

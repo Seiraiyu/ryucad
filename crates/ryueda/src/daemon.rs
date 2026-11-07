@@ -28,7 +28,8 @@ impl ryu_session::Serve for Eda {
     /// Part catalogues' downloads and distributors' calls: progress in
     /// phase `fetch`, cancelled between files and calls, their work done
     /// with the lock released.
-    const LONG: &'static [&'static str] = &["parts.sync", "parts.refresh", "parts.search"];
+    const LONG: &'static [&'static str] =
+        &["parts.sync", "parts.refresh", "parts.search", "parts.show"];
 
     fn version() -> VersionInfo {
         VersionInfo::current()

@@ -606,16 +606,20 @@ enum PartsCmd {
         #[command(flatten)]
         long: LongArgs,
     },
-    /// The records a key names: <source>:<key> (lcsc:C1525), mpn:<part
-    /// number> for every source, or library:<reference>.
+    /// The records a key names: <source>:<key> (lcsc:C1525,
+    /// digikey:311-1338-1-ND), mpn:<part number> for every source, or
+    /// library:<reference>. A distributor is called when this machine
+    /// keeps no record of the key.
     Show {
         key: String,
-        /// Say how to refresh what the record came from.
+        /// Call distributors again; say how to refresh a catalogue.
         #[arg(long)]
         refresh: bool,
-        /// Stay off the network.
+        /// Stay off the network: only what this machine keeps.
         #[arg(long)]
         offline: bool,
+        #[command(flatten)]
+        long: LongArgs,
     },
     /// The project's sourcing (parts.json): the assembly house, how many
     /// boards a build makes, the sources searches ask, supply findings'
@@ -1448,6 +1452,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             key,
             refresh,
             offline,
+            ..
         }) => Request::PartsShow {
             key: key.clone(),
             refresh: *refresh,
@@ -2119,7 +2124,8 @@ fn long_ask(cmd: &Command) -> Option<ryu_session::job::Ask> {
         Command::Parts(
             PartsCmd::Sync { long, .. }
             | PartsCmd::Refresh { long, .. }
-            | PartsCmd::Search { long, .. },
+            | PartsCmd::Search { long, .. }
+            | PartsCmd::Show { long, .. },
         ) => long,
         _ => return None,
     };

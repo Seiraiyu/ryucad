@@ -379,10 +379,18 @@ fn dispatch(
             Some(made) => made,
             None => crate::parts::sync(&source, job),
         },
-        Request::PartsShow { key, refresh, .. } => {
-            let cats = session.catalogues()?;
-            crate::parts::show(session.project(), &key, refresh, &cats)
-        }
+        Request::PartsShow {
+            key,
+            refresh,
+            offline,
+        } => match session.prepared.take() {
+            Some(made) => made,
+            None => {
+                let cats = session.catalogues()?;
+                let pl = crate::parts::show_plan(session.project(), &key, refresh, offline, &cats)?;
+                crate::parts::show_finish(pl, &cats, job)
+            }
+        },
         Request::PartsConfigure {
             assembly,
             build_quantity,
