@@ -10,9 +10,13 @@ use std::collections::BTreeMap;
 pub struct Block {
     /// What sheets' text calls it.
     pub name: String,
-    /// The area of a sheet the contents must stay inside: the paper less
-    /// the margin the PDF's border takes.
+    /// The project's paper's area (the paper less the margin the PDF's
+    /// border takes): the largest a sheet takes, and every sheet's when
+    /// `papers` is empty.
     pub sheet: [Nm; 2],
+    /// The papers a sheet may take, smallest first, the project's last;
+    /// empty when paper fit is off (every sheet at `sheet`).
+    pub papers: Vec<Paper>,
     pub parts: Vec<Part>,
     pub nets: Vec<Net>,
     /// The lasting instructions, by ID.
@@ -23,6 +27,15 @@ pub struct Block {
     pub previous: Option<Layout>,
     /// What to lay out from nothing, keeping the instructions.
     pub relayout: Relayout,
+}
+
+/// A paper a sheet may take: its size's name, its orientation and its
+/// drawing area (the paper less the PDF's border).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Paper {
+    pub size: String,
+    pub orientation: crate::layout::Orientation,
+    pub area: [Nm; 2],
 }
 
 /// What a layout starts from nothing.
@@ -52,6 +65,9 @@ pub struct Part {
     pub refdes: String,
     /// The second: a value ("" for none).
     pub value: String,
+    /// What its component does, from its `function` property ("" for
+    /// none): the title of the region it leads.
+    pub function: String,
     /// The body, in the part's own frame.
     pub graphics: Vec<Graphic>,
     pub pins: Vec<Pin>,
@@ -227,6 +243,38 @@ pub enum Graphic {
 }
 
 impl Block {
+    /// The paper a sheet has: its own where the series has it, else the
+    /// project's (the series' last), else none (fit off).
+    pub fn paper_of(&self, s: &crate::layout::Sheet) -> Option<&Paper> {
+        let own = s.size.as_deref().and_then(|size| {
+            self.papers
+                .iter()
+                .find(|p| p.size == size && s.orientation.is_none_or(|o| o == p.orientation))
+        });
+        own.or(self.papers.last())
+    }
+
+    /// A sheet's drawing area.
+    pub fn area_of(&self, s: &crate::layout::Sheet) -> [Nm; 2] {
+        self.paper_of(s).map_or(self.sheet, |p| p.area)
+    }
+
+    /// A sheet's drawing area, by its ID in `layout` (the project's paper
+    /// for a sheet it doesn't have).
+    pub fn area_in(&self, layout: &Layout, sid: &str) -> [Nm; 2] {
+        layout
+            .sheets
+            .get(sid)
+            .map_or(self.sheet, |s| self.area_of(s))
+    }
+
+    /// The next paper up the series from a sheet's, if any.
+    pub fn grown(&self, s: &crate::layout::Sheet) -> Option<&Paper> {
+        let now = self.paper_of(s)?;
+        let i = self.papers.iter().position(|p| p == now)?;
+        self.papers.get(i + 1)
+    }
+
     /// The part keyed `key`.
     pub fn part(&self, key: &str) -> Option<usize> {
         self.parts.iter().position(|p| p.key == key)
@@ -253,5 +301,46 @@ impl Block {
             }
         }
         seen.join(", ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::{Orientation, Sheet};
+
+    #[test]
+    fn a_sheet_takes_its_own_papers_area() {
+        let a4 = Paper {
+            size: "a4".into(),
+            orientation: Orientation::Landscape,
+            area: [277_000_000, 190_000_000],
+        };
+        let a3 = Paper {
+            size: "a3".into(),
+            orientation: Orientation::Landscape,
+            area: [400_000_000, 277_000_000],
+        };
+        let block = Block {
+            sheet: a3.area,
+            papers: vec![a4.clone(), a3.clone()],
+            ..Block::default()
+        };
+        let mut s = Sheet::new("Sheet 1".into(), [0, 0]);
+        assert_eq!(block.area_of(&s), a3.area, "the project's paper by default");
+        s.size = Some("a4".into());
+        assert_eq!(block.area_of(&s), a4.area);
+        assert_eq!(block.paper_of(&s), Some(&a4));
+        s.size = Some("a0".into());
+        assert_eq!(
+            block.area_of(&s),
+            a3.area,
+            "a size not in the series reads as the project's"
+        );
+        assert_eq!(
+            block.grown(&Sheet::new("x".into(), [0, 0])),
+            None,
+            "the largest grows no further"
+        );
     }
 }

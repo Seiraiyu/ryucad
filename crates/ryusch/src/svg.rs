@@ -183,6 +183,34 @@ fn item(out: &mut String, f: &Frame, it: &Item) {
                 mm(LINE)
             );
         }
+        Item::Frame { rect, title_tab } => {
+            let corners = |r: &Rect| {
+                vec![
+                    r.min,
+                    [r.max[0], r.min[1]],
+                    r.max,
+                    [r.min[0], r.max[1]],
+                    r.min,
+                ]
+            };
+            let list: Vec<String> = corners(rect).iter().map(|p| f.p(*p)).collect();
+            let _ = writeln!(
+                out,
+                "<polyline points=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\" stroke-dasharray=\"{} {}\"/>",
+                list.join(" "),
+                crate::paint::FRAME,
+                mm(LINE),
+                mm(crate::paint::DASH[0]),
+                mm(crate::paint::DASH[1]),
+            );
+            polyline(
+                out,
+                f,
+                &corners(title_tab),
+                crate::paint::FRAME,
+                crate::paint::PAPER,
+            );
+        }
         Item::Text {
             text,
             at,
@@ -263,7 +291,10 @@ fn draw_in(block: &Block, layout: &Layout, which: &[&str], view: Option<Rect>) -
     let pad = 6 * GRID;
     let bounds = sheets
         .iter()
-        .map(|(_, s)| Rect::new(s.at, [s.at[0] + block.sheet[0], s.at[1] + block.sheet[1]]))
+        .map(|(_, s)| {
+            let a = block.area_of(s);
+            Rect::new(s.at, [s.at[0] + a[0], s.at[1] + a[1]])
+        })
         .reduce(Rect::union)
         .unwrap_or(Rect::new([0, 0], block.sheet))
         .grow(pad);
@@ -299,20 +330,21 @@ fn draw_in(block: &Block, layout: &Layout, which: &[&str], view: Option<Rect>) -
             origin: [sheet.at[0] - bounds.min[0], sheet.at[1] - bounds.min[1]],
             top: bounds.height(),
         };
+        let size = block.area_of(sheet);
         let _ = writeln!(out, "<g id=\"sheet-{}\">", esc(sid));
         let _ = writeln!(
             out,
             "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{PAPER}\"/>",
             f.x(0),
-            f.y(block.sheet[1]),
-            mm(block.sheet[0]),
-            mm(block.sheet[1])
+            f.y(size[1]),
+            mm(size[0]),
+            mm(size[1])
         );
         text_el(
             &mut out,
             &f,
             &sheet.name,
-            [0, block.sheet[1] + GRID],
+            [0, size[1] + GRID],
             SIZE,
             "start",
             false,

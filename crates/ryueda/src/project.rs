@@ -69,7 +69,7 @@ pub struct Manifest {
 }
 
 /// A project's schematic settings.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Schematic {
     #[serde(default)]
@@ -82,14 +82,96 @@ impl Schematic {
     }
 }
 
-/// The paper every sheet of a schematic is laid out to fit.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// The paper a schematic's sheets are laid out to fit: `size` the
+/// largest, and with `fit` each sheet on the smallest of `sizes` (up to
+/// `size`) that holds it (plan 2.A).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sheet {
     #[serde(default)]
     pub size: PaperSize,
     #[serde(default)]
     pub orientation: Orientation,
+    /// Each sheet on the smallest paper of `sizes` that holds it; off,
+    /// every sheet is `size`.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub fit: bool,
+    /// The papers a sheet may take, up to `size`.
+    #[serde(default = "default_sizes", skip_serializing_if = "is_default_sizes")]
+    pub sizes: Vec<PaperSize>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_yes(v: &bool) -> bool {
+    *v
+}
+
+fn default_sizes() -> Vec<PaperSize> {
+    vec![PaperSize::A4, PaperSize::A3]
+}
+
+fn is_default_sizes(v: &[PaperSize]) -> bool {
+    v == default_sizes().as_slice()
+}
+
+impl Default for Sheet {
+    fn default() -> Sheet {
+        Sheet {
+            size: PaperSize::default(),
+            orientation: Orientation::default(),
+            fit: true,
+            sizes: default_sizes(),
+        }
+    }
+}
+
+impl PaperSize {
+    /// Every size, as files name them.
+    pub const ALL: [PaperSize; 10] = [
+        PaperSize::A4,
+        PaperSize::A3,
+        PaperSize::A2,
+        PaperSize::A1,
+        PaperSize::A0,
+        PaperSize::AnsiA,
+        PaperSize::AnsiB,
+        PaperSize::AnsiC,
+        PaperSize::AnsiD,
+        PaperSize::AnsiE,
+    ];
+
+    /// Its long side, for ordering the series.
+    fn long(self) -> i64 {
+        let s = Sheet {
+            size: self,
+            ..Sheet::default()
+        };
+        s.size_nm().0
+    }
+
+    /// Its name in files (`a4`, `ansi_b`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PaperSize::A4 => "a4",
+            PaperSize::A3 => "a3",
+            PaperSize::A2 => "a2",
+            PaperSize::A1 => "a1",
+            PaperSize::A0 => "a0",
+            PaperSize::AnsiA => "ansi_a",
+            PaperSize::AnsiB => "ansi_b",
+            PaperSize::AnsiC => "ansi_c",
+            PaperSize::AnsiD => "ansi_d",
+            PaperSize::AnsiE => "ansi_e",
+        }
+    }
+
+    /// The size a file's name gives.
+    pub fn parse(name: &str) -> Option<PaperSize> {
+        PaperSize::ALL.into_iter().find(|p| p.as_str() == name)
+    }
 }
 
 /// ISO A4 to A0 and ANSI A to E.
@@ -118,6 +200,25 @@ pub enum Orientation {
 }
 
 impl Sheet {
+    /// The papers a sheet may take, smallest first, the project's size
+    /// last; none when `fit` is off.
+    pub fn series(&self) -> Vec<PaperSize> {
+        if !self.fit {
+            return Vec::new();
+        }
+        let top = self.size.long();
+        let mut out: Vec<PaperSize> = self
+            .sizes
+            .iter()
+            .copied()
+            .filter(|s| s.long() <= top && *s != self.size)
+            .collect();
+        out.sort_by_key(|s| s.long());
+        out.dedup();
+        out.push(self.size);
+        out
+    }
+
     /// The paper's width and height in nanometres.
     pub fn size_nm(&self) -> (i64, i64) {
         const MM: i64 = 1_000_000;
@@ -759,6 +860,35 @@ fn listed(root: &Path, rel: &str) -> Vec<(String, std::fs::Metadata)> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn the_paper_series_is_the_sizes_up_to_the_projects() {
+        let s: Sheet = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(s.fit);
+        assert_eq!(s.series(), vec![PaperSize::A4, PaperSize::A3]);
+        let s: Sheet =
+            serde_json::from_value(serde_json::json!({"size": "a2", "sizes": ["a4", "a3"]}))
+                .unwrap();
+        assert_eq!(
+            s.series(),
+            vec![PaperSize::A4, PaperSize::A3, PaperSize::A2]
+        );
+        let s: Sheet =
+            serde_json::from_value(serde_json::json!({"size": "a4", "sizes": ["a3", "a4"]}))
+                .unwrap();
+        assert_eq!(
+            s.series(),
+            vec![PaperSize::A4],
+            "none past the project's size"
+        );
+        let off: Sheet = serde_json::from_value(serde_json::json!({"fit": false})).unwrap();
+        assert!(off.series().is_empty());
+        assert_eq!(
+            serde_json::to_value(Sheet::default()).unwrap(),
+            serde_json::json!({"size": "a3", "orientation": "landscape"}),
+            "fit and sizes at their defaults aren't written"
+        );
+    }
     use crate::source::write_atomic;
 
     pub fn pid(n: u8) -> ProjectId {

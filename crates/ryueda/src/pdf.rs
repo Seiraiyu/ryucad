@@ -249,6 +249,24 @@ fn draw(c: &mut Content, font: &Font, origin: Point, it: &Item) {
             }
             c.stroke();
         }
+        Item::Frame { rect, title_tab } => {
+            let rect_path = |c: &mut Content, r: &ryusch::geom::Rect| {
+                c.move_to(x(r.min[0]), y(r.min[1]));
+                c.line_to(x(r.max[0]), y(r.min[1]));
+                c.line_to(x(r.max[0]), y(r.max[1]));
+                c.line_to(x(r.min[0]), y(r.max[1]));
+                c.close_path();
+            };
+            stroke(c, ryusch::paint::FRAME);
+            let [on, off] = ryusch::paint::DASH;
+            c.set_dash_pattern([pt(on), pt(off)], 0.0);
+            rect_path(c, rect);
+            c.stroke();
+            c.set_dash_pattern([], 0.0);
+            fill(c, ryusch::paint::PAPER);
+            rect_path(c, title_tab);
+            c.fill_nonzero_and_stroke();
+        }
         Item::Bezier { points, stroke: s } => {
             stroke(c, s);
             let [a, b, d, e] = *points;

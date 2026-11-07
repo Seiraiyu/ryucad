@@ -24,6 +24,7 @@ pub mod lint;
 pub mod merge;
 pub mod paint;
 pub mod place;
+pub mod region;
 pub mod route;
 pub mod rules;
 pub mod shape;

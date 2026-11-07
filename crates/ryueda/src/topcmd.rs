@@ -691,6 +691,8 @@ pub fn project_edit(
     properties: &serde_json::Map<String, Value>,
     size: Option<crate::project::PaperSize>,
     orientation: Option<crate::project::Orientation>,
+    fit: Option<bool>,
+    sizes: Option<Vec<crate::project::PaperSize>>,
     expected: Option<&str>,
 ) -> Result<Value> {
     let p = session.project();
@@ -702,6 +704,12 @@ pub fn project_edit(
     }
     if let Some(o) = orientation {
         m.schematic.sheet.orientation = o;
+    }
+    if let Some(f) = fit {
+        m.schematic.sheet.fit = f;
+    }
+    if let Some(list) = sizes {
+        m.schematic.sheet.sizes = list;
     }
     let mut w = Writes::default();
     w.0.push((crate::project::MANIFEST.to_owned(), Some(m.to_text())));

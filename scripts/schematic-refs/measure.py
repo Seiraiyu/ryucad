@@ -12,6 +12,16 @@ What it counts, per file (a KiCad sheet):
   power        power symbols by the way they point: up (supplies drawn
                the usual way), down (grounds the usual way), sideways
   symbols      other symbols placed
+  paper        the sheet's paper and its drawing area in millimetres:
+               the paper less ryueda's 10 mm border on every side
+               (`schem::BORDER`), so ours and the references' compare
+  extent       the drawing's box over the drawing area, per mille: the
+               box of every wire, junction, label, power symbol and
+               symbol body (its library graphics and pins, placed)
+  fill         the share of the drawing area's 10 mm cells holding ink,
+               per mille: a cell a wire passes through, or a symbol's,
+               label's, junction's or power symbol's box touches; ryusch's
+               `lint::fill` counts ours the same way
 
 Standard library only; never run by CI. ryueda's manifest records each
 reference's crossings (`crossings <n>`), checked by eye on its render.
@@ -70,6 +80,131 @@ def key(x, y):
     return (round(float(x) * 10000), round(float(y) * 10000))
 
 
+PAPERS = {
+    "A4": (297, 210), "A3": (420, 297), "A2": (594, 420),
+    "A1": (841, 594), "A0": (1189, 841), "A": (279.4, 215.9),
+    "B": (431.8, 279.4), "C": (558.8, 431.8), "D": (863.6, 558.8),
+    "E": (1117.6, 863.6),
+}
+BORDER = 10.0
+CELL = 10.0
+
+
+def lib_boxes(root):
+    """Each library symbol's box in its own frame (y up), from its
+    graphics and its pins' lines."""
+    out = {}
+    lib = first(root, "lib_symbols")
+    for sym in items(lib, "symbol") if lib else []:
+        pts = []
+
+        def walk(node):
+            for x in node:
+                if not isinstance(x, list) or not x:
+                    continue
+                h = x[0]
+                if h == "rectangle":
+                    for k in ("start", "end"):
+                        a = first(x, k)
+                        pts.append((float(a[1]), float(a[2])))
+                elif h in ("polyline", "bezier"):
+                    for q in items(first(x, "pts"), "xy"):
+                        pts.append((float(q[1]), float(q[2])))
+                elif h == "circle":
+                    c, r = first(x, "center"), float(first(x, "radius")[1])
+                    cx, cy = float(c[1]), float(c[2])
+                    pts.extend([(cx - r, cy - r), (cx + r, cy + r)])
+                elif h == "arc":
+                    for k in ("start", "mid", "end"):
+                        a = first(x, k)
+                        pts.append((float(a[1]), float(a[2])))
+                elif h == "pin":
+                    a = first(x, "at")
+                    ln = float(first(x, "length")[1])
+                    px, py, ang = float(a[1]), float(a[2]), int(float(a[3])) % 360
+                    dx, dy = {0: (1, 0), 90: (0, 1), 180: (-1, 0), 270: (0, -1)}[ang]
+                    pts.extend([(px, py), (px + dx * ln, py + dy * ln)])
+                elif h == "symbol":
+                    walk(x)
+        walk(sym)
+        if pts:
+            xs, ys = [q[0] for q in pts], [q[1] for q in pts]
+            out[sym[1]] = (min(xs), min(ys), max(xs), max(ys))
+    return out
+
+
+def placed_box(box, at, mirror):
+    """A library box placed on the sheet (y down): mirrored, turned
+    counterclockwise by the placement's angle, then moved."""
+    x0, y0, x1, y1 = box
+    corners = [(x0, y0), (x0, y1), (x1, y0), (x1, y1)]
+    rot = int(float(at[3])) % 360 if len(at) > 3 else 0
+    out = []
+    for x, y in corners:
+        if mirror == "x":
+            y = -y
+        elif mirror == "y":
+            x = -x
+        for _ in range(rot // 90):
+            x, y = -y, x
+        out.append((float(at[1]) + x, float(at[2]) - y))
+    xs, ys = [q[0] for q in out], [q[1] for q in out]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def paper_fill(root, segs):
+    """The paper, the drawing's extent and its fill, as the module's doc
+    says."""
+    paper = first(root, "paper")
+    name = paper[1] if paper else "A4"
+    w, h = PAPERS.get(name, PAPERS["A4"])
+    if paper and "portrait" in paper:
+        w, h = h, w
+    area = (BORDER, BORDER, w - BORDER, h - BORDER)
+    boxes = []
+    libs = lib_boxes(root)
+    for s in items(root, "symbol"):
+        lib, at = first(s, "lib_id"), first(s, "at")
+        if lib is None or at is None:
+            continue
+        m = first(s, "mirror")
+        box = libs.get(lib[1])
+        if box is None:
+            x, y = float(at[1]), float(at[2])
+            box, at, m = (-1, -1, 1, 1), ["at", x, y], None
+        boxes.append(placed_box(box, at, m[1] if m else None))
+    for head in ("label", "global_label", "hierarchical_label", "junction"):
+        for x in items(root, head):
+            a = first(x, "at")
+            px, py = float(a[1]), float(a[2])
+            boxes.append((px - 1, py - 1, px + 1, py + 1))
+    for (a, b) in segs:
+        ax, ay, bx, by = a[0] / 10000, a[1] / 10000, b[0] / 10000, b[1] / 10000
+        boxes.append((min(ax, bx), min(ay, by), max(ax, bx), max(ay, by)))
+    cols = int((area[2] - area[0]) // CELL)
+    rows = int((area[3] - area[1]) // CELL)
+    cells = set()
+    for x0, y0, x1, y1 in boxes:
+        c0 = max(0, int((x0 - area[0]) // CELL))
+        c1 = min(cols - 1, int((x1 - area[0]) // CELL))
+        r0 = max(0, int((y0 - area[1]) // CELL))
+        r1 = min(rows - 1, int((y1 - area[1]) // CELL))
+        for c in range(c0, c1 + 1):
+            for r in range(r0, r1 + 1):
+                cells.add((c, r))
+    if boxes:
+        ex = (max(b[2] for b in boxes) - min(b[0] for b in boxes)) * (
+            max(b[3] for b in boxes) - min(b[1] for b in boxes))
+    else:
+        ex = 0
+    drawn = (area[2] - area[0]) * (area[3] - area[1])
+    return {
+        "paper": {"size": name, "area_mm": [area[2] - area[0], area[3] - area[1]]},
+        "extent": round(1000 * ex / drawn),
+        "fill": round(1000 * len(cells) / (cols * rows)),
+    }
+
+
 def measure(path):
     root = parse(open(path, encoding="utf-8").read())
     segs = []
@@ -121,6 +256,7 @@ def measure(path):
         else:
             symbols += 1
     return {
+        **paper_fill(root, segs),
         "file": path,
         "wires": len(segs),
         "crossings": crossings,

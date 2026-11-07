@@ -4,7 +4,7 @@
 //! (`<component>`, `<component>:<unit>`, `instance:<id>`, `port:<id>`), a
 //! net by its key (`<net>`, `rail:<id>`, `port:<id>`), a sheet by its ID.
 
-use crate::geom::{Point, Side};
+use crate::geom::{Nm, Point, Rect, Side};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -14,6 +14,10 @@ pub struct Layout {
     /// Each sheet's name and place on the block's canvas.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sheets: BTreeMap<String, Sheet>,
+    /// The sheets' regions, by ID (`r1`, `r2`, …): what each holds and
+    /// where its frame is (format 3).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub regions: BTreeMap<String, Region>,
     /// The lasting instructions, by ID (`i1`, `i2`, … one past the
     /// largest).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -38,6 +42,63 @@ pub struct Sheet {
     pub name: String,
     /// Its lower left corner on the block's canvas.
     pub at: Point,
+    /// Its paper (`a4`, `ansi_b`), where it isn't the project's (format 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+    /// Its paper's orientation, where it isn't the project's (format 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orientation: Option<Orientation>,
+    /// Its paper pinned by a `paper` instruction: never fitted again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+}
+
+impl Sheet {
+    /// A sheet on the project's paper.
+    pub fn new(name: String, at: Point) -> Sheet {
+        Sheet {
+            name,
+            at,
+            size: None,
+            orientation: None,
+            pinned: false,
+        }
+    }
+}
+
+/// Which way up a sheet's paper is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Orientation {
+    Landscape,
+    Portrait,
+}
+
+/// A titled rectangle on a sheet holding one function's parts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Region {
+    pub sheet: String,
+    /// Its origin on the sheet: set when it is made, moved only when the
+    /// region moves whole. Its parts' places are relative to it in the
+    /// file.
+    pub at: Point,
+    /// Its frame, relative to `at`: what it holds (parts, their text and
+    /// labels), grown by its margin and title band.
+    pub frame: Rect,
+    pub title: String,
+    /// Named by the agent: never proposed again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub named: bool,
+    /// Its parts' keys, in key order.
+    pub parts: Vec<String>,
+}
+
+impl Region {
+    /// Its frame on the sheet.
+    pub fn frame_on_sheet(&self) -> Rect {
+        self.frame.shift(self.at)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,6 +290,18 @@ pub enum Instruction {
         side: Side,
         steps: u16,
     },
+    /// The parts drawn as one region so titled; the agent's, never
+    /// proposed again.
+    Region { title: String, parts: Vec<String> },
+    /// The parts in no region the agent named: proposed again.
+    RegionNone { parts: Vec<String> },
+    /// A sheet's paper, pinned: never fitted again.
+    Paper {
+        sheet: String,
+        size: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        orientation: Option<Orientation>,
+    },
 }
 
 impl Instruction {
@@ -244,8 +317,10 @@ impl Instruction {
             | Instruction::Orient { parts, .. }
             | Instruction::Idiom { parts, .. }
             | Instruction::Flow { parts }
-            | Instruction::Shift { parts, .. } => parts,
-            Instruction::Net { .. } => &[],
+            | Instruction::Shift { parts, .. }
+            | Instruction::Region { parts, .. }
+            | Instruction::RegionNone { parts } => parts,
+            Instruction::Net { .. } | Instruction::Paper { .. } => &[],
         }
     }
 
@@ -257,6 +332,7 @@ impl Instruction {
             Instruction::Beside { of, .. } => out.push(of),
             Instruction::Near { to, .. } => out.push(to),
             Instruction::Net { net, .. } => out.push(net),
+            Instruction::Paper { sheet, .. } => out.push(sheet),
             _ => {}
         }
         out
@@ -276,6 +352,8 @@ impl Instruction {
             Instruction::Idiom { .. } => "idiom",
             Instruction::Flow { .. } => "flow",
             Instruction::Shift { .. } => "shift",
+            Instruction::Region { .. } | Instruction::RegionNone { .. } => "region",
+            Instruction::Paper { .. } => "paper",
         }
     }
 }
@@ -287,6 +365,63 @@ impl Layout {
         self.instructions
             .values()
             .any(|i| matches!(i, Instruction::Align { parts, .. } if parts.iter().any(|p| p.contains('/'))))
+    }
+
+    /// The lowest layout format that holds it: 3 for regions, a sheet's
+    /// own paper or an instruction format 3 brings; 2 for a lasting
+    /// pin-level `align`; else 1.
+    pub fn format(&self) -> u64 {
+        let three = !self.regions.is_empty()
+            || self
+                .sheets
+                .values()
+                .any(|s| s.size.is_some() || s.orientation.is_some() || s.pinned)
+            || self.instructions.values().any(|i| {
+                matches!(
+                    i,
+                    Instruction::Region { .. }
+                        | Instruction::RegionNone { .. }
+                        | Instruction::Paper { .. }
+                )
+            });
+        if three {
+            3
+        } else if self.names_pins() {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// The region each part is in, by part key.
+    pub fn region_of(&self) -> BTreeMap<&str, &str> {
+        self.regions
+            .iter()
+            .flat_map(|(id, r)| r.parts.iter().map(move |k| (k.as_str(), id.as_str())))
+            .collect()
+    }
+
+    /// The layout as its file holds it: each part in a region placed
+    /// relative to the region's origin.
+    pub fn relative(&self) -> Layout {
+        self.shifted(-1)
+    }
+
+    /// The layout in sheet coordinates, from its file's form.
+    pub fn absolute(&self) -> Layout {
+        self.shifted(1)
+    }
+
+    fn shifted(&self, sign: Nm) -> Layout {
+        let mut out = self.clone();
+        for r in self.regions.values() {
+            for k in &r.parts {
+                if let Some(p) = out.placed.get_mut(k) {
+                    p.at = [p.at[0] + sign * r.at[0], p.at[1] + sign * r.at[1]];
+                }
+            }
+        }
+        out
     }
 }
 
@@ -335,6 +470,60 @@ mod tests {
         );
         assert_eq!(next_id(["i1", "i9", "x"]), "i10");
         assert_eq!(next_id(Vec::<String>::new()), "i1");
+    }
+
+    #[test]
+    fn regions_place_their_parts_relative_to_their_origin() {
+        let mut l = Layout::default();
+        l.sheets
+            .insert("s1".into(), Sheet::new("Sheet 1".into(), [0, 0]));
+        let placed = |at| Placed {
+            sheet: "s1".into(),
+            at,
+            rotation: 0,
+            mirror: false,
+            held: false,
+        };
+        l.placed.insert("u1".into(), placed([30, 40]));
+        l.placed.insert("port:a".into(), placed([5, 5]));
+        l.regions.insert(
+            "r1".into(),
+            Region {
+                sheet: "s1".into(),
+                at: [10, 20],
+                frame: crate::geom::Rect::new([0, 0], [50, 60]),
+                title: "U1 LAN8710A".into(),
+                named: false,
+                parts: vec!["u1".into()],
+            },
+        );
+        let rel = l.relative();
+        assert_eq!(rel.placed["u1"].at, [20, 20]);
+        assert_eq!(rel.placed["port:a"].at, [5, 5], "a port is in no region");
+        assert_eq!(rel.absolute(), l);
+        assert_eq!(l.format(), 3);
+        let mut plain = l.clone();
+        plain.regions.clear();
+        assert_eq!(plain.format(), 1);
+        let paper: Instruction = serde_json::from_value(
+            json!({"op": "paper", "sheet": "s2", "size": "a3", "orientation": "portrait"}),
+        )
+        .unwrap();
+        assert_eq!(paper.subjects(), ["s2"]);
+        plain.instructions.insert("i1".into(), paper);
+        assert_eq!(plain.format(), 3);
+        let none: Instruction =
+            serde_json::from_value(json!({"op": "region_none", "parts": ["r1"]})).unwrap();
+        assert_eq!(none.verb(), "region");
+        let mut sized = Layout::default();
+        let mut s = Sheet::new("Sheet 1".into(), [0, 0]);
+        s.size = Some("a4".into());
+        sized.sheets.insert("s1".into(), s);
+        assert_eq!(sized.format(), 3);
+        assert_eq!(
+            serde_json::to_value(&sized.sheets["s1"]).unwrap(),
+            json!({"name": "Sheet 1", "at": [0, 0], "size": "a4"})
+        );
     }
 
     #[test]

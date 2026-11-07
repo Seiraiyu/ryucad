@@ -48,12 +48,30 @@ pub struct Resolved {
     pub flow: BTreeSet<usize>,
     /// Parts a move of this batch places: held where they go.
     pub moved: BTreeSet<usize>,
+    /// Each lasting `region` instruction's title and parts (a cluster's
+    /// whole membership following any member), in instruction ID order.
+    pub regions: Vec<(String, BTreeSet<usize>)>,
+    /// Parts a `region none` instruction leaves to the proposal.
+    pub no_region: BTreeSet<usize>,
+    /// Each `paper` instruction's paper, by sheet ID or name: pinned.
+    pub papers: BTreeMap<String, (String, Option<crate::layout::Orientation>)>,
     pub notes: Vec<Note>,
 }
 
 /// The parts a subject names: the part keyed so, or every unit of the
 /// component keyed so, or a pin's part (`<part key>/<number>`).
 pub fn parts_named(block: &Block, subject: &str) -> Vec<usize> {
+    // A region of the previous layout (`region:<id>`): its parts.
+    if let Some(id) = subject.strip_prefix("region:") {
+        let mut out: Vec<usize> = block
+            .previous
+            .as_ref()
+            .and_then(|l| l.regions.get(id))
+            .map(|r| r.parts.iter().filter_map(|k| block.part(k)).collect())
+            .unwrap_or_default();
+        out.sort_by(|a, b| block.parts[*a].key.cmp(&block.parts[*b].key));
+        return out;
+    }
     if let Some((p, _)) = pin_named(block, subject) {
         return vec![p];
     }
@@ -142,6 +160,10 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
     let mut grouped: BTreeMap<usize, String> = BTreeMap::new();
     // Edge, beside and near each say where a part goes: one at most.
     let mut placed_by: BTreeMap<usize, String> = BTreeMap::new();
+    // Each part's `region` instruction, and `region none`'s.
+    let mut region_by: BTreeMap<usize, String> = BTreeMap::new();
+    let mut none_by: BTreeMap<usize, String> = BTreeMap::new();
+    let mut by_paper: BTreeMap<String, String> = BTreeMap::new();
     let all: Vec<(String, &Instruction, bool)> = block
         .instructions
         .iter()
@@ -159,12 +181,26 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
         // the instruction set aside.
         let mut missing = Vec::new();
         let mut parts: Vec<usize> = Vec::new();
+        let mut gone_regions = Vec::new();
         for s in ins.parts() {
             let found = parts_named(block, s);
             if found.is_empty() {
-                missing.push(s.clone());
+                match s.strip_prefix("region:") {
+                    Some(region) => gone_regions.push(region.to_owned()),
+                    None => missing.push(s.clone()),
+                }
             }
             parts.extend(found);
+        }
+        if !gone_regions.is_empty() {
+            for g in &gone_regions {
+                r.notes.push(Note {
+                    code: "region_unresolved".into(),
+                    message: format!("region {g} is gone: the instruction is kept"),
+                    details: json!({"instruction": id, "region": g}),
+                });
+            }
+            continue;
         }
         match ins {
             Instruction::Beside { of, .. } if parts_named(block, of).is_empty() => {
@@ -304,6 +340,69 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
                     ));
                 }
                 r.shift.push((parts.clone(), *side, *steps));
+            }
+            Instruction::Region { title, .. } => {
+                for &p in &parts {
+                    if let Some(other) = region_by.get(&p).or(none_by.get(&p)) {
+                        return Err(Refusal {
+                            code: "instruction_conflict",
+                            message: format!(
+                                "{} is in two regions: {other} and {id}",
+                                block.parts[p].key
+                            ),
+                            details: json!({"instructions": [other, id]}),
+                        });
+                    }
+                    region_by.insert(p, id.clone());
+                }
+                r.regions
+                    .push((title.clone(), parts.iter().copied().collect()));
+            }
+            Instruction::RegionNone { .. } => {
+                for &p in &parts {
+                    if let Some(other) = region_by.get(&p) {
+                        return Err(Refusal {
+                            code: "instruction_conflict",
+                            message: format!(
+                                "{} is in two regions: {other} and {id}",
+                                block.parts[p].key
+                            ),
+                            details: json!({"instructions": [other, id]}),
+                        });
+                    }
+                    none_by.insert(p, id.clone());
+                }
+                r.no_region.extend(parts.iter().copied());
+            }
+            Instruction::Paper {
+                sheet,
+                size,
+                orientation,
+            } => {
+                let sizes: Vec<&str> = block.papers.iter().map(|p| p.size.as_str()).collect();
+                if !sizes.is_empty() && !sizes.contains(&size.as_str()) {
+                    return Err(Refusal {
+                        code: "layout_rule",
+                        message: format!(
+                            "paper {size} isn't one of this project's sizes: {}",
+                            sizes.join(", ")
+                        ),
+                        details: json!({"instructions": [id], "rule": "paper", "sizes": sizes}),
+                    });
+                }
+                let v = (size.clone(), *orientation);
+                if let Some(old) = r.papers.get(sheet)
+                    && *old != v
+                {
+                    let other = by_paper[sheet].clone();
+                    return Err(conflict(
+                        &other,
+                        &id,
+                        &format!("they say different things of sheet {sheet}'s paper"),
+                    ));
+                }
+                by_paper.insert(sheet.clone(), id.clone());
+                r.papers.insert(sheet.clone(), v);
             }
             Instruction::Group { .. } => {
                 for &p in &parts {
@@ -574,11 +673,12 @@ pub fn judge(block: &Block, layout: &Layout, ins: &Instruction) -> Result<(), St
         Instruction::Edge { side, .. } => {
             let near = 16 * GRID;
             for &p in &parts {
-                let (_, sh) = placed(p)?;
+                let (sid, sh) = placed(p)?;
+                let size = block.area_in(layout, &sid);
                 let d = match side {
                     Side::Left => sh.extent.min[0],
-                    Side::Right => block.sheet[0] - sh.extent.max[0],
-                    Side::Up => block.sheet[1] - sh.extent.max[1],
+                    Side::Right => size[0] - sh.extent.max[0],
+                    Side::Up => size[1] - sh.extent.max[1],
                     Side::Down => sh.extent.min[1],
                 };
                 if d > near {
@@ -717,12 +817,13 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
             })
         }
         Instruction::Edge { side, .. } => all(&|p| {
-            shape(p).is_some_and(|(_, sh)| {
+            shape(p).is_some_and(|(sid, sh)| {
                 let near = 16 * crate::geom::GRID;
+                let size = block.area_in(layout, &sid);
                 match side {
                     Side::Left => sh.extent.min[0] <= near,
-                    Side::Right => sh.extent.max[0] >= block.sheet[0] - near,
-                    Side::Up => sh.extent.max[1] >= block.sheet[1] - near,
+                    Side::Right => sh.extent.max[0] >= size[0] - near,
+                    Side::Up => sh.extent.max[1] >= size[1] - near,
                     Side::Down => sh.extent.min[1] <= near,
                 }
             })
@@ -778,6 +879,24 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
             }
         }
         Instruction::Idiom { .. } | Instruction::Flow { .. } => true,
+        Instruction::Region { title, .. } => {
+            let keys: Vec<&str> = parts.iter().map(|p| block.parts[*p].key.as_str()).collect();
+            !keys.is_empty()
+                && layout.regions.values().any(|g| {
+                    &g.title == title && keys.iter().all(|k| g.parts.iter().any(|x| x == k))
+                })
+        }
+        Instruction::RegionNone { .. } => parts.iter().all(|p| {
+            !layout
+                .regions
+                .values()
+                .any(|g| g.named && g.parts.contains(&block.parts[*p].key))
+        }),
+        Instruction::Paper { sheet, size, .. } => layout
+            .sheets
+            .iter()
+            .find(|(id, s)| *id == sheet || &s.name == sheet)
+            .is_some_and(|(_, s)| s.pinned && s.size.as_deref() == Some(size.as_str())),
     }
 }
 
@@ -848,10 +967,7 @@ mod tests {
         let mut layout = Layout::default();
         layout.sheets.insert(
             "s1".into(),
-            crate::layout::Sheet {
-                name: "Sheet 1".into(),
-                at: [0, 0],
-            },
+            crate::layout::Sheet::new("Sheet 1".into(), [0, 0]),
         );
         let put = |l: &mut Layout, k: &str, at: [i64; 2]| {
             l.placed.insert(

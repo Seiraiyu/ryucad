@@ -1309,6 +1309,7 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                 out[ci] = Some(Cluster {
                     members,
                     idiom: cluster.idiom,
+                    frame: 0,
                 });
             }
             _ => {
@@ -1580,6 +1581,7 @@ fn standalone(block: &Block, idiom: &Idiom) -> Option<Cluster> {
             Some(Cluster {
                 members: vec![(upper, up), (lower, low)],
                 idiom: Some(IdiomKind::LedResistor),
+                frame: 0,
             })
         }
         IdiomKind::RcFilter | IdiomKind::LcFilter => {
@@ -1601,6 +1603,7 @@ fn standalone(block: &Block, idiom: &Idiom) -> Option<Cluster> {
             Some(Cluster {
                 members: vec![(s, series), (c, cap)],
                 idiom: Some(idiom.kind),
+                frame: 0,
             })
         }
         _ => None,

@@ -28,6 +28,12 @@ pub const LABEL: &str = "#1d3f8f";
 pub const NAME: &str = "#606060";
 /// Every line's width.
 pub const LINE: Nm = 150_000;
+/// A region's frame: the symbols' colour at 45% over the paper.
+pub const FRAME: &str = "#c39a9a";
+/// The paper, under a region's title.
+pub const PAPER: &str = "#ffffff";
+/// A region frame's dash: 2 mm on, 1 mm off.
+pub const DASH: [Nm; 2] = [2_000_000, 1_000_000];
 
 /// One thing drawn. A fill of `None` draws the outline alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +63,9 @@ pub enum Item {
         points: [Point; 4],
         stroke: &'static str,
     },
+    /// A region's frame: a dashed rectangle, and its title's tab (filled
+    /// with the paper, outlined), drawn under everything on its sheet.
+    Frame { rect: Rect, title_tab: Rect },
     /// A text on its baseline through `at`, upright or reading upwards.
     Text {
         text: String,
@@ -225,6 +234,29 @@ fn label_items(items: &mut Vec<Item>, kind: LabelKind, name: &str, at: Point, si
 pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
     let mut out = Painted::default();
     let items = &mut out.items;
+    // Regions first, under everything: a dashed frame and a titled tab in
+    // its title band's top left. An untitled region isn't drawn.
+    for r in layout.regions.values() {
+        if r.sheet != sid || r.title.is_empty() {
+            continue;
+        }
+        let rect = r.frame_on_sheet();
+        let w = crate::font::width(&r.title, SIZE);
+        let base = [rect.min[0] + GRID, rect.max[1] - 2 * GRID];
+        let title_tab = Rect::new(
+            [rect.min[0] + GRID / 2, base[1] - GRID / 2],
+            [base[0] + w + GRID / 2, base[1] + SIZE + GRID / 2],
+        );
+        items.push(Item::Frame { rect, title_tab });
+        items.push(Item::Text {
+            text: r.title.clone(),
+            at: base,
+            size: SIZE,
+            anchor: Anchor::Start,
+            vertical: false,
+            colour: TEXT,
+        });
+    }
     let mut arms: BTreeMap<(usize, route::Node), u8> = BTreeMap::new();
     for part in &block.parts {
         let Some(x) = layout.placed.get(&part.key).filter(|x| x.sheet == sid) else {
@@ -348,6 +380,28 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_region_is_drawn_as_a_dashed_frame_and_a_title_tab() {
+        let block = crate::testing::regions_block();
+        let out = crate::engine::lay_out(&block).unwrap();
+        let (sid, _) = out.layout.sheets.iter().next().unwrap();
+        let painted = sheet(&block, &out.layout, sid);
+        let frames: Vec<&Item> = painted
+            .items
+            .iter()
+            .filter(|i| matches!(i, Item::Frame { .. }))
+            .collect();
+        assert_eq!(frames.len(), out.layout.regions.len());
+        assert!(
+            painted
+                .items
+                .iter()
+                .any(|i| matches!(i, Item::Text { text, .. } if text == "U1 LAN8710A"))
+        );
+        let svg = crate::svg::draw(&block, &out.layout, &[]);
+        assert!(svg.contains("stroke-dasharray"), "frames are dashed");
+    }
     use crate::testing::seeded;
 
     #[test]

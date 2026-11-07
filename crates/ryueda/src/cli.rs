@@ -1087,6 +1087,14 @@ enum ProjectCmd {
         /// landscape (the default) or portrait.
         #[arg(long)]
         orientation: Option<String>,
+        /// Paper fit: each sheet on the smallest of --sizes that holds it
+        /// (true, the default), or every sheet on --sheet-size (false).
+        #[arg(long, value_name = "true|false")]
+        fit: Option<bool>,
+        /// The papers paper fit takes, comma separated, up to
+        /// --sheet-size (a4,a3 by default).
+        #[arg(long, value_name = "SIZES")]
+        sizes: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1279,8 +1287,26 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             properties,
             sheet_size,
             orientation,
+            fit,
+            sizes,
             expect,
         }) => Request::ProjectEdit {
+            fit: *fit,
+            sizes: sizes
+                .as_deref()
+                .map(|list| {
+                    list.split(',')
+                        .map(|s| {
+                            ryueda::project::PaperSize::parse(s.trim()).ok_or_else(|| {
+                                Error::new(
+                                    Code::InvalidParam,
+                                    format!("{s:?} isn't a paper size: a4, a3, a2, a1, a0, ansi_a, ansi_b, ansi_c, ansi_d, ansi_e"),
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?,
             properties: properties.map(),
             sheet_size: sheet_size
                 .as_deref()

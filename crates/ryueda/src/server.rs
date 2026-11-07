@@ -256,12 +256,16 @@ fn dispatch(
             properties,
             sheet_size,
             orientation,
+            fit,
+            sizes,
             expected_revision,
         } => topcmd::project_edit(
             session,
             &properties,
             sheet_size,
             orientation,
+            fit,
+            sizes,
             expected_revision.as_deref(),
         ),
         Request::SymbolCreate {

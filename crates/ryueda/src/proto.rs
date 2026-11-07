@@ -59,6 +59,12 @@ pub enum Request {
         sheet_size: Option<crate::project::PaperSize>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         orientation: Option<crate::project::Orientation>,
+        /// Paper fit on or off (plan 2.A).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fit: Option<bool>,
+        /// The papers paper fit takes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sizes: Option<Vec<crate::project::PaperSize>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
