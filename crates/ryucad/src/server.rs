@@ -3848,8 +3848,16 @@ fn check_references(
     f: &Feature,
 ) -> Result<()> {
     // Nothing may change a reference import's body, whether or not the
-    // feature references anything (a cut, a boolean).
-    if !f.targets().is_empty() || f.source().is_some() {
+    // feature references anything (a cut, a boolean). Only an import in
+    // reference mode makes one, so a part without one isn't rebuilt here.
+    if (!f.targets().is_empty() || f.source().is_some())
+        && session.project().part(part)?.features.values().any(|g| {
+            g.as_ref()
+                .ok()
+                .and_then(|g| g.import())
+                .is_some_and(|i| i.mode() == crate::doc::import::Mode::Reference)
+        })
+    {
         let p = session.project().part(part)?.clone();
         let results = session.rebuilt(part)?;
         rebuild::check_not_reference(&proposed(&p, order, &[(id, f)]), id, f, results)?;
