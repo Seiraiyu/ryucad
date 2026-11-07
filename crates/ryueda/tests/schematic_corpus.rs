@@ -20,6 +20,7 @@ mod rp2040;
 
 use assert_cmd::Command;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 /// `ryueda` in `dir`, in process, its IDs a fixed sequence.
@@ -176,7 +177,7 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
                 .unwrap_or_else(|| panic!("{name}/{}: no threshold", b.id));
             for s in &scores {
                 assert!(
-                    i64::from(s.score) >= least || std::env::var_os("NO_THRESH").is_some(),
+                    i64::from(s.score) >= least,
                     "{name}/{}: sheet {} scores {}, under its threshold {least}",
                     b.id,
                     s.sheet,
@@ -1163,7 +1164,7 @@ fn unchanged(before: &Value, after: &Value, parts: &[String], nets: &[String], w
             }
         }
     }
-    let keys = |f: &str| -> std::collections::BTreeSet<String> {
+    let keys = |f: &str| -> BTreeSet<String> {
         before[f]
             .as_object()
             .unwrap()
@@ -1479,7 +1480,7 @@ fn scripted_branches_merge_their_layouts_by_area() {
     let repairs = vec![ryusch::merge::Repair::Relayout; m.conflicts.len()];
     let out = ryusch::merge::resolve(&built.input, &lb, &lo, &lt, &m, &repairs).unwrap();
     assert_eq!(ryusch::rules::check(&built.input, &out.layout), []);
-    let touched: std::collections::BTreeSet<String> = m
+    let touched: BTreeSet<String> = m
         .conflicts
         .iter()
         .flat_map(|c| c.ours.iter().chain(&c.theirs))
@@ -1619,64 +1620,131 @@ fn a_unit_to_another_sheet_and_a_new_layer_change_only_what_they_name() {
     );
 }
 
-/// Agent round projects: each circuit entered by its script and every
-/// block laid out again from nothing, with no instructions, written into
-/// `RYUEDA_ROUND_OUT/<circuit>` for a round's sessions to start from (with
-/// each block's lint as `<circuit>/baseline.json`). Run by hand:
-/// `RYUEDA_ROUND_OUT=<dir> cargo test -p ryueda --test schematic_corpus -- --ignored round_projects`.
+/// Every region ID a description gives, on any sheet of any block.
+fn region_ids(v: &Value) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m {
+                if k == "regions"
+                    && let Some(list) = x.as_array()
+                {
+                    out.extend(
+                        list.iter()
+                            .filter_map(|r| r["id"].as_str().map(str::to_owned)),
+                    );
+                }
+                out.extend(region_ids(x));
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|x| out.extend(region_ids(x))),
+        _ => {}
+    }
+    out
+}
+
 /// Plan 2.A: a region renamed and moved whole (`region rename`, then a
 /// move `beside` another region) changes, in the layout file, only that
 /// region's origin and title and the wires and labels of nets entering it;
 /// its parts keep their places in it.
 #[test]
 fn a_region_renamed_and_moved_changes_only_itself() {
+    // The RP2040 board: the breakout's one sheet is too tight for a region
+    // to move without running onto (and taking in) another.
     let dir = tempfile::tempdir().unwrap();
-    let board = circuit(dir.path(), "breakout");
+    let board = circuit(dir.path(), "rp2040");
     ryueda(&board, 1, &["layout"]);
     let raw = |b: &Path| -> Value {
-        serde_json::from_slice(&std::fs::read(b.join("blocks/breakout/layout.json")).unwrap())
+        serde_json::from_slice(&std::fs::read(b.join("blocks/mitayi/layout.json")).unwrap())
             .unwrap()
     };
     let before = raw(&board);
     let regions = before["regions"].as_object().unwrap().clone();
     assert!(regions.len() >= 2, "{regions:?}");
-    let mut ids = regions.keys();
-    let (id, other) = (ids.next().unwrap().clone(), ids.next().unwrap().clone());
+    let all: BTreeSet<String> = regions.keys().cloned().collect();
+    // The first region of two parts or more (a one-part region's move moves
+    // its part inside it, not its origin) and move `beside` a part outside
+    // it on its sheet (a `shift` moves a region's parts, not the region
+    // whole) that a dry run of the rename and the move together accepts,
+    // doesn't call unchanged, and that leaves every region standing (a
+    // region moved onto an unnamed one takes it in).
+    let mut tried = Vec::new();
+    let (id, mv) = regions
+        .iter()
+        .filter(|(_, r)| r["parts"].as_array().unwrap().len() >= 2)
+        .flat_map(|(id, r)| {
+            let mine = r["parts"].as_array().unwrap().clone();
+            let sheet = r["sheet"].clone();
+            let outside: Vec<String> = before["placed"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter(|(k, x)| {
+                    x["sheet"] == sheet && !k.starts_with("port:") && !mine.iter().any(|m| m == *k)
+                })
+                .map(|(k, _)| k.clone())
+                .collect();
+            outside.into_iter().flat_map(move |k| {
+                let id = id.clone();
+                ["right", "left", "above", "below"]
+                    .into_iter()
+                    .map(move |side| (id.clone(), format!("beside region:{id} {k} {side}")))
+            })
+        })
+        .find(|(id, m)| {
+            tried.push(m.clone());
+            let out = ryueda_envelope(
+                &board,
+                &[
+                    "place",
+                    "mitayi",
+                    &format!("region rename {id} Moved"),
+                    "--move",
+                    m,
+                    "--dry-run",
+                ],
+            );
+            out["ok"] == true
+                && !out.to_string().contains("move_unchanged")
+                && region_ids(&out) == all
+        })
+        .unwrap_or_else(|| panic!("no region move holds: {tried:?}"));
+    // The rename alone changes only that region's title.
     ryueda(
         &board,
         1,
-        &["place", "breakout", &format!("region rename {id} Moved")],
+        &["place", "mitayi", &format!("region rename {id} Moved")],
     );
-    let other_part = regions[&other]["parts"][0].as_str().unwrap().to_owned();
-    let out = ryueda_envelope(
-        &board,
-        &[
-            "place",
-            "breakout",
-            "--move",
-            &format!("beside region:{id} {other_part} right"),
-        ],
-    );
+    let renamed = raw(&board);
+    assert_eq!(renamed["regions"][&id]["title"], "Moved");
+    assert_eq!(renamed["regions"][&id]["at"], regions[&id]["at"]);
+    assert_eq!(renamed["placed"], before["placed"], "a rename moved a part");
+    // The move moves the region's origin.
+    ryueda(&board, 1, &["place", "mitayi", "--move", &mv]);
     let after = raw(&board);
-    if out["ok"] != true {
-        // A move that would break a hard rule is refused and writes
-        // nothing: the file is as the rename left it.
-        assert_eq!(out["error"]["code"], "layout_rule", "{out}");
-        return;
-    }
+    assert_ne!(
+        after["regions"][&id]["at"], regions[&id]["at"],
+        "{mv} didn't move region {id}"
+    );
     assert_eq!(after["regions"][&id]["title"], "Moved");
     // Its parts may be placed again inside it where a label finds no room
     // (the crowded pass), so only what lies outside it is held still.
     let mine: Vec<&Value> = regions[&id]["parts"].as_array().unwrap().iter().collect();
     for (k, x) in before["placed"].as_object().unwrap() {
-        if !mine.iter().any(|m| *m == k) && after["placed"].get(k).is_some() {
-            assert_eq!(&after["placed"][k], x, "{k}, outside the region, moved");
+        if !mine.iter().any(|m| *m == k) {
+            assert_eq!(
+                &after["placed"][k], x,
+                "{k}, outside the region, moved by {mv}"
+            );
         }
     }
     // Every other region keeps its origin.
     for (rid, r) in &regions {
-        if *rid != id && after["regions"].get(rid).is_some() {
-            assert_eq!(after["regions"][rid]["at"], r["at"], "region {rid} moved");
+        if *rid != id {
+            assert_eq!(
+                after["regions"][rid]["at"], r["at"],
+                "region {rid} moved by {mv}"
+            );
         }
     }
 }
@@ -1726,6 +1794,11 @@ fn a_region_moved_on_one_side_and_edited_on_the_other_merge() {
     );
 }
 
+/// Agent round projects: each circuit entered by its script and every
+/// block laid out again from nothing, with no instructions, written into
+/// `RYUEDA_ROUND_OUT/<circuit>` for a round's sessions to start from (with
+/// each block's lint as `<circuit>/baseline.json`). Run by hand:
+/// `RYUEDA_ROUND_OUT=<dir> cargo test -p ryueda --test schematic_corpus -- --ignored round_projects`.
 #[test]
 #[ignore]
 fn round_projects() {

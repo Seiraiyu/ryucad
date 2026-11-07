@@ -1257,7 +1257,6 @@ fn spot_along(
     None
 }
 
-/// Where `flow_onto_sheets` starts.
 /// From nothing (plan 2.A): `which`'s clusters packed in two levels.
 /// Each proposed region's clusters are flowed onto a sheet of their own
 /// (and drawn to their hosts) into one framed region cluster, a region
@@ -1603,6 +1602,7 @@ fn fit_paper<'a>(
     }
 }
 
+/// Where `flow_onto_sheets` starts.
 #[derive(Clone, Copy)]
 enum Target<'a> {
     /// The sheet laid out again (by ID), else a new one.
