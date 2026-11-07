@@ -5,6 +5,7 @@
 //! is the source of lifecycle. Nothing outside this module names it but
 //! `distributor::DISTRIBUTORS`.
 
+pub mod attr;
 pub mod wire;
 
 use crate::keys::{Field, KeySpec};
