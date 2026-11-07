@@ -408,8 +408,10 @@ fn dispatch(
         Request::PartsRefresh { force } => match session.prepared.take() {
             Some(made) => made,
             None => {
+                let cats = session.catalogues()?;
                 let names = crate::parts::catalogues_placed(session.project());
-                crate::parts::refresh(&names, force, job)
+                let wanted = crate::parts::offers_placed_live(session.project(), &cats, force);
+                crate::parts::refresh_all(&names, &wanted, &cats, force, job)
             }
         },
         Request::PartsSources {} => {

@@ -945,6 +945,103 @@ pub fn refresh(names: &[&str], force: bool, job: &ryu_session::job::Job) -> Resu
     )
 }
 
+/// The placed parts' offers a distributor claims, each once, by
+/// distributor and key: those with no record kept on this machine, or
+/// every one with `force`.
+pub fn offers_placed_live(
+    p: &Project,
+    cats: &Catalogues,
+    force: bool,
+) -> Vec<(&'static str, String)> {
+    let mut out = std::collections::BTreeSet::new();
+    for design in p.conn.designs.keys() {
+        let Ok(n) = crate::netlist::flatten(p, design) else {
+            continue;
+        };
+        for (_, c, _) in crate::erc::placed_by_libcomp(p, &n) {
+            for o in c
+                .offers
+                .iter()
+                .chain(c.alternates.iter().flat_map(|a| &a.offers))
+            {
+                for d in ryueda_parts::distributor::for_supplier(&o.supplier) {
+                    let key = o.sku.trim().to_owned();
+                    if force || cats.live.cached(d, &key, cats.now).is_none() {
+                        out.insert((d.name, key));
+                    }
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// `parts.refresh`'s distributor records: each of `wanted` fetched again
+/// under `job` (phase `fetch`, a record a step) and kept. A distributor
+/// with no keys is listed, not called; a key it doesn't have is `missing`;
+/// a rate limit stops the refresh as `parts_rate_limited`, saying what was
+/// fetched and what remains (run it again later: what was kept stays).
+pub fn refresh_records(
+    wanted: &[(&'static str, String)],
+    cats: &Catalogues,
+    job: &ryu_session::job::Job,
+) -> Result<Value> {
+    let (mut fetched, mut missing, mut not_configured) = (Vec::new(), Vec::new(), Vec::new());
+    let stage = (!wanted.is_empty())
+        .then(|| job.begin(ryu_session::job::Phase::Fetch, "records", wanted.len()));
+    let call = Call {
+        cancel: job.kernel_cancel(),
+        deadline: None,
+    };
+    let mut opened: BTreeMap<&'static str, Option<Box<dyn ryueda_parts::distributor::Live>>> =
+        BTreeMap::new();
+    for (i, (name, key)) in wanted.iter().enumerate() {
+        if let Some(s) = &stage {
+            s.step(|| format!("{name}:{key}"))?;
+        }
+        let d = ryueda_parts::distributor::distributor(name).expect("a distributor's name");
+        if !opened.contains_key(name) {
+            opened.insert(name, cats.live.open(d)?);
+        }
+        let Some(src) = &opened[name] else {
+            if !not_configured.contains(name) {
+                not_configured.push(*name);
+            }
+            continue;
+        };
+        match src.get(key, &call) {
+            Ok(Some(r)) => {
+                cats.live.keep(d, std::slice::from_ref(&r));
+                fetched.push(json!({"source": name, "key": key}));
+            }
+            Ok(None) => missing.push(json!({"source": name, "key": key})),
+            Err(e) if e.code == Code::PartsRateLimited => {
+                let remaining: Vec<Value> = wanted[i..]
+                    .iter()
+                    .map(|(n, k)| json!({"source": n, "key": k}))
+                    .collect();
+                return Err(e.with("fetched", &fetched).with("remaining", &remaining));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(json!({"fetched": fetched, "missing": missing, "not_configured": not_configured}))
+}
+
+/// `parts.refresh`: the catalogues `names`, then the distributor records
+/// `wanted`.
+pub fn refresh_all(
+    names: &[&str],
+    wanted: &[(&'static str, String)],
+    cats: &Catalogues,
+    force: bool,
+    job: &ryu_session::job::Job,
+) -> Result<Value> {
+    let mut v = refresh(names, force, job)?;
+    v["records"] = refresh_records(wanted, cats, job)?;
+    Ok(v)
+}
+
 /// The lock-free work of a long parts request, if `req` is one.
 pub fn prepare(
     session: &mut crate::session::Session,
@@ -957,11 +1054,15 @@ pub fn prepare(
             Some(Box::new(move || sync(&source, &job)))
         }
         // What the placed parts draw on is found under the lock; the
-        // syncs run without it.
+        // syncs and calls run without it.
         crate::proto::Request::PartsRefresh { force } => {
+            let cats = session.catalogues().ok()?;
             let names = catalogues_placed(session.project());
+            let wanted = offers_placed_live(session.project(), &cats, *force);
             let (force, job) = (*force, job.clone());
-            Some(Box::new(move || refresh(&names, force, &job)))
+            Some(Box::new(move || {
+                refresh_all(&names, &wanted, &cats, force, &job)
+            }))
         }
         // The library and catalogues are searched under the lock; the
         // distributors are called without it.
@@ -1443,5 +1544,45 @@ pub(crate) mod tests {
                 .any(|r| r["source"] == "digikey")
         );
         assert!(show(&p, "digikey:nothing-ND", false, false, &cats).is_err());
+    }
+
+    #[test]
+    fn a_refresh_fetches_each_placed_offers_record_and_stops_at_a_limit() {
+        let (_c, _k, fake, cats) = live();
+        let wanted = vec![
+            ("digikey", "1276-1001-1-ND".to_owned()),
+            ("digikey", "gone-ND".to_owned()),
+        ];
+        let job = ryu_session::job::Job::default();
+        let v = refresh_records(&wanted, &cats, &job).unwrap();
+        assert_eq!(
+            v["fetched"],
+            json!([{"source": "digikey", "key": "1276-1001-1-ND"}])
+        );
+        assert_eq!(
+            v["missing"],
+            json!([{"source": "digikey", "key": "gone-ND"}])
+        );
+        let dk = ryueda_parts::distributor::distributor("digikey").unwrap();
+        assert!(cats.live.cached(dk, "1276-1001-1-ND", 1_000).is_some());
+        // DigiKey says to wait: what was fetched and what remains.
+        fake.set(
+            ryueda_parts::fetch::Method::Get,
+            &ryueda_parts::digikey::testing::details_url("gone-ND"),
+            ryueda_parts::fetch::Response::new(429, "").with_header("Retry-After", "9"),
+        );
+        let e = refresh_records(&wanted, &cats, &job).unwrap_err();
+        assert_eq!(e.code, Code::PartsRateLimited);
+        assert_eq!(e.details["fetched"][0]["key"], "1276-1001-1-ND");
+        assert_eq!(
+            e.details["remaining"],
+            json!([{"source": "digikey", "key": "gone-ND"}])
+        );
+        // No keys: listed, not called.
+        let none = Catalogues::at(_k.path(), 1_000, MAX_AGE);
+        assert_eq!(
+            refresh_records(&wanted, &none, &job).unwrap()["not_configured"],
+            json!(["digikey"])
+        );
     }
 }

@@ -646,8 +646,9 @@ enum PartsCmd {
         expect: Expect,
     },
     /// Sync each catalogue the placed parts' offers draw on that is
-    /// missing or older than parts.max_age (every one with --force): a
-    /// long request, as sync is.
+    /// missing or older than parts.max_age, and fetch again each
+    /// distributor's record of their offers this machine doesn't keep
+    /// (every one with --force): a long request, as sync is.
     Refresh {
         #[arg(long)]
         force: bool,
