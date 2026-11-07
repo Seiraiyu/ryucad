@@ -44,6 +44,14 @@ fn judged(j: &Judged) -> String {
     }
 }
 
+/// Whether this run judged a ledger line's signature: the stage it names
+/// ran (`--stages ref` runs none of healing's, so their lines aren't fixed
+/// by it), or it is a case that wouldn't open, which any stage run settles.
+fn judged_here(ran: &Ran, sig: &str) -> bool {
+    let stage = sig.split('/').next().unwrap_or_default();
+    stage == "open" && !ran.stages.is_empty() || ran.stages.iter().any(|s| s.stage == stage)
+}
+
 /// The report: every case with its findings' states, sorted by case,
 /// then the groups by signature.
 pub fn report(
@@ -76,7 +84,7 @@ pub fn report(
             .iter()
             .any(|s| s.outcome == crate::stages::Outcome::Timeout);
         for (sig, j) in ledger.fixed(id, &r.findings) {
-            if !timed_out {
+            if !timed_out && judged_here(&r.ran, &sig) {
                 fixed.push(json!({"case": id, "signature": sig, "timed": crate::classify::is_timed(&sig), "was": j}));
             }
         }
@@ -327,7 +335,10 @@ mod tests {
         .into_iter()
         .map(|r| (r.case.id.clone(), r))
         .collect();
-        let ledger = Ledger::parse("case aaaa #5 x/one\ncase dddd #6 x/three\n").unwrap();
+        let ledger = Ledger::parse(
+            "case aaaa #5 x/one\ncase dddd #6 import/three\ncase dddd #7 ref_mesh/four\n",
+        )
+        .unwrap();
         let v = report(
             &json!({"ryucad": "0.7.2", "commit": "abc"}),
             &records,
@@ -339,6 +350,8 @@ mod tests {
         assert_eq!(v["groups"][0]["representative"], "bbbb");
         assert_eq!(v["groups"][0]["new"], 1);
         assert_eq!(v["fixed"][0]["case"], "dddd");
+        // ref_mesh never ran for dddd, so its line isn't fixed by this run.
+        assert_eq!(v["fixed"].as_array().unwrap().len(), 1, "{}", v["fixed"]);
         let md = markdown(&v, &records);
         assert!(md.contains("## `x/one`"), "{md}");
         assert!(md.contains("- `aaaa` #5: s f.stp #7 Pin"), "{md}");
