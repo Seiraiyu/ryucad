@@ -17,9 +17,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-/// The sources this ryueda searches: the library, then each catalogue.
+/// The sources this ryueda searches: the library, each catalogue, then
+/// each distributor.
 pub fn sources_known() -> Vec<&'static str> {
-    std::iter::once(Library::NAME).chain(catalogues()).collect()
+    std::iter::once(Library::NAME)
+        .chain(catalogues())
+        .chain(crate::distributors::names())
+        .collect()
 }
 
 /// `parts.max_age`'s default: 7 days.
@@ -38,6 +42,9 @@ pub struct Catalogues {
     pub max_age: u64,
     /// Each connector's catalogue once opened, by name (`None`: not synced).
     loaded: std::sync::Arc<std::sync::Mutex<BTreeMap<&'static str, Option<Shared>>>>,
+    /// This machine's distributors (6.C): `Default` has no keys, no
+    /// kept records and no network.
+    pub live: crate::distributors::Distributors,
 }
 
 impl Catalogues {
@@ -47,18 +54,26 @@ impl Catalogues {
             now,
             max_age,
             loaded: Default::default(),
+            live: Default::default(),
         }
+    }
+
+    /// This, with `live` its distributors.
+    pub fn with_live(self, live: crate::distributors::Distributors) -> Catalogues {
+        Catalogues { live, ..self }
     }
 
     /// The machine's: the parts cache, now, and `parts.max_age` from the
     /// preferences (or `RYUEDA_PARTS_MAX_AGE`).
     /// With no cache folder to be found (no home), no catalogue.
     pub fn here() -> Result<Catalogues> {
+        let live = crate::distributors::Distributors::here();
         Ok(match cache_root() {
-            Ok(root) => Catalogues::at(&root, now(), max_age()),
+            Ok(root) => Catalogues::at(&root, now(), max_age()).with_live(live),
             Err(_) => Catalogues {
                 now: now(),
                 max_age: max_age(),
+                live,
                 ..Default::default()
             },
         })
@@ -408,12 +423,15 @@ pub fn sources(p: &Project, cats: &Catalogues) -> Result<Value> {
     for name in catalogues() {
         list.push(cats.state(name)?.0);
     }
+    for d in ryueda_parts::distributor::DISTRIBUTORS {
+        list.push(cats.live.state(d, cats.now));
+    }
     Ok(json!({"sources": list, "max_age_s": cats.max_age, "cache": cats.root}))
 }
 
-/// The sources a key's `<source>:` names: `library`; a catalogue, by its
-/// name or a supplier it claims (so `lcsc:` names the catalogue keyed by
-/// LCSC numbers); or `mpn` for every source.
+/// The sources a key's `<source>:` names: `library`; a catalogue or a
+/// distributor, by its name or a supplier it claims (so `lcsc:` names the
+/// catalogue keyed by LCSC numbers); or `mpn` for every source.
 fn named(source: &str) -> Option<Vec<&'static str>> {
     match source {
         "library" => Some(vec![Library::NAME]),
@@ -421,6 +439,7 @@ fn named(source: &str) -> Option<Vec<&'static str>> {
         s => {
             let found: Vec<&'static str> = ryueda_parts::catalogue::for_supplier(s)
                 .map(|c| c.name)
+                .chain(ryueda_parts::distributor::for_supplier(s).map(|d| d.name))
                 .collect();
             (!found.is_empty()).then_some(found)
         }
@@ -439,9 +458,13 @@ pub fn records_of(
         Error::new(
             Code::InvalidParam,
             format!(
-                "{} isn't a source to look parts up in: library, mpn or a catalogue ({})",
+                "{} isn't a source to look parts up in: library, mpn, a catalogue or a distributor ({})",
                 k.source,
-                catalogues().join(", ")
+                catalogues()
+                    .into_iter()
+                    .chain(crate::distributors::names())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         )
         .with("param", "key")
@@ -458,6 +481,14 @@ pub fn records_of(
                     r.key == k.key
                 }
             }));
+            continue;
+        }
+        // A distributor's records as kept on this machine: calling it is
+        // `parts show`'s, with the lock released.
+        if let Some(d) = ryueda_parts::distributor::distributor(name) {
+            if !k.is_mpn() {
+                out.extend(cats.live.cached(d, &k.key, cats.now));
+            }
             continue;
         }
         let (_, warn) = cats.state(name)?;
@@ -850,13 +881,13 @@ pub(crate) mod tests {
         let e = search(
             &p,
             &Search {
-                sources: vec!["digikey".into()],
+                sources: vec!["acme".into()],
                 ..Default::default()
             },
             &fresh,
         )
         .unwrap_err();
-        assert_eq!(e.details["sources"], json!(["library", "jlc"]));
+        assert_eq!(e.details["sources"], json!(["library", "jlc", "digikey"]));
         // The library alone, as 6.A searched: no catalogue read, no warning.
         let v = search(&p, &Search::default(), &Catalogues::default()).unwrap();
         assert!(v["warnings"].as_array().unwrap().is_empty());
@@ -922,7 +953,7 @@ pub(crate) mod tests {
             (Code::PartsNotFound, &json!(["jlc"]))
         );
         assert_eq!(
-            show(&p, "digikey:1-ND", false, &cats).unwrap_err().code,
+            show(&p, "acme:1-ND", false, &cats).unwrap_err().code,
             Code::InvalidParam
         );
         assert_eq!(

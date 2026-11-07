@@ -236,7 +236,7 @@ mod tests {
         assert_ne!(p.revision, none.revision);
         assert!(p.faults().is_empty(), "{:?}", p.faults());
         let bad = json!({"build_quantity": 0, "format": 1, "kind": "ryueda.parts",
-                         "severity": {"pin_conflict": "off"}, "sources": ["digikey"]});
+                         "severity": {"pin_conflict": "off"}, "sources": ["acme"]});
         let (_d2, p) = project(&[("parts.json", bad)]);
         let pointers: Vec<String> = p
             .faults()
