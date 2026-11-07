@@ -561,13 +561,15 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
             format!("{} {id} makes no body of its own", f.type_name()),
         )
         .with("feature", id)),
-        Feature::Extrude(_) | Feature::Revolve(_) | Feature::Hole(_) | Feature::BaseFlange(_) => {
-            Err(Error::new(
-                Code::Internal,
-                format!("{} {id} is built from its sketch", f.type_name()),
-            )
-            .with("feature", id))
-        }
+        Feature::Extrude(_)
+        | Feature::Revolve(_)
+        | Feature::Hole(_)
+        | Feature::Planar(_)
+        | Feature::BaseFlange(_) => Err(Error::new(
+            Code::Internal,
+            format!("{} {id} is built from its sketch", f.type_name()),
+        )
+        .with("feature", id)),
         Feature::Sweep(_) => Err(Error::new(
             Code::Internal,
             format!("sweep {id} is built from its profile and path"),
@@ -628,7 +630,14 @@ fn build_sweep(
         },
         _ => unreachable!("a sweep"),
     };
-    let (valid, keys) = crate::profile::profile(&part.id, sketch, solved, loops)
+    // A surface sweep takes its sketch's loops and open chains, and
+    // founds the sheet they sweep (ryucad 18).
+    let of = if f.surface() {
+        crate::profile::surface
+    } else {
+        crate::profile::profile
+    };
+    let (valid, keys) = of(&part.id, sketch, solved, loops)
         .map_err(|e| e.with("feature", id).with("sketch", sketch))?;
     let key = op_key(&part.id, id);
     let made = match f {
@@ -882,6 +891,15 @@ fn sweep_error(id: &Id, ty: &str, e: ryukei::Error, keys: &Keys, axis: Option<&I
             let msg = format!("{seg} crosses or touches the axis");
             (Code::ProfileInvalid, msg, entities)
         }
+        ryukei::Error::InvalidSweep(SweepError::ChainOnAxis { segment }) => {
+            let seg = keys.segments[&segment.0].clone();
+            let mut entities = vec![seg.clone()];
+            entities.extend(axis.cloned());
+            let msg = format!(
+                "{seg} lies along the axis: a surface revolve's chain may end on it, never run along it"
+            );
+            (Code::ProfileInvalid, msg, entities)
+        }
         ryukei::Error::InvalidSweep(SweepError::ShortSpan | SweepError::BadAngle) => (
             Code::InvalidExtent,
             "the sweep is too short".to_owned(),
@@ -938,10 +956,26 @@ pub(crate) fn names(b: &Body) -> BTreeSet<Name> {
 
 /// The solid founded by `t` as feature `id` sees it: as its view, the
 /// last feature of its chain listed before `id`, left it.
+/// [`target_as`] in the role `targets`.
 pub fn target<'a>(
     part: &Part,
     solids: &Solids,
     id: &Id,
+    t: &Id,
+    before: &'a dyn Results,
+) -> Result<&'a Built> {
+    target_as(part, solids, id, "targets", t, before)
+}
+
+/// Solid `t` as feature `id` sees it, named in `role`: refused where it
+/// was consumed, isn't founded before `id`, failed, or is a sheet. In
+/// 18.A every feature that acts on a body acts on solids only; 18.C lets
+/// cuts, fillets, offsets, mirrors and splits take sheets.
+pub fn target_as<'a>(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    role: &str,
     t: &Id,
     before: &'a dyn Results,
 ) -> Result<&'a Built> {
@@ -953,13 +987,16 @@ pub fn target<'a>(
         if let Some(Ok(f)) = part.features.get(id) {
             crate::graph::check_order(part, part.order(), id, f)?;
         }
-        return Err(not_a_solid(part, solids, id, "targets", t));
+        return Err(not_a_solid(part, solids, id, role, t));
     };
     let out = crate::graph::input(part, id, view, before)?;
     let built = out.solid(t).expect("a solid's chain holds it");
     if built.reference {
-        return Err(reference_body(&part.id, id, t, "targets"));
+        // Every role naming one target is `targets`, as `target` names it.
+        let role = if role == "target" { "targets" } else { role };
+        return Err(reference_body(&part.id, id, t, role));
     }
+    crate::kind::need(id, role, t, &built.body, crate::kind::Want::Solid)?;
     Ok(built)
 }
 
@@ -976,14 +1013,6 @@ pub fn reference_body(part: &Id, id: &Id, t: &Id, role: &str) -> Error {
     .with("solid", t)
     .with("role", role)
     .with("hint", format!("ryucad import convert {part}/{t}"))
-}
-
-/// A refusal [`target`] gave in the role `targets`, said of `role`.
-pub(crate) fn retag(mut e: Error, role: &str) -> Error {
-    if e.code == Code::ReferenceBody {
-        e.details["role"] = json!(role);
-    }
-    e
 }
 
 /// Refuses a feature (`id`, as the write leaves `p`) that would change a
@@ -1119,6 +1148,7 @@ fn build_body(
             (Feature::Mirror(m), _) => crate::body::mirror_copy(part, solids, id, m, before),
             (Feature::Sweep(w), _) => crate::along::build(part, id, w, before, run),
             (Feature::Loft(l), _) => crate::loft::build(part, id, l, before, run),
+            (Feature::Planar(x), _) => crate::profile::planar(part, id, x, before),
             (_, Some((h, (solved, _)))) => {
                 crate::hole::tool(part, id, h, solved, &bodies, before).map(|(b, _)| b)
             }
@@ -1632,14 +1662,11 @@ fn build_boolean(
     before: &dyn Results,
     run: &crate::rebuild::Run,
 ) -> Result<Made> {
-    let target = self::target(part, solids, id, &b.target, before)?;
+    let target = self::target_as(part, solids, id, "target", &b.target, before)?;
     let tools: Vec<(&Id, &Built)> = b
         .tools
         .iter()
-        .map(|t| {
-            let b = self::target(part, solids, id, t, before).map_err(|e| retag(e, "tools"))?;
-            Ok((t, b))
-        })
+        .map(|t| Ok((t, self::target_as(part, solids, id, "tools", t, before)?)))
         .collect::<Result<_>>()?;
     let keys: Vec<ToolKey> = b.tools.iter().map(|t| solid_key(&part.id, id, t)).collect();
     let tools: Vec<ToolBody> = tools
@@ -2033,6 +2060,14 @@ pub(crate) fn finish(
     (body, journal): (Body, Journal),
     origins: impl Into<Origins>,
 ) -> Result<Built> {
+    // A mixed result (solid regions and sheets in one body) is never
+    // shown (design 388).
+    if body.kind() == ryukei::topo::BodyKind::Mixed {
+        return Err(
+            crate::kind::wrong(id, "result", id, "mixed", crate::kind::Want::Solid)
+                .with("reason", "mixed"),
+        );
+    }
     let faults = ryukei::check::check(&body);
     if !faults.is_empty() {
         return Err(Error::new(
@@ -2968,6 +3003,30 @@ mod tests {
 
     fn id(s: &str) -> Id {
         Id::parse(s, "feature").unwrap()
+    }
+
+    /// A 10 mm box's first face as a sheet.
+    pub(crate) fn sheet_fixture() -> Body {
+        let key = OpKey::from_bytes(b"s");
+        let b = ryukei::primitive::block(key, 0.01, 0.01, 0.01, &ryukei::geom::Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let top = b.faces().next().unwrap();
+        let name = b.face(top).unwrap().name;
+        ryukei::sheet::extract(key, &b, &[name]).unwrap().0
+    }
+
+    #[test]
+    fn a_sheet_target_is_wrong_body_kind() {
+        let e = crate::kind::need(
+            &id("cut"),
+            "targets",
+            &id("w"),
+            &sheet_fixture(),
+            crate::kind::Want::Solid,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::WrongBodyKind);
     }
 
     #[test]

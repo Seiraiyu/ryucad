@@ -685,10 +685,12 @@ pub fn run(session: &mut Session, entities: &[String], rev: Option<&str>) -> Res
             let mut v = if one.len() == 1 {
                 properties(&one[0], unit).map_err(|e| e.with("entities", &refs))?
             } else {
-                // Several solids: their volumes and areas together.
+                // Several solids: their volumes and areas together; a
+                // sheet adds its area and no volume.
                 let mut vols = Vec::new();
                 let mut areas = Vec::new();
-                let mut references = 0;
+                let mut sheets = 0usize;
+                let mut references = 0usize;
                 for l in one {
                     match kernel::properties(&l.built.body, Entity::Body)
                         .map_err(|e| failed(e, &refs))?
@@ -697,10 +699,15 @@ pub fn run(session: &mut Session, entities: &[String], rev: Option<&str>) -> Res
                             vols.push(volume);
                             areas.push(area);
                         }
-                        // A reference holds no volume: its area counts.
+                        // A sheet, or a reference, holds no volume: its
+                        // area counts.
                         Properties::Sheet { area } => {
-                            references += 1;
                             areas.push(area);
+                            if l.built.reference {
+                                references += 1;
+                            } else {
+                                sheets += 1;
+                            }
                         }
                         _ => unreachable!("a body's properties"),
                     }
@@ -708,6 +715,9 @@ pub fn run(session: &mut Session, entities: &[String], rev: Option<&str>) -> Res
                 let mut v = json!({"area": value(sum(areas), Kind::Area, unit)});
                 if !vols.is_empty() {
                     v["volume"] = value(sum(vols), Kind::Volume, unit);
+                }
+                if sheets > 0 {
+                    v["sheets"] = json!(sheets);
                 }
                 if references > 0 {
                     v["references"] = json!(references);

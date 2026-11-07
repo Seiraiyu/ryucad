@@ -35,7 +35,11 @@
 //! A loft's bodies pass them too; seeds loft `s` to `c`'s front face
 //! (turned over to face along the loft), joined to `b` with a weighted
 //! start tangent, cut through `b` to its back face, and closed round
-//! both (a typed refusal).
+//! both (a typed refusal). Surface sweeps (ryucad 18) found sheets that
+//! pass them too: seeds sweep `s` as surfaces (an extrude, a revolve about
+//! its first line, a sweep along `b`'s edge, a loft of `s` to `t`, a
+//! typed refusal), a planar face of `s`, and a surface joined to `b` (a
+//! typed refusal).
 //! A mate or an instance pattern is built the same way, after instances
 //! `i1` (free) and `i2` (fixed) of `fz`: what it solves and places must be
 //! finite and sound too. Each assembly's interference and clearances are

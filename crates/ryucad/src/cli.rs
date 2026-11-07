@@ -1981,6 +1981,10 @@ struct FieldArgs {
     /// (or --reverse false).
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     reverse: Option<bool>,
+    /// Sweep the profile's loops and open chains into a sheet of its own: an
+    /// extrude, revolve, sweep or loft (or --surface false).
+    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    surface: Option<bool>,
     /// A revolve's axis: a line of its sketch, or a straight edge in the sketch's plane
     /// (<part>/<feature>/<name>). A circular pattern's: x, y, z, or a straight or
     /// circular edge or a cylindrical or conical face.
@@ -2488,6 +2492,7 @@ impl FieldArgs {
             },
             extent: (!extent.is_empty()).then_some(Value::Object(extent)),
             reverse: self.reverse,
+            surface: self.surface,
             axis: self.axis.clone(),
             angle: self.angle.clone().map(Value::String),
             symmetric: self.symmetric,

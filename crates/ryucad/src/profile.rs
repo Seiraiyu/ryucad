@@ -40,6 +40,9 @@ pub struct Keys {
     pub segments: BTreeMap<u128, Id>,
     /// A loop's key, and its anchor, which names it.
     pub loops: BTreeMap<u128, Id>,
+    /// An open chain's key, and its least curve in [`natural`] order,
+    /// which names it.
+    pub chains: BTreeMap<u128, Id>,
     /// Where each point at a loop's joins lies in the profile's plane: a
     /// sketch's points, a face's vertices by name. A loft starts a loop at
     /// one of them.
@@ -67,6 +70,10 @@ impl Keys {
             | ProfileError::SeamLoop { segment } => vec![self.segment(segment)],
             ProfileError::NotClosed { after, .. } => vec![self.segment(after)],
             ProfileError::Touching { a, b } => vec![self.segment(a), self.segment(b)],
+            ProfileError::EmptyChain { chain } | ProfileError::ChainCloses { chain } => {
+                self.chains.get(&chain.0).cloned().into_iter().collect()
+            }
+            ProfileError::ChainBroken { after, .. } => vec![self.segment(after)],
             _ => Vec::new(),
         };
         out.dedup();
@@ -82,6 +89,8 @@ fn describe(e: &ProfileError) -> &'static str {
         ProfileError::NotClosed { .. } => "a loop doesn't close",
         ProfileError::Degenerate { .. } => "a loop encloses too little area to orient",
         ProfileError::OutsideSizeBox => "the profile leaves the ±500 m size box",
+        ProfileError::ChainBroken { .. } => "an open chain's curves don't meet end to end",
+        ProfileError::ChainCloses { .. } => "an open chain closes on itself: it is a loop",
         _ => "the loops don't make a profile",
     }
 }
@@ -229,6 +238,209 @@ pub fn profile(
     Ok((valid, keys))
 }
 
+/// The surface profile of a solved sketch (ryucad 18): its closed loops,
+/// swept without caps, and its open chains, every one or those holding
+/// one of `chosen`'s entities. A chain runs end to end the way its least
+/// curve (in [`natural`] order) is drawn, and is keyed over that curve:
+/// a curve added at either end has a larger ID, so the key and the way it
+/// runs stay, and only its old end's lateral and vertices rename. A chain
+/// that branches is `profile_invalid` (`reason: branches`) naming the
+/// points where it does.
+pub fn surface(
+    part: &Id,
+    sketch: &Id,
+    solved: &Solved,
+    chosen: &[Id],
+) -> Result<(ValidProfile, Keys)> {
+    use ryukei::sweep::{Chain, ChainKey};
+    let report = &solved.report;
+    let on_loop = |c: &Id| report.loops.iter().any(|l| l.iter().any(|(e, _)| e == c));
+    let on_chain = |c: &Id| report.open.iter().any(|(es, _)| es.contains(c));
+    for c in chosen {
+        if !on_loop(c) && !on_chain(c) {
+            return Err(Error::new(
+                Code::ProfileInvalid,
+                format!("{c} is on no loop or open chain of sketch {sketch}"),
+            )
+            .with("entities", [c]));
+        }
+    }
+    let picked = |es: &[&Id]| chosen.is_empty() || es.iter().any(|e| chosen.contains(e));
+    let mut keys = Keys::default();
+    let mut loops = Vec::new();
+    for l in report
+        .loops
+        .iter()
+        .filter(|l| picked(&l.iter().map(|(e, _)| e).collect::<Vec<_>>()))
+    {
+        let anchor = anchor(solved, l);
+        let lk = entity_key(part, sketch, &anchor);
+        keys.loops.insert(lk, anchor);
+        let mut segments = Vec::new();
+        for (e, reversed) in l {
+            for q in ends_of(solved, e) {
+                keys.points.insert(q.clone(), point(solved, q));
+            }
+            let k = entity_key(part, sketch, e);
+            keys.segments.insert(k, e.clone());
+            segments.push(segment(solved, e, *reversed, SegmentKey(k))?);
+        }
+        loops.push(Loop {
+            key: LoopKey(lk),
+            segments,
+        });
+    }
+    let mut chains = Vec::new();
+    for ((entities, _), walk) in report.open.iter().zip(&report.paths) {
+        if !picked(&entities.iter().collect::<Vec<_>>()) {
+            continue;
+        }
+        let walk = match walk {
+            Ok(w) => w,
+            Err(points) => {
+                return Err(Error::new(
+                    Code::ProfileInvalid,
+                    format!(
+                        "sketch {sketch}: the open chain of {} branches at {}: a surface sweeps chains that run end to end",
+                        entities.iter().map(Id::as_str).collect::<Vec<_>>().join(", "),
+                        points.iter().map(Id::as_str).collect::<Vec<_>>().join(", ")
+                    ),
+                )
+                .with("reason", "branches")
+                .with("entities", entities)
+                .with("points", points));
+            }
+        };
+        let least = walk
+            .iter()
+            .map(|(e, _)| e)
+            .min_by(|a, b| natural(a).cmp(&natural(b)))
+            .expect("a chain has curves")
+            .clone();
+        // Run the least curve's way.
+        let backwards = walk.iter().any(|(e, r)| *e == least && *r);
+        let walk: Vec<(Id, bool)> = if backwards {
+            walk.iter().rev().map(|(e, r)| (e.clone(), !r)).collect()
+        } else {
+            walk.clone()
+        };
+        let ck = entity_key(part, sketch, &least);
+        keys.chains.insert(ck, least);
+        let mut segments = Vec::new();
+        for (e, reversed) in &walk {
+            for q in ends_of(solved, e) {
+                keys.points.insert(q.clone(), point(solved, q));
+            }
+            let k = entity_key(part, sketch, e);
+            keys.segments.insert(k, e.clone());
+            segments.push(segment(solved, e, *reversed, SegmentKey(k))?);
+        }
+        chains.push(Chain {
+            key: ChainKey(ck),
+            segments,
+        });
+    }
+    if loops.is_empty() && chains.is_empty() {
+        return Err(Error::new(
+            Code::ProfileInvalid,
+            format!("sketch {sketch} has no loop or open chain to sweep"),
+        )
+        .with("entities", Vec::<Id>::new()));
+    }
+    let frame = Frame::from_rigid(&solved.frame).map_err(|e| {
+        Error::new(Code::Internal, "a sketch frame that isn't one").with("kernel", format!("{e:?}"))
+    })?;
+    let valid = ValidProfile::surface(Profile { frame, loops }, chains)
+        .map_err(|e| sketch_invalid(sketch, &keys, e))?;
+    Ok((valid, keys))
+}
+
+/// Planar feature `id`'s body: its profile's closed loops as one plane
+/// face per lump (`ryukei::sweep::planar`), named as an extrude's start
+/// cap would be. A profile with open chains, or with no loops, is
+/// `profile_invalid` (`reason: open_profile`) naming the chains' curves.
+pub fn planar(
+    part: &crate::doc::project::Part,
+    id: &Id,
+    x: &crate::doc::sweep::Planar,
+    before: &dyn crate::rebuild::Results,
+) -> Result<crate::rebuild::Built> {
+    use crate::doc::geometry::GeomRef;
+    use crate::doc::sweep::Source;
+    let key = crate::rebuild::op_key(&part.id, id);
+    let (valid, keys, sketch) = match &x.profile.source {
+        Source::Sketch(sketch) => {
+            let solved = crate::rebuild::sketch_input(part, id, sketch, before)?;
+            let (v, k) = surface(&part.id, sketch, solved, &x.profile.loops)
+                .map_err(|e| e.with("feature", id).with("sketch", sketch))?;
+            (v, k, Some(sketch))
+        }
+        Source::Face(GeomRef::Entity(r)) => {
+            let (v, k) = of_face(
+                part,
+                part.order(),
+                id,
+                "profile",
+                r,
+                &x.profile.loops,
+                before,
+                true,
+            )?;
+            (v, k, None)
+        }
+        Source::Face(_) => unreachable!("a face section is an entity, as read"),
+    };
+    if valid.lumps().is_empty() || !valid.chains().is_empty() {
+        let open: Vec<Id> = valid
+            .chains()
+            .iter()
+            .flat_map(|c| c.segments.iter().map(|g| keys.segments[&g.key.0].clone()))
+            .collect();
+        return Err(Error::new(
+            Code::ProfileInvalid,
+            format!(
+                "planar {id}: a planar face is closed loops' region; its profile has open curves ({}) or no loop",
+                open.iter().map(Id::as_str).collect::<Vec<_>>().join(", ")
+            ),
+        )
+        .with("feature", id)
+        .with("reason", "open_profile")
+        .with("entities", open));
+    }
+    let made = ryukei::sweep::planar(key, &valid).map_err(|e| {
+        Error::new(Code::RebuildFailed, format!("planar {id}: {e}"))
+            .with("feature", id)
+            .with("kernel", format!("{e:?}"))
+    })?;
+    // Named as an extrude's start cap: the origins an extrude's profile
+    // gives, from the sketch or the face.
+    let placeholder = Id::parse("face", "feature").expect("an ID");
+    let mut origins = origins(key, sketch.unwrap_or(&placeholder), &valid, &keys);
+    for o in origins.values_mut() {
+        if sketch.is_none()
+            && let Some(m) = o.as_object_mut()
+        {
+            m.remove("sketch");
+            m.insert("face".into(), x.profile.to_json()["face"].clone());
+            for (from, to) in [("entity", "edge"), ("entities", "edges")] {
+                if let Some(v) = m.remove(from) {
+                    m.insert(to.into(), v);
+                }
+            }
+        }
+        o["feature"] = json!(id);
+    }
+    crate::rebuild::finish(id, "planar", made, origins)
+}
+
+/// A line's or arc's end points; none for a circle.
+fn ends_of<'a>(solved: &'a Solved, e: &Id) -> Vec<&'a Id> {
+    match &solved.sketch.entities[e].geometry {
+        Geometry::Line { start, end } | Geometry::Arc { start, end, .. } => vec![start, end],
+        _ => Vec::new(),
+    }
+}
+
 /// The key of a face section's edge: SipHash of
 /// `ryucad.section\0<part>\0edge\0<name>`, so a face's profile renames
 /// nothing when its solid is resized.
@@ -255,7 +467,9 @@ fn name_id(n: ryukei::name::Name) -> Id {
 /// segment is its edge's exact curve in that plane, keyed by
 /// [`section_edge_key`]; each loop is keyed over its least vertex. A face
 /// that isn't planar is `reference_wrong_kind`; loops that make no
-/// profile are `profile_invalid`, naming edges.
+/// profile are `profile_invalid`, naming edges. With `surface`, the loops
+/// are a surface profile's, swept without caps (ryucad 18).
+#[allow(clippy::too_many_arguments)]
 pub fn of_face(
     part: &crate::doc::project::Part,
     order: &[Id],
@@ -264,6 +478,7 @@ pub fn of_face(
     face: &crate::doc::reference::Reference,
     chosen: &[Id],
     results: &dyn crate::rebuild::Results,
+    sheet: bool,
 ) -> Result<(ValidProfile, Keys)> {
     use ryukei::geom::{Plane, Surface};
     use ryukei::topo::{EntityId, Sense};
@@ -389,7 +604,13 @@ pub fn of_face(
             segments,
         });
     }
-    let valid = ValidProfile::new(Profile { frame, loops: out }).map_err(|e| match e {
+    let profile = Profile { frame, loops: out };
+    let valid = if sheet {
+        ValidProfile::surface(profile, Vec::new())
+    } else {
+        ValidProfile::new(profile)
+    };
+    let valid = valid.map_err(|e| match e {
         ryukei::Error::InvalidProfile(p) => {
             let entities = keys.of_fault(&p);
             invalid(describe(&p).to_owned(), &entities).with("kernel", format!("{p:?}"))
@@ -471,6 +692,63 @@ pub fn origins(
             }
         }
     }
+    // Open chains (ryucad 18), named as `ryukei::sweep::sheets` names a
+    // swept chain: sides from their segments' stand-ins, laterals and
+    // vertices from the pair either side (the chain's ends by `ChainEnd`
+    // stand-ins), rails as cap edges of the chain's own caps.
+    for c in valid.chains() {
+        let ch = derive(R::Loop, &[Name::from_u128(c.key.0)]);
+        let least = keys.chains[&c.key.0].clone();
+        let ends = [0u128, 1].map(|e| derive(R::ChainEnd, &[ch, Name::from_u128(e)]));
+        let caps = [
+            ("start", derive(R::StartCap, &[ch])),
+            ("end", derive(R::EndCap, &[ch])),
+        ];
+        let ids: Vec<Id> = c
+            .segments
+            .iter()
+            .map(|g| keys.segments[&g.key.0].clone())
+            .collect();
+        let stands: Vec<Name> = c
+            .segments
+            .iter()
+            .map(|g| derive(R::Segment, &[Name::from_u128(g.key.0)]))
+            .collect();
+        let n = ids.len();
+        for (k, e) in ids.iter().enumerate() {
+            let side = derive(R::Side, &[stands[k]]);
+            put(side, json!({"sketch": sketch, "entity": e}));
+            for (end, cap) in caps {
+                put(
+                    derive(R::CapEdge, &[cap, side]),
+                    json!({"sketch": sketch, "entity": e, "cap": end, "chain": least}),
+                );
+            }
+        }
+        // Chain vertex `i`, between curves i - 1 and i, or an end.
+        for i in 0..=n {
+            let before = if i == 0 { ends[0] } else { stands[i - 1] };
+            let after = if i == n { ends[1] } else { stands[i] };
+            let v = match i {
+                0 => json!({"sketch": sketch, "entity": ids[0], "chain_end": 0}),
+                i if i == n => json!({"sketch": sketch, "entity": ids[n - 1], "chain_end": 1}),
+                i => json!({"sketch": sketch, "entities": [ids[i - 1], ids[i]]}),
+            };
+            for (role, extra) in [
+                (R::Lateral, None),
+                (R::Vertex, None),
+                (R::StartVertex, Some(("cap", json!("start")))),
+                (R::EndVertex, Some(("cap", json!("end")))),
+                (R::Apex, Some(("apex", json!(true)))),
+            ] {
+                let mut x = v.clone();
+                if let Some((k, y)) = extra {
+                    x[k] = y;
+                }
+                put(derive(role, &[before, after]), x);
+            }
+        }
+    }
     out
 }
 
@@ -527,6 +805,118 @@ mod tests {
             _ => unreachable!(),
         };
         crate::sketch::solve(&id("s"), &s).unwrap()
+    }
+
+    use crate::sketch::tests::solve_ops;
+
+    fn u_ops(extra: bool) -> serde_json::Value {
+        // An open U: l1 up, l2 across drawn backwards, l3 down; and with
+        // `extra`, l4 on from d.
+        let mut ops = vec![
+            json!({"op": "add", "id": "a", "type": "point", "at": [0, 0]}),
+            json!({"op": "add", "id": "b", "type": "point", "at": [0, 10]}),
+            json!({"op": "add", "id": "c", "type": "point", "at": [10, 10]}),
+            json!({"op": "add", "id": "d", "type": "point", "at": [10, 0]}),
+            json!({"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}),
+            json!({"op": "add", "id": "l2", "type": "line", "start": "c", "end": "b"}),
+            json!({"op": "add", "id": "l3", "type": "line", "start": "c", "end": "d"}),
+        ];
+        if extra {
+            ops.push(json!({"op": "add", "id": "e", "type": "point", "at": [20, 0]}));
+            ops.push(json!({"op": "add", "id": "l4", "type": "line", "start": "d", "end": "e"}));
+        }
+        json!(ops)
+    }
+
+    #[test]
+    fn chains_are_keyed_by_their_least_curve_and_run_its_way() {
+        let p = Id::parse("p", "part").unwrap();
+        let s = solve_ops(u_ops(false));
+        let (v, keys) = surface(&p, &id("s"), &s, &[]).unwrap();
+        assert!(v.lumps().is_empty());
+        assert!(v.is_surface());
+        let chain = &v.chains()[0];
+        assert_eq!(chain.key.0, entity_key(&p, &id("s"), &id("l1")));
+        assert_eq!(keys.chains[&chain.key.0], id("l1"));
+        let order: Vec<&Id> = chain
+            .segments
+            .iter()
+            .map(|g| &keys.segments[&g.key.0])
+            .collect();
+        assert_eq!(order, [&id("l1"), &id("l2"), &id("l3")]);
+        // It runs l1's way: from a up to b.
+        assert!(chain.vertices[0].x.abs() < 1e-12 && chain.vertices[0].y.abs() < 1e-12);
+        assert!((chain.vertices[1].y - 0.01).abs() < 1e-12);
+        // Extending it at d with l4 keeps its key.
+        let (v2, _) = surface(&p, &id("s"), &solve_ops(u_ops(true)), &[]).unwrap();
+        assert_eq!(v2.chains()[0].key, chain.key);
+        assert_eq!(v2.chains()[0].segments.len(), 4);
+        // A rectangle is a loop, swept without caps.
+        let (r, _) = surface(&p, &id("s"), &solved(json!({})), &[]).unwrap();
+        assert_eq!((r.lumps().len(), r.chains().len()), (1, 0));
+        assert!(r.is_surface());
+    }
+
+    #[test]
+    fn a_chains_sides_laterals_and_rails_have_origins() {
+        use ryukei::name::{Name, Role, SweepRole as R};
+        let p = Id::parse("p", "part").unwrap();
+        let s = solve_ops(json!([
+            {"op": "add", "id": "a", "type": "point", "at": [0, 0]},
+            {"op": "add", "id": "b", "type": "point", "at": [10, 0]},
+            {"op": "add", "id": "c", "type": "point", "at": [10, 10]},
+            {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"},
+            {"op": "add", "id": "l2", "type": "line", "start": "b", "end": "c"}
+        ]));
+        let (v, keys) = surface(&p, &id("s"), &s, &[]).unwrap();
+        let key = OpKey::from_bytes(b"ryucad.feature\0p\0w");
+        let (body, _) = ryukei::sweep::extrude(key, &v, v.frame().z().get(), 0.0, 0.02).unwrap();
+        assert_eq!(body.kind(), ryukei::topo::BodyKind::Sheet);
+        let o = origins(key, &id("s"), &v, &keys);
+        // Every face, edge and vertex the sweep made has an origin.
+        let names = body
+            .faces()
+            .map(|f| body.face(f).unwrap().name)
+            .chain(body.edges().map(|e| body.edge(e).unwrap().name))
+            .chain(body.vertices().map(|x| body.vertex(x).unwrap().name));
+        for n in names {
+            assert!(o.contains_key(&n.to_string()), "{n} has none");
+        }
+        let derive = |r: R, ps: &[Name]| Name::derive(key, Role::Sweep(r), ps);
+        let seg = |e: &str| {
+            derive(
+                R::Segment,
+                &[Name::from_u128(entity_key(&p, &id("s"), &id(e)))],
+            )
+        };
+        assert_eq!(
+            o[&derive(R::Side, &[seg("l1")]).to_string()],
+            json!({"sketch": "s", "entity": "l1"})
+        );
+        let ch = derive(R::Loop, &[Name::from_u128(v.chains()[0].key.0)]);
+        let end0 = derive(R::ChainEnd, &[ch, Name::from_u128(0)]);
+        assert_eq!(
+            o[&derive(R::Lateral, &[end0, seg("l1")]).to_string()],
+            json!({"sketch": "s", "entity": "l1", "chain_end": 0})
+        );
+    }
+
+    #[test]
+    fn a_branching_chain_is_refused_naming_the_point() {
+        let p = Id::parse("p", "part").unwrap();
+        let s = solve_ops(json!([
+            {"op": "add", "id": "a", "type": "point", "at": [0, 0]},
+            {"op": "add", "id": "b", "type": "point", "at": [10, 0]},
+            {"op": "add", "id": "c", "type": "point", "at": [20, 0]},
+            {"op": "add", "id": "d", "type": "point", "at": [10, 10]},
+            {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"},
+            {"op": "add", "id": "l2", "type": "line", "start": "b", "end": "c"},
+            {"op": "add", "id": "l3", "type": "line", "start": "b", "end": "d"}
+        ]));
+        let e = surface(&p, &id("s"), &s, &[]).unwrap_err();
+        assert_eq!(e.code, Code::ProfileInvalid);
+        assert_eq!(e.details["reason"], "branches");
+        assert_eq!(e.details["points"], json!(["b"]));
     }
 
     #[test]
@@ -614,7 +1004,16 @@ mod tests {
         };
         let order = [id("b"), id("w")];
         let chosen: Vec<Id> = chosen.iter().map(|c| id(c)).collect();
-        let r = of_face(&part, &order, &id("w"), "profile", &face, &chosen, results);
+        let r = of_face(
+            &part,
+            &order,
+            &id("w"),
+            "profile",
+            &face,
+            &chosen,
+            results,
+            false,
+        );
         (body, r)
     }
 
@@ -695,7 +1094,17 @@ mod tests {
             name: crate::doc::reference::parse_name(&side).unwrap(),
         };
         let order = [id("b"), id("w")];
-        let e = of_face(&part, &order, &id("w"), "profile", &face, &[], results).unwrap_err();
+        let e = of_face(
+            &part,
+            &order,
+            &id("w"),
+            "profile",
+            &face,
+            &[],
+            results,
+            false,
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
     }
 

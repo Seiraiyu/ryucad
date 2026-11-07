@@ -2182,6 +2182,13 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
         Feature::Path(x) => crate::path::report(part, x),
         Feature::Sweep(w) => crate::along::feature_report(part, w),
         Feature::Loft(l) => crate::loft::feature_report(part, l),
+        Feature::Planar(x) => {
+            let mut v = x.fields();
+            if let crate::doc::sweep::Source::Face(g) = &x.profile.source {
+                v["profile"]["face"] = json!(g.text(part));
+            }
+            v
+        }
         Feature::Instance(i) => i.fields(),
         Feature::Import(i) => i.fields(),
         Feature::Mate(m) => {
@@ -2537,20 +2544,22 @@ const SKETCH: [&str; 5] = ["plane", "placement", "face", "face_origin", "face_x"
 
 /// The fields a primitive, an extrude, a revolve and a boolean take.
 const PRIMITIVE: [&str; 4] = ["params", "placement", "operation", "targets"];
-const EXTRUDE: [&str; 6] = [
+const EXTRUDE: [&str; 7] = [
     "sketch",
     "loops",
     "extent",
     "reverse",
+    "surface",
     "operation",
     "targets",
 ];
-const REVOLVE: [&str; 7] = [
+const REVOLVE: [&str; 8] = [
     "sketch",
     "loops",
     "axis",
     "angle",
     "symmetric",
+    "surface",
     "operation",
     "targets",
 ];
@@ -3576,6 +3585,47 @@ fn sweep_from(
     Ok(f)
 }
 
+/// A planar face from `current`'s fields (none for a new one) with what
+/// was given laid over them: its profile's sketch or face, and loops.
+fn planar_from(current: Option<Value>, given: &Given, part: &Id) -> Result<Feature> {
+    let bad = |param: &str, msg: &str| Error::new(Code::InvalidParam, msg).with("param", param);
+    let mut profile = current
+        .and_then(|v| v.get("profile").cloned())
+        .unwrap_or_else(|| json!({}));
+    let f = &given.fields;
+    match (&f.sketch, &f.face) {
+        (Some(_), Some(_)) => {
+            return Err(bad(
+                "face",
+                "a planar face's profile is a sketch or a planar face, not both",
+            ));
+        }
+        (Some(sk), None) => profile = json!({"sketch": sk}),
+        (None, Some(face)) => profile = json!({"face": geom_json(face, part, "/profile/face")?}),
+        (None, None) => {}
+    }
+    if profile.as_object().is_none_or(|o| o.is_empty()) {
+        return Err(bad(
+            "sketch",
+            "a planar face fills closed loops: name a sketch (sketch) or a planar face (face)",
+        ));
+    }
+    match &f.loops {
+        Some(l) if l.is_empty() => {
+            if let Some(o) = profile.as_object_mut() {
+                o.remove("loops");
+            }
+        }
+        Some(l) => profile["loops"] = json!(l),
+        None => {}
+    }
+    let v = json!({"profile": profile});
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let p = crate::doc::sweep::Planar::from_fields(&mut o)?;
+    o.finish()?;
+    Ok(Feature::Planar(Box::new(p)))
+}
+
 /// A geometric reference given as text in `part`, as a file holds it;
 /// `at` is its pointer for errors.
 pub(crate) fn geom_json(t: &str, part: &Id, at: &str) -> Result<Value> {
@@ -3663,10 +3713,15 @@ fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
             RevolveAxis::Ref(_) => (&r.loops, None),
         },
         Feature::Sweep(w) => (&w.profile.loops, None),
+        Feature::Planar(x) => (&x.profile.loops, None),
         Feature::BaseFlange(b) => (&b.loops, None),
         _ => unreachable!("a sweep"),
     };
-    let at = if f.sweep().is_some() { "/profile" } else { "" };
+    let at = if f.sweep().is_some() || matches!(f, Feature::Planar(_)) {
+        "/profile"
+    } else {
+        ""
+    };
     for (field, e) in loops
         .iter()
         .map(|e| ("loops", e))
@@ -3863,13 +3918,30 @@ fn check_references(
         rebuild::check_not_reference(&proposed(&p, order, &[(id, f)]), id, f, results)?;
     }
     // A loft's sections are matched against the rebuild whatever they
-    // reference.
-    if f.loft().is_none() && f.references().is_empty() && f.geometry().is_empty() {
+    // reference, and what a feature acts on must be a solid (ryucad 18).
+    // Only a feature whose file says so makes a sheet, so a part holding
+    // none needs no rebuild to judge what its features act on.
+    let may_hold_sheets = session
+        .project()
+        .part(part)?
+        .features
+        .values()
+        .any(|g| g.as_ref().is_ok_and(|g| g.surface()));
+    let reads_bodies = may_hold_sheets && !crate::kind::bodies_read(f).is_empty();
+    let planar = matches!(f, Feature::Planar(_));
+    if f.loft().is_none()
+        && f.references().is_empty()
+        && f.geometry().is_empty()
+        && !reads_bodies
+        && !planar
+    {
         return Ok(());
     }
     let p = session.project().part(part)?.clone();
     let results = session.rebuilt(part)?;
-    let checked = check_resolved(&p, order, id, f, results);
+    let q = proposed(&p, order, &[(id, f)]);
+    let checked = crate::kind::check(&q, order, id, f, results)
+        .and_then(|()| check_resolved(&p, order, id, f, results));
     checked.map_err(|e| session.explain_in(part, order, e))
 }
 
@@ -3925,6 +3997,12 @@ fn check_resolved(
         Feature::Path(x) => crate::path::check(p, order, id, x, results),
         Feature::Sweep(w) => crate::along::check(p, order, id, w, results),
         Feature::Loft(l) => crate::loft::check(p, order, id, l, results),
+        // A planar face's profile is closed loops: its open curves are
+        // refused when written (what else fails is rebuild's).
+        Feature::Planar(x) => match crate::profile::planar(p, id, x, results) {
+            Err(e) if e.code == Code::ProfileInvalid => Err(e),
+            _ => Ok(()),
+        },
         // Faces of its target, each once; what the kernel makes of them
         // only rebuild can tell.
         Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
@@ -3958,7 +4036,7 @@ fn check_up_to(
 }
 
 /// Every feature type `feature.add` makes.
-const FEATURE_TYPES: [&str; 21] = [
+const FEATURE_TYPES: [&str; 22] = [
     "box",
     "cylinder",
     "cone",
@@ -3969,6 +4047,7 @@ const FEATURE_TYPES: [&str; 21] = [
     "revolve",
     "sweep",
     "loft",
+    "planar",
     "boolean",
     "fillet",
     "chamfer",
@@ -4163,6 +4242,10 @@ fn feature_add(
         "loft" => {
             given.only(ty, &crate::doc::sweep::LOFT_FIELDS)?;
             crate::loft::from_given(None, &given.fields, p, unit, &env)?
+        }
+        "planar" => {
+            given.only(ty, &crate::doc::sweep::PLANAR_FIELDS)?;
+            planar_from(None, &given, &pid)?
         }
         "boolean" => {
             given.only(ty, &BOOLEAN)?;
@@ -4441,6 +4524,14 @@ fn feature_edit(
                 check_sweep(p, &list, &fid, &f)?;
                 f
             }
+            Feature::Planar(x) => {
+                given.only("planar", &crate::doc::sweep::PLANAR_FIELDS)?;
+                let f = planar_from(Some(x.fields()), &given, &pid)?;
+                if !f.profiles().is_empty() {
+                    check_sweep(p, &list, &fid, &f)?;
+                }
+                f
+            }
             f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
                 let ty = f.type_name();
                 given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
@@ -4666,6 +4757,17 @@ fn feature_list(session: &mut Session, part: &str) -> Result<Value> {
     Ok(json!({"part": p.id, "features": features, "orphans": p.orphans(), "revision": p.revision}))
 }
 
+/// A body's kind in a report: `kind`, and for a sheet how many
+/// `boundaries` it has and whether it is `closed`.
+fn kinds(v: &mut Value, b: &ryukei::topo::Body) {
+    v["kind"] = json!(crate::kind::name(b));
+    if b.kind() == ryukei::topo::BodyKind::Sheet {
+        let n = crate::kind::boundaries(b);
+        v["boundaries"] = json!(n);
+        v["closed"] = json!(n == 0);
+    }
+}
+
 /// A part's rebuild as agents and subscribers see it: each feature's
 /// status, hash and counts. With `occurrences`, an assembly's occurrences
 /// come apart, as the JSON text of the report's `occurrences` (#533: the
@@ -4846,7 +4948,10 @@ pub(crate) fn part_report(
                                 .solids()
                                 .iter()
                                 .map(|(s, b)| {
-                                    json!({"solid": s, "hash": b.hash, "counts": counts(b)})
+                                    let mut e = json!({"solid": s, "hash": b.hash,
+                                                       "counts": counts(b)});
+                                    kinds(&mut e, &b.body);
+                                    e
                                 })
                                 .collect();
                         }
@@ -4947,6 +5052,7 @@ pub(crate) fn part_report(
                 v["shown"] = json!(f);
                 v["hash"] = json!(b.hash);
                 v["counts"] = counts(b);
+                kinds(&mut v, &b.body);
                 if b.reference {
                     v["reference"] = json!(true);
                 }
@@ -6331,6 +6437,8 @@ fn draw_body(
     // Translucent faces by ID, with their opacities: their edges fade
     // with them.
     let mut glass: BTreeMap<ryukei::topo::FaceId, f32> = BTreeMap::new();
+    // A sheet's faces are drawn from both sides (ryucad 18).
+    let sheet = m.body.kind() == ryukei::topo::BodyKind::Sheet;
     for f in &mesh.faces {
         let name = m.body.face(f.face).expect("live").name.to_string();
         let mark = marks.get(&key(name.clone()));
@@ -6362,6 +6470,7 @@ fn draw_body(
             };
             match alpha {
                 Some(a) => g.translucent.push((t, a)),
+                None if sheet => g.sheets.push(t),
                 None => g.triangles.push(t),
             }
         }
@@ -7450,6 +7559,80 @@ pub(crate) mod tests {
             call(&mut s, "feature.add", f).unwrap();
         }
         (dir, s, top)
+    }
+
+    #[test]
+    fn surface_sweeps_and_planars_are_written_by_feature_add() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "plane": "xy"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
+                {"op": "add", "id": "a", "type": "point", "at": [0, 0]},
+                {"op": "add", "id": "b", "type": "point", "at": [10, 0]},
+                {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}]}),
+        )
+        .unwrap();
+        let v = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "w", "sketch": "s", "surface": true,
+                   "extent": {"type": "blind", "length": "5 mm"}}),
+        )
+        .unwrap();
+        assert_eq!(v["feature"]["surface"], true, "{v}");
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "sketch": "s", "surface": true,
+                   "operation": "join", "targets": ["w"],
+                   "extent": {"type": "blind", "length": "5 mm"}}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::InvalidParam, Some("/operation")),
+            "{e}"
+        );
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "planar", "sketch": "s"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["reason"], "open_profile", "{e}");
+        let v = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "w", "surface": false}),
+        );
+        // An open line makes no solid: back from a surface, the extrude
+        // is refused or fails, never written as a surface.
+        if let Ok(v) = v {
+            assert!(v["feature"].get("surface").is_none(), "{v}");
+        }
+    }
+
+    #[test]
+    fn reports_and_inspect_say_what_kind_each_body_is() {
+        let (_dir, mut s, _) = crate::sketch::tests::with_box();
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let solid = &r["parts"][0]["solids"][0];
+        assert_eq!(solid["kind"], "solid", "{r}");
+        assert!(solid.get("boundaries").is_none(), "{r}");
+        let i = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
+        let body = &i["bodies"][0];
+        assert_eq!(body["kind"], "solid", "{i}");
+        let edges = body["edges"].as_array().unwrap();
+        assert!(!edges.is_empty(), "{i}");
+        assert!(edges.iter().all(|e| e.get("laminar").is_none()), "{i}");
     }
 
     #[test]

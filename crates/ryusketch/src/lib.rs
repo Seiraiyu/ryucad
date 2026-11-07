@@ -31,7 +31,7 @@ mod sketch;
 mod solve;
 mod system;
 
-pub use loops::{Chain, Loop, Segment};
+pub use loops::{Chain, Loop, Path, Segment};
 pub use report::{Free, State};
 pub use sketch::{Constraint, Entity, Id, MAX_LENGTH, Sketch, SketchError};
 pub use solve::{Report, Solved, solve, solve_whole};

@@ -34,7 +34,8 @@ use crate::rebuild::{Built, Results, Run, op_key};
 use ryukei::geom::{Frame, ParamFlip, Point2, Point3, Vector3};
 use ryukei::name::{Name, OpKey, Role, SweepRole as R};
 use ryukei::sweep::{
-    LoftOptions, Loop, LoopKey, Profile, Segment, Tangent, ValidLoop, ValidProfile,
+    Chain, ChainKey, LoftOptions, Loop, LoopKey, Profile, Segment, Tangent, ValidChain, ValidLoop,
+    ValidProfile,
 };
 use ryukei::tol::LINEAR_RESOLUTION;
 use ryukei::{Error as Kernel, LoftError};
@@ -57,6 +58,19 @@ pub struct SectionLoop {
     centroid: Point3,
 }
 
+/// A section's open chain as the loft matches it (ryucad 18): the first
+/// section's key, its own, its curves in the order it runs, where it
+/// starts and its middle, and whether it runs against the way it was
+/// drawn.
+#[derive(Clone, Debug)]
+pub struct SectionChain {
+    pub key: u128,
+    pub entities: Vec<Id>,
+    start_at: Point3,
+    centroid: Point3,
+    pub reversed: bool,
+}
+
 /// A section, resolved: the kernel's profile (its loops in the order the
 /// loft matches them, each from its start, its frame facing along the
 /// loft), which entity each key came from, how origins name its source
@@ -68,8 +82,10 @@ pub struct Resolved {
     pub source: Value,
     pub entity: &'static str,
     pub loops: Vec<SectionLoop>,
+    /// Its open chains, in the order the loft matches them.
+    pub chains: Vec<SectionChain>,
     pub turned: bool,
-    /// The mean of its loops' centroids, in model space.
+    /// The mean of its loops' and chains' centroids, in model space.
     centroid: Point3,
 }
 
@@ -84,6 +100,8 @@ struct Raw {
     entity: &'static str,
     /// Each chosen loop: its key, and its start's entity if named.
     chosen: Vec<(u128, Option<Start>)>,
+    /// Each chosen open chain's key (a surface loft's).
+    chains: Vec<u128>,
 }
 
 /// Where an entry starts its loop.
@@ -125,7 +143,14 @@ fn failed(id: &Id, reason: &str, k: Option<(usize, &Section)>, msg: String) -> E
 
 /// Section `k` of loft `id` before it is ordered: its source's profile
 /// narrowed to the loops its entries name.
-fn raw(part: &Part, id: &Id, k: usize, s: &Section, before: &dyn Results) -> Result<Raw> {
+fn raw(
+    part: &Part,
+    id: &Id,
+    k: usize,
+    s: &Section,
+    before: &dyn Results,
+    surface: bool,
+) -> Result<Raw> {
     let at = format!("/sections/{k}/loops");
     let bad = |i: usize, msg: String| {
         Error::new(Code::InvalidParam, format!("loft {id}: section {k}: {msg}"))
@@ -150,7 +175,18 @@ fn raw(part: &Part, id: &Id, k: usize, s: &Section, before: &dyn Results) -> Res
                                 G::Line { start, end } | G::Arc { start, end, .. }
                                     if start == e || end == e)
                         });
-                        let Some((c, _)) = through else {
+                        // A surface loft's point may name an open chain.
+                        let on_chain = || {
+                            solved.report.open.iter().flat_map(|(es, _)| es).find(|c| {
+                                matches!(&solved.sketch.entities[*c].geometry,
+                                    G::Line { start, end } | G::Arc { start, end, .. }
+                                        if start == e || end == e)
+                            })
+                        };
+                        let Some(c) = through
+                            .map(|(c, _)| c)
+                            .or_else(|| if surface { on_chain() } else { None })
+                        else {
                             return Err(bad(i, format!("{e} is on no closed loop of {sketch}")));
                         };
                         narrow.push(c.clone());
@@ -161,7 +197,12 @@ fn raw(part: &Part, id: &Id, k: usize, s: &Section, before: &dyn Results) -> Res
                     }
                 }
             }
-            let (valid, keys) = crate::profile::profile(&part.id, sketch, solved, &narrow)
+            let of = if surface {
+                crate::profile::surface
+            } else {
+                crate::profile::profile
+            };
+            let (valid, keys) = of(&part.id, sketch, solved, &narrow)
                 .map_err(|e| e.with("feature", id).with("sketch", sketch))?;
             (valid, keys, json!({"sketch": sketch}), "entity", curves)
         }
@@ -170,8 +211,16 @@ fn raw(part: &Part, id: &Id, k: usize, s: &Section, before: &dyn Results) -> Res
                 unreachable!("a face section is an entity, as read")
             };
             let role = format!("sections.{k}");
-            let (valid, keys) =
-                crate::profile::of_face(part, part.order(), id, &role, r, &s.loops, before)?;
+            let (valid, keys) = crate::profile::of_face(
+                part,
+                part.order(),
+                id,
+                &role,
+                r,
+                &s.loops,
+                before,
+                surface,
+            )?;
             let curves = s
                 .loops
                 .iter()
@@ -181,9 +230,32 @@ fn raw(part: &Part, id: &Id, k: usize, s: &Section, before: &dyn Results) -> Res
             (valid, keys, json!({"face": g.to_json()}), "edge", curves)
         }
     };
+    // Each entry naming a chain chooses it: a chain has no start to name.
+    let holds = |c: &ValidChain, e: &Id| {
+        c.segments
+            .iter()
+            .any(|g| keys.segments.get(&g.key.0) == Some(e))
+            || keys.points.get(e).is_some_and(|p| {
+                c.vertices
+                    .iter()
+                    .any(|v| v.distance(*p) <= LINEAR_RESOLUTION)
+            })
+    };
+    let mut chains: Vec<u128> = Vec::new();
+    for (i, e) in s.loops.iter().enumerate() {
+        if let Some(c) = valid.chains().iter().find(|c| holds(c, e)) {
+            if chains.contains(&c.key.0) {
+                return Err(bad(i, format!("{e} names a chain an earlier entry names")));
+            }
+            chains.push(c.key.0);
+        }
+    }
     // Each entry's loop: the loop holding its curve, or its point.
     let mut chosen: Vec<(u128, Option<Start>)> = Vec::new();
     for (i, e) in s.loops.iter().enumerate() {
+        if valid.chains().iter().any(|c| holds(c, e)) {
+            continue;
+        }
         let (key, start) = if curves.contains(e) {
             let l = loops_of(&valid)
                 .find(|l| {
@@ -219,20 +291,30 @@ fn raw(part: &Part, id: &Id, k: usize, s: &Section, before: &dyn Results) -> Res
     }
     if s.loops.is_empty() {
         let all: Vec<&ValidLoop> = loops_of(&valid).collect();
-        if all.len() != 1 {
-            let anchors: Vec<&Id> = all.iter().map(|l| &keys.loops[&l.key.0]).collect();
+        let open = valid.chains();
+        if all.len() + open.len() != 1 {
+            let mut anchors: Vec<&Id> = all.iter().map(|l| &keys.loops[&l.key.0]).collect();
+            anchors.extend(open.iter().map(|c| &keys.chains[&c.key.0]));
+            let what = if surface {
+                "loops and open chains"
+            } else {
+                "loops"
+            };
             return Err(Error::new(
                 Code::InvalidParam,
                 format!(
-                    "loft {id}: section {k} has {} loops: name each with loops, in the order the sections match them",
-                    all.len()
+                    "loft {id}: section {k} has {} {what}: name each with loops, in the order the sections match them",
+                    all.len() + open.len()
                 ),
             )
             .with("feature", id)
             .with("pointer", format!("/sections/{k}/loops"))
             .with("loops", anchors));
         }
-        chosen.push((all[0].key.0, None));
+        match all.first() {
+            Some(l) => chosen.push((l.key.0, None)),
+            None => chains.push(open[0].key.0),
+        }
     }
     Ok(Raw {
         valid,
@@ -240,6 +322,7 @@ fn raw(part: &Part, id: &Id, k: usize, s: &Section, before: &dyn Results) -> Res
         source,
         entity,
         chosen,
+        chains,
     })
 }
 
@@ -271,20 +354,74 @@ fn centroid_of(frame: &Frame, l: &ValidLoop) -> Point3 {
     }))
 }
 
+/// Where a chain's middle is, in model space: the mean of eight points
+/// along each of its curves, evenly by parameter.
+fn chain_centroid(frame: &Frame, c: &ValidChain) -> Point3 {
+    const SAMPLES: usize = 8;
+    mean(c.segments.iter().flat_map(|g| {
+        (0..=SAMPLES).map(move |i| {
+            let t = g.t0 + (g.t1 - g.t0) * i as f64 / SAMPLES as f64;
+            world(frame, g.curve.point(t))
+        })
+    }))
+}
+
+fn chain_by_key(v: &ValidProfile, key: u128) -> &ValidChain {
+    v.chains()
+        .iter()
+        .find(|c| c.key.0 == key)
+        .expect("a chosen chain is in the profile")
+}
+
 fn loop_by_key(v: &ValidProfile, key: u128) -> &ValidLoop {
     loops_of(v)
         .find(|l| l.key.0 == key)
         .expect("a chosen loop is in the profile")
 }
 
-/// The profile of `loops` in `frame`, each loop's segments rotated to
-/// start at `starts[i]` and keyed `keys[i]`, mirrored across the plane's
-/// `x` when `mirror`.
+/// The profile of `loops` and `chains` in `frame`, each loop's segments
+/// rotated to start at `starts[i]` and keyed `keys[i]`, each chain run
+/// backwards where asked and keyed, all mirrored across the plane's `x`
+/// when `mirror`; a surface profile when `surface`.
 fn rebuilt(
     frame: Frame,
     loops: &[(&ValidLoop, usize, u128)],
+    chains: &[(&ValidChain, bool, u128)],
     mirror: bool,
+    surface: bool,
 ) -> Result<ValidProfile> {
+    let curve = |g: &Segment| {
+        if mirror {
+            g.curve.mirrored(ParamFlip::V(0.0))
+        } else {
+            g.curve.clone()
+        }
+    };
+    let chains: Vec<Chain> = chains
+        .iter()
+        .map(|(c, reversed, key)| {
+            let mut segments: Vec<Segment> = c
+                .segments
+                .iter()
+                .map(|g| Segment {
+                    key: g.key,
+                    curve: curve(g),
+                    t0: g.t0,
+                    t1: g.t1,
+                })
+                .collect();
+            if *reversed {
+                segments.reverse();
+                for g in &mut segments {
+                    core::mem::swap(&mut g.t0, &mut g.t1);
+                }
+            }
+            Chain {
+                key: ChainKey(*key),
+                segments,
+            }
+        })
+        .collect();
     let loops = loops
         .iter()
         .map(|(l, start, key)| {
@@ -310,7 +447,13 @@ fn rebuilt(
             }
         })
         .collect();
-    ValidProfile::new(Profile { frame, loops }).map_err(|e| {
+    let profile = Profile { frame, loops };
+    let valid = if surface {
+        ValidProfile::surface(profile, chains)
+    } else {
+        ValidProfile::new(profile)
+    };
+    valid.map_err(|e| {
         Error::new(Code::Internal, "a section that was valid isn't")
             .with("kernel", format!("{e:?}"))
     })
@@ -354,7 +497,7 @@ pub fn sections(part: &Part, id: &Id, l: &Loft, before: &dyn Results) -> Result<
         .sections
         .iter()
         .enumerate()
-        .map(|(k, s)| raw(part, id, k, s, before))
+        .map(|(k, s)| raw(part, id, k, s, before, l.surface))
         .collect::<Result<Vec<_>>>()?;
     let m = raws.len();
     // Loop counts first: the correspondence is by place.
@@ -373,16 +516,35 @@ pub fn sections(part: &Part, id: &Id, l: &Loft, before: &dyn Results) -> Result<
             .with("counts", json!({"first": want, "this": r.chosen.len()})));
         }
     }
-    // A section's centroid: its loops' centroids' mean.
+    let chains = raws[0].chains.len();
+    for (k, r) in raws.iter().enumerate().skip(1) {
+        if r.chains.len() != chains {
+            return Err(failed(
+                id,
+                "loop_mismatch",
+                Some((k, &l.sections[k])),
+                format!(
+                    "section {k} has {} open chains and section 0 has {chains}: name as many in each section's loops, in the order they match",
+                    r.chains.len()
+                ),
+            )
+            .with("counts", json!({"first": chains, "this": r.chains.len()})));
+        }
+    }
+    // A section's centroid: its loops' and chains' centroids' mean.
     let centroids: Vec<Point3> = raws
         .iter()
         .map(|r| {
             let frame = r.valid.frame();
-            mean(
-                r.chosen
-                    .iter()
-                    .map(|(key, _)| centroid_of(frame, loop_by_key(&r.valid, *key))),
-            )
+            let loops = r
+                .chosen
+                .iter()
+                .map(|(key, _)| centroid_of(frame, loop_by_key(&r.valid, *key)));
+            let open = r
+                .chains
+                .iter()
+                .map(|key| chain_centroid(frame, chain_by_key(&r.valid, *key)));
+            mean(loops.chain(open))
         })
         .collect();
     // Which way the loft runs at each section.
@@ -421,7 +583,13 @@ pub fn sections(part: &Part, id: &Id, l: &Loft, before: &dyn Results) -> Result<
             })?;
             let all: Vec<(&ValidLoop, usize, u128)> =
                 loops_of(&r.valid).map(|x| (x, 0, x.key.0)).collect();
-            (f, rebuilt(f, &all, true)?)
+            let open: Vec<(&ValidChain, bool, u128)> = r
+                .valid
+                .chains()
+                .iter()
+                .map(|c| (c, false, c.key.0))
+                .collect();
+            (f, rebuilt(f, &all, &open, true, l.surface)?)
         } else {
             (frame, r.valid.clone())
         };
@@ -482,13 +650,50 @@ pub fn sections(part: &Part, id: &Id, l: &Loft, before: &dyn Results) -> Result<
                 centroid: centroid_of(&frame1, lp),
             });
         }
-        let valid = rebuilt(frame1, &chosen, false)?;
+        // Each chain: the first section's runs as it was drawn; each
+        // later one from the end nearer where the section before's starts,
+        // once both chains' centroids are brought together.
+        let mut chain_list = Vec::new();
+        let mut chains_out = Vec::new();
+        for (i, key) in r.chains.iter().enumerate() {
+            let c = chain_by_key(&valid1, *key);
+            let pts: Vec<Point3> = c.vertices.iter().map(|v| world(&frame1, *v)).collect();
+            let centroid = chain_centroid(&frame1, c);
+            let reversed = if k == 0 {
+                false
+            } else {
+                let prev: &SectionChain = &out[k - 1].chains[i];
+                let aim = centroid + (prev.start_at - prev.centroid);
+                let (first, last) = (pts[0], pts[pts.len() - 1]);
+                (last - aim).length() < (first - aim).length()
+            };
+            let ck = if k == 0 { *key } else { out[0].chains[i].key };
+            let n = c.segments.len();
+            let order: Vec<usize> = if reversed {
+                (0..n).rev().collect()
+            } else {
+                (0..n).collect()
+            };
+            chain_list.push((c, reversed, ck));
+            chains_out.push(SectionChain {
+                key: ck,
+                entities: order
+                    .iter()
+                    .map(|&j| r.keys.segments[&c.segments[j].key.0].clone())
+                    .collect(),
+                start_at: if reversed { pts[pts.len() - 1] } else { pts[0] },
+                centroid,
+                reversed,
+            });
+        }
+        let valid = rebuilt(frame1, &chosen, &chain_list, false, l.surface)?;
         out.push(Resolved {
             valid,
             keys: r.keys,
             source: r.source,
             entity: r.entity,
             loops,
+            chains: chains_out,
             turned,
             centroid: centroids[k],
         });
@@ -511,6 +716,23 @@ pub fn sections(part: &Part, id: &Id, l: &Loft, before: &dyn Results) -> Result<
                 )
                 .with("entities", &lp.entities)
                 .with("counts", json!({"first": first, "this": lp.entities.len()})));
+            }
+        }
+        for (i, ch) in s.chains.iter().enumerate() {
+            let first = out[0].chains[i].entities.len();
+            if ch.entities.len() != first {
+                return Err(failed(
+                    id,
+                    "segment_count_mismatch",
+                    Some((k, &l.sections[k])),
+                    format!(
+                        "section {k}'s open chain {} has {} curves and section 0's {first}: split curves in the sketch so they match",
+                        ch.entities[0],
+                        ch.entities.len(),
+                    ),
+                )
+                .with("entities", &ch.entities)
+                .with("counts", json!({"first": first, "this": ch.entities.len()})));
             }
         }
     }
@@ -807,6 +1029,89 @@ pub fn origins(key: OpKey, s: &[Resolved], closed: bool) -> BTreeMap<String, Val
             }
         }
     }
+    // Open chains (ryucad 18), named as `ryukei::sweep::sheets` names a
+    // lofted chain: a side from the chain and its curve in every section;
+    // laterals and vertices from the sides either side (the chain's ends
+    // by `ChainEnd` stand-ins); rails as cap edges of the chain's caps.
+    for (i, c) in first.chains.iter().enumerate() {
+        let ch = derive(R::Loop, &[Name::from_u128(c.key)]);
+        let least = &first.keys.chains[&c.key];
+        let ends = [0u128, 1].map(|e| derive(R::ChainEnd, &[ch, Name::from_u128(e)]));
+        let caps = [
+            ("start", derive(R::StartCap, &[ch])),
+            ("end", derive(R::EndCap, &[ch])),
+        ];
+        let n = c.entities.len();
+        // Each section's curve `j` of this chain, as the kernel has it.
+        let seg = |r: &Resolved, j: usize| -> (u128, Id) {
+            let mine = r
+                .valid
+                .chains()
+                .iter()
+                .find(|x| x.key.0 == r.chains[i].key)
+                .expect("matched by key");
+            let k = mine.segments[j].key.0;
+            (k, r.keys.segments[&k].clone())
+        };
+        let sides: Vec<(Name, Value)> = (0..n)
+            .map(|j| {
+                let mut parents = vec![ch];
+                let mut from = Vec::new();
+                for r in s {
+                    let (k, e) = seg(r, j);
+                    parents.push(derive(R::Segment, &[Name::from_u128(k)]));
+                    let mut v = r.source.clone();
+                    v[r.entity] = json!(e);
+                    from.push(v);
+                }
+                (derive(R::Side, &parents), json!(from))
+            })
+            .collect();
+        for (side, from) in &sides {
+            out.insert(side.to_string(), json!({"chain": least, "sections": from}));
+            if !closed {
+                for (end, cap) in caps {
+                    out.insert(
+                        derive(R::CapEdge, &[cap, *side]).to_string(),
+                        json!({"chain": least, "sections": from, "cap": end}),
+                    );
+                }
+            }
+        }
+        for j in 0..=n {
+            let before = if j == 0 { ends[0] } else { sides[j - 1].0 };
+            let after = if j == n { ends[1] } else { sides[j].0 };
+            let from: Vec<Value> = s
+                .iter()
+                .map(|r| {
+                    let mut v = r.source.clone();
+                    match j {
+                        0 => {
+                            v[r.entity] = json!(seg(r, 0).1);
+                            v["chain_end"] = json!(0);
+                        }
+                        j if j == n => {
+                            v[r.entity] = json!(seg(r, n - 1).1);
+                            v["chain_end"] = json!(1);
+                        }
+                        j => v["entities"] = json!([seg(r, j - 1).1, seg(r, j).1]),
+                    }
+                    v
+                })
+                .collect();
+            let mut put = |role: R, extra: Option<(&str, &str)>| {
+                let mut v = json!({"chain": least, "sections": from});
+                if let Some((k, x)) = extra {
+                    v[k] = json!(x);
+                }
+                out.insert(derive(role, &[before, after]).to_string(), v);
+            };
+            put(R::Lateral, None);
+            put(R::Vertex, None);
+            put(R::StartVertex, Some(("cap", "start")));
+            put(R::EndVertex, Some(("cap", "end")));
+        }
+    }
     out
 }
 
@@ -869,6 +1174,13 @@ pub fn report(part: &Id, s: &[Resolved], l: &Loft) -> Value {
                 .iter()
                 .map(|x| json!({"anchor": x.anchor, "start": x.start, r.entity: x.entities, "segments": x.entities.len()}))
                 .collect::<Vec<_>>());
+            if !r.chains.is_empty() {
+                v["chains"] = json!(r
+                    .chains
+                    .iter()
+                    .map(|c| json!({"chain": s[0].keys.chains.get(&c.key), r.entity: c.entities, "reversed": c.reversed}))
+                    .collect::<Vec<_>>());
+            }
             v
         })
         .collect();
@@ -1001,14 +1313,16 @@ pub fn from_given(
             "a loft skins two sections or more: sketches, or planar faces".into(),
         ));
     }
-    match f.closed {
-        Some(true) => {
-            o.insert("closed".into(), json!(true));
+    for (key, x) in [("closed", f.closed), ("surface", f.surface)] {
+        match x {
+            Some(true) => {
+                o.insert(key.into(), json!(true));
+            }
+            Some(false) => {
+                o.remove(key);
+            }
+            None => {}
         }
-        Some(false) => {
-            o.remove("closed");
-        }
-        None => {}
     }
     for (key, dir, weight) in [
         ("start_tangent", &f.start_tangent, &f.start_weight),

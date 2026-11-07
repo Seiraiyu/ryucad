@@ -419,7 +419,16 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
         Some(b) if same_type && ty(b).0 == Some(json!("split")) => {
             split_feature(walk, b, ours, theirs)
         }
-        Some(b) if same_type && ty(b).0 == Some(json!("sweep")) => sweep(walk, b, ours, theirs),
+        // A planar face's profile is one value, as a sweep's is.
+        Some(b)
+            if same_type
+                && matches!(
+                    ty(b).0.as_ref().and_then(Value::as_str),
+                    Some("sweep" | "planar")
+                ) =>
+        {
+            sweep(walk, b, ours, theirs)
+        }
         Some(b)
             if same_type
                 && matches!(
@@ -1792,6 +1801,31 @@ mod tests {
         // Both sides change one section list alike: clean.
         let both = loft(json!({"sections": [{"sketch": "b"}, {"sketch": "a"}]}));
         assert!(merge(Some(&base), &both, &both).is_clean());
+    }
+
+    #[test]
+    fn a_planars_profile_is_one_value_and_a_surface_flag_merges_per_key() {
+        let base = json!({"format": 12, "kind": "ryucad.feature", "type": "planar",
+                          "profile": {"sketch": "s", "loops": ["l1"]}});
+        let mut ours = base.clone();
+        ours["profile"]["loops"] = json!(["l2"]);
+        let mut theirs = base.clone();
+        theirs["profile"]["sketch"] = json!("t");
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/profile"]);
+        // A surface flag one side sets and a length the other changes.
+        let base = json!({"format": 2, "kind": "ryucad.feature", "type": "extrude",
+                          "sketch": "s", "extent": {"type": "blind", "length": "20 mm"}});
+        let mut ours = base.clone();
+        ours["surface"] = json!(true);
+        ours["format"] = json!(12);
+        let mut theirs = base.clone();
+        theirs["extent"]["length"] = json!("30 mm");
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(m.value["surface"], true);
+        assert_eq!(m.value["format"], 12);
+        assert_eq!(m.value["extent"]["length"], "30 mm");
     }
 
     #[test]
