@@ -69,6 +69,9 @@ const DIFFUSE: f32 = 0.7;
 pub struct Geometry {
     pub positions: Vec<[f64; 3]>,
     pub triangles: Vec<Triangle>,
+    /// Sheets' triangles: drawn from both sides, the back lit with its
+    /// normal flipped and tinted towards [`SHEET_BACK`], never a cap.
+    pub sheets: Vec<Triangle>,
     /// Drawn over the surfaces they lie on; a line of one point is a dot.
     pub lines: Vec<Line>,
     pub labels: Vec<Label>,
@@ -241,7 +244,7 @@ impl Geometry {
         tally.translucent_lines = self.translucent_lines.len();
         tally.labels = self.labels.len();
         self.positions.len() * size_of::<[f64; 3]>()
-            + (self.triangles.len() + self.ghosts.len()) * size_of::<Triangle>()
+            + (self.triangles.len() + self.sheets.len() + self.ghosts.len()) * size_of::<Triangle>()
             + self.translucent.len() * size_of::<(Triangle, f32)>()
             + tally.bytes
     }
@@ -267,6 +270,11 @@ impl Geometry {
 
 /// Datums' colour, and how opaque a datum plane's square is.
 pub const DATUM: Rgb = [0.55, 0.36, 0.86];
+/// What a sheet's back is tinted towards, so an agent sees which way a
+/// sheet faces before it thickens or splits by it (design 388).
+pub const SHEET_BACK: Rgb = [0.86, 0.47, 0.20];
+/// How far a sheet's back colour leans towards [`SHEET_BACK`].
+pub const SHEET_TINT: f32 = 0.6;
 pub const DATUM_ALPHA: f32 = 0.18;
 /// Paths and helices, drawn as polylines.
 pub const PATH: Rgb = [0.86, 0.45, 0.12];
@@ -809,13 +817,14 @@ impl Band {
     }
 
     /// Calls `put(band, sample, depth, light, front)` for every sample a
-    /// front-facing triangle covers (and with `backs` a back-facing one,
-    /// `front` false) that no section plane cuts away.
+    /// triangle covers that no section plane cuts away, as `facing` says:
+    /// front-facing ones, back-facing ones (`front` false) where a section
+    /// plane cuts, or back-facing ones only.
     fn fill(
         &mut self,
         s: [Screen; 3],
         shade: [f32; 3],
-        backs: bool,
+        facing: Facing,
         mut put: impl FnMut(&mut Band, usize, f32, f32, bool, &[f32; PLANES]),
     ) {
         // Counterclockwise from outside stays counterclockwise on screen,
@@ -824,8 +833,12 @@ impl Band {
         // area positive for the tests below.
         let area = (s[1].x - s[0].x) * (s[2].y - s[0].y) - (s[2].x - s[0].x) * (s[1].y - s[0].y);
         let planes = self.section.as_ref().map_or(0, |c| c.planes.len());
-        let backs = backs && planes > 0;
-        if area == 0.0 || (area > 0.0 && !backs) {
+        let draws = match facing {
+            Facing::Front => area < 0.0,
+            Facing::Cut => area < 0.0 || (area > 0.0 && planes > 0),
+            Facing::Back => area > 0.0,
+        };
+        if area == 0.0 || !draws {
             return;
         }
         let front = area < 0.0;
@@ -878,7 +891,7 @@ impl Band {
     }
 
     fn triangle(&mut self, s: [Screen; 3], shade: [f32; 3], color: Rgb) {
-        self.fill(s, shade, true, |b, i, z, light, front, d| {
+        self.fill(s, shade, Facing::Cut, |b, i, z, light, front, d| {
             if z < b.depth[i] {
                 b.depth[i] = z;
                 if front {
@@ -895,10 +908,28 @@ impl Band {
         });
     }
 
+    /// A sheet's triangle: its front lit as a solid's, its back lit by
+    /// `back` (its normal flipped) in the tinted colour; neither is a cap.
+    fn sheet_triangle(&mut self, s: [Screen; 3], front: [f32; 3], back: [f32; 3], color: Rgb) {
+        let tinted: Rgb =
+            [0, 1, 2].map(|k| color[k] * (1.0 - SHEET_TINT) + SHEET_BACK[k] * SHEET_TINT);
+        for (shade, facing, c) in [(front, Facing::Front, color), (back, Facing::Back, tinted)] {
+            self.fill(s, shade, facing, |b, i, z, light, _, _| {
+                if z < b.depth[i] {
+                    b.depth[i] = z;
+                    b.color[i] = c.map(|x| x * light);
+                    if !b.cap.is_empty() {
+                        b.cap[i] = false;
+                    }
+                }
+            });
+        }
+    }
+
     /// A ghost triangle: kept where it is the nearest ghost and nothing
     /// of the model is in front of it, pushed back a little.
     fn ghost_triangle(&mut self, s: [Screen; 3], shade: [f32; 3], color: Rgb) {
-        self.fill(s, shade, false, |b, i, z, light, _, _| {
+        self.fill(s, shade, Facing::Front, |b, i, z, light, _, _| {
             let z = z + GHOST_PUSH * z.abs();
             if z < b.depth[i] && z < b.ghost_depth[i] && !b.is_cap(i) {
                 b.ghost_depth[i] = z;
@@ -917,7 +948,7 @@ impl Band {
         alpha: f32,
         order: u32,
     ) {
-        self.fill(s, shade, false, |b, i, z, light, _, _| {
+        self.fill(s, shade, Facing::Front, |b, i, z, light, _, _| {
             if z < b.stop[i] && !b.is_cap(i) {
                 b.frags[i].push(Frag {
                     z,
@@ -1185,6 +1216,17 @@ impl Band {
     }
 }
 
+/// Which way round a triangle is drawn.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Facing {
+    /// Facing the eye only.
+    Front,
+    /// Facing the eye, and away from it where a section plane cuts (a cap).
+    Cut,
+    /// Facing away from the eye only.
+    Back,
+}
+
 /// Lighting at a corner: ambient plus diffuse.
 fn shade(n: [f32; 3], light: [f32; 3]) -> f32 {
     let d = n[0] * light[0] + n[1] * light[1] + n[2] * light[2];
@@ -1260,6 +1302,19 @@ pub fn render(
                     shade(t.n[2], light),
                 ];
                 b.triangle([a, c, d], s, t.color);
+            }
+            for t in &geometry.sheets {
+                let (Some(a), Some(c), Some(d)) = (
+                    screen[t.p[0] as usize],
+                    screen[t.p[1] as usize],
+                    screen[t.p[2] as usize],
+                ) else {
+                    continue;
+                };
+                let flip = |n: [f32; 3]| [-n[0], -n[1], -n[2]];
+                let front = [0, 1, 2].map(|k| shade(t.n[k], light));
+                let back = [0, 1, 2].map(|k| shade(flip(t.n[k]), light));
+                b.sheet_triangle([a, c, d], front, back, t.color);
             }
             if options.silhouettes {
                 b.silhouettes();
@@ -1605,6 +1660,7 @@ pub(crate) mod tests {
         Geometry {
             positions,
             triangles,
+            sheets: Vec::new(),
             lines: Vec::new(),
             labels: Vec::new(),
             ghosts: Vec::new(),
@@ -1805,6 +1861,47 @@ pub(crate) mod tests {
         let a = one.install(|| render(&g, &c, 200, 150, Options::default()).unwrap());
         let b = many.install(|| render(&g, &c, 200, 150, Options::default()).unwrap());
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_sheet_shows_its_back_tinted_and_is_never_capped() {
+        // A wide quad in y = 0.5 facing +y, away from an eye at -y: culled
+        // as a solid's face, drawn as a sheet's in its back colour.
+        let c = camera([0.5, -5.0, 0.5]);
+        let mut g = Geometry {
+            positions: vec![
+                [-5.0, 0.5, -5.0],
+                [5.0, 0.5, -5.0],
+                [5.0, 0.5, 5.0],
+                [-5.0, 0.5, 5.0],
+            ],
+            ..Geometry::default()
+        };
+        let quad = [[0, 2, 1], [0, 3, 2]].map(|p| Triangle {
+            p,
+            n: [[0.0, 1.0, 0.0]; 3],
+            color: SURFACE,
+        });
+        g.triangles.extend(quad.clone());
+        let bg = BACKGROUND.map(to_u8);
+        let img = render(&g, &c, 16, 16, bare()).unwrap();
+        assert_eq!(at(&img, 8, 8)[..3], bg, "a solid's back is culled");
+        g.triangles.clear();
+        g.sheets.extend(quad);
+        let light = View::new(&c, 16, 16).light();
+        let lit = shade([0.0, -1.0, 0.0], light);
+        let back: Rgb =
+            [0, 1, 2].map(|k| (SURFACE[k] * (1.0 - SHEET_TINT) + SHEET_BACK[k] * SHEET_TINT) * lit);
+        let img = render(&g, &c, 16, 16, bare()).unwrap();
+        assert_eq!(at(&img, 8, 8)[..3], back.map(to_u8));
+        // A plane cutting away what lies beyond the quad leaves its back
+        // its own, never a cap.
+        g.sections = vec![crate::section::Plane {
+            origin_m: [0.0, 2.0, 0.0],
+            normal: [0.0, 1.0, 0.0],
+        }];
+        let img = render(&g, &c, 16, 16, bare()).unwrap();
+        assert_eq!(at(&img, 8, 8)[..3], back.map(to_u8));
     }
 
     #[test]

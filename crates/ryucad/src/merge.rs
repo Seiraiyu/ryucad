@@ -419,7 +419,16 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
         Some(b) if same_type && ty(b).0 == Some(json!("split")) => {
             split_feature(walk, b, ours, theirs)
         }
-        Some(b) if same_type && ty(b).0 == Some(json!("sweep")) => sweep(walk, b, ours, theirs),
+        // A planar face's profile is one value, as a sweep's is.
+        Some(b)
+            if same_type
+                && matches!(
+                    ty(b).0.as_ref().and_then(Value::as_str),
+                    Some("sweep" | "planar")
+                ) =>
+        {
+            sweep(walk, b, ours, theirs)
+        }
         Some(b)
             if same_type
                 && matches!(
@@ -1405,6 +1414,49 @@ mod tests {
         assert!(m.conflicts.is_empty());
     }
 
+    /// An import feature file, `mode` reference when asked, against the
+    /// file hashed `blake3`.
+    fn import_file(mode: Option<&str>, blake3: &str) -> Value {
+        let mut v = json!({"body": 0, "file": {"blake3": blake3, "path": "imports/b.step"},
+                           "format": 5, "kind": "ryucad.feature", "type": "import"});
+        if let Some(m) = mode {
+            v["mode"] = json!(m);
+            v["format"] = json!(13);
+        }
+        v
+    }
+
+    #[test]
+    fn an_imports_mode_merges_per_key() {
+        let h = "ab".repeat(32);
+        let base = import_file(None, &h);
+        let reference = import_file(Some("reference"), &h);
+        let clean = |b: &Value, o: &Value, t: &Value| {
+            let m = merge(Some(b), o, t);
+            assert!(m.is_clean(), "{:?}", m.conflicts);
+            m.value
+        };
+        // One side converts: taken, at the format that holds it.
+        assert_eq!(clean(&base, &base, &reference), reference);
+        assert_eq!(clean(&base, &reference, &base), reference);
+        // Both sides convert alike: taken.
+        assert_eq!(clean(&base, &reference, &reference), reference);
+        // One side converts to a reference, the other updates the file:
+        // both taken, at format 13.
+        let rehashed = import_file(None, &"cd".repeat(32));
+        let m = clean(&base, &reference, &rehashed);
+        assert_eq!(m["mode"], "reference");
+        assert_eq!(m["file"]["blake3"], "cd".repeat(32));
+        assert_eq!(m["format"], 13);
+        // Converted back to a solid on one side, kept on the other: the
+        // field goes, and the format with it. `mode` has two values only
+        // (a reference, or none), so two sides that both change it made
+        // the same change: `/mode` never conflicts.
+        let m = clean(&reference, &base, &reference);
+        assert!(m.get("mode").is_none(), "{m}");
+        assert_eq!(m["format"], 5);
+    }
+
     #[test]
     fn a_splits_plane_and_flip_are_one_value_and_a_mirrors_fields_merge_per_key() {
         let split = |extra: Value| {
@@ -1749,6 +1801,31 @@ mod tests {
         // Both sides change one section list alike: clean.
         let both = loft(json!({"sections": [{"sketch": "b"}, {"sketch": "a"}]}));
         assert!(merge(Some(&base), &both, &both).is_clean());
+    }
+
+    #[test]
+    fn a_planars_profile_is_one_value_and_a_surface_flag_merges_per_key() {
+        let base = json!({"format": 12, "kind": "ryucad.feature", "type": "planar",
+                          "profile": {"sketch": "s", "loops": ["l1"]}});
+        let mut ours = base.clone();
+        ours["profile"]["loops"] = json!(["l2"]);
+        let mut theirs = base.clone();
+        theirs["profile"]["sketch"] = json!("t");
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/profile"]);
+        // A surface flag one side sets and a length the other changes.
+        let base = json!({"format": 2, "kind": "ryucad.feature", "type": "extrude",
+                          "sketch": "s", "extent": {"type": "blind", "length": "20 mm"}});
+        let mut ours = base.clone();
+        ours["surface"] = json!(true);
+        ours["format"] = json!(12);
+        let mut theirs = base.clone();
+        theirs["extent"]["length"] = json!("30 mm");
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(m.value["surface"], true);
+        assert_eq!(m.value["format"], 12);
+        assert_eq!(m.value["extent"]["length"], "30 mm");
     }
 
     #[test]

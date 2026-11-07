@@ -686,6 +686,12 @@ pub enum Code {
     SchFunctionSplit,
     /// ryueda lint: a region with no title of its own (`Misc`).
     SchRegionUntitled,
+    /// A feature was given a sheet where it needs a solid, or a solid
+    /// where it needs a sheet (ryucad 18). The details name the
+    /// `feature`, the `role` it was given in (`targets`, `tools`,
+    /// `solid`, `target`), the body (`solid`, by founder), what it
+    /// `wanted` and what it `got` (`solid`, `sheet` or `mixed`).
+    WrongBodyKind,
     /// ryueda: a library component's parameter in the part vocabulary
     /// whose value doesn't read as its name's type (`capacitance` that
     /// isn't a capacitance): a warning on the component, with its pointer,
@@ -746,6 +752,30 @@ pub enum Code {
     /// model outside Direct edit, or annotating in View. The details give
     /// the participant, its `mode` and the mode the request `needs`.
     ParticipantMode,
+    /// A feature that would change a reference import's body (a join,
+    /// cut or intersect targeting it, a boolean, fillet, chamfer, shell,
+    /// offset, split, hole, pattern or mirror acting on it): references
+    /// are shown and read, never modelled on. The details carry `feature`,
+    /// `solid`, `role` and `hint` (`ryucad import convert <part>/<feature>`).
+    ReferenceBody,
+    /// Mass of a reference whose shells don't close (laminar edges), or
+    /// whose mesh doesn't (faces the mesher left out).
+    ReferenceNotSolid,
+    /// A warning: faces of a reference the mesher left out (they draw as
+    /// holes), by entity reference and STEP instance.
+    ReferenceFacesUnmeshed,
+    /// A warning: faces of a file a reference couldn't lay out even alone,
+    /// left out, by import name and STEP instance.
+    ReferenceFacesDropped,
+    /// A warning: faces of a piece the layout refused, each laid out as a
+    /// lone sheet.
+    ReferenceFacesSplit,
+    /// A warning: faces whose loops or orientation couldn't be settled,
+    /// kept as the file has them.
+    ReferenceUnoriented,
+    /// A warning: a USD export wrote a reference as meshes alone (a
+    /// reference has no BrepArray).
+    ExportReferenceMeshOnly,
 }
 
 impl Code {
@@ -860,6 +890,22 @@ mod tests {
     }
 
     #[test]
+    fn reference_codes() {
+        for (c, name) in [
+            (Code::ReferenceBody, "reference_body"),
+            (Code::ReferenceNotSolid, "reference_not_solid"),
+            (Code::ReferenceFacesUnmeshed, "reference_faces_unmeshed"),
+            (Code::ReferenceFacesDropped, "reference_faces_dropped"),
+            (Code::ReferenceFacesSplit, "reference_faces_split"),
+            (Code::ReferenceUnoriented, "reference_unoriented"),
+            (Code::ExportReferenceMeshOnly, "export_reference_mesh_only"),
+        ] {
+            assert_eq!(json!(c), json!(name));
+            assert_eq!(c.exit_code(), 1, "{name}");
+        }
+    }
+
+    #[test]
     fn shell_and_offset_codes() {
         assert_eq!(json!(Code::ShellFailed), json!("shell_failed"));
         assert_eq!(json!(Code::OffsetFailed), json!("offset_failed"));
@@ -871,6 +917,12 @@ mod tests {
     fn mirror_code() {
         assert_eq!(json!(Code::MirrorFailed), json!("mirror_failed"));
         assert_eq!(Code::MirrorFailed.exit_code(), 1);
+    }
+
+    #[test]
+    fn wrong_body_kind_code() {
+        assert_eq!(json!(Code::WrongBodyKind), json!("wrong_body_kind"));
+        assert_eq!(Code::WrongBodyKind.exit_code(), 1);
     }
 
     #[test]

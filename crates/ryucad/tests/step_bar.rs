@@ -163,7 +163,7 @@ fn the_race_imports_rebuilds_and_exports_within_its_bars() {
     std::fs::write(&file, &bytes).unwrap();
     let t = Instant::now();
     let mut s = Session::open(&root).unwrap();
-    let v = call(&mut s, "import", json!({"path": file}));
+    let v = call(&mut s, "import", json!({"solid": true, "path": file}));
     let import_s = t.elapsed().as_secs_f64();
     assert_eq!(v["parts"].as_array().unwrap().len(), parts + 1);
     drop(s);

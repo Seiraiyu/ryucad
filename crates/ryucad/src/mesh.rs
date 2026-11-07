@@ -109,6 +109,52 @@ pub struct Meshed {
     pub body: Body,
     pub hash: String,
     pub mesh: Arc<DisplayMesh>,
+    /// A reference's faces its mesh left out ([`unmeshed_warning`]).
+    pub warning: Option<Value>,
+}
+
+/// `reference_faces_unmeshed` for a reference body `b` (solid `solid` of
+/// `part`) whose display `mesh` left faces out: they draw as holes. Each
+/// face by entity reference, its fault and its STEP instance. A solid's
+/// faults are its mesh's (`mesh_faults`), never this.
+pub(crate) fn unmeshed_warning(
+    part: &crate::doc::id::Id,
+    solid: &crate::doc::id::Id,
+    b: &Built,
+    mesh: &DisplayMesh,
+) -> Option<Value> {
+    if !b.reference {
+        return None;
+    }
+    let faces: Vec<Value> = match &mesh.mesh {
+        Ok(m) => m
+            .faults
+            .iter()
+            .filter_map(|f| {
+                let name = b.body.face(f.face)?.name.to_string();
+                let mut v = json!({"entity": format!("{part}/{solid}/{name}"),
+                                   "kind": format!("{:?}", f.kind)});
+                if let Some(s) = b.origins.get(&name).and_then(|o| o.get("step")) {
+                    v["step"] = s.clone();
+                }
+                Some(v)
+            })
+            .collect(),
+        Err(e) => vec![json!({"error": e})],
+    };
+    if faces.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "code": "reference_faces_unmeshed",
+        "part": part,
+        "solid": solid,
+        "faces": faces,
+        "message": format!(
+            "{part}/{solid}: {} face(s) of the reference don't mesh and draw as holes",
+            faces.len()
+        ),
+    }))
 }
 
 /// What a mesh is kept under beside its body's hash: a display quality,
@@ -1152,6 +1198,41 @@ mod tests {
     }
 
     #[test]
+    fn a_references_unmeshed_faces_are_warned_of() {
+        let (f, mut b) = sphere("10 mm");
+        b.reference = true;
+        let mut cache = Cache::default();
+        let good = cache.get(&f, &b, Quality::Coarse, usize::MAX);
+        let (p, r) = (
+            Id::parse("p", "part").unwrap(),
+            Id::parse("r", "feature").unwrap(),
+        );
+        assert!(unmeshed_warning(&p, &r, &b, &good).is_none());
+        let mut m = good.mesh.as_ref().unwrap().as_ref().clone();
+        let face = b.body.faces().next().unwrap();
+        m.faults.push(ryukei::mesh::FaceFault {
+            face,
+            kind: ryukei::mesh::MeshFaultKind::BadDomain,
+        });
+        let mesh = DisplayMesh {
+            params: good.params,
+            mesh: Ok(Arc::new(m)),
+        };
+        let w = unmeshed_warning(&p, &r, &b, &mesh).unwrap();
+        assert_eq!(w["code"], "reference_faces_unmeshed");
+        assert_eq!(w["faces"].as_array().unwrap().len(), 1);
+        assert!(
+            w["faces"][0]["entity"]
+                .as_str()
+                .unwrap()
+                .starts_with("p/r/")
+        );
+        // A solid's faults stay its mesh's faults: no warning.
+        b.reference = false;
+        assert!(unmeshed_warning(&p, &r, &b, &mesh).is_none());
+    }
+
+    #[test]
     fn binary_carries_what_json_does() {
         let (f, b) = sphere("10 mm");
         let mut cache = Cache::default();
@@ -1159,6 +1240,7 @@ mod tests {
             body: b.body.clone(),
             hash: b.hash.clone(),
             mesh: cache.get(&f, &b, Quality::Coarse, usize::MAX),
+            warning: None,
         };
         let id = |s: &str| Id::parse(s, "feature").unwrap();
         let failed = Err(Error::new(Code::RebuildFailed, "no"));
@@ -1247,6 +1329,7 @@ mod tests {
             body: b.body.clone(),
             hash: b.hash.clone(),
             mesh: Cache::default().get(&f, &b, Quality::Normal, usize::MAX),
+            warning: None,
         };
         let (one, w1, two, w2) = both_ways(&m);
         alike(&w1, &w2);
@@ -1275,6 +1358,7 @@ mod tests {
                 params,
                 mesh: Ok(Arc::new(mesh)),
             }),
+            warning: None,
         };
         let (_, w1, _, w2) = both_ways(&m);
         alike(&w1, &w2);

@@ -57,6 +57,7 @@
 use super::{H, Iv, Net, V3, centre, centred, div3, hom, hull_or_zero, parts, pt, scale3, sub3};
 use crate::geom::Vector3;
 use crate::geom::nurbs::bezier::BezierPatch;
+use crate::interval::{add_up, mul_up};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -159,6 +160,10 @@ const EVALUATED: usize = 10;
 /// net's componentwise magnitude bound over the cell (`mags[0]` unused).
 struct Cell {
     at: Vector3,
+    /// Every weight of the patch is 1: the homogeneous weight is exactly
+    /// 1 and its derivatives exactly 0, so the point's jets are the first
+    /// three components' own enclosures, with no quotient rule.
+    polynomial: bool,
     values: [Values; EVALUATED],
     mags: [[f64; 4]; 15],
 }
@@ -240,6 +245,35 @@ fn cell(surface: u64, index: usize, patch: &BezierPatch, ks: Span, kt: Span) -> 
         index as u32,
         (ks.index() * ALONG + kt.index()) as u32,
     );
+    // The cells this thread asked for last: a mesher's boxes come one
+    // face at a time, neighbours after neighbours, so most find their cell
+    // here without the table's lock and hash (#308). A cell is a function
+    // of its key, so a hit here is the table's cell, bit for bit.
+    let recent = |found: Option<&Option<Arc<Cell>>>| found.cloned();
+    if let Some(c) = RECENT.with(|r| recent(r.borrow().iter().find(|e| e.0 == key).map(|e| &e.1))) {
+        return c;
+    }
+    let found = table_cell(key, patch, ks, kt);
+    RECENT.with(|r| {
+        let mut r = r.borrow_mut();
+        if r.len() == RECENT_CELLS {
+            r.pop_back();
+        }
+        r.push_front((key, found.clone()));
+    });
+    found
+}
+
+/// How many cells each thread keeps of those it asked for last.
+const RECENT_CELLS: usize = 4;
+
+thread_local! {
+    static RECENT: core::cell::RefCell<std::collections::VecDeque<(Key, Option<Arc<Cell>>)>> =
+        const { core::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
+/// [`cell`] from the process-wide table.
+fn table_cell(key: Key, patch: &BezierPatch, ks: Span, kt: Span) -> Option<Arc<Cell>> {
     // SipHash-free spread: the id and indices mixed by a fixed odd
     // multiplier, so neighbouring cells take different shards.
     let mix =
@@ -287,7 +321,20 @@ pub(super) fn jets(
 ) -> Option<(Vector3, [V3; 6])> {
     let (ks, kt) = (step(s[0], s[1])?, step(t[0], t[1])?);
     let cell = cell(surface, index, patch, ks, kt)?;
-    let [ru, rv] = patch.range;
+    let jets = enclose(&cell, patch.range, [s, t], [ks, kt], cell.polynomial)?;
+    Some((cell.at, jets))
+}
+
+/// The jets over the local box `[s, t]` from its cells `[ks, kt]` of a
+/// patch over `range`, by the quotient rule unless `polynomial` (which the
+/// cell must be: tests compare both ways).
+fn enclose(
+    cell: &Cell,
+    [ru, rv]: [[f64; 2]; 2],
+    [s, t]: [[f64; 2]; 2],
+    [ks, kt]: [Span; 2],
+    polynomial: bool,
+) -> Option<[V3; 6]> {
     // The box's middle, and its place in the cell's own `[0, 1]`: `mid -
     // c0` rounds by at most 2^-54 and `* cells` is exact, so the point
     // evaluated is within 2^-54 of the middle in the patch's local
@@ -307,33 +354,41 @@ pub(super) fn jets(
     // Every evaluated net's value at the point, and its own error.
     let at_point: [[f64; 4]; EVALUATED] =
         core::array::from_fn(|k| evaluate(&cell.values[k], su, sv));
-    let up = |x: Iv| x.hi();
+    // A polynomial patch's weight is 1 exactly and every derivative of it
+    // 0, so its jets are the first three components' enclosures: no
+    // weight's radii and no quotient rule, which in intervals only
+    // widened them (dividing by an enclosure of 1, less the point times an
+    // enclosure of 0). 98 of the 100 spline faces of KiCad's Smolhaj
+    // model are so (#308).
+    let comps = if polynomial { 3 } else { 4 };
     let mut out: [H; 6] = [[pt(0.0); 4]; 6];
     for (k, o) in out.iter_mut().enumerate() {
         let (i, j) = ORDERS[k];
         let (ku, kv) = (idx(i + 1, j), idx(i, j + 1));
         let (kuu, kuv, kvv) = (idx(i + 2, j), idx(i + 1, j + 1), idx(i, j + 2));
-        for c in 0..4 {
+        for c in 0..comps {
             let value = at_point[k][c];
-            let err = pt(cell.values[k].err[c]);
-            // First order: the mean value form, `|N_u|` and `|N_v|` over
-            // the cell.
-            let first = up(err + pt(cell.mags[ku][c]) * pt(hu) + pt(cell.mags[kv][c]) * pt(hv));
-            // Second order: the gradient at the point (its own errors
-            // added), and half the Hessian's bound over the cell.
-            let gu = pt(at_point[ku][c].abs()) + pt(cell.values[ku].err[c]);
-            let gv = pt(at_point[kv][c].abs()) + pt(cell.values[kv].err[c]);
-            let rest = pt(cell.mags[kuu][c]) * pt(hu) * pt(hu)
-                + pt(2.0) * pt(cell.mags[kuv][c]) * pt(hu) * pt(hv)
-                + pt(cell.mags[kvv][c]) * pt(hv) * pt(hv);
-            let second = up(err + gu * pt(hu) + gv * pt(hv) + pt(0.5) * rest);
-            // Both hold, about the same value: the lesser does.
-            let r = first.min(second);
+            let r = radius(
+                cell,
+                [k, ku, kv, kuu, kuv, kvv],
+                c,
+                [at_point[ku][c], at_point[kv][c]],
+                [hu, hv],
+            );
             if !(r.is_finite() && value.is_finite()) {
                 return None;
             }
             o[c] = pt(value) + Iv::new(-r, r).expect("ordered");
         }
+    }
+    let finite = |jets: &[V3; 6]| {
+        jets.iter()
+            .flatten()
+            .all(|x| x.lo().is_finite() && x.hi().is_finite())
+    };
+    if polynomial {
+        let jets = out.map(|o| [o[0], o[1], o[2]]);
+        return finite(&jets).then_some(jets);
     }
     let [a0, au, av, auu, auv, avv] = out.map(parts);
     let (a, w) = a0;
@@ -353,10 +408,53 @@ pub(super) fn jets(
         w,
     );
     let jets = [c, su, sv, suu, suv, svv];
-    jets.iter()
-        .flatten()
-        .all(|x| x.lo().is_finite() && x.hi().is_finite())
-        .then_some((cell.at, jets))
+    finite(&jets).then_some(jets)
+}
+
+/// The radius about a net's value at the evaluated point that holds its
+/// values over the box, for component `c` of the net `n[0]` (`n` its
+/// nets along `u` and `v`, then its second-order ones), the gradient's
+/// values `g` at the point and the box's half-widths `h` (upper ends
+/// [`jets`] rounded up, so at least `TINY`): the lesser of
+/// the mean value form and the second-order Taylor form (see the module's
+/// notes).
+///
+/// Every term is non-negative, so only upper ends are taken, by
+/// [`add_up`] and [`mul_up`], in the order the interval expressions
+///
+/// ```text
+/// first  = err + |N_u| hu + |N_v| hv
+/// second = err + (|g_u| + err_u) hu + (|g_v| + err_v) hv
+///        + 0.5 (|N_uu| hu hu + 2 |N_uv| hu hv + |N_vv| hv hv)
+/// ```
+///
+/// took them in point intervals, so the same floats for a third of the
+/// work: those expressions computed both ends of every step, three
+/// quarters of mass's fine mesh of KiCad's Smolhaj model (#308).
+fn radius(cell: &Cell, n: [usize; 6], c: usize, g: [f64; 2], [hu, hv]: [f64; 2]) -> f64 {
+    let [k, ku, kv, kuu, kuv, kvv] = n;
+    let m = |k: usize| cell.mags[k][c];
+    let err = cell.values[k].err[c];
+    // First order: the mean value form, `|N_u|` and `|N_v|` over the
+    // cell.
+    let first = add_up(add_up(err, mul_up(m(ku), hu)), mul_up(m(kv), hv));
+    // Second order: the gradient at the point (its own errors added), and
+    // half the Hessian's bound over the cell.
+    let gu = add_up(g[0].abs(), cell.values[ku].err[c]);
+    let gv = add_up(g[1].abs(), cell.values[kv].err[c]);
+    let rest = add_up(
+        add_up(
+            mul_up(mul_up(m(kuu), hu), hu),
+            mul_up(mul_up(mul_up(2.0, m(kuv)), hu), hv),
+        ),
+        mul_up(mul_up(m(kvv), hv), hv),
+    );
+    let second = add_up(
+        add_up(add_up(err, mul_up(gu, hu)), mul_up(gv, hv)),
+        mul_up(0.5, rest),
+    );
+    // Both hold, about the same value: the lesser does.
+    first.min(second)
 }
 
 /// A net's components at local `(su, sv)` by f64 de Casteljau,
@@ -366,8 +464,23 @@ fn evaluate(v: &Values, su: f64, sv: f64) -> [f64; 4] {
     if v.mids.is_empty() {
         return [0.0; 4];
     }
-    let mut column = [[0.0f64; 4]; crate::geom::nurbs::MAX_DEGREE + 1];
-    let mut row = [[0.0f64; 4]; crate::geom::nurbs::MAX_DEGREE + 1];
+    // The same arithmetic in either size: a small net (bicubic and
+    // below, most of what files hold) takes stack rows of 8 rather than
+    // clearing rows for the largest degree on every evaluation (#308).
+    if v.rows <= SMALL && v.cols <= SMALL {
+        evaluate_in::<SMALL>(v, su, sv)
+    } else {
+        evaluate_in::<{ crate::geom::nurbs::MAX_DEGREE + 1 }>(v, su, sv)
+    }
+}
+
+/// The largest net [`evaluate`] takes in its small rows.
+const SMALL: usize = 8;
+
+/// [`evaluate`] with rows of `N`, at least the net's rows and columns.
+fn evaluate_in<const N: usize>(v: &Values, su: f64, sv: f64) -> [f64; 4] {
+    let mut column = [[0.0f64; 4]; N];
+    let mut row = [[0.0f64; 4]; N];
     let lerp = |a: [f64; 4], b: [f64; 4], t: f64| -> [f64; 4] {
         core::array::from_fn(|k| a[k] + t * (b[k] - a[k]))
     };
@@ -446,7 +559,13 @@ fn build(patch: &BezierPatch, ks: Span, kt: Span) -> Option<Cell> {
     if values.iter().any(|v| v.err.iter().any(|e| !e.is_finite())) {
         return None;
     }
-    Some(Cell { at, values, mags })
+    let polynomial = patch.pts.iter().all(|h| h.w == 1.0);
+    Some(Cell {
+        at,
+        polynomial,
+        values,
+        mags,
+    })
 }
 
 /// Midpoints of a net's interval coefficients, and per component the

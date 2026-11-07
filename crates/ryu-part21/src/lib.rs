@@ -7,6 +7,7 @@
 //! parses (ryueda's 3D models) needs nothing else. ryustep re-exports it
 //! as `ryustep::part21`.
 
+pub mod closure;
 mod error;
 mod file;
 mod lex;

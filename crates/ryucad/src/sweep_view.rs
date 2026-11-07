@@ -165,7 +165,7 @@ fn sweep(
     results: &dyn Results,
     quality: crate::mesh::Quality,
 ) -> Result<Value> {
-    let profile = crate::along::profile(part, id, &w.profile, results)?;
+    let profile = crate::along::profile(part, id, &w.profile, results, w.surface)?;
     let at_ = At {
         part,
         order: part.order(),

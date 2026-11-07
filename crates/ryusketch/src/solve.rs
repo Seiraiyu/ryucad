@@ -54,6 +54,11 @@ pub struct Report {
     pub loops: Vec<Loop>,
     /// Curves that join but don't close.
     pub open: Vec<Chain>,
+    /// Each open chain of [`Self::open`] in the same order, walked from
+    /// one end to the other: its curves in order, each `reversed` when
+    /// walked from its end to its start. A chain that branches (some point
+    /// joins three curves or more) is `Err` with those points.
+    pub paths: Vec<crate::Path>,
 }
 
 /// Solves `sketch`: every constraint within [`SOLVE_TOL`] (lengths) or
@@ -93,7 +98,7 @@ fn solve_with(sketch: &Sketch, staged: bool) -> Result<Solved, SketchError> {
         iterations += steps;
     }
     let d = diagnose(&sys, &x, &held, &pieces);
-    let (loops, open) = loops::find(sketch, &sys.group_of);
+    let (loops, open, paths) = loops::find(sketch, &sys.group_of);
     let solved = write_back(sketch, &sys, &x);
     // A solve that pushed geometry out of the size box hasn't solved it:
     // the next solve would refuse what it gave.
@@ -112,6 +117,7 @@ fn solve_with(sketch: &Sketch, staged: bool) -> Result<Solved, SketchError> {
             conflicting: d.conflicting,
             loops,
             open,
+            paths,
         },
     })
 }
