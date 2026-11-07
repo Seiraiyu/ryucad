@@ -133,7 +133,7 @@ fn of_face(body: &Body, f: FaceId, view: &View, m: &Meter) -> Result<FaceOut, Fa
         let trimmed = trim(body, f, &raw, m)?;
         out.on_edges.extend(trimmed.on_edges);
         for r in trimmed.stretches {
-            stretches.push((raw.clone(), r));
+            stretches.push((covering(surface, &raw, r, m)?, r));
         }
     }
     let least = |(raw, [a, b]): &(Raw, [f64; 2])| {
@@ -164,6 +164,24 @@ fn of_face(body: &Body, f: FaceId, view: &View, m: &Meter) -> Result<FaceOut, Fa
         });
     }
     Ok(out)
+}
+
+/// `raw` for its stretch `r`: as it is where its pcurve covers `r`, else
+/// (a stretch of a closed curve across its start, past the range a fitted
+/// pcurve was made over) with a pcurve fitted again over `r`.
+fn covering(surface: &Surface, raw: &Raw, r: [f64; 2], m: &Meter) -> Result<Raw, Failure> {
+    let [r0, r1] = raw.range;
+    if !matches!(raw.pcurve.0, Curve2::Nurbs2(_)) || (r[0] >= r0 && r[1] <= r1) {
+        return Ok(raw.clone());
+    }
+    let (pc, bound) =
+        crate::intersect::fit_pcurve_within(surface, &raw.curve, r, LINEAR_RESOLUTION, 512, m)?;
+    Ok(Raw {
+        curve: raw.curve.clone(),
+        range: r,
+        pcurve: (Curve2::Nurbs2(Arc::new(pc)), [0.0, 1.0]),
+        tolerance: raw.tolerance.max(bound),
+    })
 }
 
 /// A traced face's branches, fitted. A branch under ten tolerances in

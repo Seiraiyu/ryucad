@@ -384,3 +384,36 @@ fn a_pin_through_a_plate_is_hidden_inside_it_and_behind_its_bottom() {
         }
     }
 }
+
+/// A sphere's askew silhouette circle cut by its face's loops into a
+/// stretch across the circle's start (plan 10.C's property test, sheet
+/// seed 14): the stretch runs past the range its fitted pcurve was made
+/// over, so the pcurve must be fitted again over it, and every point of
+/// the pcurve lie on the curve.
+#[test]
+fn a_silhouette_across_its_circles_start_keeps_its_pcurve_on_it() {
+    use ryukei::project::silhouettes;
+    let bytes = ryukei_testkit::race::seed_bytes(14);
+    let (sheets, _) = ryukei_testkit::sheet_bytes::sheet(&bytes).unwrap();
+    let b = &sheets[0];
+    let v = View::new(
+        Vector3::new(
+            -0.8438747602138779,
+            -0.5937262282849576,
+            -0.6568354826440128,
+        ),
+        Vector3::new(0.0, 0.0, 1.0),
+    )
+    .unwrap();
+    let s = silhouettes(b, &v).unwrap();
+    assert!(!s.branches.is_empty());
+    for br in &s.branches {
+        let surface = b.surface(b.face(br.face).unwrap().surface).unwrap();
+        for k in 0..=16 {
+            let x = br.range[0] + (br.range[1] - br.range[0]) * k as f64 / 16.0;
+            let uv = br.pcurve.0.point(br.pcurve.1[0] + br.pcurve.1[1] * x);
+            let gap = surface.point(uv.x, uv.y).distance(br.curve.point(x));
+            assert!(gap <= 2.0 * br.tolerance, "{gap} at {x} on {br:?}");
+        }
+    }
+}
