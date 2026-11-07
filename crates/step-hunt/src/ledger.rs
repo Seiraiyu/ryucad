@@ -6,7 +6,12 @@
 //! case <id> file <signature> <why…>       the file itself is wrong
 //! case <id> limit <signature> <why…>      a limit the kernel has on purpose
 //! file <source>@vN <sha256> <size>        a pinned cox-files source's file
+//! count <source> <stage> <passed> <of>     of a source's cases, how many passed a stage
 //! ```
+//!
+//! A `count` line is compared by [`Ledger::judge_count`]: fewer passing
+//! than recorded, of the same number of cases, is a regression a run
+//! reports (`count_regressed`); more is printed, to raise the line.
 //!
 //! `file` lines pin what a `cox-files:` source at `@vN` holds; `run`
 //! refuses the source when what it pulled differs (see
@@ -35,6 +40,19 @@ pub struct Ledger {
     pub lines: BTreeMap<(String, String), Judged>,
     /// `file` lines: by `<source>@vN`, each file's size by its SHA-256.
     pub files: BTreeMap<String, BTreeMap<String, u64>>,
+    /// `count` lines: `(passed, of)` by source and stage.
+    pub counts: BTreeMap<(String, String), (u64, u64)>,
+}
+
+/// A run's count against its `count` line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Count {
+    /// No line, or another number of cases: nothing to judge.
+    Unrecorded,
+    Same,
+    Improved,
+    Regressed,
 }
 
 /// A finding's state against the ledger.
@@ -50,9 +68,33 @@ impl Ledger {
     pub fn parse(text: &str) -> Result<Ledger, String> {
         let mut lines = BTreeMap::new();
         let mut files = BTreeMap::new();
+        let mut counts = BTreeMap::new();
         for (n, line) in text.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("count ") {
+                let bad = || format!("ledger line {}: {line}", n + 1);
+                let w: Vec<&str> = rest.split_whitespace().collect();
+                let [source, stage, passed, of] = w.as_slice() else {
+                    return Err(bad());
+                };
+                let (Ok(passed), Ok(of)) = (passed.parse::<u64>(), of.parse::<u64>()) else {
+                    return Err(bad());
+                };
+                if passed > of {
+                    return Err(format!("{}: more passing than cases", bad()));
+                }
+                if counts
+                    .insert(((*source).to_owned(), (*stage).to_owned()), (passed, of))
+                    .is_some()
+                {
+                    return Err(format!(
+                        "ledger line {}: count {source} {stage} listed twice",
+                        n + 1
+                    ));
+                }
                 continue;
             }
             if let Some(rest) = line.strip_prefix("file ") {
@@ -110,7 +152,11 @@ impl Ledger {
                 ));
             }
         }
-        Ok(Ledger { lines, files })
+        Ok(Ledger {
+            lines,
+            files,
+            counts,
+        })
     }
 
     /// Whether a source pinned at `pinned` (`<source>@vN`) pulled exactly
@@ -148,6 +194,19 @@ impl Ledger {
             "{pinned} isn't what the ledger pins:\n{}\nPin a new version in a ledger of its own lines, or pull the version the ledger names.",
             why.join("\n")
         ))
+    }
+
+    /// How `passed` of `of` cases of `source` passing `stage` compare with
+    /// its `count` line.
+    pub fn judge_count(&self, source: &str, stage: &str, passed: u64, of: u64) -> Count {
+        match self.counts.get(&(source.to_owned(), stage.to_owned())) {
+            Some(&(p, o)) if o == of => match passed.cmp(&p) {
+                std::cmp::Ordering::Less => Count::Regressed,
+                std::cmp::Ordering::Equal => Count::Same,
+                std::cmp::Ordering::Greater => Count::Improved,
+            },
+            _ => Count::Unrecorded,
+        }
     }
 
     /// The state of finding `sig` of case `id`.
@@ -198,6 +257,34 @@ mod tests {
         assert!(e.contains("size"), "{e}");
         let e = l.check_files("owner@v3", &have).unwrap_err();
         assert!(e.contains(&format!("file owner@v3 {SHA_A} 10")), "{e}");
+    }
+
+    #[test]
+    fn count_lines_read_and_judge() {
+        let l = Ledger::parse("count kicad-models ref_import 7000 7047\n").unwrap();
+        assert_eq!(
+            l.counts[&("kicad-models".into(), "ref_import".into())],
+            (7000, 7047)
+        );
+        assert_eq!(
+            l.judge_count("kicad-models", "ref_import", 6999, 7047),
+            Count::Regressed
+        );
+        assert_eq!(
+            l.judge_count("kicad-models", "ref_import", 7001, 7047),
+            Count::Improved
+        );
+        assert_eq!(
+            l.judge_count("kicad-models", "ref_import", 7000, 7047),
+            Count::Same
+        );
+        // Another number of cases is another campaign: not judged.
+        assert_eq!(
+            l.judge_count("kicad-models", "ref_import", 10, 20),
+            Count::Unrecorded
+        );
+        assert!(Ledger::parse("count kicad-models ref_import 9 8\n").is_err());
+        assert!(Ledger::parse("count kicad-models ref_import 9\n").is_err());
     }
 
     #[test]

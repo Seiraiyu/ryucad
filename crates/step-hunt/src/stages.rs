@@ -340,7 +340,14 @@ fn first_difference(a: &[u8], b: &[u8]) -> usize {
 /// Runs a body case's stages in `home`, then, on a binary that takes
 /// `--solid`, its reference stages.
 pub fn body(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
-    let mut ran = solid_body(ryucad, case, home);
+    let mut ran = if ryucad.only_reference {
+        Ran {
+            stages: Vec::new(),
+            key: None,
+        }
+    } else {
+        solid_body(ryucad, case, home)
+    };
     if ryucad.modes {
         reference(ryucad, case, home, &mut ran.stages);
     }
@@ -561,7 +568,14 @@ fn same_structure(root: &str, reach: &Made, stem_a: &str, again: &Made, stem_b: 
 /// takes `--solid`, `whole_ref_import`: the file imported whole as
 /// references and each root that built exported.
 pub fn whole(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
-    let mut ran = solid_whole(ryucad, case, home);
+    let mut ran = if ryucad.only_reference {
+        Ran {
+            stages: Vec::new(),
+            key: None,
+        }
+    } else {
+        solid_whole(ryucad, case, home)
+    };
     if ryucad.modes {
         stage(&mut ran.stages, ryucad, home, "whole_ref_import", |r| {
             let dir = r.project("wr")?;

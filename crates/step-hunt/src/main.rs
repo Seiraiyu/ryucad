@@ -92,6 +92,10 @@ struct RunArgs {
     /// The ledger (default: crates/step-hunt/known.txt).
     #[arg(long)]
     ledger: Option<PathBuf>,
+    /// Which stages: `all`, or `ref` for the reference stages alone (a
+    /// binary whose `import` takes `--solid`).
+    #[arg(long, default_value = "all", value_parser = ["all", "ref"])]
+    stages: String,
 }
 
 #[derive(Subcommand)]
@@ -219,7 +223,16 @@ fn failing_in(path: &Path) -> BTreeSet<String> {
 
 fn run(a: RunArgs) {
     let work = work_dir(&a.common);
-    let ryucad = Ryucad::new(a.ryucad.clone(), Duration::from_secs(a.timeout));
+    let mut ryucad = Ryucad::new(a.ryucad.clone(), Duration::from_secs(a.timeout));
+    if a.stages == "ref" {
+        if !ryucad.modes {
+            fail(format!(
+                "{}'s import takes no --solid: it has no reference imports to run --stages ref on",
+                a.ryucad.display()
+            ));
+        }
+        ryucad.only_reference = true;
+    }
     std::fs::create_dir_all(&a.out).unwrap_or_else(|e| fail(format!("{}: {e}", a.out.display())));
     std::fs::create_dir_all(&work).unwrap_or_else(|e| fail(format!("{}: {e}", work.display())));
     let version = match ryucad.call(&work, &work, "version", &["version"]).ended {

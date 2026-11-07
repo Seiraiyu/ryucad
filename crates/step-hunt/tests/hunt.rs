@@ -225,6 +225,11 @@ fn the_committed_corpus_finds_only_what_the_ledger_lists() {
         .filter(|f| f["timed"] == false)
         .count();
     assert_eq!(fixed, 0, "ledger lines that no longer fail:\n{md}");
+    assert_eq!(
+        v["count_regressed"],
+        serde_json::json!([]),
+        "fewer cases pass than the ledger counts:\n{md}"
+    );
 }
 
 #[test]
@@ -354,4 +359,44 @@ fn a_references_unmeshed_faces_are_findings_of_ref_mesh() {
     );
     // Later stages still ran.
     assert!(body_stages(&v).contains(&"ref_fixpoint".to_owned()));
+}
+
+#[test]
+fn ref_stages_alone_are_counted_against_the_ledger() {
+    let fake = env!("CARGO_BIN_EXE_fake-ryucad");
+    let dir = tempfile::tempdir().unwrap();
+    let sources = one_box(dir.path());
+    let ledger = dir.path().join("known.txt");
+    // Both cases (the body and the file whole) are the source's; one, the
+    // body, runs ref_mesh. The ledger says it passed: with unmeshed faces
+    // it now doesn't.
+    std::fs::write(
+        &ledger,
+        "count box ref_mesh 1 2\ncount box ref_import 1 2\n",
+    )
+    .unwrap();
+    let v = hunt(
+        &[
+            "run",
+            "--ryucad",
+            fake,
+            "--sources",
+            sources.to_str().unwrap(),
+            "--stages",
+            "ref",
+            "--ledger",
+            ledger.to_str().unwrap(),
+        ],
+        &[("STEP_HUNT_FAKE_MODES", "unmeshed")],
+        &dir.path().join("out"),
+    );
+    let stages = body_stages(&v);
+    assert!(stages.iter().all(|s| s.starts_with("ref_")), "{stages:?}");
+    let regressed: Vec<&str> = v["count_regressed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["stage"].as_str().unwrap())
+        .collect();
+    assert_eq!(regressed, ["ref_mesh"], "{}", v["counts"]);
 }

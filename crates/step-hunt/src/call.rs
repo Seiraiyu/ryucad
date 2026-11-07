@@ -19,6 +19,8 @@ pub struct Ryucad {
     /// but the reference ones asks for healed solids, so they mean what
     /// they always meant, and the reference stages run.
     pub modes: bool,
+    /// Run only the reference stages (`--stages ref`).
+    pub only_reference: bool,
 }
 
 /// How a command ended.
@@ -53,6 +55,7 @@ impl Ryucad {
             exe,
             timeout,
             modes: false,
+            only_reference: false,
         };
         r.modes = r.probe();
         r
