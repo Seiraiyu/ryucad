@@ -928,3 +928,158 @@ fn unfolds_that_cant_be_made_say_where() {
     );
     assert!(e.message.contains("half turn"), "{e}");
 }
+
+fn refold_of(extra: Value) -> crate::doc::files::Feature {
+    let mut v = json!({"format": 14, "type": "refold", "target": "plate", "unfold": "u"});
+    for (k, x) in extra.as_object().unwrap() {
+        v[k] = x.clone();
+    }
+    feature(v)
+}
+
+/// A 4 × 4 mm slot sketched on xy across the strip of an unfold about the
+/// plate's top at a K-factor of a half, cut through.
+fn slot() -> Vec<(&'static str, crate::doc::files::Feature)> {
+    // The strip runs from x = 60 - (r + t) = 57.5 for θ (r + t / 2).
+    let ba = core::f64::consts::FRAC_PI_2 * 1.75;
+    let mid = 57.5 + ba / 2.0;
+    vec![
+        (
+            "slot_s",
+            polyline(
+                &[
+                    [mid - 2.0, 18.0],
+                    [mid + 2.0, 18.0],
+                    [mid + 2.0, 22.0],
+                    [mid - 2.0, 22.0],
+                ],
+                true,
+            ),
+        ),
+        (
+            "slot",
+            feature(
+                json!({"format": 3, "type": "extrude", "sketch": "slot_s", "operation": "cut",
+                           "targets": ["plate"], "extent": {"type": "through_all", "both": true}}),
+            ),
+        ),
+    ]
+}
+
+#[test]
+fn a_refold_folds_its_unfold_back() {
+    let p0 = flanged(vec![]);
+    let (bend, top) = bend_and_top(&p0);
+    let p = flanged(vec![
+        ("u", unfold_of(json!({"fixed": r("plate", top)}))),
+        ("rf", refold_of(json!({}))),
+    ]);
+    let folded = output_of(&p, "f")
+        .unwrap()
+        .solid(&id("plate"))
+        .unwrap()
+        .clone();
+    let back = output_of(&p, "rf")
+        .unwrap()
+        .solid(&id("plate"))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        crate::rebuild::names(&back.body),
+        crate::rebuild::names(&folded.body)
+    );
+    for (n, o) in folded.origins.iter() {
+        assert_eq!(back.origins.get(n), Some(o), "{n}");
+    }
+    let m = ryukei::sheet_metal::recognize(&back.body, &Default::default()).unwrap();
+    assert_eq!(m.bends.len(), 1);
+    assert!((m.bends[0].angle - bend.angle).abs() < 1e-9);
+    assert!((m.bends[0].radius - bend.radius).abs() < 1e-12);
+    assert!((volume(&back.body) - volume(&folded.body)).abs() < 1e-6 * volume(&folded.body));
+}
+
+#[test]
+fn a_slot_cut_across_the_bend_in_the_flat_folds_with_it() {
+    let p0 = flanged(vec![]);
+    let (bend, top) = bend_and_top(&p0);
+    let mut extra = vec![(
+        "u",
+        unfold_of(json!({"fixed": r("plate", top), "allowance": {"k_factor": "0.5"}})),
+    )];
+    extra.extend(slot());
+    extra.push(("rf", refold_of(json!({}))));
+    let p = flanged(extra);
+    let cut = output_of(&p, "slot")
+        .unwrap()
+        .solid(&id("plate"))
+        .unwrap()
+        .clone();
+    let back = output_of(&p, "rf")
+        .unwrap()
+        .solid(&id("plate"))
+        .unwrap()
+        .clone();
+    assert!(ryukei::check::check(&back.body).is_empty());
+    assert_eq!(ryukei::check::check_intersections(&back.body), []);
+    // A half K-factor keeps the volume of a cut through the sheet.
+    let v = volume(&cut.body);
+    assert!((volume(&back.body) - v).abs() < 1e-6 * v);
+    // The cut in the flat already split the slot's walls at the bend
+    // lines, so the refold's imprint makes nothing new: every name, and
+    // the origin of every name, is the cut's.
+    assert_eq!(
+        crate::rebuild::names(&back.body),
+        crate::rebuild::names(&cut.body)
+    );
+    // A new edge the imprint makes on a folded bend's end plane would be
+    // that bend's line.
+    let lines: Vec<&Value> = back
+        .origins
+        .values()
+        .filter(|o| o.get("bend_line_of").is_some())
+        .collect();
+    for o in lines {
+        assert_eq!(o["feature"], "rf");
+        assert_eq!(o["bend_line_of"], bend.inner[0].to_string());
+    }
+}
+
+#[test]
+fn refolds_that_cant_be_made_say_where() {
+    let p0 = flanged(vec![]);
+    let (_, top) = bend_and_top(&p0);
+    let at = |extra: Vec<(&'static str, crate::doc::files::Feature)>, f: &str| -> Value {
+        let p = flanged(extra);
+        let e = output_of(&p, f).unwrap_err();
+        assert_eq!(e.code, crate::error::Code::InvalidParam, "{e}");
+        e.details["pointer"].clone()
+    };
+    // Not an unfold.
+    assert_eq!(
+        at(vec![("rf", refold_of(json!({"unfold": "f"})))], "rf"),
+        json!("/unfold")
+    );
+    // Folded once already.
+    assert_eq!(
+        at(
+            vec![
+                ("u", unfold_of(json!({}))),
+                ("rf", refold_of(json!({}))),
+                ("rf2", refold_of(json!({}))),
+            ],
+            "rf2"
+        ),
+        json!("/unfold")
+    );
+    // A side face where a bend goes.
+    assert_eq!(
+        at(
+            vec![
+                ("u", unfold_of(json!({}))),
+                ("rf", refold_of(json!({"only": [r("plate", top)]}))),
+            ],
+            "rf"
+        ),
+        json!("/only/0")
+    );
+}

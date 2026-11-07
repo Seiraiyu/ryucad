@@ -2345,12 +2345,8 @@ fn rebuild_with(
             crate::sheet_metal::unfold::unfold(part, solids, id, u, before, run).map(solid),
             None,
         ),
-        Feature::Refold(_) => (
-            Err(Error::new(
-                Code::Internal,
-                format!("refold {id} is built from 16.B's Task 7"),
-            )
-            .with("feature", id)),
+        Feature::Refold(x) => (
+            crate::sheet_metal::unfold::refold(part, solids, id, x, before, run).map(solid),
             None,
         ),
         Feature::Split(x) => (

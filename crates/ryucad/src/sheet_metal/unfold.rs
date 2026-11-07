@@ -5,16 +5,19 @@
 //! it (the kernel's sheet metal calls take none).
 
 use super::allowance::{self, Kernel};
+use crate::doc::files::Feature;
 use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::doc::reference::Reference;
-use crate::doc::sheet_metal::{Allowance, Unfold};
+use crate::doc::sheet_metal::{Allowance, Refold, Unfold};
 use crate::error::{Code, Error, Result};
-use crate::rebuild::{Built, Flat, FlatBend, Made, Results, Run};
+use crate::rebuild::{Built, Flat, FlatBend, Made, Origins, Results, Run};
 use crate::solid::Solids;
-use ryukei::name::Name;
-use ryukei::sheet_metal::{Bend, SheetModel, SheetOptions, UnfoldSpec};
-use ryukei::topo::EntityId;
+use ryukei::name::{Event, Journal, Name};
+use ryukei::sheet_metal::{Bend, RefoldSpec, SheetModel, SheetOptions, UnfoldSpec};
+use ryukei::topo::{Body, EntityId};
+use serde_json::json;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// The bend of `model` one of whose inner or outer faces is `n`.
@@ -243,4 +246,198 @@ pub fn unfold(
         flat: Some(Arc::new(flat)),
         ..Made::new(vec![(u.target.clone(), Arc::new(built))])
     })
+}
+
+fn refold_refused(id: &Id, at: &str, msg: String) -> Error {
+    Error::new(Code::InvalidParam, format!("refold {id}: {msg}"))
+        .with("feature", id)
+        .with("pointer", at)
+}
+
+/// What refold `id` folds and by what: its target as it sees it and its
+/// unfold's flat, with the strips it folds. Its unfold must be an unfold
+/// of its target listed before it, with no refold of it between; each of
+/// `only` a face of a bend that unfold unfolded.
+pub(crate) fn refold_resolve<'a>(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    x: &Refold,
+    before: &'a dyn Results,
+) -> Result<(&'a Built, Arc<Flat>, Option<Vec<Name>>)> {
+    let target = &x.target;
+    let u = &x.unfold;
+    match part.features.get(u) {
+        Some(Ok(Feature::Unfold(f))) if f.target == *target => {}
+        Some(Ok(Feature::Unfold(f))) => {
+            return Err(refold_refused(
+                id,
+                "/unfold",
+                format!(
+                    "its unfold {u} lays {} flat, not its target {target}",
+                    f.target
+                ),
+            ));
+        }
+        _ => {
+            return Err(refold_refused(
+                id,
+                "/unfold",
+                format!("{u} isn't an unfold: a refold folds by an earlier unfold of its target"),
+            ));
+        }
+    }
+    let order = part.order();
+    let pos = |f: &Id| order.iter().position(|o| o == f);
+    let chain = solids.chain(target).unwrap_or(&[]);
+    let (Some(pu), Some(me)) = (pos(u), pos(id)) else {
+        return Err(refold_refused(
+            id,
+            "/unfold",
+            format!("its unfold {u} isn't listed"),
+        ));
+    };
+    if pu >= me || !chain.contains(u) {
+        return Err(refold_refused(
+            id,
+            "/unfold",
+            format!("its unfold {u} isn't in {target}'s chain before it"),
+        ));
+    }
+    for f in chain {
+        let Some(at) = pos(f) else { continue };
+        if at > pu
+            && at < me
+            && let Some(Ok(Feature::Refold(other))) = part.features.get(f)
+            && other.unfold == *u
+        {
+            return Err(refold_refused(
+                id,
+                "/unfold",
+                format!("{f} already folds {u} back: unfold again to refold"),
+            )
+            .with("refold", f));
+        }
+    }
+    let built = crate::rebuild::target(part, solids, id, target, before)?;
+    let flat = crate::graph::input(part, id, u, before)?
+        .flat()
+        .cloned()
+        .ok_or_else(|| {
+            Error::new(
+                Code::Internal,
+                format!("refold {id}: its unfold {u} left no flat"),
+            )
+            .with("feature", id)
+        })?;
+    let mut bends = Vec::new();
+    for (i, r) in x.only.iter().enumerate() {
+        let Some(b) = flat.bend_of(r.name) else {
+            return Err(refold_refused(
+                id,
+                &format!("/only/{i}"),
+                format!("{} is no face of a bend {u} unfolded", r.text(&part.id)),
+            )
+            .with(
+                "bends",
+                flat.bends
+                    .iter()
+                    .map(|b| format!("{}/{target}/{}", part.id, b.inner[0]))
+                    .collect::<Vec<_>>(),
+            ));
+        };
+        if !bends.contains(&b.name) {
+            bends.push(b.name);
+        }
+    }
+    Ok((built, flat, (!bends.is_empty()).then_some(bends)))
+}
+
+/// A refold: its target as the chain left it folded back by its unfold's
+/// flat map.
+pub fn refold(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    x: &Refold,
+    before: &dyn Results,
+    run: &Run,
+) -> Result<Made> {
+    let (built, flat, bends) = refold_resolve(part, solids, id, x, before)?;
+    let key = crate::rebuild::op_key(&part.id, id);
+    run.job.check()?;
+    let made = ryukei::sheet_metal::refold(key, &built.body, &flat.map, &RefoldSpec { bends })
+        .map_err(|e| super::refusal(&part.id, id, "refold", (&x.target, built), e))?;
+    run.job.check()?;
+    let origins = refold_origins(id, built, &flat, &made);
+    let b = crate::rebuild::finish(id, "refold", made, origins)?;
+    Ok(Made::new(vec![(x.target.clone(), Arc::new(b))]))
+}
+
+/// The bend whose folded end plane a new edge of `body` named `n` lies
+/// in: its middle in the plane through the strip's axis at angle 0 or
+/// the strip's angle, between its radii.
+fn bend_line_of<'f>(body: &Body, n: Name, flat: &'f Flat) -> Option<&'f FlatBend> {
+    let Some(EntityId::Edge(e)) = body.by_name(n) else {
+        return None;
+    };
+    let edge = body.edge(e)?;
+    let curve = body.curve(edge.curve)?;
+    let mid = curve.point(0.5 * (edge.interval[0] + edge.interval[1]));
+    let t = flat.map.thickness;
+    flat.map.strips.iter().find_map(|s| {
+        let l = s.axis.to_local(mid);
+        let rho = ryukei::math::sqrt(l.x * l.x + l.y * l.y);
+        let phi = ryukei::math::atan2(l.y, l.x);
+        let tol = 10.0 * ryukei::tol::LINEAR_RESOLUTION;
+        let between = rho > s.radius - tol && rho < s.radius + t + tol;
+        let at_end = [0.0, s.angle].iter().any(|a| {
+            let d = phi - a;
+            ryukei::math::sin(d).abs() < 1e-6 && ryukei::math::cos(d) > 0.0
+        });
+        (between && at_end)
+            .then(|| flat.bends.iter().find(|b| b.name == s.bend))
+            .flatten()
+    })
+}
+
+/// A refold's origins: a name its target had keeps its origin; a face it
+/// split keeps its parent's; a new edge on a folded bend's end plane is
+/// that bend's line; anything else is the refold's.
+fn refold_origins(id: &Id, target: &Built, flat: &Flat, made: &(Body, Journal)) -> Origins {
+    let mut parent: BTreeMap<Name, Name> = BTreeMap::new();
+    for e in made.1.events() {
+        if let Event::Split {
+            parent: p,
+            children,
+        } = e
+        {
+            for c in children {
+                parent.insert(*c, *p);
+            }
+        }
+    }
+    let inherited = |n: Name| -> Option<serde_json::Value> {
+        let mut at = n;
+        for _ in 0..64 {
+            if let Some(o) = target.origins.get(&at.to_string()) {
+                return Some(o.clone());
+            }
+            at = *parent.get(&at)?;
+        }
+        None
+    };
+    crate::rebuild::names(&made.0)
+        .into_iter()
+        .map(|n| {
+            let o = match inherited(n) {
+                Some(o) => o,
+                None => match bend_line_of(&made.0, n, flat) {
+                    Some(b) => json!({"feature": id, "bend_line_of": b.inner[0].to_string()}),
+                    None => json!({"feature": id}),
+                },
+            };
+            (n.to_string(), o)
+        })
+        .collect()
 }
