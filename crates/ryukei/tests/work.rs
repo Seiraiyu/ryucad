@@ -254,6 +254,38 @@ fn tweaks_are_bounded() {
 }
 
 #[test]
+fn drafts_are_bounded() {
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::tweak::{DraftFace, DraftSpec, Hinge, draft_with};
+    let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+    let walls = [
+        FaceRole::PlusX,
+        FaceRole::MinusX,
+        FaceRole::PlusY,
+        FaceRole::MinusY,
+    ]
+    .map(|r| Name::derive(OpKey(1), Role::Face(r), &[]));
+    let spec = DraftSpec {
+        pull: ryukei::geom::UnitVector3::exact(Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+        angle: 0.05,
+        hinge: Hinge::Neutral {
+            origin: ryukei::geom::Point3::ORIGIN,
+        },
+        faces: walls
+            .iter()
+            .map(|&face| DraftFace {
+                face,
+                angle: None,
+                flip: false,
+            })
+            .collect(),
+        tangent: false,
+    };
+    let spent = bounded("draft", |w| draft_with(OpKey(8), &cube, &spec, w));
+    eprintln!("draft: {spent} units");
+}
+
+#[test]
 fn thickening_a_sheet_is_bounded() {
     use ryukei::name::{FaceRole, Name, Role};
     use ryukei::offset::{ThickenSpec, thicken_with};

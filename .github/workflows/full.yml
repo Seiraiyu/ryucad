@@ -112,6 +112,7 @@ jobs:
       - run: cargo test -p ryukei --release --test spline_blends
       - run: cargo test -p ryukei --release --test spline_offsets
       - run: cargo test -p ryukei --release --test offsets
+      - run: cargo test -p ryukei --release --test drafts
       - run: cargo test -p ryukei --release --test work -- --nocapture
       - run: cargo test -p ryukei --release --test silhouettes
       - run: cargo test -p ryukei --release --test heal_props
