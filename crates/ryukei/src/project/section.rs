@@ -4,10 +4,11 @@
 use crate::Error;
 use crate::geom::{Box3, Frame, Plane, Point3, Rigid, Vector3};
 use crate::intersect::face_box;
-use crate::name::{Name, OpKey};
+use crate::name::{Event, Journal, Name, OpKey};
 use crate::primitive;
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, FaceId};
+use std::collections::BTreeSet;
 
 /// What a section subtracts: a block whose base lies on the plane.
 pub(crate) struct HalfSpace {
@@ -95,6 +96,37 @@ pub(crate) fn half_space(
     Ok(Some(HalfSpace { body: tool, base }))
 }
 
+/// The faces of `body` the boolean made of the half-space's base: its
+/// placed name, the pieces it was split into, and what they were merged
+/// into, followed through `journal` until nothing more is named. In
+/// `FaceId` order.
+pub(crate) fn caps(body: &Body, journal: &Journal, base: Name) -> Vec<FaceId> {
+    let mut names = BTreeSet::from([base]);
+    loop {
+        let before = names.len();
+        for e in journal.events() {
+            match e {
+                Event::Placed { from, to, .. } if names.contains(from) => {
+                    names.insert(*to);
+                }
+                Event::Split { parent, children } if names.contains(parent) => {
+                    names.extend(children.iter().copied());
+                }
+                Event::Merged { parents, child } if parents.iter().any(|p| names.contains(p)) => {
+                    names.insert(*child);
+                }
+                _ => {}
+            }
+        }
+        if names.len() == before {
+            break;
+        }
+    }
+    body.faces()
+        .filter(|&f| names.contains(&body.faces[f].name))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +181,30 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn caps_follow_the_base_through_placing_splits_and_merges() {
+        use crate::name::{Event, Journal, Name, ToolKey};
+        let (b, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+        let faces: Vec<_> = b.faces().collect();
+        let name = |i: usize| b.faces[faces[i]].name;
+        let (base, placed, piece) = (Name::from_u128(1), Name::from_u128(2), Name::from_u128(3));
+        let mut j = Journal::new();
+        // Out of order on purpose: the merge names the piece before the
+        // split makes it.
+        j.push(Event::merged(piece, name(4), name(2)));
+        j.push(Event::Split {
+            parent: placed,
+            children: vec![name(0), piece],
+        });
+        j.push(Event::Placed {
+            tool: ToolKey(1),
+            from: base,
+            to: placed,
+        });
+        j.push(Event::Modified(name(5)));
+        assert_eq!(caps(&b, &j, base), vec![faces[0], faces[2]]);
+        assert_eq!(caps(&b, &Journal::new(), base), vec![]);
     }
 }
