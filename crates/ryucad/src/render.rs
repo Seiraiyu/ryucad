@@ -251,6 +251,23 @@ impl Geometry {
 }
 
 impl Geometry {
+    /// An annotation's pin at `at`: a dot in [`ANNOTATION`] and its
+    /// number beside it.
+    pub fn add_marker(&mut self, at: [f64; 3], number: &str) {
+        let i = self.positions.len() as u32;
+        self.positions.push(at);
+        self.lines.push(Line {
+            points: vec![i],
+            color: ANNOTATION,
+            width: 9.0,
+            dash: false,
+        });
+        self.labels.push(Label {
+            at,
+            text: number.to_owned(),
+        });
+    }
+
     /// Adds the origin's axes and planes, sized to what is drawn so far.
     pub fn add_origin(&mut self) {
         let size = origin_size(&self.positions);
@@ -270,6 +287,8 @@ impl Geometry {
 
 /// Datums' colour, and how opaque a datum plane's square is.
 pub const DATUM: Rgb = [0.55, 0.36, 0.86];
+/// An annotation's pin (`render --annotations`): a dot and its number.
+pub const ANNOTATION: Rgb = [0.05, 0.42, 0.45];
 /// What a sheet's back is tinted towards, so an agent sees which way a
 /// sheet faces before it thickens or splits by it (design 388).
 pub const SHEET_BACK: Rgb = [0.86, 0.47, 0.20];

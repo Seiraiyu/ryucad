@@ -152,6 +152,12 @@ pub const WORKTREE: &str = "worktree:";
 /// and those of every open change it stands on not yet applied.
 pub const ANNOTATION: &str = "annotation:";
 
+/// How a revision names a person's draft: `draft:<name>`, the working
+/// files with the human participant `name`'s open, unapplied proposed
+/// changes laid over them in order, exactly as `annotation.propose`
+/// runs over them (`annotation::propose::laid`).
+pub const DRAFT: &str = "draft:";
+
 /// The path a `worktree:<path>` revision names, if it is one.
 pub fn worktree_path(rev: &str) -> Option<&Path> {
     rev.strip_prefix(WORKTREE).map(Path::new)
@@ -472,24 +478,10 @@ impl Session {
             if !stale.is_empty() {
                 self.rev_warnings.push(stale_warning(rev, &stale));
             }
-            let key = format!(
-                "{rev}\0{}",
-                crate::annotation::hash(&canonical_files(&files))
-            );
-            let i = match self.revisions.iter().position(|(t, _)| *t == key) {
-                Some(i) => i,
-                None => {
-                    let s = self.over(files)?;
-                    self.revisions.push((key, s));
-                    self.revisions.len() - 1
-                }
-            };
-            let mut used = self.revisions.remove(i);
-            used.1.job = self.job.clone();
-            used.1.heal_budget = self.heal_budget;
-            self.revisions.insert(0, used);
-            self.revisions.truncate(REVISIONS);
-            return Ok((None, &mut self.revisions[0].1));
+            return self.at_files(rev, files);
+        }
+        if let Some((_, files)) = self.draft_files(rev)? {
+            return self.at_files(rev, files);
         }
         let repo = crate::git::repo(self.root())?;
         let (commit, tree) = repo.locate(rev)?;
@@ -515,6 +507,53 @@ impl Session {
         self.revisions.insert(0, used);
         self.revisions.truncate(REVISIONS);
         Ok((Some(commit), &mut self.revisions[0].1))
+    }
+
+    /// A session over `files`, kept among the revisions by `rev` and the
+    /// files' hash, so asking again with the same files reuses it.
+    fn at_files(&mut self, rev: &str, files: Files) -> Result<(Option<String>, &mut Session)> {
+        let key = format!(
+            "{rev}\0{}",
+            crate::annotation::hash(&canonical_files(&files))
+        );
+        let i = match self.revisions.iter().position(|(t, _)| *t == key) {
+            Some(i) => i,
+            None => {
+                let s = self.over(files)?;
+                self.revisions.push((key, s));
+                self.revisions.len() - 1
+            }
+        };
+        let mut used = self.revisions.remove(i);
+        used.1.job = self.job.clone();
+        used.1.heal_budget = self.heal_budget;
+        self.revisions.insert(0, used);
+        self.revisions.truncate(REVISIONS);
+        Ok((None, &mut self.revisions[0].1))
+    }
+
+    /// The files a `draft:<name>` revision names and how answers name it
+    /// (`{rev, draft, annotations}`, the IDs laid); `None` for any other
+    /// revision.
+    pub fn draft_files(&mut self, rev: &str) -> Result<Option<(Value, Files)>> {
+        let Some(name) = rev.strip_prefix(DRAFT) else {
+            return Ok(None);
+        };
+        if name.is_empty() {
+            return Err(Error::new(
+                crate::error::Code::InvalidParam,
+                "a draft is named by its participant: draft:<name>",
+            )
+            .with("rev", rev));
+        }
+        let by = crate::annotation::By {
+            participant: name.to_owned(),
+            kind: crate::annotation::AuthorKind::Human,
+        };
+        let (files, laid) = crate::annotation::propose::laid(self, &by);
+        let ids: Vec<String> = laid.iter().map(|a| a.id.to_string()).collect();
+        let named = json!({"rev": rev, "draft": name, "annotations": ids});
+        Ok(Some((named, files)))
     }
 
     /// The files an `annotation:<id>` revision names, how answers name it

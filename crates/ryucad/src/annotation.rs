@@ -526,6 +526,53 @@ pub fn list(
     Ok(v)
 }
 
+/// Where `render --annotations` draws pins on `part`: each open
+/// annotation's pins that carry a point and lie on `part` (or on one of
+/// its occurrences, placed by `poses`, keyed by instance path), with the
+/// annotation's number among the open ones, oldest first, from 1. A pin
+/// with no point is the app's to draw at its entity.
+pub fn markers(
+    files: &Files,
+    part: &str,
+    poses: &BTreeMap<String, ryukei::geom::Rigid>,
+) -> Vec<([f64; 3], String)> {
+    let all = readable(&read_all(files));
+    let mut open: Vec<&Annotation> = all.values().filter(|a| a.status.is_open()).collect();
+    open.sort_by(|a, b| (&a.at, &a.id).cmp(&(&b.at, &b.id)));
+    let mut out = Vec::new();
+    for (n, a) in open.iter().enumerate() {
+        for pin in &a.pins {
+            let at = match pin {
+                Pin::Point { part: p, point_m } if p.as_str() == part => Some(*point_m),
+                Pin::Entity {
+                    reference,
+                    point_m: Some(p),
+                } => {
+                    let steps: Vec<&str> = reference.split('/').collect();
+                    if steps.first() != Some(&part) {
+                        None
+                    } else if steps.len() > 3 {
+                        // `<asm>/<path>…/<solid>/<name>`: the point is in
+                        // the occurrence's own part's frame.
+                        let path = steps[1..steps.len() - 2].join("/");
+                        poses.get(&path).map(|r| {
+                            let q = r.apply_point(ryukei::geom::Point3::new(p[0], p[1], p[2]));
+                            [q.x, q.y, q.z]
+                        })
+                    } else {
+                        Some(*p)
+                    }
+                }
+                _ => None,
+            };
+            if let Some(at) = at {
+                out.push((at, (n + 1).to_string()));
+            }
+        }
+    }
+    out
+}
+
 /// `annotation.show`: the annotation, each pin resolved (its kind and
 /// what it names now, or why not) and each file its change touches.
 pub fn show(session: &mut Session, id: &str) -> Result<Value> {
@@ -761,6 +808,64 @@ pub(crate) mod tests {
     use super::*;
     use crate::server::tests::{call, fresh};
     use serde_json::json;
+
+    #[test]
+    fn markers_number_open_annotations_oldest_first() {
+        let (_dir, mut s, face) = plate();
+        let plate_id = || Id::parse("plate", "part").unwrap();
+        let mut a = comment(
+            "aaaaaaaaaa",
+            vec![Pin::Entity {
+                reference: face.clone(),
+                point_m: Some([0.01, 0.0, 0.005]),
+            }],
+        );
+        a.at = "2026-11-05T14:00:00Z".into();
+        let mut b = comment(
+            "bbbbbbbbbb",
+            vec![Pin::Point {
+                part: plate_id(),
+                point_m: [0.0, 0.01, 0.0],
+            }],
+        );
+        b.at = "2026-11-05T15:00:00Z".into();
+        // No point: drawn by the app at its entity, not by renders.
+        let mut c = comment(
+            "cccccccccc",
+            vec![Pin::Entity {
+                reference: face,
+                point_m: None,
+            }],
+        );
+        c.at = "2026-11-05T16:00:00Z".into();
+        let mut closed = comment(
+            "dddddddddd",
+            vec![Pin::Point {
+                part: plate_id(),
+                point_m: [1.0, 1.0, 1.0],
+            }],
+        );
+        closed.at = "2026-11-05T12:00:00Z".into();
+        closed.status = Status::Rejected;
+        closed.resolution = Some(Resolution {
+            by: By::agent("agent"),
+            at: "2026-11-05T17:00:00Z".into(),
+            note: Some("no".into()),
+            applied: false,
+        });
+        for x in [&a, &b, &c, &closed] {
+            put(&mut s, x);
+        }
+        let m = markers(&s.snapshot(), "plate", &BTreeMap::new());
+        assert_eq!(
+            m,
+            vec![
+                ([0.01, 0.0, 0.005], "1".to_owned()),
+                ([0.0, 0.01, 0.0], "2".to_owned())
+            ]
+        );
+        assert!(markers(&s.snapshot(), "other", &BTreeMap::new()).is_empty());
+    }
 
     /// Every project write a handler makes goes through the session, so a
     /// request run in a capture session writes nothing (design 374). The
