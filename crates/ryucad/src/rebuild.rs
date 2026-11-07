@@ -546,13 +546,11 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Revolve(_)
         | Feature::Hole(_)
         | Feature::Planar(_)
-        | Feature::BaseFlange(_) => {
-            Err(Error::new(
-                Code::Internal,
-                format!("{} {id} is built from its sketch", f.type_name()),
-            )
-            .with("feature", id))
-        }
+        | Feature::BaseFlange(_) => Err(Error::new(
+            Code::Internal,
+            format!("{} {id} is built from its sketch", f.type_name()),
+        )
+        .with("feature", id)),
         Feature::Sweep(_) => Err(Error::new(
             Code::Internal,
             format!("sweep {id} is built from its profile and path"),
