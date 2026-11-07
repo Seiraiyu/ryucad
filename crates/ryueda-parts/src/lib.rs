@@ -16,6 +16,7 @@ pub mod category;
 pub mod dec;
 pub mod fetch;
 pub mod jlc;
+pub mod keys;
 pub mod library;
 pub mod param;
 pub mod query;
