@@ -152,6 +152,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "tweak"
+path = "fuzz_targets/tweak.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "merge"
 path = "fuzz_targets/merge.rs"
 test = false
