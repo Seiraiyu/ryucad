@@ -9,7 +9,8 @@ use crate::geom::{
     Box3, Point3, PrincipalCurvatures, Projection, Rigid, SurfaceEval, UnitVector3, Vector3,
 };
 use crate::{Error, NurbsError};
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 /// One of a surface's two parameter directions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +27,11 @@ pub enum Direction {
 /// Like [`super::NurbsCurve`], it builds and keeps its Bézier patches the
 /// first time they are needed; the cache takes no part in equality.
 ///
+/// It also keeps, built the first time it is projected onto, what every
+/// projection reads and no point changes (`project_surface::Prep`): the
+/// patches' nets, the boundary curves' and the crease lines' Bézier
+/// pieces. Neither cache takes part in equality or the `Debug` text.
+///
 /// Each surface made has an id of its own, shared by its clones, which
 /// keys an operation's table of enclosures (`memo::Enclosures`); like the
 /// cache, it takes no part in equality or the `Debug` text.
@@ -35,6 +41,8 @@ pub struct NurbsSurface {
     points: Box<[Vector3]>,
     weights: Box<[f64]>,
     patches: OnceLock<Box<[BezierPatch]>>,
+    prep: OnceLock<Box<super::project_surface::Prep>>,
+    spans: OnceLock<[Box<[[f64; 2]]>; 2]>,
     id: u64,
 }
 
@@ -89,6 +97,8 @@ impl NurbsSurface {
             points,
             weights,
             patches: OnceLock::new(),
+            prep: OnceLock::new(),
+            spans: OnceLock::new(),
             id: next_id(),
         })
     }
@@ -176,7 +186,60 @@ impl NurbsSurface {
     }
 
     pub fn point(&self, u: f64, v: f64) -> Point3 {
-        self.eval(u, v).point
+        self.eval_to(u, v, 0).0
+    }
+
+    /// The point and its first partial derivatives, as [`Self::eval`]
+    /// gives them, bit for bit, without the second's work.
+    pub fn eval_first(&self, u: f64, v: f64) -> (Point3, Vector3, Vector3) {
+        self.eval_to(u, v, 1)
+    }
+
+    /// [`Self::eval`]'s point and, for `order` 1, its first partial
+    /// derivatives (zero for `order` 0): the same sums in the same order,
+    /// each running alone, so the same bits, without the higher orders'
+    /// basis functions and sums (#308: the mesher places every new point,
+    /// and mass integrates the coarse mesh, by these).
+    fn eval_to(&self, u: f64, v: f64, order: usize) -> (Point3, Vector3, Vector3) {
+        let (bu, bv) = (
+            self.knots[0].basis_to(u, order),
+            self.knots[1].basis_to(v, order),
+        );
+        let [p, q] = self.degrees();
+        let [nu, nv] = self.counts();
+        let n = order + 1;
+        let mut a = [[Vector3::ZERO; 2]; 2];
+        let mut w = [[0.0; 2]; 2];
+        for i in 0..=p {
+            let row = (bu.span() - p + i) % nu;
+            let mut ta = [Vector3::ZERO; 2];
+            let mut tw = [0.0; 2];
+            for j in 0..=q {
+                let idx = row * nv + (bv.span() - q + j) % nv;
+                let wi = self.weights[idx];
+                let pw = self.points[idx] * wi;
+                for l in 0..n {
+                    let nl = bv.values(l)[j];
+                    ta[l] += pw * nl;
+                    tw[l] += wi * nl;
+                }
+            }
+            for k in 0..n {
+                let nk = bu.values(k)[i];
+                for l in 0..n - k {
+                    a[k][l] += ta[l] * nk;
+                    w[k][l] += tw[l] * nk;
+                }
+            }
+        }
+        let w0 = w[0][0];
+        let s = a[0][0] / w0;
+        if order == 0 {
+            return (Point3::ORIGIN + s, Vector3::ZERO, Vector3::ZERO);
+        }
+        let su = (a[1][0] - s * w[1][0]) / w0;
+        let sv = (a[0][1] - s * w[0][1]) / w0;
+        (Point3::ORIGIN + s, su, sv)
     }
 
     /// The point and its partial derivatives up to second order (The NURBS
@@ -350,6 +413,8 @@ impl NurbsSurface {
             points: hom.iter().map(|h| h.p).collect(),
             weights: hom.iter().map(|h| h.w).collect(),
             patches: OnceLock::new(),
+            prep: OnceLock::new(),
+            spans: OnceLock::new(),
             id: next_id(),
         }
     }
@@ -477,6 +542,8 @@ impl NurbsSurface {
                 .collect(),
             weights: self.weights.clone(),
             patches: OnceLock::new(),
+            prep: OnceLock::new(),
+            spans: OnceLock::new(),
             id: next_id(),
         }
     }
@@ -485,14 +552,23 @@ impl NurbsSurface {
     /// [`crate::tol::LINEAR_RESOLUTION`] of the true global minimum. Of
     /// minima that close to each other the lowest `(u, v)` wins; periodic
     /// parameters are in `[start, start + period)`.
+    ///
+    /// A projection is a function of the surface and the point alone, so
+    /// it is kept in a process-wide table by the surface's id and the
+    /// point's bits ([`projected`]): healing projects the same edge
+    /// samples onto a face several times (its gaps, its pcurve's gap and
+    /// fit), half of the Voron Switchwire Stealthburner's 134,709 (#551).
+    /// A kept projection is the one made, so the same bits.
     pub fn project(&self, p: Point3) -> Projection<(f64, f64), Point3> {
-        let feet = self.minima(p.to_vector(), true);
-        let (param, v, distance) = nearest(&feet);
-        Projection {
-            param,
-            point: Point3::ORIGIN + v,
-            distance,
-        }
+        projected(self.id, p, || {
+            let feet = self.minima(p.to_vector(), true);
+            let (param, v, distance) = nearest(&feet);
+            Projection {
+                param,
+                point: Point3::ORIGIN + v,
+                distance,
+            }
+        })
     }
 
     /// The distance from `p` to the surface: [`NurbsSurface::project`]'s.
@@ -514,6 +590,59 @@ impl NurbsSurface {
                 distance,
             })
             .collect()
+    }
+
+    /// What every projection onto the surface reads, built once.
+    pub(crate) fn prep(&self) -> &super::project_surface::Prep {
+        self.prep
+            .get_or_init(|| Box::new(super::project_surface::Prep::of(self)))
+    }
+
+    /// The patches' spans along `u` and along `v`, ascending: patch `(a,
+    /// b)` is `patches()[a * spans[1].len() + b]`, over `spans[0][a]` and
+    /// `spans[1][b]`. Built once.
+    pub(crate) fn patch_spans(&self) -> &[Box<[[f64; 2]]>; 2] {
+        self.spans.get_or_init(|| {
+            let patches = self.patches();
+            let first = patches[0].range[0];
+            let across = patches.iter().take_while(|p| p.range[0] == first).count();
+            let u = patches.iter().step_by(across).map(|p| p.range[0]).collect();
+            let v = patches[..across].iter().map(|p| p.range[1]).collect();
+            [u, v]
+        })
+    }
+
+    /// The patches whose spans meet one of `cu` along `u` and one of `cv`
+    /// along `v` (touching counts), in ascending order: every patch a box
+    /// clipped to those ranges can reach, so a loop over the patches
+    /// testing each against the box needn't visit the rest (on a spline of
+    /// many spans, each test visited them all, #551).
+    pub(crate) fn patches_meeting(&self, cu: &[[f64; 2]], cv: &[[f64; 2]]) -> Vec<usize> {
+        // A range that isn't a number meets every patch, as `local`
+        // finds it.
+        if cu.iter().chain(cv).flatten().any(|x| x.is_nan()) {
+            return (0..self.patches().len()).collect();
+        }
+        let [su, sv] = self.patch_spans();
+        let near = |spans: &[[f64; 2]], ranges: &[[f64; 2]]| {
+            let mut out: Vec<usize> = Vec::new();
+            for &[a, b] in ranges {
+                // Spans with `r1 >= a` and `r0 <= b`, as `local` takes them.
+                let lo = spans.partition_point(|r| r[1] < a);
+                let hi = spans.partition_point(|r| r[0] <= b);
+                out.extend(lo..hi.max(lo));
+            }
+            out.sort_unstable();
+            out.dedup();
+            out
+        };
+        let (us, vs) = (near(su, cu), near(sv, cv));
+        let across = sv.len();
+        let mut out = Vec::with_capacity(us.len() * vs.len());
+        for &a in &us {
+            out.extend(vs.iter().map(|&b| a * across + b));
+        }
+        out
     }
 
     /// The Bézier patches, row-major over the spans, built once.
@@ -708,6 +837,60 @@ mod tests {
                 assert!(e.du.z.abs() <= 1e-15);
                 assert!(e.du.dot(Vector3::new(p.x, p.y, 0.0)).abs() <= 1e-14);
                 assert!(close(e.dv, Vector3::new(0.0, 0.0, 3.0), 1e-15));
+            }
+        }
+    }
+
+    /// `point` and `eval_first` are `eval`'s point and first derivatives
+    /// bit for bit (#308): degrees 1 to 9, rational and not, periodic and
+    /// clamped, at parameters across the domain and on knots.
+    #[test]
+    fn lower_orders_are_evals_bits() {
+        let mut x: u64 = 0x308_e7a1;
+        let mut unit = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for case in 0..40 {
+            let knots: [KnotVector; 2] = core::array::from_fn(|_| {
+                let p = 1 + (case % 9);
+                let ks = [0.0, 0.4 + unit(), 1.7 + unit(), 3.0];
+                KnotVector::clamped(p, &ks, &[p + 1, 1, p.min(2), p + 1]).unwrap()
+            });
+            let n = knots[0].control_count() * knots[1].control_count();
+            let points = (0..n)
+                .map(|_| Point3::new(unit() - 0.5, 2.0 * unit(), 1e-3 * unit()))
+                .collect();
+            let weights = (case % 2 == 0).then(|| (0..n).map(|_| 0.3 + 2.0 * unit()).collect());
+            let s = NurbsSurface::new(knots, points, weights).unwrap();
+            let [du, dv] = s.domain();
+            let mut uvs: Vec<(f64, f64)> = (0..60)
+                .map(|_| {
+                    (
+                        du[0] + (du[1] - du[0]) * unit(),
+                        dv[0] + (dv[1] - dv[0]) * unit(),
+                    )
+                })
+                .collect();
+            uvs.extend([
+                (du[0], dv[0]),
+                (du[1], dv[1]),
+                (s.knots[0].knots()[1], dv[0]),
+            ]);
+            let bits = |v: Vector3| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()];
+            for (u, v) in uvs {
+                let e = s.eval(u, v);
+                let (p, su, sv) = s.eval_first(u, v);
+                assert_eq!(
+                    bits(p.to_vector()),
+                    bits(e.point.to_vector()),
+                    "{case} at ({u}, {v})"
+                );
+                assert_eq!(bits(su), bits(e.du), "{case} at ({u}, {v})");
+                assert_eq!(bits(sv), bits(e.dv), "{case} at ({u}, {v})");
+                assert_eq!(bits(s.point(u, v).to_vector()), bits(e.point.to_vector()));
             }
         }
     }
@@ -909,4 +1092,60 @@ mod tests {
             Err(Error::OutsideSizeBox)
         );
     }
+}
+
+/// A projection's key: the surface's id and the point's bits.
+type Key = (u64, [u64; 3]);
+
+type Projected = Projection<(f64, f64), Point3>;
+
+/// Shards of the projections table, by a mix of the key.
+const SHARDS: usize = 16;
+
+/// The most projections a shard's young generation holds (about 80 bytes
+/// each, so the table holds at most about 40 MiB).
+const YOUNG: usize = 16_384;
+
+/// A shard's projections in two generations, as the Taylor cells' table
+/// keeps its cells: `young` takes what is made or found in `old`; when
+/// `young` is full it becomes `old` and the old one goes. Which
+/// projections are kept changes no result, only how often one is made.
+#[derive(Default)]
+struct Shard {
+    young: HashMap<Key, Projected>,
+    old: HashMap<Key, Projected>,
+}
+
+impl Shard {
+    fn keep(&mut self, key: Key, value: Projected) {
+        if self.young.len() >= YOUNG {
+            self.old = core::mem::take(&mut self.young);
+        }
+        self.young.insert(key, value);
+    }
+}
+
+static TABLE: LazyLock<[Mutex<Shard>; SHARDS]> =
+    LazyLock::new(|| core::array::from_fn(|_| Mutex::new(Shard::default())));
+
+/// Surface `id`'s projection of `p`, from the table, or made by `make` and
+/// kept there.
+fn projected(id: u64, p: Point3, make: impl FnOnce() -> Projected) -> Projected {
+    let key = (id, [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]);
+    let mix = (key.0 ^ key.1[0] ^ key.1[1].rotate_left(21) ^ key.1[2].rotate_left(42))
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let shard = &TABLE[(mix >> 60) as usize % SHARDS];
+    {
+        let mut s = shard.lock().expect("unpoisoned");
+        if let Some(&x) = s.young.get(&key) {
+            return x;
+        }
+        if let Some(x) = s.old.remove(&key) {
+            s.keep(key, x);
+            return x;
+        }
+    }
+    let made = make();
+    shard.lock().expect("unpoisoned").keep(key, made);
+    made
 }

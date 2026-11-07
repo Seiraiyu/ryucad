@@ -28,6 +28,20 @@ impl Rng {
 /// pieces, control points at a scale from a micrometre to a metre (so the
 /// rounding term matters at both ends), weights from 0.2 to 4.
 fn surface(rng: &mut Rng) -> NurbsSurface {
+    let n = polynomial_surface(rng);
+    let weights = (0..n.weights().len())
+        .map(|_| rng.range(0.2, 4.0))
+        .collect();
+    NurbsSurface::new(
+        n.knots().clone(),
+        n.control_points().collect(),
+        Some(weights),
+    )
+    .expect("a surface")
+}
+
+/// [`surface`]'s knots and control points, every weight 1.
+fn polynomial_surface(rng: &mut Rng) -> NurbsSurface {
     let scale = [1e-6, 1e-3, 0.05, 1.0][rng.below(4)];
     let mut knots = Vec::new();
     for _ in 0..2 {
@@ -56,8 +70,7 @@ fn surface(rng: &mut Rng) -> NurbsSurface {
             )
         })
         .collect();
-    let weights = (0..n).map(|_| rng.range(0.2, 4.0)).collect();
-    NurbsSurface::new(knots, pts, Some(weights)).expect("a surface")
+    NurbsSurface::new(knots, pts, None).expect("a surface")
 }
 
 /// `x` lies in `iv` grown by `slack`.
@@ -65,7 +78,7 @@ fn holds(iv: Iv, x: f64, slack: f64) -> bool {
     iv.lo() - slack <= x && x <= iv.hi() + slack
 }
 
-/// Over seeded rational patches and boxes small against them, the
+/// Over seeded rational and polynomial patches and boxes small against them, the
 /// Taylor enclosure holds the surface's point and derivatives at sampled
 /// parameters of the box. The sampled values are f64 evaluations, so each
 /// is allowed the width of the certified cut's enclosure at that very
@@ -75,8 +88,14 @@ fn holds(iv: Iv, x: f64, slack: f64) -> bool {
 fn enclosures_hold_sampled_values() {
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
     let (mut checked, mut taken) = (0usize, 0usize);
-    for _ in 0..120 {
-        let n = surface(&mut rng);
+    // Rational patches, then polynomial ones, which take no quotient rule
+    // (#308).
+    for case in 0..180 {
+        let n = if case < 120 {
+            surface(&mut rng)
+        } else {
+            polynomial_surface(&mut rng)
+        };
         let [du, dv] = n.domain();
         for _ in 0..12 {
             // Boxes from a point to most of the domain.
@@ -227,8 +246,63 @@ fn cells_are_the_same_however_found() {
         s.old.clear();
         s.bytes = 0;
     }
+    RECENT.with(|r| r.borrow_mut().clear());
     let c = cell(n.id(), 0, patch, ks, kt).expect("finite");
+    assert!(!Arc::ptr_eq(&a, &c), "built again");
     assert_eq!(bits(&fresh), bits(&c));
+}
+
+/// A polynomial patch's jets, its first three components' enclosures
+/// (#308), lie within what the quotient rule gives on the same cell, which
+/// divides by an enclosure of 1 and subtracts the point times enclosures
+/// of 0: never wider, so a mesh tested by them is never finer. And they
+/// hold sampled values as the quotient's do.
+#[test]
+fn polynomial_jets_are_no_wider_than_the_quotients() {
+    let mut rng = Rng(0x308_0001);
+    let (mut compared, mut narrower) = (0usize, 0usize);
+    for _ in 0..120 {
+        let n = polynomial_surface(&mut rng);
+        for (index, patch) in n.patches().iter().enumerate() {
+            assert!(patch.pts.iter().all(|h| h.w == 1.0));
+            for _ in 0..8 {
+                let f = [0.0, 1e-9, 1e-4, 0.01, 0.05, 0.2][rng.below(6)];
+                let g = [0.0, 1e-9, 1e-4, 0.01, 0.05, 0.2][rng.below(6)];
+                let (s0, t0) = (rng.range(0.0, 1.0 - f), rng.range(0.0, 1.0 - g));
+                let (s, t) = ([s0, s0 + f], [t0, t0 + g]);
+                let (Some(ks), Some(kt)) = (step(s[0], s[1]), step(t[0], t[1])) else {
+                    continue;
+                };
+                let Some(c) = cell(n.id(), index, patch, ks, kt) else {
+                    continue;
+                };
+                assert!(c.polynomial);
+                let (Some(p), Some(q)) = (
+                    enclose(&c, patch.range, [s, t], [ks, kt], true),
+                    enclose(&c, patch.range, [s, t], [ks, kt], false),
+                ) else {
+                    continue;
+                };
+                for k in 0..6 {
+                    for i in 0..3 {
+                        assert!(
+                            q[k][i].lo() <= p[k][i].lo() && p[k][i].hi() <= q[k][i].hi(),
+                            "jet {k}[{i}]: {:?} not within {:?}",
+                            p[k][i],
+                            q[k][i]
+                        );
+                        compared += 1;
+                        narrower += usize::from(p[k][i] != q[k][i]);
+                    }
+                }
+            }
+        }
+    }
+    assert!(compared > 20_000, "only {compared} compared");
+    assert!(
+        narrower > compared / 2,
+        "only {narrower} of {compared} narrower"
+    );
 }
 
 /// A block whose top is a bicubic spline of three by four pieces, bumped
@@ -324,4 +398,99 @@ fn eviction_and_threads_leave_the_mesh_alone() {
     CAP.store(cap, Ordering::Relaxed);
     assert_eq!(one, tiny.0, "evicted, one thread");
     assert_eq!(one, tiny.1, "evicted, eight threads");
+}
+
+/// The remainder's radius by upper ends alone (#308) is the float the
+/// interval expressions it replaced gave, bit for bit: over values from
+/// zero and below `TINY` to near overflow, infinities and NaN, with
+/// half-widths as `jets` makes them (upper ends, so at least `TINY`).
+#[test]
+fn radii_by_upper_ends_match_the_interval_expressions() {
+    let up = |x: Iv| x.hi();
+    let old = |cell: &Cell,
+               [k, ku, kv, kuu, kuv, kvv]: [usize; 6],
+               c: usize,
+               g: [f64; 2],
+               [hu, hv]: [f64; 2]| {
+        let err = pt(cell.values[k].err[c]);
+        let first = up(err + pt(cell.mags[ku][c]) * pt(hu) + pt(cell.mags[kv][c]) * pt(hv));
+        let gu = pt(g[0].abs()) + pt(cell.values[ku].err[c]);
+        let gv = pt(g[1].abs()) + pt(cell.values[kv].err[c]);
+        let rest = pt(cell.mags[kuu][c]) * pt(hu) * pt(hu)
+            + pt(2.0) * pt(cell.mags[kuv][c]) * pt(hu) * pt(hv)
+            + pt(cell.mags[kvv][c]) * pt(hv) * pt(hv);
+        let second = up(err + gu * pt(hu) + gv * pt(hv) + pt(0.5) * rest);
+        first.min(second)
+    };
+    let specials = [
+        0.0,
+        -0.0,
+        1e-300,
+        crate::interval::TINY,
+        crate::interval::TINY / 3.0,
+        f64::MIN_POSITIVE,
+        1e-160,
+        1e-12,
+        1.0,
+        1e150,
+        1e300,
+        f64::MAX,
+        f64::INFINITY,
+        f64::NAN,
+    ];
+    let mut rng = Rng(0x308_5eed);
+    let value = |rng: &mut Rng| {
+        if rng.below(3) == 0 {
+            specials[rng.below(specials.len())]
+        } else {
+            // Any exponent, so products under- and overflow.
+            f64::from_bits(rng.next() >> 1)
+        }
+    };
+    let empty = || Values {
+        rows: 0,
+        cols: 0,
+        mids: Vec::new(),
+        err: [0.0; 4],
+    };
+    for _ in 0..200_000 {
+        let mut cell = Cell {
+            at: Vector3::new(0.0, 0.0, 0.0),
+            polynomial: false,
+            values: core::array::from_fn(|_| empty()),
+            mags: [[0.0; 4]; 15],
+        };
+        for v in &mut cell.values {
+            v.err = core::array::from_fn(|_| value(&mut rng).abs());
+        }
+        for m in &mut cell.mags {
+            *m = core::array::from_fn(|_| value(&mut rng).abs());
+        }
+        let k = rng.below(6);
+        let (i, j) = ORDERS[k];
+        let n = [
+            k,
+            idx(i + 1, j),
+            idx(i, j + 1),
+            idx(i + 2, j),
+            idx(i + 1, j + 1),
+            idx(i, j + 2),
+        ];
+        let c = rng.below(4);
+        let sign = |x: f64, rng: &mut Rng| if rng.below(2) == 0 { x } else { -x };
+        let g = [
+            sign(value(&mut rng), &mut rng),
+            sign(value(&mut rng), &mut rng),
+        ];
+        // Half-widths are upper ends `up` gave, so at least `TINY`.
+        let h = [
+            (pt(value(&mut rng).abs()) * pt(1.0)).hi(),
+            (pt(value(&mut rng).abs()) * pt(1.0)).hi(),
+        ];
+        let (a, b) = (old(&cell, n, c, g, h), radius(&cell, n, c, g, h));
+        assert!(
+            a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+            "{a:e} against {b:e} for {n:?} {c} {g:?} {h:?}"
+        );
+    }
 }

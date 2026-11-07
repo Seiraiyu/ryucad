@@ -129,6 +129,7 @@ pub(crate) fn boolean_in(
     let pieces = crate::split::split_all(&ops, &table, m).map_err(named)?;
     let classes = classify::classify(&ops, &table, &pieces, m).map_err(named)?;
     let kept = select::select(op, &pieces, &classes);
+    let kept = build::enclosing_something(&ops, &table, kept);
     let built = build::build(&ops, &table, &kept, key, m).map_err(named)?;
     let mut body = built.body;
     let mut sources = merge::Sources {
