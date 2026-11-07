@@ -98,6 +98,6 @@ The design is document 364 in the Coxswain planning project `ryucad-ryukei`; thi
   - **Counts.** 7,328 pass `ref_import`, 7,164 `ref_mesh`, and 7,322 each of `ref_export`, `ref_reimport` and `ref_fixpoint`. These are the ledger's `count` lines.
   - **The one refusal.** ESP-WROOM-02 is refused, as healing refuses it, because the file extrudes a line 0.28 nm long (`file`).
   - **Faces left out.** 158 cases are judged `limit`: faces split, dropped, left unoriented or unmeshed (design 364's degrading).
-  - **The 7 that stop short.** They are the refusal and 6 Coilcraft SQ inductors whose mesh times out at 300 s. Every SQ coil takes 146 s or more, and these are ledgered as timed.
+  - **The 7 that stop short.** They are the refusal and 6 Coilcraft SQ inductors whose mesh times out at 300 s. Every SQ coil takes 146 s or more. These 20 timed findings, with the large terminal blocks' and QFPs' 30 to 58 s, wait in the ledger for their performance issue (#ISSUE).
   - **Where and when.** 91 minutes on cox-worker-4 (AMD Opteron 6380, 8 threads, shared, load average 8.6 to 14), one rayon thread a case, at 086986bb, 2026-11-07.
   - **What `--stages ref` reports.** A run judges a ledger line `fixed` only when the stage its signature names ran, so `--stages ref` doesn't report healing's lines fixed (`report::judged_here`).
