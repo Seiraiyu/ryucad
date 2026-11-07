@@ -26,6 +26,11 @@ pub const SHEET_GAP: Nm = crate::canvas::GAP;
 /// A net whose wires would run longer than this share of a sheet's width
 /// takes labels.
 const LONG_SHARE: (Nm, Nm) = (1, 4);
+/// How long a bypass wire may run, as a share of the sheet's width: a
+/// decoupling capacitor wired to its pin is the standard drawing however
+/// far its idiom stood it, so it takes more than a signal's quarter (a
+/// buck's input capacitors on an A4 sheet paper fit chose, plan 2.A).
+const BYPASS_SHARE: (Nm, Nm) = (1, 2);
 /// A connection crossing more wires than this takes labels instead.
 const CROWDED: usize = 2;
 /// How far a rail's pin with no room for its port may wire to its rail.
@@ -1420,6 +1425,44 @@ fn paper_for(block: &Block, w: Nm, h: Nm) -> Option<&crate::input::Paper> {
         .find(|p| w + 2 * MARGIN + 2 * GRID <= p.area[0] && h + 2 * MARGIN + 2 * GRID <= p.area[1])
 }
 
+/// Clusters `which` packed in rows on an area `size` from its top left,
+/// tallest first (ties in order), a channel's least width apart; `None`
+/// when they don't all fit inside the margins.
+fn shelves(
+    block: &Block,
+    packed: &[Cluster],
+    which: &[usize],
+    size: [Nm; 2],
+) -> Option<BTreeMap<usize, Point>> {
+    const GAP: Nm = 6 * GRID;
+    let mut order: Vec<(usize, Rect)> = which
+        .iter()
+        .map(|c| (*c, packed[*c].room_labelled(block, [0, 0], |_| true)))
+        .collect();
+    order.sort_by_key(|(c, r)| (std::cmp::Reverse(r.height()), *c));
+    let (mut x, mut top, mut row) = (MARGIN, size[1] - MARGIN, 0);
+    let mut out = BTreeMap::new();
+    for (c, r) in order {
+        if x > MARGIN && x + r.width() > size[0] - MARGIN {
+            x = MARGIN;
+            top -= row + GAP;
+            row = 0;
+        }
+        let o = [
+            crate::geom::snap(x - r.min[0] + GRID / 2),
+            crate::geom::snap(top - r.max[1] - GRID / 2),
+        ];
+        let at = r.shift(o);
+        if at.min[0] < MARGIN || at.max[0] > size[0] - MARGIN || at.min[1] < MARGIN {
+            return None;
+        }
+        out.insert(c, o);
+        x = at.max[0] + GAP;
+        row = row.max(top - at.min[1]);
+    }
+    Some(out)
+}
+
 /// Paper fit from nothing (plan 2.A): each sheet the packing made takes
 /// the smallest paper of the series holding its drawing; a lone sheet
 /// covering under half of it has its channels widened a step at a time,
@@ -1483,6 +1526,55 @@ fn fit_paper<'a>(
             }
             *st = t;
             d = td;
+        }
+    }
+    // A sheet whose drawing needs more than the series' smallest paper
+    // (a strip of columns an overflow left wide and sparse) is flowed again
+    // on each smaller paper, smallest first, and takes the first that holds
+    // all of it.
+    for s in sheets_of(st) {
+        let Some(d) = drawn_box(st, packed, which, s) else {
+            continue;
+        };
+        let Some(needs) = paper_for(block, d.width(), d.height())
+            .and_then(|p| block.papers.iter().position(|q| q == p))
+        else {
+            continue;
+        };
+        let mine: Vec<usize> = which
+            .iter()
+            .copied()
+            .filter(|c| st.place[packed[*c].members[0].0].is_some_and(|(x, _, _)| x == s))
+            .collect();
+        for paper in &block.papers[..needs] {
+            let flowed = place::flow(block, packed, &mine, paper.area, hints);
+            // Flow keeps its layers' columns; where they don't fit, the
+            // clusters packed in rows, tallest first.
+            let origins = if flowed.overflow.is_empty() {
+                flowed.origins
+            } else if let Some(o) = shelves(block, packed, &mine, paper.area) {
+                o
+            } else {
+                continue;
+            };
+            let Some(td) = origins
+                .iter()
+                .map(|(c, o)| packed[*c].room_labelled(block, *o, |_| true))
+                .reduce(Rect::union)
+            else {
+                continue;
+            };
+            if td.width() + 2 * MARGIN + 2 * GRID > paper.area[0]
+                || td.height() + 2 * MARGIN + 2 * GRID > paper.area[1]
+            {
+                continue;
+            }
+            for (c, o) in &origins {
+                for (p, place) in at(&packed[*c], *o) {
+                    st.place[p] = Some((s, place, false));
+                }
+            }
+            break;
         }
     }
     for s in sheets_of(st) {
@@ -2498,6 +2590,7 @@ fn draw(
             v
         };
         let long = st.size(s)[0] * LONG_SHARE.0 / LONG_SHARE.1;
+        let bypass_long = st.size(s)[0] * BYPASS_SHARE.0 / BYPASS_SHARE.1;
         // Nets that take labels though they could be wires: too long to
         // wire from the start, and those whose wires didn't fit.
         let mut instead: BTreeSet<usize> = styles
@@ -2702,7 +2795,7 @@ fn draw(
                 let run = match kept {
                     Some(run) => run,
                     None if !search => continue,
-                    None => match route_net(&guard(&field), b.net, &ends, long) {
+                    None => match route_net(&guard(&field), b.net, &ends, bypass_long) {
                         Some((_, mut runs))
                             if runs.len() == 1 && tried.mark(b.net, &runs[0]).is_ok() =>
                         {
