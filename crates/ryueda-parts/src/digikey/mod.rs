@@ -6,6 +6,9 @@
 //! `distributor::DISTRIBUTORS`.
 
 pub mod attr;
+pub mod record;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub mod wire;
 
 use crate::keys::{Field, KeySpec};
