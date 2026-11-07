@@ -7,9 +7,11 @@
 
 pub mod attr;
 pub mod record;
+pub mod source;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod wire;
+pub use source::DigiKey;
 
 use crate::keys::{Field, KeySpec};
 use crate::rate::Limits;
@@ -53,3 +55,19 @@ pub fn base() -> String {
         .trim_end_matches('/')
         .to_owned()
 }
+
+fn open(o: crate::distributor::Opened) -> Box<dyn crate::distributor::Live> {
+    Box::new(DigiKey::new(o))
+}
+
+/// The digikey distributor, listed in `distributor::DISTRIBUTORS`.
+pub const DISTRIBUTOR: crate::distributor::Distributor = crate::distributor::Distributor {
+    name: NAME,
+    suppliers: &["digikey", "digi-key", "digi key"],
+    attribution: ATTRIBUTION,
+    ttl: TTL,
+    limits: LIMITS,
+    keys: KEYS,
+    base,
+    open,
+};

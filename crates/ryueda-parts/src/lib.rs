@@ -15,6 +15,7 @@ pub mod catalogue;
 pub mod category;
 pub mod dec;
 pub mod digikey;
+pub mod distributor;
 pub mod fetch;
 pub mod jlc;
 pub mod keys;

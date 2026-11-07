@@ -3,8 +3,12 @@
 //! ryueda's and the fuzz target's tests.
 
 use super::wire;
+use crate::distributor::{Clock, Opened};
 use crate::fetch::{Fake, Method, Response};
+use crate::keys::{Keys, Origin};
+use crate::rate::Limiter;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 pub const BASE: &str = "https://dk.test";
 /// Keys no one has: a `+` and a `&` so a form's encoding shows.
@@ -117,4 +121,22 @@ pub fn fake() -> Fake {
         details_answer(LDO),
     );
     f
+}
+
+/// A digikey source's opening over `fetch` with our test keys.
+pub fn opened(
+    fetch: Arc<dyn crate::fetch::Fetch>,
+    limiter: &'static Limiter,
+    clock: Clock,
+) -> Opened {
+    Opened {
+        keys: Keys::of(
+            &[("client_id", CLIENT_ID), ("client_secret", CLIENT_SECRET)],
+            Origin::Environment,
+        ),
+        fetch,
+        base: BASE.to_owned(),
+        limiter,
+        clock,
+    }
 }
