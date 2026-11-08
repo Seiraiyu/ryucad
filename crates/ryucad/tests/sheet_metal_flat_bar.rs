@@ -7,7 +7,7 @@
 //! it back. On one thread, in release: the part rebuilt cold within 1.5
 //! times the kernel's own flange, unfold, boolean and refold on the same
 //! bodies, and the folded enclosure's DXF (before it is drilled: the
-//! refolded drilled one doesn't unfold again, a kernel limit) within 0.5 s. With
+//! refolded drilled one doesn't unfold again, #606) within 0.5 s. With
 //! `RYUCAD_BARS=1` the bars are asserted as they are, else ten times
 //! looser. Release only.
 
@@ -161,7 +161,7 @@ fn the_bar() {
     // The folded enclosure's DXF, its flat unfolded whole in memory, timed
     // before anything is drilled: the refolded drilled enclosure doesn't
     // unfold again (the kernel leaves a small hole's wall across a bend
-    // line uncertain), which this bar leaves to ryukei.
+    // line uncertain, #606), which this bar leaves to ryukei.
     one_thread(|| s.rebuilt(&Id::parse("p", "part").unwrap()).map(drop)).unwrap();
     let t = Instant::now();
     let req = Request::from_rpc("export", Some(json!({"part": "p", "format": "dxf"}))).unwrap();
