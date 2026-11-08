@@ -21,3 +21,48 @@ The design is document 326 in the Coxswain planning project `ryucad-ryukei`; thi
 - **Classes.** From `blend::convex::bend`: convex, concave or changing is `Sharp`, tangent `Smooth`, a laminar edge `Boundary`, unsettled `Uncertain`.
 - **Testing.** Unit tests per module (`project::{curve, items, events, pieces, pierce, rays, hidden}`), `tests/hidden_lines.rs` (a block from 26 directions, a cylinder, a sphere, a drilled plate, a fillet's rails, placed blocks, a sheet in front, a pin through a plate against its rulings' closed-form lengths, one thread and eight), `tests/work.rs`' `views_are_bounded`, and the `hidden_lines` golden section. No other golden hash moved. `views_are_bounded` (a block and a ball, one view) spends 8,845 units (cox-worker-1, Intel Xeon E5-2650, debug build; units are the same on every machine).
 - **Limits.** Sections, the OCCT comparison, the race against `HLRBRep_Algo`, the mesh-oracle property test, the fuzz target and the bars are plan 10.C's.
+
+## Sections and references (decided in phase 10)
+
+The design is document 326 in the Coxswain planning project `ryucad-ryukei`; this is its plan 10.C (phases 4 and 5).
+
+- **Sections.** `project::section(key, &Body, &Plane)` and `section_with(…, &Work)` give `Section { body, journal, faces }`. The body (a solid or a sheet) loses what lies in front of the plane: a block standing on the plane along its frame's `z` (the side cut away, as ryucad's section planes point), a hundredth of the body's diagonal past its box every other way, subtracted through `boolean_in` under the call's meter.
+  - Every certificate of the boolean holds, and refusals are its own (`Error::InvalidBoolean`).
+  - `faces` are the cap a drawing hatches: the block's base followed through the journal (`Placed` under `SECTION_TOOL`, `Split`, `Merged`, to a fixed point), in `FaceId` order. A sheet's section has none.
+  - A plane the body's box doesn't reach past by more than resolution gives the body as it is and an empty journal; a body wholly in front of it gives the empty body.
+  - A section view is a `view` of the cut body from the side cut away.
+- **What the property test found** (fixed in `project`, each held by `tests/hidden_lines.rs`):
+  - A sphere's askew silhouette circle cut by its face's loops into a stretch across the circle's start ran past the `[0, 2π]` its pcurve was fitted over. Such a stretch is fitted again over its own range (`silhouette::covering`), and trimming reads a wrapped middle a period back.
+  - An edge's visibility changes where a silhouette of its face ends on it (race body 15: a torus's contour starting on a cone's rim), with no image crossing there. The edge is now cut at the silhouette's end, unless a cut or an end already lies within the touch rule's tangent wedge of it (a cylinder's rulings end where its rim already touches them, so `hidden_lines` didn't move).
+  - A contour's image cusps where its tangent turns along the view (race body 18's torus, a sweep), and visibility changes there by one. A silhouette is now cut at local maxima of its tangent's turn towards the view past a squared cosine of 0.9975 (`CUSP_COSINE`). Cutting more than needed only splits a piece.
+  - A section ball's cap rim, which `events` had cut at only one of the two points where the sphere's silhouette ends on it, is now cut at both.
+- **The mesh oracle.** `ryukei_testkit::projection` gives each piece's curve and image lengths by class (sharp and boundary, smooth, outline; an overlap counted once, as its nearest piece's).
+  - Its `Oracle` meshes the placed bodies and counts the triangles a ray from a point towards the viewer crosses. Crossings within four chords are the point's own faces. A crossing through a mesh edge, within fifty chords, or a silhouette's grazing crossing within its tangent wedge is unsure.
+  - `judge` samples each piece at a quarter, a half and three quarters and compares visible against hidden only. Pieces lying on others, shorter than eighty chords in the image, and samples within twenty chords of another piece's image aren't judged.
+  - `silhouette_excess` holds silhouettes square to the view within twice their tolerance times the gradient of `n · towards`.
+- **References.** `ryukei-bench`'s OCCT shim runs `HLRBRep_Algo` and `HLRBRep_HLRToShape` (`Solid::hlr`, linking `TKHLR`): the image lengths of its visible and hidden sharp, `Rg1` and outline compounds, and its time.
+  - Lengths are summed edge by edge, a missing 3D curve built from the edge's pcurve: `BRepGProp::LinearProperties` crashed on the curveless edges HLR gives a filleted box.
+  - Closed forms (a drilled plate from a corner, a filleted box from a tilted corner, both ways; a cylinder side on, visible only) compare totals over classes, since OCCT reads no regularity from STEP and draws a cylinder's seam ruling as a sharp line. The length of pieces ryukei draws once, lying behind another, is the slack: OCCT draws them again, hidden. Seen exactly from a corner, each fillet's rails lie on one image line, so the filleted box is seen off it.
+  - Seeded race bodies and the pinned corpus are judged only where OCCT and the mesh agree and ryukei doesn't, every row printed: 148 views, none judged wrong; 18 refused `Uncertain` by ryukei's silhouettes; 702 s on cox-worker-2 (AMD Ryzen 7 9700X, devcontainer, one test thread).
+- **The race, a departure from design 326** (issue #608). The design asks ryukei to beat `HLRBRep_Algo` on one thread; plan 10.C ships slower, as the coxswain decided. Measured on cox-worker-2 (AMD Ryzen 7 9700X, 8 threads), in the devcontainer with OCCT 7.8.1, release, one thread, load average about 1.1, 2026-11-08:
+  - the 1,000-hole plate's isometric view: ryukei 6.51 s, OCCT 1.83 s (3.6 times), their lengths within 6e-6 relative;
+  - the race bodies' isometric views: 351 drawn by both, ryukei 424 s, OCCT 2.24 s (about 190 times).
+
+  The tests print the ratio and assert only regression guards: `PLATE_BAR` (5 times) and `RACE_BAR` (300 times). Where the time goes (phase timers, one thread):
+  - the plate's `events` take 3.6 s, over 13,456 image pairs, 8,712 of them line × ellipse at about 0.4 ms each in certified crossings;
+  - its rays take 2.8 s, about 0.28 ms for each of 10,009 pieces, each placing points in the top face's 1,000 loops;
+  - the race bodies' traced silhouettes take 20.6 s and their `events` 18.8 s (the first 120 bodies);
+  - two bodies spend 122 s and 54 s before refusing `Uncertain`.
+- **Benchmarks.** `cargo bench -p ryukei-bench --bench projection`, one thread, medians on cox-worker-2 (load 0.1 to 2.5, 2026-11-08): a drilled plate's section 2.69 ms; a plate from a corner with 1 hole 6.95 ms, 100 holes 335 ms, 1,000 holes 6.49 s; a sphere 27.4 ms; a torus askew 322 ms.
+- **Testing.**
+  - Unit tests in `project::section` and `ryukei_testkit::projection`.
+  - `tests/sections.rs`: a drilled plate's cap, a ball's disc, a cylinder's rectangle, a sheet trimmed, a section view, one thread and eight.
+  - `tests/work.rs`' `sections_are_bounded` (8,290 units).
+  - `tests/projection_props.rs`, release only, its own `full.yml` step: seeded bodies from seeded directions against a mesh at a thousandth of their size, silhouettes square, at most a tenth of pieces uncertain. 1,940 samples judged, 1,633 unsure, 9 of 2,955 pieces uncertain, 10 views refused, in 383 s on cox-worker-2 (load 1.5).
+  - The `section_views` golden section (`projection` names phase 2's point projection). No other golden moved.
+  - The `projection` fuzz target: views the same twice, against the oracle, and sections. It builds; it hasn't been run in this plan (fuzzing is cox-worker-4's).
+  - `ryukei-bench`'s `projection` test and bench.
+- **Limits.**
+  - Beating OCCT's `HLRBRep_Algo` (#608).
+  - Silhouettes that can't be certified refuse the view (`Uncertain`): race bodies 8, 16, 55, 56 and 89 among the first 200, and 18 views of the pinned corpus (NIST CTC 02, FTC 06, FTC 07, FTC 10 and STC 07, OCCT's `linkrods`).
+  - A piece lying behind another in the image is reported once, as ryukei's rule says, never hidden by it.
