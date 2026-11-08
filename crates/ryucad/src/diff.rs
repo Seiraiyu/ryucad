@@ -255,11 +255,14 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
         // A sheet metal feature's allowance and relief each on a line
         // (`allowance = k_factor 0.44`, `relief = obround 1 mm × 1.5 mm`), a
         // flange's edges on one line, each end on its own
-        // (`ends[plate/<hex>] = setback 5 mm, relief tear 0.5 mm`).
+        // (`ends[plate/<hex>] = setback 5 mm, relief tear 0.5 mm`), an
+        // unfold's overrides each on a line keyed by its bend
+        // (`bends[f1/<hex>] = deduction 2.2 mm`), and an unfold's or
+        // refold's `only` on one line.
         Some("ryucad.feature")
             if matches!(
                 o.get("type").and_then(Value::as_str),
-                Some("base_flange" | "flange")
+                Some("base_flange" | "flange" | "unfold" | "refold")
             ) =>
         {
             fn relief_text(r: &Value) -> String {
@@ -305,6 +308,26 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                         parts.push(format!("relief {}", relief_text(r)));
                     }
                     lines.push(format!("ends[{v}] = {}", parts.join(", ")));
+                }
+            }
+            if let Some(Value::Array(only)) = rest.remove("only") {
+                let text: Vec<String> = only
+                    .iter()
+                    .map(|r| reference(r).unwrap_or_else(|| scalar(r)))
+                    .collect();
+                lines.push(format!("only = {}", text.join(", ")));
+            }
+            if let Some(Value::Array(bends)) = rest.remove("bends") {
+                for b in &bends {
+                    let bend = reference(&b["bend"]).unwrap_or_else(|| scalar(&b["bend"]));
+                    let text: Vec<String> = b
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .filter(|(k, _)| *k != "bend")
+                        .map(|(k, x)| format!("{k} {}", scalar(x)))
+                        .collect();
+                    lines.push(format!("bends[{bend}] = {}", text.join(", ")));
                 }
             }
         }
@@ -2234,6 +2257,44 @@ mod tests {
         changes("", Some(&before), Some(&after), &mut out);
         let pointers: Vec<&str> = out.iter().map(|c| c["at"].as_str().unwrap()).collect();
         assert_eq!(pointers, ["/angle", "/ends"]);
+    }
+
+    #[test]
+    fn unfolds_and_refolds_textconv_one_line_a_field() {
+        let n = |k: u8| format!("{k:032x}");
+        let r = |f: &str, k: u8| json!({"feature": f, "name": n(k)});
+        let v = json!({"format": 14, "kind": "ryucad.feature", "type": "unfold", "target": "tray",
+                       "fixed": r("plate", 1), "only": [r("f1", 2), r("f1", 3)],
+                       "allowance": {"k_factor": "0.44"},
+                       "bends": [{"bend": r("f1", 2), "deduction": "2.2 mm"},
+                                 {"bend": r("f1", 3), "allowance": "3 mm"}]});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature unfold (format 14)\n\
+                 allowance = k_factor 0.44\n\
+                 bends[f1/{b}] = deduction 2.2 mm\n\
+                 bends[f1/{c}] = allowance 3 mm\n\
+                 fixed = plate/{a}\n\
+                 only = f1/{b}, f1/{c}\n\
+                 target = tray\n",
+                a = n(1),
+                b = n(2),
+                c = n(3)
+            )
+        );
+        let v = json!({"format": 14, "kind": "ryucad.feature", "type": "refold", "target": "tray",
+                       "unfold": "u1", "only": [r("f1", 2)]});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature refold (format 14)\n\
+                 only = f1/{b}\n\
+                 target = tray\n\
+                 unfold = u1\n",
+                b = n(2)
+            )
+        );
     }
 
     #[test]
