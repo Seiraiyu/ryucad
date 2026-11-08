@@ -511,3 +511,27 @@ fn neighbouring_legs_part_at_their_straight_section() {
     assert_eq!(check(&body), []);
     assert_eq!(check_intersections(&body), []);
 }
+
+/// The `projection` fuzz target's finds, as `(name, bytes)`: none yet.
+const PROJECTION_FINDS: &[(&str, &[u8])] = &[];
+
+#[test]
+fn projection_finds_view_and_cut_cleanly() {
+    for (name, bytes) in PROJECTION_FINDS {
+        let Some((&dir, rest)) = bytes.split_first() else {
+            continue;
+        };
+        let Some((body, _)) = ryukei_testkit::blend_bytes::body(rest) else {
+            continue;
+        };
+        let v = ryukei_testkit::projection::look(ryukei_testkit::projection::grid_direction(dir));
+        let placed = [ryukei::project::Placed {
+            body: &body,
+            place: ryukei::geom::Rigid::IDENTITY,
+        }];
+        match ryukei::project::view(&placed, &v, &Default::default()) {
+            Ok(_) | Err(ryukei::Error::InvalidView(_)) => {}
+            Err(e) => panic!("{name}: {e:?}"),
+        }
+    }
+}

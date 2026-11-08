@@ -410,6 +410,30 @@ pub fn silhouette_excess(bodies: &[Body], p: &Projection, view: &View) -> f64 {
     worst
 }
 
+/// A view direction from a byte, on a coarse grid: the 26 directions to
+/// a cube's faces, edges and corners, else one of eight tilted ones.
+pub fn grid_direction(k: u8) -> Vector3 {
+    let i = k % 34;
+    if i < 26 {
+        let j = if i >= 13 { i + 1 } else { i }; // skip (0, 0, 0)
+        let c = |n: u8| f64::from(n % 3) - 1.0;
+        Vector3::new(c(j), c(j / 3), c(j / 9))
+    } else {
+        const TILTED: [[f64; 3]; 8] = [
+            [1.0, 2.0, 3.0],
+            [3.0, -1.0, 2.0],
+            [-2.0, 1.0, 4.0],
+            [1.0, -3.0, -1.0],
+            [0.3, -0.4, 0.8],
+            [-1.0, -2.0, 0.5],
+            [2.0, 0.5, -1.5],
+            [0.1, 1.0, 0.2],
+        ];
+        let t = TILTED[usize::from(i - 26)];
+        Vector3::new(t[0], t[1], t[2])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
