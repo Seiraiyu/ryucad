@@ -316,6 +316,10 @@ pub fn answer_live(
             mesh,
             pipe_tolerance,
             skip_failing,
+            solid,
+            notes,
+            fixed,
+            bends,
         } => crate::export::export(
             session,
             crate::export::Ask {
@@ -335,6 +339,10 @@ pub fn answer_live(
                 mesh,
                 pipe_tolerance,
                 skip_failing,
+                solid,
+                notes,
+                fixed,
+                bends,
             },
         ),
         Request::Rebuild { part, rev } => session.at(rev.as_deref()).and_then(|(commit, s)| {

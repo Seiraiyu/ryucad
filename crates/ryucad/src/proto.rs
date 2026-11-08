@@ -1215,6 +1215,14 @@ pub enum Request {
         pipe_tolerance: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         skip_failing: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        solid: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notes: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fixed: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bends: Vec<Value>,
     },
     #[serde(rename = "rebuild")]
     Rebuild {

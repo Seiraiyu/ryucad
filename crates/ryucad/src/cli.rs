@@ -150,7 +150,8 @@ enum Command {
         /// STEP's schema: ap242 (the default) or ap214.
         #[arg(long)]
         schema: Option<String>,
-        /// The length unit: mm (the default), or m; a mesh format or USD also cm.
+        /// The length unit: mm (the default), or m; a mesh format or USD also cm; DXF mm
+        /// or in.
         #[arg(long)]
         unit: Option<String>,
         /// A mesh format's chord, the most a triangle may stray from the faces: a
@@ -181,6 +182,19 @@ enum Command {
         /// that didn't heal), listing what was left out, rather than refuse.
         #[arg(long)]
         skip_failing: bool,
+        /// DXF: the sheet metal solid (the part's one unless named).
+        #[arg(long)]
+        solid: Option<String>,
+        /// DXF: leave out the bend notes.
+        #[arg(long)]
+        no_notes: bool,
+        /// DXF of a folded solid: the side face held still.
+        #[arg(long, value_name = "FACE")]
+        fixed: Option<String>,
+        /// DXF of a folded solid: a bend's allowance, REF=k_factor:N,
+        /// REF=deduction:LENGTH or REF=allowance:LENGTH.
+        #[arg(long = "bend", value_name = "REF=FORM:VALUE", value_parser = bend_override)]
+        bends: Vec<Value>,
         /// The header's time stamp; by default the commit's time when exporting a
         /// commit, else now.
         #[arg(long, value_name = "T")]
@@ -3631,6 +3645,10 @@ fn request(cmd: &Command) -> Option<Request> {
             no_mesh,
             pipe_tolerance,
             skip_failing,
+            solid,
+            no_notes,
+            fixed,
+            bends,
             time_stamp,
             rev,
         } => Request::Export {
@@ -3656,6 +3674,10 @@ fn request(cmd: &Command) -> Option<Request> {
             mesh: no_mesh.then_some(false),
             pipe_tolerance: pipe_tolerance.clone(),
             skip_failing: *skip_failing,
+            solid: solid.clone(),
+            notes: no_notes.then_some(false),
+            fixed: fixed.clone(),
+            bends: bends.clone(),
         },
         Command::Rebuild { part, rev } => Request::Rebuild {
             part: part.clone(),

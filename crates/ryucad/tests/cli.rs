@@ -3810,6 +3810,22 @@ fn flat_patterns_from_the_cli() {
             .ends_with("K0.5"),
         "{half}"
     );
+    p.ok(&["export", "p", "--out", "l.dxf", "--solid", "bl"]);
+    let (a, b) = (
+        fs::read(p.direct.join("l.dxf")).unwrap(),
+        fs::read(p.daemon.join("l.dxf")).unwrap(),
+    );
+    assert_eq!(a, b, "the same DXF both ways");
+    assert!(String::from_utf8(a).unwrap().contains("BEND_UP"));
+    p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "l-in.dxf",
+        "--unit",
+        "in",
+        "--no-notes",
+    ]);
     p.fails(&["flat", "p", "--bend", "nonsense"], "usage", 2);
 }
 
