@@ -25,16 +25,17 @@ use std::path::Path;
 
 /// `ryueda` in `dir`, in process, its IDs a fixed sequence.
 fn ryueda(dir: &Path, threads: usize, args: &[&str]) -> Value {
-    let out = Command::cargo_bin("ryueda")
-        .unwrap()
-        .current_dir(dir)
+    let mut cmd = Command::cargo_bin("ryueda").unwrap();
+    cmd.current_dir(dir)
         .env("RYUEDA_NO_DAEMON", "1")
         .env("RYUEDA_ID_SEED", "corpus")
         .env("RAYON_NUM_THREADS", threads.to_string())
-        .env("RYUEDA_CONFIG_DIR", dir.join("..").join("config"))
-        .args(args)
-        .output()
-        .unwrap();
+        .env("RYUEDA_CONFIG_DIR", dir.join("..").join("config"));
+    // No person's distributor keys or API.
+    for v in ryueda_parts::distributor::env_vars() {
+        cmd.env_remove(v);
+    }
+    let out = cmd.args(args).output().unwrap();
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["ok"], true, "{args:?}: {v}");
     v["result"].clone()
@@ -344,16 +345,17 @@ fn a_net_asked_for_as_wires_is_wired() {
 /// `ryueda` in `dir` as `ryueda` does, its whole envelope, whether or not
 /// it succeeds.
 fn ryueda_envelope(dir: &Path, args: &[&str]) -> Value {
-    let out = Command::cargo_bin("ryueda")
-        .unwrap()
-        .current_dir(dir)
+    let mut cmd = Command::cargo_bin("ryueda").unwrap();
+    cmd.current_dir(dir)
         .env("RYUEDA_NO_DAEMON", "1")
         .env("RYUEDA_ID_SEED", "corpus")
         .env("RAYON_NUM_THREADS", "1")
-        .env("RYUEDA_CONFIG_DIR", dir.join("..").join("config"))
-        .args(args)
-        .output()
-        .unwrap();
+        .env("RYUEDA_CONFIG_DIR", dir.join("..").join("config"));
+    // No person's distributor keys or API.
+    for v in ryueda_parts::distributor::env_vars() {
+        cmd.env_remove(v);
+    }
+    let out = cmd.args(args).output().unwrap();
     serde_json::from_slice(&out.stdout).unwrap()
 }
 

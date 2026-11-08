@@ -104,6 +104,10 @@ fn ryueda_out(dir: &Path, threads: usize, args: &[&str], env: &[(&str, &str)]) -
         .env("RYUEDA_CONFIG_DIR", dir.join("..").join("config"))
         // No catalogue this machine holds ever shows in a golden.
         .env("RYUEDA_CACHE_DIR", dir.join("..").join("cache"));
+    // No person's distributor keys or API ever reach a golden.
+    for v in ryueda_parts::distributor::env_vars() {
+        cmd.env_remove(v);
+    }
     for (k, v) in env {
         cmd.env(k, v);
     }

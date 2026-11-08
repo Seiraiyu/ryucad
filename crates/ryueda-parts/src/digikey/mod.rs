@@ -68,6 +68,7 @@ pub const DISTRIBUTOR: crate::distributor::Distributor = crate::distributor::Dis
     ttl: TTL,
     limits: LIMITS,
     keys: KEYS,
+    url_var: URL_VAR,
     base,
     open,
 };

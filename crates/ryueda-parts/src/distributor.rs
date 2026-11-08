@@ -44,6 +44,8 @@ pub struct Distributor {
     pub ttl: u64,
     pub limits: Limits,
     pub keys: KeySpec,
+    /// The variable that moves its API (tests, a sandbox).
+    pub url_var: &'static str,
     pub base: fn() -> String,
     pub open: fn(Opened) -> Box<dyn Live>,
 }
@@ -62,6 +64,19 @@ impl Distributor {
 /// Every distributor this ryueda has.
 pub const DISTRIBUTORS: &[Distributor] = &[crate::digikey::DISTRIBUTOR];
 
+/// Every variable any distributor reads from the environment: its keys'
+/// and the one moving its API. Test harnesses remove them all, so no test
+/// ever takes a person's real keys or reaches a real distributor.
+pub fn env_vars() -> impl Iterator<Item = &'static str> {
+    DISTRIBUTORS.iter().flat_map(|d| {
+        d.keys
+            .fields
+            .iter()
+            .map(|f| f.var)
+            .chain(std::iter::once(d.url_var))
+    })
+}
+
 pub fn distributor(name: &str) -> Option<&'static Distributor> {
     DISTRIBUTORS.iter().find(|d| d.name == name)
 }
@@ -78,6 +93,18 @@ pub fn for_supplier(supplier: &str) -> impl Iterator<Item = &'static Distributor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_vars_name_every_key_and_url_variable() {
+        let vars: Vec<_> = env_vars().collect();
+        for v in [
+            "RYUEDA_DIGIKEY_CLIENT_ID",
+            "RYUEDA_DIGIKEY_CLIENT_SECRET",
+            "RYUEDA_DIGIKEY_URL",
+        ] {
+            assert!(vars.contains(&v), "{v} missing from {vars:?}");
+        }
+    }
 
     #[test]
     fn distributors_are_found_by_name_and_supplier() {

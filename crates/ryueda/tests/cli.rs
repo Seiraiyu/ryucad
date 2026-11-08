@@ -42,6 +42,10 @@ fn ryueda(run: &Path) -> Command {
         .env("RYUEDA_ID_SEED", "cli")
         .env_remove("RYUEDA_NO_DAEMON")
         .env_remove("RYUEDA_PARTICIPANT");
+    // No person's distributor keys or API: a scenario sets the fake's.
+    for v in ryueda_parts::distributor::env_vars() {
+        cmd.env_remove(v);
+    }
     cmd
 }
 
