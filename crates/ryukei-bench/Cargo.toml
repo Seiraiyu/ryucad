@@ -188,3 +188,8 @@ required-features = ["occt", "usd"]
 [[bench]]
 name = "sheet_metal"
 harness = false
+
+# Views and sections (design 326, plan 10.C).
+[[bench]]
+name = "projection"
+harness = false
