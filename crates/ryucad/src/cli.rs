@@ -1106,7 +1106,10 @@ enum FeatureCmd {
     /// --depth) founding a sheet metal solid; an edge flange (--edge,
     /// --side, --angle, --length, --measured, --position, --radius,
     /// --relief, --setback, --end-setback, --end-relief) on its straight
-    /// edges; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
+    /// edges; an unfold (--target, --fixed-face, --only repeated,
+    /// --k-factor, --deduction or --bend-allowance, --bend FACE=FORM:VALUE
+    /// repeated) laying a sheet metal solid flat; a refold (--target,
+    /// --unfold, --only) folding it back; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
     /// countersink, --bottom) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
@@ -2296,10 +2299,10 @@ struct FieldArgs {
     /// named by the split, the default) or behind (a trim).
     #[arg(long, value_name = "SIDES")]
     keep: Option<String>,
-    /// A base flange's K-factor, 0 to 1: its solid's bend allowance.
+    /// A base flange's or unfold's K-factor, 0 to 1: its bend allowance.
     #[arg(long, value_name = "NUMBER", conflicts_with = "deduction")]
     k_factor: Option<String>,
-    /// A base flange's bend deduction instead: how much shorter the flat
+    /// A base flange's or unfold's bend deduction instead: how much shorter the flat
     /// is than its flanges to their outer mould line.
     #[arg(long, value_name = "LENGTH")]
     deduction: Option<String>,
@@ -2335,6 +2338,31 @@ struct FieldArgs {
     /// Give no end vertex a setback or relief of its own.
     #[arg(long, conflicts_with_all = ["end_setbacks", "end_reliefs"])]
     no_ends: bool,
+    /// The side face an unfold holds still (`<part>/<solid>/<name>`); ""
+    /// for the kernel's default flange.
+    #[arg(long, value_name = "FACE")]
+    fixed_face: Option<String>,
+    /// A bend an unfold or refold acts on, by one of its faces, repeated;
+    /// every bend when left out.
+    #[arg(long, value_name = "FACE")]
+    only: Vec<String>,
+    /// Act on every bend again.
+    #[arg(long, conflicts_with = "only")]
+    no_only: bool,
+    /// An unfold's developed length for every bend it unfolds, instead of
+    /// a K-factor or a deduction.
+    #[arg(long, value_name = "LENGTH", conflicts_with_all = ["k_factor", "deduction"])]
+    bend_allowance: Option<String>,
+    /// One bend's allowance in an unfold: FACE=k_factor:0.4,
+    /// FACE=deduction:2mm or FACE=allowance:2.1mm, repeated.
+    #[arg(long = "bend", value_name = "FACE=FORM:VALUE", value_parser = bend_override)]
+    bends: Vec<Value>,
+    /// Give no bend of an unfold its own allowance.
+    #[arg(long, conflicts_with = "bends")]
+    no_bends: bool,
+    /// The unfold a refold folds back by.
+    #[arg(long, value_name = "UNFOLD")]
+    unfold: Option<String>,
 }
 
 /// Which `--segment`s each `--propagate` follows, in order, read from the
@@ -2632,7 +2660,8 @@ impl FieldArgs {
                 .k_factor
                 .clone()
                 .map(|k| json!({"k_factor": k}))
-                .or_else(|| self.deduction.clone().map(|d| json!({"deduction": d}))),
+                .or_else(|| self.deduction.clone().map(|d| json!({"deduction": d})))
+                .or_else(|| self.bend_allowance.clone().map(|a| json!({"allowance": a}))),
             relief: self.relief.as_deref().map(|k| match k {
                 "" => json!(""),
                 k => relief_json(
@@ -2658,10 +2687,18 @@ impl FieldArgs {
             } else {
                 ends_json(&self.end_setbacks, &self.end_reliefs)
             },
-            fixed_face: None,
-            only: None,
-            bends: None,
-            unfold: None,
+            fixed_face: self.fixed_face.clone(),
+            only: if self.no_only {
+                Some(Vec::new())
+            } else {
+                (!self.only.is_empty()).then(|| self.only.clone())
+            },
+            bends: if self.no_bends {
+                Some(json!([]))
+            } else {
+                (!self.bends.is_empty()).then(|| Value::Array(self.bends.clone()))
+            },
+            unfold: self.unfold.clone(),
         }
     }
 }
@@ -2832,6 +2869,21 @@ fn face_groups(pairs: &[(String, String)], key: &str) -> Value {
             })
             .collect(),
     )
+}
+
+/// One `--bend FACE=FORM:VALUE` as an unfold's override,
+/// `{"bend": FACE, FORM: VALUE}`, FORM `k_factor`, `deduction` or
+/// `allowance`. `flat` and `export` read theirs through it too.
+fn bend_override(s: &str) -> core::result::Result<Value, String> {
+    let (face, v) = param(s)?;
+    match v.split_once(':') {
+        Some((form @ ("k_factor" | "deduction" | "allowance"), q)) => {
+            Ok(json!({"bend": face, form: q.trim()}))
+        }
+        _ => Err(format!(
+            "{face}={v}: give FACE=FORM:VALUE, FORM k_factor, deduction or allowance"
+        )),
+    }
 }
 
 fn param(s: &str) -> core::result::Result<(String, String), String> {

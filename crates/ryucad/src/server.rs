@@ -3931,7 +3931,11 @@ fn check_references(
         .any(|g| g.as_ref().is_ok_and(|g| g.surface()));
     let reads_bodies = may_hold_sheets && !crate::kind::bodies_read(f).is_empty();
     let planar = matches!(f, Feature::Planar(_));
+    // An unfold's allowance and a refold's unfold are judged against the
+    // rebuild whatever they reference.
     if f.loft().is_none()
+        && f.unfold().is_none()
+        && f.refold().is_none()
         && f.references().is_empty()
         && f.geometry().is_empty()
         && !reads_bodies
