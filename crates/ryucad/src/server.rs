@@ -699,6 +699,19 @@ pub(crate) fn dispatch(
         Request::SheetGet { part, solid, rev } => {
             crate::sheet_metal::report::get(session, &part, solid.as_deref(), rev.as_deref())
         }
+        Request::FlatGet {
+            part,
+            solid,
+            rev,
+            fixed,
+            bends,
+        } => crate::sheet_metal::flat::get(
+            session,
+            &part,
+            solid.as_deref(),
+            rev.as_deref(),
+            &crate::sheet_metal::flat::Options { fixed, bends },
+        ),
         Request::Mass { of, tolerance, rev } => {
             crate::mass::run(session, &of, tolerance, rev.as_deref())
         }

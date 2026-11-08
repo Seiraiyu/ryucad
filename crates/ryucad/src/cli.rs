@@ -303,6 +303,21 @@ enum Command {
         #[command(flatten)]
         rev: RevArg,
     },
+    /// A solid's flat pattern (the part's one sheet metal solid unless
+    /// named): its outline, holes and bend lines with their notes, in
+    /// millimetres. A folded solid is unfolded in memory, about --fixed
+    /// (a side face) with each --bend REF=k_factor:N|deduction:LEN|allowance:LEN
+    /// overriding the solid's allowance.
+    Flat {
+        part: String,
+        solid: Option<String>,
+        #[arg(long, value_name = "FACE")]
+        fixed: Option<String>,
+        #[arg(long = "bend", value_name = "REF=FORM:VALUE", value_parser = bend_override)]
+        bends: Vec<Value>,
+        #[command(flatten)]
+        rev: RevArg,
+    },
     /// Mass properties of a part or assembly, a solid (<part>/<solid>) or an occurrence
     /// (<assembly>/<instance>/…): volume, area, centre of mass, and where every part has a
     /// material in materials.json, mass and inertia.
@@ -3776,6 +3791,19 @@ fn request(cmd: &Command) -> Option<Request> {
             part: part.clone(),
             solid: solid.clone(),
             rev: rev.rev.clone(),
+        },
+        Command::Flat {
+            part,
+            solid,
+            fixed,
+            bends,
+            rev,
+        } => Request::FlatGet {
+            part: part.clone(),
+            solid: solid.clone(),
+            rev: rev.rev.clone(),
+            fixed: fixed.clone(),
+            bends: bends.clone(),
         },
         Command::Mass { of, tolerance, rev } => Request::Mass {
             of: of.clone(),

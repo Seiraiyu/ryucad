@@ -1134,3 +1134,55 @@ fn a_flat_says_what_it_cant_take() {
         (Code::InvalidParam, Some("/bends/0/bend"))
     );
 }
+
+#[test]
+fn flat_get_answers_the_pattern_in_millimetres() {
+    let (_dir, mut s) = l_part();
+    let v = must(&mut s, "flat.get", json!({"part": "p"}));
+    assert_eq!(
+        (
+            v["schema"].as_i64(),
+            v["solid"].as_str(),
+            v["from"].as_str()
+        ),
+        (Some(1), Some("bl"), Some("whole"))
+    );
+    assert_eq!(v["thickness_m"], 0.0015);
+    let loops = v["loops"].as_array().unwrap();
+    let outline: f64 = loops
+        .iter()
+        .filter(|l| l["outer"] == true)
+        .map(|l| l["area_mm2"].as_f64().unwrap())
+        .sum();
+    assert!((outline - 20.0 * l_flat_mm(0.44)).abs() < 1e-6);
+    for seg in loops.iter().flat_map(|l| l["segments"].as_array().unwrap()) {
+        assert!(seg["edge"].as_str().unwrap().starts_with("p/bl/"), "{seg}");
+        assert!(
+            ["line", "arc", "circle", "ellipse", "spline"].contains(&seg["kind"].as_str().unwrap())
+        );
+        assert!(seg["polyline_mm"].as_array().unwrap().len() >= 2);
+    }
+    let b = &v["bend_lines"][0];
+    let sheet = must(&mut s, "sheet.get", json!({"part": "p"}));
+    assert_eq!(b["bend"], sheet["bends"][0]["bend"]);
+    assert_eq!(
+        b["note"],
+        "UP 90° R1 K0.44".replace(
+            "UP",
+            b["direction"].as_str().unwrap().to_uppercase().as_str()
+        )
+    );
+    assert!((b["developed_mm"].as_f64().unwrap() - Q * (1.0 + 0.44 * 1.5)).abs() < 1e-9);
+    // An override by text, as the CLI sends it.
+    let half = must(
+        &mut s,
+        "flat.get",
+        json!({"part": "p", "bends": [{"bend": b["bend"], "k_factor": "0.5"}]}),
+    );
+    assert!(
+        half["bend_lines"][0]["note"]
+            .as_str()
+            .unwrap()
+            .ends_with("K0.5")
+    );
+}

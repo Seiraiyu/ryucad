@@ -298,3 +298,151 @@ pub fn of(
     s.flats.put(key, Arc::clone(&f));
     Ok((commit, f))
 }
+
+/// A point of the pattern in millimetres.
+fn mm(p: ryukei::geom::Point2) -> Value {
+    json!([p.x * 1e3, p.y * 1e3])
+}
+
+/// Segment `s` cut into a polyline within `chord` (metres) of it: a line
+/// its ends, any other curve halved where its middle strays from the
+/// chord, at most 2^10 pieces.
+pub fn polyline(s: &ryukei::sheet_metal::PatternSegment, chord: f64) -> Vec<ryukei::geom::Point2> {
+    fn cut(
+        s: &ryukei::sheet_metal::PatternSegment,
+        a: f64,
+        b: f64,
+        chord: f64,
+        depth: u32,
+        out: &mut Vec<ryukei::geom::Point2>,
+    ) {
+        let (p, q, m) = (
+            s.curve.point(a),
+            s.curve.point(b),
+            s.curve.point(0.5 * (a + b)),
+        );
+        let mid = ryukei::geom::Point2::new(0.5 * (p.x + q.x), 0.5 * (p.y + q.y));
+        // Halve at least twice, so an arc's middle never hides its sweep.
+        if depth < 10 && (depth < 2 || m.distance(mid) > chord) {
+            cut(s, a, 0.5 * (a + b), chord, depth + 1, out);
+            cut(s, 0.5 * (a + b), b, chord, depth + 1, out);
+        } else {
+            out.push(q);
+        }
+    }
+    let mut out = vec![s.curve.point(s.t0)];
+    if matches!(s.curve, ryukei::geom::Curve2::Line2(_)) {
+        out.push(s.curve.point(s.t1));
+    } else {
+        cut(s, s.t0, s.t1, chord, 0, &mut out);
+    }
+    out
+}
+
+/// `flat.get`'s answer (`schema: 1`): the frame, thickness and box, each
+/// loop (outline or hole, its area, each segment's edge, kind, exact data
+/// in millimetres as the DXF writes it, and polyline at the display
+/// quality's chord), each bend line (its bend, ends, direction, angle,
+/// radius, developed length, allowance, note and edges).
+pub fn get(
+    session: &mut Session,
+    part: &str,
+    solid: Option<&str>,
+    rev: Option<&str>,
+    o: &Options,
+) -> Result<Value> {
+    use ryuformats::dxf::{DxfUnit, Shape, note, shape};
+    let (commit, f) = of(session, part, solid, rev, o)?;
+    let p = &f.pattern;
+    let b = p.bounds;
+    let diagonal = (b.max() - b.min()).length();
+    let chord = crate::mesh::Quality::preferred()
+        .params(diagonal.max(1e-3))
+        .chord;
+    let fr = &p.frame;
+    let v3 = |x: ryukei::geom::Vector3| json!([x.x, x.y, x.z]);
+    let o3 = fr.origin();
+    let mut loops = Vec::with_capacity(p.loops.len());
+    for l in &p.loops {
+        let mut segments = Vec::with_capacity(l.segments.len());
+        for s in &l.segments {
+            let exact = shape(s, 1e3)
+                .map_err(|e| Error::new(Code::Internal, format!("flat pattern: {e}")))?;
+            let mut v = match exact {
+                Shape::Line { from, to } => json!({"kind": "line", "from_mm": from, "to_mm": to}),
+                Shape::Circle { centre, radius } => {
+                    json!({"kind": "circle", "centre_mm": centre, "radius_mm": radius})
+                }
+                Shape::Arc {
+                    centre,
+                    radius,
+                    start_deg,
+                    end_deg,
+                } => {
+                    json!({"kind": "arc", "centre_mm": centre, "radius_mm": radius, "start_deg": start_deg, "end_deg": end_deg})
+                }
+                Shape::Ellipse {
+                    centre,
+                    major,
+                    ratio,
+                    start,
+                    end,
+                } => {
+                    json!({"kind": "ellipse", "centre_mm": centre, "major_mm": major, "ratio": ratio, "start": start, "end": end})
+                }
+                Shape::Spline {
+                    degree,
+                    knots,
+                    weights,
+                    points,
+                } => {
+                    json!({"kind": "spline", "degree": degree, "knots": knots, "weights": weights, "control_mm": points})
+                }
+            };
+            v["edge"] = json!(f.at(s.edge));
+            v["polyline_mm"] = Value::Array(polyline(s, chord).into_iter().map(mm).collect());
+            segments.push(v);
+        }
+        loops.push(json!({"outer": l.outer, "area_mm2": l.area() * 1e6, "segments": segments}));
+    }
+    let bend_lines: Vec<Value> = p
+        .bend_lines
+        .iter()
+        .zip(&f.bends)
+        .map(|(l, bend)| {
+            json!({
+                "bend": bend,
+                "from_mm": mm(l.start),
+                "to_mm": mm(l.end),
+                "direction": match l.direction { ryukei::sheet_metal::BendDirection::Up => "up", ryukei::sheet_metal::BendDirection::Down => "down" },
+                "angle_deg": l.angle.to_degrees(),
+                "radius_mm": l.radius * 1e3,
+                "developed_mm": l.length * 1e3,
+                "allowance": match l.allowance {
+                    ryukei::sheet_metal::Allowance::KFactor(k) => json!({"k_factor": k}),
+                    ryukei::sheet_metal::Allowance::Length(x) => json!({"allowance_mm": x * 1e3}),
+                },
+                "note": note(l, DxfUnit::Mm, "°"),
+                "edges": l.edges.iter().map(|n| f.at(*n)).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let mut v = json!({
+        "schema": 1,
+        "part": f.part,
+        "solid": f.solid,
+        "from": match &f.from { From::Whole => "whole", From::Unfold(_) => "unfold" },
+        "frame": {"origin_m": [o3.x, o3.y, o3.z], "x": v3(fr.x().get()), "y": v3(fr.y().get()), "z": v3(fr.z().get())},
+        "thickness_m": p.thickness,
+        "box_mm": [mm(b.min()), mm(b.max())],
+        "loops": loops,
+        "bend_lines": bend_lines,
+    });
+    if let From::Unfold(u) = &f.from {
+        v["unfold"] = json!(u);
+    }
+    if let Some(c) = commit {
+        v["commit"] = json!(c);
+    }
+    Ok(v)
+}

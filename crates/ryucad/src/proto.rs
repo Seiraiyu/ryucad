@@ -932,6 +932,26 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// A solid's flat pattern, as the part shows it: unfolded whole in
+    /// memory when folded (about `fixed`, a side face, each bend at its
+    /// override in `bends` else the solid's allowance), else redrawn
+    /// through the unfold in force. Its loops' segments exact in
+    /// millimetres with their edges and polylines, its bend lines with
+    /// their notes. `solid` is the part's one sheet metal solid unless
+    /// named.
+    #[serde(rename = "flat.get")]
+    FlatGet {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        solid: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fixed: Option<String>,
+        /// `{bend, k_factor | deduction | allowance}`, as an unfold's.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bends: Vec<Value>,
+    },
     /// Mass properties of a part or an assembly (its ID), a solid
     /// (`<part>/<solid>`) or an occurrence (`<asm>/<path>`): volume, area,
     /// centre of mass and, where every part has a material with a

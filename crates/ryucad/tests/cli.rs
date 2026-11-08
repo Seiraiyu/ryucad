@@ -1122,6 +1122,7 @@ fn every_protocol_method_has_a_command() {
         ("measure", &["measure"]),
         ("mass", &["mass"]),
         ("sheet.get", &["sheet"]),
+        ("flat.get", &["flat"]),
         ("clearance", &["clearance"]),
         ("deps.add", &["deps", "add"]),
         ("deps.fetch", &["deps", "fetch"]),
@@ -3751,6 +3752,65 @@ fn sheet_metal_from_the_cli() {
     assert_eq!(code, 0, "{v}");
     let (_, v) = p.run_in(&p.daemon, "", &["feature", "list", "p"]);
     assert!(!v.to_string().contains("\"zb\""), "{v}");
+}
+
+#[test]
+fn flat_patterns_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "l", "--plane", "xy",
+    ]);
+    let mut ops = Vec::new();
+    for (i, at) in [[40, 0], [0, 0], [0, 30]].into_iter().enumerate() {
+        ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    for i in 1..=2 {
+        ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                        "start": format!("p{i}"), "end": format!("p{}", i + 1)}));
+    }
+    p.ok(&[
+        "sketch",
+        "edit",
+        "p",
+        "l",
+        &serde_json::to_string(&ops).unwrap(),
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "base_flange",
+        "--id",
+        "bl",
+        "--sketch",
+        "l",
+        "--thickness",
+        "1.5mm",
+        "--radius",
+        "1mm",
+        "--k-factor",
+        "0.44",
+        "--depth",
+        "20mm",
+    ]);
+    let f = p.ok(&["flat", "p"]);
+    assert_eq!(
+        (f["solid"].as_str(), f["from"].as_str()),
+        (Some("bl"), Some("whole"))
+    );
+    let bend = f["bend_lines"][0]["bend"].as_str().unwrap().to_owned();
+    let half = p.ok(&["flat", "p", "bl", "--bend", &format!("{bend}=k_factor:0.5")]);
+    assert!(
+        half["bend_lines"][0]["note"]
+            .as_str()
+            .unwrap()
+            .ends_with("K0.5"),
+        "{half}"
+    );
+    p.fails(&["flat", "p", "--bend", "nonsense"], "usage", 2);
 }
 
 #[test]
