@@ -14,7 +14,9 @@
 //! its mirrors and splits copy and divide `b`, its base flanges make
 //! plates of `s` and bent sections of `u` (an open L, so its radius
 //! bends a corner), and its flanges bend and flange `b`'s
-//! edges:
+//! edges, and its unfolds and refolds lay flat and fold back `w`, a bent
+//! section of `u` (its unfolds of the box `b`, which no base flange
+//! founded, give their allowance or are refused):
 //! building must succeed or give a structured error, every body it leaves
 //! must pass the checks, cross or overlap itself nowhere and mesh with no
 //! faults, and a sketch that solves must solve to finite
@@ -72,8 +74,14 @@ fn project() -> &'static Env {
     static PROJECT: OnceLock<Env> = OnceLock::new();
     PROJECT.get_or_init(|| {
         Env::new(&BTreeMap::from([
-            ("wall".to_owned(), ryucad::expr::Expr::parse("3 mm").unwrap()),
-            ("gap".to_owned(), ryucad::expr::Expr::parse("wall / 2").unwrap()),
+            (
+                "wall".to_owned(),
+                ryucad::expr::Expr::parse("3 mm").unwrap(),
+            ),
+            (
+                "gap".to_owned(),
+                ryucad::expr::Expr::parse("wall / 2").unwrap(),
+            ),
         ]))
     })
 }
@@ -106,6 +114,10 @@ fn base() -> &'static [(Id, Feature)] {
                         "p3": {"type": "point", "m": [0.03, 0.01]},
                         "l1": {"type": "line", "start": "p1", "end": "p2"},
                         "l2": {"type": "line", "start": "p2", "end": "p3"}}}"#;
+        // A bent section of `u`, so unfolds and refolds act on sheet metal.
+        let w = r#"{"format": 11, "kind": "ryucad.feature", "type": "base_flange",
+                    "sketch": "u", "thickness": "1.5 mm", "radius": "1 mm",
+                    "depth": "20 mm", "allowance": {"k_factor": "0.44"}}"#;
         let c = r#"{"format": 1, "kind": "ryucad.feature", "type": "box",
                     "params": {"x": "8 mm", "y": "8 mm", "z": "8 mm"},
                     "placement": {"origin": ["16 mm", "4 mm", "2 mm"],
@@ -130,6 +142,7 @@ fn base() -> &'static [(Id, Feature)] {
             (id("t"), read(t)),
             (id("u"), read(u)),
             (id("k"), read(k)),
+            (id("w"), read(w)),
         ]
     })
 }
@@ -336,7 +349,10 @@ fn assemble(written: &str, after_instances: bool) {
         assert_eq!(near(&mut Default::default()), c, "from nothing");
         for x in c["clearances"].as_array().unwrap() {
             let d = &x["distance"];
-            assert!(d["m"].as_f64().is_some_and(|m| m.is_finite() && m >= 0.0), "{x}");
+            assert!(
+                d["m"].as_f64().is_some_and(|m| m.is_finite() && m >= 0.0),
+                "{x}"
+            );
             let shared = v["interferences"]
                 .as_array()
                 .unwrap()
@@ -373,8 +389,8 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let written = canonical::to_string(&f.to_json());
-    let back = Feature::from_json(&canonical::parse(&written).unwrap(), Unit::In, project())
-    .unwrap();
+    let back =
+        Feature::from_json(&canonical::parse(&written).unwrap(), Unit::In, project()).unwrap();
     assert_eq!(back, f);
     assert_eq!(canonical::to_string(&back.to_json()), written);
     if let Feature::Instance(_) = &f {
@@ -447,18 +463,27 @@ fuzz_target!(|data: &[u8]| {
             let r = d.report();
             for k in ["origin_m", "normal", "direction", "x"] {
                 if let Some(a) = r[k].as_array() {
-                    assert!(a.iter().all(|x| x.as_f64().is_some_and(f64::is_finite)), "{r}");
+                    assert!(
+                        a.iter().all(|x| x.as_f64().is_some_and(f64::is_finite)),
+                        "{r}"
+                    );
                 }
             }
         }
         // A path or helix is finite, and its checked path checks again.
         Some(Output::Path(m)) => {
             let r = m.report(&part.id);
-            assert!(m.length.value().is_finite() && m.length.value() > 0.0, "{r}");
+            assert!(
+                m.length.value().is_finite() && m.length.value() > 0.0,
+                "{r}"
+            );
             for seg in r["segments"].as_array().unwrap() {
                 for k in ["start_m", "end_m"] {
                     let a = seg[k].as_array().unwrap();
-                    assert!(a.iter().all(|x| x.as_f64().is_some_and(f64::is_finite)), "{r}");
+                    assert!(
+                        a.iter().all(|x| x.as_f64().is_some_and(f64::is_finite)),
+                        "{r}"
+                    );
                 }
             }
             assert_eq!(m.kernel().check(), Ok(m.closed), "{r}");

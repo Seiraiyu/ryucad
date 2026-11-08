@@ -8,7 +8,8 @@
 //! sections and explode too), `0xfb` an appearance, `0xfa` an explode,
 //! `0xf9` a lock, `0xf8` a manifest's dependencies, `0xf7` a datum
 //! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft, `0xf2` a mirror or split, `0xf1` an annotation, `0xf0` a base
-//! flange or flange and `0xef` a planar face or a surface extrude. Merging must never panic, must give the same bytes twice,
+//! flange or flange, `0xef` a planar face or a surface extrude, `0xee` an
+//! unfold or refold. Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -517,8 +518,7 @@ fn edit_dependencies(v: &mut Value, op: u8, arg: u8) {
     }
     match op % 3 {
         0 => {
-            v["dependencies"][&p] =
-                json!({"name": format!("d{}", arg % 3), "path": "", "url": format!("file:///{arg}")})
+            v["dependencies"][&p] = json!({"name": format!("d{}", arg % 3), "path": "", "url": format!("file:///{arg}")})
         }
         1 => {
             v["dependencies"].as_object_mut().unwrap().remove(&p);
@@ -541,7 +541,10 @@ fn edit_datum(v: &mut Value, op: u8, arg: u8) {
             let o = v.as_object_mut().unwrap();
             o.remove("distance");
             o.insert("by".into(), json!("parallel"));
-            o.insert("through".into(), json!({"feature": format!("q{}", arg % 3)}));
+            o.insert(
+                "through".into(),
+                json!({"feature": format!("q{}", arg % 3)}),
+            );
         }
         1 => {
             let o = v.as_object_mut().unwrap();
@@ -564,7 +567,10 @@ fn edit_sweep(v: &mut Value, op: u8, arg: u8) {
             o.remove("twist");
         }
         0 => {
-            o.insert("twist".into(), json!(format!("{} deg", 15 * u32::from(arg % 24))));
+            o.insert(
+                "twist".into(),
+                json!(format!("{} deg", 15 * u32::from(arg % 24))),
+            );
         }
         1 if arg % 4 == 0 => {
             o.remove("scale");
@@ -573,14 +579,20 @@ fn edit_sweep(v: &mut Value, op: u8, arg: u8) {
             o.insert("scale".into(), json!(format!("0.{}", 1 + arg % 9)));
         }
         2 => {
-            o.insert("profile".into(), json!({"sketch": "s", "loops": [format!("l{}", arg % 4)]}));
+            o.insert(
+                "profile".into(),
+                json!({"sketch": "s", "loops": [format!("l{}", arg % 4)]}),
+            );
         }
         3 => {
             o.insert("profile".into(), json!({"sketch": format!("s{}", arg % 3)}));
         }
         _ if arg % 2 == 0 => {
             o.insert("law".into(), json!("binormal"));
-            o.insert("direction".into(), json!(["x", "y", "z"][usize::from(arg % 3)]));
+            o.insert(
+                "direction".into(),
+                json!(["x", "y", "z"][usize::from(arg % 3)]),
+            );
         }
         _ => {
             o.insert("law".into(), json!("minimal"));
@@ -636,7 +648,10 @@ fn edit_loft(v: &mut Value, op: u8, arg: u8) {
             s.push(json!({"sketch": format!("s{}", arg % 5)}));
         }
         1 if n > 2 => {
-            o["sections"].as_array_mut().unwrap().remove(usize::from(arg) % n);
+            o["sections"]
+                .as_array_mut()
+                .unwrap()
+                .remove(usize::from(arg) % n);
         }
         1 | 2 if n > 1 => {
             let i = usize::from(arg) % (n - 1);
@@ -655,13 +670,20 @@ fn edit_loft(v: &mut Value, op: u8, arg: u8) {
             o.remove("closed");
         }
         _ => {
-            let k = if arg % 2 == 0 { "start_tangent" } else { "end_tangent" };
+            let k = if arg % 2 == 0 {
+                "start_tangent"
+            } else {
+                "end_tangent"
+            };
             match arg % 4 {
                 0 | 1 => {
                     o.insert(k.into(), json!({"direction": "normal"}));
                 }
                 2 => {
-                    o.insert(k.into(), json!({"direction": "z", "weight": format!("{}", 1 + arg % 3)}));
+                    o.insert(
+                        k.into(),
+                        json!({"direction": "z", "weight": format!("{}", 1 + arg % 3)}),
+                    );
                 }
                 _ => {
                     o.remove(k);
@@ -751,7 +773,12 @@ fn edit_mirror(v: &mut Value, op: u8, arg: u8) {
     let split = o.get("type") == Some(&json!("split"));
     match op % 4 {
         0 => {
-            let planes = [json!("xy"), json!("yz"), json!("zx"), json!({"feature": "d"})];
+            let planes = [
+                json!("xy"),
+                json!("yz"),
+                json!("zx"),
+                json!({"feature": "d"}),
+            ];
             o.insert("plane".into(), planes[usize::from(arg % 4)].clone());
         }
         1 if split => {
@@ -800,22 +827,35 @@ fn edit_sheet_metal(v: &mut Value, op: u8, arg: u8) {
             o.insert("radius".into(), json!(format!("{} mm", 1 + arg % 4)));
         }
         (true, 2) if arg % 2 == 0 => {
-            o.insert("allowance".into(), json!({"k_factor": format!("0.{}", 3 + arg % 5)}));
+            o.insert(
+                "allowance".into(),
+                json!({"k_factor": format!("0.{}", 3 + arg % 5)}),
+            );
         }
         (true, 2) => {
-            o.insert("allowance".into(), json!({"deduction": format!("{} mm", 1 + arg % 3)}));
+            o.insert(
+                "allowance".into(),
+                json!({"deduction": format!("{} mm", 1 + arg % 3)}),
+            );
         }
         (true, _) => {
             o.insert("relief".into(), reliefs[usize::from(arg % 4)].clone());
         }
         (false, 0) => {
-            o.insert("angle".into(), json!(format!("{} deg", 45 + 15 * (arg % 4))));
+            o.insert(
+                "angle".into(),
+                json!(format!("{} deg", 45 + 15 * (arg % 4))),
+            );
         }
         (false, 1) => {
             o.insert("setback".into(), json!(format!("{} mm", arg % 5)));
         }
         (false, 2) => {
-            let mut edges: Vec<Value> = o.get("edges").and_then(Value::as_array).cloned().unwrap_or_default();
+            let mut edges: Vec<Value> = o
+                .get("edges")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             let e = r(arg);
             match edges.iter().position(|x| *x == e) {
                 Some(i) if edges.len() > 1 => {
@@ -827,13 +867,19 @@ fn edit_sheet_metal(v: &mut Value, op: u8, arg: u8) {
             o.insert("edges".into(), json!(edges));
         }
         (false, _) => {
-            let mut ends: Vec<Value> = o.get("ends").and_then(Value::as_array).cloned().unwrap_or_default();
+            let mut ends: Vec<Value> = o
+                .get("ends")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             let v = r(arg / 4);
             match ends.iter().position(|x| x["vertex"] == v) {
                 Some(i) => {
                     ends.remove(i);
                 }
-                None => ends.push(json!({"vertex": v, "relief": reliefs[usize::from(arg % 4)].clone()})),
+                None => {
+                    ends.push(json!({"vertex": v, "relief": reliefs[usize::from(arg % 4)].clone()}))
+                }
             }
             if ends.is_empty() {
                 o.remove("ends");
@@ -841,6 +887,58 @@ fn edit_sheet_metal(v: &mut Value, op: u8, arg: u8) {
                 o.insert("ends".into(), json!(ends));
             }
         }
+    }
+}
+
+/// An unfold's or refold's edits on either side: an unfold's allowance (a
+/// K-factor, a deduction or a length), its fixed face, `only` (a bend
+/// added or taken out) and `bends` (an override given or taken out); a
+/// refold's unfold and `only`.
+fn edit_unfold(v: &mut Value, op: u8, arg: u8) {
+    let r = |a: u8| json!({"feature": "f", "name": format!("{:032x}", a % 4)});
+    let o = v.as_object_mut().unwrap();
+    let unfold = o.get("type") == Some(&json!("unfold"));
+    let toggle = |o: &mut serde_json::Map<String, Value>,
+                  k: &str,
+                  x: Value,
+                  key: &dyn Fn(&Value) -> Value| {
+        let mut list: Vec<Value> = o
+            .get(k)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        match list.iter().position(|y| key(y) == key(&x)) {
+            Some(i) => {
+                list.remove(i);
+            }
+            None => list.push(x),
+        }
+        if list.is_empty() {
+            o.remove(k);
+        } else {
+            o.insert(k.into(), json!(list));
+        }
+    };
+    match (unfold, op % 4) {
+        (true, 0) => {
+            let a = match arg % 3 {
+                0 => json!({"k_factor": format!("0.{}", 3 + arg % 5)}),
+                1 => json!({"deduction": format!("{} mm", 1 + arg % 3)}),
+                _ => json!({"allowance": format!("{} mm", 2 + arg % 3)}),
+            };
+            o.insert("allowance".into(), a);
+        }
+        (true, 1) => {
+            o.insert("fixed".into(), r(arg));
+        }
+        (true, 2) => {
+            let b = json!({"bend": r(arg), "deduction": format!("{} mm", 1 + arg % 3)});
+            toggle(o, "bends", b, &|y: &Value| y["bend"].clone());
+        }
+        (false, 0) => {
+            o.insert("unfold".into(), json!(format!("u{}", arg % 3)));
+        }
+        (_, _) => toggle(o, "only", r(arg), &|y: &Value| y.clone()),
     }
 }
 
@@ -905,8 +1003,9 @@ fuzz_target!(|data: &[u8]| {
     // (18), `0xf5` a sweep (19), `0xf4` a shell (20), `0xf3` a loft
     // (21), `0xf2` a mirror or split (22), `0xf1` an annotation (23),
     // `0xf0` a base flange or flange (24), `0xef` a planar face or a
-    // surface extrude (25); every other byte picks as it did before them.
+    // surface extrude (25), `0xee` an unfold or refold (26); every other byte picks as it did before them.
     let kind = match mode {
+        0xee => 26,
         0xef => 25,
         0xf0 => 24,
         0xf1 => 23,
@@ -989,6 +1088,13 @@ fuzz_target!(|data: &[u8]| {
                 json!({"format": 10, "kind": "ryucad.feature", "type": "split", "target": "b",
                        "plane": {"feature": "d"}})
             }
+            // An unfold when the edits leave no odd byte over, else a
+            // refold.
+            26 if rest.len() % 2 == 0 => json!({"format": 14, "kind": "ryucad.feature",
+                "type": "unfold", "target": "b", "allowance": {"k_factor": "0.44"},
+                "only": [{"feature": "f", "name": format!("{:032x}", 1)}]}),
+            26 => json!({"format": 14, "kind": "ryucad.feature", "type": "refold",
+                "target": "b", "unfold": "u0"}),
             // A planar face when the edits leave no odd byte over, else a
             // surface extrude.
             25 if rest.len() % 2 == 0 => {
@@ -1009,9 +1115,9 @@ fuzz_target!(|data: &[u8]| {
                          "dependencies": {project(0): {"name": "lib", "path": "",
                                                        "url": "file:///lib"}}}),
             14 => json!({"format": 1, "kind": "ryucad.explode", "steps": [
-                             {"instances": ["i0"], "translate": ["0 mm", "0 mm", "40 mm"]},
-                             {"instances": ["i1", "i2/x"], "translate": ["0 mm", "0 mm", "-10 mm"]}
-                         ]}),
+                {"instances": ["i0"], "translate": ["0 mm", "0 mm", "40 mm"]},
+                {"instances": ["i1", "i2/x"], "translate": ["0 mm", "0 mm", "-10 mm"]}
+            ]}),
             13 => json!({"faces": {format!("box/{:032x}", 0): {"colour": "#d03030"}},
                          "format": 1, "kind": "ryucad.appearance",
                          "solids": {"lid": {"opacity": 0.5}}}),
@@ -1058,6 +1164,7 @@ fuzz_target!(|data: &[u8]| {
             23 => edit_annotation(v, op, arg),
             24 => edit_sheet_metal(v, op, arg),
             25 => edit_surface(v, op, arg),
+            26 => edit_unfold(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -1178,7 +1285,9 @@ fuzz_target!(|data: &[u8]| {
             let v: Value = serde_json::from_slice(&merged).expect("JSON");
             for k in record(&v).keys() {
                 assert!(
-                    !k.starts_with("/allowance/") && !k.starts_with("/relief/") && !k.starts_with("/ends/")
+                    !k.starts_with("/allowance/")
+                        && !k.starts_with("/relief/")
+                        && !k.starts_with("/ends/")
                         && !k.starts_with("/edges/"),
                     "conflicted inside a sheet metal feature's value at {k}: {v}"
                 );
@@ -1196,6 +1305,19 @@ fuzz_target!(|data: &[u8]| {
                 );
             }
         }
+        // An unfold's allowance, `only` and `bends` are whole values.
+        if kind == 26 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            for k in record(&v).keys() {
+                assert!(
+                    !k.starts_with("/allowance/")
+                        && !k.starts_with("/only/")
+                        && !k.starts_with("/bends/"),
+                    "an unfold's {k} conflicted inside: {v}"
+                );
+            }
+        }
         // A split's plane and flip are one value together; a mirror's
         // fields merge per key, its targets a list.
         if kind == 22 {
@@ -1203,7 +1325,8 @@ fuzz_target!(|data: &[u8]| {
             let v: Value = serde_json::from_slice(&merged).expect("JSON");
             for k in record(&v).keys() {
                 assert!(
-                    ["", "/plane", "/flip", "/keep", "/operation", "/targets"].contains(&k.as_str()),
+                    ["", "/plane", "/flip", "/keep", "/operation", "/targets"]
+                        .contains(&k.as_str()),
                     "conflicted inside a mirror's or split's value at {k}: {v}"
                 );
             }
@@ -1214,10 +1337,16 @@ fuzz_target!(|data: &[u8]| {
             let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
             let v: Value = serde_json::from_slice(&merged).expect("JSON");
             for k in record(&v).keys() {
-                assert!(k.split('/').count() <= 2, "conflicted inside a value at {k}: {v}");
+                assert!(
+                    k.split('/').count() <= 2,
+                    "conflicted inside a value at {k}: {v}"
+                );
             }
             if ours["by"] != base["by"] && theirs["by"] != base["by"] && ours != theirs {
-                assert!(record(&v).contains_key(""), "a datum built two ways merged: {v}");
+                assert!(
+                    record(&v).contains_key(""),
+                    "a datum built two ways merged: {v}"
+                );
             }
         }
         // An explode's steps are one sequence: they conflict whole.
