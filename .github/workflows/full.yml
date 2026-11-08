@@ -149,6 +149,7 @@ jobs:
       - run: cargo test -p ryustep --release --test mass
       - run: cargo test -p ryustep --release --test cancel
       - run: cargo test -p ryucad --release --test bar -- --nocapture
+      - run: cargo test -p ryucad --release --test sheet_metal_flat_bar -- --nocapture
       - run: cargo test -p ryucad --release --test assembly_bar -- --nocapture
       - run: cargo test -p ryupdm --release --test api -- --nocapture
       - run: cargo test -p ryucad --release --test step_bar -- --nocapture

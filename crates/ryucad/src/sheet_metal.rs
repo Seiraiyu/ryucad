@@ -552,6 +552,29 @@ use ryukei::name::{Event, OpKey, Role, SheetMetalRole, ToolKey};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// The `EdgeFlange`s flange feature `f` of `part` resolves to, against
+/// `session`'s current rebuild: what the kernel is asked, for the bar
+/// (`tests/sheet_metal_flat_bar.rs`).
+#[doc(hidden)]
+pub fn resolve_for_bar(
+    session: &mut crate::session::Session,
+    part: &Id,
+    f: &str,
+) -> Vec<ryukei::sheet_metal::EdgeFlange> {
+    let p = session.project().part(part).expect("the part").clone();
+    let id = Id::parse(f, "feature").expect("a feature ID");
+    let flange = p.features[&id]
+        .as_ref()
+        .ok()
+        .and_then(Feature::flange)
+        .expect("a flange")
+        .clone();
+    let results = session.rebuilt(part).expect("rebuilt").clone();
+    resolve(&p, &Solids::of(&p), &id, &flange, &results)
+        .expect("the flange resolves")
+        .flanges
+}
+
 /// An edge flange: its target as it sees it, through one kernel call
 /// under the feature's key. The request's cancel is checked before and
 /// after it: the kernel's sheet metal calls take none.
