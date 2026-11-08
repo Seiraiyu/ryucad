@@ -1050,6 +1050,18 @@ impl Model {
         true
     }
 
+    /// A point clicked on `entity` (in the shown model's frame) as a pin
+    /// keeps it: in the frame of the entity's own part, so the pin moves
+    /// with an occurrence (`<asm>/<path>/<solid>/<name>`).
+    pub fn pin_point(&self, entity: &str, at: [f64; 3]) -> [f64; 3] {
+        let steps: Vec<&str> = entity.split('/').collect();
+        if steps.len() < 3 {
+            return at;
+        }
+        let key = (steps[0].to_owned(), steps[1..steps.len() - 1].join("/"));
+        self.pose(&key).unapply(at)
+    }
+
     /// Where `key`'s body is drawn: its occurrence's pose in an assembly
     /// (moved with its instance while it is dragged), else where its part
     /// puts it.
@@ -1377,6 +1389,16 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pins_point_is_in_its_entity_s_own_part_s_frame() {
+        let m = Model::default();
+        // A part's entity: its own frame is the shown one.
+        assert_eq!(
+            m.pin_point("p/base/0123456789abcdef0123456789abcdef", [1.0, 2.0, 3.0]),
+            [1.0, 2.0, 3.0]
+        );
+    }
     use serde_json::json;
 
     #[test]

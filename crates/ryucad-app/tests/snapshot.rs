@@ -11,7 +11,6 @@ use ryucad::view::{self, StandardView};
 use ryucad_app::core::compare::FaceMark;
 use ryucad_app::core::nav::Projector;
 use ryucad_app::core::pick::Picker;
-use ryucad_app::core::workspace::Workspace;
 use ryucad_app::ui::scene::{self, DrawList, Scene, linear, theme};
 use ryucad_app::ui::style;
 use std::path::Path;

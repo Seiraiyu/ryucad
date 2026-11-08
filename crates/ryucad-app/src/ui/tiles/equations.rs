@@ -12,6 +12,7 @@ use eframe::egui;
 pub fn equations(ui: &mut egui::Ui, ws: &mut Workspace) {
     ws.show_equations();
     let parts: Vec<String> = ws.model.parts.keys().cloned().collect();
+    let gate = ws.control("param.set");
     let Some(e) = &mut ws.equations else {
         ui.spinner();
         return;
@@ -88,9 +89,13 @@ pub fn equations(ui: &mut egui::Ui, ws: &mut Workspace) {
                     }
                     (None, true) => {}
                 }
-                let apply = ui
-                    .add_enabled(dirty && !saving, egui::Button::new("Apply"))
-                    .on_hover_text("Write this one where it lives");
+                let apply = crate::ui::modes::gated_if(
+                    ui,
+                    &gate,
+                    dirty && !saving,
+                    egui::Button::new("Apply"),
+                )
+                .on_hover_text("Write this one where it lives");
                 apply.widget_info(|| {
                     egui::WidgetInfo::labeled(
                         egui::Role::Button,
@@ -132,8 +137,7 @@ pub fn equations(ui: &mut egui::Ui, ws: &mut Workspace) {
         });
     });
     let can_add = e.add_request().is_some() && !saving;
-    let add = ui
-        .add_enabled(can_add, egui::Button::new("Add parameter"))
+    let add = crate::ui::modes::gated_if(ui, &gate, can_add, egui::Button::new("Add parameter"))
         .clicked();
     if let Some(err) = &e.error {
         ui.colored_label(ui.visuals().error_fg_color, &err.message);

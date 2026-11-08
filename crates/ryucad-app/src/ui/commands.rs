@@ -45,6 +45,8 @@ pub fn state(o: &mut Opened) -> State {
         scale: f64::from(crate::ui::app::scale_of(
             o.ws.settings.get("ui.scale").unwrap_or(&json!(1.0)),
         )),
+        mode: o.ws.mode,
+        annotations: o.view.annotations,
     }
 }
 
@@ -312,6 +314,15 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             crate::ui::shell::open(&mut o.tiles, "equations");
             o.layout_dirty = true;
         }
+        "mode.view" => o.ws.set_mode(crate::core::modes::Mode::View),
+        "mode.annotate" => o.ws.set_mode(crate::core::modes::Mode::Annotate),
+        "mode.edit" => o.ws.set_mode(crate::core::modes::Mode::Edit),
+        "annotations.show" => {
+            crate::ui::shell::open(&mut o.tiles, "annotations");
+            o.layout_dirty = true;
+        }
+        "view.annotations" => toggle(o, "display.annotations", o.view.annotations),
+        "annotation.add" | "annotation.here" => o.view.compose(&o.ws, id, target),
         "measure.clearance" => {
             o.ws.check_clearance();
             o.dialogs.clearance = true;

@@ -14,7 +14,6 @@ use common::{Project, gpu, ryucad};
 use ryucad::view::{self, StandardView};
 use ryucad_app::core::nav::Projector;
 use ryucad_app::core::pick::Picker;
-use ryucad_app::core::workspace::Workspace;
 use ryucad_app::ui::scene::{self, DrawList, Scene, theme};
 use serde_json::json;
 use std::sync::Arc;

@@ -2,6 +2,7 @@
 //! fixed round the viewport, now one module each.
 
 pub mod activity;
+pub mod annotations;
 pub mod branches;
 pub mod changes;
 pub mod conflicts;
@@ -98,11 +99,14 @@ pub fn show(
     match id {
         "viewport" => {
             // The compare bar stays above the viewport, inside its tile.
-            if o.compare_with.is_some() || o.ws.compare.is_some() {
+            // Not over a draft: the mode bar says what is drawn.
+            if o.compare_with.is_some() || o.ws.compare.as_ref().is_some_and(|c| c.to.is_none()) {
                 panels::compare_bar(ui, &mut o.ws, &mut o.compare_with);
                 ui.separator();
             }
             o.view.show(ui, &mut o.ws, gpu);
+            let p = o.view.palette(ui.ctx().theme() == egui::Theme::Dark);
+            crate::ui::modes::frame(ui, &o.ws, o.view.rect, &p);
         }
         "tree" => tree::tree(ui, &mut o.ws, &mut o.view),
         "properties" => scroll(ui, &mut |ui| properties::properties(ui, &mut o.ws)),
@@ -142,6 +146,9 @@ pub fn show(
         "section" => scroll_both(ui, &mut |ui| section::section(ui, &mut o.ws, &mut o.view)),
         "explode" => scroll_both(ui, &mut |ui| explode::explode(ui, &mut o.ws)),
         "equations" => scroll(ui, &mut |ui| equations::equations(ui, &mut o.ws)),
+        "annotations" => scroll(ui, &mut |ui| {
+            annotations::annotations(ui, &mut o.ws, &mut o.view)
+        }),
         _ => {}
     }
 }

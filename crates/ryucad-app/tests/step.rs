@@ -9,7 +9,6 @@ mod common;
 use common::{Project, ryucad};
 use ryucad_app::core::export::Format;
 use ryucad_app::core::step::Import;
-use ryucad_app::core::workspace::Workspace;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

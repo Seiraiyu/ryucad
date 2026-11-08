@@ -347,6 +347,7 @@ pub(crate) fn sized(ui: &mut egui::Ui, edit: egui::TextEdit<'_>, width: f32) -> 
 /// A sketch dimension's value, edited in place. Apply sends `sketch.edit`
 /// against the revision it was read at.
 pub(crate) fn dimension(ui: &mut egui::Ui, ws: &mut Workspace) {
+    let gate = ws.control("sketch.edit");
     let Some(f) = &mut ws.dimension else {
         return;
     };
@@ -372,7 +373,7 @@ pub(crate) fn dimension(ui: &mut egui::Ui, ws: &mut Workspace) {
         rows.quantity("value", &mut f.value);
     });
     let (dirty, saving) = (f.dirty(), f.saving);
-    let foot = form::foot(ui, dirty, saving, ("Apply", "Revert"));
+    let foot = form::foot(ui, dirty, saving, ("Apply", "Revert"), &gate);
     if (foot.revert || keys.revert) && dirty {
         f.value.text.clone_from(&f.value.read);
         f.value.error = None;
@@ -432,6 +433,7 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         .as_ref()
         .and_then(|f| f.foreign.as_ref())
         .map(|p| ws.model.marks.name(p));
+    let gate = ws.control("feature.edit");
     let Some(form) = &mut ws.form else {
         crate::ui::tiles::empty(
             ui,
@@ -524,7 +526,7 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         });
     }
     let (dirty, saving) = (form.dirty(), form.saving);
-    let foot = form::foot(ui, dirty, saving, ("Apply", "Revert"));
+    let foot = form::foot(ui, dirty, saving, ("Apply", "Revert"), &gate);
     if (foot.revert || keys.revert) && dirty {
         form.revert();
     }

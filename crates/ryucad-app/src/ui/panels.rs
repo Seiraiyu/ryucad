@@ -38,6 +38,11 @@ pub fn people(ui: &mut egui::Ui, ws: &mut Workspace) {
             if let Some((text, _)) = &p.status {
                 ui.weak(text);
             }
+            if p.kind == Kind::Human
+                && let Some(m) = mode_mark(p.mode)
+            {
+                ui.weak(format!("· {m}"));
+            }
             // A long request of theirs: `check 3/8 parts`.
             if let Some(r) = ws.progress.of(&p.id, std::time::Instant::now()) {
                 ui.weak(format!("· {}", r.short()));
@@ -228,5 +233,27 @@ pub fn ago(ms: u64) -> String {
         60..3600 => format!("{} min ago", s / 60),
         3600..86_400 => format!("{} h ago", s / 3600),
         _ => format!("{} d ago", s / 86_400),
+    }
+}
+
+/// What the People strip says of a participant's mode: nothing in View.
+pub fn mode_mark(mode: ryucad::live::Mode) -> Option<&'static str> {
+    match mode {
+        ryucad::live::Mode::View => None,
+        ryucad::live::Mode::Annotate => Some("annotating"),
+        ryucad::live::Mode::Edit => Some("editing directly"),
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+    use ryucad::live::Mode;
+
+    #[test]
+    fn a_participant_s_mode_is_named_beside_them() {
+        assert_eq!(mode_mark(Mode::View), None);
+        assert_eq!(mode_mark(Mode::Annotate), Some("annotating"));
+        assert_eq!(mode_mark(Mode::Edit), Some("editing directly"));
     }
 }

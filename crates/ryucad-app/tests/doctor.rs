@@ -5,7 +5,6 @@ mod common;
 
 use common::{Project, ryucad};
 use ryucad_app::core::doctor::Offline;
-use ryucad_app::core::workspace::Workspace;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

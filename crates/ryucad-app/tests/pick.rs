@@ -7,7 +7,6 @@ use ryucad::entity::{EntityKind, Target};
 use ryucad::view::{self, StandardView};
 use ryucad_app::core::nav::Projector;
 use ryucad_app::core::pick::Picker;
-use ryucad_app::core::workspace::Workspace;
 use std::sync::Arc;
 use std::time::Duration;
 

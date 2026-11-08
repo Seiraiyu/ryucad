@@ -59,6 +59,8 @@ phosphor! {
     PROHIBIT = "prohibit" '\u{e3de}',
     PLUS_CIRCLE = "plus-circle" '\u{e3d6}',
     NOTE_PENCIL = "note-pencil" '\u{e34c}',
+    CHAT_CIRCLE_TEXT = "chat-circle-text" '\u{e16e}',
+    PENCIL_SIMPLE = "pencil-simple" '\u{e3b4}',
     ARROWS_DOWN_UP = "arrows-down-up" '\u{e098}',
     MINUS_CIRCLE = "minus-circle" '\u{e32c}',
     ARROW_U_UP_LEFT = "arrow-u-up-left" '\u{e08a}',

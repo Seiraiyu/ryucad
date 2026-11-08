@@ -61,7 +61,6 @@ fn viewing_sized(p: &Project, height: f32) -> Harness<'static, App> {
 }
 
 /// [`viewing_sized`] at the usual height.
-#[allow(dead_code)]
 fn viewing(p: &Project) -> Harness<'static, App> {
     viewing_sized(p, 1000.0)
 }
@@ -5197,4 +5196,213 @@ fn a_datums_row_hides_it_and_its_form_edits_its_distance() {
     });
     let shown = p.ok(&["feature", "show", "p", "d1"]);
     assert_eq!(shown["distance"]["value"], "4 mm");
+}
+
+#[test]
+fn the_annotations_tile_lists_an_agents_reply() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let face = format!("p/base/{}", common::face_up(&p, "p", "base", 1.0));
+    let made = p.ok(&["annotations", "add", &face, "--comment", "Round this"]);
+    let id = made["annotation"]["id"].as_str().unwrap().to_owned();
+    p.ok(&["annotations", "reply", &id, "Which edge?"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "Tools", "Annotations");
+    frames(&mut h, |a| a.opened().ws.annotations.loaded);
+    h.run_steps(2);
+    h.get_by_label("Round this");
+    h.get_by_label("Which edge?");
+    // Choosing its tag chooses it (a marker in the viewport is named
+    // alike, and comes after the tile's in the tree).
+    h.get_all_by_label("#1").next().unwrap().click();
+    frames(&mut h, |a| {
+        a.opened().ws.chosen_annotation.as_deref() == Some(id.as_str())
+    });
+}
+
+#[test]
+fn a_pins_marker_is_drawn_and_chooses_its_annotation() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let face = format!("p/base/{}", common::face_up(&p, "p", "base", 1.0));
+    let made = p.ok(&[
+        "annotations",
+        "add",
+        &face,
+        "--comment",
+        "Here",
+        "--point",
+        "8,0,5",
+    ]);
+    let id = made["annotation"]["id"].as_str().unwrap().to_owned();
+    let mut h = window(&p);
+    frames(&mut h, |a| loaded(a) && a.opened().ws.annotations.loaded);
+    h.run_steps(3);
+    h.get_by_label("#1").click();
+    frames(&mut h, |a| {
+        a.opened().ws.chosen_annotation.as_deref() == Some(id.as_str())
+    });
+    // Preferences turn them off; the tile the click opened still lists
+    // it by its number.
+    h.run_steps(2);
+    let with = h.query_all_by_label("#1").count();
+    p.ok(&["config", "set", "display.annotations", "false"]);
+    frames(&mut h, |a| !a.opened().view.annotations);
+    h.run_steps(2);
+    assert_eq!(h.query_all_by_label("#1").count(), with - 1);
+    p.ok(&["config", "set", "display.annotations", "true"]);
+}
+
+#[test]
+fn a_face_is_annotated_from_its_context_menu() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = viewing(&p);
+    frames(&mut h, loaded);
+    h.state_mut()
+        .opened_mut()
+        .ws
+        .set_mode(ryucad_app::core::modes::Mode::Annotate);
+    h.run_steps(2);
+    // The block's top, away from the boss.
+    let at = on_screen(&h, [0.015, 0.006, 0.005]);
+    h.event(egui::Event::PointerMoved(at));
+    h.run_steps(2);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Default::default(),
+        });
+    }
+    h.run_steps(2);
+    h.get_by_label("Annotate…").click();
+    h.run_steps(2);
+    h.get_by_label("What should change here?")
+        .type_text("Move this hole 5 mm towards the edge");
+    h.run_steps(1);
+    // The box's button: the toolbar's mode button is named alike.
+    h.get_all_by_label("Annotate").last().unwrap().click();
+    frames(&mut h, |a| a.opened().ws.annotations.all.len() == 1);
+    let list = p.ok(&["annotations", "list"]);
+    let a = &list["annotations"][0];
+    assert_eq!(a["comment"], "Move this hole 5 mm towards the edge");
+    let pin = &a["pins"][0];
+    assert!(pin["ref"].as_str().unwrap().starts_with("p/base/"), "{pin}");
+    assert!(
+        (pin["point_m"][2].as_f64().unwrap() - 5.0e-3).abs() < 1e-4,
+        "{pin}"
+    );
+    assert!(!a["view"].is_null(), "the camera is kept");
+}
+
+#[test]
+fn view_disables_editing_and_says_which_mode_enables_it() {
+    use egui_kittest::kittest::NodeT;
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = viewing(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("boss (cylinder)").click();
+    frames(&mut h, |a| a.opened().ws.form.is_some());
+    h.run_steps(2);
+    assert!(h.get_by_label("Apply").accesskit_node().is_disabled());
+    assert!(h.query_by_label("Annotating:").is_none());
+    assert!(h.query_by_label("Direct edit:").is_none());
+}
+
+#[test]
+fn annotate_shows_its_bar_and_the_form_suggests() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = viewing(&p);
+    frames(&mut h, loaded);
+    h.get_all_by_label("Annotate").next().unwrap().click();
+    frames(&mut h, |a| {
+        a.opened().ws.mode == ryucad_app::core::modes::Mode::Annotate
+    });
+    h.run_steps(2);
+    h.get_by_label("Annotating:");
+    h.get_by_label("Stop annotating");
+    h.get_by_label("boss (cylinder)").click();
+    frames(&mut h, |a| a.opened().ws.form.is_some());
+    h.step();
+    h.get_all_by_value("3 mm").next().unwrap().click();
+    h.step();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.step();
+    h.get_all_by_value("3 mm").next().unwrap().type_text("4 mm");
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| a.opened().ws.annotations.all.len() == 1);
+    assert_eq!(
+        p.ok(&["feature", "show", "p", "boss"])["params"]["radius"]["value"],
+        "3 mm"
+    );
+    frames(&mut h, |a| a.opened().ws.model_rev().is_some());
+    h.run_steps(2);
+    h.get_by_label("Show agent's model");
+    h.get_by_label("Stop annotating").click();
+    frames(&mut h, |a| {
+        a.opened().ws.mode == ryucad_app::core::modes::Mode::View
+    });
+}
+
+#[test]
+fn direct_edit_shows_its_bar_and_writes() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = viewing(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("Direct edit").click();
+    frames(&mut h, |a| {
+        a.opened().ws.mode == ryucad_app::core::modes::Mode::Edit
+    });
+    h.run_steps(2);
+    h.get_by_label("Direct edit:");
+    h.get_by_label("boss (cylinder)").click();
+    frames(&mut h, |a| a.opened().ws.form.is_some());
+    h.step();
+    h.get_all_by_value("3 mm").next().unwrap().click();
+    h.step();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.step();
+    h.get_all_by_value("3 mm").next().unwrap().type_text("4 mm");
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
+    });
+    assert_eq!(
+        p.ok(&["feature", "show", "p", "boss"])["params"]["radius"]["value"],
+        "4 mm"
+    );
+    h.get_by_label("Stop editing").click();
+    frames(&mut h, |a| {
+        a.opened().ws.mode == ryucad_app::core::modes::Mode::View
+    });
 }

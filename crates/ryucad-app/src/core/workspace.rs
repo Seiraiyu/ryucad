@@ -50,8 +50,14 @@ enum Pending {
     /// A model edit sent as a proposal in Annotate: what its own answer
     /// was for.
     Proposal(Box<Pending>),
+    /// `annotation.list`.
+    Annotations,
+    /// An annotation made, answered or closed from the window.
+    AnnotationWrite,
     Parts,
-    Rebuild(String),
+    /// A part's report, asked for at this revision (the draft, or the
+    /// working files).
+    Rebuild(String, Option<String>),
     /// A body's mesh, asked for at this hash.
     Mesh(BodyKey, String),
     /// Several bodies of one assembly's occurrences, each at its hash.
@@ -328,6 +334,20 @@ pub struct Workspace {
     /// The window's mode (design 374): View when it opens and whenever it
     /// connects again; Annotate and Direct edit by the person's choice.
     pub mode: crate::core::modes::Mode,
+    /// The project's annotations (design 374), read when the window opens
+    /// and followed from `annotation.changed`.
+    pub annotations: crate::core::annotations::Annotations,
+    /// The annotation chosen in the tile or by its marker.
+    pub chosen_annotation: Option<String>,
+    /// Annotate's Show agent's model: the working files drawn though the
+    /// person has a draft.
+    pub show_agent: bool,
+    /// What the model was last read at: its revision and the draft's
+    /// suggestions laid.
+    drawn: (Option<String>, Vec<String>),
+    /// The Annotations tile's filter and what is typed in it.
+    pub annotation_filter: crate::core::annotations::Filter,
+    pub annotation_ui: crate::core::annotations::Typed,
     pub model: Model,
     /// Parts whose reports are asked for and not yet answered.
     pub loading: BTreeSet<String>,
@@ -535,6 +555,12 @@ impl Workspace {
             root: root.to_path_buf(),
             link,
             mode: Default::default(),
+            annotations: Default::default(),
+            chosen_annotation: None,
+            show_agent: false,
+            drawn: Default::default(),
+            annotation_filter: Default::default(),
+            annotation_ui: Default::default(),
             model: Model::default(),
             loading: BTreeSet::new(),
             wanted: Default::default(),
@@ -650,6 +676,13 @@ impl Workspace {
         self.send(Request::PdmConfig {}, Pending::PdmConfig);
         self.read_appearance();
         self.load_deps();
+        let list = Request::AnnotationList {
+            status: Vec::new(),
+            part: None,
+            by: None,
+            open: false,
+        };
+        self.send(list, Pending::Annotations);
     }
 
     fn load_settings(&mut self) {
@@ -822,7 +855,7 @@ impl Workspace {
         let req = Request::AppearanceGet {
             part: self.model.focus.clone(),
             participant: None,
-            rev: None,
+            rev: self.model_rev(),
         };
         self.send(req, Pending::Appearance(self.looks_asked));
     }
@@ -956,7 +989,7 @@ impl Workspace {
         }
         let req = Request::Measure {
             entities: picks.clone(),
-            rev: None,
+            rev: self.model_rev(),
         };
         self.send(req, Pending::Measure(picks));
     }
@@ -981,7 +1014,7 @@ impl Workspace {
         let req = Request::Mass {
             of: of.to_owned(),
             tolerance: None,
-            rev: None,
+            rev: self.model_rev(),
         };
         self.send(req, Pending::Mass(of.to_owned()));
     }
@@ -1689,11 +1722,20 @@ impl Workspace {
     /// Starts, changes or ends the compare to match this window's
     /// participant.
     fn follow_compare(&mut self) {
-        let want = self.myself().and_then(|m| m.compare.clone());
+        // While the person's draft is drawn, it is painted against the
+        // agent's model (the working files); else the participant's own
+        // compare. A draft's compare isn't sent to the session.
+        let want = match self.model_rev() {
+            Some(draft) => Some(("working".to_owned(), Some(draft))),
+            None => self
+                .myself()
+                .and_then(|m| m.compare.clone())
+                .map(|r| (r, None)),
+        };
         match (&self.compare, want) {
-            (Some(c), Some(w)) if c.rev == w => {}
-            (_, Some(w)) => {
-                self.compare = Some(Compare::new(&w));
+            (Some(c), Some((rev, to))) if c.rev == rev && c.to == to => {}
+            (_, Some((rev, to))) => {
+                self.compare = Some(Compare::between(&rev, to));
                 self.model.generation += 1;
                 self.ask_diff();
                 self.reload_bom();
@@ -1717,7 +1759,7 @@ impl Workspace {
         }
         let req = Request::Diff {
             from: Some(c.rev.clone()),
-            to: None,
+            to: c.to.clone(),
             part: None,
             model: true,
             positions: false,
@@ -1872,6 +1914,157 @@ impl Workspace {
         }
         let was = std::mem::replace(&mut self.mode, mode);
         self.send(Request::ParticipantMode { mode }, Pending::Mode(was));
+        if mode != crate::core::modes::Mode::Annotate {
+            self.show_agent = false;
+        }
+        self.model.generation += 1;
+        self.follow_draft();
+    }
+
+    /// This window's person's draft as a revision, while they have one in
+    /// Annotate: `draft:<name>`.
+    fn draft_rev(&self) -> Option<String> {
+        (self.mode == crate::core::modes::Mode::Annotate
+            && !self.annotations.draft(&self.name).is_empty())
+        .then(|| format!("{}{}", ryucad::session::DRAFT, self.name))
+    }
+
+    /// The revision the window's model is read at: the draft, unless the
+    /// person looks at the agent's model or compares with a revision;
+    /// else the working files.
+    pub fn model_rev(&self) -> Option<String> {
+        let comparing = self.myself().is_some_and(|m| m.compare.is_some());
+        self.draft_rev().filter(|_| !self.show_agent && !comparing)
+    }
+
+    /// The revision forms read at: the draft whenever there is one, since
+    /// proposals run over it (and are guarded by its revisions).
+    pub fn form_rev(&self) -> Option<String> {
+        self.draft_rev()
+    }
+
+    /// Annotate's Show agent's model (`true`), or the person's suggestions.
+    pub fn set_show_agent(&mut self, on: bool) {
+        self.show_agent = on;
+        self.follow_draft();
+    }
+
+    /// Reads the model again when what is drawn changed: the mode, Show
+    /// agent's model, a compare, or the person's draft (a suggestion made,
+    /// applied, closed or gone stale); and follows the compare.
+    fn follow_draft(&mut self) {
+        let now = (self.model_rev(), self.annotations.draft(&self.name));
+        if now != self.drawn {
+            let rev_moved = now.0 != self.drawn.0 || now.0.is_some();
+            self.drawn = now;
+            if rev_moved {
+                let loaded: Vec<String> = self.model.parts.keys().cloned().collect();
+                for id in loaded {
+                    self.loading.remove(&id);
+                    self.ask_part(&id);
+                }
+                for part in self.model.clear_sketches() {
+                    self.fetch_sketches(&part);
+                }
+                self.read_appearance();
+            }
+            if let Some(f) = &self.form {
+                let (part, id) = (f.part.clone(), f.feature.clone());
+                self.read_form(part, id, None);
+            }
+        }
+        self.follow_compare();
+    }
+
+    /// This window's participant name, as annotations name their author.
+    pub fn my_name(&self) -> &str {
+        &self.name
+    }
+
+    /// A comment pinned to `pins`, seen through `camera`.
+    pub fn create_annotation(
+        &mut self,
+        pins: Vec<ryucad::proto::PinArg>,
+        comment: String,
+        camera: Option<Camera>,
+    ) {
+        let req = Request::AnnotationCreate {
+            pins,
+            comment,
+            camera: camera.as_ref().map(camera_arg),
+            with_view: false,
+            author: None,
+        };
+        self.send(req, Pending::AnnotationWrite);
+    }
+
+    pub fn reply_annotation(&mut self, id: &str, text: String) {
+        let req = Request::AnnotationReply {
+            id: id.to_owned(),
+            text,
+            expect: None,
+            author: None,
+        };
+        self.send(req, Pending::AnnotationWrite);
+    }
+
+    pub fn edit_annotation(&mut self, id: &str, comment: String) {
+        let req = Request::AnnotationEdit {
+            id: id.to_owned(),
+            comment: Some(comment),
+            pins: None,
+            expect: None,
+            author: None,
+        };
+        self.send(req, Pending::AnnotationWrite);
+    }
+
+    pub fn delete_annotation(&mut self, id: &str) {
+        let req = Request::AnnotationDelete {
+            id: id.to_owned(),
+            expect: None,
+            author: None,
+        };
+        self.send(req, Pending::AnnotationWrite);
+    }
+
+    /// Takes an annotation's change into the working files (Direct edit).
+    pub fn apply_annotation(&mut self, id: &str) {
+        let req = Request::AnnotationApply {
+            id: id.to_owned(),
+            keep_open: false,
+            expect: None,
+            author: None,
+        };
+        self.send(req, Pending::AnnotationWrite);
+    }
+
+    /// Chooses an annotation (or none): its view restored, and with a
+    /// change, a compare against `annotation:<id>`; leaving one compared
+    /// stops that compare.
+    pub fn choose_annotation(&mut self, id: Option<&str>) {
+        self.chosen_annotation = id.map(str::to_owned);
+        let entry = id.and_then(|i| self.annotations.all.get(i)).cloned();
+        let comparing_one = self
+            .compare
+            .as_ref()
+            .is_some_and(|c| c.rev.starts_with(ryucad::session::ANNOTATION));
+        match entry {
+            Some(e) => {
+                if let Some(c) = e.view {
+                    self.looked = Some(c);
+                }
+                match e.change {
+                    Some(_) => {
+                        self.set_compare(Some(format!("{}{}", ryucad::session::ANNOTATION, e.id)))
+                    }
+                    None if comparing_one => self.set_compare(None),
+                    None => {}
+                }
+            }
+            None if comparing_one => self.set_compare(None),
+            None => {}
+        }
         self.model.generation += 1;
     }
 
@@ -1934,7 +2127,7 @@ impl Workspace {
             part: key.0.clone(),
             feature: key.1.clone(),
             quality: None,
-            rev: None,
+            rev: self.model_rev(),
         };
         self.send(req, Pending::Sweep(key.clone(), revision));
     }
@@ -1970,7 +2163,7 @@ impl Workspace {
             part: key.0.clone(),
             feature: None,
             entity: None,
-            rev: None,
+            rev: self.model_rev(),
         };
         self.send(req, Pending::Made(key, revision));
     }
@@ -1989,7 +2182,7 @@ impl Workspace {
         let req = Request::FeatureShow {
             part: part.clone(),
             id: id.clone(),
-            rev: None,
+            rev: self.form_rev(),
         };
         self.send(req, Pending::Form(part, id, before));
     }
@@ -2017,7 +2210,7 @@ impl Workspace {
             part: part.clone(),
             sketch: sketch.clone(),
             quality: None,
-            rev: None,
+            rev: self.form_rev(),
         };
         self.send(req, Pending::Dim(part, sketch, constraint, before));
     }
@@ -2038,7 +2231,7 @@ impl Workspace {
         let req = Request::ParamList {
             part: Some(part.clone()),
             scope: None,
-            rev: None,
+            rev: self.form_rev(),
         };
         self.send(req, Pending::Params(part, before));
     }
@@ -2114,7 +2307,7 @@ impl Workspace {
     fn read_props(&mut self, part: String, before: Option<Box<PartProps>>) {
         let req = Request::PropsGet {
             part: part.clone(),
-            rev: None,
+            rev: self.form_rev(),
         };
         self.send(req, Pending::Props(part, before));
     }
@@ -2587,7 +2780,14 @@ impl Workspace {
         self.load();
         // A new session knows nothing of this window's compare or focus
         // either.
-        if let Some(rev) = self.compare.as_ref().map(|c| c.rev.clone()) {
+        // (A draft's compare is the window's own: the window is in View
+        // again, so it goes.)
+        if let Some(rev) = self
+            .compare
+            .as_ref()
+            .filter(|c| c.to.is_none())
+            .map(|c| c.rev.clone())
+        {
             self.set_compare(Some(rev));
             self.ask_diff();
         }
@@ -2791,6 +2991,12 @@ impl Workspace {
                 }
                 self.answer(*inner, r);
             }
+            (Pending::Annotations, Ok(a)) => {
+                self.annotations.reset(&a.result);
+                self.model.generation += 1;
+                self.follow_draft();
+            }
+            (Pending::AnnotationWrite, Ok(_)) => {}
             (Pending::Mode(_), Ok(_)) => {}
             (Pending::Mode(was), Err(e)) => {
                 self.mode = was;
@@ -2846,7 +3052,12 @@ impl Workspace {
                 self.model.listed = listed;
                 self.model.generation += 1;
             }
-            (Pending::Rebuild(id), r) => {
+            (Pending::Rebuild(id, rev), r) => {
+                // Asked at a revision the window no longer draws: its
+                // answer is dropped, as another is on its way.
+                if rev != self.model_rev() {
+                    return;
+                }
                 self.loading.remove(&id);
                 // A failed feature fails the rebuild; the report is in the details.
                 let report = match r {
@@ -2858,7 +3069,7 @@ impl Workspace {
             }
             (Pending::People, Ok(a)) => {
                 self.people.reset(&a.result["participants"]);
-                self.follow_compare();
+                self.follow_draft();
                 self.follow_focus();
             }
             (Pending::Compare(n), r) => {
@@ -3652,6 +3863,52 @@ impl Workspace {
 
     fn noted(&mut self, method: &str, params: &Value) {
         match method {
+            "annotation.changed" => {
+                let me = self.name.clone();
+                let news = self.annotations.changed(params, &me);
+                let numbers = self.annotations.numbers();
+                let tag = |id: &str| {
+                    numbers
+                        .get(id)
+                        .map_or_else(String::new, |n| format!(" #{n}"))
+                };
+                let now = Instant::now();
+                for (id, r) in &news.replies {
+                    let text = format!("replied on{}", tag(id));
+                    self.toasts
+                        .annotation(&r.by, r.agent, &text, &r.text, id, now);
+                }
+                for (id, status, note) in &news.closed {
+                    let Some(e) = self.annotations.all.get(id) else {
+                        continue;
+                    };
+                    let by = e
+                        .resolution
+                        .as_ref()
+                        .map_or("agent", |r| r.by.as_str())
+                        .to_owned();
+                    let what = if status == "done" {
+                        "resolved"
+                    } else {
+                        "rejected"
+                    };
+                    // A closed annotation has no number any more: its
+                    // comment names it.
+                    let short: String = e.comment.chars().take(40).collect();
+                    let text = format!("{what} “{short}”");
+                    let note = note.clone().unwrap_or_default();
+                    self.toasts.annotation(&by, true, &text, &note, id, now);
+                }
+                if self
+                    .chosen_annotation
+                    .as_ref()
+                    .is_some_and(|c| !self.annotations.all.contains_key(c))
+                {
+                    self.choose_annotation(None);
+                }
+                self.model.generation += 1;
+                self.follow_draft();
+            }
             "model.changed" => {
                 // What the BOM reads changed, or parts went.
                 let parts = params["parts"].as_array().into_iter().flatten();
@@ -3679,8 +3936,12 @@ impl Workspace {
                         self.model.generation += 1;
                         continue;
                     }
-                    // An assembly's occurrences come only when asked for.
+                    // An assembly's occurrences come only when asked for;
+                    // the draft is rebuilt over the files that moved.
                     if report["kind"] == "assembly" && report["occurrences"].is_null() {
+                        self.ask_part(id);
+                    } else if self.model_rev().is_some() {
+                        self.loading.remove(id);
                         self.ask_part(id);
                     } else {
                         self.part_changed(report);
@@ -3799,7 +4060,7 @@ impl Workspace {
             "app.open" => self.raised = true,
             "participant.changed" => {
                 self.people.changed(params);
-                self.follow_compare();
+                self.follow_draft();
                 self.follow_focus();
                 self.follow_sections();
                 self.follow_explode();
@@ -3937,7 +4198,7 @@ impl Workspace {
                 part: key.0.clone(),
                 sketch: key.1.clone(),
                 quality: None,
-                rev: None,
+                rev: self.model_rev(),
             };
             self.send(req, Pending::Sketch(key, revision));
         }
@@ -3946,7 +4207,7 @@ impl Workspace {
                 part: key.0.clone(),
                 path: key.1.clone(),
                 quality: None,
-                rev: None,
+                rev: self.model_rev(),
             };
             self.send(req, Pending::Path(key, revision));
         }
@@ -3977,7 +4238,7 @@ impl Workspace {
                         features: Vec::new(),
                         quality: quality.clone(),
                         transfer: Some(Transfer::Compact),
-                        rev: None,
+                        rev: self.model_rev(),
                     };
                     self.send(req, Pending::Mesh(key, hash));
                 }
@@ -3995,7 +4256,7 @@ impl Workspace {
                     features,
                     quality: quality.clone(),
                     transfer: Some(Transfer::Compact),
-                    rev: None,
+                    rev: self.model_rev(),
                 };
                 self.send(req, Pending::Meshes(batch.to_vec()));
             }
@@ -4024,7 +4285,7 @@ impl Workspace {
                 features: Vec::new(),
                 quality: Some(level.as_str().to_owned()),
                 transfer: Some(Transfer::Compact),
-                rev: None,
+                rev: self.model_rev(),
             };
             self.send(req, Pending::Level(hash, level));
         }
@@ -4064,11 +4325,12 @@ impl Workspace {
         if !self.loading.insert(id.to_owned()) {
             return;
         }
+        let rev = self.model_rev();
         let req = Request::Rebuild {
             part: Some(id.to_owned()),
-            rev: None,
+            rev: rev.clone(),
         };
-        self.send(req, Pending::Rebuild(id.to_owned()));
+        self.send(req, Pending::Rebuild(id.to_owned(), rev));
     }
 }
 

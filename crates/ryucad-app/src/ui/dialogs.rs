@@ -287,6 +287,10 @@ pub fn settings(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, view: 
         .resizable(false)
         .show(ctx, |ui| {
             ui.label("Saved in this project's ryucad.json, so they travel with it in Git.");
+            if let crate::core::modes::Gate::Refuse(why) = ws.control("config.set") {
+                ui.weak(why);
+                ui.disable();
+            }
             crate::ui::form::plain_grid("project settings", 3)
                 .num_columns(3)
                 .show(ui, |ui| {
@@ -345,6 +349,7 @@ pub fn preferences(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, vie
                     toggle(ui, ws, "display.edges", "Draw edges");
                     toggle(ui, ws, "display.sketches", "Draw sketches");
                     toggle(ui, ws, "display.datums", "Draw datums, paths and helices");
+                    toggle(ui, ws, "display.annotations", "Draw annotations' pins");
                     toggle(ui, ws, "display.nav_cube", "Navigation cube");
                     toggle(ui, ws, "display.triad", "Axis triad");
                     toggle(ui, ws, "display.origin", "Origin axes and planes");
@@ -529,6 +534,7 @@ pub fn appearance(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
     let mut write = None;
     let mut clear = false;
     let released = !ctx.input(|i| i.pointer.any_down());
+    let gate = ws.control("appearance.set");
     window("Appearance", view)
         .open(&mut open)
         .default_width(340.0)
@@ -537,6 +543,16 @@ pub fn appearance(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
             if e.targets.is_empty() {
                 ui.label("Select a face, a solid or an occurrence, or show one part.");
                 return;
+            }
+            match &gate {
+                crate::core::modes::Gate::Refuse(why) => {
+                    ui.weak(*why);
+                    ui.disable();
+                }
+                crate::core::modes::Gate::Propose => {
+                    ui.weak("Sent to the agent as a suggestion (Annotate).");
+                }
+                crate::core::modes::Gate::Send => {}
             }
             let chosen = e.chosen;
             // The label above the box: beside a long reference it wrapped a

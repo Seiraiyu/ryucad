@@ -7,6 +7,7 @@ use eframe::egui;
 
 pub fn picker(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
     let names: Vec<String> = ws.deps.rows.iter().filter_map(|r| r.name.clone()).collect();
+    let gate = ws.control("feature.add");
     let Some(p) = ws.picker.as_mut() else {
         return;
     };
@@ -77,7 +78,7 @@ pub fn picker(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
                 ui.colored_label(ui.visuals().error_fg_color, &e.message);
             }
             let ready = p.label.is_some() && !p.placing;
-            if ui.add_enabled(ready, egui::Button::new("Place")).clicked() {
+            if crate::ui::modes::gated_if(ui, &gate, ready, egui::Button::new("Place")).clicked() {
                 place = true;
             }
         });
