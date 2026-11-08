@@ -11,18 +11,23 @@ use crate::solid::Solids;
 use ryukei::sheet_metal::{BendDirection, SheetOptions};
 use serde_json::{Value, json};
 
-pub fn get(
-    session: &mut Session,
-    part: &str,
+/// The solid `solid` names among `r`'s shown solids, else its one solid,
+/// else its one solid a base flange founded: its founder, the feature
+/// whose result shows, and the solid as it left it. `not_found` for a
+/// solid it lacks, `invalid_param` when it can't choose, the tip's error
+/// when nothing of the solid built.
+pub(crate) fn pick(
+    p: &crate::doc::project::Part,
+    r: &crate::rebuild::PartResult,
+    solids: &Solids,
     solid: Option<&str>,
-    rev: Option<&str>,
-) -> Result<Value> {
-    let (commit, s) = session.at(rev)?;
-    let pid = crate::server::part_id(part)?;
-    let p = s.project().part(&pid)?.clone();
-    let solids = Solids::of(&p);
-    let r = s.rebuilt(&pid)?.clone();
-    let shown = r.shown(&solids);
+) -> Result<(
+    crate::doc::id::Id,
+    crate::doc::id::Id,
+    std::sync::Arc<crate::rebuild::Built>,
+)> {
+    let pid = &p.id;
+    let shown = r.shown(solids);
     let pick = match solid {
         Some(x) => shown
             .iter()
@@ -38,7 +43,7 @@ pub fn get(
         None => {
             let sheet: Vec<_> = shown
                 .iter()
-                .filter(|y| super::founder(&p, y.solid).is_some())
+                .filter(|y| super::founder(p, y.solid).is_some())
                 .collect();
             match (shown.as_slice(), sheet.as_slice()) {
                 ([one], _) => one,
@@ -55,7 +60,7 @@ pub fn get(
         }
     };
     let solid = pick.solid.clone();
-    let Some((shown, built)) = pick.state else {
+    let Some((at, built)) = pick.state else {
         return Err(pick.error.cloned().unwrap_or_else(|| {
             Error::new(
                 Code::DependencyFailed,
@@ -64,6 +69,22 @@ pub fn get(
             .with("solid", &solid)
         }));
     };
+    Ok((solid, at.clone(), built.clone()))
+}
+
+pub fn get(
+    session: &mut Session,
+    part: &str,
+    solid: Option<&str>,
+    rev: Option<&str>,
+) -> Result<Value> {
+    let (commit, s) = session.at(rev)?;
+    let pid = crate::server::part_id(part)?;
+    let p = s.project().part(&pid)?.clone();
+    let solids = Solids::of(&p);
+    let r = s.rebuilt(&pid)?.clone();
+    let (solid, shown, built) = pick(&p, &r, &solids, solid)?;
+    let built = built.as_ref();
     let options = SheetOptions::default();
     let model = ryukei::sheet_metal::recognize(&built.body, &options)
         .map_err(|e| super::refusal(&pid, &solid, "sheet", (&solid, built), e))?;
@@ -121,7 +142,7 @@ pub fn get(
         "flanges": flanges,
         "bends": bends,
     });
-    if let Some((u, fl)) = super::unfold::in_force(&p, &solids, &solid, shown, &r) {
+    if let Some((u, fl)) = super::unfold::in_force(&p, &solids, &solid, &shown, &r) {
         v["state"] = json!(if fl.partial { "partly" } else { "flat" });
         v["unfold"] = json!(u);
         v["unfolded"] = Value::Array(

@@ -989,3 +989,148 @@ fn a_closed_tube_is_a_bend_loop_until_a_rip_opens_it() {
     let v = must(&mut s, "sheet.get", json!({"part": "p", "solid": "tube"}));
     assert_eq!(v["state"], "flat", "{v}");
 }
+
+use ryucad::sheet_metal::flat::{self, From, Options};
+
+/// The L of `an_l_a_u_and_a_z_from_open_sketches`, 20 mm deep, at a
+/// K-factor of 0.44: runs of 39 and 29 mm and a quarter turn of 1 mm
+/// inside, 1.5 mm thick.
+fn l_part() -> (tempfile::TempDir, Session) {
+    let (dir, mut s) = project();
+    chain(
+        &mut s,
+        "l",
+        "xy",
+        &[[40.0, 0.0], [0.0, 0.0], [0.0, 30.0]],
+        false,
+    );
+    base(&mut s, "bl", "l", json!({"depth": "20 mm"}));
+    (dir, s)
+}
+
+/// The L's flat length in mm: its runs and its bend's developed length.
+fn l_flat_mm(k: f64) -> f64 {
+    let (t, r) = (1.5, 1.0);
+    (40.0 - r) + (30.0 - r) + Q * (r + k * t)
+}
+
+fn outline_mm2(f: &flat::FlatOf) -> f64 {
+    f.pattern
+        .loops
+        .iter()
+        .filter(|l| l.outer)
+        .map(|l| l.area())
+        .sum::<f64>()
+        * 1e6
+}
+
+#[test]
+fn a_folded_solid_is_unfolded_whole_in_memory() {
+    let (_dir, mut s) = l_part();
+    let f = flat::of(&mut s, "p", None, None, &Options::default())
+        .unwrap()
+        .1;
+    assert_eq!(f.solid.as_str(), "bl");
+    assert_eq!(f.from, From::Whole);
+    assert!(
+        (outline_mm2(&f) - 20.0 * l_flat_mm(0.44)).abs() < 1e-6,
+        "{}",
+        outline_mm2(&f)
+    );
+    assert_eq!(f.pattern.bend_lines.len(), 1);
+    // The bend named as sheet.get names it.
+    let sheet = must(&mut s, "sheet.get", json!({"part": "p"}));
+    assert_eq!(f.bends[0], sheet["bends"][0]["bend"].as_str().unwrap());
+    // Asked again: the same, from the session's cache.
+    let again = flat::of(&mut s, "p", None, None, &Options::default())
+        .unwrap()
+        .1;
+    assert!(std::sync::Arc::ptr_eq(&f, &again));
+    // An override: the bend at a K-factor of a half.
+    let o = Options {
+        fixed: None,
+        bends: vec![json!({"bend": f.bends[0], "k_factor": "0.5"})],
+    };
+    let half = flat::of(&mut s, "p", None, None, &o).unwrap().1;
+    assert!((outline_mm2(&half) - 20.0 * l_flat_mm(0.5)).abs() < 1e-6);
+}
+
+#[test]
+fn a_flat_in_force_is_redrawn_with_its_cuts() {
+    let (_dir, mut s) = l_part();
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "unfold", "id": "u", "target": "bl"}),
+    );
+    // A 4 mm hole through the flat's first run, 10 mm from its end.
+    let u = flat::of(&mut s, "p", None, None, &Options::default())
+        .unwrap()
+        .1;
+    assert_eq!(u.from, From::Unfold(Id::parse("u", "feature").unwrap()));
+    let before = outline_mm2(&u);
+    let holes = |f: &flat::FlatOf| f.pattern.loops.iter().filter(|l| !l.outer).count();
+    assert_eq!(holes(&u), 0);
+    // The flat lies in y = -1.5 mm, so the hole is sketched on zx (normal
+    // y), at x = 30 mm, z = 10 mm.
+    add(&mut s, json!({"type": "sketch", "id": "h", "plane": "zx"}));
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "h", "ops": [
+        {"op": "add", "id": "p1", "type": "point", "at": [10.0, 30.0]},
+        {"op": "add", "type": "fix", "a": "p1"}]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "d", "sketch": "h", "diameter": "4 mm",
+                       "depth": "through_all", "targets": ["bl"]}),
+    );
+    let cut = flat::of(&mut s, "p", None, None, &Options::default())
+        .unwrap()
+        .1;
+    assert_eq!(holes(&cut), 1);
+    assert_eq!(cut.pattern.bend_lines, u.pattern.bend_lines);
+    assert!((outline_mm2(&cut) - before).abs() < 1e-9);
+    // The unfold's own made this flat: no fixed face, no overrides.
+    let o = Options {
+        fixed: Some(format!("p/bl/{}", u.bends[0].rsplit('/').next().unwrap())),
+        bends: vec![],
+    };
+    let e = flat::of(&mut s, "p", None, None, &o).unwrap_err();
+    assert_eq!(e.code, Code::InvalidParam, "{e}");
+}
+
+#[test]
+fn a_flat_says_what_it_cant_take() {
+    let (_dir, mut s) = project();
+    chain(
+        &mut s,
+        "b",
+        "xy",
+        &[[0.0, 0.0], [30.0, 0.0], [30.0, 20.0], [0.0, 20.0]],
+        true,
+    );
+    // A block made by an extrude: no base flange, no allowance.
+    add(
+        &mut s,
+        json!({"type": "extrude", "id": "x", "sketch": "b", "extent": {"type": "blind", "length": "2 mm"}}),
+    );
+    let f = flat::of(&mut s, "p", None, None, &Options::default());
+    // A plate: no bends, so nothing wants an allowance; its outline alone.
+    let f = f.unwrap().1;
+    assert!(f.pattern.bend_lines.is_empty());
+    assert!((outline_mm2(&f) - 600.0).abs() < 1e-6);
+    let (_dir, mut s) = l_part();
+    let e = flat::of(&mut s, "p", Some("nope"), None, &Options::default()).unwrap_err();
+    assert_eq!(e.code, Code::NotFound);
+    let o = Options {
+        fixed: None,
+        bends: vec![json!({"bend": "p/bl/00000000000000000000000000000001", "k_factor": "0.5"})],
+    };
+    let e = flat::of(&mut s, "p", None, None, &o).unwrap_err();
+    assert_eq!(
+        (e.code, e.details["pointer"].as_str()),
+        (Code::InvalidParam, Some("/bends/0/bend"))
+    );
+}

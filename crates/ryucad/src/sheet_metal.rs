@@ -4,6 +4,7 @@
 //! agent's terms; and the sheet metal report ([`report`]).
 
 pub mod allowance;
+pub mod flat;
 pub mod report;
 pub mod section;
 pub mod unfold;
