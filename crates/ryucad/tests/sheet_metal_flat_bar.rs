@@ -260,7 +260,7 @@ fn the_bar() {
     let pid = Id::parse("p", "part").unwrap();
     let mut cold = Session::open(dir.path()).unwrap();
     let t = Instant::now();
-    let r = one_thread(|| cold.rebuilt(&pid).map(|r| r.clone())).unwrap();
+    let r = one_thread(|| cold.rebuilt(&pid).cloned()).unwrap();
     let ryucad_s = t.elapsed().as_secs_f64();
     for (id, out) in &r.features {
         assert!(out.is_ok(), "{id} failed: {:?}", out.as_ref().err());
