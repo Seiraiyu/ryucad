@@ -518,20 +518,7 @@ const PROJECTION_FINDS: &[(&str, &[u8])] = &[];
 #[test]
 fn projection_finds_view_and_cut_cleanly() {
     for (name, bytes) in PROJECTION_FINDS {
-        let Some((&dir, rest)) = bytes.split_first() else {
-            continue;
-        };
-        let Some((body, _)) = ryukei_testkit::blend_bytes::body(rest) else {
-            continue;
-        };
-        let v = ryukei_testkit::projection::look(ryukei_testkit::projection::grid_direction(dir));
-        let placed = [ryukei::project::Placed {
-            body: &body,
-            place: ryukei::geom::Rigid::IDENTITY,
-        }];
-        match ryukei::project::view(&placed, &v, &Default::default()) {
-            Ok(_) | Err(ryukei::Error::InvalidView(_)) => {}
-            Err(e) => panic!("{name}: {e:?}"),
-        }
+        eprintln!("projection find {name}");
+        ryukei_testkit::projection::check_bytes(bytes);
     }
 }

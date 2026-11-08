@@ -78,13 +78,13 @@ name = "boolean_kernels"
 harness = false
 required-features = ["occt", "smlib"]
 
-# Three-way: SMLib's deviation and the exact values come from OCCT.
 # Hidden lines against OCCT's HLRBRep_Algo, and the race (design 326,
 # plan 10.C).
 [[test]]
 name = "projection"
 required-features = ["occt"]
 
+# Three-way: SMLib's deviation and the exact values come from OCCT.
 [[test]]
 name = "kernels"
 required-features = ["occt", "smlib"]
