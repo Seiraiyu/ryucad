@@ -1904,6 +1904,20 @@ fn feature_model(
         },
         _ => {}
     }
+    // An unfold's pattern on each side: how many bend lines, and its box
+    // in the pattern's frame, in meters.
+    if let (Some(crate::rebuild::Output::Solids(x)), Some(crate::rebuild::Output::Solids(y))) =
+        (ok(a), ok(b))
+        && let (Some(p), Some(q)) = (&x.flat, &y.flat)
+        && x.hash != y.hash
+    {
+        let sum = |f: &crate::rebuild::Flat| {
+            let (lo, hi) = (f.pattern.bounds.min(), f.pattern.bounds.max());
+            json!({"bends": f.pattern.bend_lines.len(),
+                   "box_m": [[lo.x, lo.y], [hi.x, hi.y]]})
+        };
+        v["flat"] = json!({"from": sum(p), "to": sum(q)});
+    }
     v
 }
 
@@ -2507,6 +2521,38 @@ mod tests {
         // The path along it changed only as its result did.
         assert_eq!(f["w"]["status"], "same");
         assert!(f["w"]["model"]["path"]["to"]["length_m"].as_f64().unwrap() > a);
+    }
+
+    #[test]
+    fn a_model_diff_says_how_an_unfolds_pattern_moved() {
+        use crate::git::tests::git;
+        use crate::server::tests::{call, fresh};
+        let (dir, mut s) = fresh();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        crate::sheet_metal::tests::tray(&mut s, "p");
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "unfold", "id": "u", "target": "plate"}),
+        )
+        .unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "start"]);
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "u", "allowance": {"k_factor": "0.3"}}),
+        )
+        .unwrap();
+        let v = call(&mut s, "diff", json!({"model": true})).unwrap();
+        let flat = &v["parts"]["p"]["features"]["u"]["model"]["flat"];
+        assert_eq!(flat["from"]["bends"], flat["to"]["bends"], "{v}");
+        assert!(flat["from"]["bends"].as_u64().unwrap() > 0, "{v}");
+        // A smaller K-factor makes every strip shorter: the box narrower.
+        let width =
+            |s: &Value| s["box_m"][1][0].as_f64().unwrap() - s["box_m"][0][0].as_f64().unwrap();
+        assert!(width(&flat["to"]) < width(&flat["from"]), "{flat}");
     }
 
     #[test]
