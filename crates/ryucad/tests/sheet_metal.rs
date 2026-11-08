@@ -3,7 +3,10 @@
 //! closed form; a tray of four flanges against the kernel's own call;
 //! names kept across edits of every size, a hole on a flange following
 //! them; refusals in the agent's terms. Every body passes the kernel's
-//! checks, the self-intersection check among them.
+//! checks, the self-intersection check among them; unfolds against
+//! developed lengths, a slot cut across a bend line in the flat and
+//! refolded, a partial unfold, names kept through unfold and refold, and a
+//! closed tube's bend loop cleared by a rip (plan 16.B).
 
 use ryucad::doc::id::Id;
 use ryucad::error::Code;
@@ -569,4 +572,420 @@ fn the_sheet_report_refuses_what_isnt_sheet_metal() {
     // gives it an allowance.
     let v = must(&mut s, "sheet.get", json!({"part": "p", "solid": "other"}));
     assert_eq!(v["allowance"], Value::Null, "{v}");
+}
+
+/// Unfold `id` of `target` with `extra`'s fields.
+fn unfold(s: &mut Session, id: &str, target: &str, extra: Value) -> Value {
+    let mut v = json!({"type": "unfold", "id": id, "target": target});
+    for (k, x) in extra.as_object().unwrap() {
+        v[k] = x.clone();
+    }
+    add(s, v)
+}
+
+fn same(a: ryukei::measure::Value, b: ryukei::measure::Value) {
+    assert!(
+        (a.value() - b.value()).abs() <= a.bound() + b.bound() + 1e-15,
+        "{a:?} against {b:?}"
+    );
+}
+
+#[test]
+fn an_l_a_u_and_a_z_unfold_to_their_developed_lengths() {
+    let (_dir, mut s) = project();
+    let (t, r, d, k) = (1.5, 1.0, 20.0, 0.44);
+    let ba = |phi: f64| phi.abs() * (r + k * t);
+    let lose = r + t;
+    for (sk, base_id, pts, straight, corners) in [
+        (
+            "l",
+            "bl",
+            vec![[40.0, 0.0], [0.0, 0.0], [0.0, 30.0]],
+            (40.0 - r) + (30.0 - r),
+            vec![Q],
+        ),
+        (
+            "u",
+            "bu",
+            vec![[100.0, 30.0], [100.0, 0.0], [140.0, 0.0], [140.0, 30.0]],
+            (30.0 - lose) + (40.0 - 2.0 * lose) + (30.0 - lose),
+            vec![Q, Q],
+        ),
+        (
+            "z",
+            "bz",
+            vec![[200.0, 0.0], [220.0, 0.0], [220.0, 25.0], [245.0, 25.0]],
+            (20.0 - lose) + (25.0 - r - lose) + (25.0 - r),
+            vec![Q, -Q],
+        ),
+    ] {
+        chain(&mut s, sk, "xy", &pts, false);
+        base(&mut s, base_id, sk, json!({"depth": "20 mm"}));
+        let u = format!("u_{base_id}");
+        unfold(&mut s, &u, base_id, json!({}));
+        let flat_len = straight + corners.iter().map(|p| ba(*p)).sum::<f64>();
+        holds(certified(&mut s, &u, base_id), d * t * flat_len);
+        let v = must(&mut s, "sheet.get", json!({"part": "p", "solid": base_id}));
+        assert_eq!(v["state"], "flat", "{v}");
+    }
+}
+
+#[test]
+fn a_deduction_unfolds_as_the_k_factor_it_equals() {
+    let (_dir, mut s, rim, _) = plated();
+    add(
+        &mut s,
+        json!({"type": "flange", "id": "f", "edges": [rim], "angle": "90 deg", "length": "20 mm"}),
+    );
+    let (r, t, k) = (1e-3, 1.5e-3, 0.44);
+    // bd = 2 (r + t) tan(θ / 2) - θ (r + k t), at θ = 90°.
+    let bd = 2.0 * (r + t) - Q * (r + k * t);
+    unfold(&mut s, "uk", "plate", json!({}));
+    let by_k = certified(&mut s, "uk", "plate");
+    must(&mut s, "feature.delete", json!({"part": "p", "id": "uk"}));
+    unfold(
+        &mut s,
+        "ud",
+        "plate",
+        json!({"allowance": {"deduction": format!("{} mm", bd * 1e3)}}),
+    );
+    same(certified(&mut s, "ud", "plate"), by_k);
+}
+
+#[test]
+fn a_tray_unfolds_to_its_plate_and_strips_keeping_its_volume() {
+    let (_dir, mut s) = project();
+    chain(
+        &mut s,
+        "s",
+        "xy",
+        &[[0.0, 0.0], [60.0, 0.0], [60.0, 40.0], [0.0, 40.0]],
+        true,
+    );
+    base(
+        &mut s,
+        "plate",
+        "s",
+        json!({"allowance": {"k_factor": "0.5"},
+        "relief": {"kind": "rectangular", "width": "1 mm", "depth": "0.5 mm"}}),
+    );
+    let b = body(&mut s, "plate");
+    let z = 1.5;
+    let corners = [
+        [0.0, 0.0, z],
+        [60.0, 0.0, z],
+        [60.0, 40.0, z],
+        [0.0, 40.0, z],
+    ];
+    let rims: Vec<String> = (0..4)
+        .map(|i| edge(&b, "plate", corners[i], corners[(i + 1) % 4]))
+        .collect();
+    add(
+        &mut s,
+        json!({"type": "flange", "id": "f", "edges": rims, "angle": "90 deg",
+                       "length": "15 mm", "setback": "5 mm"}),
+    );
+    unfold(&mut s, "u", "plate", json!({}));
+    same(
+        certified(&mut s, "u", "plate"),
+        certified(&mut s, "f", "plate"),
+    );
+    let v = must(&mut s, "sheet.get", json!({"part": "p"}));
+    assert_eq!(
+        (v["state"].as_str(), v["unfolded"].as_array().map(Vec::len)),
+        (Some("flat"), Some(4)),
+        "{v}"
+    );
+    // Four bend lines, every one in the rebuild report.
+    let rb = must(&mut s, "rebuild", json!({"part": "p"}));
+    let u = rb["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == "u")
+        .unwrap()
+        .clone();
+    assert_eq!(u["flat"]["bends"], 4, "{u}");
+}
+
+/// The plated plate flanged on its right edge and unfolded about its top
+/// at a K-factor of a half; the plate's top face as a reference.
+fn unfolded() -> (tempfile::TempDir, Session) {
+    let (dir, mut s, rim, _) = plated();
+    add(
+        &mut s,
+        json!({"type": "flange", "id": "f", "edges": [rim], "angle": "90 deg", "length": "20 mm"}),
+    );
+    let v = must(&mut s, "sheet.get", json!({"part": "p"}));
+    // The plate's top: the side whose faces the plate's base flange made
+    // and which lies at z = 1.5 mm.
+    let b = body(&mut s, "f");
+    let top = v["flanges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|f| f["sides"].as_array().unwrap().clone())
+        .flat_map(|side| side.as_array().unwrap().clone())
+        .map(|f| f.as_str().unwrap().to_owned())
+        .find(|f| {
+            let n = f.rsplit('/').next().unwrap();
+            b["faces"].as_array().unwrap().iter().any(|x| {
+                x["name"] == n
+                    && x["origin"]["feature"] == "plate"
+                    && x["surface"]["type"] == "plane"
+                    && (x["surface"]["frame"]["origin"][2].as_f64().unwrap() - 1.5e-3).abs() < 1e-12
+            })
+        })
+        .expect("the plate's top");
+    unfold(
+        &mut s,
+        "u",
+        "plate",
+        json!({"fixed_face": top, "allowance": {"k_factor": "0.5"}}),
+    );
+    (dir, s)
+}
+
+#[test]
+fn a_slot_across_a_bend_line_in_the_flat_refolds_checked_clean() {
+    let (_dir, mut s) = unfolded();
+    // The strip runs from x = 57.5 for θ (r + t / 2): a 4 × 4 mm slot
+    // across its middle crosses both bend lines.
+    let ba = Q * 1.75;
+    let mid = 57.5 + ba / 2.0;
+    chain(
+        &mut s,
+        "slot_s",
+        "xy",
+        &[
+            [mid - 2.0, 18.0],
+            [mid + 2.0, 18.0],
+            [mid + 2.0, 22.0],
+            [mid - 2.0, 22.0],
+        ],
+        true,
+    );
+    add(
+        &mut s,
+        json!({"type": "extrude", "id": "slot", "sketch": "slot_s", "operation": "cut",
+                       "targets": ["plate"], "extent": {"type": "through_all", "both": true}}),
+    );
+    let flat = certified(&mut s, "u", "plate");
+    let cut = certified(&mut s, "slot", "plate");
+    holds(cut, flat.value() * 1e9 - 4.0 * 4.0 * 1.5);
+    add(
+        &mut s,
+        json!({"type": "refold", "id": "rf", "target": "plate", "unfold": "u"}),
+    );
+    // Checked clean (`certified` checks), with the cut flat's volume.
+    same(certified(&mut s, "rf", "plate"), cut);
+    let v = must(&mut s, "sheet.get", json!({"part": "p"}));
+    assert_eq!(
+        (v["state"].as_str(), v["bends"].as_array().map(Vec::len)),
+        (Some("folded"), Some(1)),
+        "{v}"
+    );
+    // The cut in the flat split the slot's walls at the bend lines, so
+    // the refold kept every name the cut made, origins and all.
+    let names = |s: &mut Session, f: &str| -> std::collections::BTreeSet<String> {
+        body(s, f)["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(names(&mut s, "rf"), names(&mut s, "slot"));
+}
+
+#[test]
+fn names_last_through_unfold_and_refold_across_edits() {
+    let (_dir, mut s) = unfolded();
+    add(
+        &mut s,
+        json!({"type": "refold", "id": "rf", "target": "plate", "unfold": "u"}),
+    );
+    let names = |s: &mut Session, f: &str| -> std::collections::BTreeSet<String> {
+        body(s, f)["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let folded = names(&mut s, "f");
+    assert_eq!(names(&mut s, "u"), folded);
+    assert_eq!(names(&mut s, "rf"), folded);
+    for (id, edit) in [
+        ("f", json!({"angle": "80 deg"})),
+        ("f", json!({"length": "25 mm"})),
+        ("plate", json!({"radius": "2 mm"})),
+        ("plate", json!({"thickness": "1.2 mm"})),
+        ("u", json!({"allowance": {"k_factor": "0.4"}})),
+    ] {
+        let mut e = edit.clone();
+        e["part"] = json!("p");
+        e["id"] = json!(id);
+        must(&mut s, "feature.edit", e);
+        let now = names(&mut s, "f");
+        assert_eq!(names(&mut s, "u"), now, "{id}: {edit}");
+        assert_eq!(names(&mut s, "rf"), now, "{id}: {edit}");
+        assert_eq!(now, folded, "{id}: {edit}");
+    }
+}
+
+#[test]
+fn a_partial_unfold_leaves_the_rest_folded() {
+    let (_dir, mut s, rim, _) = plated();
+    let b = body(&mut s, "plate");
+    let left = edge(&b, "plate", [0.0, 0.0, 1.5], [0.0, 40.0, 1.5]);
+    add(
+        &mut s,
+        json!({"type": "flange", "id": "f", "edges": [rim, left], "angle": "90 deg",
+                       "length": "20 mm"}),
+    );
+    let v = must(&mut s, "sheet.get", json!({"part": "p"}));
+    let first = v["bends"][0]["bend"].as_str().unwrap().to_owned();
+    unfold(&mut s, "u", "plate", json!({"only": [first]}));
+    let v = must(&mut s, "sheet.get", json!({"part": "p"}));
+    assert_eq!(
+        (v["state"].as_str(), v["bends"].as_array().map(Vec::len)),
+        (Some("partly"), Some(1)),
+        "{v}"
+    );
+    // A partial unfold keeps the volume at a K-factor of a half too.
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "plate", "allowance": {"k_factor": "0.5"}}),
+    );
+    same(
+        certified(&mut s, "u", "plate"),
+        certified(&mut s, "f", "plate"),
+    );
+}
+
+/// Sketch `id` on xy: a square ring `side` mm across with its outer
+/// corners rounded at `r + t` and its inner at `r`, about the same
+/// centres, so it extrudes to a closed tube of four bends.
+fn ring(s: &mut Session, id: &str, side: f64, r: f64, t: f64) {
+    add(s, json!({"type": "sketch", "id": id, "plane": "xy"}));
+    let ro = r + t;
+    let c = [
+        [ro, ro],
+        [side - ro, ro],
+        [side - ro, side - ro],
+        [ro, side - ro],
+    ];
+    let mut ops = Vec::new();
+    // Only the centres are fixed: fixing an arc's ends as well makes its
+    // end's place on its circle redundant.
+    let point = |ops: &mut Vec<Value>, name: String, at: [f64; 2]| {
+        ops.push(json!({"op": "add", "id": name, "type": "point", "at": at}));
+    };
+    for (k, cc) in c.iter().enumerate() {
+        point(&mut ops, format!("k{k}"), *cc);
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("k{k}")}));
+    }
+    // Each loop counterclockwise: side k runs from corner k to corner k+1,
+    // `out_of[k]` from them, then the arc about corner k+1 turns a quarter
+    // to the next side.
+    let out_of = [[0.0, -1.0], [1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]];
+    for (tag, rad) in [("o", ro), ("i", r)] {
+        for k in 0..4 {
+            let n = (k + 1) % 4;
+            let a = [c[k][0] + out_of[k][0] * rad, c[k][1] + out_of[k][1] * rad];
+            let b = [c[n][0] + out_of[k][0] * rad, c[n][1] + out_of[k][1] * rad];
+            point(&mut ops, format!("{tag}a{k}"), a);
+            point(&mut ops, format!("{tag}b{k}"), b);
+        }
+        for k in 0..4 {
+            let n = (k + 1) % 4;
+            ops.push(
+                json!({"op": "add", "id": format!("{tag}l{k}"), "type": "line",
+                            "start": format!("{tag}a{k}"), "end": format!("{tag}b{k}")}),
+            );
+            ops.push(
+                json!({"op": "add", "id": format!("{tag}r{k}"), "type": "arc",
+                            "center": format!("k{n}"), "start": format!("{tag}b{k}"),
+                            "end": format!("{tag}a{n}")}),
+            );
+        }
+    }
+    must(
+        s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": id, "ops": ops}),
+    );
+}
+
+#[test]
+fn a_closed_tube_is_a_bend_loop_until_a_rip_opens_it() {
+    let (_dir, mut s) = project();
+    ring(&mut s, "r", 40.0, 1.0, 1.5);
+    add(
+        &mut s,
+        json!({"type": "extrude", "id": "tube", "sketch": "r",
+                       "extent": {"type": "blind", "length": "20 mm"}}),
+    );
+    // No base flange founded it: an unfold gives its allowance.
+    let e = call(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "unfold", "id": "u", "target": "tube"}),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.details["pointer"].as_str()),
+        (Code::InvalidParam, Some("/allowance")),
+        "{e}"
+    );
+    // A loop: refused, its hint to rip it. (A write that recognizes the
+    // tube already refuses it so: either way, the same refusal.)
+    let e = call(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "unfold", "id": "u",
+        "target": "tube", "allowance": {"k_factor": "0.5"}}),
+    );
+    let e = match e {
+        Err(e) => e,
+        Ok(_) => {
+            let part = Id::parse("p", "part").unwrap();
+            let r = s.rebuilt(&part).unwrap();
+            r.features
+                .iter()
+                .find(|(i, _)| i.as_str() == "u")
+                .unwrap()
+                .1
+                .clone()
+                .unwrap_err()
+        }
+    };
+    assert_eq!(
+        (e.code, e.details["reason"].as_str()),
+        (Code::SheetMetalFailed, Some("bend_loop")),
+        "{e}"
+    );
+    assert!(e.details["hint"].as_str().unwrap().contains("rip"), "{e}");
+    let _ = call(&mut s, "feature.delete", json!({"part": "p", "id": "u"}));
+    // A rip: a 0.5 mm slit through the bottom wall, the whole depth.
+    add(
+        &mut s,
+        json!({"type": "box", "id": "rip", "params": {"x": 0.5, "y": 3, "z": 30},
+                       "placement": {"origin": [19.75, -0.5, -5]},
+                       "operation": "cut", "targets": ["tube"]}),
+    );
+    unfold(
+        &mut s,
+        "u",
+        "tube",
+        json!({"allowance": {"k_factor": "0.5"}}),
+    );
+    same(
+        certified(&mut s, "u", "tube"),
+        certified(&mut s, "rip", "tube"),
+    );
+    let v = must(&mut s, "sheet.get", json!({"part": "p", "solid": "tube"}));
+    assert_eq!(v["state"], "flat", "{v}");
 }
