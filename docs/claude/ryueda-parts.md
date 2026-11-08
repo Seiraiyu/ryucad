@@ -29,3 +29,55 @@ The design is document 347 in the Coxswain planning project `ryucad-ryukei`; thi
 - **Testing.** Unit tests per module (quantities written as text, typed judging, the fake fetcher, the manifest and table, categories, attributes with the published table's shapes written by hand, shards, the index and its swap, the sync stopped and failing, the source and connectors, HTTPS against a local server, long requests, sync, search, sources, show, `--from` both ways, `parts.json`, supply findings, refresh); `tests/cli.rs`'s `the_jlc_catalogue_from_the_cli` (both ways, against `tests/support/fake_jlc.rs`, a local HTTP site serving the fixture), `a_sync_is_cancelled_by_its_token_and_keeps_the_old_catalogue` and `parts_configure_from_the_cli`, every CLI test with a parts cache of its own; the `parts.jlc.search`, `parts.jlc.show`, `parts.jlc.sources` and `parts.supply` golden lines (a catalogue of the seeded library's offers, `support/parts.rs`' `lcsc_parts`; the determinism harness gives every run an empty cache); the `parts` fuzz target and `tests/bytes.rs` reading jlcparts' files raw and gzipped (`required-features = ["testing"]`); `tests/connectors.rs`.
 - **Measured** on cox-worker-3 (Intel Core Ultra 5 250K Plus, 18 threads, shared, load 0.2 to 2.0), release, 2026-11-06. The live sync (`tests/parts_live.rs`, `RYUEDA_PARTS_LIVE=1 cargo test -p ryueda --release --test parts_live -- --ignored --nocapture`, into a temporary cache only): jlcparts' `totalComponents` 370,668; 1,122 files, 31.3 MB downloaded, in 50.1 s (83.3 s for the publication six hours before), one file after another; the index 42.5 MB on disk; peak RSS 1.33 GB. Of 37,192 capacitors, 36,611 have a capacitance, 34,934 a voltage rating, 37,101 a package, 33,827 a tolerance and 15,811 a dielectric; of 71,014 resistors, 70,879 a resistance and 70,735 a power rating. The publication six hours before typed far fewer dielectrics (1,003) and resistor powers (1,103): jlcparts' normalization moves, which this test is for. The bar (`tests/bar.rs`' `the_jlc_catalogue_searches_under_its_bar`, 370,668 seeded parts, one thread, `RYUEDA_BARS=1`, three runs): the first search, loading the capacitors, 272 to 277 ms; the worst of five after it 6.9 to 7.3 ms (bar 500 ms); RSS 732 MB (six runs, three after the seeded values were made from their text).
 - **Limits.** No lifecycle until 6.C. Optoelectronics' parts that aren't LEDs read as `led`. A catalogue loaded is held in memory a category at a time. A sync is the whole catalogue each time, one file at a time.
+
+## Distributors (decided in ryueda phase 6)
+
+The design is document 347 in the Coxswain planning project `ryucad-ryukei`; this is its plan 6.C (phase 5).
+
+- **Distributors are connectors.** A live source is reached only through its module and one line in `ryueda_parts::distributor::DISTRIBUTORS`. Each `Distributor` gives:
+  - its `name`;
+  - the `suppliers` whose offer SKUs are its keys;
+  - its attribution and `ttl`;
+  - its rate `limits`;
+  - its `keys` (`KeySpec`), `base` and `open`.
+
+  Everything else iterates the table, as 6.B's catalogues do through `catalogue::CONNECTORS`. `tests/connectors.rs` holds that no code outside `jlc/`, `digikey/`, `catalogue.rs`, `distributor.rs` (and KiCad import's supplier spellings) names `jlc`, `lcsc`, `digikey`, `digi-key` or `mouser`. Only DigiKey is built. Mouser waits until the owner confirms its API terms (design 347), then it is one module and one line.
+- **Fetching.** `fetch::Fetch` gains `send(&Request) -> Response`: any method, headers and body, and whatever status answered (a 401 or 429 is the adapter's to read). `parts_source_unreachable` only where nothing answered, naming the URL alone. `Request`'s `Debug` writes header names, never values or the body. `Fake` queues answers by method and URL (`answer`, `set`, `sent`). ryueda's `net::Https` implements it on ureq.
+- **Keys.** `ryueda_parts::keys`: a source's fields come from its variables (all set, else none count), else from `<config dir>/<file>`, canonical JSON `ryueda.keys` format 1, written owner-only (0600) through a temporary file.
+  - DigiKey's variables are `RYUEDA_DIGIKEY_CLIENT_ID` and `_SECRET`, its file `parts-digikey.keys`.
+  - `ryueda parts login <distributor>` (values on stdin, one a line) and `parts logout` are CLI only, never a protocol method, so keys never pass through a daemon, a request or the activity log.
+  - `Keys`' `Debug`, every message and every answer name fields, never values.
+  - A daemon sees variables as they were when it started; `parts sources` says where keys came from (`environment`, `file`).
+- **Rate limits.** `rate::Limiter::process()` counts each source's API calls in a sliding minute and day, per process (DigiKey 120 and 1,000).
+  - Past one, or while a source's own 429 holds calls (its `Retry-After`, else 60 s), a call is `parts_rate_limited` (exit 4) with `limit` (`minute`, `day`, `source`), `retry_after_s` and `retry_at`, never a silent wait.
+  - A refresh stopped by one lists what it `fetched` and what `remaining`.
+- **DigiKey** (`ryueda_parts::digikey`, Product Information API v4). An OAuth token by client credentials is kept until a minute before it expires, and a 401 asks for a new token once. Refused keys are `parts_source_refused` (`reason: keys`), a 403 `reason: forbidden`.
+  - **Search.** One keyword page of 50 per search, the keywords the category's word and each `=`/`~` condition's value, the results judged by the query here as every source's are.
+  - **Lookups.** Details by DigiKey part number (a 404 is none); `mpn:` by keyword, kept where the part number matches.
+  - **Locale** fixed at US, English, USD.
+  - **Records.** Key and one offer the variation's DigiKey part number. Category by the words of DigiKey's category names, the deepest first. Parameters onto the vocabulary (`digikey::attr`, values cleaned, kept only where they read; a ceramic's temperature coefficient is its dielectric). Price breaks of that variation in USD. Lifecycle from `ProductStatus` (`Not For New Designs` is `not_recommended`, `Discontinued at Digi-Key` `obsolete`).
+  - **Terms.** `ttl(86400)`, never written into a library, attributed `Data from DigiKey`. The v4 field names were written from DigiKey's documentation as known in planning, and are checked against the live API only by `tests/parts_live.rs`' ignored `the_live_digikey_api_answers_as_our_fixtures_say`, run by a person with keys (`RYUEDA_PARTS_LIVE=1`).
+- **This machine's distributors.** `ryueda::distributors::Distributors`: the config folder, the parts cache, the environment, a fetcher, each distributor's API (`RYUEDA_DIGIKEY_URL` moves DigiKey's), the process's limiter and a clock, carried by `parts::Catalogues` as `live`. `Default` has no keys, no cache and `NoNetwork`.
+- **Under the lock and without it.** Under the daemon's lock a request reads only kept records (`records_of`, `libcomp --from`, supply findings). `parts.search` and `parts.show` are long requests:
+  - `plan` and `show_plan` run under the lock;
+  - `finish` and `show_finish` call distributors with it released (`parts::prepare`), in phase `fetch` a source a step, cancelled between calls;
+  - with no distributor to call they answer under the lock as before.
+
+  A distributor that fails or has no keys is a search's or show's warning; the others answer. `--offline` leaves distributors out (a note). `parts show` calls a distributor when nothing is kept for the key, for `mpn:` or with `--refresh`, and keeps what it gets. `libcomp --from digikey:<key>` takes the kept record, else `parts_not_found` with the `parts show` to run.
+- **Supply findings.** A distributor's kept records join each choice's records.
+  - `part_lifecycle` (a warning, severity settable in `parts.json`) is raised for a first choice any record states `not_recommended`, `last_time_buy` or `obsolete`, the worst named, with the first active alternate.
+  - A distributor's offers count towards whether a part has data only where this machine has that distributor's keys, so a project without keys judges as before.
+  - `parts.refresh` also fetches each placed offer's distributor record not kept (every one with `--force`), listing `fetched`, `missing` and `not_configured`.
+- **Codes.** `parts_rate_limited` (exit 4) and `part_lifecycle`.
+- **Golden.** `parts.jlc.sources` moved (`parts sources` lists `digikey`); `parts.digikey.records` is new.
+- **Testing.**
+  - Unit tests per module (fetch, rate, keys, digikey's wire, attr, record and source against `Fake`, distributors, parts' live search, show and refresh, supply's lifecycle, libcmd's `--from`).
+  - `tests/cli.rs`' `digikey_from_the_cli` (both ways, against `tests/support/fake_digikey.rs`) and `parts_login_keeps_keys_out_of_sight`.
+  - `tests/connectors.rs`, the `parts.digikey.records` golden line, and the `parts` fuzz target reading DigiKey's answers (`tests/bytes.rs`).
+  - No test calls DigiKey or holds a key anyone has.
+- **Measured.** <Task 23's numbers, with the hardware.>
+- **Limits.**
+  - One keyword page (50) per search, so a search with no `=` or `~` value to send is refused.
+  - Records are kept by key, so an offline search finds no distributor's parts, only `parts show` does.
+  - Limits are per process, so many short CLI processes each start a fresh minute (DigiKey's own 429 still holds them).
+  - No Mouser until its terms are confirmed.
