@@ -1828,6 +1828,12 @@ pub enum Request {
         /// participant's).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fraction: Option<f64>,
+        /// Draw a sheet metal solid's flat pattern instead of the model:
+        /// the solid's flat body seen from its viewer side, its bend lines
+        /// dashed with their notes; `""` for the part's one sheet metal
+        /// solid.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flat: Option<String>,
     },
     /// Diagnoses the project folder: every problem, with a stable code.
     #[serde(rename = "doctor")]

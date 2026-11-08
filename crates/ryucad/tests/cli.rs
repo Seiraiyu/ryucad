@@ -3826,6 +3826,10 @@ fn flat_patterns_from_the_cli() {
         "in",
         "--no-notes",
     ]);
+    p.ok(&[
+        "render", "p", "--flat", "--out", "flat.png", "--size", "160x120",
+    ]);
+    assert!(p.direct.join("flat.png").exists() && p.daemon.join("flat.png").exists());
     p.fails(&["flat", "p", "--bend", "nonsense"], "usage", 2);
 }
 

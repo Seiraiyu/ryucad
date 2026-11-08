@@ -723,6 +723,10 @@ enum Command {
         /// Draw no explode, whatever a window shows.
         #[arg(long)]
         no_explode: bool,
+        /// Draw a sheet metal solid's flat pattern (the part's one unless
+        /// named) instead of the model.
+        #[arg(long, value_name = "SOLID", num_args = 0..=1, default_missing_value = "")]
+        flat: Option<String>,
     },
     /// What the merge (or cherry-pick, revert or rebase step) Git is in the
     /// middle of leaves to settle.
@@ -3948,6 +3952,7 @@ fn request(cmd: &Command) -> Option<Request> {
             explode,
             fraction,
             no_explode,
+            flat,
         } => Request::Render {
             part: part.clone(),
             camera: camera_arg(eye, target, up, fov, ortho),
@@ -3973,6 +3978,7 @@ fn request(cmd: &Command) -> Option<Request> {
                 explode.clone()
             },
             fraction: *fraction,
+            flat: flat.clone(),
         },
         Command::Highlight {
             entities,

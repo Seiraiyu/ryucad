@@ -1186,3 +1186,43 @@ fn flat_get_answers_the_pattern_in_millimetres() {
             .ends_with("K0.5")
     );
 }
+
+#[test]
+fn render_flat_draws_the_flat_and_its_bend_line() {
+    let (_dir, mut s) = l_part();
+    let req = Request::from_rpc(
+        "render",
+        Some(json!({"part": "p", "flat": "", "width": 400, "height": 300})),
+    )
+    .unwrap();
+    let a = ryucad::server::answer_live(&mut s, None, None, req).unwrap();
+    assert_eq!(
+        (a.result["flat"].as_str(), a.result["from"].as_str()),
+        (Some("bl"), Some("whole"))
+    );
+    let png = a.binary.expect("a PNG");
+    let mut r = png::Decoder::new(std::io::Cursor::new(png))
+        .read_info()
+        .unwrap();
+    let mut px = vec![0; r.output_buffer_size().expect("a size")];
+    r.next_frame(&mut px).unwrap();
+    let want = ryucad::render::BEND_UP
+        .iter()
+        .chain(&ryucad::render::BEND_DOWN)
+        .copied()
+        .collect::<Vec<f32>>();
+    let close = |c: &[u8], k: usize| {
+        (0..3).all(|i| (f32::from(c[i]) / 255.0 - want[3 * k + i]).abs() < 0.05)
+    };
+    assert!(
+        px.chunks(4).any(|c| close(c, 0) || close(c, 1)),
+        "a bend line's colour is drawn"
+    );
+    let req = Request::from_rpc(
+        "render",
+        Some(json!({"part": "p", "flat": "", "compare": "HEAD"})),
+    )
+    .unwrap();
+    let e = ryucad::server::answer_live(&mut s, None, None, req).unwrap_err();
+    assert_eq!(e.details["param"], "compare");
+}

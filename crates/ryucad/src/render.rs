@@ -524,6 +524,11 @@ impl Geometry {
 /// A dashed line's dashes and the gaps between them, in output pixels.
 pub const DASH: [f32; 2] = [6.0, 4.0];
 
+/// A bend line folding up in a flat pattern (DXF's yellow).
+pub const BEND_UP: Rgb = [0.85, 0.65, 0.0];
+/// A bend line folding down (DXF's cyan).
+pub const BEND_DOWN: Rgb = [0.0, 0.6, 0.75];
+
 /// A sketch's colour for an entity in `state`.
 pub fn sketch_color(state: crate::sketch_view::EntityState) -> Rgb {
     use crate::sketch_view::EntityState as S;

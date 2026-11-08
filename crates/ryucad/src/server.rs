@@ -173,7 +173,30 @@ pub fn answer_live(
             section,
             explode,
             fraction,
+            flat,
         } => {
+            // A flat pattern's render draws one solid flat: no section or
+            // explode applies, the request's own refused and the window's
+            // left out.
+            if flat.is_some() {
+                for (param, given) in [
+                    ("section", section.is_some()),
+                    ("explode", explode.is_some() || fraction.is_some()),
+                ] {
+                    if given {
+                        return Err(Error::new(
+                            Code::InvalidParam,
+                            format!("{param} doesn't apply to a flat pattern's render"),
+                        )
+                        .with("param", param));
+                    }
+                }
+            }
+            let (section, explode) = if flat.is_some() {
+                (Some(Vec::new()), Some(String::new()))
+            } else {
+                (section, explode)
+            };
             // A named view brings the planes and the explode it saved,
             // unless the request names its own.
             let named = match (&camera, view.as_deref()) {
@@ -296,6 +319,7 @@ pub fn answer_live(
                 appearance: appearance.unwrap_or(true),
                 sections,
                 explode,
+                flat,
             };
             render_noting(session, target, shown, ask)
         }
@@ -5875,6 +5899,9 @@ struct RenderAsk {
     sections: Vec<crate::section::Plane>,
     /// An explode to draw.
     explode: Option<DrawExplode>,
+    /// A sheet metal solid whose flat pattern to draw instead (`""`: the
+    /// part's one).
+    flat: Option<String>,
 }
 
 /// An explode a render draws.
@@ -6116,6 +6143,9 @@ fn render(
 ) -> Result<Answer> {
     use crate::render::{self as r, Geometry, Options};
     r::check_size(ask.width, ask.height)?;
+    if let Some(solid) = ask.flat.clone() {
+        return render_flat(session, ask, solid);
+    }
     let parts = render_parts(session.at(ask.rev.as_deref())?.1, ask.part.as_deref())?;
     // Other revisions' models only widen the framing.
     let mut extra: Vec<[f64; 3]> = Vec::new();
@@ -6432,6 +6462,137 @@ fn render(
     }
     if !warnings.is_empty() {
         result["warnings"] = json!(warnings);
+    }
+    Ok(Answer::bytes(result, "image/png", img.png()))
+}
+
+/// `render --flat`: `solid`'s flat pattern (`""`: the part's one sheet
+/// metal solid) as `flat.get` gives it, its flat body drawn as any body
+/// and seen along the pattern's `z` with its `y` up, its bend lines dashed
+/// over it in [`crate::render::BEND_UP`] or `BEND_DOWN`, labelled with
+/// their notes when `labels`.
+fn render_flat(session: &mut Session, ask: RenderAsk, solid: String) -> Result<Answer> {
+    use crate::render::{self as r, Geometry, Label, Line, Options};
+    for (param, given) in [
+        ("compare", ask.compare.is_some()),
+        ("frame", !ask.frame.is_empty()),
+        ("view", ask.view.is_some()),
+    ] {
+        if given {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("{param} doesn't apply to a flat pattern's render"),
+            )
+            .with("param", param));
+        }
+    }
+    let part =
+        match render_parts(session.at(ask.rev.as_deref())?.1, ask.part.as_deref())?.as_slice() {
+            [one] => one.to_string(),
+            _ => {
+                return Err(
+                    Error::new(Code::InvalidParam, "a flat pattern is one part's: name it")
+                        .with("param", "part"),
+                );
+            }
+        };
+    let named = (!solid.is_empty()).then_some(solid.as_str());
+    let (commit, f) = crate::sheet_metal::flat::of(
+        session,
+        &part,
+        named,
+        ask.rev.as_deref(),
+        &Default::default(),
+    )?;
+    let p = &f.pattern;
+    let size = (p.bounds.max() - p.bounds.min()).length().max(1e-3);
+    let mesh = f
+        .mesh
+        .get_or_init(|| {
+            let params = crate::mesh::Quality::Normal.params(size);
+            std::sync::Arc::new(crate::mesh::DisplayMesh {
+                mesh: ryukei::mesh::tessellate(&f.body.body, &params)
+                    .map(std::sync::Arc::new)
+                    .map_err(|e| Error::new(Code::Internal, format!("meshing the flat: {e:?}"))),
+                params,
+            })
+        })
+        .clone();
+    let meshed = mesh::Meshed {
+        body: f.body.body.clone(),
+        hash: f.body.hash.clone(),
+        mesh,
+        warning: None,
+    };
+    let mut g = Geometry::default();
+    draw_body(
+        &mut g,
+        &meshed,
+        &ryukei::geom::Rigid::IDENTITY,
+        &format!("{}/{}", f.part, f.solid),
+        &BTreeMap::new(),
+        (None, &BTreeMap::new(), None),
+        (false, ask.edges),
+    );
+    let fr = &p.frame;
+    let lift = |q: ryukei::geom::Point2| {
+        let w = fr.origin() + fr.x().get() * q.x + fr.y().get() * q.y;
+        [w.x, w.y, w.z]
+    };
+    for l in &p.bend_lines {
+        let at = g.positions.len() as u32;
+        g.positions.push(lift(l.start));
+        g.positions.push(lift(l.end));
+        let color = match l.direction {
+            ryukei::sheet_metal::BendDirection::Up => r::BEND_UP,
+            ryukei::sheet_metal::BendDirection::Down => r::BEND_DOWN,
+        };
+        g.lines.push(Line {
+            points: vec![at, at + 1],
+            color,
+            width: 2.0,
+            dash: true,
+        });
+        if ask.labels {
+            let mid =
+                ryukei::geom::Point2::new(0.5 * (l.start.x + l.end.x), 0.5 * (l.start.y + l.end.y));
+            g.labels.push(Label {
+                at: lift(mid),
+                text: ryuformats::dxf::note(l, ryuformats::dxf::DxfUnit::Mm, "°"),
+            });
+        }
+    }
+    let camera = match ask.camera {
+        Some(c) => c.resolve(session.project().manifest.default_unit)?,
+        None => {
+            let z = fr.z().get();
+            let y = fr.y().get();
+            let aspect = f64::from(ask.width) / f64::from(ask.height);
+            crate::view::frame_points_along(
+                &g.positions,
+                [z.x, z.y, z.z],
+                [y.x, y.y, y.z],
+                DEFAULT_PROJECTION,
+                aspect,
+            )
+        }
+    };
+    let img = r::render(
+        &g,
+        &camera,
+        ask.width,
+        ask.height,
+        Options {
+            silhouettes: ask.edges,
+            triad: true,
+        },
+    )?;
+    let mut result = json!({
+        "part": f.part, "flat": f.solid, "width": ask.width, "height": ask.height, "camera": camera,
+        "from": match &f.from { crate::sheet_metal::flat::From::Whole => "whole", crate::sheet_metal::flat::From::Unfold(_) => "unfold" },
+    });
+    if let Some(c) = commit {
+        result["commit"] = json!(c);
     }
     Ok(Answer::bytes(result, "image/png", img.png()))
 }
