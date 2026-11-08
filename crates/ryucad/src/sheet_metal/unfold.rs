@@ -381,7 +381,7 @@ pub fn refold(
 /// The bend whose folded end plane a new edge of `body` named `n` lies
 /// in: its middle in the plane through the strip's axis at angle 0 or
 /// the strip's angle, between its radii.
-fn bend_line_of<'f>(body: &Body, n: Name, flat: &'f Flat) -> Option<&'f FlatBend> {
+pub(super) fn bend_line_of<'f>(body: &Body, n: Name, flat: &'f Flat) -> Option<&'f FlatBend> {
     let Some(EntityId::Edge(e)) = body.by_name(n) else {
         return None;
     };

@@ -117,13 +117,37 @@ pub fn of(
     let (solid, feature, built) = super::report::pick(&p, &r, &solids, solid)?;
     let founder = super::founder(&p, &solid);
     let in_force = super::unfold::in_force(&p, &solids, &solid, &feature, &r);
+    // Allowances by value: an expression's text stays while the
+    // parameters it reads change, and no folded body's hash moves with
+    // them. An override that doesn't read is keyed by its text: it is
+    // refused below, and a refusal is never kept.
+    let unit = s.project().manifest.default_unit;
+    let bends: Vec<Value> = o
+        .bends
+        .iter()
+        .map(|v| {
+            let mut v = v.clone();
+            if let Some(m) = v.as_object_mut() {
+                let bend = m.remove("bend");
+                if let Ok(a) =
+                    Allowance::from_json(&Value::Object(m.clone()), "", unit, &p.env, false)
+                {
+                    return json!({"bend": bend, "value": super::allowance_value(&a)});
+                }
+                if let Some(b) = bend {
+                    m.insert("bend".into(), b);
+                }
+            }
+            json!({"text": v})
+        })
+        .collect();
     let key = json!({
         "body": built.hash,
         "solid": solid,
         "unfold": in_force.as_ref().map(|(u, _)| u),
-        "allowance": founder.map(|f| f.allowance.to_json()),
+        "allowance": founder.map(|f| super::allowance_value(&f.allowance)),
         "fixed": o.fixed,
-        "bends": o.bends,
+        "bends": bends,
     })
     .to_string();
     if let Some(f) = s.flats.get(&key) {

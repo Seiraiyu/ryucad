@@ -659,6 +659,17 @@ fn flange_origins(
         .collect()
 }
 
+/// An allowance by its value (the bits it evaluates to), never its text:
+/// the same expression over a changed parameter is another allowance.
+pub fn allowance_value(a: &crate::doc::sheet_metal::Allowance) -> Value {
+    use crate::doc::sheet_metal::Allowance;
+    match a {
+        Allowance::KFactor(k) => json!({"k_factor": format!("{:?}", k.number())}),
+        Allowance::Deduction(q) => json!({"deduction_m": format!("{:?}", q.meters())}),
+        Allowance::Length(q) => json!({"allowance_m": format!("{:?}", q.meters())}),
+    }
+}
+
 /// What a flange or unfold reads of its founder that shapes no body of
 /// the founder's own, by value: a flange's radius and relief, an unfold's
 /// allowance when it gives none (a parameter the founder's settings read
@@ -670,12 +681,7 @@ pub fn founder_settings(part: &Part, f: &Feature) -> Option<Value> {
             return None;
         }
         let b = founder(part, &u.target)?;
-        use crate::doc::sheet_metal::Allowance;
-        return Some(match &b.allowance {
-            Allowance::KFactor(k) => json!({"k_factor": format!("{:?}", k.number())}),
-            Allowance::Deduction(q) => json!({"deduction_m": format!("{:?}", q.meters())}),
-            Allowance::Length(q) => json!({"allowance_m": format!("{:?}", q.meters())}),
-        });
+        return Some(allowance_value(&b.allowance));
     }
     let b = founder(part, &f.flange()?.target)?;
     Some(json!({

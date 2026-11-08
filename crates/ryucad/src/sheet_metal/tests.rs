@@ -777,6 +777,58 @@ fn a_made_with_its_flat_goes_through_the_cache_and_one_without_keeps_its_bytes()
     assert!(decode_made(&longer).is_none());
 }
 
+/// A refold names a new edge in a folded bend's end plane by that bend
+/// (`bend_line_of`): the folded flange's edges along its bend lines are
+/// such edges, its plate's far rim and its faces aren't.
+#[test]
+fn an_edge_in_a_bends_end_plane_is_its_bend_line() {
+    use crate::rebuild::{Flat, FlatBend};
+    let p = flanged(vec![]);
+    let folded = output_of(&p, "f")
+        .unwrap()
+        .solid(&id("plate"))
+        .unwrap()
+        .clone();
+    let model = ryukei::sheet_metal::recognize(&folded.body, &Default::default()).unwrap();
+    let u = ryukei::sheet_metal::unfold(
+        OpKey(1),
+        &folded.body,
+        &model,
+        &ryukei::sheet_metal::UnfoldSpec::all(ryukei::sheet_metal::Allowance::KFactor(0.44)),
+    )
+    .unwrap();
+    let b = &model.bends[0];
+    let flat = Flat {
+        unfold: id("u"),
+        map: u.map,
+        pattern: u.pattern,
+        bends: vec![FlatBend {
+            name: b.name,
+            inner: b.inner.clone(),
+            outer: b.outer.clone(),
+            allowance: "K0.44".into(),
+        }],
+        partial: false,
+    };
+    let body = &folded.body;
+    let mut lines = 0;
+    for e in body.edges() {
+        let n = body.name_of(EntityId::Edge(e)).unwrap();
+        if let Some(fb) = unfold::bend_line_of(body, n, &flat) {
+            assert_eq!(fb.name, b.name);
+            lines += 1;
+        }
+    }
+    // Each end plane holds the bend's two lines (inner and outer).
+    assert!(lines >= 4, "{lines}");
+    assert!(lines < body.edges().count());
+    // The plate's rim opposite the flange lies in neither end plane.
+    let far = edge_at(body, [0.0, 40.0, 1.5], [0.0, 0.0, 1.5]);
+    assert!(unfold::bend_line_of(body, far, &flat).is_none());
+    // A face is no edge.
+    assert!(unfold::bend_line_of(body, b.inner[0], &flat).is_none());
+}
+
 fn unfold_of(extra: Value) -> crate::doc::files::Feature {
     let mut v = json!({"format": 14, "type": "unfold", "target": "plate"});
     for (k, x) in extra.as_object().unwrap() {

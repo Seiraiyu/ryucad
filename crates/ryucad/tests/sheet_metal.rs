@@ -1187,6 +1187,71 @@ fn flat_get_answers_the_pattern_in_millimetres() {
     );
 }
 
+/// The flat, its DXF and an override follow a parameter their allowance
+/// reads: the folded body's hash doesn't move with it, so the session's
+/// flats are keyed by the allowance's value, not its text.
+#[test]
+fn a_flat_follows_the_parameter_its_allowance_reads() {
+    let (_dir, mut s) = project();
+    must(
+        &mut s,
+        "param.set",
+        json!({"part": "p", "parameters": {"kf": "0.44"}}),
+    );
+    chain(
+        &mut s,
+        "l",
+        "xy",
+        &[[40.0, 0.0], [0.0, 0.0], [0.0, 30.0]],
+        false,
+    );
+    base(
+        &mut s,
+        "bl",
+        "l",
+        json!({"depth": "20 mm", "allowance": {"k_factor": "kf"}}),
+    );
+    let note = |s: &mut Session, bends: Value| {
+        let v = must(s, "flat.get", json!({"part": "p", "bends": bends}));
+        let outline: f64 = v["loops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|l| l["outer"] == true)
+            .map(|l| l["area_mm2"].as_f64().unwrap())
+            .sum();
+        let b = &v["bend_lines"][0];
+        (
+            b["note"].as_str().unwrap().to_owned(),
+            outline,
+            b["bend"].clone(),
+        )
+    };
+    let dxf = |s: &mut Session| {
+        let req = Request::from_rpc("export", Some(json!({"part": "p", "format": "dxf"}))).unwrap();
+        ryucad::server::answer_live(s, None, None, req)
+            .unwrap()
+            .binary
+            .unwrap()
+    };
+    let (before, area, bend) = note(&mut s, json!([]));
+    assert!(before.ends_with("K0.44"), "{before}");
+    assert!((area - 20.0 * l_flat_mm(0.44)).abs() < 1e-6);
+    let dxf_before = dxf(&mut s);
+    let over = json!([{"bend": bend, "k_factor": "kf"}]);
+    assert!(note(&mut s, over.clone()).0.ends_with("K0.44"));
+    must(
+        &mut s,
+        "param.set",
+        json!({"part": "p", "parameters": {"kf": "0.2"}}),
+    );
+    let (after, area, _) = note(&mut s, json!([]));
+    assert!(after.ends_with("K0.2"), "{after}");
+    assert!((area - 20.0 * l_flat_mm(0.2)).abs() < 1e-6);
+    assert_ne!(dxf(&mut s), dxf_before);
+    assert!(note(&mut s, over).0.ends_with("K0.2"));
+}
+
 #[test]
 fn render_flat_draws_the_flat_and_its_bend_line() {
     let (_dir, mut s) = l_part();
