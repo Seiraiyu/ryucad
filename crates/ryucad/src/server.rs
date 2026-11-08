@@ -6486,16 +6486,17 @@ fn render_flat(session: &mut Session, ask: RenderAsk, solid: String) -> Result<A
             .with("param", param));
         }
     }
-    let part =
-        match render_parts(session.at(ask.rev.as_deref())?.1, ask.part.as_deref())?.as_slice() {
-            [one] => one.to_string(),
-            _ => {
-                return Err(
-                    Error::new(Code::InvalidParam, "a flat pattern is one part's: name it")
-                        .with("param", "part"),
-                );
-            }
-        };
+    let part = match render_parts(session.at(ask.rev.as_deref())?.1, ask.part.as_deref())?
+        .as_slice()
+    {
+        [one] => one.to_string(),
+        _ => {
+            return Err(
+                Error::new(Code::InvalidParam, "a flat pattern is one part's: name it")
+                    .with("param", "part"),
+            );
+        }
+    };
     let named = (!solid.is_empty()).then_some(solid.as_str());
     let (commit, f) = crate::sheet_metal::flat::of(
         session,

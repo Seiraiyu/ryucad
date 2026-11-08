@@ -285,6 +285,7 @@ jobs:
             cargo test -p ryukei-bench --features occt --release --test fill -- --nocapture
             cargo test -p ryukei-bench --features occt --release --test drafts -- --nocapture
             cargo test -p ryukei-bench --features usd --release --test usd -- --nocapture
+            cargo test -p ryukei-bench --features dxf --release --test dxf -- --nocapture
             cargo test -p ryukei-bench --features occt,usd --release --test nurbs -- --skip race --nocapture
             cargo bench -p ryukei-bench --features occt,smlib --no-run
           push: never
