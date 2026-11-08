@@ -1153,3 +1153,61 @@ pub(crate) fn tray(s: &mut crate::session::Session, part: &str) {
     )
     .unwrap();
 }
+
+#[test]
+fn the_sheet_report_says_flat_partly_or_folded() {
+    use crate::server::tests::{call, fresh};
+    let (_dir, mut s) = fresh();
+    tray(&mut s, "p");
+    let state = |s: &mut crate::session::Session| -> Value {
+        let v = call(s, "sheet.get", json!({"part": "p"})).unwrap();
+        json!([
+            v["state"],
+            v["unfold"],
+            v["unfolded"].as_array().map_or(0, Vec::len)
+        ])
+    };
+    assert_eq!(state(&mut s), json!(["folded", null, 0]));
+    let sheet = call(&mut s, "sheet.get", json!({"part": "p"})).unwrap();
+    let bends: Vec<String> = sheet["bends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["bend"].as_str().unwrap().to_owned())
+        .collect();
+    // Two bends of four unfolded: partly.
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "unfold", "id": "u",
+        "only": [bends[0], bends[1]]}),
+    )
+    .unwrap();
+    assert_eq!(state(&mut s), json!(["partly", "u", 2]));
+    let v = call(&mut s, "sheet.get", json!({"part": "p"})).unwrap();
+    assert_eq!(v["bends"].as_array().unwrap().len(), 2, "{v}");
+    // Every one: flat.
+    call(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "u", "only": []}),
+    )
+    .unwrap();
+    assert_eq!(state(&mut s), json!(["flat", "u", 4]));
+    // One folded back: partly; every one: folded.
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "refold", "id": "rf",
+        "unfold": "u", "only": [bends[0]]}),
+    )
+    .unwrap();
+    assert_eq!(state(&mut s)[0], "partly");
+    call(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "rf", "only": []}),
+    )
+    .unwrap();
+    assert_eq!(state(&mut s), json!(["folded", null, 0]));
+}

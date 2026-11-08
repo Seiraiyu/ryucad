@@ -457,3 +457,55 @@ pub fn summary(f: &Flat) -> serde_json::Value {
         "box_m": [[lo.x, lo.y], [hi.x, hi.y]],
     })
 }
+
+/// The unfold of `solid` in force at `at` (the feature whose result is
+/// shown) and its flat: the latest unfold in the solid's chain up to and
+/// including `at` that no refold has folded back whole. A refold of some
+/// of its strips leaves it in force, partial. `None` when there is none,
+/// or it didn't build.
+pub fn in_force(
+    part: &Part,
+    solids: &Solids,
+    solid: &Id,
+    at: &Id,
+    results: &dyn Results,
+) -> Option<(Id, Arc<Flat>)> {
+    let order = part.order();
+    let stop = order.iter().position(|o| o == at)?;
+    let mut held: Option<(Id, Arc<Flat>)> = None;
+    for f in solids.chain(solid)? {
+        match order.iter().position(|o| o == f) {
+            Some(i) if i <= stop => {}
+            _ => continue,
+        }
+        match part.features.get(f) {
+            Some(Ok(Feature::Unfold(_))) => {
+                held = match results.result(f) {
+                    Some(Ok(o)) => o.flat().map(|fl| (f.clone(), Arc::clone(fl))),
+                    _ => None,
+                };
+            }
+            Some(Ok(Feature::Refold(r))) => {
+                let Some((u, fl)) = held.take() else { continue };
+                if r.unfold != u {
+                    held = Some((u, fl));
+                    continue;
+                }
+                let folded: std::collections::BTreeSet<Name> = r
+                    .only
+                    .iter()
+                    .filter_map(|x| fl.bend_of(x.name).map(|b| b.name))
+                    .collect();
+                if !r.only.is_empty() && folded.len() < fl.bends.len() {
+                    let partly = Flat {
+                        partial: true,
+                        ..(*fl).clone()
+                    };
+                    held = Some((u, Arc::new(partly)));
+                }
+            }
+            _ => {}
+        }
+    }
+    held
+}

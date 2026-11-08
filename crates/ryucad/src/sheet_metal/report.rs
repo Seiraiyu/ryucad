@@ -1,6 +1,8 @@
 //! The sheet metal report (`sheet.get`): a solid recognized as the part
 //! shows it, in the agent's terms. Every face is a reference
 //! (`<part>/<solid>/<name>`); a bend is named by its least inner face.
+//! Its `state` is `flat` while an unfold of the solid is in force,
+//! `partly` while a partial one is, else `folded`.
 
 use crate::doc::sheet_metal::Allowance;
 use crate::error::{Code, Error, Result};
@@ -53,7 +55,7 @@ pub fn get(
         }
     };
     let solid = pick.solid.clone();
-    let Some((_, built)) = pick.state else {
+    let Some((shown, built)) = pick.state else {
         return Err(pick.error.cloned().unwrap_or_else(|| {
             Error::new(
                 Code::DependencyFailed,
@@ -119,6 +121,16 @@ pub fn get(
         "flanges": flanges,
         "bends": bends,
     });
+    if let Some((u, fl)) = super::unfold::in_force(&p, &solids, &solid, shown, &r) {
+        v["state"] = json!(if fl.partial { "partly" } else { "flat" });
+        v["unfold"] = json!(u);
+        v["unfolded"] = Value::Array(
+            fl.bends
+                .iter()
+                .map(|b| json!(format!("{pid}/{solid}/{}", b.inner[0])))
+                .collect(),
+        );
+    }
     if let Some(c) = &model.cycle {
         v["cycle"] = json!({"bends": all(&c.bends), "faces": all(&c.faces)});
     }
