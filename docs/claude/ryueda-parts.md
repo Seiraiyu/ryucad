@@ -75,7 +75,7 @@ The design is document 347 in the Coxswain planning project `ryucad-ryukei`; thi
   - `tests/cli.rs`' `digikey_from_the_cli` (both ways, against `tests/support/fake_digikey.rs`) and `parts_login_keeps_keys_out_of_sight`.
   - `tests/connectors.rs`, the `parts.digikey.records` golden line, and the `parts` fuzz target reading DigiKey's answers (`tests/bytes.rs`).
   - No test calls DigiKey or holds a key anyone has.
-- **Measured.** <Task 23's numbers, with the hardware.>
+- **Measured** on cox-worker-1 (Intel Xeon E5-2650, 8 threads, 16 GB, shared, load average 4.6 to 6.4), debug build, 2026-11-08: `ryueda parts search capacitor capacitance=100nF --in digikey` against `tests/support/fake_digikey.rs` through a warm daemon, a CLI process each, took 25.1, 25.3 and 25.7 ms (three runs after a first that warmed the daemon and took the token), each a keyword call and the answer judged here. The live API's own latency isn't measured: nothing in this plan calls DigiKey.
 - **Limits.**
   - One keyword page (50) per search, so a search with no `=` or `~` value to send is refused.
   - Records are kept by key, so an offline search finds no distributor's parts, only `parts show` does.
