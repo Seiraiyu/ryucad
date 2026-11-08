@@ -275,6 +275,23 @@ fn netlists_and_erc_are_bit_exact() {
         }
         golden.json(name, &one);
     }
+    // DigiKey (6.C): our fixtures' products as records, at a fixed time.
+    let records: Vec<Value> = [
+        ryueda_parts::digikey::testing::CAP,
+        ryueda_parts::digikey::testing::LDO,
+    ]
+    .into_iter()
+    .map(|f| {
+        let p = ryueda_parts::digikey::testing::product(f);
+        serde_json::to_value(ryueda_parts::digikey::record::record(
+            &p,
+            None,
+            1_793_964_810,
+        ))
+        .unwrap()
+    })
+    .collect();
+    golden.json("parts.digikey.records", &Value::from(records));
     std::fs::write(
         lib.join("parts.json"),
         "{\"assembly\": \"jlcpcb\", \"build_quantity\": 3, \"format\": 1, \"kind\": \"ryueda.parts\"}\n",
