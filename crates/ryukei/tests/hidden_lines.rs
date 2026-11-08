@@ -417,3 +417,48 @@ fn a_silhouette_across_its_circles_start_keeps_its_pcurve_on_it() {
         }
     }
 }
+
+/// Views the property test found judged wrong (plan 10.C), each held to
+/// a fine mesh: race body 15's edge where a torus's silhouette ends on
+/// it, and race body 18's torus silhouette at its image's cusps, where
+/// visibility changes with no image crossing. Release only: tracing
+/// these tori takes minutes in a debug build.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn visibility_changes_at_silhouette_ends_and_cusps() {
+    use ryukei_testkit::projection::{Oracle, judge, look, placed_bodies, size};
+    for (n, t) in [
+        (
+            15,
+            [
+                0.9793780808084567,
+                -0.43247718930990686,
+                0.35915854484882126,
+            ],
+        ),
+        (
+            15,
+            [-0.604310299052824, 0.9999058082224215, -0.6282954476028557],
+        ),
+        (
+            18,
+            [0.9659554944336881, 0.5175783622980419, -0.8360049876987496],
+        ),
+        (
+            18,
+            [0.8753073327918315, -0.5493856012986855, -0.8721076118134168],
+        ),
+    ] {
+        let b = ryukei_testkit::race::bodies(24).into_iter().nth(n).unwrap();
+        let v = look(Vector3::new(t[0], t[1], t[2]));
+        let placed = [Placed {
+            body: &b,
+            place: Rigid::IDENTITY,
+        }];
+        let p = view(&placed, &v, &ViewOptions::default()).unwrap();
+        let bodies = placed_bodies(&placed);
+        let o = Oracle::new(&bodies, &v, size(&bodies) * 1e-3).unwrap();
+        let j = judge(&p, &bodies, &o);
+        assert!(j.wrong.is_empty(), "race {n} {t:?}: {:?}", j.wrong);
+    }
+}
