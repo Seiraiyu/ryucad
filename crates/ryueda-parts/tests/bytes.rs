@@ -2,7 +2,9 @@
 //! as a typed miss or a record that encodes and decodes to itself, no
 //! text panics the vocabulary or a condition, and a catalogue's files
 //! (jlcparts' manifest, lookup table, shards and attributes) read as a
-//! typed refusal or records whose every parameter reads as its kind.
+//! typed refusal or records whose every parameter reads as its kind; so
+//! do a distributor's answers (DigiKey's token, keyword search and
+//! details, 6.C).
 
 use ryueda_parts::cache::{Decoded, decode, encode};
 use ryueda_parts::param::{VOCABULARY, read};
@@ -28,6 +30,44 @@ pub fn check(data: &[u8]) {
         let _ = c.judge(Some(text));
     }
     jlc(data);
+    digikey(data);
+}
+
+/// As DigiKey's answers: a typed refusal, or products whose records hold
+/// only parameters that read as their kind and write and read back.
+fn digikey(data: &[u8]) {
+    use ryueda_parts::digikey::{attr, record::record, wire};
+    let _ = wire::read::<wire::Token>(data, "token");
+    let mut products = Vec::new();
+    if let Ok(k) = wire::read::<wire::Keyword>(data, "keyword") {
+        products.extend(k.exact_matches);
+        products.extend(k.products);
+    }
+    if let Ok(d) = wire::read::<wire::Details>(data, "details") {
+        products.push(d.product);
+    }
+    for p in &products {
+        if let Some(r) = record(p, None, 1) {
+            for (k, v) in &r.parameters {
+                assert!(matches!(read(k, v), Some(Ok(_))), "{k}={v}");
+            }
+            let back: Record = serde_json::from_value(serde_json::to_value(&r).unwrap()).unwrap();
+            assert_eq!(back, r);
+        }
+    }
+    if let Ok(text) = std::str::from_utf8(data) {
+        for name in [
+            "Capacitance",
+            "Temperature Coefficient",
+            "Package / Case",
+            "Mounting Type",
+            "Operating Temperature",
+        ] {
+            if let Some((k, t)) = attr::vocabulary(name, text) {
+                assert!(matches!(read(k, &t), Some(Ok(_))), "{k}={t}");
+            }
+        }
+    }
 }
 
 /// As jlcparts' files: a typed refusal or what reads, never a panic.
@@ -110,6 +150,21 @@ fn chosen_bytes_hold() {
         r#"{"primary": "x", "values": {"x": [-1e-320, "percentage"]}}"#,
         r#"{"values": {"temperature min": [125, "temperature"], "temperature max": [-55, "temperature"]}}"#,
         r#"{"primary": "default", "values": {"default": ["", "string"]}}"#,
+    ] {
+        fixtures.push(v.as_bytes().to_vec());
+    }
+    for f in [
+        ryueda_parts::digikey::testing::CAP,
+        ryueda_parts::digikey::testing::LDO,
+    ] {
+        fixtures.push(ryueda_parts::digikey::testing::details_answer(f).body);
+    }
+    fixtures.push(ryueda_parts::digikey::testing::keyword_answer().body);
+    fixtures.push(ryueda_parts::digikey::testing::token_answer(1).body);
+    for v in [
+        r#"{"Products": [{"ProductVariations": [{"DigiKeyProductNumber": "x", "StandardPricing": [{"BreakQuantity": -1, "UnitPrice": 1e309}]}], "QuantityAvailable": -5}]}"#,
+        r#"{"Product": {"ProductVariations": null, "Parameters": [{"ParameterText": "Capacitance", "ValueText": "1e400 F"}]}}"#,
+        r#"{"Product": {"ProductVariations": [{"DigiKeyProductNumber": " "}], "QuantityAvailable": 1e30}}"#,
     ] {
         fixtures.push(v.as_bytes().to_vec());
     }
