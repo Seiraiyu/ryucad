@@ -4036,6 +4036,7 @@ fn import_request(path: &str, update: Option<String>, dry_run: bool, solid: bool
         expected_revision: None,
         update,
         solid,
+        flatten: false,
     }
 }
 

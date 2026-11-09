@@ -904,6 +904,7 @@ pub(crate) fn dispatch(
             expected_revision,
             update,
             solid,
+            flatten,
         } => crate::import::import(
             session,
             crate::import::Ask {
@@ -915,6 +916,7 @@ pub(crate) fn dispatch(
                 expected: expected_revision,
                 update,
                 solid,
+                flatten,
             },
         ),
         Request::ImportConvert {

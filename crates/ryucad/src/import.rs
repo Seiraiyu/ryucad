@@ -698,6 +698,9 @@ pub struct Ask {
     /// Heal each body into a checked solid, rather than keep it as a
     /// reference (design 364).
     pub solid: bool,
+    /// Make one part of every body of the file, placed where its
+    /// assemblies put it (#499).
+    pub flatten: bool,
 }
 
 impl Ask {
@@ -800,6 +803,12 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
         path: stored.clone(),
         blake3: file.blake3.clone(),
     };
+    if ask.flatten && (ask.into.is_some() || ask.product.is_some()) {
+        return Err(Error::new(
+            Code::Usage,
+            "flatten makes a part of the whole file: leave out into and product",
+        ));
+    }
     let plan: Vec<Planned> = match &ask.into {
         Some(into) => {
             if ask.part.is_some() {
@@ -838,16 +847,31 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
             let taken = |s: &str| {
                 Id::parse(s, "part").is_ok_and(|id| project.parts.contains_key(&id)) || retired(s)
             };
-            plan::Fresh {
-                opened: &opened,
-                file: &file_ref,
-                stem: &stem,
-                part,
-                taken: &taken,
-                pdm: root.join(PDM_CONFIG).is_file(),
-                mode: ask.mode(),
+            if ask.flatten {
+                vec![
+                    plan::Flat {
+                        opened: &opened,
+                        file: &file_ref,
+                        stem: &stem,
+                        part,
+                        taken: &taken,
+                        pdm: root.join(PDM_CONFIG).is_file(),
+                        mode: ask.mode(),
+                    }
+                    .plan()?,
+                ]
+            } else {
+                plan::Fresh {
+                    opened: &opened,
+                    file: &file_ref,
+                    stem: &stem,
+                    part,
+                    taken: &taken,
+                    pdm: root.join(PDM_CONFIG).is_file(),
+                    mode: ask.mode(),
+                }
+                .plan()?
             }
-            .plan()?
         }
     };
     let warnings = mapped_warnings(&opened, &ask.path);
@@ -887,10 +911,10 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
     use crate::doc::import::FileRef;
     use crate::doc::project::PDM_CONFIG;
     let target = ask.update.clone().expect("an update");
-    if ask.part.is_some() || ask.into.is_some() || ask.product.is_some() {
+    if ask.part.is_some() || ask.into.is_some() || ask.product.is_some() || ask.flatten {
         return Err(Error::new(
             Code::Usage,
-            "an update replaces a file the project holds: part, into and product don't apply",
+            "an update replaces a file the project holds: part, into, product and flatten don't apply (a flattened part follows its file as it was imported)",
         ));
     }
     let root = session.root().to_path_buf();

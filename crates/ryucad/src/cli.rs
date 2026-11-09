@@ -1859,6 +1859,11 @@ struct ImportArgs {
     /// reference (shown, measured and mated to, never changed).
     #[arg(long)]
     solid: bool,
+    /// Make one part of every body of the file, each placed where its assemblies put it,
+    /// rather than a part per product and an assembly per assembly: a vendor PCBA as one
+    /// part of references.
+    #[arg(long)]
+    flatten: bool,
     /// Write nothing: say what it would store and make, and what each body would be
     /// (a reference, or with --solid how it heals).
     #[arg(long)]
@@ -3615,6 +3620,7 @@ fn request(cmd: &Command) -> Option<Request> {
                     into,
                     product,
                     solid,
+                    flatten,
                     dry_run,
                     expect,
                 },
@@ -3633,6 +3639,7 @@ fn request(cmd: &Command) -> Option<Request> {
                 expected_revision: expect.revision.clone(),
                 update: update.clone(),
                 solid: *solid,
+                flatten: *flatten,
             }
         }
         Command::Export {
