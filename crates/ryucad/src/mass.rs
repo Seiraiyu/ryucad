@@ -173,9 +173,9 @@ pub fn run(
             &l.solid,
             "sheet",
             crate::kind::Want::Solid,
+            Some("measure gives a sheet's area"),
         )
-        .with("of", of)
-        .with("hint", "measure gives a sheet's area"));
+        .with("of", of));
     }
     let dens = densities(s, located.iter().map(|l| l.part.clone()))?;
     // Work out what the cache lacks in parallel, each body once.

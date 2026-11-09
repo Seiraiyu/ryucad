@@ -1038,6 +1038,8 @@ pub struct Need<'r> {
     pub role: &'r str,
     pub want: Option<crate::kind::Want>,
     pub changes: bool,
+    /// What a refusal of the wrong kind says to do instead.
+    pub hint: Option<&'static str>,
 }
 
 /// Body `t` as feature `id` sees it, as `need` asks: refused where it was
@@ -1072,7 +1074,7 @@ pub fn body_as<'a>(
         return Err(reference_body(&part.id, id, t, role));
     }
     if let Some(want) = need.want {
-        crate::kind::need(id, need.role, t, &built.body, want)?;
+        crate::kind::need(id, need.role, t, &built.body, want, need.hint)?;
     }
     Ok(built)
 }
@@ -1094,6 +1096,7 @@ pub fn target_as<'a>(
         role,
         want: Some(crate::kind::Want::Solid),
         changes: true,
+        hint: None,
     };
     body_as(part, solids, id, t, need, before)
 }
@@ -1114,6 +1117,7 @@ pub fn target_kinds<'a>(
         role,
         want: (!sheets).then_some(crate::kind::Want::Solid),
         changes: true,
+        hint: None,
     };
     body_as(part, solids, id, t, need, before)
 }
@@ -1137,18 +1141,21 @@ pub fn reference_body(part: &Id, id: &Id, t: &Id, role: &str) -> Error {
 /// reference import's body, against the current rebuild `results`.
 pub fn check_not_reference(p: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result<()> {
     let solids = Solids::of(p);
-    for (role, t, _) in crate::kind::bodies_read(f) {
-        if let Some(view) = solids.view(t, id)
+    for r in crate::kind::bodies_read(f)
+        .into_iter()
+        .filter(|r| r.changes)
+    {
+        if let Some(view) = solids.view(r.body, id)
             && let Ok(out) = crate::graph::input(p, id, view, results)
-            && out.solid(t).is_some_and(|b| b.reference)
+            && out.solid(r.body).is_some_and(|b| b.reference)
         {
             // A boolean's target, like every one-target role, is `targets`.
-            let role = if matches!(role, "target") {
+            let role = if r.role == "target" {
                 "targets"
             } else {
-                role
+                r.role
             };
-            return Err(reference_body(&p.id, id, t, role));
+            return Err(reference_body(&p.id, id, r.body, role));
         }
     }
     Ok(())
@@ -2178,7 +2185,7 @@ pub(crate) fn finish(
     // shown (design 388).
     if body.kind() == ryukei::topo::BodyKind::Mixed {
         return Err(
-            crate::kind::wrong(id, "result", id, "mixed", crate::kind::Want::Solid)
+            crate::kind::wrong(id, "result", id, "mixed", crate::kind::Want::Solid, None)
                 .with("reason", "mixed"),
         );
     }
@@ -3177,12 +3184,14 @@ mod tests {
             role: "faces",
             want: None,
             changes: false,
+            hint: None,
         };
         assert!(body_as(&part, &solids, &id, &b, any, &r).is_ok());
         let sheet = Need {
             role: "sheets",
             want: Some(Want::Sheet),
             changes: true,
+            hint: None,
         };
         let e = body_as(&part, &solids, &id, &b, sheet, &r).unwrap_err();
         assert_eq!(
@@ -3396,6 +3405,7 @@ mod tests {
             &id("w"),
             &sheet_fixture(),
             crate::kind::Want::Solid,
+            None,
         )
         .unwrap_err();
         assert_eq!(e.code, Code::WrongBodyKind);

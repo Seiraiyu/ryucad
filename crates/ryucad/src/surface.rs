@@ -379,6 +379,7 @@ pub fn sew(
         role: "sheets",
         want: Some(crate::kind::Want::Sheet),
         changes: true,
+        hint: None,
     };
     let inputs: Vec<(&Id, &Built)> = x
         .sheets
@@ -565,6 +566,7 @@ fn thicken_input<'a>(
                 role: "from",
                 want: Some(crate::kind::Want::Sheet),
                 changes: true,
+                hint: None,
             };
             let built = crate::rebuild::body_as(part, solids, id, s, need, before)?;
             Ok((s, built, std::borrow::Cow::Borrowed(&built.body)))

@@ -4033,7 +4033,10 @@ fn check_references(
         .any(|g| g.as_ref().is_ok_and(|g| g.may_make_sheet()));
     let read = crate::kind::bodies_read(f);
     let reads_bodies = !read.is_empty()
-        && (may_hold_sheets || read.iter().any(|(_, _, w)| *w == crate::kind::Want::Sheet));
+        && (may_hold_sheets
+            || read
+                .iter()
+                .any(|r| r.want == Some(crate::kind::Want::Sheet)));
     let planar = matches!(f, Feature::Planar(_));
     // An unfold's allowance and a refold's unfold are judged against the
     // rebuild whatever they reference.

@@ -592,9 +592,9 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                 &x.founder,
                 "sheet",
                 crate::kind::Want::Solid,
+                Some("exports write sheets from ryucad 18.C"),
             )
-            .with("part", &p.part)
-            .with("hint", "exports write sheets from ryucad 18.C"));
+            .with("part", &p.part));
         }
     }
     let failing: Vec<Value> = walk.failing.values().cloned().collect();
