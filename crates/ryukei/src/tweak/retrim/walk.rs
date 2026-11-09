@@ -285,8 +285,8 @@ mod tests {
         ])
     }
 
-    // unmetered: unit tests of a combinatorial walk.
     fn free() -> Meter<'static> {
+        // unmetered: unit tests of a combinatorial walk.
         Meter::free()
     }
 

@@ -290,6 +290,32 @@ fn drafts_are_bounded() {
 }
 
 #[test]
+fn re_trims_are_bounded() {
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::tweak::{DraftFace, DraftSpec, Hinge, Topology, draft_with};
+    // A small box's −x wall drafted past its +x wall: the fixed engine
+    // refuses and the re-trim builds a wedge.
+    let (b, _) = primitive::block(OpKey(1), 0.01, 0.006, 0.004, &Rigid::IDENTITY).unwrap();
+    let wall = Name::derive(OpKey(1), Role::Face(FaceRole::MinusX), &[]);
+    let spec = DraftSpec {
+        pull: ryukei::geom::UnitVector3::exact(ryukei::geom::Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+        angle: 1.3,
+        hinge: Hinge::Neutral {
+            origin: ryukei::geom::Point3::ORIGIN,
+        },
+        faces: vec![DraftFace {
+            face: wall,
+            angle: None,
+            flip: false,
+        }],
+        tangent: false,
+        topology: Topology::Change,
+    };
+    let spent = bounded("re-trim", |w| draft_with(OpKey(8), &b, &spec, w));
+    eprintln!("re-trim: {spent} units");
+}
+
+#[test]
 fn thickening_a_sheet_is_bounded() {
     use ryukei::name::{FaceRole, Name, Role};
     use ryukei::offset::{ThickenSpec, thicken_with};
