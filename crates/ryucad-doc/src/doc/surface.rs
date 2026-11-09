@@ -1,0 +1,247 @@
+//! Surface features (ryucad 18.B, design 388 phases 4 and 5): a sheet
+//! spanning a loop of edges and curves (`fill`), faces of a body copied
+//! into a sheet (`extract`), sheets sewn into one body (`sew`, which
+//! consumes them), and a sheet or a body's faces given thickness as a
+//! solid (`thicken`, joined to, cut from or intersected with solids as an
+//! extrude's body is). Each makes a body of its own, named by its ID.
+
+use super::files::{Obj, invalid};
+use super::geometry::GeomRef;
+use super::id::Id;
+use super::reference::Reference;
+use super::solid::{Combine, Operation, targets_from_json};
+use crate::error::{Code, Error, Result};
+use crate::expr::Env;
+use crate::units::{Field, Quantity, Unit};
+use serde_json::{Value, json};
+
+/// The feature format fills, extracts, sews and thickens are new in.
+pub const FORMAT: u64 = 15;
+
+/// The smallest and largest tolerance a fill or a sew takes, in meters:
+/// the kernel's linear resolution and its tolerance cap.
+pub const TOLERANCE_RANGE: (f64, f64) = (1e-8, 1e-4);
+
+/// One side of a fill, in order round its loop.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Side {
+    /// An edge of any body by stable name; with `tangent` the fill meets
+    /// its one face tangentially (the edge must be laminar).
+    Edge { edge: Reference, tangent: bool },
+    /// A curve: a sketch's line, arc or circle, a path or a helix (each of
+    /// whose pieces is a side), or an edge taken as a curve.
+    Curve(GeomRef),
+}
+
+/// A fill: a sheet spanning `sides`, each meeting the next within
+/// `tolerance`, tangent sides and inner edges within `angle`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fill {
+    pub sides: Vec<Side>,
+    pub tolerance: Quantity,
+    pub angle: Quantity,
+}
+
+/// The fields a request may give a fill, an extract, a sew or a thicken.
+pub fn request_fields(ty: &str) -> &'static [&'static str] {
+    match ty {
+        "fill" => &["sides", "edges", "curve", "tolerance", "angle"],
+        "extract" => &["faces", "face", "face_list"],
+        "sew" => &["sheets", "tolerance", "make_solid"],
+        _ => &[
+            "sheet",
+            "sheets",
+            "from_faces",
+            "face",
+            "face_list",
+            "front",
+            "back",
+            "face_sides",
+            "operation",
+            "targets",
+        ],
+    }
+}
+
+impl Fill {
+    /// Its fields: every side, a tangent flag only when true, the
+    /// tolerance and angle always.
+    pub fn fields(&self) -> Value {
+        let sides: Vec<Value> = self
+            .sides
+            .iter()
+            .map(|s| match s {
+                Side::Edge { edge, tangent } => {
+                    let mut v = json!({"edge": edge.to_json()});
+                    if *tangent {
+                        v["tangent"] = json!(true);
+                    }
+                    v
+                }
+                Side::Curve(g) => json!({"curve": g.to_json()}),
+            })
+            .collect();
+        json!({"sides": sides, "tolerance": self.tolerance.text(), "angle": self.angle.text()})
+    }
+
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj, default: Unit, env: &Env) -> Result<Fill> {
+        let v = o.take("sides")?;
+        let a = v
+            .as_array()
+            .filter(|a| !a.is_empty())
+            .ok_or_else(|| invalid("/sides", "sides is a non-empty array of {edge, tangent?} or {curve}"))?;
+        let mut sides = Vec::with_capacity(a.len());
+        for (i, s) in a.iter().enumerate() {
+            let at = format!("/sides/{i}");
+            let mut f = Obj::new(s, &at)?;
+            let side = if f.has("edge") {
+                let edge = Reference::from_json(&f.take("edge")?, &format!("{at}/edge"))?;
+                let tangent = match f.take_opt("tangent") {
+                    None => false,
+                    Some(Value::Bool(b)) => b,
+                    Some(_) => return Err(invalid(&format!("{at}/tangent"), "tangent is true or false")),
+                };
+                Side::Edge { edge, tangent }
+            } else if f.has("curve") {
+                if f.has("tangent") {
+                    return Err(invalid(&at, "only an edge side meets its face tangentially"));
+                }
+                Side::Curve(GeomRef::from_json(&f.take("curve")?, &format!("{at}/curve"))?)
+            } else {
+                return Err(invalid(&at, "a side is {edge, tangent?} or {curve}"));
+            };
+            f.finish()?;
+            sides.push(side);
+        }
+        let tolerance = tolerance(o, "0.001 mm", default, env)?;
+        let angle = match o.take_opt("angle") {
+            None => Quantity::from_json_as(&json!("1 deg"), Field::Angle, &|n| env.get(n))?,
+            Some(v) => Quantity::from_json_as(&v, Field::Angle, &|n| env.get(n))
+                .map_err(|e| e.with("pointer", "/angle"))?,
+        };
+        let r = angle.radians();
+        if !(r > 0.0 && r < core::f64::consts::FRAC_PI_2) {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("a fill's angle is more than 0 and less than 90 deg, not {angle}"),
+            )
+            .with("pointer", "/angle")
+            .with("value", angle.text()));
+        }
+        Ok(Fill { sides, tolerance, angle })
+    }
+
+    /// Its edge sides' references, each with its role `sides.<i>.edge`.
+    pub fn references(&self) -> Vec<(String, &Reference)> {
+        self.sides
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| match s {
+                Side::Edge { edge, .. } => Some((format!("sides.{i}.edge"), edge)),
+                Side::Curve(_) => None,
+            })
+            .collect()
+    }
+
+    /// Its curve sides, each with its role `sides.<i>.curve`.
+    pub fn geometry(&self) -> Vec<(String, &GeomRef)> {
+        self.sides
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| match s {
+                Side::Curve(g) => Some((format!("sides.{i}.curve"), g)),
+                Side::Edge { .. } => None,
+            })
+            .collect()
+    }
+}
+
+/// `tolerance` (else `default_text`): a length within
+/// [`TOLERANCE_RANGE`].
+fn tolerance(o: &mut Obj, default_text: &str, default: Unit, env: &Env) -> Result<Quantity> {
+    let q = match o.take_opt("tolerance") {
+        None => Quantity::from_json_as(&json!(default_text), Field::Length(default), &|n| env.get(n))?,
+        Some(v) => Quantity::from_json_as(&v, Field::Length(default), &|n| env.get(n))
+            .map_err(|e| e.with("pointer", "/tolerance"))?,
+    };
+    let (lo, hi) = TOLERANCE_RANGE;
+    let m = q.meters();
+    if !(lo..=hi).contains(&m) {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("a tolerance is from 0.00001 mm to 0.1 mm, not {q}"),
+        )
+        .with("pointer", "/tolerance")
+        .with("value", q.text()));
+    }
+    Ok(q)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const A: &str = "0123456789abcdef0123456789abcdef";
+
+    fn fill(v: Value) -> Result<Fill> {
+        let mut o = Obj::new(&v, "")?;
+        let f = Fill::from_fields(&mut o, Unit::Mm, &Env::empty())?;
+        o.finish()?;
+        Ok(f)
+    }
+
+    #[test]
+    fn fills_round_trip() {
+        let v = json!({"sides": [
+            {"edge": {"feature": "wall", "name": A}, "tangent": true},
+            {"curve": {"feature": "s2", "entity": "a1"}},
+            {"curve": {"feature": "p1"}}]});
+        let f = fill(v).unwrap();
+        assert_eq!(f.sides.len(), 3);
+        // The tolerance and angle are always written, defaults included.
+        assert_eq!(
+            f.fields(),
+            json!({"sides": [
+                {"edge": {"feature": "wall", "name": A}, "tangent": true},
+                {"curve": {"feature": "s2", "entity": "a1"}},
+                {"curve": {"feature": "p1"}}],
+                "tolerance": "0.001 mm", "angle": "1 deg"})
+        );
+        assert_eq!(fill(f.fields()).unwrap(), f);
+        // An edge that isn't tangent writes no flag.
+        let f = fill(json!({"sides": [{"edge": {"feature": "w", "name": A}, "tangent": false},
+                                       {"curve": "x"}, {"curve": "y"}],
+                            "tolerance": "0.01 mm", "angle": 2})).unwrap();
+        assert_eq!(f.fields()["sides"][0], json!({"edge": {"feature": "w", "name": A}}));
+        assert_eq!(f.angle.radians(), 2f64.to_radians());
+        let roles: Vec<String> = f.references().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(roles, ["sides.0.edge"]);
+        let roles: Vec<String> = f.geometry().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(roles, ["sides.1.curve", "sides.2.curve"]);
+    }
+
+    #[test]
+    fn fills_are_checked() {
+        let e = |v: Value| fill(v).unwrap_err();
+        for (v, code, pointer) in [
+            (json!({}), Code::InvalidDocument, "/sides"),
+            (json!({"sides": []}), Code::InvalidDocument, "/sides"),
+            (json!({"sides": [{"edge": {"feature": "w", "name": "x"}}]}),
+             Code::InvalidDocument, "/sides/0/edge/name"),
+            (json!({"sides": [{"curve": "x", "tangent": true}]}),
+             Code::InvalidDocument, "/sides/0"),
+            (json!({"sides": [{"wire": "x"}]}), Code::InvalidDocument, "/sides/0"),
+            (json!({"sides": [{"curve": "x"}], "tolerance": "1 mm"}),
+             Code::InvalidParam, "/tolerance"),
+            (json!({"sides": [{"curve": "x"}], "tolerance": "1 deg"}),
+             Code::UnitMismatch, "/tolerance"),
+            (json!({"sides": [{"curve": "x"}], "angle": "90 deg"}),
+             Code::InvalidParam, "/angle"),
+            (json!({"sides": [{"curve": "x"}], "angle": 0}), Code::InvalidParam, "/angle"),
+        ] {
+            let err = e(v.clone());
+            assert_eq!((err.code, err.details["pointer"].as_str()), (code, Some(pointer)), "{v}");
+        }
+    }
+}
