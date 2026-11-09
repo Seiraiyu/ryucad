@@ -389,6 +389,10 @@ pub fn type_icon(ty: &str, op: Option<&str>, form: Option<&str>) -> &'static str
         "offset" => "offset",
         "mirror" => "mirror-body",
         "split" => "split",
+        "base_flange" => "base-flange",
+        "flange" => "edge-flange",
+        "unfold" => "unfold",
+        "refold" => "refold",
         _ => "question",
     }
 }
@@ -499,6 +503,10 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
             ("Offset", "offset", Tint::Plain),
             ("Mirror", "mirror-body", Tint::Plain),
             ("Split", "split", Tint::Plain),
+            ("Base flange", "base-flange", Tint::Plain),
+            ("Edge flange", "edge-flange", Tint::Plain),
+            ("Unfold", "unfold", Tint::Plain),
+            ("Refold", "refold", Tint::Plain),
             ("Linear pattern", "pattern-linear", Tint::Plain),
             ("Circular pattern", "pattern-circular", Tint::Plain),
             ("Mirror pattern", "flip-horizontal", Tint::Plain),
@@ -1717,6 +1725,51 @@ mod tests {
                 "    bad (mirror, join): failed (mirror_failed)",
             ]
         );
+    }
+
+    #[test]
+    fn sheet_metal_features_take_their_glyphs_and_list_what_they_read() {
+        let mut m = Model::default();
+        m.apply_part(&json!({"part": "p", "revision": "r1", "features": [
+            {"id": "s", "type": "sketch", "ok": true, "sketch": {"state": "well", "dof": 0}},
+            {"id": "plate", "type": "base_flange", "ok": true, "hash": "1", "solids": ["plate"],
+             "uses": ["s"]},
+            {"id": "f1", "type": "flange", "ok": true, "hash": "2", "solids": ["plate"],
+             "uses": ["plate"]},
+            {"id": "u", "type": "unfold", "ok": true, "hash": "3", "solids": ["plate"],
+             "uses": ["f1", "plate"], "flat": {"bends": 1, "partial": false,
+                                              "box_m": [[0, 0], [0.1, 0.06]]}},
+            {"id": "r", "type": "refold", "ok": false, "solids": ["plate"], "uses": ["u"],
+             "error": {"code": "sheet_metal_failed", "message": "the fold collides"}}],
+            "solids": [{"solid": "plate", "ok": false, "features": ["plate", "f1", "u", "r"],
+                        "hash": "3", "error": {"code": "sheet_metal_failed"}}]}));
+        let (states, pdm) = (States::default(), BTreeMap::new());
+        let rows = rows(&source(&m, &states, &pdm));
+        let row = |id: &str| {
+            rows.iter()
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("{id}"))
+        };
+        assert_eq!(
+            ["plate", "f1", "u", "r"].map(|f| row(&format!("feature:p/{f}")).icon),
+            ["base-flange", "edge-flange", "unfold", "refold"]
+        );
+        let bad = row("feature:p/r");
+        assert!(bad.failed && bad.tint == Tint::Danger);
+        assert!(bad.text.contains("sheet_metal_failed"), "{}", bad.text);
+        let shown = texts(&rows, &Tree::default());
+        for line in [
+            "    plate (base_flange)",
+            "      uses s",
+            "    f1 (flange)",
+            "      uses plate",
+            "    u (unfold)",
+            "      uses f1, plate",
+            "    r (refold): failed (sheet_metal_failed)",
+            "      uses u",
+        ] {
+            assert!(shown.iter().any(|t| t == line), "{line:?} in {shown:#?}");
+        }
     }
 
     #[test]
