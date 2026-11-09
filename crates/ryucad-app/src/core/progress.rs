@@ -223,6 +223,7 @@ pub fn label(method: &str, part: Option<&str>) -> String {
         "check" => format!("Checking {what}"),
         "doctor" => "Running doctor".to_owned(),
         "import" => "Importing".to_owned(),
+        "import.convert" => format!("Converting imports of {what}"),
         "interference" => format!("Checking interference in {what}"),
         "export" => format!("Exporting {what}"),
         "merge.status" => "Reading the merge".to_owned(),
@@ -294,6 +295,10 @@ mod tests {
         assert_eq!(label("check", None), "Checking the project");
         assert_eq!(label("mesh.get", Some("frame")), "Meshing frame");
         assert_eq!(label("import", Some("x")), "Importing");
+        assert_eq!(
+            label("import.convert", Some("motor")),
+            "Converting imports of motor"
+        );
         assert_eq!(label("deps.fetch", None), "Fetching dependencies");
         assert_eq!(label("deps.add", None), "Adding a dependency");
         assert_eq!(label("deps.update", None), "Updating dependencies");
