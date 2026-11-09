@@ -3,20 +3,29 @@
 //!
 //! - A **fillet** of radius `r` is a face on a canal surface of that
 //!   radius (a cylinder, a torus's tube, a pipe, or a NURBS certified
-//!   within the tolerance of a cylinder or torus): its *rails*, the edges
-//!   that don't cross its spine, are tangent all along to exactly two
-//!   faces, its supports, and it turns less than a half turn between them.
-//! - A **chamfer** is a plane or cone face whose edges to two faces are
-//!   each set back a constant distance from where those faces' surfaces
-//!   meet (a line, or a circle about a common axis), less than
-//!   [`CHAMFER_SHARE`] of the support's width; a chamfer standing on
-//!   another chamfer is left out, the narrower kept.
-//! - A **corner** is a sphere face tangent all round to fillets of its
-//!   radius.
+//!   within the tolerance of a cylinder or torus) whose *rails*, the
+//!   edges that don't run across its spine, roll on exactly two faces,
+//!   its supports: the stretch of spine under each rail lies on its
+//!   support's offset by `r`, certified by `intersect::curve_surface`
+//!   (the design's rule that the spine lies at distance `r` from both
+//!   supports along their normals). It turns less than a half turn
+//!   between them.
+//! - A **chamfer** is a plane or cone face (a flat spline as its plane)
+//!   whose edges to two faces are each set back a constant distance from
+//!   where those faces' surfaces meet (a line, or a circle about a common
+//!   axis), in closed form; of the pairs of faces that read so, the one
+//!   setting back the least share of its supports' width, which must be
+//!   under [`CHAMFER_SHARE`] (a mitred end's neighbours read so too, set
+//!   back farther). A chamfer standing on another chamfer is left out,
+//!   the narrower kept.
+//! - A **corner** is a sphere face every edge of which runs into a fillet
+//!   of its radius whose spine passes through its centre.
 //!
 //! Faces of one surface with the same supports and size are one blend;
-//! blends joined across tangent edges with the same size are a chain.
-//! A face that is nearly a blend but not within the tolerance is left out.
+//! blends of one size running on into each other (fillets across an
+//! edge that is a section of both, chamfers across a tangent edge) are a
+//! chain. A face that is nearly a blend but not within the tolerance is
+//! left out.
 
 use super::{Corner, RecogniseOptions, Recognised, Recognition};
 use crate::blend::convex::tangent_along;
