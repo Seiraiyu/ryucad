@@ -3747,6 +3747,131 @@ fn reference_imports_section(golden: &mut Golden) {
     }
 }
 
+/// Interference over references, judged on meshes: an assembly placing a
+/// reference of OCCT's box twice overlapping, once touching a healed copy
+/// and once apart: every verdict, one thread and four alike.
+fn reference_interference_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("reference_interference");
+    let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ryustep/tests/data/occt/box_ap214.stp");
+    let mut runs = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        ryucad::server::init(dir.path(), None).unwrap();
+        let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+        let call = |session: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+            let req = ryucad::proto::Request::from_rpc(m, Some(p)).unwrap();
+            pool.install(|| ryucad::server::handle(session, req))
+        };
+        call(&mut session, "import", json!({"path": file, "part": "r"})).unwrap();
+        call(
+            &mut session,
+            "import",
+            json!({"path": file, "part": "h", "solid": true}),
+        )
+        .unwrap();
+        // The box's length along x, so the places don't depend on the file.
+        let v = call(&mut session, "inspect", json!({"part": "r"})).unwrap();
+        let b = &v["bodies"][0]["bounds"];
+        let len = 1000.0 * (b["max"][0].as_f64().unwrap() - b["min"][0].as_f64().unwrap());
+        call(
+            &mut session,
+            "part.create",
+            json!({"part": "rig", "kind": "assembly"}),
+        )
+        .unwrap();
+        // `a` and `b` overlap by half; `c` (healed) touches `b`; `d` apart.
+        for (id, of, x) in [
+            ("a", "r", 0.0),
+            ("b", "r", len / 2.0),
+            ("c", "h", 1.5 * len),
+            ("d", "r", 10.0 * len),
+        ] {
+            call(
+                &mut session,
+                "feature.add",
+                json!({"part": "rig", "type": "instance", "id": id, "of": of, "fixed": true,
+                       "placement": {"origin": [format!("{x} mm"), "0 mm", "0 mm"]}}),
+            )
+            .unwrap();
+        }
+        let v = call(&mut session, "interference", json!({"part": "rig"})).unwrap();
+        runs.push(v.to_string());
+    }
+    assert_eq!(runs[0], runs[1], "one thread and four");
+    s.str(&runs[0]);
+}
+
+/// OCCT's nested assembly flattened as references: the part's features
+/// (IDs, products, places), each body's hash and counts, and its STEP and
+/// STL exports' bytes, one thread and four alike.
+fn flatten_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("flatten");
+    let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ryustep/tests/data/occt/assembly.stp");
+    let mut runs = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        ryucad::server::init(dir.path(), None).unwrap();
+        let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+        let req = ryucad::proto::Request::from_rpc(
+            "import",
+            Some(json!({"path": file, "flatten": true, "part": "board"})),
+        )
+        .unwrap();
+        pool.install(|| ryucad::server::handle(&mut session, req))
+            .unwrap();
+        let mut out = Vec::new();
+        let part = Id::parse("board", "part").unwrap();
+        let text = std::fs::read_to_string(dir.path().join("parts/board/part.json")).unwrap();
+        out.push(text);
+        let r = pool.install(|| session.rebuilt(&part).unwrap().clone());
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        for (id, o) in &r.features {
+            let f =
+                std::fs::read_to_string(dir.path().join(format!("parts/board/features/{id}.json")))
+                    .unwrap();
+            out.push(f);
+            for (solid, b) in o.as_ref().unwrap().solids() {
+                assert!(b.reference, "{solid}");
+                out.push(solid.to_string());
+                out.push(b.hash.clone());
+                let c = b.body.counts();
+                out.push(format!("{} {} {}", c.faces, c.edges, c.vertices));
+            }
+        }
+        for format in ["step", "stl"] {
+            let ask = ryucad::export::Ask {
+                part: "board".into(),
+                format: Some(format.into()),
+                time_stamp: Some("2026-11-09T00:00:00".into()),
+                chord: (format == "stl").then(|| "0.05 mm".into()),
+                angle: (format == "stl").then(|| "20 deg".into()),
+                ..Default::default()
+            };
+            let a = pool
+                .install(|| ryucad::export::export_stamped(&mut session, ask, "0.0.0"))
+                .unwrap_or_else(|e| panic!("{format}: {e}"));
+            out.push(format!("{:x}", md(&a.binary.unwrap())));
+        }
+        runs.push(out);
+    }
+    assert_eq!(runs[0], runs[1], "one thread and four");
+    for x in &runs[0] {
+        s.str(x);
+    }
+}
+
 /// The planar face of `part`'s solid `solid` whose outward normal is `n`.
 fn face_along(s: &mut ryucad::session::Session, part: &str, solid: &str, n: [f64; 3]) -> String {
     let req = ryucad::proto::Request::from_rpc(
@@ -4404,6 +4529,8 @@ sections! {
     measure => measure_section(&mut golden),
     imports => imports_section(&mut golden),
     reference_imports => reference_imports_section(&mut golden),
+    reference_interference => reference_interference_section(&mut golden),
+    flatten => flatten_section(&mut golden),
     exports => exports_section(&mut golden),
     formats => formats_section(&mut golden),
     views => views_section(&mut golden),
