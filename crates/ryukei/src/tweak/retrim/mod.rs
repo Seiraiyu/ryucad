@@ -168,7 +168,8 @@ fn attempt(
         let mut kept = walk::walk(&arr, &seeds, m);
         // Shells no outside face reaches take a seed each, once.
         if let Ok(k) = &kept {
-            let more = seeds::shell_seeds(body, changes, &w, &arr, table, pieces, k, m);
+            let seen: Vec<bool> = k.iter().map(Option::is_some).collect();
+            let more = seeds::shell_seeds(body, changes, &w, &arr, table, pieces, &seen, m);
             if !more.is_empty() {
                 seeds.extend(more);
                 kept = walk::walk(&arr, &seeds, m);
@@ -178,10 +179,11 @@ fn attempt(
             Ok(k) => Ok(pieces
                 .iter()
                 .zip(k)
-                .filter(|(_, keep)| *keep)
-                .map(|(p, _)| Kept {
-                    piece: p.clone(),
-                    reversed: false,
+                .filter_map(|(p, keep)| {
+                    keep.map(|reversed| Kept {
+                        piece: p.clone(),
+                        reversed,
+                    })
                 })
                 .collect()),
             Err(e) => {

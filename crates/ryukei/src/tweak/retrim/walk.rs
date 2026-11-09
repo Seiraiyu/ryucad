@@ -44,82 +44,182 @@ fn flip(s: Sense) -> Sense {
     }
 }
 
-/// The pieces kept, by index, from `seeds`: a unit charged per piece.
-pub(crate) fn walk(arr: &Arrangement, seeds: &[usize], m: &Meter) -> Result<Vec<bool>, WalkError> {
-    // Keyed by edge and whether the arc runs it forwards.
+/// How many choices the search tries in all before it calls the
+/// arrangement ambiguous.
+pub(crate) const CHOICES: usize = 4096;
+
+/// A state of the search: each piece's verdict, the pieces to drain and
+/// the arcs waiting for a partner.
+#[derive(Clone)]
+struct State {
+    kept: Vec<Option<bool>>,
+    queue: Vec<usize>,
+    pending: BTreeSet<(bool, usize, bool, usize)>,
+}
+
+/// The sense piece `q` uses an arc of sense `s` with, as kept.
+fn as_kept(s: Sense, reversed: bool) -> Sense {
+    if reversed { flip(s) } else { s }
+}
+
+/// The pieces kept, and which reversed, from `seeds` (kept as they are):
+/// the one closure where every edge a kept piece uses is used by exactly
+/// one other kept piece the other way (a laminar edge by none), and no
+/// kept piece uses a clipped edge. Forced partners are taken as they come;
+/// where an edge's partner isn't forced, each piece of another face that
+/// uses it the other way, then each that uses it the same way (kept
+/// reversed), is tried in piece order, and the search goes on from each.
+/// One closure is the answer; two are `Ambiguous`, as is a search past
+/// [`CHOICES`] tries; none gives the first failure met. A unit is charged
+/// per piece drained and per choice.
+pub(crate) fn walk(
+    arr: &Arrangement,
+    seeds: &[usize],
+    m: &Meter,
+) -> Result<Vec<Option<bool>>, WalkError> {
     let mut users: BTreeMap<(usize, bool), Vec<usize>> = BTreeMap::new();
     for (i, (_, arcs)) in arr.pieces.iter().enumerate() {
         for &(g, s) in arcs {
             users.entry((g, s == Sense::Forward)).or_default().push(i);
         }
     }
-    let none: Vec<usize> = Vec::new();
-    let of = |g: usize, s: Sense| users.get(&(g, s == Sense::Forward)).unwrap_or(&none);
-    let mut kept = vec![false; arr.pieces.len()];
-    let mut queue: Vec<usize> = Vec::new();
+    let mut state = State {
+        kept: vec![None; arr.pieces.len()],
+        queue: Vec::new(),
+        pending: BTreeSet::new(),
+    };
     for &s in seeds {
-        if !kept[s] {
-            kept[s] = true;
-            queue.push(s);
+        if state.kept[s].is_none() {
+            state.kept[s] = Some(false);
+            state.queue.push(s);
         }
     }
-    // Arcs waiting for a partner: new edges after old ones, then by edge,
-    // sense and piece.
-    let mut pending: BTreeSet<(bool, usize, bool, usize)> = BTreeSet::new();
+    let mut tries = 0usize;
+    let mut found: Vec<Vec<Option<bool>>> = Vec::new();
+    let mut first: Option<WalkError> = None;
+    search(arr, &users, state, m, &mut tries, &mut found, &mut first)?;
+    match found.len() {
+        1 => Ok(found.pop().expect("one")),
+        0 => Err(first.unwrap_or(WalkError::Open {
+            piece: seeds.first().copied().unwrap_or(0),
+        })),
+        _ => Err(WalkError::Ambiguous {
+            piece: seeds.first().copied().unwrap_or(0),
+        }),
+    }
+}
+
+/// The kept pieces that use edge `g` with sense `s` as kept.
+fn kept_using(
+    users: &BTreeMap<(usize, bool), Vec<usize>>,
+    kept: &[Option<bool>],
+    g: usize,
+    s: Sense,
+) -> usize {
+    [Sense::Forward, Sense::Reversed]
+        .into_iter()
+        .flat_map(|raw| {
+            users
+                .get(&(g, raw == Sense::Forward))
+                .into_iter()
+                .flatten()
+                .map(move |&q| (q, raw))
+        })
+        .filter(|&(q, raw)| kept[q].is_some_and(|r| as_kept(raw, r) == s))
+        .count()
+}
+
+/// Drains `state`, then branches on its first waiting arc; closures go
+/// into `found` (two are enough to stop), the first failure into `first`.
+/// Only a halt is an error.
+fn search(
+    arr: &Arrangement,
+    users: &BTreeMap<(usize, bool), Vec<usize>>,
+    mut st: State,
+    m: &Meter,
+    tries: &mut usize,
+    found: &mut Vec<Vec<Option<bool>>>,
+    first: &mut Option<WalkError>,
+) -> Result<(), WalkError> {
+    let fail = |e: WalkError, first: &mut Option<WalkError>| {
+        first.get_or_insert(e);
+    };
     loop {
-        // Drain what is forced.
-        while let Some(p) = queue.pop() {
+        while let Some(p) = st.queue.pop() {
             m.charge(1).map_err(|_| WalkError::Halted { piece: p })?;
-            for &(g, s) in &arr.pieces[p].1 {
+            let r = st.kept[p].expect("queued pieces are kept");
+            for &(g, raw) in &arr.pieces[p].1 {
+                let s = as_kept(raw, r);
                 if arr.clipped.contains(&g) {
-                    return Err(WalkError::Clipped { piece: p });
+                    fail(WalkError::Clipped { piece: p }, first);
+                    return Ok(());
                 }
-                if of(g, s).iter().filter(|&&q| kept[q]).count() > 1 {
-                    return Err(WalkError::Ambiguous { piece: p });
+                if kept_using(users, &st.kept, g, s) > 1 {
+                    fail(WalkError::Ambiguous { piece: p }, first);
+                    return Ok(());
                 }
                 if arr.laminar.contains(&g) {
                     continue;
                 }
-                match of(g, flip(s)).iter().filter(|&&q| kept[q]).count() {
+                match kept_using(users, &st.kept, g, flip(s)) {
                     1 => {}
                     0 => {
-                        pending.insert((!arr.old.contains(&g), g, s == Sense::Forward, p));
+                        st.pending
+                            .insert((!arr.old.contains(&g), g, s == Sense::Forward, p));
                     }
-                    _ => return Err(WalkError::Ambiguous { piece: p }),
+                    _ => {
+                        fail(WalkError::Ambiguous { piece: p }, first);
+                        return Ok(());
+                    }
                 }
             }
         }
-        // Settle the first arc still waiting.
-        let Some(&first) = pending.iter().next() else {
-            return Ok(kept);
+        let Some(&arc) = st.pending.iter().next() else {
+            found.push(st.kept);
+            return Ok(());
         };
-        pending.remove(&first);
-        let (_, g, forward, p) = first;
+        st.pending.remove(&arc);
+        let (_, g, forward, p) = arc;
         let s = if forward {
             Sense::Forward
         } else {
             Sense::Reversed
         };
-        let back = of(g, flip(s));
-        match back.iter().filter(|&&q| kept[q]).count() {
-            1 => continue,
-            0 => {}
-            _ => return Err(WalkError::Ambiguous { piece: p }),
+        if kept_using(users, &st.kept, g, flip(s)) == 1 {
+            continue;
         }
         let face = arr.pieces[p].0;
-        let others: Vec<usize> = back
-            .iter()
-            .copied()
-            .filter(|&q| arr.pieces[q].0 != face)
-            .collect();
-        match others.as_slice() {
-            [q] => {
-                kept[*q] = true;
-                queue.push(*q);
+        // Undecided pieces of other faces: the other way as they are,
+        // then the same way kept reversed.
+        let mut choices: Vec<(usize, bool)> = Vec::new();
+        for (raw, reversed) in [(flip(s), false), (s, true)] {
+            for &q in users.get(&(g, raw == Sense::Forward)).into_iter().flatten() {
+                if st.kept[q].is_none() && arr.pieces[q].0 != face {
+                    choices.push((q, reversed));
+                }
             }
-            [] => return Err(WalkError::Open { piece: p }),
-            _ => return Err(WalkError::Ambiguous { piece: p }),
         }
+        if choices.is_empty() {
+            fail(WalkError::Open { piece: p }, first);
+            return Ok(());
+        }
+        for (q, reversed) in choices {
+            *tries += 1;
+            if *tries > CHOICES {
+                found.push(Vec::new());
+                found.push(Vec::new());
+                return Ok(());
+            }
+            m.charge(1).map_err(|_| WalkError::Halted { piece: q })?;
+            let mut next = st.clone();
+            next.kept[q] = Some(reversed);
+            next.queue.push(q);
+            search(arr, users, next, m, tries, found, first)?;
+            if found.len() > 1 {
+                return Ok(());
+            }
+        }
+        return Ok(());
     }
 }
 
@@ -157,7 +257,7 @@ mod tests {
 
     #[test]
     fn a_cube_closes_from_one_seed() {
-        assert_eq!(walk(&cube(), &[0], &free()).unwrap(), vec![true; 6]);
+        assert_eq!(walk(&cube(), &[0], &free()).unwrap(), vec![Some(false); 6]);
     }
 
     #[test]
@@ -171,11 +271,23 @@ mod tests {
     }
 
     #[test]
-    fn two_partners_are_ambiguous() {
+    fn a_partner_that_closes_nothing_is_passed_over() {
+        // A stray piece takes the bottom's edge 0 back too; only the
+        // cube's own side closes, so the search keeps the cube.
         let mut a = cube();
         a.pieces.push((6, vec![(0, R)]));
+        let mut want = vec![Some(false); 6];
+        want.push(None);
+        assert_eq!(walk(&a, &[0], &free()).unwrap(), want);
+    }
+
+    #[test]
+    fn two_partners_are_ambiguous() {
+        // A stray piece using edge 0 the bottom's way: a third user.
+        let mut a = cube();
+        a.pieces.push((6, vec![(0, F)]));
         assert!(matches!(
-            walk(&a, &[0], &free()),
+            walk(&a, &[0, 6], &free()),
             Err(WalkError::Ambiguous { .. })
         ));
     }
@@ -205,7 +317,7 @@ mod tests {
         a.old = BTreeSet::from([0, 1]);
         assert_eq!(
             walk(&a, &[0], &free()).unwrap(),
-            vec![true, true, true, false]
+            vec![Some(false), Some(false), Some(false), None]
         );
     }
 
@@ -213,6 +325,62 @@ mod tests {
     fn laminar_edges_take_one_use() {
         let mut a = arrangement(vec![(0, vec![(0, F)])]);
         a.laminar.insert(0);
-        assert_eq!(walk(&a, &[0], &free()).unwrap(), vec![true]);
+        assert_eq!(walk(&a, &[0], &free()).unwrap(), vec![Some(false)]);
+    }
+    #[test]
+    fn a_wrong_first_choice_is_backed_out_of() {
+        // Seed O (face 0) uses edge 0 forward. Candidates the other way:
+        // U (face 1), which also uses edge 1 that nothing takes back
+        // (Open), and, the same way round, V (face 2), kept reversed,
+        // whose edge 2 (reversed with it) W (face 3) closes as it is.
+        let a = arrangement(vec![
+            (0, vec![(0, F)]),
+            (1, vec![(0, R), (1, F)]),
+            (2, vec![(0, F), (2, F)]),
+            (3, vec![(2, F)]),
+        ]);
+        assert_eq!(
+            walk(&a, &[0], &free()).unwrap(),
+            vec![Some(false), None, Some(true), Some(false)]
+        );
+    }
+
+    #[test]
+    fn two_closures_are_ambiguous() {
+        // Seed O's edge 0 is taken back by U or by V alone, each closing.
+        let a = arrangement(vec![
+            (0, vec![(0, F)]),
+            (1, vec![(0, R)]),
+            (2, vec![(0, R)]),
+        ]);
+        assert!(matches!(
+            walk(&a, &[0], &free()),
+            Err(WalkError::Ambiguous { .. })
+        ));
+    }
+
+    #[test]
+    fn no_closure_gives_the_first_failure() {
+        let a = arrangement(vec![(0, vec![(0, F)]), (1, vec![(0, R), (1, F)])]);
+        assert!(matches!(
+            walk(&a, &[0], &free()),
+            Err(WalkError::Open { .. })
+        ));
+    }
+
+    #[test]
+    fn the_search_is_bounded() {
+        // A chain of 64 edges, each with two candidates that both close
+        // until the last: past `CHOICES` tries it is Ambiguous, not slow.
+        let mut pieces = vec![(0, vec![(0, F)])];
+        for k in 0..64 {
+            pieces.push((2 * k + 1, vec![(k, R), (k + 1, F)]));
+            pieces.push((2 * k + 2, vec![(k, R), (k + 1, F)]));
+        }
+        let a = arrangement(pieces);
+        assert!(matches!(
+            walk(&a, &[0], &free()),
+            Err(WalkError::Ambiguous { .. })
+        ));
     }
 }
