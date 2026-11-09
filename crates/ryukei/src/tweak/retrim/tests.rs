@@ -39,3 +39,63 @@ pub(crate) fn bossed() -> Body {
     .unwrap()
     .0
 }
+
+use super::retrim;
+use crate::tweak::Motion;
+use crate::tweak::engine::Changes;
+use std::collections::BTreeMap;
+
+/// The changes that raise a block's top by `dz`.
+pub(crate) fn raised(b: &Body, dz: f64) -> Changes {
+    let top = face_of(b, FaceRole::PlusZ);
+    let up = Rigid::translation(Vector3::new(0.0, 0.0, dz));
+    Changes {
+        motion: BTreeMap::from([(top, Motion::Rigid(up))]),
+        surface: BTreeMap::from([(top, b.surfaces[b.faces[top].surface].transformed(&up))]),
+        ..Changes::default()
+    }
+}
+
+fn volume(b: &Body) -> f64 {
+    assert_eq!(crate::check::check(b), []);
+    let m = crate::mesh::tessellate(b, &crate::mesh::MeshParams::new(1e-3, 0.1)).unwrap();
+    assert!(m.faults.is_empty(), "{:?}", m.faults);
+    m.welded_triangles()
+        .map(|t| {
+            let [a, b, c] = t.map(|i| m.positions[i as usize].to_vector());
+            a.dot(b.cross(c)) / 6.0
+        })
+        .sum()
+}
+
+#[test]
+fn a_raised_top_through_the_re_trim_is_the_taller_box() {
+    let b = block();
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let (o, _) = retrim(OpKey(0x13a9), &b, &raised(&b, 0.1), &m).unwrap();
+    assert_eq!(
+        (o.faces().count(), o.edges().count(), o.vertices().count()),
+        (6, 12, 8)
+    );
+    assert!((volume(&o) - 0.6 * 0.5).abs() < 1e-9);
+    assert_eq!(crate::check::check_intersections(&o), []);
+}
+
+#[test]
+fn a_sheet_is_refused_before_the_re_trim() {
+    let b = block();
+    let (s, _) = crate::sheet::extract(
+        OpKey(0x13aa),
+        &b,
+        &[b.faces[face_of(&b, FaceRole::PlusZ)].name],
+    )
+    .unwrap();
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let c = Changes::default();
+    assert!(matches!(
+        retrim(OpKey(0x13ab), &s, &c, &m),
+        Err(crate::Error::NotASolid { .. })
+    ));
+}
