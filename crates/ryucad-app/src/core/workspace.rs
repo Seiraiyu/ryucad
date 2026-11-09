@@ -1816,6 +1816,7 @@ impl Workspace {
                 quality: None,
                 transfer: Some(Transfer::Compact),
                 rev: Some(rev.clone()),
+                flat: None,
             };
             self.send(req, Pending::Ghost(key, hash));
         }
@@ -4288,6 +4289,7 @@ impl Workspace {
                         quality: quality.clone(),
                         transfer: Some(Transfer::Compact),
                         rev: self.model_rev(),
+                        flat: None,
                     };
                     self.send(req, Pending::Mesh(key, hash));
                 }
@@ -4306,6 +4308,7 @@ impl Workspace {
                     quality: quality.clone(),
                     transfer: Some(Transfer::Compact),
                     rev: self.model_rev(),
+                    flat: None,
                 };
                 self.send(req, Pending::Meshes(batch.to_vec()));
             }
@@ -4335,6 +4338,7 @@ impl Workspace {
                 quality: Some(level.as_str().to_owned()),
                 transfer: Some(Transfer::Compact),
                 rev: self.model_rev(),
+                flat: None,
             };
             self.send(req, Pending::Level(hash, level));
         }

@@ -140,11 +140,29 @@ pub fn answer_live(
         _ if refused.is_some() => Err(refused.take().expect("checked")),
         Request::MeshGet {
             part,
+            transfer: Some(t @ (Transfer::Binary | Transfer::Compact)),
+            rev,
+            flat: Some(solid),
+            ..
+        } => mesh_flat_binary(
+            session,
+            &part,
+            &solid,
+            rev.as_deref(),
+            t == Transfer::Compact,
+        )
+        .and_then(|mut a| {
+            a.result = versioned(Ok(a.result))?;
+            Ok(a)
+        }),
+        Request::MeshGet {
+            part,
             feature,
             features,
             quality,
             transfer: Some(t @ (Transfer::Binary | Transfer::Compact)),
             rev,
+            flat: None,
         } => session.at(rev.as_deref()).and_then(|(commit, s)| {
             let only = wanted(feature.as_deref(), &features);
             let compact = t == Transfer::Compact;
@@ -1518,11 +1536,18 @@ pub(crate) fn dispatch(
         }
         Request::MeshGet {
             part,
+            rev,
+            flat: Some(solid),
+            ..
+        } => versioned(mesh_flat_json(session, &part, &solid, rev.as_deref())),
+        Request::MeshGet {
+            part,
             feature,
             features,
             quality,
             transfer: _,
             rev,
+            flat: None,
         } => {
             let (commit, s) = session.at(rev.as_deref())?;
             let only = wanted(feature.as_deref(), &features);
@@ -1769,6 +1794,7 @@ pub fn prepare_job(
         features,
         quality,
         rev,
+        flat: None,
         ..
     } = req
     else {
@@ -6583,25 +6609,7 @@ fn render_flat(session: &mut Session, ask: RenderAsk, solid: String) -> Result<A
         &Default::default(),
     )?;
     let p = &f.pattern;
-    let size = (p.bounds.max() - p.bounds.min()).length().max(1e-3);
-    let mesh = f
-        .mesh
-        .get_or_init(|| {
-            let params = crate::mesh::Quality::Normal.params(size);
-            std::sync::Arc::new(crate::mesh::DisplayMesh {
-                mesh: ryukei::mesh::tessellate(&f.body.body, &params)
-                    .map(std::sync::Arc::new)
-                    .map_err(|e| Error::new(Code::Internal, format!("meshing the flat: {e:?}"))),
-                params,
-            })
-        })
-        .clone();
-    let meshed = mesh::Meshed {
-        body: f.body.body.clone(),
-        hash: f.body.hash.clone(),
-        mesh,
-        warning: None,
-    };
+    let meshed = flat_meshed(&f);
     let mut g = Geometry::default();
     draw_body(
         &mut g,
@@ -6673,6 +6681,87 @@ fn render_flat(session: &mut Session, ask: RenderAsk, solid: String) -> Result<A
         result["commit"] = json!(c);
     }
     Ok(Answer::bytes(result, "image/png", img.png()))
+}
+
+/// A flat's display mesh, at normal quality for the pattern's own size,
+/// made the first time anything asks and kept with the flat: every name
+/// the shown body's, so a pick on it is a pick on the solid.
+fn flat_meshed(f: &crate::sheet_metal::flat::FlatOf) -> mesh::Meshed {
+    let p = &f.pattern;
+    let size = (p.bounds.max() - p.bounds.min()).length().max(1e-3);
+    let mesh = f
+        .mesh
+        .get_or_init(|| {
+            let params = crate::mesh::Quality::Normal.params(size);
+            std::sync::Arc::new(crate::mesh::DisplayMesh {
+                mesh: ryukei::mesh::tessellate(&f.body.body, &params)
+                    .map(std::sync::Arc::new)
+                    .map_err(|e| Error::new(Code::Internal, format!("meshing the flat: {e:?}"))),
+                params,
+            })
+        })
+        .clone();
+    mesh::Meshed {
+        body: f.body.body.clone(),
+        hash: f.body.hash.clone(),
+        mesh,
+        warning: None,
+    }
+}
+
+/// The flat `mesh.get` answers of: `solid` (`""`: the part's one sheet
+/// metal solid) laid flat as `flat.get` lays it, the commit read.
+fn mesh_flat(
+    session: &mut Session,
+    part: &str,
+    solid: &str,
+    rev: Option<&str>,
+) -> Result<(Value, mesh::Meshed)> {
+    let named = (!solid.is_empty()).then_some(solid);
+    let (commit, f) = crate::sheet_metal::flat::of(session, part, named, rev, &Default::default())?;
+    let mut v = json!({
+        "part": f.part, "quality": crate::mesh::Quality::Normal.as_str(), "flat": f.solid,
+        "from": match &f.from { crate::sheet_metal::flat::From::Whole => "whole", crate::sheet_metal::flat::From::Unfold(_) => "unfold" },
+    });
+    if let Some(c) = commit {
+        v["commit"] = json!(c);
+    }
+    let m = flat_meshed(&f);
+    Ok((v, m))
+}
+
+/// `mesh.get --flat` with `transfer`: the flat's one body as bytes,
+/// labelled by its solid.
+fn mesh_flat_binary(
+    session: &mut Session,
+    part: &str,
+    solid: &str,
+    rev: Option<&str>,
+    compact: bool,
+) -> Result<Answer> {
+    let (v, m) = mesh_flat(session, part, solid, rev)?;
+    let label = v["flat"].as_str().unwrap_or_default().to_owned();
+    let bodies = [(label, Ok(m))];
+    Ok(match compact {
+        true => Answer::bytes(v, mesh::COMPACT, mesh::encode_compact(&bodies)),
+        false => Answer::bytes(v, mesh::ENCODING, mesh::encode(&bodies)),
+    })
+}
+
+/// `mesh.get --flat` as JSON: the flat's one body, as `mesh_get` gives a
+/// part's.
+fn mesh_flat_json(
+    session: &mut Session,
+    part: &str,
+    solid: &str,
+    rev: Option<&str>,
+) -> Result<Value> {
+    let (mut v, m) = mesh_flat(session, part, solid, rev)?;
+    let mut b = mesh::to_json(&m.body, &m.mesh);
+    b["feature"] = v["flat"].clone();
+    b["hash"] = json!(m.hash);
+    v["bodies"] = json!([b]);
+    Ok(v)
 }
 
 /// Draws one body into a render's geometry where `pose` puts it: its

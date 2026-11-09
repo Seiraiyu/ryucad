@@ -632,6 +632,10 @@ enum Command {
         /// With --out, write ryucad.mesh.2: about half the size.
         #[arg(long, requires = "out")]
         compact: bool,
+        /// Mesh a sheet metal solid's flat body (the part's one unless
+        /// named) instead of the model.
+        #[arg(long, value_name = "SOLID", num_args = 0..=1, default_missing_value = "")]
+        flat: Option<String>,
         #[command(flatten)]
         rev: RevArg,
     },
@@ -4266,6 +4270,7 @@ fn request(cmd: &Command) -> Option<Request> {
             quality,
             out,
             compact,
+            flat,
             rev,
         } => Request::MeshGet {
             part: part.clone(),
@@ -4277,6 +4282,7 @@ fn request(cmd: &Command) -> Option<Request> {
                 false => Transfer::Binary,
             }),
             rev: rev.rev.clone(),
+            flat: flat.clone(),
         },
         Command::History { part, limit } => Request::HistoryLog {
             part: part.clone(),

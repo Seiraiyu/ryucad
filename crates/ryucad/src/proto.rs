@@ -1804,6 +1804,11 @@ pub enum Request {
         /// A Git revision to mesh instead of the working files.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
+        /// Mesh a sheet metal solid's flat body instead (`""`: the part's
+        /// one sheet metal solid), as `flat.get` and `render --flat` lay
+        /// it out: labelled by the solid, every name the shown body's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flat: Option<String>,
     },
     /// Draws a part (or the whole project) to a PNG, sent as bytes after
     /// the answer. The view is `camera`, a participant's camera, a standard
