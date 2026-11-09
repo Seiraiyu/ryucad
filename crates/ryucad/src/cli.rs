@@ -2914,7 +2914,8 @@ fn with_groups(args: &[String]) -> Result<Vec<(String, Vec<String>)>> {
             if a == flag {
                 args.get(i + 1).map(|v| (v.clone(), 2))
             } else {
-                a.strip_prefix(&format!("{flag}=")).map(|v| (v.to_owned(), 1))
+                a.strip_prefix(&format!("{flag}="))
+                    .map(|v| (v.to_owned(), 1))
             }
         };
         if let Some((w, step)) = value("--with") {
@@ -4988,14 +4989,17 @@ mod tests {
     /// `main` makes over the command line.
     fn sent(args: &[&str]) -> Result<FeatureFields> {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        let mut cli = Cli::try_parse_from(&args).map_err(|e| Error::new(Code::Usage, e.to_string()))?;
+        let mut cli =
+            Cli::try_parse_from(&args).map_err(|e| Error::new(Code::Usage, e.to_string()))?;
         if let Command::Feature(FeatureCmd::Add { fields, .. } | FeatureCmd::Edit { fields, .. }) =
             &mut cli.command
         {
             fields.with_groups = with_groups(&args)?;
         }
         match request(&cli.command) {
-            Some(Request::FeatureAdd { fields, .. } | Request::FeatureEdit { fields, .. }) => Ok(fields),
+            Some(Request::FeatureAdd { fields, .. } | Request::FeatureEdit { fields, .. }) => {
+                Ok(fields)
+            }
             _ => panic!("not a feature write"),
         }
     }
@@ -5004,14 +5008,44 @@ mod tests {
     fn faces_tangents_and_replacements_from_the_command_line() {
         on_cli_stack(|| {
             // One --face is `face`, as a chamfer and a sketch take it.
-            let f = sent(&["ryucad", "feature", "add", "p", "move_face", "--by", "translate",
-                           "--direction", "x", "--distance", "5mm", "--face", "p/b/a"]).unwrap();
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "move_face",
+                "--by",
+                "translate",
+                "--direction",
+                "x",
+                "--distance",
+                "5mm",
+                "--face",
+                "p/b/a",
+            ])
+            .unwrap();
             assert_eq!((f.face.as_deref(), &f.faces), (Some("p/b/a"), &None));
             assert_eq!(f.tangent, None);
             // Several, with groups of their own and tangency off.
-            let f = sent(&["ryucad", "feature", "add", "p", "move_face", "--by", "offset",
-                           "--distance", "-0.5mm", "--face", "p/b/a", "--face", "p/b/c",
-                           "--face-distance", "p/b/d=1mm", "--no-tangent"]).unwrap();
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "move_face",
+                "--by",
+                "offset",
+                "--distance",
+                "-0.5mm",
+                "--face",
+                "p/b/a",
+                "--face",
+                "p/b/c",
+                "--face-distance",
+                "p/b/d=1mm",
+                "--no-tangent",
+            ])
+            .unwrap();
             assert_eq!(f.face, None);
             assert_eq!(
                 f.faces,
@@ -5019,13 +5053,42 @@ mod tests {
             );
             assert_eq!(f.tangent, Some(false));
             // A turn the other way.
-            let f = sent(&["ryucad", "feature", "add", "p", "move_face", "--by", "rotate",
-                           "--axis", "x", "--angle", "-3deg", "--face", "p/b/a"]).unwrap();
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "move_face",
+                "--by",
+                "rotate",
+                "--axis",
+                "x",
+                "--angle",
+                "-3deg",
+                "--face",
+                "p/b/a",
+            ])
+            .unwrap();
             assert_eq!(f.angle, Some(json!("-3deg")));
             // --with takes the faces after it, until the next --with.
-            let f = sent(&["ryucad", "feature", "add", "p", "replace_face",
-                           "--with", "p/lid/e", "--face", "p/b/a", "--face", "p/b/c",
-                           "--with", "xy", "--face", "p/b/d"]).unwrap();
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "replace_face",
+                "--with",
+                "p/lid/e",
+                "--face",
+                "p/b/a",
+                "--face",
+                "p/b/c",
+                "--with",
+                "xy",
+                "--face",
+                "p/b/d",
+            ])
+            .unwrap();
             assert_eq!(
                 f.groups,
                 Some(json!([{"with": "p/lid/e", "faces": ["p/b/a", "p/b/c"]},
@@ -5033,8 +5096,18 @@ mod tests {
             );
             assert_eq!((f.face, f.faces), (None, None));
             // A face before any --with, when there is one, is a usage error.
-            let e = sent(&["ryucad", "feature", "add", "p", "replace_face",
-                           "--face", "p/b/a", "--with", "xy"]).unwrap_err();
+            let e = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "replace_face",
+                "--face",
+                "p/b/a",
+                "--with",
+                "xy",
+            ])
+            .unwrap_err();
             assert_eq!(e.code, Code::Usage);
         });
     }

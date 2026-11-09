@@ -5,7 +5,6 @@
 use super::assembly::Instance;
 use super::blend::{Chamfer, Fillet};
 use super::body::{Mirror, Offset, Shell, Split};
-use super::tweak::{MoveFace, ReplaceFace};
 use super::datum::Datum;
 use super::geometry::GeomRef;
 use super::hole::Hole;
@@ -19,6 +18,7 @@ use super::sheet_metal::{BaseFlange, Flange, Refold, Unfold};
 use super::sketch::Sketch;
 use super::solid::{Boolean, Combine};
 use super::sweep::{Extrude, Loft, Revolve, Sweep};
+use super::tweak::{MoveFace, ReplaceFace};
 use crate::error::{Code, Error, Result};
 use crate::expr::{self, Env, Expr};
 use crate::units::{Quantity, Unit};
@@ -1081,7 +1081,9 @@ impl Feature {
             "chamfer" => Feature::Chamfer(Chamfer::from_fields(&mut o, default, env)?),
             "shell" => Feature::Shell(Box::new(Shell::from_fields(&mut o, default, env)?)),
             "offset" => Feature::Offset(Box::new(Offset::from_fields(&mut o, default, env)?)),
-            "move_face" => Feature::MoveFace(Box::new(MoveFace::from_fields(&mut o, default, env)?)),
+            "move_face" => {
+                Feature::MoveFace(Box::new(MoveFace::from_fields(&mut o, default, env)?))
+            }
             "replace_face" => Feature::ReplaceFace(Box::new(ReplaceFace::from_fields(&mut o)?)),
             "mirror" => Feature::Mirror(Box::new(Mirror::from_fields(&mut o)?)),
             "split" => Feature::Split(Box::new(Split::from_fields(&mut o)?)),

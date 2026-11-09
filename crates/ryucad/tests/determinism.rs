@@ -2278,16 +2278,27 @@ fn bodied() -> (tempfile::TempDir, ryucad::session::Session) {
     // Face tweaks (plan 17.A): a boss slid along its plate, and a lid's
     // top made flush with a datum plane.
     call(&mut s, "part.create", json!({"part": "tw"}));
-    add(&mut s, "tw", json!({"type": "box", "id": "plate",
-        "params": {"x": "40 mm", "y": "30 mm", "z": "10 mm"}}));
-    add(&mut s, "tw", json!({"type": "box", "id": "boss", "operation": "join", "targets": ["plate"],
+    add(
+        &mut s,
+        "tw",
+        json!({"type": "box", "id": "plate",
+        "params": {"x": "40 mm", "y": "30 mm", "z": "10 mm"}}),
+    );
+    add(
+        &mut s,
+        "tw",
+        json!({"type": "box", "id": "boss", "operation": "join", "targets": ["plate"],
         "params": {"x": "10 mm", "y": "10 mm", "z": "5 mm"},
-        "placement": {"origin": ["5 mm", "5 mm", "10 mm"]}}));
+        "placement": {"origin": ["5 mm", "5 mm", "10 mm"]}}),
+    );
     let j = body(&mut s, "tw", "boss");
     // The planar face of `b` whose outward normal along `axis` is `n`, at
     // `at` meters along it.
     let at = |b: &serde_json::Value, axis: usize, n: f64, at: f64| {
-        b["faces"].as_array().unwrap().iter()
+        b["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|f| {
                 let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
                 f["surface"]["type"] == "plane"
@@ -2304,15 +2315,31 @@ fn bodied() -> (tempfile::TempDir, ryucad::session::Session) {
         at(&j, 1, 1.0, 0.015),
         at(&j, 2, 1.0, 0.015),
     ];
-    add(&mut s, "tw", json!({"type": "move_face", "id": "slide", "by": "translate",
-        "direction": "x", "distance": "4 mm", "faces": boss}));
-    add(&mut s, "tw", json!({"type": "box", "id": "lid", "params": {"x": "20 mm", "y": "20 mm", "z": "8 mm"},
-        "placement": {"origin": ["60 mm", "0 mm", "0 mm"]}}));
+    add(
+        &mut s,
+        "tw",
+        json!({"type": "move_face", "id": "slide", "by": "translate",
+        "direction": "x", "distance": "4 mm", "faces": boss}),
+    );
+    add(
+        &mut s,
+        "tw",
+        json!({"type": "box", "id": "lid", "params": {"x": "20 mm", "y": "20 mm", "z": "8 mm"},
+        "placement": {"origin": ["60 mm", "0 mm", "0 mm"]}}),
+    );
     let lid_top = top(&body(&mut s, "tw", "lid"), "tw", "lid", 0.008);
-    add(&mut s, "tw", json!({"type": "plane", "id": "level", "by": "offset", "from": "xy",
-        "distance": "6 mm"}));
-    add(&mut s, "tw", json!({"type": "replace_face", "id": "flush",
-        "groups": [{"with": "tw/level", "faces": [lid_top]}]}));
+    add(
+        &mut s,
+        "tw",
+        json!({"type": "plane", "id": "level", "by": "offset", "from": "xy",
+        "distance": "6 mm"}),
+    );
+    add(
+        &mut s,
+        "tw",
+        json!({"type": "replace_face", "id": "flush",
+        "groups": [{"with": "tw/level", "faces": [lid_top]}]}),
+    );
     (dir, s)
 }
 

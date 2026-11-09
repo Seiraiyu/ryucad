@@ -96,8 +96,16 @@ pub fn request_fields(ty: &str) -> &'static [&'static str] {
     match ty {
         "replace_face" => &["target", "targets", "groups"],
         _ => &[
-            "target", "targets", "by", "direction", "distance", "axis", "angle", "faces",
-            "groups", "tangent",
+            "target",
+            "targets",
+            "by",
+            "direction",
+            "distance",
+            "axis",
+            "angle",
+            "faces",
+            "groups",
+            "tangent",
         ],
     }
 }
@@ -108,7 +116,10 @@ impl MoveFace {
     pub fn fields(&self) -> Value {
         let mut v = json!({"target": self.target, "by": self.by.as_str()});
         match &self.by {
-            MoveBy::Translate { direction, distance } => {
+            MoveBy::Translate {
+                direction,
+                distance,
+            } => {
                 v["direction"] = direction.to_json();
                 v["distance"] = json!(distance.text());
             }
@@ -153,12 +164,16 @@ impl MoveFace {
                 if distance.meters() == 0.0 {
                     return Err(still("distance", "its distance is zero"));
                 }
-                MoveBy::Translate { direction, distance }
+                MoveBy::Translate {
+                    direction,
+                    distance,
+                }
             }
             Some("rotate") => {
                 let axis = GeomRef::from_json(&o.take("axis")?, "/axis")?;
-                let angle = Quantity::from_json_as(&o.take("angle")?, Field::Angle, &|n| env.get(n))
-                    .map_err(|e| e.with("pointer", "/angle"))?;
+                let angle =
+                    Quantity::from_json_as(&o.take("angle")?, Field::Angle, &|n| env.get(n))
+                        .map_err(|e| e.with("pointer", "/angle"))?;
                 if angle.radians() == 0.0 {
                     return Err(still("angle", "its angle is zero"));
                 }
@@ -168,10 +183,7 @@ impl MoveFace {
                 let distance = length(o, "distance")?;
                 let groups = groups(o, default, env)?;
                 if distance.meters() == 0.0 && groups.iter().all(|g| g.quantity.meters() == 0.0) {
-                    return Err(still(
-                        "distance",
-                        "its distance and every group's are zero",
-                    ));
+                    return Err(still("distance", "its distance and every group's are zero"));
                 }
                 MoveBy::Offset { distance, groups }
             }
@@ -348,12 +360,11 @@ fn groups(o: &mut Obj, default: Unit, env: &Env) -> Result<Vec<FaceGroup>> {
         .map(|(i, g)| {
             let at = format!("/groups/{i}");
             let mut f = Obj::new(g, &at)?;
-            let quantity = Quantity::from_json_as(
-                &f.take("distance")?,
-                Field::Length(default),
-                &|n| env.get(n),
-            )
-            .map_err(|e| e.with("pointer", format!("{at}/distance")))?;
+            let quantity =
+                Quantity::from_json_as(&f.take("distance")?, Field::Length(default), &|n| {
+                    env.get(n)
+                })
+                .map_err(|e| e.with("pointer", format!("{at}/distance")))?;
             let faces = refs(&f.take("faces")?, &format!("{at}/faces"))?;
             f.finish()?;
             Ok(FaceGroup { quantity, faces })
@@ -440,8 +451,10 @@ mod tests {
 
     #[test]
     fn moves_name_their_direction_and_axis_as_geometry() {
-        let m = moved(json!({"target": "p", "by": "rotate", "axis": face(B), "angle": "3 deg",
-                             "faces": [face(A)]}))
+        let m = moved(
+            json!({"target": "p", "by": "rotate", "axis": face(B), "angle": "3 deg",
+                             "faces": [face(A)]}),
+        )
         .unwrap();
         let geo: Vec<String> = m.geometry().into_iter().map(|(r, _)| r).collect();
         assert_eq!(geo, ["axis"]);
@@ -468,63 +481,126 @@ mod tests {
         let geo: Vec<String> = r.geometry().into_iter().map(|(x, _)| x).collect();
         assert_eq!(geo, ["groups.0.with", "groups.1.with"]);
         let refs: Vec<String> = r.references().into_iter().map(|(x, _)| x).collect();
-        assert_eq!(refs, ["groups.0.faces.0", "groups.1.faces.0", "groups.0.with"]);
+        assert_eq!(
+            refs,
+            ["groups.0.faces.0", "groups.1.faces.0", "groups.0.with"]
+        );
     }
 
     #[test]
     fn tweaks_are_checked() {
         for (v, code, pointer) in [
-            (json!({"by": "translate", "direction": "x", "distance": 1, "faces": [face(A)]}),
-             Code::InvalidDocument, "/target"),
-            (json!({"target": "p", "direction": "x", "distance": 1, "faces": [face(A)]}),
-             Code::InvalidDocument, "/by"),
-            (json!({"target": "p", "by": "slide", "faces": [face(A)]}),
-             Code::InvalidDocument, "/by"),
-            (json!({"target": "p", "by": "translate", "distance": 1, "faces": [face(A)]}),
-             Code::InvalidDocument, "/direction"),
-            (json!({"target": "p", "by": "translate", "direction": "x", "distance": 0,
+            (
+                json!({"by": "translate", "direction": "x", "distance": 1, "faces": [face(A)]}),
+                Code::InvalidDocument,
+                "/target",
+            ),
+            (
+                json!({"target": "p", "direction": "x", "distance": 1, "faces": [face(A)]}),
+                Code::InvalidDocument,
+                "/by",
+            ),
+            (
+                json!({"target": "p", "by": "slide", "faces": [face(A)]}),
+                Code::InvalidDocument,
+                "/by",
+            ),
+            (
+                json!({"target": "p", "by": "translate", "distance": 1, "faces": [face(A)]}),
+                Code::InvalidDocument,
+                "/direction",
+            ),
+            (
+                json!({"target": "p", "by": "translate", "direction": "x", "distance": 0,
                     "faces": [face(A)]}),
-             Code::InvalidParam, "/distance"),
-            (json!({"target": "p", "by": "translate", "direction": "x", "distance": "1 deg",
+                Code::InvalidParam,
+                "/distance",
+            ),
+            (
+                json!({"target": "p", "by": "translate", "direction": "x", "distance": "1 deg",
                     "faces": [face(A)]}),
-             Code::UnitMismatch, "/distance"),
-            (json!({"target": "p", "by": "rotate", "axis": "z", "angle": 0, "faces": [face(A)]}),
-             Code::InvalidParam, "/angle"),
+                Code::UnitMismatch,
+                "/distance",
+            ),
+            (
+                json!({"target": "p", "by": "rotate", "axis": "z", "angle": 0, "faces": [face(A)]}),
+                Code::InvalidParam,
+                "/angle",
+            ),
             // A field another `by` takes.
-            (json!({"target": "p", "by": "translate", "direction": "x", "distance": 1,
+            (
+                json!({"target": "p", "by": "translate", "direction": "x", "distance": 1,
                     "angle": "3 deg", "faces": [face(A)]}),
-             Code::InvalidDocument, "/angle"),
-            (json!({"target": "p", "by": "translate", "direction": "x", "distance": 1}),
-             Code::InvalidDocument, "/faces"),
-            (json!({"target": "p", "by": "offset", "distance": 0, "faces": [face(A)]}),
-             Code::InvalidParam, "/distance"),
-            (json!({"target": "p", "by": "offset", "distance": 1, "faces": [face(A)],
+                Code::InvalidDocument,
+                "/angle",
+            ),
+            (
+                json!({"target": "p", "by": "translate", "direction": "x", "distance": 1}),
+                Code::InvalidDocument,
+                "/faces",
+            ),
+            (
+                json!({"target": "p", "by": "offset", "distance": 0, "faces": [face(A)]}),
+                Code::InvalidParam,
+                "/distance",
+            ),
+            (
+                json!({"target": "p", "by": "offset", "distance": 1, "faces": [face(A)],
                     "groups": [{"distance": 2, "faces": [face(A)]}]}),
-             Code::InvalidParam, "/groups/0/faces/0"),
-            (json!({"target": "p", "by": "translate", "direction": "x", "distance": 1,
+                Code::InvalidParam,
+                "/groups/0/faces/0",
+            ),
+            (
+                json!({"target": "p", "by": "translate", "direction": "x", "distance": 1,
                     "faces": [face(A), face(A)]}),
-             Code::InvalidParam, "/faces/1"),
-            (json!({"target": "p", "by": "translate", "direction": "x", "distance": 1,
+                Code::InvalidParam,
+                "/faces/1",
+            ),
+            (
+                json!({"target": "p", "by": "translate", "direction": "x", "distance": 1,
                     "faces": [face(A)], "tangent": "yes"}),
-             Code::InvalidDocument, "/tangent"),
+                Code::InvalidDocument,
+                "/tangent",
+            ),
         ] {
             let e = moved(v.clone()).unwrap_err();
-            assert_eq!((e.code, e.details["pointer"].as_str()), (code, Some(pointer)), "{v}");
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (code, Some(pointer)),
+                "{v}"
+            );
         }
         for (v, code, pointer) in [
             (json!({"target": "p"}), Code::InvalidDocument, "/groups"),
-            (json!({"target": "p", "groups": []}), Code::InvalidDocument, "/groups"),
-            (json!({"target": "p", "groups": [{"faces": [face(A)]}]}),
-             Code::InvalidDocument, "/groups/0/with"),
+            (
+                json!({"target": "p", "groups": []}),
+                Code::InvalidDocument,
+                "/groups",
+            ),
+            (
+                json!({"target": "p", "groups": [{"faces": [face(A)]}]}),
+                Code::InvalidDocument,
+                "/groups/0/with",
+            ),
             // Its own surface changes nothing.
-            (json!({"target": "p", "groups": [{"with": face(A), "faces": [face(B), face(A)]}]}),
-             Code::InvalidParam, "/groups/0/faces/1"),
-            (json!({"target": "p", "groups": [{"with": "xy", "faces": [face(A)]},
+            (
+                json!({"target": "p", "groups": [{"with": face(A), "faces": [face(B), face(A)]}]}),
+                Code::InvalidParam,
+                "/groups/0/faces/1",
+            ),
+            (
+                json!({"target": "p", "groups": [{"with": "xy", "faces": [face(A)]},
                                               {"with": "yz", "faces": [face(A)]}]}),
-             Code::InvalidParam, "/groups/1/faces/0"),
+                Code::InvalidParam,
+                "/groups/1/faces/0",
+            ),
         ] {
             let e = replaced(v.clone()).unwrap_err();
-            assert_eq!((e.code, e.details["pointer"].as_str()), (code, Some(pointer)), "{v}");
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (code, Some(pointer)),
+                "{v}"
+            );
         }
     }
 
@@ -535,7 +611,9 @@ mod tests {
                        "groups": [{"distance": "d + 1 mm", "faces": [face(B)]}]});
         let mut o = Obj::new(&v, "").unwrap();
         let m = MoveFace::from_fields(&mut o, Unit::Mm, &Env::new(&p)).unwrap();
-        let MoveBy::Offset { distance, groups } = &m.by else { panic!() };
+        let MoveBy::Offset { distance, groups } = &m.by else {
+            panic!()
+        };
         assert_eq!(distance.meters(), 0.001);
         assert_eq!(groups[0].quantity.meters(), 0.003);
     }

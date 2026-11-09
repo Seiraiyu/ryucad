@@ -7,21 +7,21 @@
 
 use crate::doc::files::Feature;
 use crate::doc::geometry::GeomRef;
-use crate::proto::FeatureFields;
 use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::doc::reference::Reference;
 use crate::doc::tweak::{MoveBy, MoveFace};
 use crate::error::{Code, Error, Result};
 use crate::geometry::{At, Geom, Line, Want};
+use crate::proto::FeatureFields;
 use crate::rebuild::{Built, Made, Results, Run};
-use serde_json::{Value, json};
-use std::sync::Arc;
 use crate::solid::Solids;
 use ryukei::geom::{Rigid, Surface, UnitVector3};
 use ryukei::name::{Event, Name};
 use ryukei::topo::EntityId;
 use ryukei::tweak::{MoveSpec, OffsetFacesSpec};
+use serde_json::{Value, json};
+use std::sync::Arc;
 
 /// Whether `f` may take a sheet as its target.
 pub fn takes_sheets(f: &Feature) -> bool {
@@ -66,17 +66,35 @@ fn at<'a>(part: &'a Part, id: &'a Id, results: &'a dyn Results) -> At<'a> {
 }
 
 /// A move's rigid motion, resolved in its view; `None` for an offset.
-pub(crate) fn motion(part: &Part, id: &Id, m: &MoveFace, results: &dyn Results) -> Result<Option<Rigid>> {
+pub(crate) fn motion(
+    part: &Part,
+    id: &Id,
+    m: &MoveFace,
+    results: &dyn Results,
+) -> Result<Option<Rigid>> {
     let at = at(part, id, results);
     match &m.by {
-        MoveBy::Translate { direction, distance } => {
-            let v = match crate::geometry::resolve(&at, "direction", direction, &[Want::Axis, Want::Plane])? {
+        MoveBy::Translate {
+            direction,
+            distance,
+        } => {
+            let v = match crate::geometry::resolve(
+                &at,
+                "direction",
+                direction,
+                &[Want::Axis, Want::Plane],
+            )? {
                 Geom::Axis(l) => l.dir.get(),
                 Geom::Plane(p) => p.normal,
                 _ => unreachable!("asked for an axis or a plane"),
             };
             let u = v.normalize().ok_or_else(|| {
-                at.fail(Code::ReferenceWrongKind, "direction", direction, "gives no direction".to_owned())
+                at.fail(
+                    Code::ReferenceWrongKind,
+                    "direction",
+                    direction,
+                    "gives no direction".to_owned(),
+                )
             })?;
             Ok(Some(along(u, distance.meters())))
         }
@@ -116,14 +134,27 @@ fn face(
     let (_, e) = crate::reference::resolve(part, part.order(), id, role, r, results)?;
     match e {
         EntityId::Face(_) => Ok(r.name),
-        e => Err(crate::reference::wrong_kind(part, id, role, r, crate::reference::kind(e), "a face")),
+        e => Err(crate::reference::wrong_kind(
+            part,
+            id,
+            role,
+            r,
+            crate::reference::kind(e),
+            "a face",
+        )),
     }
 }
 
 /// The surface `with` names (in `role` of tweak `id`): a face's, whole,
 /// as its body holds it (any solid of the part, the target's own too, in
 /// the feature's view); else a plane's, through its frame.
-fn surface(part: &Part, id: &Id, role: &str, with: &GeomRef, results: &dyn Results) -> Result<Surface> {
+fn surface(
+    part: &Part,
+    id: &Id,
+    role: &str,
+    with: &GeomRef,
+    results: &dyn Results,
+) -> Result<Surface> {
     if let Some(r) = with.reference() {
         let (b, e) = crate::reference::resolve(part, part.order(), id, role, r, results)?;
         return match e {
@@ -158,7 +189,8 @@ pub(crate) fn resolve<'a>(
     let ty = f.type_name();
     match f {
         Feature::MoveFace(m) => {
-            let built = crate::rebuild::target_kinds(part, solids, id, "target", &m.target, before, true)?;
+            let built =
+                crate::rebuild::target_kinds(part, solids, id, "target", &m.target, before, true)?;
             let mut faces: Vec<(Name, f64)> = Vec::new();
             let d = match &m.by {
                 MoveBy::Offset { distance, .. } => distance.meters(),
@@ -169,7 +201,11 @@ pub(crate) fn resolve<'a>(
                 // A grouped face's distance is its group's.
                 let q = match (&m.by, role.strip_prefix("groups.")) {
                     (MoveBy::Offset { groups, .. }, Some(rest)) => {
-                        let i: usize = rest.split('.').next().and_then(|s| s.parse().ok()).expect("groups.<i>");
+                        let i: usize = rest
+                            .split('.')
+                            .next()
+                            .and_then(|s| s.parse().ok())
+                            .expect("groups.<i>");
                         groups[i].quantity.meters()
                     }
                     _ => d,
@@ -182,17 +218,33 @@ pub(crate) fn resolve<'a>(
                     motion,
                     tangent: m.tangent,
                 }),
-                None => Spec::Offset(OffsetFacesSpec { faces, tangent: m.tangent }),
+                None => Spec::Offset(OffsetFacesSpec {
+                    faces,
+                    tangent: m.tangent,
+                }),
             };
-            Ok(Resolved { target: &m.target, built, spec })
+            Ok(Resolved {
+                target: &m.target,
+                built,
+                spec,
+            })
         }
         Feature::ReplaceFace(x) => {
-            let built = crate::rebuild::target_kinds(part, solids, id, "target", &x.target, before, true)?;
+            let built =
+                crate::rebuild::target_kinds(part, solids, id, "target", &x.target, before, true)?;
             let mut faces = Vec::new();
             for (i, g) in x.groups.iter().enumerate() {
                 let s = surface(part, id, &format!("groups.{i}.with"), &g.with, before)?;
                 for (j, r) in g.faces.iter().enumerate() {
-                    let n = face(part, id, &x.target, ty, &format!("groups.{i}.faces.{j}"), r, before)?;
+                    let n = face(
+                        part,
+                        id,
+                        &x.target,
+                        ty,
+                        &format!("groups.{i}.faces.{j}"),
+                        r,
+                        before,
+                    )?;
                     faces.push((n, s.clone()));
                 }
             }
@@ -218,28 +270,109 @@ pub(crate) struct Refusal {
 /// a sentence, and the names it gives with their roles.
 pub(crate) fn refusal(e: &ryukei::TweakError) -> Refusal {
     use ryukei::{TweakCase as C, TweakError as T};
-    let r = |reason, message, entities| Refusal { reason, case: None, message, entities };
+    let r = |reason, message, entities| Refusal {
+        reason,
+        case: None,
+        message,
+        entities,
+    };
     match *e {
         T::NoFaces => r("no_faces", "the tweak names no face", vec![]),
-        T::NoSuchFace { face } => r("no_such_face", "a face isn't the target's", vec![("face", face)]),
-        T::DuplicateFace { face } => r("duplicate_face", "a face is named twice", vec![("face", face)]),
-        T::NotFinite => r("not_finite", "a motion, distance or surface isn't finite", vec![]),
-        T::BadDistance => r("bad_distance", "a distance is too small for the kernel's resolution (10 nm) and isn't zero", vec![]),
-        T::TangencyBroken { edge } => r("tangency_broken", "a face tangent to a tweaked one along this edge would meet it at an angle", vec![("edge", edge)]),
-        T::EdgeVanishes { edge } => r("edge_vanishes", "this edge's faces wouldn't meet where its vertices go: the edge would vanish", vec![("edge", edge)]),
-        T::VertexSplits { vertex } => r("vertex_splits", "this vertex's edges wouldn't meet at one point: it would split", vec![("vertex", vertex)]),
-        T::FaceCollapses { face } => r("face_collapses", "this face's new surface folds, or its loops would turn over", vec![("face", face)]),
-        T::ExtensionUnsupported { face } => r("extension_unsupported", "this unchanged face would have to be carried past its surface's edge to meet its moved neighbours, and can't be", vec![("face", face)]),
-        T::Ambiguous { face } => r("ambiguous", "the new surface is nearly square to this face: which side is out is unclear", vec![("face", face)]),
-        T::LaminarFace { face } => r("laminar_face", "this face has a sheet's boundary edge: where the boundary goes on the new surface is undefined", vec![("face", face)]),
-        T::BadAngle => r("bad_angle", "a draft angle that isn't finite, or outside the resolution to 90° less 0.01 rad", vec![]),
-        T::NoHinge { face } => r("no_hinge", "the neutral plane doesn't cross this face", vec![("face", face)]),
-        T::HingeAmbiguous { face } => r("hinge_ambiguous", "the neutral plane crosses this face in more than one place", vec![("face", face)]),
-        T::HingeNotOnFace { face } => r("hinge_not_on_face", "none of the parting line's edges bound this face, or they aren't one chain", vec![("face", face)]),
-        T::HingeAlongPull { face } => r("hinge_along_pull", "this face's hinge or normal runs along the pull somewhere: the draft has no direction there", vec![("face", face)]),
-        T::SelfIntersecting { faces: [a, b] } => r("self_intersecting", "two faces of the result would cross", vec![("a", a), ("b", b)]),
-        T::Uncertain { at } => r("uncertain", "a decision rounding left uncertain", vec![("at", at)]),
-        T::ToleranceTooLarge { at, .. } => r("tolerance_too_large", "the result would hold a tolerance past the kernel's cap", vec![("at", at)]),
+        T::NoSuchFace { face } => r(
+            "no_such_face",
+            "a face isn't the target's",
+            vec![("face", face)],
+        ),
+        T::DuplicateFace { face } => r(
+            "duplicate_face",
+            "a face is named twice",
+            vec![("face", face)],
+        ),
+        T::NotFinite => r(
+            "not_finite",
+            "a motion, distance or surface isn't finite",
+            vec![],
+        ),
+        T::BadDistance => r(
+            "bad_distance",
+            "a distance is too small for the kernel's resolution (10 nm) and isn't zero",
+            vec![],
+        ),
+        T::TangencyBroken { edge } => r(
+            "tangency_broken",
+            "a face tangent to a tweaked one along this edge would meet it at an angle",
+            vec![("edge", edge)],
+        ),
+        T::EdgeVanishes { edge } => r(
+            "edge_vanishes",
+            "this edge's faces wouldn't meet where its vertices go: the edge would vanish",
+            vec![("edge", edge)],
+        ),
+        T::VertexSplits { vertex } => r(
+            "vertex_splits",
+            "this vertex's edges wouldn't meet at one point: it would split",
+            vec![("vertex", vertex)],
+        ),
+        T::FaceCollapses { face } => r(
+            "face_collapses",
+            "this face's new surface folds, or its loops would turn over",
+            vec![("face", face)],
+        ),
+        T::ExtensionUnsupported { face } => r(
+            "extension_unsupported",
+            "this unchanged face would have to be carried past its surface's edge to meet its moved neighbours, and can't be",
+            vec![("face", face)],
+        ),
+        T::Ambiguous { face } => r(
+            "ambiguous",
+            "the new surface is nearly square to this face: which side is out is unclear",
+            vec![("face", face)],
+        ),
+        T::LaminarFace { face } => r(
+            "laminar_face",
+            "this face has a sheet's boundary edge: where the boundary goes on the new surface is undefined",
+            vec![("face", face)],
+        ),
+        T::BadAngle => r(
+            "bad_angle",
+            "a draft angle that isn't finite, or outside the resolution to 90° less 0.01 rad",
+            vec![],
+        ),
+        T::NoHinge { face } => r(
+            "no_hinge",
+            "the neutral plane doesn't cross this face",
+            vec![("face", face)],
+        ),
+        T::HingeAmbiguous { face } => r(
+            "hinge_ambiguous",
+            "the neutral plane crosses this face in more than one place",
+            vec![("face", face)],
+        ),
+        T::HingeNotOnFace { face } => r(
+            "hinge_not_on_face",
+            "none of the parting line's edges bound this face, or they aren't one chain",
+            vec![("face", face)],
+        ),
+        T::HingeAlongPull { face } => r(
+            "hinge_along_pull",
+            "this face's hinge or normal runs along the pull somewhere: the draft has no direction there",
+            vec![("face", face)],
+        ),
+        T::SelfIntersecting { faces: [a, b] } => r(
+            "self_intersecting",
+            "two faces of the result would cross",
+            vec![("a", a), ("b", b)],
+        ),
+        T::Uncertain { at } => r(
+            "uncertain",
+            "a decision rounding left uncertain",
+            vec![("at", at)],
+        ),
+        T::ToleranceTooLarge { at, .. } => r(
+            "tolerance_too_large",
+            "the result would hold a tolerance past the kernel's cap",
+            vec![("at", at)],
+        ),
         T::Unsupported { at, case } => Refusal {
             reason: "unsupported",
             case: Some(match case {
@@ -276,7 +409,13 @@ pub(crate) fn hint(r: &Refusal) -> Option<&'static str> {
 /// each entity it names as a reference into the target (with its kind and
 /// origin; else its name alone), and a hint where there is one. Anything
 /// but a tweak refusal is `tweak_failed` with reason `kernel`.
-fn kernel_error(part: &Part, id: &Id, ty: &str, (target, built): (&Id, &Built), e: ryukei::Error) -> Error {
+fn kernel_error(
+    part: &Part,
+    id: &Id,
+    ty: &str,
+    (target, built): (&Id, &Built),
+    e: ryukei::Error,
+) -> Error {
     let entity = |role: &str, n: &Name| -> Value {
         let mut v = json!({"role": role});
         match built.body.by_name(*n) {
@@ -293,7 +432,12 @@ fn kernel_error(part: &Part, id: &Id, ty: &str, (target, built): (&Id, &Built), 
     };
     let r = match &e {
         ryukei::Error::InvalidTweak(t) => refusal(t),
-        _ => Refusal { reason: "kernel", case: None, message: "the kernel refused it", entities: vec![] },
+        _ => Refusal {
+            reason: "kernel",
+            case: None,
+            message: "the kernel refused it",
+            entities: vec![],
+        },
     };
     let mut err = Error::new(Code::TweakFailed, format!("{ty} {id}: {} ({e})", r.message))
         .with("feature", id)
@@ -310,7 +454,10 @@ fn kernel_error(part: &Part, id: &Id, ty: &str, (target, built): (&Id, &Built), 
     if !r.entities.is_empty() {
         err = err.with(
             "entities",
-            r.entities.iter().map(|(role, n)| entity(role, n)).collect::<Vec<_>>(),
+            r.entities
+                .iter()
+                .map(|(role, n)| entity(role, n))
+                .collect::<Vec<_>>(),
         );
     }
     err
@@ -318,7 +465,14 @@ fn kernel_error(part: &Part, id: &Id, ty: &str, (target, built): (&Id, &Built), 
 
 /// A tweak: its target as it sees it, through one kernel call. It makes
 /// nothing, so every entity keeps its origin.
-pub fn build(part: &Part, solids: &Solids, id: &Id, f: &Feature, before: &dyn Results, run: &Run) -> Result<Made> {
+pub fn build(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    f: &Feature,
+    before: &dyn Results,
+    run: &Run,
+) -> Result<Made> {
     let ty = f.type_name();
     let r = resolve(part, solids, id, f, before)?;
     let work = crate::work::work(run.job);
@@ -404,7 +558,12 @@ pub fn default_target(ty: &str, f: &FeatureFields, before: &[Id], part: &Id) -> 
     if let [one] = before {
         return Ok(one.to_string());
     }
-    let first = f.faces.as_ref().and_then(|v| v.as_array()).and_then(|a| a.first()).cloned()
+    let first = f
+        .faces
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .cloned()
         .or_else(|| {
             let g = f.groups.as_ref()?.as_array()?.first()?;
             g.get("faces")?.as_array()?.first().cloned()
@@ -416,7 +575,10 @@ pub fn default_target(ty: &str, f: &FeatureFields, before: &[Id], part: &Id) -> 
     }
     Err(Error::new(
         Code::InvalidParam,
-        format!("a {ty} names the solid it acts on (target): the part has {} before it", before.len()),
+        format!(
+            "a {ty} names the solid it acts on (target): the part has {} before it",
+            before.len()
+        ),
     )
     .with("param", "target")
     .with("solids", before))
@@ -442,13 +604,22 @@ pub fn from_given(
     };
     let o = v.as_object_mut().expect("fields are an object");
     let reference = |t: &str, at: &str| -> Result<Value> {
-        Ok(Reference::parse(t, part).map_err(|e| e.with("pointer", at))?.to_json())
+        Ok(Reference::parse(t, part)
+            .map_err(|e| e.with("pointer", at))?
+            .to_json())
     };
     let geom = |t: &str, param: &str| -> Result<Value> {
-        Ok(GeomRef::parse(t, part).map_err(|e| e.with("param", param))?.to_json())
+        Ok(GeomRef::parse(t, part)
+            .map_err(|e| e.with("param", param))?
+            .to_json())
     };
     let target = match (&f.target, &f.targets) {
-        (Some(_), Some(_)) => return Err(Error::new(Code::Usage, format!("give a {ty}'s target once"))),
+        (Some(_), Some(_)) => {
+            return Err(Error::new(
+                Code::Usage,
+                format!("give a {ty}'s target once"),
+            ));
+        }
         (Some(t), None) => Some(t.clone()),
         (None, Some(ts)) => match ts.as_slice() {
             [t] => Some(t.clone()),
@@ -468,8 +639,11 @@ pub fn from_given(
     // Each group's faces from text; `[]` for none.
     let groups = |gs: &Value, with: bool| -> Result<Option<Value>> {
         let Value::Array(gs) = gs else {
-            return Err(Error::new(Code::InvalidParam, format!("a {ty}'s groups are a list, each with its faces"))
-                .with("param", "groups"));
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("a {ty}'s groups are a list, each with its faces"),
+            )
+            .with("param", "groups"));
         };
         let mut out = Vec::with_capacity(gs.len());
         for (i, g) in gs.iter().enumerate() {
@@ -498,8 +672,14 @@ pub fn from_given(
     } else {
         let by = f.by.clone().or_else(|| {
             (current.is_none()).then(|| {
-                if f.axis.is_some() { "rotate" } else if f.direction.is_some() { "translate" } else { "offset" }
-                    .to_owned()
+                if f.axis.is_some() {
+                    "rotate"
+                } else if f.direction.is_some() {
+                    "translate"
+                } else {
+                    "offset"
+                }
+                .to_owned()
             })
         });
         if let Some(by) = by {
@@ -561,7 +741,9 @@ pub fn from_given(
     }
     let mut r = crate::doc::files::Obj::new(&v, "")?;
     let out = match ty {
-        "replace_face" => Feature::ReplaceFace(Box::new(crate::doc::tweak::ReplaceFace::from_fields(&mut r)?)),
+        "replace_face" => Feature::ReplaceFace(Box::new(
+            crate::doc::tweak::ReplaceFace::from_fields(&mut r)?,
+        )),
         _ => Feature::MoveFace(Box::new(MoveFace::from_fields(&mut r, unit, env)?)),
     };
     r.finish()?;
@@ -577,7 +759,10 @@ pub fn report(part: &Id, f: &Feature) -> Value {
         Feature::MoveFace(m) => {
             let mut v = m.fields();
             match &m.by {
-                MoveBy::Translate { direction, distance } => {
+                MoveBy::Translate {
+                    direction,
+                    distance,
+                } => {
                     v["direction"] = json!(direction.text(part));
                     v["distance"] = distance.report();
                 }
@@ -617,7 +802,13 @@ pub fn report(part: &Id, f: &Feature) -> Value {
 /// and once built what its journal says it `modified` (counts of faces,
 /// edges and vertices; with `references`, each as
 /// `<part>/<solid>/<name>`, sorted).
-pub fn resolved(part: &Part, results: &dyn Results, id: &Id, f: &Feature, references: bool) -> Option<Value> {
+pub fn resolved(
+    part: &Part,
+    results: &dyn Results,
+    id: &Id,
+    f: &Feature,
+    references: bool,
+) -> Option<Value> {
     if !takes_sheets(f) {
         return None;
     }
@@ -668,8 +859,14 @@ mod tests {
         // (0, 0.03, 0.02) to (0, 0, 0.05), and the axis stays put.
         let l = crate::geometry::Line::along(Point3::new(0.0, 0.0, 0.02), UnitVector3::X);
         let r = about(&l, core::f64::consts::FRAC_PI_2);
-        close(r.apply_point(Point3::new(0.0, 0.03, 0.02)), Point3::new(0.0, 0.0, 0.05));
-        close(r.apply_point(Point3::new(0.04, 0.0, 0.02)), Point3::new(0.04, 0.0, 0.02));
+        close(
+            r.apply_point(Point3::new(0.0, 0.03, 0.02)),
+            Point3::new(0.0, 0.0, 0.05),
+        );
+        close(
+            r.apply_point(Point3::new(0.04, 0.0, 0.02)),
+            Point3::new(0.04, 0.0, 0.02),
+        );
         // A translation along a unit direction by a distance.
         let t = along(Vector3::new(0.0, 0.0, 2.0).normalize().unwrap(), 0.005);
         close(t.apply_point(Point3::ORIGIN), Point3::new(0.0, 0.0, 0.005));
@@ -715,8 +912,20 @@ mod tests {
             (T::HingeAlongPull { face: n }, "hinge_along_pull"),
             (T::SelfIntersecting { faces: [n, n] }, "self_intersecting"),
             (T::Uncertain { at: n }, "uncertain"),
-            (T::ToleranceTooLarge { at: n, needed: 1e-3 }, "tolerance_too_large"),
-            (T::Unsupported { at: n, case: C::PartlySmooth }, "unsupported"),
+            (
+                T::ToleranceTooLarge {
+                    at: n,
+                    needed: 1e-3,
+                },
+                "tolerance_too_large",
+            ),
+            (
+                T::Unsupported {
+                    at: n,
+                    case: C::PartlySmooth,
+                },
+                "unsupported",
+            ),
         ];
         for (e, reason) in all {
             let r = refusal(&e);
@@ -724,7 +933,11 @@ mod tests {
             assert!(!r.message.is_empty());
         }
         let hint = |e: T| hint(&refusal(&e));
-        assert!(hint(T::TangencyBroken { edge: n }).unwrap().contains("tangent"));
+        assert!(
+            hint(T::TangencyBroken { edge: n })
+                .unwrap()
+                .contains("tangent")
+        );
         for e in [
             T::EdgeVanishes { edge: n },
             T::VertexSplits { vertex: n },
@@ -732,13 +945,38 @@ mod tests {
         ] {
             assert!(hint(e).unwrap().contains("topology"), "{e:?}");
         }
-        assert!(hint(T::HingeNotOnFace { face: n }).unwrap().contains("split"));
-        assert!(hint(T::Unsupported { at: n, case: C::HingeChain }).unwrap().contains("split"));
-        assert!(hint(T::HingeAlongPull { face: n }).unwrap().contains("pull"));
+        assert!(
+            hint(T::HingeNotOnFace { face: n })
+                .unwrap()
+                .contains("split")
+        );
+        assert!(
+            hint(T::Unsupported {
+                at: n,
+                case: C::HingeChain
+            })
+            .unwrap()
+            .contains("split")
+        );
+        assert!(
+            hint(T::HingeAlongPull { face: n })
+                .unwrap()
+                .contains("pull")
+        );
         assert_eq!(hint(T::Uncertain { at: n }), None);
-        assert_eq!(refusal(&T::Unsupported { at: n, case: C::CarriedCurve }).case, Some("carried_curve"));
+        assert_eq!(
+            refusal(&T::Unsupported {
+                at: n,
+                case: C::CarriedCurve
+            })
+            .case,
+            Some("carried_curve")
+        );
         let roles: Vec<&str> = refusal(&T::SelfIntersecting { faces: [n, n] })
-            .entities.iter().map(|(r, _)| *r).collect();
+            .entities
+            .iter()
+            .map(|(r, _)| *r)
+            .collect();
         assert_eq!(roles, ["a", "b"]);
     }
 
@@ -759,23 +997,38 @@ mod tests {
         crate::server::init(dir.path(), None).unwrap();
         let mut s = crate::session::Session::open(dir.path()).unwrap();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
-        call(&mut s, "feature.add", json!({"part": "p", "type": "box", "id": "b",
-            "params": {"x": 40, "y": 30, "z": 20}})).unwrap();
-        call(&mut s, "feature.add", json!({"part": "p", "type": "box", "id": "c",
-            "params": {"x": 10, "y": 10, "z": 10}, "placement": {"origin": [60, 0, 0]}})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b",
+            "params": {"x": 40, "y": 30, "z": 20}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "c",
+            "params": {"x": 10, "y": 10, "z": 10}, "placement": {"origin": [60, 0, 0]}}),
+        )
+        .unwrap();
         (dir, s)
     }
 
     /// The names of feature `f`'s body's `kind` (`faces`, `edges`).
     fn names(s: &mut crate::session::Session, f: &str, kind: &str) -> Vec<String> {
         let v = call(s, "inspect", json!({"part": "p", "feature": f})).unwrap();
-        v["bodies"][0][kind].as_array().unwrap().iter()
-            .map(|x| x["name"].as_str().unwrap().to_owned()).collect()
+        v["bodies"][0][kind]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["name"].as_str().unwrap().to_owned())
+            .collect()
     }
 
     fn file(dir: &tempfile::TempDir, f: &str) -> Value {
         serde_json::from_str(
-            &std::fs::read_to_string(dir.path().join(format!("parts/p/features/{f}.json"))).unwrap(),
+            &std::fs::read_to_string(dir.path().join(format!("parts/p/features/{f}.json")))
+                .unwrap(),
         )
         .unwrap()
     }
@@ -786,34 +1039,70 @@ mod tests {
         let b = names(&mut s, "b", "faces");
         // No target and two solids: its faces name it. No `by`: a direction
         // makes it a translation.
-        call(&mut s, "feature.add", json!({"part": "p", "type": "move_face", "id": "m",
-            "direction": "z", "distance": "1 mm", "faces": [format!("p/b/{}", b[0])]})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "move_face", "id": "m",
+            "direction": "z", "distance": "1 mm", "faces": [format!("p/b/{}", b[0])]}),
+        )
+        .unwrap();
         let v = file(&dir, "m");
-        assert_eq!((v["target"].as_str(), v["by"].as_str()), (Some("b"), Some("translate")), "{v}");
+        assert_eq!(
+            (v["target"].as_str(), v["by"].as_str()),
+            (Some("b"), Some("translate")),
+            "{v}"
+        );
         assert_eq!(v["format"], crate::doc::tweak::FORMAT);
         assert!(v.get("tangent").is_none(), "{v}");
         // A new `by` keeps only what it takes.
-        call(&mut s, "feature.edit", json!({"part": "p", "id": "m", "by": "offset",
-            "distance": "0.5 mm"})).unwrap();
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "m", "by": "offset",
+            "distance": "0.5 mm"}),
+        )
+        .unwrap();
         let v = file(&dir, "m");
         assert_eq!(v["by"], "offset");
         assert!(v.get("direction").is_none(), "{v}");
-        call(&mut s, "feature.edit", json!({"part": "p", "id": "m", "tangent": false})).unwrap();
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "m", "tangent": false}),
+        )
+        .unwrap();
         assert_eq!(file(&dir, "m")["tangent"], false);
-        call(&mut s, "feature.edit", json!({"part": "p", "id": "m", "tangent": true})).unwrap();
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "m", "tangent": true}),
+        )
+        .unwrap();
         assert!(file(&dir, "m").get("tangent").is_none());
         // One face as `face`, groups as objects in `faces` (what the CLI
         // sends for --face and --face-distance together).
-        call(&mut s, "feature.edit", json!({"part": "p", "id": "m",
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "m",
             "face": format!("p/b/{}", b[1]),
-            "faces": [{"distance": "2 mm", "faces": [format!("p/b/{}", b[2])]}]})).unwrap();
+            "faces": [{"distance": "2 mm", "faces": [format!("p/b/{}", b[2])]}]}),
+        )
+        .unwrap();
         let v = file(&dir, "m");
         assert_eq!(v["faces"], json!([{"feature": "b", "name": b[1]}]), "{v}");
         assert_eq!(v["groups"][0]["distance"], "2 mm", "{v}");
         // A field a move doesn't take.
-        let e = call(&mut s, "feature.edit", json!({"part": "p", "id": "m", "thickness": "1 mm"}))
-            .unwrap_err();
-        assert_eq!((e.code, e.details["param"].as_str()), (Code::InvalidParam, Some("thickness")));
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "m", "thickness": "1 mm"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["param"].as_str()),
+            (Code::InvalidParam, Some("thickness"))
+        );
     }
 
     #[test]
@@ -834,12 +1123,21 @@ mod tests {
         let e = add(&mut s, json!({"faces": [format!("p/b/{edge}")]})).unwrap_err();
         assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
         // A whole solid is no direction.
-        let e = add(&mut s, json!({"faces": [format!("p/b/{}", b[0])], "direction": "p/c"}))
-            .unwrap_err();
+        let e = add(
+            &mut s,
+            json!({"faces": [format!("p/b/{}", b[0])], "direction": "p/c"}),
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
-        let e = add(&mut s, json!({"faces": [format!("p/b/{}", b[0])], "by": "slide"}))
-            .unwrap_err();
-        assert_eq!((e.code, e.details["param"].as_str()), (Code::InvalidParam, Some("by")));
+        let e = add(
+            &mut s,
+            json!({"faces": [format!("p/b/{}", b[0])], "by": "slide"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["param"].as_str()),
+            (Code::InvalidParam, Some("by"))
+        );
         // Nothing written by any of them.
         assert!(add(&mut s, json!({"faces": [format!("p/b/{}", b[0])]})).is_ok());
     }
@@ -847,14 +1145,20 @@ mod tests {
     /// The reference of `f`'s planar face facing up at `z` meters, of solid `solid`.
     fn up(s: &mut crate::session::Session, f: &str, solid: &str, z: f64) -> String {
         let v = call(s, "inspect", json!({"part": "p", "feature": f})).unwrap();
-        let face = v["bodies"][0]["faces"].as_array().unwrap().iter()
+        let face = v["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|x| {
                 let sign = if x["reversed"] == true { -1.0 } else { 1.0 };
                 x["surface"]["type"] == "plane"
                     && x["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == 1.0
                     && (x["surface"]["frame"]["origin"][2].as_f64().unwrap() - z).abs() < 1e-12
             })
-            .unwrap()["name"].as_str().unwrap().to_owned();
+            .unwrap()["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         format!("p/{solid}/{face}")
     }
 
@@ -862,20 +1166,44 @@ mod tests {
     fn a_move_reports_its_fields_motion_and_what_it_modified() {
         let (_dir, mut s) = boxes();
         let top = up(&mut s, "b", "b", 0.02);
-        let shown = call(&mut s, "feature.add", json!({"part": "p", "type": "move_face", "id": "m",
-            "by": "translate", "direction": "z", "distance": "5 mm", "faces": [top.clone()]})).unwrap();
+        let shown = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "move_face", "id": "m",
+            "by": "translate", "direction": "z", "distance": "5 mm", "faces": [top.clone()]}),
+        )
+        .unwrap();
         let f = &shown["feature"];
         assert_eq!(f["distance"], json!({"value": "5 mm", "m": 0.005}), "{f}");
         assert_eq!(f["faces"], json!([top]), "{f}");
-        assert_eq!((f["direction"].as_str(), f["tangent"].as_bool()), (Some("z"), Some(true)));
+        assert_eq!(
+            (f["direction"].as_str(), f["tangent"].as_bool()),
+            (Some("z"), Some(true))
+        );
         let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
-        let m = r["parts"][0]["features"].as_array().unwrap().iter()
-            .find(|x| x["id"] == "m").unwrap()["move_face"].clone();
-        assert_eq!(m["motion"]["translation_m"], json!([0.0, 0.0, 0.005]), "{m}");
+        let m = r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "m")
+            .unwrap()["move_face"]
+            .clone();
+        assert_eq!(
+            m["motion"]["translation_m"],
+            json!([0.0, 0.0, 0.005]),
+            "{m}"
+        );
         // The top moved; its four edges moved, the four upright ones were
         // carried on; its four corners moved. The sides keep their planes.
         assert_eq!(m["modified"]["faces"], 1, "{m}");
-        assert_eq!((m["modified"]["edges"].as_u64(), m["modified"]["vertices"].as_u64()), (Some(8), Some(4)), "{m}");
+        assert_eq!(
+            (
+                m["modified"]["edges"].as_u64(),
+                m["modified"]["vertices"].as_u64()
+            ),
+            (Some(8), Some(4)),
+            "{m}"
+        );
         assert!(m["modified"].get("references").is_none());
         let i = call(&mut s, "inspect", json!({"part": "p", "feature": "m"})).unwrap();
         let refs = i["move_face"]["modified"]["references"].as_array().unwrap();
@@ -889,21 +1217,40 @@ mod tests {
         let top = up(&mut s, "b", "b", 0.02);
         let lid = up(&mut s, "c", "c", 0.01);
         // c's top, at 10 mm: b comes down to it.
-        call(&mut s, "feature.add", json!({"part": "p", "type": "replace_face", "id": "r",
-            "groups": [{"with": lid, "faces": [top.clone()]}]})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "replace_face", "id": "r",
+            "groups": [{"with": lid, "faces": [top.clone()]}]}),
+        )
+        .unwrap();
         let part = Id::parse("p", "part").unwrap();
         let built = s.rebuilt(&part).unwrap().clone();
-        let (_, out) = built.features.iter().find(|(i, _)| i.as_str() == "r").unwrap();
+        let (_, out) = built
+            .features
+            .iter()
+            .find(|(i, _)| i.as_str() == "r")
+            .unwrap();
         assert!(out.is_ok(), "{out:?}");
         // An edge is no surface.
         let edge = names(&mut s, "b", "edges")[0].clone();
-        let e = call(&mut s, "feature.add", json!({"part": "p", "type": "replace_face",
-            "groups": [{"with": format!("p/b/{edge}"), "faces": [top]}]})).unwrap_err();
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "replace_face",
+            "groups": [{"with": format!("p/b/{edge}"), "faces": [top]}]}),
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
         // A whole solid isn't a plane.
         let top = up(&mut s, "b", "b", 0.02);
-        let e = call(&mut s, "feature.add", json!({"part": "p", "type": "replace_face",
-            "groups": [{"with": "p/c", "faces": [top]}]})).unwrap_err();
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "replace_face",
+            "groups": [{"with": "p/c", "faces": [top]}]}),
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
     }
 
@@ -912,16 +1259,33 @@ mod tests {
         let (dir, mut s) = boxes();
         let top = up(&mut s, "b", "b", 0.02);
         // What `--with p/d --face <top>` sends, `d` a datum plane.
-        call(&mut s, "feature.add", json!({"part": "p", "type": "plane", "id": "d",
-            "by": "offset", "from": "xy", "distance": 22})).unwrap();
-        call(&mut s, "feature.add", json!({"part": "p", "type": "replace_face", "id": "r",
-            "groups": [{"with": "p/d", "faces": [top.clone()]}]})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "plane", "id": "d",
+            "by": "offset", "from": "xy", "distance": 22}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "replace_face", "id": "r",
+            "groups": [{"with": "p/d", "faces": [top.clone()]}]}),
+        )
+        .unwrap();
         let v = file(&dir, "r");
         assert_eq!(v["groups"][0]["with"], json!({"feature": "d"}), "{v}");
         assert_eq!(v["target"], "b");
         // Faces outside a group are refused, saying where they go.
-        let e = call(&mut s, "feature.edit", json!({"part": "p", "id": "r", "face": top}))
-            .unwrap_err();
-        assert_eq!((e.code, e.details["param"].as_str()), (Code::InvalidParam, Some("faces")));
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "r", "face": top}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["param"].as_str()),
+            (Code::InvalidParam, Some("faces"))
+        );
     }
 }

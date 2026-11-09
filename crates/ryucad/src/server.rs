@@ -4248,8 +4248,12 @@ fn feature_add(
         crate::tweak::take_given(ty, &mut given.fields)?;
         if given.fields.target.is_none() && given.fields.targets.is_none() {
             let before = solids_before(p, &list, at);
-            given.fields.target =
-                Some(crate::tweak::default_target(ty, &given.fields, &before, &pid)?);
+            given.fields.target = Some(crate::tweak::default_target(
+                ty,
+                &given.fields,
+                &before,
+                &pid,
+            )?);
         }
     }
     // A shell or offset with no target acts on the part's one solid; the

@@ -621,23 +621,41 @@ fn tweaked() -> (tempfile::TempDir, Session, String, String) {
     ryucad::server::init(dir.path(), None).unwrap();
     let mut s = Session::open(dir.path()).unwrap();
     must(&mut s, "part.create", json!({"part": "p"}));
-    must(&mut s, "param.set",
-         json!({"part": "p", "parameters": {"w": "20 mm", "d": "2 mm", "lvl": "5 mm"}}));
+    must(
+        &mut s,
+        "param.set",
+        json!({"part": "p", "parameters": {"w": "20 mm", "d": "2 mm", "lvl": "5 mm"}}),
+    );
     let add = |s: &mut Session, f: Value| {
         let mut f = f;
         f["part"] = json!("p");
         must(s, "feature.add", f);
     };
-    add(&mut s, json!({"type": "box", "id": "b", "params": {"x": "w", "y": "12 mm", "z": "8 mm"}}));
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": "w", "y": "12 mm", "z": "8 mm"}}),
+    );
     let top = face(&mut s, "b", [0.0, 0.0, 1.0]);
-    add(&mut s, json!({"type": "move_face", "id": "m", "by": "translate", "direction": "z",
-                       "distance": "d", "faces": [top.clone()]}));
-    add(&mut s, json!({"type": "box", "id": "c", "params": {"x": "6 mm", "y": "6 mm", "z": "8 mm"},
-                       "placement": {"origin": [40, 0, 0]}}));
+    add(
+        &mut s,
+        json!({"type": "move_face", "id": "m", "by": "translate", "direction": "z",
+                       "distance": "d", "faces": [top.clone()]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "c", "params": {"x": "6 mm", "y": "6 mm", "z": "8 mm"},
+                       "placement": {"origin": [40, 0, 0]}}),
+    );
     let lid = face(&mut s, "c", [0.0, 0.0, 1.0]);
-    add(&mut s, json!({"type": "plane", "id": "lvl", "by": "offset", "from": "xy", "distance": "lvl"}));
-    add(&mut s, json!({"type": "replace_face", "id": "r",
-                       "groups": [{"with": "p/lvl", "faces": [lid.clone()]}]}));
+    add(
+        &mut s,
+        json!({"type": "plane", "id": "lvl", "by": "offset", "from": "xy", "distance": "lvl"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "replace_face", "id": "r",
+                       "groups": [{"with": "p/lvl", "faces": [lid.clone()]}]}),
+    );
     (dir, s, top, lid)
 }
 
@@ -647,10 +665,19 @@ fn tweak_edit(g: &mut Lcg, s: &mut Session, top: &str) {
         0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
         1 => ("param.set", json!({"parameters": {"d": mm(g, 1, 4)}})),
         2 => ("param.set", json!({"parameters": {"lvl": mm(g, 3, 7)}})),
-        3 => ("feature.edit", json!({"id": "m", "by": "rotate", "axis": "x", "angle": "2 deg"})),
-        4 => ("feature.edit", json!({"id": "m", "by": "translate", "direction": "z",
-                                     "distance": "d", "faces": [top]})),
-        _ => ("feature.edit", json!({"id": "m", "by": "offset", "distance": "d"})),
+        3 => (
+            "feature.edit",
+            json!({"id": "m", "by": "rotate", "axis": "x", "angle": "2 deg"}),
+        ),
+        4 => (
+            "feature.edit",
+            json!({"id": "m", "by": "translate", "direction": "z",
+                                     "distance": "d", "faces": [top]}),
+        ),
+        _ => (
+            "feature.edit",
+            json!({"id": "m", "by": "offset", "distance": "d"}),
+        ),
     };
     let mut params = params;
     params["part"] = json!("p");

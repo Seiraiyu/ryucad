@@ -869,20 +869,32 @@ mod tests {
             ("parts/a/features/o.json", off),
             ("parts/a/features/r.json", rp),
         ]);
-        let rename = Rename::Feature { part: "a".into(), from: "b".into(), to: "b-1".into() };
+        let rename = Rename::Feature {
+            part: "a".into(),
+            from: "b".into(),
+            to: "b-1".into(),
+        };
         let names = BTreeMap::from([(
             "b".to_owned(),
-            (1..=3).map(|k| (old(k), new(k))).collect::<BTreeMap<_, _>>(),
+            (1..=3)
+                .map(|k| (old(k), new(k)))
+                .collect::<BTreeMap<_, _>>(),
         )]);
         let out = renumbered(&f, &rename, &names);
         let read = |p: &str| serde_json::from_slice::<Value>(&out[p]).unwrap();
         let to = |k: u8| json!({"feature": "b-1", "name": new(k)});
         let m = read("parts/a/features/m.json");
-        assert_eq!((&m["target"], &m["faces"][0], &m["axis"]), (&json!("b-1"), &to(1), &to(3)));
+        assert_eq!(
+            (&m["target"], &m["faces"][0], &m["axis"]),
+            (&json!("b-1"), &to(1), &to(3))
+        );
         let o = read("parts/a/features/o.json");
         assert_eq!(o["groups"][0]["faces"][0], to(2));
         let x = read("parts/a/features/r.json");
-        assert_eq!((&x["groups"][0]["with"], &x["groups"][0]["faces"][0]), (&to(2), &to(1)));
+        assert_eq!(
+            (&x["groups"][0]["with"], &x["groups"][0]["faces"][0]),
+            (&to(2), &to(1))
+        );
     }
 
     #[test]

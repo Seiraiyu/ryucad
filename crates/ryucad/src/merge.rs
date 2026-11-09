@@ -1537,9 +1537,16 @@ mod tests {
         };
         let base = mv(json!({}));
         // A distance on one side and tangency on the other: both.
-        let m = merge(Some(&base), &mv(json!({"distance": "8 mm"})), &mv(json!({"tangent": false})));
+        let m = merge(
+            Some(&base),
+            &mv(json!({"distance": "8 mm"})),
+            &mv(json!({"tangent": false})),
+        );
         assert!(m.is_clean(), "{:?}", m.conflicts);
-        assert_eq!((&m.value["distance"], &m.value["tangent"]), (&json!("8 mm"), &json!(false)));
+        assert_eq!(
+            (&m.value["distance"], &m.value["tangent"]),
+            (&json!("8 mm"), &json!(false))
+        );
         // Faces are one value: added differently on both sides, one conflict.
         let m = merge(
             Some(&base),
@@ -1556,11 +1563,16 @@ mod tests {
         assert!(m.is_clean());
         assert_eq!(m.value, turned);
         let m = merge(Some(&base), &turned, &mv(json!({"distance": "8 mm"})));
-        assert!(!m.is_clean(), "a new by against a changed field is one conflict");
+        assert!(
+            !m.is_clean(),
+            "a new by against a changed field is one conflict"
+        );
         // A replacement's groups are one value.
-        let rp = |with: &str| json!({"format": crate::doc::tweak::FORMAT, "kind": "ryucad.feature",
+        let rp = |with: &str| {
+            json!({"format": crate::doc::tweak::FORMAT, "kind": "ryucad.feature",
                                       "type": "replace_face", "target": "b",
-                                      "groups": [{"with": with, "faces": [n(1)]}]});
+                                      "groups": [{"with": with, "faces": [n(1)]}]})
+        };
         let m = merge(Some(&rp("xy")), &rp("yz"), &rp("zx"));
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/groups"]);
     }
