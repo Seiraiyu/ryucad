@@ -231,7 +231,7 @@ pub fn card(ctx: &egui::Context, o: &mut Opened) {
     };
     let c = Card::of(e);
     let p = o.view.palette(ctx.theme() == egui::Theme::Dark);
-    let (mut close, mut go) = (false, None);
+    let (mut close, mut go, mut convert) = (false, None, None);
     egui::Area::new(egui::Id::unique("error card"))
         .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -30.0))
         .order(egui::Order::Foreground)
@@ -276,9 +276,25 @@ pub fn card(ctx: &egui::Context, o: &mut Opened) {
                     if let Some(h) = &c.history {
                         ui.label(h);
                     }
+                    if let Some(h) = &c.hint {
+                        ui.horizontal(|ui| {
+                            ui.weak("An agent runs");
+                            chip(ui, h);
+                        });
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("Close").clicked() {
                             close = true;
+                        }
+                        if c.convert.is_some()
+                            && ui
+                                .button("Convert to solid")
+                                .on_hover_text(
+                                    "Heal the reference import into a solid features can act on",
+                                )
+                                .clicked()
+                        {
+                            convert = c.convert.clone();
                         }
                         if ui.button("Copy details").clicked() {
                             ui.ctx().copy_text(c.json.clone());
@@ -288,6 +304,10 @@ pub fn card(ctx: &egui::Context, o: &mut Opened) {
         });
     if let Some(i) = go {
         show(o, &[c.chips[i].reference.clone()]);
+    }
+    if let Some((part, feature)) = convert {
+        o.ws.convert_import(&part, &feature, false);
+        close = true;
     }
     if close {
         o.ws.card = None;

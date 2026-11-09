@@ -44,6 +44,11 @@ const TITLES: &[(Code, &str)] = &[
     (Code::BooleanFailed, "Boolean failed"),
     (Code::ReferenceUnresolved, "A reference no longer resolves"),
     (Code::ReferenceForward, "A reference to a later feature"),
+    (Code::ReferenceBody, "A reference import can't be changed"),
+    (
+        Code::ReferenceNotSolid,
+        "An open reference import has no mass",
+    ),
     (Code::FormatTooNew, "Written by a newer ryucad"),
     (Code::AppNotInstalled, "The app isn't installed"),
 ];
@@ -97,6 +102,12 @@ pub struct Card {
     pub history: Option<String>,
     /// The error's JSON, for Copy details.
     pub json: String,
+    /// What the agent would run to clear it: `ryucad import convert
+    /// <part>/<solid>`.
+    pub hint: Option<String>,
+    /// The import a Convert button converts to a solid, `(part,
+    /// feature)`: a `reference_body` refusal's, read from its hint.
+    pub convert: Option<(String, String)>,
 }
 
 /// The details keys whose values name entities.
@@ -135,8 +146,26 @@ impl Card {
             chips,
             history: history(d),
             json: serde_json::to_string_pretty(e).unwrap_or_default(),
+            hint: d["hint"].as_str().map(str::to_owned),
+            convert: convert_of(e),
         }
     }
+}
+
+/// The import a `reference_body` refusal says to convert, `(part,
+/// feature)`: its hint is `ryucad import convert <part>/<solid>`, and a
+/// reference's solid is named by the import feature that founds it.
+/// `import.convert`'s own refusal (features act on what would become a
+/// reference) has no hint, and nothing to convert.
+pub fn convert_of(e: &Error) -> Option<(String, String)> {
+    if e.code != Code::ReferenceBody {
+        return None;
+    }
+    let target = e.details["hint"]
+        .as_str()?
+        .strip_prefix("ryucad import convert ")?;
+    let (part, feature) = target.split_once('/')?;
+    Some((part.to_owned(), feature.to_owned()))
 }
 
 /// A chip for one value of `key`: a string, or an object with its
@@ -258,6 +287,29 @@ mod tests {
         assert_eq!(c.chips[0].what, "edge, listed");
         assert_eq!(c.chips[1].what, "face, overflows onto");
         assert!(c.json.contains("radius_too_large"));
+    }
+
+    #[test]
+    fn a_reference_body_refusal_offers_its_conversion() {
+        let e = Error::new(
+            Code::ReferenceBody,
+            "f1 would change motor, a reference import",
+        )
+        .with("feature", "f1")
+        .with("solid", "motor")
+        .with("role", "targets")
+        .with("hint", "ryucad import convert p/motor");
+        let c = Card::of(&e);
+        assert_eq!(c.title, "A reference import can't be changed");
+        assert_eq!(c.facts, ["feature f1", "solid motor"]);
+        assert_eq!(c.hint.as_deref(), Some("ryucad import convert p/motor"));
+        assert_eq!(c.convert, Some(("p".into(), "motor".into())));
+        // Convert's own refusal names what acts on it, and offers nothing.
+        let own = Error::new(Code::ReferenceBody, "motor can't become a reference")
+            .with("feature", "motor")
+            .with("acting", json!(["f1"]));
+        assert_eq!(Card::of(&own).convert, None);
+        assert_eq!(convert_of(&Error::new(Code::NotFound, "x")), None);
     }
 
     #[test]
