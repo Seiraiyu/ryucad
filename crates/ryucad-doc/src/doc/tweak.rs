@@ -1,8 +1,9 @@
 //! Face tweaks (design 400): faces of one solid, its `target`, moved
 //! (`move_face`: translated along a direction, turned about an axis, or
-//! offset along their outward normals) or given another face's surface or
-//! a plane (`replace_face`). A tweak keeps every face, edge and vertex
-//! and their names, and makes nothing. Faces are references into the
+//! offset along their outward normals), given another face's surface or
+//! a plane (`replace_face`), or drafted about a neutral plane or a
+//! parting line (`draft`, plan 17.B). A tweak keeps every face, edge and
+//! vertex and their names, and makes nothing. Faces are references into the
 //! target as the feature sees it.
 
 use super::body::{FaceGroup, refs, refs_json, solid_id};
@@ -21,8 +22,20 @@ use serde_json::{Value, json};
 /// number; nothing else names it.
 pub const FORMAT: u64 = 16;
 
+/// The feature format drafts are new in (plan 17.B). Taken in the order
+/// stages merge (16 face tweaks, 17 ryucad 21.D's imports placed): if
+/// another stage holds 18 when this merges, move this constant to the next
+/// free number; nothing else names it.
+pub const DRAFT_FORMAT: u64 = 18;
+
+/// The least and greatest size of a draft's angle, as ryukei 9 takes it
+/// (`tol::ANGULAR_RESOLUTION`; `tweak::MAX_ANGLE`, a right angle less a
+/// hundredth of a radian). ryucad's tests hold them to the kernel's.
+pub const MIN_DRAFT_ANGLE: f64 = 1e-11;
+pub const MAX_DRAFT_ANGLE: f64 = core::f64::consts::FRAC_PI_2 - 0.01;
+
 /// The feature types this module reads.
-pub const TYPES: [&str; 2] = ["move_face", "replace_face"];
+pub const TYPES: [&str; 3] = ["move_face", "replace_face", "draft"];
 
 const BY: &str = "by is translate, rotate or offset";
 
@@ -91,10 +104,43 @@ pub struct ReplaceFace {
     pub groups: Vec<Replacement>,
 }
 
+/// What a draft's faces turn about.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DraftHinge {
+    /// The plane `neutral` names (an origin or datum plane, a sketch, a
+    /// planar face); the pull is its normal.
+    Neutral { plane: GeomRef },
+    /// Edges of the target the faces turn about (`parting`), and the pull:
+    /// any axis, or a plane's normal.
+    Parting { edges: Vec<Reference>, pull: GeomRef },
+}
+
+/// A `draft`: `faces` of `target` drafted to `angle` from the pull about
+/// `hinge` (each group's faces to its own), the pull turned round by
+/// `reverse`, the faces in `flip` drafted against it; with `tangent`,
+/// faces tangent to a drafted face join the draft (true unless written
+/// false). A positive angle tapers a boss inward along the pull and opens
+/// a hole.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Draft {
+    pub target: Id,
+    pub angle: Quantity,
+    pub hinge: DraftHinge,
+    pub reverse: bool,
+    pub faces: Vec<Reference>,
+    pub groups: Vec<FaceGroup>,
+    pub flip: Vec<Reference>,
+    pub tangent: bool,
+}
+
 /// The fields a request may give a tweak of type `ty`.
 pub fn request_fields(ty: &str) -> &'static [&'static str] {
     match ty {
         "replace_face" => &["target", "targets", "groups"],
+        "draft" => &[
+            "target", "targets", "angle", "neutral", "parting", "pull", "reverse", "faces",
+            "groups", "flip", "tangent",
+        ],
         _ => &[
             "target",
             "targets",
@@ -336,6 +382,249 @@ impl ReplaceFace {
         );
         out
     }
+}
+
+impl Draft {
+    /// Its fields: the hinge's, `reverse` only when true, `tangent` only
+    /// when false, no `faces`, `groups` or `flip` when there are none.
+    pub fn fields(&self) -> Value {
+        let mut v = json!({"target": self.target, "angle": self.angle.text()});
+        match &self.hinge {
+            DraftHinge::Neutral { plane } => v["neutral"] = plane.to_json(),
+            DraftHinge::Parting { edges, pull } => {
+                v["parting"] = refs_json(edges);
+                v["pull"] = pull.to_json();
+            }
+        }
+        if self.reverse {
+            v["reverse"] = json!(true);
+        }
+        if !self.faces.is_empty() {
+            v["faces"] = refs_json(&self.faces);
+        }
+        if !self.groups.is_empty() {
+            v["groups"] = Value::Array(
+                self.groups
+                    .iter()
+                    .map(|g| json!({"angle": g.quantity.text(), "faces": refs_json(&g.faces)}))
+                    .collect(),
+            );
+        }
+        if !self.flip.is_empty() {
+            v["flip"] = refs_json(&self.flip);
+        }
+        if !self.tangent {
+            v["tangent"] = json!(false);
+        }
+        v
+    }
+
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj, env: &Env) -> Result<Draft> {
+        let target = solid_id(o, "target")?;
+        let angle = draft_angle(&o.take("angle")?, "/angle", env)?;
+        let (neutral, parting, pull) = (
+            o.take_opt("neutral"),
+            o.take_opt("parting"),
+            o.take_opt("pull"),
+        );
+        let hinge = match (neutral, parting) {
+            (Some(_), Some(_)) | (None, None) => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "a draft turns its faces about a neutral plane (neutral) or a parting line (parting, with pull): give one",
+                )
+                .with("pointer", "/neutral"));
+            }
+            (Some(n), None) => {
+                if pull.is_some() {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        "a draft about a neutral plane pulls along the plane's normal: it takes no pull (reverse turns it round)",
+                    )
+                    .with("pointer", "/pull"));
+                }
+                DraftHinge::Neutral {
+                    plane: GeomRef::from_json(&n, "/neutral")?,
+                }
+            }
+            (None, Some(p)) => {
+                let edges = refs(&p, "/parting")?;
+                let pull = pull.ok_or_else(|| {
+                    invalid(
+                        "/pull",
+                        "a draft from a parting line names its pull: any axis, or a plane's normal",
+                    )
+                })?;
+                DraftHinge::Parting {
+                    edges,
+                    pull: GeomRef::from_json(&pull, "/pull")?,
+                }
+            }
+        };
+        let flag = |o: &mut Obj, k: &str, default: bool| -> Result<bool> {
+            match o.take_opt(k) {
+                None => Ok(default),
+                Some(Value::Bool(b)) => Ok(b),
+                Some(_) => Err(invalid(&format!("/{k}"), &format!("{k} is true or false"))),
+            }
+        };
+        let reverse = flag(o, "reverse", false)?;
+        let faces = match o.take_opt("faces") {
+            None => Vec::new(),
+            Some(Value::Array(a)) if a.is_empty() => Vec::new(),
+            Some(v) => refs(&v, "/faces")?,
+        };
+        let groups = match o.take_opt("groups") {
+            None => Vec::new(),
+            Some(v) => angle_groups(&v, env)?,
+        };
+        let flip = match o.take_opt("flip") {
+            None => Vec::new(),
+            Some(Value::Array(a)) if a.is_empty() => Vec::new(),
+            Some(v) => refs(&v, "/flip")?,
+        };
+        let tangent = flag(o, "tangent", true)?;
+        if faces.is_empty() && groups.is_empty() {
+            return Err(invalid(
+                "/faces",
+                "a draft names the faces it drafts: a non-empty array of faces {feature, name}, or groups",
+            ));
+        }
+        let d = Draft {
+            target,
+            angle,
+            hinge,
+            reverse,
+            faces,
+            groups,
+            flip,
+            tangent,
+        };
+        once(d.drafted())?;
+        let flipped: Vec<(String, &Reference)> = d
+            .flip
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (format!("flip.{i}"), r))
+            .collect();
+        once(flipped)?;
+        let drafted = d.drafted();
+        if let Some((i, r)) = d
+            .flip
+            .iter()
+            .enumerate()
+            .find(|(_, r)| !drafted.iter().any(|(_, x)| x == r))
+        {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "face {}/{} is flipped but not drafted: list it in faces or a group too",
+                    r.feature, r.name
+                ),
+            )
+            .with("pointer", format!("/flip/{i}")));
+        }
+        Ok(d)
+    }
+
+    /// The faces it drafts, each with its role: `faces.<i>`, then
+    /// `groups.<i>.faces.<j>`.
+    pub fn drafted(&self) -> Vec<(String, &Reference)> {
+        let mut out: Vec<(String, &Reference)> = self
+            .faces
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (format!("faces.{i}"), r))
+            .collect();
+        for (i, g) in self.groups.iter().enumerate() {
+            for (j, r) in g.faces.iter().enumerate() {
+                out.push((format!("groups.{i}.faces.{j}"), r));
+            }
+        }
+        out
+    }
+
+    /// The signed angle (radians) face `r` is drafted to: its group's,
+    /// else the draft's.
+    pub fn angle_of(&self, r: &Reference) -> f64 {
+        self.groups
+            .iter()
+            .find(|g| g.faces.contains(r))
+            .map_or(self.angle.radians(), |g| g.quantity.radians())
+    }
+
+    /// Its geometric references: `neutral`, or a parting draft's `pull`.
+    pub fn geometry(&self) -> Vec<(String, &GeomRef)> {
+        match &self.hinge {
+            DraftHinge::Neutral { plane } => vec![("neutral".to_owned(), plane)],
+            DraftHinge::Parting { pull, .. } => vec![("pull".to_owned(), pull)],
+        }
+    }
+
+    /// Its references to faces, edges and vertices: its faces, then a
+    /// parting line's edges (`parting.<i>`), its flipped faces
+    /// (`flip.<i>`), then a neutral plane's or pull's entity.
+    pub fn references(&self) -> Vec<(String, &Reference)> {
+        let mut out = self.drafted();
+        if let DraftHinge::Parting { edges, .. } = &self.hinge {
+            out.extend(
+                edges
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| (format!("parting.{i}"), r)),
+            );
+        }
+        out.extend(
+            self.flip
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (format!("flip.{i}"), r)),
+        );
+        out.extend(
+            self.geometry()
+                .into_iter()
+                .filter_map(|(k, g)| Some((k, g.reference()?))),
+        );
+        out
+    }
+}
+
+/// A draft's angle: an angle whose size is in
+/// `[MIN_DRAFT_ANGLE, MAX_DRAFT_ANGLE]`, of either sign.
+fn draft_angle(v: &Value, at: &str, env: &Env) -> Result<Quantity> {
+    let q = Quantity::from_json_as(v, Field::Angle, &|n| env.get(n))
+        .map_err(|e| e.with("pointer", at))?;
+    let a = q.radians().abs();
+    if !(MIN_DRAFT_ANGLE..=MAX_DRAFT_ANGLE).contains(&a) {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "a draft's angle is from 1e-11 rad to 90° less 0.01 rad (about 89.43°), of either sign, not {q}"
+            ),
+        )
+        .with("pointer", at)
+        .with("value", q.text()));
+    }
+    Ok(q)
+}
+
+/// A draft's `groups`: `[{angle, faces}]`.
+fn angle_groups(v: &Value, env: &Env) -> Result<Vec<FaceGroup>> {
+    let a = v
+        .as_array()
+        .ok_or_else(|| invalid("/groups", "groups is an array of {angle, faces}"))?;
+    a.iter()
+        .enumerate()
+        .map(|(i, g)| {
+            let at = format!("/groups/{i}");
+            let mut f = Obj::new(g, &at)?;
+            let quantity = draft_angle(&f.take("angle")?, &format!("{at}/angle"), env)?;
+            let faces = refs(&f.take("faces")?, &format!("{at}/faces"))?;
+            f.finish()?;
+            Ok(FaceGroup { quantity, faces })
+        })
+        .collect()
 }
 
 /// `invalid_param` at `/field`: the tweak moves nothing.
@@ -616,5 +905,164 @@ mod tests {
         };
         assert_eq!(distance.meters(), 0.001);
         assert_eq!(groups[0].quantity.meters(), 0.003);
+    }
+
+    fn drafted(v: Value) -> Result<Draft> {
+        let mut o = Obj::new(&v, "")?;
+        let d = Draft::from_fields(&mut o, &Env::empty())?;
+        o.finish()?;
+        Ok(d)
+    }
+
+    fn edge(n: &str) -> Value {
+        json!({"feature": "base", "name": n})
+    }
+
+    #[test]
+    fn drafts_round_trip() {
+        // About a neutral plane: reverse false and tangent true are written
+        // as nothing.
+        let v = json!({"target": "base", "angle": "2 deg", "neutral": "xy",
+                       "faces": [face(A)], "reverse": false, "tangent": true});
+        let d = drafted(v).unwrap();
+        assert_eq!(
+            d.fields(),
+            json!({"target": "base", "angle": "2 deg", "neutral": "xy", "faces": [face(A)]})
+        );
+        assert_eq!(drafted(d.fields()).unwrap(), d);
+        assert!(d.tangent && !d.reverse);
+        // From a parting line with a pull, a group at its own angle, a face
+        // flipped, the pull reversed, tangency off.
+        let v = json!({"target": "base", "angle": "3 deg",
+                       "parting": [edge(B)], "pull": "z", "reverse": true,
+                       "faces": [face(A)],
+                       "groups": [{"angle": "-5 deg", "faces": [face(B)]}],
+                       "flip": [face(B)], "tangent": false});
+        let d = drafted(v.clone()).unwrap();
+        assert_eq!(d.fields(), v);
+        let roles: Vec<String> = d.drafted().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(roles, ["faces.0", "groups.0.faces.0"]);
+        let geo: Vec<String> = d.geometry().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(geo, ["pull"]);
+        let refs: Vec<String> = d.references().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(refs, ["faces.0", "groups.0.faces.0", "parting.0", "flip.0"]);
+        // A neutral plane that is a face is a reference too.
+        let d = drafted(json!({"target": "base", "angle": "1 deg", "neutral": face(B),
+                               "faces": [face(A)]}))
+        .unwrap();
+        let refs: Vec<String> = d.references().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(refs, ["faces.0", "neutral"]);
+        // Groups alone need no listed faces.
+        let v = json!({"target": "base", "angle": "1 deg", "neutral": "xy",
+                       "groups": [{"angle": "2 deg", "faces": [face(A)]}]});
+        assert_eq!(drafted(v.clone()).unwrap().fields(), v);
+    }
+
+    #[test]
+    fn drafts_are_checked() {
+        for (v, code, pointer) in [
+            (
+                json!({"target": "p", "angle": "2 deg", "faces": [face(A)]}),
+                Code::InvalidParam,
+                "/neutral",
+            ),
+            (
+                json!({"target": "p", "angle": "2 deg", "neutral": "xy", "parting": [edge(B)],
+                    "pull": "z", "faces": [face(A)]}),
+                Code::InvalidParam,
+                "/neutral",
+            ),
+            (
+                json!({"target": "p", "angle": "2 deg", "neutral": "xy", "pull": "z",
+                    "faces": [face(A)]}),
+                Code::InvalidParam,
+                "/pull",
+            ),
+            (
+                json!({"target": "p", "angle": "2 deg", "parting": [edge(B)], "faces": [face(A)]}),
+                Code::InvalidDocument,
+                "/pull",
+            ),
+            (
+                json!({"target": "p", "angle": "2 deg", "parting": [], "pull": "z",
+                    "faces": [face(A)]}),
+                Code::InvalidDocument,
+                "/parting",
+            ),
+            (
+                json!({"target": "p", "angle": "0 deg", "neutral": "xy", "faces": [face(A)]}),
+                Code::InvalidParam,
+                "/angle",
+            ),
+            (
+                json!({"target": "p", "angle": "90 deg", "neutral": "xy", "faces": [face(A)]}),
+                Code::InvalidParam,
+                "/angle",
+            ),
+            (
+                json!({"target": "p", "angle": "2 mm", "neutral": "xy", "faces": [face(A)]}),
+                Code::UnitMismatch,
+                "/angle",
+            ),
+            (
+                json!({"target": "p", "angle": "2 deg", "neutral": "xy", "faces": [face(A)],
+                    "groups": [{"angle": "89.9 deg", "faces": [face(B)]}]}),
+                Code::InvalidParam,
+                "/groups/0/angle",
+            ),
+            (
+                json!({"target": "p", "angle": "2 deg", "neutral": "xy"}),
+                Code::InvalidDocument,
+                "/faces",
+            ),
+            (
+                json!({"target": "p", "angle": "2 deg", "neutral": "xy", "faces": [face(A)],
+                    "groups": [{"angle": "3 deg", "faces": [face(A)]}]}),
+                Code::InvalidParam,
+                "/groups/0/faces/0",
+            ),
+            (
+                json!({"target": "p", "angle": "2 deg", "neutral": "xy", "faces": [face(A)],
+                    "flip": [face(B)]}),
+                Code::InvalidParam,
+                "/flip/0",
+            ),
+            (
+                json!({"target": "p", "angle": "2 deg", "neutral": "xy", "faces": [face(A)],
+                    "flip": [face(A), face(A)]}),
+                Code::InvalidParam,
+                "/flip/1",
+            ),
+            (
+                json!({"target": "p", "angle": "2 deg", "neutral": "xy", "faces": [face(A)],
+                    "reverse": "yes"}),
+                Code::InvalidDocument,
+                "/reverse",
+            ),
+            (
+                json!({"target": "p", "angle": "2 deg", "neutral": "xy", "faces": [face(A)],
+                    "distance": "1 mm"}),
+                Code::InvalidDocument,
+                "/distance",
+            ),
+        ] {
+            let e = drafted(v.clone()).unwrap_err();
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (code, Some(pointer)),
+                "{v}"
+            );
+        }
+    }
+
+    #[test]
+    fn draft_angles_read_parameters_and_keep_their_sign() {
+        let p = [("a".to_owned(), crate::expr::Expr::parse("2 deg").unwrap())].into();
+        let v = json!({"target": "p", "angle": "a", "neutral": "xy", "faces": [face(A)],
+                       "groups": [{"angle": "-a * 2", "faces": [face(B)]}]});
+        let mut o = Obj::new(&v, "").unwrap();
+        let d = Draft::from_fields(&mut o, &Env::new(&p)).unwrap();
+        assert!((d.angle.radians() - 2f64.to_radians()).abs() < 1e-15);
+        assert!((d.groups[0].quantity.radians() + 4f64.to_radians()).abs() < 1e-15);
     }
 }
