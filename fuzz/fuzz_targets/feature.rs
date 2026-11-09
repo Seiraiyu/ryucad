@@ -16,7 +16,9 @@
 //! bends a corner), and its flanges bend and flange `b`'s
 //! edges, and its unfolds and refolds lay flat and fold back `w`, a bent
 //! section of `u` (its unfolds of the box `b`, which no base flange
-//! founded, give their allowance or are refused):
+//! founded, give their allowance or are refused), and seeds fill `s`'s
+//! loop of lines, extract `b`'s faces, sew sheets, and thicken a sheet (as
+//! new) and `b`'s face (joined to `b`):
 //! building must succeed or give a structured error, every body it leaves
 //! must pass the checks, cross or overlap itself nowhere and mesh with no
 //! faults, and a sketch that solves must solve to finite

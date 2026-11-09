@@ -9,7 +9,8 @@
 //! `0xf9` a lock, `0xf8` a manifest's dependencies, `0xf7` a datum
 //! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft, `0xf2` a mirror or split, `0xf1` an annotation, `0xf0` a base
 //! flange or flange, `0xef` a planar face or a surface extrude, `0xee` an
-//! unfold or refold. Merging must never panic, must give the same bytes twice,
+//! unfold or refold, `0xed` a thicken or a fill (by the parity of the
+//! edit bytes). Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -23,7 +24,8 @@
 //! sweep's profile only whole, its law only with its direction, a
 //! shell's open faces and groups only whole, a loft's sections only
 //! as the whole list, a split's plane and flip only together, and a
-//! base flange's allowance and relief only whole.
+//! base flange's allowance and relief only whole, and a thicken's
+//! source only whole.
 
 #![no_main]
 
@@ -894,6 +896,57 @@ fn edit_sheet_metal(v: &mut Value, op: u8, arg: u8) {
 /// K-factor, a deduction or a length), its fixed face, `only` (a bend
 /// added or taken out) and `bends` (an override given or taken out); a
 /// refold's unfold and `only`.
+/// A thicken's source (a sheet, or faces of `b`), front, back or
+/// operation, or a fill's sides (one replaced, one added) or tolerance.
+fn edit_surface_feature(v: &mut Value, op: u8, arg: u8) {
+    let face = |a: u8| json!({"feature": "b", "name": format!("{:032x}", a % 4)});
+    let o = v.as_object_mut().unwrap();
+    if o.get("type") == Some(&json!("thicken")) {
+        match op % 4 {
+            0 => {
+                let from = match arg % 3 {
+                    0 => json!({"sheet": "s"}),
+                    1 => json!({"sheet": "t"}),
+                    _ => json!({"faces": [face(arg)]}),
+                };
+                o.insert("from".into(), from);
+            }
+            1 => {
+                o.insert("front".into(), json!(format!("{} mm", 1 + arg % 4)));
+            }
+            2 => {
+                o.insert("back".into(), json!(format!("{} mm", arg % 3)));
+            }
+            _ => {
+                if arg % 2 == 0 {
+                    o.insert("operation".into(), json!("join"));
+                    o.insert("targets".into(), json!(["b"]));
+                } else {
+                    o.insert("operation".into(), json!("new"));
+                    o.remove("targets");
+                }
+            }
+        }
+    } else {
+        match op % 3 {
+            0 => {
+                if let Some(Value::Array(sides)) = o.get_mut("sides") {
+                    let i = arg as usize % sides.len();
+                    sides[i] = json!({"curve": {"feature": "s", "entity": format!("l{}", 4 + arg % 3)}});
+                }
+            }
+            1 => {
+                if let Some(Value::Array(sides)) = o.get_mut("sides") {
+                    sides.push(json!({"edge": face(arg)}));
+                }
+            }
+            _ => {
+                o.insert("tolerance".into(), json!(format!("0.00{} mm", 1 + arg % 5)));
+            }
+        }
+    }
+}
+
 fn edit_unfold(v: &mut Value, op: u8, arg: u8) {
     let r = |a: u8| json!({"feature": "f", "name": format!("{:032x}", a % 4)});
     let o = v.as_object_mut().unwrap();
@@ -1003,8 +1056,10 @@ fuzz_target!(|data: &[u8]| {
     // (18), `0xf5` a sweep (19), `0xf4` a shell (20), `0xf3` a loft
     // (21), `0xf2` a mirror or split (22), `0xf1` an annotation (23),
     // `0xf0` a base flange or flange (24), `0xef` a planar face or a
-    // surface extrude (25), `0xee` an unfold or refold (26); every other byte picks as it did before them.
+    // surface extrude (25), `0xee` an unfold or refold (26), `0xed` a
+    // thicken or a fill (27); every other byte picks as it did before them.
     let kind = match mode {
+        0xed => 27,
         0xee => 26,
         0xef => 25,
         0xf0 => 24,
@@ -1088,6 +1143,15 @@ fuzz_target!(|data: &[u8]| {
                 json!({"format": 10, "kind": "ryucad.feature", "type": "split", "target": "b",
                        "plane": {"feature": "d"}})
             }
+            // A thicken when the edits leave no odd byte over, else a fill.
+            27 if rest.len() % 2 == 0 => json!({"format": 15, "kind": "ryucad.feature",
+                "type": "thicken", "from": {"sheet": "s"}, "front": "1 mm", "back": "0 mm",
+                "operation": "new"}),
+            27 => json!({"format": 15, "kind": "ryucad.feature", "type": "fill",
+                "sides": [{"curve": {"feature": "s", "entity": "l1"}},
+                          {"curve": {"feature": "s", "entity": "l2"}},
+                          {"curve": {"feature": "s", "entity": "l3"}}],
+                "tolerance": "0.001 mm", "angle": "1 deg"}),
             // An unfold when the edits leave no odd byte over, else a
             // refold.
             26 if rest.len() % 2 == 0 => json!({"format": 14, "kind": "ryucad.feature",
@@ -1165,6 +1229,7 @@ fuzz_target!(|data: &[u8]| {
             24 => edit_sheet_metal(v, op, arg),
             25 => edit_surface(v, op, arg),
             26 => edit_unfold(v, op, arg),
+            27 => edit_surface_feature(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -1315,6 +1380,17 @@ fuzz_target!(|data: &[u8]| {
                         && !k.starts_with("/only/")
                         && !k.starts_with("/bends/"),
                     "an unfold's {k} conflicted inside: {v}"
+                );
+            }
+        }
+        // A thicken's source is one value: never conflicted inside.
+        if kind == 27 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            for k in record(&v).keys() {
+                assert!(
+                    !k.starts_with("/from/") && !k.starts_with("/sides/"),
+                    "conflicted inside a thicken's from or a fill's sides at {k}: {v}"
                 );
             }
         }
