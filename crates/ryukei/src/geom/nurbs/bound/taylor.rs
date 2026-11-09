@@ -325,6 +325,102 @@ pub(super) fn jets(
     Some((cell.at, jets))
 }
 
+/// The patch's point and derivatives to third order over the local box
+/// `[s, t]`, by [`crate::geom::nurbs::third::ORDERS`] (this module's first
+/// ten [`ORDERS`]), relative to the returned centre as [`jets`] gives its
+/// six: orders 0 to 2 as [`enclose`] takes them, order 3 within the mean
+/// value form, then the quotient rule as [`super::patch_jet3`] takes it.
+/// `None` where the box isn't inside one cell, or the cell or the result
+/// isn't finite (#254: the fit's third-order bound cut ten nets to every
+/// span's box).
+pub(super) fn jets3(
+    surface: u64,
+    index: usize,
+    patch: &BezierPatch,
+    s: [f64; 2],
+    t: [f64; 2],
+) -> Option<(Vector3, [V3; 10])> {
+    let (ks, kt) = (step(s[0], s[1])?, step(t[0], t[1])?);
+    let cell = cell(surface, index, patch, ks, kt)?;
+    let jets = enclose3(&cell, patch.range, [s, t], [ks, kt], cell.polynomial)?;
+    Some((cell.at, jets))
+}
+
+/// [`jets3`]'s enclosures from a cell.
+fn enclose3(
+    cell: &Cell,
+    [ru, rv]: [[f64; 2]; 2],
+    [s, t]: [[f64; 2]; 2],
+    [ks, kt]: [Span; 2],
+    polynomial: bool,
+) -> Option<[V3; 10]> {
+    let (su, hu) = place(s, ks, ru);
+    let (sv, hv) = place(t, kt, rv);
+    let at_point: [[f64; 4]; EVALUATED] =
+        core::array::from_fn(|k| evaluate(&cell.values[k], su, sv));
+    let comps = if polynomial { 3 } else { 4 };
+    let mut out: [H; EVALUATED] = [[pt(0.0); 4]; EVALUATED];
+    for (k, o) in out.iter_mut().enumerate() {
+        let (i, j) = ORDERS[k];
+        let (ku, kv) = (idx(i + 1, j), idx(i, j + 1));
+        for c in 0..comps {
+            let value = at_point[k][c];
+            let r = if i + j < 3 {
+                let (kuu, kuv, kvv) = (idx(i + 2, j), idx(i + 1, j + 1), idx(i, j + 2));
+                radius(
+                    cell,
+                    [k, ku, kv, kuu, kuv, kvv],
+                    c,
+                    [at_point[ku][c], at_point[kv][c]],
+                    [hu, hv],
+                )
+            } else {
+                first_radius(cell, [k, ku, kv], c, [hu, hv])
+            };
+            if !(r.is_finite() && value.is_finite()) {
+                return None;
+            }
+            o[c] = pt(value) + Iv::new(-r, r).expect("ordered");
+        }
+    }
+    let finite = |jets: &[V3; 10]| {
+        jets.iter()
+            .flatten()
+            .all(|x| x.lo().is_finite() && x.hi().is_finite())
+    };
+    if polynomial {
+        let jets = out.map(|o| [o[0], o[1], o[2]]);
+        return finite(&jets).then_some(jets);
+    }
+    let mut a = [[pt(0.0); 3]; 10];
+    let mut w = [pt(0.0); 10];
+    for k in 0..10 {
+        let (ak, wk) = parts(out[k]);
+        a[k] = ak;
+        w[k] = wk;
+    }
+    a[0] = div3(a[0], w[0]);
+    let jets =
+        crate::geom::nurbs::third::quotient_from(a, w, |x, y, c| scale3(x, y * pt(c)), div3, sub3);
+    finite(&jets).then_some(jets)
+}
+
+/// A box's middle in its cell's own `[0, 1]`, and its half-width from the
+/// evaluated point in the surface's parameter, rounded up. `mid - c0`
+/// rounds by at most 2^-54 and `* cells` is exact, so the point
+/// evaluated is within 2^-54 of the middle in the patch's local
+/// parameters, which `4 U` covers.
+fn place([a, b]: [f64; 2], span: Span, [r0, r1]: [f64; 2]) -> (f64, f64) {
+    let mid = 0.5 * (a + b);
+    let c0 = span.range()[0];
+    let sigma = ((mid - c0) * span.cells()).clamp(0.0, 1.0);
+    // The local half-width from the evaluated point, then in the
+    // surface's parameter: `(r1 - r0) h`, rounded up.
+    let h = ((pt(b) - pt(mid)).hi().max((pt(mid) - pt(a)).hi()) + 4.0 * U).max(0.0);
+    let width = (pt(r1) - pt(r0)).hi();
+    (sigma, (pt(h) * pt(width)).hi())
+}
+
 /// The jets over the local box `[s, t]` from its cells `[ks, kt]` of a
 /// patch over `range`, by the quotient rule unless `polynomial` (which the
 /// cell must be: tests compare both ways).
@@ -335,20 +431,6 @@ fn enclose(
     [ks, kt]: [Span; 2],
     polynomial: bool,
 ) -> Option<[V3; 6]> {
-    // The box's middle, and its place in the cell's own `[0, 1]`: `mid -
-    // c0` rounds by at most 2^-54 and `* cells` is exact, so the point
-    // evaluated is within 2^-54 of the middle in the patch's local
-    // parameters, which `4 U` covers.
-    let place = |[a, b]: [f64; 2], span: Span, [r0, r1]: [f64; 2]| {
-        let mid = 0.5 * (a + b);
-        let c0 = span.range()[0];
-        let sigma = ((mid - c0) * span.cells()).clamp(0.0, 1.0);
-        // The local half-width from the evaluated point, then in the
-        // surface's parameter: `(r1 - r0) h`, rounded up.
-        let h = ((pt(b) - pt(mid)).hi().max((pt(mid) - pt(a)).hi()) + 4.0 * U).max(0.0);
-        let width = (pt(r1) - pt(r0)).hi();
-        (sigma, (pt(h) * pt(width)).hi())
-    };
     let (su, hu) = place(s, ks, ru);
     let (sv, hv) = place(t, kt, rv);
     // Every evaluated net's value at the point, and its own error.
@@ -455,6 +537,17 @@ fn radius(cell: &Cell, n: [usize; 6], c: usize, g: [f64; 2], [hu, hv]: [f64; 2])
     );
     // Both hold, about the same value: the lesser does.
     first.min(second)
+}
+
+/// The mean value form alone (the first of [`radius`]'s two), for a
+/// third-order net, whose second-order form would read fifth-order nets
+/// a cell doesn't keep.
+fn first_radius(cell: &Cell, [k, ku, kv]: [usize; 3], c: usize, [hu, hv]: [f64; 2]) -> f64 {
+    let m = |k: usize| cell.mags[k][c];
+    add_up(
+        add_up(cell.values[k].err[c], mul_up(m(ku), hu)),
+        mul_up(m(kv), hv),
+    )
 }
 
 /// A net's components at local `(su, sv)` by f64 de Casteljau,

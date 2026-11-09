@@ -1444,14 +1444,62 @@ fn stretches_together(
     }
     let mut out = Vec::new();
     for list in by_face.values() {
-        for (i, &x) in list.iter().enumerate() {
-            for &y in &list[i + 1..] {
-                if together(&carriers[x], &carriers[y]) {
-                    out.push((x.min(y), x.max(y)));
-                }
+        // Each carrier's bounds once, and only the pairs whose grown
+        // boxes meet: the race's block top holds a stretch per pin, and
+        // every pair of its 1,000 recomputed both curves' bounds (#254).
+        let boxes: Vec<(Box3, f64)> = list
+            .iter()
+            .map(|&c| {
+                (
+                    carriers[c].curve.bounds(carriers[c].range),
+                    carriers[c].tolerance,
+                )
+            })
+            .collect();
+        for (i, j) in close_pairs(&boxes) {
+            let (x, y) = (list[i], list[j]);
+            if together(&carriers[x], &carriers[y]) {
+                out.push((x.min(y), x.max(y)));
             }
         }
     }
+    out
+}
+
+/// The pairs of positions `(i, j)`, `i < j`, in that order, whose boxes
+/// [`together_within`] wouldn't part at once: `boxes[i].0` and
+/// `boxes[j].0`, each grown by `boxes[i].1 + boxes[j].1 + SLACK`, meet.
+/// A sweep along x stops at the first box past the largest reach any
+/// partner could have, both grown by it (with a little more for the
+/// rounding of the grown sides).
+fn close_pairs(boxes: &[(Box3, f64)]) -> Vec<(usize, usize)> {
+    let tmax = boxes.iter().map(|b| b.1).fold(0.0f64, f64::max);
+    let mut order: Vec<usize> = (0..boxes.len()).collect();
+    order.sort_by(|&a, &b| {
+        boxes[a]
+            .0
+            .min()
+            .x
+            .total_cmp(&boxes[b].0.min().x)
+            .then(a.cmp(&b))
+    });
+    let mut out = Vec::new();
+    for (k, &i) in order.iter().enumerate() {
+        let (bi, ti) = boxes[i];
+        let edge = bi.max().x;
+        let far = 2.0 * (ti + tmax + SLACK) * (1.0 + 1e-9) + 1e-12 * (1.0 + edge.abs());
+        for &j in &order[k + 1..] {
+            let (bj, tj) = boxes[j];
+            if bj.min().x > edge + far {
+                break;
+            }
+            let r = ti + tj + SLACK;
+            if bi.grow(r).intersects(&bj.grow(r)) {
+                out.push((i.min(j), i.max(j)));
+            }
+        }
+    }
+    out.sort_unstable();
     out
 }
 
@@ -1892,6 +1940,44 @@ mod tests {
     use crate::geom::{Rigid, Surface, Vector3};
     use crate::name::OpKey;
     use crate::primitive;
+
+    /// `close_pairs` finds exactly the pairs whose boxes, each grown by
+    /// both tolerances and `SLACK`, meet, in the nested loop's order, as a
+    /// brute force over every pair does (#254).
+    #[test]
+    fn close_pairs_are_every_pair_whose_grown_boxes_meet() {
+        use crate::geom::{Box3, Point3};
+        let mut s = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for _ in 0..20 {
+            let boxes: Vec<(Box3, f64)> = (0..300)
+                .map(|_| {
+                    let (x, y, z) = (40.0 * next(), 25.0 * next(), next());
+                    let (w, h) = (0.7 * next(), 0.7 * next());
+                    let t = [1e-8, 1e-7, 1e-3][(next() * 3.0) as usize % 3];
+                    (
+                        Box3::new(Point3::new(x, y, z), Point3::new(x + w, y + h, z)),
+                        t,
+                    )
+                })
+                .collect();
+            let mut brute = Vec::new();
+            for i in 0..boxes.len() {
+                for j in i + 1..boxes.len() {
+                    let r = boxes[i].1 + boxes[j].1 + SLACK;
+                    if boxes[i].0.grow(r).intersects(&boxes[j].0.grow(r)) {
+                        brute.push((i, j));
+                    }
+                }
+            }
+            assert_eq!(close_pairs(&boxes), brute);
+        }
+    }
 
     fn at(x: f64, y: f64, z: f64) -> Rigid {
         Rigid::translation(Vector3::new(x, y, z))

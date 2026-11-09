@@ -220,6 +220,16 @@ impl Sheet<'_> {
         }
     }
 
+    /// [`Sheet::jet3_box`] for boxes small against a NURBS's patches, from
+    /// its Taylor cells ([`crate::geom::NurbsSurface::jet3_box_small`]);
+    /// every other sheet as `jet3_box`.
+    pub(crate) fn jet3_box_small(&self, b: [[f64; 2]; 2]) -> Option<[IVec3; 10]> {
+        match self {
+            Self::Nurbs(n) => Some(n.jet3_box_small(b)),
+            _ => self.jet3_box(b),
+        }
+    }
+
     /// A positive multiple of the natural normal as jets, for silhouettes
     /// (design 326): `S_u × S_v` from third-order jets where the surface
     /// has them, a pipe's unit normal, a torus's `cos v radial(u) + sin v

@@ -31,6 +31,7 @@ use crate::boolean::table::{Boundary, GeId, GvId, Table};
 use crate::boolean::{FaceRef, Fail};
 use crate::geom::bernstein::{Bernstein, Root};
 use crate::geom::chain2::Chain2;
+use crate::geom::intersect2::SLACK_2D;
 use crate::geom::winding2::winding;
 use crate::geom::{Curve2, Point2, Point3, Surface, Vector2, Vector3};
 use crate::intersect::face_box;
@@ -1077,7 +1078,14 @@ impl Arrangement<'_> {
         };
         for x in shifts(p.x, lo.x, hi.x, pu) {
             for y in shifts(p.y, lo.y, hi.y, pv) {
-                if winding(Vector2::new(x, y), chains)? != 0 {
+                let q = Vector2::new(x, y);
+                // A loop whose bounds exclude the point winds round it no
+                // times: the race block's top placed each of its 1,000
+                // holes by every outer loop's winding number (#254).
+                if beyond(q, lo, hi) {
+                    continue;
+                }
+                if winding(q, chains)? != 0 {
                     return Some(true);
                 }
             }
@@ -1156,6 +1164,20 @@ fn bounds(chains: &[Chain2]) -> (Vector2, Vector2) {
             )
         },
     )
+}
+
+/// Whether `q` lies outside the box `[lo, hi]` of a loop's chains by more
+/// than [`winding`]'s piece slack (`SLACK_2D`) and the rounding `moved`
+/// may leave between a chain's bounds and its pieces' hulls: then every
+/// piece's grown hull excludes `q`, each subtends the angle between its
+/// ends, and round a closed path `q` lies outside those sum to no turn,
+/// so `winding` gives 0 there.
+fn beyond(q: Vector2, lo: Vector2, hi: Vector2) -> bool {
+    let scale = [q.x, q.y, lo.x, lo.y, hi.x, hi.y]
+        .iter()
+        .fold(1.0f64, |m, v| m.max(v.abs()));
+    let m = 2.0 * SLACK_2D + 8.0 * f64::EPSILON * scale;
+    q.x < lo.x - m || q.x > hi.x + m || q.y < lo.y - m || q.y > hi.y + m
 }
 
 /// The signed area of a closed path of chains (the gaps between them
@@ -1258,6 +1280,46 @@ mod tests {
     use crate::geom::{Point3, Rigid};
     use crate::name::OpKey;
     use crate::primitive;
+
+    /// A point `beyond` a loop's bounds has winding number 0 about it, as
+    /// `winding` counts it, so `inside` may skip the loop (#254); and a
+    /// point well inside is not beyond.
+    #[test]
+    fn points_beyond_a_loops_bounds_wind_round_it_zero_times() {
+        use crate::geom::chain2::Chain2;
+        use crate::geom::winding2::winding;
+        use crate::geom::{Curve2, KnotVector, NurbsCurve2, Point2, Vector2};
+        // The race pin's wavy closed cubic, about (3, -2).
+        let n = 12;
+        let pts = (0..n)
+            .map(|i| {
+                let t = core::f64::consts::TAU * f64::from(i) / f64::from(n);
+                let r = 0.3 * (1.0 + 0.06 * crate::math::cos(3.0 * t));
+                let (s, c) = crate::math::sin_cos(t);
+                Point2::new(3.0 + r * c, -2.0 + r * s)
+            })
+            .collect();
+        let knots: Vec<f64> = (0..=n).map(f64::from).collect();
+        let k = KnotVector::periodic(3, &knots, &vec![1; knots.len()]).unwrap();
+        let c = Curve2::Nurbs2(std::sync::Arc::new(NurbsCurve2::new(k, pts, None).unwrap()));
+        let chains = vec![Chain2::new(&c, 0.0, 12.0)];
+        let (lo, hi) = bounds(&chains);
+        let mut beyond_count = 0;
+        for i in -40..=40 {
+            for j in -40..=40 {
+                let q = Vector2::new(3.0 + 0.0125 * f64::from(i), -2.0 + 0.0125 * f64::from(j));
+                if beyond(q, lo, hi) {
+                    beyond_count += 1;
+                    assert_eq!(winding(q, &chains), Some(0), "{q:?}");
+                }
+            }
+        }
+        assert!(beyond_count > 3000, "{beyond_count}");
+        assert!(!beyond(Vector2::new(3.0, -2.0), lo, hi));
+        assert_eq!(winding(Vector2::new(3.0, -2.0), &chains), Some(1));
+        // Just past the bounds by less than the margin is not beyond.
+        assert!(!beyond(Vector2::new(hi.x + 1e-11, -2.0), lo, hi));
+    }
 
     fn at(x: f64, y: f64, z: f64) -> Rigid {
         Rigid::translation(Vector3::new(x, y, z))
