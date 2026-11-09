@@ -28,6 +28,9 @@ pub mod draft;
 pub(crate) mod engine;
 pub(crate) mod extend;
 pub(crate) mod motion;
+// Wired into the tweaks by Task 11 of plan 13.A; until then nothing calls it.
+#[allow(dead_code)]
+pub(crate) mod retrim;
 pub(crate) mod vertices;
 
 #[cfg(test)]
