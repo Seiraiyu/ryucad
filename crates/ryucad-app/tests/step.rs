@@ -9,6 +9,7 @@ mod common;
 use common::{Project, ryucad};
 use ryucad_app::core::export::Format;
 use ryucad_app::core::step::Import;
+use ryucad_app::core::workspace::Workspace;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,8 +27,10 @@ fn a_file_is_planned_imported_updated_and_exported() {
     let p = Project::new();
     let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle()));
-    // Planned: nothing is written.
+    // Planned: nothing is written. Healed, as "Convert to solids (heal)"
+    // asks; references are `a_file_imports_as_a_reference_and_converts`'s.
     ws.import = Some(Import::new());
+    ws.import.as_mut().unwrap().solid = true;
     ws.import.as_mut().unwrap().path = occt("box_ap214.stp").display().to_string();
     ws.plan_import();
     assert!(ws.wait_until(WAIT, |ws| {
@@ -144,6 +147,90 @@ fn a_file_is_planned_imported_updated_and_exported() {
         i.error.as_ref().unwrap().code,
         ryucad::error::Code::StepUnreadable
     );
+}
+
+/// A file imported as the dialog leaves it is a reference (design 364):
+/// its plan and its rows say so, nothing may act on it, and it converts to
+/// a solid and back, each one undoable change that keeps its face names.
+#[test]
+fn a_file_imports_as_a_reference_and_converts() {
+    let p = Project::new();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()));
+    ws.import = Some(Import::new());
+    ws.import.as_mut().unwrap().path = occt("box_ap214.stp").display().to_string();
+    assert!(!ws.import.as_ref().unwrap().solid, "references by default");
+    ws.plan_import();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.import
+            .as_ref()
+            .is_some_and(|i| !i.waiting && i.current().is_some())
+    }));
+    let plan = ws.import.as_ref().unwrap().current().unwrap().clone();
+    assert_eq!(
+        plan.parts[0].1[0],
+        "body (body 0, reference): 6 faces, 12 edges, 8 vertices"
+    );
+    // Ticking the box asks for another plan: the one there is no longer
+    // current.
+    ws.import.as_mut().unwrap().solid = true;
+    assert!(ws.import.as_ref().unwrap().current().is_none());
+    ws.import.as_mut().unwrap().solid = false;
+    ws.run_import();
+    let reference = |ws: &Workspace| {
+        ws.part("part-2")
+            .and_then(|p| p.feature("body"))
+            .and_then(|f| f.import.as_ref())
+            .map(|i| i.reference)
+    };
+    assert!(ws.wait_until(WAIT, |ws| reference(ws) == Some(true)));
+    let part = ws.part("part-2").unwrap();
+    assert!(part.is_reference("body"));
+    assert!(part.modellable().is_empty(), "nothing offered to act on");
+    // The shown solid's face names, from its mesh at its body's hash.
+    let faces = |ws: &mut Workspace| {
+        let key = ("part-2".to_owned(), "body".to_owned());
+        assert!(ws.wait_until(WAIT, |ws| {
+            let hash = ws
+                .part("part-2")
+                .and_then(|p| p.solid("body"))
+                .and_then(|s| s.hash.clone());
+            ws.model
+                .meshes
+                .get(&key)
+                .is_some_and(|m| m.mesh.is_ok() && Some(&m.hash) == hash.as_ref())
+        }));
+        let mesh = ws.model.meshes[&key].mesh.as_ref().unwrap();
+        let mut names: Vec<[u8; 16]> = mesh.faces.iter().map(|f| f.name).collect();
+        names.sort();
+        names
+    };
+    let before = faces(&mut ws);
+    // Converted: healed, the same face names.
+    ws.convert_import("part-2", "body", false);
+    assert!(ws.wait_until(WAIT, |ws| reference(ws) == Some(false)));
+    let f = ws.part("part-2").unwrap().feature("body").unwrap();
+    assert!(f.error.is_none(), "{:?}", f.error);
+    assert!(
+        f.import
+            .as_ref()
+            .unwrap()
+            .heal
+            .iter()
+            .any(|(k, _)| k == "sewn")
+    );
+    assert_eq!(faces(&mut ws), before);
+    let file = std::fs::read_to_string(p.root.join("parts/part-2/features/body.json")).unwrap();
+    assert!(!file.contains("\"mode\""), "a solid writes no mode: {file}");
+    // Undone: a reference again.
+    ws.undo(None);
+    assert!(ws.wait_until(WAIT, |ws| reference(ws) == Some(true)));
+    // Kept as a reference from the solid: the same request, back.
+    ws.convert_import("part-2", "body", false);
+    assert!(ws.wait_until(WAIT, |ws| reference(ws) == Some(false)));
+    ws.convert_import("part-2", "body", true);
+    assert!(ws.wait_until(WAIT, |ws| reference(ws) == Some(true)));
+    assert!(ws.errors.is_empty(), "{:?}", ws.errors);
 }
 
 /// File > Export… in every other format: the daemon writes each file

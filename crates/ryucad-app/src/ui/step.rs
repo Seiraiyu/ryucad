@@ -112,6 +112,20 @@ pub fn import(
                 return;
             }
             ask = file_row(ui, "STEP file", &mut i.path, browse, Browse::Open);
+            // Off by default: bodies are kept as reference imports, shown
+            // and read but never modelled on (design 364). Ticking it
+            // asks for another plan.
+            let label = if i.update.is_some() {
+                "Convert new bodies to solids (heal)"
+            } else {
+                "Convert to solids (heal)"
+            };
+            let tip = if i.update.is_some() {
+                "Bodies already imported keep their mode; this says how bodies the new version adds are kept."
+            } else {
+                "Heal each body into a checked solid you can model on. Off, bodies are reference imports: quick, shown, measured and mated, never changed; convert one later from the tree."
+            };
+            ui.checkbox(&mut i.solid, label).on_hover_text(tip);
             let typed = !i.path.trim().is_empty();
             ask |= ui
                 .add_enabled(typed && !i.waiting, egui::Button::new("Plan"))

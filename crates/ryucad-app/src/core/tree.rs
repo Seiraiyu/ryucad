@@ -105,6 +105,10 @@ pub struct Row {
     pub words: Vec<String>,
     /// The body whose stable names a hex search matches.
     pub body: Option<BodyKey>,
+    /// An import's row, or the solid it founds: whether it is a
+    /// reference import (design 364), for Convert to solid and Keep as
+    /// reference in its context menu.
+    pub import: Option<bool>,
 }
 
 impl Row {
@@ -135,6 +139,7 @@ impl Row {
             load: None,
             words: Vec::new(),
             body: None,
+            import: None,
         }
     }
 
@@ -196,6 +201,9 @@ pub fn row_text(f: &Feature, faults: usize) -> String {
             }
             if i.body > 0 {
                 s.push_str(&format!(", body {}", i.body));
+            }
+            if i.reference {
+                s.push_str(", reference");
             }
             s
         }
@@ -286,6 +294,16 @@ pub fn mark_colour(m: &Mark) -> Rgb {
         Change::Removed => style::REMOVED,
         _ => style::CHANGED,
     }
+}
+
+/// What a reference import's badge says on hover. "Reference import",
+/// never "reference" alone: Copy reference copies an entity's text
+/// reference, and the hidden set and datums don't use the word.
+pub const REFERENCE_TIP: &str = "reference import: the file's geometry, shown, measured and mated, never modelled on; Convert to solid in its menu heals it";
+
+/// A reference import's badge.
+fn reference_badge() -> Badge {
+    Badge::new("file-lock", Tint::Info, REFERENCE_TIP)
 }
 
 /// A compare's badges for a feature: added, changed, moved.
@@ -530,6 +548,7 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
                 "arrow-elbow-down-right",
                 Tint::Weak,
             ),
+            ("Reference import", "file-lock", Tint::Info),
             ("Instance fixed", "push-pin", Tint::Plain),
             ("Mate redundant", "warning-circle", Tint::Warn),
             ("Mate conflicting", "x-circle", Tint::Danger),
@@ -663,6 +682,12 @@ impl Builder<'_> {
             if s.stale {
                 row.badges
                     .push(Badge::new("arrows-clockwise", Tint::Warn, "stale"));
+            }
+        }
+        if let Some(i) = &f.import {
+            row.import = Some(i.reference);
+            if i.reference {
+                row.badges.push(reference_badge());
             }
         }
         if let Some(i) = &f.instance {
@@ -836,8 +861,14 @@ impl Builder<'_> {
             .get(&key)
             .and_then(|m| m.mesh.as_ref().ok())
             .map_or(0, |m| m.faults.len());
+        let import = part
+            .feature(solid)
+            .and_then(|f| f.import.as_ref())
+            .map(|i| i.reference);
         let mut title = if tool {
             format!("{solid} (tool, consumed)")
+        } else if import == Some(true) {
+            format!("{solid} (solid, reference)")
         } else {
             format!("{solid} (solid)")
         };
@@ -856,6 +887,12 @@ impl Builder<'_> {
         row.strong = !tool;
         row.open = !tool;
         row.body = Some(key);
+        if !tool {
+            row.import = import;
+            if import == Some(true) {
+                row.badges.push(reference_badge());
+            }
+        }
         if tool {
             row.weak = true;
             row.tint = Tint::Weak;
@@ -1582,6 +1619,41 @@ mod tests {
         let bad = row("feature:p/bad");
         assert!(bad.failed && bad.tint == Tint::Danger && !bad.hideable);
         assert_eq!(row("feature:p/h").reference.as_deref(), Some("p/h"));
+    }
+
+    #[test]
+    fn reference_imports_are_badged_and_say_so() {
+        let mut m = Model::default();
+        m.apply_part(&json!({"part": "p", "revision": "r1", "features": [
+            {"id": "motor", "type": "import", "ok": true, "hash": "1", "solids": ["motor"],
+             "import": {"file": "imports/m.step", "blake3": "00", "body": 0,
+                        "product": {"id": "M-1", "name": "Motor"}, "mode": "reference"}},
+            {"id": "bolt", "type": "import", "ok": true, "hash": "2", "solids": ["bolt"],
+             "import": {"file": "imports/b.step", "blake3": "00", "body": 0}}],
+            "solids": [{"solid": "motor", "ok": true, "features": ["motor"], "hash": "1",
+                        "reference": true},
+                       {"solid": "bolt", "ok": true, "features": ["bolt"], "hash": "2"}]}));
+        let (states, pdm) = (States::default(), BTreeMap::new());
+        let rows = rows(&source(&m, &states, &pdm));
+        let row = |id: &str| {
+            rows.iter()
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("{id}"))
+        };
+        let badged = |id: &str| row(id).badges.iter().any(|b| b.icon == "file-lock");
+        assert_eq!(row("solid:p/motor").text, "motor (solid, reference)");
+        assert_eq!(
+            row("feature:p/motor").text,
+            "motor (import: m.step / M-1, reference)"
+        );
+        assert!(badged("solid:p/motor") && badged("feature:p/motor"));
+        assert_eq!(row("solid:p/motor").import, Some(true));
+        assert_eq!(row("feature:p/motor").import, Some(true));
+        // A healed import is a plain solid: no badge, but it can be
+        // made a reference.
+        assert_eq!(row("solid:p/bolt").text, "bolt (solid)");
+        assert!(!badged("solid:p/bolt") && !badged("feature:p/bolt"));
+        assert_eq!(row("solid:p/bolt").import, Some(false));
     }
 
     #[test]

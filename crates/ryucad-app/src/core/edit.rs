@@ -1518,7 +1518,7 @@ impl Form {
             import: (ty == "import").then(|| {
                 crate::core::model::ImportInfo::from_json(&json!({
                     "file": v["file"]["path"], "blake3": v["file"]["blake3"],
-                    "product": v["product"], "body": v["body"]}))
+                    "product": v["product"], "body": v["body"], "mode": v["mode"]}))
             }),
             ty,
             changed: Vec::new(),
@@ -2273,7 +2273,16 @@ mod tests {
             &json!({"id": "body", "type": "import", "revision": "r1", "body": 0,
                     "file": {"path": "imports/loose.step", "blake3": "ab12"}}),
         );
-        assert_eq!(none.import.unwrap().product, None);
+        let none = none.import.unwrap();
+        assert_eq!(none.product, None);
+        assert!(!none.reference, "no mode: a healed solid");
+        let r = Form::from_show(
+            "p",
+            &json!({"id": "body", "type": "import", "revision": "r1", "body": 0,
+                    "mode": "reference",
+                    "file": {"path": "imports/loose.step", "blake3": "ab12"}}),
+        );
+        assert!(r.import.unwrap().reference);
     }
 
     fn shown(radius: &str, revision: &str) -> Value {

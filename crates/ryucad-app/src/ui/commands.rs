@@ -202,6 +202,13 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             };
             ctx.copy_text(text);
         }
+        // An import's row: `<part>/<feature>`, the feature founding the
+        // solid, as `<part>/<solid>` is.
+        "import.to_solid" | "import.to_reference" => {
+            if let Some((part, feature)) = target.and_then(|t| t.split_once('/')) {
+                o.ws.convert_import(part, feature, id == "import.to_reference");
+            }
+        }
         "edit.select" => {
             if let Some(t) = target {
                 o.ws.select(vec![t.to_owned()], SelectMode::Replace);
@@ -490,16 +497,18 @@ pub fn keys(o: &mut Opened, ctx: &egui::Context, popup_open: bool) -> Option<Act
 }
 
 /// A context menu's entries for `what` (`target`, the reference
-/// right-clicked): returns the command chosen, for the window to run with
-/// it once the frame is drawn.
+/// right-clicked; `import`, for an import's rows, whether it is a
+/// reference): returns the command chosen, for the window to run with it
+/// once the frame is drawn.
 pub fn context_menu(
     ui: &mut egui::Ui,
     shown: &Shown,
     what: Context,
     target: Option<&str>,
+    import: Option<bool>,
 ) -> Option<(&'static str, Option<String>)> {
     let mut chosen = None;
-    for c in command::context(what) {
+    for c in command::context(what).filter(|c| command::offered(c.id, import)) {
         let mut b = egui::Button::new(c.title);
         if let Some(k) = shown.keys.get(c.id) {
             b = b.shortcut_text(k.as_str());

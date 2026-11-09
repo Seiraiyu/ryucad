@@ -1733,11 +1733,21 @@ impl View {
                         (None, Target::Datum(_)) => Context::Entity(Pick::Datum),
                         (None, _) => Context::Entity(Pick::Sketch),
                     };
-                    crate::ui::commands::context_menu(ui, &self.commands, what, Some(&h.entity))
+                    crate::ui::commands::context_menu(
+                        ui,
+                        &self.commands,
+                        what,
+                        Some(&h.entity),
+                        None,
+                    )
                 }
-                None => {
-                    crate::ui::commands::context_menu(ui, &self.commands, Context::Viewport, None)
-                }
+                None => crate::ui::commands::context_menu(
+                    ui,
+                    &self.commands,
+                    Context::Viewport,
+                    None,
+                    None,
+                ),
             };
         });
         if ran.is_some() {

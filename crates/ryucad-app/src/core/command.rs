@@ -193,6 +193,10 @@ const HIDEABLE: [Context; 3] = [
     Context::Row(Row::Copy),
 ];
 
+/// The rows an import's mode changes from: its feature's, and the solid
+/// it founds.
+const IMPORT_ROWS: [Context; 2] = [Context::Row(Row::Feature), Context::Row(Row::Solid)];
+
 /// How a command shows in a menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -549,6 +553,15 @@ pub const COMMANDS: &[Command] = &[
     cmd("project.doctor", "Doctor…", Project).icon("stethoscope"),
     cmd("deps.show", "Dependencies", Project).icon("package"),
     cmd("deps.place", "Place from dependency…", Project).icon("plus-square"),
+    // An import's mode (design 364), offered only where it changes it
+    // ([`offered`]); after a row's Copy reference and Zoom to fit, which
+    // every row's menu starts with.
+    cmd("import.to_solid", "Convert to solid", Project)
+        .context(&IMPORT_ROWS)
+        .hidden(),
+    cmd("import.to_reference", "Keep as reference", Project)
+        .context(&IMPORT_ROWS)
+        .hidden(),
     cmd("help.shortcuts", "Keyboard shortcuts", Help)
         .icon("keyboard")
         .keys(&["Mod+Slash"])
@@ -688,6 +701,18 @@ pub fn enabled_on(id: &str, target: &str) -> Result<(), &'static str> {
     match (id, target) {
         ("view.close_tile", "viewport") => Err("The viewport can't be closed."),
         _ => Ok(()),
+    }
+}
+
+/// Whether a context menu lists `id` for what was right-clicked: an
+/// import's mode commands only on an import's rows (`import`: whether it
+/// is a reference), each where it changes the mode; every other command
+/// always.
+pub fn offered(id: &str, import: Option<bool>) -> bool {
+    match id {
+        "import.to_solid" => import == Some(true),
+        "import.to_reference" => import == Some(false),
+        _ => true,
     }
 }
 
@@ -947,5 +972,27 @@ mod tests {
         assert_eq!(ids(Context::Tab), ["view.close_tile", "view.reset_layout"]);
         assert!(enabled_on("view.close_tile", "viewport").is_err());
         assert_eq!(enabled_on("view.close_tile", "history"), Ok(()));
+    }
+
+    #[test]
+    fn an_imports_mode_is_offered_only_where_it_changes() {
+        for r in [Row::Feature, Row::Solid] {
+            let ids: Vec<&str> = context(Context::Row(r)).map(|c| c.id).collect();
+            assert!(ids.contains(&"import.to_solid"), "{r:?}");
+            assert!(ids.contains(&"import.to_reference"), "{r:?}");
+        }
+        let listed = |import| {
+            context(Context::Row(Row::Solid))
+                .filter(|c| offered(c.id, import))
+                .filter(|c| c.id.starts_with("import."))
+                .map(|c| c.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(listed(Some(true)), ["import.to_solid"]);
+        assert_eq!(listed(Some(false)), ["import.to_reference"]);
+        assert!(listed(None).is_empty());
+        // Context only: the menu bar and the palette don't list them.
+        assert!(!get("import.to_solid").unwrap().menu);
+        assert!(offered("edit.copy_reference", None));
     }
 }

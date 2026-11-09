@@ -421,6 +421,7 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
                     shown,
                     crate::core::command::Context::Tab,
                     Some(pane),
+                    None,
                 );
             });
             if ran.is_some() {
