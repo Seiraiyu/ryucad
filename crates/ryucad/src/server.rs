@@ -3554,7 +3554,7 @@ fn check_solids(q: &Part, written: &[&Id]) -> Result<()> {
 
 /// The part as a write would leave it: `writes` in place, listed as
 /// `order`.
-fn proposed(p: &Part, order: &[Id], writes: &[(&Id, &Feature)]) -> Part {
+pub(crate) fn proposed(p: &Part, order: &[Id], writes: &[(&Id, &Feature)]) -> Part {
     let mut q = p.clone();
     for (id, f) in writes {
         q.features.insert((*id).clone(), Ok((*f).clone()));

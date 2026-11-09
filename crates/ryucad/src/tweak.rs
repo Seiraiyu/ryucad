@@ -1,7 +1,7 @@
-//! Face tweaks (design 400, plan 17.A): a solid's faces moved
-//! (translated, turned about an axis, offset along their normals) or
-//! given another surface, by one kernel call under the feature's key and
-//! the request's cancel. A tweak acts on its target: it joins its chain,
+//! Face tweaks (design 400, plans 17.A and 17.B): a solid's faces moved
+//! (translated, turned about an axis, offset along their normals), given
+//! another surface, or drafted about a neutral plane or a parting line, by
+//! one kernel call under the feature's key and the request's cancel. A tweak acts on its target: it joins its chain,
 //! what it leaves is the target, and it keeps every face, edge and vertex
 //! and their names and origins. It takes a sheet where the kernel does.
 
@@ -10,24 +10,27 @@ use crate::doc::geometry::GeomRef;
 use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::doc::reference::Reference;
-use crate::doc::tweak::{MoveBy, MoveFace};
+use crate::doc::tweak::{Draft, DraftHinge, MoveBy, MoveFace};
 use crate::error::{Code, Error, Result};
 use crate::geometry::{At, Geom, Line, Want};
 use crate::proto::FeatureFields;
 use crate::rebuild::{Built, Made, Results, Run};
 use crate::solid::Solids;
-use ryukei::geom::{Rigid, Surface, UnitVector3};
+use ryukei::geom::{Rigid, Surface, UnitVector3, Vector3};
 use ryukei::name::{Event, Name};
 use ryukei::topo::EntityId;
 // 17.A's tweaks keep the body's topology (`Topology::Keep`); changing it
 // (ryukei 13's re-trim) is a later plan's.
-use ryukei::tweak::{MoveSpec, OffsetFacesSpec, Topology};
+use ryukei::tweak::{DraftFace, DraftSpec, Hinge, MoveSpec, OffsetFacesSpec, Topology};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// Whether `f` may take a sheet as its target.
 pub fn takes_sheets(f: &Feature) -> bool {
-    matches!(f, Feature::MoveFace(_) | Feature::ReplaceFace(_))
+    matches!(
+        f,
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_)
+    )
 }
 
 /// What a tweak asks the kernel.
@@ -35,6 +38,13 @@ pub(crate) enum Spec {
     Move(MoveSpec),
     Offset(OffsetFacesSpec),
     Replace(ryukei::tweak::ReplaceSpec),
+    /// A draft, whether its hinge is a parting line, and each listed
+    /// face's signed angle (radians) as the file asks it, for its report.
+    Draft {
+        spec: DraftSpec,
+        parting: bool,
+        asked: Vec<(Name, f64)>,
+    },
 }
 
 /// A tweak resolved in its view: its target as it sees it, and the spec.
@@ -67,6 +77,19 @@ fn at<'a>(part: &'a Part, id: &'a Id, results: &'a dyn Results) -> At<'a> {
     }
 }
 
+/// The unit direction of `v`, which `role`'s `g` gave:
+/// `reference_wrong_kind` where it has no length.
+fn unit(at: &At, role: &str, g: &GeomRef, v: Vector3) -> Result<UnitVector3> {
+    v.normalize().ok_or_else(|| {
+        at.fail(
+            Code::ReferenceWrongKind,
+            role,
+            g,
+            "gives no direction".to_owned(),
+        )
+    })
+}
+
 /// A move's rigid motion, resolved in its view; `None` for an offset.
 pub(crate) fn motion(
     part: &Part,
@@ -90,14 +113,7 @@ pub(crate) fn motion(
                 Geom::Plane(p) => p.normal,
                 _ => unreachable!("asked for an axis or a plane"),
             };
-            let u = v.normalize().ok_or_else(|| {
-                at.fail(
-                    Code::ReferenceWrongKind,
-                    "direction",
-                    direction,
-                    "gives no direction".to_owned(),
-                )
-            })?;
+            let u = unit(&at, "direction", direction, v)?;
             Ok(Some(along(u, distance.meters())))
         }
         MoveBy::Rotate { axis, angle } => {
@@ -108,10 +124,12 @@ pub(crate) fn motion(
     }
 }
 
-/// The face `r` names (in `role` of tweak `id`) in the target's view:
-/// `targets_mixed` for another solid's, `reference_wrong_kind` for an edge
-/// or vertex, and whatever the reference fails with.
-fn face(
+/// The face (or, with `edge`, the edge) `r` names (in `role` of tweak
+/// `id`) in the target's view: `targets_mixed` for another solid's,
+/// `reference_wrong_kind` for another kind, and whatever the reference
+/// fails with.
+#[allow(clippy::too_many_arguments)]
+fn named(
     part: &Part,
     id: &Id,
     target: &Id,
@@ -119,12 +137,14 @@ fn face(
     role: &str,
     r: &Reference,
     results: &dyn Results,
+    edge: bool,
 ) -> Result<Name> {
+    let what = if edge { "an edge" } else { "a face" };
     if r.feature != *target {
         return Err(Error::new(
             Code::TargetsMixed,
             format!(
-                "{ty} {id}: its {role} {} is a face of {}, not of its target {target}; a {ty} acts on one solid",
+                "{ty} {id}: its {role} {} is {what} of {}, not of its target {target}; a {ty} acts on one solid",
                 r.text(&part.id),
                 r.feature
             ),
@@ -134,17 +154,29 @@ fn face(
         .with("solids", [target.as_str(), r.feature.as_str()]));
     }
     let (_, e) = crate::reference::resolve(part, part.order(), id, role, r, results)?;
-    match e {
-        EntityId::Face(_) => Ok(r.name),
-        e => Err(crate::reference::wrong_kind(
+    match (e, edge) {
+        (EntityId::Face(_), false) | (EntityId::Edge(_), true) => Ok(r.name),
+        (e, _) => Err(crate::reference::wrong_kind(
             part,
             id,
             role,
             r,
             crate::reference::kind(e),
-            "a face",
+            what,
         )),
     }
+}
+
+fn face(
+    part: &Part,
+    id: &Id,
+    target: &Id,
+    ty: &str,
+    role: &str,
+    r: &Reference,
+    results: &dyn Results,
+) -> Result<Name> {
+    named(part, id, target, ty, role, r, results, false)
 }
 
 /// The surface `with` names (in `role` of tweak `id`): a face's, whole,
@@ -176,6 +208,50 @@ fn surface(
     }
     let p = crate::geometry::one(&at(part, id, results), role, with, Want::Plane)?.plane();
     Ok(Surface::Plane(ryukei::geom::Plane::new(p.frame)))
+}
+
+/// A draft's pull (turned round by `reverse`) and hinge, resolved in its
+/// view (feature `id` of `part`): a neutral plane's point and unit normal,
+/// or a parting line's edges (each an edge of the target) and its pull,
+/// an axis or a plane's normal.
+pub(crate) fn hinge(
+    part: &Part,
+    id: &Id,
+    d: &Draft,
+    results: &dyn Results,
+) -> Result<(UnitVector3, Hinge)> {
+    let at = at(part, id, results);
+    let (pull, hinge) = match &d.hinge {
+        DraftHinge::Neutral { plane } => {
+            let p = crate::geometry::one(&at, "neutral", plane, Want::Plane)?.plane();
+            (
+                unit(&at, "neutral", plane, p.normal)?,
+                Hinge::Neutral { origin: p.point },
+            )
+        }
+        DraftHinge::Parting { edges, pull } => {
+            let v = match crate::geometry::resolve(&at, "pull", pull, &[Want::Axis, Want::Plane])? {
+                Geom::Axis(l) => l.dir.get(),
+                Geom::Plane(p) => p.normal,
+                _ => unreachable!("asked for an axis or a plane"),
+            };
+            let mut names = Vec::with_capacity(edges.len());
+            for (i, r) in edges.iter().enumerate() {
+                names.push(named(
+                    part,
+                    id,
+                    &d.target,
+                    "draft",
+                    &format!("parting.{i}"),
+                    r,
+                    results,
+                    true,
+                )?);
+            }
+            (unit(&at, "pull", pull, v)?, Hinge::PartingLine(names))
+        }
+    };
+    Ok((if d.reverse { -pull } else { pull }, hinge))
 }
 
 /// Resolves a tweak (feature `id` of `part`): its target, through
@@ -259,6 +335,39 @@ pub(crate) fn resolve<'a>(
                     faces,
                     topology: Topology::Keep,
                 }),
+            })
+        }
+        Feature::Draft(d) => {
+            let built =
+                crate::rebuild::target_kinds(part, solids, id, "target", &d.target, before, true)?;
+            let (pull, hinge) = hinge(part, id, d, before)?;
+            let mut faces = Vec::new();
+            let mut asked = Vec::new();
+            for (role, r) in d.drafted() {
+                let n = face(part, id, &d.target, ty, &role, r, before)?;
+                let a = d.angle_of(r);
+                faces.push(DraftFace {
+                    face: n,
+                    angle: role.starts_with("groups.").then_some(a),
+                    flip: d.flip.contains(r),
+                });
+                asked.push((n, a));
+            }
+            Ok(Resolved {
+                target: &d.target,
+                built,
+                spec: Spec::Draft {
+                    spec: DraftSpec {
+                        pull,
+                        angle: d.angle.radians(),
+                        hinge,
+                        faces,
+                        tangent: d.tangent,
+                        topology: Topology::Keep,
+                    },
+                    parting: matches!(d.hinge, DraftHinge::Parting { .. }),
+                    asked,
+                },
             })
         }
         _ => unreachable!("a tweak"),
@@ -504,6 +613,7 @@ pub fn build(
         Spec::Move(s) => ryukei::tweak::move_faces_with(key, body, s, &work),
         Spec::Offset(s) => ryukei::tweak::offset_faces_with(key, body, s, &work),
         Spec::Replace(s) => ryukei::tweak::replace_faces_with(key, body, s, &work),
+        Spec::Draft { .. } => unreachable!("plan 17.B task 5"),
     }
     .map_err(|e| {
         crate::work::stopped(&e, run.job)
@@ -1312,5 +1422,149 @@ mod tests {
             (e.code, e.details["param"].as_str()),
             (Code::InvalidParam, Some("faces"))
         );
+    }
+
+    #[test]
+    fn draft_angles_are_the_kernels() {
+        assert_eq!(
+            crate::doc::tweak::MIN_DRAFT_ANGLE,
+            ryukei::tol::ANGULAR_RESOLUTION
+        );
+        assert_eq!(crate::doc::tweak::MAX_DRAFT_ANGLE, ryukei::tweak::MAX_ANGLE);
+    }
+
+    /// The reference to the planar face of `f`'s body of `solid` whose
+    /// outward normal is `n` along `axis`.
+    fn facing(
+        s: &mut crate::session::Session,
+        f: &str,
+        solid: &str,
+        axis: usize,
+        n: f64,
+    ) -> String {
+        let v = call(s, "inspect", json!({"part": "p", "feature": f})).unwrap();
+        let face = v["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| {
+                let sign = if x["reversed"] == true { -1.0 } else { 1.0 };
+                x["surface"]["type"] == "plane"
+                    && x["surface"]["frame"]["z"][axis].as_f64().unwrap() * sign == n
+            })
+            .unwrap()["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        format!("p/{solid}/{face}")
+    }
+
+    /// `{feature, name}` of a reference `p/<solid>/<name>`.
+    fn wire(r: &str) -> Value {
+        let mut it = r.split('/').skip(1);
+        json!({"feature": it.next().unwrap(), "name": it.next().unwrap()})
+    }
+
+    fn draft_feature(v: Value) -> Feature {
+        let mut v = v;
+        v["format"] = json!(crate::doc::tweak::DRAFT_FORMAT);
+        v["kind"] = json!("ryucad.feature");
+        v["type"] = json!("draft");
+        Feature::from_json(&v, crate::units::Unit::Mm, &crate::expr::Env::empty()).unwrap()
+    }
+
+    /// Part `p` of `s` with draft `d` written last, and what it resolves
+    /// to: the kernel's spec, whether its hinge is a parting line, and each
+    /// listed face's asked angle.
+    fn resolved_draft(
+        s: &mut crate::session::Session,
+        v: Value,
+    ) -> Result<(DraftSpec, bool, Vec<(Name, f64)>)> {
+        let pid = Id::parse("p", "part").unwrap();
+        let part = s.project().part(&pid).unwrap().clone();
+        let d = Id::parse("d", "feature").unwrap();
+        let f = draft_feature(v);
+        let mut order = part.order().to_vec();
+        order.push(d.clone());
+        let p = crate::server::proposed(&part, &order, &[(&d, &f)]);
+        let results = s.rebuilt(&pid).unwrap();
+        match resolve(&p, &Solids::of(&p), &d, &f, results)?.spec {
+            Spec::Draft {
+                spec,
+                parting,
+                asked,
+            } => Ok((spec, parting, asked)),
+            _ => panic!("a draft's spec"),
+        }
+    }
+
+    #[test]
+    fn a_draft_resolves_its_hinge_pull_faces_and_flips() {
+        let (_dir, mut s) = boxes();
+        let (east, north) = (
+            facing(&mut s, "b", "b", 0, 1.0),
+            facing(&mut s, "b", "b", 1, 1.0),
+        );
+        // About xy, the pull turned round; one wall at the draft's angle,
+        // one in a group of its own, flipped.
+        let (spec, parting, asked) = resolved_draft(
+            &mut s,
+            json!({"target": "b", "angle": "2 deg", "neutral": "xy", "reverse": true,
+                   "faces": [wire(&east)],
+                   "groups": [{"angle": "5 deg", "faces": [wire(&north)]}],
+                   "flip": [wire(&north)]}),
+        )
+        .unwrap();
+        assert_eq!(spec.pull.get(), ryukei::geom::Vector3::new(0.0, 0.0, -1.0));
+        assert_eq!(
+            spec.hinge,
+            ryukei::tweak::Hinge::Neutral {
+                origin: ryukei::geom::Point3::ORIGIN
+            }
+        );
+        assert!(!parting && spec.tangent);
+        assert!((spec.angle - 2f64.to_radians()).abs() < 1e-15);
+        assert_eq!((spec.faces[0].angle, spec.faces[0].flip), (None, false));
+        assert!((spec.faces[1].angle.unwrap() - 5f64.to_radians()).abs() < 1e-15);
+        assert!(spec.faces[1].flip);
+        assert!((asked[0].1 - 2f64.to_radians()).abs() < 1e-15);
+        assert!((asked[1].1 - 5f64.to_radians()).abs() < 1e-15);
+        // From a parting line: the bottom edge of the east wall, pull z.
+        let edge = names(&mut s, "b", "edges")[0].clone();
+        let (spec, parting, _) = resolved_draft(
+            &mut s,
+            json!({"target": "b", "angle": "2 deg",
+                   "parting": [{"feature": "b", "name": edge}], "pull": "z",
+                   "faces": [wire(&east)]}),
+        )
+        .unwrap();
+        assert!(parting);
+        assert!(matches!(&spec.hinge, ryukei::tweak::Hinge::PartingLine(e) if e.len() == 1));
+        assert_eq!(spec.pull.get(), ryukei::geom::Vector3::new(0.0, 0.0, 1.0));
+        // A face where a parting edge goes; another solid's face; a whole
+        // solid as the neutral plane.
+        let other = facing(&mut s, "c", "c", 2, 1.0);
+        for (v, code) in [
+            (
+                json!({"target": "b", "angle": "2 deg", "parting": [wire(&north)], "pull": "z",
+                    "faces": [wire(&east)]}),
+                Code::ReferenceWrongKind,
+            ),
+            (
+                json!({"target": "b", "angle": "2 deg", "neutral": "xy",
+                    "faces": [wire(&other)]}),
+                Code::TargetsMixed,
+            ),
+            (
+                json!({"target": "b", "angle": "2 deg", "neutral": {"feature": "c"},
+                    "faces": [wire(&east)]}),
+                Code::ReferenceWrongKind,
+            ),
+        ] {
+            let e = resolved_draft(&mut s, v.clone())
+                .err()
+                .unwrap_or_else(|| panic!("{v}"));
+            assert_eq!(e.code, code, "{v}: {e}");
+        }
     }
 }
