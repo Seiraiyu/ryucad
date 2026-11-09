@@ -1389,6 +1389,9 @@ fn surfaces_section(golden: &mut Golden) {
     );
 }
 
+/// A protocol call a section's builder makes.
+type Call<'a> = dyn FnMut(&str, serde_json::Value) -> serde_json::Value + 'a;
+
 /// A part `name`'s features, built through the protocol by `build` in a
 /// project of its own, rebuilt on one thread and on four: each body's
 /// dump, kind and boundaries (checked clean), and the rebuild report's
@@ -1397,7 +1400,7 @@ fn surface_part_section(
     golden: &mut Golden,
     name: &'static str,
     part: &str,
-    build: fn(&mut dyn FnMut(&str, serde_json::Value) -> serde_json::Value),
+    build: fn(&mut Call<'_>),
 ) {
     use serde_json::json;
     let mut s = golden.section(name);
@@ -1405,13 +1408,20 @@ fn surface_part_section(
     ryucad::server::init(dir.path(), None).unwrap();
     let mut session = ryucad::session::Session::open(dir.path()).unwrap();
     let mut call = |m: &str, p: serde_json::Value| {
-        ryucad::server::handle(&mut session, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
-            .unwrap_or_else(|e| panic!("{m}: {e}"))
+        ryucad::server::handle(
+            &mut session,
+            ryucad::proto::Request::from_rpc(m, Some(p)).unwrap(),
+        )
+        .unwrap_or_else(|e| panic!("{m}: {e}"))
     };
     call("part.create", json!({"part": part}));
     build(&mut call);
     let report = call("rebuild", json!({"part": part}));
-    let p = session.project().part(&Id::parse(part, "part").unwrap()).unwrap().clone();
+    let p = session
+        .project()
+        .part(&Id::parse(part, "part").unwrap())
+        .unwrap()
+        .clone();
     let on = |n: usize| {
         rayon::ThreadPoolBuilder::new()
             .num_threads(n)
@@ -1439,7 +1449,11 @@ fn surface_part_section(
     for f in report["parts"][0]["features"].as_array().unwrap() {
         for key in ["fill", "consumes"] {
             if let Some(v) = f.get(key) {
-                s.str(&format!("{} {key} {}", f["id"], ryucad::doc::canonical::to_string(v)));
+                s.str(&format!(
+                    "{} {key} {}",
+                    f["id"],
+                    ryucad::doc::canonical::to_string(v)
+                ));
             }
         }
     }
@@ -1451,22 +1465,25 @@ fn square_ops(x: f64, y: f64, a: f64) -> serde_json::Value {
     let p = [[x, y], [x + a, y], [x + a, y + a], [x, y + a]];
     let mut ops = Vec::new();
     for (i, q) in p.iter().enumerate() {
-        ops.push(serde_json::json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": q}));
+        ops.push(
+            serde_json::json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": q}),
+        );
     }
     for i in 1..=4 {
-        ops.push(serde_json::json!({"op": "add", "id": format!("l{i}"), "type": "line",
-                        "start": format!("p{i}"), "end": format!("p{}", i % 4 + 1)}));
+        ops.push(
+            serde_json::json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                        "start": format!("p{i}"), "end": format!("p{}", i % 4 + 1)}),
+        );
     }
     serde_json::Value::Array(ops)
 }
 
 /// Each face of `feature`'s body in part `part`, as `<part>/<feature>/<name>`.
-fn faces_of(
-    call: &mut dyn FnMut(&str, serde_json::Value) -> serde_json::Value,
-    part: &str,
-    feature: &str,
-) -> Vec<String> {
-    let v = call("inspect", serde_json::json!({"part": part, "feature": feature}));
+fn faces_of(call: &mut Call<'_>, part: &str, feature: &str) -> Vec<String> {
+    let v = call(
+        "inspect",
+        serde_json::json!({"part": part, "feature": feature}),
+    );
     v["bodies"][0]["faces"]
         .as_array()
         .unwrap()
@@ -1480,27 +1497,49 @@ fn faces_of(
 fn fills_section(golden: &mut Golden) {
     surface_part_section(golden, "fills", "fi", |call| {
         use serde_json::json;
-        call("feature.add", json!({"part": "fi", "type": "sketch", "id": "pent", "plane": "xy"}));
+        call(
+            "feature.add",
+            json!({"part": "fi", "type": "sketch", "id": "pent", "plane": "xy"}),
+        );
         let mut ops = Vec::new();
         for k in 0..5 {
             let (sn, c) = ryukei::math::sin_cos((72.0 * k as f64).to_radians());
-            ops.push(json!({"op": "add", "id": format!("p{}", k + 1), "type": "point",
-                            "at": [10.0 * c, 10.0 * sn]}));
+            ops.push(
+                json!({"op": "add", "id": format!("p{}", k + 1), "type": "point",
+                            "at": [10.0 * c, 10.0 * sn]}),
+            );
         }
         for k in 0..5 {
             ops.push(json!({"op": "add", "id": format!("l{}", k + 1), "type": "line",
                             "start": format!("p{}", k + 1), "end": format!("p{}", (k + 1) % 5 + 1)}));
         }
-        call("sketch.edit", json!({"part": "fi", "sketch": "pent", "ops": ops}));
-        let sides: Vec<_> = (1..=5).map(|k| json!({"curve": format!("fi/pent/l{k}")})).collect();
-        call("feature.add", json!({"part": "fi", "type": "fill", "id": "f5", "sides": sides}));
-        call("feature.add", json!({"part": "fi", "type": "box", "id": "b",
-            "params": {"x": 10, "y": 20, "z": 5}, "placement": {"origin": [30, 0, 0]}}));
+        call(
+            "sketch.edit",
+            json!({"part": "fi", "sketch": "pent", "ops": ops}),
+        );
+        let sides: Vec<_> = (1..=5)
+            .map(|k| json!({"curve": format!("fi/pent/l{k}")}))
+            .collect();
+        call(
+            "feature.add",
+            json!({"part": "fi", "type": "fill", "id": "f5", "sides": sides}),
+        );
+        call(
+            "feature.add",
+            json!({"part": "fi", "type": "box", "id": "b",
+            "params": {"x": 10, "y": 20, "z": 5}, "placement": {"origin": [30, 0, 0]}}),
+        );
         let faces = faces_of(call, "fi", "b");
-        call("feature.add", json!({"part": "fi", "type": "extract", "id": "x",
-            "faces": [faces[0].clone()]}));
-        call("feature.add", json!({"part": "fi", "type": "extract", "id": "xall",
-            "faces": faces}));
+        call(
+            "feature.add",
+            json!({"part": "fi", "type": "extract", "id": "x",
+            "faces": [faces[0].clone()]}),
+        );
+        call(
+            "feature.add",
+            json!({"part": "fi", "type": "extract", "id": "xall",
+            "faces": faces}),
+        );
     });
 }
 
@@ -1509,17 +1548,26 @@ fn fills_section(golden: &mut Golden) {
 fn sews_section(golden: &mut Golden) {
     surface_part_section(golden, "sews", "se", |call| {
         use serde_json::json;
-        call("feature.add", json!({"part": "se", "type": "box", "id": "b",
-            "params": {"x": 10, "y": 20, "z": 5}}));
+        call(
+            "feature.add",
+            json!({"part": "se", "type": "box", "id": "b",
+            "params": {"x": 10, "y": 20, "z": 5}}),
+        );
         let faces = faces_of(call, "se", "b");
         for (pre, sew, solid) in [("x", "sw", true), ("y", "sh", false)] {
             let ids: Vec<String> = (0..faces.len()).map(|k| format!("{pre}{k}")).collect();
             for (k, f) in faces.iter().enumerate() {
-                call("feature.add", json!({"part": "se", "type": "extract", "id": ids[k],
-                    "faces": [f]}));
+                call(
+                    "feature.add",
+                    json!({"part": "se", "type": "extract", "id": ids[k],
+                    "faces": [f]}),
+                );
             }
-            call("feature.add", json!({"part": "se", "type": "sew", "id": sew, "sheets": ids,
-                "make_solid": solid}));
+            call(
+                "feature.add",
+                json!({"part": "se", "type": "sew", "id": sew, "sheets": ids,
+                "make_solid": solid}),
+            );
         }
     });
 }
@@ -1530,27 +1578,55 @@ fn thickens_section(golden: &mut Golden) {
     surface_part_section(golden, "thickens", "th", |call| {
         use serde_json::json;
         for (sk, x) in [("a", 0.0), ("b", 20.0)] {
-            call("feature.add", json!({"part": "th", "type": "sketch", "id": sk, "plane": "xy"}));
-            call("sketch.edit", json!({"part": "th", "sketch": sk, "ops": square_ops(x, 0.0, 10.0)}));
+            call(
+                "feature.add",
+                json!({"part": "th", "type": "sketch", "id": sk, "plane": "xy"}),
+            );
+            call(
+                "sketch.edit",
+                json!({"part": "th", "sketch": sk, "ops": square_ops(x, 0.0, 10.0)}),
+            );
         }
-        call("feature.add", json!({"part": "th", "type": "planar", "id": "fa", "sketch": "a"}));
-        call("feature.add", json!({"part": "th", "type": "planar", "id": "fb", "sketch": "b"}));
-        call("feature.add", json!({"part": "th", "type": "thicken", "id": "t1", "sheet": "fa",
-            "front": "2 mm"}));
-        call("feature.add", json!({"part": "th", "type": "thicken", "id": "t2", "sheet": "fb",
-            "front": "1 mm", "back": "1 mm"}));
-        call("feature.add", json!({"part": "th", "type": "box", "id": "bx",
-            "params": {"x": 10, "y": 10, "z": 10}, "placement": {"origin": [40, 0, 0]}}));
+        call(
+            "feature.add",
+            json!({"part": "th", "type": "planar", "id": "fa", "sketch": "a"}),
+        );
+        call(
+            "feature.add",
+            json!({"part": "th", "type": "planar", "id": "fb", "sketch": "b"}),
+        );
+        call(
+            "feature.add",
+            json!({"part": "th", "type": "thicken", "id": "t1", "sheet": "fa",
+            "front": "2 mm"}),
+        );
+        call(
+            "feature.add",
+            json!({"part": "th", "type": "thicken", "id": "t2", "sheet": "fb",
+            "front": "1 mm", "back": "1 mm"}),
+        );
+        call(
+            "feature.add",
+            json!({"part": "th", "type": "box", "id": "bx",
+            "params": {"x": 10, "y": 10, "z": 10}, "placement": {"origin": [40, 0, 0]}}),
+        );
         let top = call("inspect", json!({"part": "th", "feature": "bx"}))["bodies"][0]["faces"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|f| f["surface"]["type"] == "plane"
-                && f["surface"]["frame"]["origin"][2].as_f64().is_some_and(|z| z > 0.009))
+            .find(|f| {
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["origin"][2]
+                        .as_f64()
+                        .is_some_and(|z| z > 0.009)
+            })
             .map(|f| format!("th/bx/{}", f["name"].as_str().unwrap()))
             .unwrap();
-        call("feature.add", json!({"part": "th", "type": "thicken", "id": "tj",
-            "from_faces": [top], "front": "3 mm", "operation": "join", "targets": ["bx"]}));
+        call(
+            "feature.add",
+            json!({"part": "th", "type": "thicken", "id": "tj",
+            "from_faces": [top], "front": "3 mm", "operation": "join", "targets": ["bx"]}),
+        );
     });
 }
 

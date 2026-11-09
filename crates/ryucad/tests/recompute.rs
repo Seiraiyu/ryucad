@@ -462,10 +462,7 @@ fn edit(g: &mut Lcg, s: &mut Session) {
                 json!({"id": "lf", "start_tangent": ""})
             },
         ),
-        24 => (
-            "feature.edit",
-            json!({"id": "slab", "front": mm(g, 1, 4)}),
-        ),
+        24 => ("feature.edit", json!({"id": "slab", "front": mm(g, 1, 4)})),
         25 => (
             "feature.edit",
             json!({"id": "lid",

@@ -2367,29 +2367,48 @@ mod tests {
     fn surface_features_textconv_a_line_a_side_and_a_group() {
         const A: &str = "0123456789abcdef0123456789abcdef";
         let n = crate::doc::surface::FORMAT;
-        let fill = text(json!({"format": n, "kind": "ryucad.feature", "type": "fill",
+        let fill = text(
+            json!({"format": n, "kind": "ryucad.feature", "type": "fill",
             "sides": [{"edge": {"feature": "wall", "name": A}, "tangent": true},
                       {"curve": {"feature": "s2", "entity": "a1"}}, {"curve": {"feature": "p1"}}],
-            "tolerance": "0.001 mm", "angle": "1 deg"}));
-        for line in [format!("side 1 = wall/{A} (tangent)"), "side 2 = s2/a1".into(),
-                     "side 3 = p1".into(), "tolerance = 0.001 mm".into(), "angle = 1 deg".into()] {
+            "tolerance": "0.001 mm", "angle": "1 deg"}),
+        );
+        for line in [
+            format!("side 1 = wall/{A} (tangent)"),
+            "side 2 = s2/a1".into(),
+            "side 3 = p1".into(),
+            "tolerance = 0.001 mm".into(),
+            "angle = 1 deg".into(),
+        ] {
             assert!(fill.lines().any(|l| l == line), "{line:?} in\n{fill}");
         }
         let sew = text(json!({"format": n, "kind": "ryucad.feature", "type": "sew",
             "sheets": ["top", "side1"], "tolerance": "0.01 mm", "solid": true}));
         assert!(sew.lines().any(|l| l == "sheets = [top, side1]"), "{sew}");
-        let th = text(json!({"format": n, "kind": "ryucad.feature", "type": "thicken",
+        let th = text(
+            json!({"format": n, "kind": "ryucad.feature", "type": "thicken",
             "from": {"sheet": "skin"}, "front": "2 mm", "back": "0 mm", "operation": "new",
-            "faces": [{"front": "3 mm", "back": "0 mm", "faces": [{"feature": "skin", "name": A}]}]}));
-        for line in ["from = sheet skin".to_owned(), format!("faces[0] = 3 mm, 0 mm: skin/{A}")] {
+            "faces": [{"front": "3 mm", "back": "0 mm", "faces": [{"feature": "skin", "name": A}]}]}),
+        );
+        for line in [
+            "from = sheet skin".to_owned(),
+            format!("faces[0] = 3 mm, 0 mm: skin/{A}"),
+        ] {
             assert!(th.lines().any(|l| l == line), "{line:?} in\n{th}");
         }
-        let th = text(json!({"format": n, "kind": "ryucad.feature", "type": "thicken",
+        let th = text(
+            json!({"format": n, "kind": "ryucad.feature", "type": "thicken",
             "from": {"faces": [{"feature": "base", "name": A}]}, "front": "2 mm", "back": "0 mm",
-            "operation": "join", "targets": ["base"]}));
-        assert!(th.lines().any(|l| l == format!("from = faces base/{A}")), "{th}");
-        let x = text(json!({"format": n, "kind": "ryucad.feature", "type": "extract",
-            "faces": [{"feature": "base", "name": A}]}));
+            "operation": "join", "targets": ["base"]}),
+        );
+        assert!(
+            th.lines().any(|l| l == format!("from = faces base/{A}")),
+            "{th}"
+        );
+        let x = text(
+            json!({"format": n, "kind": "ryucad.feature", "type": "extract",
+            "faces": [{"feature": "base", "name": A}]}),
+        );
         assert!(x.lines().any(|l| l == format!("faces = [base/{A}]")), "{x}");
     }
 

@@ -907,9 +907,15 @@ mod tests {
         let th = read("parts/a/features/th.json");
         assert_eq!(th["from"], json!({"sheet": "b-1"}));
         let thf = read("parts/a/features/thf.json");
-        assert_eq!(thf["from"]["faces"][0], json!({"feature": "b-1", "name": new}));
+        assert_eq!(
+            thf["from"]["faces"][0],
+            json!({"feature": "b-1", "name": new})
+        );
         let fl = read("parts/a/features/fl.json");
-        assert_eq!(fl["sides"][0]["edge"], json!({"feature": "b-1", "name": new}));
+        assert_eq!(
+            fl["sides"][0]["edge"],
+            json!({"feature": "b-1", "name": new})
+        );
     }
 
     #[test]

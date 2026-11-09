@@ -71,7 +71,6 @@ fn square(x: f64, y: f64, a: f64) -> Value {
     ])
 }
 
-
 /// The body solid `solid` of part `p` shows.
 fn body(s: &mut Session, solid: &str) -> ryukei::topo::Body {
     let part = Id::parse("p", "part").unwrap();
@@ -86,7 +85,6 @@ fn body(s: &mut Session, solid: &str) -> ryukei::topo::Body {
         .unwrap_or_else(|| panic!("{solid} shows"));
     b.body.clone()
 }
-
 
 /// Feature `f` of part `p` as rebuild reports it, failed or not.
 fn reported(s: &mut Session, f: &str) -> Value {
@@ -116,7 +114,6 @@ fn names(s: &mut Session, solid: &str) -> BTreeSet<String> {
         .map(|e| b.name_of(e).unwrap().to_string())
         .collect()
 }
-
 
 /// The volume, in mm³, of solid `solid` as feature `f` leaves it.
 fn volume(s: &mut Session, f: &str, solid: &str) -> f64 {
@@ -150,18 +147,28 @@ fn near(got: f64, want: f64, rel: f64) {
 /// Part `p` with a 10 x 20 x 5 mm box `b` and each of its faces extracted
 /// as `x0`..`x5`, in `b.faces()` order; returns their IDs.
 fn extracted(s: &mut Session) -> Vec<String> {
-    add(s, json!({"type": "box", "id": "b", "params": {"x": 10, "y": 20, "z": 5}}));
+    add(
+        s,
+        json!({"type": "box", "id": "b", "params": {"x": 10, "y": 20, "z": 5}}),
+    );
     let b = body(s, "b");
     let faces: Vec<String> = b
         .faces()
-        .map(|f| b.name_of(ryukei::topo::EntityId::Face(f)).unwrap().to_string())
+        .map(|f| {
+            b.name_of(ryukei::topo::EntityId::Face(f))
+                .unwrap()
+                .to_string()
+        })
         .collect();
     faces
         .iter()
         .enumerate()
         .map(|(k, n)| {
             let id = format!("x{k}");
-            add(s, json!({"type": "extract", "id": id, "faces": [format!("p/b/{n}")]}));
+            add(
+                s,
+                json!({"type": "extract", "id": id, "faces": [format!("p/b/{n}")]}),
+            );
             id
         })
         .collect()
@@ -178,13 +185,25 @@ fn a_boxs_faces_sew_back_into_its_solid_or_a_closed_sheet() {
     let sw = names(&mut s, "sw");
     let faces_kept = body(&mut s, "b")
         .faces()
-        .map(|f| body(&mut s, "b").name_of(ryukei::topo::EntityId::Face(f)).unwrap().to_string())
+        .map(|f| {
+            body(&mut s, "b")
+                .name_of(ryukei::topo::EntityId::Face(f))
+                .unwrap()
+                .to_string()
+        })
         .all(|n| sw.contains(&n));
     assert!(faces_kept, "{b:?} against {sw:?}");
     // Not a solid: a closed sheet.
-    must(&mut s, "feature.edit", json!({"part": "p", "id": "sw", "make_solid": false}));
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "sw", "make_solid": false}),
+    );
     let sheet = body(&mut s, "sw");
-    assert_eq!((ryucad::kind::name(&sheet), ryucad::kind::boundaries(&sheet)), ("sheet", 0));
+    assert_eq!(
+        (ryucad::kind::name(&sheet), ryucad::kind::boundaries(&sheet)),
+        ("sheet", 0)
+    );
     // The extracts are consumed: the report says so.
     let r = reported(&mut s, "sw");
     assert_eq!(r["consumes"].as_array().unwrap().len(), 6, "{r}");
@@ -198,10 +217,19 @@ fn a_gap_past_the_tolerance_is_refused_as_pieces() {
     sketch(&mut s, "b", json!("xy"), square(11.0, 0.0, 10.0));
     add(&mut s, json!({"type": "planar", "id": "fa", "sketch": "a"}));
     add(&mut s, json!({"type": "planar", "id": "fb", "sketch": "b"}));
-    add(&mut s, json!({"type": "sew", "id": "sw", "sheets": ["fa", "fb"], "make_solid": false}));
+    add(
+        &mut s,
+        json!({"type": "sew", "id": "sw", "sheets": ["fa", "fb"], "make_solid": false}),
+    );
     let r = reported(&mut s, "sw");
-    assert_eq!((r["error"]["code"].as_str(), r["error"]["details"]["reason"].as_str()),
-               (Some("sew_failed"), Some("pieces")), "{r}");
+    assert_eq!(
+        (
+            r["error"]["code"].as_str(),
+            r["error"]["details"]["reason"].as_str()
+        ),
+        (Some("sew_failed"), Some("pieces")),
+        "{r}"
+    );
 }
 
 #[test]
@@ -209,39 +237,63 @@ fn a_square_sheet_thickened_forward_and_back() {
     let (_dir, mut s) = project();
     sketch(&mut s, "a", json!("xy"), square(0.0, 0.0, 10.0));
     add(&mut s, json!({"type": "planar", "id": "f", "sketch": "a"}));
-    add(&mut s, json!({"type": "thicken", "id": "t", "sheet": "f", "front": "2 mm"}));
+    add(
+        &mut s,
+        json!({"type": "thicken", "id": "t", "sheet": "f", "front": "2 mm"}),
+    );
     near(volume(&mut s, "t", "t"), 200.0, 1e-9);
     let before = names(&mut s, "t");
-    must(&mut s, "feature.edit", json!({"part": "p", "id": "t", "front": "3 mm"}));
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "t", "front": "3 mm"}),
+    );
     near(volume(&mut s, "t", "t"), 300.0, 1e-9);
     // A new thickness renames nothing (a side at zero keeps the sheet's
     // names, so its back stays at zero here).
     assert_eq!(names(&mut s, "t"), before);
-    must(&mut s, "feature.edit", json!({"part": "p", "id": "t", "back": "1 mm"}));
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "t", "back": "1 mm"}),
+    );
     near(volume(&mut s, "t", "t"), 400.0, 1e-9);
     // The planar face is consumed: nothing may act on it after.
-    let e = call(&mut s, "feature.add", json!({"part": "p", "type": "sew",
-        "sheets": ["f", "t"]})).unwrap_err();
+    let e = call(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "sew",
+        "sheets": ["f", "t"]}),
+    )
+    .unwrap_err();
     assert_eq!(e.code, ryucad::error::Code::BodyConsumed, "{e}");
 }
 
 #[test]
 fn a_boxs_face_thickened_outwards_joins_it() {
     let (_dir, mut s) = project();
-    add(&mut s, json!({"type": "box", "id": "b", "params": {"x": 10, "y": 20, "z": 5}}));
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": 10, "y": 20, "z": 5}}),
+    );
     let b = body(&mut s, "b");
     let top = b
         .faces()
-        .find(|f| matches!(
-            ryukei::measure::properties(&b, ryukei::measure::Entity::Face(*f)).unwrap(),
-            ryukei::measure::Properties::Face {
-                shape: ryukei::measure::FaceShape::Plane { normal, .. }, ..
-            } if normal.get().z > 0.5
-        ))
+        .find(|f| {
+            matches!(
+                ryukei::measure::properties(&b, ryukei::measure::Entity::Face(*f)).unwrap(),
+                ryukei::measure::Properties::Face {
+                    shape: ryukei::measure::FaceShape::Plane { normal, .. }, ..
+                } if normal.get().z > 0.5
+            )
+        })
         .unwrap();
     let top = b.name_of(ryukei::topo::EntityId::Face(top)).unwrap();
-    add(&mut s, json!({"type": "thicken", "id": "t", "from_faces": [format!("p/b/{top}")],
-                       "front": "3 mm", "operation": "join", "targets": ["b"]}));
+    add(
+        &mut s,
+        json!({"type": "thicken", "id": "t", "from_faces": [format!("p/b/{top}")],
+                       "front": "3 mm", "operation": "join", "targets": ["b"]}),
+    );
     near(volume(&mut s, "t", "b"), 1000.0 + 600.0, 1e-9);
     // The box keeps its body's other faces' names.
     let r = reported(&mut s, "t");

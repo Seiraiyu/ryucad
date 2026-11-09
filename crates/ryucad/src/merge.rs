@@ -429,7 +429,7 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
         {
             sweep(walk, b, ours, theirs)
         }
-Some(b) if same_type && ty(b).0 == Some(json!("thicken")) => thicken(walk, b, ours, theirs),
+        Some(b) if same_type && ty(b).0 == Some(json!("thicken")) => thicken(walk, b, ours, theirs),
         Some(b)
             if same_type
                 && matches!(
@@ -1638,23 +1638,36 @@ mod tests {
     fn a_thickens_from_is_one_value_and_a_fills_sides_one_sequence() {
         const A: &str = "0123456789abcdef0123456789abcdef";
         let n = crate::doc::surface::FORMAT;
-        let th = |from: Value, front: &str| json!({"format": n, "kind": "ryucad.feature",
-            "type": "thicken", "from": from, "front": front, "back": "0 mm", "operation": "new"});
+        let th = |from: Value, front: &str| {
+            json!({"format": n, "kind": "ryucad.feature",
+            "type": "thicken", "from": from, "front": front, "back": "0 mm", "operation": "new"})
+        };
         let face = json!({"faces": [{"feature": "b", "name": A}]});
         // One side moves to faces, the other changes the front: both taken.
-        let m = merge(Some(&th(json!({"sheet": "s"}), "1 mm")), &th(face.clone(), "1 mm"),
-                      &th(json!({"sheet": "s"}), "2 mm"));
+        let m = merge(
+            Some(&th(json!({"sheet": "s"}), "1 mm")),
+            &th(face.clone(), "1 mm"),
+            &th(json!({"sheet": "s"}), "2 mm"),
+        );
         assert!(m.is_clean(), "{:?}", m.conflicts);
-        assert_eq!((&m.value["from"], &m.value["front"]), (&face, &json!("2 mm")));
+        assert_eq!(
+            (&m.value["from"], &m.value["front"]),
+            (&face, &json!("2 mm"))
+        );
         // Both change the source: one conflict at /from, never inside it.
-        let m = merge(Some(&th(json!({"sheet": "s"}), "1 mm")), &th(face, "1 mm"),
-                      &th(json!({"sheet": "t"}), "1 mm"));
+        let m = merge(
+            Some(&th(json!({"sheet": "s"}), "1 mm")),
+            &th(face, "1 mm"),
+            &th(json!({"sheet": "t"}), "1 mm"),
+        );
         let at: Vec<&str> = m.conflicts.keys().map(String::as_str).collect();
         assert_eq!(at, ["/from"]);
         // A fill's sides changed on both sides conflict once, as a sequence.
-        let fill = |c: &str| json!({"format": n, "kind": "ryucad.feature", "type": "fill",
+        let fill = |c: &str| {
+            json!({"format": n, "kind": "ryucad.feature", "type": "fill",
             "sides": [{"curve": c}, {"curve": "y"}, {"curve": "z"}],
-            "tolerance": "0.001 mm", "angle": "1 deg"});
+            "tolerance": "0.001 mm", "angle": "1 deg"})
+        };
         let m = merge(Some(&fill("x")), &fill("u"), &fill("v"));
         let at: Vec<&str> = m.conflicts.keys().map(String::as_str).collect();
         assert_eq!(at, ["/sides"]);
