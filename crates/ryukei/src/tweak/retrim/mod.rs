@@ -86,6 +86,12 @@ pub(crate) fn retrim(
 fn reach(body: &Body, changes: &Changes) -> f64 {
     let mut r: f64 = 10.0 * crate::tol::LINEAR_RESOLUTION;
     for (&f, mo) in &changes.motion {
+        // An offset moves every point by its distance (`apply` needs the
+        // normal for that, which a vertex alone doesn't give).
+        if let crate::tweak::Motion::Offset(d) = mo {
+            r = r.max(d.abs());
+            continue;
+        }
         let new = changes
             .surface
             .get(&f)
@@ -164,8 +170,42 @@ fn attempt(
     let walked: Mutex<Option<(WalkError, FaceId)>> = Mutex::new(None);
     let select = |_: &[Body], table: &Table, pieces: &[Piece], _: &[usize], m: &Meter| {
         let arr = seeds::arrangement(&w, table, pieces);
-        let mut seeds = seeds::outside_seeds(&w, pieces);
-        let mut kept = walk::walk(&arr, &seeds, m);
+        let outside = seeds::outside_seeds(&w, pieces);
+        // Design 399's rule 3: region faces with no frontier edge seeded by
+        // the piece holding their old interior point. A moved face's seed
+        // says it survives, which a face moved out of the body doesn't: so
+        // the walk runs with every such seed, then with the unchanged
+        // faces' alone. A region with no outside face takes the plan's
+        // one shell seed instead (below).
+        let mut tries: Vec<Vec<usize>> = vec![outside.clone()];
+        if !outside.is_empty() {
+            let (same, moved) = seeds::face_seeds(body, changes, &w, &arr, table, pieces, m);
+            if !same.is_empty() || !moved.is_empty() {
+                let mut with_same = outside.clone();
+                with_same.extend(&same);
+                let mut all = with_same.clone();
+                all.extend(&moved);
+                tries = if moved.is_empty() {
+                    vec![with_same]
+                } else {
+                    vec![all, with_same]
+                };
+            }
+        }
+        let mut kept = Err(WalkError::Open { piece: 0 });
+        let mut seeds = Vec::new();
+        for (k, t) in tries.into_iter().enumerate() {
+            let r = walk::walk(&arr, &t, m);
+            let stop = r.is_ok() || matches!(r, Err(WalkError::Halted { .. }));
+            // The first try's failure is the one reported.
+            if stop || k == 0 {
+                kept = r;
+                seeds = t;
+            }
+            if stop {
+                break;
+            }
+        }
         // Shells no outside face reaches take a seed each, once.
         if let Ok(k) = &kept {
             let seen: Vec<bool> = k.iter().map(Option::is_some).collect();

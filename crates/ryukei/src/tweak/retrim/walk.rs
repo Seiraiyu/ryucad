@@ -66,11 +66,14 @@ fn as_kept(s: Sense, reversed: bool) -> Sense {
 /// the one closure where every edge a kept piece uses is used by exactly
 /// one other kept piece the other way (a laminar edge by none), and no
 /// kept piece uses a clipped edge. Forced partners are taken as they come;
-/// where an edge's partner isn't forced, each piece of another face that
-/// uses it the other way, then each that uses it the same way (kept
-/// reversed), is tried in piece order, and the search goes on from each.
-/// One closure is the answer; two are `Ambiguous`, as is a search past
-/// [`CHOICES`] tries; none gives the first failure met. A unit is charged
+/// where an edge's partner isn't forced, the piece's own face's piece
+/// across it (the face running on across a line another surface cut),
+/// then each piece of another face that uses it the other way, then each
+/// that uses it the same way (kept reversed), is tried in piece order, and
+/// the search goes on from each. Reversed pieces are tried only when no
+/// closure keeps every piece as it is. One closure is the answer; two are
+/// `Ambiguous`, as is a search past [`CHOICES`] tries; none gives the
+/// first failure met. A unit is charged
 /// per piece drained and per choice.
 pub(crate) fn walk(
     arr: &Arrangement,
@@ -97,7 +100,23 @@ pub(crate) fn walk(
     let mut tries = 0usize;
     let mut found: Vec<Vec<Option<bool>>> = Vec::new();
     let mut first: Option<WalkError> = None;
-    search(arr, &users, state, m, &mut tries, &mut found, &mut first)?;
+    // Pieces kept reversed only where nothing closes without them.
+    search(
+        arr,
+        &users,
+        state.clone(),
+        m,
+        &mut tries,
+        &mut found,
+        &mut first,
+        false,
+    )?;
+    if found.is_empty() {
+        first = None;
+        search(
+            arr, &users, state, m, &mut tries, &mut found, &mut first, true,
+        )?;
+    }
     match found.len() {
         1 => Ok(found.pop().expect("one")),
         0 => Err(first.unwrap_or(WalkError::Open {
@@ -131,7 +150,9 @@ fn kept_using(
 
 /// Drains `state`, then branches on its first waiting arc; closures go
 /// into `found` (two are enough to stop), the first failure into `first`.
-/// Only a halt is an error.
+/// Only a halt is an error. Pieces are tried kept reversed only with
+/// `reverse`.
+#[allow(clippy::too_many_arguments)]
 fn search(
     arr: &Arrangement,
     users: &BTreeMap<(usize, bool), Vec<usize>>,
@@ -140,6 +161,7 @@ fn search(
     tries: &mut usize,
     found: &mut Vec<Vec<Option<bool>>>,
     first: &mut Option<WalkError>,
+    reverse: bool,
 ) -> Result<(), WalkError> {
     let fail = |e: WalkError, first: &mut Option<WalkError>| {
         first.get_or_insert(e);
@@ -192,7 +214,20 @@ fn search(
         // Undecided pieces of other faces: the other way as they are,
         // then the same way kept reversed.
         let mut choices: Vec<(usize, bool)> = Vec::new();
+        // The face's own piece across the edge first: a working surface
+        // cutting through a face leaves its pieces either side of a line
+        // where, in the result, the face may simply run on.
+        let rp = st.kept[p].expect("pending pieces are kept");
+        let raw = if rp { s } else { flip(s) };
+        for &q in users.get(&(g, raw == Sense::Forward)).into_iter().flatten() {
+            if st.kept[q].is_none() && arr.pieces[q].0 == face {
+                choices.push((q, rp));
+            }
+        }
         for (raw, reversed) in [(flip(s), false), (s, true)] {
+            if reversed && !reverse {
+                continue;
+            }
             for &q in users.get(&(g, raw == Sense::Forward)).into_iter().flatten() {
                 if st.kept[q].is_none() && arr.pieces[q].0 != face {
                     choices.push((q, reversed));
@@ -214,7 +249,7 @@ fn search(
             let mut next = st.clone();
             next.kept[q] = Some(reversed);
             next.queue.push(q);
-            search(arr, users, next, m, tries, found, first)?;
+            search(arr, users, next, m, tries, found, first, reverse)?;
             if found.len() > 1 {
                 return Ok(());
             }
@@ -382,5 +417,37 @@ mod tests {
             walk(&a, &[0], &free()),
             Err(WalkError::Ambiguous { .. })
         ));
+    }
+
+    #[test]
+    fn a_face_runs_on_across_a_cut() {
+        // O and O2 are one face's pieces either side of edge 0, a line
+        // another surface cut through it; X (face 2) also takes edge 0
+        // back but closes nothing. The face running on closes through Y.
+        let a = arrangement(vec![
+            (0, vec![(0, F)]),
+            (0, vec![(0, R), (1, F)]),
+            (1, vec![(1, R)]),
+            (2, vec![(0, R), (3, F)]),
+        ]);
+        assert_eq!(
+            walk(&a, &[0], &free()).unwrap(),
+            vec![Some(false), Some(false), Some(false), None]
+        );
+    }
+
+    #[test]
+    fn a_closure_without_reversed_pieces_is_preferred() {
+        // U closes edge 0 as it is, V kept reversed would too: only where
+        // nothing closes as it is does the search reverse a piece.
+        let a = arrangement(vec![
+            (0, vec![(0, F)]),
+            (1, vec![(0, R)]),
+            (2, vec![(0, F)]),
+        ]);
+        assert_eq!(
+            walk(&a, &[0], &free()).unwrap(),
+            vec![Some(false), Some(false), None]
+        );
     }
 }

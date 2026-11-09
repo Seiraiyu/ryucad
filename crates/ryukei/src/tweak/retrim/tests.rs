@@ -169,3 +169,16 @@ fn only_an_uncertain_vertex_re_trims() {
         })
     ));
 }
+
+#[test]
+fn an_offsets_reach_is_its_distance() {
+    // `motion::apply` needs a normal to offset a point; the reach reads
+    // the distance itself.
+    let b = block();
+    let top = face_of(&b, FaceRole::PlusZ);
+    let c = Changes {
+        motion: BTreeMap::from([(top, Motion::Offset(-0.3))]),
+        ..Changes::default()
+    };
+    assert_eq!(super::reach(&b, &c), 0.3);
+}

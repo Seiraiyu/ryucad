@@ -129,6 +129,59 @@ pub(crate) fn shell_seeds(
     out
 }
 
+/// Design 399's rule 3: each region face with no frontier edge (all its
+/// neighbours in the region) seeded by its one candidate piece, the one
+/// whose inner point, taken back to the face's old surface, lies inside
+/// the old face, using no clipped edge. A face with no candidate, or more
+/// than one, seeds nothing. The unchanged faces' seeds, then the moved
+/// faces'.
+pub(crate) fn face_seeds(
+    body: &Body,
+    changes: &Changes,
+    w: &WorkBody,
+    arr: &Arrangement,
+    table: &Table,
+    pieces: &[Piece],
+    m: &Meter,
+) -> (Vec<usize>, Vec<usize>) {
+    let ops = [w.body.clone()];
+    let on_frontier: BTreeSet<FaceId> = w.frontier_faces.values().flatten().copied().collect();
+    let mut faces: Vec<(crate::name::Name, FaceId)> = w
+        .working
+        .iter()
+        .filter(|wf| !on_frontier.contains(&w.origin[wf]))
+        .map(|&wf| (body.faces[w.origin[&wf]].name, wf))
+        .collect();
+    faces.sort();
+    let (mut same, mut moved) = (Vec::new(), Vec::new());
+    for (_, wf) in faces {
+        if m.charge(1).is_err() {
+            break;
+        }
+        let found: Vec<usize> = pieces
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| {
+                p.face.face == wf
+                    && arr.pieces[*i]
+                        .1
+                        .iter()
+                        .all(|(g, _)| !arr.clipped.contains(g))
+                    && inside_old(body, changes, w, &ops, table, p)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if let [one] = found.as_slice() {
+            if changes.motion.contains_key(&w.origin[&wf]) {
+                moved.push(*one);
+            } else {
+                same.push(*one);
+            }
+        }
+    }
+    (same, moved)
+}
+
 /// Whether piece `p`'s inner point, taken back to its face's old surface,
 /// lies inside the old face (the first of four inner points that is
 /// inside or outside, not on the boundary, decides).
