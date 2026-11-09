@@ -173,6 +173,8 @@ enum Pending {
     Appearance(u64),
     /// An appearance written (`appearance.set` or `appearance.clear`).
     AppearanceWritten,
+    /// An import's mode set (`import.convert`): its part and feature.
+    ImportConvert(String, String),
     /// This window's own `section.set`.
     Sections,
     /// An assembly's explodes (`explode.list`).
@@ -1118,6 +1120,23 @@ impl Workspace {
         i.error = None;
         let req = import_request(&key.0, i.update.clone(), false, key.1);
         self.send(req, Pending::Import(key));
+    }
+
+    /// Converts import `feature` of `part` to a healed solid, or with
+    /// `reference` back to a reference (`import.convert`): one logged,
+    /// undoable change, a long request the status line shows. A body
+    /// healing refuses is the part's rebuild's to report.
+    pub fn convert_import(&mut self, part: &str, feature: &str, reference: bool) {
+        let req = Request::ImportConvert {
+            part: part.to_owned(),
+            feature: Some(feature.to_owned()),
+            reference,
+            expected_revision: self.model.parts.get(part).map(|p| p.revision.clone()),
+        };
+        self.send(
+            req,
+            Pending::ImportConvert(part.to_owned(), feature.to_owned()),
+        );
     }
 
     /// Opens File > Export… on `part`, with the last export's choices.
@@ -3238,6 +3257,17 @@ impl Workspace {
                     self.appearance.reread(now, ryucad::render::SURFACE);
                 }
             }
+            // The rebuild follows as `model.changed`; an open form on the
+            // import is read again, its mode with it.
+            (Pending::ImportConvert(part, feature), a) => match a {
+                Ok(_) => {
+                    let key = (part, feature);
+                    if self.form_for.as_ref() == Some(&key) {
+                        self.open_form(Some(key));
+                    }
+                }
+                Err(e) => self.fail(e),
+            },
             (Pending::AppearanceWritten, a) => {
                 // What was dragged stays drawn until the new reading.
                 self.appearance.dragging = None;
