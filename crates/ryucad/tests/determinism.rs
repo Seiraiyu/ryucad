@@ -2581,7 +2581,107 @@ fn bodied() -> (tempfile::TempDir, ryucad::session::Session) {
         json!({"type": "replace_face", "id": "flush",
         "groups": [{"with": "tw/level", "faces": [lid_top]}]}),
     );
+    // Part `dr`: a box's walls drafted 2° about its bottom; a plate with a
+    // boss and a bore through both, drafted 3° about the plate's top face.
+    call(&mut s, "part.create", json!({"part": "dr"}));
+    add(
+        &mut s,
+        "dr",
+        json!({"type": "box", "id": "walls",
+        "params": {"x": "40 mm", "y": "30 mm", "z": "20 mm"}}),
+    );
+    // The planar face of `b` (of `solid`) facing `n` along `axis`.
+    let facing = |b: &serde_json::Value, solid: &str, axis: usize, n: f64| {
+        b["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["z"][axis].as_f64().unwrap() * sign == n
+            })
+            .map(|f| format!("dr/{solid}/{}", f["name"].as_str().unwrap()))
+            .expect("a wall")
+    };
+    let w = body(&mut s, "dr", "walls");
+    let walls: Vec<String> = [(0, 1.0), (0, -1.0), (1, 1.0), (1, -1.0)]
+        .iter()
+        .map(|&(a, n)| facing(&w, "walls", a, n))
+        .collect();
+    add(
+        &mut s,
+        "dr",
+        json!({"type": "draft", "id": "taper", "angle": "2 deg", "neutral": "xy",
+        "faces": walls}),
+    );
+    add(
+        &mut s,
+        "dr",
+        json!({"type": "box", "id": "plate",
+        "params": {"x": "40 mm", "y": "40 mm", "z": "10 mm"},
+        "placement": {"origin": ["60 mm", "0 mm", "0 mm"]}}),
+    );
+    add(
+        &mut s,
+        "dr",
+        json!({"type": "cylinder", "id": "boss", "operation": "join", "targets": ["plate"],
+        "params": {"radius": "5 mm", "height": "10 mm"},
+        "placement": {"origin": ["80 mm", "20 mm", "10 mm"]}}),
+    );
+    add(
+        &mut s,
+        "dr",
+        json!({"type": "cylinder", "id": "bore", "operation": "cut", "targets": ["plate"],
+        "params": {"radius": "3 mm", "height": "40 mm"},
+        "placement": {"origin": ["80 mm", "20 mm", "-10 mm"]}}),
+    );
+    let j = body(&mut s, "dr", "bore");
+    let round = |r: f64| {
+        j["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                f["surface"]["type"] == "cylinder"
+                    && (f["surface"]["radius"].as_f64().unwrap() - r).abs() < 1e-12
+            })
+            .map(|f| format!("dr/plate/{}", f["name"].as_str().unwrap()))
+            .expect("a cylinder")
+    };
+    let plate_top = top(&j, "dr", "plate", 0.01);
+    add(
+        &mut s,
+        "dr",
+        json!({"type": "draft", "id": "release", "angle": "3 deg", "neutral": plate_top,
+        "faces": [round(0.005), round(0.003)]}),
+    );
     (dir, s)
+}
+
+fn drafts_section(golden: &mut Golden) {
+    bodied_section(golden, "drafts", "dr");
+}
+
+/// Each draft of part `dr` as its rebuild report gives it: its angles, its
+/// pull and its neutral plane.
+fn draft_reports_section(golden: &mut Golden) {
+    let mut s = golden.section("draft_reports");
+    let (_dir, mut session) = bodied();
+    let r = ryucad::server::handle(
+        &mut session,
+        ryucad::proto::Request::from_rpc("rebuild", Some(serde_json::json!({"part": "dr"})))
+            .unwrap(),
+    )
+    .unwrap();
+    for f in r["parts"][0]["features"].as_array().unwrap() {
+        if let Some(d) = f.get("draft") {
+            s.str(f["id"].as_str().unwrap());
+            s.str(&d["angles"].to_string());
+            s.str(&d["pull"].to_string());
+            s.str(&d["neutral"].to_string());
+        }
+    }
 }
 
 /// Every state of every solid of `part` bit for bit, built on one thread
@@ -4697,6 +4797,8 @@ sections! {
     shells => shells_section(&mut golden),
     offsets => offsets_section(&mut golden),
     tweaks => tweaks_section(&mut golden),
+    drafts => drafts_section(&mut golden),
+    draft_reports => draft_reports_section(&mut golden),
     mirrors => mirrors_section(&mut golden),
     splits => splits_section(&mut golden),
     sheet_metal => sheet_metal_section(&mut golden),
