@@ -2286,6 +2286,20 @@ mod tests {
     }
 
     #[test]
+    fn a_tweaks_changes_are_by_field() {
+        let n = |k: u8| json!({"feature": "b", "name": format!("{k:032x}")});
+        let before = json!({"format": 16, "kind": "ryucad.feature", "type": "move_face",
+                            "target": "b", "by": "offset", "distance": "1 mm", "faces": [n(1)]});
+        let mut after = before.clone();
+        after["distance"] = json!("2 mm");
+        after["groups"] = json!([{"distance": "3 mm", "faces": [n(2)]}]);
+        let mut out = Vec::new();
+        changes("", Some(&before), Some(&after), &mut out);
+        let pointers: Vec<&str> = out.iter().map(|c| c["at"].as_str().unwrap()).collect();
+        assert_eq!(pointers, ["/distance", "/groups"]);
+    }
+
+    #[test]
     fn a_flanges_changes_are_by_field() {
         let n = |k: u8| format!("{k:032x}");
         let before = json!({"format": 11, "kind": "ryucad.feature", "type": "flange", "target": "plate",
