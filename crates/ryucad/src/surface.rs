@@ -235,6 +235,98 @@ fn fill_error(part: &Part, id: &Id, x: &Fill, place: &[Place], e: ryukei::Error)
     err
 }
 
+/// Faces resolved in the feature's view: the one body they are faces of
+/// (`targets_mixed` for faces of several), its founder, and each name.
+fn resolve_faces<'a, 'f>(
+    part: &Part,
+    id: &Id,
+    ty: &str,
+    faces: &[(String, &'f crate::doc::reference::Reference)],
+    before: &'a dyn Results,
+) -> Result<(&'f Id, &'a Built, Vec<Name>)> {
+    let first = &faces[0].1.feature;
+    for (role, r) in faces {
+        if r.feature != *first {
+            return Err(Error::new(
+                Code::TargetsMixed,
+                format!(
+                    "{ty} {id}: its {role} {} is a face of {}, not of {first}; a {ty} takes faces of one body",
+                    r.text(&part.id),
+                    r.feature
+                ),
+            )
+            .with("feature", id)
+            .with("role", role.as_str())
+            .with("solids", [first.as_str(), r.feature.as_str()]));
+        }
+    }
+    let mut built = None;
+    let mut names = Vec::with_capacity(faces.len());
+    for (role, r) in faces {
+        let (b, e) = crate::reference::resolve(part, part.order(), id, role, r, before)?;
+        if !matches!(e, EntityId::Face(_)) {
+            return Err(crate::reference::wrong_kind(
+                part,
+                id,
+                role,
+                r,
+                crate::reference::kind(e),
+                "a face",
+            ));
+        }
+        built = Some(b);
+        names.push(r.name);
+    }
+    Ok((first, built.expect("at least one face"), names))
+}
+
+/// Refuses an extract whose faces aren't faces of one body, in `results`.
+pub fn check_extract(part: &Part, id: &Id, x: &Extract, results: &dyn Results) -> Result<()> {
+    resolve_faces(part, id, "extract", &x.references(), results).map(drop)
+}
+
+/// An extract: the named faces of their body, as it sees it, as a sheet.
+pub fn extract(part: &Part, id: &Id, x: &Extract, before: &dyn Results) -> Result<Built> {
+    let (from, built, names) = resolve_faces(part, id, "extract", &x.references(), before)?;
+    let key = crate::rebuild::op_key(&part.id, id);
+    let made = ryukei::sheet::extract(key, &built.body, &names)
+        .map_err(|e| extract_error(part, id, from, &e))?;
+    let origins = extract_origins(id, &made.0);
+    crate::rebuild::finish(id, "extract", made, origins)
+}
+
+/// An extract's origins: every entity keeps its source's name, and says
+/// so (`{feature, extract_of: <name>}`).
+pub(crate) fn extract_origins(id: &Id, body: &Body) -> Origins {
+    crate::rebuild::names(body)
+        .into_iter()
+        .map(|n| (n.to_string(), json!({"feature": id, "extract_of": n.to_string()})))
+        .collect()
+}
+
+/// The kernel's refusal of an extract: `no_faces`, or
+/// `non_manifold_vertex` naming the vertex in its body.
+fn extract_error(part: &Part, id: &Id, from: &Id, e: &ryukei::Error) -> Error {
+    use ryukei::SheetError as S;
+    let mut err = Error::new(Code::ExtractFailed, format!("extract {id}: {e}"))
+        .with("feature", id)
+        .with("kernel", e.to_string());
+    match e {
+        ryukei::Error::InvalidSheet(S::NonManifoldVertex { vertex }) => {
+            err = err
+                .with("reason", "non_manifold_vertex")
+                .with("vertex", format!("{}/{from}/{vertex}", part.id))
+                .with("hint", "the faces touch at this vertex alone: extract them as two sheets, or add the faces between them");
+        }
+        ryukei::Error::InvalidSheet(S::NoFaces) => err = err.with("reason", "no_faces"),
+        ryukei::Error::InvalidSheet(S::NoSuchFace { name }) => {
+            err = err.with("reason", "no_such_face").with("face", name.to_string());
+        }
+        _ => err = err.with("reason", "kernel"),
+    }
+    err
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,5 +371,18 @@ mod tests {
         let r = fill_report(&place, &report);
         assert_eq!(r["sides"].as_array().unwrap().len(), 4);
         let _ = (journal, Vector3::new(0.0, 0.0, 1.0));
+    }
+    #[test]
+    fn an_extracts_entities_keep_their_names_and_say_what_they_were() {
+        let b = ryukei::primitive::block(OpKey::from_bytes(b"k"), 0.01, 0.01, 0.01, &ryukei::geom::Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let top = b.faces().next().unwrap();
+        let name = b.name_of(EntityId::Face(top)).unwrap();
+        let (sheet, _) = ryukei::sheet::extract(OpKey::from_bytes(b"x"), &b, &[name]).unwrap();
+        let id = Id::parse("x", "feature").unwrap();
+        let o = extract_origins(&id, &sheet);
+        assert_eq!(o.get(&name.to_string()), Some(&json!({"feature": "x", "extract_of": name.to_string()})));
+        assert!(sheet.by_name(name).is_some());
     }
 }
