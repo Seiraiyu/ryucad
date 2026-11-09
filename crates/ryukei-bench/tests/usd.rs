@@ -193,11 +193,12 @@ fn the_references_read_every_seeded_body() {
 /// Every race body (`race::writable(1600)`) as a usda of its BrepArray
 /// alone, opened by OpenUSD, valid by usd-brep's validator, and imported
 /// into SMLib as manifold solids of the volume ryukei measures: design
-/// 296's BrepArray bar. About an hour: run by name in the devcontainer,
+/// 296's BrepArray bar. About a quarter of an hour on a Ryzen 7 9700X
+/// (987 s): run by name in the devcontainer,
 /// `cargo test -p ryukei-bench --features usd --release --test usd --
 /// --ignored every_race_body --nocapture`.
 #[test]
-#[ignore = "about an hour: run by name (plan 15.F's bars)"]
+#[ignore = "about a quarter of an hour on a Ryzen 7 9700X: run by name (plan 15.F's bars)"]
 fn every_race_body_is_valid_and_imports() {
     use rayon::prelude::*;
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
