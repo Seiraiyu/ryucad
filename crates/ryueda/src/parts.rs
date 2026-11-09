@@ -17,9 +17,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-/// The sources this ryueda searches: the library, then each catalogue.
+/// The sources this ryueda searches: the library, each catalogue, then
+/// each distributor.
 pub fn sources_known() -> Vec<&'static str> {
-    std::iter::once(Library::NAME).chain(catalogues()).collect()
+    std::iter::once(Library::NAME)
+        .chain(catalogues())
+        .chain(crate::distributors::names())
+        .collect()
 }
 
 /// `parts.max_age`'s default: 7 days.
@@ -38,6 +42,9 @@ pub struct Catalogues {
     pub max_age: u64,
     /// Each connector's catalogue once opened, by name (`None`: not synced).
     loaded: std::sync::Arc<std::sync::Mutex<BTreeMap<&'static str, Option<Shared>>>>,
+    /// This machine's distributors (6.C): `Default` has no keys, no
+    /// kept records and no network.
+    pub live: crate::distributors::Distributors,
 }
 
 impl Catalogues {
@@ -47,18 +54,26 @@ impl Catalogues {
             now,
             max_age,
             loaded: Default::default(),
+            live: Default::default(),
         }
+    }
+
+    /// This, with `live` its distributors.
+    pub fn with_live(self, live: crate::distributors::Distributors) -> Catalogues {
+        Catalogues { live, ..self }
     }
 
     /// The machine's: the parts cache, now, and `parts.max_age` from the
     /// preferences (or `RYUEDA_PARTS_MAX_AGE`).
     /// With no cache folder to be found (no home), no catalogue.
     pub fn here() -> Result<Catalogues> {
+        let live = crate::distributors::Distributors::here();
         Ok(match cache_root() {
-            Ok(root) => Catalogues::at(&root, now(), max_age()),
+            Ok(root) => Catalogues::at(&root, now(), max_age()).with_live(live),
             Err(_) => Catalogues {
                 now: now(),
                 max_age: max_age(),
+                live,
                 ..Default::default()
             },
         })
@@ -288,10 +303,36 @@ fn like_of(p: &Project, text: &str) -> Result<(Category, Vec<Condition>)> {
     Ok((c.category().0, conditions))
 }
 
-/// `parts.search`: the asked sources' results in order, each source's
-/// ranked by conditions met, stock and key, at most `limit` in all, with
-/// the faults of what didn't load.
-pub fn search(p: &Project, s: &Search, cats: &Catalogues) -> Result<Value> {
+/// A search worked out under the lock: the query, the sources in order,
+/// what the library and catalogues found, and which distributors are
+/// still to ask (called by [`finish`], with the lock released).
+pub struct Planned {
+    pub q: Query,
+    query: Value,
+    sources: Vec<String>,
+    found: BTreeMap<String, Vec<Hit>>,
+    states: Vec<Value>,
+    warnings: Vec<Value>,
+    notes: Vec<Value>,
+    faults: Value,
+    offline: bool,
+}
+
+impl Planned {
+    /// The distributors it is to ask (none when offline).
+    pub fn live(&self) -> Vec<&'static ryueda_parts::distributor::Distributor> {
+        if self.offline {
+            return Vec::new();
+        }
+        self.sources
+            .iter()
+            .filter_map(|n| ryueda_parts::distributor::distributor(n))
+            .collect()
+    }
+}
+
+/// `parts.search`'s work under the lock: everything but the distributors.
+pub fn plan(p: &Project, s: &Search, cats: &Catalogues) -> Result<Planned> {
     let known = sources_known();
     let default = default_sources(p);
     let asked: Vec<&str> = if s.sources.is_empty() {
@@ -342,37 +383,117 @@ pub fn search(p: &Project, s: &Search, cats: &Catalogues) -> Result<Value> {
     };
     let (records, faults) = library_records(p);
     let library = Library::new(records);
-    let mut results: Vec<Hit> = Vec::new();
+    let mut found = BTreeMap::new();
     let (mut states, mut warnings) = (Vec::new(), Vec::new());
     for name in &sources {
         if name == Library::NAME {
-            results.extend(library.search(&q, &Call::default())?);
+            found.insert(name.clone(), library.search(&q, &Call::default())?);
             states.push(json!({"name": Library::NAME, "kind": "files"}));
-            continue;
-        }
-        let (state, warn) = cats.state(name)?;
-        states.push(state);
-        warnings.extend(warn);
-        if let Some(c) = cats.get(name)? {
-            results.extend(c.search(&q, &Call::default())?);
+        } else if let Some(d) = ryueda_parts::distributor::distributor(name) {
+            states.push(cats.live.state(d, cats.now));
+        } else {
+            let (state, warn) = cats.state(name)?;
+            states.push(state);
+            warnings.extend(warn);
+            if let Some(c) = cats.get(name)? {
+                found.insert(name.clone(), c.search(&q, &Call::default())?);
+            }
         }
     }
-    results.truncate(q.limit);
-    Ok(json!({
-        "query": {
-            "category": q.category,
-            "conditions": q.conditions.iter().map(Condition::to_text).collect::<Vec<_>>(),
-            "in": sources,
-            "stock": q.stock,
-            "basic": q.basic,
-            "limit": q.limit,
-            "like": s.like,
-        },
+    let query = json!({
+        "category": q.category,
+        "conditions": q.conditions.iter().map(Condition::to_text).collect::<Vec<_>>(),
+        "in": sources,
+        "stock": q.stock,
+        "basic": q.basic,
+        "limit": q.limit,
+        "like": s.like,
+    });
+    Ok(Planned {
+        q,
+        query,
+        sources,
+        found,
+        states,
+        warnings,
+        notes: Vec::new(),
+        faults: fault::list(&faults),
+        offline: s.offline,
+    })
+}
+
+/// A distributor's failure as a search's or show's warning: its code,
+/// message and details (never a key). A cancel isn't one.
+fn failed(name: &str, e: Error) -> Result<Value> {
+    if e.code == Code::Cancelled {
+        return Err(e);
+    }
+    Ok(json!({"code": e.code, "source": name, "message": e.message, "details": e.details}))
+}
+
+/// `parts.search`'s distributors, called under `job` (a source a step in
+/// phase `fetch`), then the answer: each source's results in order, at
+/// most `limit` in all. A distributor that fails, or has no keys, is a
+/// warning; the others answer.
+pub fn finish(mut pl: Planned, cats: &Catalogues, job: &ryu_session::job::Job) -> Result<Value> {
+    let live = pl.live();
+    if pl.offline {
+        for name in &pl.sources {
+            if ryueda_parts::distributor::distributor(name).is_some() {
+                pl.notes.push(json!({"source": name, "reason": "offline",
+                    "message": format!("{name} is searched live; --offline left it out")}));
+            }
+        }
+    }
+    let stage = (!live.is_empty())
+        .then(|| job.begin(ryu_session::job::Phase::Fetch, "sources", live.len()));
+    let call = Call {
+        cancel: job.kernel_cancel(),
+        deadline: None,
+    };
+    for d in live {
+        if let Some(s) = &stage {
+            s.step(|| d.name.to_owned())?;
+        }
+        match cats.live.open(d) {
+            Ok(Some(src)) => match src.search(&pl.q, &call) {
+                Ok(hits) => {
+                    let records: Vec<Record> = hits.iter().map(|h| h.record.clone()).collect();
+                    cats.live.keep(d, &records);
+                    pl.found.insert(d.name.to_owned(), hits);
+                }
+                Err(e) => pl.warnings.push(failed(d.name, e)?),
+            },
+            Ok(None) => pl
+                .warnings
+                .push(failed(d.name, crate::distributors::not_configured(d))?),
+            Err(e) => pl.warnings.push(failed(d.name, e)?),
+        }
+    }
+    drop(stage);
+    let mut results: Vec<Hit> = Vec::new();
+    for name in &pl.sources {
+        results.extend(pl.found.remove(name).unwrap_or_default());
+    }
+    results.truncate(pl.q.limit);
+    let mut v = json!({
+        "query": pl.query,
         "results": results,
-        "sources": states,
-        "warnings": warnings,
-        "faults": fault::list(&faults),
-    }))
+        "sources": pl.states,
+        "warnings": pl.warnings,
+        "faults": pl.faults,
+    });
+    if !pl.notes.is_empty() {
+        v["notes"] = json!(pl.notes);
+    }
+    Ok(v)
+}
+
+/// `parts.search` in one go: the asked sources' results in order, each
+/// source's ranked by conditions met, stock and key, at most `limit` in
+/// all, with the faults of what didn't load.
+pub fn search(p: &Project, s: &Search, cats: &Catalogues) -> Result<Value> {
+    finish(plan(p, s, cats)?, cats, &ryu_session::job::Job::default())
 }
 
 /// The catalogues the placed parts' offers draw on (a connector claims an
@@ -396,6 +517,32 @@ pub fn catalogues_placed(p: &Project) -> Vec<&'static str> {
     used.into_iter().collect()
 }
 
+/// The distributors the placed parts' offers draw on, over every design
+/// that flattens, by name.
+pub fn distributors_placed(p: &Project) -> Vec<&'static ryueda_parts::distributor::Distributor> {
+    let mut used: Vec<&'static ryueda_parts::distributor::Distributor> = Vec::new();
+    for design in p.conn.designs.keys() {
+        let Ok(n) = crate::netlist::flatten(p, design) else {
+            continue;
+        };
+        for (_, c, _) in crate::erc::placed_by_libcomp(p, &n) {
+            for o in c
+                .offers
+                .iter()
+                .chain(c.alternates.iter().flat_map(|a| &a.offers))
+            {
+                for d in ryueda_parts::distributor::for_supplier(&o.supplier) {
+                    if !used.iter().any(|u| u.name == d.name) {
+                        used.push(d);
+                    }
+                }
+            }
+        }
+    }
+    used.sort_by_key(|d| d.name);
+    used
+}
+
 /// `parts.sources`: every source this ryueda has, the library's count of
 /// library components and each catalogue's state on this machine, with
 /// the parts cache's folder (`null` where there is none).
@@ -408,12 +555,15 @@ pub fn sources(p: &Project, cats: &Catalogues) -> Result<Value> {
     for name in catalogues() {
         list.push(cats.state(name)?.0);
     }
+    for d in ryueda_parts::distributor::DISTRIBUTORS {
+        list.push(cats.live.state(d, cats.now));
+    }
     Ok(json!({"sources": list, "max_age_s": cats.max_age, "cache": cats.root}))
 }
 
-/// The sources a key's `<source>:` names: `library`; a catalogue, by its
-/// name or a supplier it claims (so `lcsc:` names the catalogue keyed by
-/// LCSC numbers); or `mpn` for every source.
+/// The sources a key's `<source>:` names: `library`; a catalogue or a
+/// distributor, by its name or a supplier it claims (so `lcsc:` names the
+/// catalogue keyed by LCSC numbers); or `mpn` for every source.
 fn named(source: &str) -> Option<Vec<&'static str>> {
     match source {
         "library" => Some(vec![Library::NAME]),
@@ -421,6 +571,7 @@ fn named(source: &str) -> Option<Vec<&'static str>> {
         s => {
             let found: Vec<&'static str> = ryueda_parts::catalogue::for_supplier(s)
                 .map(|c| c.name)
+                .chain(ryueda_parts::distributor::for_supplier(s).map(|d| d.name))
                 .collect();
             (!found.is_empty()).then_some(found)
         }
@@ -439,9 +590,13 @@ pub fn records_of(
         Error::new(
             Code::InvalidParam,
             format!(
-                "{} isn't a source to look parts up in: library, mpn or a catalogue ({})",
+                "{} isn't a source to look parts up in: library, mpn, a catalogue or a distributor ({})",
                 k.source,
-                catalogues().join(", ")
+                catalogues()
+                    .into_iter()
+                    .chain(crate::distributors::names())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         )
         .with("param", "key")
@@ -460,6 +615,14 @@ pub fn records_of(
             }));
             continue;
         }
+        // A distributor's records as kept on this machine: calling it is
+        // `parts show`'s, with the lock released.
+        if let Some(d) = ryueda_parts::distributor::distributor(name) {
+            if !k.is_mpn() {
+                out.extend(cats.live.cached(d, &k.key, cats.now));
+            }
+            continue;
+        }
         let (_, warn) = cats.state(name)?;
         warnings.extend(warn);
         if let Some(c) = cats.get(name)? {
@@ -473,31 +636,136 @@ pub fn records_of(
     Ok((out, warnings, names))
 }
 
-/// `parts.show`: the records `key` names, from this machine's sources. A
-/// catalogue refreshes by `parts sync`, so `refresh` only says so.
-pub fn show(p: &Project, key: &str, refresh: bool, cats: &Catalogues) -> Result<Value> {
-    let (records, warnings, searched) = records_of(p, key, cats)?;
-    if records.is_empty() {
-        return Err(
-            Error::new(Code::PartsNotFound, format!("no source here has {key}"))
-                .with("key", key)
-                .with("searched", &searched)
-                .with("warnings", &warnings),
-        );
+/// A `parts.show` worked out under the lock: the records the library,
+/// catalogues and kept distributor records give, and the distributors
+/// still to call.
+pub struct ShowPlan {
+    key: String,
+    k: ryueda_parts::source::Key,
+    refresh: bool,
+    offline: bool,
+    records: Vec<Record>,
+    warnings: Vec<Value>,
+    searched: Vec<&'static str>,
+    live: Vec<&'static ryueda_parts::distributor::Distributor>,
+}
+
+impl ShowPlan {
+    pub fn calls(&self) -> bool {
+        !self.live.is_empty()
     }
-    let notes: Vec<Value> = if refresh {
-        searched
-            .iter()
-            .filter(|n| **n != Library::NAME)
-            .map(|n| {
-                json!({"source": n, "reason": "catalogue",
-                       "message": format!("{n} is a catalogue: run ryueda parts sync {n} to refresh it")})
-            })
-            .collect()
-    } else {
-        Vec::new()
+}
+
+/// `parts.show`'s work under the lock. A distributor is called when it
+/// has no record kept for the key (always for `mpn:`), or with
+/// `refresh`, unless `offline`.
+pub fn show_plan(
+    p: &Project,
+    key: &str,
+    refresh: bool,
+    offline: bool,
+    cats: &Catalogues,
+) -> Result<ShowPlan> {
+    let (mut records, warnings, searched) = records_of(p, key, cats)?;
+    let k = ryueda_parts::source::Key::parse(key)?;
+    let mut live = Vec::new();
+    for name in &searched {
+        let Some(d) = ryueda_parts::distributor::distributor(name) else {
+            continue;
+        };
+        let kept = records.iter().any(|r| r.source == d.name);
+        if refresh {
+            records.retain(|r| r.source != d.name);
+        }
+        if !offline && (refresh || k.is_mpn() || !kept) {
+            live.push(d);
+        }
+    }
+    Ok(ShowPlan {
+        key: key.to_owned(),
+        k,
+        refresh,
+        offline,
+        records,
+        warnings,
+        searched,
+        live,
+    })
+}
+
+/// `parts.show`'s distributors called under `job`, then the answer: the
+/// records in source order, `parts_not_found` where there are none.
+pub fn show_finish(
+    mut pl: ShowPlan,
+    cats: &Catalogues,
+    job: &ryu_session::job::Job,
+) -> Result<Value> {
+    let stage = pl
+        .calls()
+        .then(|| job.begin(ryu_session::job::Phase::Fetch, "sources", pl.live.len()));
+    let call = Call {
+        cancel: job.kernel_cancel(),
+        deadline: None,
     };
-    Ok(json!({"key": key, "records": records, "warnings": warnings, "notes": notes}))
+    for d in std::mem::take(&mut pl.live) {
+        if let Some(s) = &stage {
+            s.step(|| d.name.to_owned())?;
+        }
+        let got = match cats.live.open(d) {
+            Ok(Some(src)) if pl.k.is_mpn() => src.by_mpn(&pl.k.key, &call),
+            Ok(Some(src)) => src.get(&pl.k.key, &call).map(|r| r.into_iter().collect()),
+            Ok(None) if pl.k.is_mpn() => Ok(Vec::new()),
+            Ok(None) => Err(crate::distributors::not_configured(d)),
+            Err(e) => Err(e),
+        };
+        match got {
+            Ok(rs) => {
+                cats.live.keep(d, &rs);
+                pl.records.extend(rs);
+            }
+            Err(e) => pl.warnings.push(failed(d.name, e)?),
+        }
+    }
+    drop(stage);
+    // Source order, as the key named them.
+    let order = |r: &Record| pl.searched.iter().position(|n| *n == r.source);
+    pl.records.sort_by_key(|r| order(r));
+    if pl.records.is_empty() {
+        return Err(Error::new(
+            Code::PartsNotFound,
+            format!("no source here has {}", pl.key),
+        )
+        .with("key", &pl.key)
+        .with("searched", &pl.searched)
+        .with("warnings", &pl.warnings));
+    }
+    let mut notes: Vec<Value> = Vec::new();
+    for n in &pl.searched {
+        if pl.refresh && catalogues().contains(n) {
+            notes.push(json!({"source": n, "reason": "catalogue",
+                "message": format!("{n} is a catalogue: run ryueda parts sync {n} to refresh it")}));
+        }
+        if pl.offline && ryueda_parts::distributor::distributor(n).is_some() {
+            notes.push(json!({"source": n, "reason": "offline",
+                "message": format!("{n} is called live; --offline gave only what this machine keeps")}));
+        }
+    }
+    Ok(json!({"key": pl.key, "records": pl.records, "warnings": pl.warnings, "notes": notes}))
+}
+
+/// `parts.show` in one go.
+pub fn show(
+    p: &Project,
+    key: &str,
+    refresh: bool,
+    offline: bool,
+    cats: &Catalogues,
+) -> Result<Value> {
+    show_finish(
+        show_plan(p, key, refresh, offline, cats)?,
+        cats,
+        &ryu_session::job::Job::default(),
+    )
 }
 
 /// The sources a search without `in` asks: `parts.json`'s, else the
@@ -677,6 +945,103 @@ pub fn refresh(names: &[&str], force: bool, job: &ryu_session::job::Job) -> Resu
     )
 }
 
+/// The placed parts' offers a distributor claims, each once, by
+/// distributor and key: those with no record kept on this machine, or
+/// every one with `force`.
+pub fn offers_placed_live(
+    p: &Project,
+    cats: &Catalogues,
+    force: bool,
+) -> Vec<(&'static str, String)> {
+    let mut out = std::collections::BTreeSet::new();
+    for design in p.conn.designs.keys() {
+        let Ok(n) = crate::netlist::flatten(p, design) else {
+            continue;
+        };
+        for (_, c, _) in crate::erc::placed_by_libcomp(p, &n) {
+            for o in c
+                .offers
+                .iter()
+                .chain(c.alternates.iter().flat_map(|a| &a.offers))
+            {
+                for d in ryueda_parts::distributor::for_supplier(&o.supplier) {
+                    let key = o.sku.trim().to_owned();
+                    if force || cats.live.cached(d, &key, cats.now).is_none() {
+                        out.insert((d.name, key));
+                    }
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// `parts.refresh`'s distributor records: each of `wanted` fetched again
+/// under `job` (phase `fetch`, a record a step) and kept. A distributor
+/// with no keys is listed, not called; a key it doesn't have is `missing`;
+/// a rate limit stops the refresh as `parts_rate_limited`, saying what was
+/// fetched and what remains (run it again later: what was kept stays).
+pub fn refresh_records(
+    wanted: &[(&'static str, String)],
+    cats: &Catalogues,
+    job: &ryu_session::job::Job,
+) -> Result<Value> {
+    let (mut fetched, mut missing, mut not_configured) = (Vec::new(), Vec::new(), Vec::new());
+    let stage = (!wanted.is_empty())
+        .then(|| job.begin(ryu_session::job::Phase::Fetch, "records", wanted.len()));
+    let call = Call {
+        cancel: job.kernel_cancel(),
+        deadline: None,
+    };
+    let mut opened: BTreeMap<&'static str, Option<Box<dyn ryueda_parts::distributor::Live>>> =
+        BTreeMap::new();
+    for (i, (name, key)) in wanted.iter().enumerate() {
+        if let Some(s) = &stage {
+            s.step(|| format!("{name}:{key}"))?;
+        }
+        let d = ryueda_parts::distributor::distributor(name).expect("a distributor's name");
+        if !opened.contains_key(name) {
+            opened.insert(name, cats.live.open(d)?);
+        }
+        let Some(src) = &opened[name] else {
+            if !not_configured.contains(name) {
+                not_configured.push(*name);
+            }
+            continue;
+        };
+        match src.get(key, &call) {
+            Ok(Some(r)) => {
+                cats.live.keep(d, std::slice::from_ref(&r));
+                fetched.push(json!({"source": name, "key": key}));
+            }
+            Ok(None) => missing.push(json!({"source": name, "key": key})),
+            Err(e) if e.code == Code::PartsRateLimited => {
+                let remaining: Vec<Value> = wanted[i..]
+                    .iter()
+                    .map(|(n, k)| json!({"source": n, "key": k}))
+                    .collect();
+                return Err(e.with("fetched", &fetched).with("remaining", &remaining));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(json!({"fetched": fetched, "missing": missing, "not_configured": not_configured}))
+}
+
+/// `parts.refresh`: the catalogues `names`, then the distributor records
+/// `wanted`.
+pub fn refresh_all(
+    names: &[&str],
+    wanted: &[(&'static str, String)],
+    cats: &Catalogues,
+    force: bool,
+    job: &ryu_session::job::Job,
+) -> Result<Value> {
+    let mut v = refresh(names, force, job)?;
+    v["records"] = refresh_records(wanted, cats, job)?;
+    Ok(v)
+}
+
 /// The lock-free work of a long parts request, if `req` is one.
 pub fn prepare(
     session: &mut crate::session::Session,
@@ -689,11 +1054,40 @@ pub fn prepare(
             Some(Box::new(move || sync(&source, &job)))
         }
         // What the placed parts draw on is found under the lock; the
-        // syncs run without it.
+        // syncs and calls run without it.
         crate::proto::Request::PartsRefresh { force } => {
+            let cats = session.catalogues().ok()?;
             let names = catalogues_placed(session.project());
+            let wanted = offers_placed_live(session.project(), &cats, *force);
             let (force, job) = (*force, job.clone());
-            Some(Box::new(move || refresh(&names, force, &job)))
+            Some(Box::new(move || {
+                refresh_all(&names, &wanted, &cats, force, &job)
+            }))
+        }
+        // The library and catalogues are searched under the lock; the
+        // distributors are called without it.
+        crate::proto::Request::PartsSearch { search } => {
+            let cats = session.catalogues().ok()?;
+            let planned = match plan(session.project(), search, &cats) {
+                Ok(pl) if !pl.live().is_empty() => pl,
+                // Nothing to call, or a refusal: answered under the lock.
+                _ => return None,
+            };
+            let job = job.clone();
+            Some(Box::new(move || finish(planned, &cats, &job)))
+        }
+        crate::proto::Request::PartsShow {
+            key,
+            refresh,
+            offline,
+        } => {
+            let cats = session.catalogues().ok()?;
+            let planned = match show_plan(session.project(), key, *refresh, *offline, &cats) {
+                Ok(pl) if pl.calls() => pl,
+                _ => return None,
+            };
+            let job = job.clone();
+            Some(Box::new(move || show_finish(planned, &cats, &job)))
         }
         _ => None,
     }
@@ -850,13 +1244,13 @@ pub(crate) mod tests {
         let e = search(
             &p,
             &Search {
-                sources: vec!["digikey".into()],
+                sources: vec!["acme".into()],
                 ..Default::default()
             },
             &fresh,
         )
         .unwrap_err();
-        assert_eq!(e.details["sources"], json!(["library", "jlc"]));
+        assert_eq!(e.details["sources"], json!(["library", "jlc", "digikey"]));
         // The library alone, as 6.A searched: no catalogue read, no warning.
         let v = search(&p, &Search::default(), &Catalogues::default()).unwrap();
         assert!(v["warnings"].as_array().unwrap().is_empty());
@@ -909,33 +1303,39 @@ pub(crate) mod tests {
         let cats = Catalogues::at(dir.path(), 5_000, MAX_AGE);
         let (_p, p) = crate::netlist::tests::project(&[]);
         for key in ["lcsc:C1525", "jlc:C1525", "mpn:cl05b104ko5nnnc"] {
-            let v = show(&p, key, false, &cats).unwrap();
+            let v = show(&p, key, false, false, &cats).unwrap();
             assert_eq!(v["records"][0]["mpn"], "CL05B104KO5NNNC", "{key}");
             assert_eq!(
                 v["records"][0]["attribution"],
                 ryueda_parts::jlc::ATTRIBUTION
             );
         }
-        let e = show(&p, "lcsc:C9", false, &cats).unwrap_err();
+        let e = show(&p, "lcsc:C9", false, false, &cats).unwrap_err();
         assert_eq!(
             (e.code, &e.details["searched"]),
             (Code::PartsNotFound, &json!(["jlc"]))
         );
         assert_eq!(
-            show(&p, "digikey:1-ND", false, &cats).unwrap_err().code,
+            show(&p, "acme:1-ND", false, false, &cats).unwrap_err().code,
             Code::InvalidParam
+        );
+        // A distributor with no keys here: not found, saying why.
+        let e = show(&p, "digikey:1-ND", false, false, &cats).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["warnings"][0]["details"]["reason"]),
+            (Code::PartsNotFound, &json!("not_configured"))
         );
         assert_eq!(
-            show(&p, "C1525", false, &cats).unwrap_err().code,
+            show(&p, "C1525", false, false, &cats).unwrap_err().code,
             Code::InvalidParam
         );
-        let v = show(&p, "lcsc:C1525", true, &cats).unwrap();
+        let v = show(&p, "lcsc:C1525", true, false, &cats).unwrap();
         assert_eq!(
             v["notes"][0]["reason"], "catalogue",
             "a catalogue refreshes by parts sync"
         );
         let none = Catalogues::at(&dir.path().join("x"), 5_000, MAX_AGE);
-        let e = show(&p, "lcsc:C1525", false, &none).unwrap_err();
+        let e = show(&p, "lcsc:C1525", false, false, &none).unwrap_err();
         assert_eq!(e.details["warnings"][0]["reason"], "missing");
         // The library by its key, and by a part number it names.
         let lib = library_records(&p).0;
@@ -943,9 +1343,9 @@ pub(crate) mod tests {
             .iter()
             .find(|r| !r.mpn.is_empty())
             .expect("a library component with a part number");
-        let v = show(&p, &format!("library:{}", first.key), false, &cats).unwrap();
+        let v = show(&p, &format!("library:{}", first.key), false, false, &cats).unwrap();
         assert_eq!(v["records"][0]["key"], first.key);
-        let v = show(&p, &format!("mpn:{}", first.mpn), false, &cats).unwrap();
+        let v = show(&p, &format!("mpn:{}", first.mpn), false, false, &cats).unwrap();
         assert_eq!(v["records"][0]["source"], "library");
     }
 
@@ -1005,6 +1405,184 @@ pub(crate) mod tests {
             v["synced"],
             json!([]),
             "nothing placed draws on a catalogue"
+        );
+    }
+
+    /// A project, distributors over a fake DigiKey with keys, and the
+    /// catalogues the search reads (none synced), at 1,000.
+    fn live() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        std::sync::Arc<ryueda_parts::fetch::Fake>,
+        Catalogues,
+    ) {
+        let (cfg, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        crate::distributors::tests::logged_in(cfg.path());
+        let fake = std::sync::Arc::new(ryueda_parts::digikey::testing::fake());
+        let ds = crate::distributors::tests::fake(cfg.path(), cache.path(), fake.clone(), 1_000);
+        let cats = Catalogues::at(cache.path(), 1_000, MAX_AGE).with_live(ds);
+        (cfg, cache, fake, cats)
+    }
+
+    #[test]
+    fn a_distributor_is_searched_live_and_its_records_kept() {
+        let (_c, _k, fake, cats) = live();
+        let (_p, p) = crate::netlist::tests::project(&[]);
+        let s = Search {
+            category: Some("capacitor".into()),
+            conditions: vec!["capacitance=100nF".into(), "voltage_rating>=10V".into()],
+            sources: vec!["digikey".into(), "library".into()],
+            ..Default::default()
+        };
+        let v = search(&p, &s, &cats).unwrap();
+        assert_eq!(v["query"]["in"], json!(["library", "digikey"]));
+        let dk: Vec<&Value> = v["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["source"] == "digikey")
+            .collect();
+        assert_eq!(dk.len(), 1);
+        assert_eq!(
+            (dk[0]["key"].as_str(), dk[0]["attribution"].as_str()),
+            (Some("1276-1001-1-ND"), Some("Data from DigiKey"))
+        );
+        assert_eq!(v["sources"][1]["state"], "configured");
+        // Kept: a show needs no call.
+        let calls = fake.sent().len();
+        let v = show(&p, "digikey:1276-1001-1-ND", false, false, &cats).unwrap();
+        assert_eq!(v["records"][0]["mpn"], "CL05B104KO5NNNC");
+        assert_eq!(fake.sent().len(), calls);
+        // Offline: left out, with a note.
+        let v = search(
+            &p,
+            &Search {
+                offline: true,
+                ..s.clone()
+            },
+            &cats,
+        )
+        .unwrap();
+        assert!(
+            v["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["source"] != "digikey")
+        );
+        assert_eq!(v["notes"][0]["reason"], "offline");
+        assert_eq!(fake.sent().len(), calls);
+        // No keys: a warning, and the library still answers.
+        let none = Catalogues::at(_k.path(), 1_000, MAX_AGE);
+        let v = search(&p, &s, &none).unwrap();
+        assert_eq!(
+            (
+                v["warnings"][0]["code"].as_str(),
+                v["warnings"][0]["details"]["reason"].as_str()
+            ),
+            (Some("parts_source_refused"), Some("not_configured"))
+        );
+        // DigiKey down: a warning naming it.
+        fake.set(
+            ryueda_parts::fetch::Method::Post,
+            &ryueda_parts::digikey::testing::keyword_url(),
+            ryueda_parts::fetch::Response::new(503, ""),
+        );
+        let v = search(
+            &p,
+            &Search {
+                category: Some("resistor".into()),
+                ..s
+            },
+            &cats,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                v["warnings"][0]["code"].as_str(),
+                v["warnings"][0]["source"].as_str()
+            ),
+            (Some("parts_source_unreachable"), Some("digikey"))
+        );
+    }
+
+    #[test]
+    fn a_distributors_part_is_shown_kept_and_shown_again_on_refresh() {
+        let (_c, _k, fake, cats) = live();
+        let (_p, p) = crate::netlist::tests::project(&[]);
+        let calls = |f: &ryueda_parts::fetch::Fake| {
+            f.sent()
+                .iter()
+                .filter(|r| r.url.contains("productdetails"))
+                .count()
+        };
+        let v = show(&p, "digikey:296-1234-1-ND", false, false, &cats).unwrap();
+        assert_eq!(
+            (v["records"][0]["lifecycle"].as_str(), calls(&fake)),
+            (Some("not_recommended"), 1)
+        );
+        show(&p, "digikey:296-1234-1-ND", false, false, &cats).unwrap();
+        assert_eq!(calls(&fake), 1, "kept a day");
+        show(&p, "digikey:296-1234-1-ND", true, false, &cats).unwrap();
+        assert_eq!(calls(&fake), 2, "refresh calls again");
+        // Offline: what is kept, with a note.
+        let v = show(&p, "digikey:296-1234-1-ND", true, true, &cats).unwrap_err();
+        assert_eq!(
+            v.code,
+            Code::PartsNotFound,
+            "refresh offline drops the kept record and calls nothing"
+        );
+        let v = show(&p, "digikey:296-1234-1-ND", false, true, &cats).unwrap();
+        assert_eq!(v["notes"][0]["reason"], "offline");
+        // A part number asks DigiKey live.
+        let v = show(&p, "mpn:CL05B104KO5NNNC", false, false, &cats).unwrap();
+        assert!(
+            v["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["source"] == "digikey")
+        );
+        assert!(show(&p, "digikey:nothing-ND", false, false, &cats).is_err());
+    }
+
+    #[test]
+    fn a_refresh_fetches_each_placed_offers_record_and_stops_at_a_limit() {
+        let (_c, _k, fake, cats) = live();
+        let wanted = vec![
+            ("digikey", "1276-1001-1-ND".to_owned()),
+            ("digikey", "gone-ND".to_owned()),
+        ];
+        let job = ryu_session::job::Job::default();
+        let v = refresh_records(&wanted, &cats, &job).unwrap();
+        assert_eq!(
+            v["fetched"],
+            json!([{"source": "digikey", "key": "1276-1001-1-ND"}])
+        );
+        assert_eq!(
+            v["missing"],
+            json!([{"source": "digikey", "key": "gone-ND"}])
+        );
+        let dk = ryueda_parts::distributor::distributor("digikey").unwrap();
+        assert!(cats.live.cached(dk, "1276-1001-1-ND", 1_000).is_some());
+        // DigiKey says to wait: what was fetched and what remains.
+        fake.set(
+            ryueda_parts::fetch::Method::Get,
+            &ryueda_parts::digikey::testing::details_url("gone-ND"),
+            ryueda_parts::fetch::Response::new(429, "").with_header("Retry-After", "9"),
+        );
+        let e = refresh_records(&wanted, &cats, &job).unwrap_err();
+        assert_eq!(e.code, Code::PartsRateLimited);
+        assert_eq!(e.details["fetched"][0]["key"], "1276-1001-1-ND");
+        assert_eq!(
+            e.details["remaining"],
+            json!([{"source": "digikey", "key": "gone-ND"}])
+        );
+        // No keys: listed, not called.
+        let none = Catalogues::at(_k.path(), 1_000, MAX_AGE);
+        assert_eq!(
+            refresh_records(&wanted, &none, &job).unwrap()["not_configured"],
+            json!(["digikey"])
         );
     }
 }

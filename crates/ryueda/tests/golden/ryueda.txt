@@ -4,10 +4,11 @@ breakout.netlist 16daf5eca5b841dca1e0b3b6ee23a6b0
 generated.erc 78239ee711bef7fca90a828cc74caab3
 generated.netlist 5320f73be71d1afe60130384cd00fcea
 kicad.library a8dfd19c6c120da465272302f8978842
+parts.digikey.records 22ee956abb9ece594e25dd55164199c9
 parts.erc 2ff58524a6d1db3950b280aa911f6dcb
 parts.jlc.search 89035579682f3f880b534a9c10a8223e
 parts.jlc.show 276be3419d839140017e4d8d0b58a28c
-parts.jlc.sources 13c2cbceb84b7d938ea1f1bc585f08aa
+parts.jlc.sources dec518645eab153423a70dbc9bb57012
 parts.search.capacitor 5be75fa2b26f83eabfcd01291ce286c7
 parts.search.like e1035f75997d04ad056b470f50a16999
 parts.search.resistor a4d933aa8d4db78a5a774af86b274f4e

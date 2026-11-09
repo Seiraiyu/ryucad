@@ -379,10 +379,18 @@ fn dispatch(
             Some(made) => made,
             None => crate::parts::sync(&source, job),
         },
-        Request::PartsShow { key, refresh, .. } => {
-            let cats = session.catalogues()?;
-            crate::parts::show(session.project(), &key, refresh, &cats)
-        }
+        Request::PartsShow {
+            key,
+            refresh,
+            offline,
+        } => match session.prepared.take() {
+            Some(made) => made,
+            None => {
+                let cats = session.catalogues()?;
+                let pl = crate::parts::show_plan(session.project(), &key, refresh, offline, &cats)?;
+                crate::parts::show_finish(pl, &cats, job)
+            }
+        },
         Request::PartsConfigure {
             assembly,
             build_quantity,
@@ -400,18 +408,24 @@ fn dispatch(
         Request::PartsRefresh { force } => match session.prepared.take() {
             Some(made) => made,
             None => {
+                let cats = session.catalogues()?;
                 let names = crate::parts::catalogues_placed(session.project());
-                crate::parts::refresh(&names, force, job)
+                let wanted = crate::parts::offers_placed_live(session.project(), &cats, force);
+                crate::parts::refresh_all(&names, &wanted, &cats, force, job)
             }
         },
         Request::PartsSources {} => {
             let cats = session.catalogues()?;
             crate::parts::sources(session.project(), &cats)
         }
-        Request::PartsSearch { search } => {
-            let cats = session.catalogues()?;
-            crate::parts::search(session.project(), &search, &cats)
-        }
+        Request::PartsSearch { search } => match session.prepared.take() {
+            Some(made) => made,
+            None => {
+                let cats = session.catalogues()?;
+                let pl = crate::parts::plan(session.project(), &search, &cats)?;
+                crate::parts::finish(pl, &cats, job)
+            }
+        },
         Request::LibcompDelete {
             libcomp,
             expected_revision,

@@ -729,6 +729,14 @@ pub enum Code {
     /// ryueda supply: no source holds a record of any of a placed part's
     /// offers (a warning).
     PartNoData,
+    /// ryueda: a live source's rate limit is spent (`limit`: `minute` or
+    /// `day` as ryueda counts them, `source` where the source said so);
+    /// the details say when to try again (`retry_after_s`, `retry_at`).
+    /// Not the agent's fault.
+    PartsRateLimited,
+    /// ryueda supply: a placed part a source says is not recommended for
+    /// new designs, at last time buy, or obsolete (a warning).
+    PartLifecycle,
     /// The kernel refused a sheet metal feature: a body that isn't sheet
     /// metal (recognition's refusal), or an edge flange it can't make.
     /// Its `reason` (the kernel's refusal in snake case), the kernel's
@@ -795,6 +803,7 @@ impl Code {
             | Code::CacheRemoteUnreachable
             | Code::DependencyFetchFailed
             | Code::PartsSourceUnreachable
+            | Code::PartsRateLimited
             | Code::Cancelled => 4,
             _ => 1,
         }
@@ -864,6 +873,8 @@ mod tests {
             (Code::PartOutOfStock, "part_out_of_stock", 1),
             (Code::PartExtended, "part_extended", 1),
             (Code::PartNoData, "part_no_data", 1),
+            (Code::PartsRateLimited, "parts_rate_limited", 4),
+            (Code::PartLifecycle, "part_lifecycle", 1),
         ] {
             assert_eq!(json!(code), json!(name));
             assert_eq!(code.exit_code(), exit, "{name}");

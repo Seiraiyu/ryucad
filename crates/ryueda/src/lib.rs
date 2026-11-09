@@ -14,6 +14,7 @@ pub mod conn;
 pub mod coord;
 pub mod daemon;
 pub mod design;
+pub mod distributors;
 pub mod doc;
 pub mod edit;
 pub mod erc;

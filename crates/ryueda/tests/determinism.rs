@@ -104,6 +104,10 @@ fn ryueda_out(dir: &Path, threads: usize, args: &[&str], env: &[(&str, &str)]) -
         .env("RYUEDA_CONFIG_DIR", dir.join("..").join("config"))
         // No catalogue this machine holds ever shows in a golden.
         .env("RYUEDA_CACHE_DIR", dir.join("..").join("cache"));
+    // No person's distributor keys or API ever reach a golden.
+    for v in ryueda_parts::distributor::env_vars() {
+        cmd.env_remove(v);
+    }
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -275,6 +279,23 @@ fn netlists_and_erc_are_bit_exact() {
         }
         golden.json(name, &one);
     }
+    // DigiKey (6.C): our fixtures' products as records, at a fixed time.
+    let records: Vec<Value> = [
+        ryueda_parts::digikey::testing::CAP,
+        ryueda_parts::digikey::testing::LDO,
+    ]
+    .into_iter()
+    .map(|f| {
+        let p = ryueda_parts::digikey::testing::product(f);
+        serde_json::to_value(ryueda_parts::digikey::record::record(
+            &p,
+            None,
+            1_793_964_810,
+        ))
+        .unwrap()
+    })
+    .collect();
+    golden.json("parts.digikey.records", &Value::from(records));
     std::fs::write(
         lib.join("parts.json"),
         "{\"assembly\": \"jlcpcb\", \"build_quantity\": 3, \"format\": 1, \"kind\": \"ryueda.parts\"}\n",
