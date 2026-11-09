@@ -2390,7 +2390,6 @@ fn build_split(
     before: &dyn Results,
     run: &Run,
 ) -> Result<Made> {
-    use crate::doc::body::Keep;
     let t = &s.target;
     let built = read(part, solids, id, f, "target", t, before)?;
     let at = crate::geometry::At {
@@ -2400,10 +2399,33 @@ fn build_split(
         results: before,
     };
     let Some(plane) = s.plane() else {
-        return Err(Error::new(
-            Code::Internal,
-            format!("split {id}: a tool is built in Task 9"),
-        ));
+        return match crate::body::split_tool(part, solids, id, f, s, before)? {
+            crate::body::SplitTool::Solid(tool) => {
+                // Its inside is behind, its outside in front; flip swaps them.
+                let (inside, outside) = (BooleanOp::Intersect, BooleanOp::Subtract);
+                let (behind_op, front_op) = if s.flip {
+                    (outside, inside)
+                } else {
+                    (inside, outside)
+                };
+                let side = |name: &'static str, kop: BooleanOp| -> Result<Built> {
+                    let key = crate::body::side_key(&part.id, id, name);
+                    let tools = [ToolBody::whole(key, &tool, id)];
+                    apply(part, id, "split", (kop, "split"), t, built, &tools, run)
+                        .map_err(|e| crate::body::tool_side_error(id, t, name, e))
+                };
+                sides(
+                    s,
+                    t,
+                    id,
+                    || side("behind", behind_op),
+                    || side("front", front_op),
+                )
+            }
+            crate::body::SplitTool::Sheet(sheet) => {
+                split_by_sheet(part, id, s, (t, built), &sheet, run)
+            }
+        };
     };
     let pl = crate::geometry::one(&at, "plane", plane, crate::geometry::Want::Plane)?.plane();
     let normal = if s.flip { -pl.normal } else { pl.normal };
@@ -2415,23 +2437,83 @@ fn build_split(
         apply(part, id, "split", (kop, "split"), t, built, &tools, run)
             .map_err(|e| crate::body::side_error(id, t, name, e))
     };
+    sides(
+        s,
+        t,
+        id,
+        || side("behind", BooleanOp::Subtract),
+        || side("front", BooleanOp::Intersect),
+    )
+}
+
+/// A split's sides from two closures, behind and front: the target keeps
+/// behind; with `keep: both`, the split founds what is in front. Both
+/// sides are made side by side, the first failure in order reported.
+fn sides(
+    s: &crate::doc::body::Split,
+    t: &Id,
+    id: &Id,
+    behind: impl FnOnce() -> Result<Built> + Send,
+    front: impl FnOnce() -> Result<Built> + Send,
+) -> Result<Made> {
+    use crate::doc::body::Keep;
     match s.keep {
-        Keep::Behind => {
-            let behind = side("behind", BooleanOp::Subtract)?;
-            Ok(Made::new(vec![(t.clone(), Arc::new(behind))]))
-        }
+        Keep::Behind => Ok(Made::new(vec![(t.clone(), Arc::new(behind()?))])),
         Keep::Both => {
-            let (behind, front) = rayon::join(
-                || side("behind", BooleanOp::Subtract),
-                || side("front", BooleanOp::Intersect),
-            );
+            let (b, f) = rayon::join(behind, front);
             // The first failure in order, not the first a thread found.
-            let (behind, front) = (behind?, front?);
+            let (b, f) = (b?, f?);
             Ok(Made::new(vec![
-                (t.clone(), Arc::new(behind)),
-                (id.clone(), Arc::new(front)),
+                (t.clone(), Arc::new(b)),
+                (id.clone(), Arc::new(f)),
             ]))
         }
+    }
+}
+
+/// Split `id` (`s`) of target `t` (`built`) by a sheet: one division,
+/// each side one body. The side behind the sheet (against its normal,
+/// and what it doesn't reach) is the target's; flip swaps them.
+fn split_by_sheet(
+    part: &Part,
+    id: &Id,
+    s: &crate::doc::body::Split,
+    (t, built): (&Id, &Built),
+    sheet: &Body,
+    run: &Run,
+) -> Result<Made> {
+    use crate::doc::body::Keep;
+    let key = op_key(&part.id, id);
+    let tk = crate::body::side_key(&part.id, id, "tool");
+    let tool = crate::body::side_tool(id, sheet, "tool")?;
+    let tools = [ToolBody::whole(tk, &tool, id)];
+    let placed = [Tool {
+        key: tk,
+        body: sheet,
+        place: Rigid::IDENTITY,
+    }];
+    let work = crate::work::work(run.job);
+    let (d, journal) = ryukei::boolean::divide_sides_with(key, &built.body, &placed, &work)
+        .map_err(|e| {
+            crate::work::stopped(&e, run.job)
+                .unwrap_or_else(|| boolean_error(part, id, "split", t, built, &tools, None, e))
+        })?;
+    let (back, front) = if s.flip {
+        (d.front, d.back)
+    } else {
+        (d.back, d.front)
+    };
+    let one = |b: Option<Body>, name: &str| -> Result<Built> {
+        let b = b.ok_or_else(|| crate::body::empty_side(id, t, name, "tool"))?;
+        let origins = boolean_origins(id, built, &tools, &b, &journal);
+        finish(id, "split", (b, journal.clone()), origins)
+    };
+    match s.keep {
+        Keep::Behind => Ok(Made::new(vec![(t.clone(), Arc::new(one(back, "behind")?))])),
+        Keep::Both => Ok(Made::new(vec![
+            (t.clone(), Arc::new(one(back, "behind")?)),
+            (id.clone(), Arc::new(one(front, "front")?)),
+        ])),
     }
 }
 

@@ -267,7 +267,7 @@ fn fill_error(part: &Part, id: &Id, x: &Fill, place: &[Place], e: ryukei::Error)
 
 /// Faces resolved in the feature's view: the one body they are faces of
 /// (`targets_mixed` for faces of several), its founder, and each name.
-fn resolve_faces<'a, 'f>(
+pub(crate) fn resolve_faces<'a, 'f>(
     part: &Part,
     id: &Id,
     ty: &str,
@@ -341,7 +341,7 @@ pub(crate) fn extract_origins(id: &Id, body: &Body) -> Origins {
 
 /// The kernel's refusal of an extract: `no_faces`, or
 /// `non_manifold_vertex` naming the vertex in its body.
-fn extract_error(part: &Part, id: &Id, from: &Id, e: &ryukei::Error) -> Error {
+pub(crate) fn extract_error(part: &Part, id: &Id, from: &Id, e: &ryukei::Error) -> Error {
     use ryukei::SheetError as S;
     let mut err = Error::new(Code::ExtractFailed, format!("extract {id}: {e}"))
         .with("feature", id)

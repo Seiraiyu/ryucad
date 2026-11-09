@@ -782,7 +782,7 @@ pub fn lumps(b: &Body) -> usize {
 
 /// `operation_no_effect` for a split (feature `id` of `t`) leaving `side`
 /// empty: nothing of `t` lies there.
-fn empty_side(id: &Id, t: &Id, side: &str) -> Error {
+pub(crate) fn empty_side(id: &Id, t: &Id, side: &str, what: &str) -> Error {
     let place = if side == "front" {
         "in front of"
     } else {
@@ -791,7 +791,7 @@ fn empty_side(id: &Id, t: &Id, side: &str) -> Error {
     Error::new(
         Code::OperationNoEffect,
         format!(
-            "split {id}: nothing of {t} lies {place} its plane; move the plane into {t}, or flip it"
+            "split {id}: nothing of {t} lies {place} its {what}; move the {what} into {t}, or flip it"
         ),
     )
     .with("feature", id)
@@ -836,10 +836,10 @@ pub(crate) fn half_space(
     }
     let res = ryukei::tol::LINEAR_RESOLUTION;
     if far <= res {
-        return Err(empty_side(id, t, "front"));
+        return Err(empty_side(id, t, "front", "plane"));
     }
     if near >= -res {
-        return Err(empty_side(id, t, "behind"));
+        return Err(empty_side(id, t, "behind", "plane"));
     }
     // The box's foot: the box's middle brought onto the plane.
     let middle = Point3::new(
@@ -923,8 +923,81 @@ pub(crate) fn emptied(side: &str, e: &Error) -> Option<&'static str> {
 /// naming it. Anything else as it was.
 pub(crate) fn side_error(id: &Id, t: &Id, side: &str, e: Error) -> Error {
     match emptied(side, &e) {
-        Some(s) => empty_side(id, t, s),
+        Some(s) => empty_side(id, t, s, "plane"),
         None => e,
+    }
+}
+
+/// A solid tool's side (`side`, by its boolean) refused because a side is
+/// empty, named as [`empty_side`] names it, "tool": the boolean leaving
+/// nothing means its own side is empty; one changing nothing (an
+/// intersection of a target wholly inside, a subtraction of one wholly
+/// outside) means the other side is.
+pub(crate) fn tool_side_error(id: &Id, t: &Id, side: &str, e: Error) -> Error {
+    let empty = match (e.code, side) {
+        (Code::BodyEmptied, s) => s,
+        (Code::OperationNoEffect, "behind") => "front",
+        (Code::OperationNoEffect, _) => "behind",
+        _ => return e,
+    };
+    empty_side(id, t, empty, "tool")
+}
+
+/// What a split cuts with besides a plane: a solid (two booleans, its
+/// inside behind) or a sheet (one division), as the split sees it. Faces
+/// are taken off their body as a sheet first.
+pub(crate) enum SplitTool {
+    Solid(Built),
+    Sheet(Body),
+}
+
+/// The key a split's faces are taken off their body under, from IDs only.
+fn split_extract_key(part: &Id, id: &Id) -> OpKey {
+    let mut bytes = b"ryucad.split.extract\0".to_vec();
+    bytes.extend_from_slice(part.as_str().as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(id.as_str().as_bytes());
+    OpKey::from_bytes(&bytes)
+}
+
+/// The tool of split `id` (`f`, `s`) by a body or faces, as it sees it.
+/// A tool body may be either kind, and is read, never changed; it may
+/// not be the target.
+pub(crate) fn split_tool(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    f: &Feature,
+    s: &crate::doc::body::Split,
+    before: &dyn Results,
+) -> Result<SplitTool> {
+    use crate::doc::body::SplitBy;
+    match &s.by {
+        SplitBy::Plane(_) => unreachable!("a plane is split by its half-space"),
+        SplitBy::Body(b) => {
+            if *b == s.target {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("split {id}: {b} can't split itself; name another body as the tool"),
+                )
+                .with("feature", id)
+                .with("pointer", "/tool/body"));
+            }
+            let built = crate::rebuild::read(part, solids, id, f, "tool", b, before)?;
+            Ok(match built.body.kind() {
+                ryukei::topo::BodyKind::Sheet => SplitTool::Sheet(built.body.clone()),
+                _ => SplitTool::Solid(side_tool(id, &built.body, "tool")?),
+            })
+        }
+        SplitBy::Faces(_) => {
+            let refs = s.references();
+            let (from, built, names) =
+                crate::surface::resolve_faces(part, id, "split", &refs, before)?;
+            let (sheet, _) =
+                ryukei::sheet::extract(split_extract_key(&part.id, id), &built.body, &names)
+                    .map_err(|e| crate::surface::extract_error(part, id, from, &e))?;
+            Ok(SplitTool::Sheet(sheet))
+        }
     }
 }
 
@@ -964,6 +1037,86 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("no face at {at} mm along axis {axis}"));
         b.face(f).unwrap().name
+    }
+
+    /// A feature from its JSON, at this build's format, in millimetres.
+    fn latest(v: Value) -> Feature {
+        let mut v = v;
+        v["format"] = json!(crate::doc::files::FEATURE_FORMAT);
+        v["kind"] = json!("ryucad.feature");
+        Feature::from_json(&v, Unit::Mm, &crate::expr::Env::empty()).unwrap()
+    }
+
+    /// A new box `size` mm at `origin` mm.
+    fn box_at(origin: [f64; 3], size: [f64; 3]) -> Feature {
+        latest(json!({"type": "box", "operation": "new",
+                      "params": {"x": size[0], "y": size[1], "z": size[2]},
+                      "placement": {"origin": origin, "x": [1, 0, 0], "z": [0, 0, 1]}}))
+    }
+
+    #[test]
+    fn a_box_splits_by_a_box_by_faces_and_by_a_sheet() {
+        // `h` 10 mm a side; `t` a box over its top half, whose bottom face
+        // lies across `h` at z = 5 facing down; `e` that face as a sheet.
+        let base = vec![
+            ("h", box_at([0.0, 0.0, 0.0], [10.0, 10.0, 10.0])),
+            ("t", box_at([-1.0, -1.0, 5.0], [12.0, 12.0, 10.0])),
+        ];
+        let r = rebuild_part(&part(base.clone()));
+        let tb = &r.output(&id("t")).unwrap().solid(&id("t")).unwrap().body;
+        let bottom = face("t", plane(tb, 2, 5.0));
+        let mut with_e = base.clone();
+        with_e.push((
+            "e",
+            latest(json!({"type": "extract", "faces": [bottom.clone()]})),
+        ));
+        for (features, tool) in [
+            (base.clone(), json!({"body": "t"})),
+            (base.clone(), json!({"faces": [bottom.clone()]})),
+            (with_e, json!({"body": "e"})),
+        ] {
+            for flip in [false, true] {
+                let mut fs = features.clone();
+                fs.push((
+                    "sp",
+                    latest(json!({"type": "split", "target": "h", "tool": tool, "flip": flip})),
+                ));
+                let r = rebuild_part(&part(fs));
+                let out = match r.result(&id("sp")).unwrap() {
+                    Ok(o) => o,
+                    Err(e) => panic!("{tool} flip {flip}: {e}"),
+                };
+                let v = |x: &str| volume(&out.solid(&id(x)).unwrap().body) * 1e9;
+                // Behind a solid tool is its inside; behind a sheet, the
+                // side its normal (down) points away from: z > 5 either way.
+                let (b, f) = (v("h"), v("sp"));
+                assert!(
+                    (b - 500.0).abs() < 1e-3 && (f - 500.0).abs() < 1e-3,
+                    "{tool}: {b} {f}"
+                );
+                let top = |x: &str| {
+                    let body = &out.solid(&id(x)).unwrap().body;
+                    let bx = body.faces().map(|f| ryukei::intersect::face_box(body, f));
+                    bx.map(|b| b.max().z).fold(f64::MIN, f64::max)
+                };
+                // Unflipped, `h` keeps its top half; flipped, its bottom.
+                let want = if flip { 0.005 } else { 0.010 };
+                assert!(
+                    (top("h") - want).abs() < 1e-9,
+                    "{tool} flip {flip}: {}",
+                    top("h")
+                );
+            }
+        }
+        // A tool can't be its own target.
+        let mut fs = base.clone();
+        fs.push((
+            "sp",
+            latest(json!({"type": "split", "target": "h", "tool": {"body": "h"}})),
+        ));
+        let r = rebuild_part(&part(fs));
+        let e = r.result(&id("sp")).unwrap().as_ref().unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam, "{e}");
     }
 
     fn volume(b: &Body) -> f64 {
