@@ -439,7 +439,20 @@ fn sheet_pcurve_bound(
         // derivative at the middle and its third over the span: it
         // vanishes to second order where the fit follows the surface, so
         // a span is certified with few halvings, or none.
-        if let Some((bound, g)) = third_order(s, sheet, p, c, (&part, &cpart), [x0, x1]) {
+        // A NURBS's Taylor cells first (#254): about the span's middle,
+        // far cheaper than cutting ten nets to it, and certified as the
+        // cut is. A span they certify, the cut's path certifies too (here
+        // or after halving), and a fit's tolerance is resolution either
+        // way; anything else is the cut's, as before.
+        if matches!(sheet, Sheet::Nurbs(_))
+            && let Some((bound, _)) =
+                third_order(s, sheet, p, c, (&part, &cpart), [x0, x1], Jets::Cells)
+            && bound <= target
+        {
+            return bound;
+        }
+        if let Some((bound, g)) = third_order(s, sheet, p, c, (&part, &cpart), [x0, x1], Jets::Cut)
+        {
             if bound <= target || depth == 0 || g > target / 2.0 {
                 return bound;
             }
@@ -529,6 +542,15 @@ fn derivatives_at<V: crate::geom::Coords>(p: &BezierCurve<V>, x: f64) -> [V; 3] 
     out
 }
 
+/// How [`third_order`] encloses a span's jets: by the surface's Taylor
+/// cells ([`Sheet::jet3_box_small`]), or by cutting its Bézier nets to
+/// the span ([`Sheet::jet3_box`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Jets {
+    Cells,
+    Cut,
+}
+
 /// [`sheet_pcurve_bound`]'s bound over local `[x0, x1]` by Taylor's
 /// formula to third order about the middle `m`, for a surface with third
 /// derivatives ([`Sheet::jet3_box`]; `None` for the others), with the
@@ -548,10 +570,15 @@ fn third_order(
     c: &Piece3,
     (part, cpart): (&BezierCurve<Vector2>, &Piece3),
     [x0, x1]: [f64; 2],
+    jets: Jets,
 ) -> Option<(f64, f64)> {
     let w = x1 - x0;
     let (lo, hi) = part.hull();
-    let j3 = sheet.jet3_box([[lo.x, hi.x], [lo.y, hi.y]])?;
+    let b = [[lo.x, hi.x], [lo.y, hi.y]];
+    let j3 = match jets {
+        Jets::Cells => sheet.jet3_box_small(b)?,
+        Jets::Cut => sheet.jet3_box(b)?,
+    };
     let hull2 = |k: usize| {
         let (a, b) = derivative_hull(part, k, w);
         [widened(a.x, b.x), widened(a.y, b.y)]
@@ -2147,20 +2174,28 @@ mod tests {
             let c = piece(hermite(a + off, da, b, db, 1.0), [0.0, 1.0]);
             for [x0, x1] in [[0.0, 1.0], [0.0, 0.5], [0.3, 0.45], [0.9, 1.0]] {
                 let (pp, cc) = (sub(&p, x0, x1), sub(&c, x0, x1));
-                let (bound, _) =
-                    third_order(&spline, &sheet, &p, &c, (&pp, &cc), [x0, x1]).unwrap();
-                let worst = (0..=400)
-                    .map(|k| {
-                        let x = x0 + (x1 - x0) * f64::from(k) / 400.0;
-                        let (q, _) = eval(&p, x);
-                        let (cp, _) = eval(&c, x);
-                        (spline.point(q.x, q.y).to_vector() - cp).length()
-                    })
-                    .fold(0.0, f64::max);
-                assert!(worst <= bound, "{push} [{x0}, {x1}]: {worst} > {bound}");
-                if push == 0.0 && [x0, x1] == [0.0, 1.0] {
-                    // The Hermite span's own error, not the enclosures'.
-                    assert!(bound <= 1e3 * worst.max(LINEAR_RESOLUTION), "{bound}");
+                for jets in [Jets::Cut, Jets::Cells] {
+                    let (bound, _) =
+                        third_order(&spline, &sheet, &p, &c, (&pp, &cc), [x0, x1], jets).unwrap();
+                    let worst = (0..=400)
+                        .map(|k| {
+                            let x = x0 + (x1 - x0) * f64::from(k) / 400.0;
+                            let (q, _) = eval(&p, x);
+                            let (cp, _) = eval(&c, x);
+                            (spline.point(q.x, q.y).to_vector() - cp).length()
+                        })
+                        .fold(0.0, f64::max);
+                    assert!(
+                        worst <= bound,
+                        "{jets:?} {push} [{x0}, {x1}]: {worst} > {bound}"
+                    );
+                    if push == 0.0 && [x0, x1] == [0.0, 1.0] {
+                        // The Hermite span's own error, not the enclosures'.
+                        assert!(
+                            bound <= 1e3 * worst.max(LINEAR_RESOLUTION),
+                            "{jets:?} {bound}"
+                        );
+                    }
                 }
             }
         }
