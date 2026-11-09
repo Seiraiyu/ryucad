@@ -2604,7 +2604,7 @@ fn from_disk(disk: &Disk, h: &blake3::Hash, part: &Id, id: &Id) -> Option<Result
 /// Whether a feature's refusal is kept in the disk cache by its input
 /// hash, as its solids would be (#503): a kernel's verdict on what the
 /// hash covers (a heal, a boolean, a blend, a sweep, a loft, an offset, a
-/// shell, a mirror), the same every time and dear to reach again (a file's
+/// shell, a mirror, a tweak), the same every time and dear to reach again (a file's
 /// refused bodies healed again took the Switchwire's export 1,746 s).
 /// Anything else (a missing file, a dependency, a cancel, an internal
 /// fault) depends on more than the hash, or costs nothing to find again.
@@ -2620,6 +2620,7 @@ pub fn failure_kept(e: &Error) -> bool {
             | Code::ShellFailed
             | Code::OffsetFailed
             | Code::MirrorFailed
+            | Code::TweakFailed
             | Code::SheetMetalFailed
     )
 }
@@ -4008,5 +4009,10 @@ mod tests {
         );
         assert_ne!(op_key(&id("p"), &id("f")), op_key(&id("q"), &id("f")));
         assert_ne!(op_key(&id("p"), &id("f")), op_key(&id("p"), &id("g")));
+    }
+
+    #[test]
+    fn a_tweaks_refusal_is_kept_on_disk() {
+        assert!(failure_kept(&Error::new(Code::TweakFailed, "refused")));
     }
 }

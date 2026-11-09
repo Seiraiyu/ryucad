@@ -672,6 +672,13 @@ pub enum Code {
     /// mirrored (`solid`) are in the details. A combined copy's boolean
     /// refuses as `boolean_failed`.
     MirrorFailed,
+    /// The kernel refused a face tweak (`move_face`, `replace_face`, and
+    /// from ryucad 17.B `draft`): its `reason` (the refusal's variant in
+    /// snake case, an unsupported one's `case`), `kernel` (`tweak`), the
+    /// kernel's text (`refusal`), the faces, edges and vertices it names
+    /// (`entities`, each with its `role`) and, where there is a known way
+    /// out, a `hint` are in the details.
+    TweakFailed,
     /// ryueda: an instruction naming a region (`region:<id>`) the layout
     /// no longer has, kept until released (a warning).
     RegionUnresolved,
@@ -928,6 +935,8 @@ mod tests {
     fn mirror_code() {
         assert_eq!(json!(Code::MirrorFailed), json!("mirror_failed"));
         assert_eq!(Code::MirrorFailed.exit_code(), 1);
+        assert_eq!(json!(Code::TweakFailed), json!("tweak_failed"));
+        assert_eq!(Code::TweakFailed.exit_code(), 1);
     }
 
     #[test]
