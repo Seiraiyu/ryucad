@@ -226,6 +226,211 @@ impl Sew {
     }
 }
 
+/// What a thicken thickens: a sheet, by founder (consumed), or faces of
+/// one body of either kind (extracted first, the body left as it was).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ThickenFrom {
+    Sheet(Id),
+    Faces(Vec<Reference>),
+}
+
+/// Faces given a front and back of their own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SideGroup {
+    pub front: Quantity,
+    pub back: Quantity,
+    pub faces: Vec<Reference>,
+}
+
+/// A thicken: `from` given `front` along its faces' normals and `back`
+/// against them (each group's faces their own), the solid founded
+/// (`new`) or joined to, cut from or intersected with `combine`'s targets.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Thicken {
+    pub from: ThickenFrom,
+    pub front: Quantity,
+    pub back: Quantity,
+    pub faces: Vec<SideGroup>,
+    pub combine: Combine,
+}
+
+impl Thicken {
+    /// Its fields: front and back always, the operation always (as a
+    /// mirror's), targets with a join, cut or intersect.
+    pub fn fields(&self) -> Value {
+        let from = match &self.from {
+            ThickenFrom::Sheet(s) => json!({"sheet": s}),
+            ThickenFrom::Faces(f) => json!({"faces": refs_json(f)}),
+        };
+        let mut v = json!({"from": from, "front": self.front.text(), "back": self.back.text(),
+                           "operation": self.combine.operation.as_str()});
+        if !self.faces.is_empty() {
+            v["faces"] = Value::Array(
+                self.faces
+                    .iter()
+                    .map(|g| json!({"front": g.front.text(), "back": g.back.text(),
+                                    "faces": refs_json(&g.faces)}))
+                    .collect(),
+            );
+        }
+        if !self.combine.is_new() {
+            v["targets"] = json!(self.combine.targets);
+        }
+        v
+    }
+
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj, default: Unit, env: &Env) -> Result<Thicken> {
+        let from = {
+            let v = o.take("from")?;
+            let mut f = Obj::new(&v, "/from")?;
+            let from = match (f.take_opt("sheet"), f.take_opt("faces")) {
+                (Some(Value::String(s)), None) => ThickenFrom::Sheet(
+                    Id::parse(&s, "feature").map_err(|e| e.with("pointer", "/from/sheet"))?,
+                ),
+                (None, Some(faces)) => ThickenFrom::Faces(refs(&faces, "/from/faces")?),
+                _ => {
+                    return Err(invalid(
+                        "/from",
+                        "from is {\"sheet\": <founder>} or {\"faces\": [faces of one body]}",
+                    ));
+                }
+            };
+            f.finish()?;
+            from
+        };
+        let front = side(o, "front", default, env, "/front")?;
+        let back = side(o, "back", default, env, "/back")?;
+        let faces = match o.take_opt("faces") {
+            None => Vec::new(),
+            Some(v) => {
+                let a = v
+                    .as_array()
+                    .ok_or_else(|| invalid("/faces", "faces is an array of groups {front, back, faces}"))?;
+                a.iter()
+                    .enumerate()
+                    .map(|(i, g)| {
+                        let at = format!("/faces/{i}");
+                        let mut f = Obj::new(g, &at)?;
+                        let front = side(&mut f, "front", default, env, &format!("{at}/front"))?;
+                        let back = side(&mut f, "back", default, env, &format!("{at}/back"))?;
+                        if front.meters() == 0.0 && back.meters() == 0.0 {
+                            return Err(Error::new(
+                                Code::InvalidParam,
+                                "a group's front and back are both zero: its faces would have no thickness",
+                            )
+                            .with("pointer", format!("{at}/front")));
+                        }
+                        let faces = refs(&f.take("faces")?, &format!("{at}/faces"))?;
+                        f.finish()?;
+                        Ok(SideGroup { front, back, faces })
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            }
+        };
+        if front.meters() == 0.0 && back.meters() == 0.0 && faces.is_empty() {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "a thicken gives its faces a front or a back: both are zero",
+            )
+            .with("pointer", "/front"));
+        }
+        let operation = o
+            .take("operation")?
+            .as_str()
+            .and_then(Operation::parse)
+            .ok_or_else(|| invalid("/operation", "operation is one of new, join, cut, intersect"))?;
+        let targets = match o.take_opt("targets") {
+            None => Vec::new(),
+            Some(v) => targets_from_json(&v, "/targets")?,
+        };
+        let combine = match (operation, targets.is_empty()) {
+            (Operation::New, true) => Combine::NEW,
+            (Operation::New, false) => {
+                return Err(invalid("/targets", "a thicken whose solid is new has no targets"));
+            }
+            (_, true) => {
+                return Err(invalid(
+                    "/targets",
+                    &format!("a thicken whose solid {}s names the solids it acts on: targets is required", operation.as_str()),
+                ));
+            }
+            (_, false) => Combine { operation, targets },
+        };
+        let t = Thicken { from, front, back, faces, combine };
+        t.check_groups()?;
+        Ok(t)
+    }
+
+    /// Each group's faces: of the sheet (from a sheet) or among `from`'s
+    /// faces, each in one group once; `from`'s faces each once.
+    fn check_groups(&self) -> Result<()> {
+        if let ThickenFrom::Faces(f) = &self.from {
+            once(f.iter().enumerate().map(|(i, r)| (format!("from.faces.{i}"), r)).collect())?;
+        }
+        let grouped: Vec<(String, &Reference)> = self.group_roles().collect();
+        for (role, r) in &grouped {
+            let ok = match &self.from {
+                ThickenFrom::Sheet(s) => r.feature == *s,
+                ThickenFrom::Faces(f) => f.contains(r),
+            };
+            if !ok {
+                let of = match &self.from {
+                    ThickenFrom::Sheet(s) => format!("a face of its sheet {s}"),
+                    ThickenFrom::Faces(_) => "one of the faces it thickens (from.faces)".to_owned(),
+                };
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("{}/{}, grouped as {role}, isn't {of}", r.feature, r.name),
+                )
+                .with("pointer", format!("/{}", role.replace('.', "/"))));
+            }
+        }
+        once(grouped)
+    }
+
+    fn group_roles(&self) -> impl Iterator<Item = (String, &Reference)> {
+        self.faces.iter().enumerate().flat_map(|(i, g)| {
+            g.faces.iter().enumerate().map(move |(j, r)| (format!("faces.{i}.faces.{j}"), r))
+        })
+    }
+
+    /// The sheet it thickens and consumes, if it is from one.
+    pub fn sheet(&self) -> Option<&Id> {
+        match &self.from {
+            ThickenFrom::Sheet(s) => Some(s),
+            ThickenFrom::Faces(_) => None,
+        }
+    }
+
+    /// Its references, each with its role: `from.faces.<i>`, then
+    /// `faces.<i>.faces.<j>`.
+    pub fn references(&self) -> Vec<(String, &Reference)> {
+        let mut out: Vec<(String, &Reference)> = match &self.from {
+            ThickenFrom::Faces(f) => f.iter().enumerate().map(|(i, r)| (format!("from.faces.{i}"), r)).collect(),
+            ThickenFrom::Sheet(_) => Vec::new(),
+        };
+        out.extend(self.group_roles());
+        out
+    }
+}
+
+/// A front or back: a length of zero or more, zero when left out.
+fn side(o: &mut Obj, key: &str, default: Unit, env: &Env, at: &str) -> Result<Quantity> {
+    let v = o.take_opt(key).unwrap_or(json!(0));
+    let q = Quantity::from_json_as(&v, Field::Length(default), &|n| env.get(n))
+        .map_err(|e| e.with("pointer", at))?;
+    if q.meters() < 0.0 {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("a thicken's {key} is zero or more, not {q}: thicken the other way with the other side"),
+        )
+        .with("pointer", at)
+        .with("value", q.text()));
+    }
+    Ok(q)
+}
+
 /// Refuses an operation or targets on a feature that founds a sheet of
 /// its own (`what`: "an extract").
 fn new_only(o: &Obj, what: &str) -> Result<()> {
@@ -357,6 +562,71 @@ mod tests {
             (json!({"sheets": ["a", "b"], "operation": "join"}), Code::InvalidParam, "/operation"),
         ] {
             let e = sew(v.clone()).unwrap_err();
+            assert_eq!((e.code, e.details["pointer"].as_str()), (code, Some(pointer)), "{v}");
+        }
+    }
+
+    fn thicken(v: Value) -> Result<Thicken> {
+        let mut o = Obj::new(&v, "")?;
+        let t = Thicken::from_fields(&mut o, Unit::Mm, &Env::empty())?;
+        o.finish()?;
+        Ok(t)
+    }
+
+    #[test]
+    fn thickens_round_trip() {
+        let skin = |n: &str| json!({"feature": "skin", "name": n});
+        let v = json!({"from": {"sheet": "skin"}, "front": 2, "operation": "new",
+                       "faces": [{"front": "3 mm", "back": 0, "faces": [skin(A)]}]});
+        let t = thicken(v).unwrap();
+        assert_eq!(t.from, ThickenFrom::Sheet(Id::parse("skin", "feature").unwrap()));
+        assert!(t.combine.is_new());
+        // Front and back always written (back 0 when left out), the
+        // operation always, even new.
+        assert_eq!(t.fields(), json!({"from": {"sheet": "skin"}, "front": "2 mm", "back": "0 mm",
+            "faces": [{"front": "3 mm", "back": "0 mm", "faces": [skin(A)]}], "operation": "new"}));
+        assert_eq!(thicken(t.fields()).unwrap(), t);
+        let roles: Vec<String> = t.references().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(roles, ["faces.0.faces.0"]);
+        // From faces, joined to a solid.
+        let base = |n: &str| json!({"feature": "base", "name": n});
+        let v = json!({"from": {"faces": [base(A)]}, "front": "3 mm", "back": "1 mm",
+                       "operation": "join", "targets": ["base"]});
+        let t = thicken(v.clone()).unwrap();
+        assert_eq!(t.fields(), v);
+        let roles: Vec<String> = t.references().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(roles, ["from.faces.0"]);
+    }
+
+    #[test]
+    fn thickens_are_checked() {
+        const B: &str = "fedcba9876543210fedcba9876543210";
+        let skin = |n: &str| json!({"feature": "skin", "name": n});
+        let base = |n: &str| json!({"feature": "base", "name": n});
+        for (v, code, pointer) in [
+            (json!({"front": 1, "operation": "new"}), Code::InvalidDocument, "/from"),
+            (json!({"from": {}, "front": 1, "operation": "new"}), Code::InvalidDocument, "/from"),
+            (json!({"from": {"sheet": "s", "faces": [base(A)]}, "front": 1, "operation": "new"}),
+             Code::InvalidDocument, "/from"),
+            (json!({"from": {"sheet": "skin"}, "operation": "new"}), Code::InvalidParam, "/front"),
+            (json!({"from": {"sheet": "skin"}, "front": -1, "operation": "new"}),
+             Code::InvalidParam, "/front"),
+            (json!({"from": {"sheet": "skin"}, "front": 1}), Code::InvalidDocument, "/operation"),
+            (json!({"from": {"sheet": "skin"}, "front": 1, "operation": "join"}),
+             Code::InvalidDocument, "/targets"),
+            (json!({"from": {"sheet": "skin"}, "front": 1, "operation": "new",
+                    "faces": [{"front": 2, "back": 0, "faces": [base(A)]}]}),
+             Code::InvalidParam, "/faces/0/faces/0"),
+            (json!({"from": {"faces": [base(A)]}, "front": 1, "operation": "new",
+                    "faces": [{"front": 2, "back": 0, "faces": [base(B)]}]}),
+             Code::InvalidParam, "/faces/0/faces/0"),
+            (json!({"from": {"sheet": "skin"}, "front": 1, "operation": "new",
+                    "faces": [{"front": 0, "back": 0, "faces": [skin(A)]}]}),
+             Code::InvalidParam, "/faces/0/front"),
+            (json!({"from": {"faces": [base(A), base(A)]}, "front": 1, "operation": "new"}),
+             Code::InvalidParam, "/from/faces/1"),
+        ] {
+            let e = thicken(v.clone()).unwrap_err();
             assert_eq!((e.code, e.details["pointer"].as_str()), (code, Some(pointer)), "{v}");
         }
     }
