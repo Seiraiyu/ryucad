@@ -2171,6 +2171,30 @@ impl Workspace {
         }
     }
 
+    /// The sheet metal solid the Part tile's section shows of `part`: the
+    /// chosen feature's solid when it is in `part`, else the solid a base
+    /// flange founds, else `""` (the part's one sheet metal solid, as the
+    /// daemon finds it); `None` for a part with no sheet metal feature.
+    pub fn sheet_solid(&self, part: &str, chosen: Option<&BodyKey>) -> Option<BodyKey> {
+        let p = self.model.parts.get(part)?;
+        let sheet = |f: &crate::core::model::Feature| f.sheet.is_some();
+        if !p.features.iter().any(sheet) {
+            return None;
+        }
+        if let Some(k) = chosen.filter(|k| k.0 == part)
+            && p.feature(&k.1).is_some_and(sheet)
+            && let Some(s) = self.model.solid_of(k)
+        {
+            return Some(s);
+        }
+        let founder = p
+            .features
+            .iter()
+            .find(|f| f.sheet.as_ref().is_some_and(|s| s.kind == "base_flange"))
+            .map_or_else(String::new, |f| f.id.clone());
+        Some((part.to_owned(), founder))
+    }
+
     /// Reads `key`'s flat bend lines, as [`Workspace::show_sheet`] its
     /// table.
     fn ask_flat_lines(&mut self, key: &BodyKey) {
