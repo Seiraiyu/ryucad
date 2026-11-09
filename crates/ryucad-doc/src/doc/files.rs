@@ -61,10 +61,11 @@ pub fn parse_item_key(s: &str) -> Result<Id> {
 }
 
 /// The newest manifest format: 2 adds the project's ID, 3 its
-/// dependencies and where it was forked from. A manifest stays at the
-/// lowest that holds it, so older builds still read projects that don't
-/// use PDM, or other projects.
-pub const MANIFEST_FORMAT: u64 = 3;
+/// dependencies and where it was forked from, 4 the drafting standard its
+/// drawings follow (design 417). A manifest stays at the lowest that holds
+/// it, so older builds still read projects that don't use PDM, other
+/// projects or ISO drawings.
+pub const MANIFEST_FORMAT: u64 = 4;
 
 /// The newest feature format: 2 adds expressions, sketches and sweeps, 3
 /// operations on solids, 4 an assembly's instances, mates and instance
@@ -111,6 +112,9 @@ pub struct Manifest {
     pub dependencies: super::deps::Dependencies,
     /// The ID and commit `ryucad pdm new-id` gave it a new ID at.
     pub forked_from: Option<super::deps::ForkedFrom>,
+    /// The standard its drawings follow unless one says another: ASME
+    /// when none is written (question 337).
+    pub drawing_standard: Option<super::drawing::Standard>,
 }
 
 /// A part's ordered feature list, `parts/<part>/part.json`, whether it is
@@ -333,7 +337,13 @@ impl Manifest {
             project: None,
             dependencies: super::deps::Dependencies::new(),
             forked_from: None,
+            drawing_standard: None,
         }
+    }
+
+    /// The standard the project's drawings follow by default.
+    pub fn standard(&self) -> super::drawing::Standard {
+        self.drawing_standard.unwrap_or_default()
     }
 
     pub fn to_json(&self) -> Value {
@@ -345,10 +355,14 @@ impl Manifest {
         }
         if !self.dependencies.is_empty() {
             v["dependencies"] = super::deps::to_json(&self.dependencies);
-            v["format"] = json!(MANIFEST_FORMAT);
+            v["format"] = json!(3);
         }
         if let Some(f) = &self.forked_from {
             v["forked_from"] = f.to_json();
+            v["format"] = json!(3);
+        }
+        if let Some(s) = self.drawing_standard {
+            v["drawing_standard"] = json!(s.as_str());
             v["format"] = json!(MANIFEST_FORMAT);
         }
         v
@@ -373,6 +387,14 @@ impl Manifest {
             None => None,
             Some(f) => Some(super::deps::ForkedFrom::from_json(&f)?),
         };
+        let drawing_standard = match o.take_opt("drawing_standard") {
+            None => None,
+            Some(d) => Some(
+                d.as_str()
+                    .and_then(super::drawing::Standard::parse)
+                    .ok_or_else(|| invalid("/drawing_standard", "expected one of asme, iso"))?,
+            ),
+        };
         let unit = o.take("default_unit")?;
         let default_unit = unit.as_str().and_then(Unit::parse).ok_or_else(|| {
             invalid(
@@ -386,6 +408,7 @@ impl Manifest {
             project,
             dependencies,
             forked_from,
+            drawing_standard,
         })
     }
 }
@@ -673,11 +696,13 @@ pub fn part_format(v: &Value) -> u64 {
     }
 }
 
-/// The lowest manifest format that holds `v`: 3 with dependencies or a
-/// fork's origin, 2 with a project ID, else 1.
+/// The lowest manifest format that holds `v`: 4 with a drawing standard,
+/// 3 with dependencies or a fork's origin, 2 with a project ID, else 1.
 pub fn manifest_format(v: &Value) -> u64 {
-    if v.get("dependencies").is_some() || v.get("forked_from").is_some() {
+    if v.get("drawing_standard").is_some() {
         MANIFEST_FORMAT
+    } else if v.get("dependencies").is_some() || v.get("forked_from").is_some() {
+        3
     } else if v.get("project").is_some() {
         2
     } else {

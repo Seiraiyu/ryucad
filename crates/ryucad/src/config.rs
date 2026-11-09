@@ -6,6 +6,7 @@
 
 use crate::Cad;
 use crate::error::{Code, Error, Result};
+use crate::doc::files::Manifest;
 use crate::units::Unit;
 use ryu_session::prefs::{self, Schema};
 use serde_json::{Map, Value, json};
@@ -105,6 +106,13 @@ const KEYS: &[Key] = &[
         rule: Rule::OneOf(&["m", "cm", "mm", "um", "in", "ft"]),
         default: || json!("mm"),
         about: "the unit bare numbers take",
+    },
+    Key {
+        name: "drawing.standard",
+        scope: Scope::Project,
+        rule: Rule::OneOf(&["asme", "iso"]),
+        default: || json!("asme"),
+        about: "the drafting standard drawings follow unless one says another",
     },
     Key {
         name: "ui.theme",
@@ -535,17 +543,38 @@ fn report(k: &Key, value: Option<&Value>) -> Value {
     })
 }
 
-/// The project's settings from its manifest.
-fn project_values(unit: Unit) -> Map<String, Value> {
-    [("default_unit".to_owned(), json!(unit))]
+/// The project's settings from its manifest: those it writes (a standard
+/// left at its default isn't).
+fn project_values(m: &Manifest) -> Map<String, Value> {
+    let mut out: Map<String, Value> = [("default_unit".to_owned(), json!(m.default_unit))]
         .into_iter()
-        .collect()
+        .collect();
+    if let Some(s) = m.drawing_standard {
+        out.insert("drawing.standard".into(), json!(s.as_str()));
+    }
+    out
+}
+
+/// The manifest with project setting `name` set to `value` (validated).
+pub fn set_project(m: &Manifest, name: &str, value: &Value) -> Manifest {
+    let text = value.as_str().expect("validated");
+    match name {
+        "drawing.standard" => Manifest {
+            drawing_standard: crate::doc::drawing::Standard::parse(text)
+                .filter(|s| *s != crate::doc::drawing::Standard::default()),
+            ..m.clone()
+        },
+        _ => Manifest {
+            default_unit: Unit::parse(text).expect("validated"),
+            ..m.clone()
+        },
+    }
 }
 
 /// `config.get`: one key, or every key of `scope` (both when `None`).
-pub fn get(unit: Unit, name: Option<&str>, scope: Option<Scope>) -> Result<Value> {
+pub fn get(m: &Manifest, name: Option<&str>, scope: Option<Scope>) -> Result<Value> {
     let prefs = Preferences::load()?;
-    let project = project_values(unit);
+    let project = project_values(m);
     let value_of = |k: &Key| match k.scope {
         Scope::Project => project.get(k.name),
         Scope::User => prefs.values.get(k.name),
@@ -842,14 +871,14 @@ pub(crate) mod tests {
     #[test]
     fn defaults_then_set_values() {
         with_config(|dir| {
-            let v = get(Unit::Mm, Some("ui.theme"), None).unwrap();
+            let v = get(&Manifest::new(Unit::Mm), Some("ui.theme"), None).unwrap();
             assert_eq!(
                 (&v["value"], &v["default"]),
                 (&json!("system"), &json!(true))
             );
             set_user("ui.theme", json!("dark")).unwrap();
             set_user("display.mesh_cache_mib", json!(512)).unwrap();
-            let v = get(Unit::Mm, Some("ui.theme"), None).unwrap();
+            let v = get(&Manifest::new(Unit::Mm), Some("ui.theme"), None).unwrap();
             assert_eq!(
                 (&v["value"], &v["default"]),
                 (&json!("dark"), &json!(false))
@@ -857,13 +886,27 @@ pub(crate) mod tests {
             assert_eq!(user("display.mesh_cache_mib"), 512);
             let text = std::fs::read_to_string(dir.join(PREFERENCES)).unwrap();
             assert!(canonical::is_canonical(&text));
-            let all = get(Unit::In, None, None).unwrap();
+            let all = get(&Manifest::new(Unit::In), None, None).unwrap();
             assert_eq!(all["settings"][0]["value"], "in");
             assert_eq!(all["settings"].as_array().unwrap().len(), KEYS.len());
-            let user_only = get(Unit::In, None, Some(Scope::User)).unwrap();
+            let user_only = get(&Manifest::new(Unit::In), None, Some(Scope::User)).unwrap();
             assert_eq!(
                 user_only["settings"].as_array().unwrap().len(),
-                KEYS.len() - 1
+                KEYS.len() - 2
+            );
+            // The drawing standard is the project's, ASME until it says
+            // ISO, and setting it back to ASME writes nothing.
+            let m = Manifest::new(Unit::Mm);
+            let v = get(&m, Some("drawing.standard"), None).unwrap();
+            assert_eq!((&v["value"], &v["default"]), (&json!("asme"), &json!(true)));
+            let iso = set_project(&m, "drawing.standard", &json!("iso"));
+            assert_eq!(iso.to_json()["drawing_standard"], "iso");
+            assert_eq!(iso.to_json()["format"], 4);
+            let back = set_project(&iso, "drawing.standard", &json!("asme"));
+            assert_eq!(back, m);
+            assert_eq!(
+                validate("drawing.standard", &json!("din"), None).unwrap_err().code,
+                Code::InvalidSetting
             );
         });
     }
@@ -873,7 +916,7 @@ pub(crate) mod tests {
         with_config(|dir| {
             set_user("ui.scale", json!(2)).unwrap();
             set_user("ui.scale", json!(1)).unwrap();
-            let v = get(Unit::Mm, Some("ui.scale"), None).unwrap();
+            let v = get(&Manifest::new(Unit::Mm), Some("ui.scale"), None).unwrap();
             assert_eq!(v["default"], json!(true), "{v}");
             let text = std::fs::read_to_string(dir.join(PREFERENCES)).unwrap();
             assert!(!text.contains("ui.scale"), "{text}");
@@ -1088,7 +1131,7 @@ pub(crate) mod tests {
         with_config(|dir| {
             let path = dir.join(PREFERENCES);
             std::fs::write(&path, "{not json").unwrap();
-            let v = get(Unit::Mm, Some("ui.theme"), None).unwrap();
+            let v = get(&Manifest::new(Unit::Mm), Some("ui.theme"), None).unwrap();
             assert_eq!(v["value"], "system");
             assert!(
                 v["warnings"][0]
@@ -1108,7 +1151,7 @@ pub(crate) mod tests {
                 r#"{"format":2,"kind":"ryucad.preferences","values":{}}"#,
             )
             .unwrap();
-            let v = get(Unit::Mm, None, None).unwrap();
+            let v = get(&Manifest::new(Unit::Mm), None, None).unwrap();
             assert!(v["warnings"][0].as_str().unwrap().contains("newer"));
         });
     }

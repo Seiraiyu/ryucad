@@ -649,6 +649,7 @@ impl Workspace {
             views: Default::default(),
             sections: Default::default(),
             explodes: Default::default(),
+            drawings: Default::default(),
             looked: None,
             refocused: false,
             appearance: Default::default(),

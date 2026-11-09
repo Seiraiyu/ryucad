@@ -1619,11 +1619,7 @@ pub(crate) fn dispatch(
         Request::CacheWarm { part } => cache_warm(session, part.as_deref()),
         Request::ConfigGet { key, scope } => {
             let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
-            let mut v = config::get(
-                session.project().manifest.default_unit,
-                key.as_deref(),
-                scope,
-            )?;
+            let mut v = config::get(&session.project().manifest, key.as_deref(), scope)?;
             v["project_revision"] = json!(session.project_revision()?);
             Ok(v)
         }
@@ -1637,15 +1633,11 @@ pub(crate) fn dispatch(
             let v = match config::validate(&key, &value, scope)? {
                 config::Scope::Project => {
                     session.check_project_revision(expected_revision.as_deref())?;
-                    let unit = Unit::parse(value.as_str().expect("validated")).expect("validated");
                     // The rest of the manifest (the project's ID) stays.
-                    let m = Manifest {
-                        default_unit: unit,
-                        ..session.project().manifest.clone()
-                    };
+                    let m = config::set_project(&session.project().manifest, &key, &value);
                     session.write_json(&session.root().join(MANIFEST), &m.to_json())?;
                     session.reload()?;
-                    let mut v = config::get(unit, Some(&key), None)?;
+                    let mut v = config::get(&m, Some(&key), None)?;
                     v["project_revision"] = json!(session.project_revision()?);
                     v
                 }
