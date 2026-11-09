@@ -52,6 +52,9 @@ pub struct Feature {
     /// A shell's, offset's, mirror's or split's report as drawn: its
     /// plane and sides once it built, the faces an offset's groups move.
     pub body: Option<crate::core::bodies::BodyInfo>,
+    /// A base flange's, flange's, unfold's or refold's report as the
+    /// window reads it: its target, the bends it names, an unfold's flat.
+    pub sheet: Option<crate::core::sheet::SheetInfo>,
 }
 
 impl Feature {
@@ -443,6 +446,7 @@ impl Part {
                             .get("datum")
                             .and_then(ryucad::render::DatumShape::from_report),
                         body: crate::core::bodies::BodyInfo::from_report(f),
+                        sheet: crate::core::sheet::SheetInfo::from_report(f),
                     })
                     .collect()
             })
