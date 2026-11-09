@@ -7725,6 +7725,37 @@ fn rebuilt_at(session: &mut Session, rev: &str) -> Result<BTreeMap<String, crate
     Ok(out)
 }
 
+/// Each drawing of every part at `rev`, built: by part and drawing, each
+/// view's fingerprint by key, or why it didn't build.
+fn drawn_at(session: &mut Session, rev: &str) -> Result<crate::diff::Drawn> {
+    let (_, s) = session.at(Some(rev))?;
+    let mut out = crate::diff::Drawn::new();
+    let ids: Vec<(Id, Vec<Id>)> = s
+        .project()
+        .parts
+        .iter()
+        .map(|(id, p)| (id.clone(), p.drawings.keys().cloned().collect()))
+        .collect();
+    for (pid, drawings) in ids {
+        for d in drawings {
+            let views = match crate::drawing::build(s, &pid, &d) {
+                Ok(b) => Ok(b
+                    .sheets
+                    .iter()
+                    .flat_map(|sh| {
+                        sh.views
+                            .iter()
+                            .map(move |v| (v.key.to_string(), v.fingerprint(sh)))
+                    })
+                    .collect()),
+                Err(e) => Err(e.code),
+            };
+            out.insert((pid.to_string(), d.to_string()), views);
+        }
+    }
+    Ok(out)
+}
+
 /// `diff`: what changed from one revision to another.
 pub(crate) fn diff(
     session: &mut Session,
@@ -7738,6 +7769,7 @@ pub(crate) fn diff(
     }
     let (a, fa) = files_at(session, from)?;
     let (b, fb) = files_at(session, to)?;
+    let (a_rev, b_rev) = (from.to_owned(), to.to_owned());
     let releases = crate::release::history(session)
         .map(|(_, r)| r)
         .unwrap_or_default();
@@ -7753,6 +7785,9 @@ pub(crate) fn diff(
         let to = rebuilt_at(session, to)?;
         drop(stage);
         crate::diff::model(&mut v, &from, &to, opts);
+        // Each drawing whose built views differ (design 417).
+        let (dfrom, dto) = (drawn_at(session, &a_rev)?, drawn_at(session, &b_rev)?);
+        crate::diff::drawings_model(&mut v, &dfrom, &dto, opts);
         // Each imported file that differs, by product.
         if let Some(Value::Array(files)) = v.get_mut("imports") {
             for f in files {

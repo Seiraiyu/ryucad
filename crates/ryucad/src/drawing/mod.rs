@@ -110,6 +110,22 @@ pub struct ViewBuilt {
     /// Pieces drawn: visible, hidden, uncertain.
     pub counts: [usize; 3],
     pub error: Option<Error>,
+    /// Its items, as indices into its sheet's.
+    pub items: std::ops::Range<usize>,
+}
+
+impl ViewBuilt {
+    /// A hash of what it draws and where: equal, the same view drawn.
+    pub fn fingerprint(&self, sheet: &SheetBuilt) -> String {
+        let mut h = blake3::Hasher::new();
+        h.update(self.sheet.to_string().as_bytes());
+        h.update(self.scale.to_string().as_bytes());
+        for x in [self.at, self.bounds[0], self.bounds[1]].concat() {
+            h.update(&x.to_bits().to_le_bytes());
+        }
+        h.update(format!("{:?}", &sheet.items[self.items.clone()]).as_bytes());
+        h.finalize().to_hex().to_string()
+    }
 }
 
 /// One sheet as drawn.
@@ -959,6 +975,7 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
                 [at[0] + k * ub[0][0], at[1] + k * ub[0][1]],
                 [at[0] + k * ub[1][0], at[1] + k * ub[1][1]],
             ];
+            let first = items.len();
             let (counts, error) = match &drawings[*i] {
                 Ok(d) => {
                     for (path, kind, unsure) in &d.lines {
@@ -1003,6 +1020,7 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
                 rev: plan.rev.clone(),
                 counts,
                 error,
+                items: first..items.len(),
             });
         }
         sheets.push(SheetBuilt {

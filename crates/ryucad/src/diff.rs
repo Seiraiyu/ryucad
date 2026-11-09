@@ -2130,6 +2130,65 @@ fn find<'a>(
     side.features.iter().find(|(x, _)| x == id).map(|(_, r)| r)
 }
 
+/// Each drawing built at a revision: by part and drawing, each view's
+/// fingerprint by key, or the code of why it didn't build.
+pub type Drawn =
+    BTreeMap<(String, String), std::result::Result<BTreeMap<String, String>, crate::error::Code>>;
+
+/// Adds to a structural diff `v` each drawing whose built views differ
+/// (design 417): under its part's `drawings`, `model` by drawing, each
+/// `{views: {added, removed, changed}}`, or `{from, to}` with what didn't
+/// build.
+pub fn drawings_model(v: &mut Value, from: &Drawn, to: &Drawn, opts: &Options) {
+    let keys: BTreeSet<&(String, String)> = from.keys().chain(to.keys()).collect();
+    for key in keys {
+        let (part, drawing) = key;
+        if opts.part.as_ref().is_some_and(|p| p != part) {
+            continue;
+        }
+        let (a, b) = (from.get(key), to.get(key));
+        if a == b {
+            continue;
+        }
+        let m = match (a, b) {
+            (Some(Ok(a)), Some(Ok(b))) => {
+                let added: Vec<&String> = b.keys().filter(|k| !a.contains_key(*k)).collect();
+                let removed: Vec<&String> = a.keys().filter(|k| !b.contains_key(*k)).collect();
+                let changed: Vec<&String> = a
+                    .iter()
+                    .filter(|(k, x)| b.get(*k).is_some_and(|y| y != *x))
+                    .map(|(k, _)| k)
+                    .collect();
+                json!({"views": {"added": added, "removed": removed, "changed": changed}})
+            }
+            _ => {
+                let side = |x: Option<
+                    &std::result::Result<BTreeMap<String, String>, crate::error::Code>,
+                >| match x {
+                    None => Value::Null,
+                    Some(Ok(_)) => json!({"ok": true}),
+                    Some(Err(c)) => json!({"ok": false, "error": c}),
+                };
+                json!({"from": side(a), "to": side(b)})
+            }
+        };
+        let p = &mut v["parts"][part.as_str()];
+        if p.is_null() {
+            *p = json!({
+                "status": "same",
+                "order": {"added": [], "removed": [], "moved": []},
+                "parameters": {"added": [], "removed": [], "changed": []},
+                "features": {},
+            });
+        }
+        let d = &mut p["drawings"];
+        if d.is_null() {
+            *d = json!({"added": [], "removed": [], "changed": []});
+        }
+        d["model"][drawing.as_str()] = m;
+    }
+}
+
 /// Adds to a structural diff `v` what the change did to the model, from
 /// both sides' rebuilt parts: under each feature whose result differs (or
 /// every feature with `all`), `model` with its results on each side and,
@@ -3950,6 +4009,51 @@ mod tests {
             v["parts"]["p"]["features"]["a"],
             json!({"status": "changed", "invalid": ["to"]})
         );
+    }
+
+    #[test]
+    fn a_models_change_shows_in_the_drawings_views_it_moves() {
+        use crate::git::tests::git;
+        use crate::server::tests::{call, fresh};
+        let (dir, mut s) = fresh();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 40, "y": 20, "z": 10}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "drawing.create",
+            json!({"part": "p", "drawing": "main", "views": "standard"}),
+        )
+        .unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "a block drawn"]);
+        let v = call(&mut s, "diff", json!({"model": true})).unwrap();
+        assert!(v["parts"]["p"].get("drawings").is_none(), "{v}");
+        // Taller: the drawing's file doesn't change, every view it shows
+        // the box's height in does; the top view doesn't.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"z": 15}}),
+        )
+        .unwrap();
+        let v = call(&mut s, "diff", json!({"model": true})).unwrap();
+        let d = &v["parts"]["p"]["drawings"];
+        assert_eq!(d["changed"], json!([]), "{v}");
+        assert_eq!(
+            d["model"]["main"]["views"]["changed"],
+            json!(["v1", "v3", "v4"]),
+            "{v}"
+        );
+        // Without --model, no built views.
+        let v = call(&mut s, "diff", json!({})).unwrap();
+        assert!(v["parts"]["p"]["drawings"].get("model").is_none(), "{v}");
     }
 
     #[test]
