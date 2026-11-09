@@ -440,8 +440,7 @@ fn sides_are_the_lumps_of_a_division_whole() {
     let (two, _) = boolean(OpKey(9), BooleanOp::Unite, &a, &[tool(8, &c)]).unwrap();
     let s = square(3, 1.0, [-1.0, 5.0], [-1.0, 2.0]);
     let (d, j) = divide(OpKey(4), &two, &[tool(5, &s)]).unwrap();
-    let (sides, k) =
-        divide_sides_with(OpKey(4), &two, &[tool(5, &s)], &Work::unlimited()).unwrap();
+    let (sides, k) = divide_sides_with(OpKey(4), &two, &[tool(5, &s)], &Work::unlimited()).unwrap();
     let (front, back) = (sides.front.unwrap(), sides.back.unwrap());
     for b in [&front, &back] {
         assert_eq!(check(b), []);

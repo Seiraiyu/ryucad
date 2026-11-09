@@ -5,7 +5,7 @@
 //! Mirrors (plan 15.B): a solid's copy reflected in a plane, built as an
 //! extrude's body is, a solid of its own or applied to others.
 
-use crate::doc::body::{Direction, Mirror, Offset, Shell};
+use crate::doc::body::{Direction, Mirror, Offset, Shell, SplitBy};
 use crate::doc::files::{Feature, Obj};
 use crate::doc::id::Id;
 use crate::doc::project::Part;
@@ -124,15 +124,19 @@ pub fn check(part: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result
             }
             crate::pattern::mirror_plane(part, id, &m.plane, results).map(drop)
         }
-        Feature::Split(s) => {
-            let at = crate::geometry::At {
-                part,
-                order: part.order(),
-                owner: id,
-                results,
-            };
-            crate::geometry::one(&at, "plane", &s.plane, crate::geometry::Want::Plane).map(drop)
-        }
+        Feature::Split(s) => match s.plane() {
+            Some(plane) => {
+                let at = crate::geometry::At {
+                    part,
+                    order: part.order(),
+                    owner: id,
+                    results,
+                };
+                crate::geometry::one(&at, "plane", plane, crate::geometry::Want::Plane).map(drop)
+            }
+            // A tool's kind and faces are judged by its check (Task 10).
+            None => Ok(()),
+        },
         _ => resolve(part, &solids, id, f, results).map(drop),
     }
 }
@@ -549,7 +553,14 @@ pub fn report(part: &Id, f: &Feature) -> Value {
         }
         Feature::Split(s) => {
             let mut v = s.fields();
-            v["plane"] = json!(s.plane.text(part));
+            match &s.by {
+                SplitBy::Plane(p) => v["plane"] = json!(p.text(part)),
+                SplitBy::Body(b) => v["tool"] = json!({"body": b}),
+                SplitBy::Faces(f) => {
+                    v["tool"] = json!({"faces": f.iter().map(|r| r.text(part)).collect::<Vec<_>>()})
+                }
+            }
+            v["trim"] = json!(s.keep == crate::doc::body::Keep::Behind);
             v["flip"] = json!(s.flip);
             v["keep"] = json!(s.keep.as_str());
             return v;
@@ -650,7 +661,10 @@ fn mirror_or_split(
 pub fn resolved(part: &Part, results: &dyn Results, id: &Id, f: &Feature) -> Option<Value> {
     let plane = match f {
         Feature::Mirror(m) => &m.plane,
-        Feature::Split(s) => &s.plane,
+        Feature::Split(s) => match s.plane() {
+            Some(p) => p,
+            None => return split_tool_resolved(part, results, id, s),
+        },
         _ => return None,
     };
     let at = crate::geometry::At {
@@ -681,6 +695,16 @@ pub fn resolved(part: &Part, results: &dyn Results, id: &Id, f: &Feature) -> Opt
     }
     Some(v)
 }
+/// What a split by a tool adds to its report: its sides (Task 10).
+fn split_tool_resolved(
+    _part: &Part,
+    _results: &dyn Results,
+    _id: &Id,
+    _s: &crate::doc::body::Split,
+) -> Option<Value> {
+    None
+}
+
 /// A mirror's copy: its solid as the mirror sees it, reflected in its
 /// plane (any plane: an origin plane, a datum plane, a sketch's, a planar
 /// face, of this solid too). Every entity keeps its source's name, so

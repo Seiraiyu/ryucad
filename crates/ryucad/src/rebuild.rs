@@ -2313,7 +2313,13 @@ fn build_split(
         owner: id,
         results: before,
     };
-    let pl = crate::geometry::one(&at, "plane", &s.plane, crate::geometry::Want::Plane)?.plane();
+    let Some(plane) = s.plane() else {
+        return Err(Error::new(
+            Code::Internal,
+            format!("split {id}: a tool is built in Task 9"),
+        ));
+    };
+    let pl = crate::geometry::one(&at, "plane", plane, crate::geometry::Want::Plane)?.plane();
     let normal = if s.flip { -pl.normal } else { pl.normal };
     let half = crate::body::half_space(&part.id, id, t, &built.body, pl.point, normal)?;
     let side = |name: &'static str, kop: BooleanOp| -> Result<Built> {

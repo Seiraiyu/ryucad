@@ -261,7 +261,11 @@ fn divide_in(
             Some(sides),
         ));
         checked(&body)?;
-        out[s] = if whole { vec![body] } else { lumps(key, &body)? };
+        out[s] = if whole {
+            vec![body]
+        } else {
+            lumps(key, &body)?
+        };
     }
     let live: BTreeSet<Name> = out
         .iter()
