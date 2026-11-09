@@ -275,3 +275,63 @@ fn refusals() {
     assert!(e.details["hint"].as_str().unwrap().contains("topology"), "{e}");
     assert_eq!(e.details["kernel"], "tweak");
 }
+#[test]
+fn a_top_made_flush_with_another_solids_face_and_with_a_datum_plane() {
+    let (_dir, mut s) = boxed();
+    add(&mut s, json!({"type": "box", "id": "c", "params": {"x": 10, "y": 10, "z": 25},
+                       "placement": {"origin": [60, 0, 0]}}));
+    let top = plane(&body(&mut s, "b"), "b", 2, 1.0, 20.0);
+    let lid = plane(&body(&mut s, "c"), "c", 2, 1.0, 25.0);
+    add(&mut s, json!({"type": "replace_face", "id": "r",
+                       "groups": [{"with": lid, "faces": [top.clone()]}]}));
+    near(volume(&mut s, "r", "b"), 40.0 * 30.0 * 25.0, 1e-9);
+    // c, its source, is untouched (the replacement acts on b alone).
+    near(volume(&mut s, "c", "c"), 10.0 * 10.0 * 25.0, 1e-9);
+    add(&mut s, json!({"type": "plane", "id": "d", "by": "offset", "from": "xy", "distance": 22}));
+    must(&mut s, "feature.move", json!({"part": "p", "id": "d", "after": "c"}));
+    must(&mut s, "feature.edit", json!({"part": "p", "id": "r",
+        "groups": [{"with": "p/d", "faces": [top]}]}));
+    near(volume(&mut s, "r", "b"), 40.0 * 30.0 * 22.0, 1e-9);
+}
+
+/// Sketch `id` on xy with a square of side `a` mm centred on the origin.
+fn square(s: &mut Session, id: &str, a: f64) {
+    add(s, json!({"type": "sketch", "id": id, "plane": "xy"}));
+    let h = a / 2.0;
+    must(s, "sketch.edit", json!({"part": "p", "sketch": id, "ops": [
+        {"op": "add", "id": "p1", "type": "point", "at": [-h, -h]},
+        {"op": "add", "id": "p2", "type": "point", "at": [h, -h]},
+        {"op": "add", "id": "p3", "type": "point", "at": [h, h]},
+        {"op": "add", "id": "p4", "type": "point", "at": [-h, h]},
+        {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+        {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+        {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"},
+        {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}
+    ]}));
+}
+
+#[test]
+fn a_sheet_moves_but_its_boundarys_face_isnt_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    square(&mut s, "q", 10.0);
+    add(&mut s, json!({"type": "planar", "id": "f", "sketch": "q"}));
+    let face = format!("p/f/{}", body(&mut s, "f")["faces"][0]["name"].as_str().unwrap());
+    add(&mut s, json!({"type": "move_face", "id": "m", "by": "translate", "direction": "z",
+                       "distance": 5, "faces": [face.clone()]}));
+    let moved = body(&mut s, "m");
+    assert_eq!(moved["kind"], "sheet", "{moved}");
+    let z = moved["faces"][0]["surface"]["frame"]["origin"][2].as_f64().unwrap();
+    assert!((z - 0.005).abs() < 1e-12, "{moved}");
+    // Every other acting feature still refuses a sheet.
+    let e = call(&mut s, "feature.add", json!({"part": "p", "type": "offset", "target": "f",
+                                               "distance": 1})).unwrap_err();
+    assert_eq!(e.code, Code::WrongBodyKind, "{e}");
+    // A face with a laminar edge has no replacement: the kernel's refusal.
+    add(&mut s, json!({"type": "replace_face", "id": "r",
+                       "groups": [{"with": "zx", "faces": [face]}]}));
+    let e = failure(&mut s, "r");
+    assert_eq!((e.code, e.details["reason"].as_str()), (Code::TweakFailed, Some("laminar_face")), "{e}");
+}
