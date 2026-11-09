@@ -12,6 +12,8 @@
 //! parts/<part>/views/<view>.json     (optional: named views)
 //! parts/<part>/appearance.json      (optional: colours and opacities)
 //! parts/<asm>/explodes/<explode>.json (optional: exploded views)
+//! parts/<part>/drawings/<drawing>.json (optional: 2D drawings)
+//! templates/<template>.json         (optional: drawing templates)
 //! releases/<part>/<label>.json      (ryupdm's release records)
 //! imports/<file>.step               (STEP files import features read)
 //! ```
@@ -71,6 +73,14 @@ impl ImportFile {
     }
 }
 
+/// A project's drawing template, as read: its bytes (which define the
+/// drawings naming it), and it, or why it can't be used.
+#[derive(Clone, Debug)]
+pub struct TemplateFile {
+    pub bytes: Arc<[u8]>,
+    pub template: Result<super::drawing_template::Template>,
+}
+
 /// The files at the project's root that a session tracks.
 pub const ROOT_FILES: [&str; 6] = [
     MANIFEST,
@@ -96,6 +106,8 @@ pub struct Project {
     pub parts: BTreeMap<Id, Part>,
     /// The files under `imports/`, by path relative to the root.
     pub imports: BTreeMap<String, ImportFile>,
+    /// The project's drawing templates (`templates/<id>.json`), by ID.
+    pub templates: BTreeMap<String, TemplateFile>,
     /// Entries under `parts/` and `imports/` that don't belong there, as
     /// paths relative to the root.
     pub unknown: Vec<String>,
@@ -154,11 +166,15 @@ pub struct Part {
     /// that isn't an assembly, `wrong_part_kind`). Nothing a rebuild makes
     /// reads them.
     pub explodes: BTreeMap<Id, Result<super::explode::ExplodeFile>>,
+    /// Its drawings, by ID, or why each can't be used. Nothing a rebuild
+    /// makes reads them.
+    pub drawings: BTreeMap<Id, Result<super::drawing::DrawingFile>>,
     /// A hash of the bytes of `ryucad.json`, `part.json`, `parameters.json`,
     /// the listed feature files in order, the hashes of the files their
     /// imports read, ryupdm's properties, the named views, the
-    /// appearance, the explodes and the project parameters it reads: it
-    /// changes whenever anything that defines the part does.
+    /// appearance, the explodes, the drawings and the project templates
+    /// they name, and the project parameters it reads: it changes
+    /// whenever anything that defines the part does.
     pub revision: String,
 }
 
@@ -515,6 +531,7 @@ impl Project {
                     self.lock_bytes.as_deref(),
                     &scope,
                     &self.imports,
+                    &self.templates,
                     id.clone(),
                     &mut unknown,
                 )?;
@@ -612,6 +629,37 @@ fn load_imports(
     Ok(out)
 }
 
+/// The project's drawing templates, by ID; anything else under
+/// `templates/` is unknown.
+fn load_templates(
+    src: &dyn Source,
+    unknown: &mut Vec<String>,
+) -> Result<BTreeMap<String, TemplateFile>> {
+    use super::drawing_template::{TEMPLATES, Template, check_id};
+    let mut out = BTreeMap::new();
+    for (name, kind) in src.list(TEMPLATES)? {
+        let at = join(TEMPLATES, &name);
+        let id = name
+            .strip_suffix(".json")
+            .and_then(|stem| check_id(stem).ok());
+        match id {
+            Some(id) if kind == Kind::File => {
+                let read = read_json(src, &at);
+                let bytes: Arc<[u8]> = match &read {
+                    Ok((b, _)) => b.clone().into(),
+                    Err(_) => src.read(&at)?.unwrap_or_default().into(),
+                };
+                let template = read
+                    .and_then(|(_, v)| Template::from_json(&v))
+                    .map_err(|e| e.with("path", &at));
+                out.insert(id.as_str().to_owned(), TemplateFile { bytes, template });
+            }
+            _ => unknown.push(at),
+        }
+    }
+    Ok(out)
+}
+
 /// What an entry of `parts/` loads as: a part and the unknown files in
 /// its folder, or an unknown entry.
 enum Listed {
@@ -627,6 +675,7 @@ struct Begun {
     manifest_bytes: Vec<u8>,
     unknown: Vec<String>,
     imports: BTreeMap<String, ImportFile>,
+    templates: BTreeMap<String, TemplateFile>,
     lock: Option<Result<super::lock::Lock>>,
     lock_bytes: Option<Vec<u8>>,
     scope: Scope,
@@ -654,6 +703,7 @@ impl Begun {
         })?;
         let mut unknown = Vec::new();
         let imports = load_imports(src, &mut unknown)?;
+        let templates = load_templates(src, &mut unknown)?;
         let (lock, lock_bytes) = load_lock(src)?;
         let scope = load_scope(src)?;
         let entries = src.list("parts")?;
@@ -663,6 +713,7 @@ impl Begun {
             manifest_bytes,
             unknown,
             imports,
+            templates,
             lock,
             lock_bytes,
             scope,
@@ -683,6 +734,7 @@ impl Begun {
                     self.lock_bytes.as_deref(),
                     &self.scope,
                     &self.imports,
+                    &self.templates,
                     id,
                     &mut unknown,
                 );
@@ -711,6 +763,7 @@ impl Begun {
             manifest: self.manifest,
             parts,
             imports: self.imports,
+            templates: self.templates,
             unknown,
             manifest_fault: self.manifest_fault,
             lock: self.lock,
@@ -732,6 +785,7 @@ fn load_part(
     lock_bytes: Option<&[u8]>,
     scope: &Scope,
     imports: &BTreeMap<String, ImportFile>,
+    templates: &BTreeMap<String, TemplateFile>,
     id: Id,
     unknown: &mut Vec<String>,
 ) -> Result<Part> {
@@ -756,6 +810,7 @@ fn load_part(
             "part.json" | "features" => {}
             super::views::VIEWS if kind == Kind::Dir => {}
             super::explode::EXPLODES if kind == Kind::Dir => {}
+            super::drawing::DRAWINGS if kind == Kind::Dir => {}
             super::appearance::APPEARANCE if kind == Kind::File => has_appearance = true,
             PARAMETERS => has_parameters = kind == Kind::File,
             PROPERTIES => has_properties = kind == Kind::File,
@@ -942,6 +997,49 @@ fn load_part(
             _ => unknown.push(at),
         }
     }
+    // Drawings, by ID, after the explodes, then the bytes of each project
+    // template they name: tagged, so a part without drawings hashes as
+    // before.
+    let mut drawings = BTreeMap::new();
+    let mut named: BTreeSet<String> = BTreeSet::new();
+    let mut tagged = false;
+    let drawings_dir = join(&dir, super::drawing::DRAWINGS);
+    for (name, kind) in src.list(&drawings_dir)? {
+        let at = join(&drawings_dir, &name);
+        let did = name
+            .strip_suffix(".json")
+            .and_then(|stem| super::drawing::check_id(stem).ok());
+        match did {
+            Some(did) if kind == Kind::File => {
+                let drawing = read_json(src, &at).and_then(|(bytes, v)| {
+                    if !tagged {
+                        piece(&mut hasher, super::drawing::TAG.as_bytes());
+                        tagged = true;
+                    }
+                    piece(&mut hasher, did.as_str().as_bytes());
+                    piece(&mut hasher, &bytes);
+                    super::drawing::DrawingFile::from_json(&v)
+                });
+                if let Ok(d) = &drawing {
+                    named.extend(d.templates().into_iter().map(str::to_owned));
+                }
+                drawings.insert(did, drawing.map_err(|e| e.with("path", &at)));
+            }
+            _ => unknown.push(at),
+        }
+    }
+    // A sheet naming a built-in template names no file.
+    for t in named
+        .iter()
+        .filter(|t| !super::drawing_template::builtin(t))
+    {
+        piece(&mut hasher, super::drawing_template::TEMPLATES.as_bytes());
+        piece(&mut hasher, t.as_bytes());
+        match templates.get(t) {
+            Some(f) => piece(&mut hasher, &f.bytes),
+            None => piece(&mut hasher, b"missing"),
+        }
+    }
     // The project parameters it reads, and those its own shadow, last:
     // their text, tagged, so a part reading and shadowing none hashes as
     // before. While the project's file can't
@@ -997,6 +1095,7 @@ fn load_part(
         views,
         appearance,
         explodes,
+        drawings,
         revision,
     })
 }
@@ -1628,6 +1727,60 @@ mod tests {
             project.parts[&id("theirs")].revision,
             broken.parts[&id("theirs")].revision
         );
+    }
+
+    #[test]
+    fn drawings_and_the_templates_they_name_count_in_their_parts_revision() {
+        let dir = sample();
+        let root = dir.path();
+        let p = id("p");
+        let before = Project::load(root).unwrap();
+        let rev = before.parts[&p].revision.clone();
+        assert!(before.parts[&p].drawings.is_empty() && before.templates.is_empty());
+        let drawings = part_dir(root, &p).join("drawings");
+        fs::create_dir_all(&drawings).unwrap();
+        let drawing = |template: &str| {
+            serde_json::json!({"format": 1, "kind": "ryucad.drawing", "name": "P",
+                "sheets": {"s1": {"name": "Sheet 1", "size": "iso_a4", "template": template}},
+                "views": {}})
+        };
+        write_json(&drawings.join("d1.json"), &drawing("iso-a4")).unwrap();
+        let project = Project::load(root).unwrap();
+        let with_builtin = project.parts[&p].revision.clone();
+        assert!(project.parts[&p].drawings[&id("d1")].is_ok());
+        assert_ne!(with_builtin, rev);
+        assert!(project.unknown.is_empty(), "{:?}", project.unknown);
+        // A project template the drawing names counts by its bytes; one it
+        // doesn't, not at all.
+        write_json(&drawings.join("d1.json"), &drawing("ours")).unwrap();
+        let missing = Project::load(root).unwrap().parts[&p].revision.clone();
+        let templates = root.join("templates");
+        fs::create_dir_all(&templates).unwrap();
+        let t = serde_json::json!({"format": 1, "kind": "ryucad.drawing_template",
+            "size": "iso_a4", "area": [[10, 10], [287, 200]]});
+        write_json(&templates.join("ours.json"), &t).unwrap();
+        write_json(&templates.join("other.json"), &t).unwrap();
+        fs::write(templates.join("notes.txt"), "").unwrap();
+        let project = Project::load(root).unwrap();
+        let found = project.parts[&p].revision.clone();
+        assert_ne!(found, missing);
+        assert!(project.templates["ours"].template.is_ok());
+        assert_eq!(project.unknown, ["templates/notes.txt"]);
+        fs::remove_file(templates.join("other.json")).unwrap();
+        assert_eq!(Project::load(root).unwrap().parts[&p].revision, found);
+        // One that doesn't read fails in its place.
+        fs::write(drawings.join("broken.json"), "{").unwrap();
+        let project = Project::load(root).unwrap();
+        let e = project.parts[&p].drawings[&id("broken")]
+            .as_ref()
+            .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["path"].as_str()),
+            (Code::InvalidJson, Some("parts/p/drawings/broken.json"))
+        );
+        // Gone again, the part hashes as it did.
+        fs::remove_dir_all(&drawings).unwrap();
+        assert_eq!(Project::load(root).unwrap().parts[&p].revision, rev);
     }
 
     #[test]
