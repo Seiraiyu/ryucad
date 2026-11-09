@@ -272,6 +272,12 @@ fn race_bodies_469_are_sound() {
             .unwrap_or_else(|e| panic!("blend {seed}: {e}"));
         check(&p);
     }
+    // Race body 1187, a boolean whose plane face's circle was cut two
+    // ulps short of a knot (#247).
+    let b = boolean_body(657).expect("it builds");
+    let p = brep_array(&b, "brep", Unit::Millimeter, 1e-7)
+        .unwrap_or_else(|e| panic!("boolean 657: {e}"));
+    check(&p);
 }
 
 /// Every race body (`race::writable(1600)`) is written as a BrepArray
