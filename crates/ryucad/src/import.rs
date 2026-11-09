@@ -397,6 +397,7 @@ pub fn build(
         ImportError::Work(w) => stopped(id, i, &w, (read.representation, &read.items), run.job),
         e => failed(id, i, &e, &read.instances, &read.solids),
     })?;
+    let body = placed(id, i, body)?;
     let step = |n: &Name| read.instances.get(n).map(|k| format!("#{k}"));
     let origins: crate::rebuild::Origins = crate::rebuild::names(&body)
         .into_iter()
@@ -437,6 +438,7 @@ fn build_reference(
         ImportError::Work(w) => stopped(id, i, &w, (read.representation, &read.items), run.job),
         e => failed(id, i, &e, &read.instances, &read.solids),
     })?;
+    let body = placed(id, i, body)?;
     let step = |n: &Name| read.instances.get(n).map(|k| format!("#{k}"));
     let origins: crate::rebuild::Origins = crate::rebuild::names(&body)
         .into_iter()
@@ -456,6 +458,24 @@ fn build_reference(
         crate::rebuild::finish_reference(id, (body, journal), origins)?,
         v,
     ))
+}
+
+/// `body` moved where a flattened import's `place` puts it; as it is
+/// with none. Names don't depend on where the body stands, so a placed
+/// import's names are its file's.
+fn placed(id: &Id, i: &Import, body: ryukei::topo::Body) -> Result<ryukei::topo::Body> {
+    let Some(p) = &i.place else {
+        return Ok(body);
+    };
+    let r = crate::assembly::pose_rigid(&p.pose).map_err(|e| e.with("feature", id))?;
+    body.transformed(&r).map_err(|e| {
+        Error::new(
+            Code::ImportFailed,
+            format!("import {id}: its place puts it where it can't stand: {e:?}"),
+        )
+        .with("feature", id)
+        .with("reason", "place")
+    })
 }
 
 /// A heal its work stopped: the request's `cancelled`, or
@@ -1605,6 +1625,48 @@ pub(crate) mod tests {
         match crate::server::tests::call(s, "rebuild", json!({"part": "p"})) {
             Ok(v) => v["parts"][0].clone(),
             Err(e) => e.details["parts"][0].clone(),
+        }
+    }
+
+    #[test]
+    fn a_placed_import_stands_where_its_place_puts_it() {
+        use crate::doc::files::Feature;
+        use crate::doc::import::{Mode, Place, Via};
+        use crate::doc::project::{feature_path, write_json};
+        let bytes = occt("box_ap214.stp");
+        for mode in [None, Some(Mode::Reference)] {
+            let (dir, mut s) = with_import_as(&bytes, Some(("part 2", "part 2")), mode);
+            let bounds = |s: &mut crate::session::Session| {
+                let v = crate::server::tests::call(s, "inspect", json!({"part": "p"})).unwrap();
+                let b = &v["bodies"][0]["bounds"];
+                [0, 1, 2].map(|k| b["min"][k].as_f64().unwrap())
+            };
+            let before = bounds(&mut s);
+            let f = ImportFile::new(bytes.clone());
+            let i = Feature::Import(Import {
+                mode,
+                place: Some(Place {
+                    pose: crate::doc::assembly::Pose {
+                        origin_m: [0.1, 0.0, 0.0],
+                        ..crate::doc::assembly::Pose::IDENTITY
+                    },
+                    via: vec![Via {
+                        usage: "u1".into(),
+                        ordinal: 0,
+                    }],
+                }),
+                ..import(&f, Some(("part 2", "part 2")), 0)
+            });
+            let p = Id::parse("p", "part").unwrap();
+            write_json(&feature_path(dir.path(), &p, &id("i")), &i.to_json()).unwrap();
+            s.reload().unwrap();
+            let after = bounds(&mut s);
+            assert!(
+                (after[0] - before[0] - 0.1).abs() < 1e-12,
+                "{mode:?}: {before:?} {after:?}"
+            );
+            assert!((after[1] - before[1]).abs() < 1e-12);
+            assert!((after[2] - before[2]).abs() < 1e-12);
         }
     }
 
