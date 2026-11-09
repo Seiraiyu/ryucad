@@ -4242,6 +4242,16 @@ fn feature_add(
             }
         }
     }
+    // A tweak sorts what it was given; with no target it acts on the part's
+    // one solid, else the one its faces name. The file names it all the same.
+    if crate::doc::tweak::TYPES.contains(&ty) {
+        crate::tweak::take_given(ty, &mut given.fields)?;
+        if given.fields.target.is_none() && given.fields.targets.is_none() {
+            let before = solids_before(p, &list, at);
+            given.fields.target =
+                Some(crate::tweak::default_target(ty, &given.fields, &before, &pid)?);
+        }
+    }
     // A shell or offset with no target acts on the part's one solid; the
     // file names it all the same.
     if matches!(ty, "shell" | "offset" | "split")
@@ -4331,6 +4341,10 @@ fn feature_add(
         "shell" | "offset" | "mirror" | "split" => {
             given.only(ty, crate::doc::body::request_fields(ty))?;
             crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
+        }
+        "move_face" | "replace_face" => {
+            given.only(ty, crate::doc::tweak::request_fields(ty))?;
+            crate::tweak::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
         "base_flange" | "flange" | "unfold" | "refold" => {
             crate::sheet_metal::take_given(ty, &mut given.fields);
@@ -4563,8 +4577,11 @@ fn feature_edit(
                 f
             }
             Feature::Import(_) => return Err(import_not_written_here("edit").with("feature", &fid)),
-            Feature::MoveFace(_) | Feature::ReplaceFace(_) => {
-                return Err(Error::new(Code::Internal, "not yet").with("feature", &fid));
+            f @ (Feature::MoveFace(_) | Feature::ReplaceFace(_)) => {
+                let ty = f.type_name();
+                crate::tweak::take_given(ty, &mut given.fields)?;
+                given.only(ty, crate::doc::tweak::request_fields(ty))?;
+                crate::tweak::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
             }
             Feature::Datum(d) => {
                 let ty = d.type_name();

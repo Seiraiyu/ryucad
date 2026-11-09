@@ -6,6 +6,8 @@
 //! and their names and origins. It takes a sheet where the kernel does.
 
 use crate::doc::files::Feature;
+use crate::doc::geometry::GeomRef;
+use crate::proto::FeatureFields;
 use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::doc::reference::Reference;
@@ -304,6 +306,228 @@ pub fn check(part: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result
     resolve(part, &Solids::of(part), id, f, results).map(drop)
 }
 
+/// Sorts what a tweak (`ty`) was given as the CLI sends it: one `--face`
+/// as `face`, several as `faces`, and `--face-distance` groups as objects
+/// in `faces`. After it, `faces` holds the listed faces and `groups` the
+/// groups; `face` is taken. Any other type is left alone.
+pub fn take_given(ty: &str, f: &mut FeatureFields) -> Result<()> {
+    if !crate::doc::tweak::TYPES.contains(&ty) {
+        return Ok(());
+    }
+    let mut faces: Vec<Value> = f.face.take().map(|x| vec![json!(x)]).unwrap_or_default();
+    let mut groups: Vec<Value> = Vec::new();
+    let cleared = matches!(&f.faces, Some(Value::Array(a)) if a.is_empty());
+    match f.faces.take() {
+        None => {}
+        Some(Value::Array(a)) => {
+            for x in a {
+                if x.is_object() {
+                    groups.push(x);
+                } else {
+                    faces.push(x);
+                }
+            }
+        }
+        Some(_) => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("a {ty}'s faces are a list of faces, each <part>/<solid>/<name>"),
+            )
+            .with("param", "faces"));
+        }
+    }
+    if ty == "replace_face" && !faces.is_empty() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a replace_face's faces are in groups, each with the surface it takes: give --with before the faces it replaces (groups: [{with, faces}])",
+        )
+        .with("param", "faces"));
+    }
+    if !groups.is_empty() {
+        if f.groups.is_some() {
+            return Err(Error::new(
+                Code::Usage,
+                format!("give a {ty}'s groups once: as groups, or as faces with distances"),
+            ));
+        }
+        f.groups = Some(Value::Array(groups));
+    }
+    if !faces.is_empty() || cleared {
+        f.faces = Some(Value::Array(faces));
+    }
+    Ok(())
+}
+
+/// The target a new tweak takes when it names none: the part's one solid
+/// before it, else the solid its first face names.
+pub fn default_target(ty: &str, f: &FeatureFields, before: &[Id], part: &Id) -> Result<String> {
+    if let [one] = before {
+        return Ok(one.to_string());
+    }
+    let first = f.faces.as_ref().and_then(|v| v.as_array()).and_then(|a| a.first()).cloned()
+        .or_else(|| {
+            let g = f.groups.as_ref()?.as_array()?.first()?;
+            g.get("faces")?.as_array()?.first().cloned()
+        });
+    if let Some(t) = first.as_ref().and_then(Value::as_str)
+        && let Ok(r) = Reference::parse(t, part)
+    {
+        return Ok(r.feature.to_string());
+    }
+    Err(Error::new(
+        Code::InvalidParam,
+        format!("a {ty} names the solid it acts on (target): the part has {} before it", before.len()),
+    )
+    .with("param", "target")
+    .with("solids", before))
+}
+
+/// A tweak (`ty`) from `current`'s fields (none for a new one) with what
+/// was given laid over them, faces as `<part>/<solid>/<name>` and
+/// directions, axes and `with` as geometric references in text. A new
+/// `by` keeps only the fields it takes; a new move naming no `by` is a
+/// rotation with an axis, a translation with a direction, else an offset.
+pub fn from_given(
+    ty: &str,
+    current: Option<&Feature>,
+    f: &FeatureFields,
+    part: &Id,
+    unit: crate::units::Unit,
+    env: &crate::expr::Env,
+) -> Result<Feature> {
+    let mut v = match current {
+        Some(Feature::MoveFace(m)) => m.fields(),
+        Some(Feature::ReplaceFace(r)) => r.fields(),
+        _ => json!({}),
+    };
+    let o = v.as_object_mut().expect("fields are an object");
+    let reference = |t: &str, at: &str| -> Result<Value> {
+        Ok(Reference::parse(t, part).map_err(|e| e.with("pointer", at))?.to_json())
+    };
+    let geom = |t: &str, param: &str| -> Result<Value> {
+        Ok(GeomRef::parse(t, part).map_err(|e| e.with("param", param))?.to_json())
+    };
+    let target = match (&f.target, &f.targets) {
+        (Some(_), Some(_)) => return Err(Error::new(Code::Usage, format!("give a {ty}'s target once"))),
+        (Some(t), None) => Some(t.clone()),
+        (None, Some(ts)) => match ts.as_slice() {
+            [t] => Some(t.clone()),
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("a {ty} acts on one target, not {}", ts.len()),
+                )
+                .with("param", "targets"));
+            }
+        },
+        (None, None) => None,
+    };
+    if let Some(t) = target {
+        o.insert("target".into(), json!(t));
+    }
+    // Each group's faces from text; `[]` for none.
+    let groups = |gs: &Value, with: bool| -> Result<Option<Value>> {
+        let Value::Array(gs) = gs else {
+            return Err(Error::new(Code::InvalidParam, format!("a {ty}'s groups are a list, each with its faces"))
+                .with("param", "groups"));
+        };
+        let mut out = Vec::with_capacity(gs.len());
+        for (i, g) in gs.iter().enumerate() {
+            let mut g = g.clone();
+            if let Some(Value::Array(fs)) = g.get_mut("faces") {
+                for (j, x) in fs.iter_mut().enumerate() {
+                    if let Some(t) = x.as_str().map(str::to_owned) {
+                        *x = reference(&t, &format!("/groups/{i}/faces/{j}"))?;
+                    }
+                }
+            }
+            if with && let Some(t) = g.get("with").and_then(Value::as_str).map(str::to_owned) {
+                g["with"] = geom(&t, "groups")?;
+            }
+            out.push(g);
+        }
+        Ok((!out.is_empty()).then_some(Value::Array(out)))
+    };
+    if ty == "replace_face" {
+        if let Some(gs) = &f.groups {
+            match groups(gs, true)? {
+                Some(g) => o.insert("groups".into(), g),
+                None => o.remove("groups"),
+            };
+        }
+    } else {
+        let by = f.by.clone().or_else(|| {
+            (current.is_none()).then(|| {
+                if f.axis.is_some() { "rotate" } else if f.direction.is_some() { "translate" } else { "offset" }
+                    .to_owned()
+            })
+        });
+        if let Some(by) = by {
+            let Some(takes) = MoveBy::takes(&by) else {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("a move_face's by is translate, rotate or offset, not {by:?}"),
+                )
+                .with("param", "by"));
+            };
+            if o.get("by").and_then(Value::as_str) != Some(by.as_str()) {
+                let motion = ["direction", "distance", "axis", "angle", "groups"];
+                o.retain(|k, _| !motion.contains(&k.as_str()) || takes.contains(&k.as_str()));
+                o.insert("by".into(), json!(by));
+            }
+        }
+        if let Some(d) = &f.direction {
+            o.insert("direction".into(), geom(d, "direction")?);
+        }
+        if let Some(a) = &f.axis {
+            o.insert("axis".into(), geom(a, "axis")?);
+        }
+        if let Some(q) = &f.distance {
+            o.insert("distance".into(), q.clone());
+        }
+        if let Some(q) = &f.angle {
+            o.insert("angle".into(), q.clone());
+        }
+        if let Some(Value::Array(fs)) = &f.faces {
+            let refs = fs
+                .iter()
+                .enumerate()
+                .map(|(i, x)| match x.as_str() {
+                    Some(t) => reference(t, &format!("/faces/{i}")),
+                    None => Ok(x.clone()),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if refs.is_empty() {
+                o.remove("faces");
+            } else {
+                o.insert("faces".into(), json!(refs));
+            }
+        }
+        if let Some(gs) = &f.groups {
+            match groups(gs, false)? {
+                Some(g) => o.insert("groups".into(), g),
+                None => o.remove("groups"),
+            };
+        }
+        match f.tangent {
+            Some(true) => {
+                o.remove("tangent");
+            }
+            Some(false) => {
+                o.insert("tangent".into(), json!(false));
+            }
+            None => {}
+        }
+    }
+    let mut r = crate::doc::files::Obj::new(&v, "")?;
+    let out = match ty {
+        "replace_face" => Feature::ReplaceFace(Box::new(crate::doc::tweak::ReplaceFace::from_fields(&mut r)?)),
+        _ => Feature::MoveFace(Box::new(MoveFace::from_fields(&mut r, unit, env)?)),
+    };
+    r.finish()?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,5 +621,101 @@ mod tests {
     fn check_is_resolve() {
         // The write-time check is the build's resolution, kernel left out.
         let _: fn(&Part, &Id, &Feature, &dyn Results) -> Result<()> = check;
+    }
+
+    fn call(s: &mut crate::session::Session, m: &str, p: Value) -> Result<Value> {
+        crate::server::handle(s, crate::proto::Request::from_rpc(m, Some(p)).unwrap())
+    }
+
+    /// A project with part `p`: a box `b` 40 × 30 × 20 mm, a box `c` beside
+    /// it.
+    fn boxes() -> (tempfile::TempDir, crate::session::Session) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::server::init(dir.path(), None).unwrap();
+        let mut s = crate::session::Session::open(dir.path()).unwrap();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(&mut s, "feature.add", json!({"part": "p", "type": "box", "id": "b",
+            "params": {"x": 40, "y": 30, "z": 20}})).unwrap();
+        call(&mut s, "feature.add", json!({"part": "p", "type": "box", "id": "c",
+            "params": {"x": 10, "y": 10, "z": 10}, "placement": {"origin": [60, 0, 0]}})).unwrap();
+        (dir, s)
+    }
+
+    /// The names of feature `f`'s body's `kind` (`faces`, `edges`).
+    fn names(s: &mut crate::session::Session, f: &str, kind: &str) -> Vec<String> {
+        let v = call(s, "inspect", json!({"part": "p", "feature": f})).unwrap();
+        v["bodies"][0][kind].as_array().unwrap().iter()
+            .map(|x| x["name"].as_str().unwrap().to_owned()).collect()
+    }
+
+    fn file(dir: &tempfile::TempDir, f: &str) -> Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join(format!("parts/p/features/{f}.json"))).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_protocol_adds_and_edits_a_move() {
+        let (dir, mut s) = boxes();
+        let b = names(&mut s, "b", "faces");
+        // No target and two solids: its faces name it. No `by`: a direction
+        // makes it a translation.
+        call(&mut s, "feature.add", json!({"part": "p", "type": "move_face", "id": "m",
+            "direction": "z", "distance": "1 mm", "faces": [format!("p/b/{}", b[0])]})).unwrap();
+        let v = file(&dir, "m");
+        assert_eq!((v["target"].as_str(), v["by"].as_str()), (Some("b"), Some("translate")), "{v}");
+        assert_eq!(v["format"], crate::doc::tweak::FORMAT);
+        assert!(v.get("tangent").is_none(), "{v}");
+        // A new `by` keeps only what it takes.
+        call(&mut s, "feature.edit", json!({"part": "p", "id": "m", "by": "offset",
+            "distance": "0.5 mm"})).unwrap();
+        let v = file(&dir, "m");
+        assert_eq!(v["by"], "offset");
+        assert!(v.get("direction").is_none(), "{v}");
+        call(&mut s, "feature.edit", json!({"part": "p", "id": "m", "tangent": false})).unwrap();
+        assert_eq!(file(&dir, "m")["tangent"], false);
+        call(&mut s, "feature.edit", json!({"part": "p", "id": "m", "tangent": true})).unwrap();
+        assert!(file(&dir, "m").get("tangent").is_none());
+        // One face as `face`, groups as objects in `faces` (what the CLI
+        // sends for --face and --face-distance together).
+        call(&mut s, "feature.edit", json!({"part": "p", "id": "m",
+            "face": format!("p/b/{}", b[1]),
+            "faces": [{"distance": "2 mm", "faces": [format!("p/b/{}", b[2])]}]})).unwrap();
+        let v = file(&dir, "m");
+        assert_eq!(v["faces"], json!([{"feature": "b", "name": b[1]}]), "{v}");
+        assert_eq!(v["groups"][0]["distance"], "2 mm", "{v}");
+        // A field a move doesn't take.
+        let e = call(&mut s, "feature.edit", json!({"part": "p", "id": "m", "thickness": "1 mm"}))
+            .unwrap_err();
+        assert_eq!((e.code, e.details["param"].as_str()), (Code::InvalidParam, Some("thickness")));
+    }
+
+    #[test]
+    fn writes_refuse_what_cant_resolve() {
+        let (_dir, mut s) = boxes();
+        let (b, c) = (names(&mut s, "b", "faces"), names(&mut s, "c", "faces"));
+        let edge = names(&mut s, "b", "edges")[0].clone();
+        let add = |s: &mut crate::session::Session, extra: Value| {
+            let mut v = json!({"part": "p", "type": "move_face", "target": "b",
+                               "by": "translate", "direction": "z", "distance": "1 mm"});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            call(s, "feature.add", v)
+        };
+        let e = add(&mut s, json!({"faces": [format!("p/c/{}", c[0])]})).unwrap_err();
+        assert_eq!(e.code, Code::TargetsMixed, "{e}");
+        let e = add(&mut s, json!({"faces": [format!("p/b/{edge}")]})).unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+        // A whole solid is no direction.
+        let e = add(&mut s, json!({"faces": [format!("p/b/{}", b[0])], "direction": "p/c"}))
+            .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+        let e = add(&mut s, json!({"faces": [format!("p/b/{}", b[0])], "by": "slide"}))
+            .unwrap_err();
+        assert_eq!((e.code, e.details["param"].as_str()), (Code::InvalidParam, Some("by")));
+        // Nothing written by any of them.
+        assert!(add(&mut s, json!({"faces": [format!("p/b/{}", b[0])]})).is_ok());
     }
 }

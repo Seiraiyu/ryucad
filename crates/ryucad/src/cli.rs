@@ -2565,6 +2565,7 @@ impl FieldArgs {
             groups: self.groups.clone().map(|g| g.0),
             // A path's --propagate is its segments'.
             propagate: self.propagate.filter(|_| self.segments.is_empty()),
+            tangent: None,
             radius: self.radius.clone().map(Value::String),
             edges: (!self.edges.is_empty()).then(|| self.edges.clone()),
             form: self.form.clone(),
