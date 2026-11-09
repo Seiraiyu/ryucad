@@ -327,6 +327,165 @@ fn extract_error(part: &Part, id: &Id, from: &Id, e: &ryukei::Error) -> Error {
     err
 }
 
+/// A sew: its sheets, as it sees them, sewn into one body. Several pieces,
+/// or a body that doesn't close where a solid was asked for, are
+/// `sew_failed`.
+pub fn sew(
+    part: &Part,
+    solids: &crate::solid::Solids,
+    id: &Id,
+    x: &crate::doc::surface::Sew,
+    before: &dyn Results,
+    run: &Run,
+) -> Result<Built> {
+    let need = crate::rebuild::Need {
+        role: "sheets",
+        want: Some(crate::kind::Want::Sheet),
+        changes: true,
+    };
+    let inputs: Vec<(&Id, &Built)> = x
+        .sheets
+        .iter()
+        .map(|t| Ok((t, crate::rebuild::body_as(part, solids, id, t, need, before)?)))
+        .collect::<Result<_>>()?;
+    let sheets: Vec<Body> = inputs.iter().map(|(_, b)| b.body.clone()).collect();
+    let key = crate::rebuild::op_key(&part.id, id);
+    let opts = ryukei::heal::SewOptions {
+        tolerance: x.tolerance.meters(),
+        solid: x.solid,
+    };
+    let work = crate::work::work(run.job);
+    let (mut pieces, journal) = ryukei::heal::sew_with(key, &sheets, &opts, &work).map_err(|e| {
+        crate::work::stopped(&e, run.job).unwrap_or_else(|| sew_error(id, e))
+    })?;
+    if pieces.len() > 1 {
+        let listed: Vec<Value> = pieces
+            .iter()
+            .map(|p| {
+                json!({
+                    "sheets": inputs
+                        .iter()
+                        .filter(|(_, b)| p.faces().any(|f| p.name_of(EntityId::Face(f)).is_some_and(|n| b.body.by_name(n).is_some())))
+                        .map(|(t, _)| t.as_str())
+                        .collect::<Vec<_>>(),
+                    "laminar": laminar(part, &inputs, p),
+                })
+            })
+            .collect();
+        return Err(Error::new(
+            Code::SewFailed,
+            format!(
+                "sew {id}: its sheets make {} pieces: their edges are farther apart than {} where the pieces meet",
+                pieces.len(),
+                x.tolerance
+            ),
+        )
+        .with("feature", id)
+        .with("reason", "pieces")
+        .with("pieces", listed)
+        .with("hint", "raise the tolerance (at most 0.1 mm), move the sheets' edges together, or sew each piece alone"));
+    }
+    let body = pieces.pop().expect("a sew of sheets gives a piece");
+    if x.solid && body.kind() != ryukei::topo::BodyKind::Solid {
+        return Err(Error::new(
+            Code::SewFailed,
+            format!("sew {id}: its sheets don't close up, so they make no solid"),
+        )
+        .with("feature", id)
+        .with("reason", "open")
+        .with("laminar", laminar(part, &inputs, &body))
+        .with("hint", "these edges have nothing to sew to: add sheets to close them, or set solid false for a sheet"));
+    }
+    let origins = sew_origins(id, &inputs, &body, &journal);
+    crate::rebuild::finish(id, "sew", (body, journal), origins)
+}
+
+/// A piece's laminar edges, each as a reference into the sheet whose
+/// name it kept (`<part>/<sheet>/<name>`), else its name alone.
+fn laminar(part: &Part, inputs: &[(&Id, &Built)], piece: &Body) -> Vec<String> {
+    piece
+        .edges()
+        .filter(|e| piece.is_laminar(*e))
+        .filter_map(|e| piece.name_of(EntityId::Edge(e)))
+        .map(|n| match inputs.iter().find(|(_, b)| b.body.by_name(n).is_some()) {
+            Some((t, _)) => format!("{}/{t}/{n}", part.id),
+            None => n.to_string(),
+        })
+        .collect()
+}
+
+/// A sew's origins: a sewn edge or a joined vertex (the kernel's `Merged`
+/// child) is `{feature, sewn: [<names>]}`; a split copy takes its
+/// parent's; everything else keeps its sheet's origin.
+fn sew_origins(id: &Id, inputs: &[(&Id, &Built)], body: &Body, journal: &ryukei::name::Journal) -> Origins {
+    use ryukei::name::Event;
+    let mut sewn: std::collections::BTreeMap<Name, Vec<String>> = Default::default();
+    let mut parent: std::collections::BTreeMap<Name, Name> = Default::default();
+    for e in journal.events() {
+        match e {
+            Event::Merged { parents, child } => {
+                sewn.insert(*child, parents.iter().map(Name::to_string).collect());
+            }
+            Event::Split { parent: p, children } => {
+                for c in children {
+                    parent.insert(*c, *p);
+                }
+            }
+            _ => {}
+        }
+    }
+    let of = |n: Name| -> Option<Value> {
+        inputs.iter().find_map(|(_, b)| b.origins.get(&n.to_string()).cloned())
+    };
+    crate::rebuild::names(body)
+        .into_iter()
+        .map(|n| {
+            let o = match sewn.get(&n) {
+                Some(p) => json!({"feature": id, "sewn": p}),
+                None => of(n)
+                    .or_else(|| parent.get(&n).and_then(|p| of(*p)))
+                    .unwrap_or_else(|| json!({"feature": id})),
+            };
+            (n.to_string(), o)
+        })
+        .collect()
+}
+
+/// The kernel's refusal of a sew: `sew_failed` with the healing refusal
+/// as `reason` (its variant in snake case), its text, and the sheets'
+/// entities it names where it names one.
+fn sew_error(id: &Id, e: ryukei::Error) -> Error {
+    let debug = format!("{e:?}");
+    let reason = match &e {
+        ryukei::Error::InvalidHeal(h) => variant_snake(&format!("{h:?}")),
+        ryukei::Error::NotASheet { .. } => "not_a_sheet".to_owned(),
+        _ => "kernel".to_owned(),
+    };
+    Error::new(Code::SewFailed, format!("sew {id}: {e}"))
+        .with("feature", id)
+        .with("reason", reason)
+        .with("kernel", e.to_string())
+        .with("refusal", debug)
+}
+
+/// An enum variant's name, from its debug form, in snake case:
+/// `GapTooLarge { .. }` is `gap_too_large`.
+fn variant_snake(debug: &str) -> String {
+    let end = debug.find([' ', '(', '{']).unwrap_or(debug.len());
+    let mut out = String::new();
+    for (k, c) in debug[..end].chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if k > 0 {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// A fill, extract, sew or thicken as output reports it: its file's
 /// fields, references as text, quantities with their meters.
 pub fn report(part: &Id, f: &Feature) -> Value {
@@ -348,7 +507,11 @@ pub fn report(part: &Id, f: &Feature) -> Value {
         Feature::Extract(x) => {
             json!({"faces": x.faces.iter().map(|r| r.text(part)).collect::<Vec<_>>()})
         }
-        Feature::Sew(x) => x.fields(),
+Feature::Sew(x) => {
+            let mut v = x.fields();
+            v["tolerance"] = x.tolerance.report();
+            v
+        }
         Feature::Thicken(x) => x.fields(),
         _ => unreachable!("a fill, an extract, a sew or a thicken"),
     }
@@ -529,5 +692,11 @@ mod tests {
         let o = extract_origins(&id, &sheet);
         assert_eq!(o.get(&name.to_string()), Some(&json!({"feature": "x", "extract_of": name.to_string()})));
         assert!(sheet.by_name(name).is_some());
+    }
+
+    #[test]
+    fn variants_are_named_in_snake_case() {
+        assert_eq!(variant_snake("GapTooLarge { at: .. }"), "gap_too_large");
+        assert_eq!(variant_snake("OpenShell"), "open_shell");
     }
 }

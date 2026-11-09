@@ -2387,6 +2387,11 @@ fn rebuild_with(
             });
             (r, None)
         }
+Feature::Sew(x) => (
+            crate::surface::sew(part, solids, id, x, before, run)
+                .map(|b| solid(Made::new(vec![(id.clone(), Arc::new(b))]))),
+            None,
+        ),
         Feature::Extract(x) => (
             crate::surface::extract(part, id, x, before)
                 .map(|b| solid(Made::new(vec![(id.clone(), Arc::new(b))]))),
@@ -3151,6 +3156,68 @@ mod tests {
         assert_eq!(crate::kind::boundaries(&sheet.body), 1);
         // The box is as it was.
         assert_eq!(state(&r, "b", "b").hash, built.hash);
+    }
+
+    /// The `x<j>` whose face's outward normal is the negation of face
+    /// `k`'s, faces in `body.faces()`'s order.
+    fn opposite_of(body: &Body, k: usize) -> String {
+        use ryukei::measure::{Entity, FaceShape, Properties, properties};
+        let normal = |f| match properties(body, Entity::Face(f)).unwrap() {
+            Properties::Face { shape: FaceShape::Plane { normal, .. }, .. } => normal.get(),
+            p => panic!("{p:?}"),
+        };
+        let faces: Vec<_> = body.faces().collect();
+        let n = normal(faces[k]);
+        let j = faces.iter().position(|f| normal(*f).dot(n) < -0.5).unwrap();
+        format!("x{j}")
+    }
+
+    #[test]
+    fn a_boxs_faces_extracted_sew_back_into_a_solid_or_say_why_not() {
+        use crate::doc::solid::Operation;
+        use crate::solid::tests::{boxed, part};
+        let n = crate::doc::surface::FORMAT;
+        let f = |v: Value| Feature::from_json(&v, crate::units::Unit::Mm, &crate::expr::Env::empty()).unwrap();
+        let b = boxed("0", Operation::New, &[]);
+        let r0 = rebuild_part(&part(vec![("b", b.clone())]));
+        let body = &state(&r0, "b", "b").body;
+        let mut list = vec![("b", b)];
+        let mut ids = Vec::new();
+        let faces: Vec<String> = body
+            .faces()
+            .map(|x| body.name_of(ryukei::topo::EntityId::Face(x)).unwrap().to_string())
+            .collect();
+        let names: Vec<String> = (0..faces.len()).map(|k| format!("x{k}")).collect();
+        for (k, name) in faces.iter().enumerate() {
+            ids.push(names[k].clone());
+            list.push((names[k].as_str(), f(json!({"format": n, "kind": "ryucad.feature",
+                "type": "extract", "faces": [{"feature": "b", "name": name}]}))));
+        }
+        let sew = |solid: bool, sheets: &[String]| f(json!({"format": n, "kind": "ryucad.feature",
+            "type": "sew", "sheets": sheets, "tolerance": "0.01 mm", "solid": solid}));
+        let mut all = list.clone();
+        all.push(("s", sew(true, &ids)));
+        let r = rebuild_part(&part(all));
+        let s = state(&r, "s", "s");
+        assert_eq!(crate::kind::name(&s.body), "solid");
+        close(volume(&s.body), 1e-9);
+        // Five of the six: open, and asked to be a solid.
+        let mut five = list.clone();
+        five.push(("s", sew(true, &ids[..5])));
+        let r = rebuild_part(&part(five));
+        let (_, e) = r.features.iter().find(|(i, _)| i.as_str() == "s").unwrap();
+        let e = e.as_ref().unwrap_err();
+        assert_eq!((e.code, e.details["reason"].as_str()), (Code::SewFailed, Some("open")), "{e}");
+        assert_eq!(e.details["laminar"].as_array().unwrap().len(), 4);
+        // Two opposite faces alone: two pieces.
+        let mut two = list.clone();
+        let opposite = vec![ids[0].clone(), opposite_of(body, 0)];
+        two.push(("s", sew(false, &opposite)));
+        let r = rebuild_part(&part(two));
+        let (_, e) = r.features.iter().find(|(i, _)| i.as_str() == "s").unwrap();
+        let e = e.as_ref().unwrap_err();
+        assert_eq!((e.code, e.details["reason"].as_str()), (Code::SewFailed, Some("pieces")), "{e}");
+        assert_eq!(e.details["pieces"].as_array().unwrap().len(), 2);
     }
 
     #[test]
