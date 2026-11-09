@@ -232,7 +232,8 @@ fn swept_faces_place_their_curves_as_their_loops_run() {
 /// over the whole spline; a torus's seam along a hole's edge, which left
 /// the hole outside the band; a sphere face's range starting 3e-9 short
 /// of its first turn; and, once their seams were right, extrusions whose
-/// curves crossed their NURBS form's period start. Release only: blends
+/// curves crossed their NURBS form's period start; and #247's last three:
+/// two revolutions and a plane face's circle. Release only: blends
 /// take seconds each in a debug build.
 #[test]
 #[cfg_attr(
@@ -281,7 +282,7 @@ fn race_bodies_469_are_sound() {
 }
 
 /// Every race body (`race::writable(1600)`) is written as a BrepArray
-/// that passes the schema's checks, or refused as `pcurve` where listed.
+/// that passes the schema's checks, or refused where `REFUSED` lists it (none).
 /// Release only (minutes even there): its own step in `full.yml`.
 #[test]
 #[cfg_attr(
@@ -290,10 +291,8 @@ fn race_bodies_469_are_sound() {
 )]
 fn the_race_is_sound_or_refused() {
     use rayon::prelude::*;
-    // Race body, and why it's refused: 482 and 819 are revolutions whose
-    // near-meridian edges can't be fitted onto their NURBS forms (#469);
-    // 1187 is refused on main too.
-    const REFUSED: [(usize, &str); 3] = [(482, "pcurve"), (819, "pcurve"), (1187, "pcurve")];
+    // Race bodies refused, and why: none since #247's last three.
+    const REFUSED: [(usize, &str); 0] = [];
     let bodies = ryukei_testkit::race::writable(1600);
     let outcomes: Vec<Result<(), String>> = bodies
         .par_iter()
