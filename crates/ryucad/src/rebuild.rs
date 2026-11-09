@@ -1609,11 +1609,24 @@ fn apply(
             return Err(e);
         }
     }
-    // Origins: the target's, each tool's under their placed names, a
-    // split entity's for each of its pieces, merged entities' where they
-    // all agree, and this feature's for everything else it made: the
-    // edges and vertices where faces cross, and merges of entities from
-    // different features.
+    let origins = boolean_origins(id, target, tools, &body, &journal);
+    finish(id, ty, (body, journal), origins)
+}
+
+/// Origins of what a boolean or a division of `target` by `tools` left
+/// (`body`, by its `journal`): the target's, each tool's under their
+/// placed names, a split entity's for each of its pieces, merged
+/// entities' where they all agree, and feature `id`'s for everything
+/// else it made: the edges and vertices where faces cross, and merges of
+/// entities from different features.
+fn boolean_origins(
+    id: &Id,
+    target: &Built,
+    tools: &[ToolBody],
+    body: &Body,
+    journal: &Journal,
+) -> Origins {
+    let kept = names(body);
     let mut from: BTreeMap<Name, Value> = BTreeMap::new();
     for (n, o) in target.origins.iter() {
         if let Some(n) = crate::doc::reference::parse_name(n) {
@@ -1654,11 +1667,9 @@ fn apply(
             _ => {}
         }
     }
-    let origins: Origins = kept
-        .iter()
+    kept.iter()
         .map(|n| (n.to_string(), from.get(n).unwrap_or(&own).clone()))
-        .collect();
-    finish(id, ty, (body, journal), origins)
+        .collect()
 }
 
 /// A tool's label as text: a hole's point (`p3`), or a pattern's
