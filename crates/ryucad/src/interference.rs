@@ -12,6 +12,12 @@
 //! interference, with its box, its volume estimated from its mesh at
 //! normal quality and the faces of each side it touches. Any other
 //! refusal leaves the pair unchecked, saying why.
+//!
+//! A pair with a reference import's body on a side (design 364) is
+//! judged on both meshes at normal quality instead ([`mesh`]): clear or
+//! touching within the pair's reach, or an approximate interference, with
+//! no volume, where a point of one surface lies deep inside the other's
+//! closed mesh.
 
 use crate::assembly::{Model, Occurrence, path_text};
 use crate::doc::id::Id;
@@ -95,6 +101,10 @@ struct Piece<'m> {
 pub(crate) fn key(a: &Built, b: &Built, rel: &Rigid) -> String {
     let mut h = blake3::Hasher::new();
     h.update(format!("{} {}\n", a.hash, b.hash).as_bytes());
+    // Judged on meshes: never a verdict a boolean gave.
+    if a.reference || b.reference {
+        h.update(b"mesh\n");
+    }
     for row in rel.rotation_matrix() {
         for x in row {
             h.update(&x.to_bits().to_le_bytes());
@@ -377,8 +387,8 @@ pub fn find_for(
     let mut local: HashMap<*const Built, Option<Box3>> = HashMap::new();
     for (i, o) in model.occurrences.iter().enumerate() {
         for s in &o.solids {
-            // A sheet shares no volume: interference pairs solids only. A
-            // reference import is paired, and left unchecked, until 21.D.
+            // A sheet shares no volume: interference pairs solids, and
+            // reference imports, which are judged on their meshes.
             if !s.built.reference && s.built.body.kind() != ryukei::topo::BodyKind::Solid {
                 continue;
             }
@@ -424,6 +434,33 @@ pub fn find_for(
         .filter(|(_, _, _, k)| !cache.verdicts.contains_key(k))
         .map(|(a, b, rel, k)| (k.as_str(), (*a, *b, *rel)))
         .collect();
+    // Each body a missing pair with a reference side needs, meshed once.
+    // Keyed by address (as usize: a raw pointer isn't Send).
+    let mut need: BTreeMap<usize, &Built> = BTreeMap::new();
+    for (a, b, _) in missing.values() {
+        let (x, y) = (pieces[*a].1.built, pieces[*b].1.built);
+        if x.reference || y.reference {
+            need.insert(x as *const Built as usize, x);
+            need.insert(y as *const Built as usize, y);
+        }
+    }
+    let work = crate::work::work(job);
+    let need: Vec<(usize, &Built)> = need.into_iter().collect();
+    let meshed: Vec<(usize, std::result::Result<Arc<Prepared>, ryukei::Error>)> = need
+        .into_par_iter()
+        .map(|(k, b)| (k, Prepared::new_for(&b.body, &work).map(Arc::new)))
+        .collect();
+    let mut prepared: HashMap<usize, std::result::Result<Arc<Prepared>, String>> = HashMap::new();
+    for (k, r) in meshed {
+        let r = match r {
+            Ok(p) => Ok(p),
+            Err(e) => match crate::work::stopped(&e, job) {
+                Some(stop) => return Err(stop),
+                None => Err(format!("{e:?}")),
+            },
+        };
+        prepared.insert(k, r);
+    }
     let stage = job.begin(Phase::Intersect, "pairs", missing.len());
     let worked: Vec<Result<(String, Verdict)>> = missing
         .into_par_iter()
@@ -433,7 +470,19 @@ pub fn find_for(
                 let at = |p: &Piece| format!("{}/{}", path_text(&p.occurrence.path), p.founder);
                 format!("{} {}", at(x), at(y))
             })?;
-            let v = verdict_for(&x.built.body, &y.built.body, rel, job)?;
+            let v = if x.built.reference || y.built.reference {
+                let get = |b: &Built| prepared[&(b as *const Built as usize)].clone();
+                match (get(x.built), get(y.built)) {
+                    (Ok(ma), Ok(mb)) => {
+                        mesh::verdict(&ma, &mb, &rel, &mut 0).unwrap_or(Verdict::CannotCheck {
+                            kernel: "mesh search past its budget".to_owned(),
+                        })
+                    }
+                    (Err(e), _) | (_, Err(e)) => Verdict::CannotCheck { kernel: e },
+                }
+            } else {
+                verdict_for(&x.built.body, &y.built.body, rel, job)?
+            };
             Ok((k.to_owned(), v))
         })
         .collect();
@@ -464,7 +513,29 @@ pub fn find_for(
             Verdict::CannotCheck { kernel } => {
                 unchecked.push(json!({"a": sa, "b": sb, "kernel": kernel}));
             }
-            Verdict::Approximate { .. } => unreachable!("21.D Task 4"),
+            Verdict::Approximate {
+                min,
+                max,
+                open,
+                faces_a,
+                faces_b,
+            } => {
+                let p = |c: &[f64; 3]| Point3::new(c[0], c[1], c[2]);
+                let at = Box3::new(p(min), p(max)).transform_rigid(&x.occurrence.pose);
+                let (lo, hi) = (at.min(), at.max());
+                let names = |s: &str, ns: &[Name]| -> Vec<String> {
+                    ns.iter().map(|n| format!("{s}/{n}")).collect()
+                };
+                let mut i = json!({
+                    "a": sa, "b": sb, "volume_m3": null, "approximate": true,
+                    "box": {"min_m": [lo.x, lo.y, lo.z], "max_m": [hi.x, hi.y, hi.z]},
+                    "faces": {"a": names(&sa, faces_a), "b": names(&sb, faces_b)},
+                });
+                if *open {
+                    i["open"] = json!(true);
+                }
+                interferences.push(i);
+            }
             Verdict::Interferes {
                 min,
                 max,
@@ -496,7 +567,7 @@ pub fn find_for(
         "interferences": interferences,
         "touching": touching,
         "unchecked": unchecked,
-        "volume": "estimated from each intersection's mesh at normal quality",
+        "volume": "estimated from each intersection's mesh at normal quality; null where judged on meshes (approximate: a reference import's side)",
     }))
 }
 

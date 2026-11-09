@@ -295,8 +295,8 @@ fn check_warns_of_a_reference_and_never_runs_the_intersection_check_on_it() {
 }
 
 #[test]
-fn interference_of_references_is_unchecked_until_21d() {
-    let (_dir, mut s) = project();
+fn references_interfere_on_their_meshes() {
+    let (_dir, mut s) = project(); // r: OCCT's box as a reference; b: a 10 mm box
     must(
         &mut s,
         "part.create",
@@ -309,16 +309,49 @@ fn interference_of_references_is_unchecked_until_21d() {
             json!({"part": "rig", "type": "instance", "id": id, "of": "p", "fixed": true}),
         );
     }
-    let v = must(&mut s, "check", json!({"part": "rig"}));
-    let codes: Vec<&str> = v["findings"]
+    // Two copies of one part standing in each other: every pair overlaps,
+    // and those with a reference side are judged on their meshes.
+    let v = must(&mut s, "interference", json!({"part": "rig"}));
+    assert_eq!(v["unchecked"], json!([]), "{v}");
+    let approximate: Vec<&serde_json::Value> = v["interferences"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|f| f["code"].as_str().unwrap())
+        .filter(|i| i["approximate"] == true)
         .collect();
-    // The two references overlap where they stand: the kernel's boolean
-    // takes no sheet, so the pairs with a reference side can't be checked.
-    assert!(codes.contains(&"cannot_check"), "{v}");
+    assert!(!approximate.is_empty(), "{v}");
+    for i in &approximate {
+        assert!(i["volume_m3"].is_null(), "{v}");
+        assert!(!i["faces"]["a"].as_array().unwrap().is_empty(), "{v}");
+        assert!(!i["faces"]["b"].as_array().unwrap().is_empty(), "{v}");
+    }
+    // The solid pair is still a boolean's, with its volume.
+    assert!(
+        v["interferences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["volume_m3"].is_f64()),
+        "{v}"
+    );
+    let v = must(&mut s, "check", json!({"part": "rig"}));
+    assert!(
+        v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["code"] != "cannot_check"),
+        "{v}"
+    );
+    // Moved a metre off, nothing is paired.
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "rig", "id": "c", "placement": {"origin": [1000, 0, 0]}}),
+    );
+    let v = must(&mut s, "interference", json!({"part": "rig"}));
+    assert_eq!(v["interferences"], json!([]), "{v}");
+    assert_eq!(v["unchecked"], json!([]), "{v}");
 }
 
 #[test]

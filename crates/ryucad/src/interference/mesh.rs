@@ -27,19 +27,21 @@ pub struct Prepared {
 impl Prepared {
     /// `body`'s mesh, or the mesher's refusal as text.
     pub fn new(body: &Body) -> Result<Prepared, String> {
-        Prepared::new_for(body, &ryukei::work::Work::unlimited())
+        Prepared::new_for(body, &ryukei::work::Work::unlimited()).map_err(|e| format!("{e:?}"))
     }
 
-    pub fn new_for(body: &Body, work: &ryukei::work::Work) -> Result<Prepared, String> {
+    /// [`Prepared::new`] under `work`, the mesher's refusal as it gave it
+    /// (a cancel among them).
+    pub fn new_for(body: &Body, work: &ryukei::work::Work) -> Result<Prepared, ryukei::Error> {
         let diagonal = match crate::inspect::loose_extent(body) {
             Some((lo, hi)) => {
                 let d = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
                 (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
             }
-            None => return Err("an empty body".to_owned()),
+            None => 1.0,
         };
         let params = crate::mesh::Quality::Normal.params(diagonal);
-        let m = ryukei::mesh::tessellate_with(body, &params, work).map_err(|e| format!("{e:?}"))?;
+        let m = ryukei::mesh::tessellate_with(body, &params, work)?;
         let mut triangles = Vec::with_capacity(m.triangles.len());
         let mut faces = Vec::with_capacity(m.triangles.len());
         for fm in &m.faces {
