@@ -2689,6 +2689,11 @@ pub(crate) fn input_hash(
     if let Some(i) = f.import() {
         let mut x = blake3::Hasher::new();
         x.update(h.as_bytes());
+        // Surface models heal as sheets since ryucad 18.C: a refusal an
+        // earlier build kept (`open_shell`) isn't this build's result.
+        if i.mode() != crate::doc::import::Mode::Reference {
+            x.update(b"ryucad.import.open_sheet\0");
+        }
         let now = part.imports.get(&i.file.path);
         x.update(now.map_or("missing", |f| f.blake3.as_str()).as_bytes());
         h = x.finalize();
