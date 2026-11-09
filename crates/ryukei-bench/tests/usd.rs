@@ -209,8 +209,10 @@ fn every_race_body_is_valid_and_imports() {
         pipe_tolerance: 1e-7,
         layer_data: vec![],
     };
-    // Each body's file and its volume with its bound, or why it's refused.
-    type Written = Result<(PathBuf, (f64, f64)), String>;
+    // Each body's file and its volume with its bound (none where mass
+    // can't mesh a face of it: then only its validity and manifold breps
+    // are judged), or why it's refused.
+    type Written = Result<(PathBuf, Option<(f64, f64)>), String>;
     let written: Vec<Written> = bodies
         .par_iter()
         .enumerate()
@@ -233,26 +235,41 @@ fn every_race_body_is_valid_and_imports() {
             let l = layer(&model, &opts).map_err(|e| format!("{k}: {e}"))?;
             let path = dir.path().join(format!("b{k}.usda"));
             std::fs::write(&path, usda::to_string(&l).unwrap()).unwrap();
-            Ok((path, exact(b, Unit::Millimeter)))
+            Ok((path, measured(b, Unit::Millimeter)))
         })
         .collect();
     let refused: Vec<&String> = written.iter().filter_map(|r| r.as_ref().err()).collect();
     assert!(refused.is_empty(), "refused: {refused:#?}");
-    let (files, volumes): (Vec<PathBuf>, Vec<(f64, f64)>) =
+    let (files, volumes): (Vec<PathBuf>, Vec<Option<(f64, f64)>>) =
         written.into_iter().map(Result::unwrap).unzip();
+    let unmeasured: Vec<usize> = (0..volumes.len())
+        .filter(|&k| volumes[k].is_none())
+        .collect();
     let report = reference(dir.path(), &files);
     let wrong: Vec<String> = report
         .iter()
         .zip(&volumes)
-        .filter_map(|(r, &v)| judge(r, &[v]).err())
+        .filter_map(|(r, v)| judge(r, v.as_slice()).err())
         .collect();
     println!(
-        "{} race bodies written, {} wrong, on {}",
+        "{} race bodies written, {} wrong, {} not measured (their volumes unjudged: {unmeasured:?}), on {}",
         files.len(),
         wrong.len(),
+        unmeasured.len(),
         machine()
     );
     assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// `b`'s volume and its bound, as [`exact`], or `None` where
+/// `measure::properties` refuses it (a face mass can't mesh).
+fn measured(b: &Body, unit: Unit) -> Option<(f64, f64)> {
+    let Ok(Properties::Body { volume, .. }) = properties(b, Entity::Body) else {
+        return None;
+    };
+    let k = unit.per_meter();
+    let k = k * k * k;
+    Some((volume.value() * k, volume.bound() * k))
 }
 
 /// The CPU's name, from `/proc/cpuinfo` (the devcontainer is Linux).
