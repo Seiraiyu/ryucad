@@ -74,3 +74,20 @@ Issue #308: KiCad's `Smolhaj_Scale_0.1.step` body 5 (116 faces, 100 of them spli
 - **Tried and left.** The remainder in plain f64 with one inflation by `1 + 32u` took a tenth off the fine mesh, but it moves every spline mesh's bits and can be a few ulps looser than the stepped expressions. A memo of verdicts across a face's rounds: only 5% of tests repeat a triangle of an earlier round.
 - **Measured.** Body 5's mass on cox-worker-2 (AMD Ryzen 7 9700X, one thread, three runs, 2026-11-07): main 63.4, 63.9 and 63.2 s, this 39.2, 39.3 and 39.3 s, the same bits; still over step-hunt's 30 s, so #308's remainder went to v0.9.0. Side by side on cox-worker-1 (Intel Xeon E5-2650, one rayon thread each, load 2.5 to 5.1): main (a553ba6a, with #551's patch spans) 334.3 s, this 189.2 s (1.77 times). The other #307/#308 cases (`nist_ftc_07`, `nist_ftc_10`, OCCT's `nurbs_cylinder` and `linkrods.step`) are none slower, their volumes and bounds the same bits.
 - **Testing.** `taylor::tests::radii_by_upper_ends_match_the_interval_expressions` (200,000 draws from zeros, values under `TINY`, near overflow, infinities and NaN), `polynomial_jets_are_no_wider_than_the_quotients`, `enclosures_hold_sampled_values` over polynomial surfaces too, `interval::tests::steps_on_the_bits_follow_the_rule`, `basis::tests::small_tables_give_the_same_bits`, `surface::tests::lower_orders_are_evals_bits`, and every golden section held.
+
+## Phase 15's bars (decided in ryukei phase 15)
+
+The design is document 296 in the Coxswain planning project `ryucad-ryukei`; this is its plan 15.F (phase 10). Every bar of phase 15 recorded on one machine, cox-worker-2 (AMD Ryzen 7 9700X, 8 cores, 32 GB, Debian 13, Linux 6.17.2-1-pve), at `a4f21095` on 2026-11-09, three runs back to back, each with its one-minute load before and after.
+
+- **The meshing race** (`ryukei-bench`'s `formats` test, `meshing_and_writing_the_race_as_stl_against_occt`, in the devcontainer, release, all 8 cores, `RYUKEI_BARS=1`). All three runs pass design 296's bar: faster than OCCT, at no more than `TRIANGLES_BAR` (2) times its triangles.
+  - **Triangles**, every run: ryukei 21,082,668 (all 1,600 bodies, none refused, no face left out), OCCT 11,661,133 (four faces skipped, no triangulation), 1.81 times. 15.B's were 21,002,124 against 11,278,534.
+  - **Times:**
+
+    | Run | Load | ryukei | OCCT |
+    |---|---|---|---|
+    | 1 | 1.28 → 5.00 | 7.57 s | 13.69 s |
+    | 2 | 1.83 → 4.70 | 6.99 s | 12.69 s |
+    | 3 | 1.81 → 4.69 | 7.34 s | 12.65 s |
+
+    That is 0.55 to 0.58 of OCCT's time; the load after is the test's own.
+  - **The slowest bodies**, in every run 303, 1382, 1101, 1257, 489, 869, 834 and 1530 at 0.8 to 1.4 s each (body 1257, 283,168 triangles, the slowest in two runs at 1.32 and 1.41 s).

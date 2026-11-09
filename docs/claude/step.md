@@ -87,3 +87,29 @@ The design is document 364 in the Coxswain planning project `ryucad-ryukei`; thi
 - **Empty shapes.** A shape with no faces (a boolean that leaves nothing, which healing gives as the empty body) is refused `Malformed`, as a shape no face of which lays out is: the seeded tests and the golden section leave such bodies out.
 - **ryustep.** `Opened::reference(k, &ReadOptions)` (and `reference_with`) reads the shape as `body` does (`read::shape_of`, shared) and builds its reference under `opts.key` and `opts.heal.tolerance_cap`: `Referenced { representation, items, definition, result, instances, solids }`. Solids of one representation aren't united and faces split at a revolution's axis aren't repaired.
 - **Testing.** `heal::reference::tests` (a block, an open box, seams, poles, a face turned, a loop reversed, crossing loops kept, an edge of three uses, a face dropped, pieces touching at a vertex, refusals); `tests/reference.rs` (seeded bodies against healing's face names, one thread and four); `tests/work.rs`'s `a_reference_is_bounded`; the `reference` golden section; ryustep's `tests/read.rs` and `tests/reference.rs` (every committed and OCCT body builds, meshes at a hundredth of the box of points along its edges (a face bounded by one closed edge has one vertex: a PMI plane disc in NIST CTC 04's AP203 with PMI edition) and, in release, keeps healing's face names; under a second on one thread with `RYUCAD_BARS=1`; OCCT's `offset_sheet`, whose offset folds, is refused before a reference as healing refuses it); `ryukei-bench`'s `pinned_corpus_builds_as_references`. Measured: every committed and OCCT body's reference in 0.81 to 0.86 s on one thread in release, the slowest `nist_ftc_07` at about 0.38 s (cox-worker-2: AMD Ryzen 7 9700X, load average 2.0 to 2.8, 2026-11-06). The pinned corpus (`pinned_corpus_builds_as_references`, devcontainer, release): 65 of the 66 representations in its 35 files built, with 0 faces split, dropped or unmeshed, and OCCT's `screw.step` refused (a spindle torus, `InvalidGeometry`, as healing refuses it; `PINNED_REFUSED`), in 57.4 s on one thread, the largest representation spending 6,639 work units (`nist_ctc_02`'s AP203 #20754) against ryucad's default `heal.budget` of 33,554,432 (`1 << 25`), so the budget never binds, and the whole corpus 130,439 (cox-worker-4: AMD Opteron 6380, 8 threads, shared at a load average of 13.0 to 14.3, 2026-11-06).
+
+## Phase 15's bars (decided in ryukei phase 15)
+
+The design is document 296 in the Coxswain planning project `ryucad-ryukei`; this is its plan 15.F (phase 10). Every bar of phase 15 recorded on one machine, cox-worker-2 (AMD Ryzen 7 9700X, 8 cores, 32 GB, Debian 13, Linux 6.17.2-1-pve), at `a4f21095` on 2026-11-09, three runs back to back, each with its one-minute load before and after.
+
+- **step-hunt** over `committed` and `nist`, natively, release, `--jobs 4 --timeout 1800 --slow 30` (one rayon thread a case, each a full core): 90 cases in 1 min 58 s, load 1.87 → 3.69 (its own jobs). Design 296's bar holds: no `slow` or `timeout` finding in `import`, `check` or `volume`.
+  - **Slowest:** `check` 9.89 s (`nist_ctc_02`'s AP242 edition, #1341), `import` 3.45 s (`nist_ctc_02_asme1_rc`, #20772), `volume` 18.92 s (`nist_ctc_02_asme1_rc`, #20754).
+  - **The ledger.** 44 timed lines were fixed and are gone from `crates/step-hunt/known.txt` (#301's checks ×8, #302's ×4, #303's ×6, #305 ×6, #306 ×6, #308's volumes ×14). One new finding is ledgered as a `limit`: `nist_ftc_08`'s tessellated-only file at `whole_ref_import`. The 16 cases that fail are the ledger's limits (13 PMI sheets, `nist_ftc_07` #7830's unmeshed reference faces, `nist_ftc_08`'s tessellated solid).
+- **The hard bodies**, natively, release, one rayon thread, one `--only` a process, three runs each, one-minute load 1.19 to 1.85. Every run gave the same seconds, and all are at least ten times faster than #239:
+
+  | Body | Now | #239 |
+  |---|---|---|
+  | OCCT's `linkrods.step`, the check (`check-split`) | 2.2 s (heal 3.7 s, mesh 2.7 s; 273,426 units, no faults) | 8.F: 44 minutes |
+  | Switchwire's M3 threaded insert (#21124, 117 faces) | 3.46 s | 1,872 s |
+  | Switchwire's M5x16 BHCS (#21101, 20 faces) | 0.05 s | 287 s |
+  | Voron 0.2's filament (#24989, 5 faces) | 23.1 to 23.3 s | 1,976 s |
+  | Voron 0.2's leadscrew stepper (#24785, 294 faces) | 14.7 s | 2,074 s |
+- **The Voron imports** (ryucad's `corpus` test, `slow_pinned`, natively, release, all cores). Every file imports in under 30 minutes, so `crates/ryucad/tests/corpus/pinned.txt` holds them as `builds`, no longer `slow`:
+
+  | File | Parts built | Import | With the round trip | Load |
+  |---|---|---|---|---|
+  | Switchwire | 324 of 470 | 677 s | 755 s | 1.19 → 3.42 |
+  | Voron 0.2's master assembly | 381 of 1,170 | 45 s | 149 s | 1.81 → 2.58 |
+  | Voron 2.4r2 | 1,291 of 1,571 | 301 s | 629 s | 1.93 → 3.02 |
+
+  The Voron 2.4r2 built none before. The two parts listed as not coming back through STEP now do (`120x120mm-mic6`, #234, and the Switchwire's heatsink), and their lines are gone. One newly reached part doesn't: the Voron 0.2's `v0-display-pcb` (4,166 faces) imports back as nothing, #618, listed as its `roundtrip` line.

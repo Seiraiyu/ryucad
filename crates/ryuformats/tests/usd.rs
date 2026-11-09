@@ -232,7 +232,8 @@ fn swept_faces_place_their_curves_as_their_loops_run() {
 /// over the whole spline; a torus's seam along a hole's edge, which left
 /// the hole outside the band; a sphere face's range starting 3e-9 short
 /// of its first turn; and, once their seams were right, extrusions whose
-/// curves crossed their NURBS form's period start. Release only: blends
+/// curves crossed their NURBS form's period start; and #247's last three:
+/// two revolutions and a plane face's circle. Release only: blends
 /// take seconds each in a debug build.
 #[test]
 #[cfg_attr(
@@ -264,17 +265,24 @@ fn race_bodies_469_are_sound() {
     }
     // Two revolutions of closed profiles, race bodies 819 and 482, whose
     // near-meridian edges a fit by projection can't follow onto their
-    // NURBS forms across the profile's period start: refused, not written
-    // wrong. A fix shows here.
+    // NURBS forms across the profile's period start: their curves are
+    // carried through the forms' reparameterizations (#247).
     for seed in [455, 267] {
         let b = blend_body(seed).expect("it builds");
-        let e = brep_array(&b, "brep", Unit::Millimeter, 1e-7).unwrap_err();
-        assert_eq!(e.reason, "pcurve", "blend {seed}");
+        let p = brep_array(&b, "brep", Unit::Millimeter, 1e-7)
+            .unwrap_or_else(|e| panic!("blend {seed}: {e}"));
+        check(&p);
     }
+    // Race body 1187, a boolean whose plane face's circle was cut two
+    // ulps short of a knot (#247).
+    let b = boolean_body(657).expect("it builds");
+    let p = brep_array(&b, "brep", Unit::Millimeter, 1e-7)
+        .unwrap_or_else(|e| panic!("boolean 657: {e}"));
+    check(&p);
 }
 
 /// Every race body (`race::writable(1600)`) is written as a BrepArray
-/// that passes the schema's checks, or refused as `pcurve` where listed.
+/// that passes the schema's checks, or refused where `REFUSED` lists it (none).
 /// Release only (minutes even there): its own step in `full.yml`.
 #[test]
 #[cfg_attr(
@@ -283,10 +291,8 @@ fn race_bodies_469_are_sound() {
 )]
 fn the_race_is_sound_or_refused() {
     use rayon::prelude::*;
-    // Race body, and why it's refused: 482 and 819 are revolutions whose
-    // near-meridian edges can't be fitted onto their NURBS forms (#469);
-    // 1187 is refused on main too.
-    const REFUSED: [(usize, &str); 3] = [(482, "pcurve"), (819, "pcurve"), (1187, "pcurve")];
+    // Race bodies refused, and why: none since #247's last three.
+    const REFUSED: [(usize, &str); 0] = [];
     let bodies = ryukei_testkit::race::writable(1600);
     let outcomes: Vec<Result<(), String>> = bodies
         .par_iter()

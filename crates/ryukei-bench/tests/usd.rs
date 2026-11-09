@@ -190,6 +190,101 @@ fn the_references_read_every_seeded_body() {
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
+/// Every race body (`race::writable(1600)`) as a usda of its BrepArray
+/// alone, opened by OpenUSD, valid by usd-brep's validator, and imported
+/// into SMLib as manifold solids of the volume ryukei measures: design
+/// 296's BrepArray bar. About a quarter of an hour on a Ryzen 7 9700X
+/// (987 s): run by name in the devcontainer,
+/// `cargo test -p ryukei-bench --features usd --release --test usd --
+/// --ignored every_race_body --nocapture`.
+#[test]
+#[ignore = "about a quarter of an hour on a Ryzen 7 9700X: run by name (plan 15.F's bars)"]
+fn every_race_body_is_valid_and_imports() {
+    use rayon::prelude::*;
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let bodies = ryukei_testkit::race::writable(1600);
+    let opts = Options {
+        unit: Unit::Millimeter,
+        brep: true,
+        mesh: false,
+        pipe_tolerance: 1e-7,
+        layer_data: vec![],
+    };
+    // Each body's file and its volume with its bound (none where mass
+    // can't mesh a face of it: then only its validity and manifold breps
+    // are judged), or why it's refused.
+    type Written = Result<(PathBuf, Option<(f64, f64)>), String>;
+    let written: Vec<Written> = bodies
+        .par_iter()
+        .enumerate()
+        .map(|(k, b)| {
+            let model = Model {
+                products: vec![Product {
+                    id: format!("B-{k}"),
+                    name: format!("Body {k}"),
+                    part: format!("b{k}"),
+                    label: None,
+                    solids: vec![Solid {
+                        name: "s".into(),
+                        body: Arc::new(b.clone()),
+                        mesh: None,
+                        brep: true,
+                    }],
+                    children: vec![],
+                }],
+            };
+            let l = layer(&model, &opts).map_err(|e| format!("{k}: {e}"))?;
+            let path = dir.path().join(format!("b{k}.usda"));
+            std::fs::write(&path, usda::to_string(&l).unwrap()).unwrap();
+            Ok((path, measured(b, Unit::Millimeter)))
+        })
+        .collect();
+    let refused: Vec<&String> = written.iter().filter_map(|r| r.as_ref().err()).collect();
+    assert!(refused.is_empty(), "refused: {refused:#?}");
+    let (files, volumes): (Vec<PathBuf>, Vec<Option<(f64, f64)>>) =
+        written.into_iter().map(Result::unwrap).unzip();
+    let unmeasured: Vec<usize> = (0..volumes.len())
+        .filter(|&k| volumes[k].is_none())
+        .collect();
+    let report = reference(dir.path(), &files);
+    let wrong: Vec<String> = report
+        .iter()
+        .zip(&volumes)
+        .filter_map(|(r, v)| judge(r, v.as_slice()).err())
+        .collect();
+    println!(
+        "{} race bodies written, {} wrong, {} not measured (their volumes unjudged: {unmeasured:?}), on {}",
+        files.len(),
+        wrong.len(),
+        unmeasured.len(),
+        machine()
+    );
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// `b`'s volume and its bound, as [`exact`], or `None` where
+/// `measure::properties` refuses it (a face mass can't mesh).
+fn measured(b: &Body, unit: Unit) -> Option<(f64, f64)> {
+    let Ok(Properties::Body { volume, .. }) = properties(b, Entity::Body) else {
+        return None;
+    };
+    let k = unit.per_meter();
+    let k = k * k * k;
+    Some((volume.value() * k, volume.bound() * k))
+}
+
+/// The CPU's name, from `/proc/cpuinfo` (the devcontainer is Linux).
+fn machine() -> String {
+    std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("model name"))
+                .map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string())
+        })
+        .unwrap_or_else(|| std::env::consts::ARCH.into())
+}
+
 /// A plate drilled through, a pin, a ball, and an assembly placing the
 /// pin twice (once turned) on the plate, and the ball.
 fn project() -> (tempfile::TempDir, ryucad::session::Session) {
