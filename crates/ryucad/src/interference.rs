@@ -48,6 +48,19 @@ pub enum Verdict {
         faces_a: Vec<Name>,
         faces_b: Vec<Name>,
     },
+    /// Overlapping, judged on meshes (a reference import's side): a point
+    /// of one surface certified deep inside the other's closed mesh. Its
+    /// volume isn't known; `min`/`max` are the meshes' boxes' overlap in
+    /// the first solid's frame; `open` where a side's mesh doesn't close
+    /// (a sheet passing through a solid); the faces of each side whose
+    /// triangles come within the pair's reach of the other.
+    Approximate {
+        min: [f64; 3],
+        max: [f64; 3],
+        open: bool,
+        faces_a: Vec<Name>,
+        faces_b: Vec<Name>,
+    },
     /// ryukei couldn't decide: its refusal.
     CannotCheck { kernel: String },
 }
@@ -451,6 +464,7 @@ pub fn find_for(
             Verdict::CannotCheck { kernel } => {
                 unchecked.push(json!({"a": sa, "b": sb, "kernel": kernel}));
             }
+            Verdict::Approximate { .. } => unreachable!("21.D Task 4"),
             Verdict::Interferes {
                 min,
                 max,
