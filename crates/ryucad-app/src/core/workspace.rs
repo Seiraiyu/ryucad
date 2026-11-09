@@ -3317,7 +3317,9 @@ impl Workspace {
                         None => Form::from_show_in(&part, &a.result, self.unit()),
                     };
                     if let Some(p) = self.model.parts.get(&part) {
-                        form.offer(&p.founders());
+                        // A reference import's solid is never offered to
+                        // act on (design 364).
+                        form.offer(&p.modellable());
                     }
                     // An instance may take its part's latest release; another
                     // project's, any of its dependency's official labels.

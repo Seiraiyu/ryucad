@@ -551,6 +551,23 @@ impl Part {
             .collect()
     }
 
+    /// Whether solid `id` is a reference import's (design 364): its
+    /// founder is an import in reference mode, built or not.
+    pub fn is_reference(&self, id: &str) -> bool {
+        self.feature(id)
+            .and_then(|f| f.import.as_ref())
+            .is_some_and(|i| i.reference)
+    }
+
+    /// The solids a feature may act on: the founders, less reference
+    /// imports', which nothing changes (`reference_body`).
+    pub fn modellable(&self) -> Vec<String> {
+        self.founders()
+            .into_iter()
+            .filter(|s| !self.is_reference(s))
+            .collect()
+    }
+
     /// The solids the model shows that `feature` founds or acts on.
     pub fn solids_of(&self, feature: &str) -> Vec<&Solid> {
         self.solids
@@ -1611,6 +1628,26 @@ mod tests {
                                               "body": 0, "heal": {"sewn": 1}}));
         assert!(!s.reference && s.faults.is_empty());
         assert_eq!(s.heal, [("sewn".to_owned(), 1)]);
+    }
+
+    #[test]
+    fn references_are_known_and_never_offered_to_act_on() {
+        let mut m = Model::default();
+        m.apply_part(&json!({"part": "p", "revision": "r", "features": [
+            {"id": "base", "type": "box", "ok": true, "solids": ["base"], "hash": "h1"},
+            {"id": "motor", "type": "import", "ok": true, "solids": ["motor"], "hash": "h2",
+             "import": {"file": "imports/m.step", "blake3": "00", "body": 0, "mode": "reference"}},
+            {"id": "bolt", "type": "import", "ok": true, "solids": ["bolt"], "hash": "h3",
+             "import": {"file": "imports/b.step", "blake3": "00", "body": 0}}],
+            "solids": [{"solid": "base", "features": ["base"], "ok": true, "hash": "h1"},
+                       {"solid": "motor", "features": ["motor"], "ok": true, "hash": "h2",
+                        "reference": true},
+                       {"solid": "bolt", "features": ["bolt"], "ok": true, "hash": "h3"}]}));
+        let p = &m.parts["p"];
+        assert!(p.is_reference("motor"));
+        assert!(!p.is_reference("bolt") && !p.is_reference("base"));
+        assert_eq!(p.founders(), ["base", "motor", "bolt"]);
+        assert_eq!(p.modellable(), ["base", "bolt"]);
     }
 
     #[test]
