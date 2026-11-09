@@ -10,7 +10,9 @@
 //! against real faces, edges and vertices, its operations act on real
 //! solids, its fillets and chamfers (seeded with `b`'s edges) round real
 //! edges, its holes drill at `t`'s point, its patterns repeat `k`, and
-//! its shells and offsets (seeded with `b`'s faces) hollow and grow `b`, and
+//! its shells and offsets (seeded with `b`'s faces) hollow and grow `b`,
+//! its face tweaks (seeded with `b`'s faces) move, offset and replace
+//! `b`'s faces, and
 //! its mirrors and splits copy and divide `b`, its base flanges make
 //! plates of `s` and bent sections of `u` (an open L, so its radius
 //! bends a corner), and its flanges bend and flange `b`'s
