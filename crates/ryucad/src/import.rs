@@ -972,6 +972,11 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
             "import_usage_missing: {a}/{i}'s usage is gone from {target}, but a mate or pattern reads it, so it stays"
         ));
     }
+    for (p, f) in &u.kept_bodies {
+        warnings.push(format!(
+            "import_usage_missing: {p}/{f}'s body is gone from {target}, but another feature reads it, so it stays"
+        ));
+    }
     // What builds now and wouldn't after, from the files as they would be.
     let now = failing(session)?;
     let mut proposed = session.proposed(&writes)?;
@@ -993,11 +998,16 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
         if !vanished.is_empty() {
             v["vanished"] = json!(vanished);
         }
-        if !u.kept.is_empty() {
+        if !u.kept.is_empty() || !u.kept_bodies.is_empty() {
             let kept: Vec<Value> = u
                 .kept
                 .iter()
                 .map(|(a, i)| json!({"part": a, "instance": i}))
+                .chain(
+                    u.kept_bodies
+                        .iter()
+                        .map(|(p, f)| json!({"part": p, "feature": f})),
+                )
                 .collect();
             v["kept"] = json!(kept);
         }

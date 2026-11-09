@@ -423,12 +423,14 @@ pub const MAX_FLAT: usize = 10_000;
 
 /// One body of a flattened walk: definition `definition`'s (`None`: the
 /// bodies no product reaches) body `body`, placed by `place` (none for a
-/// root's own bodies, at the part's origin).
+/// root's own bodies, at the part's origin); `steps` are the definitions
+/// each of `place`'s usages places, in order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Walked {
     pub definition: Option<usize>,
     pub body: usize,
     pub place: Option<crate::doc::import::Place>,
+    pub steps: Vec<usize>,
 }
 
 /// Every body of every occurrence of every product of the file, placed
@@ -451,17 +453,18 @@ pub fn walk(opened: &Opened, path: &str) -> Result<Vec<Walked>> {
         .with("param", "flatten")
     };
     let mut out = Vec::new();
-    // (definition, its placement in the root's frame, the usages to it)
-    let mut stack: Vec<(usize, Rigid, Vec<Via>)> = opened
+    // (definition, its placement in the root's frame, the usages to it,
+    // the definitions they place)
+    let mut stack: Vec<(usize, Rigid, Vec<Via>, Vec<usize>)> = opened
         .products
         .roots
         .iter()
         .rev()
         .copied()
         .filter(|&k| makes[k])
-        .map(|k| (k, Rigid::IDENTITY, Vec::new()))
+        .map(|k| (k, Rigid::IDENTITY, Vec::new(), Vec::new()))
         .collect();
-    while let Some((k, world, via)) = stack.pop() {
+    while let Some((k, world, via, steps)) = stack.pop() {
         let place = (!via.is_empty()).then(|| Place {
             pose: crate::assembly::rigid_pose(&world).snapped(),
             via: via.clone(),
@@ -471,6 +474,7 @@ pub fn walk(opened: &Opened, path: &str) -> Result<Vec<Walked>> {
                 definition: Some(k),
                 body,
                 place: place.clone(),
+                steps: steps.clone(),
             });
             if out.len() > MAX_FLAT {
                 return Err(too_many());
@@ -488,7 +492,9 @@ pub fn walk(opened: &Opened, path: &str) -> Result<Vec<Walked>> {
                 product: product_of(opened, c.definition),
                 ordinal: usage_ordinal(opened, k, n),
             });
-            stack.push((c.definition, world.then_after(&r), v));
+            let mut d = steps.clone();
+            d.push(c.definition);
+            stack.push((c.definition, world.then_after(&r), v, d));
         }
     }
     for body in 0..bodies(opened, None) {
@@ -496,6 +502,7 @@ pub fn walk(opened: &Opened, path: &str) -> Result<Vec<Walked>> {
             definition: None,
             body,
             place: None,
+            steps: Vec::new(),
         });
         if out.len() > MAX_FLAT {
             return Err(too_many());

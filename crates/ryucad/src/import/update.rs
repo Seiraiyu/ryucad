@@ -18,6 +18,12 @@
 //! ordinal: a matched instance takes the file's pose while it is fixed; a
 //! new usage is a new instance; an instance whose usage vanished is
 //! deleted unless a mate or pattern reads it.
+//!
+//! A flattened part (its import features carry places) follows its file
+//! by walking it again (see [`reflatten`]): a body is the same where its
+//! usages, product and body are, matched features keep their IDs, new
+//! bodies are new features, and gone ones go unless another feature
+//! reads them.
 
 use super::plan::{self, Planned};
 use crate::doc::assembly::{ImportUsage, Instance, Pose};
@@ -39,6 +45,9 @@ pub struct Update {
     /// Instances kept though their usage vanished, because a mate or
     /// pattern reads them: `(assembly, instance)`.
     pub kept: Vec<(Id, Id)>,
+    /// A flattened part's import features kept though their body vanished,
+    /// because another feature reads them: `(part, feature)`.
+    pub kept_bodies: Vec<(Id, Id)>,
     /// `import_kind_changed` for each part whose product has children now,
     /// and `import_products_skipped` for new products nothing makes.
     pub warnings: Vec<String>,
@@ -104,7 +113,26 @@ pub fn plan(
     let path = file.path.as_str();
     let defs = &opened.products.definitions;
     let makes = plan::makes(opened);
-    let (features, instances) = made_of(project, path);
+    let (mut features, instances) = made_of(project, path);
+    // Flattened parts follow their file apart.
+    let flat: BTreeSet<Id> = features
+        .iter()
+        .filter(|(_, _, i)| i.place.is_some())
+        .map(|(p, _, _)| p.clone())
+        .collect();
+    let mut flattened = Vec::new();
+    let mut kept_bodies = Vec::new();
+    for p in &flat {
+        let old: Vec<(Id, Import)> = features
+            .iter()
+            .filter(|(q, _, _)| q == p)
+            .map(|(_, f, i)| (f.clone(), i.clone()))
+            .collect();
+        let (pl, kept) = reflatten(project, p, &old, opened, file)?;
+        flattened.push(pl);
+        kept_bodies.extend(kept.into_iter().map(|f| (p.clone(), f)));
+    }
+    features.retain(|(p, _, _)| !flat.contains(p));
     let olds: BTreeSet<ProductRef> = features
         .iter()
         .filter_map(|(_, _, i)| i.product.clone())
@@ -193,7 +221,8 @@ pub fn plan(
     let mut warnings = Vec::new();
     // Products of a new version that nothing matched and nothing makes,
     // and bodies no product reaches that no feature held before.
-    if !whole && !same_bytes {
+    // A flattened part takes every product of its file.
+    if !whole && !same_bytes && flat.is_empty() {
         let skipped: Vec<String> = (0..defs.len())
             .filter(|k| makes[*k] && !known.contains_key(k))
             .map(|k| format!("{:?}", &*defs[k].product_id))
@@ -485,11 +514,125 @@ pub fn plan(
         })
         .collect();
     Ok(Update {
-        planned: planned.into_values().chain(made).collect(),
+        planned: planned.into_values().chain(made).chain(flattened).collect(),
         vanished,
         kept,
+        kept_bodies,
         warnings,
     })
+}
+
+/// A flattened part's features after its file changed: the new file
+/// walked as flattening walks it (`plan::walk`), each walked body matched
+/// to the old feature with its usages, product and body, products (its
+/// own and each usage's) matched by [`match_products`]. Matched features
+/// keep their IDs and mode and take the new hash, place and product; new
+/// bodies take new features (the part's most common mode, IDs first free
+/// past the part's); features whose body vanished are deleted unless
+/// another feature of the part reads them, then kept (with the new hash)
+/// and returned.
+fn reflatten(
+    project: &Project,
+    part: &Id,
+    old: &[(Id, Import)],
+    opened: &Opened,
+    file: &FileRef,
+) -> Result<(Planned, Vec<Id>)> {
+    use crate::doc::import::Via;
+    let olds: BTreeSet<ProductRef> = old
+        .iter()
+        .flat_map(|(_, i)| {
+            i.product.iter().cloned().chain(
+                i.place
+                    .iter()
+                    .flat_map(|p| p.via.iter().map(|v| v.product.clone())),
+            )
+        })
+        .collect();
+    let matched = match_products(opened, &olds);
+    // Each matched definition by the product its old features name.
+    let known: BTreeMap<usize, &ProductRef> = matched.iter().map(|(p, &k)| (k, p)).collect();
+    let as_known = |k: usize| {
+        known
+            .get(&k)
+            .map(|p| (*p).clone())
+            .unwrap_or_else(|| plan::product_of(opened, k))
+    };
+    type Key = (Vec<Via>, Option<ProductRef>, u32);
+    let key_of = |i: &Import| -> Key {
+        (
+            i.place.as_ref().map(|p| p.via.clone()).unwrap_or_default(),
+            i.product.clone(),
+            i.body,
+        )
+    };
+    let mut by_key: BTreeMap<Key, &(Id, Import)> = old.iter().map(|o| (key_of(&o.1), o)).collect();
+    let mode = majority_mode(old);
+    let p = project.part(part)?;
+    let mut taken: Vec<String> = p.features.keys().map(|f| f.to_string()).collect();
+    let mut features = Vec::new();
+    for w in plan::walk(opened, &file.path)? {
+        let via: Vec<Via> = w
+            .place
+            .iter()
+            .flat_map(|p| p.via.iter())
+            .zip(&w.steps)
+            .map(|(v, &k)| Via {
+                product: as_known(k),
+                ..v.clone()
+            })
+            .collect();
+        let k = (via, w.definition.map(as_known), w.body as u32);
+        match by_key.remove(&k) {
+            Some((id, i)) => {
+                let new = Import {
+                    file: file.clone(),
+                    product: w.definition.map(|k| plan::product_of(opened, k)),
+                    body: i.body,
+                    mode: i.mode,
+                    place: w.place.clone(),
+                };
+                if new != *i {
+                    features.push((id.clone(), Feature::Import(new)));
+                }
+            }
+            None => features.push(plan::flat_feature(opened, file, mode, &w, &mut taken)),
+        }
+    }
+    let (mut removed, mut kept) = (Vec::new(), Vec::new());
+    for (id, i) in by_key.into_values() {
+        if crate::graph::dependents(p, id).is_empty() {
+            removed.push(id.clone());
+        } else {
+            let mut i = i.clone();
+            i.file = file.clone();
+            features.push((id.clone(), Feature::Import(i)));
+            kept.push(id.clone());
+        }
+    }
+    removed.sort();
+    kept.sort();
+    Ok((
+        Planned {
+            part: part.clone(),
+            new: false,
+            kind: PartKind::Part,
+            definition: None,
+            features,
+            removed,
+            properties: BTreeMap::new(),
+        },
+        kept,
+    ))
+}
+
+/// The mode most of `old` have, ties to a reference.
+fn majority_mode(old: &[(Id, Import)]) -> Option<crate::doc::import::Mode> {
+    let refs = old
+        .iter()
+        .filter(|(_, i)| i.mode() == crate::doc::import::Mode::Reference)
+        .count();
+    (2 * refs >= old.len()).then_some(crate::doc::import::Mode::Reference)
 }
 
 /// `import_usage_missing` for each instance of assembly `part` an import
@@ -771,6 +914,92 @@ mod tests {
             params[k] = v.clone();
         }
         call(s, "import", params)
+    }
+
+    #[test]
+    fn a_flattened_part_follows_its_file_keeping_its_features() {
+        let (src, path) = outside(&frame_version(1));
+        let (dir, mut s) = fresh();
+        call(
+            &mut s,
+            "import",
+            json!({"path": path, "flatten": true, "part": "board"}),
+        )
+        .unwrap();
+        drop(src);
+        let root = dir.path();
+        let before = listed(root, "board");
+        let via = |f: &Value| -> Vec<String> {
+            f["place"]["via"]
+                .as_array()
+                .map(|v| {
+                    v.iter()
+                        .map(|u| u["usage"].as_str().unwrap().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let shape = |l: &[(String, Value)]| -> Vec<(String, Vec<String>, Value)> {
+            l.iter()
+                .map(|(id, f)| (id.clone(), via(f), f["product"]["id"].clone()))
+                .collect()
+        };
+        // The plate, the frame's pin, the sub-assembly's two pins and the
+        // loose block.
+        assert_eq!(before.len(), 5, "{before:?}");
+        let (_new, path) = outside(&frame_version(2));
+        let v = call(
+            &mut s,
+            "import",
+            json!({"path": path, "update": "imports/frame.step"}),
+        )
+        .unwrap();
+        let after = listed(root, "board");
+        let new = crate::doc::project::ImportFile::new(frame_version(2)).blake3;
+        assert!(
+            after.iter().all(|(_, f)| f["file"]["blake3"] == new),
+            "{after:?}"
+        );
+        assert!(
+            after.iter().all(|(_, f)| f["mode"] == "reference"),
+            "{after:?}"
+        );
+        let (b, a) = (shape(&before), shape(&after));
+        // The plate, the frame's pin and the sub-assembly's first pin keep
+        // their features; its second pin and the loose block go; its third
+        // pin and the new block are new.
+        let kept: Vec<&(String, Vec<String>, Value)> = b.iter().filter(|x| a.contains(x)).collect();
+        assert_eq!(kept.len(), 3, "{b:?}\n{a:?}");
+        assert_eq!(a.len(), 5, "{v}");
+        assert!(a.iter().any(|x| x.1 == ["1", "3"]), "{a:?}");
+        assert!(a.iter().any(|x| x.2 == "N-1"), "{a:?}");
+        assert!(!a.iter().any(|x| x.2 == "L-1"), "{a:?}");
+        // The frame's pin moved with the file, on the thicker plate.
+        let pin = after.iter().find(|(_, f)| via(f) == ["1"]).unwrap();
+        assert_eq!(
+            pin.1["place"]["pose"]["origin_m"],
+            json!([0.06, 0.05, 0.012])
+        );
+        let sub = after.iter().find(|(_, f)| via(f) == ["1", "1"]).unwrap();
+        assert_eq!(sub.1["place"]["pose"]["origin_m"], json!([0.01, 0, 0.012]));
+        // It is still one part: no new parts for the new product.
+        assert!(
+            v["parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|p| p["part"] == "board"),
+            "{v}"
+        );
+        let r = call(&mut s, "rebuild", json!({"part": "board"})).unwrap();
+        assert!(
+            r["parts"][0]["solids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s["ok"] == true),
+            "{r}"
+        );
     }
 
     #[test]
