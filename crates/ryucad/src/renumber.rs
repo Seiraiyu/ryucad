@@ -852,6 +852,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn drafts_follow_their_target_faces_parting_line_and_flips() {
+        let old = |k: u8| format!("{k:032x}");
+        let new = |k: u8| format!("{:032x}", k + 100);
+        let r = |k: u8| json!({"feature": "b", "name": old(k)});
+        let d = json!({"format": crate::doc::tweak::DRAFT_FORMAT, "kind": "ryucad.feature",
+            "type": "draft", "target": "b", "angle": "2 deg", "parting": [r(3)], "pull": "z",
+            "faces": [r(1)], "groups": [{"angle": "5 deg", "faces": [r(2)]}], "flip": [r(2)]});
+        let n = json!({"format": crate::doc::tweak::DRAFT_FORMAT, "kind": "ryucad.feature",
+            "type": "draft", "target": "b", "angle": "2 deg", "neutral": r(4), "faces": [r(1)]});
+        let f = files(&[
+            ("parts/a/features/d.json", d),
+            ("parts/a/features/n.json", n),
+        ]);
+        let rename = Rename::Feature {
+            part: "a".into(),
+            from: "b".into(),
+            to: "b-1".into(),
+        };
+        let names = BTreeMap::from([(
+            "b".to_owned(),
+            (1..=4)
+                .map(|k| (old(k), new(k)))
+                .collect::<BTreeMap<_, _>>(),
+        )]);
+        let out = renumbered(&f, &rename, &names);
+        let read = |p: &str| serde_json::from_slice::<Value>(&out[p]).unwrap();
+        let to = |k: u8| json!({"feature": "b-1", "name": new(k)});
+        let d = read("parts/a/features/d.json");
+        assert_eq!(
+            (&d["target"], &d["faces"][0], &d["parting"][0]),
+            (&json!("b-1"), &to(1), &to(3))
+        );
+        assert_eq!(
+            (&d["groups"][0]["faces"][0], &d["flip"][0]),
+            (&to(2), &to(2))
+        );
+        assert_eq!(read("parts/a/features/n.json")["neutral"], to(4));
+    }
+
+    #[test]
     fn tweaks_follow_their_target_faces_and_axis() {
         let old = |k: u8| format!("{k:032x}");
         let new = |k: u8| format!("{:032x}", k + 100);
