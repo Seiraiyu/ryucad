@@ -348,6 +348,32 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_sew_that_doesnt_load_still_consumes_its_sheets() {
+        use Operation::*;
+        let mut p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("b", boxed("2", New, &[])),
+            ("s", boxed("0", New, &[])),
+            ("later", boxed("0.5", Cut, &["a"])),
+        ]);
+        let v = serde_json::json!({"format": 15, "kind": "ryucad.feature", "type": "sew",
+                                   "sheets": ["a", "b"], "tolerance": "nope", "solid": true});
+        p.acts.insert(id("s"), crate::doc::files::feature_acts(&v));
+        p.features.insert(
+            id("s"),
+            Err(crate::error::Error::new(
+                crate::error::Code::InvalidDocument,
+                "a conflict",
+            )),
+        );
+        let s = Solids::of(&p);
+        assert_eq!(s.consumer(&id("a")), Some(&id("s")));
+        assert_eq!(s.consumer(&id("b")), Some(&id("s")));
+        // A cut after the sew naming a doesn't join a's chain.
+        assert_eq!(s.chain(&id("a")).unwrap(), [id("a")]);
+    }
+
+    #[test]
     fn a_split_that_doesnt_load_acts_and_founds_as_its_text_says() {
         let mut p = part(vec![
             ("a", boxed("0", Operation::New, &[])),
