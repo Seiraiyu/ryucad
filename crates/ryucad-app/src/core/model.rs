@@ -61,8 +61,8 @@ impl Feature {
     }
 }
 
-/// An import feature's file, product and body, and what healing did when
-/// it built.
+/// An import feature's file, product, body and mode, and what healing
+/// (or the reference path) did when it built.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImportInfo {
     /// `imports/<name>.step`.
@@ -76,11 +76,32 @@ pub struct ImportInfo {
     /// tolerance given, in meters, when it built.
     pub heal: Vec<(String, u64)>,
     pub tolerance_m: Option<f64>,
+    /// A reference import (design 364): the file's topology, shown and
+    /// read, never modelled on. Else a healed solid.
+    pub reference: bool,
+    /// A reference's faults when it built: how many faces were laid out
+    /// alone (`split_faces`), left out (`dropped_faces`) or kept as the
+    /// file has them (`unoriented`), each listed only when some were.
+    pub faults: Vec<(String, usize)>,
 }
 
 impl ImportInfo {
     pub fn from_json(v: &Value) -> ImportInfo {
-        let heal = &v["heal"];
+        // A reference reports `reference` where a solid reports `heal`:
+        // their counts read alike, its fault lists apart.
+        let reference = v["mode"] == "reference";
+        let heal = if v["reference"].is_object() {
+            &v["reference"]
+        } else {
+            &v["heal"]
+        };
+        let faults = ["split_faces", "dropped_faces", "unoriented"]
+            .into_iter()
+            .filter_map(|k| {
+                let n = v["reference"][k].as_array()?.len();
+                (n > 0).then(|| (k.to_owned(), n))
+            })
+            .collect();
         ImportInfo {
             file: text(&v["file"]),
             blake3: text(&v["blake3"]),
@@ -99,6 +120,8 @@ impl ImportInfo {
                 .filter_map(|(k, n)| Some((k.clone(), n.as_u64()?)))
                 .collect(),
             tolerance_m: heal["tolerance_m"].as_f64(),
+            reference,
+            faults,
         }
     }
 
@@ -1566,6 +1589,28 @@ mod tests {
             later.failure().as_deref(),
             Some("failed (rebuild_failed), showing its last good state")
         );
+    }
+
+    #[test]
+    fn a_reference_import_reads_its_mode_and_faults() {
+        let r = ImportInfo::from_json(&json!({
+            "file": "imports/a.step", "blake3": "00", "body": 0, "mode": "reference",
+            "reference": {"seams": 2, "poles": 0, "tolerance_m": 0.0,
+                          "split_faces": [{"name": "aa", "step": "#7"}],
+                          "dropped_faces": [], "unoriented": []}}));
+        assert!(r.reference);
+        assert_eq!(r.heal, [("poles".to_owned(), 0), ("seams".to_owned(), 2)]);
+        assert_eq!(r.faults, [("split_faces".to_owned(), 1)]);
+        assert_eq!(r.tolerance_text().as_deref(), Some("none raised"));
+        // Written but not built: the mode alone.
+        let w = ImportInfo::from_json(&json!({"file": "imports/a.step", "blake3": "00",
+                                              "body": 0, "mode": "reference"}));
+        assert!(w.reference && w.heal.is_empty() && w.faults.is_empty());
+        // A solid, as before.
+        let s = ImportInfo::from_json(&json!({"file": "imports/a.step", "blake3": "00",
+                                              "body": 0, "heal": {"sewn": 1}}));
+        assert!(!s.reference && s.faults.is_empty());
+        assert_eq!(s.heal, [("sewn".to_owned(), 1)]);
     }
 
     #[test]
