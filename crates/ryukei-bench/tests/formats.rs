@@ -62,6 +62,7 @@ fn one(mesh: Arc<BodyMesh>) -> Scene {
             solids: vec![Solid {
                 name: "s".into(),
                 mesh,
+                surface: false,
             }],
             children: vec![],
         }],
@@ -416,6 +417,7 @@ fn meshing_and_writing_the_race_as_stl_against_occt() {
                 solids.push(Solid {
                     name: format!("s{k}"),
                     mesh: Arc::new(m),
+                    surface: false,
                 });
             }
             Err(_) => refused += 1,

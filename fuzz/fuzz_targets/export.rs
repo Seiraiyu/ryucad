@@ -162,6 +162,7 @@ fuzz_target!(|data: &[u8]| {
             p.solids.push(Solid {
                 name: format!("s{s}"),
                 mesh: Arc::clone(mesh),
+                surface: false,
             });
             u.solids.push(stage::Solid {
                 name: format!("s{s}"),

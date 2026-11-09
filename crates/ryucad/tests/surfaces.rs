@@ -685,3 +685,42 @@ fn a_sheets_laminar_edge_is_refused_before_the_kernel() {
     assert_eq!(e.details["entities"][0]["reference"], format!("p/w/{name}"));
     assert_eq!(must(&mut s, "feature.list", json!({"part": "p"})), before);
 }
+
+#[test]
+fn a_sheet_exports_as_stl_and_3mf() {
+    let (dir, mut s) = project();
+    wall(&mut s);
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": 5, "y": 5, "z": 5},
+               "placement": {"origin": [20, 0, 0]}}),
+    );
+    let stl = dir.path().join("w.stl");
+    let a = must(
+        &mut s,
+        "export",
+        json!({"part": "p", "out": stl.to_str().unwrap()}),
+    );
+    // Binary STL: the count after the 80-byte header, every triangle the
+    // export meshed, the open wall's among them.
+    let bytes = std::fs::read(&stl).unwrap();
+    let n = u32::from_le_bytes(bytes[80..84].try_into().unwrap());
+    let meshed: u64 = a["products"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["triangles"].as_u64().unwrap())
+        .sum();
+    assert_eq!(u64::from(n), meshed, "{a}");
+    let three = dir.path().join("w.3mf");
+    must(
+        &mut s,
+        "export",
+        json!({"part": "p", "out": three.to_str().unwrap(), "time_stamp": "2026-11-09T00:00:00"}),
+    );
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(std::fs::read(&three).unwrap())).unwrap();
+    let mut model = String::new();
+    std::io::Read::read_to_string(&mut z.by_name("3D/3dmodel.model").unwrap(), &mut model).unwrap();
+    assert_eq!(model.matches("type=\"surface\"").count(), 1, "{model}");
+    assert!(model.contains("type=\"model\""), "{model}");
+}

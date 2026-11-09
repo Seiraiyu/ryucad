@@ -1038,6 +1038,7 @@ fn meshed_with(
                 .map(|x| ryuformats::Solid {
                     name: x.founder.to_string(),
                     mesh: Arc::clone(&meshes[x.built.hash.as_str()]),
+                    surface: x.built.body.kind() == ryukei::topo::BodyKind::Sheet,
                 })
                 .collect(),
             children: p

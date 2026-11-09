@@ -158,6 +158,7 @@ mod tests {
                 solids: vec![Solid {
                     name: "b".into(),
                     mesh: block(0.01, 0.02, 0.005),
+                    surface: false,
                 }],
                 children: vec![],
             }],
