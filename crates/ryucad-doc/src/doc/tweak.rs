@@ -112,7 +112,10 @@ pub enum DraftHinge {
     Neutral { plane: GeomRef },
     /// Edges of the target the faces turn about (`parting`), and the pull:
     /// any axis, or a plane's normal.
-    Parting { edges: Vec<Reference>, pull: GeomRef },
+    Parting {
+        edges: Vec<Reference>,
+        pull: GeomRef,
+    },
 }
 
 /// A `draft`: `faces` of `target` drafted to `angle` from the pull about
@@ -947,8 +950,10 @@ mod tests {
         let refs: Vec<String> = d.references().into_iter().map(|(r, _)| r).collect();
         assert_eq!(refs, ["faces.0", "groups.0.faces.0", "parting.0", "flip.0"]);
         // A neutral plane that is a face is a reference too.
-        let d = drafted(json!({"target": "base", "angle": "1 deg", "neutral": face(B),
-                               "faces": [face(A)]}))
+        let d = drafted(
+            json!({"target": "base", "angle": "1 deg", "neutral": face(B),
+                               "faces": [face(A)]}),
+        )
         .unwrap();
         let refs: Vec<String> = d.references().into_iter().map(|(r, _)| r).collect();
         assert_eq!(refs, ["faces.0", "neutral"]);

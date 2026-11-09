@@ -2835,7 +2835,7 @@ impl FieldArgs {
             onto: self.onto.clone(),
             origin: None,
             x: None,
-            flip: self.flip,
+            flip: self.flip.map(crate::proto::Flip::On),
             segments: (!self.segments.is_empty()).then(|| {
                 self.segments
                     .iter()
