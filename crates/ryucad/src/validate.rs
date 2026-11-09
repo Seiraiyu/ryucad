@@ -3331,12 +3331,12 @@ pub(crate) mod tests {
             .unwrap()
             .to_owned();
         let drawing = json!({"format": 1, "kind": "ryucad.drawing", "name": "P",
-            "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b"}},
-            "views": {
-                "v1": {"type": "base", "sheet": "s1", "at": ["100 mm", "100 mm"], "orient": "front"},
-                "v2": {"type": "auxiliary", "sheet": "s1", "from": "v1",
-                       "normal_to": {"feature": "box-2", "name": face}}
-            }});
+        "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b"}},
+        "views": {
+            "v1": {"type": "base", "sheet": "s1", "at": ["100 mm", "100 mm"], "orient": "front"},
+            "v2": {"type": "auxiliary", "sheet": "s1", "from": "v1",
+                   "normal_to": {"feature": "box-2", "name": face}}
+        }});
         let dir = m.root().join("parts/p/drawings");
         std::fs::create_dir_all(&dir).unwrap();
         crate::doc::project::write_json(&dir.join("main.json"), &drawing).unwrap();

@@ -734,7 +734,10 @@ fn drawing_view(m: &Value) -> String {
                 (None, Some(l)) => format!(" @ label {}", scalar(l)),
                 (None, None) => String::new(),
             };
-            (format!("base {orient}{of}"), &["type", "orient", "of", "rev"])
+            (
+                format!("base {orient}{of}"),
+                &["type", "orient", "of", "rev"],
+            )
         }
         "projected" | "auxiliary" => {
             let from = m.get("from").map(scalar).unwrap_or_default();
@@ -742,9 +745,8 @@ fn drawing_view(m: &Value) -> String {
                 .get("side")
                 .map(scalar)
                 .or_else(|| {
-                    m.get("normal_to").map(|r| {
-                        format!("normal to {}", reference(r).unwrap_or_else(|| scalar(r)))
-                    })
+                    m.get("normal_to")
+                        .map(|r| format!("normal to {}", reference(r).unwrap_or_else(|| scalar(r))))
                 })
                 .unwrap_or_default();
             (

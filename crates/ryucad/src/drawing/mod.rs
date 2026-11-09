@@ -14,6 +14,7 @@
 
 pub mod curves;
 pub mod output;
+pub mod request;
 pub mod template;
 
 use crate::doc::assembly::Rev;
@@ -184,7 +185,9 @@ impl Built {
                 continue;
             };
             match (&w.kind, w.parent().and_then(|p| by_key.get(&p))) {
-                (ViewKind::Projected { side, .. }, Some(p)) if !matches!(side, Side::Diagonal(_)) => {
+                (ViewKind::Projected { side, .. }, Some(p))
+                    if !matches!(side, Side::Diagonal(_)) =>
+                {
                     out.insert(*k, Placement::Offset(distance(p.at, v.at)));
                 }
                 (ViewKind::Auxiliary { .. }, Some(p)) => {
@@ -279,7 +282,10 @@ impl Frame {
                 // The cube's directions are a front view's: x right, z up,
                 // -y towards the eye; here they are this view's.
                 let (back, _) = c.axes();
-                let towards = add3(add3(scale3(x, back[0]), scale3(t, -back[1])), scale3(y, back[2]));
+                let towards = add3(
+                    add3(scale3(x, back[0]), scale3(t, -back[1])),
+                    scale3(y, back[2]),
+                );
                 Frame::new(towards, y)
             }
         }
@@ -293,7 +299,11 @@ enum Place {
     At(Option<P>),
     /// Along `dir` (a unit on the sheet) from its parent, by a distance
     /// written or one ryucad chooses.
-    Along { parent: Key, dir: P, offset: Option<f64> },
+    Along {
+        parent: Key,
+        dir: P,
+        offset: Option<f64>,
+    },
 }
 
 /// What a view is to draw, before its projection.
@@ -328,7 +338,11 @@ fn source(session: &mut Session, of: &Id, rev: &Rev) -> Result<Source> {
                 .chain(o.path.iter().map(Id::to_string))
                 .collect();
             o.solids.iter().map(move |s| {
-                (s.built.clone(), o.pose, format!("{}/{}", path.join("/"), s.founder))
+                (
+                    s.built.clone(),
+                    o.pose,
+                    format!("{}/{}", path.join("/"), s.founder),
+                )
             })
         })
         .collect())
@@ -344,7 +358,11 @@ fn middle(src: &Source) -> [f64; 3] {
     match b {
         Some(b) => {
             let (lo, hi) = (b.min(), b.max());
-            [(lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, (lo.z + hi.z) / 2.0]
+            [
+                (lo.x + hi.x) / 2.0,
+                (lo.y + hi.y) / 2.0,
+                (lo.z + hi.z) / 2.0,
+            ]
         }
         None => [0.0; 3],
     }
@@ -410,23 +428,26 @@ fn orient(session: &mut Session, part: &Id, of: &Id, o: &Orient) -> Result<([f64
                     v.up,
                 )),
                 Some(Err(e)) => Err(e.clone()),
-                None => Err(Error::new(
-                    Code::ViewNotFound,
-                    format!("{of} has no named view {n}"),
-                )
-                .with("part", of)
-                .with("views", p.views.keys().collect::<Vec<_>>())),
+                None => Err(
+                    Error::new(Code::ViewNotFound, format!("{of} has no named view {n}"))
+                        .with("part", of)
+                        .with("views", p.views.keys().collect::<Vec<_>>()),
+                ),
             }
         }
-        Orient::NormalTo(r) => crate::server::normal_to_face(
-            session,
-            &format!("{}/{}/{}", part, r.feature, r.name),
-        ),
+        Orient::NormalTo(r) => {
+            crate::server::normal_to_face(session, &format!("{}/{}/{}", part, r.feature, r.name))
+        }
     }
 }
 
 /// The plans of `file`'s views, parents before their children.
-fn plans(session: &mut Session, part: &Id, file: &DrawingFile, angle: Angle) -> Result<Vec<(Plan, Source)>> {
+fn plans(
+    session: &mut Session,
+    part: &Id,
+    file: &DrawingFile,
+    angle: Angle,
+) -> Result<Vec<(Plan, Source)>> {
     let mut done: BTreeMap<Key, usize> = BTreeMap::new();
     let mut out: Vec<(Plan, Source)> = Vec::new();
     let mut sources: BTreeMap<(Id, String), Source> = BTreeMap::new();
@@ -449,7 +470,14 @@ fn plans(session: &mut Session, part: &Id, file: &DrawingFile, angle: Angle) -> 
             };
             let mm = |q: &Option<crate::units::Quantity>| q.as_ref().map(|q| q.meters() * 1000.0);
             let (of, rev, frame, anchor, place, kind) = match (&w.kind, parent) {
-                (ViewKind::Base { of, label, orient: o }, _) => {
+                (
+                    ViewKind::Base {
+                        of,
+                        label,
+                        orient: o,
+                    },
+                    _,
+                ) => {
                     let of = of.clone().unwrap_or_else(|| part.clone());
                     let rev = label.clone().map_or(Rev::Working, Rev::Label);
                     let key = (of.clone(), format!("{rev:?}"));
@@ -480,9 +508,21 @@ fn plans(session: &mut Session, part: &Id, file: &DrawingFile, angle: Angle) -> 
                         },
                         None => Place::At(at(w)),
                     };
-                    (p.of.clone(), p.rev.clone(), frame, p.anchor, place, "projected")
+                    (
+                        p.of.clone(),
+                        p.rev.clone(),
+                        frame,
+                        p.anchor,
+                        place,
+                        "projected",
+                    )
                 }
-                (ViewKind::Auxiliary { normal_to, offset, .. }, Some(i)) => {
+                (
+                    ViewKind::Auxiliary {
+                        normal_to, offset, ..
+                    },
+                    Some(i),
+                ) => {
                     let p = &out[i].0;
                     let text = format!("{}/{}/{}", p.of, normal_to.feature, normal_to.name);
                     let (n, _) = crate::server::normal_to_face(session, &text)?;
@@ -511,7 +551,14 @@ fn plans(session: &mut Session, part: &Id, file: &DrawingFile, angle: Angle) -> 
                         dir: [flip * img[0] / len, flip * img[1] / len],
                         offset: mm(offset),
                     };
-                    (p.of.clone(), p.rev.clone(), frame, p.anchor, place, "auxiliary")
+                    (
+                        p.of.clone(),
+                        p.rev.clone(),
+                        frame,
+                        p.anchor,
+                        place,
+                        "auxiliary",
+                    )
                 }
                 (_, None) => unreachable!("a derived view waits for its parent"),
             };
@@ -598,7 +645,8 @@ fn drawn(p: &Projection, plan: &Plan, src: &Source) -> Drawn {
     for (i, piece) in p.pieces.iter().enumerate() {
         if let Some(first) = piece.overlaps.first()
             && let Some(o) = p.pieces.get(*first as usize)
-            && (o.depth[1] > piece.depth[1] || (o.depth[1] == piece.depth[1] && (*first as usize) < i))
+            && (o.depth[1] > piece.depth[1]
+                || (o.depth[1] == piece.depth[1] && (*first as usize) < i))
         {
             continue;
         }
@@ -620,7 +668,9 @@ fn drawn(p: &Projection, plan: &Plan, src: &Source) -> Drawn {
         if unsure {
             let (body, what, name) = match piece.source {
                 ryukei::project::Source::Edge { body, name, .. } => (body, "edge", name),
-                ryukei::project::Source::Silhouette { body, face_name, .. } => (body, "face", face_name),
+                ryukei::project::Source::Silhouette {
+                    body, face_name, ..
+                } => (body, "face", face_name),
             };
             let solid = src.get(body as usize).map_or("", |(_, _, r)| r.as_str());
             uncertain.push(format!("{what} {solid}/{name}"));
@@ -633,7 +683,10 @@ fn drawn(p: &Projection, plan: &Plan, src: &Source) -> Drawn {
         };
         if same(piece.source)
             && let Some((prev, _, u)) = lines.last_mut()
-            && distance(prev.segments.last().map_or(prev.start, Segment::end), path.start) < 1e-9
+            && distance(
+                prev.segments.last().map_or(prev.start, Segment::end),
+                path.start,
+            ) < 1e-9
         {
             join(prev, path);
             *u |= unsure;
@@ -659,10 +712,16 @@ fn join(path: &mut Path, next: Path) {
             } else {
                 path.start
             };
-            let (u, v) = ([a[0] - start[0], a[1] - start[1]], [b[0] - a[0], b[1] - a[1]]);
+            let (u, v) = (
+                [a[0] - start[0], a[1] - start[1]],
+                [b[0] - a[0], b[1] - a[1]],
+            );
             let cross = u[0] * v[1] - u[1] * v[0];
             let dot = u[0] * v[0] + u[1] * v[1];
-            if cross.abs() <= 1e-12 * (ryu_math::hypot(u[0], u[1]) * ryu_math::hypot(v[0], v[1])).max(1e-30) && dot > 0.0 {
+            if cross.abs()
+                <= 1e-12 * (ryu_math::hypot(u[0], u[1]) * ryu_math::hypot(v[0], v[1])).max(1e-30)
+                && dot > 0.0
+            {
                 *path.segments.last_mut().expect("checked") = Segment::Line(*b);
                 continue;
             }
@@ -673,7 +732,10 @@ fn join(path: &mut Path, next: Path) {
 
 /// Projections for `plans`, from the session's cache, the disk's, or the
 /// kernel side by side; each failure in its place.
-fn project(session: &mut Session, plans: &[(Plan, Source)]) -> Result<Vec<std::result::Result<Arc<Projection>, Error>>> {
+fn project(
+    session: &mut Session,
+    plans: &[(Plan, Source)],
+) -> Result<Vec<std::result::Result<Arc<Projection>, Error>>> {
     let keys: Vec<String> = plans.iter().map(|(p, s)| key_of(s, &p.frame)).collect();
     let disk = session.disk().cloned();
     let mut found: Vec<Option<Arc<Projection>>> = keys
@@ -782,12 +844,11 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
         Some(Ok(f)) => f.clone(),
         Some(Err(e)) => return Err(e.clone()),
         None => {
-            return Err(Error::new(
-                Code::DrawingNotFound,
-                format!("{part} has no drawing {id}"),
-            )
-            .with("part", part)
-            .with("drawings", p.drawings.keys().collect::<Vec<_>>()));
+            return Err(
+                Error::new(Code::DrawingNotFound, format!("{part} has no drawing {id}"))
+                    .with("part", part)
+                    .with("drawings", p.drawings.keys().collect::<Vec<_>>()),
+            );
         }
     };
     file.check()?;
@@ -847,31 +908,40 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
     let mut count = 0;
     for (sk, sheet) in &file.sheets {
         count += 1;
-        let tid = sheet.template.clone().unwrap_or_else(|| sheet.size.template());
+        let tid = sheet
+            .template
+            .clone()
+            .unwrap_or_else(|| sheet.size.template());
         let t: Template = template::resolve(
             &tid,
             sheet.size,
             sheet.orientation,
             project_templates.get(&tid).map(|f| &f.template),
         )?;
-        let on: Vec<usize> = (0..plans.len()).filter(|i| plans[*i].0.sheet == *sk).collect();
+        let on: Vec<usize> = (0..plans.len())
+            .filter(|i| plans[*i].0.sheet == *sk)
+            .collect();
         let scales = |s: Scale| -> Vec<Scale> {
-            on.iter()
-                .map(|i| plans[*i].0.scale.unwrap_or(s))
-                .collect()
+            on.iter().map(|i| plans[*i].0.scale.unwrap_or(s)).collect()
         };
         let fixed = sheet.scale;
         let chosen = match fixed {
             Some(s) => s,
             None => SCALES
                 .iter()
-                .map(|(a, b)| Scale { sheet: *a, model: *b })
+                .map(|(a, b)| Scale {
+                    sheet: *a,
+                    model: *b,
+                })
                 .find(|s| {
                     let sc = scales(*s);
                     let placed = layout(&plans, &unit_boxes, &on, &sc, &t);
                     fits(&grown_at(&unit_boxes, &on, &sc, &placed), &t)
                 })
-                .unwrap_or(Scale { sheet: 1, model: 1000 }),
+                .unwrap_or(Scale {
+                    sheet: 1,
+                    model: 1000,
+                }),
         };
         let views_scale = scales(chosen);
         let placed = layout(&plans, &unit_boxes, &on, &views_scale, &t);
@@ -961,7 +1031,11 @@ fn crossed(items: &mut Vec<Item>, [lo, hi]: [P; 2], style: ryu_draw::Standard) {
     let mut stroke = style.stroke(LineKind::Thin);
     stroke.colour = WARNING;
     let rect = Path::polyline(&[lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]], true);
-    for path in [rect, Path::polyline(&[lo, hi], false), Path::polyline(&[[lo[0], hi[1]], [hi[0], lo[1]]], false)] {
+    for path in [
+        rect,
+        Path::polyline(&[lo, hi], false),
+        Path::polyline(&[[lo[0], hi[1]], [hi[0], lo[1]]], false),
+    ] {
         items.push(Item::Path {
             path,
             stroke: Some(stroke.clone()),
@@ -982,7 +1056,11 @@ fn layout(
     scales: &[Scale],
     t: &Template,
 ) -> Vec<(P, bool)> {
-    let index: BTreeMap<Key, usize> = on.iter().enumerate().map(|(j, i)| (plans[*i].0.key, j)).collect();
+    let index: BTreeMap<Key, usize> = on
+        .iter()
+        .enumerate()
+        .map(|(j, i)| (plans[*i].0.key, j))
+        .collect();
     let grown = |j: usize| -> [P; 2] {
         let k = scales[j].mm_per_m();
         let b = boxes[on[j]];
@@ -1005,7 +1083,11 @@ fn layout(
     for (j, i) in on.iter().enumerate() {
         match plans[*i].0.place {
             Place::At(_) => rel[j] = Some([0.0, 0.0]),
-            Place::Along { parent, dir, offset } => {
+            Place::Along {
+                parent,
+                dir,
+                offset,
+            } => {
                 let Some(pj) = index.get(&parent).copied() else {
                     rel[j] = Some([0.0, 0.0]);
                     continue;
@@ -1017,7 +1099,9 @@ fn layout(
                     let reach = |bx: [P; 2], s: f64| {
                         let along = |q: P| q[0] * dir[0] + q[1] * dir[1];
                         let c = [bx[0], [bx[1][0], bx[0][1]], bx[1], [bx[0][0], bx[1][1]]];
-                        c.iter().map(|q| s * along(*q)).fold(f64::NEG_INFINITY, f64::max)
+                        c.iter()
+                            .map(|q| s * along(*q))
+                            .fold(f64::NEG_INFINITY, f64::max)
                     };
                     reach(a, 1.0) + reach(b, -1.0)
                 });
@@ -1038,9 +1122,17 @@ fn layout(
             .map(|m| {
                 let r = rel[*m].unwrap_or([0.0, 0.0]);
                 let b = grown(*m);
-                [[r[0] + b[0][0], r[1] + b[0][1]], [r[0] + b[1][0], r[1] + b[1][1]]]
+                [
+                    [r[0] + b[0][0], r[1] + b[0][1]],
+                    [r[0] + b[1][0], r[1] + b[1][1]],
+                ]
             })
-            .reduce(|a, b| [[a[0][0].min(b[0][0]), a[0][1].min(b[0][1])], [a[1][0].max(b[1][0]), a[1][1].max(b[1][1])]])
+            .reduce(|a, b| {
+                [
+                    [a[0][0].min(b[0][0]), a[0][1].min(b[0][1])],
+                    [a[1][0].max(b[1][0]), a[1][1].max(b[1][1])],
+                ]
+            })
             .expect("a family has its root");
         let diagonal = plans[*i].0.kind == "projected";
         let origin = match plans[*i].0.place {
@@ -1062,7 +1154,9 @@ fn layout(
         }
     }
     let _ = lo[1];
-    at.into_iter().map(|a| a.unwrap_or(([0.0, 0.0], true))).collect()
+    at.into_iter()
+        .map(|a| a.unwrap_or(([0.0, 0.0], true)))
+        .collect()
 }
 
 /// Each view's box on the sheet grown by its room, where `placed` put it.
@@ -1073,8 +1167,14 @@ fn grown_at(boxes: &[[P; 2]], on: &[usize], scales: &[Scale], placed: &[(P, bool
             let k = scales[j].mm_per_m();
             let (b, at) = (boxes[*i], placed[j].0);
             [
-                [at[0] + k * b[0][0] - DIM_ROOM, at[1] + k * b[0][1] - DIM_ROOM],
-                [at[0] + k * b[1][0] + DIM_ROOM, at[1] + k * b[1][1] + DIM_ROOM],
+                [
+                    at[0] + k * b[0][0] - DIM_ROOM,
+                    at[1] + k * b[0][1] - DIM_ROOM,
+                ],
+                [
+                    at[0] + k * b[1][0] + DIM_ROOM,
+                    at[1] + k * b[1][1] + DIM_ROOM,
+                ],
             ]
         })
         .collect()
@@ -1171,7 +1271,15 @@ fn fields(
     v.insert("scale".into(), scale.to_string());
     v.insert("sheet".into(), number.to_string());
     v.insert("sheets".into(), file.sheets.len().to_string());
-    v.insert("size".into(), sheet.size.as_str().trim_start_matches("ansi_").trim_start_matches("iso_").to_uppercase());
+    v.insert(
+        "size".into(),
+        sheet
+            .size
+            .as_str()
+            .trim_start_matches("ansi_")
+            .trim_start_matches("iso_")
+            .to_uppercase(),
+    );
     let standard = file.standard_in(session.project().manifest.standard());
     v.insert(
         "standard".into(),
@@ -1264,9 +1372,16 @@ pub(crate) mod tests {
             .items
             .iter()
             .filter_map(|it| match it {
-                Item::Path { path, stroke: Some(s), .. } if s.width == 0.6 && s.dash.is_empty() => {
+                Item::Path {
+                    path,
+                    stroke: Some(s),
+                    ..
+                } if s.width == 0.6 && s.dash.is_empty() => {
                     let [a, b] = path.bounds();
-                    (a[0] >= lo[0] - 1e-6 && a[1] >= lo[1] - 1e-6 && b[0] <= hi[0] + 1e-6 && b[1] <= hi[1] + 1e-6)
+                    (a[0] >= lo[0] - 1e-6
+                        && a[1] >= lo[1] - 1e-6
+                        && b[0] <= hi[0] + 1e-6
+                        && b[1] <= hi[1] + 1e-6)
                         .then(|| path.clone())
                 }
                 _ => None,
@@ -1312,14 +1427,24 @@ pub(crate) mod tests {
         let want = k * (3.0 * 40.0 + 3.0 * 20.0 + 3.0 * 10.0) * (2.0f64 / 3.0).sqrt();
         assert!((iso - want).abs() < 1e-6, "{iso} against {want}");
         // ryucad placed them all, and says so for writing back.
-        let places = b.placements(match &s.project().part(&id("p")).unwrap().drawings[&id("d")] {
-            Ok(f) => f,
-            Err(e) => panic!("{e:?}"),
-        });
+        let places = b.placements(
+            match &s.project().part(&id("p")).unwrap().drawings[&id("d")] {
+                Ok(f) => f,
+                Err(e) => panic!("{e:?}"),
+            },
+        );
         assert_eq!(places.len(), 4);
-        assert!(matches!(places[&Key::parse("v2", 'v').unwrap()], Placement::Offset(_)));
+        assert!(matches!(
+            places[&Key::parse("v2", 'v').unwrap()],
+            Placement::Offset(_)
+        ));
         // The sheet's title block reads the drawing.
-        assert!(sheet.items.iter().any(|it| matches!(it, Item::Text { text, .. } if text == "Block")));
+        assert!(
+            sheet
+                .items
+                .iter()
+                .any(|it| matches!(it, Item::Text { text, .. } if text == "Block"))
+        );
     }
 
     #[test]
@@ -1372,7 +1497,11 @@ pub(crate) mod tests {
             .items
             .iter()
             .filter_map(|it| match it {
-                Item::Path { path, stroke: Some(st), .. } if !st.dash.is_empty() => Some(length(path)),
+                Item::Path {
+                    path,
+                    stroke: Some(st),
+                    ..
+                } if !st.dash.is_empty() => Some(length(path)),
                 _ => None,
             })
             .collect();

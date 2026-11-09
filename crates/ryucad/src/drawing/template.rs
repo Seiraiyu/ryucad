@@ -57,12 +57,7 @@ type Rows<'a> = &'a [(f64, &'a [(f64, &'a str, &'a str)])];
 /// Draws `rows` as a block whose lower right corner is `corner`: its
 /// frame thick, its cells thin, each label at its cell's upper left and
 /// its value under it. The block's box.
-fn block(
-    t: &mut Template,
-    corner: [f64; 2],
-    width: f64,
-    rows: Rows,
-) -> [[f64; 2]; 2] {
+fn block(t: &mut Template, corner: [f64; 2], width: f64, rows: Rows) -> [[f64; 2]; 2] {
     let height: f64 = rows.iter().map(|r| r.0).sum();
     let lo = [corner[0] - width, corner[1]];
     let hi = [corner[0], corner[1] + height];
@@ -77,8 +72,12 @@ fn block(
             if i > 0 {
                 t.thin.push(vec![[x, y], [x, y + h]]);
             }
-            t.texts
-                .push(text([x + 1.5, y + h - 1.5 - LABEL], LABEL, Anchor::Start, label));
+            t.texts.push(text(
+                [x + 1.5, y + h - 1.5 - LABEL],
+                LABEL,
+                Anchor::Start,
+                label,
+            ));
             let size = if *h < 9.0 { LABEL * 1.25 } else { VALUE };
             t.texts
                 .push(text([x + 1.5, y + 2.0], size, Anchor::Start, value));
@@ -160,7 +159,13 @@ pub fn compiled(id: &str, size: Size, orientation: Orientation) -> Template {
     t.lines.push(rect(lo, hi));
     // Zones: none on an A (ASME) or A4 (ISO) sheet, else about 50 mm.
     if !matches!(size, Size::AnsiA | Size::IsoA4) {
-        zones(&mut t, paper, [lo, hi], if iso { 50.0 } else { 2.0 * 25.4 * 2.0 }, iso);
+        zones(
+            &mut t,
+            paper,
+            [lo, hi],
+            if iso { 50.0 } else { 2.0 * 25.4 * 2.0 },
+            iso,
+        );
     }
     let corner = [hi[0], lo[1]];
     let keep = if iso {
@@ -189,7 +194,10 @@ pub fn compiled(id: &str, size: Size, orientation: Orientation) -> Template {
                         (40.0, "Revision", "{revision}"),
                     ],
                 ),
-                (14.0, &[(120.0, "Title", "{name}"), (60.0, "Owner", "{owner}")]),
+                (
+                    14.0,
+                    &[(120.0, "Title", "{name}"), (60.0, "Owner", "{owner}")],
+                ),
             ],
         )
     } else {

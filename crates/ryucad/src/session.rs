@@ -1790,7 +1790,9 @@ fn listed(root: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
     out.extend(releases_in(&root.join(crate::doc::project::RELEASES))?);
     out.extend(files_in(&root.join(crate::doc::project::IMPORTS))?);
     out.extend(files_in(&root.join(crate::doc::annotation::ANNOTATIONS))?);
-    out.extend(files_in(&root.join(crate::doc::drawing_template::TEMPLATES))?);
+    out.extend(files_in(
+        &root.join(crate::doc::drawing_template::TEMPLATES),
+    )?);
     Ok(out)
 }
 

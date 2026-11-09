@@ -337,9 +337,8 @@ mod tests {
         let f = files();
         let h = hash(&f, &id("p")).unwrap();
         let mut d = DrawingFile::new("P", Size::AnsiB);
-        let text = |d: &DrawingFile| {
-            ryucad_doc::doc::canonical::to_string(&d.to_json()).into_bytes()
-        };
+        let text =
+            |d: &DrawingFile| ryucad_doc::doc::canonical::to_string(&d.to_json()).into_bytes();
         let mut drawn = f.clone();
         drawn.insert("parts/p/drawings/main.json".into(), text(&d));
         // Something in `drawings/` that isn't a drawing changes nothing.

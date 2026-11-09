@@ -23,7 +23,9 @@ pub fn path(c: &ImageCurve) -> Option<Path> {
     let segments = match (curve, map) {
         // A line, or a conic seen edge-on (its cosine map one to one over
         // the stretch): straight between its ends.
-        (Curve2::Line2(_), _) | (_, ImageMap::Cosine { .. }) => vec![Segment::Line(pt(c.point(t1)))],
+        (Curve2::Line2(_), _) | (_, ImageMap::Cosine { .. }) => {
+            vec![Segment::Line(pt(c.point(t1)))]
+        }
         (Curve2::Circle2(k), ImageMap::Affine(_)) => {
             let [s0, s1] = [map.apply(t0), map.apply(t1)];
             let f = k.frame();

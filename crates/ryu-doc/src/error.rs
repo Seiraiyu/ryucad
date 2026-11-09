@@ -952,8 +952,14 @@ mod tests {
             (Code::DrawingNotFound, "drawing_not_found"),
             (Code::DrawingViewFailed, "drawing_view_failed"),
             (Code::DrawingViewUncertain, "drawing_view_uncertain"),
-            (Code::DrawingReferenceUnresolved, "drawing_reference_unresolved"),
-            (Code::DrawingReferenceNotShown, "drawing_reference_not_shown"),
+            (
+                Code::DrawingReferenceUnresolved,
+                "drawing_reference_unresolved",
+            ),
+            (
+                Code::DrawingReferenceNotShown,
+                "drawing_reference_not_shown",
+            ),
             (Code::TemplateNotFound, "template_not_found"),
         ] {
             assert_eq!(json!(c), json!(name));

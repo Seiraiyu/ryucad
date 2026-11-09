@@ -394,6 +394,44 @@ pub fn answer_live(
                 bends,
             },
         ),
+        Request::DrawingRender {
+            part,
+            drawing,
+            rev,
+            sheet,
+            format,
+            scale,
+        } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+            let mut a = crate::drawing::request::render(
+                s,
+                &part,
+                &drawing,
+                sheet.as_deref(),
+                format.as_deref(),
+                scale,
+            )?;
+            a.result = noted(Ok(a.result), commit)?;
+            Ok(a)
+        }),
+        Request::DrawingExport {
+            part,
+            drawing,
+            rev,
+            sheet,
+            format,
+            out,
+        } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+            let mut a = crate::drawing::request::export(
+                s,
+                &part,
+                &drawing,
+                sheet.as_deref(),
+                format.as_deref(),
+                out.as_deref(),
+            )?;
+            a.result = noted(Ok(a.result), commit)?;
+            Ok(a)
+        }),
         Request::Rebuild { part, rev } => session.at(rev.as_deref()).and_then(|(commit, s)| {
             rebuild(s, part.as_deref(), commit.as_deref())
                 .map_err(|e| noted(Err(e), commit).expect_err("an error"))
@@ -1287,6 +1325,93 @@ pub(crate) fn dispatch(
             live.set_hidden(&id, hidden)?;
             Ok(json!({"participant": id, "hidden": live.get(&id)?.view.hidden}))
         }
+        Request::DrawingList { part } => crate::drawing::request::list(session, part.as_deref()),
+        Request::DrawingCreate {
+            part,
+            drawing,
+            name,
+            template,
+            size,
+            views,
+            expected_revision,
+        } => crate::drawing::request::create(
+            session,
+            &part,
+            &drawing,
+            &crate::drawing::request::Create {
+                name,
+                template,
+                size,
+                views,
+            },
+            expected_revision.as_deref(),
+        ),
+        Request::DrawingEdit {
+            part,
+            drawing,
+            ops,
+            expected_revision,
+        } => crate::drawing::request::edit(
+            session,
+            &part,
+            &drawing,
+            &ops,
+            expected_revision.as_deref(),
+        ),
+        Request::DrawingDelete {
+            part,
+            drawing,
+            expected_revision,
+        } => {
+            crate::drawing::request::delete(session, &part, &drawing, expected_revision.as_deref())
+        }
+        Request::DrawingRename {
+            part,
+            drawing,
+            to,
+            expected_revision,
+        } => crate::drawing::request::rename(
+            session,
+            &part,
+            &drawing,
+            &to,
+            expected_revision.as_deref(),
+        ),
+        Request::DrawingLayout {
+            part,
+            drawing,
+            dry_run,
+            expected_revision,
+        } => crate::drawing::request::layout(
+            session,
+            &part,
+            &drawing,
+            dry_run,
+            expected_revision.as_deref(),
+        ),
+        Request::DrawingGet {
+            part,
+            drawing,
+            rev,
+            sheet,
+            items,
+        } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+            noted(
+                crate::drawing::request::get(s, &part, &drawing, sheet.as_deref(), items),
+                commit,
+            )
+        }),
+        Request::DrawingDescribe {
+            part,
+            drawing,
+            rev,
+            sheet,
+        } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+            noted(
+                crate::drawing::request::describe(s, &part, &drawing, sheet.as_deref()),
+                commit,
+            )
+        }),
         Request::ExplodeList { part } => crate::explode::list(session, part.as_deref()),
         Request::ExplodeSave {
             part,
@@ -1570,6 +1695,10 @@ pub(crate) fn dispatch(
         // A render's answer is bytes: `answer_live` handles it.
         Request::Render { .. } => Err(Error::new(Code::Internal, "render answers with bytes")),
         Request::Export { .. } => Err(Error::new(Code::Internal, "export answers with bytes")),
+        Request::DrawingRender { .. } | Request::DrawingExport { .. } => Err(Error::new(
+            Code::Internal,
+            "drawings render and export with bytes",
+        )),
         // The session is current: doctor reuses its rebuilds (#125).
         Request::Doctor {} => {
             let root = session.root().to_owned();
@@ -5922,7 +6051,10 @@ fn framed(
 /// `reference` names (`<part>/<solid>/<name>`, or an occurrence's face,
 /// placed by its pose): along a planar face's outward normal or a
 /// revolved face's axis, its longest straight edge level.
-pub(crate) fn normal_to_face(session: &mut Session, reference: &str) -> Result<([f64; 3], [f64; 3])> {
+pub(crate) fn normal_to_face(
+    session: &mut Session,
+    reference: &str,
+) -> Result<([f64; 3], [f64; 3])> {
     use ryukei::geom::{Curve, Surface};
     use ryukei::measure::Entity;
     // A datum plane: along its normal, its x level; a datum axis: along it.

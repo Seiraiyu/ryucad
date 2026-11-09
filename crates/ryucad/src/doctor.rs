@@ -2482,13 +2482,20 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&d).unwrap();
         let good = DrawingFile::new("Plate", Size::AnsiB).to_json();
         crate::doc::project::write_json(&d.join("main.json"), &good).unwrap();
-        std::fs::write(d.join("loose.json"), serde_json::to_string_pretty(&good).unwrap()).unwrap();
+        std::fs::write(
+            d.join("loose.json"),
+            serde_json::to_string_pretty(&good).unwrap(),
+        )
+        .unwrap();
         std::fs::write(d.join("bad.json"), b"{\"kind\": \"ryucad.drawing\"}\n").unwrap();
         std::fs::write(d.join("notes.txt"), b"hi").unwrap();
         let t = root.join("templates");
         std::fs::create_dir_all(&t).unwrap();
-        std::fs::write(t.join("ours.json"), b"{\"kind\": \"ryucad.drawing_template\"}\n")
-            .unwrap();
+        std::fs::write(
+            t.join("ours.json"),
+            b"{\"kind\": \"ryucad.drawing_template\"}\n",
+        )
+        .unwrap();
         std::fs::write(t.join("logo.png"), b"").unwrap();
         let issues = diagnose(root);
         let of = |code: &str| -> Vec<String> {

@@ -5,8 +5,8 @@
 //! every key can be read and set by agents as well as the app.
 
 use crate::Cad;
-use crate::error::{Code, Error, Result};
 use crate::doc::files::Manifest;
+use crate::error::{Code, Error, Result};
 use crate::units::Unit;
 use ryu_session::prefs::{self, Schema};
 use serde_json::{Map, Value, json};
@@ -905,7 +905,9 @@ pub(crate) mod tests {
             let back = set_project(&iso, "drawing.standard", &json!("asme"));
             assert_eq!(back, m);
             assert_eq!(
-                validate("drawing.standard", &json!("din"), None).unwrap_err().code,
+                validate("drawing.standard", &json!("din"), None)
+                    .unwrap_err()
+                    .code,
                 Code::InvalidSetting
             );
         });
