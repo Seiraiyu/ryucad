@@ -444,16 +444,32 @@ fn sheet_pcurve_bound(
         // cut is. A span they certify, the cut's path certifies too (here
         // or after halving), and a fit's tolerance is resolution either
         // way; anything else is the cut's, as before.
+        //
+        // Where the cells don't certify the span and it would be halved
+        // whatever the cut found (`g`, the error at the middle, is an f64
+        // evaluation, the same either way), it is halved at once: the cut
+        // failed on 99.6% of those spans in the race's 1,000 clear pins,
+        // and certified the rest only by a hair, which halving certifies
+        // too (plan 15.E's departure from its Task 6).
+        let mut halve = false;
         if matches!(sheet, Sheet::Nurbs(_))
-            && let Some((bound, _)) =
+            && let Some((bound, g)) =
                 third_order(s, sheet, p, c, (&part, &cpart), [x0, x1], Jets::Cells)
-            && bound <= target
         {
-            return bound;
+            if bound <= target {
+                return bound;
+            }
+            halve = depth > 0 && g <= target / 2.0;
         }
-        if let Some((bound, g)) = third_order(s, sheet, p, c, (&part, &cpart), [x0, x1], Jets::Cut)
-        {
-            if bound <= target || depth == 0 || g > target / 2.0 {
+        let cut = if halve {
+            None
+        } else {
+            third_order(s, sheet, p, c, (&part, &cpart), [x0, x1], Jets::Cut)
+        };
+        if halve || cut.is_some() {
+            if let Some((bound, g)) = cut
+                && (bound <= target || depth == 0 || g > target / 2.0)
+            {
                 return bound;
             }
             let m = (x0 + x1) / 2.0;
