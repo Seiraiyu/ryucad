@@ -264,12 +264,13 @@ fn race_bodies_469_are_sound() {
     }
     // Two revolutions of closed profiles, race bodies 819 and 482, whose
     // near-meridian edges a fit by projection can't follow onto their
-    // NURBS forms across the profile's period start: refused, not written
-    // wrong. A fix shows here.
+    // NURBS forms across the profile's period start: their curves are
+    // carried through the forms' reparameterizations (#247).
     for seed in [455, 267] {
         let b = blend_body(seed).expect("it builds");
-        let e = brep_array(&b, "brep", Unit::Millimeter, 1e-7).unwrap_err();
-        assert_eq!(e.reason, "pcurve", "blend {seed}");
+        let p = brep_array(&b, "brep", Unit::Millimeter, 1e-7)
+            .unwrap_or_else(|e| panic!("blend {seed}: {e}"));
+        check(&p);
     }
 }
 

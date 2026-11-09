@@ -530,13 +530,19 @@ fn converted(
     {
         return Some((n, 0.0));
     }
-    ryukei::pcurve::fitted(n, curve, e.interval, tol).or_else(|| {
-        // Where the form keeps the swept surface's parameters, the curve
-        // found on that surface lies on the form as it is: a fit by
-        // projection can't follow one across the form's period start, as
-        // a band cut at a seam elsewhere has (#469).
-        (reparam == [Reparam::Identity; 2]).then(|| (x.uv.clone(), 0.0))
-    })
+    let through = |t: f64| {
+        let q = x.uv.point(t);
+        Point2::new(reparam[0].to_nurbs(q.x), reparam[1].to_nurbs(q.y))
+    };
+    ryukei::pcurve::fitted(n, curve, e.interval, tol)
+        .or_else(|| ryukei::pcurve::fitted_by(n, curve, e.interval, &through, tol))
+        .or_else(|| {
+            // Where the form keeps the swept surface's parameters, the curve
+            // found on that surface lies on the form as it is: a fit by
+            // projection can't follow one across the form's period start, as
+            // a band cut at a seam elsewhere has (#469).
+            (reparam == [Reparam::Identity; 2]).then(|| (x.uv.clone(), 0.0))
+        })
 }
 
 /// A degree 1 curve from `a` to `b` over `[t0, t1]`.
