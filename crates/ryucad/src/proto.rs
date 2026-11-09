@@ -593,7 +593,15 @@ pub enum Request {
     #[serde(rename = "feature.list")]
     FeatureList { part: String },
     #[serde(rename = "feature.show")]
-    FeatureShow { part: String, id: String },
+    FeatureShow {
+        part: String,
+        id: String,
+        /// Read the project as this revision has it (the working files by
+        /// default): a Git revision, `annotation:<id>`, `draft:<name>` or
+        /// `worktree:<path>`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     #[serde(rename = "param.list")]
     ParamList {
         /// The part, or none with `scope: project`.
@@ -601,6 +609,11 @@ pub enum Request {
         part: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<crate::param::Scope>,
+        /// Read the project as this revision has it (the working files by
+        /// default): a Git revision, `annotation:<id>`, `draft:<name>` or
+        /// `worktree:<path>`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     /// Sets or adds parameters, each an expression.
     #[serde(rename = "param.set")]
@@ -678,7 +691,14 @@ pub enum Request {
     },
     /// A part's properties: every core and declared one, set or not.
     #[serde(rename = "props.get")]
-    PropsGet { part: String },
+    PropsGet {
+        part: String,
+        /// Read the project as this revision has it (the working files by
+        /// default): a Git revision, `annotation:<id>`, `draft:<name>` or
+        /// `worktree:<path>`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     /// Sets a part's properties; `null` clears one.
     #[serde(rename = "props.set")]
     PropsSet {
@@ -818,6 +838,11 @@ pub enum Request {
         /// the user's display quality by default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quality: Option<String>,
+        /// Read the project as this revision has it (the working files by
+        /// default): a Git revision, `annotation:<id>`, `draft:<name>` or
+        /// `worktree:<path>`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     /// A path's or helix's polyline in model space, as the app draws it.
     #[serde(rename = "path.get")]
@@ -828,6 +853,11 @@ pub enum Request {
         /// quality by default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quality: Option<String>,
+        /// Read the project as this revision has it (the working files by
+        /// default): a Git revision, `annotation:<id>`, `draft:<name>` or
+        /// `worktree:<path>`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     /// What a sweep or a loft is built from, drawn in model space as the
     /// app draws it: a sweep's profile and path, a loft's sections in
@@ -840,6 +870,11 @@ pub enum Request {
         /// quality by default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quality: Option<String>,
+        /// Read the project as this revision has it (the working files by
+        /// default): a Git revision, `annotation:<id>`, `draft:<name>` or
+        /// `worktree:<path>`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     /// Moves an instance of an assembly: to the pose `placement` gives
     /// (what it leaves out stays), then by `translate` and a turn of
@@ -1812,6 +1847,9 @@ pub enum Request {
         /// Draw the origin's axes and planes (default false).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         origin: bool,
+        /// Draw open annotations' pins, numbered (default false).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        annotations: bool,
         /// Draw faces in their appearance (default true); false draws the
         /// fixed theme.
         #[serde(default, skip_serializing_if = "Option::is_none")]

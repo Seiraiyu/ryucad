@@ -701,6 +701,9 @@ enum Command {
         /// Draw the origin's axes and planes.
         #[arg(long)]
         origin: bool,
+        /// Draw open annotations' pins, numbered.
+        #[arg(long)]
+        annotations: bool,
         /// Draw every face in the fixed theme, not its appearance.
         #[arg(long)]
         no_appearance: bool,
@@ -1216,6 +1219,10 @@ enum FeatureCmd {
     Show {
         part: String,
         id: String,
+        /// Read the project as this revision has it (`annotation:<id>`,
+        /// `draft:<name>`, a Git revision).
+        #[arg(long)]
+        rev: Option<String>,
     },
 }
 
@@ -1228,6 +1235,10 @@ enum ParamCmd {
         /// The project's parameters, which every part may read.
         #[arg(long, conflicts_with = "part")]
         project: bool,
+        /// Read the project as this revision has it (`annotation:<id>`,
+        /// `draft:<name>`, a Git revision).
+        #[arg(long)]
+        rev: Option<String>,
     },
     /// Set or add parameters: wall="3 mm" hole="wall * 2" n=4 (with --project, the
     /// project's: `param set --project wall="3 mm"`).
@@ -1681,7 +1692,13 @@ fn json_array(s: &str) -> core::result::Result<Value, String> {
 #[derive(Subcommand)]
 enum PropsCmd {
     /// Every property of a part, set or not, with its declaration and faults.
-    Show { part: String },
+    Show {
+        part: String,
+        /// Read the project as this revision has it (`annotation:<id>`,
+        /// `draft:<name>`, a Git revision).
+        #[arg(long)]
+        rev: Option<String>,
+    },
     /// Set properties: number=100-0042 material=6061-T6 count=4; NAME= clears one. Values are
     /// read as each property's type.
     Set {
@@ -1796,6 +1813,10 @@ enum SketchCmd {
         /// user's display quality by default).
         #[arg(long)]
         quality: Option<String>,
+        /// Read the project as this revision has it (`annotation:<id>`,
+        /// `draft:<name>`, a Git revision).
+        #[arg(long)]
+        rev: Option<String>,
     },
 }
 
@@ -1810,6 +1831,10 @@ enum PathCmd {
         /// default).
         #[arg(long)]
         quality: Option<String>,
+        /// Read the project as this revision has it (`annotation:<id>`,
+        /// `draft:<name>`, a Git revision).
+        #[arg(long)]
+        rev: Option<String>,
     },
 }
 
@@ -1826,6 +1851,10 @@ enum SweepCmd {
         /// default).
         #[arg(long)]
         quality: Option<String>,
+        /// Read the project as this revision has it (`annotation:<id>`,
+        /// `draft:<name>`, a Git revision).
+        #[arg(long)]
+        rev: Option<String>,
     },
 }
 
@@ -3153,13 +3182,15 @@ fn request(cmd: &Command) -> Option<Request> {
             expected_revision: expect.revision.clone(),
         },
         Command::Feature(FeatureCmd::List { part }) => Request::FeatureList { part: part.clone() },
-        Command::Feature(FeatureCmd::Show { part, id }) => Request::FeatureShow {
+        Command::Feature(FeatureCmd::Show { part, id, rev }) => Request::FeatureShow {
             part: part.clone(),
             id: id.clone(),
+            rev: rev.clone(),
         },
-        Command::Param(ParamCmd::List { part, project }) => Request::ParamList {
+        Command::Param(ParamCmd::List { part, project, rev }) => Request::ParamList {
             part: part.clone(),
             scope: param_scope(*project),
+            rev: rev.clone(),
         },
         Command::Param(ParamCmd::Set {
             part,
@@ -3499,7 +3530,10 @@ fn request(cmd: &Command) -> Option<Request> {
             force: *force,
             expected_revision: expect.clone(),
         },
-        Command::Props(PropsCmd::Show { part }) => Request::PropsGet { part: part.clone() },
+        Command::Props(PropsCmd::Show { part, rev }) => Request::PropsGet {
+            part: part.clone(),
+            rev: rev.clone(),
+        },
         Command::Props(PropsCmd::Set {
             part,
             values,
@@ -3562,28 +3596,34 @@ fn request(cmd: &Command) -> Option<Request> {
             part,
             sketch,
             quality,
+            rev,
         }) => Request::SketchGet {
             part: part.clone(),
             sketch: sketch.clone(),
             quality: quality.clone(),
+            rev: rev.clone(),
         },
         Command::Path(PathCmd::Get {
             part,
             path,
             quality,
+            rev,
         }) => Request::PathGet {
             part: part.clone(),
             path: path.clone(),
             quality: quality.clone(),
+            rev: rev.clone(),
         },
         Command::Sweep(SweepCmd::Get {
             part,
             feature,
             quality,
+            rev,
         }) => Request::SweepGet {
             part: part.clone(),
             feature: feature.clone(),
             quality: quality.clone(),
+            rev: rev.clone(),
         },
         Command::Import {
             cmd:
@@ -3946,6 +3986,7 @@ fn request(cmd: &Command) -> Option<Request> {
             compare,
             hidden,
             origin,
+            annotations,
             no_appearance,
             section,
             no_section,
@@ -3978,6 +4019,7 @@ fn request(cmd: &Command) -> Option<Request> {
                 explode.clone()
             },
             fraction: *fraction,
+            annotations: *annotations,
             flat: flat.clone(),
         },
         Command::Highlight {

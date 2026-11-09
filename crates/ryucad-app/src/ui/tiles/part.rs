@@ -95,7 +95,7 @@ pub fn part_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
     ws.show_props(part.as_deref());
     if ws.pdm_config.is_some() && !ws.pdm_ready() {
         ui.weak("PDM isn't set up: the project has no ID for release records yet.");
-        if ui.button("Set up PDM").clicked() {
+        if crate::ui::modes::button(ui, ws, "pdm.init", "Set up PDM").clicked() {
             ws.pdm_init();
         }
     }
@@ -106,6 +106,7 @@ pub fn part_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
             None => b,
         })
     });
+    let gate = ws.control("props.set");
     let Some(p) = &mut ws.props else {
         return;
     };
@@ -158,7 +159,13 @@ pub fn part_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
         }
     });
     let (dirty, saving) = (p.dirty(), p.saving);
-    let foot = form::foot(ui, dirty, saving, ("Apply properties", "Revert properties"));
+    let foot = form::foot(
+        ui,
+        dirty,
+        saving,
+        ("Apply properties", "Revert properties"),
+        &gate,
+    );
     if (foot.revert || keys.revert) && dirty {
         for prop in &mut p.props {
             prop.field.text.clone_from(&prop.field.read);

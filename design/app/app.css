@@ -181,49 +181,49 @@ kbd { font-family: "JetBrains Mono", monospace; font-size: 11px; padding: 0 5px;
 [data-look="drafting"][data-theme="light"][data-contrast="normal"] {
   --app: #f7f6f2; --viewport: #efede8; --raised: #fdfcfa; --frame: #ebe9e3; --frame-hover: #e2dfd8;
   --border: #e2dfd7; --border-strong: #cdc9bf; --text: #1c1b18; --text-weak: #6a675f;
-  --accent: #d4530c; --select-bg: #fae2d2; --select-fg: #8c3504; --focus: #d4530c;
+  --accent: #d4530c; --select-bg: #fae2d2; --select-fg: #8c3504; --focus: #d4530c; --annotate: #0d6b73; --direct: #b3261e;
   --ok: #1f7a3d; --warn: #97650a; --danger: #c93a3a; --info: #1f5fc8;
 }
 [data-look="drafting"][data-theme="dark"][data-contrast="normal"] {
   --app: #141412; --viewport: #383b42; --raised: #1d1c1a; --frame: #262522; --frame-hover: #2f2e2a;
   --border: #292825; --border-strong: #3b3a35; --text: #ebe8e1; --text-weak: #908d83;
-  --accent: #ff7a2f; --select-bg: #3d2414; --select-fg: #ffc7a3; --focus: #ff7a2f;
+  --accent: #ff7a2f; --select-bg: #3d2414; --select-fg: #ffc7a3; --focus: #ff7a2f; --annotate: #4fc8d1; --direct: #ff7a6e;
   --ok: #5cc77f; --warn: #e3a63a; --danger: #f0706b; --info: #6ea0ff;
 }
 [data-look="graphite"][data-theme="light"][data-contrast="normal"] {
   --app: #fafbfc; --viewport: #f1f2f5; --raised: #ffffff; --frame: #eceef1; --frame-hover: #e2e5e9;
   --border: #e3e6ea; --border-strong: #c8cdd4; --text: #1b1d21; --text-weak: #656b73;
-  --accent: #0c82bf; --select-bg: #dcedf8; --select-fg: #075a84; --focus: #0c82bf;
+  --accent: #0c82bf; --select-bg: #dcedf8; --select-fg: #075a84; --focus: #0c82bf; --annotate: #0d6b73; --direct: #b3261e;
   --ok: #1f7a3d; --warn: #9b680a; --danger: #cf3f3f; --info: #1f5fc8;
 }
 [data-look="graphite"][data-theme="dark"][data-contrast="normal"] {
   --app: #18191c; --viewport: #383b42; --raised: #212327; --frame: #2a2c31; --frame-hover: #33363c;
   --border: #2b2d32; --border-strong: #3b3e45; --text: #e4e6e9; --text-weak: #91959c;
-  --accent: #38a3dc; --select-bg: #133a50; --select-fg: #bfe3ff; --focus: #38a3dc;
+  --accent: #38a3dc; --select-bg: #133a50; --select-fg: #bfe3ff; --focus: #38a3dc; --annotate: #4fc8d1; --direct: #ff7a6e;
   --ok: #5cc77f; --warn: #e3a63a; --danger: #f0706b; --info: #6ea0ff;
 }
 [data-look="studio"][data-theme="light"][data-contrast="normal"] {
   --app: #ffffff; --viewport: #f3f4f6; --raised: #ffffff; --frame: #f0f1f4; --frame-hover: #e7e9ed;
   --border: #e6e8ec; --border-strong: #d3d7dd; --text: #15171a; --text-weak: #686d74;
-  --accent: #3557f0; --select-bg: #3557f0; --select-fg: #ffffff; --focus: #3557f0;
+  --accent: #3557f0; --select-bg: #3557f0; --select-fg: #ffffff; --focus: #3557f0; --annotate: #0d6b73; --direct: #b3261e;
   --ok: #1f7a3d; --warn: #9f6a09; --danger: #cf3f3f; --info: #1f5fc8;
 }
 [data-look="studio"][data-theme="dark"][data-contrast="normal"] {
   --app: #18191c; --viewport: #383b42; --raised: #1f2024; --frame: #26282c; --frame-hover: #2e3035;
   --border: #26282c; --border-strong: #34373d; --text: #ecedef; --text-weak: #8c9096;
-  --accent: #6f88ff; --select-bg: #6f88ff; --select-fg: #0a0f2a; --focus: #6f88ff;
+  --accent: #6f88ff; --select-bg: #6f88ff; --select-fg: #0a0f2a; --focus: #6f88ff; --annotate: #4fc8d1; --direct: #ff7a6e;
   --ok: #5cc77f; --warn: #e3a63a; --danger: #f0706b; --info: #6ea0ff;
 }
 
 [data-look][data-theme="light"][data-contrast="high"] {
   --app: #ffffff; --viewport: #f2f2f2; --raised: #ffffff; --frame: #ffffff; --frame-hover: #e6e6e6;
   --border: #000000; --border-strong: #000000; --text: #000000; --text-weak: #333333;
-  --accent: #0037a6; --select-bg: #0037a6; --select-fg: #ffffff; --focus: #0037a6;
+  --accent: #0037a6; --select-bg: #0037a6; --select-fg: #ffffff; --focus: #0037a6; --annotate: #005a62; --direct: #9c0000;
   --ok: #006b21; --warn: #7a4d00; --danger: #b00000; --info: #0037a6;
 }
 [data-look][data-theme="dark"][data-contrast="high"] {
   --app: #000000; --viewport: #2b2b2b; --raised: #000000; --frame: #000000; --frame-hover: #262626;
   --border: #ffffff; --border-strong: #ffffff; --text: #ffffff; --text-weak: #d6d6d6;
-  --accent: #ffd400; --select-bg: #ffd400; --select-fg: #000000; --focus: #ffd400;
+  --accent: #ffd400; --select-bg: #ffd400; --select-fg: #000000; --focus: #ffd400; --annotate: #5ce6ee; --direct: #ff8a80;
   --ok: #4cff7a; --warn: #ffb000; --danger: #ff6b6b; --info: #7ab8ff;
 }

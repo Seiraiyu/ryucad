@@ -37,7 +37,7 @@ fn assembled() -> Project {
 }
 
 fn open(p: &Project) -> Workspace {
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.part("frame").is_some()));
     ws
 }

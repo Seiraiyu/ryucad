@@ -28,7 +28,7 @@ fn a_large_project_loads_what_the_window_shows() {
         ..Spec::parts(1000)
     };
     let made = write(&root, &spec, &[]);
-    let mut ws = Workspace::open(&root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     let t = Instant::now();
     let drawn = |ws: &Workspace| {
         ws.part("root").is_some_and(|r| {

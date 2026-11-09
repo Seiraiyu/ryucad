@@ -19,7 +19,7 @@ fn key(f: &str) -> (String, String) {
 
 /// The window, once the model and every solid's mesh have come.
 fn open(p: &Project) -> Workspace {
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| {
         ws.idle()
             && ws.part("p").is_some_and(|p| {

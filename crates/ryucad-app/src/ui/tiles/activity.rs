@@ -34,6 +34,7 @@ pub fn activity(ui: &mut egui::Ui, o: &mut Opened) {
             });
     });
     o.ws.feed_only = only;
+    let (undo_gate, redo_gate) = (o.ws.control("undo"), o.ws.control("redo"));
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
@@ -98,9 +99,14 @@ pub fn activity(ui: &mut egui::Ui, o: &mut Opened) {
                             }
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if row.undo && ui.small_button("Undo").clicked() {
+                            let small = |t| egui::Button::new(t).small();
+                            if row.undo
+                                && crate::ui::modes::gated(ui, &undo_gate, small("Undo")).clicked()
+                            {
                                 undo = Some(row.seq);
-                            } else if row.redo && ui.small_button("Redo").clicked() {
+                            } else if row.redo
+                                && crate::ui::modes::gated(ui, &redo_gate, small("Redo")).clicked()
+                            {
                                 redo = Some(row.seq);
                             }
                         });

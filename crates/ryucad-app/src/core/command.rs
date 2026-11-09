@@ -151,6 +151,23 @@ const ENTITIES: [Context; 5] = [
     Context::Entity(Pick::Datum),
 ];
 
+/// What can be annotated: every row and entity (a ghost is gone).
+const ANNOTATABLE: [Context; 13] = [
+    Context::Row(Row::Part),
+    Context::Row(Row::Solid),
+    Context::Row(Row::Feature),
+    Context::Row(Row::Sketch),
+    Context::Row(Row::Instance),
+    Context::Row(Row::Mate),
+    Context::Row(Row::Pattern),
+    Context::Row(Row::Copy),
+    Context::Entity(Pick::Face),
+    Context::Entity(Pick::Edge),
+    Context::Entity(Pick::Vertex),
+    Context::Entity(Pick::Sketch),
+    Context::Entity(Pick::Datum),
+];
+
 /// Every row, every entity and a ghost: what has a reference to copy.
 const REFERENCED: [Context; 14] = [
     Context::Row(Row::Part),
@@ -514,6 +531,16 @@ pub const COMMANDS: &[Command] = &[
     cmd("appearance.edit", "Appearance", Tools).icon("palette"),
     cmd("params.equations", "Equations", Tools).icon("function"),
     cmd("measure.clearance", "Clearance", Tools).icon("arrows-left-right"),
+    cmd("annotations.show", "Annotations", Tools).icon("chat-circle-text"),
+    cmd("view.annotations", "Annotations' pins", View).toggle(),
+    cmd("annotation.add", "Annotate…", Edit)
+        .icon("chat-circle-text")
+        .context(&ANNOTATABLE)
+        .hidden(),
+    cmd("annotation.here", "Annotate here", Edit)
+        .icon("chat-circle-text")
+        .context(&[Context::Viewport])
+        .hidden(),
     cmd("tools.interference", "Check interference", Tools)
         .icon("intersect-square")
         .toolbar(),
@@ -541,6 +568,20 @@ pub const COMMANDS: &[Command] = &[
         .in_text(),
     cmd("help.agents", "Driving ryucad from an agent", Help).icon("robot"),
     cmd("help.about", "About ryucad", Help).icon("info"),
+    // The window's mode (design 374), last on the toolbar, beside the
+    // People strip.
+    cmd("mode.view", "View only", Edit)
+        .icon("eye")
+        .toolbar()
+        .toggle(),
+    cmd("mode.annotate", "Annotate", Edit)
+        .icon("note-pencil")
+        .toolbar()
+        .toggle(),
+    cmd("mode.edit", "Direct edit", Edit)
+        .icon("pencil-simple")
+        .toolbar()
+        .toggle(),
 ];
 
 /// The size `ui.scale` takes after Zoom in (`up`) or Zoom out from
@@ -593,17 +634,44 @@ pub struct State {
     pub filter: crate::core::pick::Filter,
     /// The app's size (`ui.scale`).
     pub scale: f64,
+    /// The window's mode.
+    pub mode: crate::core::modes::Mode,
+    /// Annotations' pins are drawn (`display.annotations`).
+    pub annotations: bool,
+}
+
+/// Whether the window's mode allows `id`, or which mode would: the part
+/// of [`enabled`] that holds whatever was right-clicked, so a context
+/// menu's targeted entries are gated by mode too.
+pub fn mode_allows(id: &str, s: &State) -> Result<(), &'static str> {
+    let need = |ok: bool, why: &'static str| if ok { Ok(()) } else { Err(why) };
+    match id {
+        "annotation.add" | "annotation.here" => need(
+            s.mode != crate::core::modes::Mode::View,
+            "Annotate does this: press Annotate first.",
+        ),
+        "edit.undo"
+        | "edit.redo"
+        | "file.import_step"
+        | "file.update_import"
+        | "import.to_solid"
+        | "import.to_reference" => need(
+            s.mode == crate::core::modes::Mode::Edit,
+            "Direct edit does this: it changes the project's files.",
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// Whether `id` can run now, or why not: a sentence the menus' hover, the
 /// palette and the toolbar's tooltip all show.
 pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
+    mode_allows(id, s)?;
     let need = |ok: bool, why: &'static str| if ok { Ok(()) } else { Err(why) };
     match id {
-        "file.update_import" => need(
-            s.chosen_import,
-            "Choose an imported feature in the tree first.",
-        ),
+        "file.update_import" if !s.chosen_import => {
+            Err("Choose an imported feature in the tree first.")
+        }
         "file.export" => need(
             s.one_shown,
             "Show one part or assembly first (View > Show).",
@@ -680,6 +748,10 @@ pub fn checked(id: &str, s: &State) -> Option<bool> {
         "select.bodies" => s.filter.bodies,
         "select.sketches" => s.filter.sketches,
         "select.datums" => s.filter.datums,
+        "mode.view" => s.mode == crate::core::modes::Mode::View,
+        "mode.annotate" => s.mode == crate::core::modes::Mode::Annotate,
+        "mode.edit" => s.mode == crate::core::modes::Mode::Edit,
+        "view.annotations" => s.annotations,
         _ => return None,
     })
 }
@@ -703,6 +775,44 @@ pub fn toolbar() -> impl Iterator<Item = &'static Command> {
 mod tests {
     use super::*;
     use crate::core::keys::Chord;
+
+    #[test]
+    fn modes_are_toolbar_toggles_and_annotating_needs_a_mode() {
+        use crate::core::modes::Mode;
+        let bar: Vec<&str> = toolbar().map(|c| c.id).collect();
+        // Last on the toolbar, before the People strip, in order.
+        assert_eq!(
+            &bar[bar.len() - 3..],
+            ["mode.view", "mode.annotate", "mode.edit"]
+        );
+        for m in ["mode.view", "mode.annotate", "mode.edit"] {
+            assert_eq!(get(m).unwrap().kind, Kind::Toggle, "{m}");
+        }
+        let s = |mode| State {
+            mode,
+            ..State::default()
+        };
+        assert_eq!(checked("mode.annotate", &s(Mode::Annotate)), Some(true));
+        assert_eq!(checked("mode.edit", &s(Mode::Annotate)), Some(false));
+        assert!(enabled("annotation.add", &s(Mode::View)).is_err());
+        assert!(enabled("annotation.add", &s(Mode::Annotate)).is_ok());
+        assert!(enabled("edit.undo", &s(Mode::Annotate)).is_err());
+        assert!(enabled("edit.undo", &s(Mode::Edit)).is_ok());
+        // `import.convert` isn't proposable: converting an import needs
+        // Direct edit, as the daemon judges it.
+        for id in ["import.to_solid", "import.to_reference"] {
+            assert!(enabled(id, &s(Mode::View)).is_err(), "{id} in View");
+            assert!(enabled(id, &s(Mode::Annotate)).is_err(), "{id} in Annotate");
+            assert!(enabled(id, &s(Mode::Edit)).is_ok(), "{id} in Direct edit");
+            // A row's context menu runs them with a target, still by mode.
+            assert!(mode_allows(id, &s(Mode::Annotate)).is_err(), "{id}");
+            assert!(mode_allows(id, &s(Mode::Edit)).is_ok(), "{id}");
+        }
+        assert!(context(Context::Entity(Pick::Face)).any(|c| c.id == "annotation.add"));
+        assert!(context(Context::Viewport).any(|c| c.id == "annotation.here"));
+        assert!(!context(Context::Ghost).any(|c| c.id == "annotation.add"));
+        assert!(menu(Category::Tools).any(|c| c.id == "annotations.show"));
+    }
 
     #[test]
     fn dependencies_are_in_the_project_menu() {
@@ -801,6 +911,7 @@ mod tests {
             sectioned: true,
             exploded: true,
             scale: 1.0,
+            mode: crate::core::modes::Mode::Edit,
             ..State::default()
         };
         for c in COMMANDS {
@@ -865,17 +976,25 @@ mod tests {
         }
         assert_eq!(
             ids(Context::Row(Row::Part)),
-            ["edit.copy_reference", "view.fit_row"]
+            ["edit.copy_reference", "view.fit_row", "annotation.add"]
         );
         for k in Pick::ALL {
             assert_eq!(
                 ids(Context::Entity(k)),
-                ["edit.copy_reference", "edit.select", "edit.select_other"],
+                [
+                    "edit.copy_reference",
+                    "edit.select",
+                    "edit.select_other",
+                    "annotation.add"
+                ],
                 "{k:?}"
             );
         }
         assert_eq!(ids(Context::Ghost), ["edit.copy_reference"]);
-        assert_eq!(ids(Context::Viewport), ["view.fit", "view.show_all"]);
+        assert_eq!(
+            ids(Context::Viewport),
+            ["view.fit", "view.show_all", "annotation.here"]
+        );
         assert_eq!(ids(Context::Tab), ["view.close_tile", "view.reset_layout"]);
         assert!(enabled_on("view.close_tile", "viewport").is_err());
         assert_eq!(enabled_on("view.close_tile", "history"), Ok(()));

@@ -173,6 +173,7 @@ pub fn answer_live(
             section,
             explode,
             fraction,
+            annotations,
             flat,
         } => {
             // A flat pattern's render draws one solid flat: no section or
@@ -319,6 +320,7 @@ pub fn answer_live(
                 appearance: appearance.unwrap_or(true),
                 sections,
                 explode,
+                annotations,
                 flat,
             };
             render_noting(session, target, shown, ask)
@@ -518,7 +520,10 @@ pub(crate) fn dispatch(
             },
             expected_revision.as_deref(),
         ),
-        Request::PropsGet { part } => crate::pdm::get(session, &part),
+        Request::PropsGet { part, rev } => {
+            let (_, session) = session.at(rev.as_deref())?;
+            crate::pdm::get(session, &part)
+        }
         Request::BomGet {
             part,
             rev,
@@ -608,10 +613,13 @@ pub(crate) fn dispatch(
             properties,
             expected_revision,
         } => crate::pdm::set(session, &part, properties, expected_revision.as_deref()),
-        Request::ParamList { part, scope } => match param::Target::of(part, scope)? {
-            param::Target::Part(p) => param::list(session, &p),
-            param::Target::Project => param::list_project(session),
-        },
+        Request::ParamList { part, scope, rev } => {
+            let (_, session) = session.at(rev.as_deref())?;
+            match param::Target::of(part, scope)? {
+                param::Target::Part(p) => param::list(session, &p),
+                param::Target::Project => param::list_project(session),
+            }
+        }
         Request::ParamSet {
             part,
             scope,
@@ -665,7 +673,9 @@ pub(crate) fn dispatch(
             part,
             sketch,
             quality,
+            rev,
         } => {
+            let (_, session) = session.at(rev.as_deref())?;
             let quality = match quality {
                 Some(q) => mesh::Quality::parse(&q)?,
                 None => mesh::Quality::preferred(),
@@ -676,7 +686,9 @@ pub(crate) fn dispatch(
             part,
             path,
             quality,
+            rev,
         } => {
+            let (_, session) = session.at(rev.as_deref())?;
             let quality = match quality {
                 Some(q) => mesh::Quality::parse(&q)?,
                 None => mesh::Quality::preferred(),
@@ -687,7 +699,9 @@ pub(crate) fn dispatch(
             part,
             feature,
             quality,
+            rev,
         } => {
+            let (_, session) = session.at(rev.as_deref())?;
             let quality = match quality {
                 Some(q) => mesh::Quality::parse(&q)?,
                 None => mesh::Quality::preferred(),
@@ -873,7 +887,8 @@ pub(crate) fn dispatch(
                 .collect(),
             component,
         ),
-        Request::FeatureShow { part, id } => {
+        Request::FeatureShow { part, id, rev } => {
+            let (_, session) = session.at(rev.as_deref())?;
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
             let p = session.project().part(&part)?;
             let mut v = feature_report(p, &fid, feature(p, &fid)?);
@@ -5899,6 +5914,8 @@ struct RenderAsk {
     sections: Vec<crate::section::Plane>,
     /// An explode to draw.
     explode: Option<DrawExplode>,
+    /// Draw open annotations' pins, numbered.
+    annotations: bool,
     /// A sheet metal solid whose flat pattern to draw instead (`""`: the
     /// part's one).
     flat: Option<String>,
@@ -6190,6 +6207,9 @@ fn render(
         marks.insert(e.to_string(), (r::NOTE, None));
     }
     let mut g = Geometry::default();
+    // Each assembly's occurrences' poses, by instance path, for the pins
+    // `annotations` draws on them.
+    let mut poses: BTreeMap<String, BTreeMap<String, ryukei::geom::Rigid>> = BTreeMap::new();
     // What the geometry holds, judged against the render's budget (#400).
     let budget = render_budget();
     let mut tally = r::Tally::default();
@@ -6285,6 +6305,10 @@ fn render(
                     Some(off) => off.0.then_after(&o.pose),
                     None => o.pose,
                 };
+                poses
+                    .entry(part.to_string())
+                    .or_default()
+                    .insert(path.clone(), pose);
                 let solids: Vec<&crate::assembly::Solid> = o.solids.iter().collect();
                 let made = occurrence_meshes(session, &solids, mesh::Quality::Normal)?;
                 for (s, m) in solids.iter().zip(made) {
@@ -6413,6 +6437,16 @@ fn render(
     }
     if ask.origin {
         g.add_origin();
+    }
+    if ask.annotations {
+        let files = session.snapshot();
+        let none = BTreeMap::new();
+        for part in &parts {
+            let on = poses.get(part.as_str()).unwrap_or(&none);
+            for (at, n) in crate::annotation::markers(&files, part.as_str(), on) {
+                g.add_marker(at, &n);
+            }
+        }
     }
     g.sections = ask.sections.clone();
     let camera = match (ask.camera, target, ask.view.as_deref()) {
@@ -7304,6 +7338,9 @@ fn files_at(session: &mut Session, rev: &str) -> Result<(Value, activity::Files)
         }
         return Ok((named, files));
     }
+    if let Some((named, files)) = session.draft_files(rev)? {
+        return Ok((named, files));
+    }
     if let Some((w, files, _)) = session.worktree_files(rev)? {
         let named = json!({"rev": rev, "worktree": w.root, "branch": w.branch, "head": w.head});
         return Ok((named, files));
@@ -8052,6 +8089,37 @@ pub(crate) mod tests {
         assert_eq!(m["turns"], 10.0);
         let e = call(&mut s, "measure", json!({"entities": ["p/w", "p/b"]})).unwrap_err();
         assert_eq!(e.details["reason"], "path_against_entity");
+    }
+
+    #[test]
+    fn renders_draw_annotations_only_when_asked() {
+        use crate::render::ANNOTATION;
+        let (dir, mut s, face) = crate::annotation::tests::plate();
+        crate::annotation::tests::put(
+            &mut s,
+            &crate::annotation::tests::comment(
+                "aaaaaaaaaa",
+                vec![crate::annotation::Pin::Entity {
+                    reference: face,
+                    point_m: Some([0.0, 0.0, 0.005]),
+                }],
+            ),
+        );
+        drop(s);
+        let count = |annotations: bool| {
+            let mut p = json!({"part": "plate", "view": "iso", "width": 200, "height": 150});
+            if annotations {
+                p["annotations"] = json!(true);
+            }
+            let px = ANNOTATION.map(|x| (x * 255.0 + 0.5) as u8);
+            let s = Session::open(dir.path()).unwrap();
+            render_pixels(dir.path(), s, p)
+                .into_iter()
+                .filter(|p| *p == px)
+                .count()
+        };
+        assert_eq!(count(false), 0, "only when asked");
+        assert!(count(true) > 5, "the pin's marker is drawn");
     }
 
     #[test]

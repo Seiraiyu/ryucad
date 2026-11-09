@@ -18,6 +18,7 @@ pub fn parameters(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
         .map(|k| k.0.clone())
         .or_else(|| ws.model.parts.keys().next().cloned());
     ws.show_params(part.as_deref());
+    let gate = ws.control("param.set");
     let Some(p) = &mut ws.params else {
         return;
     };
@@ -86,7 +87,13 @@ pub fn parameters(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
         rows.keys.apply |= entered;
     });
     let (dirty, saving) = (p.dirty(), p.saving);
-    let foot = form::foot(ui, dirty, saving, ("Apply parameters", "Revert parameters"));
+    let foot = form::foot(
+        ui,
+        dirty,
+        saving,
+        ("Apply parameters", "Revert parameters"),
+        &gate,
+    );
     if (foot.revert || keys.revert) && dirty {
         for row in &mut p.params {
             row.field.text.clone_from(&row.field.read);

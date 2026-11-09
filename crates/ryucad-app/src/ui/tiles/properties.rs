@@ -347,6 +347,7 @@ pub(crate) fn sized(ui: &mut egui::Ui, edit: egui::TextEdit<'_>, width: f32) -> 
 /// A sketch dimension's value, edited in place. Apply sends `sketch.edit`
 /// against the revision it was read at.
 pub(crate) fn dimension(ui: &mut egui::Ui, ws: &mut Workspace) {
+    let gate = ws.control("sketch.edit");
     let Some(f) = &mut ws.dimension else {
         return;
     };
@@ -372,7 +373,7 @@ pub(crate) fn dimension(ui: &mut egui::Ui, ws: &mut Workspace) {
         rows.quantity("value", &mut f.value);
     });
     let (dirty, saving) = (f.dirty(), f.saving);
-    let foot = form::foot(ui, dirty, saving, ("Apply", "Revert"));
+    let foot = form::foot(ui, dirty, saving, ("Apply", "Revert"), &gate);
     if (foot.revert || keys.revert) && dirty {
         f.value.text.clone_from(&f.value.read);
         f.value.error = None;
@@ -432,6 +433,7 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         .as_ref()
         .and_then(|f| f.foreign.as_ref())
         .map(|p| ws.model.marks.name(p));
+    let gate = ws.control("feature.edit");
     let Some(form) = &mut ws.form else {
         crate::ui::tiles::empty(
             ui,
@@ -495,7 +497,8 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
             .get(&key.0)
             .and_then(|p| p.feature(&key.1))
             .and_then(|f| f.import.clone());
-        if let Some(reference) = import(ui, &i, built.as_ref()) {
+        let gate = ws.control("import.convert");
+        if let Some(reference) = import(ui, &i, built.as_ref(), &gate) {
             ws.convert_import(&key.0, &key.1, reference);
         }
         names(ui, ws, &key);
@@ -526,7 +529,7 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         });
     }
     let (dirty, saving) = (form.dirty(), form.saving);
-    let foot = form::foot(ui, dirty, saving, ("Apply", "Revert"));
+    let foot = form::foot(ui, dirty, saving, ("Apply", "Revert"), &gate);
     if (foot.revert || keys.revert) && dirty {
         form.revert();
     }
@@ -546,6 +549,7 @@ pub(crate) fn import(
     ui: &mut egui::Ui,
     i: &crate::core::model::ImportInfo,
     built: Option<&crate::core::model::ImportInfo>,
+    gate: &crate::core::modes::Gate,
 ) -> Option<bool> {
     let mut asked = None;
     form::grid(ui, "import", |rows| {
@@ -592,7 +596,12 @@ pub(crate) fn import(
             "Keep the file's geometry as it is, shown and read but never changed; refused while a feature acts on it",
         )
     };
-    if ui.button(label).on_hover_text(tip).clicked() {
+    // `import.convert` writes the part's files: disabled where the mode
+    // doesn't allow it, saying which would.
+    if crate::ui::modes::gated(ui, gate, egui::Button::new(label))
+        .on_hover_text(tip)
+        .clicked()
+    {
         asked = Some(!i.reference);
     }
     ui.weak("Imports are written by ryucad import; File > Update import… takes a new version of the file.");

@@ -34,7 +34,15 @@ pub fn people(ui: &mut egui::Ui, ws: &mut Workspace) {
                 Kind::Agent => " [agent]",
             };
             let you = if p.id == me { " (you)" } else { "" };
-            ui.label(RichText::new(format!("{}{kind}{you}", p.name)).color(style::color32(colour)));
+            // A human's mode goes in their own label: the strip runs right
+            // to left, so a label of its own read before the name.
+            let mode = match mode_mark(p.mode) {
+                Some(m) if p.kind == Kind::Human => format!(" · {m}"),
+                _ => String::new(),
+            };
+            ui.label(
+                RichText::new(format!("{}{kind}{you}{mode}", p.name)).color(style::color32(colour)),
+            );
             if let Some((text, _)) = &p.status {
                 ui.weak(text);
             }
@@ -228,5 +236,27 @@ pub fn ago(ms: u64) -> String {
         60..3600 => format!("{} min ago", s / 60),
         3600..86_400 => format!("{} h ago", s / 3600),
         _ => format!("{} d ago", s / 86_400),
+    }
+}
+
+/// What the People strip says of a participant's mode: nothing in View.
+pub fn mode_mark(mode: ryucad::live::Mode) -> Option<&'static str> {
+    match mode {
+        ryucad::live::Mode::View => None,
+        ryucad::live::Mode::Annotate => Some("annotating"),
+        ryucad::live::Mode::Edit => Some("editing directly"),
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+    use ryucad::live::Mode;
+
+    #[test]
+    fn a_participant_s_mode_is_named_beside_them() {
+        assert_eq!(mode_mark(Mode::View), None);
+        assert_eq!(mode_mark(Mode::Annotate), Some("annotating"));
+        assert_eq!(mode_mark(Mode::Edit), Some("editing directly"));
     }
 }

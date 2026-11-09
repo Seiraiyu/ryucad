@@ -86,6 +86,7 @@ pub fn import(
     browse: &mut Option<Browse>,
     view: egui::Rect,
 ) {
+    let gate = ws.control("import");
     let Some(i) = &mut ws.import else {
         return;
     };
@@ -145,8 +146,7 @@ pub fn import(
                 } else {
                     "Import"
                 };
-                go = ui
-                    .add_enabled(!i.waiting, egui::Button::new(verb))
+                go = crate::ui::modes::gated_if(ui, &gate, !i.waiting, egui::Button::new(verb))
                     .clicked();
             }
         });

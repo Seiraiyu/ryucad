@@ -57,6 +57,8 @@ pub enum Action {
     Undo(Vec<u64>),
     /// Open the error card of the window's failure at this index.
     Details(usize),
+    /// Choose this annotation and open the Annotations tile.
+    Annotation(String),
 }
 
 impl Action {
@@ -65,6 +67,7 @@ impl Action {
             Action::Show(_) => "Show",
             Action::Undo(_) => "Undo",
             Action::Details(_) => "Details",
+            Action::Annotation(_) => "Show",
         }
     }
 }
@@ -125,10 +128,49 @@ impl Toasts {
         }
     }
 
+    /// Someone's reply on, or closing of, one of this window's person's
+    /// annotations.
+    pub fn annotation(
+        &mut self,
+        who: &str,
+        agent: bool,
+        text: &str,
+        detail: &str,
+        id: &str,
+        now: Instant,
+    ) {
+        let kind = Kind::Change {
+            participant: who.to_owned(),
+            agent,
+        };
+        if !self.wants(&kind) {
+            return;
+        }
+        self.push(Toast {
+            id: 0,
+            kind,
+            who: Some(who.to_owned()),
+            text: text.to_owned(),
+            detail: (!detail.is_empty()).then(|| detail.to_owned()),
+            actions: vec![Action::Annotation(id.to_owned())],
+            at: now,
+            batch: None,
+        });
+    }
+
     /// An `activity.appended` entry: a change another participant made,
     /// batched with their changes of the last [`BATCH`]. The window's own
     /// and changes from outside ryucad make none.
     pub fn activity(&mut self, entry: &Value, me: &str, now: Instant) {
+        // Annotations' own writes make toasts of their own (`annotation`)
+        // for their authors and show in the tile; applying one writes the
+        // model, and is a change like any.
+        if entry["method"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("annotation.") && m != "annotation.apply")
+        {
+            return;
+        }
         let p = &entry["participant"];
         let (Some(id), Some(name)) = (p["id"].as_str(), p["name"].as_str()) else {
             return;
@@ -366,6 +408,46 @@ mod tests {
         let files: Vec<Value> = files.iter().map(|p| json!({"path": p})).collect();
         json!({"seq": seq, "kind": "change", "method": method, "undone_by": null,
                "participant": {"id": who, "kind": "agent", "name": "agent"}, "files": files})
+    }
+
+    #[test]
+    fn an_agent_s_reply_on_my_annotation_is_a_toast() {
+        let mut t = Toasts::default();
+        let now = Instant::now();
+        t.annotation(
+            "agent",
+            true,
+            "replied on #2",
+            "Moved it 5 mm.",
+            "aaaaaaaaaa",
+            now,
+        );
+        let shown = t.shown();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].who.as_deref(), Some("agent"));
+        assert_eq!(shown[0].text, "replied on #2");
+        assert_eq!(shown[0].detail.as_deref(), Some("Moved it 5 mm."));
+        assert_eq!(
+            shown[0].actions,
+            vec![Action::Annotation("aaaaaaaaaa".into())]
+        );
+        // ui.notify = errors keeps them out.
+        let mut quiet = Toasts {
+            notify: Notify::Errors,
+            ..Toasts::default()
+        };
+        quiet.annotation("agent", true, "replied on #2", "x", "aaaaaaaaaa", now);
+        assert!(quiet.shown().is_empty());
+    }
+
+    #[test]
+    fn annotation_writes_make_no_change_toast() {
+        let mut t = Toasts::default();
+        let e = |method| entry(7, "a1", method, &["annotations/aaaaaaaaaa.json"]);
+        t.activity(&e("annotation.reply"), "me", Instant::now());
+        assert!(t.shown().is_empty());
+        t.activity(&e("annotation.apply"), "me", Instant::now());
+        assert_eq!(t.shown().len(), 1, "applying writes the model");
     }
 
     /// #426: a change of no feature names its part.
