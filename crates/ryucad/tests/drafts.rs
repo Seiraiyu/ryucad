@@ -152,7 +152,7 @@ fn failure(s: &mut Session, f: &str) -> ryucad::error::Error {
         .clone()
 }
 
-/// Part `p`'s rebuild report: draft `f`'s, and the part's warnings.
+/// Part `p`'s rebuild report: draft `f`'s, and the rebuild's warnings.
 fn report(s: &mut Session, f: &str) -> (Value, Vec<Value>) {
     let r = must(s, "rebuild", json!({"part": "p"}));
     let d = r["parts"][0]["features"]
@@ -162,10 +162,8 @@ fn report(s: &mut Session, f: &str) -> (Value, Vec<Value>) {
         .find(|x| x["id"] == f)
         .unwrap()["draft"]
         .clone();
-    let w = r["parts"][0]["warnings"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    // A rebuild's answer gives its parts' warnings at its top.
+    let w = r["warnings"].as_array().cloned().unwrap_or_default();
     (d, w)
 }
 
@@ -414,7 +412,11 @@ fn walls_at_their_own_angles_and_one_flipped() {
             .unwrap()["least"]["value"]
             .clone()
     };
-    assert_eq!((by(&w[2]), by(&w[3])), (json!("5 deg"), json!("2 deg")), "{r}");
+    assert_eq!(
+        (by(&w[2]), by(&w[3])),
+        (json!("5 deg"), json!("2 deg")),
+        "{r}"
+    );
     assert!(warnings.is_empty());
 }
 
@@ -456,7 +458,10 @@ fn a_fillet_after_a_draft_and_one_before_it() {
         (Code::TweakFailed, Some("tangency_broken")),
         "{e}"
     );
-    assert!(e.details["hint"].as_str().unwrap().contains("tangent true"), "{e}");
+    assert!(
+        e.details["hint"].as_str().unwrap().contains("tangent true"),
+        "{e}"
+    );
     // With tangency (the default), the fillet joins the draft.
     must(
         &mut s,
@@ -562,7 +567,10 @@ fn refusals() {
         "{e}"
     );
     if ["edge_vanishes", "vertex_splits", "face_collapses"].contains(&reason) {
-        assert!(e.details["hint"].as_str().unwrap().contains("topology"), "{e}");
+        assert!(
+            e.details["hint"].as_str().unwrap().contains("topology"),
+            "{e}"
+        );
     }
 }
 
@@ -596,7 +604,11 @@ fn a_closed_sheet_drafts_and_an_open_ones_rim_is_refused() {
         .find(|x| x["solid"] == "skin")
         .unwrap()
         .clone();
-    assert_eq!((skin["ok"].as_bool(), skin["kind"].as_str()), (Some(true), Some("sheet")), "{skin}");
+    assert_eq!(
+        (skin["ok"].as_bool(), skin["kind"].as_str()),
+        (Some(true), Some("sheet")),
+        "{skin}"
+    );
     // An open box: its walls' top edges are laminar.
     let open: Vec<String> = all.iter().filter(|f| **f != top).cloned().collect();
     add(
@@ -644,7 +656,10 @@ fn a_parting_line_climbing_along_the_pull_warns_its_angle_varies() {
         .iter()
         .find(|w| w["code"] == "draft_angle_varies")
         .unwrap_or_else(|| panic!("{warnings:?}"));
-    assert_eq!((w["feature"].as_str(), w["face"].as_str()), (Some("d"), Some(east.as_str())));
+    assert_eq!(
+        (w["feature"].as_str(), w["face"].as_str()),
+        (Some("d"), Some(east.as_str()))
+    );
     // Its angle from the pull isn't the 3° asked, and the report says so.
     let a = &r["angles"][0];
     assert!(
