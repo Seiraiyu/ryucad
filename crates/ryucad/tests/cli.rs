@@ -5465,10 +5465,10 @@ fn interference_from_the_cli() {
     p.fails(&["clearance", "bolt"], "wrong_part_kind", 1);
 }
 
-#[test]
-fn mates_from_the_cli() {
-    let p = Pair::new();
-    p.ok(&["init", "--unit", "mm"]);
+/// A plate `base` (100 × 50 × 5 mm, fixed) and a bolt `pin` (radius 3,
+/// height 20) placed 50 mm along x in assembly `frame`; the plate's top
+/// and the bolt's foot as entity references.
+fn plate_and_bolt(p: &Pair) -> (String, String) {
     let params: [(&str, &str, &str, &[&str]); 2] = [
         ("plate", "box", "slab", &["x=100", "y=50", "z=5"]),
         ("bolt", "cylinder", "shank", &["radius=3", "height=20"]),
@@ -5502,8 +5502,48 @@ fn mates_from_the_cli() {
             .map(|f| f["name"].as_str().unwrap().to_owned())
             .unwrap()
     };
-    let top = format!("frame/base/slab/{}", face("plate", "slab", 1.0));
-    let foot = format!("frame/pin/shank/{}", face("bolt", "shank", -1.0));
+    (
+        format!("frame/base/slab/{}", face("plate", "slab", 1.0)),
+        format!("frame/pin/shank/{}", face("bolt", "shank", -1.0)),
+    )
+}
+
+#[test]
+fn controlled_edits_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let (top, foot) = plate_and_bolt(&p);
+    // A mate previewed, nothing written.
+    let mate = format!(
+        r#"{{"form": "revolute", "a": "{top}", "b": "{foot}", "b_offset": {{"flip": true}}}}"#
+    );
+    let v = p.ok(&["assembly", "solve", "frame", "--mate", &mate]);
+    assert_eq!(v["converged"], true, "{v}");
+    assert_eq!(v["solve"]["instances"]["pin"]["dof"], 1, "{v}");
+    let listed = p.ok(&["feature", "list", "frame"]);
+    assert!(!listed.to_string().contains("\"mate\""), "{listed}");
+    // A turn about a point, written.
+    let v = p.ok(&[
+        "assembly", "move", "frame", "pin", "--axis", "0,0,1", "--angle", "90deg", "--about",
+        "60mm,0,0",
+    ]);
+    let o = &v["pose"]["origin_m"];
+    assert!((o[0].as_f64().unwrap() - 0.06).abs() < 1e-12, "{v}");
+    assert!((o[1].as_f64().unwrap() + 0.01).abs() < 1e-12, "{v}");
+    // About alone is refused.
+    let e = p.fails(
+        &["assembly", "move", "frame", "pin", "--about", "0,0,0"],
+        "invalid_param",
+        1,
+    );
+    assert_eq!(e["details"]["param"], "about", "{e}");
+}
+
+#[test]
+fn mates_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let (top, foot) = plate_and_bolt(&p);
     let added = p.ok(&[
         "feature",
         "add",
