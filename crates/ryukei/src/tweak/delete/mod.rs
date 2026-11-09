@@ -4,7 +4,17 @@
 //! or by growth, where the neighbours round the gap are extended until
 //! they meet (the local re-trim with the faces taken away).
 
+// Until delete_faces wires the modules up (plan 13.B, Task 7).
+#![allow(dead_code, unused_imports)]
+
+pub(crate) mod sets;
+
+#[cfg(test)]
+mod tests;
+
 use crate::name::Name;
+use crate::topo::FaceId;
+use std::collections::BTreeSet;
 
 /// How a deleted set's gap is closed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
