@@ -24,6 +24,7 @@
 pub(crate) mod chain;
 pub(crate) mod classify;
 pub(crate) mod curves;
+pub mod blends;
 pub mod delete;
 pub mod draft;
 pub(crate) mod engine;
@@ -35,6 +36,11 @@ pub(crate) mod vertices;
 #[cfg(test)]
 mod tests;
 
+pub use blends::{
+    Blends, Corner, DEFAULT_TOLERANCE, DeleteBlends, RecogniseOptions, Recognised, Recognition,
+    delete_blends, delete_blends_with, recognise_blends, recognise_blends_with, resize_blends,
+    resize_blends_with,
+};
 pub use delete::{DeleteSpec, Heal, delete_faces, delete_faces_with, feature_faces};
 pub use draft::{
     DraftFace, DraftReport, DraftSpec, FaceAngle, Hinge, MAX_ANGLE, draft, draft_with,

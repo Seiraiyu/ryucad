@@ -265,6 +265,12 @@ pub(crate) fn common(a: &Surface, b: &Surface) -> Surface {
 /// Whether every Bézier patch of a NURBS is certified within resolution of
 /// an implicit form's surface, and none reaches past a cone's apex.
 fn on_implicit(imp: &Implicit, n: &NurbsSurface) -> bool {
+    within_implicit(imp, n, LINEAR_RESOLUTION)
+}
+
+/// Whether every Bézier patch of a NURBS is certified within `tol` of an
+/// implicit form's surface, and none reaches past a cone's apex.
+pub(crate) fn within_implicit(imp: &Implicit, n: &NurbsSurface, tol: f64) -> bool {
     n.patches().iter().all(|patch| {
         let (f, _) = imp.on_patch(patch);
         let mut local: Option<[Interval; 3]> = None;
@@ -279,7 +285,7 @@ fn on_implicit(imp: &Implicit, n: &NurbsSurface) -> bool {
             return false;
         };
         !imp.box_beyond_apex(local)
-            && imp.distance_bound(f.range().mag(), local) <= LINEAR_RESOLUTION
+            && imp.distance_bound(f.range().mag(), local) <= tol
     })
 }
 

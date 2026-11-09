@@ -37,7 +37,7 @@ pub mod tweak;
 pub mod work;
 
 pub use error::{
-    BlendError, BooleanError, Error, FillError, FlangeSize, HealError, LoftError, MeasureError,
+    BlendError, BlendLoss, BooleanError, Error, FillError, FlangeSize, HealError, LoftError, MeasureError,
     NurbsError, OffsetCase, OffsetError, ProfileError, RepairError, SheetError, SheetMetalError,
     SweepError, TopologyError, TweakCase, TweakError, ViewError,
 };

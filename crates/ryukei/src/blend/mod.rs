@@ -150,7 +150,7 @@ pub fn blend_with(
     crate::work::run(work, |meter| blend_in(key, body, blends, meter))
 }
 
-fn blend_in(
+pub(crate) fn blend_in(
     key: OpKey,
     body: &Body,
     blends: &[EdgeBlend],
