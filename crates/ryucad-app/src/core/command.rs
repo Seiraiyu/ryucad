@@ -640,22 +640,38 @@ pub struct State {
     pub annotations: bool,
 }
 
+/// Whether the window's mode allows `id`, or which mode would: the part
+/// of [`enabled`] that holds whatever was right-clicked, so a context
+/// menu's targeted entries are gated by mode too.
+pub fn mode_allows(id: &str, s: &State) -> Result<(), &'static str> {
+    let need = |ok: bool, why: &'static str| if ok { Ok(()) } else { Err(why) };
+    match id {
+        "annotation.add" | "annotation.here" => need(
+            s.mode != crate::core::modes::Mode::View,
+            "Annotate does this: press Annotate first.",
+        ),
+        "edit.undo"
+        | "edit.redo"
+        | "file.import_step"
+        | "file.update_import"
+        | "import.to_solid"
+        | "import.to_reference" => need(
+            s.mode == crate::core::modes::Mode::Edit,
+            "Direct edit does this: it changes the project's files.",
+        ),
+        _ => Ok(()),
+    }
+}
+
 /// Whether `id` can run now, or why not: a sentence the menus' hover, the
 /// palette and the toolbar's tooltip all show.
 pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
+    mode_allows(id, s)?;
     let need = |ok: bool, why: &'static str| if ok { Ok(()) } else { Err(why) };
     match id {
         "file.update_import" if !s.chosen_import => {
             Err("Choose an imported feature in the tree first.")
         }
-        "annotation.add" | "annotation.here" => need(
-            s.mode != crate::core::modes::Mode::View,
-            "Annotate does this: press Annotate first.",
-        ),
-        "edit.undo" | "edit.redo" | "file.import_step" | "file.update_import" => need(
-            s.mode == crate::core::modes::Mode::Edit,
-            "Direct edit does this: it changes the project's files.",
-        ),
         "file.export" => need(
             s.one_shown,
             "Show one part or assembly first (View > Show).",
@@ -782,6 +798,16 @@ mod tests {
         assert!(enabled("annotation.add", &s(Mode::Annotate)).is_ok());
         assert!(enabled("edit.undo", &s(Mode::Annotate)).is_err());
         assert!(enabled("edit.undo", &s(Mode::Edit)).is_ok());
+        // `import.convert` isn't proposable: converting an import needs
+        // Direct edit, as the daemon judges it.
+        for id in ["import.to_solid", "import.to_reference"] {
+            assert!(enabled(id, &s(Mode::View)).is_err(), "{id} in View");
+            assert!(enabled(id, &s(Mode::Annotate)).is_err(), "{id} in Annotate");
+            assert!(enabled(id, &s(Mode::Edit)).is_ok(), "{id} in Direct edit");
+            // A row's context menu runs them with a target, still by mode.
+            assert!(mode_allows(id, &s(Mode::Annotate)).is_err(), "{id}");
+            assert!(mode_allows(id, &s(Mode::Edit)).is_ok(), "{id}");
+        }
         assert!(context(Context::Entity(Pick::Face)).any(|c| c.id == "annotation.add"));
         assert!(context(Context::Viewport).any(|c| c.id == "annotation.here"));
         assert!(!context(Context::Ghost).any(|c| c.id == "annotation.add"));

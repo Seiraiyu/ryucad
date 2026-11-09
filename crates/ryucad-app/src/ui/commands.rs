@@ -148,7 +148,10 @@ pub fn choose(o: &mut Opened, id: &str, key: &str) -> Option<Action> {
 /// context menu with the reference of what was right-clicked. A command
 /// that can't run now does nothing. Returns what it asks of the app.
 pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) -> Option<Action> {
-    if command::enabled(id, &state(o)).is_err() && target.is_none() {
+    let s = state(o);
+    if command::mode_allows(id, &s).is_err()
+        || (command::enabled(id, &s).is_err() && target.is_none())
+    {
         return None;
     }
     if let Some(v) = id.strip_prefix("view.").and_then(StandardView::named) {
@@ -514,7 +517,9 @@ pub fn context_menu(
             b = b.shortcut_text(k.as_str());
         }
         let enabled = match target {
-            Some(t) => command::enabled_on(c.id, t),
+            Some(t) => {
+                command::mode_allows(c.id, &shown.state).and_then(|()| command::enabled_on(c.id, t))
+            }
             None => command::enabled(c.id, &shown.state),
         };
         let r = ui.add_enabled(enabled.is_ok(), b);

@@ -241,6 +241,7 @@ pub fn card(ctx: &egui::Context, o: &mut Opened) {
         return;
     };
     let c = Card::of(e);
+    let convert_gate = o.ws.control("import.convert");
     let p = o.view.palette(ctx.theme() == egui::Theme::Dark);
     let (mut close, mut go, mut convert) = (false, None, None);
     egui::Area::new(egui::Id::unique("error card"))
@@ -298,12 +299,15 @@ pub fn card(ctx: &egui::Context, o: &mut Opened) {
                             close = true;
                         }
                         if c.convert.is_some()
-                            && ui
-                                .button("Convert to solid")
-                                .on_hover_text(
-                                    "Heal the reference import into a solid features can act on",
-                                )
-                                .clicked()
+                            && crate::ui::modes::gated(
+                                ui,
+                                &convert_gate,
+                                egui::Button::new("Convert to solid"),
+                            )
+                            .on_hover_text(
+                                "Heal the reference import into a solid features can act on",
+                            )
+                            .clicked()
                         {
                             convert = c.convert.clone();
                         }

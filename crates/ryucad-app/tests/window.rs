@@ -2896,6 +2896,77 @@ fn a_step_file_imports_as_a_reference_and_its_row_converts_it() {
     shown(&mut h, "body (solid, reference)");
 }
 
+/// Converting an import writes the part's files and can't be suggested
+/// (`import.convert` isn't proposable): in View and Annotate the solid's
+/// menu and the property panel's button are disabled, saying Direct edit
+/// does it; in Direct edit the button converts.
+#[test]
+fn converting_an_import_is_gated_by_mode() {
+    use egui_kittest::kittest::NodeT;
+    use ryucad_app::core::modes::Mode;
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new();
+    p.ok(&[
+        "import",
+        &occt("box_ap214.stp").display().to_string(),
+        "--part",
+        "box",
+    ]);
+    let mut h = viewing(&p);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.part("box").is_some()
+    });
+    let mode = |a: &App| {
+        a.opened()
+            .ws
+            .part("box")
+            .and_then(|p| p.feature("body"))
+            .and_then(|f| f.import.as_ref())
+            .map(|i| i.reference)
+    };
+    frames(&mut h, |a| mode(a) == Some(true));
+    let row = "body (import: box_ap214.step / part 2, reference)";
+    h.get_by_label(row).click();
+    frames(&mut h, |a| a.opened().ws.form.is_some());
+    h.run_steps(2);
+    for m in [Mode::View, Mode::Annotate] {
+        h.state_mut().opened_mut().ws.set_mode(m);
+        frames(&mut h, |a| a.opened().ws.idle());
+        h.run_steps(2);
+        assert!(
+            h.get_by_label("Convert to solid")
+                .accesskit_node()
+                .is_disabled(),
+            "the panel's button in {m:?}"
+        );
+        h.get_by_label("body (solid, reference)").click_secondary();
+        for _ in 0..10 {
+            h.step();
+        }
+        let item = h
+            .get_all_by_role(egui::accesskit::Role::Menu)
+            .last()
+            .unwrap()
+            .get_by_label("Convert to solid")
+            .accesskit_node()
+            .is_disabled();
+        assert!(item, "the solid's menu in {m:?}");
+        h.key_press(egui::Key::Escape);
+        h.run_steps(2);
+        assert_eq!(mode(h.state()), Some(true), "nothing written in {m:?}");
+    }
+    h.state_mut().opened_mut().ws.set_mode(Mode::Edit);
+    frames(&mut h, |a| a.opened().ws.idle());
+    h.run_steps(2);
+    let button = h.get_by_label("Convert to solid");
+    assert!(!button.accesskit_node().is_disabled());
+    button.click();
+    frames(&mut h, |a| mode(a) == Some(false));
+}
+
 #[test]
 fn file_export_writes_the_shown_part() {
     let _one = one_at_a_time();
