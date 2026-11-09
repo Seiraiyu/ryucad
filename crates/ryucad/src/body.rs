@@ -134,8 +134,7 @@ pub fn check(part: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result
                 };
                 crate::geometry::one(&at, "plane", plane, crate::geometry::Want::Plane).map(drop)
             }
-            // A tool's kind and faces are judged by its check (Task 10).
-            None => Ok(()),
+            None => split_tool(part, &solids, id, f, s, results).map(drop),
         },
         _ => resolve(part, &solids, id, f, results).map(drop),
     }
@@ -607,6 +606,47 @@ fn mirror_or_split(
         let g =
             crate::doc::geometry::GeomRef::parse(p, part).map_err(|e| e.with("param", "plane"))?;
         o.insert("plane".into(), g.to_json());
+        o.remove("tool");
+    }
+    if ty == "split" {
+        let body = match (&f.tool, &f.tools) {
+            (Some(_), Some(_)) => return Err(Error::new(Code::Usage, "give a split's tool once")),
+            (Some(t), None) => Some(t.clone()),
+            (None, Some(ts)) => match ts.as_slice() {
+                [t] => Some(t.clone()),
+                _ => {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        format!("a split cuts with one tool, not {}", ts.len()),
+                    )
+                    .with("param", "tool"));
+                }
+            },
+            (None, None) => None,
+        };
+        if body.is_some() && f.tool_faces.is_some() {
+            return Err(Error::new(
+                Code::Usage,
+                "give a split's tool as a body or as faces, not both",
+            ));
+        }
+        if let Some(b) = body {
+            o.remove("plane");
+            o.insert("tool".into(), json!({"body": b}));
+        }
+        if let Some(faces) = &f.tool_faces {
+            let refs = faces
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    Ok(Reference::parse(t, part)
+                        .map_err(|e| e.with("pointer", format!("/tool/faces/{i}")))?
+                        .to_json())
+                })
+                .collect::<Result<Vec<Value>>>()?;
+            o.remove("plane");
+            o.insert("tool".into(), json!({"faces": refs}));
+        }
     }
     if ty == "mirror" {
         if let Some(s) = &f.solid {
@@ -683,26 +723,49 @@ pub fn resolved(part: &Part, results: &dyn Results, id: &Id, f: &Feature) -> Opt
     if let Feature::Split(s) = f
         && let Some(Ok(out)) = results.result(id)
     {
-        let side = |name: &str, solid: &Id| {
-            out.solid(solid)
-                .map(|b| json!({"side": name, "solid": solid, "lumps": lumps(&b.body)}))
-        };
-        let mut sides = vec![side("behind", &s.target)];
-        if s.keep == crate::doc::body::Keep::Both {
-            sides.push(side("front", id));
-        }
-        v["sides"] = json!(sides.into_iter().flatten().collect::<Vec<_>>());
+        v["sides"] = split_sides(out, s, id);
     }
     Some(v)
 }
-/// What a split by a tool adds to its report: its sides (Task 10).
+
+/// A split's sides as it built them, each `{side, solid, lumps, kind}`.
+fn split_sides(out: &crate::rebuild::Output, s: &crate::doc::body::Split, id: &Id) -> Value {
+    let side = |name: &str, solid: &Id| {
+        out.solid(solid).map(|b| {
+            json!({"side": name, "solid": solid, "lumps": lumps(&b.body),
+                   "kind": crate::kind::name(&b.body)})
+        })
+    };
+    let mut sides = vec![side("behind", &s.target)];
+    if s.keep == crate::doc::body::Keep::Both {
+        sides.push(side("front", id));
+    }
+    json!(sides.into_iter().flatten().collect::<Vec<_>>())
+}
+
+/// What a split by a tool adds to its report: the kind of its tool (a
+/// solid or a sheet; faces are a sheet) and, once built, its sides.
 fn split_tool_resolved(
-    _part: &Part,
-    _results: &dyn Results,
-    _id: &Id,
-    _s: &crate::doc::body::Split,
+    part: &Part,
+    results: &dyn Results,
+    id: &Id,
+    s: &crate::doc::body::Split,
 ) -> Option<Value> {
-    None
+    let mut v = json!({});
+    if let Some(b) = s.tool_body()
+        && let Some(view) = Solids::of(part).view(b, id)
+        && let Some(Ok(out)) = results.result(view)
+        && let Some(x) = out.solid(b)
+    {
+        v["tool_kind"] = json!(crate::kind::name(&x.body));
+    }
+    if matches!(s.by, SplitBy::Faces(_)) {
+        v["tool_kind"] = json!("sheet");
+    }
+    if let Some(Ok(out)) = results.result(id) {
+        v["sides"] = split_sides(out, s, id);
+    }
+    Some(v)
 }
 
 /// A mirror's copy: its solid as the mirror sees it, reflected in its
@@ -1052,6 +1115,83 @@ mod tests {
         latest(json!({"type": "box", "operation": "new",
                       "params": {"x": size[0], "y": size[1], "z": size[2]},
                       "placement": {"origin": origin, "x": [1, 0, 0], "z": [0, 0, 1]}}))
+    }
+
+    #[test]
+    fn a_splits_tool_is_given_by_body_or_faces_and_replaces_its_plane() {
+        use crate::proto::FeatureFields;
+        let part = Id::parse("p", "part").unwrap();
+        let face = "p/base/0123456789abcdef0123456789abcdef".to_owned();
+        let given = |f: FeatureFields, current: Option<&Feature>| {
+            from_given(
+                "split",
+                current,
+                &f,
+                &part,
+                Unit::Mm,
+                &crate::expr::Env::empty(),
+            )
+        };
+        let by_body = given(
+            FeatureFields {
+                target: Some("h".into()),
+                tool: Some("parting".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        let Feature::Split(s) = &by_body else {
+            panic!()
+        };
+        assert_eq!(s.tool_body().map(Id::as_str), Some("parting"));
+        // The CLI's --tool is a boolean's tools: one of them is a split's tool.
+        let by_tools = given(
+            FeatureFields {
+                target: Some("h".into()),
+                tools: Some(vec!["parting".into()]),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(by_tools, by_body);
+        // Faces replace the body; a plane replaces either.
+        let by_faces = given(
+            FeatureFields {
+                tool_faces: Some(vec![face]),
+                ..Default::default()
+            },
+            Some(&by_body),
+        )
+        .unwrap();
+        let Feature::Split(s) = &by_faces else {
+            panic!()
+        };
+        assert!(matches!(s.by, SplitBy::Faces(_)));
+        let by_plane = given(
+            FeatureFields {
+                plane: Some("xy".into()),
+                ..Default::default()
+            },
+            Some(&by_faces),
+        )
+        .unwrap();
+        let Feature::Split(s) = &by_plane else {
+            panic!()
+        };
+        assert!(s.plane().is_some());
+        // Two tools at once.
+        let e = given(
+            FeatureFields {
+                target: Some("h".into()),
+                tools: Some(vec!["a".into(), "b".into()]),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(e.details["param"], "tool", "{e}");
     }
 
     #[test]

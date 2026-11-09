@@ -85,6 +85,14 @@ pub struct FeatureFields {
     /// or a planar face as `<part>/<feature>/<name>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plane: Option<String>,
+    /// The body a split cuts with, by its founder: a sheet divides, a
+    /// solid's inside is behind. Replaces its plane or faces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// Faces of one body a split cuts with, taken off as a sheet:
+    /// `<part>/<solid>/<name>`. Replaces its plane or tool body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_faces: Option<Vec<String>>,
     /// A planar face to sketch on, the face a chamfer's first distance
     /// runs along, or the planar face whose loops a sweep carries:
     /// `<part>/<feature>/<name>`.

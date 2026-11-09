@@ -4075,6 +4075,7 @@ fn check_references(
         && f.geometry().is_empty()
         && !reads_bodies
         && !planar
+        && !matches!(f, Feature::Split(s) if s.plane().is_none())
     {
         return Ok(());
     }
@@ -8038,6 +8039,78 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_split_by_a_tool_is_checked_when_written_and_reports_its_sides() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let add = |s: &mut Session, f: Value| {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(s, "feature.add", f)
+        };
+        add(
+            &mut s,
+            json!({"type": "box", "id": "h", "params": {"x": 10, "y": 10, "z": 10}}),
+        )
+        .unwrap();
+        add(
+            &mut s,
+            json!({"type": "box", "id": "t", "params": {"x": 12, "y": 12, "z": 10},
+                   "placement": {"origin": [-1, -1, 5]}}),
+        )
+        .unwrap();
+        // Its own target, and a body the part hasn't, are refused.
+        let e = add(
+            &mut s,
+            json!({"type": "split", "id": "x", "target": "h", "tool": "h"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["pointer"], "/tool/body", "{e}");
+        let e = add(
+            &mut s,
+            json!({"type": "split", "id": "x", "target": "h", "tool": "zz"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound, "{e}");
+        // Faces of two bodies.
+        let face = |s: &mut Session, f: &str| {
+            let v = call(s, "inspect", json!({"part": "p", "feature": f})).unwrap();
+            format!(
+                "p/{f}/{}",
+                v["bodies"][0]["faces"][0]["name"].as_str().unwrap()
+            )
+        };
+        let (fh, ft) = (face(&mut s, "h"), face(&mut s, "t"));
+        let e = add(
+            &mut s,
+            json!({"type": "split", "id": "x", "target": "h", "tool_faces": [fh, ft]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::TargetsMixed, "{e}");
+        add(
+            &mut s,
+            json!({"type": "split", "id": "sp", "target": "h", "tool": "t"}),
+        )
+        .unwrap();
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let line = r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "sp")
+            .unwrap()
+            .clone();
+        assert_eq!(line["ok"], true, "{line}");
+        assert_eq!(line["split"]["tool"], json!({"body": "t"}), "{line}");
+        assert_eq!(line["split"]["tool_kind"], "solid", "{line}");
+        let sides = line["split"]["sides"].as_array().unwrap();
+        assert_eq!(sides.len(), 2, "{line}");
+        assert_eq!(
+            sides[0],
+            json!({"side": "behind", "solid": "h", "lumps": 1, "kind": "solid"})
+        );
+    }
+
+    #[test]
     fn a_mirror_of_a_sheet_is_new_and_an_offset_of_one_a_sheet() {
         let (_dir, mut s) = fresh();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
@@ -8156,8 +8229,8 @@ pub(crate) mod tests {
         assert_eq!(sp["solids"], json!(["half", "sp"]));
         assert_eq!(
             sp["split"]["sides"],
-            json!([{"side": "behind", "solid": "half", "lumps": 1},
-                   {"side": "front", "solid": "sp", "lumps": 1}])
+            json!([{"side": "behind", "solid": "half", "lumps": 1, "kind": "solid"},
+                   {"side": "front", "solid": "sp", "lumps": 1, "kind": "solid"}])
         );
         // Refusals at write time: a plane that isn't one, a solid that isn't.
         let e = add(
