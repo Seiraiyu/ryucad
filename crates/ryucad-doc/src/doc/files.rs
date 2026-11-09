@@ -19,7 +19,7 @@ use super::sketch::Sketch;
 use super::solid::{Boolean, Combine};
 use super::surface::{Extract, Fill, Sew, Thicken};
 use super::sweep::{Extrude, Loft, Revolve, Sweep};
-use super::tweak::{MoveFace, ReplaceFace};
+use super::tweak::{Draft, MoveFace, ReplaceFace};
 use crate::error::{Code, Error, Result};
 use crate::expr::{self, Env, Expr};
 use crate::units::{Quantity, Unit};
@@ -75,7 +75,7 @@ pub const MANIFEST_FORMAT: u64 = 3;
 /// flanges (ryucad 16), 12 surface sweeps and planar faces (ryucad 18),
 /// 13 reference imports (ryucad 21), 14 unfolds and refolds (ryucad
 /// 16.B), 15 fills, extracts, sews and thickens (ryucad 18), 16 face
-/// tweaks (ryucad 17). A feature is written at the lowest format that
+/// tweaks (ryucad 17), 18 drafts (ryucad 17.B). A feature is written at the lowest format that
 /// holds it, so one with only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
     // The largest of every stage's (a later stage merging adds its own).
@@ -85,6 +85,7 @@ pub const FEATURE_FORMAT: u64 = {
         super::sheet_metal::UNFOLD_FORMAT,
         super::surface::FORMAT,
         super::tweak::FORMAT,
+        super::tweak::DRAFT_FORMAT,
     ];
     let (mut max, mut i) = (0, 0);
     while i < all.len() {
@@ -225,6 +226,9 @@ pub enum Feature {
     MoveFace(Box<MoveFace>),
     /// Faces of a solid given another face's surface or a plane.
     ReplaceFace(Box<ReplaceFace>),
+    /// Faces of a solid drafted about a neutral plane or a parting line
+    /// (ryucad 17.B).
+    Draft(Box<Draft>),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -692,6 +696,9 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if v.get("type").and_then(Value::as_str) == Some("draft") {
+        return super::tweak::DRAFT_FORMAT;
+    }
     if matches!(
         v.get("type").and_then(Value::as_str),
         Some("fill" | "extract" | "sew" | "thicken")
@@ -904,7 +911,7 @@ pub fn feature_acts(v: &Value) -> Acts {
         Some("base_flange") => out.founds = true,
         Some("flange" | "unfold" | "refold") => out.acts_on = ids(v.get("target")),
         Some("shell" | "offset") => out.acts_on = ids(v.get("target")),
-        Some("move_face" | "replace_face") => out.acts_on = ids(v.get("target")),
+        Some("move_face" | "replace_face" | "draft") => out.acts_on = ids(v.get("target")),
         _ => {}
     }
     out
@@ -940,7 +947,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold, fill, extract, sew, thicken, move_face, replace_face"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold, fill, extract, sew, thicken, move_face, replace_face, draft"),
     )
     .with("type", s)
 }
@@ -981,6 +988,7 @@ impl Feature {
             Feature::Thicken(_) => "thicken",
             Feature::MoveFace(_) => "move_face",
             Feature::ReplaceFace(_) => "replace_face",
+            Feature::Draft(_) => "draft",
         }
     }
 
@@ -1013,6 +1021,9 @@ impl Feature {
             Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_)
         ) {
             return super::surface::FORMAT;
+        }
+        if matches!(self, Feature::Draft(_)) {
+            return super::tweak::DRAFT_FORMAT;
         }
         if matches!(self, Feature::MoveFace(_) | Feature::ReplaceFace(_)) {
             return super::tweak::FORMAT;
@@ -1069,6 +1080,7 @@ impl Feature {
                 super::surface::FORMAT
             }
             Feature::MoveFace(_) | Feature::ReplaceFace(_) => super::tweak::FORMAT,
+            Feature::Draft(_) => super::tweak::DRAFT_FORMAT,
         }
     }
 
@@ -1115,6 +1127,7 @@ impl Feature {
             Feature::Thicken(x) => x.fields(),
             Feature::MoveFace(m) => m.fields(),
             Feature::ReplaceFace(r) => r.fields(),
+            Feature::Draft(d) => d.fields(),
         }
     }
 
@@ -1146,6 +1159,7 @@ impl Feature {
                 Feature::MoveFace(Box::new(MoveFace::from_fields(&mut o, default, env)?))
             }
             "replace_face" => Feature::ReplaceFace(Box::new(ReplaceFace::from_fields(&mut o)?)),
+            "draft" => Feature::Draft(Box::new(Draft::from_fields(&mut o, env)?)),
             "mirror" => Feature::Mirror(Box::new(Mirror::from_fields(&mut o)?)),
             "split" => Feature::Split(Box::new(Split::from_fields(&mut o)?)),
             "base_flange" => {
@@ -1223,7 +1237,8 @@ impl Feature {
             | Feature::Unfold(_)
             | Feature::Refold(_)
             | Feature::MoveFace(_)
-            | Feature::ReplaceFace(_) => None,
+            | Feature::ReplaceFace(_)
+            | Feature::Draft(_) => None,
         }
     }
 
@@ -1258,6 +1273,7 @@ impl Feature {
             Feature::Thicken(t) => t.combine.targets.iter().chain(t.sheet()).collect(),
             Feature::MoveFace(m) => vec![&m.target],
             Feature::ReplaceFace(r) => vec![&r.target],
+            Feature::Draft(d) => vec![&d.target],
             f => f
                 .combine()
                 .map_or(Vec::new(), |c| c.targets.iter().collect()),
@@ -1411,6 +1427,7 @@ impl Feature {
                 .collect(),
             Feature::MoveFace(m) => m.references(),
             Feature::ReplaceFace(r) => r.references(),
+            Feature::Draft(d) => d.references(),
             _ => self
                 .geometry()
                 .into_iter()
@@ -1447,6 +1464,7 @@ impl Feature {
             Feature::Fill(x) => x.geometry(),
             Feature::MoveFace(m) => m.geometry(),
             Feature::ReplaceFace(r) => r.geometry(),
+            Feature::Draft(d) => d.geometry(),
             _ => Vec::new(),
         }
     }
@@ -2608,5 +2626,39 @@ mod tests {
         assert_eq!(reads, ["lid", "base"]);
         // One past the newest is too new.
         const { assert!(FEATURE_FORMAT >= super::super::tweak::FORMAT) };
+    }
+
+    #[test]
+    fn a_draft_is_a_feature_at_its_own_format() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let v = json!({"format": super::super::tweak::DRAFT_FORMAT, "kind": "ryucad.feature",
+                       "type": "draft", "target": "base", "angle": "2 deg", "neutral": "xy",
+                       "faces": [{"feature": "base", "name": n}]});
+        let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!(f.type_name(), "draft");
+        assert_eq!(f.format(), super::super::tweak::DRAFT_FORMAT);
+        assert_eq!(feature_format(&v), super::super::tweak::DRAFT_FORMAT);
+        assert_eq!(f.to_json(), v);
+        assert_eq!(f.targets(), [&Id::parse("base", "feature").unwrap()]);
+        let roles: Vec<String> = f.references().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(roles, ["faces.0"]);
+        let geo: Vec<String> = f.geometry().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(geo, ["neutral"]);
+        assert!(f.combine().is_none());
+        // What a file that doesn't load still says it acts on.
+        assert_eq!(
+            feature_acts(&v).acts_on,
+            vec![Id::parse("base", "feature").unwrap()]
+        );
+        // The format reads the constant; a newer one is refused.
+        const { assert!(FEATURE_FORMAT >= super::super::tweak::DRAFT_FORMAT) };
+        let mut newer = v.clone();
+        newer["format"] = json!(FEATURE_FORMAT + 1);
+        assert_eq!(
+            Feature::from_json(&newer, Unit::Mm, &Env::empty())
+                .unwrap_err()
+                .code,
+            Code::FormatTooNew
+        );
     }
 }
