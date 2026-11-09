@@ -8,6 +8,7 @@
 //! outside faces (see `walk`). Nothing about which side of a surface is
 //! material is guessed: the walk only counts.
 
+pub(crate) mod body;
 pub(crate) mod region;
 pub(crate) mod working;
 
