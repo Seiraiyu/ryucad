@@ -51,9 +51,7 @@ pub fn window(ctx: &egui::Context, ws: &mut Workspace, at: egui::Rect) {
                 ui.horizontal(|ui| {
                     ui.label(name);
                     let r = ui.add(egui::TextEdit::singleline(text).desired_width(90.0));
-                    r.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::Role::TextInput, true, name)
-                    });
+                    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, name));
                     r.lost_focus()
                 })
                 .inner

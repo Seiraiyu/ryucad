@@ -1250,9 +1250,10 @@ impl Workspace {
             return;
         }
         let asked = (m.grip, m.value);
-        if self.mover_asked.is_some_and(|(at, g, v)| {
-            (g, v) == asked || at.elapsed() < DRAG_EVERY
-        }) {
+        if self
+            .mover_asked
+            .is_some_and(|(at, g, v)| (g, v) == asked || at.elapsed() < DRAG_EVERY)
+        {
             return;
         }
         let part = m.part.clone();
@@ -1331,7 +1332,9 @@ impl Workspace {
     /// revision, writing nothing.
     pub fn preview_mate(&mut self) {
         let rev = self.model_rev();
-        let Some(d) = self.mating.as_mut() else { return };
+        let Some(d) = self.mating.as_mut() else {
+            return;
+        };
         let Some(req) = d.preview(rev) else { return };
         self.mate_previews += 1;
         d.asked = self.mate_previews;
@@ -3977,7 +3980,9 @@ impl Workspace {
                         self.preview_poses(&part, &a.result);
                     }
                     Err(e) => {
-                        let code = serde_json::to_value(e.code).ok().and_then(|v| v.as_str().map(str::to_owned));
+                        let code = serde_json::to_value(e.code)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_owned));
                         d.previewed(Err((code.unwrap_or_default(), e.message.clone())));
                         self.model.preview.retain(|(p, _), _| *p != part);
                         self.model.generation += 1;

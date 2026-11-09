@@ -2383,8 +2383,13 @@ mod move_tests {
         )
         .unwrap();
         assert_eq!(v["converged"], true, "{v}");
-        let z = v["instances"]["pin"]["pose"]["origin_m"][2].as_f64().unwrap();
-        assert!((z - 0.005).abs() < 1e-9, "the pin stands on the plate's top: {v}");
+        let z = v["instances"]["pin"]["pose"]["origin_m"][2]
+            .as_f64()
+            .unwrap();
+        assert!(
+            (z - 0.005).abs() < 1e-9,
+            "the pin stands on the plate's top: {v}"
+        );
         assert_eq!(files(dir.path()), before, "nothing written");
         let frame = s.project().part(&id("frame")).unwrap();
         assert!(

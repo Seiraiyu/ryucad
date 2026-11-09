@@ -2670,9 +2670,12 @@ fn waited(h: &mut Harness<'static, App>, what: &str, done: impl Fn(&App) -> bool
         let o = h.state().opened();
         assert!(
             t.elapsed() < Duration::from_secs(30),
-            "timed out waiting for {what}: {:?}, {:?}",
+            "timed out waiting for {what}: {:?}, {:?}, {:?}, {} meshes, idle {}",
             o.ws.mover,
-            o.ws.drag_note
+            o.ws.mating,
+            o.ws.drag_note,
+            o.ws.model.meshes.len(),
+            o.ws.idle()
         );
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -2721,13 +2724,19 @@ fn a_typed_move_by_the_handle_is_written_in_direct_edit_and_proposed_in_annotate
         !a.opened().ws.myself().unwrap().selection.is_empty()
     });
     h.get_by_label("Move").click();
-    waited(&mut h, "the Move tool on", |a| a.opened().ws.mover.is_some());
+    waited(&mut h, "the Move tool on", |a| {
+        a.opened().ws.mover.is_some()
+    });
     h.run_steps(2);
     // A click on x's arrow opens the field at 0; 20 typed and Enter.
     let x = move_handle(&mut h, 0, false);
     click(&h, x);
     waited(&mut h, "a handle's value", |a| {
-        a.opened().ws.mover.as_ref().is_some_and(|m| m.grip.is_some())
+        a.opened()
+            .ws
+            .mover
+            .as_ref()
+            .is_some_and(|m| m.grip.is_some())
     });
     h.run_steps(2);
     h.get_by_label("Move value").type_text("20");
@@ -2752,7 +2761,9 @@ fn a_typed_move_by_the_handle_is_written_in_direct_edit_and_proposed_in_annotate
     both_bolts(&mut h);
     h.run_steps(2);
     h.get_by_label("Move").click();
-    waited(&mut h, "the Move tool on", |a| a.opened().ws.mover.is_some());
+    waited(&mut h, "the Move tool on", |a| {
+        a.opened().ws.mover.is_some()
+    });
     h.run_steps(2);
     // Framed again: the draft's reading may leave b2 out of the view.
     {
@@ -2764,10 +2775,17 @@ fn a_typed_move_by_the_handle_is_written_in_direct_edit_and_proposed_in_annotate
         std::thread::sleep(Duration::from_millis(20));
     }
     let x = move_handle(&mut h, 0, false);
-    assert!(h.state().opened().view.rect.contains(x), "{x:?} out of the view");
+    assert!(
+        h.state().opened().view.rect.contains(x),
+        "{x:?} out of the view"
+    );
     click(&h, x);
     waited(&mut h, "a handle's value in Annotate", |a| {
-        a.opened().ws.mover.as_ref().is_some_and(|m| m.grip.is_some())
+        a.opened()
+            .ws
+            .mover
+            .as_ref()
+            .is_some_and(|m| m.grip.is_some())
     });
     h.run_steps(2);
     h.get_by_label("Move value").type_text("5");
@@ -2835,14 +2853,22 @@ fn a_dragged_ring_previews_and_esc_drops_the_value_then_the_tool() {
         let m = h.state().opened().ws.mover.clone().unwrap();
         assert_eq!(m.grip, Some(ryucad_app::core::mover::Grip::Ring(2)));
         let steps = m.value / ryucad_app::core::mover::ANGLE_STEP;
-        assert!(m.value != 0.0 && (steps - steps.round()).abs() < 1e-9, "{}", m.value);
+        assert!(
+            m.value != 0.0 && (steps - steps.round()).abs() < 1e-9,
+            "{}",
+            m.value
+        );
     }
     // Esc drops the value and its preview, a second Esc the tool; nothing
     // was written.
     h.run_steps(2);
     h.key_press(egui::Key::Escape);
     frames(&mut h, |a| {
-        a.opened().ws.mover.as_ref().is_some_and(|m| m.grip.is_none())
+        a.opened()
+            .ws
+            .mover
+            .as_ref()
+            .is_some_and(|m| m.grip.is_none())
             && a.opened().ws.model.preview.is_empty()
     });
     h.run_steps(2);
@@ -2883,24 +2909,32 @@ fn a_mate_is_picked_previewed_and_added_from_its_dialog() {
     }
     let (p, _, _) = common::plate_and_bolt();
     let mut h = window(&p);
-    frames(&mut h, loaded);
+    waited(&mut h, "the frame drawn", |a| {
+        a.opened().ws.idle() && a.opened().ws.model.middles("frame").len() == 2
+    });
     h.step();
     menu(&mut h, "Edit", "Mate…");
-    frames(&mut h, |a| a.opened().ws.mating.is_some());
+    waited(&mut h, "step 2", |a| a.opened().ws.mating.is_some());
     shown(&mut h, "Mate");
     // The bolt, then the plate: each click picks for the next side.
     let pin = over_body(&mut h, "pin/shank");
     click(&h, pin);
-    frames(&mut h, |a| a.opened().ws.mating.as_ref().unwrap().a.is_some());
+    waited(&mut h, "step 3", |a| {
+        a.opened().ws.mating.as_ref().unwrap().a.is_some()
+    });
     // A second pick on the same instance is refused in the dialog.
     click(&h, pin);
-    frames(&mut h, |a| a.opened().ws.mating.as_ref().unwrap().note.is_some());
+    waited(&mut h, "step 4", |a| {
+        a.opened().ws.mating.as_ref().unwrap().note.is_some()
+    });
     assert!(h.state().opened().ws.mating.as_ref().unwrap().b.is_none());
     let base = over_body(&mut h, "base/slab");
     click(&h, base);
-    frames(&mut h, |a| a.opened().ws.mating.as_ref().unwrap().b.is_some());
+    waited(&mut h, "step 5", |a| {
+        a.opened().ws.mating.as_ref().unwrap().b.is_some()
+    });
     // Fastened holds wherever they are: Add is enabled once it solved.
-    frames(&mut h, |a| {
+    waited(&mut h, "step 6", |a| {
         a.opened().ws.mating.as_ref().is_some_and(|d| d.addable())
     });
     assert!(
@@ -2911,11 +2945,15 @@ fn a_mate_is_picked_previewed_and_added_from_its_dialog() {
     let add = h.get_by_label("Add");
     assert!(!add.accesskit_node().is_disabled());
     add.click();
-    frames(&mut h, |a| {
+    waited(&mut h, "step 7", |a| {
         a.opened().ws.mating.is_none() && a.opened().ws.idle()
     });
     let t = Instant::now();
-    while !p.ok(&["feature", "list", "frame"]).to_string().contains("\"mate\"") {
+    while !p
+        .ok(&["feature", "list", "frame"])
+        .to_string()
+        .contains("\"mate\"")
+    {
         assert!(t.elapsed() < Duration::from_secs(30), "no mate written");
         h.step();
     }
@@ -2930,23 +2968,27 @@ fn the_mate_dialogs_add_waits_for_both_picks_and_esc_closes_it() {
     }
     let (p, _, _) = common::plate_and_bolt();
     let mut h = window(&p);
-    frames(&mut h, loaded);
+    waited(&mut h, "the frame drawn", |a| {
+        a.opened().ws.idle() && a.opened().ws.model.middles("frame").len() == 2
+    });
     h.step();
     menu(&mut h, "Edit", "Mate…");
     shown(&mut h, "Mate");
     let pin = over_body(&mut h, "pin/shank");
     click(&h, pin);
-    frames(&mut h, |a| a.opened().ws.mating.as_ref().unwrap().a.is_some());
+    waited(&mut h, "step 2", |a| {
+        a.opened().ws.mating.as_ref().unwrap().a.is_some()
+    });
     h.run_steps(2);
     assert!(h.get_by_label("Add").accesskit_node().is_disabled());
     // In View it can't be opened at all.
     h.key_press(egui::Key::Escape);
-    frames(&mut h, |a| a.opened().ws.mating.is_none());
+    waited(&mut h, "step 3", |a| a.opened().ws.mating.is_none());
     h.state_mut()
         .opened_mut()
         .ws
         .set_mode(ryucad_app::core::modes::Mode::View);
-    frames(&mut h, |a| a.opened().ws.idle());
+    waited(&mut h, "step 4", |a| a.opened().ws.idle());
     menu(&mut h, "Edit", "Mate…");
     h.run_steps(2);
     assert!(h.state().opened().ws.mating.is_none());

@@ -376,7 +376,9 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         "edit.mate" => {
             if let Some(asm) = o.ws.shown_assembly() {
                 let rest = target.and_then(|t| t.strip_prefix(&asm)?.strip_prefix('/'));
-                let instance = rest.and_then(|r| r.split('/').next()).filter(|i| !i.is_empty());
+                let instance = rest
+                    .and_then(|r| r.split('/').next())
+                    .filter(|i| !i.is_empty());
                 o.ws.open_mate(&asm, instance);
                 if let Some(t) = target.filter(|t| t.split('/').count() > 3) {
                     o.ws.mate_pick(t).ok();

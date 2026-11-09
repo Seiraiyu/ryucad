@@ -107,8 +107,7 @@ impl Mating {
         let on = instance_of(&self.part, entity)
             .ok_or_else(|| format!("pick on an instance of {}", self.part))?;
         let side = self.next().unwrap_or(Side::B);
-        if side == Side::B
-            && self.a.as_deref().and_then(|a| instance_of(&self.part, a)) == Some(on)
+        if side == Side::B && self.a.as_deref().and_then(|a| instance_of(&self.part, a)) == Some(on)
         {
             return Err("pick on another instance: a mate joins two".into());
         }
@@ -245,7 +244,10 @@ mod tests {
         let a = d.add(Some("r9".into())).unwrap();
         assert_eq!(a.method(), "feature.add");
         let a = a.params();
-        assert_eq!((&a["type"], &a["form"], &a["expected_revision"]), (&json!("mate"), &json!("fastened"), &json!("r9")));
+        assert_eq!(
+            (&a["type"], &a["form"], &a["expected_revision"]),
+            (&json!("mate"), &json!("fastened"), &json!("r9"))
+        );
         d.b = None;
         assert!(d.preview(None).is_none(), "nothing until both are picked");
     }
@@ -253,8 +255,14 @@ mod tests {
     #[test]
     fn a_refused_preview_disables_add_and_says_why() {
         let mut d = Mating::new("frame", None);
-        d.previewed(Err(("connector_unsupported".into(), "a torus face can't be a connector".into())));
+        d.previewed(Err((
+            "connector_unsupported".into(),
+            "a torus face can't be a connector".into(),
+        )));
         assert!(!d.addable());
-        assert_eq!(d.refusal.as_deref(), Some("a torus face can't be a connector"));
+        assert_eq!(
+            d.refusal.as_deref(),
+            Some("a torus face can't be a connector")
+        );
     }
 }

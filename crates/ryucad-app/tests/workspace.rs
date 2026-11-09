@@ -558,18 +558,27 @@ fn the_mate_dialog_previews_and_adds_a_mate() {
         "the pin drawn where the mate puts it"
     );
     // Nothing written by the preview.
-    assert!(!p.ok(&["feature", "list", "frame"]).to_string().contains("\"mate\""));
+    assert!(
+        !p.ok(&["feature", "list", "frame"])
+            .to_string()
+            .contains("\"mate\"")
+    );
     ws.add_mate();
     assert!(ws.mating.is_none());
     let t = Instant::now();
-    while !p.ok(&["feature", "list", "frame"]).to_string().contains("\"mate\"") {
+    while !p
+        .ok(&["feature", "list", "frame"])
+        .to_string()
+        .contains("\"mate\"")
+    {
         assert!(t.elapsed() < WAIT, "no mate written");
         ws.wait_until(Duration::from_millis(200), |_| false);
     }
     // A form a face pair can't take is the daemon's refusal: Add stays off.
     ws.open_mate("frame", None);
     ws.mate_pick(&foot).unwrap();
-    ws.mate_pick(&foot.replace("frame/pin/", "frame/base/")).ok();
+    ws.mate_pick(&foot.replace("frame/pin/", "frame/base/"))
+        .ok();
     assert!(ws.wait_until(WAIT, |w| w.mating.as_ref().is_some_and(|d| !d.waiting)));
     let d = ws.mating.as_ref().unwrap();
     assert!(d.refusal.is_some() && !d.addable(), "{d:?}");

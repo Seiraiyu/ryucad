@@ -439,7 +439,15 @@ pub(crate) mod tests {
         v["pose"]["origin_m"][2] = json!(z + 0.005);
         put(
             &mut s,
-            &changing("aaaaaaaaaa", &dave, "2026-11-05T14:00:00Z", rel, Some(&now), v, vec![]),
+            &changing(
+                "aaaaaaaaaa",
+                &dave,
+                "2026-11-05T14:00:00Z",
+                rel,
+                Some(&now),
+                v,
+                vec![],
+            ),
         );
         let at = |s: &mut Session, rev: Option<&str>| {
             let mut p = json!({"part": "frame"});
@@ -447,11 +455,19 @@ pub(crate) mod tests {
                 p["rev"] = json!(r);
             }
             let v = call(s, "assembly.solve", p).unwrap();
-            (v["instances"]["pin"]["pose"]["origin_m"][2].as_f64().unwrap(), v)
+            (
+                v["instances"]["pin"]["pose"]["origin_m"][2]
+                    .as_f64()
+                    .unwrap(),
+                v,
+            )
         };
         let (working, _) = at(&mut s, None);
         let (drafted, v) = at(&mut s, Some("draft:dave (window 1)"));
-        assert!((drafted - working - 0.005).abs() < 1e-9, "{working} → {drafted}");
+        assert!(
+            (drafted - working - 0.005).abs() < 1e-9,
+            "{working} → {drafted}"
+        );
         assert_eq!(v["rev"]["draft"], "dave (window 1)", "{v}");
     }
 

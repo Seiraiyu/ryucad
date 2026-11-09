@@ -544,7 +544,15 @@ pub fn plate_and_bolt() -> (Project, String, String) {
     ]);
     p.ok(&["part", "create", "bolt"]);
     p.ok(&[
-        "feature", "add", "bolt", "cylinder", "--id", "shank", "--param", "radius=3", "--param",
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "shank",
+        "--param",
+        "radius=3",
+        "--param",
         "height=20",
     ]);
     p.ok(&["part", "create", "frame", "--assembly"]);

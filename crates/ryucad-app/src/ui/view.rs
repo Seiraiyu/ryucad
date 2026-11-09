@@ -359,12 +359,13 @@ impl View {
             } else {
                 (1.5, style::color32(colours[k]))
             };
-            let pts: Vec<egui::Pos2> = rings[k].on_screen(pr, size, 48).into_iter().map(at).collect();
+            let pts: Vec<egui::Pos2> = rings[k]
+                .on_screen(pr, size, 48)
+                .into_iter()
+                .map(at)
+                .collect();
             if m.grip == Some(Grip::Ring(k)) {
-                tip = pts
-                    .iter()
-                    .copied()
-                    .max_by(|a, b| a.x.total_cmp(&b.x));
+                tip = pts.iter().copied().max_by(|a, b| a.x.total_cmp(&b.x));
             }
             painter.add(egui::Shape::line(pts, egui::Stroke::new(width, colour)));
         }
@@ -418,8 +419,12 @@ impl View {
                         ws.type_move(&text);
                     }
                     if r.lost_focus() {
-                        let (enter, esc) =
-                            ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+                        let (enter, esc) = ui.input(|i| {
+                            (
+                                i.key_pressed(egui::Key::Enter),
+                                i.key_pressed(egui::Key::Escape),
+                            )
+                        });
                         send = enter;
                         drop = esc;
                     }
