@@ -9,6 +9,7 @@
 //! material is guessed: the walk only counts.
 
 pub(crate) mod region;
+pub(crate) mod working;
 
 #[cfg(test)]
 pub(crate) mod tests;
