@@ -1206,10 +1206,14 @@ impl Workspace {
 
     /// Opens File > Export… on `part`, with the last export's choices.
     pub fn open_export(&mut self, part: &str) {
-        self.export = Some(crate::core::export::Export::new(
-            part,
-            self.export_choices.clone(),
-        ));
+        let mut e = crate::core::export::Export::new(part, self.export_choices.clone());
+        // DXF only for sheet metal; the last export's DXF doesn't carry
+        // over to a part with none.
+        e.sheet = self.sheet_solid(part, None).map(|k| k.1);
+        if e.sheet.is_none() && e.choices.format == crate::core::export::Format::Dxf {
+            e.choices.format = crate::core::export::Format::Step;
+        }
+        self.export = Some(e);
     }
 
     /// Exports the open export's part: the daemon, on this machine,
