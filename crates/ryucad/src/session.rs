@@ -1664,8 +1664,9 @@ pub(crate) fn names_of_all(parts: &[(&Id, &PartResult)]) -> Vec<Vec<Name>> {
 }
 
 /// Whether an event's path (relative, with `/`) can matter to a project's
-/// state: the root files, and anything under `parts/`, `releases/` and
-/// `imports/` ([`listed`] decides which files there do).
+/// state: the root files, and anything under `parts/`, `releases/`,
+/// `imports/`, `annotations/` and `templates/` ([`listed`] decides which
+/// files there do).
 pub(crate) fn tracked(rel: &str) -> bool {
     let first = rel.split('/').next().unwrap_or_default();
     crate::doc::project::ROOT_FILES.contains(&rel)
@@ -1673,6 +1674,7 @@ pub(crate) fn tracked(rel: &str) -> bool {
         || first == crate::doc::project::RELEASES
         || first == crate::doc::project::IMPORTS
         || first == crate::doc::annotation::ANNOTATIONS
+        || first == crate::doc::drawing_template::TEMPLATES
 }
 
 /// The project's folders as they are on disk, and its files' bytes as
@@ -1784,6 +1786,7 @@ fn listed(root: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
     out.extend(releases_in(&root.join(crate::doc::project::RELEASES))?);
     out.extend(files_in(&root.join(crate::doc::project::IMPORTS))?);
     out.extend(files_in(&root.join(crate::doc::annotation::ANNOTATIONS))?);
+    out.extend(files_in(&root.join(crate::doc::drawing_template::TEMPLATES))?);
     Ok(out)
 }
 
@@ -1868,6 +1871,8 @@ fn listed_at(root: &Path, rel: &str) -> Result<Vec<(PathBuf, fs::Metadata)>> {
         [i, _] if *i == IMPORTS && file => one(),
         [a] if *a == crate::doc::annotation::ANNOTATIONS => files_in(&path),
         [a, _] if *a == crate::doc::annotation::ANNOTATIONS && file => one(),
+        [t] if *t == crate::doc::drawing_template::TEMPLATES => files_in(&path),
+        [t, _] if *t == crate::doc::drawing_template::TEMPLATES && file => one(),
         _ => Ok(Vec::new()),
     }
 }
