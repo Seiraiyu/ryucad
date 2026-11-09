@@ -2602,7 +2602,7 @@ fn from_disk(disk: &Disk, h: &blake3::Hash, part: &Id, id: &Id) -> Option<Result
 /// Whether a feature's refusal is kept in the disk cache by its input
 /// hash, as its solids would be (#503): a kernel's verdict on what the
 /// hash covers (a heal, a boolean, a blend, a sweep, a loft, an offset, a
-/// shell, a mirror), the same every time and dear to reach again (a file's
+/// shell, a mirror, a fill, an extract, a sew, a thicken), the same every time and dear to reach again (a file's
 /// refused bodies healed again took the Switchwire's export 1,746 s).
 /// Anything else (a missing file, a dependency, a cancel, an internal
 /// fault) depends on more than the hash, or costs nothing to find again.
@@ -2619,6 +2619,10 @@ pub fn failure_kept(e: &Error) -> bool {
             | Code::OffsetFailed
             | Code::MirrorFailed
             | Code::SheetMetalFailed
+            | Code::FillFailed
+            | Code::ExtractFailed
+            | Code::SewFailed
+            | Code::ThickenFailed
     )
 }
 
@@ -3061,6 +3065,13 @@ pub fn successors(
 mod tests {
     use super::*;
     use crate::units::{Quantity, Unit};
+
+    #[test]
+    fn surface_refusals_are_kept() {
+        for code in [Code::FillFailed, Code::ExtractFailed, Code::SewFailed, Code::ThickenFailed] {
+            assert!(failure_kept(&Error::new(code, "x")), "{code:?}");
+        }
+    }
 
     fn id(s: &str) -> Id {
         Id::parse(s, "feature").unwrap()
