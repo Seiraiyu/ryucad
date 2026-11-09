@@ -182,3 +182,91 @@ fn an_offsets_reach_is_its_distance() {
     };
     assert_eq!(super::reach(&b, &c), 0.3);
 }
+
+// Faces deleted through the re-trim (13.B): `Changes::deleted`.
+
+/// `b` with `faces` taken away through the re-trim alone.
+fn deleted(b: &Body, faces: &[FaceId]) -> Result<(Body, crate::name::Journal), crate::Error> {
+    let ch = Changes {
+        deleted: faces.iter().copied().collect(),
+        ..Changes::default()
+    };
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    retrim(OpKey(0x13b9), b, &ch, &m)
+}
+
+/// The faces of `b` that aren't planes.
+fn curved(b: &Body) -> Vec<FaceId> {
+    b.faces()
+        .filter(|&f| {
+            !matches!(
+                b.surfaces[b.faces[f].surface],
+                crate::geom::Surface::Plane(_)
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_deleted_faces_neighbours_grow_to_meet() {
+    let b = block();
+    let e = b
+        .edges()
+        .find(|&e| {
+            let fs: Vec<FaceId> = b
+                .edge_fins(e)
+                .map(|fin| b.loops[b.fins[fin].loop_].face)
+                .collect();
+            fs.contains(&face_of(&b, FaceRole::PlusZ))
+                && fs.contains(&face_of(&b, FaceRole::MinusY))
+        })
+        .unwrap();
+    let (r, _) = crate::blend::blend(
+        OpKey(0x13b8),
+        &b,
+        &[crate::blend::EdgeBlend {
+            edge: b.edges[e].name,
+            kind: crate::blend::BlendKind::Fillet { radius: 0.1 },
+        }],
+    )
+    .unwrap();
+    let (o, _) = deleted(&r, &curved(&r)).unwrap();
+    assert_eq!(o.faces().count(), 6);
+    assert!((volume(&o) - 0.24).abs() < 1e-6);
+}
+
+#[test]
+fn a_region_of_every_face_is_seeded_by_its_one_unclipped_piece() {
+    // Every edge of the block rounded: the 20 blend faces touch all six
+    // planes, so no face is outside the region and each plane's one
+    // closed piece seeds the walk (its inner points lie in the strip it
+    // grew by, outside the old face).
+    let b = block();
+    let edges: Vec<crate::blend::EdgeBlend> = b
+        .edges()
+        .map(|e| crate::blend::EdgeBlend {
+            edge: b.edges[e].name,
+            kind: crate::blend::BlendKind::Fillet { radius: 0.05 },
+        })
+        .collect();
+    let (r, _) = crate::blend::blend(OpKey(0x13b7), &b, &edges).unwrap();
+    let blends = curved(&r);
+    assert_eq!(blends.len(), 20);
+    let (o, _) = deleted(&r, &blends).unwrap();
+    assert_eq!(o.faces().count(), 6);
+    assert!((volume(&o) - 0.24).abs() < 1e-6);
+}
+
+#[test]
+fn a_slabs_side_reaches_the_region_s_side() {
+    // Nothing meets the four faces running past the deleted side:
+    // `delete::grow` reads this as GapNotHealed.
+    let b = block();
+    assert!(matches!(
+        deleted(&b, &[face_of(&b, FaceRole::PlusX)]),
+        Err(crate::Error::InvalidTweak(
+            crate::TweakError::RegionTooSmall { .. }
+        ))
+    ));
+}

@@ -107,19 +107,7 @@ pub(crate) fn shell_seeds(
             if m.charge(1).is_err() {
                 return out;
             }
-            let found: Vec<usize> = pieces
-                .iter()
-                .enumerate()
-                .filter(|(i, p)| {
-                    p.face.face == wf
-                        && arr.pieces[*i]
-                            .1
-                            .iter()
-                            .all(|(g, _)| !arr.clipped.contains(g))
-                        && inside_old(body, changes, w, &ops, table, p)
-                })
-                .map(|(i, _)| i)
-                .collect();
+            let found = candidates(body, changes, w, arr, &ops, table, pieces, wf);
             if let [one] = found.as_slice() {
                 out.push(*one);
                 break;
@@ -158,19 +146,7 @@ pub(crate) fn face_seeds(
         if m.charge(1).is_err() {
             break;
         }
-        let found: Vec<usize> = pieces
-            .iter()
-            .enumerate()
-            .filter(|(i, p)| {
-                p.face.face == wf
-                    && arr.pieces[*i]
-                        .1
-                        .iter()
-                        .all(|(g, _)| !arr.clipped.contains(g))
-                    && inside_old(body, changes, w, &ops, table, p)
-            })
-            .map(|(i, _)| i)
-            .collect();
+        let found = candidates(body, changes, w, arr, &ops, table, pieces, wf);
         if let [one] = found.as_slice() {
             if changes.motion.contains_key(&w.origin[&wf]) {
                 moved.push(*one);
@@ -180,6 +156,42 @@ pub(crate) fn face_seeds(
         }
     }
     (same, moved)
+}
+
+/// Face `wf`'s candidate pieces: those using no clipped edge whose inner
+/// point lies inside the old face; where faces are deleted, a face with
+/// one piece using no clipped edge takes it (a face growing over the gap
+/// has its inner points in the strip it grew by).
+#[allow(clippy::too_many_arguments)]
+fn candidates(
+    body: &Body,
+    changes: &Changes,
+    w: &WorkBody,
+    arr: &Arrangement,
+    ops: &[Body],
+    table: &Table,
+    pieces: &[Piece],
+    wf: FaceId,
+) -> Vec<usize> {
+    let unclipped: Vec<usize> = pieces
+        .iter()
+        .enumerate()
+        .filter(|(i, p)| {
+            p.face.face == wf
+                && arr.pieces[*i]
+                    .1
+                    .iter()
+                    .all(|(g, _)| !arr.clipped.contains(g))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if !changes.deleted.is_empty() && unclipped.len() == 1 {
+        return unclipped;
+    }
+    unclipped
+        .into_iter()
+        .filter(|&i| inside_old(body, changes, w, ops, table, &pieces[i]))
+        .collect()
 }
 
 /// Whether piece `p`'s inner point, taken back to its face's old surface,
