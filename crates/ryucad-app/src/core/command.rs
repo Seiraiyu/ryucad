@@ -420,6 +420,9 @@ pub const COMMANDS: &[Command] = &[
     cmd("view.edges", "Edges", View).toggle(),
     cmd("view.sketches", "Sketches", View).toggle(),
     cmd("view.datums", "Datums, paths and helices", View).toggle(),
+    cmd("view.flat", "Flat pattern", View)
+        .icon("square-split-horizontal")
+        .toggle(),
     cmd("view.nav_cube", "Navigation cube", View).toggle(),
     cmd("view.triad", "Axis triad", View).toggle(),
     cmd("view.origin", "Origin", View).toggle(),
@@ -638,6 +641,10 @@ pub struct State {
     pub mode: crate::core::modes::Mode,
     /// Annotations' pins are drawn (`display.annotations`).
     pub annotations: bool,
+    /// The flat view is on, and whether there is a solid to lay flat (the
+    /// chosen feature's, or the one part shown).
+    pub flat: bool,
+    pub flattenable: bool,
 }
 
 /// Whether the window's mode allows `id`, or which mode would: the part
@@ -686,6 +693,10 @@ pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
             "Nothing is selected or chosen.",
         ),
         "view.normal_to" => need(s.planar_face, "Select a planar face first."),
+        "view.flat" => need(
+            s.flat || s.flattenable,
+            "Show one part, or choose a feature of a sheet metal solid.",
+        ),
         "view.compare_head" => need(
             s.comparing.as_deref() != Some("HEAD"),
             "Already comparing with HEAD.",
@@ -752,6 +763,7 @@ pub fn checked(id: &str, s: &State) -> Option<bool> {
         "mode.annotate" => s.mode == crate::core::modes::Mode::Annotate,
         "mode.edit" => s.mode == crate::core::modes::Mode::Edit,
         "view.annotations" => s.annotations,
+        "view.flat" => s.flat,
         _ => return None,
     })
 }
@@ -912,6 +924,7 @@ mod tests {
             exploded: true,
             scale: 1.0,
             mode: crate::core::modes::Mode::Edit,
+            flattenable: true,
             ..State::default()
         };
         for c in COMMANDS {

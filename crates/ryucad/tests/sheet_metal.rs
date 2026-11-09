@@ -1291,3 +1291,44 @@ fn render_flat_draws_the_flat_and_its_bend_line() {
     let e = ryucad::server::answer_live(&mut s, None, None, req).unwrap_err();
     assert_eq!(e.details["param"], "compare");
 }
+
+#[test]
+fn mesh_get_meshes_the_flat_body_by_its_solid() {
+    let (_dir, mut s) = l_part();
+    // As JSON: one body, labelled by its solid, its faces the shown
+    // body's names.
+    let v = must(&mut s, "mesh.get", json!({"part": "p", "flat": ""}));
+    assert_eq!(
+        (v["flat"].as_str(), v["from"].as_str()),
+        (Some("bl"), Some("whole"))
+    );
+    let bodies = v["bodies"].as_array().unwrap();
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["feature"], "bl");
+    let folded = must(&mut s, "mesh.get", json!({"part": "p", "feature": "bl"}));
+    let names = |b: &Value| -> std::collections::BTreeSet<String> {
+        b["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(names(&bodies[0]), names(&folded["bodies"][0]));
+    assert_ne!(bodies[0]["hash"], folded["bodies"][0]["hash"]);
+    // As bytes: the same body, decoded as the window decodes it, its box
+    // flat along the pattern's z.
+    let req = Request::from_rpc(
+        "mesh.get",
+        Some(json!({"part": "p", "flat": "", "transfer": "compact"})),
+    )
+    .unwrap();
+    let a = ryucad::server::answer_live(&mut s, None, None, req).unwrap();
+    let wire = ryucad::mesh::decode(&a.binary.expect("bytes")).unwrap();
+    assert_eq!(wire.len(), 1);
+    assert_eq!(wire[0].feature, "bl");
+    assert_eq!(wire[0].hash, bodies[0]["hash"]);
+    // A solid that isn't the part's is refused as flat.get refuses it.
+    let e = call(&mut s, "mesh.get", json!({"part": "p", "flat": "nope"})).unwrap_err();
+    assert_eq!(e.code, ryucad::error::Code::NotFound, "{e:?}");
+}

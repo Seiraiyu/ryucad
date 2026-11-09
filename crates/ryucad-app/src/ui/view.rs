@@ -741,6 +741,27 @@ impl View {
             }
         }
         let mut lines = Vec::new();
+        // An unfold chosen: its bend lines; a refold: the strips it
+        // folded. A bend under the pointer in the Part tile's table.
+        let sheet = chosen
+            .as_ref()
+            .map(|k| ws.sheet_paint(k))
+            .unwrap_or_default();
+        for (refs, c) in [
+            (sheet.0, style::CHOSEN),
+            (ws.sheet_hover.clone(), style::HOVER),
+        ] {
+            for r in refs {
+                if let Some(Place::Face(k, i)) = picker.place(&r) {
+                    faces.push((k, i, linear(c)));
+                }
+            }
+        }
+        for r in sheet.1 {
+            if let Some(p @ Place::Edge(_)) = picker.place(&r) {
+                lines.push((p, style::CHOSEN));
+            }
+        }
         // A sketch chosen in the tree: all of it.
         if let Some(d) = chosen_sketch {
             let c = style::CHOSEN;
@@ -1051,6 +1072,42 @@ impl View {
                 &m.reference,
                 font.clone(),
                 style::color32(m.color()),
+            );
+        }
+    }
+
+    /// The flat view's bend notes (`UP 90° R1 K0.44`) at each bend line's
+    /// middle, in its colour, where no face hides it, as `render --flat`
+    /// writes them.
+    fn bend_notes(&mut self, ui: &egui::Ui, ws: &Workspace, rect: egui::Rect, pr: &Projector) {
+        let Some(l) = ws
+            .flat_view
+            .as_ref()
+            .and_then(|v| v.lines.as_ref())
+            .filter(|_| ws.model.flat.is_some())
+        else {
+            return;
+        };
+        let size = [f64::from(rect.width()), f64::from(rect.height())];
+        let painter = ui.painter_at(rect);
+        let font = egui::FontId::proportional(11.0);
+        let picker = self.picker(ws);
+        for b in &l.lines {
+            let at = b.middle();
+            let Some(n) = pr.ndc(at) else { continue };
+            let s = egui::pos2(
+                rect.min.x + ((n[0] + 1.0) / 2.0 * size[0]) as f32,
+                rect.min.y + ((1.0 - n[1]) / 2.0 * size[1]) as f32,
+            );
+            if !rect.contains(s) || picker.hidden(pr, at) {
+                continue;
+            }
+            painter.text(
+                s + egui::vec2(4.0, -4.0),
+                egui::Align2::LEFT_BOTTOM,
+                &b.note,
+                font.clone(),
+                style::color32(b.colour()),
             );
         }
     }
@@ -1518,6 +1575,7 @@ impl View {
         if self.datums {
             self.datum_labels(ui, ws, rect, &pr);
         }
+        self.bend_notes(ui, ws, rect, &pr);
         self.annotation_markers(ui, ws, rect, &pr);
         // The active section plane's handles, a new step's arrows, and an
         // explode's trails from where occurrences are to where it puts
@@ -2196,6 +2254,15 @@ impl View {
             ));
         }
         overlay.extend(body_lines);
+        // The flat view's bend lines, dashed in their direction's colour.
+        if let Some(l) = ws
+            .flat_view
+            .as_ref()
+            .and_then(|v| v.lines.as_ref())
+            .filter(|_| ws.model.flat.is_some())
+        {
+            overlay.extend(crate::core::flat::overlay(l, pr, size, f64::from(ppp)));
+        }
         // The origin's axes and planes, a tenth of the model's size.
         if self.origin {
             let length = match bounds {

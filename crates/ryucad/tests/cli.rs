@@ -3941,6 +3941,59 @@ fn flat_patterns_from_the_cli() {
     ]);
     assert!(p.direct.join("flat.png").exists() && p.daemon.join("flat.png").exists());
     p.fails(&["flat", "p", "--bend", "nonsense"], "usage", 2);
+    // The flat body as a mesh: the part's one sheet metal solid, or the
+    // one named, as JSON and as bytes alike both ways.
+    let folded = p.ok(&["mesh", "p"]);
+    let m = p.ok(&["mesh", "p", "--flat"]);
+    assert_eq!(m["flat"], "bl");
+    assert_eq!(m["bodies"].as_array().unwrap().len(), 1);
+    assert_eq!(m["bodies"][0]["feature"], "bl");
+    assert_ne!(m["bodies"][0]["hash"], folded["bodies"][0]["hash"]);
+    assert_eq!(p.ok(&["mesh", "p", "--flat", "bl"]), m);
+    let r = p.ok(&["mesh", "p", "--flat", "bl", "--out", "flat.mesh"]);
+    assert_eq!(r["binary"]["encoding"], "ryucad.mesh.1");
+    let a = fs::read(p.direct.join("flat.mesh")).unwrap();
+    assert_eq!(a, fs::read(p.daemon.join("flat.mesh")).unwrap());
+    let wire = ryucad::mesh::decode(&a).unwrap();
+    assert_eq!(wire.len(), 1);
+    assert_eq!(wire[0].feature, "bl");
+    // Laid flat: 1.5 mm through the sheet, its thinnest way.
+    let mesh = wire[0].mesh.as_ref().unwrap();
+    let thinnest = (0..3)
+        .map(|k| {
+            let (lo, hi) = mesh
+                .positions
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(lo, hi), q| {
+                    (lo.min(q[k]), hi.max(q[k]))
+                });
+            f64::from(hi - lo)
+        })
+        .fold(f64::MAX, f64::min);
+    assert!((thinnest - 1.5e-3).abs() < 1e-6, "{thinnest}");
+    let r = p.ok(&["mesh", "p", "--flat", "--out", "flat2.mesh", "--compact"]);
+    assert_eq!(r["binary"]["encoding"], "ryucad.mesh.2");
+    // What a flat can't honour is refused, not ignored.
+    p.fails(&["mesh", "p", "bl", "--flat"], "invalid_param", 1);
+    p.fails(
+        &["mesh", "p", "--flat", "--quality", "fine"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &[
+            "mesh",
+            "p",
+            "--flat",
+            "--occurrence",
+            "x",
+            "--out",
+            "f.mesh",
+        ],
+        "invalid_param",
+        1,
+    );
+    p.fails(&["mesh", "p", "--flat", "nope"], "not_found", 1);
 }
 
 #[test]

@@ -4755,7 +4755,10 @@ fn a_dependency_is_added_from_its_tab_and_its_part_placed_from_the_picker() {
     shown(&mut h, "Update would move");
     h.get_by_label("Move them").click();
     frames(&mut h, |a| {
-        let ws = &a.opened().ws;
+        let ryucad_app::ui::app::Screen::Opened(o) = &a.screen else {
+            return false;
+        };
+        let ws = &o.ws;
         ws.idle()
             && ws.part("frame").is_some_and(|f| {
                 f.features[0]
@@ -5215,6 +5218,81 @@ fn a_shells_thickness_and_a_splits_flip_are_edited_from_their_forms() {
     });
     let shown = p.ok(&["feature", "show", "p", "sp"]);
     assert_eq!(shown["flip"], true);
+}
+
+#[test]
+fn a_flanges_angle_and_a_base_flanges_k_factor_are_edited_and_the_part_laid_flat() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_sheet_metal();
+    let mut h = window(&p);
+    // One solid, so one mesh: `loaded` waits for two.
+    frames(&mut h, |a| {
+        let ws = &a.opened().ws;
+        ws.idle()
+            && ws.model.meshes.len() == 1
+            && ["plate", "f", "u"].iter().all(|f| {
+                ws.model.parts["p"]
+                    .feature(f)
+                    .is_some_and(|f| f.hash.is_some())
+            })
+    });
+    h.step();
+    let save = |h: &mut Harness<'static, App>| {
+        h.get_by_label("Apply").click();
+        frames(h, |a| {
+            a.opened()
+                .ws
+                .form
+                .as_ref()
+                .is_some_and(|f| !f.saving && !f.dirty())
+        });
+    };
+    h.get_by_label("f (flange)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| f.sheet.is_some())
+    });
+    h.step();
+    // The founder's radius says so.
+    h.get_by_label("the base flange's radius: change it to give the flange its own");
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "angle")
+        .set_text_value_accesskit("100 deg");
+    h.step();
+    save(&mut h);
+    let shown = p.ok(&["feature", "show", "p", "f"]);
+    assert_eq!(shown["angle"]["value"], "100 deg");
+    h.get_by_label("plate (base_flange)").click();
+    frames(&mut h, |a| {
+        a.opened().ws.form.as_ref().is_some_and(|f| {
+            matches!(
+                f.sheet,
+                Some(ryucad_app::core::edit::SheetMetalForm::BaseFlange(_))
+            )
+        })
+    });
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "allowance")
+        .set_text_value_accesskit("0.5");
+    h.step();
+    save(&mut h);
+    let shown = p.ok(&["feature", "show", "p", "plate"]);
+    assert_eq!(shown["allowance"]["k_factor"]["value"], "0.5");
+    // View > Flat pattern lays the part's one sheet metal solid flat, and
+    // again folds it.
+    menu(&mut h, "View", "Flat pattern");
+    frames(&mut h, |a| {
+        let ws = &a.opened().ws;
+        ws.model.flat.is_some() && ws.flat_view.as_ref().is_some_and(|v| v.lines.is_some())
+    });
+    menu(&mut h, "View", "Flat pattern");
+    h.step();
+    assert!(h.state().opened().ws.model.flat.is_none());
 }
 
 /// The sides split `sp`'s report gives, behind first.

@@ -554,6 +554,50 @@ fn a_chosen_split_looks_as_it_did() {
     looks_as_it_did(&adapter, &px, "split");
 }
 
+/// A sheet metal part in the flat view (design 346, The app): its plate
+/// and flange laid flat, the flat body drawn in place of the folded one,
+/// its bend line dashed in the colour of its direction, seen from above.
+#[test]
+fn a_flat_pattern_looks_as_it_did() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::named("snapshot").with_sheet_metal();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(120), |ws| ws.idle()
+        && ws.model.meshes.len() == 1));
+    ws.show_flat_view(Some(("p".to_owned(), String::new())));
+    assert!(ws.wait_until(Duration::from_secs(120), |ws| {
+        ws.idle()
+            && ws.model.flat.is_some()
+            && ws.flat_view.as_ref().is_some_and(|v| v.lines.is_some())
+    }));
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let lines = ws.flat_view.as_ref().unwrap().lines.as_ref().unwrap();
+    // As the window turns to it: from the pattern's viewer side.
+    let camera = lines.camera(&picker.points(None), f64::from(W) / f64::from(H));
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.015);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    let overlay = ryucad_app::core::flat::overlay(lines, &pr, [f64::from(W), f64::from(H)], 1.0);
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: theme::BACKGROUND,
+        light: scene::light(&camera),
+        edges: true,
+        faces: &[],
+        overlay: &overlay,
+        glass: &[],
+    };
+    scene.render(&device, &queue, [W, H], &list);
+    let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
+    looks_as_it_did(&adapter, &px, "flat");
+}
+
 /// Compares `px` with `tests/snapshots/<name>-lavapipe.png` on lavapipe,
 /// or only checks something was drawn on other adapters.
 /// The part in steel blue, the base's top red, the boss translucent: the

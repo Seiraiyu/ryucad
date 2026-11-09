@@ -330,6 +330,153 @@ pub(crate) fn split(ui: &mut egui::Ui, s: &mut crate::core::edit::SplitForm) -> 
     })
 }
 
+/// A relief's kind, and the sizes that kind takes.
+fn relief(rows: &mut Rows<'_>, r: &mut crate::core::edit::ReliefForm) {
+    let name = r.kind.name.clone();
+    rows.choice(&name, &mut r.kind);
+    let (w, d) = r.takes();
+    if w {
+        let name = r.width.name.clone();
+        rows.quantity(&name, &mut r.width);
+    }
+    if d {
+        let name = r.depth.name.clone();
+        rows.quantity(&name, &mut r.depth);
+    }
+}
+
+/// An allowance's form (a K-factor, a deduction or an allowance) and
+/// its value.
+fn allowance(rows: &mut Rows<'_>, a: &mut crate::core::edit::AllowanceForm) {
+    let name = a.form.name.clone();
+    rows.choice(&name, &mut a.form);
+    let name = a.value.name.clone();
+    rows.quantity(&name, &mut a.value);
+}
+
+/// A base flange's sketch (an agent's to change), thickness, inner
+/// radius, allowance and default relief, a bent section's depth, and
+/// which way it goes.
+pub(crate) fn base_flange(ui: &mut egui::Ui, b: &mut crate::core::edit::BaseFlangeForm) -> Keys {
+    form::grid(ui, "base flange", |rows| {
+        rows.read_only("sketch", &b.sketch, true, None);
+        rows.quantity("thickness", &mut b.thickness);
+        rows.quantity("radius", &mut b.radius);
+        allowance(rows, &mut b.allowance);
+        relief(rows, &mut b.relief);
+        if let Some(d) = &mut b.depth {
+            rows.quantity("depth", d);
+        }
+        rows.flag("reverse", &mut b.reverse);
+        if let Some(s) = &mut b.symmetric {
+            rows.flag("symmetric", s);
+        }
+    })
+}
+
+/// A flange's target (an agent's to change); its edges and ends, each a
+/// checkbox to take it out; its angle, length, measure, position, radius,
+/// relief and setback, the founder's marked so; each end's values.
+pub(crate) fn flange(ui: &mut egui::Ui, f: &mut crate::core::edit::FlangeForm) -> Keys {
+    let inherits = (f.inherits("radius"), f.inherits("relief"));
+    let mut keys = form::grid(ui, "flange", |rows| {
+        rows.read_only("target", &f.target, true, None);
+        rows.quantity("angle", &mut f.angle);
+        rows.quantity("length", &mut f.length);
+        let name = f.measured.name.clone();
+        rows.choice(&name, &mut f.measured);
+        let name = f.position.name.clone();
+        rows.choice(&name, &mut f.position);
+        rows.quantity("radius", &mut f.radius);
+        if inherits.0 && !f.radius.dirty() {
+            rows.note("the base flange's radius: change it to give the flange its own");
+        }
+        relief(rows, &mut f.relief);
+        if inherits.1 && !f.relief.dirty() {
+            rows.note("the base flange's relief: change it to give the flange its own");
+        }
+        rows.quantity("setback", &mut f.setback);
+    });
+    removable(ui, &mut f.edges, "edge");
+    if !f.ends.is_empty() {
+        removable(ui, &mut f.kept, "vertex");
+        for (i, e) in f.ends.iter_mut().enumerate() {
+            let k = form::grid(ui, ("flange end", i), |rows| {
+                rows.read_only(&format!("end {}", i + 1), &e.vertex, true, None);
+                let name = e.setback.name.clone();
+                rows.quantity(&name, &mut e.setback);
+                if let Some(r) = &mut e.relief {
+                    relief(rows, r);
+                }
+            });
+            keys.apply |= k.apply;
+            keys.revert |= k.revert;
+        }
+    }
+    keys
+}
+
+/// An unfold's target and fixed face (the box clears it back to the
+/// kernel's default flange); its allowance, the founder's marked so; its
+/// bends and overrides, each a checkbox to take it out, and each
+/// override's allowance.
+pub(crate) fn unfold(ui: &mut egui::Ui, u: &mut crate::core::edit::UnfoldForm) -> Keys {
+    let inherited = u.inherited;
+    let mut keys = form::grid(ui, "unfold", |rows| {
+        rows.read_only("target", &u.target, true, None);
+        match &u.fixed {
+            Some(f) => {
+                let f = f.clone();
+                rows.read_only("fixed", &f, true, Some(&f));
+                rows.flag("keep this fixed face", &mut u.keep_fixed);
+            }
+            None => rows.read_only("fixed", "the kernel's default flange", false, None),
+        }
+        allowance(rows, &mut u.allowance);
+        if inherited && !u.allowance.dirty() {
+            rows.note("the base flange's allowance: change it to give the unfold its own");
+        }
+    });
+    if u.only.options.is_empty() {
+        ui.weak("Unfolds every bend");
+    } else {
+        removable(ui, &mut u.only, "bend");
+        if u.only.chosen.is_empty() {
+            ui.weak("With none left it unfolds every bend");
+        }
+    }
+    if !u.overrides.is_empty() {
+        removable(ui, &mut u.kept, "bend");
+        for (i, o) in u.overrides.iter_mut().enumerate() {
+            let k = form::grid(ui, ("unfold override", i), |rows| {
+                rows.read_only(&format!("override {}", i + 1), &o.bend, true, None);
+                allowance(rows, &mut o.allowance);
+            });
+            keys.apply |= k.apply;
+            keys.revert |= k.revert;
+        }
+    }
+    keys
+}
+
+/// A refold's target and unfold (an agent's to change), and the bends it
+/// folds, each a checkbox to take it out.
+pub(crate) fn refold(ui: &mut egui::Ui, r: &mut crate::core::edit::RefoldForm) -> Keys {
+    let keys = form::grid(ui, "refold", |rows| {
+        rows.read_only("target", &r.target, true, None);
+        rows.read_only("unfold", &r.unfold, true, None);
+    });
+    if r.only.options.is_empty() {
+        ui.weak("Folds every bend its unfold unfolded");
+    } else {
+        removable(ui, &mut r.only, "bend");
+        if r.only.chosen.is_empty() {
+            ui.weak("With none left it folds every bend its unfold unfolded");
+        }
+    }
+    keys
+}
+
 /// The width of a text field in a grid's column: a grid gives a column
 /// other than its last only the width it had last frame, at least 40
 /// points, so a field there asking for more never gets it (`add_sized`
@@ -482,6 +629,15 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         form.offset.as_mut().map(|o| body_offset(ui, o)),
         form.mirror.as_mut().map(|m| mirror(ui, m)),
         form.split.as_mut().map(|s| split(ui, s)),
+        form.sheet.as_mut().map(|s| {
+            use crate::core::edit::SheetMetalForm as S;
+            match s {
+                S::BaseFlange(b) => base_flange(ui, b),
+                S::Flange(f) => flange(ui, f),
+                S::Unfold(u) => unfold(ui, u),
+                S::Refold(r) => refold(ui, r),
+            }
+        }),
     ]
     .into_iter()
     .flatten()
