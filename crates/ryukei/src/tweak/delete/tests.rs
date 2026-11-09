@@ -121,24 +121,111 @@ fn a_cap_lays_the_plate_out_without_its_hole() {
     assert_eq!(j.events().len(), 2 + 1 + 2 + 2);
 }
 
+/// The plate with two holes of radius 0.1 through it, at x = 0.3 and 0.7.
+fn drilled_twice() -> Body {
+    let (plate, _) = primitive::block(K, 1.0, 1.0, 0.2, &Rigid::IDENTITY).unwrap();
+    let (pin, _) = primitive::cylinder(OpKey(0x13b2), 0.1, 0.6, &Rigid::IDENTITY).unwrap();
+    let tool = |key, x| Tool {
+        key: ToolKey(key),
+        body: &pin,
+        place: Rigid::translation(Vector3::new(x, 0.5, -0.2)),
+    };
+    boolean(
+        OpKey(0x13b3),
+        BooleanOp::Subtract,
+        &plate,
+        &[tool(1, 0.3), tool(2, 0.7)],
+    )
+    .unwrap()
+    .0
+}
+
+/// Every named entity's geometry as the dump writes it, by name, with no
+/// array index in it: a face's sense and surface; each fin's pcurve and
+/// map, by its face, edge and sense; an edge's curve, interval, tolerance
+/// and end vertices; a vertex's point and tolerance.
+fn geometry(b: &Body) -> std::collections::BTreeMap<String, String> {
+    use crate::topo::dump::{bits, curve, curve2, point, surface};
+    let mut out = std::collections::BTreeMap::new();
+    for f in b.faces() {
+        let face = &b.faces[f];
+        let text = format!(
+            "face {:?} {}",
+            face.sense,
+            surface(&b.surfaces[face.surface])
+        );
+        assert!(out.insert(face.name.to_string(), text).is_none());
+        for l in b.face_loops(f) {
+            for i in b.loop_fins(l) {
+                let fin = &b.fins[i];
+                let text = fin.pcurve.map_or_else(String::new, |p| {
+                    format!(
+                        "{} map={},{}",
+                        curve2(&b.curves2[p.curve]),
+                        bits(p.map[0]),
+                        bits(p.map[1])
+                    )
+                });
+                let key = format!("{}/{}/{:?}", face.name, b.edges[fin.edge].name, fin.sense);
+                assert!(out.insert(key, text).is_none());
+            }
+        }
+    }
+    for e in b.edges() {
+        let edge = &b.edges[e];
+        let text = format!(
+            "edge {} interval={},{} tol={} start={} end={}",
+            curve(&b.curves[edge.curve]),
+            bits(edge.interval[0]),
+            bits(edge.interval[1]),
+            bits(edge.tolerance.get()),
+            b.vertices[edge.start].name,
+            b.vertices[edge.end].name
+        );
+        assert!(out.insert(edge.name.to_string(), text).is_none());
+    }
+    for v in b.vertices() {
+        let vertex = &b.vertices[v];
+        let text = format!(
+            "vertex {} tol={}",
+            point(vertex.point),
+            bits(vertex.tolerance.get())
+        );
+        assert!(out.insert(vertex.name.to_string(), text).is_none());
+    }
+    out
+}
+
 #[test]
 fn a_through_hole_is_capped_bit_for_bit() {
-    let b = drilled();
-    let (o, j) = delete_faces(D, &b, &spec(cylinders(&b), Heal::Auto)).unwrap();
-    assert_eq!(o.faces().count(), 6);
-    assert!((volume(&o) - 0.2).abs() < 1e-9);
-    // The plate's own faces keep their surfaces.
-    for f in o.faces() {
-        let n = o.faces[f].name;
-        let EntityId::Face(g) = b.by_name(n).unwrap() else {
-            panic!()
-        };
-        assert_eq!(
-            o.surfaces[o.faces[f].surface],
-            b.surfaces[b.faces[g].surface]
-        );
+    let b = drilled_twice();
+    let walls = cylinders(&b);
+    assert_eq!(walls.len(), 2);
+    let (o, j) = delete_faces(D, &b, &spec(vec![walls[0]], Heal::Auto)).unwrap();
+    assert_eq!(o.faces().count(), 7);
+    // The other hole's wall is curved: its mesh at a chord of 1e-4 holds
+    // the volume to about the chord times the wall's area (0.126 m²).
+    assert!((volume(&o) - (0.2 - 0.2 * core::f64::consts::PI * 0.01)).abs() < 2e-5);
+    // Every face, edge and vertex the cap keeps is as it was, bit for bit:
+    // its geometry, tolerances, pcurves (the other hole's rims' too) and
+    // name. The cap makes nothing new.
+    let (before, after) = (geometry(&b), geometry(&o));
+    for (name, text) in &after {
+        assert_eq!(Some(text), before.get(name), "{name}");
     }
-    assert!(j.events().contains(&Event::Deleted(cylinders(&b)[0])));
+    assert!(after.contains_key(&walls[1].to_string()));
+    assert!(!after.contains_key(&walls[0].to_string()));
+    // The other hole's rims keep their fins on the top and bottom.
+    let rims = after.keys().filter(|k| k.matches('/').count() == 2).count();
+    assert_eq!(
+        rims,
+        before
+            .keys()
+            .filter(|k| k.matches('/').count() == 2)
+            .count()
+            - 4
+    );
+    assert!(j.events().contains(&Event::Deleted(walls[0])));
     assert_eq!(
         j.events()
             .iter()
@@ -146,6 +233,13 @@ fn a_through_hole_is_capped_bit_for_bit() {
             .count(),
         2
     );
+    let b = drilled();
+    let (o, _) = delete_faces(D, &b, &spec(cylinders(&b), Heal::Auto)).unwrap();
+    assert_eq!(o.faces().count(), 6);
+    let (before, after) = (geometry(&b), geometry(&o));
+    for (name, text) in &after {
+        assert_eq!(Some(text), before.get(name), "{name}");
+    }
     assert_eq!(
         delete_faces(D, &b, &spec(cylinders(&b), Heal::Grow)).unwrap_err(),
         TweakError::GrowWouldCap {

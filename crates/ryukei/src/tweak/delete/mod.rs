@@ -105,16 +105,18 @@ fn delete_faces_in(
         }
         _ => {}
     }
+    // A cap keeps the body's kind, so growth on a sheet is refused before
+    // anything is built.
+    if !grows.is_empty() && body.kind() != BodyKind::Solid {
+        return Err(Error::NotASolid {
+            op: "delete faces by growth",
+        });
+    }
     let (mut out, mut journal) = (body.clone(), Journal::new());
     if !caps.is_empty() {
         (out, journal) = cap::cap(key, body, &caps, m)?;
     }
     if !grows.is_empty() {
-        if out.kind() != BodyKind::Solid {
-            return Err(Error::NotASolid {
-                op: "delete faces by growth",
-            });
-        }
         let names: BTreeSet<Name> = grows
             .iter()
             .flat_map(|s| s.faces.iter().map(|&f| body.faces[f].name))
