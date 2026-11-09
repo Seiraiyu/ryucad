@@ -27,8 +27,10 @@ fn a_file_is_planned_imported_updated_and_exported() {
     let p = Project::new();
     let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle()));
-    // Planned: nothing is written.
+    // Planned: nothing is written. Healed, as "Convert to solids (heal)"
+    // asks; references are `a_file_imports_as_a_reference_and_converts`'s.
     ws.import = Some(Import::new());
+    ws.import.as_mut().unwrap().solid = true;
     ws.import.as_mut().unwrap().path = occt("box_ap214.stp").display().to_string();
     ws.plan_import();
     assert!(ws.wait_until(WAIT, |ws| {

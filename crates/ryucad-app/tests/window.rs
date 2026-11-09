@@ -2779,6 +2779,9 @@ fn file_import_step_plans_then_imports() {
         "STEP file",
         &occt("box_ap214.stp").display().to_string(),
     );
+    // Healed: references are a_step_file_imports_as_a_reference's.
+    h.get_by_label("Convert to solids (heal)").click();
+    h.step();
     h.get_by_label("Plan").click();
     frames(&mut h, |a| {
         a.opened()
