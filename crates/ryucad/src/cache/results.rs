@@ -215,7 +215,7 @@ pub fn encode_made(m: &Made) -> Vec<u8> {
             w.str(&a.hash);
         }
     }
-    match &m.import {
+    match &m.report {
         None => w.flag(false),
         Some(v) => {
             w.flag(true);
@@ -289,7 +289,7 @@ pub fn decode_made(bytes: &[u8]) -> Option<Made> {
         solids,
         hash,
         applied,
-        import,
+        report: import,
         flat,
         encoded: Default::default(),
     })
@@ -424,7 +424,7 @@ mod tests {
         .unwrap();
         assert!(b.reference);
         let made = Made {
-            import: Some(Arc::new(json!({"mode": "reference"}))),
+            report: Some(Arc::new(json!({"mode": "reference"}))),
             ..Made::new(vec![(id.clone(), Arc::new(b.clone()))])
         };
         let back = decode_made(&encode_made(&made)).unwrap();

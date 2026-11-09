@@ -331,6 +331,84 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
+        // A fill's sides, one line each in order: `side 1 = wall/<hex>
+        // (tangent)`, `side 2 = s2/a1`.
+        Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("fill") => {
+            if let Some(Value::Array(sides)) = rest.remove("sides") {
+                for (i, s) in sides.iter().enumerate() {
+                    let (r, tangent) = match (s.get("edge"), s.get("curve")) {
+                        (Some(e), _) => (e, s.get("tangent") == Some(&Value::Bool(true))),
+                        (None, Some(c)) => (c, false),
+                        _ => (s, false),
+                    };
+                    let r = reference(r).unwrap_or_else(|| scalar(r));
+                    let t = if tangent { " (tangent)" } else { "" };
+                    lines.push(format!("side {} = {r}{t}", i + 1));
+                }
+            }
+        }
+        // A thicken's source on one line, its groups one line each:
+        // `from = sheet skin`, `faces[0] = 3 mm, 0 mm: skin/<hex>`.
+        Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("thicken") => {
+            if let Some(from) = rest.remove("from") {
+                let refs = |v: &Value| -> String {
+                    v.as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|f| reference(f).unwrap_or_else(|| scalar(f)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let line = match (from.get("sheet"), from.get("faces")) {
+                    (Some(s), _) => format!("from = sheet {}", scalar(s)),
+                    (None, Some(f)) => format!("from = faces {}", refs(f)),
+                    _ => format!("from = {}", scalar(&from)),
+                };
+                lines.push(line);
+            }
+            if let Some(Value::Array(groups)) = rest.remove("faces") {
+                for (i, g) in groups.iter().enumerate() {
+                    let faces: Vec<String> = g["faces"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|f| reference(f).unwrap_or_else(|| scalar(f)))
+                        .collect();
+                    lines.push(format!(
+                        "faces[{i}] = {}, {}: {}",
+                        scalar(&g["front"]),
+                        scalar(&g["back"]),
+                        faces.join(", ")
+                    ));
+                }
+            }
+        }
+        // A tweak's groups, each on one line: a move's
+        // `groups[0] = 1 mm: base/<hex>, base/<hex>`, a replacement's
+        // `groups[0] = lid/<hex>: base/<hex>` (its surface first).
+        Some("ryucad.feature")
+            if matches!(
+                o.get("type").and_then(Value::as_str),
+                Some("move_face" | "replace_face")
+            ) =>
+        {
+            if let Some(Value::Array(groups)) = rest.remove("groups") {
+                for (i, g) in groups.iter().enumerate() {
+                    let head = g
+                        .get("distance")
+                        .or_else(|| g.get("with"))
+                        .map(|x| reference(x).unwrap_or_else(|| scalar(x)))
+                        .unwrap_or_default();
+                    let faces: Vec<String> = g["faces"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|f| reference(f).unwrap_or_else(|| scalar(f)))
+                        .collect();
+                    lines.push(format!("groups[{i}] = {head}: {}", faces.join(", ")));
+                }
+            }
+        }
         // A shell's or offset's face groups, each on one line:
         // `faces[0] = 4 mm: base/<hex>, base/<hex>`.
         Some("ryucad.feature")
@@ -2260,6 +2338,20 @@ mod tests {
     }
 
     #[test]
+    fn a_tweaks_changes_are_by_field() {
+        let n = |k: u8| json!({"feature": "b", "name": format!("{k:032x}")});
+        let before = json!({"format": 16, "kind": "ryucad.feature", "type": "move_face",
+                            "target": "b", "by": "offset", "distance": "1 mm", "faces": [n(1)]});
+        let mut after = before.clone();
+        after["distance"] = json!("2 mm");
+        after["groups"] = json!([{"distance": "3 mm", "faces": [n(2)]}]);
+        let mut out = Vec::new();
+        changes("", Some(&before), Some(&after), &mut out);
+        let pointers: Vec<&str> = out.iter().map(|c| c["at"].as_str().unwrap()).collect();
+        assert_eq!(pointers, ["/distance", "/groups"]);
+    }
+
+    #[test]
     fn a_flanges_changes_are_by_field() {
         let n = |k: u8| format!("{k:032x}");
         let before = json!({"format": 11, "kind": "ryucad.feature", "type": "flange", "target": "plate",
@@ -2312,6 +2404,55 @@ mod tests {
     }
 
     #[test]
+    fn surface_features_textconv_a_line_a_side_and_a_group() {
+        const A: &str = "0123456789abcdef0123456789abcdef";
+        let n = crate::doc::surface::FORMAT;
+        let fill = text(
+            json!({"format": n, "kind": "ryucad.feature", "type": "fill",
+            "sides": [{"edge": {"feature": "wall", "name": A}, "tangent": true},
+                      {"curve": {"feature": "s2", "entity": "a1"}}, {"curve": {"feature": "p1"}}],
+            "tolerance": "0.001 mm", "angle": "1 deg"}),
+        );
+        for line in [
+            format!("side 1 = wall/{A} (tangent)"),
+            "side 2 = s2/a1".into(),
+            "side 3 = p1".into(),
+            "tolerance = 0.001 mm".into(),
+            "angle = 1 deg".into(),
+        ] {
+            assert!(fill.lines().any(|l| l == line), "{line:?} in\n{fill}");
+        }
+        let sew = text(json!({"format": n, "kind": "ryucad.feature", "type": "sew",
+            "sheets": ["top", "side1"], "tolerance": "0.01 mm", "solid": true}));
+        assert!(sew.lines().any(|l| l == "sheets = [top, side1]"), "{sew}");
+        let th = text(
+            json!({"format": n, "kind": "ryucad.feature", "type": "thicken",
+            "from": {"sheet": "skin"}, "front": "2 mm", "back": "0 mm", "operation": "new",
+            "faces": [{"front": "3 mm", "back": "0 mm", "faces": [{"feature": "skin", "name": A}]}]}),
+        );
+        for line in [
+            "from = sheet skin".to_owned(),
+            format!("faces[0] = 3 mm, 0 mm: skin/{A}"),
+        ] {
+            assert!(th.lines().any(|l| l == line), "{line:?} in\n{th}");
+        }
+        let th = text(
+            json!({"format": n, "kind": "ryucad.feature", "type": "thicken",
+            "from": {"faces": [{"feature": "base", "name": A}]}, "front": "2 mm", "back": "0 mm",
+            "operation": "join", "targets": ["base"]}),
+        );
+        assert!(
+            th.lines().any(|l| l == format!("from = faces base/{A}")),
+            "{th}"
+        );
+        let x = text(
+            json!({"format": n, "kind": "ryucad.feature", "type": "extract",
+            "faces": [{"feature": "base", "name": A}]}),
+        );
+        assert!(x.lines().any(|l| l == format!("faces = [base/{A}]")), "{x}");
+    }
+
+    #[test]
     fn a_shells_groups_read_on_a_line_each() {
         let (a, b) = (
             "0123456789abcdef0123456789abcdef",
@@ -2344,6 +2485,59 @@ mod tests {
             )
         );
     }
+    #[test]
+    fn a_tweaks_groups_read_on_a_line_each() {
+        let (a, b) = (
+            "0123456789abcdef0123456789abcdef",
+            "fedcba9876543210fedcba9876543210",
+        );
+        let v = json!({"format": 16, "kind": "ryucad.feature", "type": "move_face",
+            "target": "base", "by": "offset", "distance": "0.5 mm",
+            "faces": [{"feature": "base", "name": a}],
+            "groups": [{"distance": "1 mm",
+                        "faces": [{"feature": "base", "name": b}, {"feature": "base", "name": a}]}],
+            "tangent": false});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature move_face (format 16)\n\
+                 by = offset\n\
+                 distance = 0.5 mm\n\
+                 faces = [base/{a}]\n\
+                 groups[0] = 1 mm: base/{b}, base/{a}\n\
+                 tangent = false\n\
+                 target = base\n"
+            )
+        );
+        let v = json!({"format": 16, "kind": "ryucad.feature", "type": "move_face",
+            "target": "base", "by": "rotate", "axis": {"feature": "base", "name": b},
+            "angle": "3 deg", "faces": [{"feature": "base", "name": a}]});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature move_face (format 16)\n\
+                 angle = 3 deg\n\
+                 axis = base/{b}\n\
+                 by = rotate\n\
+                 faces = [base/{a}]\n\
+                 target = base\n"
+            )
+        );
+        let v = json!({"format": 16, "kind": "ryucad.feature", "type": "replace_face",
+            "target": "base",
+            "groups": [{"with": {"feature": "lid", "name": b}, "faces": [{"feature": "base", "name": a}]},
+                       {"with": "xy", "faces": [{"feature": "base", "name": b}]}]});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature replace_face (format 16)\n\
+                 groups[0] = lid/{b}: base/{a}\n\
+                 groups[1] = xy: base/{b}\n\
+                 target = base\n"
+            )
+        );
+    }
+
     use crate::session::Session;
     use serde_json::json;
 

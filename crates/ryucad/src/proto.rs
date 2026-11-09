@@ -119,10 +119,12 @@ pub struct FeatureFields {
     pub surface: Option<bool>,
     /// A revolve's axis: a line of its sketch, or a straight edge as
     /// `<part>/<feature>/<name>`. A circular pattern's: `x`, `y`, `z`, or
-    /// an edge or face as `<part>/<feature>/<name>`.
+    /// an edge or face as `<part>/<feature>/<name>`. A move_face's
+    /// (rotate): any axis.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axis: Option<String>,
-    /// A revolve's angle, or `"full"`; a chamfer's angle to its face.
+    /// A revolve's angle, or `"full"`; a chamfer's angle to its face; a
+    /// move_face's (rotate), right-handed about its axis.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub angle: Option<Value>,
     /// Revolve half the angle each side of the sketch's plane.
@@ -148,12 +150,19 @@ pub struct FeatureFields {
     pub tools: Option<Vec<String>>,
     /// A fillet's or chamfer's groups, each as a file has it but with its
     /// edges and face as `<part>/<feature>/<name>` (or `{feature, name}`).
+    /// A move_face's `[{distance, faces}]`, a replace_face's
+    /// `[{with, faces}]` (`with` a face or a plane as text).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub groups: Option<Value>,
     /// Whether a fillet or chamfer grows each edge to its tangent chain
     /// (true when left out of a new one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub propagate: Option<bool>,
+    /// Whether a face tweak moves faces tangent to the ones it names with
+    /// them (true when left out of a new one; `false` keeps the kernel's
+    /// `tangency_broken`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tangent: Option<bool>,
     /// A fillet's one group: its radius.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<Value>,
@@ -204,7 +213,8 @@ pub struct FeatureFields {
     /// A linear pattern's direction: `x`, `y`, `z`, or a straight edge or
     /// planar face as `<part>/<feature>/<name>`. A binormal sweep's: any
     /// axis, or a plane's normal (a datum, a helix's axis by its ID). A
-    /// shell's: `inward` or `outward`.
+    /// shell's: `inward` or `outward`. A move_face's (translate): any
+    /// axis, or a plane's normal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direction: Option<String>,
     /// A linear pattern's spacing along its direction.
@@ -257,7 +267,8 @@ pub struct FeatureFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub b_offset: Option<Value>,
     /// A slider's, cylindrical's or planar mate's distance along `a`'s z;
-    /// `""` lets it go. An offset's: positive outwards, zero allowed.
+    /// `""` lets it go. An offset's: positive outwards, zero allowed. A
+    /// move_face's: along its direction, or (offset) positive outwards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distance: Option<Value>,
     /// The instances an instance pattern copies.
@@ -267,7 +278,8 @@ pub struct FeatureFields {
     /// `angle`, `three_points`, `parallel`, `axis_point`, `normal_to` or
     /// `midplane`; an axis `of`, `two_points`, `planes` or `normal`; a
     /// point `of`, `coordinates`, `along`, `intersection`, `projection` or
-    /// `midpoint`. A new `by` keeps only the fields it takes.
+    /// `midpoint`. A move_face's motion: `translate`, `rotate` or
+    /// `offset`. A new `by` keeps only the fields it takes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
     /// A datum plane's base plane (`offset`, `angle`, `parallel`), or
@@ -399,7 +411,8 @@ pub struct FeatureFields {
     pub open: Option<Vec<String>>,
     /// A shell's or offset's face groups, replacing them all:
     /// `[{"thickness" | "distance": Q, "faces": ["<part>/<solid>/<name>", ...]}]`
-    /// (`[]` for none).
+    /// (`[]` for none). A move_face's faces, each `<part>/<solid>/<name>`,
+    /// replacing them all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub faces: Option<Value>,
     /// The solid a mirror copies, by the feature that founded it.
@@ -436,9 +449,46 @@ pub struct FeatureFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ends: Option<Value>,
     /// The side face each named edge of a flange folds towards, each
-    /// `{edge, side}`; `[]` takes every side away.
+    /// `{edge, side}`; `[]` takes every side away. A fill's sides in
+    /// order, replacing them all: each `{"edge": text, "tangent": bool}`
+    /// or `{"curve": text}` (an edge `<part>/<solid>/<name>`, a sketch's
+    /// curve `<part>/<sketch>/<entity>`, a path or helix
+    /// `<part>/<feature>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sides: Option<Value>,
+    /// A fill's or a sew's tolerance: a length from 0.00001 mm to 0.1 mm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance: Option<Value>,
+    /// Faces given one by one, two or more (`--face` repeated): an
+    /// extract's faces, or the faces a thicken thickens. One is `face`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_list: Option<Vec<String>>,
+    /// A sew's sheets, by the features that founded them (two or more);
+    /// from the CLI, a thicken's one sheet too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheets: Option<Vec<String>>,
+    /// The sheet a thicken thickens and consumes, by its founder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<String>,
+    /// Whether a sew that closes up makes a solid (true by default; the
+    /// file's `solid`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub make_solid: Option<bool>,
+    /// The faces a thicken thickens, each `<part>/<solid>/<name>`, of one
+    /// body (they are extracted first; the body is left as it was).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_faces: Option<Vec<String>>,
+    /// A thicken's thickness along its faces' normals, zero or more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub front: Option<Value>,
+    /// A thicken's thickness against its faces' normals, zero or more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back: Option<Value>,
+    /// A thicken's face groups, replacing them all:
+    /// `[{"front": Q, "back": Q, "faces": ["<part>/<solid>/<name>", ...]}]`
+    /// (`[]` for none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_sides: Option<Value>,
     /// An unfold's fixed face, a side face of the flange held still
     /// (`<part>/<solid>/<name>`, written `fixed`); `""` for the kernel's
     /// default.

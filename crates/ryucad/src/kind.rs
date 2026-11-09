@@ -112,22 +112,44 @@ pub fn need(owner: &Id, role: &str, solid: &Id, body: &Body, want: Want) -> Resu
     }
 }
 
-/// The bodies feature `f` reads where a solid goes, each with its role:
-/// a boolean's target and tools, a mirror's source, every other
-/// feature's targets (`target` for a shell, offset and split).
-pub fn bodies_read(f: &crate::doc::files::Feature) -> Vec<(&'static str, &Id)> {
+/// The bodies feature `f` names, each with its role and what it wants of
+/// it: a boolean's target and tools, a mirror's source, a sew's sheets
+/// (`Sheet`), a thicken's sheet (`Sheet`, `from`), and every other
+/// feature's targets (`target` for a shell, offset and split), all
+/// `Solid` but those.
+pub fn bodies_read(f: &crate::doc::files::Feature) -> Vec<(&'static str, &Id, Want)> {
     use crate::doc::files::Feature as F;
     match f {
-        F::Boolean(b) => std::iter::once(("target", &b.target))
-            .chain(b.tools.iter().map(|t| ("tools", t)))
+        F::Boolean(b) => std::iter::once(("target", &b.target, Want::Solid))
+            .chain(b.tools.iter().map(|t| ("tools", t, Want::Solid)))
             .collect(),
-        F::Mirror(m) => std::iter::once(("solid", &m.solid))
-            .chain(f.targets().into_iter().map(|t| ("targets", t)))
+        F::Mirror(m) => std::iter::once(("solid", &m.solid, Want::Solid))
+            .chain(f.targets().into_iter().map(|t| ("targets", t, Want::Solid)))
             .collect(),
-        F::Shell(_) | F::Offset(_) | F::Split(_) => {
-            f.targets().into_iter().map(|t| ("target", t)).collect()
+        F::Shell(_) | F::Offset(_) | F::Split(_) | F::MoveFace(_) | F::ReplaceFace(_) => f
+            .targets()
+            .into_iter()
+            .map(|t| ("target", t, Want::Solid))
+            .collect(),
+        _ => {
+            let consumes = f.consumes();
+            f.targets()
+                .into_iter()
+                .map(|t| match consumes.contains(&t) {
+                    true => (sheet_role(f), t, Want::Sheet),
+                    false => ("targets", t, Want::Solid),
+                })
+                .collect()
         }
-        _ => f.targets().into_iter().map(|t| ("targets", t)).collect(),
+    }
+}
+
+/// The role a feature names the sheets it consumes in: a sew's `sheets`,
+/// a thicken's `from`.
+fn sheet_role(f: &crate::doc::files::Feature) -> &'static str {
+    match f {
+        crate::doc::files::Feature::Thicken(_) => "from",
+        _ => "sheets",
     }
 }
 
@@ -143,8 +165,15 @@ pub fn check(
     results: &dyn crate::rebuild::Results,
 ) -> Result<()> {
     let solids = crate::solid::Solids::of_order(part, order);
-    for (role, t) in bodies_read(f) {
-        match crate::rebuild::target_as(part, &solids, id, role, t, results) {
+    // A face tweak takes a sheet as well as a solid (design 400).
+    let sheets = crate::tweak::takes_sheets(f);
+    for (role, t, want) in bodies_read(f) {
+        let need = crate::rebuild::Need {
+            role,
+            want: (!sheets || want != Want::Solid).then_some(want),
+            changes: true,
+        };
+        match crate::rebuild::body_as(part, &solids, id, t, need, results) {
             Err(e) if e.code == Code::WrongBodyKind => return Err(e),
             _ => {}
         }
