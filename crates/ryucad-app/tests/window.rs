@@ -1921,7 +1921,9 @@ fn a_release_is_proposed_synced_and_made_obsolete_from_the_releases_tab() {
     p.ok(&["pdm", "init"]);
     p.ok(&["props", "set", "p", "number=100"]);
     let p = p.committed();
-    let mut h = window(&p);
+    // Taller: the tab's buttons sit under the status line at 1000 under
+    // the mode bar.
+    let mut h = sized(&p, 1150.0);
     frames(&mut h, loaded);
     h.get_by_label("Releases").click();
     frames(&mut h, |a| {
@@ -1931,19 +1933,8 @@ fn a_release_is_proposed_synced_and_made_obsolete_from_the_releases_tab() {
     h.get_by_label("Releases of p");
     h.get_by_label("No release records yet");
     // Propose: the dialog says the label, then the record is written.
-    {
-        use egui_kittest::kittest::NodeT;
-        eprintln!(
-            "DEBUG mode {:?} disabled {}",
-            h.state().opened().ws.mode,
-            h.get_by_label("Propose…").accesskit_node().is_disabled()
-        );
-    }
     h.get_by_label("Propose…").click();
-    frames(&mut h, |a| {
-        a.opened().ws.releases.proposal.is_some() || a.opened().ws.releases.error.is_some()
-    });
-    eprintln!("DEBUG error {:?}", h.state().opened().ws.releases.error);
+    frames(&mut h, |a| a.opened().ws.releases.proposal.is_some());
     shown(&mut h, "It will be revision A.");
     h.get_by_label("Note").click();
     h.get_by_label("Note").set_text_value_accesskit("first");
@@ -5305,21 +5296,18 @@ fn a_face_is_annotated_from_its_context_menu() {
         "the comment box opens"
     );
     h.run_steps(2);
+    h.get_by_label("What should change here?").focus();
+    h.run_steps(1);
     h.get_by_label("What should change here?")
         .type_text("Move this hole 5 mm towards the edge");
     h.run_steps(1);
-    // The box's button: the toolbar's mode button is named alike.
-    h.get_all_by_label("Annotate").last().unwrap().click();
-    for _ in 0..50 {
-        h.step();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    eprintln!(
-        "DEBUG composing {:?} errors {:?} labels {:?}",
-        h.state().opened().view.composing,
-        h.state().opened().ws.errors,
-        h.query_all_by_label("Annotate").count()
-    );
+    // The box's button: the toolbar's mode button is named alike, so take
+    // the one inside the box.
+    let boxed = h.get_by_label("Comment for the agent").rect();
+    h.get_all_by_label("Annotate")
+        .find(|n| boxed.contains(n.rect().center()))
+        .expect("the box's Annotate")
+        .click();
     frames(&mut h, |a| a.opened().ws.annotations.all.len() == 1);
     let list = p.ok(&["annotations", "list"]);
     let a = &list["annotations"][0];

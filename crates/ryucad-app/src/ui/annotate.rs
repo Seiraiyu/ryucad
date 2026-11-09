@@ -29,7 +29,11 @@ pub fn compose(ctx: &egui::Context, view: &mut View, ws: &mut Workspace, at: egu
                     .desired_rows(3),
             );
             r.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::Role::MultilineTextInput, true, "What should change here?")
+                egui::WidgetInfo::labeled(
+                    egui::Role::MultilineTextInput,
+                    true,
+                    "What should change here?",
+                )
             });
             ui.horizontal(|ui| {
                 let ok = !c.text.trim().is_empty();
