@@ -119,12 +119,14 @@ pub fn tweak_case(data: &[u8]) -> Option<TweakCase> {
                 motion,
                 tangent,
                 topology: Topology::Keep,
+                blends: Default::default(),
             })
         }
         1 => Op::Offset(OffsetFacesSpec {
             faces: chosen.iter().map(|&n| (n, sign * step)).collect(),
             tangent,
             topology: Topology::Keep,
+            blends: Default::default(),
         }),
         2 => {
             // The first face's own surface turned a little about the
@@ -136,6 +138,7 @@ pub fn tweak_case(data: &[u8]) -> Option<TweakCase> {
             Op::Replace(ReplaceSpec {
                 faces: vec![(first.0, s.transformed(&turn_about(at, axis, turn)))],
                 topology: Topology::Keep,
+                blends: Default::default(),
             })
         }
         _ => {
@@ -171,6 +174,7 @@ pub fn tweak_case(data: &[u8]) -> Option<TweakCase> {
                     .collect(),
                 tangent,
                 topology: Topology::Keep,
+                blends: Default::default(),
             })
         }
     };

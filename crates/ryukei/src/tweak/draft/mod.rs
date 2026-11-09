@@ -36,6 +36,9 @@ pub struct DraftSpec {
     pub tangent: bool,
     /// Whether the tweak may change the body's topology.
     pub topology: Topology,
+    /// Whether blends standing on the drafted faces are made again where
+    /// the draft would break them.
+    pub blends: crate::tweak::Blends,
 }
 
 /// What drafted faces turn about.
@@ -125,6 +128,18 @@ pub fn draft_with(
 }
 
 fn draft_in(
+    key: OpKey,
+    body: &Body,
+    spec: &DraftSpec,
+    meter: &Meter,
+) -> Result<(Body, Journal, DraftReport), Error> {
+    let named: Vec<Name> = spec.faces.iter().map(|f| f.face).collect();
+    crate::tweak::blends::tweak_with(key, body, &named, spec.blends, meter, |b, m| {
+        draft_on(key, b, spec, m)
+    })
+}
+
+fn draft_on(
     key: OpKey,
     body: &Body,
     spec: &DraftSpec,

@@ -77,6 +77,9 @@ pub struct MoveSpec {
     pub tangent: bool,
     /// Whether the tweak may change the body's topology.
     pub topology: Topology,
+    /// Whether blends standing on the changed faces are made again where
+    /// the tweak would break them.
+    pub blends: Blends,
 }
 
 /// `body` with `spec.faces` moved by `spec.motion`: a new body and the
@@ -99,6 +102,19 @@ pub fn move_faces_with(
 }
 
 fn move_faces_in(
+    key: OpKey,
+    body: &Body,
+    spec: &MoveSpec,
+    meter: &Meter,
+) -> Result<(Body, Journal), Error> {
+    let named = spec.faces.clone();
+    let (out, journal, ()) = blends::tweak_with(key, body, &named, spec.blends, meter, |b, m| {
+        move_faces_on(key, b, spec, m).map(|(b, j)| (b, j, ()))
+    })?;
+    Ok((out, journal))
+}
+
+fn move_faces_on(
     key: OpKey,
     body: &Body,
     spec: &MoveSpec,
@@ -128,6 +144,9 @@ pub struct OffsetFacesSpec {
     pub tangent: bool,
     /// Whether the tweak may change the body's topology.
     pub topology: Topology,
+    /// Whether blends standing on the changed faces are made again where
+    /// the tweak would break them.
+    pub blends: Blends,
 }
 
 /// `body` with `spec`'s faces offset, the rest staying: their edges and
@@ -152,6 +171,19 @@ pub fn offset_faces_with(
 }
 
 fn offset_faces_in(
+    key: OpKey,
+    body: &Body,
+    spec: &OffsetFacesSpec,
+    meter: &Meter,
+) -> Result<(Body, Journal), Error> {
+    let named: Vec<Name> = spec.faces.iter().map(|&(n, _)| n).collect();
+    let (out, journal, ()) = blends::tweak_with(key, body, &named, spec.blends, meter, |b, m| {
+        offset_faces_on(key, b, spec, m).map(|(b, j)| (b, j, ()))
+    })?;
+    Ok((out, journal))
+}
+
+fn offset_faces_on(
     key: OpKey,
     body: &Body,
     spec: &OffsetFacesSpec,
@@ -205,6 +237,9 @@ pub struct ReplaceSpec {
     pub faces: Vec<(Name, crate::geom::Surface)>,
     /// Whether the tweak may change the body's topology.
     pub topology: Topology,
+    /// Whether blends standing on the changed faces are made again where
+    /// the tweak would break them.
+    pub blends: Blends,
 }
 
 /// `body` with each of `spec`'s faces on its new surface, the face's
@@ -229,6 +264,19 @@ pub fn replace_faces_with(
 }
 
 fn replace_faces_in(
+    key: OpKey,
+    body: &Body,
+    spec: &ReplaceSpec,
+    meter: &Meter,
+) -> Result<(Body, Journal), Error> {
+    let named: Vec<Name> = spec.faces.iter().map(|(n, _)| *n).collect();
+    let (out, journal, ()) = blends::tweak_with(key, body, &named, spec.blends, meter, |b, m| {
+        replace_faces_on(key, b, spec, m).map(|(b, j)| (b, j, ()))
+    })?;
+    Ok((out, journal))
+}
+
+fn replace_faces_on(
     key: OpKey,
     body: &Body,
     spec: &ReplaceSpec,

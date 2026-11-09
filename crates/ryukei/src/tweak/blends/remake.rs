@@ -144,42 +144,345 @@ fn refused_edge(e: &BlendError) -> Option<Name> {
 
 /// `blends` made again on `body`, each with its kind, on the edges
 /// between its supports: one blend call. A blend with no edge there, or
-/// one the call refuses, is `BlendLost` naming its least face.
+/// one the call refuses, is `BlendLost` naming its least face. Where the
+/// call refuses `Overflow` because a cap-closed feature (a hole, a boss)
+/// stands in a blend's strip on one of its supports, the feature is
+/// capped, the blends made on the capped body, and the feature cut or
+/// added again by a boolean ([`through_features`]).
 fn reblend(
     key: OpKey,
+    orig: &Body,
     body: &Body,
     blends: &[(Recognised, BlendKind)],
     m: &Meter,
 ) -> Result<(Body, Journal), Error> {
+    match reblend_plain(key, orig, body, blends, m) {
+        Err((Error::InvalidBlend(BlendError::Overflow { edge, face }), _))
+            if blends.iter().any(|(b, _)| b.supports.contains(&face)) =>
+        {
+            match through_features(key, orig, body, blends, edge, face, m) {
+                Some(r) => r,
+                None => reblend_plain(key, orig, body, blends, m).map_err(|(_, lost)| lost),
+            }
+        }
+        r => r.map_err(|(_, lost)| lost),
+    }
+}
+
+/// The feature on face `host` (a cap-closed set across one of its inner
+/// loops) whose loop lies nearest `edge`: its faces.
+fn feature_near(body: &Body, host: Name, edge: Name) -> Option<Vec<Name>> {
+    let (Some(EntityId::Face(h)), Some(EntityId::Edge(e))) = (body.by_name(host), body.by_name(edge)) else {
+        return None;
+    };
+    let ed = &body.edges[e];
+    let curve = &body.curves[ed.curve];
+    let mut best: Option<(f64, Vec<Name>)> = None;
+    for l in body.face_loops(h) {
+        let fins: Vec<_> = body.loop_fins(l).collect();
+        let edges: BTreeSet<_> = fins.iter().map(|&fin| body.fins[fin].edge).collect();
+        if edges.contains(&e) {
+            continue;
+        }
+        let Some(seed) = fins.first().and_then(|&fin| recognise::across(body, body.fins[fin].edge, h)) else {
+            continue;
+        };
+        let Ok(faces) = crate::tweak::delete::feature_faces(body, body.faces[seed].name) else {
+            continue;
+        };
+        let d = edges
+            .iter()
+            .flat_map(|&x| [body.edges[x].start, body.edges[x].end])
+            .map(|v| {
+                let p = body.vertices[v].point;
+                curve.point(curve.project(p).param).distance(p)
+            })
+            .fold(f64::INFINITY, f64::min);
+        if best.as_ref().is_none_or(|(b, _)| d < *b) {
+            best = Some((d, faces));
+        }
+    }
+    best.map(|(_, f)| f)
+}
+
+/// The blends made through the features standing in their strips: each
+/// feature nearest an overflowing rail capped (at most
+/// [`FEATURES`] of them), the blends made on the capped body, then the
+/// material the features took away subtracted and what they added
+/// united, both found from the capped body and `body` by booleans. The
+/// features' faces take back their names through the booleans' journals.
+/// `None` where no feature is found or the capped body's blends still
+/// overflow on no feature.
+fn through_features(
+    key: OpKey,
+    orig: &Body,
+    body: &Body,
+    blends: &[(Recognised, BlendKind)],
+    mut edge: Name,
+    mut face: Name,
+    m: &Meter,
+) -> Option<Result<(Body, Journal), Error>> {
+    use crate::boolean::{BooleanOp, Tool};
+    use crate::geom::Rigid;
+    use crate::name::{EditRole, Role, ToolKey};
+    let mut capped = body.clone();
+    let mut taken: Vec<Name> = Vec::new();
+    for _ in 0..FEATURES {
+        let faces = feature_near(&capped, face, edge)?;
+        let spec = DeleteSpec {
+            faces,
+            heal: Heal::Cap,
+        };
+        let (next, _) = match delete_faces_in(key, &capped, &spec, m) {
+            Ok(r) => r,
+            Err(e) => return Some(Err(e)),
+        };
+        taken.extend(spec.faces);
+        capped = next;
+        match reblend_plain(key, orig, &capped, blends, m) {
+            Err((Error::InvalidBlend(BlendError::Overflow { edge: e, face: f }), _))
+                if blends.iter().any(|(b, _)| b.supports.contains(&f)) =>
+            {
+                (edge, face) = (e, f);
+            }
+            Err((_, lost)) => return Some(Err(lost)),
+            Ok((round, _)) => {
+                let r = (|| -> Result<(Body, Journal), Error> {
+                    let (out, steps) = recut(key, body, &capped, round, &taken, m)?;
+                    let mut out = out;
+                    let remade = blends.iter().flat_map(|(b, _)| b.faces.iter().copied());
+                    for n in taken.clone().into_iter().chain(remade) {
+                        if let Some(x) = follow(n, &steps, &out) {
+                            rename(orig, &mut out, x, n);
+                        }
+                    }
+                    Ok((out, Journal::new()))
+                })();
+                return Some(r);
+            }
+        }
+    }
+    None
+}
+
+/// The features `taken` (faces of `body`, capped in `capped`) made again
+/// on `round`, the capped body blended: what they took away is the lump
+/// of `capped` the sheet of their faces cuts off, subtracted; what they
+/// added the lump of `body` the sheet of the capped hosts cuts off,
+/// united. A lump is the one holding the fewest of the other body's own
+/// face names. Returns the body and the journals in order.
+fn recut(
+    key: OpKey,
+    body: &Body,
+    capped: &Body,
+    round: Body,
+    taken: &[Name],
+    m: &Meter,
+) -> Result<(Body, Vec<Journal>), Error> {
+    use crate::boolean::{BooleanOp, Tool, boolean_in, divide_in};
+    use crate::geom::Rigid;
+    use crate::name::{EditRole, Role, ToolKey};
+    let k = |i: u128| OpKey(Name::derive(key, Role::Edit(EditRole::Feature), &[Name::from_u128(i)]).to_u128());
+    fn tool(b: &Body) -> Tool<'_> {
+        Tool {
+            key: ToolKey(1),
+            body: b,
+            place: Rigid::IDENTITY,
+        }
+    }
+    let own = |b: &Body, of: &Body| of.faces().filter(|&f| b.by_name(of.faces[f].name).is_some()).count();
+    // The plug: `capped` cut by the sheet of the features' faces.
+    let (walls, _) = crate::sheet::extract(k(1), body, taken)?;
+    let mut steps = Vec::new();
+    let mut out = round;
+    let dv = divide_in(k(2), capped, &[tool(&walls)], m);
+    if std::env::var("DBG").is_ok() { eprintln!("taken {} walls faces {} divide {:?}", taken.len(), walls.faces().count(), dv.as_ref().map(|(d,_)| (d.front.len(), d.back.len(), d.apart.len())).err()); }
+    if let Ok((d, j)) = dv {
+        let lumps: Vec<&Body> = d.front.iter().chain(&d.back).collect();
+        if lumps.len() >= 2 {
+            let plug = lumps.iter().min_by_key(|b| own(b, capped)).expect("two");
+            steps.push(j);
+            let (o, j) = boolean_in(k(3), BooleanOp::Subtract, &out, &[tool(plug)], m)?;
+            steps.push(j);
+            return Ok((o, steps));
+        }
+    }
+    // An addition: `body` cut by the sheet of the hosts the caps closed.
+    let taken_set: BTreeSet<Name> = taken.iter().copied().collect();
+    let hosts: Vec<Name> = body
+        .faces()
+        .filter(|&f| !taken_set.contains(&body.faces[f].name))
+        .filter(|&f| neighbours(body, f).iter().any(|n| taken_set.contains(n)))
+        .map(|f| body.faces[f].name)
+        .filter(|&n| capped.by_name(n).is_some())
+        .collect();
+    let (lid, _) = crate::sheet::extract(k(4), capped, &hosts)?;
+    let (d, j) = divide_in(k(5), body, &[tool(&lid)], m)?;
+    let lumps: Vec<&Body> = d.front.iter().chain(&d.back).collect();
+    let Some(boss) = lumps.iter().min_by_key(|b| own(b, body)) else {
+        return Err(TweakError::Uncertain { at: taken[0] }.into());
+    };
+    steps.push(j);
+    let (o, j) = boolean_in(k(6), BooleanOp::Unite, &out, &[tool(boss)], m)?;
+    steps.push(j);
+    out = o;
+    Ok((out, steps))
+}
+
+/// Features a blend made again may be made through.
+const FEATURES: usize = 8;
+
+/// The one live face of `out` that name `n` became through `steps`'
+/// placings and splits, if there is exactly one.
+fn follow(n: Name, steps: &[Journal], out: &Body) -> Option<EntityId> {
+    let mut now: BTreeSet<Name> = BTreeSet::from([n]);
+    for j in steps {
+        let mut next = BTreeSet::new();
+        for x in &now {
+            let mut went = false;
+            for e in j.events() {
+                match e {
+                    Event::Placed { from, to, .. } if from == x => {
+                        next.insert(*to);
+                        went = true;
+                    }
+                    Event::Split { parent, children } if parent == x => {
+                        next.extend(children.iter().copied());
+                        went = true;
+                    }
+                    _ => {}
+                }
+            }
+            if !went {
+                next.insert(*x);
+            }
+        }
+        // A split after a placing: follow the placed names too.
+        for e in j.events() {
+            if let Event::Split { parent, children } = e
+                && next.contains(parent)
+            {
+                next.remove(parent);
+                next.extend(children.iter().copied());
+            }
+        }
+        now = next;
+    }
+    let live: Vec<EntityId> = now
+        .iter()
+        .filter_map(|x| out.by_name(*x))
+        .filter(|x| matches!(x, EntityId::Face(_)))
+        .collect();
+    match live.as_slice() {
+        [x] => Some(*x),
+        _ => None,
+    }
+}
+
+/// [`reblend`] without the features: the blend's refusal beside the
+/// `BlendLost` it maps to.
+fn reblend_plain(
+    key: OpKey,
+    orig: &Body,
+    body: &Body,
+    blends: &[(Recognised, BlendKind)],
+    m: &Meter,
+) -> Result<(Body, Journal), (Error, Error)> {
     let mut edges = Vec::new();
     let mut owner: BTreeMap<Name, Name> = BTreeMap::new();
     for (b, kind) in blends {
         let found = between(body, b.supports);
         if found.is_empty() {
-            return Err(TweakError::BlendLost {
+            let lost: Error = TweakError::BlendLost {
                 face: b.faces[0],
                 reason: BlendLoss::NoEdge,
             }
-            .into());
+            .into();
+            return Err((lost.clone(), lost));
         }
         for e in found {
             owner.insert(e, b.faces[0]);
             edges.push(EdgeBlend { edge: e, kind: *kind });
         }
     }
-    crate::blend::blend_in(key, body, &edges, m).map_err(|e| match &e {
-        Error::InvalidBlend(be) => {
-            let face = refused_edge(be)
-                .and_then(|n| owner.get(&n).copied())
-                .unwrap_or(blends[0].0.faces[0]);
-            TweakError::BlendLost {
-                face,
-                reason: loss(be),
+    let (mut out, journal) = crate::blend::blend_in(key, body, &edges, m).map_err(|e| {
+        let lost = match &e {
+            Error::InvalidBlend(be) => {
+                let face = refused_edge(be)
+                    .and_then(|n| owner.get(&n).copied())
+                    .unwrap_or(blends[0].0.faces[0]);
+                TweakError::BlendLost {
+                    face,
+                    reason: loss(be),
+                }
+                .into()
             }
-            .into()
+            _ => e.clone(),
+        };
+        (e, lost)
+    })?;
+    name_blends(orig, &mut out, &journal, blends, &owner);
+    Ok((out, journal))
+}
+
+/// Gives each blend made again the names of its faces in `orig`: its new
+/// faces are those the blend's journal says replaced the edges it was
+/// made on; one new face for one old takes its name, and several are
+/// paired with the old faces on coincident surfaces, each pairing only
+/// where it is one to one.
+fn name_blends(
+    orig: &Body,
+    out: &mut Body,
+    journal: &Journal,
+    blends: &[(Recognised, BlendKind)],
+    owner: &BTreeMap<Name, Name>,
+) {
+    for (b, _) in blends {
+        let mut new: BTreeSet<Name> = BTreeSet::new();
+        for e in journal.events() {
+            if let Event::Replaced { old, new: faces } = e
+                && owner.get(old) == Some(&b.faces[0])
+            {
+                new.extend(faces.iter().copied().filter(|n| matches!(out.by_name(*n), Some(EntityId::Face(_)))));
+            }
         }
-        _ => e,
-    })
+        // Corner faces replace vertices, not edges: left to `restore`.
+        let new: Vec<Name> = new
+            .into_iter()
+            .filter(|n| match out.by_name(*n) {
+                Some(EntityId::Face(f)) => !matches!(out.surfaces[out.faces[f].surface], crate::geom::Surface::Sphere(_)),
+                _ => false,
+            })
+            .collect();
+        let surface = |body: &Body, n: Name| match body.by_name(n) {
+            Some(EntityId::Face(f)) => Some(body.surfaces[body.faces[f].surface].clone()),
+            _ => None,
+        };
+        if let ([o], [n]) = (b.faces.as_slice(), new.as_slice()) {
+            if let Some(EntityId::Face(f)) = out.by_name(*n) {
+                rename(orig, out, EntityId::Face(f), *o);
+            }
+            continue;
+        }
+        for &o in &b.faces {
+            let Some(so) = surface(orig, o) else { continue };
+            let on: Vec<Name> = new
+                .iter()
+                .copied()
+                .filter(|&n| surface(out, n).is_some_and(|sn| crate::intersect::coincident(&so, &sn) == Some(true)))
+                .collect();
+            let olds = b
+                .faces
+                .iter()
+                .filter(|&&p| surface(orig, p).is_some_and(|sp| on.iter().any(|&n| surface(out, n).is_some_and(|sn| crate::intersect::coincident(&sp, &sn) == Some(true)))))
+                .count();
+            if let ([n], 1) = (on.as_slice(), olds)
+                && let Some(x) = out.by_name(*n)
+            {
+                rename(orig, out, x, o);
+            }
+        }
+    }
 }
 
 /// The names of the faces around face `f`.
@@ -373,7 +676,7 @@ fn remake<X>(
             (b, k)
         })
         .collect();
-    let (mut out, j3) = reblend(key, &stepped, &todo, m)?;
+    let (mut out, j3) = reblend(key, body, &stepped, &todo, m)?;
     let back = restore(body, &mut out);
     let j = net(body, &out, &[&j1, &j2, &j3], &back);
     Ok((out, j, x))
@@ -431,13 +734,39 @@ pub(crate) fn breaks(e: &Error) -> bool {
     )
 }
 
-/// The tweak `run` made over the blends standing on `faces`: `None`
-/// where none does (the tweak's own refusal stands), or where the faces
-/// it names are themselves blends' faces.
+/// The faces round the entity a tweak's refusal names.
+fn blamed(body: &Body, e: &Error) -> BTreeSet<Name> {
+    let Error::InvalidTweak(t) = e else {
+        return BTreeSet::new();
+    };
+    let name = match t {
+        TweakError::TangencyBroken { edge } | TweakError::EdgeVanishes { edge } => *edge,
+        TweakError::VertexSplits { vertex } => *vertex,
+        TweakError::FaceCollapses { face }
+        | TweakError::GapNotHealed { face }
+        | TweakError::HealAmbiguous { face }
+        | TweakError::RegionTooSmall { face } => *face,
+        TweakError::SelfIntersecting { faces } => return faces.iter().copied().collect(),
+        _ => return BTreeSet::new(),
+    };
+    match body.by_name(name) {
+        Some(EntityId::Face(_)) => BTreeSet::from([name]),
+        Some(x) => faces_at(body, x),
+        None => BTreeSet::new(),
+    }
+}
+
+/// The tweak `run` made over the blends in its way: those standing on
+/// `faces`, and those holding or standing on the faces round what the
+/// tweak's own refusal `refused` names (a hole moved into a fillet's
+/// strip is refused at the fillet's support). `None` where no blend is in
+/// the way (the tweak's own refusal stands), or where the faces it names
+/// are themselves blends' faces.
 pub(crate) fn rebuild<X>(
     key: OpKey,
     body: &Body,
     faces: &[Name],
+    refused: &Error,
     m: &Meter,
     run: &impl Fn(&Body, &Meter) -> Result<(Body, Journal, X), Error>,
 ) -> Option<Result<(Body, Journal, X), Error>> {
@@ -446,11 +775,15 @@ pub(crate) fn rebuild<X>(
         Err(e) => return Some(Err(e)),
     };
     let named: BTreeSet<Name> = faces.iter().copied().collect();
+    let blame = blamed(body, refused);
     let kinds: BTreeMap<usize, BlendKind> = rec
         .blends
         .iter()
         .enumerate()
-        .filter(|(_, b)| b.supports.iter().any(|s| named.contains(s)) && !b.faces.iter().any(|f| named.contains(f)))
+        .filter(|(_, b)| {
+            b.supports.iter().chain(&b.faces).any(|s| named.contains(s) || blame.contains(s))
+        })
+        .filter(|(_, b)| !b.faces.iter().any(|f| named.contains(f)))
         .map(|(i, b)| (i, b.kind))
         .collect();
     if kinds.is_empty() {

@@ -80,6 +80,7 @@ fn spec(faces: &[Name], angle: f64, hinge: Hinge, tangent: bool) -> DraftSpec {
             .collect(),
         tangent,
         topology: Topology::Keep,
+        blends: Default::default(),
     }
 }
 

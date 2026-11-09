@@ -226,6 +226,7 @@ fn tweaks_are_bounded() {
         motion: Rigid::translation(ryukei::geom::Vector3::new(0.0, 0.0, 0.002)),
         tangent: false,
         topology: Topology::Keep,
+        blends: Default::default(),
     };
     let spent = bounded("move_faces", |w| move_faces_with(OpKey(8), &cube, &up, w));
     eprintln!("move_faces: {spent} units");
@@ -233,6 +234,7 @@ fn tweaks_are_bounded() {
         faces: vec![(top, 0.001), (side, 0.002)],
         tangent: false,
         topology: Topology::Keep,
+        blends: Default::default(),
     };
     let spent = bounded("offset_faces", |w| {
         offset_faces_with(OpKey(8), &cube, &out, w)
@@ -249,6 +251,7 @@ fn tweaks_are_bounded() {
     let flush = ReplaceSpec {
         faces: vec![(top, plane)],
         topology: Topology::Keep,
+        blends: Default::default(),
     };
     let spent = bounded("replace_faces", |w| {
         replace_faces_with(OpKey(8), &cube, &flush, w)
@@ -284,6 +287,7 @@ fn drafts_are_bounded() {
             .collect(),
         tangent: false,
         topology: Topology::Keep,
+        blends: Default::default(),
     };
     let spent = bounded("draft", |w| draft_with(OpKey(8), &cube, &spec, w));
     eprintln!("draft: {spent} units");
@@ -310,6 +314,7 @@ fn re_trims_are_bounded() {
         }],
         tangent: false,
         topology: Topology::Change,
+        blends: Default::default(),
     };
     let spent = bounded("re-trim", |w| draft_with(OpKey(8), &b, &spec, w));
     eprintln!("re-trim: {spent} units");

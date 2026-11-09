@@ -172,6 +172,6 @@ pub(crate) fn tweak_with<X>(
     match (&plain, blends) {
         (Ok(_), _) | (Err(_), Blends::Keep) => plain,
         (Err(e), Blends::Rebuild) if !remake::breaks(e) => plain,
-        (Err(_), Blends::Rebuild) => remake::rebuild(key, body, faces, m, &run).unwrap_or(plain),
+        (Err(e), Blends::Rebuild) => remake::rebuild(key, body, faces, e, m, &run).unwrap_or(plain),
     }
 }

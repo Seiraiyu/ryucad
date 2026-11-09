@@ -4,7 +4,7 @@
 //! along a curve that is no line or circle is no fillet here.
 
 use super::recognise::Canal;
-use crate::geom::{Cylinder, Frame, NurbsSurface, Point3, Surface, Torus, Vector3};
+use crate::geom::{Circle, Curve, Cylinder, Frame, Line, NurbsSurface, Point3, Surface, Torus, Vector3};
 use crate::intersect::coincide::within_implicit;
 use crate::intersect::implicit::Implicit;
 use crate::topo::{Body, FaceId};
@@ -69,14 +69,18 @@ pub(crate) fn fit(body: &Body, f: FaceId, n: &std::sync::Arc<NurbsSurface>, tol:
         let fr = Frame::new(c0, dir, hint).ok()?;
         (
             Surface::Cylinder(Cylinder::new(fr, r).ok()?),
-            Canal::Line(c0, dir),
+            Canal {
+                spine: Curve::Line(Line::new(c0, dir).ok()?),
+            },
         )
     } else {
         let (o, z, big) = circle(c0, c1, c2)?;
         let fr = Frame::new(o, z, c0 - o).ok()?;
         (
             Surface::Torus(Torus::new(fr, big, r).ok()?),
-            Canal::Circle(o, fr.x().get(), fr.y().get(), big),
+            Canal {
+                spine: Curve::Circle(Circle::new(fr, big).ok()?),
+            },
         )
     };
     let imp = Implicit::of(&candidate)?;
