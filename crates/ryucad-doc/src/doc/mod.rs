@@ -26,7 +26,9 @@ pub mod reference;
 pub mod sheet_metal;
 pub mod sketch;
 pub mod solid;
+pub mod surface;
 pub mod sweep;
+pub mod tweak;
 pub mod views;
 
 pub use ryu_doc::{canonical, id, source};

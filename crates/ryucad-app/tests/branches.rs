@@ -60,7 +60,7 @@ fn previewed(ws: &Workspace, arm: &str) -> bool {
 fn the_tab_lists_the_other_worktree_and_previews_merging_it() {
     let (p, arm) = two_worktrees();
     let arm_s = arm.to_str().unwrap().to_owned();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle()));
     ws.load_branches();
     assert!(ws.wait_until(WAIT, |ws| previewed(ws, &arm_s)));

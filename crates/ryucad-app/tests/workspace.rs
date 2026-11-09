@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 const WAIT: Duration = Duration::from_secs(30);
 
 fn open(p: &Project) -> Workspace {
-    Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap()
+    common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap()
 }
 
 /// The hash of the mesh the window holds for a feature of part `p`.
@@ -472,4 +472,28 @@ fn a_lost_daemon_is_a_toast_until_it_comes_back() {
         ws.toasts.shown().last().unwrap().text,
         "Connected to the daemon again"
     );
+}
+
+#[test]
+fn a_window_opens_in_view_and_its_mode_is_its_participants() {
+    use ryucad_app::core::modes::Mode;
+    let p = Project::new().with_part();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert_eq!(ws.mode, Mode::View);
+    assert!(ws.wait_until(WAIT, |ws| ws.myself().is_some_and(|m| m.mode == Mode::View)));
+    ws.set_mode(Mode::Annotate);
+    assert_eq!(ws.mode, Mode::Annotate);
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.myself().is_some_and(|m| m.mode == Mode::Annotate)
+    }));
+    // An agent sees it.
+    let list = p.ok(&["participants"]);
+    let me = list["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == ws.me())
+        .unwrap()
+        .clone();
+    assert_eq!(me["mode"], "annotate");
 }

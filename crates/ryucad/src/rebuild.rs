@@ -146,9 +146,11 @@ pub struct Made {
     pub hash: String,
     /// What a join, cut or hole applied, for a pattern to apply again.
     pub applied: Option<Arc<Applied>>,
-    /// An import's report: its file, product and what healing did (see
-    /// [`crate::import::report`]).
-    pub import: Option<Arc<Value>>,
+    /// A feature's report kept with its result: an import's (its file,
+    /// product and what healing did; see [`crate::import::report`]) or a
+    /// fill's (each side's deviation and angle, see
+    /// [`crate::surface::fill_report`]).
+    pub report: Option<Arc<Value>>,
     /// An unfold's flat: what a refold folds by and the flat pattern
     /// reads (plan 16.B).
     pub flat: Option<Arc<Flat>>,
@@ -251,7 +253,7 @@ impl Made {
             solids,
             hash,
             applied: None,
-            import: None,
+            report: None,
             flat: None,
             encoded: Default::default(),
         }
@@ -520,7 +522,7 @@ impl PartResult {
                         .collect();
                 }
                 if let Output::Solids(m) = o
-                    && let Some(rep) = &m.import
+                    && let Some(rep) = &m.report
                 {
                     return crate::import::reference_warnings(part, id, rep);
                 }
@@ -608,7 +610,9 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Split(_)
         | Feature::Flange(_)
         | Feature::Unfold(_)
-        | Feature::Refold(_) => Err(Error::new(
+        | Feature::Refold(_)
+        | Feature::MoveFace(_)
+        | Feature::ReplaceFace(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} makes no body of its own", f.type_name()),
         )
@@ -637,6 +641,13 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
             format!("import {id} is built from its file"),
         )
         .with("feature", id)),
+        Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_) => {
+            Err(Error::new(
+                Code::Internal,
+                format!("{} {id} is built from what it names", f.type_name()),
+            )
+            .with("feature", id))
+        }
     }
 }
 
@@ -1019,10 +1030,58 @@ pub fn target<'a>(
     target_as(part, solids, id, "targets", t, before)
 }
 
+/// How a feature asks for a body it names: in `role`, of a kind (`None`
+/// for either), and whether it changes it (acts on it or consumes it), so
+/// that a reference import's body is refused.
+#[derive(Clone, Copy, Debug)]
+pub struct Need<'r> {
+    pub role: &'r str,
+    pub want: Option<crate::kind::Want>,
+    pub changes: bool,
+}
+
+/// Body `t` as feature `id` sees it, as `need` asks: refused where it was
+/// consumed, isn't founded before `id`, failed, is a reference import's
+/// and `id` would change it, or is the wrong kind.
+pub fn body_as<'a>(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    t: &Id,
+    need: Need<'_>,
+    before: &'a dyn Results,
+) -> Result<&'a Built> {
+    if let Some(by) = solids.consumed_by(t, id) {
+        return Err(consumed(id, t, by));
+    }
+    let Some(view) = solids.view(t, id) else {
+        if let Some(Ok(f)) = part.features.get(id) {
+            crate::graph::check_order(part, part.order(), id, f)?;
+        }
+        return Err(not_a_solid(part, solids, id, need.role, t));
+    };
+    let out = crate::graph::input(part, id, view, before)?;
+    let built = out.solid(t).expect("a solid's chain holds it");
+    if built.reference && need.changes {
+        // Every role naming one target is `targets`, as `target` names it.
+        let role = if need.role == "target" {
+            "targets"
+        } else {
+            need.role
+        };
+        return Err(reference_body(&part.id, id, t, role));
+    }
+    if let Some(want) = need.want {
+        crate::kind::need(id, need.role, t, &built.body, want)?;
+    }
+    Ok(built)
+}
+
 /// Solid `t` as feature `id` sees it, named in `role`: refused where it
 /// was consumed, isn't founded before `id`, failed, or is a sheet. In
 /// 18.A every feature that acts on a body acts on solids only; 18.C lets
-/// cuts, fillets, offsets, mirrors and splits take sheets.
+/// cuts, fillets, offsets, mirrors and splits take sheets. It is
+/// [`body_as`] wanting a solid that the feature changes.
 pub fn target_as<'a>(
     part: &Part,
     solids: &Solids,
@@ -1031,25 +1090,32 @@ pub fn target_as<'a>(
     t: &Id,
     before: &'a dyn Results,
 ) -> Result<&'a Built> {
-    if let Some(by) = solids.consumed_by(t, id) {
-        return Err(consumed(id, t, by));
-    }
-    let Some(view) = solids.view(t, id) else {
-        // Not listed before `id` at all, or listed but no solid.
-        if let Some(Ok(f)) = part.features.get(id) {
-            crate::graph::check_order(part, part.order(), id, f)?;
-        }
-        return Err(not_a_solid(part, solids, id, role, t));
+    let need = Need {
+        role,
+        want: Some(crate::kind::Want::Solid),
+        changes: true,
     };
-    let out = crate::graph::input(part, id, view, before)?;
-    let built = out.solid(t).expect("a solid's chain holds it");
-    if built.reference {
-        // Every role naming one target is `targets`, as `target` names it.
-        let role = if role == "target" { "targets" } else { role };
-        return Err(reference_body(&part.id, id, t, role));
-    }
-    crate::kind::need(id, role, t, &built.body, crate::kind::Want::Solid)?;
-    Ok(built)
+    body_as(part, solids, id, t, need, before)
+}
+
+/// [`target_as`], taking a sheet too where `sheets` is true: face tweaks
+/// act on sheets where the kernel does (design 400), every other feature
+/// on solids only.
+pub fn target_kinds<'a>(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    role: &str,
+    t: &Id,
+    before: &'a dyn Results,
+    sheets: bool,
+) -> Result<&'a Built> {
+    let need = Need {
+        role,
+        want: (!sheets).then_some(crate::kind::Want::Solid),
+        changes: true,
+    };
+    body_as(part, solids, id, t, need, before)
 }
 
 /// `reference_body`: feature `id` of `part` would change solid `t`, a
@@ -1071,34 +1137,29 @@ pub fn reference_body(part: &Id, id: &Id, t: &Id, role: &str) -> Error {
 /// reference import's body, against the current rebuild `results`.
 pub fn check_not_reference(p: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result<()> {
     let solids = Solids::of(p);
-    let tools: Vec<&Id> = match f {
-        Feature::Boolean(b) => b.tools.iter().collect(),
-        _ => Vec::new(),
-    };
-    let named = f
-        .targets()
-        .into_iter()
-        .filter(|t| !tools.contains(t))
-        .map(|t| (t, "targets"))
-        .chain(tools.iter().map(|t| (*t, "tools")))
-        .chain(f.source().map(|s| (s, "solid")));
-    for (t, role) in named {
+    for (role, t, _) in crate::kind::bodies_read(f) {
         if let Some(view) = solids.view(t, id)
             && let Ok(out) = crate::graph::input(p, id, view, results)
             && out.solid(t).is_some_and(|b| b.reference)
         {
+            // A boolean's target, like every one-target role, is `targets`.
+            let role = if matches!(role, "target") {
+                "targets"
+            } else {
+                role
+            };
             return Err(reference_body(&p.id, id, t, role));
         }
     }
     Ok(())
 }
 
-/// `body_consumed`: feature `id` acts on solid `t`, which the boolean
-/// `by` before it consumed.
+/// `body_consumed`: feature `id` acts on body `t`, which `by` before it
+/// consumed.
 pub fn consumed(id: &Id, t: &Id, by: &Id) -> Error {
     Error::new(
         Code::BodyConsumed,
-        format!("{id} acts on {t}, which the boolean {by} consumed: act on its target instead"),
+        format!("{id} acts on {t}, which {by} before it consumed: act on what {by} made instead"),
     )
     .with("feature", id)
     .with("solid", t)
@@ -1201,6 +1262,7 @@ fn build_body(
             (Feature::Sweep(w), _) => crate::along::build(part, id, w, before, run),
             (Feature::Loft(l), _) => crate::loft::build(part, id, l, before, run),
             (Feature::Planar(x), _) => crate::profile::planar(part, id, x, before),
+            (Feature::Thicken(x), _) => crate::surface::thicken(part, solids, id, x, before, run),
             (_, Some((h, (solved, _)))) => {
                 crate::hole::tool(part, id, h, solved, &bodies, before).map(|(b, _)| b)
             }
@@ -2332,6 +2394,10 @@ fn rebuild_with(
             crate::body::build(part, solids, id, f, before, run).map(solid),
             None,
         ),
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) => (
+            crate::tweak::build(part, solids, id, f, before, run).map(solid),
+            None,
+        ),
         Feature::BaseFlange(b) => (
             crate::sheet_metal::base_flange(part, id, b, before, run)
                 .map(|built| solid(Made::new(vec![(id.clone(), Arc::new(built))]))),
@@ -2353,6 +2419,25 @@ fn rebuild_with(
             build_split(part, solids, id, x, before, run).map(solid),
             None,
         ),
+        Feature::Fill(x) => {
+            let r = crate::surface::fill(part, id, x, before, run).map(|(b, rep)| {
+                solid(Made {
+                    report: Some(Arc::new(rep)),
+                    ..Made::new(vec![(id.clone(), Arc::new(b))])
+                })
+            });
+            (r, None)
+        }
+        Feature::Sew(x) => (
+            crate::surface::sew(part, solids, id, x, before, run)
+                .map(|b| solid(Made::new(vec![(id.clone(), Arc::new(b))]))),
+            None,
+        ),
+        Feature::Extract(x) => (
+            crate::surface::extract(part, id, x, before)
+                .map(|b| solid(Made::new(vec![(id.clone(), Arc::new(b))]))),
+            None,
+        ),
         Feature::Pattern(p) => (
             build_pattern(part, solids, id, p, before, run).map(solid),
             None,
@@ -2360,7 +2445,7 @@ fn rebuild_with(
         Feature::Import(i) => {
             let r = crate::import::build(part, id, i, run).map(|(b, report)| {
                 solid(Made {
-                    import: Some(Arc::new(report)),
+                    report: Some(Arc::new(report)),
                     ..Made::new(vec![(id.clone(), Arc::new(b))])
                 })
             });
@@ -2475,6 +2560,7 @@ fn tool_hash(
         .profiles()
         .into_iter()
         .chain(f.source())
+        .chain(f.consumes())
         .chain(f.geometry_reads())
         .chain(if through { f.targets() } else { Vec::new() });
     let mut reads: Vec<&Id> = Vec::new();
@@ -2602,7 +2688,7 @@ fn from_disk(disk: &Disk, h: &blake3::Hash, part: &Id, id: &Id) -> Option<Result
 /// Whether a feature's refusal is kept in the disk cache by its input
 /// hash, as its solids would be (#503): a kernel's verdict on what the
 /// hash covers (a heal, a boolean, a blend, a sweep, a loft, an offset, a
-/// shell, a mirror), the same every time and dear to reach again (a file's
+/// shell, a mirror, a tweak, a fill, an extract, a sew, a thicken), the same every time and dear to reach again (a file's
 /// refused bodies healed again took the Switchwire's export 1,746 s).
 /// Anything else (a missing file, a dependency, a cancel, an internal
 /// fault) depends on more than the hash, or costs nothing to find again.
@@ -2618,7 +2704,12 @@ pub fn failure_kept(e: &Error) -> bool {
             | Code::ShellFailed
             | Code::OffsetFailed
             | Code::MirrorFailed
+            | Code::TweakFailed
             | Code::SheetMetalFailed
+            | Code::FillFailed
+            | Code::ExtractFailed
+            | Code::SewFailed
+            | Code::ThickenFailed
     )
 }
 
@@ -3061,6 +3152,220 @@ pub fn successors(
 mod tests {
     use super::*;
     use crate::units::{Quantity, Unit};
+
+    #[test]
+    fn a_body_is_asked_for_as_a_solid_a_sheet_or_either() {
+        use crate::doc::solid::Operation;
+        use crate::kind::Want;
+        use crate::solid::tests::{boxed, part};
+        // `later` is listed after the box, so it has a view of it.
+        let part = part(vec![
+            ("b", boxed("0", Operation::New, &[])),
+            ("later", boxed("20", Operation::New, &[])),
+        ]);
+        let r = rebuild_part(&part);
+        let solids = Solids::of(&part);
+        let id = Id::parse("later", "feature").unwrap();
+        let b = Id::parse("b", "feature").unwrap();
+        let any = Need {
+            role: "faces",
+            want: None,
+            changes: false,
+        };
+        assert!(body_as(&part, &solids, &id, &b, any, &r).is_ok());
+        let sheet = Need {
+            role: "sheets",
+            want: Some(Want::Sheet),
+            changes: true,
+        };
+        let e = body_as(&part, &solids, &id, &b, sheet, &r).unwrap_err();
+        assert_eq!(
+            (
+                e.code,
+                e.details["wanted"].as_str(),
+                e.details["got"].as_str()
+            ),
+            (Code::WrongBodyKind, Some("sheet"), Some("solid"))
+        );
+        // target_as is body_as wanting a solid.
+        assert!(target_as(&part, &solids, &id, "targets", &b, &r).is_ok());
+    }
+
+    #[test]
+    fn an_extract_of_a_boxs_face_is_a_sheet_beside_it() {
+        use crate::doc::solid::Operation;
+        use crate::solid::tests::{boxed, part};
+        let b = boxed("0", Operation::New, &[]);
+        let r0 = rebuild_part(&part(vec![("b", b.clone())]));
+        let built = state(&r0, "b", "b");
+        let face = built.body.faces().next().unwrap();
+        let name = built
+            .body
+            .name_of(ryukei::topo::EntityId::Face(face))
+            .unwrap();
+        let x = Feature::from_json(
+            &json!({"format": crate::doc::surface::FORMAT, "kind": "ryucad.feature",
+                    "type": "extract", "faces": [{"feature": "b", "name": name.to_string()}]}),
+            crate::units::Unit::Mm,
+            &crate::expr::Env::empty(),
+        )
+        .unwrap();
+        let r = rebuild_part(&part(vec![("b", b), ("x", x)]));
+        let sheet = state(&r, "x", "x");
+        assert_eq!(crate::kind::name(&sheet.body), "sheet");
+        assert_eq!(crate::kind::boundaries(&sheet.body), 1);
+        // The box is as it was.
+        assert_eq!(state(&r, "b", "b").hash, built.hash);
+    }
+
+    /// The `x<j>` whose face's outward normal is the negation of face
+    /// `k`'s, faces in `body.faces()`'s order.
+    fn opposite_of(body: &Body, k: usize) -> String {
+        use ryukei::measure::{Entity, FaceShape, Properties, properties};
+        let normal = |f| match properties(body, Entity::Face(f)).unwrap() {
+            Properties::Face {
+                shape: FaceShape::Plane { normal, .. },
+                ..
+            } => normal.get(),
+            p => panic!("{p:?}"),
+        };
+        let faces: Vec<_> = body.faces().collect();
+        let n = normal(faces[k]);
+        let j = faces.iter().position(|f| normal(*f).dot(n) < -0.5).unwrap();
+        format!("x{j}")
+    }
+
+    #[test]
+    fn a_boxs_faces_extracted_sew_back_into_a_solid_or_say_why_not() {
+        use crate::doc::solid::Operation;
+        use crate::solid::tests::{boxed, part};
+        let n = crate::doc::surface::FORMAT;
+        let f = |v: Value| {
+            Feature::from_json(&v, crate::units::Unit::Mm, &crate::expr::Env::empty()).unwrap()
+        };
+        let b = boxed("0", Operation::New, &[]);
+        let r0 = rebuild_part(&part(vec![("b", b.clone())]));
+        let body = &state(&r0, "b", "b").body;
+        let mut list = vec![("b", b)];
+        let mut ids = Vec::new();
+        let faces: Vec<String> = body
+            .faces()
+            .map(|x| {
+                body.name_of(ryukei::topo::EntityId::Face(x))
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        let names: Vec<String> = (0..faces.len()).map(|k| format!("x{k}")).collect();
+        for (k, name) in faces.iter().enumerate() {
+            ids.push(names[k].clone());
+            list.push((
+                names[k].as_str(),
+                f(json!({"format": n, "kind": "ryucad.feature",
+                "type": "extract", "faces": [{"feature": "b", "name": name}]})),
+            ));
+        }
+        let sew = |solid: bool, sheets: &[String]| {
+            f(json!({"format": n, "kind": "ryucad.feature",
+            "type": "sew", "sheets": sheets, "tolerance": "0.01 mm", "solid": solid}))
+        };
+        let mut all = list.clone();
+        all.push(("s", sew(true, &ids)));
+        let r = rebuild_part(&part(all));
+        let s = state(&r, "s", "s");
+        assert_eq!(crate::kind::name(&s.body), "solid");
+        close(volume(&s.body), 1e-9);
+        // Five of the six: open, and asked to be a solid.
+        let mut five = list.clone();
+        five.push(("s", sew(true, &ids[..5])));
+        let r = rebuild_part(&part(five));
+        let (_, e) = r.features.iter().find(|(i, _)| i.as_str() == "s").unwrap();
+        let e = e.as_ref().unwrap_err();
+        assert_eq!(
+            (e.code, e.details["reason"].as_str()),
+            (Code::SewFailed, Some("open")),
+            "{e}"
+        );
+        assert_eq!(e.details["laminar"].as_array().unwrap().len(), 4);
+        // Two opposite faces alone: two pieces.
+        let mut two = list.clone();
+        let opposite = vec![ids[0].clone(), opposite_of(body, 0)];
+        two.push(("s", sew(false, &opposite)));
+        let r = rebuild_part(&part(two));
+        let (_, e) = r.features.iter().find(|(i, _)| i.as_str() == "s").unwrap();
+        let e = e.as_ref().unwrap_err();
+        assert_eq!(
+            (e.code, e.details["reason"].as_str()),
+            (Code::SewFailed, Some("pieces")),
+            "{e}"
+        );
+        assert_eq!(e.details["pieces"].as_array().unwrap().len(), 2);
+    }
+
+    /// The name of the face whose plane's outward normal points up.
+    fn top_face(b: &Body) -> ryukei::name::Name {
+        use ryukei::measure::{Entity, FaceShape, Properties, properties};
+        let f = b
+            .faces()
+            .find(|f| matches!(properties(b, Entity::Face(*f)).unwrap(),
+                Properties::Face { shape: FaceShape::Plane { normal, .. }, .. } if normal.get().z > 0.5))
+            .unwrap();
+        b.name_of(ryukei::topo::EntityId::Face(f)).unwrap()
+    }
+
+    #[test]
+    fn a_face_thickened_joins_its_body_and_a_sheet_thickened_is_consumed() {
+        use crate::doc::solid::Operation;
+        use crate::solid::tests::{boxed, part};
+        let n = crate::doc::surface::FORMAT;
+        let f = |v: Value| {
+            Feature::from_json(&v, crate::units::Unit::Mm, &crate::expr::Env::empty()).unwrap()
+        };
+        let b = boxed("0", Operation::New, &[]);
+        let r0 = rebuild_part(&part(vec![("b", b.clone())]));
+        let body = &state(&r0, "b", "b").body;
+        let top = top_face(body);
+        // The box's top thickened 0.5 mm outwards and joined: 1.5 mm³.
+        let th = f(
+            json!({"format": n, "kind": "ryucad.feature", "type": "thicken",
+            "from": {"faces": [{"feature": "b", "name": top.to_string()}]},
+            "front": "0.5 mm", "back": "0 mm", "operation": "join", "targets": ["b"]}),
+        );
+        let r = rebuild_part(&part(vec![("b", b.clone()), ("t", th)]));
+        close(volume(&state(&r, "t", "b").body), 1.5e-9);
+        // The top extracted, then thickened as a new solid: 0.5 mm³, the
+        // sheet consumed.
+        let x = f(
+            json!({"format": n, "kind": "ryucad.feature", "type": "extract",
+            "faces": [{"feature": "b", "name": top.to_string()}]}),
+        );
+        let th = f(
+            json!({"format": n, "kind": "ryucad.feature", "type": "thicken",
+            "from": {"sheet": "x"}, "front": "0.5 mm", "back": "0 mm", "operation": "new"}),
+        );
+        let p = part(vec![("b", b), ("x", x), ("t", th)]);
+        let r = rebuild_part(&p);
+        close(volume(&state(&r, "t", "t").body), 0.5e-9);
+        assert_eq!(Solids::of(&p).consumer(&id("x")), Some(&id("t")));
+        // Its front face says what it is the front of.
+        let o = &state(&r, "t", "t").origins;
+        assert!(
+            o.values().any(|v| v["front_of"] == top.to_string()),
+            "{o:?}"
+        );
+    }
+
+    #[test]
+    fn surface_refusals_are_kept() {
+        for code in [
+            Code::FillFailed,
+            Code::ExtractFailed,
+            Code::SewFailed,
+            Code::ThickenFailed,
+        ] {
+            assert!(failure_kept(&Error::new(code, "x")), "{code:?}");
+        }
+    }
 
     fn id(s: &str) -> Id {
         Id::parse(s, "feature").unwrap()
@@ -4006,5 +4311,10 @@ mod tests {
         );
         assert_ne!(op_key(&id("p"), &id("f")), op_key(&id("q"), &id("f")));
         assert_ne!(op_key(&id("p"), &id("f")), op_key(&id("p"), &id("g")));
+    }
+
+    #[test]
+    fn a_tweaks_refusal_is_kept_on_disk() {
+        assert!(failure_kept(&Error::new(Code::TweakFailed, "refused")));
     }
 }

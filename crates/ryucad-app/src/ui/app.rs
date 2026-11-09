@@ -485,8 +485,8 @@ impl Opened {
         let action = action.or(tools);
         let action = action.or_else(|| commands::keys(self, &ctx, popup_open));
         egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &mut self.ws, &self.view));
+        let p = self.view.palette(ctx.theme() == egui::Theme::Dark);
         if self.ws.lost {
-            let p = self.view.palette(ctx.theme() == egui::Theme::Dark);
             egui::Panel::top("disconnected")
                 .frame(
                     egui::Frame::new()
@@ -497,6 +497,16 @@ impl Opened {
                 .show(ui, |ui| {
                     crate::ui::feedback::disconnected(ui, &mut self.ws, &p)
                 });
+        }
+        if let Some(c) = crate::ui::modes::colour(self.ws.mode, &p) {
+            egui::Panel::top("mode")
+                .frame(
+                    egui::Frame::new()
+                        .fill(crate::ui::feedback::tint(c, &p))
+                        .stroke(egui::Stroke::new(1.0, style::rgb(c)))
+                        .inner_margin(egui::Margin::symmetric(12, 4)),
+                )
+                .show(ui, |ui| crate::ui::modes::bar(ui, &mut self.ws, &p));
         }
         // The tiles on the look's own colour: a window clears to it, but
         // not every renderer does (the snapshots' doesn't).
@@ -561,6 +571,7 @@ impl Opened {
         }
         crate::ui::bom::export(&ctx, &mut self.ws, &mut self.browse, view);
         crate::ui::deps::picker(&ctx, &mut self.ws, view);
+        crate::ui::annotate::compose(&ctx, &mut self.view, &mut self.ws, view);
         // What a context menu chose, with what it was opened on.
         let action = match self.view.ran.take() {
             Some((id, target)) => action.or(commands::run(self, &ctx, id, target.as_deref())),
@@ -763,6 +774,7 @@ impl Opened {
         self.view.edges = on("display.edges");
         self.view.sketches = on("display.sketches");
         self.view.datums = on("display.datums");
+        self.view.annotations = on("display.annotations");
         self.view.cube = on("display.nav_cube");
         self.view.triad = on("display.triad");
         self.view.origin = self

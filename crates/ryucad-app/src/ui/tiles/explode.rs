@@ -8,6 +8,7 @@ use eframe::egui;
 
 /// Draws the tile.
 pub fn explode(ui: &mut egui::Ui, ws: &mut Workspace) {
+    let save_gate = ws.control("explode.save");
     let Some(part) = ws.explodes.part.clone().or_else(|| ws.shown_assembly()) else {
         ui.weak("Show an assembly to explode it (View > Show).");
         return;
@@ -70,8 +71,7 @@ pub fn explode(ui: &mut egui::Ui, ws: &mut Workspace) {
             for (k, step) in e.steps.as_array().into_iter().flatten().enumerate() {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(format!("{}. {}", k + 1, describe(step)));
-                    if ui
-                        .small_button("Remove")
+                    if crate::ui::modes::gated(ui, &save_gate, egui::Button::new("Remove").small())
                         .on_hover_text("Take this step out")
                         .clicked()
                     {
@@ -116,11 +116,15 @@ pub fn explode(ui: &mut egui::Ui, ws: &mut Workspace) {
                     .iter()
                     .any(|r| ws.model.occurrence_path(r).is_some_and(|(a, _)| a == part))
             });
-            let b = ui.add_enabled(
+            let b = crate::ui::modes::gated_if(
+                ui,
+                &save_gate,
                 named && selected,
                 egui::Button::new("Add step from selection"),
             );
-            let b = if !selected {
+            let b = if matches!(save_gate, crate::core::modes::Gate::Refuse(_)) {
+                b
+            } else if !selected {
                 b.on_disabled_hover_text("Select occurrences of the assembly first.")
             } else if !named {
                 b.on_disabled_hover_text("Name the new explode first.")

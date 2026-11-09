@@ -316,6 +316,17 @@ fn project() -> (tempfile::TempDir, Session) {
         &mut s,
         json!({"type": "planar", "id": "pad", "sketch": "la"}),
     );
+    // A fill of `v`'s rectangle, and the planar face thickened as a solid
+    // of its own (consuming it).
+    let sides: Vec<Value> = ["l1", "l2", "l3", "l4"]
+        .iter()
+        .map(|l| json!({"curve": format!("p/v/{l}")}))
+        .collect();
+    add(&mut s, json!({"type": "fill", "id": "lid", "sides": sides}));
+    add(
+        &mut s,
+        json!({"type": "thicken", "id": "slab", "sheet": "pad", "front": "1 mm"}),
+    );
     // A reference import of OCCT's box, which edits convert and back.
     let file = format!(
         "{}/../ryustep/tests/data/occt/box_ap214.stp",
@@ -334,7 +345,7 @@ fn mm(g: &mut Lcg, lo: u64, hi: u64) -> String {
 /// One random edit. Some are refused, or leave a feature failing; both
 /// must rebuild the same way however they are reached.
 fn edit(g: &mut Lcg, s: &mut Session) {
-    let (method, params) = match g.next_u64() % 24 {
+    let (method, params) = match g.next_u64() % 26 {
         0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
         1 => (
             "param.set",
@@ -450,6 +461,12 @@ fn edit(g: &mut Lcg, s: &mut Session) {
             } else {
                 json!({"id": "lf", "start_tangent": ""})
             },
+        ),
+        24 => ("feature.edit", json!({"id": "slab", "front": mm(g, 1, 4)})),
+        25 => (
+            "feature.edit",
+            json!({"id": "lid",
+                   "tolerance": format!("{} mm", [0.001, 0.002, 0.005][(g.next_u64() % 3) as usize])}),
         ),
         // The import made a healed solid, or a reference again.
         23 => (
@@ -604,6 +621,96 @@ fn shells_and_offsets_recompute_as_from_nothing() {
         let mut g = Lcg::new(seed);
         for step in 0..10 {
             shell_edit(&mut g, &mut s, &top, &bottom);
+            let (one, eight) = (full(&s, 1), full(&s, 8));
+            let r = s.rebuilt(&part).unwrap();
+            let incremental = (r.hash.clone(), summary(r));
+            assert_eq!(incremental, one, "seed {seed}, step {step}");
+            assert_eq!(incremental, eight, "seed {seed}, step {step}");
+        }
+    }
+}
+
+/// Part `p`: a box `b` (`w` × 12 × 8 mm) whose top `m` raises by `d`, a
+/// datum plane `lvl` up from xy, and a box `c` beside it whose top `r`
+/// makes flush with `lvl`. Returns the top's and `c`'s top's references.
+fn tweaked() -> (tempfile::TempDir, Session, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    must(
+        &mut s,
+        "param.set",
+        json!({"part": "p", "parameters": {"w": "20 mm", "d": "2 mm", "lvl": "5 mm"}}),
+    );
+    let add = |s: &mut Session, f: Value| {
+        let mut f = f;
+        f["part"] = json!("p");
+        must(s, "feature.add", f);
+    };
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": "w", "y": "12 mm", "z": "8 mm"}}),
+    );
+    let top = face(&mut s, "b", [0.0, 0.0, 1.0]);
+    add(
+        &mut s,
+        json!({"type": "move_face", "id": "m", "by": "translate", "direction": "z",
+                       "distance": "d", "faces": [top.clone()]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "c", "params": {"x": "6 mm", "y": "6 mm", "z": "8 mm"},
+                       "placement": {"origin": [40, 0, 0]}}),
+    );
+    let lid = face(&mut s, "c", [0.0, 0.0, 1.0]);
+    add(
+        &mut s,
+        json!({"type": "plane", "id": "lvl", "by": "offset", "from": "xy", "distance": "lvl"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "replace_face", "id": "r",
+                       "groups": [{"with": "p/lvl", "faces": [lid.clone()]}]}),
+    );
+    (dir, s, top, lid)
+}
+
+/// One random edit of [`tweaked`]'s part.
+fn tweak_edit(g: &mut Lcg, s: &mut Session, top: &str) {
+    let (method, params) = match g.next_u64() % 6 {
+        0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
+        1 => ("param.set", json!({"parameters": {"d": mm(g, 1, 4)}})),
+        2 => ("param.set", json!({"parameters": {"lvl": mm(g, 3, 7)}})),
+        3 => (
+            "feature.edit",
+            json!({"id": "m", "by": "rotate", "axis": "x", "angle": "2 deg"}),
+        ),
+        4 => (
+            "feature.edit",
+            json!({"id": "m", "by": "translate", "direction": "z",
+                                     "distance": "d", "faces": [top]}),
+        ),
+        _ => (
+            "feature.edit",
+            json!({"id": "m", "by": "offset", "distance": "d"}),
+        ),
+    };
+    let mut params = params;
+    params["part"] = json!("p");
+    let _ = call(s, method, params);
+}
+
+#[test]
+fn tweaks_recompute_as_from_nothing() {
+    for seed in [8, 9] {
+        let (_dir, mut s, top, _lid) = tweaked();
+        let part = Id::parse("p", "part").unwrap();
+        let first = s.rebuilt(&part).unwrap();
+        assert_eq!(first.failed(), 0, "{:?}", summary(first));
+        let mut g = Lcg::new(seed);
+        for step in 0..10 {
+            tweak_edit(&mut g, &mut s, &top);
             let (one, eight) = (full(&s, 1), full(&s, 8));
             let r = s.rebuilt(&part).unwrap();
             let incremental = (r.hash.clone(), summary(r));

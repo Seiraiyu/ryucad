@@ -14,7 +14,7 @@ use std::time::Duration;
 const WAIT: Duration = Duration::from_secs(30);
 
 fn open(p: &Project) -> Workspace {
-    Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap()
+    common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap()
 }
 
 /// [`Project::with_part`] committed in a repository of its own, then

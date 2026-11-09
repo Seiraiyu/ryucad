@@ -118,6 +118,8 @@ const HIGH_LIGHT: Palette = Palette {
     ok: 0x006b21,
     info: 0x0037a6,
     focus: 0x0037a6,
+    annotate: 0x005a62,
+    direct: 0x9c0000,
 };
 
 /// High contrast in a dark theme: white on black, a yellow accent.
@@ -140,6 +142,8 @@ const HIGH_DARK: Palette = Palette {
     ok: 0x4cff7a,
     info: 0x7ab8ff,
     focus: 0xffd400,
+    annotate: 0x5ce6ee,
+    direct: 0xff8a80,
 };
 
 /// A style's colours in one mode, as `0xRRGGBB`: the mockups' palettes
@@ -170,6 +174,11 @@ pub struct Palette {
     pub info: u32,
     /// The keyboard focus ring.
     pub focus: u32,
+    /// Annotate's bar and the viewport's frame while annotating: teal.
+    pub annotate: u32,
+    /// Direct edit's bar and frame: red, apart from `annotate` for every
+    /// simulated vision.
+    pub direct: u32,
 }
 
 /// A palette colour as egui's.
@@ -236,6 +245,8 @@ impl Look {
                 ok: 0x1f7a3d,
                 info: 0x1f5fc8,
                 focus: 0xd4530c,
+                annotate: 0x0d6b73,
+                direct: 0xb3261e,
             },
             (Look::Drafting, true) => Palette {
                 app: 0x141412,
@@ -256,6 +267,8 @@ impl Look {
                 ok: 0x5cc77f,
                 info: 0x6ea0ff,
                 focus: 0xff7a2f,
+                annotate: 0x4fc8d1,
+                direct: 0xff7a6e,
             },
             (Look::Graphite, false) => Palette {
                 app: 0xfafbfc,
@@ -276,6 +289,8 @@ impl Look {
                 ok: 0x1f7a3d,
                 info: 0x1f5fc8,
                 focus: 0x0c82bf,
+                annotate: 0x0d6b73,
+                direct: 0xb3261e,
             },
             (Look::Graphite, true) => Palette {
                 app: 0x18191c,
@@ -296,6 +311,8 @@ impl Look {
                 ok: 0x5cc77f,
                 info: 0x6ea0ff,
                 focus: 0x38a3dc,
+                annotate: 0x4fc8d1,
+                direct: 0xff7a6e,
             },
             (Look::Studio, false) => Palette {
                 app: 0xffffff,
@@ -316,6 +333,8 @@ impl Look {
                 ok: 0x1f7a3d,
                 info: 0x1f5fc8,
                 focus: 0x3557f0,
+                annotate: 0x0d6b73,
+                direct: 0xb3261e,
             },
             (Look::Studio, true) => Palette {
                 app: 0x18191c,
@@ -336,6 +355,8 @@ impl Look {
                 ok: 0x5cc77f,
                 info: 0x6ea0ff,
                 focus: 0x6f88ff,
+                annotate: 0x4fc8d1,
+                direct: 0xff7a6e,
             },
         }
     }
@@ -480,6 +501,28 @@ mod tests {
     const LOOKS: [Look; 3] = [Look::Drafting, Look::Graphite, Look::Studio];
     const CONTRASTS: [Contrast; 2] = [Contrast::Normal, Contrast::High];
 
+    /// The bars and frames of Annotate and Direct edit apart for every
+    /// vision the style tests simulate (design 374, Modes).
+    #[test]
+    fn annotate_and_direct_stay_apart() {
+        let rgb = |x: u32| -> Rgb {
+            [(x >> 16) & 0xff, (x >> 8) & 0xff, x & 0xff].map(|c| c as f32 / 255.0)
+        };
+        let mut fails = Vec::new();
+        for (look, level) in LOOKS.iter().flat_map(|l| CONTRASTS.map(|c| (*l, c))) {
+            for dark in [false, true] {
+                let p = look.colours(dark, level);
+                for (vision, m) in vision::VISIONS {
+                    let d = vision::apart(rgb(p.annotate), rgb(p.direct), &m);
+                    if d < 10.0 {
+                        fails.push(format!("{look:?} {level:?} dark={dark} {vision}: {d:.1}"));
+                    }
+                }
+            }
+        }
+        assert!(fails.is_empty(), "{}", fails.join("\n"));
+    }
+
     #[test]
     fn backgrounds_keep_silhouettes_visible() {
         let lum = |c: Rgb| (c[0] + c[1] + c[2]) / 3.0;
@@ -548,6 +591,8 @@ mod tests {
                     ("select-bg", p.select_bg),
                     ("select-fg", p.select_fg),
                     ("focus", p.focus),
+                    ("annotate", p.annotate),
+                    ("direct", p.direct),
                     ("ok", p.ok),
                     ("warn", p.warning),
                     ("danger", p.danger),
@@ -599,7 +644,7 @@ mod tests {
                 let rules: [(&[u32], &[u32], f32); 5] = [
                     (&[p.text, p.text_weak], &[p.app, p.raised, p.frame], 4.5),
                     (
-                        &[p.danger, p.info, p.ok, p.warning],
+                        &[p.danger, p.info, p.ok, p.warning, p.annotate, p.direct],
                         &[p.app, p.raised],
                         4.5,
                     ),

@@ -44,7 +44,7 @@ fn key(part: &str, f: &str) -> (String, String) {
 #[test]
 fn the_window_draws_an_assembly_where_it_places_its_parts() {
     let p = assembled();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| {
         ws.idle()
             && ws.model.meshes.contains_key(&key("frame", "b1/shank"))
@@ -93,7 +93,7 @@ fn the_window_draws_an_assembly_where_it_places_its_parts() {
 #[test]
 fn the_form_edits_an_instance() {
     let p = assembled();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.part("frame").is_some()));
     ws.open_form(Some(key("frame", "b2")));
     assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
@@ -125,7 +125,7 @@ fn the_form_edits_an_instance() {
 #[test]
 fn the_tree_says_what_mates_leave_and_a_mate_paints_its_faces() {
     let p = mated();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| {
         ws.idle()
             && ws
@@ -167,7 +167,7 @@ fn the_window_finds_which_instances_interfere_and_follows_edits() {
     p.ok(&[
         "feature", "add", "frame", "instance", "--id", "b3", "--of", "bolt", "--origin", "4,0,0",
     ]);
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle()
         && ws.model.meshes.contains_key(&key("frame", "b3/shank"))));
     assert_eq!(ws.shown_assembly().as_deref(), Some("frame"));
@@ -190,7 +190,7 @@ fn the_window_finds_which_instances_interfere_and_follows_edits() {
 #[test]
 fn the_window_hides_as_its_own_request_answers() {
     let p = assembled();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.part("frame").is_some()));
     // #143: with the notification lost, the answer alone hides it.
     ws.deaf = true;

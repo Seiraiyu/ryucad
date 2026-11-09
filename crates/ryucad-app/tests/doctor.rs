@@ -5,7 +5,6 @@ mod common;
 
 use common::{Project, ryucad};
 use ryucad_app::core::doctor::Offline;
-use ryucad_app::core::workspace::Workspace;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -35,7 +34,7 @@ fn repair(report: &Value, code: &str) -> String {
 #[test]
 fn an_open_project_is_diagnosed_and_repaired_through_its_daemon() {
     let p = Project::new().with_part();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle()));
     // A feature file nobody listed: an orphan.
     let boss = std::fs::read(p.root.join("parts/p/features/boss.json")).unwrap();

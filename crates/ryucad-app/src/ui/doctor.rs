@@ -4,6 +4,7 @@
 //! the screen of a damaged one.
 
 use crate::core::doctor::{Offline, proposed_order};
+use crate::core::modes::Gate;
 use crate::core::workspace::Workspace;
 use eframe::egui::{self, RichText};
 use serde_json::{Map, Value, json};
@@ -187,7 +188,14 @@ pub fn dialog(
             egui::ScrollArea::vertical()
                 .max_height(480.0)
                 .show(ui, |ui| match &ws.doctor {
-                    Some(report) => chosen = issues(ui, report, !ws.idle(), state),
+                    Some(report) => {
+                        // Repairs write the project's files: Direct edit's.
+                        let editing = ws.control("doctor.repair") == Gate::Send;
+                        if !editing {
+                            ui.weak("Direct edit repairs: View and Annotate only report.");
+                        }
+                        chosen = issues(ui, report, !ws.idle() || !editing, state);
+                    }
                     None => {
                         ui.spinner();
                     }

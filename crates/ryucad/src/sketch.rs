@@ -1120,6 +1120,7 @@ pub fn edit(
             },
             Feature::Hole(h) => h.points.clone(),
             Feature::Sweep(w) => w.profile.loops.clone(),
+            Feature::Planar(x) => x.profile.loops.clone(),
             // The loops of every section on this sketch.
             Feature::Loft(l) => l
                 .sections
@@ -1127,7 +1128,7 @@ pub fn edit(
                 .filter(|x| x.sketch() == Some(&fid))
                 .flat_map(|x| x.loops.clone())
                 .collect(),
-            _ => unreachable!("a sweep or a hole"),
+            _ => unreachable!("a sweep, a planar face or a hole"),
         };
         if let Some(gone) = names.iter().find(|e| !s.entities.contains_key(*e)) {
             return Err(Error::new(

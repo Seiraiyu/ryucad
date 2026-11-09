@@ -9,6 +9,11 @@ use eframe::egui;
 pub fn deps(ui: &mut egui::Ui, ws: &mut Workspace) {
     let (mut fetch, mut update, mut remove, mut add, mut confirm, mut cancel) =
         (None, None, None, false, false, false);
+    let (add_gate, move_gate, remove_gate) = (
+        ws.control("deps.add"),
+        ws.control("deps.update"),
+        ws.control("deps.remove"),
+    );
     let d = &mut ws.deps;
     if let Some(e) = &d.error {
         ui.colored_label(ui.visuals().error_fg_color, &e.message);
@@ -65,12 +70,13 @@ pub fn deps(ui: &mut egui::Ui, ws: &mut Workspace) {
                 .desired_width(fit(ui, 100.0)),
         )
         .labelled_by(name.id);
-        if ui
-            .add_enabled(
-                !d.busy && !d.add_url.trim().is_empty(),
-                egui::Button::new("Add"),
-            )
-            .clicked()
+        if crate::ui::modes::gated_if(
+            ui,
+            &add_gate,
+            !d.busy && !d.add_url.trim().is_empty(),
+            egui::Button::new("Add"),
+        )
+        .clicked()
         {
             add = true;
         }
@@ -98,9 +104,13 @@ pub fn deps(ui: &mut egui::Ui, ws: &mut Workspace) {
                 }
             }
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!u.is_empty(), egui::Button::new("Move them"))
-                    .clicked()
+                if crate::ui::modes::gated_if(
+                    ui,
+                    &move_gate,
+                    !u.is_empty(),
+                    egui::Button::new("Move them"),
+                )
+                .clicked()
                 {
                     confirm = true;
                 }
@@ -158,15 +168,16 @@ pub fn deps(ui: &mut egui::Ui, ws: &mut Workspace) {
                                 {
                                     update = Some((vec![name.clone()], None));
                                 }
-                                if ui
-                                    .add_enabled(
-                                        !d.busy && r.removable(),
-                                        egui::Button::new("Remove"),
-                                    )
-                                    .on_hover_text(format!(
-                                        "Take {name} out of the manifest and the lock"
-                                    ))
-                                    .clicked()
+                                if crate::ui::modes::gated_if(
+                                    ui,
+                                    &remove_gate,
+                                    !d.busy && r.removable(),
+                                    egui::Button::new("Remove"),
+                                )
+                                .on_hover_text(format!(
+                                    "Take {name} out of the manifest and the lock"
+                                ))
+                                .clicked()
                                 {
                                     remove = Some(name.clone());
                                 }

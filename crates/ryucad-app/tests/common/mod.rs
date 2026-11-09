@@ -49,6 +49,19 @@ fn shared() -> &'static Path {
 /// The `ryucad` binary of this build, built if needed: `cargo test -p
 /// ryucad-app` doesn't build other packages' binaries. With
 /// `RYUCAD_TEST_PREBUILT` set, the one beside the tests is taken as it is.
+/// A window's workspace in Direct edit, as every window was before
+/// ryucad 19.B: for tests of what the window writes.
+pub fn open_editing(
+    root: &std::path::Path,
+    daemon: &Daemon,
+    name: &str,
+    wake: ryucad_app::core::link::Wake,
+) -> ryucad::error::Result<ryucad_app::core::workspace::Workspace> {
+    let mut ws = ryucad_app::core::workspace::Workspace::open(root, daemon, name, wake)?;
+    ws.set_mode(ryucad_app::core::modes::Mode::Edit);
+    Ok(ws)
+}
+
 pub fn ryucad() -> &'static Daemon {
     static DAEMON: OnceLock<Daemon> = OnceLock::new();
     DAEMON.get_or_init(|| {

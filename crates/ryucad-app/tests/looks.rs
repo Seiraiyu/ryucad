@@ -181,4 +181,63 @@ fn the_window_and_the_icon_sheet_look_as_they_did() {
         );
         looks_as_it_did(lavapipe, &h.render().unwrap(), &format!("window-{name}"));
     }
+    // Annotate and Direct edit (ryucad 19.B): the sample, Drafting light,
+    // the default tiles. One open comment, pinned with a point on the
+    // bracket where `rig` places it as `plate` (the window shows `rig`,
+    // and draws markers only of pins on what it shows), so Annotate's
+    // picture has a marker; the agent's, so the window's own count is 0.
+    for (key, value) in [
+        ("ui.style", "drafting"),
+        ("ui.theme", "light"),
+        ("ui.contrast", "normal"),
+        ("ui.layout", "{}"),
+    ] {
+        p.ok(&["config", "set", key, value]);
+    }
+    let body = p.ok(&["inspect", "bracket"])["bodies"][0].clone();
+    let pin = format!(
+        "rig/plate/{}/{}",
+        body["solid"].as_str().unwrap(),
+        body["faces"][0]["name"].as_str().unwrap()
+    );
+    p.ok(&[
+        "annotations",
+        "add",
+        &pin,
+        "--comment",
+        "Thicker here",
+        "--point",
+        "0,0,0",
+    ]);
+    for (mode, name) in [
+        (ryucad_app::core::modes::Mode::Annotate, "annotate"),
+        (ryucad_app::core::modes::Mode::Edit, "direct"),
+    ] {
+        let root = p.root.clone();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1600.0, 1000.0))
+            .wgpu()
+            .build_eframe(move |cc| App::open(&cc.egui_ctx, Some(&root), ryucad()));
+        frames(
+            &mut h,
+            |a| {
+                matches!(&a.screen, Screen::Opened(o) if o.ws.idle()
+                    && o.ws.model.meshes.len() >= 2
+                    && o.ws.annotations.loaded)
+            },
+            |_| "loading".into(),
+        );
+        h.state_mut().opened_mut().ws.set_mode(mode);
+        h.event(egui::Event::PointerGone);
+        for _ in 0..20 {
+            h.step();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        frames(
+            &mut h,
+            |a| a.opened().ws.idle(),
+            |a| format!("idle {}", a.opened().ws.idle()),
+        );
+        looks_as_it_did(lavapipe, &h.render().unwrap(), name);
+    }
 }

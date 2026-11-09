@@ -45,6 +45,8 @@ pub fn state(o: &mut Opened) -> State {
         scale: f64::from(crate::ui::app::scale_of(
             o.ws.settings.get("ui.scale").unwrap_or(&json!(1.0)),
         )),
+        mode: o.ws.mode,
+        annotations: o.view.annotations,
     }
 }
 
@@ -146,7 +148,10 @@ pub fn choose(o: &mut Opened, id: &str, key: &str) -> Option<Action> {
 /// context menu with the reference of what was right-clicked. A command
 /// that can't run now does nothing. Returns what it asks of the app.
 pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) -> Option<Action> {
-    if command::enabled(id, &state(o)).is_err() && target.is_none() {
+    let s = state(o);
+    if command::mode_allows(id, &s).is_err()
+        || (command::enabled(id, &s).is_err() && target.is_none())
+    {
         return None;
     }
     if let Some(v) = id.strip_prefix("view.").and_then(StandardView::named) {
@@ -319,6 +324,15 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             crate::ui::shell::open(&mut o.tiles, "equations");
             o.layout_dirty = true;
         }
+        "mode.view" => o.ws.set_mode(crate::core::modes::Mode::View),
+        "mode.annotate" => o.ws.set_mode(crate::core::modes::Mode::Annotate),
+        "mode.edit" => o.ws.set_mode(crate::core::modes::Mode::Edit),
+        "annotations.show" => {
+            crate::ui::shell::open(&mut o.tiles, "annotations");
+            o.layout_dirty = true;
+        }
+        "view.annotations" => toggle(o, "display.annotations", o.view.annotations),
+        "annotation.add" | "annotation.here" => o.view.compose(&o.ws, id, target),
         "measure.clearance" => {
             o.ws.check_clearance();
             o.dialogs.clearance = true;
@@ -503,7 +517,9 @@ pub fn context_menu(
             b = b.shortcut_text(k.as_str());
         }
         let enabled = match target {
-            Some(t) => command::enabled_on(c.id, t),
+            Some(t) => {
+                command::mode_allows(c.id, &shown.state).and_then(|()| command::enabled_on(c.id, t))
+            }
             None => command::enabled(c.id, &shown.state),
         };
         let r = ui.add_enabled(enabled.is_ok(), b);
