@@ -108,6 +108,7 @@ pub mod sheet_metal;
 pub mod sketch;
 pub mod sketch_view;
 pub mod solid;
+pub mod surface;
 pub mod sweep_view;
 pub mod tweak;
 pub mod validate;

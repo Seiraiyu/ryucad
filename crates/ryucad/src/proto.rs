@@ -449,9 +449,46 @@ pub struct FeatureFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ends: Option<Value>,
     /// The side face each named edge of a flange folds towards, each
-    /// `{edge, side}`; `[]` takes every side away.
+    /// `{edge, side}`; `[]` takes every side away. A fill's sides in
+    /// order, replacing them all: each `{"edge": text, "tangent": bool}`
+    /// or `{"curve": text}` (an edge `<part>/<solid>/<name>`, a sketch's
+    /// curve `<part>/<sketch>/<entity>`, a path or helix
+    /// `<part>/<feature>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sides: Option<Value>,
+    /// A fill's or a sew's tolerance: a length from 0.00001 mm to 0.1 mm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance: Option<Value>,
+    /// Faces given one by one, two or more (`--face` repeated): an
+    /// extract's faces, or the faces a thicken thickens. One is `face`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_list: Option<Vec<String>>,
+    /// A sew's sheets, by the features that founded them (two or more);
+    /// from the CLI, a thicken's one sheet too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheets: Option<Vec<String>>,
+    /// The sheet a thicken thickens and consumes, by its founder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<String>,
+    /// Whether a sew that closes up makes a solid (true by default; the
+    /// file's `solid`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub make_solid: Option<bool>,
+    /// The faces a thicken thickens, each `<part>/<solid>/<name>`, of one
+    /// body (they are extracted first; the body is left as it was).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_faces: Option<Vec<String>>,
+    /// A thicken's thickness along its faces' normals, zero or more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub front: Option<Value>,
+    /// A thicken's thickness against its faces' normals, zero or more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back: Option<Value>,
+    /// A thicken's face groups, replacing them all:
+    /// `[{"front": Q, "back": Q, "faces": ["<part>/<solid>/<name>", ...]}]`
+    /// (`[]` for none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_sides: Option<Value>,
     /// An unfold's fixed face, a side face of the flange held still
     /// (`<part>/<solid>/<name>`, written `fixed`); `""` for the kernel's
     /// default.

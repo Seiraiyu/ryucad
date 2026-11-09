@@ -429,6 +429,7 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
         {
             sweep(walk, b, ours, theirs)
         }
+        Some(b) if same_type && ty(b).0 == Some(json!("thicken")) => thicken(walk, b, ours, theirs),
         Some(b)
             if same_type
                 && matches!(
@@ -532,6 +533,26 @@ fn annotation(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Valu
 /// the loops it narrows go together), and so are its law and direction (a
 /// law changed alone would leave a direction it doesn't take): changed on
 /// both sides, they conflict at `/law` and `/direction` together.
+/// A thicken: per key, but its `from` (a sheet, or faces of one body) is
+/// one value: two sides changing it conflict once at `/from`.
+fn thicken(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Value {
+    let obj = |v: &Value| v.as_object().cloned().unwrap_or_default();
+    let (b, o, t) = (obj(base), obj(ours), obj(theirs));
+    let mut out = walk.object("", &b, &o, &t, &["from"]);
+    let (fb, fo, ft) = (b.get("from"), o.get("from"), t.get("from"));
+    let from = if fo == ft || ft == fb {
+        fo.cloned()
+    } else if fo == fb {
+        ft.cloned()
+    } else {
+        walk.conflict("/from", Kind::Value, fb, fo, ft)
+    };
+    if let Some(f) = from {
+        out.insert("from".to_owned(), f);
+    }
+    Value::Object(out)
+}
+
 fn sweep(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Value {
     let obj = |v: &Value| v.as_object().cloned().unwrap_or_default();
     let (b, o, t) = (obj(base), obj(ours), obj(theirs));
@@ -1665,6 +1686,45 @@ mod tests {
             &mirror(json!({"targets": ["b"]})),
         );
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/targets"]);
+    }
+
+    #[test]
+    fn a_thickens_from_is_one_value_and_a_fills_sides_one_sequence() {
+        const A: &str = "0123456789abcdef0123456789abcdef";
+        let n = crate::doc::surface::FORMAT;
+        let th = |from: Value, front: &str| {
+            json!({"format": n, "kind": "ryucad.feature",
+            "type": "thicken", "from": from, "front": front, "back": "0 mm", "operation": "new"})
+        };
+        let face = json!({"faces": [{"feature": "b", "name": A}]});
+        // One side moves to faces, the other changes the front: both taken.
+        let m = merge(
+            Some(&th(json!({"sheet": "s"}), "1 mm")),
+            &th(face.clone(), "1 mm"),
+            &th(json!({"sheet": "s"}), "2 mm"),
+        );
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            (&m.value["from"], &m.value["front"]),
+            (&face, &json!("2 mm"))
+        );
+        // Both change the source: one conflict at /from, never inside it.
+        let m = merge(
+            Some(&th(json!({"sheet": "s"}), "1 mm")),
+            &th(face, "1 mm"),
+            &th(json!({"sheet": "t"}), "1 mm"),
+        );
+        let at: Vec<&str> = m.conflicts.keys().map(String::as_str).collect();
+        assert_eq!(at, ["/from"]);
+        // A fill's sides changed on both sides conflict once, as a sequence.
+        let fill = |c: &str| {
+            json!({"format": n, "kind": "ryucad.feature", "type": "fill",
+            "sides": [{"curve": c}, {"curve": "y"}, {"curve": "z"}],
+            "tolerance": "0.001 mm", "angle": "1 deg"})
+        };
+        let m = merge(Some(&fill("x")), &fill("u"), &fill("v"));
+        let at: Vec<&str> = m.conflicts.keys().map(String::as_str).collect();
+        assert_eq!(at, ["/sides"]);
     }
 
     #[test]

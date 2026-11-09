@@ -4,9 +4,9 @@
 //! target changes it, in list order: the solid's chain. A feature's view
 //! of a solid is the last of its chain listed before the feature: what it
 //! reads the solid's faces, edges and vertices from. The solid's tip, the
-//! last of its chain, is what the part's model shows. A `boolean` feature
-//! joins its target's chain and consumes its tools: their chains end, and
-//! they are no longer part of the model. A split joins its target's chain
+//! last of its chain, is what the part's model shows. A feature that
+//! consumes bodies (a `boolean` its tools, a `sew` its sheets, a `thicken`
+//! its sheet) ends their chains: they are no longer part of the model. A split joins its target's chain
 //! and founds the side in front of its plane, whose chain starts at the
 //! split.
 
@@ -23,7 +23,7 @@ pub struct Solids {
     founders: Vec<Id>,
     /// Each listed feature's place in the list.
     at: BTreeMap<Id, usize>,
-    /// Each consumed solid, by founder, with the boolean that consumed it.
+    /// Each consumed body, by founder, with the feature that consumed it.
     consumed: BTreeMap<Id, Id>,
     /// The solids each feature of a chain belongs to, in list order.
     member: BTreeMap<Id, Vec<Id>>,
@@ -53,10 +53,16 @@ impl Solids {
             // follows it in a chain reads it and fails through it.
             let (founds, acts_on, consumes): (bool, Vec<&Id>, Vec<&Id>) =
                 match part.features.get(id) {
-                    Some(Ok(f)) => match f.boolean() {
-                        Some(b) => (false, vec![&b.target], b.tools.iter().collect()),
-                        None => (f.founds(), f.targets(), Vec::new()),
-                    },
+                    Some(Ok(f)) => {
+                        // What it consumes isn't in a chain it joins.
+                        let consumes = f.consumes();
+                        let acts_on = f
+                            .targets()
+                            .into_iter()
+                            .filter(|t| !consumes.contains(t))
+                            .collect();
+                        (f.founds(), acts_on, consumes)
+                    }
                     Some(Err(_)) => match part.acts.get(id) {
                         Some(a) => (
                             a.founds,
@@ -108,13 +114,13 @@ impl Solids {
         }
     }
 
-    /// The boolean that consumed `solid` before `reader`, if one did.
+    /// The feature that consumed `solid` before `reader`, if one did.
     pub fn consumed_by(&self, solid: &Id, reader: &Id) -> Option<&Id> {
         let by = self.consumed.get(solid)?;
         (self.at.get(by)? < self.at.get(reader)?).then_some(by)
     }
 
-    /// The boolean that consumed `solid`, if one did.
+    /// The feature that consumed `solid`, if one did.
     pub fn consumer(&self, solid: &Id) -> Option<&Id> {
         self.consumed.get(solid)
     }
@@ -238,6 +244,47 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_sew_and_a_thicken_from_a_sheet_consume_what_they_take() {
+        let f = |v: serde_json::Value| {
+            crate::doc::files::Feature::from_json(
+                &v,
+                crate::units::Unit::Mm,
+                &crate::expr::Env::empty(),
+            )
+            .unwrap()
+        };
+        let n = crate::doc::surface::FORMAT;
+        let p = part(vec![
+            ("a", boxed("0", Operation::New, &[])),
+            ("b", boxed("2", Operation::New, &[])),
+            (
+                "s",
+                f(
+                    serde_json::json!({"format": n, "kind": "ryucad.feature", "type": "sew",
+                           "sheets": ["a", "b"], "tolerance": "0.01 mm", "solid": true}),
+                ),
+            ),
+            (
+                "t",
+                f(
+                    serde_json::json!({"format": n, "kind": "ryucad.feature", "type": "thicken",
+                           "from": {"sheet": "s"}, "front": "1 mm", "back": "0 mm",
+                           "operation": "new"}),
+                ),
+            ),
+        ]);
+        let solids = Solids::of(&p);
+        let id = |s: &str| Id::parse(s, "feature").unwrap();
+        assert_eq!(solids.consumer(&id("a")), Some(&id("s")));
+        assert_eq!(solids.consumer(&id("b")), Some(&id("s")));
+        assert_eq!(solids.consumer(&id("s")), Some(&id("t")));
+        assert_eq!(solids.chain(&id("s")), Some(&[id("s")][..]));
+        assert_eq!(solids.chain(&id("t")), Some(&[id("t")][..]));
+        // Each consumed body's chain ends where it was consumed.
+        assert_eq!(solids.chain(&id("a")), Some(&[id("a")][..]));
+    }
+
+    #[test]
     fn a_boolean_consumes_its_tools() {
         use crate::doc::solid::BooleanOp::Subtract;
         use Operation::*;
@@ -298,6 +345,32 @@ pub(crate) mod tests {
             s.tips().collect::<Vec<_>>(),
             [(&id("a"), &id("ja")), (&id("s"), &id("js"))]
         );
+    }
+
+    #[test]
+    fn a_sew_that_doesnt_load_still_consumes_its_sheets() {
+        use Operation::*;
+        let mut p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("b", boxed("2", New, &[])),
+            ("s", boxed("0", New, &[])),
+            ("later", boxed("0.5", Cut, &["a"])),
+        ]);
+        let v = serde_json::json!({"format": crate::doc::surface::FORMAT, "kind": "ryucad.feature", "type": "sew",
+                                   "sheets": ["a", "b"], "tolerance": "nope", "solid": true});
+        p.acts.insert(id("s"), crate::doc::files::feature_acts(&v));
+        p.features.insert(
+            id("s"),
+            Err(crate::error::Error::new(
+                crate::error::Code::InvalidDocument,
+                "a conflict",
+            )),
+        );
+        let s = Solids::of(&p);
+        assert_eq!(s.consumer(&id("a")), Some(&id("s")));
+        assert_eq!(s.consumer(&id("b")), Some(&id("s")));
+        // A cut after the sew naming a doesn't join a's chain.
+        assert_eq!(s.chain(&id("a")).unwrap(), [id("a")]);
     }
 
     #[test]

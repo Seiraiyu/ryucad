@@ -751,6 +751,24 @@ pub enum Code {
     /// (`entities`) and, where an agent can fix it, a `hint` are in the
     /// details. A flange's boolean refuses as `boolean_failed`.
     SheetMetalFailed,
+    /// The kernel refused a fill (ryucad 18): its `reason` (`too_few_sides`,
+    /// `not_laminar`, `not_closed` with `gap_m`, `degenerate`,
+    /// `angle_too_large` with `angle_deg`, `uncertain`), `kernel` (its
+    /// text) and the side it names (`side`: its index in the file,
+    /// `piece` within a curve of several, and `source`, as text).
+    FillFailed,
+    /// The kernel refused an extract: `reason` `no_faces` or
+    /// `non_manifold_vertex` (with the vertex's reference).
+    ExtractFailed,
+    /// A sew left several pieces (`reason: pieces`, each piece's sheets and
+    /// laminar edges), left a body open where a solid was asked for
+    /// (`reason: open`, its laminar edges), or the kernel refused it
+    /// (`reason` the healing refusal in snake case).
+    SewFailed,
+    /// The kernel refused a thicken: `reason` (the `OffsetError` variant
+    /// in snake case, an unsupported one's `case`), `kernel`, `refusal`
+    /// and `entities`, as `offset_failed` gives them.
+    ThickenFailed,
     /// No annotation by that ID in `annotations/`; the details name the
     /// ID asked for.
     AnnotationNotFound,
@@ -949,6 +967,19 @@ mod tests {
     fn sheet_metal_code() {
         assert_eq!(json!(Code::SheetMetalFailed), json!("sheet_metal_failed"));
         assert_eq!(Code::SheetMetalFailed.exit_code(), 1);
+    }
+
+    #[test]
+    fn surface_codes() {
+        for (code, name) in [
+            (Code::FillFailed, "fill_failed"),
+            (Code::ExtractFailed, "extract_failed"),
+            (Code::SewFailed, "sew_failed"),
+            (Code::ThickenFailed, "thicken_failed"),
+        ] {
+            assert_eq!(json!(code), json!(name));
+            assert_eq!(code.exit_code(), 1, "{name}");
+        }
     }
 
     #[test]

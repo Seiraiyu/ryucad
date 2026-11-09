@@ -334,8 +334,9 @@ impl Offset {
     }
 }
 
-/// The expression strings of a shell's or offset's `faces`: each group's
-/// thickness or distance.
+/// The expression strings of a shell's, offset's or thicken's `faces`:
+/// each group's thickness or distance, or a thicken's groups' front and
+/// back.
 pub fn expression_strings(groups: &mut Value) -> Vec<&mut String> {
     let mut out = Vec::new();
     let Value::Array(groups) = groups else {
@@ -344,7 +345,8 @@ pub fn expression_strings(groups: &mut Value) -> Vec<&mut String> {
     for g in groups {
         let Value::Object(g) = g else { continue };
         for (k, x) in g.iter_mut() {
-            if let ("thickness" | "distance", Value::String(s)) = (k.as_str(), x) {
+            if let ("thickness" | "distance" | "front" | "back", Value::String(s)) = (k.as_str(), x)
+            {
                 out.push(s);
             }
         }

@@ -2252,6 +2252,9 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
         }
         Feature::Instance(i) => i.fields(),
         Feature::Import(i) => i.fields(),
+        Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_) => {
+            crate::surface::report(part, f)
+        }
         Feature::Mate(m) => {
             let mut v = m.fields();
             for (side, c) in [("a", &m.a), ("b", &m.b)] {
@@ -3983,14 +3986,17 @@ fn check_references(
     // A loft's sections are matched against the rebuild whatever they
     // reference, and what a feature acts on must be a solid (ryucad 18).
     // Only a feature whose file says so makes a sheet, so a part holding
-    // none needs no rebuild to judge what its features act on.
+    // none needs no rebuild to judge a feature that wants solids; one that
+    // wants a sheet there names a solid, which the rebuild must refuse.
     let may_hold_sheets = session
         .project()
         .part(part)?
         .features
         .values()
-        .any(|g| g.as_ref().is_ok_and(|g| g.surface()));
-    let reads_bodies = may_hold_sheets && !crate::kind::bodies_read(f).is_empty();
+        .any(|g| g.as_ref().is_ok_and(|g| g.may_make_sheet()));
+    let read = crate::kind::bodies_read(f);
+    let reads_bodies = !read.is_empty()
+        && (may_hold_sheets || read.iter().any(|(_, _, w)| *w == crate::kind::Want::Sheet));
     let planar = matches!(f, Feature::Planar(_));
     // An unfold's allowance and a refold's unfold are judged against the
     // rebuild whatever they reference.
@@ -4083,6 +4089,19 @@ fn check_resolved(
         Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
             crate::sheet_metal::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
+        // Its sides edges and curves, its faces of one body; whether they
+        // close up, or extract cleanly, only rebuild can tell.
+        Feature::Fill(x) => {
+            crate::surface::check_fill(&proposed(p, order, &[(id, f)]), id, x, results)
+        }
+        Feature::Extract(x) => {
+            crate::surface::check_extract(&proposed(p, order, &[(id, f)]), id, x, results)
+        }
+        // Its sheet or faces; what the kernel makes of them only rebuild
+        // can tell. A sew's sheets are judged by kind and order already.
+        Feature::Thicken(x) => {
+            crate::surface::check_thicken(&proposed(p, order, &[(id, f)]), id, x, results)
+        }
         _ => Ok(()),
     }
 }
@@ -4108,7 +4127,7 @@ fn check_up_to(
 }
 
 /// Every feature type `feature.add` makes.
-const FEATURE_TYPES: [&str; 22] = [
+const FEATURE_TYPES: [&str; 26] = [
     "box",
     "cylinder",
     "cone",
@@ -4120,6 +4139,10 @@ const FEATURE_TYPES: [&str; 22] = [
     "sweep",
     "loft",
     "planar",
+    "fill",
+    "extract",
+    "sew",
+    "thicken",
     "boolean",
     "fillet",
     "chamfer",
@@ -4335,6 +4358,10 @@ fn feature_add(
         "planar" => {
             given.only(ty, &crate::doc::sweep::PLANAR_FIELDS)?;
             planar_from(None, &given, &pid)?
+        }
+        "fill" | "extract" | "sew" | "thicken" => {
+            given.only(ty, crate::doc::surface::request_fields(ty))?;
+            crate::surface::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
         "boolean" => {
             given.only(ty, &BOOLEAN)?;
@@ -4596,6 +4623,12 @@ fn feature_edit(
                 f
             }
             Feature::Import(_) => return Err(import_not_written_here("edit").with("feature", &fid)),
+            f
+            @ (Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_)) => {
+                let ty = f.type_name();
+                given.only(ty, crate::doc::surface::request_fields(ty))?;
+                crate::surface::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
+            }
             f @ (Feature::MoveFace(_) | Feature::ReplaceFace(_)) => {
                 let ty = f.type_name();
                 crate::tweak::take_given(ty, &mut given.fields)?;
@@ -4705,6 +4738,10 @@ fn feature_edit(
             || f.unfold().is_some()
             || f.refold().is_some())
             && f != old)
+        || (matches!(
+            f,
+            Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_)
+        ) && f != old)
         || f.source() != old.source()
     {
         check_references(session, &pid, &list, &fid, &f)?;
@@ -4915,8 +4952,9 @@ pub(crate) fn part_report(
             (!ins.is_empty()).then(|| (fid.clone(), ins.into_iter().cloned().collect()))
         })
         .collect();
-    // What each feature does to solids, and the tools a boolean consumes:
-    // for showing the chains.
+    // What each feature does to solids, and the bodies it consumes (a
+    // boolean's tools, a sew's sheets, a thicken's sheet): for showing the
+    // chains.
     let ops: BTreeMap<Id, (&'static str, Vec<Id>)> = part
         .features
         .iter()
@@ -4933,8 +4971,12 @@ pub(crate) fn part_report(
                 Some((fid.clone(), (op, Vec::new())))
             }
             f => {
-                let c = f.combine().filter(|c| !c.is_new())?;
-                Some((fid.clone(), (c.operation.as_str(), Vec::new())))
+                let consumes: Vec<Id> = f.consumes().into_iter().cloned().collect();
+                match f.combine() {
+                    Some(c) if !c.is_new() => Some((fid.clone(), (c.operation.as_str(), consumes))),
+                    _ if !consumes.is_empty() => Some((fid.clone(), ("new", consumes))),
+                    _ => None,
+                }
             }
         })
         .collect();
@@ -4994,6 +5036,9 @@ pub(crate) fn part_report(
                 | Feature::Flange(_)
                 | Feature::Unfold(_)
                 | Feature::Refold(_) => crate::sheet_metal::report(part, f),
+                // A fill's rebuild report is what it measured (see
+                // `Made::report`), an extract's its faces.
+                Feature::Extract(_) => crate::surface::report(id, f),
                 Feature::MoveFace(_) | Feature::ReplaceFace(_) => crate::tweak::report(id, f),
                 _ => return None,
             };
@@ -5046,9 +5091,15 @@ pub(crate) fn part_report(
                     let mut v = json!({"id": fid, "type": types.get(fid), "ok": true,
                                        "hash": o.hash()});
                     if let crate::rebuild::Output::Solids(m) = o
-                        && let Some(i) = &m.import
+                        && let Some(i) = &m.report
                     {
-                        v["import"] = i.as_ref().clone();
+                        // A fill's report under its own type, else an
+                        // import's.
+                        let key = match types.get(fid).and_then(Value::as_str) {
+                            Some("fill") => "fill",
+                            _ => "import",
+                        };
+                        v[key] = i.as_ref().clone();
                     }
                     if let crate::rebuild::Output::Solids(m) = o
                         && let Some(f) = &m.flat
@@ -7381,6 +7432,12 @@ fn inspect(
             }
         }
     }
+    if let Some(f) = &only
+        && let Some((_, x @ (Feature::Fill(_) | Feature::Extract(_)))) =
+            features.iter().find(|(i, _)| i == f)
+    {
+        v[x.type_name()] = crate::surface::report(&pid, x);
+    }
     Ok(v)
 }
 
@@ -7967,6 +8024,214 @@ pub(crate) mod tests {
             call(&mut s, "feature.add", f).unwrap();
         }
         (dir, s, top)
+    }
+
+    /// Each face of `feature`'s body, as `p/<feature>/<name>`.
+    fn inspect_faces(s: &mut Session, feature: &str) -> Vec<Value> {
+        let v = call(s, "inspect", json!({"part": "p", "feature": feature})).unwrap();
+        v["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| json!(format!("p/{feature}/{}", f["name"].as_str().unwrap())))
+            .collect()
+    }
+
+    #[test]
+    fn sews_and_thickens_of_solids_are_refused_in_a_part_of_solids() {
+        let (_dir, mut s) = fresh();
+        let must = |s: &mut Session, m: &str, v: Value| call(s, m, v).unwrap();
+        must(&mut s, "part.create", json!({"part": "p"}));
+        for (id, at) in [("a", 0), ("b", 20)] {
+            must(
+                &mut s,
+                "feature.add",
+                json!({"part": "p", "type": "box", "id": id,
+                "params": {"x": 10, "y": 10, "z": 10}, "placement": {"origin": [at, 0, 0]}}),
+            );
+        }
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sew", "sheets": ["a", "b"]}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["wanted"].as_str()),
+            (Code::WrongBodyKind, Some("sheet")),
+            "{e}"
+        );
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "thicken", "sheet": "a", "front": "1 mm"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["role"].as_str()),
+            (Code::WrongBodyKind, Some("from")),
+            "{e}"
+        );
+        // Nothing was written.
+        let v = call(&mut s, "feature.list", json!({"part": "p"})).unwrap();
+        assert_eq!(v["features"].as_array().map(Vec::len), Some(2), "{v}");
+    }
+
+    #[test]
+    fn sews_and_thickens_are_refused_when_written() {
+        let (_dir, mut s) = fresh();
+        let must = |s: &mut Session, m: &str, v: Value| call(s, m, v).unwrap();
+        must(&mut s, "part.create", json!({"part": "p"}));
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b",
+            "params": {"x": 10, "y": 10, "z": 10}}),
+        );
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "c",
+            "params": {"x": 1, "y": 1, "z": 1}, "placement": {"origin": [20, 0, 0]}}),
+        );
+        let faces = inspect_faces(&mut s, "b");
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extract", "id": "x",
+            "faces": [faces[0].clone()]}),
+        );
+        // A sew of a solid: wrong_body_kind, naming it.
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sew",
+            "sheets": ["x", "c"]}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (
+                e.code,
+                e.details["solid"].as_str(),
+                e.details["wanted"].as_str()
+            ),
+            (Code::WrongBodyKind, Some("c"), Some("sheet")),
+            "{e}"
+        );
+        // A thicken of a solid by name: wrong_body_kind too.
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "thicken",
+            "sheet": "c", "front": "1 mm"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["role"].as_str()),
+            (Code::WrongBodyKind, Some("from")),
+            "{e}"
+        );
+        // A thicken whose group names a face it doesn't thicken.
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "thicken",
+            "from_faces": [faces[0].clone()], "front": "1 mm",
+            "face_sides": [{"front": "2 mm", "back": "0", "faces": [faces[1].clone()]}]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam, "{e}");
+        // After a thicken consumes x, nothing acts on it.
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extract", "id": "y",
+            "faces": [faces[1].clone()]}),
+        );
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "thicken", "id": "t",
+            "sheet": "x", "front": "1 mm"}),
+        );
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sew",
+            "sheets": ["x", "y"]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::BodyConsumed, "{e}");
+    }
+
+    #[test]
+    fn fills_and_extracts_through_the_protocol() {
+        let (_dir, mut s) = fresh();
+        let must = |s: &mut Session, m: &str, v: Value| call(s, m, v).unwrap();
+        must(&mut s, "part.create", json!({"part": "p"}));
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b",
+            "params": {"x": 10, "y": 10, "z": 10}}),
+        );
+        let b = inspect_faces(&mut s, "b");
+        let x = must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extract", "id": "x",
+            "faces": [b[0].clone()]}),
+        );
+        assert_eq!(x["feature"]["type"], "extract", "{x}");
+        // A face of another body beside it is targets_mixed.
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "c",
+            "params": {"x": 1, "y": 1, "z": 1}, "placement": {"origin": [20, 0, 0]}}),
+        );
+        let c = inspect_faces(&mut s, "c");
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extract",
+            "faces": [b[0].clone(), c[0].clone()]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::TargetsMixed, "{e}");
+        // A fill's sides as text; its tolerance and angle written with defaults.
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "plane": "xy"}),
+        );
+        must(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
+            {"op": "add", "id": "p1", "type": "point", "at": [0, 0]},
+            {"op": "add", "id": "p2", "type": "point", "at": [10, 0]},
+            {"op": "add", "id": "p3", "type": "point", "at": [0, 10]},
+            {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p1"}]}),
+        );
+        let f = must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "fill", "id": "f",
+            "sides": [{"curve": "p/s/l1"}, {"curve": "p/s/l2"}, {"curve": "p/s/l3"}]}),
+        );
+        assert_eq!(f["feature"]["tolerance"]["value"], "0.001 mm", "{f}");
+        // An edge side that names a face is refused when written.
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "fill",
+            "sides": [{"edge": b[0].clone()}, {"curve": "p/s/l2"}, {"curve": "p/s/l3"}]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
     }
 
     #[test]
