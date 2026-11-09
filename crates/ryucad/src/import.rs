@@ -1430,6 +1430,7 @@ pub(crate) mod tests {
             }),
             body,
             mode: None,
+            place: None,
         }
     }
 

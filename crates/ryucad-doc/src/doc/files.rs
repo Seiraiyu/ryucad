@@ -72,17 +72,26 @@ pub const MANIFEST_FORMAT: u64 = 3;
 /// 9 shells and offsets, 10 mirrors and splits, 11 base flanges and
 /// flanges (ryucad 16), 12 surface sweeps and planar faces (ryucad 18),
 /// 13 reference imports (ryucad 21), 14 unfolds and refolds (ryucad
-/// 16.B). A feature is written at the lowest
+/// 16.B), 17 a flattened import's place (ryucad 21.D). A feature is
+/// written at the lowest
 /// format that holds it, so one with only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
     // The largest of every stage's (a later stage merging takes the max).
-    let (a, b, c) = (
+    let all = [
         super::sweep::SURFACE_FORMAT,
         super::import::MODE_FORMAT,
         super::sheet_metal::UNFOLD_FORMAT,
-    );
-    let ab = if a > b { a } else { b };
-    if ab > c { ab } else { c }
+        super::import::PLACE_FORMAT,
+    ];
+    let mut max = 0;
+    let mut k = 0;
+    while k < all.len() {
+        if all[k] > max {
+            max = all[k];
+        }
+        k += 1;
+    }
+    max
 };
 
 pub const PROJECT_KIND: &str = "ryucad.project";
@@ -672,6 +681,9 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if v.get("type").and_then(Value::as_str) == Some("import") && v.get("place").is_some() {
+        return super::import::PLACE_FORMAT;
+    }
     if v.get("type").and_then(Value::as_str) == Some("import")
         && v.get("mode").and_then(Value::as_str) == Some("reference")
     {

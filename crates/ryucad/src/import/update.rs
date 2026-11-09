@@ -245,6 +245,7 @@ pub fn plan(
             body: i.body,
             // An updated feature keeps its own mode.
             mode: i.mode,
+            place: i.place.clone(),
         };
         if let Some(g) = group {
             held.entry((p.clone(), g))

@@ -16,6 +16,79 @@ use serde_json::{Value, json};
 /// 11 and 18.A takes 12; a stage taking 13 first moves this one on.
 pub const MODE_FORMAT: u64 = 13;
 
+/// The feature format that holds `place` (ryucad 21.D, `import
+/// --flatten`): 15 and 16 are ryucad 18.B's and 17.A's, in flight when
+/// it was planned.
+pub const PLACE_FORMAT: u64 = 17;
+
+/// Where a flattened import's body stands in its part: the file's
+/// placements of the usages from a root down to its product, composed
+/// (`pose`, written as an instance's pose is), and those usages (`via`),
+/// which say which occurrence of the product it is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Place {
+    pub pose: super::assembly::Pose,
+    pub via: Vec<Via>,
+}
+
+/// One usage of a flattened body's walk: the
+/// `NEXT_ASSEMBLY_USAGE_OCCURRENCE`'s id and its place among its parent's
+/// usages of the same child with that id.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Via {
+    pub usage: String,
+    pub ordinal: u32,
+}
+
+impl Place {
+    pub fn to_json(&self) -> Value {
+        let via: Vec<Value> = self
+            .via
+            .iter()
+            .map(|u| {
+                let mut v = json!({"usage": u.usage});
+                if u.ordinal != 0 {
+                    v["ordinal"] = json!(u.ordinal);
+                }
+                v
+            })
+            .collect();
+        json!({"pose": self.pose.to_json(), "via": via})
+    }
+
+    pub fn from_json(v: &Value, at: &str) -> Result<Place> {
+        let mut o = Obj::new(v, at)?;
+        let pose = super::assembly::Pose::from_json(&o.take("pose")?, &format!("{at}/pose"))?;
+        let list = o.take("via")?;
+        let items = list.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
+            invalid(
+                &format!("{at}/via"),
+                "place.via must list the usages from a root down",
+            )
+        })?;
+        let mut via = Vec::new();
+        for (k, u) in items.iter().enumerate() {
+            let here = format!("{at}/via/{k}");
+            let mut uo = Obj::new(u, &here)?;
+            let usage = uo
+                .take("usage")?
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    invalid(&format!("{here}/usage"), "a usage's id must be a string")
+                })?;
+            let ordinal = match uo.take_opt("ordinal") {
+                None => 0,
+                Some(n) => count(&n, &format!("{here}/ordinal"))?,
+            };
+            uo.finish()?;
+            via.push(Via { usage, ordinal });
+        }
+        o.finish()?;
+        Ok(Place { pose, via })
+    }
+}
+
 /// How an import builds its body: a reference (the file's topology, never
 /// healed, never changed) or a healed solid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -42,7 +115,7 @@ impl Mode {
 }
 
 /// An import feature: which body of which file.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Import {
     pub file: FileRef,
     /// The product definition whose body it is; `None` for a body no
@@ -54,6 +127,9 @@ pub struct Import {
     /// `Some(Reference)` for a reference; `None` (no field, as every file
     /// before design 364) is a healed solid, written with no field.
     pub mode: Option<Mode>,
+    /// Where a flattened import's body stands (`import --flatten`); none
+    /// for a body at its part's origin.
+    pub place: Option<Place>,
 }
 
 /// A file under `imports/` and the BLAKE3 of the bytes the feature was
@@ -142,9 +218,12 @@ impl Import {
         self.mode.unwrap_or(Mode::Solid)
     }
 
-    /// The format it needs: [`MODE_FORMAT`] for a reference, else 5.
+    /// The format it needs: [`PLACE_FORMAT`] for a placed one,
+    /// [`MODE_FORMAT`] for a reference, else 5.
     pub fn format(&self) -> u64 {
-        if self.mode() == Mode::Reference {
+        if self.place.is_some() {
+            PLACE_FORMAT
+        } else if self.mode() == Mode::Reference {
             MODE_FORMAT
         } else {
             5
@@ -162,6 +241,9 @@ impl Import {
         }
         if self.mode() == Mode::Reference {
             v["mode"] = json!("reference");
+        }
+        if let Some(p) = &self.place {
+            v["place"] = p.to_json();
         }
         v
     }
@@ -197,11 +279,16 @@ impl Import {
                 None => return Err(invalid("/mode", "mode must be reference or solid")),
             },
         };
+        let place = match o.take_opt("place") {
+            None => None,
+            Some(p) => Some(Place::from_json(&p, "/place")?),
+        };
         Ok(Import {
             file: FileRef { path, blake3 },
             product,
             body,
             mode,
+            place,
         })
     }
 }
@@ -362,5 +449,51 @@ mod tests {
         ] {
             assert!(!is_import_path(p), "{p}");
         }
+    }
+
+    #[test]
+    fn place_reads_writes_and_needs_its_format() {
+        let place = json!({
+            "pose": {"origin_m": [0.01, 0, 0.002], "x": [1, 0, 0], "z": [0, 0, 1]},
+            "via": [{"usage": "U1"}, {"ordinal": 2, "usage": "R7"}],
+        });
+        let v = file(json!({"place": place, "mode": "reference", "format": PLACE_FORMAT}));
+        let f = read(v.clone()).unwrap();
+        let Feature::Import(i) = &f else {
+            unreachable!()
+        };
+        let p = i.place.as_ref().unwrap();
+        assert_eq!(
+            p.via,
+            vec![
+                Via {
+                    usage: "U1".into(),
+                    ordinal: 0
+                },
+                Via {
+                    usage: "R7".into(),
+                    ordinal: 2
+                },
+            ]
+        );
+        assert_eq!(f.format(), PLACE_FORMAT);
+        assert_eq!(f.to_json(), v);
+        assert_eq!(crate::doc::files::feature_format(&v), PLACE_FORMAT);
+        // A healed solid placed takes the same format.
+        let v = file(json!({"place": place, "format": PLACE_FORMAT}));
+        assert_eq!(read(v.clone()).unwrap().format(), PLACE_FORMAT);
+        for (bad, at) in [
+            (json!({"pose": place["pose"]}), "/place/via"),
+            (json!({"pose": place["pose"], "via": []}), "/place/via"),
+            (
+                json!({"pose": place["pose"], "via": [{"usage": 3}]}),
+                "/place/via/0/usage",
+            ),
+            (json!({"via": place["via"]}), "/place/pose"),
+        ] {
+            let e = read(file(json!({"place": bad}))).unwrap_err();
+            assert_eq!(e.details["pointer"], at, "{bad}");
+        }
+        const { assert!(FEATURE_FORMAT >= PLACE_FORMAT) };
     }
 }
