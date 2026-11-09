@@ -4363,7 +4363,7 @@ fn tweaks_section(golden: &mut Golden) {
     use ryukei::geom::{Frame, Plane, Point3, Surface, Vector3};
     use ryukei::name::{FaceRole, Name, Role};
     use ryukei::tweak::{
-        MoveSpec, OffsetFacesSpec, ReplaceSpec, move_faces, offset_faces, replace_faces,
+        MoveSpec, OffsetFacesSpec, ReplaceSpec, Topology, move_faces, offset_faces, replace_faces,
     };
     let mut s = golden.section("tweaks");
     let key = OpKey(0x7477_6b00);
@@ -4378,6 +4378,7 @@ fn tweaks_section(golden: &mut Golden) {
         faces,
         motion,
         tangent: false,
+        topology: Topology::Keep,
     };
     let (b, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
     let top = face(FaceRole::PlusZ);
@@ -4391,6 +4392,7 @@ fn tweaks_section(golden: &mut Golden) {
     let out = OffsetFacesSpec {
         faces: vec![(top, 0.05), (face(FaceRole::PlusX), -0.03)],
         tangent: false,
+        topology: Topology::Keep,
     };
     let (o, j) = offset_faces(k, &b, &out).unwrap();
     hash_body(&mut s, &o, &j);
@@ -4454,6 +4456,7 @@ fn tweaks_section(golden: &mut Golden) {
     let chain = OffsetFacesSpec {
         faces: vec![(face(FaceRole::PlusX), 0.05)],
         tangent: true,
+        topology: Topology::Keep,
     };
     let (o, j) = offset_faces(k, &rounded, &chain).unwrap();
     hash_body(&mut s, &o, &j);
@@ -4470,6 +4473,7 @@ fn tweaks_section(golden: &mut Golden) {
         &b,
         &ReplaceSpec {
             faces: vec![(top, tilted)],
+            topology: Topology::Keep,
         },
     )
     .unwrap();
@@ -4485,7 +4489,7 @@ fn drafts_section(golden: &mut Golden) {
     use ryukei::geom::{Point3, Surface, UnitVector3, Vector3};
     use ryukei::name::{FaceRole, Name, Role};
     use ryukei::topo::Body;
-    use ryukei::tweak::{DraftFace, DraftSpec, Hinge, draft};
+    use ryukei::tweak::{DraftFace, DraftSpec, Hinge, Topology, draft};
     let mut s = golden.section("drafts");
     let key = OpKey(0x6466_7400);
     let k = OpKey(0x6466_7401);
@@ -4503,6 +4507,7 @@ fn drafts_section(golden: &mut Golden) {
             })
             .collect(),
         tangent: false,
+        topology: Topology::Keep,
     };
     let about = |z: f64| Hinge::Neutral {
         origin: Point3::new(0.0, 0.0, z),

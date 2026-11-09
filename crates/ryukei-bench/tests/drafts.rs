@@ -15,7 +15,7 @@ use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::{FaceRole, Name, OpKey, Role};
 use ryukei::primitive;
 use ryukei::topo::Body;
-use ryukei::tweak::{DraftFace, DraftSpec, Hinge, OffsetFacesSpec, draft, offset_faces};
+use ryukei::tweak::{DraftFace, DraftSpec, Hinge, OffsetFacesSpec, Topology, draft, offset_faces};
 use ryukei_bench::{Primitive, occt};
 use ryukei_testkit::mesh::volume_and_area;
 use std::f64::consts::PI;
@@ -79,6 +79,7 @@ fn spec(faces: &[Name], angle: f64, z: f64) -> DraftSpec {
             })
             .collect(),
         tangent: false,
+        topology: Topology::Keep,
     }
 }
 
@@ -301,6 +302,7 @@ fn offset_faces_against_occt() {
         let spec = OffsetFacesSpec {
             faces,
             tangent: false,
+            topology: Topology::Keep,
         };
         let (o, _) = offset_faces(OpKey(0xbd4), &b, &spec).expect(name);
         let (v, slack) = ryukei_volume(&o, 1e-4);

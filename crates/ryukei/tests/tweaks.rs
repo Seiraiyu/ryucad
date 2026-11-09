@@ -14,7 +14,7 @@ use ryukei::primitive;
 use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
 use ryukei::topo::{Body, EntityId};
 use ryukei::tweak::{
-    MoveSpec, OffsetFacesSpec, ReplaceSpec, move_faces, offset_faces, replace_faces,
+    MoveSpec, OffsetFacesSpec, ReplaceSpec, Topology, move_faces, offset_faces, replace_faces,
 };
 use ryukei::{Error, TweakError};
 use std::sync::Arc;
@@ -82,6 +82,7 @@ fn moved(faces: Vec<Name>, motion: Rigid) -> MoveSpec {
         faces,
         motion,
         tangent: false,
+        topology: Topology::Keep,
     }
 }
 
@@ -254,6 +255,7 @@ fn an_ls_end_offset() {
     let spec = OffsetFacesSpec {
         faces: vec![(end[0], 0.1)],
         tangent: false,
+        topology: Topology::Keep,
     };
     let (o, _) = offset_faces(T, &b, &spec).unwrap();
     near(volume(&o, 1e-3), (3.0 + 0.1) * h, 1e-9);
@@ -311,6 +313,7 @@ fn a_rounded_boxs_side_offset_with_its_tangent_chain() {
     let spec = |tangent| OffsetFacesSpec {
         faces: vec![(side, d)],
         tangent,
+        topology: Topology::Keep,
     };
     assert!(matches!(
         refusal(offset_faces(T, &b, &spec(false))),
@@ -339,6 +342,7 @@ fn a_top_replaced_by_a_tilted_plane_and_by_a_spline() {
         &b,
         &ReplaceSpec {
             faces: vec![(top, tilted)],
+            topology: Topology::Keep,
         },
     )
     .unwrap();
@@ -359,6 +363,7 @@ fn a_top_replaced_by_a_tilted_plane_and_by_a_spline() {
         &b,
         &ReplaceSpec {
             faces: vec![(top, spline)],
+            topology: Topology::Keep,
         },
     )
     .unwrap();
@@ -393,6 +398,7 @@ fn a_top_beside_its_fillet_moves_only_with_its_chain() {
         faces: vec![top],
         motion: up,
         tangent: true,
+        topology: Topology::Keep,
     };
     let (o, _) = move_faces(T, &b, &spec).unwrap();
     near(
@@ -486,6 +492,7 @@ fn a_pyramids_face_offset_would_split_its_apex() {
     let spec = OffsetFacesSpec {
         faces: vec![(slanted[0], 0.02)],
         tangent: false,
+        topology: Topology::Keep,
     };
     assert!(matches!(
         refusal(offset_faces(T, &b, &spec)),

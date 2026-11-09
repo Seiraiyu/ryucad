@@ -12,7 +12,9 @@ use ryukei::blend::blend;
 use ryukei::geom::{Point3, Rigid, UnitVector3, Vector3};
 use ryukei::name::{Name, OpKey};
 use ryukei::topo::{Body, FaceId};
-use ryukei::tweak::{DraftFace, DraftSpec, Hinge, MoveSpec, OffsetFacesSpec, ReplaceSpec};
+use ryukei::tweak::{
+    DraftFace, DraftSpec, Hinge, MoveSpec, OffsetFacesSpec, ReplaceSpec, Topology,
+};
 
 /// What to do to the body.
 pub enum Op {
@@ -116,11 +118,13 @@ pub fn tweak_case(data: &[u8]) -> Option<TweakCase> {
                 faces: chosen,
                 motion,
                 tangent,
+                topology: Topology::Keep,
             })
         }
         1 => Op::Offset(OffsetFacesSpec {
             faces: chosen.iter().map(|&n| (n, sign * step)).collect(),
             tangent,
+            topology: Topology::Keep,
         }),
         2 => {
             // The first face's own surface turned a little about the
@@ -131,6 +135,7 @@ pub fn tweak_case(data: &[u8]) -> Option<TweakCase> {
             let at = middle(fb.min(), fb.max());
             Op::Replace(ReplaceSpec {
                 faces: vec![(first.0, s.transformed(&turn_about(at, axis, turn)))],
+                topology: Topology::Keep,
             })
         }
         _ => {
@@ -165,6 +170,7 @@ pub fn tweak_case(data: &[u8]) -> Option<TweakCase> {
                     })
                     .collect(),
                 tangent,
+                topology: Topology::Keep,
             })
         }
     };
