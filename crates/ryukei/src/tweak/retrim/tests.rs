@@ -148,3 +148,24 @@ fn a_raised_tops_journal_is_the_fixed_engines() {
     };
     assert_eq!(set(&j), set(&fixed));
 }
+
+#[test]
+fn only_an_uncertain_vertex_re_trims() {
+    use crate::{Error, TweakError};
+    let b = block();
+    let un = |at| Error::from(TweakError::Uncertain { at });
+    let v = b.vertices().next().unwrap();
+    let e = b.edges().next().unwrap();
+    let f = b.faces().next().unwrap();
+    assert!(super::takes(&b, &un(b.vertices[v].name)));
+    assert!(!super::takes(&b, &un(b.edges[e].name)));
+    assert!(!super::takes(&b, &un(b.faces[f].name)));
+    // A name the body hasn't (a trace's, a working entity's).
+    assert!(!super::takes(&b, &un(Name::from_u128(0x13ac))));
+    assert!(!super::takes(
+        &b,
+        &Error::from(TweakError::TangencyBroken {
+            edge: b.edges[e].name,
+        })
+    ));
+}

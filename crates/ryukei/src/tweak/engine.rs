@@ -47,7 +47,7 @@ pub(crate) fn run_with(
 ) -> Result<(Body, Journal), Error> {
     let fixed = run(key, body, changes, meter);
     match fixed {
-        Err(e) if topology == super::Topology::Change && super::retrim::takes(&e) => {
+        Err(e) if topology == super::Topology::Change && super::retrim::takes(body, &e) => {
             super::retrim::retrim(key, body, changes, meter)
         }
         r => r,

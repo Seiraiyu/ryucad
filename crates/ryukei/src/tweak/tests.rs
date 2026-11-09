@@ -465,3 +465,42 @@ fn a_split_vertex_is_re_trimmed_under_change_only() {
     // The apex split into two vertices joined by a new edge.
     assert_eq!(o.vertices().count(), 6);
 }
+
+#[test]
+fn a_wall_drafted_past_its_neighbour_takes_the_top_away() {
+    use crate::tweak::draft::{DraftFace, DraftSpec, Hinge, draft};
+    let b = block();
+    let wall = face(FaceRole::MinusX);
+    let top = face(FaceRole::PlusZ);
+    let pull = crate::geom::UnitVector3::exact(Vector3::new(0.0, 0.0, 1.0)).unwrap();
+    let spec = DraftSpec {
+        pull,
+        angle: 1.3,
+        hinge: Hinge::Neutral {
+            origin: crate::geom::Point3::ORIGIN,
+        },
+        faces: vec![DraftFace {
+            face: wall,
+            angle: None,
+            flip: false,
+        }],
+        tangent: false,
+        topology: Topology::Keep,
+    };
+    assert!(draft(T, &b, &spec).is_err());
+    let (o, j, report) = draft(
+        T,
+        &b,
+        &DraftSpec {
+            topology: Topology::Change,
+            ..spec
+        },
+    )
+    .unwrap();
+    assert_eq!(crate::check::check(&o), []);
+    assert!(o.by_name(top).is_none());
+    assert!(j.events().contains(&crate::name::Event::Deleted(top)));
+    // The drafted wall is reported at its angle.
+    assert_eq!(report.faces.len(), 1);
+    assert!((report.faces[0].least - 1.3).abs() < 1e-9);
+}

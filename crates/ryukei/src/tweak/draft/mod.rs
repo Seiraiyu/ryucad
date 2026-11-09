@@ -219,12 +219,29 @@ fn draft_in(
         changes.senses.insert(f, sense);
     }
     changes.drafts = drafts;
-    let (out, journal) = engine::run(key, body, &changes, meter)?;
-    let named: Vec<(Name, UnitVector3)> = changes
-        .drafts
-        .iter()
-        .map(|(&f, d)| (body.faces[f].name, d.pull))
-        .collect();
+    let (out, journal) = engine::run_with(key, body, &changes, spec.topology, meter)?;
+    // Each drafted face as it came out: itself, or the pieces a re-trim
+    // split it into; a face the re-trim took away has no angle.
+    let mut named: Vec<(Name, UnitVector3)> = Vec::new();
+    for (&f, d) in &changes.drafts {
+        let n = body.faces[f].name;
+        if out.by_name(n).is_some() {
+            named.push((n, d.pull));
+            continue;
+        }
+        for e in journal.events() {
+            if let crate::name::Event::Split { parent, children } = e
+                && *parent == n
+            {
+                named.extend(
+                    children
+                        .iter()
+                        .filter(|c| out.by_name(**c).is_some())
+                        .map(|&c| (c, d.pull)),
+                );
+            }
+        }
+    }
     let report = report::report(&out, &named)?;
     Ok((out, journal, report))
 }

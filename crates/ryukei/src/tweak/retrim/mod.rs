@@ -277,21 +277,30 @@ fn walk_error(w: &WorkBody, e: WalkError, face: FaceId) -> Error {
 
 /// Whether the fixed engine's refusal `e` means the topology must change
 /// (so `Topology::Change` re-trims): an edge vanishing, a vertex
-/// splitting, a face collapsing, faces crossing, or a lone vertex.
-pub(crate) fn takes(e: &Error) -> bool {
-    matches!(
-        e,
-        Error::InvalidTweak(
-            TweakError::EdgeVanishes { .. }
-                | TweakError::VertexSplits { .. }
-                | TweakError::FaceCollapses { .. }
-                | TweakError::SelfIntersecting { .. }
-                | TweakError::Unsupported {
-                    case: crate::TweakCase::LoneVertex,
-                    ..
-                }
-        )
-    )
+/// splitting, a face collapsing, faces crossing, or a lone vertex. An
+/// `Uncertain` at one of `body`'s vertices is the fixed engine's
+/// three-face form of a vertex splitting (`tweak::vertices`: a curve there
+/// doesn't pass the point the others meet at), so it re-trims too; every
+/// other `Uncertain` answers at once.
+pub(crate) fn takes(body: &Body, e: &Error) -> bool {
+    match e {
+        Error::InvalidTweak(TweakError::Uncertain { at }) => {
+            matches!(body.by_name(*at), Some(crate::topo::EntityId::Vertex(_)))
+        }
+        _ => matches!(
+            e,
+            Error::InvalidTweak(
+                TweakError::EdgeVanishes { .. }
+                    | TweakError::VertexSplits { .. }
+                    | TweakError::FaceCollapses { .. }
+                    | TweakError::SelfIntersecting { .. }
+                    | TweakError::Unsupported {
+                        case: crate::TweakCase::LoneVertex,
+                        ..
+                    }
+            )
+        ),
+    }
 }
 
 #[cfg(test)]
