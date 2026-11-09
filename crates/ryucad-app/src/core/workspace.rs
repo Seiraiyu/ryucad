@@ -1107,6 +1107,8 @@ impl Workspace {
                 ..Default::default()
             }],
             component: true,
+            rev: None,
+            mates: Vec::new(),
         };
         let part = d.part.clone();
         self.send(req, Pending::DragSolve(part));
@@ -1152,6 +1154,7 @@ impl Workspace {
             translate: Some(meters(d.translate)),
             axis: None,
             angle: None,
+            about: None,
             expected_revision: revision,
         };
         self.send(req, Pending::DragMove(d.part));

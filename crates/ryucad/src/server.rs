@@ -738,6 +738,7 @@ pub(crate) fn dispatch(
             translate,
             axis,
             angle,
+            about,
             expected_revision,
         } => crate::assembly::moved(
             session,
@@ -748,6 +749,7 @@ pub(crate) fn dispatch(
                 translate,
                 axis,
                 angle,
+                about,
             },
             expected_revision.as_deref(),
         ),
@@ -891,10 +893,10 @@ pub(crate) fn dispatch(
             part,
             moves,
             component,
-        } => crate::mate::solve_request(
-            session,
-            &part,
-            moves
+            rev,
+            mates,
+        } => {
+            let moves = moves
                 .into_iter()
                 .map(|m| {
                     (
@@ -904,12 +906,13 @@ pub(crate) fn dispatch(
                             translate: m.translate,
                             axis: m.axis,
                             angle: m.angle,
+                            about: m.about,
                         },
                     )
                 })
-                .collect(),
-            component,
-        ),
+                .collect();
+            solve_at(session, &part, moves, component, rev.as_deref(), mates)
+        }
         Request::FeatureShow { part, id, rev } => {
             let (_, session) = session.at(rev.as_deref())?;
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
@@ -7558,6 +7561,55 @@ fn inspect(
             features.iter().find(|(i, _)| i == f)
     {
         v[x.type_name()] = crate::surface::report(&pid, x);
+    }
+    Ok(v)
+}
+
+/// `assembly.solve` answered for `rev` (the working files when `None`):
+/// any revision a read takes, a person's draft included, named in the
+/// answer's `rev`. `mates` are each run as `feature.add` of a mate in a
+/// capture session over those files and solved with the rest, never
+/// written; a refusal is `feature.add`'s own, at `/mates/<i>`.
+fn solve_at(
+    session: &mut Session,
+    part: &str,
+    moves: Vec<(String, crate::assembly::Move)>,
+    component: bool,
+    rev: Option<&str>,
+    mates: Vec<serde_json::Map<String, Value>>,
+) -> Result<Value> {
+    let rev = rev.filter(|r| *r != "working");
+    let (named, files) = match rev {
+        None => (None, None),
+        Some(r) => {
+            let (n, f) = files_at(session, r)?;
+            (Some(n), Some(f))
+        }
+    };
+    let mut v = if mates.is_empty() {
+        let (_, s) = session.at(rev)?;
+        crate::mate::solve_request(s, part, moves, component)?
+    } else {
+        let files = files.unwrap_or_else(|| session.snapshot());
+        let mut capture = session.capturing(files)?;
+        for (i, m) in mates.into_iter().enumerate() {
+            let at = |mut e: Error| {
+                if let Some(p) = e.details.get("pointer").cloned() {
+                    e = e.with("field", p);
+                }
+                e.with("pointer", format!("/mates/{i}"))
+            };
+            let mut params = json!({"part": part, "type": "mate"});
+            for (k, v) in m {
+                params[k] = v;
+            }
+            let req = Request::from_rpc("feature.add", Some(params)).map_err(at)?;
+            dispatch(&mut capture, None, None, req).map_err(at)?;
+        }
+        crate::mate::solve_request(&mut capture, part, moves, component)?
+    };
+    if let Some(n) = named {
+        v["rev"] = n;
     }
     Ok(v)
 }
