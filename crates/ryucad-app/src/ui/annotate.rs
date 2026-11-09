@@ -13,7 +13,7 @@ pub fn compose(ctx: &egui::Context, view: &mut View, ws: &mut Workspace, at: egu
     let mut send = false;
     let mut cancel = false;
     egui::Window::new("Comment for the agent")
-        .id(egui::Id::new("annotate-compose"))
+        .id(egui::Id::unique("annotate-compose"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
