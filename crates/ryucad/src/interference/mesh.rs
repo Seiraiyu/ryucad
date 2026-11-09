@@ -114,6 +114,10 @@ fn to_triangle(p: Point3, t: &[Point3; 3]) -> f64 {
     one.nearest_to(p).map_or(f64::INFINITY, |(d, _, _)| d)
 }
 
+/// A search for a deep point that ran past [`BUDGET`] pieces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OverBudget;
+
 /// A point of a triangle of `tris` (those whose boxes come within `reach`
 /// of `inside`'s box) whose winding in `inside` isn't zero and that lies
 /// farther than `reach` from it, found by quartering triangles. A piece
@@ -127,14 +131,14 @@ fn to_triangle(p: Point3, t: &[Point3; 3]) -> f64 {
 ///   within about the reach of the mesh: not deep).
 ///
 /// A piece wholly inside (its ball misses the mesh, its middle winds) is
-/// deep when its middle lies farther than `reach`. `Err(())` past
+/// deep when its middle lies farther than `reach`. [`OverBudget`] past
 /// [`BUDGET`] pieces, counted in `spent`.
 pub fn deep_point(
     inside: &MeshTree,
     tris: &[[Point3; 3]],
     reach: f64,
     spent: &mut u64,
-) -> Result<Option<Point3>, ()> {
+) -> Result<Option<Point3>, OverBudget> {
     let Some((lo, hi)) = inside.bounds() else {
         return Ok(None);
     };
@@ -147,7 +151,7 @@ pub fn deep_point(
     while let Some(t) = stack.pop() {
         *spent += 1;
         if *spent > BUDGET {
-            return Err(());
+            return Err(OverBudget);
         }
         let c = Point3::new(
             (t[0].x + t[1].x + t[2].x) / 3.0,

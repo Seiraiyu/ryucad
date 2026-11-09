@@ -653,10 +653,10 @@ mod flat_tests {
         // (an assembly's part before the part of its own bodies).
         let mut of_part: BTreeMap<String, usize> = BTreeMap::new();
         for p in &fresh {
-            if let Some(k) = p.definition {
-                if p.kind == PartKind::Assembly || !of_part.contains_key(p.part.as_str()) {
-                    of_part.insert(p.part.to_string(), k);
-                }
+            if let Some(k) = p.definition
+                && (p.kind == PartKind::Assembly || !of_part.contains_key(p.part.as_str()))
+            {
+                of_part.insert(p.part.to_string(), k);
             }
         }
         let instances: Vec<(&crate::doc::assembly::ImportUsage, &Id, Pose)> = fresh
