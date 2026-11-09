@@ -86,6 +86,7 @@ impl Fill {
 
     #[doc(hidden)]
     pub fn from_fields(o: &mut Obj, default: Unit, env: &Env) -> Result<Fill> {
+        new_only(o, "a fill")?;
         let v = o.take("sides")?;
         let a = v
             .as_array()
@@ -157,6 +158,81 @@ impl Fill {
     }
 }
 
+/// An extract: faces of one body, as the extract sees it, copied into a
+/// sheet of its own; the body is left as it was.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Extract {
+    pub faces: Vec<Reference>,
+}
+
+impl Extract {
+    pub fn fields(&self) -> Value {
+        json!({"faces": refs_json(&self.faces)})
+    }
+
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj) -> Result<Extract> {
+        new_only(o, "an extract")?;
+        let faces = refs(&o.take("faces")?, "/faces")?;
+        let x = Extract { faces };
+        once(x.references())?;
+        Ok(x)
+    }
+
+    /// Its faces, each with its role `faces.<i>`.
+    pub fn references(&self) -> Vec<(String, &Reference)> {
+        self.faces
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (format!("faces.{i}"), r))
+            .collect()
+    }
+}
+
+/// Refuses an operation or targets on a feature that founds a sheet of
+/// its own (`what`: "an extract").
+fn new_only(o: &Obj, what: &str) -> Result<()> {
+    if o.has("operation") || o.has("targets") {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("{what} founds a body of its own: it has no operation or targets"),
+        )
+        .with("pointer", "/operation"));
+    }
+    Ok(())
+}
+
+/// A non-empty array of face references.
+fn refs(v: &Value, at: &str) -> Result<Vec<Reference>> {
+    let a = v
+        .as_array()
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| invalid(at, "a non-empty array of faces {feature, name}"))?;
+    a.iter()
+        .enumerate()
+        .map(|(j, r)| Reference::from_json(r, &format!("{at}/{j}")))
+        .collect()
+}
+
+fn refs_json(refs: &[Reference]) -> Value {
+    Value::Array(refs.iter().map(Reference::to_json).collect())
+}
+
+/// Refuses a face named twice; the pointer is the second naming's.
+fn once(refs: Vec<(String, &Reference)>) -> Result<()> {
+    for (k, (role, r)) in refs.iter().enumerate() {
+        if let Some((first, _)) = refs[..k].iter().find(|(_, x)| x == r) {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("face {}/{} is named twice, as {first} and {role}", r.feature, r.name),
+            )
+            .with("pointer", format!("/{}", role.replace('.', "/")))
+            .with("first", format!("/{}", first.replace('.', "/"))));
+        }
+    }
+    Ok(())
+}
+
 /// `tolerance` (else `default_text`): a length within
 /// [`TOLERANCE_RANGE`].
 fn tolerance(o: &mut Obj, default_text: &str, default: Unit, env: &Env) -> Result<Quantity> {
@@ -189,6 +265,33 @@ mod tests {
         let f = Fill::from_fields(&mut o, Unit::Mm, &Env::empty())?;
         o.finish()?;
         Ok(f)
+    }
+
+    fn extract(v: Value) -> Result<Extract> {
+        let mut o = Obj::new(&v, "")?;
+        let x = Extract::from_fields(&mut o)?;
+        o.finish()?;
+        Ok(x)
+    }
+
+    #[test]
+    fn extracts_round_trip_and_are_checked() {
+        const B: &str = "fedcba9876543210fedcba9876543210";
+        let face = |n: &str| json!({"feature": "base", "name": n});
+        let x = extract(json!({"faces": [face(A), face(B)]})).unwrap();
+        assert_eq!(x.fields(), json!({"faces": [face(A), face(B)]}));
+        assert_eq!(extract(x.fields()).unwrap(), x);
+        let roles: Vec<String> = x.references().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(roles, ["faces.0", "faces.1"]);
+        for (v, code, pointer) in [
+            (json!({}), Code::InvalidDocument, "/faces"),
+            (json!({"faces": []}), Code::InvalidDocument, "/faces"),
+            (json!({"faces": [face(A), face(A)]}), Code::InvalidParam, "/faces/1"),
+            (json!({"faces": [face(A)], "operation": "join"}), Code::InvalidParam, "/operation"),
+        ] {
+            let e = extract(v.clone()).unwrap_err();
+            assert_eq!((e.code, e.details["pointer"].as_str()), (code, Some(pointer)), "{v}");
+        }
     }
 
     #[test]
@@ -239,6 +342,7 @@ mod tests {
             (json!({"sides": [{"curve": "x"}], "angle": "90 deg"}),
              Code::InvalidParam, "/angle"),
             (json!({"sides": [{"curve": "x"}], "angle": 0}), Code::InvalidParam, "/angle"),
+            (json!({"sides": [{"curve": "x"}], "targets": ["b"]}), Code::InvalidParam, "/operation"),
         ] {
             let err = e(v.clone());
             assert_eq!((err.code, err.details["pointer"].as_str()), (code, Some(pointer)), "{v}");
