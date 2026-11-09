@@ -140,21 +140,26 @@ pub fn answer_live(
         _ if refused.is_some() => Err(refused.take().expect("checked")),
         Request::MeshGet {
             part,
+            feature,
+            features,
+            quality,
             transfer: Some(t @ (Transfer::Binary | Transfer::Compact)),
             rev,
             flat: Some(solid),
-            ..
-        } => mesh_flat_binary(
-            session,
-            &part,
-            &solid,
-            rev.as_deref(),
-            t == Transfer::Compact,
-        )
-        .and_then(|mut a| {
-            a.result = versioned(Ok(a.result))?;
-            Ok(a)
-        }),
+        } => flat_alone(feature.as_deref(), &features, quality.as_deref())
+            .and_then(|()| {
+                mesh_flat_binary(
+                    session,
+                    &part,
+                    &solid,
+                    rev.as_deref(),
+                    t == Transfer::Compact,
+                )
+            })
+            .and_then(|mut a| {
+                a.result = versioned(Ok(a.result))?;
+                Ok(a)
+            }),
         Request::MeshGet {
             part,
             feature,
@@ -1536,10 +1541,16 @@ pub(crate) fn dispatch(
         }
         Request::MeshGet {
             part,
+            feature,
+            features,
+            quality,
+            transfer: _,
             rev,
             flat: Some(solid),
-            ..
-        } => versioned(mesh_flat_json(session, &part, &solid, rev.as_deref())),
+        } => {
+            flat_alone(feature.as_deref(), &features, quality.as_deref())?;
+            versioned(mesh_flat_json(session, &part, &solid, rev.as_deref()))
+        }
         Request::MeshGet {
             part,
             feature,
@@ -6746,6 +6757,27 @@ fn mesh_flat_binary(
         true => Answer::bytes(v, mesh::COMPACT, mesh::encode_compact(&bodies)),
         false => Answer::bytes(v, mesh::ENCODING, mesh::encode(&bodies)),
     })
+}
+
+/// `mesh.get --flat` meshes one flat body at normal quality, so it takes
+/// no feature, occurrences or quality: refused, naming the field, rather
+/// than answered as if they were honoured.
+fn flat_alone(feature: Option<&str>, features: &[String], quality: Option<&str>) -> Result<()> {
+    let given = [
+        ("feature", feature.is_some()),
+        ("features", !features.is_empty()),
+        ("quality", quality.is_some()),
+    ];
+    match given.iter().find(|(_, g)| *g) {
+        Some((field, _)) => Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "a flat body is the solid's one flat, at normal quality: give flat without {field}"
+            ),
+        )
+        .with("param", *field)),
+        None => Ok(()),
+    }
 }
 
 /// `mesh.get --flat` as JSON: the flat's one body, as `mesh_get` gives a

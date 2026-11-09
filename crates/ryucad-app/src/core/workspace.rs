@@ -4102,7 +4102,13 @@ impl Workspace {
                 {
                     match &f {
                         Ok(l) => v.lines = Some(l.clone()),
-                        Err(e) => v.error = Some(e.clone()),
+                        Err(e) => {
+                            // The flat no longer reads: draw the folded
+                            // body again, not the last revision's flat.
+                            v.lines = None;
+                            v.error = Some(e.clone());
+                            self.model.show_flat(None);
+                        }
                     }
                 }
                 self.sheets.take_flat(key, revision, f);
@@ -4128,12 +4134,20 @@ impl Workspace {
                         self.turn_to_flat();
                     }
                     Ok(Some(Err(e))) | Err(e) => {
+                        // Refused (an edit left the solid unfolding no
+                        // more): the folded body is drawn again, and the
+                        // view keeps the refusal, not the stale flat.
                         if let Some(v) = &mut self.flat_view {
+                            v.lines = None;
                             v.error = Some(e.clone());
                         }
+                        self.model.show_flat(None);
                         self.fail(e);
                     }
-                    Ok(_) => self.fail(Error::new(Code::Daemon, "a flat came without its body")),
+                    Ok(_) => {
+                        self.model.show_flat(None);
+                        self.fail(Error::new(Code::Daemon, "a flat came without its body"));
+                    }
                 }
             }
             (Pending::Made(key, revision), a) => {

@@ -109,6 +109,32 @@ fn a_sheet_metal_part_is_listed_tabled_painted_and_laid_flat() {
 }
 
 #[test]
+fn a_flat_view_refused_at_a_new_revision_draws_the_folded_body_again() {
+    let p = Project::new().with_sheet_metal();
+    let mut ws = open(&p);
+    let candidate = ws.flat_candidate(None).unwrap();
+    ws.show_flat_view(Some(candidate));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.model.flat.is_some() && ws.flat_view.as_ref().is_some_and(|v| v.lines.is_some())
+    }));
+    let (k, flat) = ws.model.flat.clone().unwrap();
+    // A deduction longer than the bend: the solid lays flat no more, so
+    // the view's re-read at the new revision is refused.
+    p.ok(&["feature", "edit", "p", "plate", "--deduction", "100mm"]);
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.flat_view.as_ref().is_some_and(|v| v.error.is_some())
+    }));
+    // The stale flat is gone, body and bend lines, and the folded body is
+    // drawn in its place.
+    let v = ws.flat_view.clone().unwrap();
+    assert!(v.lines.is_none(), "{:?}", v.lines);
+    assert!(ws.model.flat.is_none());
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.model.mesh_of(&k).is_some_and(|m| m.hash != flat.hash)
+    }));
+}
+
+#[test]
 fn a_flanges_angle_and_a_base_flanges_k_factor_are_edited_from_their_forms() {
     let p = Project::new().with_sheet_metal();
     let mut ws = open(&p);
