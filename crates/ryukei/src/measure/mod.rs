@@ -16,6 +16,7 @@ mod distance;
 mod gauss;
 mod length;
 mod mass;
+mod meshes;
 mod prims;
 mod props;
 mod tree;
@@ -23,6 +24,7 @@ mod tree;
 pub use angle::{Angle, angle};
 pub use distance::{Distance, DistanceOptions, distance, distance_with};
 pub use mass::{MassOptions, MassProperties, mass, mass_with, principal};
+pub use meshes::{MeshNear, MeshTree};
 pub use props::{DEFAULT_TOLERANCE, EdgeShape, FaceShape, Properties, properties};
 
 use crate::geom::Curve;
