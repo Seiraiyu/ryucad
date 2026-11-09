@@ -72,6 +72,10 @@ pub struct Mating {
     pub held: Option<bool>,
     pub refusal: Option<String>,
     pub waiting: bool,
+    /// Why the last pick wasn't taken.
+    pub note: Option<String>,
+    /// The last preview asked: an answer to an earlier one is dropped.
+    pub asked: u64,
 }
 
 /// The instance an occurrence's entity reference is on: its first step.

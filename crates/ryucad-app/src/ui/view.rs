@@ -404,7 +404,15 @@ impl View {
                         egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Move value")
                     });
                     if focus {
+                        // Its text selected, so typing replaces it.
                         r.request_focus();
+                        let mut st = egui::text_edit::TextEditState::load(ui.ctx(), r.id)
+                            .unwrap_or_default();
+                        st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                            egui::text::CCursor::new(0),
+                            egui::text::CCursor::new(text.chars().count()),
+                        )));
+                        st.store(ui.ctx(), r.id);
                     }
                     if r.changed() {
                         ws.type_move(&text);
@@ -1563,6 +1571,30 @@ impl View {
         {
             m.release();
             self.mover_focus = true;
+            clicked = false;
+        }
+        // While the Mate dialog waits on a pick, a click picks a face, edge
+        // or vertex of an occurrence for it; it never selects.
+        if clicked
+            && ws.mating.as_ref().is_some_and(|d| d.next().is_some())
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            let hit = self.picker(ws).pick_with(
+                &pr,
+                size,
+                local(p),
+                crate::core::pick::Filter::connectors(),
+            );
+            match hit.filter(|h| h.rev.is_none()) {
+                Some(h) => {
+                    ws.mate_pick(&h.entity).ok();
+                }
+                None => {
+                    if let Some(d) = ws.mating.as_mut() {
+                        d.note = Some("Click a face, edge or vertex of an instance.".into());
+                    }
+                }
+            }
             clicked = false;
         }
         // The Move tool previews its value as it changes.

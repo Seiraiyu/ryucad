@@ -670,6 +670,8 @@ pub struct State {
     pub movable: Option<Result<(String, String), String>>,
     /// The Move tool is on.
     pub moving: bool,
+    /// The Mate dialog is open.
+    pub mating: bool,
 }
 
 /// Whether the window's mode allows `id`, or which mode would: the part
@@ -718,7 +720,7 @@ pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
         // Esc also closes the view selector or Select other's list and
         // leaves the Measure tool.
         "edit.clear_selection" => need(
-            s.selected > 0 || s.chosen || s.selector || s.measuring || s.moving,
+            s.selected > 0 || s.chosen || s.selector || s.measuring || s.moving || s.mating,
             "Nothing is selected or chosen.",
         ),
         "view.normal_to" => need(s.planar_face, "Select a planar face first."),

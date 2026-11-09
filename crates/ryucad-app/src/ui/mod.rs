@@ -13,6 +13,7 @@ pub mod feedback;
 pub mod fonts;
 pub mod form;
 pub mod help;
+pub mod mate;
 pub mod icon;
 pub mod menu;
 pub mod modes;

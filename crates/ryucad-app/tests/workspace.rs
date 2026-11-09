@@ -533,3 +533,46 @@ fn the_move_tool_previews_and_writes_a_typed_move() {
     ws.cancel_move();
     assert!(ws.model.preview.is_empty() && ws.mover.is_none());
 }
+
+#[test]
+fn the_mate_dialog_previews_and_adds_a_mate() {
+    use ryucad_app::core::mating::Form;
+    let (p, top, foot) = common::plate_and_bolt();
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |w| w.idle() && w.model.middles("frame").len() == 2));
+    ws.open_mate("frame", Some("pin"));
+    ws.mate_pick(&foot).unwrap();
+    // Both picks on one instance are refused in the dialog.
+    assert!(ws.mate_pick(&foot).is_err());
+    assert!(ws.mating.as_ref().unwrap().note.is_some());
+    ws.mate_pick(&top).unwrap();
+    {
+        let d = ws.mating.as_mut().unwrap();
+        d.form = Form::Revolute;
+        d.flip = true;
+    }
+    ws.preview_mate();
+    assert!(ws.wait_until(WAIT, |w| w.mating.as_ref().is_some_and(|d| d.addable())));
+    assert!(
+        !ws.model.preview.is_empty(),
+        "the pin drawn where the mate puts it"
+    );
+    // Nothing written by the preview.
+    assert!(!p.ok(&["feature", "list", "frame"]).to_string().contains("\"mate\""));
+    ws.add_mate();
+    assert!(ws.mating.is_none());
+    let t = Instant::now();
+    while !p.ok(&["feature", "list", "frame"]).to_string().contains("\"mate\"") {
+        assert!(t.elapsed() < WAIT, "no mate written");
+        ws.wait_until(Duration::from_millis(200), |_| false);
+    }
+    // A form a face pair can't take is the daemon's refusal: Add stays off.
+    ws.open_mate("frame", None);
+    ws.mate_pick(&foot).unwrap();
+    ws.mate_pick(&foot.replace("frame/pin/", "frame/base/")).ok();
+    assert!(ws.wait_until(WAIT, |w| w.mating.as_ref().is_some_and(|d| !d.waiting)));
+    let d = ws.mating.as_ref().unwrap();
+    assert!(d.refusal.is_some() && !d.addable(), "{d:?}");
+    ws.close_mate();
+    assert!(ws.mating.is_none());
+}

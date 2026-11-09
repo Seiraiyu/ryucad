@@ -55,6 +55,7 @@ pub fn state(o: &mut Opened) -> State {
             .and_then(|m| m.selection.first().cloned())
             .and_then(|r| movable_of(&o.ws, &r)),
         moving: o.ws.mover.is_some(),
+        mating: o.ws.mating.is_some(),
     }
 }
 
@@ -254,6 +255,8 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
                 o.ws.clear_move();
             } else if o.ws.mover.is_some() {
                 o.ws.cancel_move();
+            } else if o.ws.mating.is_some() {
+                o.ws.close_mate();
             } else if o.view.others.is_some() {
                 o.view.others = None;
             } else if o.view.selector.is_some() {
@@ -368,6 +371,18 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         "view.annotations" => toggle(o, "display.annotations", o.view.annotations),
         "annotation.add" | "annotation.here" => o.view.compose(&o.ws, id, target),
         "edit.move" if o.ws.mover.is_some() && target.is_none() => o.ws.cancel_move(),
+        // On the shown assembly, from what was right-clicked: an instance's
+        // row, or an occurrence's entity (the first pick, too).
+        "edit.mate" => {
+            if let Some(asm) = o.ws.shown_assembly() {
+                let rest = target.and_then(|t| t.strip_prefix(&asm)?.strip_prefix('/'));
+                let instance = rest.and_then(|r| r.split('/').next()).filter(|i| !i.is_empty());
+                o.ws.open_mate(&asm, instance);
+                if let Some(t) = target.filter(|t| t.split('/').count() > 3) {
+                    o.ws.mate_pick(t).ok();
+                }
+            }
+        }
         "edit.move" => {
             let movable = match target {
                 Some(t) => movable_of(&o.ws, t),
