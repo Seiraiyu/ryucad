@@ -228,3 +228,41 @@ fn probe_divide_after_move() {
         eprintln!("{label}: cut {:?}", boolean(OpKey(7), BooleanOp::Subtract, &round, &[Tool { key: ToolKey(1), body: plug, place: Rigid::IDENTITY }]).map(|(o,_)| (o.faces().count(), vol(&o))));
     }
 }
+
+#[test]
+fn probe_spline_and_resize() {
+    let (b, _) = primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let r = all_edges(&b, BlendKind::Fillet { radius: 0.05 });
+    let e0 = edge_between(&b, face(FaceRole::PlusZ), face(FaceRole::PlusX));
+    let mut n = blend(OpKey(1), &b, &[EdgeBlend { edge: e0, kind: BlendKind::Fillet { radius: 0.1 } }]).unwrap().0;
+    eprintln!("convert one-fillet: {:?}", ryukei_testkit::nurbs::convert_body(&mut n).err());
+    let t = std::time::Instant::now();
+    let rec = recognise_blends(&n, &RecogniseOptions::default()).unwrap();
+    eprintln!("nurbs rounded box: {} blends {} corners kinds {:?} in {:?}", rec.blends.len(), rec.corners.len(), rec.blends.first().map(|b| b.kind), t.elapsed());
+    let c = all_edges(&b, BlendKind::Chamfer(Chamfer::Equal { distance: 0.05 }));
+    let mut nc = c.clone();
+    eprintln!("convert chamfered: {:?}", ryukei_testkit::nurbs::convert_body(&mut nc).err());
+    eprintln!("nurbs chamfered box: {}", recognise_blends(&nc, &RecogniseOptions::default()).unwrap().blends.len());
+    // Resize every blend of the rounded box.
+    let all: Vec<(Name, BlendKind)> = recognise_blends(&r, &RecogniseOptions::default()).unwrap().blends.iter().map(|b| (b.faces[0], BlendKind::Fillet { radius: 0.08 })).collect();
+    let t = std::time::Instant::now();
+    match resize_blends(OpKey(20), &r, &all) {
+        Ok((o, _)) => {
+            let kept = r.faces().filter(|&f| o.by_name(r.face(f).unwrap().name).is_some()).count();
+            let kv = r.vertices().filter(|&v| o.by_name(r.vertex(v).unwrap().name).is_some()).count();
+            let ke = r.edges().filter(|&v| o.by_name(r.edge(v).unwrap().name).is_some()).count();
+            let (a,bb,cc,rr) = (1.0f64,0.6f64,0.4f64,0.08f64);
+            let want = a*bb*cc - (8.0 - 4.0*std::f64::consts::PI/3.0)*(rr*rr*rr) - (4.0-std::f64::consts::PI)*rr*rr*(a+bb+cc-6.0*rr);
+            eprintln!("resize all {:?}: faces {kept}/{} edges {ke}/{} vertices {kv}/{} vol {} want {want}", t.elapsed(), r.faces().count(), r.edges().count(), r.vertices().count(), vol(&o));
+        }
+        Err(e) => eprintln!("resize all err {e:?}"),
+    }
+    // One edge's fillet resized.
+    let e = edge_between(&b, face(FaceRole::PlusZ), face(FaceRole::PlusX));
+    let (f, _) = blend(OpKey(1), &b, &[EdgeBlend { edge: e, kind: BlendKind::Fillet { radius: 0.1 } }]).unwrap();
+    let fl = blendface(&f);
+    let (o, j) = resize_blends(OpKey(21), &f, &[(fl, BlendKind::Fillet { radius: 0.15 })]).unwrap();
+    let kept = f.faces().filter(|&x| o.by_name(f.face(x).unwrap().name).is_some()).count();
+    let ke = f.edges().filter(|&x| o.by_name(f.edge(x).unwrap().name).is_some()).count();
+    eprintln!("resize one: faces {kept}/{} edges {ke}/{} vol {} want {} journal {:?}", f.faces().count(), f.edges().count(), vol(&o), 0.24 - 0.6*0.0225*(1.0-std::f64::consts::PI/4.0), j.events().len());
+}

@@ -237,6 +237,16 @@ pub(crate) fn fillet(body: &Body, f: FaceId, tol: f64) -> Option<Candidate> {
     })
 }
 
+/// A surface as chamfers are read on it: a flat NURBS as its plane
+/// (`blend::spine::twin`, every control point within half the
+/// resolution of it), anything else as it is.
+fn flat(s: &Surface) -> std::borrow::Cow<'_, Surface> {
+    match crate::blend::spine::twin(s) {
+        Some(p) => std::borrow::Cow::Owned(p),
+        None => std::borrow::Cow::Borrowed(s),
+    }
+}
+
 /// Where two support surfaces meet, in closed form.
 enum Meet {
     /// A line: a point on it and its unit direction.
@@ -308,6 +318,27 @@ fn setback(body: &Body, edge: EdgeId, m: &Meet, tol: f64) -> Option<f64> {
                 })
                 .collect()
         }
+        (Meet::Line(o, dir), crate::geom::Curve::Nurbs(n)) => {
+            // A spline edge is a straight setback when every control point
+            // lies within the reach of the line through its first, parallel
+            // to the meeting: the curve lies in the hull, so within the
+            // reach of that line too.
+            let w = n.weights();
+            if w.iter().any(|&x| x <= 0.0) {
+                return None;
+            }
+            let first = n.control_points().next()?;
+            let dist = |p: Point3| {
+                let q = p - first;
+                (q - *dir * q.dot(*dir)).length()
+            };
+            if n.control_points().any(|p| dist(p) > reach) {
+                return None;
+            }
+            let q = first - *o;
+            let d = (q - *dir * q.dot(*dir)).length();
+            vec![d, d]
+        }
         (Meet::Circle(c, z, big), crate::geom::Curve::Circle(_)) => pts
             .iter()
             .map(|&p| {
@@ -354,7 +385,7 @@ fn width(body: &Body, g: FaceId, m: &Meet) -> f64 {
 /// Face `f` read as a chamfer.
 pub(crate) fn chamfer(body: &Body, f: FaceId, tol: f64) -> Option<Candidate> {
     if !matches!(
-        body.surfaces[body.faces[f].surface],
+        flat(&body.surfaces[body.faces[f].surface]).as_ref(),
         Surface::Plane(_) | Surface::Cone(_)
     ) {
         return None;
@@ -371,10 +402,10 @@ pub(crate) fn chamfer(body: &Body, f: FaceId, tol: f64) -> Option<Candidate> {
     for (i, &a) in faces.iter().enumerate() {
         for &b in &faces[i + 1..] {
             let (sa, sb) = (
-                &body.surfaces[body.faces[a].surface],
-                &body.surfaces[body.faces[b].surface],
+                flat(&body.surfaces[body.faces[a].surface]),
+                flat(&body.surfaces[body.faces[b].surface]),
             );
-            let Some(m) = meet(sa, sb) else { continue };
+            let Some(m) = meet(&sa, &sb) else { continue };
             let side = |g: FaceId| -> Option<f64> {
                 let ds: Option<Vec<f64>> =
                     by[&g].iter().map(|&e| setback(body, e, &m, tol)).collect();
@@ -473,7 +504,7 @@ fn joins(body: &Body, edge: EdgeId, a: FaceId, b: FaceId, kind: &BlendKind, tol:
 /// `body`'s blends and corners.
 pub(crate) fn recognise(body: &Body, opts: &RecogniseOptions, m: &Meter) -> Result<Recognition, Error> {
     let tol = opts.tolerance;
-    if !(tol.is_finite() && tol >= LINEAR_RESOLUTION && tol <= crate::tol::TOLERANCE_CAP) {
+    if !(LINEAR_RESOLUTION..=crate::tol::TOLERANCE_CAP).contains(&tol) {
         return Err(TweakError::BadTolerance.into());
     }
     let faces: Vec<FaceId> = body.faces().collect();

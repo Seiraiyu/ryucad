@@ -398,6 +398,30 @@ pub(crate) fn refusal(e: &ryukei::TweakError) -> Refusal {
             "this face is part of no feature (at most half the body's faces) that a cap closes",
             vec![("face", face)],
         ),
+        T::NotABlend { face } => r(
+            "not_a_blend",
+            "this face is no recognised fillet's, chamfer's or corner's (or no support of its chamfer)",
+            vec![("face", face)],
+        ),
+        T::BlendLost { face, reason } => Refusal {
+            reason: "blend_lost",
+            case: Some(match reason {
+                ryukei::BlendLoss::NoEdge => "no_edge",
+                ryukei::BlendLoss::Overflow => "overflow",
+                ryukei::BlendLoss::RadiusTooLarge => "radius_too_large",
+                ryukei::BlendLoss::SmoothEdge => "smooth_edge",
+                ryukei::BlendLoss::Unsupported => "unsupported",
+                ryukei::BlendLoss::NonManifold => "non_manifold",
+                ryukei::BlendLoss::Uncertain => "uncertain",
+            }),
+            message: "the blend holding this face can't be made again after the edit",
+            entities: vec![("face", face)],
+        },
+        T::BadTolerance => r(
+            "bad_tolerance",
+            "a recognition tolerance that isn't finite or lies outside 10 nm to 0.1 mm",
+            vec![],
+        ),
         T::SelfIntersecting { faces: [a, b] } => r(
             "self_intersecting",
             "two faces of the result would cross",

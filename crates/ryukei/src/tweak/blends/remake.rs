@@ -157,15 +157,14 @@ fn reblend(
     m: &Meter,
 ) -> Result<(Body, Journal), Error> {
     match reblend_plain(key, orig, body, blends, m) {
-        Err((Error::InvalidBlend(BlendError::Overflow { edge, face }), _))
-            if blends.iter().any(|(b, _)| b.supports.contains(&face)) =>
-        {
-            match through_features(key, orig, body, blends, edge, face, m) {
-                Some(r) => r,
-                None => reblend_plain(key, orig, body, blends, m).map_err(|(_, lost)| lost),
-            }
-        }
-        r => r.map_err(|(_, lost)| lost),
+        Err(r) => match r.overflow(blends) {
+            Some((edge, face)) => match through_features(key, orig, body, blends, edge, face, m) {
+                Some(done) => done,
+                None => Err(r.lost),
+            },
+            None => Err(r.lost),
+        },
+        Ok(done) => Ok(done),
     }
 }
 
@@ -222,9 +221,6 @@ fn through_features(
     mut face: Name,
     m: &Meter,
 ) -> Option<Result<(Body, Journal), Error>> {
-    use crate::boolean::{BooleanOp, Tool};
-    use crate::geom::Rigid;
-    use crate::name::{EditRole, Role, ToolKey};
     let mut capped = body.clone();
     let mut taken: Vec<Name> = Vec::new();
     for _ in 0..FEATURES {
@@ -240,12 +236,10 @@ fn through_features(
         taken.extend(spec.faces);
         capped = next;
         match reblend_plain(key, orig, &capped, blends, m) {
-            Err((Error::InvalidBlend(BlendError::Overflow { edge: e, face: f }), _))
-                if blends.iter().any(|(b, _)| b.supports.contains(&f)) =>
-            {
-                (edge, face) = (e, f);
-            }
-            Err((_, lost)) => return Some(Err(lost)),
+            Err(r) => match r.overflow(blends) {
+                Some(at) => (edge, face) = at,
+                None => return Some(Err(r.lost)),
+            },
             Ok((round, _)) => {
                 let r = (|| -> Result<(Body, Journal), Error> {
                     let (out, steps) = recut(key, body, &capped, round, &taken, m)?;
@@ -295,9 +289,7 @@ fn recut(
     let (walls, _) = crate::sheet::extract(k(1), body, taken)?;
     let mut steps = Vec::new();
     let mut out = round;
-    let dv = divide_in(k(2), capped, &[tool(&walls)], m);
-    if std::env::var("DBG").is_ok() { eprintln!("taken {} walls faces {} divide {:?}", taken.len(), walls.faces().count(), dv.as_ref().map(|(d,_)| (d.front.len(), d.back.len(), d.apart.len())).err()); }
-    if let Ok((d, j)) = dv {
+    if let Ok((d, j)) = divide_in(k(2), capped, &[tool(&walls)], m) {
         let lumps: Vec<&Body> = d.front.iter().chain(&d.back).collect();
         if lumps.len() >= 2 {
             let plug = lumps.iter().min_by_key(|b| own(b, capped)).expect("two");
@@ -379,6 +371,28 @@ fn follow(n: Name, steps: &[Journal], out: &Body) -> Option<EntityId> {
     }
 }
 
+/// A blend made again refused: the blend's own refusal, and the
+/// `BlendLost` it maps to.
+struct Refusal {
+    raw: Error,
+    lost: Error,
+}
+
+impl Refusal {
+    /// The edge and face an `Overflow` names, where the face is one of
+    /// the blends' supports: a feature on it may stand in the strip.
+    fn overflow(&self, blends: &[(Recognised, BlendKind)]) -> Option<(Name, Name)> {
+        match self.raw {
+            Error::InvalidBlend(BlendError::Overflow { edge, face })
+                if blends.iter().any(|(b, _)| b.supports.contains(&face)) =>
+            {
+                Some((edge, face))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// [`reblend`] without the features: the blend's refusal beside the
 /// `BlendLost` it maps to.
 fn reblend_plain(
@@ -387,7 +401,7 @@ fn reblend_plain(
     body: &Body,
     blends: &[(Recognised, BlendKind)],
     m: &Meter,
-) -> Result<(Body, Journal), (Error, Error)> {
+) -> Result<(Body, Journal), Box<Refusal>> {
     let mut edges = Vec::new();
     let mut owner: BTreeMap<Name, Name> = BTreeMap::new();
     for (b, kind) in blends {
@@ -398,7 +412,10 @@ fn reblend_plain(
                 reason: BlendLoss::NoEdge,
             }
             .into();
-            return Err((lost.clone(), lost));
+            return Err(Box::new(Refusal {
+                raw: lost.clone(),
+                lost,
+            }));
         }
         for e in found {
             owner.insert(e, b.faces[0]);
@@ -419,7 +436,7 @@ fn reblend_plain(
             }
             _ => e.clone(),
         };
-        (e, lost)
+        Box::new(Refusal { raw: e, lost })
     })?;
     name_blends(orig, &mut out, &journal, blends, &owner);
     Ok((out, journal))
