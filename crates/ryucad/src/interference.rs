@@ -28,6 +28,9 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+pub mod mesh;
+pub use mesh::Prepared;
+
 /// What intersecting two solids found, in the first one's frame.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Verdict {
