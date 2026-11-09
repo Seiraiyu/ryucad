@@ -156,6 +156,25 @@ fn a_through_hole_is_capped_bit_for_bit() {
 }
 
 #[test]
+fn a_bosss_side_and_top_are_one_feature_capped_by_the_plate() {
+    let b = bossed();
+    let f = feature_faces(&b, cylinders(&b)[0]).unwrap();
+    assert_eq!(f.len(), 2);
+    let (o, _) = delete_faces(D, &b, &spec(f, Heal::Cap)).unwrap();
+    assert!((volume(&o) - 0.2).abs() < 1e-9);
+    // The side alone: no cap; growth takes the top too.
+    assert_eq!(
+        delete_faces(D, &b, &spec(cylinders(&b), Heal::Cap)).unwrap_err(),
+        TweakError::CapNotOnFace {
+            face: cylinders(&b)[0]
+        }
+        .into()
+    );
+    let (o, _) = delete_faces(D, &b, &spec(cylinders(&b), Heal::Auto)).unwrap();
+    assert!((volume(&o) - 0.2).abs() < 1e-9);
+}
+
+#[test]
 fn a_fillet_grows_back_to_its_sharp_edge() {
     let (b, _) = primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
     let top = Name::derive(

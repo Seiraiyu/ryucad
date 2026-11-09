@@ -5,12 +5,15 @@
 //! they meet (the local re-trim with the faces taken away).
 
 pub(crate) mod cap;
+pub(crate) mod feature;
 pub(crate) mod grow;
 pub(crate) mod hole;
 pub(crate) mod sets;
 
 #[cfg(test)]
 mod tests;
+
+pub use feature::feature_faces;
 
 use crate::name::{Event, Journal, Name, OpKey};
 use crate::topo::{Body, BodyKind, FaceId};
