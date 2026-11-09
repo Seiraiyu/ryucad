@@ -19,7 +19,9 @@ use crate::solid::Solids;
 use ryukei::geom::{Rigid, Surface, UnitVector3};
 use ryukei::name::{Event, Name};
 use ryukei::topo::EntityId;
-use ryukei::tweak::{MoveSpec, OffsetFacesSpec};
+// 17.A's tweaks keep the body's topology (`Topology::Keep`); changing it
+// (ryukei 13's re-trim) is a later plan's.
+use ryukei::tweak::{MoveSpec, OffsetFacesSpec, Topology};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -217,10 +219,12 @@ pub(crate) fn resolve<'a>(
                     faces: faces.into_iter().map(|(n, _)| n).collect(),
                     motion,
                     tangent: m.tangent,
+                    topology: Topology::Keep,
                 }),
                 None => Spec::Offset(OffsetFacesSpec {
                     faces,
                     tangent: m.tangent,
+                    topology: Topology::Keep,
                 }),
             };
             Ok(Resolved {
@@ -251,7 +255,10 @@ pub(crate) fn resolve<'a>(
             Ok(Resolved {
                 target: &x.target,
                 built,
-                spec: Spec::Replace(ryukei::tweak::ReplaceSpec { faces }),
+                spec: Spec::Replace(ryukei::tweak::ReplaceSpec {
+                    faces,
+                    topology: Topology::Keep,
+                }),
             })
         }
         _ => unreachable!("a tweak"),
@@ -356,6 +363,21 @@ pub(crate) fn refusal(e: &ryukei::TweakError) -> Refusal {
         T::HingeAlongPull { face } => r(
             "hinge_along_pull",
             "this face's hinge or normal runs along the pull somewhere: the draft has no direction there",
+            vec![("face", face)],
+        ),
+        T::GapNotHealed { face } => r(
+            "gap_not_healed",
+            "the re-trim's walk round this face didn't close",
+            vec![("face", face)],
+        ),
+        T::HealAmbiguous { face } => r(
+            "heal_ambiguous",
+            "which side of this face the re-trim keeps can't be decided",
+            vec![("face", face)],
+        ),
+        T::RegionTooSmall { face } => r(
+            "region_too_small",
+            "this face reaches past the region its re-trim works in",
             vec![("face", face)],
         ),
         T::SelfIntersecting { faces: [a, b] } => r(
@@ -910,6 +932,9 @@ mod tests {
             (T::HingeAmbiguous { face: n }, "hinge_ambiguous"),
             (T::HingeNotOnFace { face: n }, "hinge_not_on_face"),
             (T::HingeAlongPull { face: n }, "hinge_along_pull"),
+            (T::GapNotHealed { face: n }, "gap_not_healed"),
+            (T::HealAmbiguous { face: n }, "heal_ambiguous"),
+            (T::RegionTooSmall { face: n }, "region_too_small"),
             (T::SelfIntersecting { faces: [n, n] }, "self_intersecting"),
             (T::Uncertain { at: n }, "uncertain"),
             (
