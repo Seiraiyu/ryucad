@@ -22,6 +22,8 @@ pub(crate) struct Changes {
     pub(crate) drafts: BTreeMap<FaceId, super::draft::Drafted>,
     /// The parting line's edges, which stay where they are.
     pub(crate) hinges: BTreeSet<crate::topo::EdgeId>,
+    /// Faces taken away (a delete's only): in the region, no working face.
+    pub(crate) deleted: BTreeSet<FaceId>,
 }
 
 /// The tweaked body and its journal, or the refusal, under `meter`.

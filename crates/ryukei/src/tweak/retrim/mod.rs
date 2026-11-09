@@ -55,7 +55,12 @@ pub(crate) fn retrim(
     m: &Meter,
 ) -> Result<(Body, Journal), Error> {
     body.require_solid("re-trim")?;
-    let changed = changes.motion.keys().copied().collect();
+    let changed = changes
+        .motion
+        .keys()
+        .chain(&changes.deleted)
+        .copied()
+        .collect();
     let mut region = region::region(body, &changed);
     let reach = reach(body, changes);
     // The ladder: the region and its box; the box doubled; the region
@@ -85,6 +90,15 @@ pub(crate) fn retrim(
 /// resolutions.
 fn reach(body: &Body, changes: &Changes) -> f64 {
     let mut r: f64 = 10.0 * crate::tol::LINEAR_RESOLUTION;
+    // A gap is as wide as the box of the faces taken away.
+    if let Some(g) = changes
+        .deleted
+        .iter()
+        .map(|&f| crate::intersect::face_box(body, f))
+        .reduce(|a, b| a.union(&b))
+    {
+        r = r.max(g.min().distance(g.max()));
+    }
     for (&f, mo) in &changes.motion {
         // An offset moves every point by its distance (`apply` needs the
         // normal for that, which a vertex alone doesn't give).
@@ -142,7 +156,7 @@ fn attempt(
     m: &Meter,
 ) -> Rung {
     let mut ws = BTreeMap::new();
-    for &f in &region.faces {
+    for &f in region.faces.iter().filter(|f| !changes.deleted.contains(f)) {
         let mo = changes.motion.get(&f);
         let sense = changes
             .senses
