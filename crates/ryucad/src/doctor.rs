@@ -513,6 +513,7 @@ fn diagnose_in(builds: &mut Builds) -> Vec<Issue> {
     diagnose_items(&mut issues, root);
     diagnose_imports(root, &part_ids, unit, &mut issues);
     diagnose_annotations(root, &mut issues);
+    diagnose_templates(root, &mut issues);
     diagnose_placements(root, &mut issues);
     diagnose_pdm(root, manifest.as_ref(), &part_ids, &mut issues);
     diagnose_deps(builds, manifest.as_ref(), &mut issues);
@@ -1198,12 +1199,14 @@ fn diagnose_part(
                 || (n == "features" && d)
                 || (n == crate::doc::views::VIEWS && d)
                 || (n == crate::doc::explode::EXPLODES && d)
+                || (n == crate::doc::drawing::DRAWINGS && d)
                 || (n == crate::doc::appearance::APPEARANCE && !d)
         },
         &["part", "parameters", "properties", "appearance"],
         issues,
     );
     diagnose_views(root, &dir, issues);
+    diagnose_drawings(root, &dir, issues);
     diagnose_appearance(builds, part, issues);
     diagnose_explodes(builds, part, issues);
     let params = format!("{dir}/parameters.json");
@@ -1404,6 +1407,63 @@ fn diagnose_annotations(root: &Path, issues: &mut Vec<Issue>) {
                     )
                     .with("pointer", "/id"),
                 )),
+                Ok(_) if !canonical => issues.push(non_canonical(&rel)),
+                Ok(_) => {}
+                Err(e) => issues.push(document_issue(&rel, &e)),
+            },
+        }
+    }
+}
+
+/// A part's drawings: each file that doesn't read is `invalid_document`,
+/// one not written canonically `non_canonical`, anything else in the
+/// folder `unknown_file`. A drawing never fails a rebuild: nothing builds
+/// from it.
+fn diagnose_drawings(root: &Path, dir: &str, issues: &mut Vec<Issue>) {
+    use crate::doc::drawing::{DRAWINGS, DrawingFile, check_id};
+    let ddir = format!("{dir}/{DRAWINGS}");
+    json_files(root, &ddir, check_id, DrawingFile::from_json, issues);
+}
+
+/// The project's drawing templates, as a part's drawings: `invalid_document`,
+/// `non_canonical` and `unknown_file`.
+fn diagnose_templates(root: &Path, issues: &mut Vec<Issue>) {
+    use crate::doc::drawing_template::{TEMPLATES, Template, check_id};
+    json_files(root, TEMPLATES, check_id, Template::from_json, issues);
+}
+
+/// A folder of `<id>.json` files of one kind: each that doesn't read (by
+/// `from_json`) is `invalid_document`, one not written canonically
+/// `non_canonical`, and anything else in the folder `unknown_file`.
+fn json_files<T>(
+    root: &Path,
+    dir: &str,
+    check_id: fn(&str) -> crate::error::Result<Id>,
+    from_json: fn(&Value) -> crate::error::Result<T>,
+    issues: &mut Vec<Issue>,
+) {
+    let files = names(&root.join(dir));
+    let ids: Vec<&str> = files
+        .iter()
+        .filter_map(|(n, d)| {
+            (!d).then_some(n.strip_suffix(".json")?)
+                .filter(|s| check_id(s).is_ok())
+        })
+        .collect();
+    classify(
+        root,
+        dir,
+        &files,
+        |n, d| !d && n.strip_suffix(".json").is_some_and(|s| check_id(s).is_ok()),
+        &ids,
+        issues,
+    );
+    for id in &ids {
+        let rel = format!("{dir}/{id}.json");
+        match read(root, &rel) {
+            Read::Missing => {}
+            Read::Bad(i) => issues.push(i),
+            Read::Json(json, canonical) => match from_json(&json) {
                 Ok(_) if !canonical => issues.push(non_canonical(&rel)),
                 Ok(_) => {}
                 Err(e) => issues.push(document_issue(&rel, &e)),
@@ -2410,6 +2470,45 @@ pub(crate) mod tests {
         assert_eq!(of("non_canonical"), ["annotations/bbbbbbbbbb.json"]);
         assert_eq!(of("invalid_document"), ["annotations/cccccccccc.json"]);
         assert_eq!(of("unknown_file"), ["annotations/notes.txt"]);
+    }
+
+    #[test]
+    fn drawings_and_templates_that_dont_read_are_reported() {
+        use crate::doc::drawing::{DrawingFile, Size};
+        let (dir, mut s) = crate::server::tests::fresh();
+        crate::server::tests::call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let root = dir.path();
+        let d = root.join("parts/p/drawings");
+        std::fs::create_dir_all(&d).unwrap();
+        let good = DrawingFile::new("Plate", Size::AnsiB).to_json();
+        crate::doc::project::write_json(&d.join("main.json"), &good).unwrap();
+        std::fs::write(d.join("loose.json"), serde_json::to_string_pretty(&good).unwrap()).unwrap();
+        std::fs::write(d.join("bad.json"), b"{\"kind\": \"ryucad.drawing\"}\n").unwrap();
+        std::fs::write(d.join("notes.txt"), b"hi").unwrap();
+        let t = root.join("templates");
+        std::fs::create_dir_all(&t).unwrap();
+        std::fs::write(t.join("ours.json"), b"{\"kind\": \"ryucad.drawing_template\"}\n")
+            .unwrap();
+        std::fs::write(t.join("logo.png"), b"").unwrap();
+        let issues = diagnose(root);
+        let of = |code: &str| -> Vec<String> {
+            let mut v: Vec<String> = issues
+                .iter()
+                .filter(|i| i.code == code)
+                .flat_map(|i| i.files.clone())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(of("non_canonical"), ["parts/p/drawings/loose.json"]);
+        assert_eq!(
+            of("invalid_document"),
+            ["parts/p/drawings/bad.json", "templates/ours.json"]
+        );
+        assert_eq!(
+            of("unknown_file"),
+            ["parts/p/drawings/notes.txt", "templates/logo.png"]
+        );
     }
 
     #[test]
