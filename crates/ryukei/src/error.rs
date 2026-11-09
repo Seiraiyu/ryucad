@@ -762,6 +762,15 @@ pub enum TweakError {
     /// A kept piece of the face named still reaches its working face's
     /// side with the region at its largest.
     RegionTooSmall { face: Name },
+    /// `Heal::Cap` for a deleted set some edge round which lies on no hole
+    /// of one surviving face: the set's least face.
+    CapNotOnFace { face: Name },
+    /// `Heal::Grow` for a deleted set a cap would close: the set's least
+    /// face.
+    GrowWouldCap { face: Name },
+    /// No set of faces holding the face named, at most half the body's,
+    /// is closed by a cap.
+    NoFeature { face: Name },
     /// Two faces of the result meet away from the edges they share.
     SelfIntersecting { faces: [Name; 2] },
     /// A decision rounding left uncertain at the entity named.
@@ -835,6 +844,13 @@ impl fmt::Display for TweakError {
                 write!(f, "the hinge of face {face} runs along the pull")
             }
             Self::GapNotHealed { face } => write!(f, "the gap at face {face} doesn't close"),
+            Self::CapNotOnFace { face } => {
+                write!(f, "the gap at face {face} doesn't lie on a hole of one face to cap")
+            }
+            Self::GrowWouldCap { face } => {
+                write!(f, "the gap at face {face} is closed by a cap, not by growth")
+            }
+            Self::NoFeature { face } => write!(f, "face {face} is part of no feature a cap closes"),
             Self::HealAmbiguous { face } => {
                 write!(f, "which side of face {face} is kept can't be decided")
             }
@@ -1649,6 +1665,9 @@ mod tweak_error_tests {
             TweakError::GapNotHealed { face: n },
             TweakError::HealAmbiguous { face: n },
             TweakError::RegionTooSmall { face: n },
+            TweakError::CapNotOnFace { face: n },
+            TweakError::GrowWouldCap { face: n },
+            TweakError::NoFeature { face: n },
         ] {
             let text = Error::from(e).to_string();
             assert!(text.starts_with("can't tweak: "), "{text}");
