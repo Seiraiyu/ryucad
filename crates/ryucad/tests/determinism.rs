@@ -269,7 +269,7 @@ fn cache_section(golden: &mut Golden) {
     };
     let (dir, _) = showcase();
     let disk = std::sync::Arc::new(Disk::open_as(dir.path().join("cache"), identity));
-    for kind in Kind::ALL {
+    for kind in Kind::ALL.into_iter().filter(|k| k.shared()) {
         s.str(&disk.key(kind, b"golden input"));
     }
     let mut session = ryucad::session::Session::open(dir.path())
@@ -277,7 +277,7 @@ fn cache_section(golden: &mut Golden) {
         .with_disk(Some(std::sync::Arc::clone(&disk)));
     let part = Id::parse("show", "part").unwrap();
     ryucad::server::meshes(&mut session, &part, None, ryucad::mesh::Quality::Coarse).unwrap();
-    for kind in Kind::ALL {
+    for kind in Kind::ALL.into_iter().filter(|k| k.shared()) {
         let keys = disk.keys_of(kind, &bytes);
         let mut entries: Vec<(u128, usize)> = keys
             .iter()
