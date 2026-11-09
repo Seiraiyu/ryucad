@@ -716,6 +716,38 @@ pub fn plan(
             }
         }
     }
+    // References theirs' drawings of the part make (plan 9.A): a node the
+    // merge has from theirs, not ours, mapped as a feature's references
+    // are. Only references: a drawing's other strings are its own keys
+    // (`s1`, `v2`) and part IDs, which a feature's renumbering never names.
+    if let Rename::Feature { .. } = &r {
+        let dir = format!("parts/{part}/{}/", crate::doc::drawing::DRAWINGS);
+        for (p, b) in working {
+            if !p.starts_with(&dir) {
+                continue;
+            }
+            let (Ok(v), Some(t), o) = (
+                serde_json::from_slice::<Value>(b),
+                json_of(theirs, p),
+                json_of(ours, p),
+            ) else {
+                continue;
+            };
+            let new = rewrite(&v, "", &mut |pt, n| {
+                if !is_reference(n) {
+                    return None;
+                }
+                let mine = o.as_ref().and_then(|o| o.pointer(pt));
+                if t.pointer(pt) != Some(n) || mine == Some(n) {
+                    return None;
+                }
+                transform(&r, &names, &v, "", pt, n)
+            });
+            if new != v {
+                files.insert(p.clone(), bytes(&new));
+            }
+        }
+    }
     // Explode steps theirs wrote (plan 10.D): the assembly's instance
     // paths through a renumbered instance or pattern. A file's steps are
     // one value, as the merge takes them.
