@@ -1040,6 +1040,29 @@ pub fn report(part: &Id, f: &Feature) -> Value {
             }
             v
         }
+        Feature::Draft(d) => {
+            let mut v = d.fields();
+            v["angle"] = d.angle.report();
+            for (i, g) in d.groups.iter().enumerate() {
+                v["groups"][i]["angle"] = g.quantity.report();
+            }
+            match &d.hinge {
+                DraftHinge::Neutral { plane } => v["neutral"] = json!(plane.text(part)),
+                DraftHinge::Parting { edges, pull } => {
+                    v["parting"] = json!(edges.iter().map(|r| r.text(part)).collect::<Vec<_>>());
+                    v["pull"] = json!(pull.text(part));
+                }
+            }
+            v["reverse"] = json!(d.reverse);
+            v["tangent"] = json!(d.tangent);
+            for (role, r) in d.drafted() {
+                *v.pointer_mut(&pointer(&role)).expect("its own face") = json!(r.text(part));
+            }
+            if !d.flip.is_empty() {
+                v["flip"] = json!(d.flip.iter().map(|r| r.text(part)).collect::<Vec<_>>());
+            }
+            v
+        }
         _ => unreachable!("a tweak"),
     }
 }
@@ -1757,7 +1780,10 @@ mod tests {
     #[test]
     fn the_protocol_adds_and_edits_a_draft() {
         let (dir, mut s) = boxes();
-        let (east, north) = (facing(&mut s, "b", "b", 0, 1.0), facing(&mut s, "b", "b", 1, 1.0));
+        let (east, north) = (
+            facing(&mut s, "b", "b", 0, 1.0),
+            facing(&mut s, "b", "b", 1, 1.0),
+        );
         // No target and two solids: its faces name it.
         call(
             &mut s,
@@ -1771,7 +1797,10 @@ mod tests {
         assert_eq!(v["target"], "b", "{v}");
         assert_eq!(v["neutral"], "xy", "{v}");
         assert_eq!(v["groups"][0]["angle"], "5 deg", "{v}");
-        assert!(v.get("tangent").is_none() && v.get("reverse").is_none(), "{v}");
+        assert!(
+            v.get("tangent").is_none() && v.get("reverse").is_none(),
+            "{v}"
+        );
         // A parting line replaces the neutral plane; a flipped face; the
         // pull reversed; tangency off.
         let edge = format!("p/b/{}", names(&mut s, "b", "edges")[0]);
@@ -1784,7 +1813,10 @@ mod tests {
         .unwrap();
         let v = file(&dir, "d");
         assert!(v.get("neutral").is_none(), "{v}");
-        assert_eq!((v["pull"].as_str(), v["reverse"].as_bool()), (Some("z"), Some(true)));
+        assert_eq!(
+            (v["pull"].as_str(), v["reverse"].as_bool()),
+            (Some("z"), Some(true))
+        );
         assert_eq!(v["flip"][0]["name"], wire(&north)["name"], "{v}");
         assert_eq!(v["tangent"], false);
         // Back to a neutral plane: the parting line and its pull go.
