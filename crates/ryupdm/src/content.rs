@@ -21,14 +21,21 @@
 //!    turn ([`ryucad_doc::doc::project::project_reads`]), with its own
 //!    parameters the project also has ([`shadowed`]: a fault, so the hash
 //!    moves when the project gains or loses one), so a part reading and
-//!    shadowing none hashes as it always has.
+//!    shadowing none hashes as it always has;
+//! 7. if the part has drawings (`drawings/<id>.json`), the tag
+//!    `ryucad.drawings`, then each drawing's ID and bytes in ID order,
+//!    then for each project template the drawings that read name, in ID
+//!    order, the tag `templates`, its ID and its bytes (`missing` when
+//!    there is no such file): a drawing's tolerances define the part as
+//!    much as its geometry does, so a part without drawings hashes as it
+//!    always has (plan 9.A).
 
 use ryucad_doc::doc::files::{ParametersFile, PartFile, feature_names};
 use ryucad_doc::doc::id::Id;
 use ryucad_doc::doc::project::{
     MANIFEST, PARAMETERS, PROJECT_PARAMETERS_TAG, project_reads, shadowed,
 };
-use ryucad_doc::doc::source::{Source, join};
+use ryucad_doc::doc::source::{Kind, Source, join};
 use ryucad_doc::error::{Code, Error, Result};
 use std::collections::BTreeSet;
 
@@ -116,6 +123,42 @@ pub fn hash(src: &dyn Source, part: &Id) -> Result<String> {
             for n in &hashed {
                 piece(n.as_bytes());
                 piece(project.parameters[n].text().as_bytes());
+            }
+        }
+    }
+    // Drawings, last, and the project templates they name.
+    let drawings_at = join(&dir, ryucad_doc::doc::drawing::DRAWINGS);
+    let mut drawings: Vec<(Id, String)> = src
+        .list(&drawings_at)
+        .map_err(|e| e.with("path", &drawings_at))?
+        .into_iter()
+        .filter(|(_, k)| *k == Kind::File)
+        .filter_map(|(n, _)| {
+            let id = ryucad_doc::doc::drawing::check_id(n.strip_suffix(".json")?).ok()?;
+            Some((id, join(&drawings_at, &n)))
+        })
+        .collect();
+    drawings.sort();
+    if !drawings.is_empty() {
+        piece(ryucad_doc::doc::drawing::TAG.as_bytes());
+        let mut named = BTreeSet::new();
+        for (id, at) in &drawings {
+            piece(id.as_str().as_bytes());
+            piece(&bytes(at)?);
+            if let Ok(Some(v)) = crate::read_json(src, at)
+                && let Ok(d) = ryucad_doc::doc::drawing::DrawingFile::from_json(&v)
+            {
+                named.extend(d.templates().into_iter().map(str::to_owned));
+            }
+        }
+        use ryucad_doc::doc::drawing_template::{TEMPLATES, builtin, template_file};
+        for t in named.iter().filter(|t| !builtin(t)) {
+            let at = template_file(t);
+            piece(TEMPLATES.as_bytes());
+            piece(t.as_bytes());
+            match src.read(&at).map_err(|e| e.with("path", &at))? {
+                Some(b) => piece(&b),
+                None => piece(b"missing"),
             }
         }
     }
@@ -286,6 +329,63 @@ mod tests {
                 .to_vec(),
         );
         assert_ne!(hash(&inch, &id("p")).unwrap(), h);
+    }
+
+    #[test]
+    fn drawings_and_the_templates_they_name_count() {
+        use ryucad_doc::doc::drawing::{DrawingFile, Size};
+        let f = files();
+        let h = hash(&f, &id("p")).unwrap();
+        let mut d = DrawingFile::new("P", Size::AnsiB);
+        let text = |d: &DrawingFile| {
+            ryucad_doc::doc::canonical::to_string(&d.to_json()).into_bytes()
+        };
+        let mut drawn = f.clone();
+        drawn.insert("parts/p/drawings/main.json".into(), text(&d));
+        // Something in `drawings/` that isn't a drawing changes nothing.
+        let mut other = f.clone();
+        other.insert("parts/p/drawings/notes.txt".into(), b"hi".to_vec());
+        assert_eq!(hash(&other, &id("p")).unwrap(), h);
+        let one = hash(&drawn, &id("p")).unwrap();
+        assert_ne!(one, h);
+        // Written out piece by piece: the part's pieces, then the tag,
+        // the drawing's ID and its bytes.
+        assert_eq!(
+            one,
+            by_hand(
+                "mm",
+                &[
+                    &f["parts/p/part.json"],
+                    b"a",
+                    &f["parts/p/features/a.json"],
+                    b"b",
+                    &f["parts/p/features/b.json"],
+                    b"ryucad.drawings",
+                    b"main",
+                    &text(&d),
+                ]
+            )
+        );
+        // A project template a sheet names counts by its bytes; another
+        // project template doesn't, and a built-in one names no file.
+        d.sheets.values_mut().next().unwrap().template = Some("ours".into());
+        let mut named = f.clone();
+        named.insert("parts/p/drawings/main.json".into(), text(&d));
+        let missing = hash(&named, &id("p")).unwrap();
+        named.insert("templates/ours.json".into(), b"ours".to_vec());
+        let ours = hash(&named, &id("p")).unwrap();
+        assert_ne!(ours, missing);
+        named.insert("templates/theirs.json".into(), b"theirs".to_vec());
+        assert_eq!(hash(&named, &id("p")).unwrap(), ours);
+        named.insert("templates/ours.json".into(), b"ours, edited".to_vec());
+        assert_ne!(hash(&named, &id("p")).unwrap(), ours);
+        d.sheets.values_mut().next().unwrap().template = Some("asme-b".into());
+        let mut built_in = f.clone();
+        built_in.insert("parts/p/drawings/main.json".into(), text(&d));
+        built_in.insert("templates/asme-b.json".into(), b"x".to_vec());
+        let a = hash(&built_in, &id("p")).unwrap();
+        built_in.remove("templates/asme-b.json");
+        assert_eq!(hash(&built_in, &id("p")).unwrap(), a);
     }
 
     #[test]
