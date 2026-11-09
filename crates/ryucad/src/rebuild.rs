@@ -146,9 +146,11 @@ pub struct Made {
     pub hash: String,
     /// What a join, cut or hole applied, for a pattern to apply again.
     pub applied: Option<Arc<Applied>>,
-    /// An import's report: its file, product and what healing did (see
-    /// [`crate::import::report`]).
-    pub import: Option<Arc<Value>>,
+    /// A feature's report kept with its result: an import's (its file,
+    /// product and what healing did; see [`crate::import::report`]) or a
+    /// fill's (each side's deviation and angle, see
+    /// [`crate::surface::fill_report`]).
+    pub report: Option<Arc<Value>>,
     /// An unfold's flat: what a refold folds by and the flat pattern
     /// reads (plan 16.B).
     pub flat: Option<Arc<Flat>>,
@@ -251,7 +253,7 @@ impl Made {
             solids,
             hash,
             applied: None,
-            import: None,
+            report: None,
             flat: None,
             encoded: Default::default(),
         }
@@ -520,7 +522,7 @@ impl PartResult {
                         .collect();
                 }
                 if let Output::Solids(m) = o
-                    && let Some(rep) = &m.import
+                    && let Some(rep) = &m.report
                 {
                     return crate::import::reference_warnings(part, id, rep);
                 }
@@ -2383,7 +2385,7 @@ fn rebuild_with(
         Feature::Import(i) => {
             let r = crate::import::build(part, id, i, run).map(|(b, report)| {
                 solid(Made {
-                    import: Some(Arc::new(report)),
+                    report: Some(Arc::new(report)),
                     ..Made::new(vec![(id.clone(), Arc::new(b))])
                 })
             });

@@ -1313,7 +1313,7 @@ fn parts_report(
                             v["counts"] = json!({"faces": c.faces, "edges": c.edges,
                                                  "vertices": c.vertices});
                         }
-                        if let Some(x) = &m.import {
+                        if let Some(x) = &m.report {
                             if x.get("reference").is_some() {
                                 v["mode"] = json!("reference");
                                 v["reference"] = x["reference"].clone();

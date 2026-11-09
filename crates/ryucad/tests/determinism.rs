@@ -3693,7 +3693,7 @@ fn reference_imports_section(golden: &mut Golden) {
                 let o = o.as_ref().unwrap();
                 out.push(id.to_string());
                 if let ryucad::rebuild::Output::Solids(m) = o
-                    && let Some(rep) = &m.import
+                    && let Some(rep) = &m.report
                 {
                     out.push(rep["reference"].to_string());
                 }

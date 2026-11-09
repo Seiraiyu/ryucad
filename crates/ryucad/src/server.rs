@@ -4998,9 +4998,15 @@ pub(crate) fn part_report(
                     let mut v = json!({"id": fid, "type": types.get(fid), "ok": true,
                                        "hash": o.hash()});
                     if let crate::rebuild::Output::Solids(m) = o
-                        && let Some(i) = &m.import
+                        && let Some(i) = &m.report
                     {
-                        v["import"] = i.as_ref().clone();
+                        // A fill's report under its own type, else an
+                        // import's.
+                        let key = match types.get(fid).and_then(Value::as_str) {
+                            Some("fill") => "fill",
+                            _ => "import",
+                        };
+                        v[key] = i.as_ref().clone();
                     }
                     if let crate::rebuild::Output::Solids(m) = o
                         && let Some(f) = &m.flat
