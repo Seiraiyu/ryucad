@@ -28,6 +28,8 @@ pub(crate) struct WorkBody {
     pub(crate) clipped: BTreeSet<EdgeId>,
     /// The frontier edges, as edges of the working body.
     pub(crate) frontier: BTreeSet<EdgeId>,
+    /// Each frontier edge (the working body's) and its input faces.
+    pub(crate) frontier_faces: BTreeMap<EdgeId, BTreeSet<FaceId>>,
     /// The names of the scaffolding: working faces' sides and corners.
     pub(crate) scaffold: BTreeSet<Name>,
 }
@@ -97,9 +99,17 @@ pub(crate) fn work_body(
         origin.insert(built.faces[k], f);
     }
     let mut frontier = BTreeSet::new();
+    let mut frontier_faces = BTreeMap::new();
     for (&e, &g) in &copied.edges {
         if region.frontier.contains(&e) {
-            frontier.insert(built.edges[&g]);
+            let we = built.edges[&g];
+            frontier.insert(we);
+            frontier_faces.insert(
+                we,
+                body.edge_fins(e)
+                    .map(|fin| body.loops[body.fins[fin].loop_].face)
+                    .collect(),
+            );
         }
     }
     let (mut working_faces, mut fixed, mut clipped, mut scaffold) = (
@@ -133,6 +143,7 @@ pub(crate) fn work_body(
         fixed,
         clipped,
         frontier,
+        frontier_faces,
         scaffold,
     })
 }
@@ -153,6 +164,45 @@ pub(crate) fn doubled(b: &Box3) -> Box3 {
     let (lo, hi) = (b.min(), b.max());
     let h = (hi - lo) * 0.5;
     Box3::new(lo - h, hi + h)
+}
+
+impl WorkBody {
+    /// The pairs of faces the table meets, each in face order: every two
+    /// working faces whose boxes meet, and each working face with each
+    /// outside face it shares a frontier edge with (which imprints that
+    /// edge on it). Outside faces are never met with each other.
+    pub(crate) fn pairs(&self) -> BTreeSet<(FaceId, FaceId)> {
+        let b = &self.body;
+        let boxes: BTreeMap<FaceId, Box3> = b
+            .faces()
+            .map(|f| (f, crate::intersect::face_box(b, f)))
+            .collect();
+        let mut out = BTreeSet::new();
+        let list: Vec<FaceId> = self.working.iter().copied().collect();
+        for (i, &a) in list.iter().enumerate() {
+            for &c in &list[i + 1..] {
+                if boxes[&a].intersects(&boxes[&c]) {
+                    out.insert((a.min(c), a.max(c)));
+                }
+            }
+        }
+        for (&e, faces) in &self.frontier_faces {
+            // The outside face across the frontier edge.
+            let Some(o) = b
+                .edge_fins(e)
+                .map(|fin| b.loops[b.fins[fin].loop_].face)
+                .find(|f| !self.working.contains(f))
+            else {
+                continue;
+            };
+            for &wf in &self.working {
+                if faces.contains(&self.origin[&wf]) {
+                    out.insert((wf.min(o), wf.max(o)));
+                }
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -193,5 +243,48 @@ mod tests {
         assert_eq!(w.frontier.len(), 4);
         // Five rectangles' sides.
         assert_eq!(w.clipped.len(), 20);
+    }
+    #[test]
+    fn working_faces_meet_each_other_and_their_frontier_neighbours() {
+        let b = block();
+        let top = face_of(&b, FaceRole::PlusZ);
+        let r = region(&b, &BTreeSet::from([top]));
+        let bx = Box3::new(Point3::new(-0.2, -0.2, -0.2), Point3::new(1.2, 0.8, 0.8));
+        let ws: BTreeMap<FaceId, Working> = r
+            .faces
+            .iter()
+            .map(|&f| {
+                (
+                    f,
+                    working(&b, f, None, b.faces[f].sense, true, &bx).unwrap(),
+                )
+            })
+            .collect();
+        let w = work_body(K, &b, &r, &ws).unwrap();
+        let pairs = w.pairs();
+        let bottom = *w
+            .origin
+            .iter()
+            .find(|(_, o)| **o == face_of(&b, FaceRole::MinusZ))
+            .unwrap()
+            .0;
+        // Each side with the bottom, across its frontier edge.
+        assert_eq!(
+            pairs
+                .iter()
+                .filter(|&&(a, c)| a == bottom || c == bottom)
+                .count(),
+            4
+        );
+        // The top with each side, and each side with its two neighbours;
+        // opposite sides' boxes are flat slabs apart: 8 pairs.
+        let working_pairs = pairs
+            .iter()
+            .filter(|&&(a, c)| w.working.contains(&a) && w.working.contains(&c))
+            .count();
+        assert_eq!(working_pairs, 8);
+        for &(a, c) in &pairs {
+            assert!(a < c);
+        }
     }
 }
