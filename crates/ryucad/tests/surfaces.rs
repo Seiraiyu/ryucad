@@ -408,17 +408,30 @@ fn a_face_swept_as_a_surface_has_no_caps() {
 }
 
 #[test]
-fn every_acting_feature_refuses_a_sheet() {
-    // A surface wall `w` and a box `b`; each feature that acts on a body
+fn features_that_need_a_solid_refuse_a_sheet() {
+    // A surface wall `w` and a box `b`; each feature that needs a solid
     // is refused naming `w`, at write, and nothing is written.
-    for f in [
-        json!({"type": "box", "params": {"x": 1, "y": 1, "z": 1}, "operation": "join", "targets": ["w"]}),
-        json!({"type": "box", "params": {"x": 1, "y": 1, "z": 1}, "operation": "cut", "targets": ["w"]}),
-        json!({"type": "boolean", "op": "unite", "target": "b", "tools": ["w"]}),
-        json!({"type": "shell", "target": "w", "thickness": "1 mm"}),
-        json!({"type": "offset", "target": "w", "distance": "1 mm"}),
-        json!({"type": "mirror", "solid": "w", "plane": "yz", "operation": "new"}),
-        json!({"type": "split", "target": "w", "plane": "yz"}),
+    for (f, hint) in [
+        (
+            json!({"type": "box", "params": {"x": 1, "y": 1, "z": 1}, "operation": "join", "targets": ["w"]}),
+            "sew",
+        ),
+        (
+            json!({"type": "boolean", "op": "unite", "target": "w", "tools": ["b"]}),
+            "sew",
+        ),
+        (
+            json!({"type": "boolean", "op": "subtract", "target": "b", "tools": ["w"]}),
+            "split",
+        ),
+        (
+            json!({"type": "shell", "target": "w", "thickness": "1 mm"}),
+            "thicken",
+        ),
+        (
+            json!({"type": "mirror", "solid": "w", "plane": "yz", "operation": "join", "targets": ["b"]}),
+            "new",
+        ),
     ] {
         let (_dir, mut s) = project();
         wall(&mut s);
@@ -436,6 +449,7 @@ fn every_acting_feature_refuses_a_sheet() {
             "{f}: {e}"
         );
         assert_eq!(e.details["got"], "sheet");
+        assert!(e.details["hint"].as_str().unwrap().contains(hint), "{e}");
         assert_eq!(
             must(&mut s, "feature.list", json!({"part": "p"})),
             before,
@@ -445,8 +459,23 @@ fn every_acting_feature_refuses_a_sheet() {
 }
 
 #[test]
+fn a_cut_trims_a_sheet_at_write_and_at_rebuild() {
+    // The wall (x 0..10, z 0..20 on y = 0) less a box over its top half.
+    let (_dir, mut s) = project();
+    wall(&mut s);
+    add(
+        &mut s,
+        json!({"type": "box", "id": "c", "params": {"x": 20, "y": 4, "z": 20},
+               "placement": {"origin": [-5, -2, 10]}, "operation": "cut", "targets": ["w"]}),
+    );
+    let r = reported(&mut s, "c");
+    assert_eq!(r["ok"], true, "{r}");
+    close(area(&body(&mut s, "w")), 1e-4, 1e-9);
+}
+
+#[test]
 fn a_sheet_written_by_hand_where_a_solid_goes_fails_at_rebuild() {
-    // The write is refused, so a cut of a sheet reaches rebuild only from
+    // The write is refused, so a join to a sheet reaches rebuild only from
     // a file written by hand (a merge, an older build): it fails there,
     // as wrong_body_kind.
     let (dir, mut s) = project();
@@ -457,7 +486,7 @@ fn a_sheet_written_by_hand_where_a_solid_goes_fails_at_rebuild() {
     );
     let feature = dir.path().join("parts/p/features/k.json");
     let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&feature).unwrap()).unwrap();
-    v["operation"] = json!("cut");
+    v["operation"] = json!("join");
     v["targets"] = json!(["w"]);
     v["format"] = json!(3);
     std::fs::write(&feature, ryucad::doc::canonical::to_string(&v)).unwrap();

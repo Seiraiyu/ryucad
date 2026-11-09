@@ -65,7 +65,7 @@ fn resolve<'a>(
             .with("solids", [target.as_str(), r.feature.as_str()]));
         }
     }
-    let built = crate::rebuild::target_as(part, solids, id, "target", target, before)?;
+    let built = crate::rebuild::read(part, solids, id, f, "target", target, before)?;
     let face = |role: &str, r: &Reference| -> Result<Name> {
         let (_, e) = crate::reference::resolve(part, part.order(), id, role, r, before)?;
         match e {
@@ -716,10 +716,11 @@ pub fn mirror_copy(
     part: &Part,
     solids: &Solids,
     id: &Id,
+    f: &Feature,
     m: &Mirror,
     before: &dyn Results,
 ) -> Result<Built> {
-    let source = source(part, solids, id, &m.solid, before)?;
+    let source = crate::rebuild::read(part, solids, id, f, "solid", &m.solid, before)?;
     let plane = crate::pattern::mirror_plane(part, id, &m.plane, before)?;
     let body = source.body.mirrored(&plane).map_err(|e| {
         Error::new(
@@ -743,18 +744,6 @@ pub fn mirror_copy(
         })
         .collect();
     crate::rebuild::finish(id, "mirror", (body, ryukei::name::Journal::new()), origins)
-}
-
-/// The solid a mirror (feature `id`) copies, as it sees it: what
-/// [`crate::rebuild::target_as`] gives, its refusal naming the `solid` role.
-fn source<'a>(
-    part: &Part,
-    solids: &Solids,
-    id: &Id,
-    s: &Id,
-    before: &'a dyn Results,
-) -> Result<&'a Built> {
-    crate::rebuild::target_as(part, solids, id, "solid", s, before)
 }
 
 /// The key of the box a split (feature `id` of `part`) cuts with, from

@@ -490,12 +490,11 @@ fn a_sheet_moves_but_its_boundarys_face_isnt_replaced() {
         .as_f64()
         .unwrap();
     assert!((z - 0.005).abs() < 1e-12, "{moved}");
-    // Every other acting feature still refuses a sheet.
+    // A feature that needs a solid still refuses a sheet.
     let e = call(
         &mut s,
         "feature.add",
-        json!({"part": "p", "type": "offset", "target": "f",
-                                               "distance": 1}),
+        json!({"part": "p", "type": "shell", "target": "f", "thickness": 1}),
     )
     .unwrap_err();
     assert_eq!(e.code, Code::WrongBodyKind, "{e}");

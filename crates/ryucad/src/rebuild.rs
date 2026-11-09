@@ -1019,7 +1019,9 @@ pub(crate) fn names(b: &Body) -> BTreeSet<Name> {
 
 /// The solid founded by `t` as feature `id` sees it: as its view, the
 /// last feature of its chain listed before `id`, left it.
-/// [`target_as`] in the role `targets`.
+/// [`target_as`] in the role `targets`: a solid that the feature
+/// changes. Builds ask through [`read`]; sheet metal and tests through
+/// this.
 pub fn target<'a>(
     part: &Part,
     solids: &Solids,
@@ -1028,6 +1030,39 @@ pub fn target<'a>(
     before: &'a dyn Results,
 ) -> Result<&'a Built> {
     target_as(part, solids, id, "targets", t, before)
+}
+
+/// Body `t` that feature `f` (`id`) names in `role`, asked for as
+/// [`crate::kind::bodies_read`] says, the one table of what each feature
+/// wants of each body, so a write and a rebuild judge it alike. A body
+/// the table doesn't list in that role is wanted a solid that `f` changes.
+pub fn read<'a>(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    f: &Feature,
+    role: &str,
+    t: &Id,
+    before: &'a dyn Results,
+) -> Result<&'a Built> {
+    let need = match crate::kind::bodies_read(f)
+        .into_iter()
+        .find(|r| r.role == role && r.body == t)
+    {
+        Some(r) => Need {
+            role,
+            want: r.want,
+            changes: r.changes,
+            hint: r.hint,
+        },
+        None => Need {
+            role,
+            want: Some(crate::kind::Want::Solid),
+            changes: true,
+            hint: None,
+        },
+    };
+    body_as(part, solids, id, t, need, before)
 }
 
 /// How a feature asks for a body it names: in `role`, of a kind (`None`
@@ -1095,27 +1130,6 @@ pub fn target_as<'a>(
     let need = Need {
         role,
         want: Some(crate::kind::Want::Solid),
-        changes: true,
-        hint: None,
-    };
-    body_as(part, solids, id, t, need, before)
-}
-
-/// [`target_as`], taking a sheet too where `sheets` is true: face tweaks
-/// act on sheets where the kernel does (design 400), every other feature
-/// on solids only.
-pub fn target_kinds<'a>(
-    part: &Part,
-    solids: &Solids,
-    id: &Id,
-    role: &str,
-    t: &Id,
-    before: &'a dyn Results,
-    sheets: bool,
-) -> Result<&'a Built> {
-    let need = Need {
-        role,
-        want: (!sheets).then_some(crate::kind::Want::Solid),
         changes: true,
         hint: None,
     };
@@ -1241,7 +1255,7 @@ fn build_body(
     // `dependency_failed`, whatever its own body would be.
     let targets: Result<Vec<(&Id, &Built)>> = targets
         .iter()
-        .map(|t| Ok((t, target(part, solids, id, t, before)?)))
+        .map(|t| Ok((t, read(part, solids, id, f, "targets", t, before)?)))
         .collect();
     let targets = match targets {
         Ok(t) => t,
@@ -1265,7 +1279,7 @@ fn build_body(
         Some((h, Some((c, b)))) if *c == h => Ok(Arc::clone(b)),
         _ => match (f, &holes) {
             (Feature::Primitive(p), _) => build_primitive(&part.id, id, p),
-            (Feature::Mirror(m), _) => crate::body::mirror_copy(part, solids, id, m, before),
+            (Feature::Mirror(m), _) => crate::body::mirror_copy(part, solids, id, f, m, before),
             (Feature::Sweep(w), _) => crate::along::build(part, id, w, before, run),
             (Feature::Loft(l), _) => crate::loft::build(part, id, l, before, run),
             (Feature::Planar(x), _) => crate::profile::planar(part, id, x, before),
@@ -1338,6 +1352,7 @@ fn build_pattern(
     part: &Part,
     solids: &Solids,
     id: &Id,
+    f: &Feature,
     p: &crate::doc::pattern::Pattern,
     before: &dyn Results,
     run: &crate::rebuild::Run,
@@ -1346,7 +1361,7 @@ fn build_pattern(
     let targets: Vec<(&Id, &Built)> = p
         .targets
         .iter()
-        .map(|t| Ok((t, target(part, solids, id, t, before)?)))
+        .map(|t| Ok((t, read(part, solids, id, f, "targets", t, before)?)))
         .collect::<Result<_>>()?;
     let (operation, seeds) = crate::pattern::seeds(part, id, p, before)?;
     let motions = crate::pattern::motions(part, id, p, before)?;
@@ -1532,14 +1547,17 @@ fn apply(
     let kept = names(&body);
     // A tool counts if any of it is left, or any of the target went: a
     // join inside the target, a cut or an intersect that misses nothing,
-    // changes nothing.
+    // changes nothing. A sheet trimmed keeps its face's name, the face
+    // `Modified`, and none of the tool is left.
     let target_faces: BTreeSet<Name> = target
         .body
         .faces()
         .map(|f| target.body.face(f).expect("live").name)
         .collect();
     let changed = journal.events().iter().any(|e| match e {
-        Event::Deleted(n) | Event::Split { parent: n, .. } => target_faces.contains(n),
+        Event::Deleted(n) | Event::Modified(n) | Event::Split { parent: n, .. } => {
+            target_faces.contains(n)
+        }
         _ => false,
     });
     for x in tools {
@@ -1779,15 +1797,16 @@ fn build_boolean(
     part: &Part,
     solids: &Solids,
     id: &Id,
+    f: &Feature,
     b: &crate::doc::solid::Boolean,
     before: &dyn Results,
     run: &crate::rebuild::Run,
 ) -> Result<Made> {
-    let target = self::target_as(part, solids, id, "target", &b.target, before)?;
+    let target = read(part, solids, id, f, "target", &b.target, before)?;
     let tools: Vec<(&Id, &Built)> = b
         .tools
         .iter()
-        .map(|t| Ok((t, self::target_as(part, solids, id, "tools", t, before)?)))
+        .map(|t| Ok((t, read(part, solids, id, f, "tools", t, before)?)))
         .collect::<Result<_>>()?;
     let keys: Vec<ToolKey> = b.tools.iter().map(|t| solid_key(&part.id, id, t)).collect();
     let tools: Vec<ToolBody> = tools
@@ -1995,7 +2014,7 @@ fn blend_solid(id: &Id, f: &Feature) -> Result<(Id, bool)> {
 pub fn check_blend(part: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result<()> {
     let solids = Solids::of(part);
     let (solid, propagate) = blend_solid(id, f)?;
-    let built = target(part, &solids, id, &solid, results)?;
+    let built = read(part, &solids, id, f, "targets", &solid, results)?;
     let groups = groups(part, id, f, results)?;
     blend_edges(part, id, &solid, built, &groups, propagate, results).map(drop)
 }
@@ -2125,7 +2144,7 @@ fn build_blend(
 ) -> Result<Made> {
     let ty = f.type_name();
     let (solid, propagate) = blend_solid(id, f)?;
-    let built = target(part, solids, id, &solid, before)?;
+    let built = read(part, solids, id, f, "targets", &solid, before)?;
     let groups = groups(part, id, f, before)?;
     let listed = blend_edges(part, id, &solid, built, &groups, propagate, before)?;
     let edges: Vec<ryukei::blend::EdgeBlend> = listed.iter().map(|(e, _)| *e).collect();
@@ -2307,13 +2326,14 @@ fn build_split(
     part: &Part,
     solids: &Solids,
     id: &Id,
+    f: &Feature,
     s: &crate::doc::body::Split,
     before: &dyn Results,
     run: &Run,
 ) -> Result<Made> {
     use crate::doc::body::Keep;
     let t = &s.target;
-    let built = target(part, solids, id, t, before)?;
+    let built = read(part, solids, id, f, "target", t, before)?;
     let at = crate::geometry::At {
         part,
         order: part.order(),
@@ -2396,7 +2416,7 @@ fn rebuild_with(
             (r, None)
         }
         Feature::Boolean(b) => (
-            build_boolean(part, solids, id, b, before, run).map(solid),
+            build_boolean(part, solids, id, f, b, before, run).map(solid),
             None,
         ),
         Feature::Fillet(_) | Feature::Chamfer(_) => (
@@ -2429,7 +2449,7 @@ fn rebuild_with(
             None,
         ),
         Feature::Split(x) => (
-            build_split(part, solids, id, x, before, run).map(solid),
+            build_split(part, solids, id, f, x, before, run).map(solid),
             None,
         ),
         Feature::Fill(x) => {
@@ -2452,7 +2472,7 @@ fn rebuild_with(
             None,
         ),
         Feature::Pattern(p) => (
-            build_pattern(part, solids, id, p, before, run).map(solid),
+            build_pattern(part, solids, id, f, p, before, run).map(solid),
             None,
         ),
         Feature::Import(i) => {
