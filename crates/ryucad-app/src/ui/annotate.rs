@@ -12,7 +12,7 @@ pub fn compose(ctx: &egui::Context, view: &mut View, ws: &mut Workspace, at: egu
     let mut open = true;
     let mut send = false;
     let mut cancel = false;
-    egui::Window::new("Annotate")
+    egui::Window::new("Comment for the agent")
         .id(egui::Id::new("annotate-compose"))
         .open(&mut open)
         .collapsible(false)
@@ -23,11 +23,14 @@ pub fn compose(ctx: &egui::Context, view: &mut View, ws: &mut Workspace, at: egu
                 let t = p.reference.clone().unwrap_or_else(|| "a point".into());
                 ui.label(egui::RichText::new(t).monospace().small());
             }
-            ui.add(
+            let r = ui.add(
                 egui::TextEdit::multiline(&mut c.text)
                     .hint_text("What should change here?")
                     .desired_rows(3),
             );
+            r.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::MultilineTextInput, true, "What should change here?")
+            });
             ui.horizontal(|ui| {
                 let ok = !c.text.trim().is_empty();
                 let gate = ws.control("annotation.create");

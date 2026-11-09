@@ -1931,6 +1931,14 @@ fn a_release_is_proposed_synced_and_made_obsolete_from_the_releases_tab() {
     h.get_by_label("Releases of p");
     h.get_by_label("No release records yet");
     // Propose: the dialog says the label, then the record is written.
+    {
+        use egui_kittest::kittest::NodeT;
+        eprintln!(
+            "DEBUG mode {:?} disabled {}",
+            h.state().opened().ws.mode,
+            h.get_by_label("Propose…").accesskit_node().is_disabled()
+        );
+    }
     h.get_by_label("Propose…").click();
     frames(&mut h, |a| a.opened().ws.releases.proposal.is_some());
     shown(&mut h, "It will be revision A.");
@@ -5288,6 +5296,11 @@ fn a_face_is_annotated_from_its_context_menu() {
     }
     h.run_steps(2);
     h.get_by_label("Annotate…").click();
+    h.run_steps(2);
+    assert!(
+        h.state().opened().view.composing.is_some(),
+        "the comment box opens"
+    );
     h.run_steps(2);
     h.get_by_label("What should change here?")
         .type_text("Move this hole 5 mm towards the edge");
