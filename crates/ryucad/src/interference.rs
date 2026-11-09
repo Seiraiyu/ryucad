@@ -233,6 +233,12 @@ fn thin(points: &[Point3], normals: &[[f64; 3]]) -> bool {
     })
 }
 
+/// [`mesh::verdict`] of two prepared meshes, `None` past its budget: how
+/// a pair with a reference side is judged, public for tests.
+pub fn mesh_verdict(a: &Prepared, b: &Prepared, rel: &Rigid) -> Option<Verdict> {
+    mesh::verdict(a, b, rel, &mut 0)
+}
+
 /// [`verdict`] for a request's `job`: a cancel stops the kernel inside the
 /// pair, and the pair answers the job's `cancelled` (never a verdict).
 pub fn verdict_for(a: &Body, b: &Body, rel: Rigid, job: &Job) -> Result<Verdict> {
