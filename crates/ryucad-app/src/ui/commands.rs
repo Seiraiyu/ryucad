@@ -47,6 +47,8 @@ pub fn state(o: &mut Opened) -> State {
         )),
         mode: o.ws.mode,
         annotations: o.view.annotations,
+        flat: o.ws.flat_view.is_some(),
+        flattenable: o.ws.flat_candidate(o.view.chosen.as_ref()).is_some(),
     }
 }
 
@@ -264,6 +266,15 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         "view.edges" => toggle(o, "display.edges", o.view.edges),
         "view.sketches" => toggle(o, "display.sketches", o.view.sketches),
         "view.datums" => toggle(o, "display.datums", o.view.datums),
+        // A sheet metal solid laid flat where its fixed flange lies, or
+        // folded again.
+        "view.flat" => {
+            let solid = match o.ws.flat_view {
+                Some(_) => None,
+                None => o.ws.flat_candidate(o.view.chosen.as_ref()),
+            };
+            o.ws.show_flat_view(solid);
+        }
         "view.nav_cube" => toggle(o, "display.nav_cube", o.view.cube),
         "view.triad" => toggle(o, "display.triad", o.view.triad),
         "view.origin" => toggle(o, "display.origin", o.view.origin),

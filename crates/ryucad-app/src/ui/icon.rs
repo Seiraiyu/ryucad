@@ -113,6 +113,7 @@ phosphor! {
     SQUARE = "square" '\u{e45e}',
     LINE_SEGMENT = "line-segment" '\u{e6d2}',
     DOT_OUTLINE = "dot-outline" '\u{ece0}',
+    SQUARE_SPLIT_HORIZONTAL = "square-split-horizontal" '\u{e870}',
 }
 
 impl Icon {

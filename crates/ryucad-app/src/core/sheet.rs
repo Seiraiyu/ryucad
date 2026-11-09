@@ -9,6 +9,7 @@
 use crate::core::flat::FlatLines;
 use ryucad::error::Error;
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The kinds of sheet metal feature, as reports name their objects.
 pub const KINDS: [&str; 4] = ["base_flange", "flange", "unfold", "refold"];
@@ -192,6 +193,61 @@ fn trim(x: f64) -> String {
     }
 }
 
+/// The window's sheet metal readings, by part and solid asked for (`""`
+/// for the part's one sheet metal solid): tables (`sheet.get`) and flats'
+/// bend lines (`flat.get`), each for the part revision it was read at, and
+/// what is on its way, so each is asked for once a revision.
+#[derive(Debug, Default)]
+pub struct Cache {
+    tables: BTreeMap<BodyKey, (String, Shown)>,
+    flats: BTreeMap<BodyKey, (String, Result<FlatLines, Error>)>,
+    asked: BTreeSet<(bool, BodyKey, String)>,
+}
+
+/// A part and a solid, as the model keys bodies.
+type BodyKey = (String, String);
+
+impl Cache {
+    /// `key`'s table, if it was read at `revision`.
+    pub fn table(&self, key: &BodyKey, revision: &str) -> Option<&Shown> {
+        self.tables
+            .get(key)
+            .filter(|(r, _)| r == revision)
+            .map(|(_, t)| t)
+    }
+
+    /// `key`'s flat, if it was read at `revision`.
+    pub fn flat(&self, key: &BodyKey, revision: &str) -> Option<&Result<FlatLines, Error>> {
+        self.flats
+            .get(key)
+            .filter(|(r, _)| r == revision)
+            .map(|(_, f)| f)
+    }
+
+    /// Whether `key`'s table must be asked for at `revision`: noted as
+    /// asked when it must.
+    pub fn want_table(&mut self, key: &BodyKey, revision: &str) -> bool {
+        self.table(key, revision).is_none()
+            && self.asked.insert((false, key.clone(), revision.to_owned()))
+    }
+
+    /// The same of `key`'s flat.
+    pub fn want_flat(&mut self, key: &BodyKey, revision: &str) -> bool {
+        self.flat(key, revision).is_none()
+            && self.asked.insert((true, key.clone(), revision.to_owned()))
+    }
+
+    pub fn take_table(&mut self, key: BodyKey, revision: String, t: Shown) {
+        self.asked.remove(&(false, key.clone(), revision.clone()));
+        self.tables.insert(key, (revision, t));
+    }
+
+    pub fn take_flat(&mut self, key: BodyKey, revision: String, f: Result<FlatLines, Error>) {
+        self.asked.remove(&(true, key.clone(), revision.clone()));
+        self.flats.insert(key, (revision, f));
+    }
+}
+
 /// What choosing a sheet metal feature paints beyond the faces it made:
 /// faces and edges by reference, in the chosen colour. An unfold its bend
 /// lines: the edges of the flat's bend lines, when the flat shown is its
@@ -310,6 +366,21 @@ mod tests {
             bend_text(&t.bends[1], mm),
             "down 180° R1 mm, a deduction has no hem"
         );
+    }
+
+    #[test]
+    fn readings_are_asked_for_once_a_revision() {
+        let mut c = Cache::default();
+        let key = ("p".to_owned(), String::new());
+        assert!(c.want_table(&key, "r1"));
+        assert!(!c.want_table(&key, "r1"), "on its way");
+        c.take_table(key.clone(), "r1".into(), Shown::Table(table()));
+        assert!(c.table(&key, "r1").is_some() && c.table(&key, "r2").is_none());
+        assert!(!c.want_table(&key, "r1"));
+        assert!(c.want_table(&key, "r2"));
+        assert!(c.want_flat(&key, "r2"));
+        c.take_flat(key.clone(), "r2".into(), Ok(FlatLines::default()));
+        assert!(c.flat(&key, "r2").is_some_and(Result::is_ok));
     }
 
     #[test]

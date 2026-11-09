@@ -53,6 +53,10 @@ pub struct FlatLines {
     /// The unfold in force, when `from` is `unfold`.
     pub unfold: Option<String>,
     pub lines: Vec<BendLine>,
+    /// The pattern's frame: its `z` towards its viewer side (where the
+    /// bend lines lie), its `y` up, as `render --flat` looks at it.
+    pub towards: [f64; 3],
+    pub up: [f64; 3],
 }
 
 fn triple(v: &Value) -> [f64; 3] {
@@ -96,7 +100,22 @@ impl FlatLines {
             from: v["from"].as_str().unwrap_or("whole").to_owned(),
             unfold: v["unfold"].as_str().map(str::to_owned),
             lines,
+            towards: triple(&f["z"]),
+            up: y,
         }
+    }
+
+    /// The camera `render --flat` takes, framing `points` (the flat's,
+    /// as the window has them) at `aspect`: along the pattern's `z`, its
+    /// `y` up.
+    pub fn camera(&self, points: &[[f64; 3]], aspect: f64) -> ryucad::view::Camera {
+        ryucad::view::frame_points_along(
+            points,
+            self.towards,
+            self.up,
+            ryucad::view::DEFAULT_PROJECTION,
+            aspect,
+        )
     }
 }
 
@@ -114,6 +133,9 @@ pub struct FlatView {
     pub lines: Option<FlatLines>,
     /// Why the solid can't be shown flat.
     pub error: Option<ryucad::error::Error>,
+    /// Whether the camera has turned to look at it, as `render --flat`
+    /// does: once, when its body and its lines have both come.
+    pub turned: bool,
 }
 
 /// The bend lines as `pr` sees them on a viewport `size` pixels big
@@ -163,5 +185,9 @@ mod tests {
         assert_eq!(l.middle(), [-0.01, 0.01, 0.0015]);
         assert_eq!(l.colour(), ryucad::render::BEND_DOWN);
         assert_eq!(l.edges, ["p/plate/e1"]);
+        assert_eq!((f.towards, f.up), ([0.0, 0.0, 1.0], [-1.0, 0.0, 0.0]));
+        // Looked at as render --flat looks: from its viewer side.
+        let c = f.camera(&[l.from, l.to], 1.0);
+        assert!(c.eye[2] > c.target[2] && c.up == [-1.0, 0.0, 0.0], "{c:?}");
     }
 }
