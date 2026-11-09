@@ -1226,6 +1226,7 @@ fn build_body(
             (Feature::Sweep(w), _) => crate::along::build(part, id, w, before, run),
             (Feature::Loft(l), _) => crate::loft::build(part, id, l, before, run),
             (Feature::Planar(x), _) => crate::profile::planar(part, id, x, before),
+            (Feature::Thicken(x), _) => crate::surface::thicken(part, solids, id, x, before, run),
             (_, Some((h, (solved, _)))) => {
                 crate::hole::tool(part, id, h, solved, &bodies, before).map(|(b, _)| b)
             }
@@ -2519,6 +2520,7 @@ fn tool_hash(
         .profiles()
         .into_iter()
         .chain(f.source())
+        .chain(f.consumes())
         .chain(f.geometry_reads())
         .chain(if through { f.targets() } else { Vec::new() });
     let mut reads: Vec<&Id> = Vec::new();
@@ -3218,6 +3220,48 @@ mod tests {
         let e = e.as_ref().unwrap_err();
         assert_eq!((e.code, e.details["reason"].as_str()), (Code::SewFailed, Some("pieces")), "{e}");
         assert_eq!(e.details["pieces"].as_array().unwrap().len(), 2);
+    }
+
+    /// The name of the face whose plane's outward normal points up.
+    fn top_face(b: &Body) -> ryukei::name::Name {
+        use ryukei::measure::{Entity, FaceShape, Properties, properties};
+        let f = b
+            .faces()
+            .find(|f| matches!(properties(b, Entity::Face(*f)).unwrap(),
+                Properties::Face { shape: FaceShape::Plane { normal, .. }, .. } if normal.get().z > 0.5))
+            .unwrap();
+        b.name_of(ryukei::topo::EntityId::Face(f)).unwrap()
+    }
+
+    #[test]
+    fn a_face_thickened_joins_its_body_and_a_sheet_thickened_is_consumed() {
+        use crate::doc::solid::Operation;
+        use crate::solid::tests::{boxed, part};
+        let n = crate::doc::surface::FORMAT;
+        let f = |v: Value| Feature::from_json(&v, crate::units::Unit::Mm, &crate::expr::Env::empty()).unwrap();
+        let b = boxed("0", Operation::New, &[]);
+        let r0 = rebuild_part(&part(vec![("b", b.clone())]));
+        let body = &state(&r0, "b", "b").body;
+        let top = top_face(body);
+        // The box's top thickened 0.5 mm outwards and joined: 1.5 mm³.
+        let th = f(json!({"format": n, "kind": "ryucad.feature", "type": "thicken",
+            "from": {"faces": [{"feature": "b", "name": top.to_string()}]},
+            "front": "0.5 mm", "back": "0 mm", "operation": "join", "targets": ["b"]}));
+        let r = rebuild_part(&part(vec![("b", b.clone()), ("t", th)]));
+        close(volume(&state(&r, "t", "b").body), 1.5e-9);
+        // The top extracted, then thickened as a new solid: 0.5 mm³, the
+        // sheet consumed.
+        let x = f(json!({"format": n, "kind": "ryucad.feature", "type": "extract",
+            "faces": [{"feature": "b", "name": top.to_string()}]}));
+        let th = f(json!({"format": n, "kind": "ryucad.feature", "type": "thicken",
+            "from": {"sheet": "x"}, "front": "0.5 mm", "back": "0 mm", "operation": "new"}));
+        let p = part(vec![("b", b), ("x", x), ("t", th)]);
+        let r = rebuild_part(&p);
+        close(volume(&state(&r, "t", "t").body), 0.5e-9);
+        assert_eq!(Solids::of(&p).consumer(&id("x")), Some(&id("t")));
+        // Its front face says what it is the front of.
+        let o = &state(&r, "t", "t").origins;
+        assert!(o.values().any(|v| v["front_of"] == top.to_string()), "{o:?}");
     }
 
     #[test]

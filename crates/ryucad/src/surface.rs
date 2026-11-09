@@ -486,6 +486,151 @@ fn variant_snake(debug: &str) -> String {
     out
 }
 
+/// The key a thicken from faces extracts them under.
+fn extract_key(part: &Id, id: &Id) -> OpKey {
+    let mut bytes = b"ryucad.thicken.extract\0".to_vec();
+    bytes.extend_from_slice(part.as_str().as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(id.as_str().as_bytes());
+    OpKey::from_bytes(&bytes)
+}
+
+/// What a thicken thickens, as it sees it: the sheet it consumes (by
+/// founder) or the body whose faces it takes, and the sheet itself
+/// (those faces extracted).
+fn thicken_input<'a>(
+    part: &Part,
+    solids: &crate::solid::Solids,
+    id: &Id,
+    t: &'a crate::doc::surface::Thicken,
+    before: &'a dyn Results,
+) -> Result<(&'a Id, &'a Built, std::borrow::Cow<'a, Body>)> {
+    use crate::doc::surface::ThickenFrom;
+    match &t.from {
+        ThickenFrom::Sheet(s) => {
+            let need = crate::rebuild::Need {
+                role: "from",
+                want: Some(crate::kind::Want::Sheet),
+                changes: true,
+            };
+            let built = crate::rebuild::body_as(part, solids, id, s, need, before)?;
+            Ok((s, built, std::borrow::Cow::Borrowed(&built.body)))
+        }
+        ThickenFrom::Faces(_) => {
+            let refs: Vec<(String, &crate::doc::reference::Reference)> = t
+                .references()
+                .into_iter()
+                .filter(|(role, _)| role.starts_with("from."))
+                .collect();
+            let (from, built, names) = resolve_faces(part, id, "thicken", &refs, before)?;
+            let (sheet, _) = ryukei::sheet::extract(extract_key(&part.id, id), &built.body, &names)
+                .map_err(|e| extract_error(part, id, from, &e))?;
+            Ok((from, built, std::borrow::Cow::Owned(sheet)))
+        }
+    }
+}
+
+/// Refuses a thicken whose sheet or faces don't resolve, in `results`
+/// (what the kernel makes of them only rebuild can tell).
+pub fn check_thicken(
+    part: &Part,
+    id: &Id,
+    t: &crate::doc::surface::Thicken,
+    results: &dyn Results,
+) -> Result<()> {
+    let solids = crate::solid::Solids::of(part);
+    thicken_input(part, &solids, id, t, results).map(drop)
+}
+
+/// A thicken's own body: its sheet (or its faces extracted) given its
+/// front and back, each group's faces their own, by one kernel call.
+/// `build_body` founds it or applies it to the targets.
+pub fn thicken(
+    part: &Part,
+    solids: &crate::solid::Solids,
+    id: &Id,
+    t: &crate::doc::surface::Thicken,
+    before: &dyn Results,
+    run: &Run,
+) -> Result<Built> {
+    let (from, built, sheet) = thicken_input(part, solids, id, t, before)?;
+    let spec = ryukei::offset::ThickenSpec {
+        front: t.front.meters(),
+        back: t.back.meters(),
+        faces: t
+            .faces
+            .iter()
+            .flat_map(|g| g.faces.iter().map(move |r| (r.name, g.front.meters(), g.back.meters())))
+            .collect(),
+    };
+    let key = crate::rebuild::op_key(&part.id, id);
+    let work = crate::work::work(run.job);
+    let made = ryukei::offset::thicken_with(key, &sheet, &spec, &work).map_err(|e| {
+        crate::work::stopped(&e, run.job)
+            .unwrap_or_else(|| crate::body::kernel_error(part, id, "thicken", (from, built), e))
+    })?;
+    let origins = thicken_origins(id, key, built, &sheet, &made);
+    crate::rebuild::finish(id, "thicken", made, origins)
+}
+
+/// A thicken's origins: a face, edge or vertex moved to the front (or the
+/// back) is `{feature, front_of | back_of: <name>}` of the sheet's entity
+/// (the kernel names it `ThickenRole::Front` or `Back` from that entity
+/// and journals it `Replaced`); a wall `{feature, wall_of: [<edges>]}` of
+/// the laminar edges it replaces; an entity a side at zero left with its
+/// name keeps its origin; anything else (fills, new points) the
+/// feature's.
+fn thicken_origins(
+    id: &Id,
+    key: OpKey,
+    from: &Built,
+    sheet: &Body,
+    made: &(Body, ryukei::name::Journal),
+) -> Origins {
+    use ryukei::name::{Event, ThickenRole};
+    let mut of: std::collections::BTreeMap<Name, Value> = Default::default();
+    let mut walls: std::collections::BTreeMap<Name, Vec<String>> = Default::default();
+    // Every sheet entity a side moves takes `Front` or `Back` from it,
+    // whether or not the journal says it was replaced (a side at zero
+    // keeps the sheet's names, and the kernel journals nothing then).
+    for n in crate::rebuild::names(sheet) {
+        for (role, word) in [(ThickenRole::Front, "front_of"), (ThickenRole::Back, "back_of")] {
+            let m = Name::derive(key, Role::Thicken(role), &[n]);
+            if made.0.by_name(m).is_some() {
+                of.insert(m, json!({"feature": id, word: n.to_string()}));
+            }
+        }
+    }
+    for e in made.1.events() {
+        if let Event::Replaced { old, new } = e {
+            for n in new {
+                if !of.contains_key(n) {
+                    walls.entry(*n).or_default().push(old.to_string());
+                }
+            }
+        }
+    }
+    crate::rebuild::names(&made.0)
+        .into_iter()
+        .map(|n| {
+            let o = match (of.get(&n), walls.get(&n)) {
+                (Some(o), _) => o.clone(),
+                (None, Some(w)) => {
+                    let mut w = w.clone();
+                    w.sort();
+                    json!({"feature": id, "wall_of": w})
+                }
+                (None, None) => from
+                    .origins
+                    .get(&n.to_string())
+                    .cloned()
+                    .unwrap_or_else(|| json!({"feature": id})),
+            };
+            (n.to_string(), o)
+        })
+        .collect()
+}
+
 /// A fill, extract, sew or thicken as output reports it: its file's
 /// fields, references as text, quantities with their meters.
 pub fn report(part: &Id, f: &Feature) -> Value {
@@ -512,7 +657,20 @@ Feature::Sew(x) => {
             v["tolerance"] = x.tolerance.report();
             v
         }
-        Feature::Thicken(x) => x.fields(),
+Feature::Thicken(t) => {
+            let mut v = t.fields();
+            if let crate::doc::surface::ThickenFrom::Faces(f) = &t.from {
+                v["from"]["faces"] = json!(f.iter().map(|r| r.text(part)).collect::<Vec<_>>());
+            }
+            v["front"] = t.front.report();
+            v["back"] = t.back.report();
+            for (i, g) in t.faces.iter().enumerate() {
+                v["faces"][i]["front"] = g.front.report();
+                v["faces"][i]["back"] = g.back.report();
+                v["faces"][i]["faces"] = json!(g.faces.iter().map(|r| r.text(part)).collect::<Vec<_>>());
+            }
+            v
+        }
         _ => unreachable!("a fill, an extract, a sew or a thicken"),
     }
 }

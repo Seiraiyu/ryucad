@@ -71,12 +71,15 @@ pub fn check_seeds(part: &Part, id: &Id, p: &Pattern) -> Result<Operation> {
             // Its file's fault, or its absence, is the order check's.
             _ => continue,
         };
-        if let Feature::Mirror(_) = f {
+        let whole = match f {
+            Feature::Mirror(_) => Some("a mirror, which copies a whole solid"),
+            Feature::Thicken(_) => Some("a thicken, which consumes a sheet or reads faces of one body"),
+            _ => None,
+        };
+        if let Some(what) = whole {
             return Err(Error::new(
                 Code::ReferenceWrongKind,
-                format!(
-                    "pattern {id}: its seed {seed} is a mirror, which copies a whole solid; a pattern repeats joins, cuts and holes"
-                ),
+                format!("pattern {id}: its seed {seed} is {what}; a pattern repeats joins, cuts and holes"),
             )
             .with("feature", id)
             .with("seed", seed)

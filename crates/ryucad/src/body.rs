@@ -237,8 +237,8 @@ fn shell_origins(
 /// (`refusal`), and each entity it names (`entities`, each with its `role`
 /// in the refusal): a reference into the target as the feature sees it,
 /// with its kind and origin, else its name alone (an entity of a shell's
-/// inner offset).
-fn kernel_error(
+/// inner offset). A thicken's refusal is `thicken_failed`.
+pub(crate) fn kernel_error(
     part: &Part,
     id: &Id,
     ty: &str,
@@ -391,10 +391,10 @@ fn kernel_error(
             },
             _ => ("offset", "kernel", None, "the kernel refused it", none()),
         };
-    let code = if ty == "shell" {
-        Code::ShellFailed
-    } else {
-        Code::OffsetFailed
+    let code = match ty {
+        "shell" => Code::ShellFailed,
+        "thicken" => Code::ThickenFailed,
+        _ => Code::OffsetFailed,
     };
     let mut err = Error::new(code, format!("{ty} {id}: {msg} ({e})"))
         .with("feature", id)
