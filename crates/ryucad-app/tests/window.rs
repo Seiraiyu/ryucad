@@ -2823,6 +2823,61 @@ fn file_import_step_plans_then_imports() {
     );
 }
 
+/// Import STEP… leaves "Convert to solids (heal)" off: the body is a
+/// reference import, its rows say so, and its solid's menu converts it to
+/// a solid, whose menu then offers to keep it as a reference.
+#[test]
+fn a_step_file_imports_as_a_reference_and_its_row_converts_it() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new();
+    let mut h = window(&p);
+    frames(&mut h, |a| a.opened().ws.idle());
+    menu(&mut h, "File", "Import STEP…");
+    shown(&mut h, "Convert to solids (heal)");
+    type_into(
+        &mut h,
+        "STEP file",
+        &occt("box_ap214.stp").display().to_string(),
+    );
+    h.get_by_label("Plan").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .import
+            .as_ref()
+            .is_some_and(|i| i.current().is_some())
+    });
+    shown(
+        &mut h,
+        "    body (body 0, reference): 6 faces, 12 edges, 8 vertices",
+    );
+    h.get_by_label("Import").click();
+    let mode = |a: &App| {
+        a.opened()
+            .ws
+            .part("part-2")
+            .and_then(|p| p.feature("body"))
+            .and_then(|f| f.import.as_ref())
+            .map(|i| i.reference)
+    };
+    frames(&mut h, |a| mode(a) == Some(true));
+    // The dialog's, past the tiles' tabs' close buttons.
+    h.get_all_by_label("Close").last().unwrap().click();
+    h.step();
+    shown(&mut h, "body (import: box_ap214.step / part 2, reference)");
+    h.get_by_label("body (solid, reference)").click_secondary();
+    context_item(&mut h, "Convert to solid");
+    frames(&mut h, |a| mode(a) == Some(false));
+    shown(&mut h, "body (import: box_ap214.step / part 2)");
+    h.get_by_label("body (solid)").click_secondary();
+    context_item(&mut h, "Keep as reference");
+    frames(&mut h, |a| mode(a) == Some(true));
+    shown(&mut h, "body (solid, reference)");
+}
+
 #[test]
 fn file_export_writes_the_shown_part() {
     let _one = one_at_a_time();
