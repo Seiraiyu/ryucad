@@ -3546,6 +3546,34 @@ fn blend_from(
 
 /// The solids a feature put at `at` in `order` could act on: founded
 /// before it and not consumed.
+/// Whether body `x` of part `pid`, as a feature at `at` of `list` would
+/// see it, is a sheet in the current rebuild: the tip of its chain among
+/// the features before `at`. A part no feature of which may make a
+/// sheet is never rebuilt for this.
+fn source_is_sheet(session: &mut Session, pid: &Id, list: &[Id], at: usize, x: &Id) -> bool {
+    let Ok(p) = session.project().part(pid).cloned() else {
+        return false;
+    };
+    let may = p
+        .features
+        .values()
+        .any(|g| g.as_ref().is_ok_and(|g| g.may_make_sheet()));
+    if !may {
+        return false;
+    }
+    let solids = Solids::of_order(&p, &list[..at]);
+    let Some(tip) = solids.tips().find(|(s, _)| *s == x).map(|(_, t)| t.clone()) else {
+        return false;
+    };
+    let Ok(results) = session.rebuilt(pid) else {
+        return false;
+    };
+    crate::rebuild::Results::result(results, &tip)
+        .and_then(|r| r.as_ref().ok())
+        .and_then(|o| o.solid(x))
+        .is_some_and(|b| b.body.kind() == ryukei::topo::BodyKind::Sheet)
+}
+
 fn solids_before(p: &Part, order: &[Id], at: usize) -> Vec<Id> {
     Solids::of_order(p, &order[..at])
         .tips()
@@ -4265,31 +4293,42 @@ fn feature_add(
     // A mirror whose operation is left out joins its own source (design
     // 327, question 20); one with no solid copies the part's one solid.
     // The file names both all the same.
-    if ty == "mirror" {
-        if given.fields.solid.is_none() {
-            let before = solids_before(p, &list, at);
-            match before.as_slice() {
-                [one] => given.fields.solid = Some(one.to_string()),
-                _ => {
-                    return Err(Error::new(
-                        Code::InvalidParam,
-                        format!(
-                            "a mirror names the solid it copies (solid): the part has {} before it",
-                            before.len()
-                        ),
-                    )
-                    .with("param", "solid")
-                    .with("solids", before));
-                }
+    if ty == "mirror" && given.fields.solid.is_none() {
+        let before = solids_before(p, &list, at);
+        match before.as_slice() {
+            [one] => given.fields.solid = Some(one.to_string()),
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "a mirror names the solid it copies (solid): the part has {} before it",
+                        before.len()
+                    ),
+                )
+                .with("param", "solid")
+                .with("solids", before));
             }
         }
-        if given.fields.operation.is_none() {
+    }
+    // A sheet's copy can't be joined: left out, its operation is new
+    // (design 388).
+    if ty == "mirror" && given.fields.operation.is_none() {
+        let sheet = given
+            .fields
+            .solid
+            .as_deref()
+            .and_then(|x| Id::parse(x, "feature").ok())
+            .is_some_and(|x| source_is_sheet(session, &pid, &list, at, &x));
+        if sheet {
+            given.fields.operation = Some("new".into());
+        } else {
             given.fields.operation = Some("join".into());
             if given.fields.targets.is_none() {
                 given.fields.targets = given.fields.solid.clone().map(|s| vec![s]);
             }
         }
     }
+    let p = session.project().part(&pid)?;
     // A join, cut, intersect or hole with no targets acts on the part's
     // one solid; the file names it all the same.
     let acts = ty == "hole"
@@ -7996,6 +8035,60 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::InvalidParam, "{e}");
+    }
+
+    #[test]
+    fn a_mirror_of_a_sheet_is_new_and_an_offset_of_one_a_sheet() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "plane": "xy"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
+                {"op": "add", "id": "a", "type": "point", "at": [0, 0]},
+                {"op": "add", "id": "b", "type": "point", "at": [10, 0]},
+                {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}]}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "w", "sketch": "s", "surface": true,
+                   "extent": {"type": "blind", "length": "20 mm"}}),
+        )
+        .unwrap();
+        // Left out, the operation is new for a sheet.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "mirror", "id": "m", "solid": "w", "plane": "zx"}),
+        )
+        .unwrap();
+        let shown = call(&mut s, "feature.show", json!({"part": "p", "id": "m"})).unwrap();
+        assert_eq!(shown["operation"], "new", "{shown}");
+        assert!(shown.get("targets").is_none(), "{shown}");
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "offset", "id": "o", "target": "w", "distance": "2 mm"}),
+        )
+        .unwrap();
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let solids = r["parts"][0]["solids"].as_array().unwrap();
+        for id in ["m", "w"] {
+            let b = solids
+                .iter()
+                .find(|x| x["solid"] == id)
+                .unwrap_or_else(|| panic!("{r}"));
+            assert_eq!(b["kind"], "sheet", "{b}");
+            assert_eq!(b["ok"], true, "{b}");
+        }
     }
 
     #[test]

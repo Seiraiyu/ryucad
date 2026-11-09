@@ -769,8 +769,12 @@ pub(crate) fn side_key(part: &Id, id: &Id, side: &str) -> ToolKey {
     ToolKey(OpKey::from_bytes(&bytes).0)
 }
 
-/// How many lumps a body has: its solid regions.
+/// How many lumps a body has: a solid's solid regions, a sheet's
+/// connected shells.
 pub fn lumps(b: &Body) -> usize {
+    if b.kind() == ryukei::topo::BodyKind::Sheet {
+        return b.shells().count();
+    }
     b.regions()
         .filter(|r| b.region(*r).is_some_and(|x| x.kind == RegionKind::Solid))
         .count()
