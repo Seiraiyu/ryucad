@@ -2451,11 +2451,11 @@ mod tests {
         // other field is read, and format 0 never existed.
         let mut v = Manifest::new(Unit::Mm).to_json();
         assert!(Manifest::from_json(&v).is_ok());
-        v["format"] = json!(4);
+        v["format"] = json!(MANIFEST_FORMAT + 1);
         v["default_unit"] = json!("parsec");
         let e = Manifest::from_json(&v).unwrap_err();
         assert_eq!(e.code, Code::FormatTooNew);
-        assert_eq!(e.details["supported"], 3);
+        assert_eq!(e.details["supported"], MANIFEST_FORMAT);
         v["format"] = json!(0);
         assert_eq!(
             Manifest::from_json(&v).unwrap_err().code,
