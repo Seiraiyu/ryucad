@@ -2353,6 +2353,10 @@ fn rebuild_with(
             crate::body::build(part, solids, id, f, before, run).map(solid),
             None,
         ),
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) => (
+            crate::tweak::build(part, solids, id, f, before, run).map(solid),
+            None,
+        ),
         Feature::BaseFlange(b) => (
             crate::sheet_metal::base_flange(part, id, b, before, run)
                 .map(|built| solid(Made::new(vec![(id.clone(), Arc::new(built))]))),

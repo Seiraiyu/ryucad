@@ -12,7 +12,9 @@ use crate::doc::reference::Reference;
 use crate::doc::tweak::{MoveBy, MoveFace};
 use crate::error::{Code, Error, Result};
 use crate::geometry::{At, Geom, Line, Want};
-use crate::rebuild::{Built, Results};
+use crate::rebuild::{Built, Made, Results, Run};
+use serde_json::{Value, json};
+use std::sync::Arc;
 use crate::solid::Solids;
 use ryukei::geom::{Rigid, UnitVector3};
 use ryukei::name::Name;
@@ -162,6 +164,138 @@ pub(crate) fn resolve<'a>(
     }
 }
 
+/// A kernel refusal in ryucad's terms, before its entities are placed.
+pub(crate) struct Refusal {
+    pub reason: &'static str,
+    pub case: Option<&'static str>,
+    pub message: &'static str,
+    pub entities: Vec<(&'static str, Name)>,
+}
+
+/// `e`'s reason (its variant in snake case), an unsupported one's case,
+/// a sentence, and the names it gives with their roles.
+pub(crate) fn refusal(e: &ryukei::TweakError) -> Refusal {
+    use ryukei::{TweakCase as C, TweakError as T};
+    let r = |reason, message, entities| Refusal { reason, case: None, message, entities };
+    match *e {
+        T::NoFaces => r("no_faces", "the tweak names no face", vec![]),
+        T::NoSuchFace { face } => r("no_such_face", "a face isn't the target's", vec![("face", face)]),
+        T::DuplicateFace { face } => r("duplicate_face", "a face is named twice", vec![("face", face)]),
+        T::NotFinite => r("not_finite", "a motion, distance or surface isn't finite", vec![]),
+        T::BadDistance => r("bad_distance", "a distance is too small for the kernel's resolution (10 nm) and isn't zero", vec![]),
+        T::TangencyBroken { edge } => r("tangency_broken", "a face tangent to a tweaked one along this edge would meet it at an angle", vec![("edge", edge)]),
+        T::EdgeVanishes { edge } => r("edge_vanishes", "this edge's faces wouldn't meet where its vertices go: the edge would vanish", vec![("edge", edge)]),
+        T::VertexSplits { vertex } => r("vertex_splits", "this vertex's edges wouldn't meet at one point: it would split", vec![("vertex", vertex)]),
+        T::FaceCollapses { face } => r("face_collapses", "this face's new surface folds, or its loops would turn over", vec![("face", face)]),
+        T::ExtensionUnsupported { face } => r("extension_unsupported", "this unchanged face would have to be carried past its surface's edge to meet its moved neighbours, and can't be", vec![("face", face)]),
+        T::Ambiguous { face } => r("ambiguous", "the new surface is nearly square to this face: which side is out is unclear", vec![("face", face)]),
+        T::LaminarFace { face } => r("laminar_face", "this face has a sheet's boundary edge: where the boundary goes on the new surface is undefined", vec![("face", face)]),
+        T::BadAngle => r("bad_angle", "a draft angle that isn't finite, or outside the resolution to 90° less 0.01 rad", vec![]),
+        T::NoHinge { face } => r("no_hinge", "the neutral plane doesn't cross this face", vec![("face", face)]),
+        T::HingeAmbiguous { face } => r("hinge_ambiguous", "the neutral plane crosses this face in more than one place", vec![("face", face)]),
+        T::HingeNotOnFace { face } => r("hinge_not_on_face", "none of the parting line's edges bound this face, or they aren't one chain", vec![("face", face)]),
+        T::HingeAlongPull { face } => r("hinge_along_pull", "this face's hinge or normal runs along the pull somewhere: the draft has no direction there", vec![("face", face)]),
+        T::SelfIntersecting { faces: [a, b] } => r("self_intersecting", "two faces of the result would cross", vec![("a", a), ("b", b)]),
+        T::Uncertain { at } => r("uncertain", "a decision rounding left uncertain", vec![("at", at)]),
+        T::ToleranceTooLarge { at, .. } => r("tolerance_too_large", "the result would hold a tolerance past the kernel's cap", vec![("at", at)]),
+        T::Unsupported { at, case } => Refusal {
+            reason: "unsupported",
+            case: Some(match case {
+                C::PartlySmooth => "partly_smooth",
+                C::LoneVertex => "lone_vertex",
+                C::CarriedCurve => "carried_curve",
+                C::HingeChain => "hinge_chain",
+            }),
+            message: "the kernel can't tweak this face, edge or vertex yet",
+            entities: vec![("at", at)],
+        },
+    }
+}
+
+/// What to do about a refusal, where there is a known way out.
+pub(crate) fn hint(r: &Refusal) -> Option<&'static str> {
+    match (r.reason, r.case) {
+        ("tangency_broken", _) => Some(
+            "set tangent true, so faces tangent to a tweaked face move with it; or put the fillet after this feature in the list, where it is built again on the tweaked edges",
+        ),
+        ("edge_vanishes" | "vertex_splits" | "face_collapses", _) => Some(
+            "the tweak would change the body's topology, which ryucad can't do yet (ryukei 13): a smaller motion, or the faces it reaches listed too, may keep it",
+        ),
+        ("hinge_not_on_face", _) | ("unsupported", Some("hinge_chain")) => {
+            Some("split the face along the parting line first (a split, or a sketch's cut)")
+        }
+        ("hinge_along_pull", _) => Some("give a pull more nearly square to the face"),
+        _ => None,
+    }
+}
+
+/// The kernel's refusal of tweak `id` (`ty`) of `target` as `built` holds
+/// it: `tweak_failed` with its reason, `kernel: tweak`, the kernel's text,
+/// each entity it names as a reference into the target (with its kind and
+/// origin; else its name alone), and a hint where there is one. Anything
+/// but a tweak refusal is `tweak_failed` with reason `kernel`.
+fn kernel_error(part: &Part, id: &Id, ty: &str, (target, built): (&Id, &Built), e: ryukei::Error) -> Error {
+    let entity = |role: &str, n: &Name| -> Value {
+        let mut v = json!({"role": role});
+        match built.body.by_name(*n) {
+            Some(x) => {
+                v["reference"] = json!(format!("{}/{target}/{n}", part.id));
+                v["kind"] = json!(crate::reference::kind(x));
+                if let Some(o) = built.origins.get(&n.to_string()) {
+                    v["origin"] = o.clone();
+                }
+            }
+            None => v["name"] = json!(n.to_string()),
+        }
+        v
+    };
+    let r = match &e {
+        ryukei::Error::InvalidTweak(t) => refusal(t),
+        _ => Refusal { reason: "kernel", case: None, message: "the kernel refused it", entities: vec![] },
+    };
+    let mut err = Error::new(Code::TweakFailed, format!("{ty} {id}: {} ({e})", r.message))
+        .with("feature", id)
+        .with("solid", target)
+        .with("reason", r.reason)
+        .with("kernel", "tweak")
+        .with("refusal", format!("{e:?}"));
+    if let Some(c) = r.case {
+        err = err.with("case", c);
+    }
+    if let Some(h) = hint(&r) {
+        err = err.with("hint", h);
+    }
+    if !r.entities.is_empty() {
+        err = err.with(
+            "entities",
+            r.entities.iter().map(|(role, n)| entity(role, n)).collect::<Vec<_>>(),
+        );
+    }
+    err
+}
+
+/// A tweak: its target as it sees it, through one kernel call. It makes
+/// nothing, so every entity keeps its origin.
+pub fn build(part: &Part, solids: &Solids, id: &Id, f: &Feature, before: &dyn Results, run: &Run) -> Result<Made> {
+    let ty = f.type_name();
+    let r = resolve(part, solids, id, f, before)?;
+    let work = crate::work::work(run.job);
+    let key = crate::rebuild::op_key(&part.id, id);
+    let body = &r.built.body;
+    let made = match &r.spec {
+        Spec::Move(s) => ryukei::tweak::move_faces_with(key, body, s, &work),
+        Spec::Offset(s) => ryukei::tweak::offset_faces_with(key, body, s, &work),
+        Spec::Replace(s) => ryukei::tweak::replace_faces_with(key, body, s, &work),
+    }
+    .map_err(|e| {
+        crate::work::stopped(&e, run.job)
+            .unwrap_or_else(|| kernel_error(part, id, ty, (r.target, r.built), e))
+    })?;
+    let origins = crate::rebuild::replaced_origins(id, r.built, &made);
+    let built = crate::rebuild::finish(id, ty, made, origins)?;
+    Ok(Made::new(vec![(r.target.clone(), Arc::new(built))]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +332,56 @@ mod tests {
         let f =
             Feature::from_json(&shell, crate::units::Unit::Mm, &crate::expr::Env::empty()).unwrap();
         assert!(!takes_sheets(&f));
+    }
+
+    #[test]
+    fn every_refusal_has_a_reason_and_the_known_ways_out_a_hint() {
+        use ryukei::{TweakCase as C, TweakError as T};
+        let n = Name::from_u128(7);
+        let all = [
+            (T::NoFaces, "no_faces"),
+            (T::NoSuchFace { face: n }, "no_such_face"),
+            (T::DuplicateFace { face: n }, "duplicate_face"),
+            (T::NotFinite, "not_finite"),
+            (T::BadDistance, "bad_distance"),
+            (T::TangencyBroken { edge: n }, "tangency_broken"),
+            (T::EdgeVanishes { edge: n }, "edge_vanishes"),
+            (T::VertexSplits { vertex: n }, "vertex_splits"),
+            (T::FaceCollapses { face: n }, "face_collapses"),
+            (T::ExtensionUnsupported { face: n }, "extension_unsupported"),
+            (T::Ambiguous { face: n }, "ambiguous"),
+            (T::LaminarFace { face: n }, "laminar_face"),
+            (T::BadAngle, "bad_angle"),
+            (T::NoHinge { face: n }, "no_hinge"),
+            (T::HingeAmbiguous { face: n }, "hinge_ambiguous"),
+            (T::HingeNotOnFace { face: n }, "hinge_not_on_face"),
+            (T::HingeAlongPull { face: n }, "hinge_along_pull"),
+            (T::SelfIntersecting { faces: [n, n] }, "self_intersecting"),
+            (T::Uncertain { at: n }, "uncertain"),
+            (T::ToleranceTooLarge { at: n, needed: 1e-3 }, "tolerance_too_large"),
+            (T::Unsupported { at: n, case: C::PartlySmooth }, "unsupported"),
+        ];
+        for (e, reason) in all {
+            let r = refusal(&e);
+            assert_eq!(r.reason, reason, "{e:?}");
+            assert!(!r.message.is_empty());
+        }
+        let hint = |e: T| hint(&refusal(&e));
+        assert!(hint(T::TangencyBroken { edge: n }).unwrap().contains("tangent"));
+        for e in [
+            T::EdgeVanishes { edge: n },
+            T::VertexSplits { vertex: n },
+            T::FaceCollapses { face: n },
+        ] {
+            assert!(hint(e).unwrap().contains("topology"), "{e:?}");
+        }
+        assert!(hint(T::HingeNotOnFace { face: n }).unwrap().contains("split"));
+        assert!(hint(T::Unsupported { at: n, case: C::HingeChain }).unwrap().contains("split"));
+        assert!(hint(T::HingeAlongPull { face: n }).unwrap().contains("pull"));
+        assert_eq!(hint(T::Uncertain { at: n }), None);
+        assert_eq!(refusal(&T::Unsupported { at: n, case: C::CarriedCurve }).case, Some("carried_curve"));
+        let roles: Vec<&str> = refusal(&T::SelfIntersecting { faces: [n, n] })
+            .entities.iter().map(|(r, _)| *r).collect();
+        assert_eq!(roles, ["a", "b"]);
     }
 }
