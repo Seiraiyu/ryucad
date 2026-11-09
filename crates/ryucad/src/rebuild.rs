@@ -639,7 +639,7 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
             format!("import {id} is built from its file"),
         )
         .with("feature", id)),
-        Feature::Fill(_) | Feature::Extract(_) => Err(Error::new(
+        Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} is built from what it names", f.type_name()),
         )

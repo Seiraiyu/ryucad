@@ -348,6 +348,8 @@ pub fn report(part: &Id, f: &Feature) -> Value {
         Feature::Extract(x) => {
             json!({"faces": x.faces.iter().map(|r| r.text(part)).collect::<Vec<_>>()})
         }
+        Feature::Sew(x) => x.fields(),
+        Feature::Thicken(x) => x.fields(),
         _ => unreachable!("a fill, an extract, a sew or a thicken"),
     }
 }

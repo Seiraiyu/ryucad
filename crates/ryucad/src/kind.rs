@@ -113,9 +113,10 @@ pub fn need(owner: &Id, role: &str, solid: &Id, body: &Body, want: Want) -> Resu
 }
 
 /// The bodies feature `f` names, each with its role and what it wants of
-/// it: a boolean's target and tools, a mirror's source, and every other
+/// it: a boolean's target and tools, a mirror's source, a sew's sheets
+/// (`Sheet`), a thicken's sheet (`Sheet`, `from`), and every other
 /// feature's targets (`target` for a shell, offset and split), all
-/// `Solid`.
+/// `Solid` but those.
 pub fn bodies_read(f: &crate::doc::files::Feature) -> Vec<(&'static str, &Id, Want)> {
     use crate::doc::files::Feature as F;
     match f {
@@ -128,7 +129,25 @@ pub fn bodies_read(f: &crate::doc::files::Feature) -> Vec<(&'static str, &Id, Wa
         F::Shell(_) | F::Offset(_) | F::Split(_) => {
             f.targets().into_iter().map(|t| ("target", t, Want::Solid)).collect()
         }
-        _ => f.targets().into_iter().map(|t| ("targets", t, Want::Solid)).collect(),
+        _ => {
+            let consumes = f.consumes();
+            f.targets()
+                .into_iter()
+                .map(|t| match consumes.contains(&t) {
+                    true => (sheet_role(f), t, Want::Sheet),
+                    false => ("targets", t, Want::Solid),
+                })
+                .collect()
+        }
+    }
+}
+
+/// The role a feature names the sheets it consumes in: a sew's `sheets`,
+/// a thicken's `from`.
+fn sheet_role(f: &crate::doc::files::Feature) -> &'static str {
+    match f {
+        crate::doc::files::Feature::Thicken(_) => "from",
+        _ => "sheets",
     }
 }
 

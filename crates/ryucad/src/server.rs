@@ -2236,7 +2236,9 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
         }
         Feature::Instance(i) => i.fields(),
         Feature::Import(i) => i.fields(),
-        Feature::Fill(_) | Feature::Extract(_) => crate::surface::report(part, f),
+        Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_) => {
+            crate::surface::report(part, f)
+        }
         Feature::Mate(m) => {
             let mut v = m.fields();
             for (side, c) in [("a", &m.a), ("b", &m.b)] {
@@ -4570,6 +4572,13 @@ fn feature_edit(
                 f
             }
             Feature::Import(_) => return Err(import_not_written_here("edit").with("feature", &fid)),
+            Feature::Sew(_) | Feature::Thicken(_) => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("{} {fid} can't be edited by this build", old.type_name()),
+                )
+                .with("feature", &fid));
+            }
             f @ (Feature::Fill(_) | Feature::Extract(_)) => {
                 let ty = f.type_name();
                 given.only(ty, crate::doc::surface::request_fields(ty))?;

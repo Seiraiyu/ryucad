@@ -17,7 +17,7 @@ use super::reference::Reference;
 use super::sheet_metal::{BaseFlange, Flange, Refold, Unfold};
 use super::sketch::Sketch;
 use super::solid::{Boolean, Combine};
-use super::surface::{Extract, Fill};
+use super::surface::{Extract, Fill, Sew, Thicken};
 use super::sweep::{Extrude, Loft, Revolve, Sweep};
 use crate::error::{Code, Error, Result};
 use crate::expr::{self, Env, Expr};
@@ -209,6 +209,8 @@ pub enum Feature {
     Planar(Box<super::sweep::Planar>),
     Fill(Box<Fill>),
     Extract(Box<Extract>),
+    Sew(Box<Sew>),
+    Thicken(Box<Thicken>),
     /// A sheet metal solid founded from a sketch, with its settings.
     BaseFlange(Box<BaseFlange>),
     /// Bends and flanges on straight edges of a sheet metal solid.
@@ -589,7 +591,7 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
                 }
             }
             // "full" is a word, not a parameter.
-            ("tolerance", Value::String(s)) => out.push(s),
+            ("tolerance" | "front" | "back", Value::String(s)) => out.push(s),
             ("angle", Value::String(s)) if s != "full" => out.push(s),
             _ => {}
         }
@@ -812,7 +814,8 @@ pub struct Acts {
     pub founds: bool,
     /// The solids whose chains it joins.
     pub acts_on: Vec<Id>,
-    /// The solids a boolean consumes.
+    /// The bodies it consumes: a boolean's tools, a sew's sheets, a
+    /// thicken's sheet.
     pub consumes: Vec<Id>,
 }
 
@@ -831,6 +834,18 @@ pub fn feature_acts(v: &Value) -> Acts {
     let mut out = Acts::default();
     match v.get("type").and_then(Value::as_str) {
         Some("import" | "planar" | "fill" | "extract") => out.founds = true,
+        Some("sew") => {
+            out.founds = true;
+            out.consumes = ids(v.get("sheets"));
+        }
+        Some("thicken") => {
+            if v.get("operation").and_then(Value::as_str).is_none_or(|o| o == "new") {
+                out.founds = true;
+            } else {
+                out.acts_on = ids(v.get("targets"));
+            }
+            out.consumes = ids(v.pointer("/from/sheet"));
+        }
         Some(
             "box" | "cylinder" | "cone" | "sphere" | "torus" | "extrude" | "revolve" | "sweep"
             | "loft",
@@ -946,6 +961,8 @@ impl Feature {
             Feature::Planar(_) => "planar",
             Feature::Fill(_) => "fill",
             Feature::Extract(_) => "extract",
+            Feature::Sew(_) => "sew",
+            Feature::Thicken(_) => "thicken",
         }
     }
 
@@ -966,12 +983,17 @@ impl Feature {
     /// holding none holds no sheet, so what its features act on needs no
     /// rebuild to judge (`server::check_references`).
     pub fn may_make_sheet(&self) -> bool {
-        self.surface() || matches!(self, Feature::Fill(_) | Feature::Extract(_))
+        self.surface()
+            || matches!(self, Feature::Fill(_) | Feature::Extract(_))
+            || matches!(self, Feature::Sew(s) if !s.solid)
     }
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
-        if matches!(self, Feature::Fill(_) | Feature::Extract(_)) {
+        if matches!(
+            self,
+            Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_)
+        ) {
             return super::surface::FORMAT;
         }
         if matches!(self, Feature::Unfold(_) | Feature::Refold(_)) {
@@ -1022,7 +1044,9 @@ impl Feature {
             Feature::Planar(_) => super::sweep::SURFACE_FORMAT,
             Feature::BaseFlange(_) | Feature::Flange(_) => super::sheet_metal::FORMAT,
             Feature::Unfold(_) | Feature::Refold(_) => super::sheet_metal::UNFOLD_FORMAT,
-            Feature::Fill(_) | Feature::Extract(_) => super::surface::FORMAT,
+            Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_) => {
+                super::surface::FORMAT
+            }
         }
     }
 
@@ -1065,6 +1089,8 @@ impl Feature {
             Feature::Refold(r) => r.fields(),
             Feature::Fill(x) => x.fields(),
             Feature::Extract(x) => x.fields(),
+            Feature::Sew(x) => x.fields(),
+            Feature::Thicken(x) => x.fields(),
         }
     }
 
@@ -1085,6 +1111,8 @@ impl Feature {
             "planar" => Feature::Planar(Box::new(super::sweep::Planar::from_fields(&mut o)?)),
             "fill" => Feature::Fill(Box::new(Fill::from_fields(&mut o, default, env)?)),
             "extract" => Feature::Extract(Box::new(Extract::from_fields(&mut o)?)),
+            "sew" => Feature::Sew(Box::new(Sew::from_fields(&mut o, default, env)?)),
+            "thicken" => Feature::Thicken(Box::new(Thicken::from_fields(&mut o, default, env)?)),
             "boolean" => Feature::Boolean(Boolean::from_fields(&mut o)?),
             "fillet" => Feature::Fillet(Fillet::from_fields(&mut o, default, env)?),
             "chamfer" => Feature::Chamfer(Chamfer::from_fields(&mut o, default, env)?),
@@ -1143,6 +1171,9 @@ impl Feature {
             Feature::Import(_) | Feature::Planar(_) | Feature::Fill(_) | Feature::Extract(_) => {
                 Some(&NEW)
             }
+            // A sew founds the body it sews.
+            Feature::Sew(_) => Some(&NEW),
+            Feature::Thicken(t) => Some(&t.combine),
             // A base flange always founds its own solid.
             Feature::BaseFlange(_) => Some(&NEW),
             Feature::Mirror(m) => Some(&m.combine),
@@ -1168,7 +1199,7 @@ impl Feature {
 
     /// The solids it acts on, by their founders, in the order it names
     /// them: an operation's, a hole's or a pattern's targets, a boolean's
-    /// target then tools, a shell's or offset's target, or the solids a
+    /// target then tools, a sew's sheets, a thicken's targets then its sheet, a shell's or offset's target, or the solids a
     /// fillet's or chamfer's references name, each once (one, unless the
     /// file mixes them).
     pub fn targets(&self) -> Vec<&Id> {
@@ -1191,6 +1222,10 @@ impl Feature {
             Feature::Flange(f) => vec![&f.target],
             Feature::Unfold(u) => vec![&u.target],
             Feature::Refold(r) => vec![&r.target],
+            // The sheets a sew consumes, as a boolean's tools are its.
+            Feature::Sew(s) => s.sheets.iter().collect(),
+            // A thicken's targets, then the sheet it consumes.
+            Feature::Thicken(t) => t.combine.targets.iter().chain(t.sheet()).collect(),
             f => f
                 .combine()
                 .map_or(Vec::new(), |c| c.targets.iter().collect()),
@@ -1204,6 +1239,18 @@ impl Feature {
         match self {
             Feature::Split(s) => s.keep == super::body::Keep::Both,
             f => f.combine().is_some_and(Combine::is_new),
+        }
+    }
+
+    /// The bodies it consumes, by founder: a boolean's tools, a sew's
+    /// sheets, a thicken's sheet. Their chains end here: nothing acts on
+    /// them or refers to them after it.
+    pub fn consumes(&self) -> Vec<&Id> {
+        match self {
+            Feature::Boolean(b) => b.tools.iter().collect(),
+            Feature::Sew(s) => s.sheets.iter().collect(),
+            Feature::Thicken(t) => t.sheet().into_iter().collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -1317,6 +1364,7 @@ impl Feature {
             Feature::Unfold(u) => u.references(),
             Feature::Refold(r) => r.references(),
             Feature::Extract(x) => x.references(),
+            Feature::Thicken(x) => x.references(),
             // A fill's edge sides, then the edges its curve sides name.
             Feature::Fill(x) => x
                 .references()
@@ -2422,5 +2470,46 @@ mod tests {
         // A fill's tolerance and angle are expressions an equations table lists.
         let fields: Vec<String> = expression_fields(&fill).into_iter().map(|(p, _)| p).collect();
         assert_eq!(fields, ["/angle", "/tolerance"]);
+    }
+
+    #[test]
+    fn sews_and_thickens_are_format_15_and_consume_their_sheets() {
+        use super::super::surface::FORMAT;
+        const A: &str = "0123456789abcdef0123456789abcdef";
+        let ids = |v: Vec<&Id>| -> Vec<String> { v.into_iter().map(|i| i.to_string()).collect() };
+        let sew = json!({"format": FORMAT, "kind": FEATURE_KIND, "type": "sew",
+                         "sheets": ["a", "b"], "tolerance": "0.01 mm", "solid": false});
+        let f = Feature::from_json(&sew, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!((f.type_name(), f.format(), feature_format(&sew)), ("sew", FORMAT, FORMAT));
+        assert!(f.founds() && f.may_make_sheet());
+        assert_eq!((ids(f.targets()), ids(f.consumes())), (vec!["a".into(), "b".into()], vec!["a".into(), "b".into()]));
+        assert_eq!(f.to_json(), sew);
+        let a = feature_acts(&sew);
+        assert!(a.founds && a.acts_on.is_empty());
+        assert_eq!(a.consumes, [Id::parse("a", "feature").unwrap(), Id::parse("b", "feature").unwrap()]);
+        let th = json!({"format": FORMAT, "kind": FEATURE_KIND, "type": "thicken",
+                        "from": {"sheet": "skin"}, "front": "2 mm", "back": "0 mm",
+                        "operation": "join", "targets": ["base"]});
+        let f = Feature::from_json(&th, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!((f.type_name(), f.format()), ("thicken", FORMAT));
+        assert!(!f.founds() && !f.may_make_sheet());
+        assert_eq!(ids(f.targets()), ["base", "skin"]);
+        assert_eq!(ids(f.consumes()), ["skin"]);
+        let a = feature_acts(&th);
+        assert_eq!((a.founds, a.acts_on.len(), a.consumes.len()), (false, 1, 1));
+        // From faces: it consumes nothing, and reads the faces' body.
+        let th = json!({"format": FORMAT, "kind": FEATURE_KIND, "type": "thicken",
+                        "from": {"faces": [{"feature": "base", "name": A}]},
+                        "front": "2 mm", "back": "0 mm", "operation": "new"});
+        let f = Feature::from_json(&th, Unit::Mm, &Env::empty()).unwrap();
+        assert!(f.founds() && f.consumes().is_empty() && f.targets().is_empty());
+        assert_eq!(ids(f.geometry_reads()), ["base"]);
+        let fields: Vec<String> = expression_fields(&th).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(fields, ["/back", "/front"]);
+        // A boolean consumes its tools, as before.
+        let b = json!({"format": 3, "kind": FEATURE_KIND, "type": "boolean", "op": "unite",
+                       "target": "a", "tools": ["t"]});
+        let f = Feature::from_json(&b, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!(ids(f.consumes()), ["t"]);
     }
 }
