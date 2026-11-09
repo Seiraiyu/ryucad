@@ -49,8 +49,9 @@ fn solids(s: &mut Session, part: &Id) -> Vec<ryukei::topo::Body> {
         .collect()
 }
 
-/// A body's volume from a mesh at a thousandth of its size.
-fn volume(b: &ryukei::topo::Body) -> f64 {
+/// A body's volume, or a sheet's area, from a mesh at a thousandth of
+/// its size.
+fn measure_of(b: &ryukei::topo::Body) -> f64 {
     let mesh = |chord| ryukei::mesh::tessellate(b, &ryukei::mesh::MeshParams::new(chord, 0.5));
     let size = mesh(1e-3)
         .unwrap()
@@ -60,7 +61,12 @@ fn volume(b: &ryukei::topo::Body) -> f64 {
             (lo.min(p.x.min(p.y).min(p.z)), hi.max(p.x.max(p.y).max(p.z)))
         });
     let m = mesh((size.1 - size.0) * 1e-3).unwrap();
-    ryukei_testkit::mesh::volume_and_area(&m).0
+    let (v, a) = ryukei_testkit::mesh::volume_and_area(&m);
+    if b.kind() == ryukei::topo::BodyKind::Sheet {
+        a
+    } else {
+        v
+    }
 }
 
 /// Every part of `s`'s project whose features all build, exported in
@@ -108,7 +114,7 @@ fn exports_import_again(s: &mut Session, unrepresentable: &[&str]) {
         assert_eq!(before.len(), after.len(), "{pid}");
         for (k, (a, b)) in before.iter().zip(&after).enumerate() {
             assert_eq!(a.counts(), b.counts(), "{pid} solid {k}");
-            let (va, vb) = (volume(a), volume(b));
+            let (va, vb) = (measure_of(a), measure_of(b));
             assert!(
                 (va - vb).abs() <= 1e-3 * va.abs(),
                 "{pid} solid {k}: {va} against {vb}"
@@ -119,14 +125,20 @@ fn exports_import_again(s: &mut Session, unrepresentable: &[&str]) {
     assert_eq!(refused, unrepresentable);
 }
 
-/// The manifest's outcome per file and representation.
+/// The manifest's outcome per file and representation: `ok`, a refusal's
+/// reason, or for a surface model `sheet <faces> <laminar>`, which
+/// imports heal as a sheet since 18.C.
 fn manifest() -> BTreeMap<(String, u64), String> {
     let text = std::fs::read_to_string(ryustep_tests().join("corpus/manifest.txt")).unwrap();
     text.lines()
         .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
         .map(|l| {
             let w: Vec<&str> = l.split_whitespace().collect();
-            ((w[0].to_owned(), w[1].parse().unwrap()), w[2].to_owned())
+            let outcome = match w.iter().position(|x| *x == "sheet") {
+                Some(k) => w[k..].join(" "),
+                None => w[2].to_owned(),
+            };
+            ((w[0].to_owned(), w[1].parse().unwrap()), outcome)
         })
         .collect()
 }
@@ -159,17 +171,27 @@ fn the_corpus_imports_as_ryustep_reads_it() {
                     k,
                     &ReadOptions {
                         key: ryucad::rebuild::op_key(&pid, &fid),
-                        heal: Default::default(),
+                        heal: ryucad::import::heal_options(),
                     },
                 );
                 let rep = opened.held[k].representation;
                 let outcome = match &f["error"]["details"]["reason"] {
                     Value::String(r) => r.clone(),
-                    _ if f["ok"] == true => "ok".to_owned(),
+                    _ if f["ok"] == true => {
+                        let body = &read.result.as_ref().unwrap().0;
+                        match body.kind() {
+                            ryukei::topo::BodyKind::Sheet => format!(
+                                "sheet {} {}",
+                                body.faces().count(),
+                                body.edges().filter(|&e| body.is_laminar(e)).count()
+                            ),
+                            _ => "ok".to_owned(),
+                        }
+                    }
                     e => panic!("{name} #{rep}: {e}"),
                 };
                 seen.insert((name.clone(), rep), outcome.clone());
-                if outcome == "ok" {
+                if outcome == "ok" || outcome.starts_with("sheet") {
                     let body = &read.result.as_ref().unwrap().0;
                     let hash = blake3::hash(body.dump().as_bytes()).to_hex()[..32].to_owned();
                     assert_eq!(f["hash"], hash, "{name} #{rep}");
@@ -191,7 +213,11 @@ fn the_corpus_imports_as_ryustep_reads_it() {
         .flat_map(|p| p["features"].as_array().unwrap())
         .filter(|f| f["ok"] == true)
         .count();
-    assert_eq!(ok, want.values().filter(|o| *o == "ok").count());
+    let builds = want
+        .values()
+        .filter(|o| *o == "ok" || o.starts_with("sheet"))
+        .count();
+    assert_eq!(ok, builds);
     // Every part that builds exports, nist_ctc_05's second too: its
     // countersink's cone face, a lune through the apex, is cut open
     // (issue #146).
