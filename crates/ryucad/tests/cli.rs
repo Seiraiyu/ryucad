@@ -4440,6 +4440,156 @@ fn surfaces_from_the_cli() {
     assert!(!l.to_string().contains("\"pad\""), "{l}");
 }
 
+/// The ops of a 10 mm square from `(x, y)`: points `p1`..`p4`, lines
+/// `l1`..`l4`.
+fn square_10(x: f64, y: f64) -> String {
+    let p = [[x, y], [x + 10.0, y], [x + 10.0, y + 10.0], [x, y + 10.0]];
+    let mut ops = Vec::new();
+    for (i, q) in p.iter().enumerate() {
+        ops.push(serde_json::json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": q}));
+    }
+    for i in 1..=4 {
+        ops.push(serde_json::json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                                    "start": format!("p{i}"), "end": format!("p{}", i % 4 + 1)}));
+    }
+    serde_json::Value::Array(ops).to_string()
+}
+
+/// The faces of `feature`'s body in part `p`, each `p/<feature>/<name>`,
+/// with the z of their plane's origin (bottom to top for a box).
+fn faces_by_z(p: &Pair, feature: &str) -> Vec<(String, f64)> {
+    let body = p.ok(&["inspect", "p", feature])["bodies"][0].clone();
+    let mut out: Vec<(String, f64)> = body["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            let z = f["surface"]["frame"]["origin"][2].as_f64().unwrap_or(0.0);
+            (format!("p/{feature}/{}", f["name"].as_str().unwrap()), z)
+        })
+        .collect();
+    out.sort_by(|a, b| a.1.total_cmp(&b.1));
+    out
+}
+
+#[test]
+fn fills_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&["feature", "add", "p", "sketch", "--id", "s", "--plane", "xy"]);
+    p.ok(&["sketch", "edit", "p", "s", &square_10(0.0, 0.0)]);
+    let v = p.ok(&[
+        "feature", "add", "p", "fill", "--id", "f", "--curve", "p/s/l1", "--curve", "p/s/l2",
+        "--curve", "p/s/l3", "--curve", "p/s/l4", "--tolerance", "0.002mm",
+    ]);
+    assert_eq!(v["feature"]["tolerance"]["value"], "0.002 mm", "{v}");
+    assert_eq!(v["feature"]["sides"][3]["curve"], "p/s/l4", "{v}");
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+        "--param", "z=10", "--origin", "20,0,0",
+    ]);
+    let faces = faces_by_z(&p, "b");
+    let (bottom, top) = (&faces[0].0, &faces[faces.len() - 1].0);
+    let v = p.ok(&["feature", "add", "p", "extract", "--id", "x", "--face", top]);
+    assert_eq!(v["feature"]["faces"], serde_json::json!([top]), "{v}");
+    let v = p.ok(&["feature", "add", "p", "extract", "--id", "x2", "--face", top, "--face", bottom]);
+    assert_eq!(v["feature"]["faces"].as_array().unwrap().len(), 2, "{v}");
+    let r = p.ok(&["rebuild", "p"]);
+    let kinds: Vec<&Value> = r["parts"][0]["solids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|x| x["solid"] == "x" || x["solid"] == "f")
+        .map(|x| &x["kind"])
+        .collect();
+    assert_eq!(kinds, [&serde_json::json!("sheet"), &serde_json::json!("sheet")], "{r}");
+    // An edge of the box (two faces) asked tangent is refused at rebuild.
+    let edge = p.ok(&["inspect", "p", "b"])["bodies"][0]["edges"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (code, v) = p.both_from(
+        "",
+        &[
+            "feature", "add", "p", "fill", "--id", "g", "--edge", &format!("p/b/{edge}"),
+            "--tangent", "--curve", "p/s/l2", "--curve", "p/s/l3",
+        ],
+    );
+    assert_eq!((code, &v["ok"]), (0, &Value::Bool(true)), "{v}");
+    let (_, r) = p.both_from("", &["rebuild", "p"]);
+    assert!(r.to_string().contains("fill_failed"), "{r}");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, l) = p.run_in(&p.daemon, "", &["feature", "list", "p"]);
+    assert!(!l.to_string().contains("\"g\""), "{l}");
+}
+
+#[test]
+fn sew_and_thicken_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+        "--param", "z=10",
+    ]);
+    let faces = faces_by_z(&p, "b");
+    let mut sheets = Vec::new();
+    for (k, (f, _)) in faces.iter().enumerate() {
+        let id = format!("x{k}");
+        p.ok(&["feature", "add", "p", "extract", "--id", &id, "--face", f]);
+        sheets.push(id);
+    }
+    let mut args: Vec<&str> = vec!["feature", "add", "p", "sew", "--id", "sw"];
+    for s in &sheets {
+        args.extend(["--sheet", s.as_str()]);
+    }
+    let v = p.ok(&args);
+    assert_eq!(v["feature"]["solid"], true, "{v}");
+    let kind = |p: &Pair, solid: &str| -> Value {
+        let r = p.ok(&["rebuild", "p"]);
+        r["parts"][0]["solids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["solid"] == solid)
+            .map(|x| x["kind"].clone())
+            .unwrap_or_else(|| panic!("{r}"))
+    };
+    assert_eq!(kind(&p, "sw"), "solid");
+    p.ok(&["feature", "edit", "p", "sw", "--no-solid"]);
+    assert_eq!(kind(&p, "sw"), "sheet");
+    p.ok(&["feature", "add", "p", "sketch", "--id", "s", "--plane", "xy"]);
+    p.ok(&["sketch", "edit", "p", "s", &square_10(20.0, 0.0)]);
+    p.ok(&["feature", "add", "p", "planar", "--id", "pf", "--sketch", "s"]);
+    let v = p.ok(&["feature", "add", "p", "thicken", "--id", "t", "--sheet", "pf", "--front", "2mm"]);
+    assert_eq!(v["feature"]["front"]["value"], "2 mm", "{v}");
+    let v = p.ok(&["feature", "edit", "p", "t", "--back", "1mm"]);
+    assert_eq!(v["feature"]["back"]["value"], "1 mm", "{v}");
+    assert_eq!(kind(&p, "t"), "solid");
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "c", "--param", "x=10", "--param", "y=10",
+        "--param", "z=10", "--origin", "40,0,0",
+    ]);
+    let c = faces_by_z(&p, "c");
+    let top = &c[c.len() - 1].0;
+    let v = p.ok(&[
+        "feature", "add", "p", "thicken", "--id", "tj", "--face", top, "--front", "3mm",
+        "--operation", "join", "--target", "c",
+    ]);
+    assert_eq!(v["feature"]["operation"], "join", "{v}");
+    p.fails(
+        &["feature", "add", "p", "sew", "--sheet", "pf", "--sheet", "x0"],
+        "body_consumed",
+        1,
+    );
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0, "{v}");
+}
+
 #[test]
 fn lofts_from_the_cli() {
     let p = Pair::new();
