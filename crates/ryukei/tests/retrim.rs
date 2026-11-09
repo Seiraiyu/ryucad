@@ -13,6 +13,7 @@ use ryukei::tweak::{
     DraftFace, DraftSpec, Hinge, MoveSpec, OffsetFacesSpec, Topology, draft, move_faces,
     offset_faces,
 };
+use ryukei::{Error, TweakError};
 
 const K: OpKey = OpKey(0x13b0);
 const T: OpKey = OpKey(0x13b1);
@@ -299,4 +300,131 @@ fn a_boss_slid_over_its_plates_edge() {
     // edge only), and that edge is cut where the boss's foot crosses it.
     assert!(o.by_name(face(K, FaceRole::MinusX)).is_some());
     assert!(o.edges().count() > b.edges().count());
+}
+
+fn refusal<X>(r: Result<X, Error>) -> TweakError {
+    match r {
+        Err(Error::InvalidTweak(e)) => e,
+        Err(e) => panic!("not a tweak's refusal: {e:?}"),
+        Ok(_) => panic!("not refused"),
+    }
+}
+
+/// Every phase 9 tweak that builds builds the same bits under `Change`:
+/// the fixed engine runs first and its result stands.
+#[test]
+fn phase_9s_tweaks_are_the_same_bits_under_change() {
+    let b = block();
+    let top = face(K, FaceRole::PlusZ);
+    let side = face(K, FaceRole::PlusX);
+    let up = Rigid::translation(Vector3::new(0.0, 0.0, 0.1));
+    let both = |keep: MoveSpec| {
+        let change = MoveSpec {
+            topology: Topology::Change,
+            ..keep.clone()
+        };
+        let (a, ja) = move_faces(T, &b, &keep).unwrap();
+        let (c, jc) = move_faces(T, &b, &change).unwrap();
+        assert_eq!(
+            ryukei::codec::encode_body(&a),
+            ryukei::codec::encode_body(&c)
+        );
+        assert_eq!(ja, jc);
+    };
+    both(MoveSpec {
+        faces: vec![top],
+        motion: up,
+        tangent: false,
+        topology: Topology::Keep,
+    });
+    let keep = OffsetFacesSpec {
+        faces: vec![(top, 0.05), (side, -0.1)],
+        tangent: false,
+        topology: Topology::Keep,
+    };
+    let (a, ja) = offset_faces(T, &b, &keep).unwrap();
+    let (c, jc) = offset_faces(
+        T,
+        &b,
+        &OffsetFacesSpec {
+            topology: Topology::Change,
+            ..keep
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        ryukei::codec::encode_body(&a),
+        ryukei::codec::encode_body(&c)
+    );
+    assert_eq!(ja, jc);
+}
+
+/// A refusal no change of topology answers stays the fixed engine's.
+#[test]
+fn a_broken_tangency_is_still_refused_under_change() {
+    // `tests/tweaks.rs`' fillet case: a block with its top's +x edge
+    // filleted, its top raised alone.
+    let b = block();
+    let mut f = [face(K, FaceRole::PlusZ), face(K, FaceRole::PlusX)];
+    f.sort();
+    let edge = Name::derive(K, Role::Edge, &f);
+    let b = ryukei::blend::blend(
+        OpKey(0x13b6),
+        &b,
+        &[ryukei::blend::EdgeBlend {
+            edge,
+            kind: ryukei::blend::BlendKind::Fillet { radius: 0.1 },
+        }],
+    )
+    .unwrap()
+    .0;
+    let keep = MoveSpec {
+        faces: vec![face(K, FaceRole::PlusZ)],
+        motion: Rigid::translation(Vector3::new(0.0, 0.0, 0.05)),
+        tangent: false,
+        topology: Topology::Keep,
+    };
+    let kept = refusal(move_faces(T, &b, &keep));
+    assert!(
+        matches!(kept, TweakError::TangencyBroken { .. }),
+        "{kept:?}"
+    );
+    let change = MoveSpec {
+        topology: Topology::Change,
+        ..keep
+    };
+    assert_eq!(refusal(move_faces(T, &b, &change)), kept);
+}
+
+#[test]
+fn one_thread_and_eight_alike() {
+    let b = grooved();
+    let ends: Vec<Name> = b
+        .faces()
+        .filter(|&f| match b.surface(b.face(f).unwrap().surface).unwrap() {
+            Surface::Plane(p) => {
+                let y = p.frame().origin().y;
+                p.frame().z().get().y.abs() > 0.9
+                    && ((y - 0.2).abs() < 1e-12 || (y - 0.8).abs() < 1e-12)
+            }
+            _ => false,
+        })
+        .map(|f| b.face(f).unwrap().name)
+        .collect();
+    let spec = OffsetFacesSpec {
+        faces: ends.iter().map(|&n| (n, -0.3)).collect(),
+        tangent: false,
+        topology: Topology::Change,
+    };
+    let run = |threads| {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let (o, j) = offset_faces(T, &b, &spec).unwrap();
+            (ryukei::codec::encode_body(&o), j)
+        })
+    };
+    assert_eq!(run(1), run(8));
 }
