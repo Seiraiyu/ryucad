@@ -355,6 +355,41 @@ fn references_interfere_on_their_meshes() {
 }
 
 #[test]
+fn check_and_clearance_read_reference_pairs() {
+    let (_dir, mut s) = project();
+    must(
+        &mut s,
+        "part.create",
+        json!({"part": "rig", "kind": "assembly"}),
+    );
+    for id in ["a", "c"] {
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "rig", "type": "instance", "id": id, "of": "p", "fixed": true}),
+        );
+    }
+    let v = must(&mut s, "check", json!({"part": "rig"}));
+    let f = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "instances_interfere" && f["approximate"] == true)
+        .cloned()
+        .unwrap_or_else(|| panic!("{v}"));
+    assert!(f["volume_m3"].is_null(), "{f}");
+    assert!(
+        f["message"]
+            .as_str()
+            .unwrap()
+            .contains("judged on their meshes"),
+        "{f}"
+    );
+    let v = must(&mut s, "clearance", json!({"part": "rig"}));
+    assert_eq!(v["unchecked"], json!([]), "{v}");
+}
+
+#[test]
 fn a_reference_measures_as_its_faces_and_its_area() {
     let (_dir, mut s) = project(); // r: OCCT's box as a reference; b: a 10 mm box
     let v = must(&mut s, "measure", json!({"entities": ["p/r"]}));

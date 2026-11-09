@@ -406,13 +406,25 @@ pub fn run(
             let mut cache = crate::interference::Cache::default();
             let found = crate::interference::find_for(id, &model, &[], &mut cache, &job)?;
             for i in found["interferences"].as_array().into_iter().flatten() {
-                findings.push(json!({
+                let (a, b) = (
+                    i["a"].as_str().unwrap_or_default(),
+                    i["b"].as_str().unwrap_or_default(),
+                );
+                let message = match i["volume_m3"].as_f64() {
+                    Some(v) => format!("{a} and {b} share about {v:.3e} m³"),
+                    None => format!(
+                        "{a} and {b} share a volume, judged on their meshes (a reference import)"
+                    ),
+                };
+                let mut f = json!({
                     "code": "instances_interfere", "severity": severity("instances_interfere"),
                     "part": id, "a": i["a"], "b": i["b"], "volume_m3": i["volume_m3"],
-                    "box": i["box"],
-                    "message": format!("{} and {} share about {:.3e} m³", i["a"].as_str().unwrap_or_default(),
-                        i["b"].as_str().unwrap_or_default(), i["volume_m3"].as_f64().unwrap_or_default()),
-                }));
+                    "box": i["box"], "message": message,
+                });
+                if i["approximate"] == true {
+                    f["approximate"] = json!(true);
+                }
+                findings.push(f);
             }
             let unchecked = found["unchecked"].as_array().cloned().unwrap_or_default();
             if !unchecked.is_empty() {
