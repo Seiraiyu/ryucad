@@ -1122,6 +1122,7 @@ fn every_protocol_method_has_a_command() {
         ("measure", &["measure"]),
         ("mass", &["mass"]),
         ("sheet.get", &["sheet"]),
+        ("flat.get", &["flat"]),
         ("clearance", &["clearance"]),
         ("deps.add", &["deps", "add"]),
         ("deps.fetch", &["deps", "fetch"]),
@@ -3754,6 +3755,200 @@ fn sheet_metal_from_the_cli() {
 }
 
 #[test]
+fn flat_patterns_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "l", "--plane", "xy",
+    ]);
+    let mut ops = Vec::new();
+    for (i, at) in [[40, 0], [0, 0], [0, 30]].into_iter().enumerate() {
+        ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    for i in 1..=2 {
+        ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                        "start": format!("p{i}"), "end": format!("p{}", i + 1)}));
+    }
+    p.ok(&[
+        "sketch",
+        "edit",
+        "p",
+        "l",
+        &serde_json::to_string(&ops).unwrap(),
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "base_flange",
+        "--id",
+        "bl",
+        "--sketch",
+        "l",
+        "--thickness",
+        "1.5mm",
+        "--radius",
+        "1mm",
+        "--k-factor",
+        "0.44",
+        "--depth",
+        "20mm",
+    ]);
+    let f = p.ok(&["flat", "p"]);
+    assert_eq!(
+        (f["solid"].as_str(), f["from"].as_str()),
+        (Some("bl"), Some("whole"))
+    );
+    let bend = f["bend_lines"][0]["bend"].as_str().unwrap().to_owned();
+    let half = p.ok(&["flat", "p", "bl", "--bend", &format!("{bend}=k_factor:0.5")]);
+    assert!(
+        half["bend_lines"][0]["note"]
+            .as_str()
+            .unwrap()
+            .ends_with("K0.5"),
+        "{half}"
+    );
+    p.ok(&["export", "p", "--out", "l.dxf", "--solid", "bl"]);
+    let (a, b) = (
+        fs::read(p.direct.join("l.dxf")).unwrap(),
+        fs::read(p.daemon.join("l.dxf")).unwrap(),
+    );
+    assert_eq!(a, b, "the same DXF both ways");
+    assert!(String::from_utf8(a).unwrap().contains("BEND_UP"));
+    p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "l-in.dxf",
+        "--unit",
+        "in",
+        "--no-notes",
+    ]);
+    p.ok(&[
+        "render", "p", "--flat", "--out", "flat.png", "--size", "160x120",
+    ]);
+    assert!(p.direct.join("flat.png").exists() && p.daemon.join("flat.png").exists());
+    p.fails(&["flat", "p", "--bend", "nonsense"], "usage", 2);
+}
+
+#[test]
+fn unfold_and_refold_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--plane", "xy",
+    ]);
+    let mut ops = Vec::new();
+    for (i, at) in [[0, 0], [60, 0], [60, 40], [0, 40]].into_iter().enumerate() {
+        ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    for i in 1..=4 {
+        ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                        "start": format!("p{i}"), "end": format!("p{}", i % 4 + 1)}));
+    }
+    p.ok(&[
+        "sketch",
+        "edit",
+        "p",
+        "s",
+        &serde_json::to_string(&ops).unwrap(),
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "base_flange",
+        "--id",
+        "plate",
+        "--sketch",
+        "s",
+        "--thickness",
+        "1.5mm",
+        "--radius",
+        "1mm",
+        "--k-factor",
+        "0.44",
+    ]);
+    let body = p.ok(&["inspect", "p", "plate"])["bodies"][0].clone();
+    let at = |q: [f64; 3]| -> String {
+        body["vertices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| (0..3).all(|k| (v["point"][k].as_f64().unwrap() - q[k] * 1e-3).abs() < 1e-9))
+            .map(|v| v["name"].as_str().unwrap().to_owned())
+            .unwrap()
+    };
+    let (a, b) = (at([60.0, 0.0, 1.5]), at([60.0, 40.0, 1.5]));
+    let edge = body["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| (e["start"] == a && e["end"] == b) || (e["start"] == b && e["end"] == a))
+        .map(|e| format!("p/plate/{}", e["name"].as_str().unwrap()))
+        .unwrap();
+    p.ok(&[
+        "feature", "add", "p", "flange", "--id", "f", "--edge", &edge, "--angle", "90deg",
+        "--length", "20mm",
+    ]);
+    let sheet = p.ok(&["sheet", "p"]);
+    let bend = sheet["bends"][0]["bend"].as_str().unwrap().to_owned();
+    // Unfolded with its own deduction and one bend's allowance.
+    let over = format!("{bend}=allowance:2.1mm");
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "unfold",
+        "--id",
+        "u",
+        "--deduction",
+        "2.4mm",
+        "--bend",
+        &over,
+    ]);
+    assert_eq!(r["feature"]["target"], "plate", "{r}");
+    assert_eq!(r["feature"]["allowance"]["deduction"]["m"], 0.0024, "{r}");
+    assert_eq!(
+        r["feature"]["bends"][0]["allowance"]["value"], "2.1 mm",
+        "{r}"
+    );
+    let v = p.ok(&["sheet", "p"]);
+    assert_eq!(v["state"], "flat", "{v}");
+    // Its overrides dropped, then refolded by name.
+    p.ok(&["feature", "edit", "p", "u", "--no-bends"]);
+    let file = std::fs::read_to_string(p.direct.join("parts/p/features/u.json")).unwrap();
+    assert!(!file.contains("bends"), "{file}");
+    let r = p.ok(&[
+        "feature", "add", "p", "refold", "--id", "rf", "--unfold", "u", "--only", &bend,
+    ]);
+    assert_eq!(r["feature"]["only"], json!([bend]), "{r}");
+    p.ok(&["rebuild", "p"]);
+    assert_eq!(p.ok(&["sheet", "p"])["state"], "folded");
+    // A refold of what isn't an unfold is refused when written.
+    let (code, v) = p.both_from(
+        "",
+        &[
+            "feature", "add", "p", "refold", "--id", "rf2", "--unfold", "f",
+        ],
+    );
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("invalid_param")),
+        "{v}"
+    );
+    // Undone through the daemon, the part is flat again.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["sheet", "p"]);
+    assert_eq!(v["result"]["state"], "flat", "{v}");
+}
+
+#[test]
 fn mirrors_and_splits_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
@@ -5241,7 +5436,16 @@ fn reference_imports_from_the_cli() {
     ]);
     let w = p.ok(&["mass", &solid]);
     assert_eq!(w["reference"], true, "{w}");
-    p.ok(&["export", "r", "--out", "r.step"]);
+    // A fixed time stamp: the in-process and daemon runs must write the same
+    // header whatever second each runs in (#607).
+    p.ok(&[
+        "export",
+        "r",
+        "--out",
+        "r.step",
+        "--time-stamp",
+        "2026-11-07T00:00:00",
+    ]);
     p.ok(&["export", "r", "--out", "r.stl"]);
     let (code, v) = p.both_from(
         "",

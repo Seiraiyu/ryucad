@@ -54,16 +54,17 @@ fn ten_thousand_occurrences_flatten_and_check_within_the_bars() {
     // one to read what it wrote.
     let run = dir.path().join("run");
     let ryueda = |args: &[&str]| {
-        let out = Command::cargo_bin("ryueda")
-            .unwrap()
-            .current_dir(&board)
+        let mut cmd = Command::cargo_bin("ryueda").unwrap();
+        cmd.current_dir(&board)
             .env("RYUEDA_RUNTIME_DIR", &run)
             .env("RYUEDA_CONFIG_DIR", dir.path().join("config"))
             .env("RYUEDA_IDLE_TIMEOUT", "60")
-            .env_remove("RYUEDA_NO_DAEMON")
-            .args(args)
-            .output()
-            .unwrap();
+            .env_remove("RYUEDA_NO_DAEMON");
+        // No person's distributor keys or API, in the daemon it starts too.
+        for v in ryueda_parts::distributor::env_vars() {
+            cmd.env_remove(v);
+        }
+        let out = cmd.args(args).output().unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(v["ok"], true, "{args:?}: {v}");
     };

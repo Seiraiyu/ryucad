@@ -14,7 +14,7 @@ use super::mate::{InstancePattern, Mate};
 use super::path::PathFeature;
 use super::pattern::Pattern;
 use super::reference::Reference;
-use super::sheet_metal::{BaseFlange, Flange};
+use super::sheet_metal::{BaseFlange, Flange, Refold, Unfold};
 use super::sketch::Sketch;
 use super::solid::{Boolean, Combine};
 use super::sweep::{Extrude, Loft, Revolve, Sweep};
@@ -71,12 +71,18 @@ pub const MANIFEST_FORMAT: u64 = 3;
 /// entity, a plane where an axis went), 8 sweeps along a path (ryucad 14),
 /// 9 shells and offsets, 10 mirrors and splits, 11 base flanges and
 /// flanges (ryucad 16), 12 surface sweeps and planar faces (ryucad 18),
-/// 13 reference imports (ryucad 21). A feature is written at the lowest
+/// 13 reference imports (ryucad 21), 14 unfolds and refolds (ryucad
+/// 16.B). A feature is written at the lowest
 /// format that holds it, so one with only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
     // The largest of every stage's (a later stage merging takes the max).
-    let (a, b) = (super::sweep::SURFACE_FORMAT, super::import::MODE_FORMAT);
-    if a > b { a } else { b }
+    let (a, b, c) = (
+        super::sweep::SURFACE_FORMAT,
+        super::import::MODE_FORMAT,
+        super::sheet_metal::UNFOLD_FORMAT,
+    );
+    let ab = if a > b { a } else { b };
+    if ab > c { ab } else { c }
 };
 
 pub const PROJECT_KIND: &str = "ryucad.project";
@@ -196,6 +202,10 @@ pub enum Feature {
     BaseFlange(Box<BaseFlange>),
     /// Bends and flanges on straight edges of a sheet metal solid.
     Flange(Box<Flange>),
+    /// A sheet metal solid laid flat.
+    Unfold(Box<Unfold>),
+    /// A sheet metal solid folded back by its unfold's flat map.
+    Refold(Box<Refold>),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -537,7 +547,7 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
                 out.extend(super::path::expression_strings(k, x));
             }
             ("groups", g) => out.extend(super::blend::expression_strings(g)),
-            (k @ ("allowance" | "relief" | "ends" | "setback" | "length"), x) => {
+            (k @ ("allowance" | "relief" | "ends" | "setback" | "length" | "bends"), x) => {
                 out.extend(super::sheet_metal::expression_strings(k, x));
             }
             ("thickness", Value::String(s)) => out.push(s),
@@ -671,6 +681,12 @@ pub fn feature_format(v: &Value) -> u64 {
         || v.get("type").and_then(Value::as_str) == Some("planar")
     {
         return super::sweep::SURFACE_FORMAT;
+    }
+    if matches!(
+        v.get("type").and_then(Value::as_str),
+        Some("unfold" | "refold")
+    ) {
+        return super::sheet_metal::UNFOLD_FORMAT;
     }
     if matches!(
         v.get("type").and_then(Value::as_str),
@@ -838,7 +854,7 @@ pub fn feature_acts(v: &Value) -> Acts {
             out.acts_on = ids(v.get("target"));
         }
         Some("base_flange") => out.founds = true,
-        Some("flange") => out.acts_on = ids(v.get("target")),
+        Some("flange" | "unfold" | "refold") => out.acts_on = ids(v.get("target")),
         Some("shell" | "offset") => out.acts_on = ids(v.get("target")),
         _ => {}
     }
@@ -875,7 +891,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold"),
     )
     .with("type", s)
 }
@@ -907,6 +923,8 @@ impl Feature {
             Feature::Split(_) => "split",
             Feature::BaseFlange(_) => "base_flange",
             Feature::Flange(_) => "flange",
+            Feature::Unfold(_) => "unfold",
+            Feature::Refold(_) => "refold",
             Feature::Planar(_) => "planar",
         }
     }
@@ -925,6 +943,9 @@ impl Feature {
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
+        if matches!(self, Feature::Unfold(_) | Feature::Refold(_)) {
+            return super::sheet_metal::UNFOLD_FORMAT;
+        }
         if self.surface() {
             return super::sweep::SURFACE_FORMAT;
         }
@@ -969,6 +990,7 @@ impl Feature {
             Feature::Mirror(_) | Feature::Split(_) => super::body::MIRROR_FORMAT,
             Feature::Planar(_) => super::sweep::SURFACE_FORMAT,
             Feature::BaseFlange(_) | Feature::Flange(_) => super::sheet_metal::FORMAT,
+            Feature::Unfold(_) | Feature::Refold(_) => super::sheet_metal::UNFOLD_FORMAT,
         }
     }
 
@@ -1007,6 +1029,8 @@ impl Feature {
             Feature::Planar(p) => p.fields(),
             Feature::BaseFlange(b) => b.fields(),
             Feature::Flange(f) => f.fields(),
+            Feature::Unfold(u) => u.fields(),
+            Feature::Refold(r) => r.fields(),
         }
     }
 
@@ -1036,6 +1060,8 @@ impl Feature {
                 Feature::BaseFlange(Box::new(BaseFlange::from_fields(&mut o, default, env)?))
             }
             "flange" => Feature::Flange(Box::new(Flange::from_fields(&mut o, default, env)?)),
+            "unfold" => Feature::Unfold(Box::new(Unfold::from_fields(&mut o, default, env)?)),
+            "refold" => Feature::Refold(Box::new(Refold::from_fields(&mut o)?)),
             "hole" => Feature::Hole(Hole::from_fields(&mut o, default, env)?),
             "pattern" => Feature::Pattern(Pattern::from_fields(&mut o, default, env)?),
             "instance" => Feature::Instance(Instance::from_fields(&mut o)?),
@@ -1096,7 +1122,9 @@ impl Feature {
             | Feature::Shell(_)
             | Feature::Offset(_)
             | Feature::Split(_)
-            | Feature::Flange(_) => None,
+            | Feature::Flange(_)
+            | Feature::Unfold(_)
+            | Feature::Refold(_) => None,
         }
     }
 
@@ -1123,6 +1151,8 @@ impl Feature {
             Feature::Offset(o) => vec![&o.target],
             Feature::Split(s) => vec![&s.target],
             Feature::Flange(f) => vec![&f.target],
+            Feature::Unfold(u) => vec![&u.target],
+            Feature::Refold(r) => vec![&r.target],
             f => f
                 .combine()
                 .map_or(Vec::new(), |c| c.targets.iter().collect()),
@@ -1246,6 +1276,8 @@ impl Feature {
             Feature::Shell(s) => s.references(),
             Feature::Offset(o) => o.references(),
             Feature::Flange(f) => f.references(),
+            Feature::Unfold(u) => u.references(),
+            Feature::Refold(r) => r.references(),
             _ => self
                 .geometry()
                 .into_iter()
@@ -1344,6 +1376,22 @@ impl Feature {
     pub fn flange(&self) -> Option<&Flange> {
         match self {
             Feature::Flange(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// The unfold, if it is one.
+    pub fn unfold(&self) -> Option<&Unfold> {
+        match self {
+            Feature::Unfold(u) => Some(u),
+            _ => None,
+        }
+    }
+
+    /// The refold, if it is one.
+    pub fn refold(&self) -> Option<&Refold> {
+        match self {
+            Feature::Refold(r) => Some(r),
             _ => None,
         }
     }
@@ -1665,6 +1713,49 @@ mod tests {
             feature_names(&b).into_iter().collect::<Vec<_>>(),
             ["r", "t"]
         );
+    }
+
+    #[test]
+    fn unfolds_and_refolds_are_format_14_and_act_on_their_target() {
+        let id = |s: &str| Id::parse(s, "feature").unwrap();
+        let n = "0123456789abcdef0123456789abcdef";
+        let v = json!({"format": 14, "kind": FEATURE_KIND, "type": "unfold", "target": "tray",
+                       "fixed": {"feature": "plate", "name": n},
+                       "allowance": {"k_factor": "0.4"},
+                       "bends": [{"bend": {"feature": "plate", "name": n}, "deduction": "2 mm"}]});
+        let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!((f.type_name(), f.format()), ("unfold", 14));
+        assert_eq!(feature_format(&v), 14);
+        assert_eq!(f.to_json(), v);
+        assert!(!f.founds() && f.combine().is_none());
+        assert_eq!(f.targets(), [&id("tray")]);
+        assert_eq!(f.geometry_reads(), [&id("plate")]);
+        assert_eq!(
+            feature_acts(&v),
+            Acts {
+                founds: false,
+                acts_on: vec![id("tray")],
+                consumes: vec![]
+            }
+        );
+        let fields: Vec<String> = expression_fields(&v).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(fields, ["/allowance/k_factor", "/bends/0/deduction"]);
+        let v = json!({"format": 14, "kind": FEATURE_KIND, "type": "refold", "target": "tray",
+                       "unfold": "u1"});
+        let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!((f.type_name(), f.format()), ("refold", 14));
+        assert_eq!(f.to_json(), v);
+        assert_eq!(f.targets(), [&id("tray")]);
+        assert_eq!(f.refold().map(|r| &r.unfold), Some(&id("u1")));
+        assert_eq!(
+            feature_acts(&v),
+            Acts {
+                founds: false,
+                acts_on: vec![id("tray")],
+                consumes: vec![]
+            }
+        );
+        const { assert!(FEATURE_FORMAT >= super::super::sheet_metal::UNFOLD_FORMAT) };
     }
 
     #[test]

@@ -42,6 +42,10 @@ fn ryueda(run: &Path) -> Command {
         .env("RYUEDA_ID_SEED", "cli")
         .env_remove("RYUEDA_NO_DAEMON")
         .env_remove("RYUEDA_PARTICIPANT");
+    // No person's distributor keys or API: a scenario sets the fake's.
+    for v in ryueda_parts::distributor::env_vars() {
+        cmd.env_remove(v);
+    }
     cmd
 }
 
@@ -2625,7 +2629,7 @@ fn parts_from_the_cli() {
         keys(&p.ok(&["parts", "search", "--like", "top/r1"])),
         keys(&like)
     );
-    p.fails(&["parts", "search", "--in", "digikey"], "invalid_param", 1);
+    p.fails(&["parts", "search", "--in", "acme"], "invalid_param", 1);
     p.fails(&["parts", "search", "colour=red"], "invalid_param", 1);
     p.fails(
         &["parts", "search", "capacitance=lots"],
@@ -2673,7 +2677,7 @@ fn parts_configure_from_the_cli() {
         1,
     );
     p.fails(
-        &["parts", "configure", "--source", "digikey"],
+        &["parts", "configure", "--source", "acme"],
         "invalid_param",
         1,
     );
@@ -2886,4 +2890,154 @@ fn a_sync_is_cancelled_by_its_token_and_keeps_the_old_catalogue() {
     // In process there is nothing to cancel.
     let (_, v) = p.run_in(&p.direct, "board", &["cancel", "sync1"]);
     assert_eq!(v["error"]["code"], "no_live_session");
+}
+
+/// `parts login` keeps keys owner-only beside the preferences, from
+/// stdin, and `parts logout` forgets them; neither says what they are.
+#[test]
+fn parts_login_keeps_keys_out_of_sight() {
+    let p = Pair::projects();
+    let mut cmd = p.command_in(&p.direct, "board", &["parts", "login", "digikey"]);
+    cmd.write_stdin("my-id\nmy-very-secret\n");
+    let (code, v) = parse(cmd.output().unwrap(), &p.direct);
+    assert_eq!(code, 0, "{v}");
+    assert!(!v.to_string().contains("my-very-secret"));
+    let file = p.run.with_file_name("config").join("parts-digikey.keys");
+    assert!(file.is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let v = p.ok(&["parts", "sources"]);
+    let dk = v["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "digikey")
+        .unwrap()
+        .clone();
+    assert_eq!(dk["keys"], "file");
+    let mut cmd = p.command_in(&p.direct, "board", &["parts", "login", "digikey"]);
+    cmd.write_stdin("only-one\n");
+    let (code, v) = parse(cmd.output().unwrap(), &p.direct);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("invalid_param"))
+    );
+    let (code, v) = p.run_in(&p.direct, "board", &["parts", "logout", "digikey"]);
+    assert_eq!((code, &v["result"]["removed"]), (0, &json!(true)));
+    assert!(!file.exists());
+}
+
+#[path = "support/fake_digikey.rs"]
+mod fake_digikey;
+
+/// DigiKey through a fake of its API (our own answers), with keys from the
+/// environment: not configured, then searched, shown, kept, written into
+/// the library as identifiers, and refused at its rate limit. In process
+/// and through the daemon alike; nothing here is a key anyone has.
+#[test]
+fn digikey_from_the_cli() {
+    use ryueda_parts::digikey::testing::{CLIENT_ID, CLIENT_SECRET};
+    let site = fake_digikey::start();
+    let bare = Pair::with_resistor_in(Pair::with_env(&[
+        ("RYUEDA_DIGIKEY_URL", &site.base),
+        ("RYUEDA_NOW", "1793964810"),
+    ]));
+    let v = bare.ok(&["parts", "sources"]);
+    let dk = v["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "digikey")
+        .unwrap()
+        .clone();
+    assert_eq!(dk["state"], "not_configured");
+    assert!(
+        dk["how"]
+            .as_str()
+            .unwrap()
+            .contains("ryueda parts login digikey")
+    );
+    let v = bare.ok(&["parts", "search", "capacitor", "--in", "digikey"]);
+    assert_eq!(v["warnings"][0]["details"]["reason"], "not_configured");
+
+    let p = Pair::with_resistor_in(Pair::with_env(&[
+        ("RYUEDA_DIGIKEY_URL", &site.base),
+        ("RYUEDA_NOW", "1793964810"),
+        ("RYUEDA_DIGIKEY_CLIENT_ID", CLIENT_ID),
+        ("RYUEDA_DIGIKEY_CLIENT_SECRET", CLIENT_SECRET),
+    ]));
+    let v = p.ok(&["parts", "sources"]);
+    let dk = v["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "digikey")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (dk["state"].as_str(), dk["keys"].as_str()),
+        (Some("configured"), Some("environment"))
+    );
+    assert!(!v.to_string().contains(CLIENT_SECRET));
+    let v = p.ok(&[
+        "parts",
+        "search",
+        "capacitor",
+        "capacitance=100nF",
+        "--in",
+        "digikey",
+    ]);
+    assert_eq!(v["results"][0]["key"], "1276-1001-1-ND");
+    assert_eq!(v["results"][0]["attribution"], "Data from DigiKey");
+    let v = p.ok(&["parts", "show", "digikey:296-1234-1-ND"]);
+    assert_eq!(v["records"][0]["lifecycle"], "not_recommended");
+    assert_eq!(v["records"][0]["fetched_at"], 1_793_964_810u64);
+    p.fails(
+        &["parts", "show", "digikey:nothing-ND"],
+        "parts_not_found",
+        1,
+    );
+    // Kept: offline still shows it.
+    let v = p.ok(&["parts", "show", "digikey:296-1234-1-ND", "--offline"]);
+    assert_eq!(v["records"][0]["mpn"], "TPS7A2033PDBVR");
+    // A component from the record: identifiers only.
+    p.ok(&["parts", "show", "digikey:1276-1001-1-ND"]);
+    let v = p.ok(&[
+        "libcomp",
+        "create",
+        "100n dk",
+        "--from",
+        "digikey:1276-1001-1-ND",
+        "--symbol",
+        "r",
+        "--prefix",
+        "C",
+        "--footprint",
+        "lib/passives/footprint/r_0402",
+        "--param",
+        "capacitance=100 nF",
+    ]);
+    assert_eq!(v["libcomp"]["mpn"], "CL05B104KO5NNNC");
+    assert_eq!(
+        v["libcomp"]["offers"],
+        json!([{"supplier": "DigiKey", "sku": "1276-1001-1-ND"}])
+    );
+    assert_eq!(v["libcomp"]["parameters"], json!({"capacitance": "100 nF"}));
+    assert_eq!(v["from"]["attribution"], "Data from DigiKey");
+    // DigiKey says to wait: refused, saying when.
+    site.limited
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let e = p.fails(
+        &["parts", "show", "digikey:296-1234-1-ND", "--refresh"],
+        "parts_not_found",
+        1,
+    );
+    assert_eq!(e["details"]["warnings"][0]["code"], "parts_rate_limited");
+    assert_eq!(e["details"]["warnings"][0]["details"]["retry_after_s"], 30);
 }

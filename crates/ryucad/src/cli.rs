@@ -150,7 +150,8 @@ enum Command {
         /// STEP's schema: ap242 (the default) or ap214.
         #[arg(long)]
         schema: Option<String>,
-        /// The length unit: mm (the default), or m; a mesh format or USD also cm.
+        /// The length unit: mm (the default), or m; a mesh format or USD also cm; DXF mm
+        /// or in.
         #[arg(long)]
         unit: Option<String>,
         /// A mesh format's chord, the most a triangle may stray from the faces: a
@@ -181,6 +182,19 @@ enum Command {
         /// that didn't heal), listing what was left out, rather than refuse.
         #[arg(long)]
         skip_failing: bool,
+        /// DXF: the sheet metal solid (the part's one unless named).
+        #[arg(long)]
+        solid: Option<String>,
+        /// DXF: leave out the bend notes.
+        #[arg(long)]
+        no_notes: bool,
+        /// DXF of a folded solid: the side face held still.
+        #[arg(long, value_name = "FACE")]
+        fixed: Option<String>,
+        /// DXF of a folded solid: a bend's allowance, REF=k_factor:N,
+        /// REF=deduction:LENGTH or REF=allowance:LENGTH.
+        #[arg(long = "bend", value_name = "REF=FORM:VALUE", value_parser = bend_override)]
+        bends: Vec<Value>,
         /// The header's time stamp; by default the commit's time when exporting a
         /// commit, else now.
         #[arg(long, value_name = "T")]
@@ -300,6 +314,21 @@ enum Command {
     Sheet {
         part: String,
         solid: Option<String>,
+        #[command(flatten)]
+        rev: RevArg,
+    },
+    /// A solid's flat pattern (the part's one sheet metal solid unless
+    /// named): its outline, holes and bend lines with their notes, in
+    /// millimetres. A folded solid is unfolded in memory, about --fixed
+    /// (a side face) with each --bend REF=k_factor:N|deduction:LEN|allowance:LEN
+    /// overriding the solid's allowance.
+    Flat {
+        part: String,
+        solid: Option<String>,
+        #[arg(long, value_name = "FACE")]
+        fixed: Option<String>,
+        #[arg(long = "bend", value_name = "REF=FORM:VALUE", value_parser = bend_override)]
+        bends: Vec<Value>,
         #[command(flatten)]
         rev: RevArg,
     },
@@ -697,6 +726,10 @@ enum Command {
         /// Draw no explode, whatever a window shows.
         #[arg(long)]
         no_explode: bool,
+        /// Draw a sheet metal solid's flat pattern (the part's one unless
+        /// named) instead of the model.
+        #[arg(long, value_name = "SOLID", num_args = 0..=1, default_missing_value = "")]
+        flat: Option<String>,
     },
     /// What the merge (or cherry-pick, revert or rebase step) Git is in the
     /// middle of leaves to settle.
@@ -1109,7 +1142,10 @@ enum FeatureCmd {
     /// --depth) founding a sheet metal solid; an edge flange (--edge,
     /// --side, --angle, --length, --measured, --position, --radius,
     /// --relief, --setback, --end-setback, --end-relief) on its straight
-    /// edges; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
+    /// edges; an unfold (--target, --fixed-face, --only repeated,
+    /// --k-factor, --deduction or --bend-allowance, --bend FACE=FORM:VALUE
+    /// repeated) laying a sheet metal solid flat; a refold (--target,
+    /// --unfold, --only) folding it back; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
     /// countersink, --bottom) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
@@ -2325,10 +2361,10 @@ struct FieldArgs {
     /// named by the split, the default) or behind (a trim).
     #[arg(long, value_name = "SIDES")]
     keep: Option<String>,
-    /// A base flange's K-factor, 0 to 1: its solid's bend allowance.
+    /// A base flange's or unfold's K-factor, 0 to 1: its bend allowance.
     #[arg(long, value_name = "NUMBER", conflicts_with = "deduction")]
     k_factor: Option<String>,
-    /// A base flange's bend deduction instead: how much shorter the flat
+    /// A base flange's or unfold's bend deduction instead: how much shorter the flat
     /// is than its flanges to their outer mould line.
     #[arg(long, value_name = "LENGTH")]
     deduction: Option<String>,
@@ -2364,6 +2400,31 @@ struct FieldArgs {
     /// Give no end vertex a setback or relief of its own.
     #[arg(long, conflicts_with_all = ["end_setbacks", "end_reliefs"])]
     no_ends: bool,
+    /// The side face an unfold holds still (`<part>/<solid>/<name>`); ""
+    /// for the kernel's default flange.
+    #[arg(long, value_name = "FACE")]
+    fixed_face: Option<String>,
+    /// A bend an unfold or refold acts on, by one of its faces, repeated;
+    /// every bend when left out.
+    #[arg(long, value_name = "FACE")]
+    only: Vec<String>,
+    /// Act on every bend again.
+    #[arg(long, conflicts_with = "only")]
+    no_only: bool,
+    /// An unfold's developed length for every bend it unfolds, instead of
+    /// a K-factor or a deduction.
+    #[arg(long, value_name = "LENGTH", conflicts_with_all = ["k_factor", "deduction"])]
+    bend_allowance: Option<String>,
+    /// One bend's allowance in an unfold: FACE=k_factor:0.4,
+    /// FACE=deduction:2mm or FACE=allowance:2.1mm, repeated.
+    #[arg(long = "bend", value_name = "FACE=FORM:VALUE", value_parser = bend_override)]
+    bends: Vec<Value>,
+    /// Give no bend of an unfold its own allowance.
+    #[arg(long, conflicts_with = "bends")]
+    no_bends: bool,
+    /// The unfold a refold folds back by.
+    #[arg(long, value_name = "UNFOLD")]
+    unfold: Option<String>,
 }
 
 /// Which `--segment`s each `--propagate` follows, in order, read from the
@@ -2661,7 +2722,8 @@ impl FieldArgs {
                 .k_factor
                 .clone()
                 .map(|k| json!({"k_factor": k}))
-                .or_else(|| self.deduction.clone().map(|d| json!({"deduction": d}))),
+                .or_else(|| self.deduction.clone().map(|d| json!({"deduction": d})))
+                .or_else(|| self.bend_allowance.clone().map(|a| json!({"allowance": a}))),
             relief: self.relief.as_deref().map(|k| match k {
                 "" => json!(""),
                 k => relief_json(
@@ -2687,6 +2749,18 @@ impl FieldArgs {
             } else {
                 ends_json(&self.end_setbacks, &self.end_reliefs)
             },
+            fixed_face: self.fixed_face.clone(),
+            only: if self.no_only {
+                Some(Vec::new())
+            } else {
+                (!self.only.is_empty()).then(|| self.only.clone())
+            },
+            bends: if self.no_bends {
+                Some(json!([]))
+            } else {
+                (!self.bends.is_empty()).then(|| Value::Array(self.bends.clone()))
+            },
+            unfold: self.unfold.clone(),
         }
     }
 }
@@ -2857,6 +2931,21 @@ fn face_groups(pairs: &[(String, String)], key: &str) -> Value {
             })
             .collect(),
     )
+}
+
+/// One `--bend FACE=FORM:VALUE` as an unfold's override,
+/// `{"bend": FACE, FORM: VALUE}`, FORM `k_factor`, `deduction` or
+/// `allowance`. `flat` and `export` read theirs through it too.
+fn bend_override(s: &str) -> core::result::Result<Value, String> {
+    let (face, v) = param(s)?;
+    match v.split_once(':') {
+        Some((form @ ("k_factor" | "deduction" | "allowance"), q)) => {
+            Ok(json!({"bend": face, form: q.trim()}))
+        }
+        _ => Err(format!(
+            "{face}={v}: give FACE=FORM:VALUE, FORM k_factor, deduction or allowance"
+        )),
+    }
 }
 
 fn param(s: &str) -> core::result::Result<(String, String), String> {
@@ -3600,6 +3689,10 @@ fn request(cmd: &Command) -> Option<Request> {
             no_mesh,
             pipe_tolerance,
             skip_failing,
+            solid,
+            no_notes,
+            fixed,
+            bends,
             time_stamp,
             rev,
         } => Request::Export {
@@ -3625,6 +3718,10 @@ fn request(cmd: &Command) -> Option<Request> {
             mesh: no_mesh.then_some(false),
             pipe_tolerance: pipe_tolerance.clone(),
             skip_failing: *skip_failing,
+            solid: solid.clone(),
+            notes: no_notes.then_some(false),
+            fixed: fixed.clone(),
+            bends: bends.clone(),
         },
         Command::Rebuild { part, rev } => Request::Rebuild {
             part: part.clone(),
@@ -3761,6 +3858,19 @@ fn request(cmd: &Command) -> Option<Request> {
             solid: solid.clone(),
             rev: rev.rev.clone(),
         },
+        Command::Flat {
+            part,
+            solid,
+            fixed,
+            bends,
+            rev,
+        } => Request::FlatGet {
+            part: part.clone(),
+            solid: solid.clone(),
+            rev: rev.rev.clone(),
+            fixed: fixed.clone(),
+            bends: bends.clone(),
+        },
         Command::Mass { of, tolerance, rev } => Request::Mass {
             of: of.clone(),
             tolerance: *tolerance,
@@ -3883,6 +3993,7 @@ fn request(cmd: &Command) -> Option<Request> {
             explode,
             fraction,
             no_explode,
+            flat,
         } => Request::Render {
             part: part.clone(),
             camera: camera_arg(eye, target, up, fov, ortho),
@@ -3909,6 +4020,7 @@ fn request(cmd: &Command) -> Option<Request> {
             },
             fraction: *fraction,
             annotations: *annotations,
+            flat: flat.clone(),
         },
         Command::Highlight {
             entities,

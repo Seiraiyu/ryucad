@@ -1,6 +1,7 @@
 //! Silhouette branches trimmed to their faces (design 326).
 
 use super::closed::Raw;
+use crate::geom::Curve2;
 use crate::geom::intersect2::{Meet2, crossings};
 use crate::intersect::{Failure, Place, point_in_face, shifted, shifts};
 use crate::tol::LINEAR_RESOLUTION;
@@ -85,7 +86,14 @@ pub(super) fn trim(body: &Body, face: FaceId, raw: &Raw, m: &Meter) -> Result<Tr
         if pa.distance(pb) <= short && pa.distance(pm) <= short {
             continue;
         }
-        match point_in_face(body, face, c2.point(fwd(mid)))? {
+        // The piece across a closed curve's start runs past `r1`; a
+        // fitted (clamped) pcurve covers only `[r0, r1]`, so its middle is
+        // read a period back there.
+        let inside = match period {
+            Some(p) if mid > r1 && matches!(c2, Curve2::Nurbs2(_)) => mid - p,
+            _ => mid,
+        };
+        match point_in_face(body, face, c2.point(fwd(inside)))? {
             Place::Inside => out.stretches.push([a, b]),
             Place::OnEdge(e) => out.on_edges.push(e),
             Place::Outside | Place::OnVertex(_) => {}

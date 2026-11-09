@@ -827,6 +827,73 @@ fn sheet_metal_recomputes_as_from_nothing() {
     }
 }
 
+/// [`sheeted`]'s part unfolded (`u`), a slot cut across the flange's bend
+/// line in the flat (`c`: the bend line lies `r + t` in from the plate's
+/// right edge, between 55 and 58 mm for every thickness and radius the
+/// edits give, and the strip runs on past 59 mm), and folded back (`rf`).
+fn flattened() -> (tempfile::TempDir, Session, String) {
+    let (dir, mut s, corner) = sheeted();
+    let add = |s: &mut Session, f: Value| {
+        let mut f = f;
+        f["part"] = json!("p");
+        must(s, "feature.add", f)
+    };
+    add(
+        &mut s,
+        json!({"type": "unfold", "id": "u", "target": "plate"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "c", "operation": "cut", "targets": ["plate"],
+               "params": {"x": 5, "y": 4, "z": 6}, "placement": {"origin": [54, 12, -2]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "refold", "id": "rf", "target": "plate", "unfold": "u"}),
+    );
+    (dir, s, corner)
+}
+
+/// One random edit of [`flattened`]'s part: one of [`sheet_edit`]'s, or
+/// the unfold's allowance, the cut moved along the bend line, or the
+/// refold's strips all again.
+fn flat_edit(g: &mut Lcg, s: &mut Session, corner: &str) {
+    let (method, params) = match g.next_u64() % 4 {
+        0 => return sheet_edit(g, s, corner),
+        1 => (
+            "feature.edit",
+            json!({"id": "u", "allowance": {"k_factor": format!("0.{}", 3 + g.next_u64() % 4)}}),
+        ),
+        2 => (
+            "feature.edit",
+            json!({"id": "c", "placement": {"origin": [54, 8 + g.next_u64() % 16, -2]}}),
+        ),
+        _ => ("feature.edit", json!({"id": "u", "allowance": ""})),
+    };
+    let mut params = params;
+    params["part"] = json!("p");
+    let _ = call(s, method, params);
+}
+
+#[test]
+fn unfold_cut_and_refold_recompute_as_from_nothing() {
+    for seed in [10, 11] {
+        let (_dir, mut s, corner) = flattened();
+        let part = Id::parse("p", "part").unwrap();
+        let first = s.rebuilt(&part).unwrap();
+        assert_eq!(first.failed(), 0, "{:?}", summary(first));
+        let mut g = Lcg::new(seed);
+        for step in 0..10 {
+            flat_edit(&mut g, &mut s, &corner);
+            let (one, eight) = (full(&s, 1), full(&s, 8));
+            let r = s.rebuilt(&part).unwrap();
+            let incremental = (r.hash.clone(), summary(r));
+            assert_eq!(incremental, one, "seed {seed}, step {step}");
+            assert_eq!(incremental, eight, "seed {seed}, step {step}");
+        }
+    }
+}
+
 #[test]
 fn an_edit_at_a_long_solids_end_rebuilds_one_feature_and_at_its_founder_the_chain_once() {
     // A plate and 49 pockets cut along it: one solid of 50 features.

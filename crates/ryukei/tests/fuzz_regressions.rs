@@ -511,3 +511,14 @@ fn neighbouring_legs_part_at_their_straight_section() {
     assert_eq!(check(&body), []);
     assert_eq!(check_intersections(&body), []);
 }
+
+/// The `projection` fuzz target's finds, as `(name, bytes)`: none yet.
+const PROJECTION_FINDS: &[(&str, &[u8])] = &[];
+
+#[test]
+fn projection_finds_view_and_cut_cleanly() {
+    for (name, bytes) in PROJECTION_FINDS {
+        eprintln!("projection find {name}");
+        ryukei_testkit::projection::check_bytes(bytes);
+    }
+}

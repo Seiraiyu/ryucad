@@ -10,7 +10,9 @@
 //! again to the same text; the usdc read to the same layer; the usdz
 //! holding the usdc's bytes. Every BrepArray must pass the schema's
 //! checks, and a body the BrepArray can't describe must be a typed
-//! refusal. Any panic is a bug.
+//! refusal. Any panic is a bug. With a first byte `0xd5`, the rest is a
+//! seeded sheet metal part (`sheet_metal_bytes::case`) whose flat pattern
+//! is written as DXF in millimetres and inches and read back.
 
 #![no_main]
 
@@ -26,6 +28,7 @@ use ryukei::geom::{Rigid, UnitVector3, Vector3};
 use ryukei::mesh::{BodyMesh, MeshParams, tessellate};
 use ryukei::topo::Body;
 use ryukei_testkit::euler_script::Bytes;
+use ryukei_testkit::sheet_metal_bytes;
 use std::sync::Arc;
 
 /// A body's mesh at a chord of 5 mm (the seeded bodies are about a
@@ -71,7 +74,56 @@ fn scale(triangles: &[common::Triangle]) -> f64 {
         .sum()
 }
 
+/// A seeded sheet metal part (`sheet_metal_bytes::case`) unfolded about
+/// its plate and its pattern written as DXF: the same bytes twice, read
+/// back by ryuformats' test reader to one entity per pattern segment on
+/// `OUTLINE` and `INNER` and one per bend line on `BEND_UP` and
+/// `BEND_DOWN`, each with its note on `BEND_NOTES`. A refused case is a
+/// typed refusal; any panic is a bug.
+fn dxf(data: &[u8]) {
+    let c = match sheet_metal_bytes::case(data) {
+        None => return,
+        Some(Err(r)) => {
+            assert!(sheet_metal_bytes::typed(&r), "{r:?}");
+            return;
+        }
+        Some(Ok(c)) => c,
+    };
+    let key = ryukei::name::OpKey(0xd5);
+    let u = match ryukei::sheet_metal::unfold(key, &c.folded, &c.model, &c.spec) {
+        Ok(u) => u,
+        Err(e) => {
+            assert!(matches!(e, ryukei::Error::InvalidSheetMetal(_)), "{e:?}");
+            return;
+        }
+    };
+    for unit in [ryuformats::dxf::DxfUnit::Mm, ryuformats::dxf::DxfUnit::In] {
+        let opts = ryuformats::dxf::DxfOptions { unit, notes: true };
+        let bytes = ryuformats::dxf::write(&u.pattern, &opts).unwrap();
+        assert_eq!(
+            bytes,
+            ryuformats::dxf::write(&u.pattern, &opts).unwrap(),
+            "not deterministic"
+        );
+        let d = common::dxf::read(&bytes);
+        let on = |layers: &[&str]| {
+            d.entities
+                .iter()
+                .filter(|e| layers.contains(&e.layer.as_str()))
+                .count()
+        };
+        let segments: usize = u.pattern.loops.iter().map(|l| l.segments.len()).sum();
+        assert_eq!(on(&["OUTLINE", "INNER"]), segments);
+        assert_eq!(on(&["BEND_UP", "BEND_DOWN"]), u.pattern.bend_lines.len());
+        assert_eq!(on(&["BEND_NOTES"]), u.pattern.bend_lines.len());
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
+    // `0xd5` first: the DXF of a seeded flat.
+    if let Some((&0xd5, rest)) = data.split_first() {
+        return dxf(rest);
+    }
     let mut rest = data;
     let mut bodies = Vec::new();
     while bodies.len() < 3 {
@@ -194,7 +246,10 @@ fuzz_target!(|data: &[u8]| {
     assert!(head.starts_with(header.as_bytes()));
     assert_eq!(triangles.len(), want);
     let mut text = Vec::new();
-    let opts = ryuformats::stl::Stl { ascii: true, ..opts };
+    let opts = ryuformats::stl::Stl {
+        ascii: true,
+        ..opts
+    };
     ryuformats::stl::write(&scene, &opts, &mut text).unwrap();
     let solids = common::read_ascii_stl(std::str::from_utf8(&text).unwrap());
     assert_eq!(solids.len(), placed.len());
@@ -235,7 +290,10 @@ fuzz_target!(|data: &[u8]| {
     let back = common::usda::read(&text);
     assert_eq!(ryuformats::usd::usda::to_string(&back).unwrap(), text);
     let crate_bytes = ryuformats::usd::usdc::to_bytes(&layer).unwrap();
-    assert_eq!(common::usdc::read(&crate_bytes), common::usdc::sorted(&layer));
+    assert_eq!(
+        common::usdc::read(&crate_bytes),
+        common::usdc::sorted(&layer)
+    );
     let mut z = Vec::new();
     ryuformats::usd::usdz::write(&layer, "root", &mut z).unwrap();
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&z)).unwrap();

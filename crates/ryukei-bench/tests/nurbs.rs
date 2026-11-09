@@ -91,6 +91,7 @@ fn to_usd(dir: &FilePath, name: &str, b: &Body) -> PathBuf {
                 name: "s".into(),
                 body: Arc::new(b.clone()),
                 mesh: None,
+                brep: true,
             }],
             children: vec![],
         }],

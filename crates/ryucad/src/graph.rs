@@ -30,7 +30,8 @@ pub fn inputs(f: &Feature) -> Vec<&Id> {
         .chain(f.seeds())
         .chain(f.geometry_reads())
         .chain(f.connectors().into_iter().map(|(_, c)| &c.root))
-        .chain(f.targets());
+        .chain(f.targets())
+        .chain(f.refold().map(|r| &r.unfold));
     for id in named {
         if !out.contains(&id) {
             out.push(id);

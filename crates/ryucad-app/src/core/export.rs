@@ -242,6 +242,10 @@ impl Export {
             mesh: usd.then_some(c.mesh),
             pipe_tolerance: None,
             skip_failing: c.skip_failing,
+            solid: None,
+            notes: None,
+            fixed: None,
+            bends: Vec::new(),
         }
     }
 

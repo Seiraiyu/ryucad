@@ -1,7 +1,8 @@
 use super::*;
 use crate::SheetMetalError;
+use crate::boolean::{BooleanOp, Tool, boolean};
 use crate::geom::{Axis, Circle2, Curve2, Frame2, Line2, Point2, Point3, Vector2, Vector3};
-use crate::name::{Event, OpKey};
+use crate::name::{Event, OpKey, ToolKey};
 use crate::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude, revolve};
 use crate::topo::Body;
 use core::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
@@ -1157,4 +1158,73 @@ fn imprinting_cuts_walls_at_the_bend_lines() {
             .count();
         assert_eq!(faces, in_strip);
     }
+}
+
+#[test]
+fn a_flat_redraws_as_its_unfold_drew_it() {
+    let b = l_bracket();
+    let m = recognize(&b, &SheetOptions::default()).unwrap();
+    let u = unfold(OpKey(1), &b, &m, &UnfoldSpec::all(Allowance::KFactor(0.4))).unwrap();
+    let again = redraw(&u.body, &u.pattern, &SheetOptions::default()).unwrap();
+    assert_eq!(again, u.pattern);
+}
+
+#[test]
+fn a_hole_drilled_in_the_flat_is_a_hole_of_its_pattern() {
+    let b = l_bracket();
+    let m = recognize(&b, &SheetOptions::default()).unwrap();
+    let u = unfold(OpKey(1), &b, &m, &UnfoldSpec::all(Allowance::KFactor(0.4))).unwrap();
+    let p = &u.pattern;
+    let (lo, hi) = (p.bounds.min(), p.bounds.max());
+    let (cx, cy) = (0.5 * (lo.x + hi.x), 0.5 * (lo.y + hi.y));
+    let r = 0.2 * (hi.y - lo.y).min(hi.x - lo.x);
+    let t = p.thickness;
+    let at = p.frame.to_world(cx, cy, -2.0 * t);
+    let place = crate::geom::Rigid::from_frame(
+        &crate::geom::Frame::new(at, p.frame.z().get(), p.frame.x().get()).unwrap(),
+    );
+    let pin = crate::primitive::cylinder(OpKey(2), r, 5.0 * t, &crate::geom::Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let tools = [Tool {
+        key: ToolKey(1),
+        body: &pin,
+        place,
+    }];
+    let (drilled, _) = boolean(OpKey(3), BooleanOp::Subtract, &u.body, &tools).unwrap();
+    let q = redraw(&drilled, p, &SheetOptions::default()).unwrap();
+    assert_eq!(q.frame, p.frame);
+    assert_eq!(q.bend_lines.len(), p.bend_lines.len());
+    assert_eq!(q.loops.iter().filter(|l| l.outer).count(), 1);
+    let holes: Vec<_> = q.loops.iter().filter(|l| !l.outer).collect();
+    assert_eq!(holes.len(), 1);
+    let want = -core::f64::consts::PI * r * r;
+    // `area` is eight-point Gauss per segment: a whole circle in one
+    // segment comes within about 6e-6 of it.
+    assert!(
+        (holes[0].area() - want).abs() <= 1e-5 * want.abs(),
+        "{}",
+        holes[0].area()
+    );
+    let outline = |x: &FlatPattern| x.loops.iter().find(|l| l.outer).unwrap().area();
+    assert!((outline(&q) - outline(p)).abs() <= 1e-12 * outline(p));
+}
+
+#[test]
+fn redraw_refuses_a_tolerance_that_isnt_finite() {
+    let b = l_bracket();
+    let m = recognize(&b, &SheetOptions::default()).unwrap();
+    let u = unfold(OpKey(1), &b, &m, &UnfoldSpec::all(Allowance::KFactor(0.4))).unwrap();
+    let e = redraw(
+        &u.body,
+        &u.pattern,
+        &SheetOptions {
+            tolerance: f64::NAN,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        e,
+        crate::Error::InvalidSheetMetal(SheetMetalError::BadTolerance)
+    );
 }

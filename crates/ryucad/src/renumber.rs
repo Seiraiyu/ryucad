@@ -262,7 +262,11 @@ fn transform(
             (node.as_str() == Some(from)).then(|| json!(to))
         }
         Rename::Feature { from, to, .. } => match pointer {
-            "/sketch" | "/target" | "/solid" => (node.as_str() == Some(from)).then(|| json!(to)),
+            // A refold's `unfold` names its unfold as `target` names a
+            // solid's founder.
+            "/sketch" | "/target" | "/solid" | "/unfold" => {
+                (node.as_str() == Some(from)).then(|| json!(to))
+            }
             // The solids an operation or a boolean acts on, what a
             // pattern repeats, and the instances an instance pattern
             // copies.
@@ -937,6 +941,63 @@ mod tests {
         assert_eq!(x["edges"][0], to(1));
         assert_eq!(x["edges"][1], json!({"edge": to(2), "side": to(3)}));
         assert_eq!(x["ends"][0]["vertex"], to(4));
+    }
+
+    #[test]
+    fn unfolds_and_refolds_follow_their_solid_their_unfold_and_their_bends() {
+        let old = |k: u8| format!("{k:032x}");
+        let new = |k: u8| format!("{:032x}", k + 100);
+        let r = |f: &str, k: u8| json!({"feature": f, "name": old(k)});
+        let unfold = json!({
+            "format": 14, "kind": "ryucad.feature", "type": "unfold", "target": "plate",
+            "fixed": r("plate", 1), "only": [r("f", 2)],
+            "bends": [{"bend": r("f", 2), "deduction": "2 mm"}],
+        });
+        let refold = json!({
+            "format": 14, "kind": "ryucad.feature", "type": "refold", "target": "plate",
+            "unfold": "u", "only": [r("f", 2)],
+        });
+        let f = files(&[
+            ("parts/a/features/u.json", unfold),
+            ("parts/a/features/rf.json", refold),
+        ]);
+        let read = |out: &Files, p: &str| serde_json::from_slice::<Value>(&out[p]).unwrap();
+        // The unfold renumbered: the refold follows it.
+        let out = renumbered(
+            &f,
+            &Rename::Feature {
+                part: "a".into(),
+                from: "u".into(),
+                to: "u-1".into(),
+            },
+            &BTreeMap::new(),
+        );
+        assert_eq!(read(&out, "parts/a/features/rf.json")["unfold"], "u-1");
+        // The solid and the flange renumbered, names mapped: both follow.
+        let names = BTreeMap::from([
+            ("plate".to_owned(), BTreeMap::from([(old(1), new(1))])),
+            ("f".to_owned(), BTreeMap::from([(old(2), new(2))])),
+        ]);
+        let out = renumbered(
+            &f,
+            &Rename::Feature {
+                part: "a".into(),
+                from: "plate".into(),
+                to: "plate-1".into(),
+            },
+            &names,
+        );
+        let u = read(&out, "parts/a/features/u.json");
+        assert_eq!(u["target"], "plate-1");
+        assert_eq!(u["fixed"], json!({"feature": "plate-1", "name": new(1)}));
+        assert_eq!(u["only"][0], json!({"feature": "f", "name": new(2)}));
+        assert_eq!(
+            u["bends"][0]["bend"],
+            json!({"feature": "f", "name": new(2)})
+        );
+        let rf = read(&out, "parts/a/features/rf.json");
+        assert_eq!(rf["target"], "plate-1");
+        assert_eq!(rf["only"][0], json!({"feature": "f", "name": new(2)}));
     }
 
     #[test]

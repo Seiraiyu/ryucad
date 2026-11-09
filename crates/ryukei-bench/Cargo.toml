@@ -20,6 +20,9 @@ formats = ["dep:cxx", "dep:cxx-build"]
 # USD's references: OpenUSD and usd-brep (its validator and SMLib) from
 # Python, which the devcontainer installs in /opt/usd. No C++ to build.
 usd = []
+# DXF's reference: ezdxf from Python, which the devcontainer installs in
+# /opt/usd beside OpenUSD. No C++ to build.
+dxf = []
 
 [dependencies]
 cxx = { version = "1", optional = true }
@@ -77,6 +80,12 @@ required-features = ["smlib"]
 name = "boolean_kernels"
 harness = false
 required-features = ["occt", "smlib"]
+
+# Hidden lines against OCCT's HLRBRep_Algo, and the race (design 326,
+# plan 10.C).
+[[test]]
+name = "projection"
+required-features = ["occt"]
 
 # Three-way: SMLib's deviation and the exact values come from OCCT.
 [[test]]
@@ -171,6 +180,11 @@ required-features = ["occt", "formats"]
 name = "usd"
 required-features = ["usd"]
 
+# Flat patterns' DXF read by ezdxf (design 346, plan 16.B).
+[[test]]
+name = "dxf"
+required-features = ["dxf"]
+
 # Every surface against OCCT and SMLib (design 94, plan 8.F): the NURBS
 # race, lofts, sweeps, offsets, shells and intersections.
 [[test]]
@@ -181,4 +195,9 @@ required-features = ["occt", "usd"]
 # refolding.
 [[bench]]
 name = "sheet_metal"
+harness = false
+
+# Views and sections (design 326, plan 10.C).
+[[bench]]
+name = "projection"
 harness = false

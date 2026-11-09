@@ -3645,9 +3645,11 @@ sections! {
     self_union => self_union_section,
     global_offsets => global_offsets_section,
     sheet_metal => sheet_metal_section,
+    flat_patterns => flat_patterns_section,
     bent => bent_section,
     silhouettes => silhouettes_section,
     hidden_lines => hidden_lines_section,
+    section_views => section_views_section,
     tweaks => tweaks_section,
     drafts => drafts_section,
 }
@@ -3965,6 +3967,84 @@ fn sheet_metal_section(golden: &mut Golden) {
     hash_body(&mut s, &back, &j);
 }
 
+/// Flat patterns kept and redrawn (ryucad plan 16.B): a jog's pattern
+/// through its codec, and a bracket's flat drilled across its bend line
+/// and redrawn.
+fn flat_patterns_section(golden: &mut Golden) {
+    use core::f64::consts::FRAC_PI_2;
+    use ryukei::boolean::{BooleanOp, Tool, boolean};
+    use ryukei::name::ToolKey;
+    use ryukei::sheet_metal::{Allowance, SheetOptions, UnfoldSpec, recognize, redraw, unfold};
+    use ryukei_testkit::sheet_metal::{Leg, strip};
+    let mut s = golden.section("flat_patterns");
+    let key = OpKey(0x666c_6174);
+    let (t, r) = (0.001, 0.002);
+    let opts = SheetOptions::default();
+    let jog = strip(
+        key,
+        &[
+            Leg::Run(0.01),
+            Leg::Turn {
+                angle: FRAC_PI_2,
+                radius: r,
+            },
+            Leg::Run(0.02),
+            Leg::Turn {
+                angle: -1.0,
+                radius: r,
+            },
+            Leg::Run(0.015),
+        ],
+        t,
+        0.02,
+    );
+    let m = recognize(&jog, &opts).unwrap();
+    let u = unfold(key, &jog, &m, &UnfoldSpec::all(Allowance::KFactor(0.44))).unwrap();
+    let bytes = ryukei::codec::encode_flat_pattern(&u.pattern);
+    s.bytes(&bytes);
+    assert_eq!(
+        ryukei::codec::decode_flat_pattern(&bytes).unwrap(),
+        u.pattern
+    );
+    assert_eq!(redraw(&u.body, &u.pattern, &opts).unwrap(), u.pattern);
+    let bracket = strip(
+        key,
+        &[
+            Leg::Run(0.02),
+            Leg::Turn {
+                angle: FRAC_PI_2,
+                radius: r,
+            },
+            Leg::Run(0.015),
+        ],
+        t,
+        0.02,
+    );
+    let m = recognize(&bracket, &opts).unwrap();
+    let u = unfold(key, &bracket, &m, &UnfoldSpec::all(Allowance::KFactor(0.5))).unwrap();
+    let st = &u.map.strips[0];
+    let place = Rigid::from_frame(
+        &Frame::new(
+            st.frame.to_world(0.5 * st.length, 0.01, -0.0002),
+            st.frame.z().get(),
+            st.frame.x().get(),
+        )
+        .unwrap(),
+    );
+    let pin = primitive::cylinder(key, 0.0008, t + 0.0004, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let tools = [Tool {
+        key: ToolKey(1),
+        body: &pin,
+        place,
+    }];
+    let (cut, _) = boolean(key, BooleanOp::Subtract, &u.body, &tools).unwrap();
+    let p = redraw(&cut, &u.pattern, &opts).unwrap();
+    s.str(&format!("{p:?}"));
+    s.bytes(&ryukei::codec::encode_flat_pattern(&p));
+}
+
 /// The bent surface (design 298, plan 11.B): a round hole's wall and a
 /// slot's wall carried through a right-angled bend, each at seeded
 /// points with its derivatives and projection, its derivative bound, and
@@ -4175,6 +4255,100 @@ fn hidden_lines_section(golden: &mut Golden) {
                     "{:?}",
                     view(&all, v, &ViewOptions::default()).unwrap().pieces
                 ));
+            }
+        });
+    }
+}
+
+/// Sections and section views (plan 10.C): a block, a cylinder, a ball
+/// and a drilled plate cut by an axis plane and by a tilted one, each
+/// cut body, journal and cap hashed, and each cut body viewed from the
+/// side cut away and from a corner, on one thread and eight.
+fn section_views_section(golden: &mut Golden) {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::{Frame, Plane, Point3};
+    use ryukei::project::{Placed, View, ViewOptions, section, view};
+    let mut s = golden.section("section_views");
+    let plate = primitive::block(OpKey(0x6200), 0.04, 0.03, 0.01, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let pin = primitive::cylinder(OpKey(0x6201), 0.004, 0.02, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let drilled = boolean(
+        OpKey(0x6202),
+        BooleanOp::Subtract,
+        &plate,
+        &[Tool {
+            key: ToolKey(1),
+            body: &pin,
+            place: Rigid::translation(Vector3::new(0.02, 0.015, -0.005)),
+        }],
+    )
+    .unwrap()
+    .0;
+    let bodies = [
+        primitive::block(OpKey(0x6203), 0.02, 0.02, 0.02, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+        primitive::cylinder(OpKey(0x6204), 0.01, 0.02, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+        primitive::sphere(OpKey(0x6205), 0.01, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+        drilled,
+    ];
+    let planes = [
+        Plane::new(
+            Frame::new(
+                Point3::new(0.005, 0.005, 0.005),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            )
+            .unwrap(),
+        ),
+        Plane::new(
+            Frame::new(
+                Point3::new(0.004, 0.006, 0.003),
+                Vector3::new(1.0, 0.3, 0.2),
+                Vector3::new(0.0, 0.0, 1.0),
+            )
+            .unwrap(),
+        ),
+    ];
+    let corner = View::new(Vector3::new(1.0, -1.0, 1.0), Vector3::new(0.0, 0.0, 1.0)).unwrap();
+    for threads in [1, 8] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            for b in &bodies {
+                for (k, p) in planes.iter().enumerate() {
+                    let cut = section(OpKey(0x6210 + k as u128), b, p).unwrap();
+                    hash_body(&mut s, &cut.body, &cut.journal);
+                    s.str(&format!("{:?}", cut.faces));
+                    if cut.body.faces().next().is_none() {
+                        continue;
+                    }
+                    let n = p.frame().z().get();
+                    let up = if n.cross(Vector3::new(0.0, 0.0, 1.0)).length() > 0.1 {
+                        Vector3::new(0.0, 0.0, 1.0)
+                    } else {
+                        Vector3::new(0.0, 1.0, 0.0)
+                    };
+                    for v in [View::new(n, up).unwrap(), corner] {
+                        let placed = [Placed {
+                            body: &cut.body,
+                            place: Rigid::IDENTITY,
+                        }];
+                        s.str(&format!(
+                            "{:?}",
+                            view(&placed, &v, &ViewOptions::default()).unwrap().pieces
+                        ));
+                    }
+                }
             }
         });
     }

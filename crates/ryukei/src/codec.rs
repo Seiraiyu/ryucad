@@ -12,7 +12,7 @@
 //! display meshes beside the bodies they mesh, [`encode_rigid`] a
 //! [`Rigid`] motion, for callers that keep where they placed a body, and
 //! [`encode_flat_map`] a sheet's [`FlatMap`], what refolding its flat
-//! needs.
+//! needs, and [`encode_flat_pattern`] its [`FlatPattern`].
 //!
 //! The format starts with `ryukei.body.1` (`ryukei.journal.1` for a
 //! [`Journal`], `ryukei.mesh.1` for a mesh); integers are little-endian, counts `u32`, an absent ID
@@ -32,7 +32,9 @@ use crate::geom::{
 };
 use crate::mesh::{BodyMesh, Corner, EdgePolyline, FaceFault, FaceMesh, MeshFaultKind};
 use crate::name::{Event, Journal, Name, ToolKey};
-use crate::sheet_metal::{Allowance, FlatMap, Strip};
+use crate::sheet_metal::{
+    Allowance, BendDirection, BendLine, FlatMap, FlatPattern, PatternLoop, PatternSegment, Strip,
+};
 use crate::tol::Tolerance;
 use crate::topo::{
     Arena, Body, Edge, Face, Fin, Id, Loop, Pcurve, Region, RegionKind, Sense, Shell, Vertex,
@@ -48,6 +50,9 @@ pub const JOURNAL_MAGIC: &[u8] = b"ryukei.journal.1";
 pub const MESH_MAGIC: &[u8] = b"ryukei.mesh.1";
 /// The first bytes of an encoded flat map.
 pub const FLAT_MAP_MAGIC: &[u8] = b"ryukei.flatmap.1";
+
+/// What a sheet's flat pattern's bytes start with.
+pub const FLAT_PATTERN_MAGIC: &[u8] = b"ryukei.pattern.1";
 
 fn invalid(what: &'static str) -> Error {
     Error::InvalidEncoding { what }
@@ -1454,6 +1459,139 @@ pub fn decode_flat_map(bytes: &[u8]) -> Result<FlatMap, Error> {
         thickness,
         strips,
         flanges,
+    })
+}
+
+/// A sheet's flat pattern as bytes: its frame and thickness, its bounds,
+/// each loop (whether it is an outline, each segment's edge name, plane
+/// curve and run `t0` to `t1`) and each bend line (its bend's name, its
+/// ends, its edges' names, direction, angle, radius, developed length and
+/// allowance). Curves a NURBS shares are written once.
+pub fn encode_flat_pattern(p: &FlatPattern) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.out.extend_from_slice(FLAT_PATTERN_MAGIC);
+    w.frame(&p.frame);
+    w.f64(p.thickness);
+    w.point2(p.bounds.min());
+    w.point2(p.bounds.max());
+    w.len(p.loops.len());
+    for l in &p.loops {
+        w.u8(u8::from(l.outer));
+        w.len(l.segments.len());
+        for s in &l.segments {
+            w.name(s.edge);
+            w.curve2(&s.curve);
+            w.f64(s.t0);
+            w.f64(s.t1);
+        }
+    }
+    w.len(p.bend_lines.len());
+    for b in &p.bend_lines {
+        w.name(b.bend);
+        w.point2(b.start);
+        w.point2(b.end);
+        w.names(&b.edges);
+        w.u8(match b.direction {
+            BendDirection::Up => 0,
+            BendDirection::Down => 1,
+        });
+        w.f64(b.angle);
+        w.f64(b.radius);
+        w.f64(b.length);
+        match b.allowance {
+            Allowance::KFactor(k) => {
+                w.u8(0);
+                w.f64(k);
+            }
+            Allowance::Length(l) => {
+                w.u8(1);
+                w.f64(l);
+            }
+        }
+    }
+    w.out
+}
+
+/// The flat pattern `bytes` encode, bit for bit. Fails with
+/// [`Error::InvalidEncoding`] for bytes of another format or version, cut
+/// short or running on, or holding a thickness, radius, angle or length
+/// that isn't positive and finite, an angle past half a turn, a run that
+/// isn't finite, a frame that isn't orthonormal or a curve its constructor
+/// refuses.
+pub fn decode_flat_pattern(bytes: &[u8]) -> Result<FlatPattern, Error> {
+    let mut r = Reader::new(bytes);
+    r.magic(FLAT_PATTERN_MAGIC)?;
+    let positive = |x: f64| {
+        if x > 0.0 && x.is_finite() {
+            Ok(x)
+        } else {
+            Err(invalid("a size that isn't positive"))
+        }
+    };
+    let frame = r.frame()?;
+    let thickness = positive(r.f64()?)?;
+    let (lo, hi) = (r.point2()?, r.point2()?);
+    let bounds = crate::geom::Box2::new(lo, hi);
+    let n = r.count(5)?;
+    let mut loops = Vec::with_capacity(n);
+    for _ in 0..n {
+        let outer = r.flag()?;
+        let m = r.count(16 + 1 + 16)?;
+        let mut segments = Vec::with_capacity(m);
+        for _ in 0..m {
+            let edge = r.name()?;
+            let curve = r.curve2()?;
+            let (t0, t1) = (r.finite()?, r.finite()?);
+            segments.push(PatternSegment {
+                edge,
+                curve,
+                t0,
+                t1,
+            });
+        }
+        loops.push(PatternLoop { outer, segments });
+    }
+    let n = r.count(16 + 32 + 4 + 1 + 24 + 9)?;
+    let mut bend_lines = Vec::with_capacity(n);
+    for _ in 0..n {
+        let bend = r.name()?;
+        let (start, end) = (r.point2()?, r.point2()?);
+        let edges = r.names()?;
+        let direction = match r.u8()? {
+            0 => BendDirection::Up,
+            1 => BendDirection::Down,
+            _ => return Err(invalid("an unknown bend direction")),
+        };
+        let angle = positive(r.f64()?)?;
+        if angle > core::f64::consts::PI + 1e-9 {
+            return Err(invalid("a bend past half a turn"));
+        }
+        let radius = positive(r.f64()?)?;
+        let length = positive(r.f64()?)?;
+        let allowance = match r.u8()? {
+            0 => Allowance::KFactor(r.finite()?),
+            1 => Allowance::Length(r.finite()?),
+            _ => return Err(invalid("an unknown allowance")),
+        };
+        bend_lines.push(BendLine {
+            bend,
+            start,
+            end,
+            edges,
+            direction,
+            angle,
+            radius,
+            length,
+            allowance,
+        });
+    }
+    r.end()?;
+    Ok(FlatPattern {
+        frame,
+        loops,
+        bend_lines,
+        thickness,
+        bounds,
     })
 }
 

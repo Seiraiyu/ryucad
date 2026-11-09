@@ -12,6 +12,7 @@ drafts a2e5c5d56618af08
 ellipse d183a46baced650d
 euler 3ba8955bf1ecaddf
 fill 25135c1d6598f06e
+flat_patterns fb1d143a9bde2f49
 general 75485bda72cf12d1
 general_booleans 28949919b652ece3
 geom 90cad8ca80df54df
@@ -37,6 +38,7 @@ predicates 582c63309c4c6f67
 primitives d1d75bf1aae07f71
 projection 5cabf36eda0e3960
 reference b16573e05f22ed3a
+section_views 85e6dc539783db2b
 self_union 63d790ba1aa91bdb
 sewing b7344fea95c33f8e
 sheet_blends 43f0b48c0378ac5e

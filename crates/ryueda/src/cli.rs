@@ -582,8 +582,9 @@ enum PartsCmd {
     Search {
         /// A category first if wanted (capacitor), then conditions.
         terms: Vec<String>,
-        /// Where to search, in order: library (the default). Repeat for
-        /// more.
+        /// Where to search, in order: library (the default), a catalogue
+        /// (jlc) or a distributor (digikey, called live with your keys).
+        /// Repeat for more.
         #[arg(long = "in", value_name = "SOURCE")]
         sources: Vec<String>,
         /// At least this many in stock.
@@ -599,21 +600,36 @@ enum PartsCmd {
         /// lib/<alias>/libcomp/<id>, or a placed <block>/<component>.
         #[arg(long)]
         like: Option<String>,
-        /// Stay off the network.
+        /// Stay off the network: distributors are left out.
         #[arg(long)]
         offline: bool,
+        #[command(flatten)]
+        long: LongArgs,
     },
-    /// The records a key names: <source>:<key> (lcsc:C1525), mpn:<part
-    /// number> for every source, or library:<reference>.
+    /// The records a key names: <source>:<key> (lcsc:C1525,
+    /// digikey:311-1338-1-ND), mpn:<part number> for every source, or
+    /// library:<reference>. A distributor is called when this machine
+    /// keeps no record of the key.
     Show {
         key: String,
-        /// Say how to refresh what the record came from.
+        /// Call distributors again; say how to refresh a catalogue.
         #[arg(long)]
         refresh: bool,
-        /// Stay off the network.
+        /// Stay off the network: only what this machine keeps.
         #[arg(long)]
         offline: bool,
+        #[command(flatten)]
+        long: LongArgs,
     },
+    /// Keep a distributor's keys on this machine, owner-only, beside the
+    /// preferences: its key values on stdin, one a line, in its order
+    /// (digikey: client ID, then client secret). Never in a project.
+    Login {
+        /// The distributor (`ryueda parts sources` lists them).
+        distributor: String,
+    },
+    /// Forget a distributor's keys kept on this machine.
+    Logout { distributor: String },
     /// The project's sourcing (parts.json): the assembly house, how many
     /// boards a build makes, the sources searches ask, supply findings'
     /// severities. Nothing given shows it.
@@ -639,8 +655,9 @@ enum PartsCmd {
         expect: Expect,
     },
     /// Sync each catalogue the placed parts' offers draw on that is
-    /// missing or older than parts.max_age (every one with --force): a
-    /// long request, as sync is.
+    /// missing or older than parts.max_age, and fetch again each
+    /// distributor's record of their offers this machine doesn't keep
+    /// (every one with --force): a long request, as sync is.
     Refresh {
         #[arg(long)]
         force: bool,
@@ -1445,6 +1462,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             key,
             refresh,
             offline,
+            ..
         }) => Request::PartsShow {
             key: key.clone(),
             refresh: *refresh,
@@ -1462,6 +1480,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             limit,
             like,
             offline,
+            ..
         }) => {
             // A first word with no operator in it is the category.
             let (category, conditions) = match terms.split_first() {
@@ -2002,7 +2021,11 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             expected_revision: expect.expect.clone(),
         },
         Command::Design(DesignCmd::List) => Request::DesignList {},
-        Command::Version | Command::Init { .. } | Command::Watch { .. } | Command::Daemon(_) => {
+        Command::Version
+        | Command::Init { .. }
+        | Command::Watch { .. }
+        | Command::Daemon(_)
+        | Command::Parts(PartsCmd::Login { .. } | PartsCmd::Logout { .. }) => {
             return Ok(None);
         }
     }))
@@ -2037,6 +2060,23 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             daemon::run(&find_root(&here)?, idle).map(|()| Value::Null)
         }
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
+        // Keys go straight to the user's config folder: never through a
+        // daemon, a request or a log.
+        Command::Parts(PartsCmd::Login { distributor }) => {
+            let dir = ryu_session::prefs::config_dir::<ryueda::Eda>()?;
+            let mut values = Vec::new();
+            for line in std::io::stdin().lines() {
+                let line = line.map_err(|e| Error::io(std::path::Path::new("<stdin>"), &e))?;
+                if !line.trim().is_empty() {
+                    values.push(line.trim().to_owned());
+                }
+            }
+            ryueda::distributors::login(&dir, distributor, &values)
+        }
+        Command::Parts(PartsCmd::Logout { distributor }) => {
+            let dir = ryu_session::prefs::config_dir::<ryueda::Eda>()?;
+            ryueda::distributors::logout(&dir, distributor)
+        }
         Command::Daemon(DaemonCmd::Stop { all: true }) => client::stop_all(),
         Command::Daemon(DaemonCmd::Stop { all: false }) => client::stop(&find_root(&here)?),
         Command::Watch {
@@ -2112,7 +2152,12 @@ fn cli_token() -> String {
 /// What a long request's command asks of its job: always a token.
 fn long_ask(cmd: &Command) -> Option<ryu_session::job::Ask> {
     let long = match cmd {
-        Command::Parts(PartsCmd::Sync { long, .. } | PartsCmd::Refresh { long, .. }) => long,
+        Command::Parts(
+            PartsCmd::Sync { long, .. }
+            | PartsCmd::Refresh { long, .. }
+            | PartsCmd::Search { long, .. }
+            | PartsCmd::Show { long, .. },
+        ) => long,
         _ => return None,
     };
     Some(ryu_session::job::Ask {

@@ -672,7 +672,22 @@ pub fn record_from(
     let library = ryueda_parts::library::Library::NAME;
     recs.retain(|r| r.source != library);
     searched.retain(|n| *n != library);
+    // A distributor's records are fetched by `parts show` (with the
+    // daemon's lock released) and kept a day; a write reads only those.
+    let live: Vec<&str> = searched
+        .iter()
+        .copied()
+        .filter(|n| ryueda_parts::distributor::distributor(n).is_some())
+        .collect();
     match recs.len() {
+        0 if !live.is_empty() => Err(Error::new(
+            Code::PartsNotFound,
+            format!("this machine keeps no record of {from}; run ryueda parts show {from} first"),
+        )
+        .with("key", from)
+        .with("searched", searched)
+        .with("warnings", warnings)
+        .with("command", format!("ryueda parts show {from}"))),
         0 => Err(
             Error::new(Code::PartsNotFound, format!("no source here has {from}"))
                 .with("key", from)
@@ -1343,6 +1358,43 @@ mod part_data_tests {
         assert_eq!(
             merged_offers(&[o("Mouser", "m")], &[o("LCSC", "C9")]),
             vec![o("Mouser", "m"), o("LCSC", "C9")]
+        );
+    }
+
+    #[test]
+    fn a_distributors_part_comes_from_its_kept_record() {
+        let (cfg, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let live = crate::distributors::tests::fake(
+            cfg.path(),
+            cache.path(),
+            std::sync::Arc::new(crate::distributors::NoNetwork),
+            1_000,
+        );
+        let cats = crate::parts::Catalogues::at(cache.path(), 1_000, crate::parts::MAX_AGE)
+            .with_live(live.clone());
+        let (_p, p) = crate::netlist::tests::project(&[]);
+        let e = record_from(&p, "digikey:1276-1001-1-ND", &cats).unwrap_err();
+        assert_eq!(
+            (e.code, e.details["command"].as_str()),
+            (
+                Code::PartsNotFound,
+                Some("ryueda parts show digikey:1276-1001-1-ND")
+            )
+        );
+        let r = ryueda_parts::digikey::record::record(
+            &ryueda_parts::digikey::testing::product(ryueda_parts::digikey::testing::CAP),
+            None,
+            900,
+        )
+        .unwrap();
+        live.keep(
+            ryueda_parts::distributor::distributor("digikey").unwrap(),
+            &[r],
+        );
+        let r = record_from(&p, "digikey:1276-1001-1-ND", &cats).unwrap();
+        assert_eq!(
+            (r.mpn.as_str(), r.offers[0].supplier.as_str()),
+            ("CL05B104KO5NNNC", "DigiKey")
         );
     }
 }

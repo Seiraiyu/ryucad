@@ -83,6 +83,8 @@ ARG UV_VERSION=0.13.6
 ARG USD_CORE_VERSION=26.8
 ARG USD_VALIDATION_VERSION=1.23.0
 ARG USD_BREP_VERSION=1.0.1
+# ryukei-bench's dxf reference (plan 16.B): ezdxf, pure Python.
+ARG EZDXF_VERSION=1.4.5
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3-venv \
     && rm -rf /var/lib/apt/lists/* \
@@ -92,7 +94,8 @@ RUN apt-get update \
     && /opt/uv/bin/uv pip install -q --python /opt/usd \
         usd-core==${USD_CORE_VERSION} "usd-brep[validation]==${USD_BREP_VERSION}" \
         "usd-validation-nvidia[usd]==${USD_VALIDATION_VERSION}" \
-    && /opt/usd/bin/python -c "import usd_brep, pxr, brep_validator" \
+        ezdxf==${EZDXF_VERSION} \
+    && /opt/usd/bin/python -c "import usd_brep, pxr, brep_validator, ezdxf" \
     && chmod -R a+rX /opt/uv /opt/usd
 
 RUN useradd -m -s /bin/bash ${USERNAME} \

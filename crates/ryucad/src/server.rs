@@ -174,7 +174,30 @@ pub fn answer_live(
             explode,
             fraction,
             annotations,
+            flat,
         } => {
+            // A flat pattern's render draws one solid flat: no section or
+            // explode applies, the request's own refused and the window's
+            // left out.
+            if flat.is_some() {
+                for (param, given) in [
+                    ("section", section.is_some()),
+                    ("explode", explode.is_some() || fraction.is_some()),
+                ] {
+                    if given {
+                        return Err(Error::new(
+                            Code::InvalidParam,
+                            format!("{param} doesn't apply to a flat pattern's render"),
+                        )
+                        .with("param", param));
+                    }
+                }
+            }
+            let (section, explode) = if flat.is_some() {
+                (Some(Vec::new()), Some(String::new()))
+            } else {
+                (section, explode)
+            };
             // A named view brings the planes and the explode it saved,
             // unless the request names its own.
             let named = match (&camera, view.as_deref()) {
@@ -298,6 +321,7 @@ pub fn answer_live(
                 sections,
                 explode,
                 annotations,
+                flat,
             };
             render_noting(session, target, shown, ask)
         }
@@ -318,6 +342,10 @@ pub fn answer_live(
             mesh,
             pipe_tolerance,
             skip_failing,
+            solid,
+            notes,
+            fixed,
+            bends,
         } => crate::export::export(
             session,
             crate::export::Ask {
@@ -337,6 +365,10 @@ pub fn answer_live(
                 mesh,
                 pipe_tolerance,
                 skip_failing,
+                solid,
+                notes,
+                fixed,
+                bends,
             },
         ),
         Request::Rebuild { part, rev } => session.at(rev.as_deref()).and_then(|(commit, s)| {
@@ -713,6 +745,19 @@ pub(crate) fn dispatch(
         Request::SheetGet { part, solid, rev } => {
             crate::sheet_metal::report::get(session, &part, solid.as_deref(), rev.as_deref())
         }
+        Request::FlatGet {
+            part,
+            solid,
+            rev,
+            fixed,
+            bends,
+        } => crate::sheet_metal::flat::get(
+            session,
+            &part,
+            solid.as_deref(),
+            rev.as_deref(),
+            &crate::sheet_metal::flat::Options { fixed, bends },
+        ),
         Request::Mass { of, tolerance, rev } => {
             crate::mass::run(session, &of, tolerance, rev.as_deref())
         }
@@ -2230,7 +2275,9 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
         Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
             crate::body::report(part, f)
         }
-        Feature::BaseFlange(_) | Feature::Flange(_) => crate::sheet_metal::report(p, f),
+        Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
+            crate::sheet_metal::report(p, f)
+        }
         Feature::Hole(h) => hole_report(part, h),
         Feature::Pattern(x) => pattern_report(part, x),
         Feature::Revolve(r) => {
@@ -3944,7 +3991,11 @@ fn check_references(
         .any(|g| g.as_ref().is_ok_and(|g| g.surface()));
     let reads_bodies = may_hold_sheets && !crate::kind::bodies_read(f).is_empty();
     let planar = matches!(f, Feature::Planar(_));
+    // An unfold's allowance and a refold's unfold are judged against the
+    // rebuild whatever they reference.
     if f.loft().is_none()
+        && f.unfold().is_none()
+        && f.refold().is_none()
         && f.references().is_empty()
         && f.geometry().is_empty()
         && !reads_bodies
@@ -4023,7 +4074,7 @@ fn check_resolved(
         Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
             crate::body::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
-        Feature::BaseFlange(_) | Feature::Flange(_) => {
+        Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
             crate::sheet_metal::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
         _ => Ok(()),
@@ -4222,7 +4273,10 @@ fn feature_add(
             }
         }
     }
-    if ty == "flange" && given.fields.target.is_none() && given.fields.targets.is_none() {
+    if matches!(ty, "flange" | "unfold" | "refold")
+        && given.fields.target.is_none()
+        && given.fields.targets.is_none()
+    {
         let before = solids_before(p, &list, at);
         let sheet: Vec<Id> = before
             .iter()
@@ -4234,7 +4288,7 @@ fn feature_add(
             _ => {
                 return Err(Error::new(
                     Code::InvalidParam,
-                    format!("a flange names the solid it acts on (target): the part has {} solids before it, {} of them founded by a base flange", before.len(), sheet.len()),
+                    format!("a {ty} names the solid it acts on (target): the part has {} solids before it, {} of them founded by a base flange", before.len(), sheet.len()),
                 )
                 .with("param", "target")
                 .with("solids", before));
@@ -4287,7 +4341,7 @@ fn feature_add(
             given.only(ty, crate::doc::body::request_fields(ty))?;
             crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
-        "base_flange" | "flange" => {
+        "base_flange" | "flange" | "unfold" | "refold" => {
             crate::sheet_metal::take_given(ty, &mut given.fields);
             given.only(ty, crate::doc::sheet_metal::request_fields(ty))?;
             crate::sheet_metal::from_given(ty, None, &given.fields, &pid, unit, &env)?
@@ -4498,7 +4552,10 @@ fn feature_edit(
                 given.only(ty, crate::doc::body::request_fields(ty))?;
                 crate::body::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
             }
-            f @ (Feature::BaseFlange(_) | Feature::Flange(_)) => {
+            f @ (Feature::BaseFlange(_)
+            | Feature::Flange(_)
+            | Feature::Unfold(_)
+            | Feature::Refold(_)) => {
                 let ty = f.type_name();
                 crate::sheet_metal::take_given(ty, &mut given.fields);
                 given.only(ty, crate::doc::sheet_metal::request_fields(ty))?;
@@ -4608,7 +4665,11 @@ fn feature_edit(
             f,
             Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_)
         ) && f.targets() != old.targets())
-        || ((f.base_flange().is_some() || f.flange().is_some()) && f != old)
+        || ((f.base_flange().is_some()
+            || f.flange().is_some()
+            || f.unfold().is_some()
+            || f.refold().is_some())
+            && f != old)
         || f.source() != old.source()
     {
         check_references(session, &pid, &list, &fid, &f)?;
@@ -4894,7 +4955,10 @@ pub(crate) fn part_report(
                 Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
                     crate::body::report(id, f)
                 }
-                Feature::BaseFlange(_) | Feature::Flange(_) => crate::sheet_metal::report(part, f),
+                Feature::BaseFlange(_)
+                | Feature::Flange(_)
+                | Feature::Unfold(_)
+                | Feature::Refold(_) => crate::sheet_metal::report(part, f),
                 _ => return None,
             };
             Some((fid.clone(), (f.type_name(), report)))
@@ -4943,6 +5007,11 @@ pub(crate) fn part_report(
                         && let Some(i) = &m.import
                     {
                         v["import"] = i.as_ref().clone();
+                    }
+                    if let crate::rebuild::Output::Solids(m) = o
+                        && let Some(f) = &m.flat
+                    {
+                        v["flat"] = crate::sheet_metal::unfold::summary(f);
                     }
                     if let Some(p) = &held
                         && let Some(Ok(Feature::Sweep(w))) = p.features.get(fid)
@@ -5847,6 +5916,9 @@ struct RenderAsk {
     explode: Option<DrawExplode>,
     /// Draw open annotations' pins, numbered.
     annotations: bool,
+    /// A sheet metal solid whose flat pattern to draw instead (`""`: the
+    /// part's one).
+    flat: Option<String>,
 }
 
 /// An explode a render draws.
@@ -6088,6 +6160,9 @@ fn render(
 ) -> Result<Answer> {
     use crate::render::{self as r, Geometry, Options};
     r::check_size(ask.width, ask.height)?;
+    if let Some(solid) = ask.flat.clone() {
+        return render_flat(session, ask, solid);
+    }
     let parts = render_parts(session.at(ask.rev.as_deref())?.1, ask.part.as_deref())?;
     // Other revisions' models only widen the framing.
     let mut extra: Vec<[f64; 3]> = Vec::new();
@@ -6421,6 +6496,138 @@ fn render(
     }
     if !warnings.is_empty() {
         result["warnings"] = json!(warnings);
+    }
+    Ok(Answer::bytes(result, "image/png", img.png()))
+}
+
+/// `render --flat`: `solid`'s flat pattern (`""`: the part's one sheet
+/// metal solid) as `flat.get` gives it, its flat body drawn as any body
+/// and seen along the pattern's `z` with its `y` up, its bend lines dashed
+/// over it in [`crate::render::BEND_UP`] or `BEND_DOWN`, labelled with
+/// their notes when `labels`.
+fn render_flat(session: &mut Session, ask: RenderAsk, solid: String) -> Result<Answer> {
+    use crate::render::{self as r, Geometry, Label, Line, Options};
+    for (param, given) in [
+        ("compare", ask.compare.is_some()),
+        ("frame", !ask.frame.is_empty()),
+        ("view", ask.view.is_some()),
+    ] {
+        if given {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("{param} doesn't apply to a flat pattern's render"),
+            )
+            .with("param", param));
+        }
+    }
+    let part = match render_parts(session.at(ask.rev.as_deref())?.1, ask.part.as_deref())?
+        .as_slice()
+    {
+        [one] => one.to_string(),
+        _ => {
+            return Err(
+                Error::new(Code::InvalidParam, "a flat pattern is one part's: name it")
+                    .with("param", "part"),
+            );
+        }
+    };
+    let named = (!solid.is_empty()).then_some(solid.as_str());
+    let (commit, f) = crate::sheet_metal::flat::of(
+        session,
+        &part,
+        named,
+        ask.rev.as_deref(),
+        &Default::default(),
+    )?;
+    let p = &f.pattern;
+    let size = (p.bounds.max() - p.bounds.min()).length().max(1e-3);
+    let mesh = f
+        .mesh
+        .get_or_init(|| {
+            let params = crate::mesh::Quality::Normal.params(size);
+            std::sync::Arc::new(crate::mesh::DisplayMesh {
+                mesh: ryukei::mesh::tessellate(&f.body.body, &params)
+                    .map(std::sync::Arc::new)
+                    .map_err(|e| Error::new(Code::Internal, format!("meshing the flat: {e:?}"))),
+                params,
+            })
+        })
+        .clone();
+    let meshed = mesh::Meshed {
+        body: f.body.body.clone(),
+        hash: f.body.hash.clone(),
+        mesh,
+        warning: None,
+    };
+    let mut g = Geometry::default();
+    draw_body(
+        &mut g,
+        &meshed,
+        &ryukei::geom::Rigid::IDENTITY,
+        &format!("{}/{}", f.part, f.solid),
+        &BTreeMap::new(),
+        (None, &BTreeMap::new(), None),
+        (false, ask.edges),
+    );
+    let fr = &p.frame;
+    let lift = |q: ryukei::geom::Point2| {
+        let w = fr.origin() + fr.x().get() * q.x + fr.y().get() * q.y;
+        [w.x, w.y, w.z]
+    };
+    for l in &p.bend_lines {
+        let at = g.positions.len() as u32;
+        g.positions.push(lift(l.start));
+        g.positions.push(lift(l.end));
+        let color = match l.direction {
+            ryukei::sheet_metal::BendDirection::Up => r::BEND_UP,
+            ryukei::sheet_metal::BendDirection::Down => r::BEND_DOWN,
+        };
+        g.lines.push(Line {
+            points: vec![at, at + 1],
+            color,
+            width: 2.0,
+            dash: true,
+        });
+        if ask.labels {
+            let mid =
+                ryukei::geom::Point2::new(0.5 * (l.start.x + l.end.x), 0.5 * (l.start.y + l.end.y));
+            g.labels.push(Label {
+                at: lift(mid),
+                text: ryuformats::dxf::note(l, ryuformats::dxf::DxfUnit::Mm, "°"),
+            });
+        }
+    }
+    let camera = match ask.camera {
+        Some(c) => c.resolve(session.project().manifest.default_unit)?,
+        None => {
+            let z = fr.z().get();
+            let y = fr.y().get();
+            let aspect = f64::from(ask.width) / f64::from(ask.height);
+            crate::view::frame_points_along(
+                &g.positions,
+                [z.x, z.y, z.z],
+                [y.x, y.y, y.z],
+                DEFAULT_PROJECTION,
+                aspect,
+            )
+        }
+    };
+    let img = r::render(
+        &g,
+        &camera,
+        ask.width,
+        ask.height,
+        Options {
+            silhouettes: ask.edges,
+            triad: true,
+        },
+    )?;
+    let mut result = json!({
+        "part": f.part, "flat": f.solid, "width": ask.width, "height": ask.height, "camera": camera,
+        "from": match &f.from { crate::sheet_metal::flat::From::Whole => "whole", crate::sheet_metal::flat::From::Unfold(_) => "unfold" },
+    });
+    if let Some(c) = commit {
+        result["commit"] = json!(c);
     }
     Ok(Answer::bytes(result, "image/png", img.png()))
 }
@@ -7444,6 +7651,109 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::HasDependents, "{e}");
+    }
+
+    #[test]
+    fn unfolds_and_refolds_through_the_protocol() {
+        let (_dir, mut s) = fresh();
+        crate::sheet_metal::tests::tray(&mut s, "p");
+        let sheet = call(&mut s, "sheet.get", json!({"part": "p"})).unwrap();
+        let bend = sheet["bends"][0]["bend"].as_str().unwrap().to_owned();
+        let side = sheet["flanges"][0]["sides"][0][0]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // An unfold: its target filled in, its fixed face written `fixed`,
+        // its allowance its founder's until it has its own.
+        let r = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "unfold", "id": "u",
+            "fixed_face": side, "bends": [{"bend": bend, "deduction": "2.2 mm"}]}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["target"], "plate", "{r}");
+        assert_eq!(r["feature"]["fixed"], side, "{r}");
+        assert_eq!(r["feature"]["bends"][0]["bend"], bend, "{r}");
+        assert_eq!(r["feature"]["bends"][0]["deduction"]["m"], 0.0022, "{r}");
+        assert_eq!(
+            r["feature"]["allowance"]["k_factor"]["value"], "0.44",
+            "{r}"
+        );
+        assert_eq!(r["feature"]["inherited"], json!(["allowance"]), "{r}");
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "u",
+            "allowance": {"k_factor": "0.5"}}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["inherited"], json!([]), "{r}");
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "u", "allowance": ""}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["inherited"], json!(["allowance"]), "{r}");
+        // The rebuild report gives the flat.
+        let rb = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let u = rb["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "u")
+            .unwrap()
+            .clone();
+        assert_eq!(u["flat"]["bends"], 4, "{u}");
+        assert_eq!(u["flat"]["partial"], false, "{u}");
+        assert!(u["flat"]["box_m"][1][0].as_f64().unwrap() > 0.06, "{u}");
+        // A refold, its unfold named.
+        let r = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "refold", "id": "rf", "unfold": "u", "only": [bend]}),
+        )
+        .unwrap();
+        assert_eq!(r["feature"]["unfold"], "u", "{r}");
+        assert_eq!(r["feature"]["only"], json!([bend]), "{r}");
+        let rb = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        assert_eq!(rb["parts"][0]["failed"], 0, "{rb}");
+        // Refused when written: a side face where a bend goes; an unfold
+        // the refold doesn't fold by; the unfold deleted while the refold
+        // reads it.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "u", "only": [side]}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::InvalidParam, Some("/only/0")),
+            "{e}"
+        );
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "rf", "unfold": "f"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::InvalidParam, Some("/unfold")),
+            "{e}"
+        );
+        let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "u"})).unwrap_err();
+        assert_eq!(e.code, Code::HasDependents, "{e}");
+        // A field another type takes is refused.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "rf", "angle": "90 deg"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam, "{e}");
     }
 
     #[test]

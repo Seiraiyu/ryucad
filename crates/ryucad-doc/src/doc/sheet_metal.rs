@@ -3,8 +3,9 @@
 //! or a bent section of one open chain) and holds the solid's settings;
 //! and an edge flange (`flange`), which adds a bend and a flange on each
 //! of its straight edges of one such solid, taking the settings it
-//! doesn't give from that solid's founder. Unfold and refold are plan
-//! 16.B's.
+//! doesn't give from that solid's founder. An unfold (`unfold`) lays one
+//! such solid flat, from then on in its chain, and a refold (`refold`)
+//! folds it back by its unfold's flat map (plan 16.B).
 
 use super::files::{Obj, invalid};
 use super::id::Id;
@@ -16,6 +17,9 @@ use serde_json::{Value, json};
 
 /// The feature format base flanges and flanges are new in.
 pub const FORMAT: u64 = 11;
+
+/// The feature format unfolds and refolds are new in.
+pub const UNFOLD_FORMAT: u64 = 14;
 
 /// How long a bend is in the flat (design 346's Bend allowance).
 #[derive(Clone, Debug, PartialEq)]
@@ -293,6 +297,38 @@ pub struct Flange {
     pub ends: Vec<End>,
 }
 
+/// One bend's allowance in an unfold, overriding its solid's: the bend
+/// named by any of its inner or outer faces.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BendAllowance {
+    pub bend: Reference,
+    pub allowance: Allowance,
+}
+
+/// An unfold: `target` laid flat, every bend (or those `only` names, each
+/// by a face of it) about the flange holding the side face `fixed` (the
+/// kernel's default flange unless written), each bend's developed length
+/// from `allowance` (its founder's unless written) unless `bends`
+/// overrides it. From it on, the solid's chain sees the flat.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Unfold {
+    pub target: Id,
+    pub fixed: Option<Reference>,
+    pub only: Vec<Reference>,
+    pub allowance: Option<Allowance>,
+    pub bends: Vec<BendAllowance>,
+}
+
+/// A refold: `target` folded back by the flat map of `unfold`, an earlier
+/// unfold of it with no refold of it between; every strip, or the bends
+/// `only` names (by the faces that named them in the unfold).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Refold {
+    pub target: Id,
+    pub unfold: Id,
+    pub only: Vec<Reference>,
+}
+
 /// The fields a request may give a base flange or a flange.
 pub fn request_fields(ty: &str) -> &'static [&'static str] {
     match ty {
@@ -307,6 +343,15 @@ pub fn request_fields(ty: &str) -> &'static [&'static str] {
             "allowance",
             "relief",
         ],
+        "unfold" => &[
+            "target",
+            "targets",
+            "fixed_face",
+            "only",
+            "allowance",
+            "bends",
+        ],
+        "refold" => &["target", "targets", "unfold", "only"],
         _ => &[
             "target", "targets", "edges", "sides", "angle", "length", "measured", "position",
             "radius", "relief", "setback", "ends",
@@ -612,9 +657,176 @@ impl Flange {
     }
 }
 
+/// A list of references at `key` (a bend or face each), written only
+/// when given, never empty.
+fn references_at(o: &mut Obj, key: &str) -> Result<Vec<Reference>> {
+    match o.take_opt(key) {
+        None => Ok(Vec::new()),
+        Some(Value::Array(a)) if !a.is_empty() => a
+            .iter()
+            .enumerate()
+            .map(|(i, x)| Reference::from_json(x, &format!("/{key}/{i}")))
+            .collect(),
+        Some(_) => Err(invalid(
+            &format!("/{key}"),
+            &format!("{key} is a non-empty array of faces {{feature, name}}"),
+        )),
+    }
+}
+
+impl Unfold {
+    /// Its fields; no fixed face, no `only`, no allowance and no
+    /// overrides are written as nothing.
+    pub fn fields(&self) -> Value {
+        let mut v = json!({"target": self.target});
+        if let Some(f) = &self.fixed {
+            v["fixed"] = f.to_json();
+        }
+        if !self.only.is_empty() {
+            v["only"] = Value::Array(self.only.iter().map(Reference::to_json).collect());
+        }
+        if let Some(a) = &self.allowance {
+            v["allowance"] = a.to_json();
+        }
+        if !self.bends.is_empty() {
+            v["bends"] = Value::Array(
+                self.bends
+                    .iter()
+                    .map(|b| {
+                        let mut x = b.allowance.to_json();
+                        x["bend"] = b.bend.to_json();
+                        x
+                    })
+                    .collect(),
+            );
+        }
+        v
+    }
+
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj, default: Unit, env: &Env) -> Result<Unfold> {
+        let target = id_field(o, "target")?;
+        let fixed = o
+            .take_opt("fixed")
+            .map(|v| Reference::from_json(&v, "/fixed"))
+            .transpose()?;
+        let only = references_at(o, "only")?;
+        let allowance = o
+            .take_opt("allowance")
+            .map(|v| Allowance::from_json(&v, "/allowance", default, env, true))
+            .transpose()?;
+        let bends = match o.take_opt("bends") {
+            None => Vec::new(),
+            Some(Value::Array(a)) if !a.is_empty() => a
+                .iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    let at = format!("/bends/{i}");
+                    let what = "an override is {bend, k_factor | deduction | allowance}";
+                    let mut rest = x.as_object().cloned().ok_or_else(|| invalid(&at, what))?;
+                    let bend = rest.remove("bend").ok_or_else(|| invalid(&at, what))?;
+                    let bend = Reference::from_json(&bend, &format!("{at}/bend"))?;
+                    let allowance =
+                        Allowance::from_json(&Value::Object(rest), &at, default, env, false)?;
+                    Ok(BendAllowance { bend, allowance })
+                })
+                .collect::<Result<_>>()?,
+            Some(_) => {
+                return Err(invalid(
+                    "/bends",
+                    "bends is a non-empty array of {bend, k_factor | deduction | allowance}",
+                ));
+            }
+        };
+        let u = Unfold {
+            target,
+            fixed,
+            only,
+            allowance,
+            bends,
+        };
+        once_each(&u.references(), &["only.", "bends."])?;
+        Ok(u)
+    }
+
+    /// Its references, each with its role: `fixed`, `only.<i>`,
+    /// `bends.<i>.bend`.
+    pub fn references(&self) -> Vec<(String, &Reference)> {
+        let mut out = Vec::new();
+        if let Some(f) = &self.fixed {
+            out.push(("fixed".to_owned(), f));
+        }
+        for (i, r) in self.only.iter().enumerate() {
+            out.push((format!("only.{i}"), r));
+        }
+        for (i, b) in self.bends.iter().enumerate() {
+            out.push((format!("bends.{i}.bend"), &b.bend));
+        }
+        out
+    }
+}
+
+impl Refold {
+    /// Its fields; no `only` is written as nothing.
+    pub fn fields(&self) -> Value {
+        let mut v = json!({"target": self.target, "unfold": self.unfold});
+        if !self.only.is_empty() {
+            v["only"] = Value::Array(self.only.iter().map(Reference::to_json).collect());
+        }
+        v
+    }
+
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj) -> Result<Refold> {
+        let target = id_field(o, "target")?;
+        let unfold = id_field(o, "unfold")?;
+        let only = references_at(o, "only")?;
+        let r = Refold {
+            target,
+            unfold,
+            only,
+        };
+        once_each(&r.references(), &["only."])?;
+        Ok(r)
+    }
+
+    /// Its references, each with its role: `only.<i>`.
+    pub fn references(&self) -> Vec<(String, &Reference)> {
+        self.only
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (format!("only.{i}"), r))
+            .collect()
+    }
+}
+
+/// Refuses a face named twice within one list (`only.`, `bends.`): the
+/// pointer is the second naming's. A face may be in `only` and
+/// overridden in `bends`.
+fn once_each(refs: &[(String, &Reference)], lists: &[&str]) -> Result<()> {
+    for list in lists {
+        let named: Vec<&(String, &Reference)> =
+            refs.iter().filter(|(r, _)| r.starts_with(list)).collect();
+        for (k, (role, r)) in named.iter().enumerate() {
+            if let Some((first, _)) = named[..k].iter().find(|(_, x)| x == r) {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "{}/{} is named twice, as {first} and {role}",
+                        r.feature, r.name
+                    ),
+                )
+                .with("pointer", format!("/{}", role.replace('.', "/")))
+                .with("first", format!("/{}", first.replace('.', "/"))));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The expression strings of a sheet metal field `k` of a feature's JSON:
 /// an allowance's size, a relief's sizes, each end's setback and relief,
-/// a setback and a flange's length.
+/// a setback and a flange's length, and an unfold's overrides.
 pub fn expression_strings<'a>(k: &str, field: &'a mut Value) -> Vec<&'a mut String> {
     fn relief(v: &mut Value) -> Vec<&mut String> {
         let mut out = Vec::new();
@@ -650,6 +862,20 @@ pub fn expression_strings<'a>(k: &str, field: &'a mut Value) -> Vec<&'a mut Stri
             }
         }
         ("setback" | "length", Value::String(s)) => out.push(s),
+        // An unfold's overrides: each bend's K-factor, deduction or
+        // allowance.
+        ("bends", Value::Array(bends)) => {
+            for b in bends.iter_mut() {
+                let Value::Object(b) = b else { continue };
+                for (k, x) in b.iter_mut() {
+                    if let ("k_factor" | "deduction" | "allowance", Value::String(s)) =
+                        (k.as_str(), x)
+                    {
+                        out.push(s);
+                    }
+                }
+            }
+        }
         _ => {}
     }
     out
@@ -957,5 +1183,110 @@ mod tests {
             _ => -1.0,
         };
         assert_eq!(k, 0.44);
+    }
+
+    fn unfold(v: Value) -> Result<Unfold> {
+        let mut o = Obj::new(&v, "")?;
+        let u = Unfold::from_fields(&mut o, Unit::Mm, &Env::empty())?;
+        o.finish()?;
+        Ok(u)
+    }
+
+    fn refold(v: Value) -> Result<Refold> {
+        let mut o = Obj::new(&v, "")?;
+        let r = Refold::from_fields(&mut o)?;
+        o.finish()?;
+        Ok(r)
+    }
+
+    #[test]
+    fn unfolds_and_refolds_round_trip() {
+        // Every bend about the default flange with the founder's
+        // allowance: only the target is written.
+        let u = unfold(json!({"target": "tray"})).unwrap();
+        assert!(u.fixed.is_none() && u.only.is_empty() && u.bends.is_empty());
+        assert!(u.allowance.is_none());
+        assert_eq!(u.fields(), json!({"target": "tray"}));
+        let v = json!({"target": "tray", "fixed": r(A), "only": [r(B)],
+                       "allowance": {"k_factor": "0.4"},
+                       "bends": [{"bend": r(B), "deduction": "2.2 mm"},
+                                 {"bend": r(C), "allowance": "3.1 mm"}]});
+        let u = unfold(v.clone()).unwrap();
+        assert_eq!(u.fields(), v);
+        assert_eq!(unfold(u.fields()).unwrap(), u);
+        let roles: Vec<String> = u.references().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(roles, ["fixed", "only.0", "bends.0.bend", "bends.1.bend"]);
+        let rf = refold(json!({"target": "tray", "unfold": "u1"})).unwrap();
+        assert_eq!(rf.fields(), json!({"target": "tray", "unfold": "u1"}));
+        let v = json!({"target": "tray", "unfold": "u1", "only": [r(B)]});
+        let x = refold(v.clone()).unwrap();
+        assert_eq!(x.fields(), v);
+        let roles: Vec<String> = x.references().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(roles, ["only.0"]);
+    }
+
+    #[test]
+    fn unfold_and_refold_files_are_checked() {
+        for (v, code, pointer) in [
+            (json!({}), Code::InvalidDocument, "/target"),
+            (
+                json!({"target": "tray", "only": []}),
+                Code::InvalidDocument,
+                "/only",
+            ),
+            (
+                json!({"target": "tray", "only": [r(A), r(A)]}),
+                Code::InvalidParam,
+                "/only/1",
+            ),
+            (
+                json!({"target": "tray", "allowance": {"allowance": "2 mm"}}),
+                Code::InvalidDocument,
+                "/allowance",
+            ),
+            (
+                json!({"target": "tray", "bends": [{"bend": r(A)}]}),
+                Code::InvalidDocument,
+                "/bends/0",
+            ),
+            (
+                json!({"target": "tray", "bends": [{"bend": r(A), "k_factor": 2}]}),
+                Code::InvalidParam,
+                "/bends/0/k_factor",
+            ),
+            (
+                json!({"target": "tray", "bends": [{"bend": r(A), "k_factor": 0.4},
+                                                   {"bend": r(A), "k_factor": 0.5}]}),
+                Code::InvalidParam,
+                "/bends/1/bend",
+            ),
+        ] {
+            let e = unfold(v.clone()).unwrap_err();
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (code, Some(pointer)),
+                "{v}"
+            );
+        }
+        for (v, code, pointer) in [
+            (json!({"target": "tray"}), Code::InvalidDocument, "/unfold"),
+            (
+                json!({"target": "tray", "unfold": "U1"}),
+                Code::InvalidId,
+                "/unfold",
+            ),
+            (
+                json!({"target": "tray", "unfold": "u1", "only": []}),
+                Code::InvalidDocument,
+                "/only",
+            ),
+        ] {
+            let e = refold(v.clone()).unwrap_err();
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (code, Some(pointer)),
+                "{v}"
+            );
+        }
     }
 }

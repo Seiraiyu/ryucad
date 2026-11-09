@@ -1,12 +1,15 @@
-//! jlc is a connector: outside its own module, only the connector table
-//! names it (the owner, on plan 387's question 248). Tests and comments
-//! may; a supplier's name in an offer is the agent's data, not code.
+//! jlc and digikey are connectors: outside its own module, only its table
+//! names each (`catalogue::CONNECTORS`, `distributor::DISTRIBUTORS`; the
+//! owner, on plan 387's question 248: no hard commitment to any one
+//! supplier). Tests and comments may; a supplier's name in an offer is
+//! the agent's data, not code.
 
 fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     for e in std::fs::read_dir(dir).unwrap().flatten() {
         let p = e.path();
         if p.is_dir() {
-            if p.file_name() != Some(std::ffi::OsStr::new("jlc")) {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !["jlc", "digikey"].contains(&name) {
                 rust_files(&p, out);
             }
         } else if p.extension() == Some(std::ffi::OsStr::new("rs")) {
@@ -16,7 +19,7 @@ fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 }
 
 #[test]
-fn no_file_outside_the_connector_names_jlc() {
+fn no_file_outside_a_connector_names_it() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut files = Vec::new();
     for c in ["ryueda/src", "ryueda-parts/src"] {
@@ -27,7 +30,12 @@ fn no_file_outside_the_connector_names_jlc() {
     // Besides the table: the connector's module declared, and KiCad
     // import's spellings of suppliers' columns (6.A: an offer names its
     // supplier, as files write it; that is data, not a connector).
-    let allowed = ["catalogue.rs", "ryueda-parts/src/lib.rs", "kicad/import.rs"];
+    let allowed = [
+        "catalogue.rs",
+        "distributor.rs",
+        "ryueda-parts/src/lib.rs",
+        "kicad/import.rs",
+    ];
     for f in files.iter().filter(|f| {
         !allowed
             .iter()
@@ -44,7 +52,10 @@ fn no_file_outside_the_connector_names_jlc() {
             // `jlcpcb` is the assembly house (`parts.json`'s `assembly`),
             // not the catalogue.
             let l = l.replace("jlcpcb", "");
-            if l.contains("jlc") || l.contains("lcsc") {
+            if ["jlc", "lcsc", "digikey", "digi-key", "mouser"]
+                .iter()
+                .any(|n| l.contains(n))
+            {
                 hits.push(format!("{}:{}: {}", f.display(), i + 1, line.trim()));
             }
         }

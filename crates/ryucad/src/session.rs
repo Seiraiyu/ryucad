@@ -78,6 +78,9 @@ pub struct Session {
     known: BTreeMap<(Id, Id), BTreeMap<ryukei::name::Name, Known>>,
     /// Display meshes of rebuilt bodies.
     pub meshes: crate::mesh::Cache,
+    /// The last flat patterns asked for (`flat.get`, DXF exports,
+    /// `render --flat`), by the shown body and the options.
+    pub flats: crate::sheet_metal::flat::Cache,
     /// What intersecting pairs of placed solids found, for `interference`.
     pub interference: crate::interference::Cache,
     /// Mass properties worked out, for `mass`.
@@ -235,6 +238,7 @@ impl Session {
             foreign_pins: BTreeMap::new(),
             known: BTreeMap::new(),
             meshes: crate::mesh::Cache::default(),
+            flats: Default::default(),
             interference: crate::interference::Cache::default(),
             mass: crate::mass::Cache::default(),
             clearance: crate::clearance::Cache::default(),
@@ -439,6 +443,7 @@ impl Session {
             foreign_pins: from.foreign_pins.clone(),
             known: from.known.clone(),
             meshes: crate::mesh::Cache::with_disk(from.store.disk.clone()),
+            flats: Default::default(),
             interference: from.interference.clone(),
             mass: from.mass.clone(),
             clearance: from.clearance.clone(),

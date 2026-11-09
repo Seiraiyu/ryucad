@@ -189,6 +189,54 @@ fn project(
         .map(|g| (image(g), item(g).tolerance))
         .collect();
     let mut ev = events(&met, m);
+    // A silhouette changes visibility at its image's cusps, and an edge
+    // where a silhouette of its face ends on it, with no image crossing
+    // (plan 10.C's property test: a torus's contour, race bodies 15 and
+    // 18).
+    for g in 0..imgs.len() {
+        let it = item(g);
+        if let Source::Silhouette { .. } = it.source {
+            ev.cuts[g].extend(cusps(&it.curve, image(g).range, view));
+        }
+    }
+    for (b, sil) in silhouettes.iter().enumerate() {
+        let body = bodies[b];
+        for s in &sil.branches {
+            for t in s.range {
+                let x = s.curve.point(t);
+                for l in body.face_loops(s.face) {
+                    for fin in body.loop_fins(l) {
+                        let e = body.fins[fin].edge;
+                        let Some(at) = on_edge(body, e, x, s.tolerance) else {
+                            continue;
+                        };
+                        for g in 0..imgs.len() {
+                            let hit = matches!(item(g).source,
+                                Source::Edge { body: eb, edge, .. } if eb as usize == b && edge == e);
+                            let [r0, r1] = image(g).range;
+                            if !hit || at <= r0.min(r1) || at >= r0.max(r1) {
+                                continue;
+                            }
+                            // Not where the piece already ends or is cut
+                            // (a ruling ending where its rim touches its
+                            // image: a touch's parameter is found only
+                            // within the tangent wedge, `sqrt(2 × size ×
+                            // reach)`).
+                            let (it, y) = (item(g), item(g).curve.point(at));
+                            let reach = touch_reach(it.tolerance.max(s.tolerance));
+                            let bx = it.curve.bounds([r0.min(r1), r0.max(r1)]);
+                            let size = (bx.max() - bx.min()).length();
+                            let wedge = crate::math::sqrt(2.0 * size * reach).max(reach);
+                            let clear = |c: f64| y.distance(it.curve.point(c)) > wedge;
+                            if clear(r0) && clear(r1) && ev.cuts[g].iter().all(|&c| clear(c)) {
+                                ev.cuts[g].push(at);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     // Where a curve passes through another body (a press fit), its
     // visibility changes with no image event.
     let stretches: Vec<Stretch> = (0..imgs.len())
@@ -270,6 +318,81 @@ fn project(
         pieces,
         silhouettes,
     })
+}
+
+/// Where `curve`'s image over `range` has a cusp: local maxima of the
+/// cosine between its tangent and the view direction past
+/// [`CUSP_COSINE`], found at 256 samples and refined by golden section.
+/// A contour's image cusps where its tangent turns along the view (where
+/// a fitted one turns sharply short of it), and its visibility changes
+/// there. Cutting more than needed only splits a piece, each part judged
+/// by its own ray.
+fn cusps(curve: &Curve, range: [f64; 2], view: &View) -> Vec<f64> {
+    let t = view.towards().get();
+    let along = |s: f64| {
+        let d = curve.eval(s).d1;
+        let n2 = d.dot(d);
+        if n2 > 0.0 {
+            let c = d.dot(t);
+            c * c / n2
+        } else {
+            1.0
+        }
+    };
+    const N: usize = 256;
+    let [r0, r1] = [range[0].min(range[1]), range[0].max(range[1])];
+    let at = |k: usize| r0 + (r1 - r0) * k as f64 / N as f64;
+    let vals: Vec<f64> = (0..=N).map(|k| along(at(k))).collect();
+    let mut out = Vec::new();
+    for k in 1..N {
+        if vals[k] < CUSP_COSINE || vals[k] < vals[k - 1] || vals[k] < vals[k + 1] {
+            continue;
+        }
+        // Golden section over the two steps either side.
+        let (mut a, mut b) = (at(k - 1), at(k + 1));
+        let g = 0.618_033_988_749_894_9;
+        for _ in 0..80 {
+            let (c, d) = (b - g * (b - a), a + g * (b - a));
+            if along(c) >= along(d) {
+                b = d;
+            } else {
+                a = c;
+            }
+        }
+        let m = (a + b) / 2.0;
+        if m > r0 && m < r1 {
+            out.push(m);
+        }
+    }
+    out
+}
+
+/// The squared cosine past which a local maximum of a silhouette's
+/// tangent's turn towards the view is a cusp of its image: within about
+/// 0.05 rad of along it.
+const CUSP_COSINE: f64 = 0.9975;
+
+/// Edge `e`'s parameter nearest `x`, where `x` (a silhouette's end, of
+/// tolerance `tol`) lies within the touch reach of it, inside its interval.
+fn on_edge(body: &Body, e: EdgeId, x: crate::geom::Point3, tol: f64) -> Option<f64> {
+    let edge = &body.edges[e];
+    let curve = &body.curves[edge.curve];
+    let p = curve.project(x);
+    let reach = touch_reach(tol.max(edge.tolerance.get()));
+    if p.distance > reach {
+        return None;
+    }
+    let [i0, i1] = edge.interval;
+    let mut at = p.param;
+    if let Some(period) = curve.period() {
+        while at < i0 {
+            at += period;
+        }
+        while at - period > i0 {
+            at -= period;
+        }
+    }
+    (at > i0 && at < i1).then_some(at)
 }
 
 /// An enclosure of `curve`'s depth along the view over `range`.
