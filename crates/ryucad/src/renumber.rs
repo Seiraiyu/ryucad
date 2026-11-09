@@ -264,13 +264,13 @@ fn transform(
         Rename::Feature { from, to, .. } => match pointer {
             // A refold's `unfold` names its unfold as `target` names a
             // solid's founder.
-            "/sketch" | "/target" | "/solid" | "/unfold" => {
+            "/sketch" | "/target" | "/solid" | "/unfold" | "/from/sheet" => {
                 (node.as_str() == Some(from)).then(|| json!(to))
             }
-            // The solids an operation or a boolean acts on, what a
-            // pattern repeats, and the instances an instance pattern
-            // copies.
-            "/targets" | "/tools" | "/features" | "/instances" => {
+            // The solids an operation or a boolean acts on, the sheets a
+            // sew sews, what a pattern repeats, and the instances an
+            // instance pattern copies.
+            "/targets" | "/tools" | "/features" | "/instances" | "/sheets" => {
                 let list: Vec<Value> = node
                     .as_array()?
                     .iter()
@@ -864,9 +864,23 @@ mod tests {
             "distance": "0 mm",
             "faces": [{"distance": "1 mm", "faces": [{"feature": "b", "name": old}]}],
         });
+        let sew = json!({"format": 15, "kind": "ryucad.feature", "type": "sew",
+            "sheets": ["b", "c"], "tolerance": "0.01 mm", "solid": true});
+        let th = json!({"format": 15, "kind": "ryucad.feature", "type": "thicken",
+            "from": {"sheet": "b"}, "front": "1 mm", "back": "0 mm", "operation": "new"});
+        let thf = json!({"format": 15, "kind": "ryucad.feature", "type": "thicken",
+            "from": {"faces": [{"feature": "b", "name": old}]}, "front": "1 mm", "back": "0 mm",
+            "operation": "new"});
+        let fl = json!({"format": 15, "kind": "ryucad.feature", "type": "fill",
+            "sides": [{"edge": {"feature": "b", "name": old}}, {"curve": "x"}, {"curve": "y"}],
+            "tolerance": "0.001 mm", "angle": "1 deg"});
         let f = files(&[
             ("parts/a/features/sh.json", shell),
             ("parts/a/features/o.json", offset),
+            ("parts/a/features/sw.json", sew),
+            ("parts/a/features/th.json", th),
+            ("parts/a/features/thf.json", thf),
+            ("parts/a/features/fl.json", fl),
         ]);
         let r = Rename::Feature {
             part: "a".into(),
@@ -888,6 +902,14 @@ mod tests {
             o["faces"][0]["faces"][0],
             json!({"feature": "b-1", "name": new})
         );
+        let sw = read("parts/a/features/sw.json");
+        assert_eq!(sw["sheets"], json!(["b-1", "c"]));
+        let th = read("parts/a/features/th.json");
+        assert_eq!(th["from"], json!({"sheet": "b-1"}));
+        let thf = read("parts/a/features/thf.json");
+        assert_eq!(thf["from"]["faces"][0], json!({"feature": "b-1", "name": new}));
+        let fl = read("parts/a/features/fl.json");
+        assert_eq!(fl["sides"][0]["edge"], json!({"feature": "b-1", "name": new}));
     }
 
     #[test]
