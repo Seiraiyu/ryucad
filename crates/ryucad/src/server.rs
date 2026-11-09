@@ -3970,14 +3970,17 @@ fn check_references(
     // A loft's sections are matched against the rebuild whatever they
     // reference, and what a feature acts on must be a solid (ryucad 18).
     // Only a feature whose file says so makes a sheet, so a part holding
-    // none needs no rebuild to judge what its features act on.
+    // none needs no rebuild to judge a feature that wants solids; one that
+    // wants a sheet there names a solid, which the rebuild must refuse.
     let may_hold_sheets = session
         .project()
         .part(part)?
         .features
         .values()
         .any(|g| g.as_ref().is_ok_and(|g| g.may_make_sheet()));
-    let reads_bodies = may_hold_sheets && !crate::kind::bodies_read(f).is_empty();
+    let read = crate::kind::bodies_read(f);
+    let reads_bodies = !read.is_empty()
+        && (may_hold_sheets || read.iter().any(|(_, _, w)| *w == crate::kind::Want::Sheet));
     let planar = matches!(f, Feature::Planar(_));
     // An unfold's allowance and a refold's unfold are judged against the
     // rebuild whatever they reference.
@@ -7934,6 +7937,46 @@ pub(crate) mod tests {
             .iter()
             .map(|f| json!(format!("p/{feature}/{}", f["name"].as_str().unwrap())))
             .collect()
+    }
+
+    #[test]
+    fn sews_and_thickens_of_solids_are_refused_in_a_part_of_solids() {
+        let (_dir, mut s) = fresh();
+        let must = |s: &mut Session, m: &str, v: Value| call(s, m, v).unwrap();
+        must(&mut s, "part.create", json!({"part": "p"}));
+        for (id, at) in [("a", 0), ("b", 20)] {
+            must(
+                &mut s,
+                "feature.add",
+                json!({"part": "p", "type": "box", "id": id,
+                "params": {"x": 10, "y": 10, "z": 10}, "placement": {"origin": [at, 0, 0]}}),
+            );
+        }
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sew", "sheets": ["a", "b"]}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["wanted"].as_str()),
+            (Code::WrongBodyKind, Some("sheet")),
+            "{e}"
+        );
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "thicken", "sheet": "a", "front": "1 mm"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["role"].as_str()),
+            (Code::WrongBodyKind, Some("from")),
+            "{e}"
+        );
+        // Nothing was written.
+        let v = call(&mut s, "feature.list", json!({"part": "p"})).unwrap();
+        assert_eq!(v["features"].as_array().map(Vec::len), Some(2), "{v}");
     }
 
     #[test]

@@ -864,14 +864,14 @@ mod tests {
             "distance": "0 mm",
             "faces": [{"distance": "1 mm", "faces": [{"feature": "b", "name": old}]}],
         });
-        let sew = json!({"format": 15, "kind": "ryucad.feature", "type": "sew",
+        let sew = json!({"format": crate::doc::surface::FORMAT, "kind": "ryucad.feature", "type": "sew",
             "sheets": ["b", "c"], "tolerance": "0.01 mm", "solid": true});
-        let th = json!({"format": 15, "kind": "ryucad.feature", "type": "thicken",
+        let th = json!({"format": crate::doc::surface::FORMAT, "kind": "ryucad.feature", "type": "thicken",
             "from": {"sheet": "b"}, "front": "1 mm", "back": "0 mm", "operation": "new"});
-        let thf = json!({"format": 15, "kind": "ryucad.feature", "type": "thicken",
+        let thf = json!({"format": crate::doc::surface::FORMAT, "kind": "ryucad.feature", "type": "thicken",
             "from": {"faces": [{"feature": "b", "name": old}]}, "front": "1 mm", "back": "0 mm",
             "operation": "new"});
-        let fl = json!({"format": 15, "kind": "ryucad.feature", "type": "fill",
+        let fl = json!({"format": crate::doc::surface::FORMAT, "kind": "ryucad.feature", "type": "fill",
             "sides": [{"edge": {"feature": "b", "name": old}}, {"curve": "x"}, {"curve": "y"}],
             "tolerance": "0.001 mm", "angle": "1 deg"});
         let f = files(&[

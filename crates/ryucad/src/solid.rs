@@ -356,7 +356,7 @@ pub(crate) mod tests {
             ("s", boxed("0", New, &[])),
             ("later", boxed("0.5", Cut, &["a"])),
         ]);
-        let v = serde_json::json!({"format": 15, "kind": "ryucad.feature", "type": "sew",
+        let v = serde_json::json!({"format": crate::doc::surface::FORMAT, "kind": "ryucad.feature", "type": "sew",
                                    "sheets": ["a", "b"], "tolerance": "nope", "solid": true});
         p.acts.insert(id("s"), crate::doc::files::feature_acts(&v));
         p.features.insert(
