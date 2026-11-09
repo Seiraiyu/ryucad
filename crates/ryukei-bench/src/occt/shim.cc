@@ -2,6 +2,17 @@
 #include "ryukei-bench/src/occt.rs.h"
 
 #include <BRepAlgoAPI_BooleanOperation.hxx>
+#include <BRepLib.hxx>
+#include <GCPnts_AbscissaPoint.hxx>
+#include <GeomAdaptor_Curve.hxx>
+#include <HLRAlgo_Projector.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Edge.hxx>
+#include <HLRBRep_Algo.hxx>
+#include <HLRBRep_HLRToShape.hxx>
+#include <gp_Ax2.hxx>
+#include <chrono>
+#include <stdexcept>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepAlgoAPI_Splitter.hxx>
@@ -996,6 +1007,57 @@ rust::Vec<double> face_normal(const Shape &s, double x, double y, double z) {
   out.push_back(n.Y());
   out.push_back(n.Z());
   return out;
+}
+
+rust::Vec<double> hlr(const Shape &s, rust::Slice<const double> view) {
+  try {
+    gp_Ax2 frame(gp::Origin(), gp_Dir(view[0], view[1], view[2]),
+                 gp_Dir(view[3], view[4], view[5]));
+    auto start = std::chrono::steady_clock::now();
+    Handle(HLRBRep_Algo) algo = new HLRBRep_Algo();
+    algo->Add(s.shape);
+    algo->Projector(HLRAlgo_Projector(frame));
+    algo->Update();
+    algo->Hide();
+    HLRBRep_HLRToShape out(algo);
+    TopoDS_Shape parts[6] = {
+        out.VCompound(),  out.Rg1LineVCompound(), out.OutLineVCompound(),
+        out.HCompound(),  out.Rg1LineHCompound(), out.OutLineHCompound()};
+    double seconds = std::chrono::duration<double>(
+                         std::chrono::steady_clock::now() - start)
+                         .count();
+    // Each compound's length edge by edge: HLRBRep_HLRToShape can give
+    // edges with no 3D curve, on which BRepGProp::LinearProperties
+    // crashes (a filleted box's smooth lines), so a missing curve is
+    // built from the edge's pcurve first, and an edge with none at all
+    // is skipped.
+    rust::Vec<double> r;
+    for (const TopoDS_Shape &p : parts) {
+      double length = 0.0;
+      if (!p.IsNull()) {
+        for (TopExp_Explorer ex(p, TopAbs_EDGE); ex.More(); ex.Next()) {
+          const TopoDS_Edge &e = TopoDS::Edge(ex.Current());
+          Standard_Real f, l;
+          Handle(Geom_Curve) c = BRep_Tool::Curve(e, f, l);
+          if (c.IsNull()) {
+            BRepLib::BuildCurve3d(e);
+            c = BRep_Tool::Curve(e, f, l);
+          }
+          if (c.IsNull()) {
+            continue;
+          }
+          GeomAdaptor_Curve a(c, f, l);
+          length += GCPnts_AbscissaPoint::Length(a);
+        }
+      }
+      r.push_back(length);
+    }
+    r.push_back(seconds);
+    return r;
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("HLRBRep_Algo: ") +
+                             e.GetMessageString());
+  }
 }
 
 } // namespace ryukei_occt

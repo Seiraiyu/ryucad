@@ -164,6 +164,7 @@ fn the_references_read_every_seeded_body() {
                     name: "s".into(),
                     body: Arc::new(b.clone()),
                     mesh: meshed(b),
+                    brep: true,
                 }],
                 children: vec![],
             }],

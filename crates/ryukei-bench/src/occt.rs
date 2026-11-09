@@ -5,8 +5,8 @@
 //! fillets and chamfers from `BRepFilletAPI`, meshes from `BRepMesh_IncrementalMesh`
 //! in absolute mode, exact volume, area and distance from the B-rep,
 //! STL files read by `RWStl` and written by `StlAPI_Writer`, and faces
-//! sewn by `BRepBuilderAPI_Sewing`, and shapes split by
-//! `BRepAlgoAPI_Splitter`.
+//! sewn by `BRepBuilderAPI_Sewing`, shapes split by
+//! `BRepAlgoAPI_Splitter`, and exact hidden lines from `HLRBRep_Algo`.
 //! Only built with the `occt` feature, against a system OCCT 7.8 or later
 //! (`OCCT_DIR`, default `/usr`).
 
@@ -120,6 +120,7 @@ mod ffi {
             pb: &[f64],
             samples: u32,
         ) -> Result<Vec<f64>>;
+        fn hlr(s: &Shape, view: &[f64]) -> Result<Vec<f64>>;
     }
 }
 
@@ -597,4 +598,29 @@ pub fn intersect_faces(
         at += 3 * n;
     }
     Ok(out)
+}
+
+/// What OCCT's exact hidden-line removal draws: image lengths of the
+/// visible and hidden lines, each `[sharp, smooth, outline]` as
+/// `ryukei_testkit::projection::Lengths` holds them, in the shape's
+/// units, and how long it took.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Hlr {
+    pub visible: [f64; 3],
+    pub hidden: [f64; 3],
+    pub seconds: f64,
+}
+
+impl Solid {
+    /// `HLRBRep_Algo` and `HLRBRep_HLRToShape` seen along `-towards`,
+    /// `x` to the right, on one thread (OCCT's HLR has no other).
+    pub fn hlr(&self, towards: Vector3, x: Vector3) -> Result<Hlr, String> {
+        let r = ffi::hlr(&self.0, &[towards.x, towards.y, towards.z, x.x, x.y, x.z])
+            .map_err(|e| e.to_string())?;
+        Ok(Hlr {
+            visible: [r[0], r[1], r[2]],
+            hidden: [r[3], r[4], r[5]],
+            seconds: r[6],
+        })
+    }
 }

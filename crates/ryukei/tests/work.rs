@@ -573,6 +573,23 @@ fn views_are_bounded() {
     eprintln!("view: {spent} units");
 }
 
+#[test]
+fn sections_are_bounded() {
+    use ryukei::geom::{Frame, Plane, Point3};
+    use ryukei::project::section_with;
+    let (ball, _) = primitive::sphere(OpKey(15), 0.01, &Rigid::IDENTITY).unwrap();
+    let plane = Plane::new(
+        Frame::new(
+            Point3::new(0.0, 0.0, 0.002),
+            Vector3::new(0.0, 0.3, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap(),
+    );
+    let spent = bounded("section", |w| section_with(OpKey(16), &ball, &plane, w));
+    eprintln!("section: {spent} units");
+}
+
 /// A unit costs about the same time whichever surfaces it encloses
 /// (#353): the drilled block's check, its NURBS twin's, and #260's first
 /// sweep find (sides on sweep surfaces, built and checked) spend units
