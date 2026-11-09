@@ -10,6 +10,7 @@
 
 pub(crate) mod body;
 pub(crate) mod region;
+pub(crate) mod seeds;
 pub(crate) mod walk;
 pub(crate) mod working;
 
