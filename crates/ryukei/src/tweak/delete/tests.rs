@@ -95,3 +95,29 @@ fn a_holes_rims_are_holes_of_the_plate_and_its_foot_is_not_the_bosss_tops() {
     assert_eq!(s[0].hosts.len(), 2);
     assert!(!s[0].closable(&b));
 }
+
+#[test]
+fn a_cap_lays_the_plate_out_without_its_hole() {
+    let b = drilled();
+    let wall: BTreeSet<FaceId> = b
+        .faces()
+        .filter(|&f| cylinders(&b).contains(&b.faces[f].name))
+        .collect();
+    let s = sets::sets(&b, &wall);
+    // unmetered: a unit test.
+    let m = Meter::free();
+    let (o, j) = cap::cap(D, &b, &[&s[0]], &m).unwrap();
+    assert_eq!(
+        (o.faces().count(), o.edges().count(), o.vertices().count()),
+        (6, 12, 8)
+    );
+    assert!((volume(&o) - 0.2).abs() < 1e-9);
+    let modified = j
+        .events()
+        .iter()
+        .filter(|e| matches!(e, Event::Modified(_)))
+        .count();
+    // The top and the bottom; the wall, both rims and their vertices go.
+    assert_eq!(modified, 2);
+    assert_eq!(j.events().len(), 2 + 1 + 2 + 2);
+}

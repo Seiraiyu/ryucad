@@ -7,14 +7,15 @@
 // Until delete_faces wires the modules up (plan 13.B, Task 7).
 #![allow(dead_code, unused_imports)]
 
+pub(crate) mod cap;
 pub(crate) mod hole;
 pub(crate) mod sets;
 
 #[cfg(test)]
 mod tests;
 
-use crate::name::Name;
-use crate::topo::FaceId;
+use crate::name::{Event, Name};
+use crate::topo::{Body, FaceId};
 use std::collections::BTreeSet;
 
 /// How a deleted set's gap is closed.
@@ -34,4 +35,13 @@ pub enum Heal {
 pub struct DeleteSpec {
     pub faces: Vec<Name>,
     pub heal: Heal,
+}
+
+/// The least name among `faces`.
+pub(crate) fn least(body: &Body, faces: &BTreeSet<FaceId>) -> Name {
+    faces
+        .iter()
+        .map(|&f| body.faces[f].name)
+        .min()
+        .expect("a set holds a face")
 }

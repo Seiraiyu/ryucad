@@ -69,6 +69,18 @@ pub(crate) struct Copied {
 /// Copies the chosen faces of `body` into `out` after what it holds, in
 /// body order, each piece of geometry and each edge and vertex once.
 pub(crate) fn copy(out: &mut Layout, body: &Body, chosen: &BTreeSet<FaceId>) -> Copied {
+    copy_where(out, body, chosen, |_| true)
+}
+
+/// [`copy`] keeping only the loops `keep` takes (a cap's hosts lose the
+/// holes it closes); an edge or vertex only a dropped loop uses isn't
+/// copied.
+pub(crate) fn copy_where(
+    out: &mut Layout,
+    body: &Body,
+    chosen: &BTreeSet<FaceId>,
+    keep: impl Fn(crate::topo::LoopId) -> bool,
+) -> Copied {
     let (mut surfaces, mut curves, mut curves2) =
         (BTreeMap::new(), BTreeMap::new(), BTreeMap::new());
     let mut faces = Vec::with_capacity(chosen.len());
@@ -85,6 +97,9 @@ pub(crate) fn copy(out: &mut Layout, body: &Body, chosen: &BTreeSet<FaceId>) -> 
         });
         let mut loops = Vec::new();
         for l in body.face_loops(f) {
+            if !keep(l) {
+                continue;
+            }
             if let Some(v) = body.loops[l].vertex {
                 loops.push(Boundary::Lone(slot(
                     &mut vertices,
