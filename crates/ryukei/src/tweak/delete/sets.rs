@@ -1,6 +1,8 @@
 //! Deleted faces in connected sets, and the loops of the faces round each
 //! set that run wholly along it: where a cap would close it.
 
+use super::hole::is_hole;
+use crate::geom::Surface;
 use crate::topo::{Body, EdgeId, FaceId, LoopId};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -84,4 +86,29 @@ pub(crate) fn sets(body: &Body, deleted: &BTreeSet<FaceId>) -> Vec<Set> {
             }
         })
         .collect()
+}
+
+impl Set {
+    /// Whether a cap closes the set: every boundary edge on a host loop,
+    /// each a hole of its face, the face keeping a loop or closing up.
+    pub(crate) fn closable(&self, body: &Body) -> bool {
+        let on: BTreeSet<EdgeId> = self
+            .hosts
+            .iter()
+            .flat_map(|&(_, l)| body.loop_fins(l).map(|fin| body.fins[fin].edge))
+            .collect();
+        if on != self.boundary {
+            return false;
+        }
+        self.hosts.iter().all(|&(g, l)| {
+            let left = body.face_loops(g).filter(|&k| k != l).count();
+            let closes = matches!(
+                body.surfaces[body.faces[g].surface],
+                Surface::Sphere(_) | Surface::Torus(_)
+            );
+            // Loops this set takes from the same face all go together.
+            let taken = self.hosts.iter().filter(|&&(h, _)| h == g).count();
+            (left + 1 > taken || closes) && is_hole(body, g, l)
+        })
+    }
 }

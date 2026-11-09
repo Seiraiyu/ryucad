@@ -76,7 +76,7 @@ fn spec(faces: Vec<Name>, heal: Heal) -> DeleteSpec {
 }
 
 #[test]
-fn a_holes_wall_is_one_set_round_two_host_loops() {
+fn a_holes_rims_are_holes_of_the_plate_and_its_foot_is_not_the_bosss_tops() {
     let b = drilled();
     let wall: BTreeSet<FaceId> = b
         .faces()
@@ -84,6 +84,14 @@ fn a_holes_wall_is_one_set_round_two_host_loops() {
         .collect();
     let s = sets::sets(&b, &wall);
     assert_eq!(s.len(), 1);
-    assert_eq!(s[0].boundary.len(), 2);
     assert_eq!(s[0].hosts.len(), 2);
+    assert!(s[0].closable(&b));
+    let b = bossed();
+    let side: BTreeSet<FaceId> = b
+        .faces()
+        .filter(|&f| cylinders(&b).contains(&b.faces[f].name))
+        .collect();
+    let s = sets::sets(&b, &side);
+    assert_eq!(s[0].hosts.len(), 2);
+    assert!(!s[0].closable(&b));
 }

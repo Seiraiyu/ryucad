@@ -7,6 +7,7 @@
 // Until delete_faces wires the modules up (plan 13.B, Task 7).
 #![allow(dead_code, unused_imports)]
 
+pub(crate) mod hole;
 pub(crate) mod sets;
 
 #[cfg(test)]
