@@ -9,6 +9,7 @@
 //! material is guessed: the walk only counts.
 
 pub(crate) mod body;
+pub(crate) mod names;
 pub(crate) mod region;
 pub(crate) mod seeds;
 pub(crate) mod walk;
@@ -253,6 +254,9 @@ fn attempt(
     if let Some((at, needed)) = past_cap(&out) {
         return done(Err(TweakError::ToleranceTooLarge { at, needed }.into()));
     }
+    let mut out = out;
+    let moved = changes.motion.keys().map(|&f| body.faces[f].name).collect();
+    let journal = names::finish(key, body, &w, &mut out, journal, &moved);
     done(Ok((out, journal)))
 }
 

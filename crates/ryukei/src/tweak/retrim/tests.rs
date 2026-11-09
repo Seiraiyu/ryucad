@@ -99,3 +99,52 @@ fn a_sheet_is_refused_before_the_re_trim() {
         Err(crate::Error::NotASolid { .. })
     ));
 }
+
+fn all_names(b: &Body) -> Vec<Name> {
+    let mut n: Vec<Name> = b
+        .faces()
+        .map(|f| b.faces[f].name)
+        .chain(b.edges().map(|e| b.edges[e].name))
+        .chain(b.vertices().map(|v| b.vertices[v].name))
+        .collect();
+    n.sort();
+    n
+}
+
+#[test]
+fn a_raised_top_through_the_re_trim_keeps_every_name() {
+    let b = block();
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let (o, j) = retrim(OpKey(0x13a9), &b, &raised(&b, 0.1), &m).unwrap();
+    assert_eq!(all_names(&o), all_names(&b));
+    use crate::name::Event;
+    // Nothing created or deleted, and no scaffolding in the journal.
+    assert!(
+        j.events().iter().all(|e| matches!(e, Event::Modified(_))),
+        "{:?}",
+        j.events()
+    );
+}
+
+#[test]
+fn a_raised_tops_journal_is_the_fixed_engines() {
+    use crate::tweak::{MoveSpec, Topology, move_faces};
+    let b = block();
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let (_, j) = retrim(OpKey(0x13a9), &b, &raised(&b, 0.1), &m).unwrap();
+    let spec = MoveSpec {
+        faces: vec![b.faces[face_of(&b, FaceRole::PlusZ)].name],
+        motion: Rigid::translation(Vector3::new(0.0, 0.0, 0.1)),
+        tangent: false,
+        topology: Topology::Keep,
+    };
+    let (_, fixed) = move_faces(OpKey(0x13a9), &b, &spec).unwrap();
+    let set = |j: &crate::name::Journal| {
+        let mut e: Vec<String> = j.events().iter().map(|e| format!("{e:?}")).collect();
+        e.sort();
+        e
+    };
+    assert_eq!(set(&j), set(&fixed));
+}
