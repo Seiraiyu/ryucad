@@ -126,7 +126,7 @@ pub fn bodies_read(f: &crate::doc::files::Feature) -> Vec<(&'static str, &Id, Wa
         F::Mirror(m) => std::iter::once(("solid", &m.solid, Want::Solid))
             .chain(f.targets().into_iter().map(|t| ("targets", t, Want::Solid)))
             .collect(),
-        F::Shell(_) | F::Offset(_) | F::Split(_) => f
+        F::Shell(_) | F::Offset(_) | F::Split(_) | F::MoveFace(_) | F::ReplaceFace(_) => f
             .targets()
             .into_iter()
             .map(|t| ("target", t, Want::Solid))
@@ -165,10 +165,12 @@ pub fn check(
     results: &dyn crate::rebuild::Results,
 ) -> Result<()> {
     let solids = crate::solid::Solids::of_order(part, order);
+    // A face tweak takes a sheet as well as a solid (design 400).
+    let sheets = crate::tweak::takes_sheets(f);
     for (role, t, want) in bodies_read(f) {
         let need = crate::rebuild::Need {
             role,
-            want: Some(want),
+            want: (!sheets || want != Want::Solid).then_some(want),
             changes: true,
         };
         match crate::rebuild::body_as(part, &solids, id, t, need, results) {

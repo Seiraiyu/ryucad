@@ -347,6 +347,7 @@ pub(crate) fn sized(ui: &mut egui::Ui, edit: egui::TextEdit<'_>, width: f32) -> 
 /// A sketch dimension's value, edited in place. Apply sends `sketch.edit`
 /// against the revision it was read at.
 pub(crate) fn dimension(ui: &mut egui::Ui, ws: &mut Workspace) {
+    let gate = ws.control("sketch.edit");
     let Some(f) = &mut ws.dimension else {
         return;
     };
@@ -372,7 +373,7 @@ pub(crate) fn dimension(ui: &mut egui::Ui, ws: &mut Workspace) {
         rows.quantity("value", &mut f.value);
     });
     let (dirty, saving) = (f.dirty(), f.saving);
-    let foot = form::foot(ui, dirty, saving, ("Apply", "Revert"));
+    let foot = form::foot(ui, dirty, saving, ("Apply", "Revert"), &gate);
     if (foot.revert || keys.revert) && dirty {
         f.value.text.clone_from(&f.value.read);
         f.value.error = None;
@@ -432,6 +433,7 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         .as_ref()
         .and_then(|f| f.foreign.as_ref())
         .map(|p| ws.model.marks.name(p));
+    let gate = ws.control("feature.edit");
     let Some(form) = &mut ws.form else {
         crate::ui::tiles::empty(
             ui,
@@ -487,15 +489,18 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         keys.apply |= k.apply;
         keys.revert |= k.revert;
     }
-    if let Some(i) = &form.import {
+    if let Some(i) = form.import.clone() {
+        let key = (form.part.clone(), form.feature.clone());
         let built = ws
             .model
             .parts
-            .get(&form.part)
-            .and_then(|p| p.feature(&form.feature))
+            .get(&key.0)
+            .and_then(|p| p.feature(&key.1))
             .and_then(|f| f.import.clone());
-        import(ui, i, built.as_ref());
-        let key = (form.part.clone(), form.feature.clone());
+        let gate = ws.control("import.convert");
+        if let Some(reference) = import(ui, &i, built.as_ref(), &gate) {
+            ws.convert_import(&key.0, &key.1, reference);
+        }
         names(ui, ws, &key);
         return;
     }
@@ -524,7 +529,7 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         });
     }
     let (dirty, saving) = (form.dirty(), form.saving);
-    let foot = form::foot(ui, dirty, saving, ("Apply", "Revert"));
+    let foot = form::foot(ui, dirty, saving, ("Apply", "Revert"), &gate);
     if (foot.revert || keys.revert) && dirty {
         form.revert();
     }
@@ -535,13 +540,18 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     names(ui, ws, &key);
 }
 
-/// An import, read only: its file, the hash its bytes must have, its
-/// product and body, and when it built what healing did to it.
+/// An import, read only but for its mode: its file, the hash its bytes
+/// must have, its product, body and mode, and when it built what healing
+/// (or the reference path) did to it. Returns the mode its button asks
+/// for (`reference`): `Some(false)` Convert to solid, `Some(true)` Keep
+/// as reference.
 pub(crate) fn import(
     ui: &mut egui::Ui,
     i: &crate::core::model::ImportInfo,
     built: Option<&crate::core::model::ImportInfo>,
-) {
+    gate: &crate::core::modes::Gate,
+) -> Option<bool> {
+    let mut asked = None;
     form::grid(ui, "import", |rows| {
         rows.read_only("file", &i.file, true, Some(&i.file));
         rows.read_only(
@@ -557,16 +567,45 @@ pub(crate) fn import(
         };
         rows.read_only("product", &product, false, None);
         rows.read_only("body", &i.body.to_string(), false, None);
+        let mode = if i.reference {
+            "reference import: shown and read, never modelled on"
+        } else {
+            "solid: healed, can be modelled on"
+        };
+        rows.read_only("mode", mode, false, None);
         if let Some(b) = built {
             for (k, n) in b.heal.iter().filter(|(_, n)| *n > 0) {
                 rows.read_only(k, &n.to_string(), false, None);
+            }
+            for (k, n) in &b.faults {
+                rows.read_only(&k.replace('_', " "), &n.to_string(), false, None);
             }
             if let Some(t) = b.tolerance_text() {
                 rows.read_only("largest tolerance", &t, false, None);
             }
         }
     });
+    let (label, tip) = if i.reference {
+        (
+            "Convert to solid",
+            "Heal the body into a checked solid that features can act on; its faces keep their names",
+        )
+    } else {
+        (
+            "Keep as reference",
+            "Keep the file's geometry as it is, shown and read but never changed; refused while a feature acts on it",
+        )
+    };
+    // `import.convert` writes the part's files: disabled where the mode
+    // doesn't allow it, saying which would.
+    if crate::ui::modes::gated(ui, gate, egui::Button::new(label))
+        .on_hover_text(tip)
+        .clicked()
+    {
+        asked = Some(!i.reference);
+    }
     ui.weak("Imports are written by ryucad import; File > Update import… takes a new version of the file.");
+    asked
 }
 
 /// The stable names of the faces, edges and vertices of a feature's

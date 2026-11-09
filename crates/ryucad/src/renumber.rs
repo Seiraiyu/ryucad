@@ -852,6 +852,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tweaks_follow_their_target_faces_and_axis() {
+        let old = |k: u8| format!("{k:032x}");
+        let new = |k: u8| format!("{:032x}", k + 100);
+        let r = |k: u8| json!({"feature": "b", "name": old(k)});
+        let mv = json!({"format": crate::doc::tweak::FORMAT, "kind": "ryucad.feature",
+            "type": "move_face", "target": "b", "by": "rotate", "axis": r(3), "angle": "3 deg",
+            "faces": [r(1)]});
+        let off = json!({"format": crate::doc::tweak::FORMAT, "kind": "ryucad.feature",
+            "type": "move_face", "target": "b", "by": "offset", "distance": "0 mm",
+            "groups": [{"distance": "1 mm", "faces": [r(2)]}]});
+        let rp = json!({"format": crate::doc::tweak::FORMAT, "kind": "ryucad.feature",
+            "type": "replace_face", "target": "b", "groups": [{"with": r(2), "faces": [r(1)]}]});
+        let f = files(&[
+            ("parts/a/features/m.json", mv),
+            ("parts/a/features/o.json", off),
+            ("parts/a/features/r.json", rp),
+        ]);
+        let rename = Rename::Feature {
+            part: "a".into(),
+            from: "b".into(),
+            to: "b-1".into(),
+        };
+        let names = BTreeMap::from([(
+            "b".to_owned(),
+            (1..=3)
+                .map(|k| (old(k), new(k)))
+                .collect::<BTreeMap<_, _>>(),
+        )]);
+        let out = renumbered(&f, &rename, &names);
+        let read = |p: &str| serde_json::from_slice::<Value>(&out[p]).unwrap();
+        let to = |k: u8| json!({"feature": "b-1", "name": new(k)});
+        let m = read("parts/a/features/m.json");
+        assert_eq!(
+            (&m["target"], &m["faces"][0], &m["axis"]),
+            (&json!("b-1"), &to(1), &to(3))
+        );
+        let o = read("parts/a/features/o.json");
+        assert_eq!(o["groups"][0]["faces"][0], to(2));
+        let x = read("parts/a/features/r.json");
+        assert_eq!(
+            (&x["groups"][0]["with"], &x["groups"][0]["faces"][0]),
+            (&to(2), &to(1))
+        );
+    }
+
+    #[test]
     fn shells_and_offsets_follow_their_target() {
         let old = "0123456789abcdef0123456789abcdef";
         let new = "fedcba9876543210fedcba9876543210";

@@ -54,6 +54,7 @@ pub fn request_fields(ty: &str) -> &'static [&'static str] {
             "from_faces",
             "face",
             "face_list",
+            "faces",
             "front",
             "back",
             "face_sides",

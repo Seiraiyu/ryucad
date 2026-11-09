@@ -9,8 +9,8 @@
 //! `0xf9` a lock, `0xf8` a manifest's dependencies, `0xf7` a datum
 //! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft, `0xf2` a mirror or split, `0xf1` an annotation, `0xf0` a base
 //! flange or flange, `0xef` a planar face or a surface extrude, `0xee` an
-//! unfold or refold, `0xed` a thicken or a fill (by the parity of the
-//! edit bytes). Merging must never panic, must give the same bytes twice,
+//! unfold or refold, `0xed` a face tweak, `0xec` a thicken or a fill (by the
+//! parity of the edit bytes). Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -721,6 +721,66 @@ fn edit_path(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// Edits a move_face: its distance or angle, its faces, its tangency, or a
+/// new `by` with the fields it takes.
+fn edit_tweak(v: &mut Value, op: u8, arg: u8) {
+    let face = |a: u8| json!({"feature": "b", "name": format!("{:032x}", a % 5)});
+    let o = v.as_object_mut().unwrap();
+    match op % 5 {
+        0 => {
+            let k = if o.get("by").and_then(Value::as_str) == Some("rotate") { "angle" } else { "distance" };
+            let unit = if k == "angle" { "deg" } else { "mm" };
+            o.insert(k.into(), json!(format!("{} {unit}", 1 + arg % 6)));
+        }
+        1 => {
+            let mut faces: Vec<Value> =
+                o.get("faces").and_then(Value::as_array).cloned().unwrap_or_default();
+            let f = face(arg);
+            match faces.iter().position(|x| *x == f) {
+                Some(i) if faces.len() > 1 => {
+                    faces.remove(i);
+                }
+                Some(_) => {}
+                None => faces.push(f),
+            }
+            o.insert("faces".into(), json!(faces));
+        }
+        2 if arg % 2 == 0 => {
+            o.insert("tangent".into(), json!(false));
+        }
+        2 => {
+            o.remove("tangent");
+        }
+        3 => {
+            for k in ["direction", "distance", "axis", "angle", "groups"] {
+                o.remove(k);
+            }
+            match arg % 3 {
+                0 => {
+                    o.insert("by".into(), json!("translate"));
+                    o.insert("direction".into(), json!(["x", "y", "z"][(arg / 3 % 3) as usize]));
+                    o.insert("distance".into(), json!("2 mm"));
+                }
+                1 => {
+                    o.insert("by".into(), json!("rotate"));
+                    o.insert("axis".into(), json!("x"));
+                    o.insert("angle".into(), json!("3 deg"));
+                }
+                _ => {
+                    o.insert("by".into(), json!("offset"));
+                    o.insert("distance".into(), json!("1 mm"));
+                }
+            }
+        }
+        _ => {
+            if o.get("by").and_then(Value::as_str) == Some("offset") {
+                o.insert("groups".into(), json!([{"distance": format!("{} mm", 1 + arg % 3),
+                                                  "faces": [face(arg.wrapping_add(1))]}]));
+            }
+        }
+    }
+}
+
 /// A shell's edits on either side: its thickness, its direction, an open
 /// face added or taken out, a group's wall, or its groups dropped.
 fn edit_shell(v: &mut Value, op: u8, arg: u8) {
@@ -1056,9 +1116,11 @@ fuzz_target!(|data: &[u8]| {
     // (18), `0xf5` a sweep (19), `0xf4` a shell (20), `0xf3` a loft
     // (21), `0xf2` a mirror or split (22), `0xf1` an annotation (23),
     // `0xf0` a base flange or flange (24), `0xef` a planar face or a
-    // surface extrude (25), `0xee` an unfold or refold (26), `0xed` a
-    // thicken or a fill (27); every other byte picks as it did before them.
+    // surface extrude (25), `0xee` an unfold or refold (26), `0xed` a face
+    // tweak (27), `0xec` a thicken or a fill (28); every other byte picks as
+    // it did before them.
     let kind = match mode {
+        0xec => 28,
         0xed => 27,
         0xee => 26,
         0xef => 25,
@@ -1143,11 +1205,14 @@ fuzz_target!(|data: &[u8]| {
                 json!({"format": 10, "kind": "ryucad.feature", "type": "split", "target": "b",
                        "plane": {"feature": "d"}})
             }
+            27 => json!({"format": 16, "kind": "ryucad.feature", "type": "move_face",
+                         "target": "b", "by": "translate", "direction": "z", "distance": "5 mm",
+                         "faces": [{"feature": "b", "name": format!("{:032x}", 1)}]}),
             // A thicken when the edits leave no odd byte over, else a fill.
-            27 if rest.len() % 2 == 0 => json!({"format": 15, "kind": "ryucad.feature",
+            28 if rest.len() % 2 == 0 => json!({"format": 15, "kind": "ryucad.feature",
                 "type": "thicken", "from": {"sheet": "s"}, "front": "1 mm", "back": "0 mm",
                 "operation": "new"}),
-            27 => json!({"format": 15, "kind": "ryucad.feature", "type": "fill",
+            28 => json!({"format": 15, "kind": "ryucad.feature", "type": "fill",
                 "sides": [{"curve": {"feature": "s", "entity": "l1"}},
                           {"curve": {"feature": "s", "entity": "l2"}},
                           {"curve": {"feature": "s", "entity": "l3"}}],
@@ -1229,7 +1294,8 @@ fuzz_target!(|data: &[u8]| {
             24 => edit_sheet_metal(v, op, arg),
             25 => edit_surface(v, op, arg),
             26 => edit_unfold(v, op, arg),
-            27 => edit_surface_feature(v, op, arg),
+            27 => edit_tweak(v, op, arg),
+            28 => edit_surface_feature(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.

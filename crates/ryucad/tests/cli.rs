@@ -3398,6 +3398,116 @@ fn datums_from_the_cli() {
 }
 
 #[test]
+fn face_tweaks_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "box"]);
+    p.ok(&[
+        "feature", "add", "box", "box", "--id", "base", "--param", "x=40", "--param", "y=30",
+        "--param", "z=20",
+    ]);
+    p.ok(&[
+        "feature", "add", "box", "box", "--id", "lid", "--param", "x=10", "--param", "y=10",
+        "--param", "z=25", "--origin", "60,0,0",
+    ]);
+    let plane = |body: &Value, solid: &str, n: f64, z: f64| -> String {
+        let f = body["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == n
+                    && (f["surface"]["frame"]["origin"][2].as_f64().unwrap() - z).abs() < 1e-12
+            })
+            .unwrap();
+        format!("box/{solid}/{}", f["name"].as_str().unwrap())
+    };
+    let base = p.ok(&["inspect", "box", "base"])["bodies"][0].clone();
+    let top = plane(&base, "base", 1.0, 0.02);
+    let lid = plane(
+        &p.ok(&["inspect", "box", "lid"])["bodies"][0],
+        "lid",
+        1.0,
+        0.025,
+    );
+    // Two solids: the face names the target.
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "box",
+        "move_face",
+        "--id",
+        "up",
+        "--by",
+        "translate",
+        "--direction",
+        "z",
+        "--distance",
+        "5mm",
+        "--face",
+        &top,
+    ]);
+    assert_eq!(r["feature"]["target"], "base", "{r}");
+    assert_eq!(r["feature"]["faces"], json!([top]), "{r}");
+    // A new by keeps only what it takes; tangency off.
+    p.ok(&[
+        "feature",
+        "edit",
+        "box",
+        "up",
+        "--by",
+        "offset",
+        "--distance",
+        "-2mm",
+        "--no-tangent",
+    ]);
+    let shown = p.ok(&["feature", "show", "box", "up"]);
+    assert_eq!(shown["tangent"], false, "{shown}");
+    assert_eq!(shown["distance"]["m"], -0.002, "{shown}");
+    // Made flush with the lid's top, the faces after --with.
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "box",
+        "replace_face",
+        "--id",
+        "flush",
+        "--with",
+        &lid,
+        "--face",
+        &top,
+    ]);
+    assert_eq!(r["feature"]["groups"][0]["with"], json!(lid), "{r}");
+    // A face before any --with is a usage error.
+    p.fails(
+        &[
+            "feature",
+            "add",
+            "box",
+            "replace_face",
+            "--face",
+            &top,
+            "--with",
+            &lid,
+        ],
+        "usage",
+        2,
+    );
+    // The daemon logged the replacement: undo takes its file away, redo
+    // puts it back (last: the two projects differ after it).
+    let flush = p.daemon.join("parts/box/features/flush.json");
+    assert!(flush.exists());
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(!flush.exists());
+    let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(flush.exists());
+}
+
+#[test]
 fn shells_and_offsets_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);

@@ -66,7 +66,7 @@ fn opening_ten_thousand_occurrences_stays_within_the_budget() {
         .unwrap();
     assert!(set.status.success(), "{set:?}");
     let t = Instant::now();
-    let mut ws = Workspace::open(&root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     let drawn = |ws: &Workspace| {
         ws.part("root").is_some_and(|r| {
             r.occurrences.len() == made.occurrences

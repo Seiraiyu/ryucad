@@ -173,6 +173,7 @@ pub fn answer_live(
             section,
             explode,
             fraction,
+            annotations,
             flat,
         } => {
             // A flat pattern's render draws one solid flat: no section or
@@ -319,6 +320,7 @@ pub fn answer_live(
                 appearance: appearance.unwrap_or(true),
                 sections,
                 explode,
+                annotations,
                 flat,
             };
             render_noting(session, target, shown, ask)
@@ -518,7 +520,10 @@ pub(crate) fn dispatch(
             },
             expected_revision.as_deref(),
         ),
-        Request::PropsGet { part } => crate::pdm::get(session, &part),
+        Request::PropsGet { part, rev } => {
+            let (_, session) = session.at(rev.as_deref())?;
+            crate::pdm::get(session, &part)
+        }
         Request::BomGet {
             part,
             rev,
@@ -608,10 +613,13 @@ pub(crate) fn dispatch(
             properties,
             expected_revision,
         } => crate::pdm::set(session, &part, properties, expected_revision.as_deref()),
-        Request::ParamList { part, scope } => match param::Target::of(part, scope)? {
-            param::Target::Part(p) => param::list(session, &p),
-            param::Target::Project => param::list_project(session),
-        },
+        Request::ParamList { part, scope, rev } => {
+            let (_, session) = session.at(rev.as_deref())?;
+            match param::Target::of(part, scope)? {
+                param::Target::Part(p) => param::list(session, &p),
+                param::Target::Project => param::list_project(session),
+            }
+        }
         Request::ParamSet {
             part,
             scope,
@@ -665,7 +673,9 @@ pub(crate) fn dispatch(
             part,
             sketch,
             quality,
+            rev,
         } => {
+            let (_, session) = session.at(rev.as_deref())?;
             let quality = match quality {
                 Some(q) => mesh::Quality::parse(&q)?,
                 None => mesh::Quality::preferred(),
@@ -676,7 +686,9 @@ pub(crate) fn dispatch(
             part,
             path,
             quality,
+            rev,
         } => {
+            let (_, session) = session.at(rev.as_deref())?;
             let quality = match quality {
                 Some(q) => mesh::Quality::parse(&q)?,
                 None => mesh::Quality::preferred(),
@@ -687,7 +699,9 @@ pub(crate) fn dispatch(
             part,
             feature,
             quality,
+            rev,
         } => {
+            let (_, session) = session.at(rev.as_deref())?;
             let quality = match quality {
                 Some(q) => mesh::Quality::parse(&q)?,
                 None => mesh::Quality::preferred(),
@@ -873,7 +887,8 @@ pub(crate) fn dispatch(
                 .collect(),
             component,
         ),
-        Request::FeatureShow { part, id } => {
+        Request::FeatureShow { part, id, rev } => {
+            let (_, session) = session.at(rev.as_deref())?;
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
             let p = session.project().part(&part)?;
             let mut v = feature_report(p, &fid, feature(p, &fid)?);
@@ -2223,6 +2238,7 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Boolean(b) => b.fields(),
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) => crate::tweak::report(part, f),
         Feature::Datum(d) => crate::datum::report(part, d),
         Feature::Path(x) => crate::path::report(part, x),
         Feature::Sweep(w) => crate::along::feature_report(part, w),
@@ -4065,6 +4081,11 @@ fn check_resolved(
         Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
             crate::body::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
+        // Faces of its target, its direction, axis or surfaces their
+        // kinds; what the kernel makes of them only rebuild can tell.
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) => {
+            crate::tweak::check(&proposed(p, order, &[(id, f)]), id, f, results)
+        }
         Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
             crate::sheet_metal::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
@@ -4259,6 +4280,20 @@ fn feature_add(
             }
         }
     }
+    // A tweak sorts what it was given; with no target it acts on the part's
+    // one solid, else the one its faces name. The file names it all the same.
+    if crate::doc::tweak::TYPES.contains(&ty) {
+        crate::tweak::take_given(ty, &mut given.fields)?;
+        if given.fields.target.is_none() && given.fields.targets.is_none() {
+            let before = solids_before(p, &list, at);
+            given.fields.target = Some(crate::tweak::default_target(
+                ty,
+                &given.fields,
+                &before,
+                &pid,
+            )?);
+        }
+    }
     // A shell or offset with no target acts on the part's one solid; the
     // file names it all the same.
     if matches!(ty, "shell" | "offset" | "split")
@@ -4352,6 +4387,10 @@ fn feature_add(
         "shell" | "offset" | "mirror" | "split" => {
             given.only(ty, crate::doc::body::request_fields(ty))?;
             crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
+        }
+        "move_face" | "replace_face" => {
+            given.only(ty, crate::doc::tweak::request_fields(ty))?;
+            crate::tweak::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
         "base_flange" | "flange" | "unfold" | "refold" => {
             crate::sheet_metal::take_given(ty, &mut given.fields);
@@ -4590,6 +4629,12 @@ fn feature_edit(
                 given.only(ty, crate::doc::surface::request_fields(ty))?;
                 crate::surface::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
             }
+            f @ (Feature::MoveFace(_) | Feature::ReplaceFace(_)) => {
+                let ty = f.type_name();
+                crate::tweak::take_given(ty, &mut given.fields)?;
+                given.only(ty, crate::doc::tweak::request_fields(ty))?;
+                crate::tweak::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
+            }
             Feature::Datum(d) => {
                 let ty = d.type_name();
                 given.only(ty, crate::datum::request_fields(ty))?;
@@ -4681,7 +4726,12 @@ fn feature_edit(
         || sweep_changed
         || (matches!(
             f,
-            Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_)
+            Feature::Shell(_)
+                | Feature::Offset(_)
+                | Feature::Mirror(_)
+                | Feature::Split(_)
+                | Feature::MoveFace(_)
+                | Feature::ReplaceFace(_)
         ) && f.targets() != old.targets())
         || ((f.base_flange().is_some()
             || f.flange().is_some()
@@ -4989,6 +5039,7 @@ pub(crate) fn part_report(
                 // A fill's rebuild report is what it measured (see
                 // `Made::report`), an extract's its faces.
                 Feature::Extract(_) => crate::surface::report(id, f),
+                Feature::MoveFace(_) | Feature::ReplaceFace(_) => crate::tweak::report(id, f),
                 _ => return None,
             };
             Some((fid.clone(), (f.type_name(), report)))
@@ -5004,8 +5055,8 @@ pub(crate) fn part_report(
             _ => None,
         })
         .collect();
-    // A sweep's profile and path, a loft's sections, and a mirror's or
-    // split's plane, are resolved again from the rebuild for its report: the part, held apart
+    // A sweep's profile and path, a loft's sections, a mirror's or
+    // split's plane, and a tweak's motion, are resolved again from the rebuild for its report: the part, held apart
     // from the session while it rebuilds.
     let held = part
         .features
@@ -5014,7 +5065,13 @@ pub(crate) fn part_report(
             f.as_ref().is_ok_and(|f| {
                 f.sweep().is_some()
                     || f.loft().is_some()
-                    || matches!(f, Feature::Mirror(_) | Feature::Split(_))
+                    || matches!(
+                        f,
+                        Feature::Mirror(_)
+                            | Feature::Split(_)
+                            | Feature::MoveFace(_)
+                            | Feature::ReplaceFace(_)
+                    )
             })
         })
         .then(|| part.clone());
@@ -5125,6 +5182,7 @@ pub(crate) fn part_report(
                     held.as_ref().filter(|_| v["ok"] == true).and_then(|q| {
                         let f = q.features.get(fid)?.as_ref().ok()?;
                         crate::body::resolved(q, r, fid, f)
+                            .or_else(|| crate::tweak::resolved(q, r, fid, f, false))
                     })
                 {
                     for (key, x) in extra {
@@ -5950,6 +6008,8 @@ struct RenderAsk {
     sections: Vec<crate::section::Plane>,
     /// An explode to draw.
     explode: Option<DrawExplode>,
+    /// Draw open annotations' pins, numbered.
+    annotations: bool,
     /// A sheet metal solid whose flat pattern to draw instead (`""`: the
     /// part's one).
     flat: Option<String>,
@@ -6241,6 +6301,9 @@ fn render(
         marks.insert(e.to_string(), (r::NOTE, None));
     }
     let mut g = Geometry::default();
+    // Each assembly's occurrences' poses, by instance path, for the pins
+    // `annotations` draws on them.
+    let mut poses: BTreeMap<String, BTreeMap<String, ryukei::geom::Rigid>> = BTreeMap::new();
     // What the geometry holds, judged against the render's budget (#400).
     let budget = render_budget();
     let mut tally = r::Tally::default();
@@ -6336,6 +6399,10 @@ fn render(
                     Some(off) => off.0.then_after(&o.pose),
                     None => o.pose,
                 };
+                poses
+                    .entry(part.to_string())
+                    .or_default()
+                    .insert(path.clone(), pose);
                 let solids: Vec<&crate::assembly::Solid> = o.solids.iter().collect();
                 let made = occurrence_meshes(session, &solids, mesh::Quality::Normal)?;
                 for (s, m) in solids.iter().zip(made) {
@@ -6464,6 +6531,16 @@ fn render(
     }
     if ask.origin {
         g.add_origin();
+    }
+    if ask.annotations {
+        let files = session.snapshot();
+        let none = BTreeMap::new();
+        for part in &parts {
+            let on = poses.get(part.as_str()).unwrap_or(&none);
+            for (at, n) in crate::annotation::markers(&files, part.as_str(), on) {
+                g.add_marker(at, &n);
+            }
+        }
     }
     g.sections = ask.sections.clone();
     let camera = match (ask.camera, target, ask.view.as_deref()) {
@@ -7151,7 +7228,7 @@ fn inspect(
         .filter_map(|(id, f)| Some((id.clone(), f.as_ref().ok()?.clone())))
         .collect();
     let solids = Solids::of(session.project().part(&pid)?);
-    // A sweep, loft, mirror or split asked for says what it built from:
+    // A sweep, loft, mirror, split or tweak asked for says what it built from:
     // its part, held apart from the session while it rebuilds.
     let held = match &only {
         Some(f)
@@ -7159,7 +7236,13 @@ fn inspect(
                 i == f
                     && (x.sweep().is_some()
                         || x.loft().is_some()
-                        || matches!(x, Feature::Mirror(_) | Feature::Split(_)))
+                        || matches!(
+                            x,
+                            Feature::Mirror(_)
+                                | Feature::Split(_)
+                                | Feature::MoveFace(_)
+                                | Feature::ReplaceFace(_)
+                        ))
             }) =>
         {
             Some(session.project().part(&pid)?.clone())
@@ -7321,17 +7404,29 @@ fn inspect(
     if let Some(f) = &only
         && let Some((
             _,
-            x @ (Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_)),
+            x @ (Feature::Shell(_)
+            | Feature::Offset(_)
+            | Feature::Mirror(_)
+            | Feature::Split(_)
+            | Feature::MoveFace(_)
+            | Feature::ReplaceFace(_)),
         )) = features.iter().find(|(i, _)| i == f)
     {
         let k = x.type_name();
-        v[k] = crate::body::report(&pid, x);
+        let tweak = crate::tweak::takes_sheets(x);
+        v[k] = if tweak {
+            crate::tweak::report(&pid, x)
+        } else {
+            crate::body::report(&pid, x)
+        };
         let built = matches!(crate::rebuild::Results::result(result, f), Some(Ok(_)));
-        if let Some(Value::Object(extra)) = held
-            .as_ref()
-            .filter(|_| built)
-            .and_then(|q| crate::body::resolved(q, result, f, x))
-        {
+        if let Some(Value::Object(extra)) = held.as_ref().filter(|_| built).and_then(|q| {
+            if tweak {
+                crate::tweak::resolved(q, result, f, x, true)
+            } else {
+                crate::body::resolved(q, result, f, x)
+            }
+        }) {
             for (key, e) in extra {
                 v[k][key] = e;
             }
@@ -7359,6 +7454,9 @@ fn files_at(session: &mut Session, rev: &str) -> Result<(Value, activity::Files)
                 .rev_warnings
                 .push(crate::session::stale_warning(rev, &stale));
         }
+        return Ok((named, files));
+    }
+    if let Some((named, files)) = session.draft_files(rev)? {
         return Ok((named, files));
     }
     if let Some((w, files, _)) = session.worktree_files(rev)? {
@@ -8317,6 +8415,37 @@ pub(crate) mod tests {
         assert_eq!(m["turns"], 10.0);
         let e = call(&mut s, "measure", json!({"entities": ["p/w", "p/b"]})).unwrap_err();
         assert_eq!(e.details["reason"], "path_against_entity");
+    }
+
+    #[test]
+    fn renders_draw_annotations_only_when_asked() {
+        use crate::render::ANNOTATION;
+        let (dir, mut s, face) = crate::annotation::tests::plate();
+        crate::annotation::tests::put(
+            &mut s,
+            &crate::annotation::tests::comment(
+                "aaaaaaaaaa",
+                vec![crate::annotation::Pin::Entity {
+                    reference: face,
+                    point_m: Some([0.0, 0.0, 0.005]),
+                }],
+            ),
+        );
+        drop(s);
+        let count = |annotations: bool| {
+            let mut p = json!({"part": "plate", "view": "iso", "width": 200, "height": 150});
+            if annotations {
+                p["annotations"] = json!(true);
+            }
+            let px = ANNOTATION.map(|x| (x * 255.0 + 0.5) as u8);
+            let s = Session::open(dir.path()).unwrap();
+            render_pixels(dir.path(), s, p)
+                .into_iter()
+                .filter(|p| *p == px)
+                .count()
+        };
+        assert_eq!(count(false), 0, "only when asked");
+        assert!(count(true) > 5, "the pin's marker is drawn");
     }
 
     #[test]

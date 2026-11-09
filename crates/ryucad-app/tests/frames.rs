@@ -14,7 +14,6 @@ use common::{Project, gpu, ryucad};
 use ryucad::view::{self, StandardView};
 use ryucad_app::core::nav::Projector;
 use ryucad_app::core::pick::Picker;
-use ryucad_app::core::workspace::Workspace;
 use ryucad_app::ui::scene::{self, DrawList, Scene, theme};
 use serde_json::json;
 use std::sync::Arc;
@@ -99,7 +98,7 @@ fn a_thousand_occurrences_draw_at_60_frames_a_second() {
         );
     }
     let p = project();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(300), |ws| ws.idle()
         && ws.model.drawn().count() == PINS + 1));
     let picker = Picker::new(&ws.model);

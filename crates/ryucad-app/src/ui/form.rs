@@ -374,7 +374,16 @@ pub struct Foot {
 /// Revert and Apply at the form's foot, with their keys, disabled while
 /// nothing changed or a save is on its way. `names` are their labels
 /// (`Apply`, `Revert`; a tile with several forms names them apart).
-pub fn foot(ui: &mut egui::Ui, dirty: bool, saving: bool, names: (&str, &str)) -> Foot {
+/// `gate` says what Apply does in the window's mode: disabled, saying
+/// which mode allows it, or sent as a suggestion; Revert only puts back
+/// what was read, and is never gated.
+pub fn foot(
+    ui: &mut egui::Ui,
+    dirty: bool,
+    saving: bool,
+    names: (&str, &str),
+    gate: &crate::core::modes::Gate,
+) -> Foot {
     let mut out = Foot::default();
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -391,10 +400,15 @@ pub fn foot(ui: &mut egui::Ui, dirty: bool, saving: bool, names: (&str, &str)) -
         } else {
             apply
         };
-        out.apply = ui
-            .add_enabled(ok, apply)
-            .on_hover_text("Enter in a field")
-            .clicked();
+        use crate::core::modes::Gate;
+        let r = match gate {
+            Gate::Refuse(why) => ui.add_enabled(false, apply).on_disabled_hover_text(*why),
+            Gate::Propose => ui
+                .add_enabled(ok, apply)
+                .on_hover_text("Enter in a field: sent to the agent as a suggestion"),
+            Gate::Send => ui.add_enabled(ok, apply).on_hover_text("Enter in a field"),
+        };
+        out.apply = r.clicked();
         if saving {
             ui.spinner();
         }

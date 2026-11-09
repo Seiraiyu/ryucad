@@ -30,7 +30,7 @@ fn boss_hash(ws: &Workspace) -> Option<String> {
 #[test]
 fn a_lost_daemon_is_replaced_and_the_window_catches_up() {
     let p = Project::new().with_part();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     frames(&mut ws, |ws| ws.idle() && ws.model.meshes.len() == 2);
     let (before, me) = (boss_hash(&ws), ws.me().to_owned());
     // The window's camera, shared before the daemon goes.
@@ -81,7 +81,7 @@ fn a_lost_daemon_is_replaced_and_the_window_catches_up() {
 #[test]
 fn panels_asked_for_while_the_daemon_went_come_back() {
     let p = Project::new().with_sketch();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     frames(&mut ws, |ws| ws.idle() && ws.part("p").is_some());
     // The parameters asked for as the daemon goes: never answered.
     p.ok(&["daemon", "stop"]);
@@ -110,7 +110,7 @@ fn a_reconnected_window_keeps_its_focus() {
     // #100: the window showed the project's model again.
     let p = Project::new().with_part();
     p.ok(&["part", "create", "q"]);
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     frames(&mut ws, |ws| ws.idle() && ws.part("q").is_some());
     ws.set_focus(Some("p".into()));
     frames(&mut ws, |ws| ws.model.focus.as_deref() == Some("p"));

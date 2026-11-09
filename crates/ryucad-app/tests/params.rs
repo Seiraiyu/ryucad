@@ -11,7 +11,7 @@ use std::time::Duration;
 const WAIT: Duration = Duration::from_secs(30);
 
 fn open(p: &Project) -> Workspace {
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.part("p").is_some()));
     ws.show_params(Some("p"));
     assert!(ws.wait_until(WAIT, |ws| ws.params.is_some()));

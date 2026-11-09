@@ -741,8 +741,8 @@ pub fn report(part: &Id, f: &Feature) -> Value {
 /// whole (else its `edges` as edge sides, or its one `curve`),
 /// `tolerance`, `angle`. An extract: `faces` (else `face_list`, else
 /// `face`) whole. A sew: `sheets`, `tolerance`, `make_solid`. A thicken:
-/// its `sheet` (or one `sheets`) or its faces (`from_faces`, `face_list`
-/// or `face`), `front`, `back`, `face_sides` whole, `operation`,
+/// its `sheet` (or one `sheets`) or its faces (`from_faces`, `face_list`,
+/// `faces` as text (the CLI's repeated --face) or `face`), `front`, `back`, `face_sides` whole, `operation`,
 /// `targets`.
 pub fn from_given(
     ty: &str,
@@ -857,10 +857,27 @@ pub fn from_given(
                 }
                 (None, None) => None,
             };
+            let listed = match &f.faces {
+                Some(Value::Array(a)) => Some(
+                    a.iter()
+                        .map(|x| {
+                            x.as_str().map(str::to_owned).ok_or_else(|| {
+                                Error::new(
+                                    Code::InvalidParam,
+                                    "a thicken's faces are text, <part>/<solid>/<name>",
+                                )
+                                .with("param", "faces")
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                ),
+                _ => None,
+            };
             let faces: Option<Vec<String>> = f
                 .from_faces
                 .clone()
                 .or_else(|| f.face_list.clone())
+                .or(listed)
                 .or_else(|| f.face.clone().map(|x| vec![x]));
             match (one_sheet, faces) {
                 (Some(_), Some(_)) => {
