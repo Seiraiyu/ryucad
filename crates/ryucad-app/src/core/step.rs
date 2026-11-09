@@ -1,6 +1,8 @@
 //! STEP from the File menu: Import STEP… and Update import…. The window
 //! asks the daemon what an import would do (`import` with `dry_run`),
-//! shows that plan, and on confirmation sends the same `import`. Nothing
+//! shows that plan, and on confirmation sends the same `import`. Bodies
+//! are kept as references unless "Convert to solids (heal)" is ticked
+//! (design 364). Nothing
 //! is worked out here: plans are the daemon's answers, as an agent's are.
 //! Exports, STEP's among them, are [`crate::core::export`]'s.
 
@@ -30,12 +32,23 @@ fn text(v: &Value) -> &str {
     v.as_str().unwrap_or_default()
 }
 
+/// What each of a reference's fault lists says, for people.
+const FAULTS: [(&str, &str); 3] = [
+    ("split_faces", "faces laid out alone"),
+    ("dropped_faces", "faces left out"),
+    ("unoriented", "faces kept unoriented"),
+];
+
 /// A feature of a planned part as one line: an import's body with its
-/// counts and what healing did, or why it doesn't build; an instance what
-/// it places.
+/// counts and what healing (or, for a reference, the reference path) did,
+/// or why it doesn't build; an instance what it places.
 fn feature_line(f: &Value) -> String {
     let id = text(&f["id"]);
+    let reference = f["mode"] == "reference";
     let what = match text(&f["type"]) {
+        "import" if reference => {
+            format!("body {}, reference", f["body"].as_u64().unwrap_or_default())
+        }
         "import" => format!("body {}", f["body"].as_u64().unwrap_or_default()),
         "instance" => format!("places {}", text(&f["of"])),
         t => t.to_owned(),
@@ -67,6 +80,22 @@ fn feature_line(f: &Value) -> String {
         .collect();
     if !healed.is_empty() {
         s.push_str(&format!("; healed: {}", healed.join(", ")));
+    }
+    let r = &f["reference"];
+    let mut said: Vec<String> = r
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(k, _)| k.as_str() != "tolerance_m")
+        .filter_map(|(k, n)| Some((k, n.as_u64().filter(|n| *n > 0)?)))
+        .map(|(k, n)| format!("{k} {n}"))
+        .collect();
+    said.extend(FAULTS.iter().filter_map(|(k, words)| {
+        let n = r[*k].as_array()?.len();
+        (n > 0).then(|| format!("{words} {n}"))
+    }));
+    if !said.is_empty() {
+        s.push_str(&format!("; as the file has it: {}", said.join(", ")));
     }
     s
 }
@@ -154,8 +183,12 @@ pub struct Import {
     pub path: String,
     /// For an update, the file the project holds that it replaces.
     pub update: Option<String>,
-    /// The dry run's plan, for the path it was asked for.
-    pub plan: Option<(String, Plan)>,
+    /// Heal each body into a solid ("Convert to solids (heal)"), rather
+    /// than keep it as a reference, the default (design 364). An update
+    /// keeps each feature's mode: this is for the bodies it adds.
+    pub solid: bool,
+    /// The dry run's plan, for the path and mode it was asked for.
+    pub plan: Option<((String, bool), Plan)>,
     /// What the import wrote, once it has.
     pub done: Option<Plan>,
     pub error: Option<Error>,
@@ -177,11 +210,16 @@ impl Import {
         }
     }
 
-    /// The plan, when it is for the path as typed now.
+    /// What a plan is for: the path as typed now, and the mode.
+    pub fn key(&self) -> (String, bool) {
+        (self.path.trim().to_owned(), self.solid)
+    }
+
+    /// The plan, when it is for the path and mode as they are now.
     pub fn current(&self) -> Option<&Plan> {
         self.plan
             .as_ref()
-            .filter(|(p, _)| *p == self.path.trim())
+            .filter(|(k, _)| *k == self.key())
             .map(|(_, plan)| plan)
     }
 }
@@ -240,11 +278,37 @@ mod tests {
     }
 
     #[test]
+    fn a_references_plan_says_what_the_file_has() {
+        let v = json!({
+            "file": {"path": "imports/motor.step", "reused": false},
+            "parts": [{"part": "motor", "kind": "part", "created": true,
+                "features": [{"id": "body", "type": "import", "body": 0, "ok": true,
+                    "mode": "reference",
+                    "counts": {"faces": 40, "edges": 90, "vertices": 52},
+                    "reference": {"seams": 3, "poles": 0, "tolerance_m": 0.0,
+                                  "split_faces": [{"name": "aa", "step": "#7"}],
+                                  "dropped_faces": [], "unoriented": []}}]}],
+        });
+        let p = Plan::from_answer(&v);
+        assert_eq!(
+            p.parts[0].1,
+            [
+                "body (body 0, reference): 40 faces, 90 edges, 52 vertices; \
+              as the file has it: seams 3, faces laid out alone 1"
+            ]
+        );
+    }
+
+    #[test]
     fn a_plan_belongs_to_the_path_it_was_asked_for() {
         let mut i = Import::new();
         i.path = " /tmp/a.step ".into();
-        i.plan = Some(("/tmp/a.step".into(), Plan::default()));
+        i.plan = Some((("/tmp/a.step".into(), false), Plan::default()));
         assert!(i.current().is_some());
+        // Asking for solids is another plan.
+        i.solid = true;
+        assert!(i.current().is_none());
+        i.solid = false;
         i.path = "/tmp/b.step".into();
         assert!(i.current().is_none());
         assert_eq!(

@@ -40,6 +40,7 @@ phosphor! {
     INTERSECT = "intersect" '\u{e2d2}',
     FLIP_HORIZONTAL = "flip-horizontal" '\u{ed6a}',
     FILE_ARROW_DOWN = "file-arrow-down" '\u{e232}',
+    FILE_LOCK = "file-lock" '\u{e95c}',
     PAPERCLIP = "paperclip" '\u{e39a}',
     LOCK_SIMPLE = "lock-simple" '\u{e308}',
     ARROW_COUNTER_CLOCKWISE = "arrow-counter-clockwise" '\u{e038}',

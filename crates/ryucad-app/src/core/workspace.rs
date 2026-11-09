@@ -153,10 +153,10 @@ enum Pending {
     /// The shared cache's token stored or removed (`cache.login`,
     /// `cache.logout`).
     CacheToken,
-    /// An import's dry run, for the file at this path.
-    ImportPlan(String),
+    /// An import's dry run, for the file at this path, as solids or not.
+    ImportPlan((String, bool)),
     /// An import or update of the file at this path, written.
-    Import(String),
+    Import((String, bool)),
     /// An export, which the daemon writes where the dialog says.
     Export,
     /// A drag's preview solve (`assembly.solve`), for this assembly.
@@ -173,6 +173,8 @@ enum Pending {
     Appearance(u64),
     /// An appearance written (`appearance.set` or `appearance.clear`).
     AppearanceWritten,
+    /// An import's mode set (`import.convert`): its part and feature.
+    ImportConvert(String, String),
     /// This window's own `section.set`.
     Sections,
     /// An assembly's explodes (`explode.list`).
@@ -1096,15 +1098,15 @@ impl Workspace {
         let Some(i) = self.import.as_mut() else {
             return;
         };
-        let path = i.path.trim().to_owned();
-        if path.is_empty() {
+        let key = i.key();
+        if key.0.is_empty() {
             return;
         }
         i.waiting = true;
         i.error = None;
         i.done = None;
-        let req = import_request(&path, i.update.clone(), true);
-        self.send(req, Pending::ImportPlan(path));
+        let req = import_request(&key.0, i.update.clone(), true, key.1);
+        self.send(req, Pending::ImportPlan(key));
     }
 
     /// Imports the open import's file, as its plan said: the same
@@ -1113,11 +1115,28 @@ impl Workspace {
         let Some(i) = self.import.as_mut() else {
             return;
         };
-        let path = i.path.trim().to_owned();
+        let key = i.key();
         i.waiting = true;
         i.error = None;
-        let req = import_request(&path, i.update.clone(), false);
-        self.send(req, Pending::Import(path));
+        let req = import_request(&key.0, i.update.clone(), false, key.1);
+        self.send(req, Pending::Import(key));
+    }
+
+    /// Converts import `feature` of `part` to a healed solid, or with
+    /// `reference` back to a reference (`import.convert`): one logged,
+    /// undoable change, a long request the status line shows. A body
+    /// healing refuses is the part's rebuild's to report.
+    pub fn convert_import(&mut self, part: &str, feature: &str, reference: bool) {
+        let req = Request::ImportConvert {
+            part: part.to_owned(),
+            feature: Some(feature.to_owned()),
+            reference,
+            expected_revision: self.model.parts.get(part).map(|p| p.revision.clone()),
+        };
+        self.send(
+            req,
+            Pending::ImportConvert(part.to_owned(), feature.to_owned()),
+        );
     }
 
     /// Opens File > Export… on `part`, with the last export's choices.
@@ -3118,18 +3137,18 @@ impl Workspace {
             (Pending::CacheToken, Err(e)) => self.cache_token = Some(json!({"error": e})),
             // Only the dialog for that file takes an answer: one opened
             // since asks again.
-            (Pending::ImportPlan(path), a) => {
-                let Some(i) = self.import.as_mut().filter(|i| i.path.trim() == path) else {
+            (Pending::ImportPlan(key), a) => {
+                let Some(i) = self.import.as_mut().filter(|i| i.key() == key) else {
                     return;
                 };
                 i.waiting = false;
                 match a {
-                    Ok(a) => i.plan = Some((path, crate::core::step::Plan::from_answer(&a.result))),
+                    Ok(a) => i.plan = Some((key, crate::core::step::Plan::from_answer(&a.result))),
                     Err(e) => i.error = Some(e),
                 }
             }
-            (Pending::Import(path), a) => {
-                let Some(i) = self.import.as_mut().filter(|i| i.path.trim() == path) else {
+            (Pending::Import(key), a) => {
+                let Some(i) = self.import.as_mut().filter(|i| i.key() == key) else {
                     return;
                 };
                 i.waiting = false;
@@ -3238,6 +3257,17 @@ impl Workspace {
                     self.appearance.reread(now, ryucad::render::SURFACE);
                 }
             }
+            // The rebuild follows as `model.changed`; an open form on the
+            // import is read again, its mode with it.
+            (Pending::ImportConvert(part, feature), a) => match a {
+                Ok(_) => {
+                    let key = (part, feature);
+                    if self.form_for.as_ref() == Some(&key) {
+                        self.open_form(Some(key));
+                    }
+                }
+                Err(e) => self.fail(e),
+            },
             (Pending::AppearanceWritten, a) => {
                 // What was dragged stays drawn until the new reading.
                 self.appearance.dragging = None;
@@ -3317,7 +3347,9 @@ impl Workspace {
                         None => Form::from_show_in(&part, &a.result, self.unit()),
                     };
                     if let Some(p) = self.model.parts.get(&part) {
-                        form.offer(&p.founders());
+                        // A reference import's solid is never offered to
+                        // act on (design 364).
+                        form.offer(&p.modellable());
                     }
                     // An instance may take its part's latest release; another
                     // project's, any of its dependency's official labels.
@@ -3468,6 +3500,11 @@ impl Workspace {
                 }
             }
             (Pending::Save, Err(e)) => {
+                // A feature that would change a reference import: the
+                // card offers Convert to solid, beside the form's own.
+                if e.code == Code::ReferenceBody {
+                    self.fail(e.clone());
+                }
                 if let Some(f) = &mut self.form {
                     f.saving = false;
                     if e.code == Code::Conflict {
@@ -3988,8 +4025,8 @@ impl Workspace {
 }
 
 /// An `import` of the file at `path`, replacing `update` when given; a
-/// dry run plans without writing.
-fn import_request(path: &str, update: Option<String>, dry_run: bool) -> Request {
+/// dry run plans without writing. Bodies are references unless `solid`.
+fn import_request(path: &str, update: Option<String>, dry_run: bool, solid: bool) -> Request {
     Request::Import {
         path: absolute(path).display().to_string(),
         part: None,
@@ -3998,9 +4035,7 @@ fn import_request(path: &str, update: Option<String>, dry_run: bool) -> Request 
         dry_run,
         expected_revision: None,
         update,
-        // Until 21.C's "Convert to solids (heal)" box, the dialog heals as
-        // it did.
-        solid: true,
+        solid,
     }
 }
 
