@@ -5100,12 +5100,16 @@ pub(crate) fn part_report(
                         && let Some(i) = &m.report
                     {
                         // A fill's report under its own type, else an
-                        // import's.
+                        // import's; a draft's angles come with its own
+                        // report (`tweak::resolved`).
                         let key = match types.get(fid).and_then(Value::as_str) {
-                            Some("fill") => "fill",
-                            _ => "import",
+                            Some("fill") => Some("fill"),
+                            Some("draft") => None,
+                            _ => Some("import"),
                         };
-                        v[key] = i.as_ref().clone();
+                        if let Some(key) = key {
+                            v[key] = i.as_ref().clone();
+                        }
                     }
                     if let crate::rebuild::Output::Solids(m) = o
                         && let Some(f) = &m.flat

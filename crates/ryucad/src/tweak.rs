@@ -1089,6 +1089,15 @@ pub fn resolved(
         let t = r.translation_part();
         v["motion"] = json!({"rotation": r.rotation_matrix(), "translation_m": [t.x, t.y, t.z]});
     }
+    if let Feature::Draft(d) = f
+        && let Ok((pull, h)) = hinge(part, id, d, results)
+    {
+        let p = pull.get();
+        v["pull"] = json!([p.x, p.y, p.z]);
+        if let Hinge::Neutral { origin: o } = h {
+            v["neutral"] = json!({"origin_m": [o.x, o.y, o.z], "normal": [p.x, p.y, p.z]});
+        }
+    }
     let target = f.targets()[0];
     if let Some(Ok(out)) = results.result(id)
         && let Some(b) = out.solid(target)
@@ -1110,8 +1119,38 @@ pub fn resolved(
             refs.sort();
             v["modified"]["references"] = json!(refs);
         }
+        if let crate::rebuild::Output::Solids(m) = out
+            && let Some(rep) = &m.report
+            && let Some(a) = angles(&part.id, rep)
+        {
+            v["angles"] = a;
+        }
     }
     Some(v)
+}
+
+/// A draft report's angles as output gives them: each face as
+/// `<part>/<solid>/<name>`, its least and greatest angle from its pull in
+/// degrees and radians, and `exact` where the two are the same bits (the
+/// kernel's closed form for planes and cones).
+fn angles(part: &Id, rep: &Value) -> Option<Value> {
+    let target = rep["target"].as_str()?;
+    let deg = |x: f64| json!({"value": format!("{} deg", crate::measure::number(x / crate::units::DEG)), "rad": x});
+    Some(Value::Array(
+        rep["angles"]
+            .as_array()?
+            .iter()
+            .filter_map(|a| {
+                let (lo, hi) = (a["least"].as_f64()?, a["greatest"].as_f64()?);
+                Some(json!({
+                    "face": format!("{part}/{target}/{}", a["face"].as_str()?),
+                    "least": deg(lo),
+                    "greatest": deg(hi),
+                    "exact": lo.to_bits() == hi.to_bits(),
+                }))
+            })
+            .collect(),
+    ))
 }
 
 #[cfg(test)]
@@ -1855,6 +1894,70 @@ mod tests {
         assert_eq!(
             (e.code, e.details["pointer"].as_str()),
             (Code::InvalidParam, Some("/angle"))
+        );
+    }
+
+    #[test]
+    fn a_draft_reports_its_fields_pull_and_angles() {
+        let (_dir, mut s) = boxes();
+        let east = facing(&mut s, "b", "b", 0, 1.0);
+        let shown = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "draft", "id": "d", "target": "b", "angle": "2 deg",
+                   "neutral": "xy", "reverse": true, "faces": [east.clone()]}),
+        )
+        .unwrap();
+        let f = &shown["feature"];
+        assert_eq!(f["angle"]["value"], "2 deg", "{f}");
+        assert!((f["angle"]["rad"].as_f64().unwrap() - 2f64.to_radians()).abs() < 1e-15);
+        assert_eq!(f["faces"], json!([east]), "{f}");
+        assert_eq!(
+            (
+                f["neutral"].as_str(),
+                f["reverse"].as_bool(),
+                f["tangent"].as_bool()
+            ),
+            (Some("xy"), Some(true), Some(true))
+        );
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let d = r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "d")
+            .unwrap()["draft"]
+            .clone();
+        // Reversed: the pull is -z, and xy's point is the neutral plane's.
+        assert_eq!(d["pull"], json!([0.0, 0.0, -1.0]), "{d}");
+        assert_eq!(
+            d["neutral"],
+            json!({"origin_m": [0.0, 0.0, 0.0], "normal": [0.0, 0.0, -1.0]})
+        );
+        // Pulled down, the east wall drafted about its bottom leans out
+        // going up: its angle from the pull is the one asked, exactly.
+        let a = &d["angles"][0];
+        assert_eq!(a["face"], east, "{d}");
+        assert_eq!(a["exact"], true, "{d}");
+        assert_eq!(a["least"]["value"], "2 deg", "{d}");
+        assert_eq!(a["least"], a["greatest"]);
+        assert_eq!(d["modified"]["faces"], 1, "{d}");
+        assert!(
+            r["parts"][0]["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|x| x.get("import").is_none()),
+            "{r}"
+        );
+        // inspect --feature gives the same, with what it modified by name.
+        let i = call(&mut s, "inspect", json!({"part": "p", "feature": "d"})).unwrap();
+        assert_eq!(i["draft"]["angles"], d["angles"]);
+        assert!(
+            i["draft"]["modified"]["references"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(east))
         );
     }
 }
