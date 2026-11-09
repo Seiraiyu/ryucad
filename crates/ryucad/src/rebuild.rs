@@ -1033,6 +1033,21 @@ pub fn target_as<'a>(
     t: &Id,
     before: &'a dyn Results,
 ) -> Result<&'a Built> {
+    target_kinds(part, solids, id, role, t, before, false)
+}
+
+/// [`target_as`], taking a sheet too where `sheets` is true: face tweaks
+/// act on sheets where the kernel does (design 400), every other feature
+/// on solids only.
+pub fn target_kinds<'a>(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    role: &str,
+    t: &Id,
+    before: &'a dyn Results,
+    sheets: bool,
+) -> Result<&'a Built> {
     if let Some(by) = solids.consumed_by(t, id) {
         return Err(consumed(id, t, by));
     }
@@ -1050,7 +1065,11 @@ pub fn target_as<'a>(
         let role = if role == "target" { "targets" } else { role };
         return Err(reference_body(&part.id, id, t, role));
     }
-    crate::kind::need(id, role, t, &built.body, crate::kind::Want::Solid)?;
+    // A mixed body is never shown (`finish` refuses it), so `sheets`
+    // lets through a sheet or a solid.
+    if !sheets {
+        crate::kind::need(id, role, t, &built.body, crate::kind::Want::Solid)?;
+    }
     Ok(built)
 }
 

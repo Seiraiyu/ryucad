@@ -124,7 +124,7 @@ pub fn bodies_read(f: &crate::doc::files::Feature) -> Vec<(&'static str, &Id)> {
         F::Mirror(m) => std::iter::once(("solid", &m.solid))
             .chain(f.targets().into_iter().map(|t| ("targets", t)))
             .collect(),
-        F::Shell(_) | F::Offset(_) | F::Split(_) => {
+        F::Shell(_) | F::Offset(_) | F::Split(_) | F::MoveFace(_) | F::ReplaceFace(_) => {
             f.targets().into_iter().map(|t| ("target", t)).collect()
         }
         _ => f.targets().into_iter().map(|t| ("targets", t)).collect(),
@@ -143,8 +143,9 @@ pub fn check(
     results: &dyn crate::rebuild::Results,
 ) -> Result<()> {
     let solids = crate::solid::Solids::of_order(part, order);
+    let sheets = crate::tweak::takes_sheets(f);
     for (role, t) in bodies_read(f) {
-        match crate::rebuild::target_as(part, &solids, id, role, t, results) {
+        match crate::rebuild::target_kinds(part, &solids, id, role, t, results, sheets) {
             Err(e) if e.code == Code::WrongBodyKind => return Err(e),
             _ => {}
         }
