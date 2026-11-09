@@ -32,11 +32,14 @@ pub struct Place {
 }
 
 /// One usage of a flattened body's walk: the
-/// `NEXT_ASSEMBLY_USAGE_OCCURRENCE`'s id and its place among its parent's
-/// usages of the same child with that id.
+/// `NEXT_ASSEMBLY_USAGE_OCCURRENCE`'s id, the child product it places and
+/// its place among its parent's usages of that child with that id. The
+/// child is named because writers give usages ids that aren't unique (KiCad
+/// and ryustep number them per parent, some files give every one `1`).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Via {
     pub usage: String,
+    pub product: ProductRef,
     pub ordinal: u32,
 }
 
@@ -46,7 +49,7 @@ impl Place {
             .via
             .iter()
             .map(|u| {
-                let mut v = json!({"usage": u.usage});
+                let mut v = json!({"usage": u.usage, "product": u.product.to_json()});
                 if u.ordinal != 0 {
                     v["ordinal"] = json!(u.ordinal);
                 }
@@ -77,12 +80,17 @@ impl Place {
                 .ok_or_else(|| {
                     invalid(&format!("{here}/usage"), "a usage's id must be a string")
                 })?;
+            let product = ProductRef::from_json(&uo.take("product")?, &format!("{here}/product"))?;
             let ordinal = match uo.take_opt("ordinal") {
                 None => 0,
                 Some(n) => count(&n, &format!("{here}/ordinal"))?,
             };
             uo.finish()?;
-            via.push(Via { usage, ordinal });
+            via.push(Via {
+                usage,
+                product,
+                ordinal,
+            });
         }
         o.finish()?;
         Ok(Place { pose, via })
@@ -455,7 +463,10 @@ mod tests {
     fn place_reads_writes_and_needs_its_format() {
         let place = json!({
             "pose": {"origin_m": [0.01, 0, 0.002], "x": [1, 0, 0], "z": [0, 0, 1]},
-            "via": [{"usage": "U1"}, {"ordinal": 2, "usage": "R7"}],
+            "via": [
+                {"product": {"id": "S", "name": "Sub"}, "usage": "U1"},
+                {"ordinal": 2, "product": {"id": "R", "name": "R", "ordinal": 1}, "usage": "R7"},
+            ],
         });
         let v = file(json!({"place": place, "mode": "reference", "format": PLACE_FORMAT}));
         let f = read(v.clone()).unwrap();
@@ -468,10 +479,20 @@ mod tests {
             vec![
                 Via {
                     usage: "U1".into(),
+                    product: ProductRef {
+                        id: "S".into(),
+                        name: "Sub".into(),
+                        ordinal: 0
+                    },
                     ordinal: 0
                 },
                 Via {
                     usage: "R7".into(),
+                    product: ProductRef {
+                        id: "R".into(),
+                        name: "R".into(),
+                        ordinal: 1
+                    },
                     ordinal: 2
                 },
             ]
@@ -488,6 +509,10 @@ mod tests {
             (
                 json!({"pose": place["pose"], "via": [{"usage": 3}]}),
                 "/place/via/0/usage",
+            ),
+            (
+                json!({"pose": place["pose"], "via": [{"usage": "U1"}]}),
+                "/place/via/0/product",
             ),
             (json!({"via": place["via"]}), "/place/pose"),
         ] {

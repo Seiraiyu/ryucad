@@ -418,6 +418,315 @@ impl Fresh<'_> {
     }
 }
 
+/// Bodies a flattened import makes at most.
+pub const MAX_FLAT: usize = 10_000;
+
+/// One body of a flattened walk: definition `definition`'s (`None`: the
+/// bodies no product reaches) body `body`, placed by `place` (none for a
+/// root's own bodies, at the part's origin).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Walked {
+    pub definition: Option<usize>,
+    pub body: usize,
+    pub place: Option<crate::doc::import::Place>,
+}
+
+/// Every body of every occurrence of every product of the file, placed
+/// where its assemblies put it (#499): roots in the file's order, at each
+/// definition its own bodies, then its usages in order, depth first; the
+/// bodies no product reaches last. More than [`MAX_FLAT`] is
+/// `invalid_param`; a placement that can't be read `import_failed`.
+pub fn walk(opened: &Opened, path: &str) -> Result<Vec<Walked>> {
+    use crate::doc::import::{Place, Via};
+    use ryukei::geom::Rigid;
+    let defs = &opened.products.definitions;
+    let makes = makes(opened);
+    let too_many = || {
+        Error::new(
+            Code::InvalidParam,
+            format!(
+                "{path} flattens to more than {MAX_FLAT} bodies: import it whole, or a product of it with --into"
+            ),
+        )
+        .with("param", "flatten")
+    };
+    let mut out = Vec::new();
+    // (definition, its placement in the root's frame, the usages to it)
+    let mut stack: Vec<(usize, Rigid, Vec<Via>)> = opened
+        .products
+        .roots
+        .iter()
+        .rev()
+        .copied()
+        .filter(|&k| makes[k])
+        .map(|k| (k, Rigid::IDENTITY, Vec::new()))
+        .collect();
+    while let Some((k, world, via)) = stack.pop() {
+        let place = (!via.is_empty()).then(|| Place {
+            pose: crate::assembly::rigid_pose(&world).snapped(),
+            via: via.clone(),
+        });
+        for body in 0..bodies(opened, Some(k)) {
+            out.push(Walked {
+                definition: Some(k),
+                body,
+                place: place.clone(),
+            });
+            if out.len() > MAX_FLAT {
+                return Err(too_many());
+            }
+        }
+        // Children pushed last first, so the first usage pops first.
+        for (n, c) in defs[k].children.iter().enumerate().rev() {
+            if !makes[c.definition] {
+                continue;
+            }
+            let r = crate::assembly::pose_rigid(&pose(opened, path, k, n)?)?;
+            let mut v = via.clone();
+            v.push(Via {
+                usage: c.id.to_string(),
+                product: product_of(opened, c.definition),
+                ordinal: usage_ordinal(opened, k, n),
+            });
+            stack.push((c.definition, world.then_after(&r), v));
+        }
+    }
+    for body in 0..bodies(opened, None) {
+        out.push(Walked {
+            definition: None,
+            body,
+            place: None,
+        });
+        if out.len() > MAX_FLAT {
+            return Err(too_many());
+        }
+    }
+    Ok(out)
+}
+
+/// What `import --flatten` makes of a whole file: one part of an import
+/// feature per body [`walk`] gives, each placed where the file's
+/// assemblies put it (#499).
+pub struct Flat<'a> {
+    pub opened: &'a Opened,
+    pub file: &'a FileRef,
+    /// The stored file's stem, for a part no product names.
+    pub stem: &'a str,
+    /// The part `--part` names.
+    pub part: Option<Id>,
+    /// Whether an ID is taken: by a part, or retired by a release record.
+    pub taken: &'a dyn Fn(&str) -> bool,
+    /// Whether the project uses PDM: the part gets its one root's name.
+    pub pdm: bool,
+    /// The mode its import features take (none: a solid).
+    pub mode: Option<crate::doc::import::Mode>,
+}
+
+impl Flat<'_> {
+    pub fn plan(&self) -> Result<Planned> {
+        let opened = self.opened;
+        let defs = &opened.products.definitions;
+        let makes = makes(opened);
+        let roots: Vec<usize> = opened
+            .products
+            .roots
+            .iter()
+            .copied()
+            .filter(|&k| makes[k])
+            .collect();
+        let walked = walk(opened, &self.file.path)?;
+        if walked.is_empty() {
+            return Err(Error::new(
+                Code::ImportBodyMissing,
+                format!("{} holds no solid to import", self.file.path),
+            )
+            .with("path", &self.file.path));
+        }
+        let part = match &self.part {
+            Some(p) => p.clone(),
+            None => {
+                let base = roots
+                    .first()
+                    .and_then(|&k| id_from(&defs[k].product_id).or_else(|| id_from(&defs[k].name)))
+                    .or_else(|| id_from(self.stem))
+                    .unwrap_or_else(|| Id::parse("part", "part").expect("an ID"));
+                free(&base, self.taken)
+            }
+        };
+        let mut taken: Vec<String> = Vec::new();
+        let features = walked
+            .iter()
+            .map(|w| flat_feature(opened, self.file, self.mode, w, &mut taken))
+            .collect();
+        let properties = match roots.as_slice() {
+            [k] => properties(opened, Some(*k), self.pdm),
+            _ => BTreeMap::new(),
+        };
+        Ok(Planned {
+            part,
+            new: true,
+            kind: PartKind::Part,
+            definition: roots.first().copied(),
+            features,
+            removed: Vec::new(),
+            properties,
+        })
+    }
+}
+
+/// The import feature of a walked body, its ID the first free past
+/// `taken` as [`import_features`] names one.
+pub fn flat_feature(
+    opened: &Opened,
+    file: &FileRef,
+    mode: Option<crate::doc::import::Mode>,
+    w: &Walked,
+    taken: &mut Vec<String>,
+) -> (Id, Feature) {
+    let product = w.definition.map(|k| product_of(opened, k));
+    let names = body_names(opened, w.definition);
+    let mut f = import_features(file, product, mode, &names, w.body..w.body + 1, taken);
+    let (fid, mut feature) = f.pop().expect("one feature");
+    if let Feature::Import(i) = &mut feature {
+        i.place = w.place.clone();
+    }
+    (fid, feature)
+}
+
+#[cfg(test)]
+mod flat_tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_file_flattens_to_one_part_placed_as_its_usages_put_it() {
+        let bytes = crate::import::tests::frame_file();
+        let file = crate::doc::project::ImportFile::new(bytes);
+        let opened = crate::import::opened(&file).unwrap();
+        let fr = FileRef {
+            path: "imports/frame.step".into(),
+            blake3: file.blake3.clone(),
+        };
+        let taken = |_: &str| false;
+        let mode = Some(crate::doc::import::Mode::Reference);
+        let planned = Flat {
+            opened: &opened,
+            file: &fr,
+            stem: "frame",
+            part: None,
+            taken: &taken,
+            pdm: false,
+            mode,
+        }
+        .plan()
+        .unwrap();
+        assert_eq!(planned.kind, PartKind::Part);
+        assert_eq!(planned.features.len(), count_bodies(&opened));
+        let mut ids: Vec<String> = planned
+            .features
+            .iter()
+            .map(|(i, _)| i.to_string())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), planned.features.len(), "IDs are unique");
+        for (_, f) in &planned.features {
+            let Feature::Import(i) = f else { panic!() };
+            assert_eq!(i.mode, mode);
+            if let Some(p) = &i.place {
+                assert!(!p.via.is_empty());
+            }
+        }
+        // A placed body's pose is its usages' placements composed, as the
+        // whole import's instances carry them, from the root down.
+        let fresh = Fresh {
+            opened: &opened,
+            file: &fr,
+            stem: "frame",
+            part: None,
+            taken: &taken,
+            pdm: false,
+            mode: None,
+        }
+        .plan()
+        .unwrap();
+        // Each part the whole import makes, by the definition it stands for
+        // (an assembly's part before the part of its own bodies).
+        let mut of_part: BTreeMap<String, usize> = BTreeMap::new();
+        for p in &fresh {
+            if let Some(k) = p.definition {
+                if p.kind == PartKind::Assembly || !of_part.contains_key(p.part.as_str()) {
+                    of_part.insert(p.part.to_string(), k);
+                }
+            }
+        }
+        let instances: Vec<(&crate::doc::assembly::ImportUsage, &Id, Pose)> = fresh
+            .iter()
+            .flat_map(|p| p.features.iter())
+            .filter_map(|(_, f)| match f {
+                Feature::Instance(i) => Some((i.import.as_ref()?, &i.part, i.pose)),
+                _ => None,
+            })
+            .collect();
+        let mut placed = 0;
+        let mut deep = 0;
+        for (_, f) in &planned.features {
+            let Feature::Import(i) = f else { continue };
+            let Some(p) = &i.place else { continue };
+            placed += 1;
+            if p.via.len() > 1 {
+                deep += 1;
+            }
+            let mut cur = planned.definition.unwrap();
+            let mut world = ryukei::geom::Rigid::IDENTITY;
+            for v in &p.via {
+                let parent = product_of(&opened, cur);
+                let (_, child, pose) = instances
+                    .iter()
+                    .find(|(u, child, _)| {
+                        u.product == parent
+                            && u.usage.as_deref() == Some(v.usage.as_str())
+                            && u.ordinal == v.ordinal
+                            && of_part.get(child.as_str()).map(|&k| product_of(&opened, k))
+                                == Some(v.product.clone())
+                    })
+                    .unwrap_or_else(|| panic!("no instance for {v:?} in {parent:?}"));
+                world = world.then_after(&crate::assembly::pose_rigid(pose).unwrap());
+                cur = of_part[child.as_str()];
+            }
+            assert_eq!(
+                crate::assembly::rigid_pose(&world).snapped(),
+                p.pose,
+                "{p:?}"
+            );
+        }
+        assert!(placed > 0 && deep > 0, "{placed} placed, {deep} deep");
+        // The walk is the same twice.
+        assert_eq!(
+            walk(&opened, &fr.path).unwrap(),
+            walk(&opened, &fr.path).unwrap()
+        );
+    }
+
+    /// Bodies over every occurrence of every product: what flattening makes.
+    fn count_bodies(opened: &Opened) -> usize {
+        fn under(o: &Opened, k: usize) -> usize {
+            bodies(o, Some(k))
+                + o.products.definitions[k]
+                    .children
+                    .iter()
+                    .map(|c| under(o, c.definition))
+                    .sum::<usize>()
+        }
+        opened
+            .products
+            .roots
+            .iter()
+            .map(|&k| under(opened, k))
+            .sum::<usize>()
+            + bodies(opened, None)
+    }
+}
+
 /// The product's name and description where non-empty, when `pdm`.
 pub fn properties(opened: &Opened, k: Option<usize>, pdm: bool) -> BTreeMap<String, Value> {
     let mut out = BTreeMap::new();

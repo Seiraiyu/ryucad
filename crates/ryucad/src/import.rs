@@ -1652,6 +1652,11 @@ pub(crate) mod tests {
                     },
                     via: vec![Via {
                         usage: "u1".into(),
+                        product: crate::doc::import::ProductRef {
+                            id: "part 2".into(),
+                            name: "part 2".into(),
+                            ordinal: 0,
+                        },
                         ordinal: 0,
                     }],
                 }),
