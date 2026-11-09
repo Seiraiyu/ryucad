@@ -75,6 +75,8 @@ pub enum Role {
     Thicken(ThickenRole),
     /// An entity of a fill (see [`crate::fill`]).
     Fill(FillRole),
+    /// An entity a direct edit made (see [`crate::tweak`], design 399).
+    Edit(EditRole),
 }
 
 /// The faces of the primitives.
@@ -193,6 +195,16 @@ pub enum FillRole {
     Middle,
     /// The centre; it has no parents.
     Centre,
+}
+
+/// The entities a direct edit makes where faces meet anew.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EditRole {
+    /// An edge: its parents are its two faces' names, sorted, and an
+    /// ordinal only where names would still collide.
+    Edge,
+    /// A vertex: its parents are its edges' names, sorted.
+    Vertex,
 }
 
 /// The entities of the sheet-metal operations (see [`crate::sheet_metal`]).
@@ -325,6 +337,7 @@ impl Role {
             Self::SheetMetal(r) => [15, r as u8],
             Self::Thicken(r) => [16, r as u8],
             Self::Fill(r) => [17, r as u8],
+            Self::Edit(r) => [18, r as u8],
         }
     }
 }
@@ -431,6 +444,10 @@ impl fmt::Display for Role {
                 FillRole::Middle => "fill-middle",
                 FillRole::Centre => "fill-centre",
             }),
+            Self::Edit(r) => f.write_str(match r {
+                EditRole::Edge => "edit-edge",
+                EditRole::Vertex => "edit-vertex",
+            }),
         }
     }
 }
@@ -493,6 +510,15 @@ pub(crate) fn recipe(kind: &str, key: OpKey, role: Role, parents: &[&str]) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_roles_read_well_and_collide_with_nothing() {
+        assert_eq!(Role::Edit(EditRole::Edge).to_string(), "edit-edge");
+        assert_eq!(Role::Edit(EditRole::Vertex).to_string(), "edit-vertex");
+        let a = Name::derive(OpKey(1), Role::Edit(EditRole::Edge), &[]);
+        let b = Name::derive(OpKey(1), Role::Boolean(BooleanRole::IntersectionEdge), &[]);
+        assert_ne!(a, b);
+    }
 
     #[test]
     fn op_key_from_bytes_is_fixed() {
@@ -667,6 +693,9 @@ mod tests {
             FillRole::Centre,
         ] {
             roles.push(Role::Fill(r));
+        }
+        for r in [EditRole::Edge, EditRole::Vertex] {
+            roles.push(Role::Edit(r));
         }
         let mut codes: Vec<[u8; 2]> = roles.iter().map(|r| r.code()).collect();
         codes.sort_unstable();

@@ -9,11 +9,11 @@
 //!
 //! - The race: a block whose top is a lofted bicubic face, minus 1,000
 //!   lofted pins poking out of both faces, on one thread, against OCCT's
-//!   `BRepAlgoAPI_Cut`: ryukei within two and a half times OCCT's time
-//!   (design 94 asked it to be faster; that is left to phase 9, #254).
-//!   Its flush variant (pins standing on the block's bottom, issue #77) is measured on the first row of 40 pins
-//!   and printed with its ratio to the clear pins' time per pin; SMLib's
-//!   times are printed beside them.
+//!   `BRepAlgoAPI_Cut`: ryukei must be faster (design 94's bar, plan
+//!   15.E, #254). Its flush variant (pins standing on the block's bottom,
+//!   issue #77), measured on the first row of 40 pins, must cost at most
+//!   twice the clear pins' time per pin; SMLib's times are printed beside
+//!   them.
 //! - Lofts, sweeps along paths, offsets and shells: volumes against exact
 //!   values where they are known, else against the references; where
 //!   both references agree and ryukei doesn't, the test fails.
@@ -321,15 +321,16 @@ fn the_nurbs_race_against_occt_on_one_thread() {
             "ryukei {v} against SMLib {sv}"
         );
     }
-    // Design 94's bar was to beat OCCT (#254, phase 9); plan 8.F measured
-    // ryukei at about twice OCCT's time once OCCT read the pins right (it
-    // had read them as other shapes, and lost). OCCT's own time ranged from
-    // 44.9 to 75.4 s across runs, which twice left no margin for, so this
-    // guards against regressions at two and a half times.
+    // Design 94's bar (plan 15.E, #254): faster than OCCT on one thread,
+    // and a flush pin at most twice a clear one.
     println!("ryukei / OCCT: {:.2}", ryukei_s / occt_s);
     assert!(
-        ryukei_s < 2.5 * occt_s,
+        ryukei_s < occt_s,
         "ryukei {ryukei_s:.1} s vs OCCT {occt_s:.1} s"
+    );
+    assert!(
+        row_s <= 2.0 * clear_row_s,
+        "flush row {row_s:.1} s vs the clear row's {clear_row_s:.1} s"
     );
 }
 

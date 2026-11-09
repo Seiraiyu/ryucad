@@ -34,6 +34,26 @@ pub(crate) fn run(
     built(key, body, changes, meter).map_err(translate)
 }
 
+/// [`run`] under `topology`: with `Change`, the re-trim where the fixed
+/// engine refuses a change of topology ([`super::retrim::takes`]); its
+/// refusal is then the answer. The fixed engine's result stands wherever
+/// it builds.
+pub(crate) fn run_with(
+    key: OpKey,
+    body: &Body,
+    changes: &Changes,
+    topology: super::Topology,
+    meter: &Meter,
+) -> Result<(Body, Journal), Error> {
+    let fixed = run(key, body, changes, meter);
+    match fixed {
+        Err(e) if topology == super::Topology::Change && super::retrim::takes(body, &e) => {
+            super::retrim::retrim(key, body, changes, meter)
+        }
+        r => r,
+    }
+}
+
 fn built(
     key: OpKey,
     body: &Body,

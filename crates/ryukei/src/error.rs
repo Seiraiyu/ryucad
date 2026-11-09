@@ -751,6 +751,17 @@ pub enum TweakError {
     /// The face's hinge, or its normal, runs within a hundredth of a
     /// radian of the pull somewhere: the draft has no direction there.
     HingeAlongPull { face: Name },
+    /// The re-trim's frontier walk didn't close at the face named: a piece
+    /// of it has an edge no other face's piece takes the other way (or,
+    /// from 13.B, a deleted set leaves nothing to close its gap).
+    GapNotHealed { face: Name },
+    /// A piece of the face named would need one of two partners with
+    /// nothing to choose between them, or would be a third user of an
+    /// edge.
+    HealAmbiguous { face: Name },
+    /// A kept piece of the face named still reaches its working face's
+    /// side with the region at its largest.
+    RegionTooSmall { face: Name },
     /// Two faces of the result meet away from the edges they share.
     SelfIntersecting { faces: [Name; 2] },
     /// A decision rounding left uncertain at the entity named.
@@ -822,6 +833,13 @@ impl fmt::Display for TweakError {
             }
             Self::HingeAlongPull { face } => {
                 write!(f, "the hinge of face {face} runs along the pull")
+            }
+            Self::GapNotHealed { face } => write!(f, "the gap at face {face} doesn't close"),
+            Self::HealAmbiguous { face } => {
+                write!(f, "which side of face {face} is kept can't be decided")
+            }
+            Self::RegionTooSmall { face } => {
+                write!(f, "face {face} reaches past the region its re-trim works in")
             }
             Self::SelfIntersecting { faces } => {
                 write!(f, "faces {} and {} would cross", faces[0], faces[1])
@@ -1623,6 +1641,20 @@ mod view_tests {
 #[cfg(test)]
 mod tweak_error_tests {
     use super::*;
+
+    #[test]
+    fn re_trim_refusals_name_their_face() {
+        let n = Name::from_u128(9);
+        for e in [
+            TweakError::GapNotHealed { face: n },
+            TweakError::HealAmbiguous { face: n },
+            TweakError::RegionTooSmall { face: n },
+        ] {
+            let text = Error::from(e).to_string();
+            assert!(text.starts_with("can't tweak: "), "{text}");
+            assert!(text.contains(&n.to_string()), "{text}");
+        }
+    }
 
     #[test]
     fn draft_refusals_name_their_face() {

@@ -494,3 +494,81 @@ fn radii_by_upper_ends_match_the_interval_expressions() {
         );
     }
 }
+
+/// [`jets3`] holds a patch's point and derivatives to third order at
+/// sampled parameters of seeded boxes, rational and polynomial: each
+/// enclosure meets the cut's enclosure at that very point (both hold the
+/// true value), and holds the f64 evaluation within that enclosure's
+/// width and a part in 10⁹ (rounding of the reference).
+#[test]
+fn third_order_jets_hold_sampled_values() {
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    let (mut checked, mut taken) = (0usize, 0usize);
+    for case in 0..120 {
+        let n = if case < 80 {
+            surface(&mut rng)
+        } else {
+            polynomial_surface(&mut rng)
+        };
+        let [du, dv] = n.domain();
+        for _ in 0..8 {
+            let fu = [0.0, 1e-9, 1e-4, 0.01, 0.05][rng.below(5)];
+            let fv = [0.0, 1e-9, 1e-4, 0.01, 0.05][rng.below(5)];
+            let (wu, wv) = ((du[1] - du[0]) * fu, (dv[1] - dv[0]) * fv);
+            let u0 = rng.range(du[0], du[1] - wu);
+            let v0 = rng.range(dv[0], dv[1] - wv);
+            for (index, patch) in n.patches().iter().enumerate() {
+                let (Some(s), Some(t)) = (
+                    super::super::local(patch.range[0], [u0, u0 + wu]),
+                    super::super::local(patch.range[1], [v0, v0 + wv]),
+                ) else {
+                    continue;
+                };
+                let Some((at, j)) = jets3(n.id(), index, patch, s, t) else {
+                    continue;
+                };
+                taken += 1;
+                let [ru, rv] = patch.range;
+                for (a, b) in [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                    (0.5, 0.25),
+                    (rng.unit(), rng.unit()),
+                ] {
+                    let su = s[0] + (s[1] - s[0]) * a;
+                    let sv = t[0] + (t[1] - t[0]) * b;
+                    let reference = super::super::patch_jet3(patch, [su, su], [sv, sv])
+                        .expect("a point enclosure");
+                    let (u, v) = (ru[0] + (ru[1] - ru[0]) * su, rv[0] + (rv[1] - rv[0]) * sv);
+                    // `jet3` picks a patch by position; inside this one's
+                    // open box its derivatives are this patch's.
+                    let inner = su > 0.0 && su < 1.0 && sv > 0.0 && sv < 1.0;
+                    let f = n.jet3(u, v);
+                    let shift = [at.x, at.y, at.z];
+                    for k in 0..10 {
+                        for c in 0..3 {
+                            let mine = if k == 0 {
+                                j[k][c] + pt(shift[c])
+                            } else {
+                                j[k][c]
+                            };
+                            let cut = reference[k][c];
+                            assert!(
+                                mine.lo() <= cut.hi() && cut.lo() <= mine.hi(),
+                                "jet {k}[{c}] at ({u}, {v}): {mine:?} misses {cut:?}"
+                            );
+                            if inner {
+                                let x = [f[k].x, f[k].y, f[k].z][c];
+                                let slack = cut.hi() - cut.lo() + 1e-9 * x.abs();
+                                assert!(holds(mine, x, slack), "jet {k}[{c}]: {x} not in {mine:?}");
+                            }
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 50_000, "only {checked} values checked");
+    assert!(taken > 500, "the Taylor path served only {taken} boxes");
+}

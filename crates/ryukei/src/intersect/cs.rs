@@ -98,6 +98,9 @@ fn search(
     m: &Meter,
 ) -> Result<Vec<CurveHit>, Failure> {
     let Some(imp) = Implicit::of(surface) else {
+        if let Some(hits) = on_affine_twin(curve, [t0, t1], surface, tolerance, m)? {
+            return Ok(hits);
+        }
         return super::sheet_cs::curve_sheet(curve, [t0, t1], surface, tolerance, m).or_else(|e| {
             // A curve along a bounded surface's domain edge lies on the
             // side of every cell beside it: on the surface carried past
@@ -188,6 +191,140 @@ fn on_surface(
         }
     }
     Ok(out)
+}
+
+/// The parameters inside `[t0, t1]` of a NURBS curve's joints: knots of
+/// multiplicity at least its degree (a periodic curve's first knot moved
+/// by whole periods into the range), where the implicit search, which
+/// judges touches at a curve's ends, can miss one (a vee dipping half a
+/// tolerance above a flat spline, which the sheet search finds).
+fn joints(curve: &Curve, [t0, t1]: [f64; 2]) -> Vec<f64> {
+    let Curve::Nurbs(n) = curve else {
+        return Vec::new();
+    };
+    let k = n.knots();
+    let p = k.degree();
+    let mut out = Vec::new();
+    for (&x, &m) in k.knots().iter().zip(k.mults()) {
+        if m < p {
+            continue;
+        }
+        match k.period() {
+            Some(q) if q > 0.0 => {
+                let mut y = x + ((t0 - x) / q).ceil() * q;
+                while y < t1 {
+                    if y > t0 {
+                        out.push(y);
+                    }
+                    y += q;
+                }
+            }
+            _ => {
+                if x > t0 && x < t1 {
+                    out.push(x);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A curve met with a spline whose net is an affine map of the plane
+/// ([`crate::pcurve::affine_net`], within [`crate::pcurve::TWIN_DEVIATION`]:
+/// a lofted flat face) as with that plane, by its implicit form, keeping
+/// the hits in the spline's domain. The sheet search spent most of a
+/// flush pin's cut following a curve lying in such a face (#254).
+///
+/// The spline lies within its deviation of the plane, so a contact within
+/// `tolerance - deviation` of the plane is within `tolerance` of the
+/// spline, and the plane's natural normal is the spline's (`a × b`), so
+/// sides agree. A hit is in the domain when its parameters (a point's, or
+/// every corner of an `On` stretch's box: an affine function is extreme
+/// over a box at its corners) lie at least twice the tolerance inside it,
+/// out when beyond it by that; anything between, and any spline that
+/// isn't such a net, is `None`: search the spline.
+fn on_affine_twin(
+    curve: &Curve,
+    [t0, t1]: [f64; 2],
+    surface: &Surface,
+    tolerance: f64,
+    m: &Meter,
+) -> Result<Option<Vec<CurveHit>>, Failure> {
+    let Some(a) = crate::pcurve::affine_net(surface) else {
+        return Ok(None);
+    };
+    if a.deviation > crate::pcurve::TWIN_DEVIATION {
+        return Ok(None);
+    }
+    let Some(plane) = a.plane() else {
+        return Ok(None);
+    };
+    let tolerance = tolerance.max(LINEAR_RESOLUTION);
+    let hits = search(curve, [t0, t1], &plane, tolerance - a.deviation, m)?;
+    // A joint within the tolerance of the plane that no hit covers may be
+    // a touch the implicit search can't see: search the spline.
+    let frame = plane.frame().expect("a plane has a frame");
+    for x in joints(curve, [t0, t1]) {
+        let q = curve.point(x);
+        if frame.to_local(q).z.abs() > tolerance {
+            continue;
+        }
+        let covered = hits.iter().any(|h| match *h {
+            CurveHit::On { t: [y0, y1] } => y0 <= x && x <= y1,
+            CurveHit::Point { point, .. } => {
+                point.distance(q) <= crate::tol::touch_reach(tolerance)
+            }
+        });
+        if !covered {
+            return Ok(None);
+        }
+    }
+    let [[u0, u1], [v0, v1]] = surface.domain();
+    let (mu, mv) = (
+        2.0 * tolerance / a.a.length(),
+        2.0 * tolerance / a.b.length(),
+    );
+    // `Some(true)` well inside, `Some(false)` beyond, `None` near the edge.
+    let place = |p: Point3| -> Option<bool> {
+        let q = a.local(p);
+        if q.x >= u0 + mu && q.x <= u1 - mu && q.y >= v0 + mv && q.y <= v1 - mv {
+            Some(true)
+        } else if q.x < u0 - mu || q.x > u1 + mu || q.y < v0 - mv || q.y > v1 + mv {
+            Some(false)
+        } else {
+            None
+        }
+    };
+    let mut out = Vec::with_capacity(hits.len());
+    for h in hits {
+        let keep = match h {
+            CurveHit::Point { point, .. } => place(point),
+            CurveHit::On { t: [x, y] } => {
+                let b = curve.bounds([x, y]);
+                let (lo, hi) = (b.min(), b.max());
+                let corners: Vec<Option<bool>> = (0..8)
+                    .map(|k| {
+                        place(Point3::new(
+                            if k & 1 == 0 { lo.x } else { hi.x },
+                            if k & 2 == 0 { lo.y } else { hi.y },
+                            if k & 4 == 0 { lo.z } else { hi.z },
+                        ))
+                    })
+                    .collect();
+                if corners.iter().all(|c| *c == Some(true)) {
+                    Some(true)
+                } else {
+                    None
+                }
+            }
+        };
+        match keep {
+            Some(true) => out.push(h),
+            Some(false) => {}
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(out))
 }
 
 /// How many parts a stretch may be halved into to certify that it lies
@@ -577,6 +714,67 @@ mod tests {
     use std::sync::Arc;
 
     const TOL: f64 = LINEAR_RESOLUTION;
+
+    /// A spline whose net is affine (the race block's flat bottom) is met
+    /// as its plane: a curve lying in it is one `On` stretch over its
+    /// range, a line through it one crossing where the spline search puts
+    /// it, a line through the plane past the domain nothing, as the spline
+    /// search finds (#254).
+    #[test]
+    fn an_affine_spline_is_met_as_its_plane() {
+        use crate::geom::{KnotVector, Line, NurbsCurve, NurbsSurface, Point3, Vector3};
+        use std::sync::Arc;
+        let ku = KnotVector::clamped(1, &[0.0, 1.0], &[2, 2]).unwrap();
+        let kv = KnotVector::clamped(3, &[0.0, 1.0, 2.0], &[4, 1, 4]).unwrap();
+        let gv = [0.0, 1.0 / 3.0, 1.0, 5.0 / 3.0, 2.0];
+        let mut pts = Vec::new();
+        for u in [0.0, 1.0] {
+            for &v in &gv {
+                pts.push(Point3::new(40.0 * u, 12.5 * v, 0.0));
+            }
+        }
+        let s = Surface::Nurbs(Arc::new(NurbsSurface::new([ku, kv], pts, None).unwrap()));
+        let n = 12;
+        let ring: Vec<Point3> = (0..n)
+            .map(|i| {
+                let t = core::f64::consts::TAU * f64::from(i) / f64::from(n);
+                let (si, co) = crate::math::sin_cos(t);
+                Point3::new(10.5 + 0.3 * co, 7.5 + 0.3 * si, 0.0)
+            })
+            .collect();
+        let knots: Vec<f64> = (0..=n).map(f64::from).collect();
+        let k = KnotVector::periodic(3, &knots, &vec![1; knots.len()]).unwrap();
+        let ring = Curve::Nurbs(Arc::new(NurbsCurve::new(k, ring, None).unwrap()));
+        let m = Meter::free(); // unmetered: a test
+        let twin = on_affine_twin(&ring, [0.0, 12.0], &s, 1e-8, &m)
+            .unwrap()
+            .expect("met as its plane");
+        assert!(matches!(twin.as_slice(), [CurveHit::On { t: [a, b] }] if *a == 0.0 && *b == 12.0));
+        let line = Curve::Line(
+            Line::new(Point3::new(3.3, 4.1, -1.0), Vector3::new(0.1, 0.1, 1.0)).unwrap(),
+        );
+        let twin = on_affine_twin(&line, [0.0, 3.0], &s, 1e-8, &m)
+            .unwrap()
+            .unwrap();
+        let spline = super::super::sheet_cs::curve_sheet(&line, [0.0, 3.0], &s, 1e-8, &m).unwrap();
+        assert_eq!(twin.len(), 1);
+        assert_eq!(spline.len(), 1);
+        let (CurveHit::Point { point: p, .. }, CurveHit::Point { point: q, .. }) =
+            (&twin[0], &spline[0])
+        else {
+            panic!("crossings");
+        };
+        assert!(p.distance(*q) <= 1e-9, "{p:?} {q:?}");
+        let outside = Curve::Line(
+            Line::new(Point3::new(50.0, 4.0, -1.0), Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+        );
+        assert!(
+            on_affine_twin(&outside, [0.0, 3.0], &s, 1e-8, &m)
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     fn line(o: (f64, f64, f64), d: (f64, f64, f64)) -> Curve {
         Curve::Line(Line::new(Point3::new(o.0, o.1, o.2), Vector3::new(d.0, d.1, d.2)).unwrap())
