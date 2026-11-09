@@ -1777,6 +1777,11 @@ fn boolean_error(
             faces.iter().map(face).collect(),
             Some([at.x, at.y, at.z]),
         ),
+        ryukei::Error::InvalidBoolean(BooleanError::ToolDoesNotDivide { face: f }) => (
+            "a cut ends inside the target: the tool doesn't divide it".to_owned(),
+            vec![face(f)],
+            None,
+        ),
         e => (e.to_string(), Vec::new(), None),
     };
     let which = match alone.and_then(|x| x.label.as_ref()) {
@@ -1798,6 +1803,12 @@ fn boolean_error(
     }
     if let Some(at) = at {
         err = err.with("at", at);
+    }
+    if let ryukei::Error::InvalidBoolean(BooleanError::ToolDoesNotDivide { .. }) = &e {
+        err = err.with("reason", "tool_does_not_divide").with(
+            "hint",
+            "a split's tool must cut the target right through: carry the sheet past the target on every side",
+        );
     }
     err
 }
