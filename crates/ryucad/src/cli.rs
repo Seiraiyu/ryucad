@@ -4579,7 +4579,8 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             let disk = Disk::for_user().ok_or_else(|| {
                 Error::new(Code::Io, "there is no disk cache on this machine to push")
             })?;
-            let kinds = kind.map_or(Kind::ALL.to_vec(), |k| vec![k]);
+            let shared: Vec<Kind> = Kind::ALL.into_iter().filter(|k| k.shared()).collect();
+            let kinds = kind.map_or(shared, |k| vec![k]);
             ryucad::cache::push(&disk, &kinds)
         }
         Command::WhereUsed {

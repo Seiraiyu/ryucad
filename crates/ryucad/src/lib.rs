@@ -63,6 +63,7 @@ pub mod connector;
 pub mod daemon;
 pub mod datum;
 pub mod dependents;
+pub mod drawing;
 pub mod deps;
 pub mod diff;
 pub mod doctor;

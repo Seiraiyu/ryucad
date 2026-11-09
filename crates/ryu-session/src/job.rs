@@ -33,6 +33,8 @@ pub enum Phase {
     Check,
     /// Fetching other repositories (ryucad's dependencies).
     Fetch,
+    /// Projecting a drawing's views (ryucad's drawings), a view a step.
+    Project,
 }
 
 /// What a request asked of its job: `progress` and `token`, taken out of

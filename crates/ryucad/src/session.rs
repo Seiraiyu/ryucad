@@ -83,6 +83,8 @@ pub struct Session {
     pub flats: crate::sheet_metal::flat::Cache,
     /// What intersecting pairs of placed solids found, for `interference`.
     pub interference: crate::interference::Cache,
+    /// Drawing views' projections, by their placed bodies and the view.
+    pub projections: crate::drawing::Cache,
     /// Mass properties worked out, for `mass`.
     pub mass: crate::mass::Cache,
     /// Distances between placed solids, for `clearance`.
@@ -240,6 +242,7 @@ impl Session {
             meshes: crate::mesh::Cache::default(),
             flats: Default::default(),
             interference: crate::interference::Cache::default(),
+            projections: crate::drawing::Cache::default(),
             mass: crate::mass::Cache::default(),
             clearance: crate::clearance::Cache::default(),
             frozen: false,
@@ -445,6 +448,7 @@ impl Session {
             meshes: crate::mesh::Cache::with_disk(from.store.disk.clone()),
             flats: Default::default(),
             interference: from.interference.clone(),
+            projections: from.projections.clone(),
             mass: from.mass.clone(),
             clearance: from.clearance.clone(),
             frozen: true,

@@ -5922,7 +5922,7 @@ fn framed(
 /// `reference` names (`<part>/<solid>/<name>`, or an occurrence's face,
 /// placed by its pose): along a planar face's outward normal or a
 /// revolved face's axis, its longest straight edge level.
-fn normal_to_face(session: &mut Session, reference: &str) -> Result<([f64; 3], [f64; 3])> {
+pub(crate) fn normal_to_face(session: &mut Session, reference: &str) -> Result<([f64; 3], [f64; 3])> {
     use ryukei::geom::{Curve, Surface};
     use ryukei::measure::Entity;
     // A datum plane: along its normal, its x level; a datum axis: along it.
