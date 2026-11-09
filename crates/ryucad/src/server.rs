@@ -2223,7 +2223,7 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Boolean(b) => b.fields(),
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) => json!({}),
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) => crate::tweak::report(part, f),
         Feature::Datum(d) => crate::datum::report(part, d),
         Feature::Path(x) => crate::path::report(part, x),
         Feature::Sweep(w) => crate::along::feature_report(part, w),
@@ -4975,6 +4975,7 @@ pub(crate) fn part_report(
                 | Feature::Flange(_)
                 | Feature::Unfold(_)
                 | Feature::Refold(_) => crate::sheet_metal::report(part, f),
+                Feature::MoveFace(_) | Feature::ReplaceFace(_) => crate::tweak::report(id, f),
                 _ => return None,
             };
             Some((fid.clone(), (f.type_name(), report)))
@@ -4990,8 +4991,8 @@ pub(crate) fn part_report(
             _ => None,
         })
         .collect();
-    // A sweep's profile and path, a loft's sections, and a mirror's or
-    // split's plane, are resolved again from the rebuild for its report: the part, held apart
+    // A sweep's profile and path, a loft's sections, a mirror's or
+    // split's plane, and a tweak's motion, are resolved again from the rebuild for its report: the part, held apart
     // from the session while it rebuilds.
     let held = part
         .features
@@ -5000,7 +5001,13 @@ pub(crate) fn part_report(
             f.as_ref().is_ok_and(|f| {
                 f.sweep().is_some()
                     || f.loft().is_some()
-                    || matches!(f, Feature::Mirror(_) | Feature::Split(_))
+                    || matches!(
+                        f,
+                        Feature::Mirror(_)
+                            | Feature::Split(_)
+                            | Feature::MoveFace(_)
+                            | Feature::ReplaceFace(_)
+                    )
             })
         })
         .then(|| part.clone());
@@ -5105,6 +5112,7 @@ pub(crate) fn part_report(
                     held.as_ref().filter(|_| v["ok"] == true).and_then(|q| {
                         let f = q.features.get(fid)?.as_ref().ok()?;
                         crate::body::resolved(q, r, fid, f)
+                            .or_else(|| crate::tweak::resolved(q, r, fid, f, false))
                     })
                 {
                     for (key, x) in extra {
@@ -7131,7 +7139,7 @@ fn inspect(
         .filter_map(|(id, f)| Some((id.clone(), f.as_ref().ok()?.clone())))
         .collect();
     let solids = Solids::of(session.project().part(&pid)?);
-    // A sweep, loft, mirror or split asked for says what it built from:
+    // A sweep, loft, mirror, split or tweak asked for says what it built from:
     // its part, held apart from the session while it rebuilds.
     let held = match &only {
         Some(f)
@@ -7139,7 +7147,13 @@ fn inspect(
                 i == f
                     && (x.sweep().is_some()
                         || x.loft().is_some()
-                        || matches!(x, Feature::Mirror(_) | Feature::Split(_)))
+                        || matches!(
+                            x,
+                            Feature::Mirror(_)
+                                | Feature::Split(_)
+                                | Feature::MoveFace(_)
+                                | Feature::ReplaceFace(_)
+                        ))
             }) =>
         {
             Some(session.project().part(&pid)?.clone())
@@ -7301,17 +7315,29 @@ fn inspect(
     if let Some(f) = &only
         && let Some((
             _,
-            x @ (Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_)),
+            x @ (Feature::Shell(_)
+            | Feature::Offset(_)
+            | Feature::Mirror(_)
+            | Feature::Split(_)
+            | Feature::MoveFace(_)
+            | Feature::ReplaceFace(_)),
         )) = features.iter().find(|(i, _)| i == f)
     {
         let k = x.type_name();
-        v[k] = crate::body::report(&pid, x);
+        let tweak = crate::tweak::takes_sheets(x);
+        v[k] = if tweak {
+            crate::tweak::report(&pid, x)
+        } else {
+            crate::body::report(&pid, x)
+        };
         let built = matches!(crate::rebuild::Results::result(result, f), Some(Ok(_)));
-        if let Some(Value::Object(extra)) = held
-            .as_ref()
-            .filter(|_| built)
-            .and_then(|q| crate::body::resolved(q, result, f, x))
-        {
+        if let Some(Value::Object(extra)) = held.as_ref().filter(|_| built).and_then(|q| {
+            if tweak {
+                crate::tweak::resolved(q, result, f, x, true)
+            } else {
+                crate::body::resolved(q, result, f, x)
+            }
+        }) {
             for (key, e) in extra {
                 v[k][key] = e;
             }

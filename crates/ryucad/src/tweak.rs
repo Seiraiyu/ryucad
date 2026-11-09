@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use crate::solid::Solids;
 use ryukei::geom::{Rigid, UnitVector3};
-use ryukei::name::Name;
+use ryukei::name::{Event, Name};
 use ryukei::topo::EntityId;
 use ryukei::tweak::{MoveSpec, OffsetFacesSpec};
 
@@ -528,6 +528,91 @@ pub fn from_given(
     Ok(out)
 }
 
+/// A tweak as output reports it: its file's fields, quantities as written
+/// and in meters or radians, faces as `<part>/<solid>/<name>`, directions,
+/// axes and `with` as text, a move's `tangent` always.
+pub fn report(part: &Id, f: &Feature) -> Value {
+    let pointer = |role: &str| format!("/{}", role.replace('.', "/"));
+    match f {
+        Feature::MoveFace(m) => {
+            let mut v = m.fields();
+            match &m.by {
+                MoveBy::Translate { direction, distance } => {
+                    v["direction"] = json!(direction.text(part));
+                    v["distance"] = distance.report();
+                }
+                MoveBy::Rotate { axis, angle } => {
+                    v["axis"] = json!(axis.text(part));
+                    v["angle"] = angle.report();
+                }
+                MoveBy::Offset { distance, groups } => {
+                    v["distance"] = distance.report();
+                    for (i, g) in groups.iter().enumerate() {
+                        v["groups"][i]["distance"] = g.quantity.report();
+                    }
+                }
+            }
+            v["tangent"] = json!(m.tangent);
+            for (role, r) in m.faces() {
+                *v.pointer_mut(&pointer(&role)).expect("its own face") = json!(r.text(part));
+            }
+            v
+        }
+        Feature::ReplaceFace(x) => {
+            let mut v = x.fields();
+            for (i, g) in x.groups.iter().enumerate() {
+                v["groups"][i]["with"] = json!(g.with.text(part));
+            }
+            for (role, r) in x.faces() {
+                *v.pointer_mut(&pointer(&role)).expect("its own face") = json!(r.text(part));
+            }
+            v
+        }
+        _ => unreachable!("a tweak"),
+    }
+}
+
+/// What a tweak resolved to, beside its fields: a move's rigid `motion`
+/// (`{rotation, translation_m}`, the rotation's rows) where it resolves,
+/// and once built what its journal says it `modified` (counts of faces,
+/// edges and vertices; with `references`, each as
+/// `<part>/<solid>/<name>`, sorted).
+pub fn resolved(part: &Part, results: &dyn Results, id: &Id, f: &Feature, references: bool) -> Option<Value> {
+    if !takes_sheets(f) {
+        return None;
+    }
+    let mut v = json!({});
+    if let Feature::MoveFace(m) = f
+        && let Ok(Some(r)) = motion(part, id, m, results)
+    {
+        let t = r.translation_part();
+        v["motion"] = json!({"rotation": r.rotation_matrix(), "translation_m": [t.x, t.y, t.z]});
+    }
+    let target = f.targets()[0];
+    if let Some(Ok(out)) = results.result(id)
+        && let Some(b) = out.solid(target)
+    {
+        let (mut faces, mut edges, mut vertices) = (0u64, 0u64, 0u64);
+        let mut refs = Vec::new();
+        for e in b.journal.events() {
+            let Event::Modified(n) = e else { continue };
+            match b.body.by_name(*n) {
+                Some(EntityId::Face(_)) => faces += 1,
+                Some(EntityId::Edge(_)) => edges += 1,
+                Some(EntityId::Vertex(_)) => vertices += 1,
+                _ => continue,
+            }
+            refs.push(format!("{}/{target}/{n}", part.id));
+        }
+        v["modified"] = json!({"faces": faces, "edges": edges, "vertices": vertices});
+        if references {
+            refs.sort();
+            v["modified"]["references"] = json!(refs);
+        }
+    }
+    Some(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -717,5 +802,44 @@ mod tests {
         assert_eq!((e.code, e.details["param"].as_str()), (Code::InvalidParam, Some("by")));
         // Nothing written by any of them.
         assert!(add(&mut s, json!({"faces": [format!("p/b/{}", b[0])]})).is_ok());
+    }
+
+    /// The reference of `f`'s planar face facing up at `z` meters, of solid `solid`.
+    fn up(s: &mut crate::session::Session, f: &str, solid: &str, z: f64) -> String {
+        let v = call(s, "inspect", json!({"part": "p", "feature": f})).unwrap();
+        let face = v["bodies"][0]["faces"].as_array().unwrap().iter()
+            .find(|x| {
+                let sign = if x["reversed"] == true { -1.0 } else { 1.0 };
+                x["surface"]["type"] == "plane"
+                    && x["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == 1.0
+                    && (x["surface"]["frame"]["origin"][2].as_f64().unwrap() - z).abs() < 1e-12
+            })
+            .unwrap()["name"].as_str().unwrap().to_owned();
+        format!("p/{solid}/{face}")
+    }
+
+    #[test]
+    fn a_move_reports_its_fields_motion_and_what_it_modified() {
+        let (_dir, mut s) = boxes();
+        let top = up(&mut s, "b", "b", 0.02);
+        let shown = call(&mut s, "feature.add", json!({"part": "p", "type": "move_face", "id": "m",
+            "by": "translate", "direction": "z", "distance": "5 mm", "faces": [top.clone()]})).unwrap();
+        let f = &shown["feature"];
+        assert_eq!(f["distance"], json!({"value": "5 mm", "m": 0.005}), "{f}");
+        assert_eq!(f["faces"], json!([top]), "{f}");
+        assert_eq!((f["direction"].as_str(), f["tangent"].as_bool()), (Some("z"), Some(true)));
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let m = r["parts"][0]["features"].as_array().unwrap().iter()
+            .find(|x| x["id"] == "m").unwrap()["move_face"].clone();
+        assert_eq!(m["motion"]["translation_m"], json!([0.0, 0.0, 0.005]), "{m}");
+        // The top moved; its four edges moved, the four upright ones were
+        // carried on; its four corners moved. The sides keep their planes.
+        assert_eq!(m["modified"]["faces"], 1, "{m}");
+        assert_eq!((m["modified"]["edges"].as_u64(), m["modified"]["vertices"].as_u64()), (Some(8), Some(4)), "{m}");
+        assert!(m["modified"].get("references").is_none());
+        let i = call(&mut s, "inspect", json!({"part": "p", "feature": "m"})).unwrap();
+        let refs = i["move_face"]["modified"]["references"].as_array().unwrap();
+        assert!(refs.contains(&json!(top)), "{i}");
+        assert_eq!(refs.len(), 13);
     }
 }
