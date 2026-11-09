@@ -839,7 +839,10 @@ pub fn feature_acts(v: &Value) -> Acts {
             out.consumes = ids(v.get("sheets"));
         }
         Some("thicken") => {
-            if v.get("operation").and_then(Value::as_str).is_none_or(|o| o == "new") {
+            if v.get("operation")
+                .and_then(Value::as_str)
+                .is_none_or(|o| o == "new")
+            {
                 out.founds = true;
             } else {
                 out.acts_on = ids(v.get("targets"));
@@ -2451,7 +2454,10 @@ mod tests {
                                     {"curve": {"feature": "p1"}}],
                           "tolerance": "0.001 mm", "angle": "1 deg"});
         let f = Feature::from_json(&fill, Unit::Mm, &Env::empty()).unwrap();
-        assert_eq!((f.type_name(), f.format(), feature_format(&fill)), ("fill", FORMAT, FORMAT));
+        assert_eq!(
+            (f.type_name(), f.format(), feature_format(&fill)),
+            ("fill", FORMAT, FORMAT)
+        );
         assert!(f.founds() && f.may_make_sheet() && f.targets().is_empty());
         assert_eq!(f.to_json(), fill);
         let reads: Vec<&str> = f.geometry_reads().into_iter().map(Id::as_str).collect();
@@ -2461,14 +2467,20 @@ mod tests {
         let ex = json!({"format": FORMAT, "kind": FEATURE_KIND, "type": "extract",
                         "faces": [{"feature": "base", "name": A}]});
         let f = Feature::from_json(&ex, Unit::Mm, &Env::empty()).unwrap();
-        assert_eq!((f.type_name(), f.format(), feature_format(&ex)), ("extract", FORMAT, FORMAT));
+        assert_eq!(
+            (f.type_name(), f.format(), feature_format(&ex)),
+            ("extract", FORMAT, FORMAT)
+        );
         assert!(f.founds() && f.may_make_sheet() && f.targets().is_empty());
         assert_eq!(f.to_json(), ex);
         assert!(feature_acts(&ex).founds);
         // The newest format is the largest stage's, at least this one.
         const { assert!(FEATURE_FORMAT >= FORMAT) };
         // A fill's tolerance and angle are expressions an equations table lists.
-        let fields: Vec<String> = expression_fields(&fill).into_iter().map(|(p, _)| p).collect();
+        let fields: Vec<String> = expression_fields(&fill)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
         assert_eq!(fields, ["/angle", "/tolerance"]);
     }
 
@@ -2480,13 +2492,25 @@ mod tests {
         let sew = json!({"format": FORMAT, "kind": FEATURE_KIND, "type": "sew",
                          "sheets": ["a", "b"], "tolerance": "0.01 mm", "solid": false});
         let f = Feature::from_json(&sew, Unit::Mm, &Env::empty()).unwrap();
-        assert_eq!((f.type_name(), f.format(), feature_format(&sew)), ("sew", FORMAT, FORMAT));
+        assert_eq!(
+            (f.type_name(), f.format(), feature_format(&sew)),
+            ("sew", FORMAT, FORMAT)
+        );
         assert!(f.founds() && f.may_make_sheet());
-        assert_eq!((ids(f.targets()), ids(f.consumes())), (vec!["a".into(), "b".into()], vec!["a".into(), "b".into()]));
+        assert_eq!(
+            (ids(f.targets()), ids(f.consumes())),
+            (vec!["a".into(), "b".into()], vec!["a".into(), "b".into()])
+        );
         assert_eq!(f.to_json(), sew);
         let a = feature_acts(&sew);
         assert!(a.founds && a.acts_on.is_empty());
-        assert_eq!(a.consumes, [Id::parse("a", "feature").unwrap(), Id::parse("b", "feature").unwrap()]);
+        assert_eq!(
+            a.consumes,
+            [
+                Id::parse("a", "feature").unwrap(),
+                Id::parse("b", "feature").unwrap()
+            ]
+        );
         let th = json!({"format": FORMAT, "kind": FEATURE_KIND, "type": "thicken",
                         "from": {"sheet": "skin"}, "front": "2 mm", "back": "0 mm",
                         "operation": "join", "targets": ["base"]});

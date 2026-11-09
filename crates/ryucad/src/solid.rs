@@ -246,17 +246,32 @@ pub(crate) mod tests {
     #[test]
     fn a_sew_and_a_thicken_from_a_sheet_consume_what_they_take() {
         let f = |v: serde_json::Value| {
-            crate::doc::files::Feature::from_json(&v, crate::units::Unit::Mm, &crate::expr::Env::empty()).unwrap()
+            crate::doc::files::Feature::from_json(
+                &v,
+                crate::units::Unit::Mm,
+                &crate::expr::Env::empty(),
+            )
+            .unwrap()
         };
         let n = crate::doc::surface::FORMAT;
         let p = part(vec![
             ("a", boxed("0", Operation::New, &[])),
             ("b", boxed("2", Operation::New, &[])),
-            ("s", f(serde_json::json!({"format": n, "kind": "ryucad.feature", "type": "sew",
-                           "sheets": ["a", "b"], "tolerance": "0.01 mm", "solid": true}))),
-            ("t", f(serde_json::json!({"format": n, "kind": "ryucad.feature", "type": "thicken",
+            (
+                "s",
+                f(
+                    serde_json::json!({"format": n, "kind": "ryucad.feature", "type": "sew",
+                           "sheets": ["a", "b"], "tolerance": "0.01 mm", "solid": true}),
+                ),
+            ),
+            (
+                "t",
+                f(
+                    serde_json::json!({"format": n, "kind": "ryucad.feature", "type": "thicken",
                            "from": {"sheet": "s"}, "front": "1 mm", "back": "0 mm",
-                           "operation": "new"}))),
+                           "operation": "new"}),
+                ),
+            ),
         ]);
         let solids = Solids::of(&p);
         let id = |s: &str| Id::parse(s, "feature").unwrap();

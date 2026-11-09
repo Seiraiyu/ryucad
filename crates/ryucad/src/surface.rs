@@ -82,15 +82,29 @@ pub fn check_fill(part: &Part, id: &Id, x: &Fill, results: &dyn Results) -> Resu
 }
 
 /// A fill: its sheet and its report.
-pub fn fill(part: &Part, id: &Id, x: &Fill, before: &dyn Results, run: &Run) -> Result<(Built, Value)> {
+pub fn fill(
+    part: &Part,
+    id: &Id,
+    x: &Fill,
+    before: &dyn Results,
+    run: &Run,
+) -> Result<(Built, Value)> {
     let resolved = resolve_sides(part, id, x, before)?;
     let mut sides: Vec<FillSide<'_>> = Vec::new();
     let mut place: Vec<Place> = Vec::new();
     for (i, r) in resolved.iter().enumerate() {
         match r {
             Resolved::Edge(body, name, tangent) => {
-                sides.push(FillSide::Edge { body, edge: *name, tangent: *tangent });
-                place.push(Place { side: i, piece: None, edge: Some(*name) });
+                sides.push(FillSide::Edge {
+                    body,
+                    edge: *name,
+                    tangent: *tangent,
+                });
+                place.push(Place {
+                    side: i,
+                    piece: None,
+                    edge: Some(*name),
+                });
             }
             Resolved::Curve(chain) => {
                 let many = chain.pieces.len() > 1;
@@ -99,8 +113,15 @@ pub fn fill(part: &Part, id: &Id, x: &Fill, before: &dyn Results, run: &Run) -> 
                     // its range increasing.
                     let [a, b] = p.range;
                     let range = if a <= b { [a, b] } else { [b, a] };
-                    sides.push(FillSide::Curve { curve: p.curve.clone(), range });
-                    place.push(Place { side: i, piece: many.then_some(j), edge: None });
+                    sides.push(FillSide::Curve {
+                        curve: p.curve.clone(),
+                        range,
+                    });
+                    place.push(Place {
+                        side: i,
+                        piece: many.then_some(j),
+                        edge: None,
+                    });
                 }
             }
         }
@@ -111,8 +132,8 @@ pub fn fill(part: &Part, id: &Id, x: &Fill, before: &dyn Results, run: &Run) -> 
         angle: x.angle.radians(),
     };
     let work = crate::work::work(run.job);
-    let (body, journal, report) = ryukei::fill::fill_with(key, &FillBoundary { sides }, &opts, &work)
-        .map_err(|e| {
+    let (body, journal, report) =
+        ryukei::fill::fill_with(key, &FillBoundary { sides }, &opts, &work).map_err(|e| {
             crate::work::stopped(&e, run.job).unwrap_or_else(|| fill_error(part, id, x, &place, e))
         })?;
     let origins = fill_origins(id, key, &place, &body);
@@ -139,7 +160,11 @@ pub(crate) fn fill_origins(id: &Id, key: OpKey, place: &[Place], body: &Body) ->
         }
         sides.insert(stand_in, v.clone());
         for half in [0u128, 1] {
-            let n = Name::derive(key, Role::Fill(FillRole::Half), &[stand_in, Name::from_u128(half)]);
+            let n = Name::derive(
+                key,
+                Role::Fill(FillRole::Half),
+                &[stand_in, Name::from_u128(half)],
+            );
             sides.insert(n, v.clone());
         }
     }
@@ -155,7 +180,10 @@ pub(crate) fn fill_origins(id: &Id, key: OpKey, place: &[Place], body: &Body) ->
         .map(|n| {
             let o = match body.by_name(n) {
                 Some(EntityId::Face(_)) => json!({"feature": id, "fill": face}),
-                _ => sides.get(&n).cloned().unwrap_or_else(|| json!({"feature": id})),
+                _ => sides
+                    .get(&n)
+                    .cloned()
+                    .unwrap_or_else(|| json!({"feature": id})),
             };
             (n.to_string(), o)
         })
@@ -200,9 +228,11 @@ fn fill_error(part: &Part, id: &Id, x: &Fill, place: &[Place], e: ryukei::Error)
             F::NotLaminar { side } => ("not_laminar", Some(*side), None),
             F::NotClosed { side, gap } => ("not_closed", Some(*side), Some(("gap_m", *gap))),
             F::Degenerate { side } => ("degenerate", *side, None),
-            F::AngleTooLarge { side, angle } => {
-                ("angle_too_large", *side, Some(("angle_deg", angle.to_degrees())))
-            }
+            F::AngleTooLarge { side, angle } => (
+                "angle_too_large",
+                *side,
+                Some(("angle_deg", angle.to_degrees())),
+            ),
             F::Uncertain { side } => ("uncertain", *side, None),
         },
         _ => ("kernel", None, None),
@@ -300,7 +330,12 @@ pub fn extract(part: &Part, id: &Id, x: &Extract, before: &dyn Results) -> Resul
 pub(crate) fn extract_origins(id: &Id, body: &Body) -> Origins {
     crate::rebuild::names(body)
         .into_iter()
-        .map(|n| (n.to_string(), json!({"feature": id, "extract_of": n.to_string()})))
+        .map(|n| {
+            (
+                n.to_string(),
+                json!({"feature": id, "extract_of": n.to_string()}),
+            )
+        })
         .collect()
 }
 
@@ -320,7 +355,9 @@ fn extract_error(part: &Part, id: &Id, from: &Id, e: &ryukei::Error) -> Error {
         }
         ryukei::Error::InvalidSheet(S::NoFaces) => err = err.with("reason", "no_faces"),
         ryukei::Error::InvalidSheet(S::NoSuchFace { name }) => {
-            err = err.with("reason", "no_such_face").with("face", name.to_string());
+            err = err
+                .with("reason", "no_such_face")
+                .with("face", name.to_string());
         }
         _ => err = err.with("reason", "kernel"),
     }
@@ -346,7 +383,12 @@ pub fn sew(
     let inputs: Vec<(&Id, &Built)> = x
         .sheets
         .iter()
-        .map(|t| Ok((t, crate::rebuild::body_as(part, solids, id, t, need, before)?)))
+        .map(|t| {
+            Ok((
+                t,
+                crate::rebuild::body_as(part, solids, id, t, need, before)?,
+            ))
+        })
         .collect::<Result<_>>()?;
     let sheets: Vec<Body> = inputs.iter().map(|(_, b)| b.body.clone()).collect();
     let key = crate::rebuild::op_key(&part.id, id);
@@ -355,9 +397,8 @@ pub fn sew(
         solid: x.solid,
     };
     let work = crate::work::work(run.job);
-    let (mut pieces, journal) = ryukei::heal::sew_with(key, &sheets, &opts, &work).map_err(|e| {
-        crate::work::stopped(&e, run.job).unwrap_or_else(|| sew_error(id, e))
-    })?;
+    let (mut pieces, journal) = ryukei::heal::sew_with(key, &sheets, &opts, &work)
+        .map_err(|e| crate::work::stopped(&e, run.job).unwrap_or_else(|| sew_error(id, e)))?;
     if pieces.len() > 1 {
         let listed: Vec<Value> = pieces
             .iter()
@@ -407,17 +448,24 @@ fn laminar(part: &Part, inputs: &[(&Id, &Built)], piece: &Body) -> Vec<String> {
         .edges()
         .filter(|e| piece.is_laminar(*e))
         .filter_map(|e| piece.name_of(EntityId::Edge(e)))
-        .map(|n| match inputs.iter().find(|(_, b)| b.body.by_name(n).is_some()) {
-            Some((t, _)) => format!("{}/{t}/{n}", part.id),
-            None => n.to_string(),
-        })
+        .map(
+            |n| match inputs.iter().find(|(_, b)| b.body.by_name(n).is_some()) {
+                Some((t, _)) => format!("{}/{t}/{n}", part.id),
+                None => n.to_string(),
+            },
+        )
         .collect()
 }
 
 /// A sew's origins: a sewn edge or a joined vertex (the kernel's `Merged`
 /// child) is `{feature, sewn: [<names>]}`; a split copy takes its
 /// parent's; everything else keeps its sheet's origin.
-fn sew_origins(id: &Id, inputs: &[(&Id, &Built)], body: &Body, journal: &ryukei::name::Journal) -> Origins {
+fn sew_origins(
+    id: &Id,
+    inputs: &[(&Id, &Built)],
+    body: &Body,
+    journal: &ryukei::name::Journal,
+) -> Origins {
     use ryukei::name::Event;
     let mut sewn: std::collections::BTreeMap<Name, Vec<String>> = Default::default();
     let mut parent: std::collections::BTreeMap<Name, Name> = Default::default();
@@ -426,7 +474,10 @@ fn sew_origins(id: &Id, inputs: &[(&Id, &Built)], body: &Body, journal: &ryukei:
             Event::Merged { parents, child } => {
                 sewn.insert(*child, parents.iter().map(Name::to_string).collect());
             }
-            Event::Split { parent: p, children } => {
+            Event::Split {
+                parent: p,
+                children,
+            } => {
                 for c in children {
                     parent.insert(*c, *p);
                 }
@@ -435,7 +486,9 @@ fn sew_origins(id: &Id, inputs: &[(&Id, &Built)], body: &Body, journal: &ryukei:
         }
     }
     let of = |n: Name| -> Option<Value> {
-        inputs.iter().find_map(|(_, b)| b.origins.get(&n.to_string()).cloned())
+        inputs
+            .iter()
+            .find_map(|(_, b)| b.origins.get(&n.to_string()).cloned())
     };
     crate::rebuild::names(body)
         .into_iter()
@@ -560,7 +613,11 @@ pub fn thicken(
         faces: t
             .faces
             .iter()
-            .flat_map(|g| g.faces.iter().map(move |r| (r.name, g.front.meters(), g.back.meters())))
+            .flat_map(|g| {
+                g.faces
+                    .iter()
+                    .map(move |r| (r.name, g.front.meters(), g.back.meters()))
+            })
             .collect(),
     };
     let key = crate::rebuild::op_key(&part.id, id);
@@ -594,7 +651,10 @@ fn thicken_origins(
     // whether or not the journal says it was replaced (a side at zero
     // keeps the sheet's names, and the kernel journals nothing then).
     for n in crate::rebuild::names(sheet) {
-        for (role, word) in [(ThickenRole::Front, "front_of"), (ThickenRole::Back, "back_of")] {
+        for (role, word) in [
+            (ThickenRole::Front, "front_of"),
+            (ThickenRole::Back, "back_of"),
+        ] {
             let m = Name::derive(key, Role::Thicken(role), &[n]);
             if made.0.by_name(m).is_some() {
                 of.insert(m, json!({"feature": id, word: n.to_string()}));
@@ -652,12 +712,12 @@ pub fn report(part: &Id, f: &Feature) -> Value {
         Feature::Extract(x) => {
             json!({"faces": x.faces.iter().map(|r| r.text(part)).collect::<Vec<_>>()})
         }
-Feature::Sew(x) => {
+        Feature::Sew(x) => {
             let mut v = x.fields();
             v["tolerance"] = x.tolerance.report();
             v
         }
-Feature::Thicken(t) => {
+        Feature::Thicken(t) => {
             let mut v = t.fields();
             if let crate::doc::surface::ThickenFrom::Faces(f) = &t.from {
                 v["from"]["faces"] = json!(f.iter().map(|r| r.text(part)).collect::<Vec<_>>());
@@ -667,7 +727,8 @@ Feature::Thicken(t) => {
             for (i, g) in t.faces.iter().enumerate() {
                 v["faces"][i]["front"] = g.front.report();
                 v["faces"][i]["back"] = g.back.report();
-                v["faces"][i]["faces"] = json!(g.faces.iter().map(|r| r.text(part)).collect::<Vec<_>>());
+                v["faces"][i]["faces"] =
+                    json!(g.faces.iter().map(|r| r.text(part)).collect::<Vec<_>>());
             }
             v
         }
@@ -675,10 +736,14 @@ Feature::Thicken(t) => {
     }
 }
 
-/// A fill or extract (`ty`) from `current`'s fields (none for a new one)
-/// with what was given laid over them. A fill: `sides` whole (else its
-/// `edges` as edge sides, or its one `curve`), `tolerance`, `angle`. An
-/// extract: `faces` (else `face_list`, else `face`) whole.
+/// A fill, extract, sew or thicken (`ty`) from `current`'s fields (none
+/// for a new one) with what was given laid over them. A fill: `sides`
+/// whole (else its `edges` as edge sides, or its one `curve`),
+/// `tolerance`, `angle`. An extract: `faces` (else `face_list`, else
+/// `face`) whole. A sew: `sheets`, `tolerance`, `make_solid`. A thicken:
+/// its `sheet` (or one `sheets`) or its faces (`from_faces`, `face_list`
+/// or `face`), `front`, `back`, `face_sides` whole, `operation`,
+/// `targets`.
 pub fn from_given(
     ty: &str,
     current: Option<&Feature>,
@@ -693,14 +758,20 @@ pub fn from_given(
     let mut v = match current {
         Some(Feature::Fill(x)) => x.fields(),
         Some(Feature::Extract(x)) => x.fields(),
+        Some(Feature::Sew(x)) => x.fields(),
+        Some(Feature::Thicken(x)) => x.fields(),
         _ => json!({}),
     };
     let o = v.as_object_mut().expect("fields are an object");
     let reference = |t: &str, at: &str| -> Result<Value> {
-        Ok(Reference::parse(t, part).map_err(|e| e.with("pointer", at))?.to_json())
+        Ok(Reference::parse(t, part)
+            .map_err(|e| e.with("pointer", at))?
+            .to_json())
     };
     let curve = |t: &str, at: &str| -> Result<Value> {
-        Ok(GeomRef::parse(t, part).map_err(|e| e.with("pointer", at))?.to_json())
+        Ok(GeomRef::parse(t, part)
+            .map_err(|e| e.with("pointer", at))?
+            .to_json())
     };
     match ty {
         "fill" => {
@@ -742,7 +813,9 @@ pub fn from_given(
                     edges
                         .iter()
                         .enumerate()
-                        .map(|(i, t)| Ok(json!({"edge": reference(t, &format!("/sides/{i}/edge"))?})))
+                        .map(|(i, t)| {
+                            Ok(json!({"edge": reference(t, &format!("/sides/{i}/edge"))?}))
+                        })
                         .collect::<Result<Vec<_>>>()?,
                 )
             } else if let Some(c) = &f.curve {
@@ -760,14 +833,111 @@ pub fn from_given(
                 o.insert("angle".into(), q.clone());
             }
         }
+        "sew" => {
+            if let Some(s) = &f.sheets {
+                o.insert("sheets".into(), json!(s));
+            }
+            if let Some(q) = &f.tolerance {
+                o.insert("tolerance".into(), q.clone());
+            }
+            if let Some(b) = f.make_solid {
+                o.insert("solid".into(), json!(b));
+            }
+        }
+        "thicken" => {
+            let one_sheet = match (&f.sheet, &f.sheets) {
+                (Some(s), _) => Some(s.clone()),
+                (None, Some(l)) if l.len() == 1 => Some(l[0].clone()),
+                (None, Some(l)) => {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        format!("a thicken thickens one sheet, not {}", l.len()),
+                    )
+                    .with("param", "sheet"));
+                }
+                (None, None) => None,
+            };
+            let faces: Option<Vec<String>> = f
+                .from_faces
+                .clone()
+                .or_else(|| f.face_list.clone())
+                .or_else(|| f.face.clone().map(|x| vec![x]));
+            match (one_sheet, faces) {
+                (Some(_), Some(_)) => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "a thicken thickens a sheet or faces, not both",
+                    ));
+                }
+                (Some(s), None) => {
+                    o.insert("from".into(), json!({"sheet": s}));
+                }
+                (None, Some(fs)) => {
+                    let refs = fs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| reference(t, &format!("/from/faces/{i}")))
+                        .collect::<Result<Vec<_>>>()?;
+                    o.insert("from".into(), json!({"faces": refs}));
+                }
+                (None, None) => {}
+            }
+            for (k, q) in [("front", &f.front), ("back", &f.back)] {
+                if let Some(q) = q {
+                    o.insert(k.into(), q.clone());
+                }
+            }
+            if let Some(groups) = &f.face_sides {
+                let Value::Array(gs) = groups else {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        "a thicken's face_sides are a list of groups {front, back, faces}",
+                    )
+                    .with("param", "face_sides"));
+                };
+                let mut out = Vec::with_capacity(gs.len());
+                for (i, g) in gs.iter().enumerate() {
+                    let mut g = g.clone();
+                    if let Some(Value::Array(fs)) = g.get_mut("faces") {
+                        for (j, x) in fs.iter_mut().enumerate() {
+                            if let Some(t) = x.as_str().map(str::to_owned) {
+                                *x = reference(&t, &format!("/faces/{i}/faces/{j}"))?;
+                            }
+                        }
+                    }
+                    out.push(g);
+                }
+                if out.is_empty() {
+                    o.remove("faces");
+                } else {
+                    o.insert("faces".into(), Value::Array(out));
+                }
+            }
+            if let Some(op) = &f.operation {
+                o.insert("operation".into(), json!(op));
+                if op == "new" {
+                    o.remove("targets");
+                }
+            }
+            if let Some(t) = &f.targets {
+                o.insert("targets".into(), json!(t));
+            }
+            // A new thicken founds a solid unless told otherwise.
+            o.entry("operation").or_insert(json!("new"));
+        }
         _ => {
             let given: Option<Vec<String>> = match (&f.faces, &f.face_list, &f.face) {
                 (Some(Value::Array(a)), _, _) => Some(
                     a.iter()
-                        .map(|x| x.as_str().map(str::to_owned).ok_or_else(|| {
-                            Error::new(Code::InvalidParam, "an extract's faces are text, <part>/<solid>/<name>")
+                        .map(|x| {
+                            x.as_str().map(str::to_owned).ok_or_else(|| {
+                                Error::new(
+                                    Code::InvalidParam,
+                                    "an extract's faces are text, <part>/<solid>/<name>",
+                                )
                                 .with("param", "faces")
-                        }))
+                            })
+                        })
                         .collect::<Result<Vec<_>>>()?,
                 ),
                 (_, Some(l), _) => Some(l.clone()),
@@ -787,6 +957,12 @@ pub fn from_given(
     let mut r = Obj::new(&v, "")?;
     let out = match ty {
         "fill" => Feature::Fill(Box::new(Fill::from_fields(&mut r, unit, env)?)),
+        "sew" => Feature::Sew(Box::new(crate::doc::surface::Sew::from_fields(
+            &mut r, unit, env,
+        )?)),
+        "thicken" => Feature::Thicken(Box::new(crate::doc::surface::Thicken::from_fields(
+            &mut r, unit, env,
+        )?)),
         _ => Feature::Extract(Box::new(Extract::from_fields(&mut r)?)),
     };
     r.finish()?;
@@ -808,23 +984,40 @@ mod tests {
     #[test]
     fn a_square_of_lines_fills_one_plane_face_and_its_edges_name_their_sides() {
         let key = ryukei::name::OpKey::from_bytes(b"ryucad.feature\0p\0f");
-        let pts = [[0.0, 0.0, 0.0], [0.01, 0.0, 0.0], [0.01, 0.01, 0.0], [0.0, 0.01, 0.0]];
+        let pts = [
+            [0.0, 0.0, 0.0],
+            [0.01, 0.0, 0.0],
+            [0.01, 0.01, 0.0],
+            [0.0, 0.01, 0.0],
+        ];
         let sides: Vec<FillSide<'_>> = (0..4)
             .map(|k| {
                 let (curve, range) = line(pts[k], pts[(k + 1) % 4]);
                 FillSide::Curve { curve, range }
             })
             .collect();
-        let opts = FillOptions { tolerance: 1e-8, angle: 1f64.to_radians() };
+        let opts = FillOptions {
+            tolerance: 1e-8,
+            angle: 1f64.to_radians(),
+        };
         let (body, journal, report) =
             ryukei::fill::fill(key, &FillBoundary { sides }, &opts).unwrap();
         // Each kernel side is a file side of its own (none is a path).
-        let place: Vec<Place> = (0..4).map(|i| Place { side: i, piece: None, edge: None }).collect();
+        let place: Vec<Place> = (0..4)
+            .map(|i| Place {
+                side: i,
+                piece: None,
+                edge: None,
+            })
+            .collect();
         let id = Id::parse("f", "feature").unwrap();
         let o = fill_origins(&id, key, &place, &body);
         let faces: Vec<&Value> = body
             .faces()
-            .map(|f| o.get(&body.name_of(EntityId::Face(f)).unwrap().to_string()).unwrap())
+            .map(|f| {
+                o.get(&body.name_of(EntityId::Face(f)).unwrap().to_string())
+                    .unwrap()
+            })
             .collect();
         assert_eq!(faces, [&json!({"feature": "f", "fill": "plane"})]);
         let mut sides: Vec<i64> = body
@@ -840,15 +1033,24 @@ mod tests {
     }
     #[test]
     fn an_extracts_entities_keep_their_names_and_say_what_they_were() {
-        let b = ryukei::primitive::block(OpKey::from_bytes(b"k"), 0.01, 0.01, 0.01, &ryukei::geom::Rigid::IDENTITY)
-            .unwrap()
-            .0;
+        let b = ryukei::primitive::block(
+            OpKey::from_bytes(b"k"),
+            0.01,
+            0.01,
+            0.01,
+            &ryukei::geom::Rigid::IDENTITY,
+        )
+        .unwrap()
+        .0;
         let top = b.faces().next().unwrap();
         let name = b.name_of(EntityId::Face(top)).unwrap();
         let (sheet, _) = ryukei::sheet::extract(OpKey::from_bytes(b"x"), &b, &[name]).unwrap();
         let id = Id::parse("x", "feature").unwrap();
         let o = extract_origins(&id, &sheet);
-        assert_eq!(o.get(&name.to_string()), Some(&json!({"feature": "x", "extract_of": name.to_string()})));
+        assert_eq!(
+            o.get(&name.to_string()),
+            Some(&json!({"feature": "x", "extract_of": name.to_string()}))
+        );
         assert!(sheet.by_name(name).is_some());
     }
 

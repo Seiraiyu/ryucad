@@ -345,7 +345,8 @@ pub fn expression_strings(groups: &mut Value) -> Vec<&mut String> {
     for g in groups {
         let Value::Object(g) = g else { continue };
         for (k, x) in g.iter_mut() {
-            if let ("thickness" | "distance" | "front" | "back", Value::String(s)) = (k.as_str(), x) {
+            if let ("thickness" | "distance" | "front" | "back", Value::String(s)) = (k.as_str(), x)
+            {
                 out.push(s);
             }
         }

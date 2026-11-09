@@ -88,10 +88,12 @@ impl Fill {
     pub fn from_fields(o: &mut Obj, default: Unit, env: &Env) -> Result<Fill> {
         new_only(o, "a fill")?;
         let v = o.take("sides")?;
-        let a = v
-            .as_array()
-            .filter(|a| !a.is_empty())
-            .ok_or_else(|| invalid("/sides", "sides is a non-empty array of {edge, tangent?} or {curve}"))?;
+        let a = v.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
+            invalid(
+                "/sides",
+                "sides is a non-empty array of {edge, tangent?} or {curve}",
+            )
+        })?;
         let mut sides = Vec::with_capacity(a.len());
         for (i, s) in a.iter().enumerate() {
             let at = format!("/sides/{i}");
@@ -101,14 +103,25 @@ impl Fill {
                 let tangent = match f.take_opt("tangent") {
                     None => false,
                     Some(Value::Bool(b)) => b,
-                    Some(_) => return Err(invalid(&format!("{at}/tangent"), "tangent is true or false")),
+                    Some(_) => {
+                        return Err(invalid(
+                            &format!("{at}/tangent"),
+                            "tangent is true or false",
+                        ));
+                    }
                 };
                 Side::Edge { edge, tangent }
             } else if f.has("curve") {
                 if f.has("tangent") {
-                    return Err(invalid(&at, "only an edge side meets its face tangentially"));
+                    return Err(invalid(
+                        &at,
+                        "only an edge side meets its face tangentially",
+                    ));
                 }
-                Side::Curve(GeomRef::from_json(&f.take("curve")?, &format!("{at}/curve"))?)
+                Side::Curve(GeomRef::from_json(
+                    &f.take("curve")?,
+                    &format!("{at}/curve"),
+                )?)
             } else {
                 return Err(invalid(&at, "a side is {edge, tangent?} or {curve}"));
             };
@@ -130,7 +143,11 @@ impl Fill {
             .with("pointer", "/angle")
             .with("value", angle.text()));
         }
-        Ok(Fill { sides, tolerance, angle })
+        Ok(Fill {
+            sides,
+            tolerance,
+            angle,
+        })
     }
 
     /// Its edge sides' references, each with its role `sides.<i>.edge`.
@@ -222,7 +239,11 @@ impl Sew {
             Some(Value::Bool(b)) => b,
             Some(_) => return Err(invalid("/solid", "solid is true or false")),
         };
-        Ok(Sew { sheets, tolerance, solid })
+        Ok(Sew {
+            sheets,
+            tolerance,
+            solid,
+        })
     }
 }
 
@@ -268,8 +289,10 @@ impl Thicken {
             v["faces"] = Value::Array(
                 self.faces
                     .iter()
-                    .map(|g| json!({"front": g.front.text(), "back": g.back.text(),
-                                    "faces": refs_json(&g.faces)}))
+                    .map(|g| {
+                        json!({"front": g.front.text(), "back": g.back.text(),
+                                    "faces": refs_json(&g.faces)})
+                    })
                     .collect(),
             );
         }
@@ -304,9 +327,9 @@ impl Thicken {
         let faces = match o.take_opt("faces") {
             None => Vec::new(),
             Some(v) => {
-                let a = v
-                    .as_array()
-                    .ok_or_else(|| invalid("/faces", "faces is an array of groups {front, back, faces}"))?;
+                let a = v.as_array().ok_or_else(|| {
+                    invalid("/faces", "faces is an array of groups {front, back, faces}")
+                })?;
                 a.iter()
                     .enumerate()
                     .map(|(i, g)| {
@@ -339,7 +362,12 @@ impl Thicken {
             .take("operation")?
             .as_str()
             .and_then(Operation::parse)
-            .ok_or_else(|| invalid("/operation", "operation is one of new, join, cut, intersect"))?;
+            .ok_or_else(|| {
+                invalid(
+                    "/operation",
+                    "operation is one of new, join, cut, intersect",
+                )
+            })?;
         let targets = match o.take_opt("targets") {
             None => Vec::new(),
             Some(v) => targets_from_json(&v, "/targets")?,
@@ -347,17 +375,29 @@ impl Thicken {
         let combine = match (operation, targets.is_empty()) {
             (Operation::New, true) => Combine::NEW,
             (Operation::New, false) => {
-                return Err(invalid("/targets", "a thicken whose solid is new has no targets"));
+                return Err(invalid(
+                    "/targets",
+                    "a thicken whose solid is new has no targets",
+                ));
             }
             (_, true) => {
                 return Err(invalid(
                     "/targets",
-                    &format!("a thicken whose solid {}s names the solids it acts on: targets is required", operation.as_str()),
+                    &format!(
+                        "a thicken whose solid {}s names the solids it acts on: targets is required",
+                        operation.as_str()
+                    ),
                 ));
             }
             (_, false) => Combine { operation, targets },
         };
-        let t = Thicken { from, front, back, faces, combine };
+        let t = Thicken {
+            from,
+            front,
+            back,
+            faces,
+            combine,
+        };
         t.check_groups()?;
         Ok(t)
     }
@@ -366,7 +406,12 @@ impl Thicken {
     /// faces, each in one group once; `from`'s faces each once.
     fn check_groups(&self) -> Result<()> {
         if let ThickenFrom::Faces(f) = &self.from {
-            once(f.iter().enumerate().map(|(i, r)| (format!("from.faces.{i}"), r)).collect())?;
+            once(
+                f.iter()
+                    .enumerate()
+                    .map(|(i, r)| (format!("from.faces.{i}"), r))
+                    .collect(),
+            )?;
         }
         let grouped: Vec<(String, &Reference)> = self.group_roles().collect();
         for (role, r) in &grouped {
@@ -391,7 +436,10 @@ impl Thicken {
 
     fn group_roles(&self) -> impl Iterator<Item = (String, &Reference)> {
         self.faces.iter().enumerate().flat_map(|(i, g)| {
-            g.faces.iter().enumerate().map(move |(j, r)| (format!("faces.{i}.faces.{j}"), r))
+            g.faces
+                .iter()
+                .enumerate()
+                .map(move |(j, r)| (format!("faces.{i}.faces.{j}"), r))
         })
     }
 
@@ -407,7 +455,11 @@ impl Thicken {
     /// `faces.<i>.faces.<j>`.
     pub fn references(&self) -> Vec<(String, &Reference)> {
         let mut out: Vec<(String, &Reference)> = match &self.from {
-            ThickenFrom::Faces(f) => f.iter().enumerate().map(|(i, r)| (format!("from.faces.{i}"), r)).collect(),
+            ThickenFrom::Faces(f) => f
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (format!("from.faces.{i}"), r))
+                .collect(),
             ThickenFrom::Sheet(_) => Vec::new(),
         };
         out.extend(self.group_roles());
@@ -466,7 +518,10 @@ fn once(refs: Vec<(String, &Reference)>) -> Result<()> {
         if let Some((first, _)) = refs[..k].iter().find(|(_, x)| x == r) {
             return Err(Error::new(
                 Code::InvalidParam,
-                format!("face {}/{} is named twice, as {first} and {role}", r.feature, r.name),
+                format!(
+                    "face {}/{} is named twice, as {first} and {role}",
+                    r.feature, r.name
+                ),
             )
             .with("pointer", format!("/{}", role.replace('.', "/")))
             .with("first", format!("/{}", first.replace('.', "/"))));
@@ -479,7 +534,9 @@ fn once(refs: Vec<(String, &Reference)>) -> Result<()> {
 /// [`TOLERANCE_RANGE`].
 fn tolerance(o: &mut Obj, default_text: &str, default: Unit, env: &Env) -> Result<Quantity> {
     let q = match o.take_opt("tolerance") {
-        None => Quantity::from_json_as(&json!(default_text), Field::Length(default), &|n| env.get(n))?,
+        None => Quantity::from_json_as(&json!(default_text), Field::Length(default), &|n| {
+            env.get(n)
+        })?,
         Some(v) => Quantity::from_json_as(&v, Field::Length(default), &|n| env.get(n))
             .map_err(|e| e.with("pointer", "/tolerance"))?,
     };
@@ -528,11 +585,23 @@ mod tests {
         for (v, code, pointer) in [
             (json!({}), Code::InvalidDocument, "/faces"),
             (json!({"faces": []}), Code::InvalidDocument, "/faces"),
-            (json!({"faces": [face(A), face(A)]}), Code::InvalidParam, "/faces/1"),
-            (json!({"faces": [face(A)], "operation": "join"}), Code::InvalidParam, "/operation"),
+            (
+                json!({"faces": [face(A), face(A)]}),
+                Code::InvalidParam,
+                "/faces/1",
+            ),
+            (
+                json!({"faces": [face(A)], "operation": "join"}),
+                Code::InvalidParam,
+                "/operation",
+            ),
         ] {
             let e = extract(v.clone()).unwrap_err();
-            assert_eq!((e.code, e.details["pointer"].as_str()), (code, Some(pointer)), "{v}");
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (code, Some(pointer)),
+                "{v}"
+            );
         }
     }
 
@@ -547,8 +616,11 @@ mod tests {
     fn sews_round_trip_and_are_checked() {
         let s = sew(json!({"sheets": ["top", "side1", "side2"]})).unwrap();
         // The tolerance and solid are always written, defaults included.
-        assert_eq!(s.fields(), json!({"sheets": ["top", "side1", "side2"],
-                                      "tolerance": "0.01 mm", "solid": true}));
+        assert_eq!(
+            s.fields(),
+            json!({"sheets": ["top", "side1", "side2"],
+                                      "tolerance": "0.01 mm", "solid": true})
+        );
         assert_eq!(sew(s.fields()).unwrap(), s);
         let s = sew(json!({"sheets": ["a", "b"], "tolerance": "0.05 mm", "solid": false})).unwrap();
         assert!(!s.solid);
@@ -556,13 +628,33 @@ mod tests {
         for (v, code, pointer) in [
             (json!({}), Code::InvalidDocument, "/sheets"),
             (json!({"sheets": ["a"]}), Code::InvalidParam, "/sheets"),
-            (json!({"sheets": ["a", "a"]}), Code::InvalidDocument, "/sheets/1"),
-            (json!({"sheets": ["a", "b"], "solid": "yes"}), Code::InvalidDocument, "/solid"),
-            (json!({"sheets": ["a", "b"], "tolerance": "1 mm"}), Code::InvalidParam, "/tolerance"),
-            (json!({"sheets": ["a", "b"], "operation": "join"}), Code::InvalidParam, "/operation"),
+            (
+                json!({"sheets": ["a", "a"]}),
+                Code::InvalidDocument,
+                "/sheets/1",
+            ),
+            (
+                json!({"sheets": ["a", "b"], "solid": "yes"}),
+                Code::InvalidDocument,
+                "/solid",
+            ),
+            (
+                json!({"sheets": ["a", "b"], "tolerance": "1 mm"}),
+                Code::InvalidParam,
+                "/tolerance",
+            ),
+            (
+                json!({"sheets": ["a", "b"], "operation": "join"}),
+                Code::InvalidParam,
+                "/operation",
+            ),
         ] {
             let e = sew(v.clone()).unwrap_err();
-            assert_eq!((e.code, e.details["pointer"].as_str()), (code, Some(pointer)), "{v}");
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (code, Some(pointer)),
+                "{v}"
+            );
         }
     }
 
@@ -579,12 +671,18 @@ mod tests {
         let v = json!({"from": {"sheet": "skin"}, "front": 2, "operation": "new",
                        "faces": [{"front": "3 mm", "back": 0, "faces": [skin(A)]}]});
         let t = thicken(v).unwrap();
-        assert_eq!(t.from, ThickenFrom::Sheet(Id::parse("skin", "feature").unwrap()));
+        assert_eq!(
+            t.from,
+            ThickenFrom::Sheet(Id::parse("skin", "feature").unwrap())
+        );
         assert!(t.combine.is_new());
         // Front and back always written (back 0 when left out), the
         // operation always, even new.
-        assert_eq!(t.fields(), json!({"from": {"sheet": "skin"}, "front": "2 mm", "back": "0 mm",
-            "faces": [{"front": "3 mm", "back": "0 mm", "faces": [skin(A)]}], "operation": "new"}));
+        assert_eq!(
+            t.fields(),
+            json!({"from": {"sheet": "skin"}, "front": "2 mm", "back": "0 mm",
+            "faces": [{"front": "3 mm", "back": "0 mm", "faces": [skin(A)]}], "operation": "new"})
+        );
         assert_eq!(thicken(t.fields()).unwrap(), t);
         let roles: Vec<String> = t.references().into_iter().map(|(r, _)| r).collect();
         assert_eq!(roles, ["faces.0.faces.0"]);
@@ -604,30 +702,71 @@ mod tests {
         let skin = |n: &str| json!({"feature": "skin", "name": n});
         let base = |n: &str| json!({"feature": "base", "name": n});
         for (v, code, pointer) in [
-            (json!({"front": 1, "operation": "new"}), Code::InvalidDocument, "/from"),
-            (json!({"from": {}, "front": 1, "operation": "new"}), Code::InvalidDocument, "/from"),
-            (json!({"from": {"sheet": "s", "faces": [base(A)]}, "front": 1, "operation": "new"}),
-             Code::InvalidDocument, "/from"),
-            (json!({"from": {"sheet": "skin"}, "operation": "new"}), Code::InvalidParam, "/front"),
-            (json!({"from": {"sheet": "skin"}, "front": -1, "operation": "new"}),
-             Code::InvalidParam, "/front"),
-            (json!({"from": {"sheet": "skin"}, "front": 1}), Code::InvalidDocument, "/operation"),
-            (json!({"from": {"sheet": "skin"}, "front": 1, "operation": "join"}),
-             Code::InvalidDocument, "/targets"),
-            (json!({"from": {"sheet": "skin"}, "front": 1, "operation": "new",
+            (
+                json!({"front": 1, "operation": "new"}),
+                Code::InvalidDocument,
+                "/from",
+            ),
+            (
+                json!({"from": {}, "front": 1, "operation": "new"}),
+                Code::InvalidDocument,
+                "/from",
+            ),
+            (
+                json!({"from": {"sheet": "s", "faces": [base(A)]}, "front": 1, "operation": "new"}),
+                Code::InvalidDocument,
+                "/from",
+            ),
+            (
+                json!({"from": {"sheet": "skin"}, "operation": "new"}),
+                Code::InvalidParam,
+                "/front",
+            ),
+            (
+                json!({"from": {"sheet": "skin"}, "front": -1, "operation": "new"}),
+                Code::InvalidParam,
+                "/front",
+            ),
+            (
+                json!({"from": {"sheet": "skin"}, "front": 1}),
+                Code::InvalidDocument,
+                "/operation",
+            ),
+            (
+                json!({"from": {"sheet": "skin"}, "front": 1, "operation": "join"}),
+                Code::InvalidDocument,
+                "/targets",
+            ),
+            (
+                json!({"from": {"sheet": "skin"}, "front": 1, "operation": "new",
                     "faces": [{"front": 2, "back": 0, "faces": [base(A)]}]}),
-             Code::InvalidParam, "/faces/0/faces/0"),
-            (json!({"from": {"faces": [base(A)]}, "front": 1, "operation": "new",
+                Code::InvalidParam,
+                "/faces/0/faces/0",
+            ),
+            (
+                json!({"from": {"faces": [base(A)]}, "front": 1, "operation": "new",
                     "faces": [{"front": 2, "back": 0, "faces": [base(B)]}]}),
-             Code::InvalidParam, "/faces/0/faces/0"),
-            (json!({"from": {"sheet": "skin"}, "front": 1, "operation": "new",
+                Code::InvalidParam,
+                "/faces/0/faces/0",
+            ),
+            (
+                json!({"from": {"sheet": "skin"}, "front": 1, "operation": "new",
                     "faces": [{"front": 0, "back": 0, "faces": [skin(A)]}]}),
-             Code::InvalidParam, "/faces/0/front"),
-            (json!({"from": {"faces": [base(A), base(A)]}, "front": 1, "operation": "new"}),
-             Code::InvalidParam, "/from/faces/1"),
+                Code::InvalidParam,
+                "/faces/0/front",
+            ),
+            (
+                json!({"from": {"faces": [base(A), base(A)]}, "front": 1, "operation": "new"}),
+                Code::InvalidParam,
+                "/from/faces/1",
+            ),
         ] {
             let e = thicken(v.clone()).unwrap_err();
-            assert_eq!((e.code, e.details["pointer"].as_str()), (code, Some(pointer)), "{v}");
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (code, Some(pointer)),
+                "{v}"
+            );
         }
     }
 
@@ -650,10 +789,16 @@ mod tests {
         );
         assert_eq!(fill(f.fields()).unwrap(), f);
         // An edge that isn't tangent writes no flag.
-        let f = fill(json!({"sides": [{"edge": {"feature": "w", "name": A}, "tangent": false},
+        let f = fill(
+            json!({"sides": [{"edge": {"feature": "w", "name": A}, "tangent": false},
                                        {"curve": "x"}, {"curve": "y"}],
-                            "tolerance": "0.01 mm", "angle": 2})).unwrap();
-        assert_eq!(f.fields()["sides"][0], json!({"edge": {"feature": "w", "name": A}}));
+                            "tolerance": "0.01 mm", "angle": 2}),
+        )
+        .unwrap();
+        assert_eq!(
+            f.fields()["sides"][0],
+            json!({"edge": {"feature": "w", "name": A}})
+        );
         assert_eq!(f.angle.radians(), 2f64.to_radians());
         let roles: Vec<String> = f.references().into_iter().map(|(r, _)| r).collect();
         assert_eq!(roles, ["sides.0.edge"]);
@@ -667,22 +812,53 @@ mod tests {
         for (v, code, pointer) in [
             (json!({}), Code::InvalidDocument, "/sides"),
             (json!({"sides": []}), Code::InvalidDocument, "/sides"),
-            (json!({"sides": [{"edge": {"feature": "w", "name": "x"}}]}),
-             Code::InvalidDocument, "/sides/0/edge/name"),
-            (json!({"sides": [{"curve": "x", "tangent": true}]}),
-             Code::InvalidDocument, "/sides/0"),
-            (json!({"sides": [{"wire": "x"}]}), Code::InvalidDocument, "/sides/0"),
-            (json!({"sides": [{"curve": "x"}], "tolerance": "1 mm"}),
-             Code::InvalidParam, "/tolerance"),
-            (json!({"sides": [{"curve": "x"}], "tolerance": "1 deg"}),
-             Code::UnitMismatch, "/tolerance"),
-            (json!({"sides": [{"curve": "x"}], "angle": "90 deg"}),
-             Code::InvalidParam, "/angle"),
-            (json!({"sides": [{"curve": "x"}], "angle": 0}), Code::InvalidParam, "/angle"),
-            (json!({"sides": [{"curve": "x"}], "targets": ["b"]}), Code::InvalidParam, "/operation"),
+            (
+                json!({"sides": [{"edge": {"feature": "w", "name": "x"}}]}),
+                Code::InvalidDocument,
+                "/sides/0/edge/name",
+            ),
+            (
+                json!({"sides": [{"curve": "x", "tangent": true}]}),
+                Code::InvalidDocument,
+                "/sides/0",
+            ),
+            (
+                json!({"sides": [{"wire": "x"}]}),
+                Code::InvalidDocument,
+                "/sides/0",
+            ),
+            (
+                json!({"sides": [{"curve": "x"}], "tolerance": "1 mm"}),
+                Code::InvalidParam,
+                "/tolerance",
+            ),
+            (
+                json!({"sides": [{"curve": "x"}], "tolerance": "1 deg"}),
+                Code::UnitMismatch,
+                "/tolerance",
+            ),
+            (
+                json!({"sides": [{"curve": "x"}], "angle": "90 deg"}),
+                Code::InvalidParam,
+                "/angle",
+            ),
+            (
+                json!({"sides": [{"curve": "x"}], "angle": 0}),
+                Code::InvalidParam,
+                "/angle",
+            ),
+            (
+                json!({"sides": [{"curve": "x"}], "targets": ["b"]}),
+                Code::InvalidParam,
+                "/operation",
+            ),
         ] {
             let err = e(v.clone());
-            assert_eq!((err.code, err.details["pointer"].as_str()), (code, Some(pointer)), "{v}");
+            assert_eq!(
+                (err.code, err.details["pointer"].as_str()),
+                (code, Some(pointer)),
+                "{v}"
+            );
         }
     }
 }

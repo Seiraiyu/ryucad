@@ -126,9 +126,11 @@ pub fn bodies_read(f: &crate::doc::files::Feature) -> Vec<(&'static str, &Id, Wa
         F::Mirror(m) => std::iter::once(("solid", &m.solid, Want::Solid))
             .chain(f.targets().into_iter().map(|t| ("targets", t, Want::Solid)))
             .collect(),
-        F::Shell(_) | F::Offset(_) | F::Split(_) => {
-            f.targets().into_iter().map(|t| ("target", t, Want::Solid)).collect()
-        }
+        F::Shell(_) | F::Offset(_) | F::Split(_) => f
+            .targets()
+            .into_iter()
+            .map(|t| ("target", t, Want::Solid))
+            .collect(),
         _ => {
             let consumes = f.consumes();
             f.targets()
@@ -164,7 +166,11 @@ pub fn check(
 ) -> Result<()> {
     let solids = crate::solid::Solids::of_order(part, order);
     for (role, t, want) in bodies_read(f) {
-        let need = crate::rebuild::Need { role, want: Some(want), changes: true };
+        let need = crate::rebuild::Need {
+            role,
+            want: Some(want),
+            changes: true,
+        };
         match crate::rebuild::body_as(part, &solids, id, t, need, results) {
             Err(e) if e.code == Code::WrongBodyKind => return Err(e),
             _ => {}

@@ -529,22 +529,41 @@ mod tests {
     #[test]
     fn a_sew_stops_at_a_cancel_and_otherwise_sews_a_block_back() {
         use std::sync::atomic::AtomicBool;
-        let b = crate::primitive::block(OpKey::from_bytes(b"b"), 1.0, 2.0, 3.0, &crate::geom::Rigid::IDENTITY)
-            .unwrap()
-            .0;
+        let b = crate::primitive::block(
+            OpKey::from_bytes(b"b"),
+            1.0,
+            2.0,
+            3.0,
+            &crate::geom::Rigid::IDENTITY,
+        )
+        .unwrap()
+        .0;
         let sheets: Vec<Body> = b
             .faces()
             .map(|f| {
                 let n = b.name_of(crate::topo::EntityId::Face(f)).unwrap();
-                crate::sheet::extract(OpKey::from_bytes(n.to_string().as_bytes()), &b, &[n]).unwrap().0
+                crate::sheet::extract(OpKey::from_bytes(n.to_string().as_bytes()), &b, &[n])
+                    .unwrap()
+                    .0
             })
             .collect();
         let opts = SewOptions::default();
         let stop = AtomicBool::new(true);
-        let e = sew_with(OpKey::from_bytes(b"s"), &sheets, &opts, &crate::work::Work::unlimited().with_cancel(&stop))
-            .unwrap_err();
+        let e = sew_with(
+            OpKey::from_bytes(b"s"),
+            &sheets,
+            &opts,
+            &crate::work::Work::unlimited().with_cancel(&stop),
+        )
+        .unwrap_err();
         assert_eq!(e, Error::Cancelled);
-        let (pieces, _) = sew_with(OpKey::from_bytes(b"s"), &sheets, &opts, &crate::work::Work::unlimited()).unwrap();
+        let (pieces, _) = sew_with(
+            OpKey::from_bytes(b"s"),
+            &sheets,
+            &opts,
+            &crate::work::Work::unlimited(),
+        )
+        .unwrap();
         assert_eq!(pieces.len(), 1);
         assert_eq!(pieces[0].kind(), crate::topo::BodyKind::Solid);
         // `sew` is `sew_with` unlimited, the same bits.

@@ -73,7 +73,9 @@ pub fn check_seeds(part: &Part, id: &Id, p: &Pattern) -> Result<Operation> {
         };
         let whole = match f {
             Feature::Mirror(_) => Some("a mirror, which copies a whole solid"),
-            Feature::Thicken(_) => Some("a thicken, which consumes a sheet or reads faces of one body"),
+            Feature::Thicken(_) => {
+                Some("a thicken, which consumes a sheet or reads faces of one body")
+            }
             _ => None,
         };
         if let Some(what) = whole {

@@ -4067,9 +4067,16 @@ fn check_resolved(
         }
         // Its sides edges and curves, its faces of one body; whether they
         // close up, or extract cleanly, only rebuild can tell.
-        Feature::Fill(x) => crate::surface::check_fill(&proposed(p, order, &[(id, f)]), id, x, results),
+        Feature::Fill(x) => {
+            crate::surface::check_fill(&proposed(p, order, &[(id, f)]), id, x, results)
+        }
         Feature::Extract(x) => {
             crate::surface::check_extract(&proposed(p, order, &[(id, f)]), id, x, results)
+        }
+        // Its sheet or faces; what the kernel makes of them only rebuild
+        // can tell. A sew's sheets are judged by kind and order already.
+        Feature::Thicken(x) => {
+            crate::surface::check_thicken(&proposed(p, order, &[(id, f)]), id, x, results)
         }
         _ => Ok(()),
     }
@@ -4096,7 +4103,7 @@ fn check_up_to(
 }
 
 /// Every feature type `feature.add` makes.
-const FEATURE_TYPES: [&str; 24] = [
+const FEATURE_TYPES: [&str; 26] = [
     "box",
     "cylinder",
     "cone",
@@ -4110,6 +4117,8 @@ const FEATURE_TYPES: [&str; 24] = [
     "planar",
     "fill",
     "extract",
+    "sew",
+    "thicken",
     "boolean",
     "fillet",
     "chamfer",
@@ -4312,7 +4321,7 @@ fn feature_add(
             given.only(ty, &crate::doc::sweep::PLANAR_FIELDS)?;
             planar_from(None, &given, &pid)?
         }
-        "fill" | "extract" => {
+        "fill" | "extract" | "sew" | "thicken" => {
             given.only(ty, crate::doc::surface::request_fields(ty))?;
             crate::surface::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
@@ -4572,14 +4581,8 @@ fn feature_edit(
                 f
             }
             Feature::Import(_) => return Err(import_not_written_here("edit").with("feature", &fid)),
-            Feature::Sew(_) | Feature::Thicken(_) => {
-                return Err(Error::new(
-                    Code::InvalidParam,
-                    format!("{} {fid} can't be edited by this build", old.type_name()),
-                )
-                .with("feature", &fid));
-            }
-            f @ (Feature::Fill(_) | Feature::Extract(_)) => {
+            f
+            @ (Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_)) => {
                 let ty = f.type_name();
                 given.only(ty, crate::doc::surface::request_fields(ty))?;
                 crate::surface::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
@@ -4682,7 +4685,10 @@ fn feature_edit(
             || f.unfold().is_some()
             || f.refold().is_some())
             && f != old)
-        || (matches!(f, Feature::Fill(_) | Feature::Extract(_)) && f != old)
+        || (matches!(
+            f,
+            Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_)
+        ) && f != old)
         || f.source() != old.source()
     {
         check_references(session, &pid, &list, &fid, &f)?;
@@ -7931,38 +7937,159 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn sews_and_thickens_are_refused_when_written() {
+        let (_dir, mut s) = fresh();
+        let must = |s: &mut Session, m: &str, v: Value| call(s, m, v).unwrap();
+        must(&mut s, "part.create", json!({"part": "p"}));
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b",
+            "params": {"x": 10, "y": 10, "z": 10}}),
+        );
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "c",
+            "params": {"x": 1, "y": 1, "z": 1}, "placement": {"origin": [20, 0, 0]}}),
+        );
+        let faces = inspect_faces(&mut s, "b");
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extract", "id": "x",
+            "faces": [faces[0].clone()]}),
+        );
+        // A sew of a solid: wrong_body_kind, naming it.
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sew",
+            "sheets": ["x", "c"]}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (
+                e.code,
+                e.details["solid"].as_str(),
+                e.details["wanted"].as_str()
+            ),
+            (Code::WrongBodyKind, Some("c"), Some("sheet")),
+            "{e}"
+        );
+        // A thicken of a solid by name: wrong_body_kind too.
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "thicken",
+            "sheet": "c", "front": "1 mm"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["role"].as_str()),
+            (Code::WrongBodyKind, Some("from")),
+            "{e}"
+        );
+        // A thicken whose group names a face it doesn't thicken.
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "thicken",
+            "from_faces": [faces[0].clone()], "front": "1 mm",
+            "face_sides": [{"front": "2 mm", "back": "0", "faces": [faces[1].clone()]}]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam, "{e}");
+        // After a thicken consumes x, nothing acts on it.
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extract", "id": "y",
+            "faces": [faces[1].clone()]}),
+        );
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "thicken", "id": "t",
+            "sheet": "x", "front": "1 mm"}),
+        );
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sew",
+            "sheets": ["x", "y"]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::BodyConsumed, "{e}");
+    }
+
+    #[test]
     fn fills_and_extracts_through_the_protocol() {
         let (_dir, mut s) = fresh();
         let must = |s: &mut Session, m: &str, v: Value| call(s, m, v).unwrap();
         must(&mut s, "part.create", json!({"part": "p"}));
-        must(&mut s, "feature.add", json!({"part": "p", "type": "box", "id": "b",
-            "params": {"x": 10, "y": 10, "z": 10}}));
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b",
+            "params": {"x": 10, "y": 10, "z": 10}}),
+        );
         let b = inspect_faces(&mut s, "b");
-        let x = must(&mut s, "feature.add", json!({"part": "p", "type": "extract", "id": "x",
-            "faces": [b[0].clone()]}));
+        let x = must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extract", "id": "x",
+            "faces": [b[0].clone()]}),
+        );
         assert_eq!(x["feature"]["type"], "extract", "{x}");
         // A face of another body beside it is targets_mixed.
-        must(&mut s, "feature.add", json!({"part": "p", "type": "box", "id": "c",
-            "params": {"x": 1, "y": 1, "z": 1}, "placement": {"origin": [20, 0, 0]}}));
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "c",
+            "params": {"x": 1, "y": 1, "z": 1}, "placement": {"origin": [20, 0, 0]}}),
+        );
         let c = inspect_faces(&mut s, "c");
-        let e = call(&mut s, "feature.add", json!({"part": "p", "type": "extract",
-            "faces": [b[0].clone(), c[0].clone()]})).unwrap_err();
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extract",
+            "faces": [b[0].clone(), c[0].clone()]}),
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::TargetsMixed, "{e}");
         // A fill's sides as text; its tolerance and angle written with defaults.
-        must(&mut s, "feature.add", json!({"part": "p", "type": "sketch", "id": "s", "plane": "xy"}));
-        must(&mut s, "sketch.edit", json!({"part": "p", "sketch": "s", "ops": [
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "plane": "xy"}),
+        );
+        must(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
             {"op": "add", "id": "p1", "type": "point", "at": [0, 0]},
             {"op": "add", "id": "p2", "type": "point", "at": [10, 0]},
             {"op": "add", "id": "p3", "type": "point", "at": [0, 10]},
             {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
             {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
-            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p1"}]}));
-        let f = must(&mut s, "feature.add", json!({"part": "p", "type": "fill", "id": "f",
-            "sides": [{"curve": "p/s/l1"}, {"curve": "p/s/l2"}, {"curve": "p/s/l3"}]}));
+            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p1"}]}),
+        );
+        let f = must(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "fill", "id": "f",
+            "sides": [{"curve": "p/s/l1"}, {"curve": "p/s/l2"}, {"curve": "p/s/l3"}]}),
+        );
         assert_eq!(f["feature"]["tolerance"]["value"], "0.001 mm", "{f}");
         // An edge side that names a face is refused when written.
-        let e = call(&mut s, "feature.add", json!({"part": "p", "type": "fill",
-            "sides": [{"edge": b[0].clone()}, {"curve": "p/s/l2"}, {"curve": "p/s/l3"}]})).unwrap_err();
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "fill",
+            "sides": [{"edge": b[0].clone()}, {"curve": "p/s/l2"}, {"curve": "p/s/l3"}]}),
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
     }
 

@@ -1145,7 +1145,10 @@ enum FeatureCmd {
     /// --unfold, --only) folding it back; a fill (--edge, --curve in
     /// order, --tangent after an edge, --tolerance, --angle) spanning
     /// edges and curves; an extract (--face, repeated) of a body's faces as
-    /// a sheet; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
+    /// a sheet; a sew (--sheet, repeated, --tolerance, --no-solid) of
+    /// sheets into one body; a thicken (--sheet, or --face repeated;
+    /// --front, --back, --face-sides, --operation and --target) of a sheet
+    /// or a body's faces into a solid; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
     /// countersink, --bottom) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
@@ -2212,6 +2215,30 @@ struct FieldArgs {
     /// A fill's sides as written: --edge, --curve and --tangent in order.
     #[arg(skip)]
     fill_sides: Vec<Value>,
+    /// A sheet a sew sews, by its founder; repeat for each. A thicken's one
+    /// sheet.
+    #[arg(long = "sheet", value_name = "SHEET")]
+    sheets: Vec<String>,
+    /// A sew that closes up stays a closed sheet, not a solid.
+    #[arg(long, conflicts_with = "make_solid")]
+    no_solid: bool,
+    /// Whether a sew that closes up makes a solid (true by default).
+    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    make_solid: Option<bool>,
+    /// A thicken's thickness along its faces' normals.
+    #[arg(long, value_name = "LENGTH")]
+    front: Option<String>,
+    /// A thicken's thickness against its faces' normals.
+    #[arg(long, value_name = "LENGTH")]
+    back: Option<String>,
+    /// A face of a thicken with its own front and back: REFERENCE=FRONT,BACK;
+    /// repeat for several. Faces of one pair are one group. Given, they
+    /// replace a thicken's groups.
+    #[arg(long = "face-sides", value_name = "REFERENCE=FRONT,BACK", value_parser = param)]
+    face_sides: Vec<(String, String)>,
+    /// Give no face of a thicken a front and back of its own.
+    #[arg(long, conflicts_with = "face_sides")]
+    no_face_sides: bool,
     /// Where on its curve a normal_to plane is: start, end or a point.
     #[arg(long, value_name = "POINT")]
     at: Option<String>,
@@ -2607,6 +2634,39 @@ impl FieldArgs {
             face: (self.face.len() == 1).then(|| self.face[0].clone()),
             face_list: (self.face.len() > 1).then(|| self.face.clone()),
             tolerance: self.tolerance.clone().map(Value::String),
+            sheets: (!self.sheets.is_empty()).then(|| self.sheets.clone()),
+            sheet: None,
+            make_solid: if self.no_solid {
+                Some(false)
+            } else {
+                self.make_solid
+            },
+            front: self.front.clone().map(Value::String),
+            back: self.back.clone().map(Value::String),
+            from_faces: None,
+            face_sides: if self.no_face_sides {
+                Some(json!([]))
+            } else if self.face_sides.is_empty() {
+                None
+            } else {
+                // Faces of one pair are one group, in the order first named.
+                let mut groups: Vec<(String, String, Vec<String>)> = Vec::new();
+                for (face, pair) in &self.face_sides {
+                    let (front, back) = pair.split_once(',').unwrap_or((pair.as_str(), "0"));
+                    match groups.iter_mut().find(|(f, b, _)| f == front && b == back) {
+                        Some((_, _, fs)) => fs.push(face.clone()),
+                        None => {
+                            groups.push((front.to_owned(), back.to_owned(), vec![face.clone()]))
+                        }
+                    }
+                }
+                Some(Value::Array(
+                    groups
+                        .into_iter()
+                        .map(|(f, b, fs)| json!({"front": f, "back": b, "faces": fs}))
+                        .collect(),
+                ))
+            },
             face_origin: self.face_origin.clone(),
             face_x: self.face_x.clone(),
             sketch: self.sketch.clone(),
@@ -4958,16 +5018,95 @@ mod tests {
 
     #[test]
     fn fill_sides_are_read_in_order() {
-        let args: Vec<String> = ["ryucad", "feature", "add", "p", "fill", "--edge", "p/w/aa",
-            "--tangent", "--curve=p/s/l1"]
+        let args: Vec<String> = [
+            "ryucad",
+            "feature",
+            "add",
+            "p",
+            "fill",
+            "--edge",
+            "p/w/aa",
+            "--tangent",
+            "--curve=p/s/l1",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(
+            fill_sides(&args).unwrap(),
+            vec![
+                json!({"edge": "p/w/aa", "tangent": true}),
+                json!({"curve": "p/s/l1"})
+            ]
+        );
+        let early: Vec<String> = ["--tangent", "--edge", "x"]
             .into_iter()
             .map(str::to_owned)
             .collect();
-        assert_eq!(
-            fill_sides(&args).unwrap(),
-            vec![json!({"edge": "p/w/aa", "tangent": true}), json!({"curve": "p/s/l1"})]
-        );
-        let early: Vec<String> = ["--tangent", "--edge", "x"].into_iter().map(str::to_owned).collect();
         assert_eq!(fill_sides(&early).unwrap_err().code, Code::Usage);
+    }
+
+    #[test]
+    fn a_thickens_and_a_sews_flags_reach_their_fields() {
+        on_cli_stack(|| {
+            let cli = Cli::try_parse_from([
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "thicken",
+                "--face",
+                "p/b/aa",
+                "--face",
+                "p/b/bb",
+                "--front",
+                "2mm",
+                "--face-sides",
+                "p/b/aa=3mm,0",
+                "--operation",
+                "join",
+                "--target",
+                "b",
+            ])
+            .unwrap();
+            let Command::Feature(FeatureCmd::Add { fields, .. }) = &cli.command else {
+                panic!()
+            };
+            let f = fields.to_fields();
+            assert_eq!(
+                f.face_list.as_deref(),
+                Some(&["p/b/aa".to_owned(), "p/b/bb".to_owned()][..])
+            );
+            assert_eq!(f.front, Some(json!("2mm")));
+            assert_eq!(
+                f.face_sides,
+                Some(json!([{"front": "3mm", "back": "0", "faces": ["p/b/aa"]}]))
+            );
+            let cli = Cli::try_parse_from([
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "sew",
+                "--sheet",
+                "a",
+                "--sheet",
+                "b",
+                "--no-solid",
+                "--tolerance",
+                "0.02mm",
+            ])
+            .unwrap();
+            let Command::Feature(FeatureCmd::Add { fields, .. }) = &cli.command else {
+                panic!()
+            };
+            let f = fields.to_fields();
+            assert_eq!(
+                f.sheets.as_deref(),
+                Some(&["a".to_owned(), "b".to_owned()][..])
+            );
+            assert_eq!(f.make_solid, Some(false));
+            assert_eq!(f.tolerance, Some(json!("0.02mm")));
+        });
     }
 }

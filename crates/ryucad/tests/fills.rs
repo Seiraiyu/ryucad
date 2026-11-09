@@ -55,8 +55,6 @@ fn sketch(s: &mut Session, id: &str, plane: Value, ops: Value) {
     );
 }
 
-
-
 /// The body solid `solid` of part `p` shows.
 fn body(s: &mut Session, solid: &str) -> ryukei::topo::Body {
     let part = Id::parse("p", "part").unwrap();
@@ -95,7 +93,6 @@ fn reported(s: &mut Session, f: &str) -> Value {
         .clone()
 }
 
-
 /// A sheet's area as ryukei measures it (certified), checked clean and
 /// meshed without faults first.
 fn area(b: &ryukei::topo::Body) -> f64 {
@@ -120,8 +117,10 @@ fn pentagon(r: f64) -> Value {
         ops.push(json!({"op": "add", "id": format!("p{}", k + 1), "type": "point", "at": [r * c, r * s]}));
     }
     for k in 0..5 {
-        ops.push(json!({"op": "add", "id": format!("l{}", k + 1), "type": "line",
-                        "start": format!("p{}", k + 1), "end": format!("p{}", (k + 1) % 5 + 1)}));
+        ops.push(
+            json!({"op": "add", "id": format!("l{}", k + 1), "type": "line",
+                        "start": format!("p{}", k + 1), "end": format!("p{}", (k + 1) % 5 + 1)}),
+        );
     }
     json!(ops)
 }
@@ -130,7 +129,9 @@ fn pentagon(r: f64) -> Value {
 fn a_flat_pentagon_fills_one_plane_face_of_its_area() {
     let (_dir, mut s) = project();
     sketch(&mut s, "s", json!("xy"), pentagon(10.0));
-    let sides: Vec<Value> = (1..=5).map(|k| json!({"curve": format!("p/s/l{k}")})).collect();
+    let sides: Vec<Value> = (1..=5)
+        .map(|k| json!({"curve": format!("p/s/l{k}")}))
+        .collect();
     add(&mut s, json!({"type": "fill", "id": "f", "sides": sides}));
     let b = body(&mut s, "f");
     assert_eq!(b.faces().count(), 1);
@@ -144,13 +145,21 @@ fn a_flat_pentagon_fills_one_plane_face_of_its_area() {
 fn a_quad_tangent_to_a_quarter_cylinder_sheet_meets_it_within_its_angle() {
     let (_dir, mut s) = project();
     // A quarter cylinder of radius 10 mm, 20 mm tall: an arc swept as a surface.
-    sketch(&mut s, "arc", json!("xy"), json!([
+    sketch(
+        &mut s,
+        "arc",
+        json!("xy"),
+        json!([
         {"op": "add", "id": "o", "type": "point", "at": [0, 0]},
         {"op": "add", "id": "a", "type": "point", "at": [10, 0]},
         {"op": "add", "id": "b", "type": "point", "at": [0, 10]},
-        {"op": "add", "id": "a1", "type": "arc", "center": "o", "start": "a", "end": "b"}]));
-    add(&mut s, json!({"type": "extrude", "id": "w", "sketch": "arc", "surface": true,
-                       "extent": {"type": "blind", "length": "20 mm"}}));
+        {"op": "add", "id": "a1", "type": "arc", "center": "o", "start": "a", "end": "b"}]),
+    );
+    add(
+        &mut s,
+        json!({"type": "extrude", "id": "w", "sketch": "arc", "surface": true,
+                       "extent": {"type": "blind", "length": "20 mm"}}),
+    );
     // Its straight laminar edge at (0, 10, z): the one whose points all have x = 0.
     let w = body(&mut s, "w");
     let edge = w
@@ -164,20 +173,31 @@ fn a_quad_tangent_to_a_quarter_cylinder_sheet_meets_it_within_its_angle() {
         .unwrap();
     let name = w.name_of(ryukei::topo::EntityId::Edge(edge)).unwrap();
     // Three lines in the plane y = 10 mm closing the quad on -x, on a datum plane.
-    add(&mut s, json!({"type": "plane", "id": "y10", "by": "offset", "from": "zx", "distance": "10 mm"}));
+    add(
+        &mut s,
+        json!({"type": "plane", "id": "y10", "by": "offset", "from": "zx", "distance": "10 mm"}),
+    );
     // In the zx plane's frame x runs along z and y along x (sketch.get gives
     // model-space positions: check them if the quad doesn't close).
-    sketch(&mut s, "q", json!({"plane": "y10"}), json!([
+    sketch(
+        &mut s,
+        "q",
+        json!({"plane": "y10"}),
+        json!([
         {"op": "add", "id": "p1", "type": "point", "at": [20, 0]},
         {"op": "add", "id": "p2", "type": "point", "at": [20, -10]},
         {"op": "add", "id": "p3", "type": "point", "at": [0, -10]},
         {"op": "add", "id": "p4", "type": "point", "at": [0, 0]},
         {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
         {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
-        {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"}]));
-    add(&mut s, json!({"type": "fill", "id": "f", "sides": [
+        {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"}]),
+    );
+    add(
+        &mut s,
+        json!({"type": "fill", "id": "f", "sides": [
         {"edge": format!("p/w/{name}"), "tangent": true},
-        {"curve": "p/q/l1"}, {"curve": "p/q/l2"}, {"curve": "p/q/l3"}]}));
+        {"curve": "p/q/l1"}, {"curve": "p/q/l2"}, {"curve": "p/q/l3"}]}),
+    );
     close(area(&body(&mut s, "f")), 2e-4, 1e-9);
     let r = reported(&mut s, "f");
     let angle = r["fill"]["sides"][0]["angle_deg"].as_f64().unwrap();
@@ -187,7 +207,10 @@ fn a_quad_tangent_to_a_quarter_cylinder_sheet_meets_it_within_its_angle() {
 #[test]
 fn a_gap_and_a_tangent_edge_with_two_faces_are_refused() {
     let (_dir, mut s) = project();
-    add(&mut s, json!({"type": "box", "id": "b", "params": {"x": 10, "y": 10, "z": 10}}));
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": 10, "y": 10, "z": 10}}),
+    );
     // A box edge along x from the origin, closed by three lines below it in xy.
     let b = body(&mut s, "b");
     let edge = b
@@ -200,26 +223,50 @@ fn a_gap_and_a_tangent_edge_with_two_faces_are_refused() {
         })
         .unwrap();
     let name = b.name_of(ryukei::topo::EntityId::Edge(edge)).unwrap();
-    sketch(&mut s, "s", json!("xy"), json!([
+    sketch(
+        &mut s,
+        "s",
+        json!("xy"),
+        json!([
         {"op": "add", "id": "p1", "type": "point", "at": [10, 0]},
         {"op": "add", "id": "p2", "type": "point", "at": [10, -10]},
         {"op": "add", "id": "p3", "type": "point", "at": [0, -10]},
         {"op": "add", "id": "p4", "type": "point", "at": [0, 0]},
         {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
         {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
-        {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"}]));
-    let sides = |tangent: bool| json!([{"edge": format!("p/b/{name}"), "tangent": tangent},
-                                       {"curve": "p/s/l1"}, {"curve": "p/s/l2"}, {"curve": "p/s/l3"}]);
-    add(&mut s, json!({"type": "fill", "id": "f", "sides": sides(true)}));
+        {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"}]),
+    );
+    let sides = |tangent: bool| {
+        json!([{"edge": format!("p/b/{name}"), "tangent": tangent},
+                                       {"curve": "p/s/l1"}, {"curve": "p/s/l2"}, {"curve": "p/s/l3"}])
+    };
+    add(
+        &mut s,
+        json!({"type": "fill", "id": "f", "sides": sides(true)}),
+    );
     let r = reported(&mut s, "f");
-    assert_eq!((r["error"]["code"].as_str(), r["error"]["details"]["reason"].as_str()),
-               (Some("fill_failed"), Some("not_laminar")), "{r}");
+    assert_eq!(
+        (
+            r["error"]["code"].as_str(),
+            r["error"]["details"]["reason"].as_str()
+        ),
+        (Some("fill_failed"), Some("not_laminar")),
+        "{r}"
+    );
     assert_eq!(r["error"]["details"]["side"], 0);
     // Not tangent, it fills; with the last line moved 2 mm off, it gaps.
-    must(&mut s, "feature.edit", json!({"part": "p", "id": "f", "sides": sides(false)}));
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "f", "sides": sides(false)}),
+    );
     assert_eq!(reported(&mut s, "f")["ok"], true);
-    must(&mut s, "sketch.edit", json!({"part": "p", "sketch": "s",
-        "ops": [{"op": "move", "id": "p4", "at": [0, -2]}]}));
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "s",
+        "ops": [{"op": "move", "id": "p4", "at": [0, -2]}]}),
+    );
     let r = reported(&mut s, "f");
     assert_eq!(r["error"]["details"]["reason"], "not_closed", "{r}");
     assert!(r["error"]["details"]["gap_m"].as_f64().unwrap() > 1e-3);
@@ -228,19 +275,27 @@ fn a_gap_and_a_tangent_edge_with_two_faces_are_refused() {
 #[test]
 fn a_boxs_top_extracted_keeps_its_name_and_area() {
     let (_dir, mut s) = project();
-    add(&mut s, json!({"type": "box", "id": "b", "params": {"x": 10, "y": 20, "z": 5}}));
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": 10, "y": 20, "z": 5}}),
+    );
     let b = body(&mut s, "b");
     let top = b
         .faces()
-        .find(|f| matches!(
-            ryukei::measure::properties(&b, ryukei::measure::Entity::Face(*f)).unwrap(),
-            ryukei::measure::Properties::Face {
-                shape: ryukei::measure::FaceShape::Plane { normal, .. }, ..
-            } if normal.get().z > 0.5
-        ))
+        .find(|f| {
+            matches!(
+                ryukei::measure::properties(&b, ryukei::measure::Entity::Face(*f)).unwrap(),
+                ryukei::measure::Properties::Face {
+                    shape: ryukei::measure::FaceShape::Plane { normal, .. }, ..
+                } if normal.get().z > 0.5
+            )
+        })
         .unwrap();
     let name = b.name_of(ryukei::topo::EntityId::Face(top)).unwrap();
-    add(&mut s, json!({"type": "extract", "id": "x", "faces": [format!("p/b/{name}")]}));
+    add(
+        &mut s,
+        json!({"type": "extract", "id": "x", "faces": [format!("p/b/{name}")]}),
+    );
     let x = body(&mut s, "x");
     close(area(&x), 2e-4, 1e-12);
     assert!(x.by_name(name).is_some());
@@ -252,10 +307,28 @@ fn a_boxs_top_extracted_keeps_its_name_and_area() {
         .iter()
         .find(|f| f["name"] == name.to_string())
         .unwrap();
-    assert_eq!(face["origin"]["extract_of"], name.to_string(), "{inspected}");
+    assert_eq!(
+        face["origin"]["extract_of"],
+        name.to_string(),
+        "{inspected}"
+    );
     // Every face: a closed sheet.
-    let all: Vec<String> = b.faces().map(|f| format!("p/b/{}", b.name_of(ryukei::topo::EntityId::Face(f)).unwrap())).collect();
-    add(&mut s, json!({"type": "extract", "id": "all", "faces": all}));
+    let all: Vec<String> = b
+        .faces()
+        .map(|f| {
+            format!(
+                "p/b/{}",
+                b.name_of(ryukei::topo::EntityId::Face(f)).unwrap()
+            )
+        })
+        .collect();
+    add(
+        &mut s,
+        json!({"type": "extract", "id": "all", "faces": all}),
+    );
     let all = body(&mut s, "all");
-    assert_eq!((ryucad::kind::name(&all), ryucad::kind::boundaries(&all)), ("sheet", 0));
+    assert_eq!(
+        (ryucad::kind::name(&all), ryucad::kind::boundaries(&all)),
+        ("sheet", 0)
+    );
 }
