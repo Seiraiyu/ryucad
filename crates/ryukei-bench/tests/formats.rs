@@ -470,3 +470,74 @@ fn meshing_and_writing_the_race_as_stl_against_occt() {
         "ryukei {triangles} triangles, OCCT {theirs_triangles}"
     );
 }
+
+/// A part `skin` of a 10 x 10 mm planar sheet and a 5 mm box beside it,
+/// exported as 3MF and binary STL: lib3mf reads the 3MF strictly with no
+/// warning, its sheet a `surface` object, every triangle the export
+/// meshed placed by the build; OCCT reads the STL's triangles, open
+/// where the sheet is.
+#[test]
+fn a_sheet_reads_through_lib3mf_and_occt() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let mut call = |m: &str, p: serde_json::Value| -> serde_json::Value {
+        let req = ryucad::proto::Request::from_rpc(m, Some(p)).unwrap();
+        ryucad::server::handle(&mut s, req).unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    call("part.create", json!({"part": "skin"}));
+    call(
+        "feature.add",
+        json!({"part": "skin", "type": "sketch", "id": "s", "plane": "xy"}),
+    );
+    call(
+        "sketch.edit",
+        json!({"part": "skin", "sketch": "s", "ops": [
+            {"op": "add", "id": "p1", "type": "point", "at": [0, 0]},
+            {"op": "add", "id": "p2", "type": "point", "at": [10, 0]},
+            {"op": "add", "id": "p3", "type": "point", "at": [10, 10]},
+            {"op": "add", "id": "p4", "type": "point", "at": [0, 10]},
+            {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}]}),
+    );
+    call(
+        "feature.add",
+        json!({"part": "skin", "type": "planar", "id": "w", "sketch": "s"}),
+    );
+    call(
+        "feature.add",
+        json!({"part": "skin", "type": "box", "id": "b", "params": {"x": 5, "y": 5, "z": 5},
+               "placement": {"origin": [20, 0, 0]}}),
+    );
+    let mut export = |format: &str| -> (std::path::PathBuf, u64) {
+        let out = dir.path().join(format!("skin.{format}"));
+        let params = json!({"part": "skin", "out": out, "time_stamp": "2026-11-09T00:00:00"});
+        let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
+        let a = ryucad::server::answer_live(&mut s, None, None, req).unwrap();
+        let n = a.result["products"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["triangles"].as_u64().unwrap())
+            .sum();
+        (out, n)
+    };
+    let (three, n) = export("3mf");
+    let r = lib3mf::read(&three).unwrap();
+    println!("lib3mf: {r:?}");
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    assert_eq!(
+        r.types.iter().filter(|t| *t == "surface").count(),
+        1,
+        "{:?}",
+        r.types
+    );
+    assert_eq!(r.triangles, n);
+    let (stl, n) = export("stl");
+    let m = occt::read_stl(&stl).unwrap();
+    assert_eq!(m.triangles.len() as u64 / 3, n);
+    assert!(!m.closed(), "the sheet is open");
+}
