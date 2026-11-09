@@ -415,6 +415,7 @@ fn row_ui(
                     &view.commands,
                     Context::Row(kind),
                     Some(&reference),
+                    row.import,
                 ) {
                     did.run = Some((id, reference.clone()));
                 }
