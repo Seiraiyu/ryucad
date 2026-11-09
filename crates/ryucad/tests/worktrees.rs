@@ -270,7 +270,7 @@ fn another_worktree_is_compared_with_and_diffed_against() {
     assert_eq!(code, 0, "{v}");
 
     // When the other agent writes, the comparing participant hears of it.
-    let watcher = {
+    let mut watcher = {
         let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"));
         cmd.args([
             "watch",
@@ -290,8 +290,18 @@ fn another_worktree_is_compared_with_and_diffed_against() {
         .stdout(std::process::Stdio::piped());
         cmd.spawn().unwrap()
     };
-    std::thread::sleep(std::time::Duration::from_millis(1500));
-    r.ok(&arm, &["feature", "edit", "p", "b", "--param", "x=14"]);
+    // Nothing says when the watcher has subscribed, and subscribing takes
+    // the other worktree's files as they are then, so an edit made before
+    // it is no news (#604: a sleep before one edit was a guess a loaded
+    // runner broke). The other agent writes a new value until the watcher
+    // has heard: some edit comes after it subscribed.
+    let mut x = 14;
+    while watcher.try_wait().unwrap().is_none() {
+        let param = format!("x={x}");
+        r.ok(&arm, &["feature", "edit", "p", "b", "--param", &param]);
+        x += 1;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     let out = watcher.wait_with_output().unwrap();
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     let n = &v["result"]["notifications"][0];

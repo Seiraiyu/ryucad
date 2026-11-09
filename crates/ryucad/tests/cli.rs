@@ -5241,7 +5241,16 @@ fn reference_imports_from_the_cli() {
     ]);
     let w = p.ok(&["mass", &solid]);
     assert_eq!(w["reference"], true, "{w}");
-    p.ok(&["export", "r", "--out", "r.step"]);
+    // A fixed time stamp: the in-process and daemon runs must write the same
+    // header whatever second each runs in (#607).
+    p.ok(&[
+        "export",
+        "r",
+        "--out",
+        "r.step",
+        "--time-stamp",
+        "2026-11-07T00:00:00",
+    ]);
     p.ok(&["export", "r", "--out", "r.stl"]);
     let (code, v) = p.both_from(
         "",
