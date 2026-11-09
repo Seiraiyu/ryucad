@@ -2236,8 +2236,7 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
         }
         Feature::Instance(i) => i.fields(),
         Feature::Import(i) => i.fields(),
-        Feature::Fill(x) => x.fields(),
-        Feature::Extract(x) => x.fields(),
+        Feature::Fill(_) | Feature::Extract(_) => crate::surface::report(part, f),
         Feature::Mate(m) => {
             let mut v = m.fields();
             for (side, c) in [("a", &m.a), ("b", &m.b)] {
@@ -3975,7 +3974,7 @@ fn check_references(
         .part(part)?
         .features
         .values()
-        .any(|g| g.as_ref().is_ok_and(|g| g.surface()));
+        .any(|g| g.as_ref().is_ok_and(|g| g.may_make_sheet()));
     let reads_bodies = may_hold_sheets && !crate::kind::bodies_read(f).is_empty();
     let planar = matches!(f, Feature::Planar(_));
     // An unfold's allowance and a refold's unfold are judged against the
@@ -4063,6 +4062,12 @@ fn check_resolved(
         }
         Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
             crate::sheet_metal::check(&proposed(p, order, &[(id, f)]), id, f, results)
+        }
+        // Its sides edges and curves, its faces of one body; whether they
+        // close up, or extract cleanly, only rebuild can tell.
+        Feature::Fill(x) => crate::surface::check_fill(&proposed(p, order, &[(id, f)]), id, x, results),
+        Feature::Extract(x) => {
+            crate::surface::check_extract(&proposed(p, order, &[(id, f)]), id, x, results)
         }
         _ => Ok(()),
     }
@@ -4953,6 +4958,9 @@ pub(crate) fn part_report(
                 | Feature::Flange(_)
                 | Feature::Unfold(_)
                 | Feature::Refold(_) => crate::sheet_metal::report(part, f),
+                // A fill's rebuild report is what it measured (see
+                // `Made::report`), an extract's its faces.
+                Feature::Extract(_) => crate::surface::report(id, f),
                 _ => return None,
             };
             Some((fid.clone(), (f.type_name(), report)))
@@ -7300,6 +7308,12 @@ fn inspect(
                 v[k][key] = e;
             }
         }
+    }
+    if let Some(f) = &only
+        && let Some((_, x @ (Feature::Fill(_) | Feature::Extract(_)))) =
+            features.iter().find(|(i, _)| i == f)
+    {
+        v[x.type_name()] = crate::surface::report(&pid, x);
     }
     Ok(v)
 }

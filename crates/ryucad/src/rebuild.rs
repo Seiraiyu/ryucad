@@ -2378,6 +2378,20 @@ fn rebuild_with(
             build_split(part, solids, id, x, before, run).map(solid),
             None,
         ),
+        Feature::Fill(x) => {
+            let r = crate::surface::fill(part, id, x, before, run).map(|(b, rep)| {
+                solid(Made {
+                    report: Some(Arc::new(rep)),
+                    ..Made::new(vec![(id.clone(), Arc::new(b))])
+                })
+            });
+            (r, None)
+        }
+        Feature::Extract(x) => (
+            crate::surface::extract(part, id, x, before)
+                .map(|b| solid(Made::new(vec![(id.clone(), Arc::new(b))]))),
+            None,
+        ),
         Feature::Pattern(p) => (
             build_pattern(part, solids, id, p, before, run).map(solid),
             None,
@@ -3113,6 +3127,30 @@ mod tests {
                    (Code::WrongBodyKind, Some("sheet"), Some("solid")));
         // target_as is body_as wanting a solid.
         assert!(target_as(&part, &solids, &id, "targets", &b, &r).is_ok());
+    }
+
+    #[test]
+    fn an_extract_of_a_boxs_face_is_a_sheet_beside_it() {
+        use crate::doc::solid::Operation;
+        use crate::solid::tests::{boxed, part};
+        let b = boxed("0", Operation::New, &[]);
+        let r0 = rebuild_part(&part(vec![("b", b.clone())]));
+        let built = state(&r0, "b", "b");
+        let face = built.body.faces().next().unwrap();
+        let name = built.body.name_of(ryukei::topo::EntityId::Face(face)).unwrap();
+        let x = Feature::from_json(
+            &json!({"format": crate::doc::surface::FORMAT, "kind": "ryucad.feature",
+                    "type": "extract", "faces": [{"feature": "b", "name": name.to_string()}]}),
+            crate::units::Unit::Mm,
+            &crate::expr::Env::empty(),
+        )
+        .unwrap();
+        let r = rebuild_part(&part(vec![("b", b), ("x", x)]));
+        let sheet = state(&r, "x", "x");
+        assert_eq!(crate::kind::name(&sheet.body), "sheet");
+        assert_eq!(crate::kind::boundaries(&sheet.body), 1);
+        // The box is as it was.
+        assert_eq!(state(&r, "b", "b").hash, built.hash);
     }
 
     #[test]

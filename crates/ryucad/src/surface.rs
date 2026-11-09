@@ -327,6 +327,31 @@ fn extract_error(part: &Part, id: &Id, from: &Id, e: &ryukei::Error) -> Error {
     err
 }
 
+/// A fill, extract, sew or thicken as output reports it: its file's
+/// fields, references as text, quantities with their meters.
+pub fn report(part: &Id, f: &Feature) -> Value {
+    match f {
+        Feature::Fill(x) => {
+            let mut v = x.fields();
+            for (i, s) in x.sides.iter().enumerate() {
+                v["sides"][i] = match s {
+                    Side::Edge { edge, tangent } => {
+                        json!({"edge": edge.text(part), "tangent": tangent})
+                    }
+                    Side::Curve(g) => json!({"curve": g.text(part)}),
+                };
+            }
+            v["tolerance"] = x.tolerance.report();
+            v["angle"] = x.angle.report();
+            v
+        }
+        Feature::Extract(x) => {
+            json!({"faces": x.faces.iter().map(|r| r.text(part)).collect::<Vec<_>>()})
+        }
+        _ => unreachable!("a fill, an extract, a sew or a thicken"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
