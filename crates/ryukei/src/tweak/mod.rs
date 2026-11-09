@@ -38,6 +38,19 @@ pub use draft::{
 };
 pub(crate) use motion::Motion;
 
+/// Whether a tweak may change the body's topology (design 399).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Topology {
+    /// Phase 9's: every face, edge and vertex stays, and a tweak that
+    /// would need one made or taken away is refused.
+    #[default]
+    Keep,
+    /// Faces may grow over neighbours, shrink away or split, and edges and
+    /// vertices come and go (the local re-trim). The fixed-topology engine
+    /// runs first, and its result stands wherever it builds.
+    Change,
+}
+
 use crate::geom::Rigid;
 use crate::name::{Event, Journal, Name, OpKey};
 use crate::topo::{Body, EntityId, FaceId};
@@ -53,6 +66,8 @@ pub struct MoveSpec {
     pub faces: Vec<Name>,
     pub motion: Rigid,
     pub tangent: bool,
+    /// Whether the tweak may change the body's topology.
+    pub topology: Topology,
 }
 
 /// `body` with `spec.faces` moved by `spec.motion`: a new body and the
@@ -102,6 +117,8 @@ fn move_faces_in(
 pub struct OffsetFacesSpec {
     pub faces: Vec<(Name, f64)>,
     pub tangent: bool,
+    /// Whether the tweak may change the body's topology.
+    pub topology: Topology,
 }
 
 /// `body` with `spec`'s faces offset, the rest staying: their edges and
@@ -176,6 +193,8 @@ fn offset_faces_in(
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReplaceSpec {
     pub faces: Vec<(Name, crate::geom::Surface)>,
+    /// Whether the tweak may change the body's topology.
+    pub topology: Topology,
 }
 
 /// `body` with each of `spec`'s faces on its new surface, the face's

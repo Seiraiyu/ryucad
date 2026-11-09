@@ -6,7 +6,7 @@
 //! frame of the pull.
 
 use super::engine::{self, Changes};
-use super::{Motion, chain, resolve};
+use super::{Motion, Topology, chain, resolve};
 use crate::geom::{Frame, Plane, Point3, Surface, UnitVector3, Vector3};
 use crate::name::{Journal, Name, OpKey};
 use crate::tol::ANGULAR_RESOLUTION;
@@ -34,6 +34,8 @@ pub struct DraftSpec {
     pub hinge: Hinge,
     pub faces: Vec<DraftFace>,
     pub tangent: bool,
+    /// Whether the tweak may change the body's topology.
+    pub topology: Topology,
 }
 
 /// What drafted faces turn about.

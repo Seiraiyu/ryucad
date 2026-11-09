@@ -215,7 +215,7 @@ fn offsets_and_shells_are_bounded() {
 fn tweaks_are_bounded() {
     use ryukei::name::{FaceRole, Name, Role};
     use ryukei::tweak::{
-        MoveSpec, OffsetFacesSpec, ReplaceSpec, move_faces_with, offset_faces_with,
+        MoveSpec, OffsetFacesSpec, ReplaceSpec, Topology, move_faces_with, offset_faces_with,
         replace_faces_with,
     };
     let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
@@ -225,12 +225,14 @@ fn tweaks_are_bounded() {
         faces: vec![top],
         motion: Rigid::translation(ryukei::geom::Vector3::new(0.0, 0.0, 0.002)),
         tangent: false,
+        topology: Topology::Keep,
     };
     let spent = bounded("move_faces", |w| move_faces_with(OpKey(8), &cube, &up, w));
     eprintln!("move_faces: {spent} units");
     let out = OffsetFacesSpec {
         faces: vec![(top, 0.001), (side, 0.002)],
         tangent: false,
+        topology: Topology::Keep,
     };
     let spent = bounded("offset_faces", |w| {
         offset_faces_with(OpKey(8), &cube, &out, w)
@@ -246,6 +248,7 @@ fn tweaks_are_bounded() {
     ));
     let flush = ReplaceSpec {
         faces: vec![(top, plane)],
+        topology: Topology::Keep,
     };
     let spent = bounded("replace_faces", |w| {
         replace_faces_with(OpKey(8), &cube, &flush, w)
@@ -256,7 +259,7 @@ fn tweaks_are_bounded() {
 #[test]
 fn drafts_are_bounded() {
     use ryukei::name::{FaceRole, Name, Role};
-    use ryukei::tweak::{DraftFace, DraftSpec, Hinge, draft_with};
+    use ryukei::tweak::{DraftFace, DraftSpec, Hinge, Topology, draft_with};
     let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
     let walls = [
         FaceRole::PlusX,
@@ -280,6 +283,7 @@ fn drafts_are_bounded() {
             })
             .collect(),
         tangent: false,
+        topology: Topology::Keep,
     };
     let spent = bounded("draft", |w| draft_with(OpKey(8), &cube, &spec, w));
     eprintln!("draft: {spent} units");

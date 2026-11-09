@@ -32,6 +32,7 @@ fn mv(faces: Vec<Name>, motion: Rigid) -> MoveSpec {
         faces,
         motion,
         tangent: false,
+        topology: Topology::Keep,
     }
 }
 
@@ -135,6 +136,7 @@ fn moving_a_top_beside_its_fillet_needs_the_tangent_option() {
         faces: vec![face(FaceRole::PlusZ)],
         motion: up,
         tangent,
+        topology: Topology::Keep,
     };
     assert!(matches!(
         refusal(move_faces(T, &b, &spec(false))),
@@ -151,6 +153,7 @@ fn two_neighbouring_faces_offset_keep_their_sharp_edge() {
     let spec = OffsetFacesSpec {
         faces: vec![(face(FaceRole::PlusZ), 0.1), (face(FaceRole::PlusX), 0.2)],
         tangent: false,
+        topology: Topology::Keep,
     };
     let (o, _) = offset_faces(T, &b, &spec).unwrap();
     assert_eq!((o.faces().count(), o.edges().count()), (6, 12));
@@ -173,6 +176,7 @@ fn offsets_are_checked_as_offsets_are() {
     let spec = |d| OffsetFacesSpec {
         faces: vec![(face(FaceRole::PlusZ), d)],
         tangent: false,
+        topology: Topology::Keep,
     };
     assert_eq!(
         refusal(offset_faces(T, &b, &spec(1e-9))),
@@ -211,6 +215,7 @@ fn a_top_replaced_by_a_higher_plane_either_way_up() {
                     Vector3::new(0.0, 0.0, z),
                 ),
             )],
+            topology: Topology::Keep,
         };
         let (o, _) = replace_faces(T, &b, &spec).unwrap();
         assert_eq!(crate::check::check(&o), []);
@@ -234,6 +239,7 @@ fn a_replacement_square_to_its_face_is_ambiguous() {
                 Vector3::new(1.0, 0.0, 0.0),
             ),
         )],
+        topology: Topology::Keep,
     };
     assert_eq!(
         refusal(replace_faces(T, &b, &spec)),
@@ -266,6 +272,7 @@ fn a_boxs_walls_drafted_about_its_bottom_lean_in_and_report_their_angle() {
             })
             .collect(),
         tangent: false,
+        topology: Topology::Keep,
     };
     let (o, _, report) = draft(T, &b, &spec).unwrap();
     assert_eq!(crate::check::check(&o), []);
@@ -308,6 +315,7 @@ fn a_draft_checks_its_angle_and_faces() {
             flip: false,
         }],
         tangent: false,
+        topology: Topology::Keep,
     };
     assert_eq!(
         refusal(draft(T, &b, &spec(0.0, wall))),
@@ -325,4 +333,26 @@ fn a_draft_checks_its_angle_and_faces() {
         refusal(draft(T, &b, &spec(0.05, top))),
         TweakError::NoHinge { face: top }
     );
+}
+
+#[test]
+fn topology_is_kept_unless_asked_to_change() {
+    assert_eq!(Topology::default(), Topology::Keep);
+    let b = block();
+    let r = Rigid::translation(Vector3::new(0.0, 0.0, 0.1));
+    let keep = MoveSpec {
+        faces: vec![face(FaceRole::PlusZ)],
+        motion: r,
+        tangent: false,
+        topology: Topology::Keep,
+    };
+    let change = MoveSpec {
+        topology: Topology::Change,
+        ..keep.clone()
+    };
+    let (a, ja) = move_faces(T, &b, &keep).unwrap();
+    let (c, jc) = move_faces(T, &b, &change).unwrap();
+    // Where the fixed engine builds, its result stands under Change.
+    assert_eq!(crate::codec::encode_body(&a), crate::codec::encode_body(&c));
+    assert_eq!(ja, jc);
 }
