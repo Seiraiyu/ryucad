@@ -745,7 +745,7 @@ mod tests {
         let knots: Vec<f64> = (0..=n).map(f64::from).collect();
         let k = KnotVector::periodic(3, &knots, &vec![1; knots.len()]).unwrap();
         let ring = Curve::Nurbs(Arc::new(NurbsCurve::new(k, ring, None).unwrap()));
-        let m = Meter::free();
+        let m = Meter::free(); // unmetered: a test
         let twin = on_affine_twin(&ring, [0.0, 12.0], &s, 1e-8, &m)
             .unwrap()
             .expect("met as its plane");
