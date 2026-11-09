@@ -693,9 +693,9 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                 time_stamp,
                 ..WriteOptions::default()
             };
-            let passed = passed_references(&walk)?;
-            let bytes = ryustep::write_with(&step_model(&walk.scene), &passed, &opts)
-                .map_err(|e| walk.unwritable(e))?;
+            let (model, passed) = step_parts(&walk)?;
+            let bytes =
+                ryustep::write_with(&model, &passed, &opts).map_err(|e| walk.unwritable(e))?;
             result["time_stamp"] = json!(opts.time_stamp);
             result["schema"] = json!(schema_name);
             result["unit"] = json!(unit_name);
@@ -1264,7 +1264,7 @@ fn step_model(scene: &Scene) -> WriteModel {
 /// file (as step-hunt cuts a body) and named by its founder, beside its
 /// product: a reference is written as the file had it, never healed or
 /// seamed (design 364). Each file is parsed once.
-fn passed_references(walk: &Walk) -> Result<Vec<ryustep::Passed>> {
+fn passed_references(walk: &Walk) -> Result<Vec<Cut>> {
     let mut parsed: BTreeMap<String, Arc<ryustep::part21::File>> = BTreeMap::new();
     let mut passed = Vec::new();
     for (k, p) in walk.scene.products.iter().enumerate() {
@@ -1311,13 +1311,73 @@ fn passed_references(walk: &Walk) -> Result<Vec<ryustep::Passed>> {
                 sol.founder.as_str(),
             )
             .map_err(|e| Error::new(Code::Internal, format!("export: {e}")))?;
-            passed.push(ryustep::Passed {
+            let place = match &i.place {
+                Some(p) => Some(crate::assembly::pose_rigid(&p.pose)?),
+                None => None,
+            };
+            passed.push(Cut {
                 product: k,
+                founder: sol.founder.to_string(),
+                place,
                 instances,
             });
         }
     }
     Ok(passed)
+}
+
+/// A reference's representation cut out of its file: the product it
+/// belongs to, its founder, where a flattened import placed it, and the
+/// instances.
+struct Cut {
+    product: usize,
+    founder: String,
+    place: Option<ryukei::geom::Rigid>,
+    instances: Vec<ryustep::part21::Instance>,
+}
+
+/// STEP's model of a scene and the reference representations passed
+/// through: each product's healed solids as its bodies, named by their
+/// founders (#412), each child's usage as its identifier, and each
+/// reference cut out of its imported file (as step-hunt cuts a body)
+/// beside its product. A reference placed by a flattened import stands in
+/// a child product of its own (named by its founder), placed by a usage,
+/// since a reader takes as a product's own only representations related
+/// to it without a transformation (design 364, ryucad 21.D). A healed
+/// solid placed so is written as its body already stands.
+fn step_parts(walk: &Walk) -> Result<(WriteModel, Vec<ryustep::Passed>)> {
+    let mut model = step_model(&walk.scene);
+    let mut passed = Vec::new();
+    for c in passed_references(walk)? {
+        match c.place {
+            None => passed.push(ryustep::Passed {
+                product: c.product,
+                instances: c.instances,
+            }),
+            Some(r) => {
+                let child = model.products.len();
+                model.products.push(ryustep::Product {
+                    id: c.founder.clone(),
+                    name: c.founder.clone(),
+                    description: String::new(),
+                    revision: String::new(),
+                    bodies: Vec::new(),
+                    children: Vec::new(),
+                    names: Vec::new(),
+                });
+                model.products[c.product].children.push(ryustep::Child {
+                    product: child,
+                    place: r,
+                    id: c.founder,
+                });
+                passed.push(ryustep::Passed {
+                    product: child,
+                    instances: c.instances,
+                });
+            }
+        }
+    }
+    Ok((model, passed))
 }
 
 /// The scene being built, walked from the part exported.

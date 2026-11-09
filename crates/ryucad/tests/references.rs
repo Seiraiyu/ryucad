@@ -485,3 +485,67 @@ fn a_closed_reference_weighs_from_its_mesh_and_an_open_one_is_refused() {
     assert_eq!(e.code, ryucad::error::Code::ReferenceNotSolid, "{e:?}");
     assert_eq!(e.details["reason"], "open");
 }
+
+/// The box of a binary STL's points.
+fn stl_box(bytes: &[u8]) -> ([f32; 3], [f32; 3]) {
+    let n = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize;
+    let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    for t in 0..n {
+        let at = 84 + 50 * t + 12;
+        for v in 0..9 {
+            let o = at + 4 * v;
+            let x = f32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+            lo[v % 3] = lo[v % 3].min(x);
+            hi[v % 3] = hi[v % 3].max(x);
+        }
+    }
+    (lo, hi)
+}
+
+#[test]
+fn a_flattened_part_exports_and_reads_back_where_it_stands() {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let path = src.path().join("asm.step");
+    std::fs::write(&path, occt("assembly.stp")).unwrap();
+    let path = path.display().to_string();
+    must(
+        &mut s,
+        "import",
+        json!({"path": path, "flatten": true, "part": "board"}),
+    );
+    // As imported whole: the assembly's occurrences, where the file puts them.
+    must(&mut s, "import", json!({"path": path, "part": "whole"}));
+    let stl = |s: &mut Session, part: &str| {
+        let out = src.path().join(format!("{part}.stl"));
+        must(
+            s,
+            "export",
+            json!({"part": part, "out": out.display().to_string(), "unit": "m"}),
+        );
+        stl_box(&std::fs::read(&out).unwrap())
+    };
+    let near = |a: ([f32; 3], [f32; 3]), b: ([f32; 3], [f32; 3])| {
+        (0..3).all(|k| (a.0[k] - b.0[k]).abs() < 1e-6 && (a.1[k] - b.1[k]).abs() < 1e-6)
+    };
+    let board = stl(&mut s, "board");
+    let whole = stl(&mut s, "whole");
+    assert!(near(board, whole), "{board:?} {whole:?}");
+    // Through STEP and back: each placed reference is a child product at
+    // its place, so what is read back stands where the part does.
+    let out = src.path().join("board.step");
+    must(
+        &mut s,
+        "export",
+        json!({"part": "board", "out": out.display().to_string()}),
+    );
+    must(
+        &mut s,
+        "import",
+        json!({"path": out.display().to_string(), "part": "again"}),
+    );
+    let again = stl(&mut s, "again");
+    assert!(near(board, again), "{board:?} {again:?}");
+}
