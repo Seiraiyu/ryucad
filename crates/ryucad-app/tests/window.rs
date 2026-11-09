@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{Project, ryucad};
+use common::{Project, ryucad, two_bolts, two_bolts_as};
 use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
@@ -2512,29 +2512,6 @@ fn a_mates_angle_is_edited_in_the_property_panel() {
 }
 
 /// A bolt, and an assembly `frame` placing it twice, 40 mm apart.
-fn two_bolts() -> Project {
-    two_bolts_as("cylinder", &["radius=3", "height=20"])
-}
-
-/// [`two_bolts`] with each bolt's shank a `kind` primitive of `params`.
-fn two_bolts_as(kind: &str, params: &[&str]) -> Project {
-    let p = Project::new();
-    p.ok(&["part", "create", "bolt"]);
-    let mut add = vec!["feature", "add", "bolt", kind, "--id", "shank"];
-    for x in params {
-        add.extend(["--param", x]);
-    }
-    p.ok(&add);
-    p.ok(&["part", "create", "frame", "--assembly"]);
-    p.ok(&[
-        "feature", "add", "frame", "instance", "--id", "b1", "--of", "bolt", "--fixed",
-    ]);
-    p.ok(&[
-        "feature", "add", "frame", "instance", "--id", "b2", "--of", "bolt", "--origin", "40,0,0",
-    ]);
-    p
-}
-
 /// Runs frames until both bolts are drawn.
 fn both_bolts(h: &mut Harness<'static, App>) {
     frames(h, |a| match &a.screen {

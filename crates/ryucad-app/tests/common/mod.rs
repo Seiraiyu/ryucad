@@ -507,6 +507,58 @@ pub fn face_up(p: &Project, part: &str, solid: &str, z: f64) -> String {
         .unwrap()
 }
 
+/// A bolt `b1` fixed at the origin and `b2` free 40 mm along x, in
+/// assembly `frame`.
+pub fn two_bolts() -> Project {
+    two_bolts_as("cylinder", &["radius=3", "height=20"])
+}
+
+/// [`two_bolts`] with each bolt's shank a `kind` primitive of `params`.
+pub fn two_bolts_as(kind: &str, params: &[&str]) -> Project {
+    let p = Project::new();
+    p.ok(&["part", "create", "bolt"]);
+    let mut add = vec!["feature", "add", "bolt", kind, "--id", "shank"];
+    for x in params {
+        add.extend(["--param", x]);
+    }
+    p.ok(&add);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b1", "--of", "bolt", "--fixed",
+    ]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b2", "--of", "bolt", "--origin", "40,0,0",
+    ]);
+    p
+}
+
+/// A plate `base` (100 × 50 × 5 mm, fixed at the origin) and a free bolt
+/// `pin` (radius 3, height 20) placed 50 mm along x, in assembly `frame`,
+/// with no mate: the plate's top and the bolt's foot as references.
+pub fn plate_and_bolt() -> (Project, String, String) {
+    let p = Project::new();
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "slab", "--param", "x=100", "--param", "y=50",
+        "--param", "z=5",
+    ]);
+    p.ok(&["part", "create", "bolt"]);
+    p.ok(&[
+        "feature", "add", "bolt", "cylinder", "--id", "shank", "--param", "radius=3", "--param",
+        "height=20",
+    ]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "base", "--of", "plate", "--fixed",
+    ]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "pin", "--of", "bolt", "--origin", "50,0,0",
+    ]);
+    let top = format!("frame/base/slab/{}", face_up(&p, "plate", "slab", 1.0));
+    let foot = format!("frame/pin/shank/{}", face_up(&p, "bolt", "shank", -1.0));
+    (p, top, foot)
+}
+
 /// A plate fixed in `frame` and a bolt stood on its top by revolute `m1`,
 /// with three copies of the bolt round the plate's z (`ring`).
 pub fn mated() -> Project {

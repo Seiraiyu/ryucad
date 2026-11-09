@@ -49,7 +49,26 @@ pub fn state(o: &mut Opened) -> State {
         annotations: o.view.annotations,
         flat: o.ws.flat_view.is_some(),
         flattenable: o.ws.flat_candidate(o.view.chosen.as_ref()).is_some(),
+        movable: o
+            .ws
+            .myself()
+            .and_then(|m| m.selection.first().cloned())
+            .and_then(|r| movable_of(&o.ws, &r)),
+        moving: o.ws.mover.is_some(),
     }
+}
+
+/// The assembly and instance a reference (an occurrence `<asm>/<path>`,
+/// or one of its entities) is on, and whether it can move: `None` for a
+/// reference into no shown assembly.
+pub fn movable_of(
+    ws: &crate::core::workspace::Workspace,
+    reference: &str,
+) -> Option<Result<(String, String), String>> {
+    let asm = ws.shown_assembly()?;
+    let rest = reference.strip_prefix(&asm)?.strip_prefix('/')?;
+    let instance = rest.split('/').next().filter(|i| !i.is_empty())?;
+    Some(ws.model.movable(&(asm.clone(), format!("{instance}/"))))
 }
 
 /// One choice of a submenu command.
@@ -231,7 +250,11 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         // leaves the Measure tool, then clears the selection and the
         // tree's choice with it.
         "edit.clear_selection" => {
-            if o.view.others.is_some() {
+            if o.ws.mover.as_ref().is_some_and(|m| m.grip.is_some()) {
+                o.ws.clear_move();
+            } else if o.ws.mover.is_some() {
+                o.ws.cancel_move();
+            } else if o.view.others.is_some() {
                 o.view.others = None;
             } else if o.view.selector.is_some() {
                 o.view.selector = None;
@@ -344,6 +367,22 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         }
         "view.annotations" => toggle(o, "display.annotations", o.view.annotations),
         "annotation.add" | "annotation.here" => o.view.compose(&o.ws, id, target),
+        "edit.move" if o.ws.mover.is_some() && target.is_none() => o.ws.cancel_move(),
+        "edit.move" => {
+            let movable = match target {
+                Some(t) => movable_of(&o.ws, t),
+                None => state(o).movable,
+            };
+            match movable {
+                Some(Ok((part, instance))) => {
+                    if let Err(why) = o.ws.start_move(&part, &instance) {
+                        o.ws.drag_note = Some(why);
+                    }
+                }
+                Some(Err(why)) => o.ws.drag_note = Some(why),
+                None => {}
+            }
+        }
         "measure.clearance" => {
             o.ws.check_clearance();
             o.dialogs.clearance = true;

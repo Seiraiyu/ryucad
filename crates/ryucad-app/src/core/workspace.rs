@@ -174,6 +174,9 @@ enum Pending {
     DragSolve(String),
     /// A drag's move, written (`assembly.move`).
     DragMove(String),
+    /// The Move tool's preview of an assembly, and its write.
+    MoveSolve(String),
+    MoveWrite(String),
     /// A part's named views (`view.list`).
     Views(String),
     /// A named view of a part, saved (`view.save`).
@@ -487,6 +490,12 @@ pub struct Workspace {
     pub export_choices: crate::core::export::Choices,
     /// The instance being dragged, if any.
     pub drag: Option<Drag>,
+    /// The Move tool, while it is on one instance.
+    pub mover: Option<crate::core::mover::Mover>,
+    /// When the Move tool's preview was last asked and for which value,
+    /// and whether one is on its way.
+    mover_asked: Option<(Instant, Option<crate::core::mover::Grip>, f64)>,
+    mover_waiting: bool,
     /// The named views of the part the window shows, for the cube's menu
     /// and the view selector.
     pub views: crate::core::views::NamedViews,
@@ -561,10 +570,6 @@ pub struct Workspace {
 
 impl Workspace {
     /// The project's default unit, for forms.
-    fn unit(&self) -> ryucad::units::Unit {
-        ryucad::units::Unit::parse(&self.model.default_unit).unwrap_or(ryucad::units::Unit::Mm)
-    }
-
     /// Opens the project at `root` (canonical) as the human `name`, and
     /// starts loading it.
     pub fn open(root: &Path, daemon: &Daemon, name: &str, wake: Wake) -> Result<Workspace> {
@@ -646,6 +651,9 @@ impl Workspace {
             export: None,
             export_choices: Default::default(),
             drag: None,
+            mover: None,
+            mover_asked: None,
+            mover_waiting: false,
             views: Default::default(),
             sections: Default::default(),
             explodes: Default::default(),
@@ -1158,6 +1166,112 @@ impl Workspace {
             expected_revision: revision,
         };
         self.send(req, Pending::DragMove(d.part));
+    }
+
+    /// Puts the Move tool's handles on instance `instance` of assembly
+    /// `part`, at the middle of its drawn boxes, or says why it can't
+    /// move (fixed, a pattern's copy, no freedom left).
+    pub fn start_move(&mut self, part: &str, instance: &str) -> Result<(), String> {
+        let key = (part.to_owned(), format!("{instance}/"));
+        self.model.movable(&key)?;
+        let middle = self
+            .model
+            .middles(part)
+            .get(instance)
+            .copied()
+            .ok_or_else(|| format!("{instance} isn't drawn yet"))?;
+        let body = self
+            .model
+            .meshes
+            .keys()
+            .find(|k| k.0 == part && k.1.split('/').next() == Some(instance))
+            .cloned();
+        let pose = body.map_or(crate::core::model::Pose::IDENTITY, |k| self.model.pose(&k));
+        let own = self.mover.as_ref().is_some_and(|m| m.own);
+        self.cancel_move();
+        self.mover = Some(crate::core::mover::Mover::new(
+            part, instance, middle, pose, own,
+        ));
+        Ok(())
+    }
+
+    /// The project's default unit.
+    pub fn unit(&self) -> ryucad::units::Unit {
+        ryucad::units::Unit::parse(&self.model.default_unit).unwrap_or(ryucad::units::Unit::Mm)
+    }
+
+    /// Reads the Move tool's value field.
+    pub fn type_move(&mut self, text: &str) {
+        let unit = self.unit();
+        if let Some(m) = self.mover.as_mut() {
+            m.typed(text, unit);
+        }
+    }
+
+    /// Asks where the Move tool's value puts what the instance's mates
+    /// reach, at the drawn revision: when the value has changed since it
+    /// last asked, one at a time, at most every [`DRAG_EVERY`]. The view
+    /// calls it every frame the tool is on.
+    pub fn preview_move(&mut self) {
+        let Some(m) = &self.mover else { return };
+        if self.mover_waiting {
+            return;
+        }
+        let asked = (m.grip, m.value);
+        if self.mover_asked.is_some_and(|(at, g, v)| {
+            (g, v) == asked || at.elapsed() < DRAG_EVERY
+        }) {
+            return;
+        }
+        let part = m.part.clone();
+        if m.grip.is_none() || m.value == 0.0 || m.error.is_some() {
+            // Nothing to move: drawn where it is.
+            self.mover_asked = Some((Instant::now(), asked.0, asked.1));
+            if self.model.preview.keys().any(|(p, _)| *p == part) {
+                self.model.preview.retain(|(p, _), _| *p != part);
+                self.model.generation += 1;
+            }
+            return;
+        }
+        let req = m.preview(self.model_rev());
+        self.mover_asked = Some((Instant::now(), asked.0, asked.1));
+        self.mover_waiting = true;
+        self.send(req, Pending::MoveSolve(part));
+    }
+
+    /// Sends the Move tool's value as `assembly.move` (proposed in
+    /// Annotate) against the assembly's revision as the window last saw
+    /// it; the handles go.
+    pub fn send_move(&mut self) {
+        let Some(m) = self.mover.take() else { return };
+        if !m.ready() {
+            self.mover = Some(m);
+            return;
+        }
+        let revision = self.model.parts.get(&m.part).map(|p| p.revision.clone());
+        let part = m.part.clone();
+        self.mover_asked = None;
+        self.mover_waiting = false;
+        self.send(m.request(revision), Pending::MoveWrite(part));
+    }
+
+    /// Drops the Move tool's value and its preview; the handles stay.
+    pub fn clear_move(&mut self) {
+        let Some(m) = self.mover.as_mut() else { return };
+        m.clear();
+        let part = m.part.clone();
+        self.model.preview.retain(|(p, _), _| *p != part);
+        self.model.generation += 1;
+    }
+
+    /// Drops the Move tool and its preview.
+    pub fn cancel_move(&mut self) {
+        if let Some(m) = self.mover.take() {
+            self.model.preview.retain(|(p, _), _| *p != m.part);
+            self.model.generation += 1;
+        }
+        self.mover_asked = None;
+        self.mover_waiting = false;
     }
 
     /// Asks what importing the open import's file would do: `import` as
@@ -3718,6 +3832,28 @@ impl Workspace {
                 }
                 if again {
                     self.ask_drag();
+                }
+            }
+            (Pending::MoveSolve(part), a) => {
+                self.mover_waiting = false;
+                let on = self.mover.as_ref().is_some_and(|m| m.part == part);
+                match a {
+                    // A late answer after the tool went would undo the
+                    // written move's look.
+                    Ok(a) if on => self.preview_poses(&part, &a.result),
+                    Ok(_) => {}
+                    Err(e) => {
+                        if let Some(m) = self.mover.as_mut().filter(|_| on) {
+                            m.error = Some(e.message.clone());
+                        }
+                    }
+                }
+            }
+            (Pending::MoveWrite(part), a) => {
+                self.model.preview.retain(|(p, _), _| *p != part);
+                self.model.generation += 1;
+                if let Err(e) = a {
+                    self.fail(e);
                 }
             }
             (Pending::DragMove(part), a) => {

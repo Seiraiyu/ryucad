@@ -65,6 +65,9 @@ pub struct View {
     /// The viewport's commands whose keys were pressed over it, taken
     /// from the frame's input ([`View::take_keys`]).
     tabs: Vec<&'static str>,
+    /// The Move tool's value field takes the keyboard next frame (after a
+    /// drag or a click on a handle).
+    pub mover_focus: bool,
     /// The viewport's commands' keys (`view.hide_under`, `view.show_under`,
     /// `view.show_all`, and with its keyboard the arrows and + and -),
     /// from the window's keymap.
@@ -150,6 +153,8 @@ pub struct Others {
 enum Handle {
     Section,
     Step,
+    /// The Move tool's arrows and rings.
+    Mover,
 }
 
 /// A body's points that frame it from one direction
@@ -292,6 +297,7 @@ impl View {
             hovered: false,
             focused: false,
             tabs: Vec::new(),
+            mover_focus: false,
             keys: Vec::new(),
             commands: Default::default(),
             ran: None,
@@ -320,6 +326,111 @@ impl View {
             tree_focus: None,
             tree_menu: None,
             tree_menu_opening: false,
+        }
+    }
+
+    /// The Move tool's arrows and rings in the axes' colours (the held one
+    /// wider, in the accent), and its value field at the handle's tip:
+    /// Enter sends, Esc drops the value.
+    fn mover_handles(
+        &mut self,
+        ui: &mut egui::Ui,
+        ws: &mut Workspace,
+        rect: egui::Rect,
+        pr: &Projector,
+        length: f64,
+    ) {
+        let Some(m) = ws.mover.clone() else { return };
+        let size = [f64::from(rect.width()), f64::from(rect.height())];
+        let at = |q: [f64; 2]| egui::pos2(rect.min.x + q[0] as f32, rect.min.y + q[1] as f32);
+        let painter = ui.painter_at(rect);
+        let accent = style::color32(style::SELECTED);
+        let colours = [
+            ryucad::render::AXIS_X,
+            ryucad::render::AXIS_Y,
+            ryucad::render::AXIS_Z,
+        ];
+        let (arrows, rings) = m.handles(length);
+        use crate::core::mover::Grip;
+        let mut tip = None;
+        for k in 0..3 {
+            let (width, colour) = if m.grip == Some(Grip::Ring(k)) {
+                (2.5, accent)
+            } else {
+                (1.5, style::color32(colours[k]))
+            };
+            let pts: Vec<egui::Pos2> = rings[k].on_screen(pr, size, 48).into_iter().map(at).collect();
+            if m.grip == Some(Grip::Ring(k)) {
+                tip = pts
+                    .iter()
+                    .copied()
+                    .max_by(|a, b| a.x.total_cmp(&b.x));
+            }
+            painter.add(egui::Shape::line(pts, egui::Stroke::new(width, colour)));
+        }
+        for k in 0..3 {
+            let Some((b, t)) = arrows[k].on_screen(pr, size) else {
+                continue;
+            };
+            let (width, colour) = if m.grip == Some(Grip::Arrow(k)) {
+                tip = Some(at(t));
+                (3.5, accent)
+            } else {
+                (2.5, style::color32(colours[k]))
+            };
+            painter.line_segment([at(b), at(t)], egui::Stroke::new(width, colour));
+            painter.circle_filled(at(t), 4.5, colour);
+        }
+        let Some(tip) = tip.filter(|_| m.grip.is_some()) else {
+            return;
+        };
+        let unit = ws.unit();
+        let mut text = m.field(unit);
+        let mut own = m.own;
+        let mut send = false;
+        let mut drop = false;
+        let focus = std::mem::take(&mut self.mover_focus);
+        egui::Area::new(egui::Id::unique("move-value"))
+            .fixed_pos(tip + egui::vec2(8.0, -10.0))
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut text)
+                            .id_salt("move-value")
+                            .desired_width(90.0),
+                    );
+                    r.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Move value")
+                    });
+                    if focus {
+                        r.request_focus();
+                    }
+                    if r.changed() {
+                        ws.type_move(&text);
+                    }
+                    if r.lost_focus() {
+                        let (enter, esc) =
+                            ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+                        send = enter;
+                        drop = esc;
+                    }
+                    if let Some(e) = &m.error {
+                        ui.colored_label(ui.visuals().warn_fg_color, e);
+                    }
+                    if ui.checkbox(&mut own, "Own axes").changed()
+                        && let Some(m) = ws.mover.as_mut()
+                    {
+                        m.own = own;
+                    }
+                });
+            });
+        if own != m.own {
+            ws.clear_move();
+        } else if send {
+            ws.send_move();
+        } else if drop {
+            ws.clear_move();
         }
     }
 
@@ -1243,6 +1354,12 @@ impl View {
             {
                 let at = local(p);
                 if ws
+                    .mover
+                    .as_mut()
+                    .is_some_and(|m| m.grab(&pr, size, at, length))
+                {
+                    self.handle = Some(Handle::Mover);
+                } else if ws
                     .explodes
                     .adding
                     .as_mut()
@@ -1302,6 +1419,19 @@ impl View {
                     }
                     ws.sync_explode();
                 }
+                Handle::Mover => {
+                    let unit = ws.unit();
+                    if let Some(m) = ws.mover.as_mut() {
+                        let snap = match m.grip {
+                            Some(crate::core::mover::Grip::Ring(_)) => {
+                                crate::core::mover::angle_step(modifiers.shift)
+                            }
+                            _ => crate::core::mover::length_step(unit, modifiers.shift),
+                        };
+                        m.drag(&pr, size, local(p), length, Some(snap));
+                    }
+                    ws.preview_move();
+                }
             }
             ui.ctx().request_repaint();
         } else if response.dragged()
@@ -1352,6 +1482,13 @@ impl View {
                     }
                 }
                 Some(Handle::Step) => ws.finish_step(),
+                // Letting go keeps the value: Enter in its field sends it.
+                Some(Handle::Mover) => {
+                    if let Some(m) = ws.mover.as_mut() {
+                        m.release();
+                    }
+                    self.mover_focus = true;
+                }
                 None => {}
             }
         }
@@ -1416,7 +1553,22 @@ impl View {
         {
             self.cube_click(ws, hit);
         }
-        let clicked = response.clicked() && !over_cube;
+        let mut clicked = response.clicked() && !over_cube;
+        // A click on a Move handle opens its value at 0, to type; it never
+        // picks.
+        if clicked
+            && let Some(p) = response.interact_pointer_pos()
+            && let Some(m) = ws.mover.as_mut()
+            && m.grab(&pr, size, local(p), length)
+        {
+            m.release();
+            self.mover_focus = true;
+            clicked = false;
+        }
+        // The Move tool previews its value as it changes.
+        if ws.mover.is_some() {
+            ws.preview_move();
+        }
         // With whole bodies picked, a click chooses the solid or the
         // occurrence under it, as its row in the tree does.
         let body = self
@@ -1607,6 +1759,9 @@ impl View {
             for x in a.arrows(length) {
                 arrow(&painter, &x);
             }
+        }
+        if ws.mover.is_some() {
+            self.mover_handles(ui, ws, rect, &pr, length);
         }
         if let Some(part) = ws.explodes.part.clone()
             && ws.explodes.current(&part).is_some()
