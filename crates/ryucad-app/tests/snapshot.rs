@@ -11,7 +11,6 @@ use ryucad::view::{self, StandardView};
 use ryucad_app::core::compare::FaceMark;
 use ryucad_app::core::nav::Projector;
 use ryucad_app::core::pick::Picker;
-use ryucad_app::core::workspace::Workspace;
 use ryucad_app::ui::scene::{self, DrawList, Scene, linear, theme};
 use ryucad_app::ui::style;
 use std::path::Path;
@@ -49,7 +48,7 @@ fn the_viewport_looks_as_it_did() {
         return;
     };
     let p = Project::named("snapshot").with_part().with_top_sketch();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.meshes.len() == 2
         && ws.model.sketches.len() == 1));
@@ -96,7 +95,7 @@ fn a_compare_looks_as_it_did() {
     let p = Project::named("snapshot").with_part().committed();
     p.ok(&["feature", "edit", "p", "base", "--param", "x=30"]);
     p.ok(&["feature", "delete", "p", "boss"]);
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     p.ok(&["compare", "HEAD"]);
     assert!(ws.wait_until(Duration::from_secs(30), |ws| {
         ws.idle()
@@ -219,7 +218,7 @@ fn a_drilled_part_looks_as_it_did() {
         "--count",
         "4",
     ]);
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.meshes.len() == 1
         && ws.model.sketches.len() == 1));
@@ -328,7 +327,7 @@ fn an_assembly_with_a_pattern_looks_as_it_did() {
         "--angle",
         "360",
     ]);
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.drawn().count() == 7));
     let picker = Picker::new(&ws.model);
@@ -423,7 +422,7 @@ fn datums_paths_and_helices_look_as_they_did() {
     ] {
         p.ok(f);
     }
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.meshes.len() == 2
         && ws.model.paths.len() == 1));
@@ -467,7 +466,7 @@ fn a_chosen_loft_looks_as_it_did() {
         return;
     };
     let p = Project::named("snapshot").with_loft();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(60), |ws| ws.idle()
         && ws.model.meshes.len() == 2));
     ws.choose(Some(("p".to_owned(), "l".to_owned())));
@@ -511,7 +510,7 @@ fn a_chosen_split_looks_as_it_did() {
         return;
     };
     let p = Project::named("snapshot").with_shell_and_split();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(60), |ws| ws.idle()
         && ws.model.meshes.len() == 2));
     let b = ws.model.parts["p"]
@@ -555,6 +554,50 @@ fn a_chosen_split_looks_as_it_did() {
     looks_as_it_did(&adapter, &px, "split");
 }
 
+/// A sheet metal part in the flat view (design 346, The app): its plate
+/// and flange laid flat, the flat body drawn in place of the folded one,
+/// its bend line dashed in the colour of its direction, seen from above.
+#[test]
+fn a_flat_pattern_looks_as_it_did() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::named("snapshot").with_sheet_metal();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(120), |ws| ws.idle()
+        && ws.model.meshes.len() == 1));
+    ws.show_flat_view(Some(("p".to_owned(), String::new())));
+    assert!(ws.wait_until(Duration::from_secs(120), |ws| {
+        ws.idle()
+            && ws.model.flat.is_some()
+            && ws.flat_view.as_ref().is_some_and(|v| v.lines.is_some())
+    }));
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let lines = ws.flat_view.as_ref().unwrap().lines.as_ref().unwrap();
+    // As the window turns to it: from the pattern's viewer side.
+    let camera = lines.camera(&picker.points(None), f64::from(W) / f64::from(H));
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.015);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    let overlay = ryucad_app::core::flat::overlay(lines, &pr, [f64::from(W), f64::from(H)], 1.0);
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: theme::BACKGROUND,
+        light: scene::light(&camera),
+        edges: true,
+        faces: &[],
+        overlay: &overlay,
+        glass: &[],
+    };
+    scene.render(&device, &queue, [W, H], &list);
+    let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
+    looks_as_it_did(&adapter, &px, "flat");
+}
+
 /// Compares `px` with `tests/snapshots/<name>-lavapipe.png` on lavapipe,
 /// or only checks something was drawn on other adapters.
 /// The part in steel blue, the base's top red, the boss translucent: the
@@ -584,7 +627,7 @@ fn a_coloured_translucent_part_looks_as_it_did() {
     p.ok(&["colour", "p", "--colour", "#4a78c2"]);
     p.ok(&["colour", &top, "--colour", "#d03030"]);
     p.ok(&["colour", "p/boss", "--opacity", "0.4"]);
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.meshes.len() == 2
         && ws.model.looks.len() == 2));
@@ -620,7 +663,7 @@ fn a_cut_part_looks_as_it_did() {
         return;
     };
     let p = Project::named("snapshot").with_part();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.meshes.len() == 2));
     p.ok(&["section", "zx", "--offset", "1", "--flip"]);
@@ -674,7 +717,7 @@ fn an_exploded_assembly_looks_as_it_did() {
         r#"[{"instances": ["two"], "translate": [0, 0, 15]},
             {"instances": ["two"], "rotate": {"axis": [1, 0, 0], "angle": "60 deg"}}]"#,
     ]);
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     let two = ("asm".to_owned(), "two/base".to_owned());
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.meshes.contains_key(&two)

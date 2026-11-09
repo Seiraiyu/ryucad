@@ -45,8 +45,19 @@ const MESH_BATCH: usize = 256;
 #[derive(Clone, Debug, PartialEq)]
 enum Pending {
     Info,
+    /// This window's own `participant.mode`; the mode it was in before.
+    Mode(crate::core::modes::Mode),
+    /// A model edit sent as a proposal in Annotate: what its own answer
+    /// was for.
+    Proposal(Box<Pending>),
+    /// `annotation.list`.
+    Annotations,
+    /// An annotation made, answered or closed from the window.
+    AnnotationWrite,
     Parts,
-    Rebuild(String),
+    /// A part's report, asked for at this revision (the draft, or the
+    /// working files).
+    Rebuild(String, Option<String>),
     /// A body's mesh, asked for at this hash.
     Mesh(BodyKey, String),
     /// Several bodies of one assembly's occurrences, each at its hash.
@@ -184,6 +195,13 @@ enum Pending {
     /// An assembly's explode written or deleted, to show `explode` next
     /// if it is still there.
     ExplodeSaved(String, Option<String>),
+    /// A sheet metal solid's table (`sheet.get`): its part and the solid
+    /// asked for, at a part revision.
+    SheetTable(BodyKey, String),
+    /// A sheet metal solid's flat bend lines (`flat.get`), likewise.
+    FlatLines(BodyKey, String),
+    /// The flat view's body (`mesh.get` with `flat`), likewise.
+    FlatMesh(BodyKey, String),
     /// Only a failure matters.
     Quiet,
 }
@@ -322,9 +340,28 @@ pub fn camera_arg(c: &Camera) -> CameraArg {
 pub struct Workspace {
     pub root: PathBuf,
     pub link: Link,
+    /// The window's mode (design 374): View when it opens and whenever it
+    /// connects again; Annotate and Direct edit by the person's choice.
+    pub mode: crate::core::modes::Mode,
+    /// The project's annotations (design 374), read when the window opens
+    /// and followed from `annotation.changed`.
+    pub annotations: crate::core::annotations::Annotations,
+    /// The annotation chosen in the tile or by its marker.
+    pub chosen_annotation: Option<String>,
+    /// Annotate's Show agent's model: the working files drawn though the
+    /// person has a draft.
+    pub show_agent: bool,
+    /// What the model was last read at: its revision and the draft's
+    /// suggestions laid.
+    drawn: (Option<String>, Vec<String>),
+    /// The Annotations tile's filter and what is typed in it.
+    pub annotation_filter: crate::core::annotations::Filter,
+    pub annotation_ui: crate::core::annotations::Typed,
     pub model: Model,
     /// Parts whose reports are asked for and not yet answered.
     pub loading: BTreeSet<String>,
+    /// The revision each part in `loading` was last asked for at.
+    asked_at: BTreeMap<String, Option<String>>,
     /// Parts the tree, as it draws, found it wants loaded (its rows
     /// opened): loaded once it is drawn ([`Workspace::load_wanted`]).
     pub wanted: std::cell::RefCell<BTreeSet<String>>,
@@ -343,6 +380,15 @@ pub struct Workspace {
     /// The part revision the chosen feature was last looked at for a
     /// sweep's or loft's drawing.
     swept_at: Option<String>,
+    /// Sheet metal solids' tables and flats, as read (design 346, The
+    /// app): the Part tile's sheet metal section and what a chosen unfold
+    /// or refold paints.
+    pub sheets: crate::core::sheet::Cache,
+    /// The flat view (View > Flat pattern), while on.
+    pub flat_view: Option<crate::core::flat::FlatView>,
+    /// The faces of the bend under the pointer in the Part tile's bend
+    /// table, painted in the hover colour.
+    pub sheet_hover: Vec<String>,
     /// The property panel's form for a dimension chosen by its label;
     /// shown instead of `form`.
     pub dimension: Option<DimForm>,
@@ -528,8 +574,16 @@ impl Workspace {
         let mut ws = Workspace {
             root: root.to_path_buf(),
             link,
+            mode: Default::default(),
+            annotations: Default::default(),
+            chosen_annotation: None,
+            show_agent: false,
+            drawn: Default::default(),
+            annotation_filter: Default::default(),
+            annotation_ui: Default::default(),
             model: Model::default(),
             loading: BTreeSet::new(),
+            asked_at: BTreeMap::new(),
             wanted: Default::default(),
             people,
             following: None,
@@ -538,6 +592,9 @@ impl Workspace {
             made_for: None,
             swept: None,
             swept_at: None,
+            sheets: Default::default(),
+            flat_view: None,
+            sheet_hover: Vec::new(),
             dimension: None,
             form_for: None,
             dimension_for: None,
@@ -630,6 +687,7 @@ impl Workspace {
     fn load(&mut self) {
         // What was asked for before a resync may never be answered.
         self.loading.clear();
+        self.asked_at.clear();
         self.send(Request::ProjectInfo {}, Pending::Info);
         self.send(Request::PartList {}, Pending::Parts);
         let log = Request::ActivityLog {
@@ -643,6 +701,13 @@ impl Workspace {
         self.send(Request::PdmConfig {}, Pending::PdmConfig);
         self.read_appearance();
         self.load_deps();
+        let list = Request::AnnotationList {
+            status: Vec::new(),
+            part: None,
+            by: None,
+            open: false,
+        };
+        self.send(list, Pending::Annotations);
     }
 
     fn load_settings(&mut self) {
@@ -815,7 +880,7 @@ impl Workspace {
         let req = Request::AppearanceGet {
             part: self.model.focus.clone(),
             participant: None,
-            rev: None,
+            rev: self.model_rev(),
         };
         self.send(req, Pending::Appearance(self.looks_asked));
     }
@@ -949,7 +1014,7 @@ impl Workspace {
         }
         let req = Request::Measure {
             entities: picks.clone(),
-            rev: None,
+            rev: self.model_rev(),
         };
         self.send(req, Pending::Measure(picks));
     }
@@ -974,7 +1039,7 @@ impl Workspace {
         let req = Request::Mass {
             of: of.to_owned(),
             tolerance: None,
-            rev: None,
+            rev: self.model_rev(),
         };
         self.send(req, Pending::Mass(of.to_owned()));
     }
@@ -1141,10 +1206,14 @@ impl Workspace {
 
     /// Opens File > Export… on `part`, with the last export's choices.
     pub fn open_export(&mut self, part: &str) {
-        self.export = Some(crate::core::export::Export::new(
-            part,
-            self.export_choices.clone(),
-        ));
+        let mut e = crate::core::export::Export::new(part, self.export_choices.clone());
+        // DXF only for sheet metal; the last export's DXF doesn't carry
+        // over to a part with none.
+        e.sheet = self.sheet_solid(part, None).map(|k| k.1);
+        if e.sheet.is_none() && e.choices.format == crate::core::export::Format::Dxf {
+            e.choices.format = crate::core::export::Format::Step;
+        }
+        self.export = Some(e);
     }
 
     /// Exports the open export's part: the daemon, on this machine,
@@ -1699,11 +1768,20 @@ impl Workspace {
     /// Starts, changes or ends the compare to match this window's
     /// participant.
     fn follow_compare(&mut self) {
-        let want = self.myself().and_then(|m| m.compare.clone());
+        // While the person's draft is drawn, it is painted against the
+        // agent's model (the working files); else the participant's own
+        // compare. A draft's compare isn't sent to the session.
+        let want = match self.model_rev() {
+            Some(draft) => Some(("working".to_owned(), Some(draft))),
+            None => self
+                .myself()
+                .and_then(|m| m.compare.clone())
+                .map(|r| (r, None)),
+        };
         match (&self.compare, want) {
-            (Some(c), Some(w)) if c.rev == w => {}
-            (_, Some(w)) => {
-                self.compare = Some(Compare::new(&w));
+            (Some(c), Some((rev, to))) if c.rev == rev && c.to == to => {}
+            (_, Some((rev, to))) => {
+                self.compare = Some(Compare::between(&rev, to));
                 self.model.generation += 1;
                 self.ask_diff();
                 self.reload_bom();
@@ -1727,7 +1805,7 @@ impl Workspace {
         }
         let req = Request::Diff {
             from: Some(c.rev.clone()),
-            to: None,
+            to: c.to.clone(),
             part: None,
             model: true,
             positions: false,
@@ -1761,12 +1839,48 @@ impl Workspace {
                 quality: None,
                 transfer: Some(Transfer::Compact),
                 rev: Some(rev.clone()),
+                flat: None,
             };
             self.send(req, Pending::Ghost(key, hash));
         }
     }
 
+    /// Sends `req`, as the window's mode allows: as it is, as a proposed
+    /// change (`annotation.propose`, its answer the request's own), or
+    /// not at all, its refusal answered where its answer would have gone
+    /// (a form's error, else an error card), saying which mode allows it.
     fn send(&mut self, req: Request, why: Pending) {
+        use crate::core::modes::{Gate, gate};
+        match gate(self.mode, &req) {
+            Gate::Send => self.send_now(req, why),
+            Gate::Propose => {
+                let request = json!({"method": req.method(), "params": req.params()});
+                let wrapped = Request::AnnotationPropose {
+                    request,
+                    comment: None,
+                    pins: Vec::new(),
+                    rough: false,
+                    author: None,
+                };
+                self.send_now(wrapped, Pending::Proposal(Box::new(why)));
+            }
+            Gate::Refuse(because) => {
+                let method = req.method();
+                let e = Error::new(Code::ParticipantMode, format!("{method}: {because}"))
+                    .with("mode", self.mode.as_str())
+                    .with("method", &method);
+                self.answer(why, Err(e));
+            }
+        }
+    }
+
+    /// What a control that writes by `method` does in the window's mode
+    /// (see `core::modes::control`).
+    pub fn control(&self, method: &str) -> crate::core::modes::Gate {
+        crate::core::modes::control(self.mode, method)
+    }
+
+    fn send_now(&mut self, req: Request, why: Pending) {
         let method = req.method();
         if !ryucad::daemon::LONG.contains(&method.as_str()) {
             let ticket = self.link.send(req);
@@ -1838,6 +1952,169 @@ impl Workspace {
         &self.link.participant
     }
 
+    /// Puts the window in `mode`: at once here, and for the daemon, which
+    /// refuses a human's writes their mode doesn't allow. Sent on the
+    /// request connection, so every request after it is judged in it.
+    pub fn set_mode(&mut self, mode: crate::core::modes::Mode) {
+        if mode == self.mode {
+            return;
+        }
+        let was = std::mem::replace(&mut self.mode, mode);
+        self.send(Request::ParticipantMode { mode }, Pending::Mode(was));
+        if mode != crate::core::modes::Mode::Annotate {
+            self.show_agent = false;
+        }
+        self.model.generation += 1;
+        self.follow_draft();
+    }
+
+    /// This window's person's draft as a revision, while they have one in
+    /// Annotate: `draft:<name>`.
+    fn draft_rev(&self) -> Option<String> {
+        (self.mode == crate::core::modes::Mode::Annotate
+            && !self.annotations.draft(&self.name).is_empty())
+        .then(|| format!("{}{}", ryucad::session::DRAFT, self.name))
+    }
+
+    /// The revision the window's model is read at: the draft, unless the
+    /// person looks at the agent's model or compares with a revision;
+    /// else the working files.
+    pub fn model_rev(&self) -> Option<String> {
+        let comparing = self.myself().is_some_and(|m| m.compare.is_some());
+        self.draft_rev().filter(|_| !self.show_agent && !comparing)
+    }
+
+    /// The revision forms read at: the draft whenever there is one, since
+    /// proposals run over it (and are guarded by its revisions).
+    pub fn form_rev(&self) -> Option<String> {
+        self.draft_rev()
+    }
+
+    /// Annotate's Show agent's model (`true`), or the person's suggestions.
+    pub fn set_show_agent(&mut self, on: bool) {
+        self.show_agent = on;
+        self.follow_draft();
+    }
+
+    /// Reads the model again when what is drawn changed: the mode, Show
+    /// agent's model, a compare, or the person's draft (a suggestion made,
+    /// applied, closed or gone stale); and follows the compare.
+    fn follow_draft(&mut self) {
+        let now = (self.model_rev(), self.annotations.draft(&self.name));
+        if now != self.drawn {
+            let rev_moved = now.0 != self.drawn.0 || now.0.is_some();
+            self.drawn = now;
+            if rev_moved {
+                let loaded: Vec<String> = self.model.parts.keys().cloned().collect();
+                for id in loaded {
+                    self.loading.remove(&id);
+                    self.ask_part(&id);
+                }
+                for part in self.model.clear_sketches() {
+                    self.fetch_sketches(&part);
+                }
+                self.read_appearance();
+            }
+            if let Some(f) = &self.form {
+                let (part, id) = (f.part.clone(), f.feature.clone());
+                self.read_form(part, id, None);
+            }
+        }
+        self.follow_compare();
+    }
+
+    /// This window's participant name, as annotations name their author.
+    pub fn my_name(&self) -> &str {
+        &self.name
+    }
+
+    /// A comment pinned to `pins`, seen through `camera`.
+    pub fn create_annotation(
+        &mut self,
+        pins: Vec<ryucad::proto::PinArg>,
+        comment: String,
+        camera: Option<Camera>,
+    ) {
+        let req = Request::AnnotationCreate {
+            pins,
+            comment,
+            camera: camera.as_ref().map(camera_arg),
+            with_view: false,
+            author: None,
+        };
+        self.send(req, Pending::AnnotationWrite);
+    }
+
+    pub fn reply_annotation(&mut self, id: &str, text: String) {
+        let req = Request::AnnotationReply {
+            id: id.to_owned(),
+            text,
+            expect: None,
+            author: None,
+        };
+        self.send(req, Pending::AnnotationWrite);
+    }
+
+    pub fn edit_annotation(&mut self, id: &str, comment: String) {
+        let req = Request::AnnotationEdit {
+            id: id.to_owned(),
+            comment: Some(comment),
+            pins: None,
+            expect: None,
+            author: None,
+        };
+        self.send(req, Pending::AnnotationWrite);
+    }
+
+    pub fn delete_annotation(&mut self, id: &str) {
+        let req = Request::AnnotationDelete {
+            id: id.to_owned(),
+            expect: None,
+            author: None,
+        };
+        self.send(req, Pending::AnnotationWrite);
+    }
+
+    /// Takes an annotation's change into the working files (Direct edit).
+    pub fn apply_annotation(&mut self, id: &str) {
+        let req = Request::AnnotationApply {
+            id: id.to_owned(),
+            keep_open: false,
+            expect: None,
+            author: None,
+        };
+        self.send(req, Pending::AnnotationWrite);
+    }
+
+    /// Chooses an annotation (or none): its view restored, and with a
+    /// change, a compare against `annotation:<id>`; leaving one compared
+    /// stops that compare.
+    pub fn choose_annotation(&mut self, id: Option<&str>) {
+        self.chosen_annotation = id.map(str::to_owned);
+        let entry = id.and_then(|i| self.annotations.all.get(i)).cloned();
+        let comparing_one = self
+            .compare
+            .as_ref()
+            .is_some_and(|c| c.rev.starts_with(ryucad::session::ANNOTATION));
+        match entry {
+            Some(e) => {
+                if let Some(c) = e.view {
+                    self.looked = Some(c);
+                }
+                match e.change {
+                    Some(_) => {
+                        self.set_compare(Some(format!("{}{}", ryucad::session::ANNOTATION, e.id)))
+                    }
+                    None if comparing_one => self.set_compare(None),
+                    None => {}
+                }
+            }
+            None if comparing_one => self.set_compare(None),
+            None => {}
+        }
+        self.model.generation += 1;
+    }
+
     /// This window as the session knows it.
     pub fn myself(&self) -> Option<&Person> {
         self.people.get(&self.link.participant)
@@ -1875,7 +2152,212 @@ impl Workspace {
         self.made_for.clone_from(&feature);
         if let Some(key) = feature {
             self.ask_swept(&key);
+            self.ask_sheet_paint(&key);
             self.ask_made(key);
+        }
+    }
+
+    /// Reads `key`'s sheet metal table (the part and the solid, `""` for
+    /// its one sheet metal solid) unless it was read at the part's
+    /// revision or is on its way: the Part tile's sheet metal section asks
+    /// every frame it shows.
+    pub fn show_sheet(&mut self, key: &BodyKey) {
+        let Some(revision) = self.revision_of(&key.0) else {
+            return;
+        };
+        if self.sheets.want_table(key, &revision) {
+            let req = Request::SheetGet {
+                part: key.0.clone(),
+                solid: (!key.1.is_empty()).then(|| key.1.clone()),
+                rev: self.model_rev(),
+            };
+            self.send(req, Pending::SheetTable(key.clone(), revision));
+        }
+    }
+
+    /// The sheet metal solid the Part tile's section shows of `part`: the
+    /// chosen feature's solid when it is in `part`, else the solid a base
+    /// flange founds, else `""` (the part's one sheet metal solid, as the
+    /// daemon finds it); `None` for a part with no sheet metal feature.
+    pub fn sheet_solid(&self, part: &str, chosen: Option<&BodyKey>) -> Option<BodyKey> {
+        let p = self.model.parts.get(part)?;
+        let sheet = |f: &crate::core::model::Feature| f.sheet.is_some();
+        if !p.features.iter().any(sheet) {
+            return None;
+        }
+        if let Some(k) = chosen.filter(|k| k.0 == part)
+            && p.feature(&k.1).is_some_and(sheet)
+            && let Some(s) = self.model.solid_of(k)
+        {
+            return Some(s);
+        }
+        let founder = p
+            .features
+            .iter()
+            .find(|f| f.sheet.as_ref().is_some_and(|s| s.kind == "base_flange"))
+            .map_or_else(String::new, |f| f.id.clone());
+        Some((part.to_owned(), founder))
+    }
+
+    /// Reads `key`'s flat bend lines, as [`Workspace::show_sheet`] its
+    /// table.
+    fn ask_flat_lines(&mut self, key: &BodyKey) {
+        let Some(revision) = self.revision_of(&key.0) else {
+            return;
+        };
+        if self.sheets.want_flat(key, &revision) {
+            let req = Request::FlatGet {
+                part: key.0.clone(),
+                solid: (!key.1.is_empty()).then(|| key.1.clone()),
+                rev: self.model_rev(),
+                fixed: None,
+                bends: Vec::new(),
+            };
+            self.send(req, Pending::FlatLines(key.clone(), revision));
+        }
+    }
+
+    /// What a chosen unfold or refold paints needs: its target's table,
+    /// and an unfold's flat too.
+    fn ask_sheet_paint(&mut self, key: &BodyKey) {
+        let Some(info) = self
+            .model
+            .parts
+            .get(&key.0)
+            .and_then(|p| p.feature(&key.1))
+            .filter(|f| f.error.is_none())
+            .and_then(|f| f.sheet.clone())
+        else {
+            return;
+        };
+        let Some(target) = info.target else {
+            return;
+        };
+        let solid = (key.0.clone(), target);
+        match info.kind.as_str() {
+            "unfold" => {
+                self.show_sheet(&solid);
+                self.ask_flat_lines(&solid);
+            }
+            "refold" => self.show_sheet(&solid),
+            _ => {}
+        }
+    }
+
+    /// The faces and edges a chosen unfold or refold paints, from what
+    /// the window has read ([`crate::core::sheet::painted`]).
+    pub fn sheet_paint(&self, key: &BodyKey) -> (Vec<String>, Vec<String>) {
+        let none = (Vec::new(), Vec::new());
+        let Some(p) = self.model.parts.get(&key.0) else {
+            return none;
+        };
+        let Some(info) = p.feature(&key.1).and_then(|f| f.sheet.as_ref()) else {
+            return none;
+        };
+        let Some(target) = &info.target else {
+            return none;
+        };
+        let solid = (key.0.clone(), target.clone());
+        let table = match self.sheets.table(&solid, &p.revision) {
+            Some(crate::core::sheet::Shown::Table(t)) => Some(t),
+            _ => None,
+        };
+        let flat = self
+            .sheets
+            .flat(&solid, &p.revision)
+            .and_then(|f| f.as_ref().ok());
+        let unfold_only = info
+            .unfold
+            .as_ref()
+            .and_then(|u| p.feature(u))
+            .and_then(|f| f.sheet.as_ref())
+            .map(|u| u.only.clone())
+            .unwrap_or_default();
+        crate::core::sheet::painted(&key.1, info, &unfold_only, table, flat)
+    }
+
+    /// Turns the flat view on, for `solid` (a part and its solid, `""` for
+    /// the part's one sheet metal solid), or off.
+    pub fn show_flat_view(&mut self, solid: Option<BodyKey>) {
+        self.model.show_flat(None);
+        self.flat_view = None;
+        let Some(key) = solid else {
+            return;
+        };
+        let Some(revision) = self.revision_of(&key.0) else {
+            return;
+        };
+        self.flat_view = Some(crate::core::flat::FlatView {
+            part: key.0.clone(),
+            solid: key.1.clone(),
+            revision: revision.clone(),
+            lines: None,
+            error: None,
+            turned: false,
+        });
+        self.read_flat_view();
+    }
+
+    /// Reads the flat view's bend lines and body again, at its part's
+    /// revision.
+    fn read_flat_view(&mut self) {
+        let Some(v) = &self.flat_view else {
+            return;
+        };
+        let key = (v.part.clone(), v.solid.clone());
+        let revision = v.revision.clone();
+        self.ask_flat_lines(&key);
+        let req = Request::MeshGet {
+            part: key.0.clone(),
+            feature: None,
+            features: Vec::new(),
+            quality: None,
+            transfer: Some(Transfer::Compact),
+            rev: self.model_rev(),
+            flat: Some(key.1.clone()),
+        };
+        self.send(req, Pending::FlatMesh(key, revision));
+    }
+
+    /// Turns the camera to the flat view, once its body and lines have
+    /// come: along the pattern's `z`, from its viewer side (where its bend
+    /// lines lie), as `render --flat` looks at it; the view frames it.
+    fn turn_to_flat(&mut self) {
+        let Some(v) = self.flat_view.as_mut().filter(|v| !v.turned) else {
+            return;
+        };
+        let (Some(l), Some((_, body))) = (&v.lines, &self.model.flat) else {
+            return;
+        };
+        let points: Vec<[f64; 3]> = match &body.mesh {
+            Ok(m) => m
+                .positions
+                .iter()
+                .map(|p| [0, 1, 2].map(|k| m.origin[k] + f64::from(p[k])))
+                .collect(),
+            Err(_) => l.lines.iter().flat_map(|b| [b.from, b.to]).collect(),
+        };
+        v.turned = true;
+        self.looked = Some(l.camera(&points, 1.0));
+    }
+
+    /// The solid View > Flat pattern lays flat: the chosen feature's
+    /// solid, else the one part shown (not an assembly), its one sheet
+    /// metal solid; `None` where neither is.
+    pub fn flat_candidate(&self, chosen: Option<&BodyKey>) -> Option<BodyKey> {
+        let shown = self.model.shown();
+        if let Some(k) = chosen
+            && shown.contains(&k.0.as_str())
+            && let Some(s) = self.model.solid_of(k)
+            && self.model.parts.get(&k.0).is_some_and(|p| !p.assembly)
+        {
+            return Some(s);
+        }
+        match shown.as_slice() {
+            [one] if self.model.parts.get(*one).is_some_and(|p| !p.assembly) => {
+                Some(((*one).to_owned(), String::new()))
+            }
+            _ => None,
         }
     }
 
@@ -1897,6 +2379,7 @@ impl Workspace {
             part: key.0.clone(),
             feature: key.1.clone(),
             quality: None,
+            rev: self.model_rev(),
         };
         self.send(req, Pending::Sweep(key.clone(), revision));
     }
@@ -1932,7 +2415,7 @@ impl Workspace {
             part: key.0.clone(),
             feature: None,
             entity: None,
-            rev: None,
+            rev: self.model_rev(),
         };
         self.send(req, Pending::Made(key, revision));
     }
@@ -1951,6 +2434,7 @@ impl Workspace {
         let req = Request::FeatureShow {
             part: part.clone(),
             id: id.clone(),
+            rev: self.form_rev(),
         };
         self.send(req, Pending::Form(part, id, before));
     }
@@ -1978,6 +2462,7 @@ impl Workspace {
             part: part.clone(),
             sketch: sketch.clone(),
             quality: None,
+            rev: self.form_rev(),
         };
         self.send(req, Pending::Dim(part, sketch, constraint, before));
     }
@@ -1998,6 +2483,7 @@ impl Workspace {
         let req = Request::ParamList {
             part: Some(part.clone()),
             scope: None,
+            rev: self.form_rev(),
         };
         self.send(req, Pending::Params(part, before));
     }
@@ -2071,7 +2557,10 @@ impl Workspace {
     }
 
     fn read_props(&mut self, part: String, before: Option<Box<PartProps>>) {
-        let req = Request::PropsGet { part: part.clone() };
+        let req = Request::PropsGet {
+            part: part.clone(),
+            rev: self.form_rev(),
+        };
         self.send(req, Pending::Props(part, before));
     }
 
@@ -2521,6 +3010,9 @@ impl Workspace {
     fn reconnected(&mut self, link: Link) {
         self.people.reset(&link.session["participants"]);
         self.link = link;
+        // A reconnected window starts in View, as the daemon starts every
+        // participant: Direct edit isn't kept across a daemon's restart.
+        self.mode = Default::default();
         self.lost = false;
         self.lost_why = None;
         self.toasts
@@ -2540,7 +3032,14 @@ impl Workspace {
         self.load();
         // A new session knows nothing of this window's compare or focus
         // either.
-        if let Some(rev) = self.compare.as_ref().map(|c| c.rev.clone()) {
+        // (A draft's compare is the window's own: the window is in View
+        // again, so it goes.)
+        if let Some(rev) = self
+            .compare
+            .as_ref()
+            .filter(|c| c.to.is_none())
+            .map(|c| c.rev.clone())
+        {
             self.set_compare(Some(rev));
             self.ask_diff();
         }
@@ -2732,6 +3231,29 @@ impl Workspace {
 
     fn answer(&mut self, why: Pending, answer: Result<Answer>) {
         match (why, answer) {
+            (Pending::Proposal(inner), r) => {
+                let r = r.map(|a| Answer {
+                    result: a.result["answer"].clone(),
+                    binary: None,
+                    raw: None,
+                });
+                if r.is_ok() {
+                    self.toasts
+                        .note("Suggested: the agent will see it", false, Instant::now());
+                }
+                self.answer(*inner, r);
+            }
+            (Pending::Annotations, Ok(a)) => {
+                self.annotations.reset(&a.result);
+                self.model.generation += 1;
+                self.follow_draft();
+            }
+            (Pending::AnnotationWrite, Ok(_)) => {}
+            (Pending::Mode(_), Ok(_)) => {}
+            (Pending::Mode(was), Err(e)) => {
+                self.mode = was;
+                self.fail(e);
+            }
             (Pending::Info, Ok(a)) => {
                 self.model.default_unit = a.result["default_unit"].as_str().unwrap_or("mm").into();
             }
@@ -2782,8 +3304,21 @@ impl Workspace {
                 self.model.listed = listed;
                 self.model.generation += 1;
             }
-            (Pending::Rebuild(id), r) => {
+            (Pending::Rebuild(id, rev), r) => {
+                // Asked at a revision the window no longer draws: its
+                // answer is dropped, and the part asked for at the one it
+                // draws unless that is on its way already (a part not yet
+                // loaded when the revision moved isn't asked again then).
+                let now = self.model_rev();
+                if rev != now {
+                    if self.asked_at.get(&id) != Some(&now) {
+                        self.loading.remove(&id);
+                        self.ask_part(&id);
+                    }
+                    return;
+                }
                 self.loading.remove(&id);
+                self.asked_at.remove(&id);
                 // A failed feature fails the rebuild; the report is in the details.
                 let report = match r {
                     Ok(a) => a.result["parts"][0].clone(),
@@ -2794,7 +3329,7 @@ impl Workspace {
             }
             (Pending::People, Ok(a)) => {
                 self.people.reset(&a.result["participants"]);
-                self.follow_compare();
+                self.follow_draft();
                 self.follow_focus();
             }
             (Pending::Compare(n), r) => {
@@ -3549,6 +4084,72 @@ impl Workspace {
                     self.model.generation += 1;
                 }
             }
+            (Pending::SheetTable(key, revision), a) => {
+                use crate::core::sheet::{SheetTable, Shown};
+                let t = match a {
+                    Ok(a) => Shown::Table(SheetTable::from_answer(&revision, &a.result)),
+                    Err(e) => Shown::Failed(e),
+                };
+                self.sheets.take_table(key, revision, t);
+                self.model.generation += 1;
+            }
+            (Pending::FlatLines(key, revision), a) => {
+                let f = a.map(|a| crate::core::flat::FlatLines::from_answer(&a.result));
+                if let Some(v) = self
+                    .flat_view
+                    .as_mut()
+                    .filter(|v| (v.part.clone(), v.solid.clone()) == key && v.revision == revision)
+                {
+                    match &f {
+                        Ok(l) => v.lines = Some(l.clone()),
+                        Err(e) => {
+                            // The flat no longer reads: draw the folded
+                            // body again, not the last revision's flat.
+                            v.lines = None;
+                            v.error = Some(e.clone());
+                            self.model.show_flat(None);
+                        }
+                    }
+                }
+                self.sheets.take_flat(key, revision, f);
+                self.turn_to_flat();
+                self.model.generation += 1;
+            }
+            (Pending::FlatMesh(key, revision), a) => {
+                let wanted = self.flat_view.as_ref().is_some_and(|v| {
+                    (v.part.clone(), v.solid.clone()) == key && v.revision == revision
+                });
+                if !wanted {
+                    return;
+                }
+                match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
+                    Ok(Some(Ok(mut bodies))) if bodies.len() == 1 => {
+                        let body = bodies.remove(0);
+                        // The solid it is, named now the daemon has chosen it.
+                        let solid = (key.0.clone(), body.feature.clone());
+                        if let Some(v) = &mut self.flat_view {
+                            v.solid.clone_from(&body.feature);
+                        }
+                        self.model.show_flat(Some((solid, body)));
+                        self.turn_to_flat();
+                    }
+                    Ok(Some(Err(e))) | Err(e) => {
+                        // Refused (an edit left the solid unfolding no
+                        // more): the folded body is drawn again, and the
+                        // view keeps the refusal, not the stale flat.
+                        if let Some(v) = &mut self.flat_view {
+                            v.lines = None;
+                            v.error = Some(e.clone());
+                        }
+                        self.model.show_flat(None);
+                        self.fail(e);
+                    }
+                    Ok(_) => {
+                        self.model.show_flat(None);
+                        self.fail(Error::new(Code::Daemon, "a flat came without its body"));
+                    }
+                }
+            }
             (Pending::Made(key, revision), a) => {
                 if self.made_for.as_ref() == Some(&key) {
                     match a {
@@ -3606,6 +4207,52 @@ impl Workspace {
 
     fn noted(&mut self, method: &str, params: &Value) {
         match method {
+            "annotation.changed" => {
+                let me = self.name.clone();
+                let news = self.annotations.changed(params, &me);
+                let numbers = self.annotations.numbers();
+                let tag = |id: &str| {
+                    numbers
+                        .get(id)
+                        .map_or_else(String::new, |n| format!(" #{n}"))
+                };
+                let now = Instant::now();
+                for (id, r) in &news.replies {
+                    let text = format!("replied on{}", tag(id));
+                    self.toasts
+                        .annotation(&r.by, r.agent, &text, &r.text, id, now);
+                }
+                for (id, status, note) in &news.closed {
+                    let Some(e) = self.annotations.all.get(id) else {
+                        continue;
+                    };
+                    let by = e
+                        .resolution
+                        .as_ref()
+                        .map_or("agent", |r| r.by.as_str())
+                        .to_owned();
+                    let what = if status == "done" {
+                        "resolved"
+                    } else {
+                        "rejected"
+                    };
+                    // A closed annotation has no number any more: its
+                    // comment names it.
+                    let short: String = e.comment.chars().take(40).collect();
+                    let text = format!("{what} “{short}”");
+                    let note = note.clone().unwrap_or_default();
+                    self.toasts.annotation(&by, true, &text, &note, id, now);
+                }
+                if self
+                    .chosen_annotation
+                    .as_ref()
+                    .is_some_and(|c| !self.annotations.all.contains_key(c))
+                {
+                    self.choose_annotation(None);
+                }
+                self.model.generation += 1;
+                self.follow_draft();
+            }
             "model.changed" => {
                 // What the BOM reads changed, or parts went.
                 let parts = params["parts"].as_array().into_iter().flatten();
@@ -3633,8 +4280,12 @@ impl Workspace {
                         self.model.generation += 1;
                         continue;
                     }
-                    // An assembly's occurrences come only when asked for.
+                    // An assembly's occurrences come only when asked for;
+                    // the draft is rebuilt over the files that moved.
                     if report["kind"] == "assembly" && report["occurrences"].is_null() {
+                        self.ask_part(id);
+                    } else if self.model_rev().is_some() {
+                        self.loading.remove(id);
                         self.ask_part(id);
                     } else {
                         self.part_changed(report);
@@ -3753,7 +4404,7 @@ impl Workspace {
             "app.open" => self.raised = true,
             "participant.changed" => {
                 self.people.changed(params);
-                self.follow_compare();
+                self.follow_draft();
                 self.follow_focus();
                 self.follow_sections();
                 self.follow_explode();
@@ -3870,6 +4521,23 @@ impl Workspace {
         {
             self.ask_made(key);
         }
+        // So does what a chosen unfold or refold paints.
+        if let Some(key) = self.made_for.clone()
+            && report["part"] == key.0.as_str()
+        {
+            self.ask_sheet_paint(&key);
+        }
+        // And the flat view, read again at the part's new revision.
+        if let Some(v) = &mut self.flat_view
+            && report["part"] == v.part.as_str()
+            && let Some(r) = report["revision"].as_str()
+            && r != v.revision
+        {
+            v.revision = r.to_owned();
+            v.lines = None;
+            v.error = None;
+            self.read_flat_view();
+        }
         // So does how the chosen sweep or loft is drawn.
         if let Some(key) = self.made_for.clone()
             && report["part"] == key.0.as_str()
@@ -3891,6 +4559,7 @@ impl Workspace {
                 part: key.0.clone(),
                 sketch: key.1.clone(),
                 quality: None,
+                rev: self.model_rev(),
             };
             self.send(req, Pending::Sketch(key, revision));
         }
@@ -3899,6 +4568,7 @@ impl Workspace {
                 part: key.0.clone(),
                 path: key.1.clone(),
                 quality: None,
+                rev: self.model_rev(),
             };
             self.send(req, Pending::Path(key, revision));
         }
@@ -3929,7 +4599,8 @@ impl Workspace {
                         features: Vec::new(),
                         quality: quality.clone(),
                         transfer: Some(Transfer::Compact),
-                        rev: None,
+                        rev: self.model_rev(),
+                        flat: None,
                     };
                     self.send(req, Pending::Mesh(key, hash));
                 }
@@ -3947,7 +4618,8 @@ impl Workspace {
                     features,
                     quality: quality.clone(),
                     transfer: Some(Transfer::Compact),
-                    rev: None,
+                    rev: self.model_rev(),
+                    flat: None,
                 };
                 self.send(req, Pending::Meshes(batch.to_vec()));
             }
@@ -3976,7 +4648,8 @@ impl Workspace {
                 features: Vec::new(),
                 quality: Some(level.as_str().to_owned()),
                 transfer: Some(Transfer::Compact),
-                rev: None,
+                rev: self.model_rev(),
+                flat: None,
             };
             self.send(req, Pending::Level(hash, level));
         }
@@ -4016,11 +4689,13 @@ impl Workspace {
         if !self.loading.insert(id.to_owned()) {
             return;
         }
+        let rev = self.model_rev();
+        self.asked_at.insert(id.to_owned(), rev.clone());
         let req = Request::Rebuild {
             part: Some(id.to_owned()),
-            rev: None,
+            rev: rev.clone(),
         };
-        self.send(req, Pending::Rebuild(id.to_owned()));
+        self.send(req, Pending::Rebuild(id.to_owned(), rev));
     }
 }
 

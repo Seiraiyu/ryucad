@@ -115,7 +115,7 @@ fn race(n: usize) -> Vec<u8> {
 /// every mesh, and how many solids' occurrences it draws.
 fn open(root: &Path) -> (Workspace, f64, f64, usize) {
     let t = Instant::now();
-    let mut ws = Workspace::open(root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| {
         ws.part("root").is_some_and(|r| !r.solids.is_empty())
     }));

@@ -76,6 +76,79 @@ pub(crate) fn prop_control(
     keys
 }
 
+/// The Part tile's sheet metal section (design 346, The app): for a part
+/// with sheet metal features, its solid's thickness, state and allowance
+/// and its bend table, as `sheet.get` gives them. Hovering a bend paints
+/// its faces; clicking one selects them. A solid that isn't sheet metal
+/// says why, quietly. Returns whether it drew anything: a part with no
+/// sheet metal features has no section.
+pub fn sheet_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) -> bool {
+    use crate::core::sheet::Shown;
+    ws.sheet_hover.clear();
+    let Some(part) = section_part(ws, view) else {
+        return false;
+    };
+    let Some(key) = ws.sheet_solid(&part, view.chosen.as_ref()) else {
+        return false;
+    };
+    ws.show_sheet(&key);
+    let Some(revision) = ws.part(&part).map(|p| p.revision.clone()) else {
+        return false;
+    };
+    let unit =
+        ryucad::units::Unit::parse(&ws.model.default_unit).unwrap_or(ryucad::units::Unit::Mm);
+    let (mut hover, mut select) = (None, None);
+    match ws.sheets.table(&key, &revision) {
+        None => {
+            ui.weak("Reading the sheet metal…");
+        }
+        Some(Shown::Failed(e)) => {
+            ui.weak(format!("Not sheet metal: {}", e.message));
+        }
+        Some(Shown::Table(t)) => {
+            form::heading(
+                ui,
+                crate::ui::toolbar::icon_of("base-flange"),
+                &format!("Sheet metal of {}", t.solid),
+                false,
+            );
+            let thickness = format!("{} {}", t.thickness_m / unit.factor(), unit.as_str());
+            let allowance = t
+                .allowance
+                .as_deref()
+                .map_or_else(String::new, |a| format!(", {a}"));
+            ui.label(format!("{thickness} thick, {}{allowance}", t.state));
+            if t.bends.is_empty() {
+                ui.weak(match t.state.as_str() {
+                    "flat" => "Laid flat: its bends are unfolded",
+                    _ => "No bends",
+                });
+            }
+            for (i, b) in t.bends.iter().enumerate() {
+                let r = ui
+                    .selectable_label(
+                        false,
+                        format!("Bend {}: {}", i + 1, crate::core::sheet::bend_text(b, unit)),
+                    )
+                    .on_hover_text(&b.bend);
+                if r.hovered() {
+                    hover = Some(b.faces().cloned().collect::<Vec<_>>());
+                }
+                if r.clicked() {
+                    select = Some(b.faces().cloned().collect::<Vec<_>>());
+                }
+            }
+        }
+    }
+    if let Some(h) = hover {
+        ws.sheet_hover = h;
+    }
+    if let Some(s) = select {
+        ws.select(s, ryucad::live::SelectMode::Replace);
+    }
+    true
+}
+
 /// The part the Part section shows: the chosen feature's part, else the
 /// first.
 pub fn section_part(ws: &Workspace, view: &View) -> Option<String> {
@@ -95,7 +168,7 @@ pub fn part_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
     ws.show_props(part.as_deref());
     if ws.pdm_config.is_some() && !ws.pdm_ready() {
         ui.weak("PDM isn't set up: the project has no ID for release records yet.");
-        if ui.button("Set up PDM").clicked() {
+        if crate::ui::modes::button(ui, ws, "pdm.init", "Set up PDM").clicked() {
             ws.pdm_init();
         }
     }
@@ -106,6 +179,7 @@ pub fn part_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
             None => b,
         })
     });
+    let gate = ws.control("props.set");
     let Some(p) = &mut ws.props else {
         return;
     };
@@ -158,7 +232,13 @@ pub fn part_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
         }
     });
     let (dirty, saving) = (p.dirty(), p.saving);
-    let foot = form::foot(ui, dirty, saving, ("Apply properties", "Revert properties"));
+    let foot = form::foot(
+        ui,
+        dirty,
+        saving,
+        ("Apply properties", "Revert properties"),
+        &gate,
+    );
     if (foot.revert || keys.revert) && dirty {
         for prop in &mut p.props {
             prop.field.text.clone_from(&prop.field.read);

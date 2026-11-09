@@ -1,5 +1,6 @@
 //! The window: a thin view over `core`.
 
+pub mod annotate;
 pub mod app;
 pub mod bom;
 pub mod commands;
@@ -14,6 +15,7 @@ pub mod form;
 pub mod help;
 pub mod icon;
 pub mod menu;
+pub mod modes;
 pub mod palette;
 pub mod panels;
 pub mod platform;

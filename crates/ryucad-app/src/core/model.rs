@@ -52,6 +52,9 @@ pub struct Feature {
     /// A shell's, offset's, mirror's or split's report as drawn: its
     /// plane and sides once it built, the faces an offset's groups move.
     pub body: Option<crate::core::bodies::BodyInfo>,
+    /// A base flange's, flange's, unfold's or refold's report as the
+    /// window reads it: its target, the bends it names, an unfold's flat.
+    pub sheet: Option<crate::core::sheet::SheetInfo>,
 }
 
 impl Feature {
@@ -443,6 +446,7 @@ impl Part {
                             .get("datum")
                             .and_then(ryucad::render::DatumShape::from_report),
                         body: crate::core::bodies::BodyInfo::from_report(f),
+                        sheet: crate::core::sheet::SheetInfo::from_report(f),
                     })
                     .collect()
             })
@@ -672,6 +676,11 @@ pub struct Model {
     /// what the Appearance window drags laid over it; a body with none is
     /// drawn plain.
     pub looks: Arc<BTreeMap<BodyKey, Arc<crate::core::appearance::Look>>>,
+    /// The flat view's body (design 346, The app): a sheet metal solid's
+    /// flat, drawn and picked in place of its folded mesh at every level
+    /// while the view is on. Its names are the folded body's, so a pick
+    /// on it is the same reference.
+    pub flat: Option<(BodyKey, Arc<WireBody>)>,
     /// Bumped whenever anything here changes, so views know to redraw.
     pub generation: u64,
     /// The body hashes whose mesh at the display quality came since the
@@ -980,8 +989,30 @@ impl Model {
         true
     }
 
-    /// `key`'s mesh at `level`, if the window has it.
+    /// The mesh `key` is drawn with at the user's display quality: the
+    /// flat view's body for the solid it lays flat, else its own.
+    pub fn mesh_of(&self, key: &BodyKey) -> Option<&Arc<WireBody>> {
+        match &self.flat {
+            Some((k, m)) if k == key => Some(m),
+            _ => self.meshes.get(key),
+        }
+    }
+
+    /// Shows `body` as the flat of `key`'s solid, or (`None`) shows it
+    /// folded again.
+    pub fn show_flat(&mut self, flat: Option<(BodyKey, WireBody)>) {
+        self.flat = flat.map(|(k, b)| (k, Arc::new(b)));
+        self.generation += 1;
+    }
+
+    /// `key`'s mesh at `level`, if the window has it; the flat view's
+    /// body at any level, since it comes at one.
     pub fn mesh_at(&self, key: &BodyKey, level: Quality) -> Option<Arc<WireBody>> {
+        if let Some((k, m)) = &self.flat
+            && k == key
+        {
+            return Some(Arc::clone(m));
+        }
         let first = self.meshes.get(key)?;
         if lod::level_of(first, self.base) == level {
             return Some(Arc::clone(first));
@@ -1056,6 +1087,10 @@ impl Model {
     ) -> Vec<(BodyKey, String, Quality)> {
         let mut out = Vec::new();
         for (key, level) in wanted {
+            // The flat view's body comes at one level only.
+            if self.flat.as_ref().is_some_and(|(k, _)| *k == key) {
+                continue;
+            }
             let Some(first) = self.meshes.get(&key) else {
                 continue;
             };
@@ -1088,6 +1123,18 @@ impl Model {
             self.reindexed.push(hash);
         }
         true
+    }
+
+    /// A point clicked on `entity` (in the shown model's frame) as a pin
+    /// keeps it: in the frame of the entity's own part, so the pin moves
+    /// with an occurrence (`<asm>/<path>/<solid>/<name>`).
+    pub fn pin_point(&self, entity: &str, at: [f64; 3]) -> [f64; 3] {
+        let steps: Vec<&str> = entity.split('/').collect();
+        if steps.len() < 3 {
+            return at;
+        }
+        let key = (steps[0].to_owned(), steps[1..steps.len() - 1].join("/"));
+        self.pose(&key).unapply(at)
     }
 
     /// Where `key`'s body is drawn: its occurrence's pose in an assembly
@@ -1345,7 +1392,10 @@ impl Model {
         self.meshes
             .iter()
             .filter(move |(k, _)| shown.contains(&k.0.as_str()) && self.is_hidden(k) == hidden)
-            .map(|(k, m)| (k, self.indexed(m), self.pose(k)))
+            .map(|(k, m)| {
+                let m = self.mesh_of(k).unwrap_or(m);
+                (k, self.indexed(m), self.pose(k))
+            })
     }
 
     /// The frames of the mate `key` names, as its assembly's solve placed
@@ -1417,6 +1467,16 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pins_point_is_in_its_entity_s_own_part_s_frame() {
+        let m = Model::default();
+        // A part's entity: its own frame is the shown one.
+        assert_eq!(
+            m.pin_point("p/base/0123456789abcdef0123456789abcdef", [1.0, 2.0, 3.0]),
+            [1.0, 2.0, 3.0]
+        );
+    }
     use serde_json::json;
 
     #[test]
@@ -1628,6 +1688,51 @@ mod tests {
                                               "body": 0, "heal": {"sewn": 1}}));
         assert!(!s.reference && s.faults.is_empty());
         assert_eq!(s.heal, [("sewn".to_owned(), 1)]);
+    }
+
+    #[test]
+    fn the_flat_view_draws_and_levels_its_body_in_place_of_the_folded_one() {
+        let wire = |hash: &str, x: f32| WireBody {
+            feature: "plate".into(),
+            hash: hash.into(),
+            mesh: Ok(ryucad::mesh::WireMesh {
+                origin: [0.0; 3],
+                chord: 1e-5,
+                angle: 0.5,
+                positions: vec![[x, 0.0, 0.0]],
+                corners: Vec::new(),
+                triangles: Vec::new(),
+                faces: Vec::new(),
+                edges: Vec::new(),
+                vertices: Vec::new(),
+                faults: Vec::new(),
+            }),
+        };
+        let mut m = Model::default();
+        let want = m.apply_part(&json!({"part": "p", "revision": "r", "features": [
+            {"id": "plate", "type": "base_flange", "ok": true, "solids": ["plate"], "hash": "fold"}],
+            "solids": [{"solid": "plate", "features": ["plate"], "ok": true, "hash": "fold"}]}));
+        m.ask(want);
+        assert!(m.take_mesh("p", wire("fold", 1.0)));
+        let key = ("p".to_owned(), "plate".to_owned());
+        let drawn = |m: &Model| {
+            m.drawn()
+                .map(|(_, b, _)| b.hash.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(drawn(&m), ["fold"]);
+        m.show_flat(Some((key.clone(), wire("flat", 2.0))));
+        assert_eq!(drawn(&m), ["flat"]);
+        assert_eq!(m.mesh_of(&key).unwrap().hash, "flat");
+        // At every level, and no other level of it is asked for.
+        assert_eq!(m.mesh_at(&key, Quality::Coarse).unwrap().hash, "flat");
+        assert!(
+            m.ask_levels(vec![(key.clone(), Quality::Coarse)])
+                .is_empty()
+        );
+        // Folded again: the solid's own mesh, kept all along.
+        m.show_flat(None);
+        assert_eq!(drawn(&m), ["fold"]);
     }
 
     #[test]

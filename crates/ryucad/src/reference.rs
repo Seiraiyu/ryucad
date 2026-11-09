@@ -52,7 +52,7 @@ pub fn resolve<'a>(
         return Err(fail(
             Code::BodyConsumed,
             format!(
-                "names {}, which the boolean {by} consumed: refer to its target instead",
+                "names {}, which {by} consumed: refer to what {by} made instead",
                 r.feature
             ),
         )

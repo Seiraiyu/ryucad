@@ -31,6 +31,17 @@ fn window(p: &Project) -> Harness<'static, App> {
 
 /// A window `height` tall: the right tabs' lower sections need room.
 fn sized(p: &Project, height: f32) -> Harness<'static, App> {
+    let mut h = viewing_sized(p, height);
+    // Window tests that write ask for Direct edit, as every window was
+    // before ryucad 19.B; View and Annotate have tests of their own.
+    if let ryucad_app::ui::app::Screen::Opened(o) = &mut h.state_mut().screen {
+        o.ws.set_mode(ryucad_app::core::modes::Mode::Edit);
+    }
+    h
+}
+
+/// A window as it opens, in View.
+fn viewing_sized(p: &Project, height: f32) -> Harness<'static, App> {
     // Every window test shares the preferences: each window starts from
     // the default tiles, whatever the last one left. Set from a project
     // of its own: `p` may be damaged on purpose, and refuse the CLI.
@@ -47,6 +58,11 @@ fn sized(p: &Project, height: f32) -> Harness<'static, App> {
         .with_size(egui::vec2(1600.0, height))
         .wgpu()
         .build_eframe(move |cc| App::open(&cc.egui_ctx, Some(&root), ryucad()))
+}
+
+/// [`viewing_sized`] at the usual height.
+fn viewing(p: &Project) -> Harness<'static, App> {
+    viewing_sized(p, 1000.0)
 }
 
 /// Opens the menu `menu` and clicks `item` in it (named after its text,
@@ -1905,7 +1921,9 @@ fn a_release_is_proposed_synced_and_made_obsolete_from_the_releases_tab() {
     p.ok(&["pdm", "init"]);
     p.ok(&["props", "set", "p", "number=100"]);
     let p = p.committed();
-    let mut h = window(&p);
+    // Taller: the tab's buttons sit under the status line at 1000 under
+    // the mode bar.
+    let mut h = sized(&p, 1150.0);
     frames(&mut h, loaded);
     h.get_by_label("Releases").click();
     frames(&mut h, |a| {
@@ -2876,6 +2894,77 @@ fn a_step_file_imports_as_a_reference_and_its_row_converts_it() {
     context_item(&mut h, "Keep as reference");
     frames(&mut h, |a| mode(a) == Some(true));
     shown(&mut h, "body (solid, reference)");
+}
+
+/// Converting an import writes the part's files and can't be suggested
+/// (`import.convert` isn't proposable): in View and Annotate the solid's
+/// menu and the property panel's button are disabled, saying Direct edit
+/// does it; in Direct edit the button converts.
+#[test]
+fn converting_an_import_is_gated_by_mode() {
+    use egui_kittest::kittest::NodeT;
+    use ryucad_app::core::modes::Mode;
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new();
+    p.ok(&[
+        "import",
+        &occt("box_ap214.stp").display().to_string(),
+        "--part",
+        "box",
+    ]);
+    let mut h = viewing(&p);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.part("box").is_some()
+    });
+    let mode = |a: &App| {
+        a.opened()
+            .ws
+            .part("box")
+            .and_then(|p| p.feature("body"))
+            .and_then(|f| f.import.as_ref())
+            .map(|i| i.reference)
+    };
+    frames(&mut h, |a| mode(a) == Some(true));
+    let row = "body (import: box_ap214.step / part 2, reference)";
+    h.get_by_label(row).click();
+    frames(&mut h, |a| a.opened().ws.form.is_some());
+    h.run_steps(2);
+    for m in [Mode::View, Mode::Annotate] {
+        h.state_mut().opened_mut().ws.set_mode(m);
+        frames(&mut h, |a| a.opened().ws.idle());
+        h.run_steps(2);
+        assert!(
+            h.get_by_label("Convert to solid")
+                .accesskit_node()
+                .is_disabled(),
+            "the panel's button in {m:?}"
+        );
+        h.get_by_label("body (solid, reference)").click_secondary();
+        for _ in 0..10 {
+            h.step();
+        }
+        let item = h
+            .get_all_by_role(egui::accesskit::Role::Menu)
+            .last()
+            .unwrap()
+            .get_by_label("Convert to solid")
+            .accesskit_node()
+            .is_disabled();
+        assert!(item, "the solid's menu in {m:?}");
+        h.key_press(egui::Key::Escape);
+        h.run_steps(2);
+        assert_eq!(mode(h.state()), Some(true), "nothing written in {m:?}");
+    }
+    h.state_mut().opened_mut().ws.set_mode(Mode::Edit);
+    frames(&mut h, |a| a.opened().ws.idle());
+    h.run_steps(2);
+    let button = h.get_by_label("Convert to solid");
+    assert!(!button.accesskit_node().is_disabled());
+    button.click();
+    frames(&mut h, |a| mode(a) == Some(false));
 }
 
 #[test]
@@ -4666,7 +4755,10 @@ fn a_dependency_is_added_from_its_tab_and_its_part_placed_from_the_picker() {
     shown(&mut h, "Update would move");
     h.get_by_label("Move them").click();
     frames(&mut h, |a| {
-        let ws = &a.opened().ws;
+        let ryucad_app::ui::app::Screen::Opened(o) = &a.screen else {
+            return false;
+        };
+        let ws = &o.ws;
         ws.idle()
             && ws.part("frame").is_some_and(|f| {
                 f.features[0]
@@ -5128,6 +5220,81 @@ fn a_shells_thickness_and_a_splits_flip_are_edited_from_their_forms() {
     assert_eq!(shown["flip"], true);
 }
 
+#[test]
+fn a_flanges_angle_and_a_base_flanges_k_factor_are_edited_and_the_part_laid_flat() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_sheet_metal();
+    let mut h = window(&p);
+    // One solid, so one mesh: `loaded` waits for two.
+    frames(&mut h, |a| {
+        let ws = &a.opened().ws;
+        ws.idle()
+            && ws.model.meshes.len() == 1
+            && ["plate", "f", "u"].iter().all(|f| {
+                ws.model.parts["p"]
+                    .feature(f)
+                    .is_some_and(|f| f.hash.is_some())
+            })
+    });
+    h.step();
+    let save = |h: &mut Harness<'static, App>| {
+        h.get_by_label("Apply").click();
+        frames(h, |a| {
+            a.opened()
+                .ws
+                .form
+                .as_ref()
+                .is_some_and(|f| !f.saving && !f.dirty())
+        });
+    };
+    h.get_by_label("f (flange)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| f.sheet.is_some())
+    });
+    h.step();
+    // The founder's radius says so.
+    h.get_by_label("the base flange's radius: change it to give the flange its own");
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "angle")
+        .set_text_value_accesskit("100 deg");
+    h.step();
+    save(&mut h);
+    let shown = p.ok(&["feature", "show", "p", "f"]);
+    assert_eq!(shown["angle"]["value"], "100 deg");
+    h.get_by_label("plate (base_flange)").click();
+    frames(&mut h, |a| {
+        a.opened().ws.form.as_ref().is_some_and(|f| {
+            matches!(
+                f.sheet,
+                Some(ryucad_app::core::edit::SheetMetalForm::BaseFlange(_))
+            )
+        })
+    });
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "allowance")
+        .set_text_value_accesskit("0.5");
+    h.step();
+    save(&mut h);
+    let shown = p.ok(&["feature", "show", "p", "plate"]);
+    assert_eq!(shown["allowance"]["k_factor"]["value"], "0.5");
+    // View > Flat pattern lays the part's one sheet metal solid flat, and
+    // again folds it.
+    menu(&mut h, "View", "Flat pattern");
+    frames(&mut h, |a| {
+        let ws = &a.opened().ws;
+        ws.model.flat.is_some() && ws.flat_view.as_ref().is_some_and(|v| v.lines.is_some())
+    });
+    menu(&mut h, "View", "Flat pattern");
+    h.step();
+    assert!(h.state().opened().ws.model.flat.is_none());
+}
+
 /// The sides split `sp`'s report gives, behind first.
 fn split_sides(h: &Harness<'static, App>) -> Vec<String> {
     let ws = &h.state().opened().ws;
@@ -5238,4 +5405,225 @@ fn a_datums_row_hides_it_and_its_form_edits_its_distance() {
     });
     let shown = p.ok(&["feature", "show", "p", "d1"]);
     assert_eq!(shown["distance"]["value"], "4 mm");
+}
+
+#[test]
+fn the_annotations_tile_lists_an_agents_reply() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let face = format!("p/base/{}", common::face_up(&p, "p", "base", 1.0));
+    let made = p.ok(&["annotations", "add", &face, "--comment", "Round this"]);
+    let id = made["annotation"]["id"].as_str().unwrap().to_owned();
+    p.ok(&["annotations", "reply", &id, "Which edge?"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "Tools", "Annotations");
+    frames(&mut h, |a| a.opened().ws.annotations.loaded);
+    h.run_steps(2);
+    h.get_by_label("Round this");
+    h.get_by_label("Which edge?");
+    // Choosing its tag chooses it (a marker in the viewport is named
+    // alike, and comes after the tile's in the tree).
+    h.get_all_by_label("#1").next().unwrap().click();
+    frames(&mut h, |a| {
+        a.opened().ws.chosen_annotation.as_deref() == Some(id.as_str())
+    });
+}
+
+#[test]
+fn a_pins_marker_is_drawn_and_chooses_its_annotation() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let face = format!("p/base/{}", common::face_up(&p, "p", "base", 1.0));
+    let made = p.ok(&[
+        "annotations",
+        "add",
+        &face,
+        "--comment",
+        "Here",
+        "--point",
+        "8,0,5",
+    ]);
+    let id = made["annotation"]["id"].as_str().unwrap().to_owned();
+    let mut h = window(&p);
+    frames(&mut h, |a| loaded(a) && a.opened().ws.annotations.loaded);
+    h.run_steps(3);
+    h.get_by_label("#1").click();
+    frames(&mut h, |a| {
+        a.opened().ws.chosen_annotation.as_deref() == Some(id.as_str())
+    });
+    // Preferences turn them off; the tile the click opened still lists
+    // it by its number.
+    h.run_steps(2);
+    let with = h.query_all_by_label("#1").count();
+    p.ok(&["config", "set", "display.annotations", "false"]);
+    frames(&mut h, |a| !a.opened().view.annotations);
+    h.run_steps(2);
+    assert_eq!(h.query_all_by_label("#1").count(), with - 1);
+    p.ok(&["config", "set", "display.annotations", "true"]);
+}
+
+#[test]
+fn a_face_is_annotated_from_its_context_menu() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = viewing(&p);
+    frames(&mut h, loaded);
+    h.state_mut()
+        .opened_mut()
+        .ws
+        .set_mode(ryucad_app::core::modes::Mode::Annotate);
+    h.run_steps(2);
+    // The block's top, away from the boss.
+    let at = on_screen(&h, [0.015, 0.006, 0.005]);
+    h.event(egui::Event::PointerMoved(at));
+    h.run_steps(2);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Default::default(),
+        });
+    }
+    h.run_steps(2);
+    h.get_by_label("Annotate…").click();
+    h.run_steps(2);
+    assert!(
+        h.state().opened().view.composing.is_some(),
+        "the comment box opens"
+    );
+    h.run_steps(2);
+    h.get_by_label("What should change here?").focus();
+    h.run_steps(1);
+    h.get_by_label("What should change here?")
+        .type_text("Move this hole 5 mm towards the edge");
+    h.run_steps(1);
+    // The box's button: the toolbar's mode button is named alike, so take
+    // the one inside the box.
+    let boxed = h.get_by_label("Comment for the agent").rect();
+    h.get_all_by_label("Annotate")
+        .find(|n| boxed.contains(n.rect().center()))
+        .expect("the box's Annotate")
+        .click();
+    frames(&mut h, |a| a.opened().ws.annotations.all.len() == 1);
+    let list = p.ok(&["annotations", "list"]);
+    let a = &list["annotations"][0];
+    assert_eq!(a["comment"], "Move this hole 5 mm towards the edge");
+    let pin = &a["pins"][0];
+    assert!(pin["ref"].as_str().unwrap().starts_with("p/base/"), "{pin}");
+    assert!(
+        (pin["point_m"][2].as_f64().unwrap() - 5.0e-3).abs() < 1e-4,
+        "{pin}"
+    );
+    assert!(!a["view"].is_null(), "the camera is kept");
+}
+
+#[test]
+fn view_disables_editing_and_says_which_mode_enables_it() {
+    use egui_kittest::kittest::NodeT;
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = viewing(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("boss (cylinder)").click();
+    frames(&mut h, |a| a.opened().ws.form.is_some());
+    h.run_steps(2);
+    assert!(h.get_by_label("Apply").accesskit_node().is_disabled());
+    assert!(h.query_by_label("Annotating:").is_none());
+    assert!(h.query_by_label("Direct edit:").is_none());
+}
+
+#[test]
+fn annotate_shows_its_bar_and_the_form_suggests() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = viewing(&p);
+    frames(&mut h, loaded);
+    h.get_all_by_label("Annotate").next().unwrap().click();
+    frames(&mut h, |a| {
+        a.opened().ws.mode == ryucad_app::core::modes::Mode::Annotate
+    });
+    h.run_steps(2);
+    h.get_by_label("Annotating:");
+    h.get_by_label("Stop annotating");
+    h.get_by_label("boss (cylinder)").click();
+    frames(&mut h, |a| a.opened().ws.form.is_some());
+    h.step();
+    h.get_all_by_value("3 mm").next().unwrap().click();
+    h.step();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.step();
+    h.get_all_by_value("3 mm").next().unwrap().type_text("4 mm");
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| a.opened().ws.annotations.all.len() == 1);
+    assert_eq!(
+        p.ok(&["feature", "show", "p", "boss"])["params"]["radius"]["value"],
+        "3 mm"
+    );
+    frames(&mut h, |a| a.opened().ws.model_rev().is_some());
+    h.run_steps(2);
+    h.get_by_label("Show agent's model");
+    h.get_by_label("Stop annotating").click();
+    frames(&mut h, |a| {
+        a.opened().ws.mode == ryucad_app::core::modes::Mode::View
+    });
+}
+
+#[test]
+fn direct_edit_shows_its_bar_and_writes() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = viewing(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("Direct edit").click();
+    frames(&mut h, |a| {
+        a.opened().ws.mode == ryucad_app::core::modes::Mode::Edit
+    });
+    h.run_steps(2);
+    h.get_by_label("Direct edit:");
+    h.get_by_label("boss (cylinder)").click();
+    frames(&mut h, |a| a.opened().ws.form.is_some());
+    h.step();
+    h.get_all_by_value("3 mm").next().unwrap().click();
+    h.step();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.step();
+    h.get_all_by_value("3 mm").next().unwrap().type_text("4 mm");
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
+    });
+    assert_eq!(
+        p.ok(&["feature", "show", "p", "boss"])["params"]["radius"]["value"],
+        "4 mm"
+    );
+    h.get_by_label("Stop editing").click();
+    frames(&mut h, |a| {
+        a.opened().ws.mode == ryucad_app::core::modes::Mode::View
+    });
 }

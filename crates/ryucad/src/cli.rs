@@ -632,6 +632,10 @@ enum Command {
         /// With --out, write ryucad.mesh.2: about half the size.
         #[arg(long, requires = "out")]
         compact: bool,
+        /// Mesh a sheet metal solid's flat body (the part's one unless
+        /// named) instead of the model.
+        #[arg(long, value_name = "SOLID", num_args = 0..=1, default_missing_value = "")]
+        flat: Option<String>,
         #[command(flatten)]
         rev: RevArg,
     },
@@ -701,6 +705,9 @@ enum Command {
         /// Draw the origin's axes and planes.
         #[arg(long)]
         origin: bool,
+        /// Draw open annotations' pins, numbered.
+        #[arg(long)]
+        annotations: bool,
         /// Draw every face in the fixed theme, not its appearance.
         #[arg(long)]
         no_appearance: bool,
@@ -1132,6 +1139,12 @@ enum FeatureCmd {
     /// --face, --edge) of a solid's edges, or several sizes (--groups); a
     /// shell (--target, --thickness, --open, --face-thickness, --outward) or
     /// an offset (--target, --distance, --face-distance) of a solid; a
+    /// face tweak: move_face (--by translate with --direction and --distance,
+    /// rotate with --axis and --angle, or offset with --distance and
+    /// --face-distance; --face repeated, --no-tangent) or replace_face (--with,
+    /// then the --face values it replaces) of a solid, keeping every name (offset
+    /// moves every face, filling where they part; move_face --by offset moves
+    /// only the faces named, keeping the topology); a
     /// mirror (--solid, --plane, --operation) of a whole solid, joined to
     /// it unless told otherwise; a split (--target, --plane, --flip,
     /// --keep) of a solid by a plane; a base flange (--sketch, --thickness,
@@ -1142,7 +1155,13 @@ enum FeatureCmd {
     /// edges; an unfold (--target, --fixed-face, --only repeated,
     /// --k-factor, --deduction or --bend-allowance, --bend FACE=FORM:VALUE
     /// repeated) laying a sheet metal solid flat; a refold (--target,
-    /// --unfold, --only) folding it back; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
+    /// --unfold, --only) folding it back; a fill (--edge, --curve in
+    /// order, --tangent after an edge, --tolerance, --angle) spanning
+    /// edges and curves; an extract (--face, repeated) of a body's faces as
+    /// a sheet; a sew (--sheet, repeated, --tolerance, --no-solid) of
+    /// sheets into one body; a thicken (--sheet, or --face repeated;
+    /// --front, --back, --face-sides, --operation and --target) of a sheet
+    /// or a body's faces into a solid; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
     /// countersink, --bottom) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
@@ -1216,6 +1235,10 @@ enum FeatureCmd {
     Show {
         part: String,
         id: String,
+        /// Read the project as this revision has it (`annotation:<id>`,
+        /// `draft:<name>`, a Git revision).
+        #[arg(long)]
+        rev: Option<String>,
     },
 }
 
@@ -1228,6 +1251,10 @@ enum ParamCmd {
         /// The project's parameters, which every part may read.
         #[arg(long, conflicts_with = "part")]
         project: bool,
+        /// Read the project as this revision has it (`annotation:<id>`,
+        /// `draft:<name>`, a Git revision).
+        #[arg(long)]
+        rev: Option<String>,
     },
     /// Set or add parameters: wall="3 mm" hole="wall * 2" n=4 (with --project, the
     /// project's: `param set --project wall="3 mm"`).
@@ -1681,7 +1708,13 @@ fn json_array(s: &str) -> core::result::Result<Value, String> {
 #[derive(Subcommand)]
 enum PropsCmd {
     /// Every property of a part, set or not, with its declaration and faults.
-    Show { part: String },
+    Show {
+        part: String,
+        /// Read the project as this revision has it (`annotation:<id>`,
+        /// `draft:<name>`, a Git revision).
+        #[arg(long)]
+        rev: Option<String>,
+    },
     /// Set properties: number=100-0042 material=6061-T6 count=4; NAME= clears one. Values are
     /// read as each property's type.
     Set {
@@ -1796,6 +1829,10 @@ enum SketchCmd {
         /// user's display quality by default).
         #[arg(long)]
         quality: Option<String>,
+        /// Read the project as this revision has it (`annotation:<id>`,
+        /// `draft:<name>`, a Git revision).
+        #[arg(long)]
+        rev: Option<String>,
     },
 }
 
@@ -1810,6 +1847,10 @@ enum PathCmd {
         /// default).
         #[arg(long)]
         quality: Option<String>,
+        /// Read the project as this revision has it (`annotation:<id>`,
+        /// `draft:<name>`, a Git revision).
+        #[arg(long)]
+        rev: Option<String>,
     },
 }
 
@@ -1826,6 +1867,10 @@ enum SweepCmd {
         /// default).
         #[arg(long)]
         quality: Option<String>,
+        /// Read the project as this revision has it (`annotation:<id>`,
+        /// `draft:<name>`, a Git revision).
+        #[arg(long)]
+        rev: Option<String>,
     },
 }
 
@@ -1981,9 +2026,10 @@ struct FieldArgs {
     plane: Option<String>,
     /// A planar face to sketch on, the face a chamfer's first distance runs along, or a
     /// planar face whose loops a sweep carries: <part>/<feature>/<name>, as inspect
-    /// gives it.
-    #[arg(long, value_name = "REFERENCE")]
-    face: Option<String>,
+    /// gives it. Repeat for an extract's faces, a thicken's or a move_face's; a
+    /// replace_face's, after the --with they take.
+    #[arg(long = "face", value_name = "REFERENCE")]
+    face: Vec<String>,
     /// A sketch on a face: a vertex for its origin ("" for the part origin, projected).
     #[arg(long, value_name = "REFERENCE")]
     face_origin: Option<String>,
@@ -2033,8 +2079,9 @@ struct FieldArgs {
     axis: Option<String>,
     /// A revolve's angle: 90, "90 deg", or full; a chamfer's angle to its face
     /// (distance_angle). A circular pattern's span, which it needs: 360 spaces --count
-    /// evenly round a whole turn, less spans the first instance to the last.
-    #[arg(long)]
+    /// evenly round a whole turn, less spans the first instance to the last. A
+    /// move_face's turn about its --axis (right-handed; a minus sign turns it back).
+    #[arg(long, allow_hyphen_values = true)]
     angle: Option<String>,
     /// Revolve half the angle each side of the sketch's plane (or --symmetric false).
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
@@ -2199,9 +2246,41 @@ struct FieldArgs {
     /// The point a parallel plane passes through.
     #[arg(long, value_name = "POINT")]
     through: Option<String>,
-    /// The curve a normal_to plane or an along point is on.
-    #[arg(long, value_name = "CURVE")]
-    curve: Option<String>,
+    /// A datum's curve (the curve a normal_to plane or an along point is
+    /// on); a fill's side, in order with --edge.
+    #[arg(long = "curve", value_name = "CURVE")]
+    curve: Vec<String>,
+    /// A fill's or a sew's tolerance: how far its sides, or the sheets'
+    /// edges, may be apart.
+    #[arg(long, value_name = "LENGTH")]
+    tolerance: Option<String>,
+    /// A fill's sides as written: --edge, --curve and --tangent in order.
+    #[arg(skip)]
+    fill_sides: Vec<Value>,
+    /// A sheet a sew sews, by its founder; repeat for each. A thicken's one
+    /// sheet.
+    #[arg(long = "sheet", value_name = "SHEET")]
+    sheets: Vec<String>,
+    /// A sew that closes up stays a closed sheet, not a solid.
+    #[arg(long, conflicts_with = "make_solid")]
+    no_solid: bool,
+    /// Whether a sew that closes up makes a solid (true by default).
+    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    make_solid: Option<bool>,
+    /// A thicken's thickness along its faces' normals.
+    #[arg(long, value_name = "LENGTH")]
+    front: Option<String>,
+    /// A thicken's thickness against its faces' normals.
+    #[arg(long, value_name = "LENGTH")]
+    back: Option<String>,
+    /// A face of a thicken with its own front and back: REFERENCE=FRONT,BACK;
+    /// repeat for several. Faces of one pair are one group. Given, they
+    /// replace a thicken's groups.
+    #[arg(long = "face-sides", value_name = "REFERENCE=FRONT,BACK", value_parser = param)]
+    face_sides: Vec<(String, String)>,
+    /// Give no face of a thicken a front and back of its own.
+    #[arg(long, conflicts_with = "face_sides")]
+    no_face_sides: bool,
     /// Where on its curve a normal_to plane is: start, end or a point.
     #[arg(long, value_name = "POINT")]
     at: Option<String>,
@@ -2317,7 +2396,7 @@ struct FieldArgs {
     face_thickness: Vec<(String, String)>,
     /// A face an offset moves by its own distance: REFERENCE=QUANTITY, of either sign;
     /// repeat for several. Faces of one distance are one group. Given, they replace an
-    /// offset's groups.
+    /// offset's groups; a move_face's (--by offset) likewise.
     #[arg(
         long = "face-distance",
         value_name = "REFERENCE=QUANTITY",
@@ -2329,6 +2408,30 @@ struct FieldArgs {
     /// Give no face of a shell or offset a thickness or distance of its own.
     #[arg(long, conflicts_with_all = ["face_thickness", "face_distance"])]
     no_faces: bool,
+    /// Move a face tweak's tangent neighbours with the faces it names (the default;
+    /// --tangent false or --no-tangent keeps the kernel's tangency_broken). In a
+    /// fill, the --edge just before meets its face tangentially (the edge must have
+    /// one face).
+    #[arg(
+        long,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        conflicts_with = "no_tangent"
+    )]
+    tangent: Option<bool>,
+    /// Don't move a face tweak's tangent neighbours: a fillet beside a moved face is
+    /// refused (tangency_broken).
+    #[arg(long)]
+    no_tangent: bool,
+    /// The surface a replace_face gives the --face values after it, until the next
+    /// --with: a face <part>/<solid>/<name> (its surface whole), or a plane (xy, a datum
+    /// plane <part>/<datum>, a sketch).
+    #[arg(long = "with", value_name = "REFERENCE")]
+    with: Vec<String>,
+    /// Which --face values follow each --with, from the command line as written.
+    #[arg(skip)]
+    with_groups: Vec<(String, Vec<String>)>,
     /// The solid a mirror copies, by the feature that founded it (the part's one solid
     /// when left out). Left without --operation, its copy joins this solid.
     #[arg(long, value_name = "SOLID")]
@@ -2453,6 +2556,50 @@ fn grown(args: &[String]) -> Result<Vec<bool>> {
 /// command line as written: a loft's loops narrow the section before
 /// them. A `--loop` before the first `--section` of a command that has
 /// some is a usage error.
+/// A fill's sides from the command line as written: each --edge or --curve
+/// a side in order, --tangent qualifying the --edge just before it.
+fn fill_sides(args: &[String]) -> Result<Vec<Value>> {
+    let mut out: Vec<Value> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--" {
+            break;
+        }
+        let value = |flag: &str| -> Option<(String, usize)> {
+            if a == flag {
+                args.get(i + 1).map(|v| (v.clone(), 2))
+            } else {
+                a.strip_prefix(&format!("{flag}="))
+                    .map(|v| (v.to_owned(), 1))
+            }
+        };
+        if let Some((v, step)) = value("--edge") {
+            out.push(json!({"edge": v}));
+            i += step;
+            continue;
+        }
+        if let Some((v, step)) = value("--curve") {
+            out.push(json!({"curve": v}));
+            i += step;
+            continue;
+        }
+        if a == "--tangent" {
+            match out.last_mut() {
+                Some(last) if last.get("edge").is_some() => last["tangent"] = json!(true),
+                _ => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "--tangent goes right after the --edge it qualifies",
+                    ));
+                }
+            }
+        }
+        i += 1;
+    }
+    Ok(out)
+}
+
 fn section_loops(args: &[String]) -> Result<Vec<Vec<String>>> {
     let (mut out, mut early): (Vec<Vec<String>>, bool) = (Vec::new(), false);
     let mut i = 0;
@@ -2502,6 +2649,12 @@ fn json_object(s: &str) -> core::result::Result<Value, String> {
 
 impl FieldArgs {
     fn to_fields(&self) -> FeatureFields {
+        // A fill's sides given in order (--tangent after an --edge, several
+        // --curve, or --curve beside --edge) go as sides; a lone --curve is
+        // a datum's, --edge alone a blend's edges.
+        let ordered = (self.tangent == Some(true) && !self.edges.is_empty())
+            || self.curve.len() > 1
+            || (!self.curve.is_empty() && !self.edges.is_empty());
         let mut extent = Map::new();
         if let Some(t) = &self.extent {
             extent.insert("type".into(), json!(t));
@@ -2544,7 +2697,46 @@ impl FieldArgs {
         }
         FeatureFields {
             plane: self.plane.clone(),
-            face: self.face.clone(),
+            // One --face is a chamfer's, a sketch's or a sweep's `face`;
+            // several are a move's `faces`, beside any --face-distance
+            // groups; with --with they are a replacement's groups.
+            face: (self.with_groups.is_empty() && self.face.len() == 1)
+                .then(|| self.face[0].clone()),
+            face_list: None,
+            tolerance: self.tolerance.clone().map(Value::String),
+            sheets: (!self.sheets.is_empty()).then(|| self.sheets.clone()),
+            sheet: None,
+            make_solid: if self.no_solid {
+                Some(false)
+            } else {
+                self.make_solid
+            },
+            front: self.front.clone().map(Value::String),
+            back: self.back.clone().map(Value::String),
+            from_faces: None,
+            face_sides: if self.no_face_sides {
+                Some(json!([]))
+            } else if self.face_sides.is_empty() {
+                None
+            } else {
+                // Faces of one pair are one group, in the order first named.
+                let mut groups: Vec<(String, String, Vec<String>)> = Vec::new();
+                for (face, pair) in &self.face_sides {
+                    let (front, back) = pair.split_once(',').unwrap_or((pair.as_str(), "0"));
+                    match groups.iter_mut().find(|(f, b, _)| f == front && b == back) {
+                        Some((_, _, fs)) => fs.push(face.clone()),
+                        None => {
+                            groups.push((front.to_owned(), back.to_owned(), vec![face.clone()]))
+                        }
+                    }
+                }
+                Some(Value::Array(
+                    groups
+                        .into_iter()
+                        .map(|(f, b, fs)| json!({"front": f, "back": b, "faces": fs}))
+                        .collect(),
+                ))
+            },
             face_origin: self.face_origin.clone(),
             face_x: self.face_x.clone(),
             sketch: self.sketch.clone(),
@@ -2567,11 +2759,25 @@ impl FieldArgs {
             op: self.op.clone(),
             target: None,
             tools: (!self.tools.is_empty()).then(|| self.tools.clone()),
-            groups: self.groups.clone().map(|g| g.0),
+            groups: if self.with_groups.is_empty() {
+                self.groups.clone().map(|g| g.0)
+            } else {
+                Some(Value::Array(
+                    self.with_groups
+                        .iter()
+                        .map(|(w, fs)| json!({"with": w, "faces": fs}))
+                        .collect(),
+                ))
+            },
             // A path's --propagate is its segments'.
             propagate: self.propagate.filter(|_| self.segments.is_empty()),
+            tangent: if self.no_tangent {
+                Some(false)
+            } else {
+                self.tangent
+            },
             radius: self.radius.clone().map(Value::String),
-            edges: (!self.edges.is_empty()).then(|| self.edges.clone()),
+            edges: (!self.edges.is_empty() && !ordered).then(|| self.edges.clone()),
             form: self.form.clone(),
             d: self.d.clone().map(Value::String),
             d1: self.d1.clone().map(Value::String),
@@ -2626,7 +2832,7 @@ impl FieldArgs {
             from: self.from.clone(),
             about: self.about.clone(),
             through: self.through.clone(),
-            curve: self.curve.clone(),
+            curve: (self.curve.len() == 1 && !ordered).then(|| self.curve[0].clone()),
             at: self.at.clone(),
             between: (!self.between.is_empty()).then(|| self.between.clone()),
             coordinates: self
@@ -2685,12 +2891,21 @@ impl FieldArgs {
             },
             faces: if self.no_faces {
                 Some(json!([]))
-            } else if !self.face_thickness.is_empty() {
-                Some(face_groups(&self.face_thickness, "thickness"))
-            } else if !self.face_distance.is_empty() {
-                Some(face_groups(&self.face_distance, "distance"))
             } else {
-                None
+                let mut list: Vec<Value> = if self.with_groups.is_empty() && self.face.len() > 1 {
+                    self.face.iter().map(|f| json!(f)).collect()
+                } else {
+                    Vec::new()
+                };
+                let groups = if !self.face_thickness.is_empty() {
+                    face_groups(&self.face_thickness, "thickness")
+                } else if !self.face_distance.is_empty() {
+                    face_groups(&self.face_distance, "distance")
+                } else {
+                    json!([])
+                };
+                list.extend(groups.as_array().into_iter().flatten().cloned());
+                (!list.is_empty()).then_some(Value::Array(list))
             },
             solid: self.solid.clone(),
             keep: self.keep.clone(),
@@ -2712,14 +2927,18 @@ impl FieldArgs {
             measured: self.measured.clone(),
             position: self.position.clone(),
             setback: self.setback.clone().map(Value::String),
-            sides: (!self.sides.is_empty()).then(|| {
-                json!(
+            sides: if !self.sides.is_empty() {
+                Some(json!(
                     self.sides
                         .iter()
                         .map(|(e, s)| json!({"edge": e, "side": s}))
                         .collect::<Vec<_>>()
-                )
-            }),
+                ))
+            } else if ordered {
+                Some(json!(self.fill_sides))
+            } else {
+                None
+            },
             ends: if self.no_ends {
                 Some(json!([]))
             } else {
@@ -2845,6 +3064,49 @@ fn groups(s: &str) -> core::result::Result<Groups, String> {
         Ok(_) => Err("JSON must be an array of groups".to_owned()),
         Err(e) => Err(format!("JSON must be an array of groups: {e}")),
     }
+}
+
+/// The `--face` values after each `--with`, from the command line as
+/// written: a replacement's groups. With no `--with`, none. A `--face`
+/// before the first `--with` of a command that has one is a usage error.
+fn with_groups(args: &[String]) -> Result<Vec<(String, Vec<String>)>> {
+    let (mut out, mut early): (Vec<(String, Vec<String>)>, bool) = (Vec::new(), false);
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--" {
+            break;
+        }
+        let value = |flag: &str| -> Option<(String, usize)> {
+            if a == flag {
+                args.get(i + 1).map(|v| (v.clone(), 2))
+            } else {
+                a.strip_prefix(&format!("{flag}="))
+                    .map(|v| (v.to_owned(), 1))
+            }
+        };
+        if let Some((w, step)) = value("--with") {
+            out.push((w, Vec::new()));
+            i += step;
+            continue;
+        }
+        if let Some((f, step)) = value("--face") {
+            match out.last_mut() {
+                Some((_, faces)) => faces.push(f),
+                None => early = true,
+            }
+            i += step;
+            continue;
+        }
+        i += 1;
+    }
+    if early && !out.is_empty() {
+        return Err(Error::new(
+            Code::Usage,
+            "give --with before the faces it replaces: each --face takes the surface of the --with before it",
+        ));
+    }
+    Ok(out)
 }
 
 /// `REFERENCE=QUANTITY` pairs as face groups `[{<key>: Q, faces: [REFERENCE, ...]}]`:
@@ -3158,13 +3420,15 @@ fn request(cmd: &Command) -> Option<Request> {
             expected_revision: expect.revision.clone(),
         },
         Command::Feature(FeatureCmd::List { part }) => Request::FeatureList { part: part.clone() },
-        Command::Feature(FeatureCmd::Show { part, id }) => Request::FeatureShow {
+        Command::Feature(FeatureCmd::Show { part, id, rev }) => Request::FeatureShow {
             part: part.clone(),
             id: id.clone(),
+            rev: rev.clone(),
         },
-        Command::Param(ParamCmd::List { part, project }) => Request::ParamList {
+        Command::Param(ParamCmd::List { part, project, rev }) => Request::ParamList {
             part: part.clone(),
             scope: param_scope(*project),
+            rev: rev.clone(),
         },
         Command::Param(ParamCmd::Set {
             part,
@@ -3504,7 +3768,10 @@ fn request(cmd: &Command) -> Option<Request> {
             force: *force,
             expected_revision: expect.clone(),
         },
-        Command::Props(PropsCmd::Show { part }) => Request::PropsGet { part: part.clone() },
+        Command::Props(PropsCmd::Show { part, rev }) => Request::PropsGet {
+            part: part.clone(),
+            rev: rev.clone(),
+        },
         Command::Props(PropsCmd::Set {
             part,
             values,
@@ -3567,28 +3834,34 @@ fn request(cmd: &Command) -> Option<Request> {
             part,
             sketch,
             quality,
+            rev,
         }) => Request::SketchGet {
             part: part.clone(),
             sketch: sketch.clone(),
             quality: quality.clone(),
+            rev: rev.clone(),
         },
         Command::Path(PathCmd::Get {
             part,
             path,
             quality,
+            rev,
         }) => Request::PathGet {
             part: part.clone(),
             path: path.clone(),
             quality: quality.clone(),
+            rev: rev.clone(),
         },
         Command::Sweep(SweepCmd::Get {
             part,
             feature,
             quality,
+            rev,
         }) => Request::SweepGet {
             part: part.clone(),
             feature: feature.clone(),
             quality: quality.clone(),
+            rev: rev.clone(),
         },
         Command::Import {
             cmd:
@@ -3953,6 +4226,7 @@ fn request(cmd: &Command) -> Option<Request> {
             compare,
             hidden,
             origin,
+            annotations,
             no_appearance,
             section,
             no_section,
@@ -3985,6 +4259,7 @@ fn request(cmd: &Command) -> Option<Request> {
                 explode.clone()
             },
             fraction: *fraction,
+            annotations: *annotations,
             flat: flat.clone(),
         },
         Command::Highlight {
@@ -4131,6 +4406,7 @@ fn request(cmd: &Command) -> Option<Request> {
             quality,
             out,
             compact,
+            flat,
             rev,
         } => Request::MeshGet {
             part: part.clone(),
@@ -4142,6 +4418,7 @@ fn request(cmd: &Command) -> Option<Request> {
                 false => Transfer::Binary,
             }),
             rev: rev.rev.clone(),
+            flat: flat.clone(),
         },
         Command::History { part, limit } => Request::HistoryLog {
             part: part.clone(),
@@ -4668,6 +4945,18 @@ pub fn main() -> ExitCode {
             Ok(l) => fields.section_loops = l,
             Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
         }
+        match fill_sides(&args) {
+            Ok(s) => fields.fill_sides = s,
+            Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
+        }
+        // A fill's --tangent is its sides', not a face tweak's.
+        if !fields.fill_sides.is_empty() {
+            fields.tangent = None;
+        }
+        match with_groups(&args) {
+            Ok(w) => fields.with_groups = w,
+            Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
+        }
     }
     // Git reads a textconv's output as the file's text, not JSON.
     if let Command::Git(GitCmd::Textconv { file }) = &cli.command {
@@ -4885,6 +5174,224 @@ mod tests {
             assert!(
                 matches!(&cli.command, Command::Open { dir: Some(d) } if d == &PathBuf::from("."))
             );
+        });
+    }
+
+    #[test]
+    fn fill_sides_are_read_in_order() {
+        let args: Vec<String> = [
+            "ryucad",
+            "feature",
+            "add",
+            "p",
+            "fill",
+            "--edge",
+            "p/w/aa",
+            "--tangent",
+            "--curve=p/s/l1",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(
+            fill_sides(&args).unwrap(),
+            vec![
+                json!({"edge": "p/w/aa", "tangent": true}),
+                json!({"curve": "p/s/l1"})
+            ]
+        );
+        let early: Vec<String> = ["--tangent", "--edge", "x"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(fill_sides(&early).unwrap_err().code, Code::Usage);
+    }
+
+    #[test]
+    fn a_thickens_and_a_sews_flags_reach_their_fields() {
+        on_cli_stack(|| {
+            let cli = Cli::try_parse_from([
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "thicken",
+                "--face",
+                "p/b/aa",
+                "--face",
+                "p/b/bb",
+                "--front",
+                "2mm",
+                "--face-sides",
+                "p/b/aa=3mm,0",
+                "--operation",
+                "join",
+                "--target",
+                "b",
+            ])
+            .unwrap();
+            let Command::Feature(FeatureCmd::Add { fields, .. }) = &cli.command else {
+                panic!()
+            };
+            let f = fields.to_fields();
+            assert_eq!(f.faces, Some(json!(["p/b/aa", "p/b/bb"])));
+            assert_eq!(f.front, Some(json!("2mm")));
+            assert_eq!(
+                f.face_sides,
+                Some(json!([{"front": "3mm", "back": "0", "faces": ["p/b/aa"]}]))
+            );
+            let cli = Cli::try_parse_from([
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "sew",
+                "--sheet",
+                "a",
+                "--sheet",
+                "b",
+                "--no-solid",
+                "--tolerance",
+                "0.02mm",
+            ])
+            .unwrap();
+            let Command::Feature(FeatureCmd::Add { fields, .. }) = &cli.command else {
+                panic!()
+            };
+            let f = fields.to_fields();
+            assert_eq!(
+                f.sheets.as_deref(),
+                Some(&["a".to_owned(), "b".to_owned()][..])
+            );
+            assert_eq!(f.make_solid, Some(false));
+            assert_eq!(f.tolerance, Some(json!("0.02mm")));
+        });
+    }
+
+    /// What `ryucad <args>` sends as a feature's fields, after the passes
+    /// `main` makes over the command line.
+    fn sent(args: &[&str]) -> Result<FeatureFields> {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let mut cli =
+            Cli::try_parse_from(&args).map_err(|e| Error::new(Code::Usage, e.to_string()))?;
+        if let Command::Feature(FeatureCmd::Add { fields, .. } | FeatureCmd::Edit { fields, .. }) =
+            &mut cli.command
+        {
+            fields.with_groups = with_groups(&args)?;
+        }
+        match request(&cli.command) {
+            Some(Request::FeatureAdd { fields, .. } | Request::FeatureEdit { fields, .. }) => {
+                Ok(fields)
+            }
+            _ => panic!("not a feature write"),
+        }
+    }
+
+    #[test]
+    fn faces_tangents_and_replacements_from_the_command_line() {
+        on_cli_stack(|| {
+            // One --face is `face`, as a chamfer and a sketch take it.
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "move_face",
+                "--by",
+                "translate",
+                "--direction",
+                "x",
+                "--distance",
+                "5mm",
+                "--face",
+                "p/b/a",
+            ])
+            .unwrap();
+            assert_eq!((f.face.as_deref(), &f.faces), (Some("p/b/a"), &None));
+            assert_eq!(f.tangent, None);
+            // Several, with groups of their own and tangency off.
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "move_face",
+                "--by",
+                "offset",
+                "--distance",
+                "-0.5mm",
+                "--face",
+                "p/b/a",
+                "--face",
+                "p/b/c",
+                "--face-distance",
+                "p/b/d=1mm",
+                "--no-tangent",
+            ])
+            .unwrap();
+            assert_eq!(f.face, None);
+            assert_eq!(
+                f.faces,
+                Some(json!(["p/b/a", "p/b/c", {"distance": "1mm", "faces": ["p/b/d"]}]))
+            );
+            assert_eq!(f.tangent, Some(false));
+            // A turn the other way.
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "move_face",
+                "--by",
+                "rotate",
+                "--axis",
+                "x",
+                "--angle",
+                "-3deg",
+                "--face",
+                "p/b/a",
+            ])
+            .unwrap();
+            assert_eq!(f.angle, Some(json!("-3deg")));
+            // --with takes the faces after it, until the next --with.
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "replace_face",
+                "--with",
+                "p/lid/e",
+                "--face",
+                "p/b/a",
+                "--face",
+                "p/b/c",
+                "--with",
+                "xy",
+                "--face",
+                "p/b/d",
+            ])
+            .unwrap();
+            assert_eq!(
+                f.groups,
+                Some(json!([{"with": "p/lid/e", "faces": ["p/b/a", "p/b/c"]},
+                            {"with": "xy", "faces": ["p/b/d"]}]))
+            );
+            assert_eq!((f.face, f.faces), (None, None));
+            // A face before any --with, when there is one, is a usage error.
+            let e = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "replace_face",
+                "--face",
+                "p/b/a",
+                "--with",
+                "xy",
+            ])
+            .unwrap_err();
+            assert_eq!(e.code, Code::Usage);
         });
     }
 }

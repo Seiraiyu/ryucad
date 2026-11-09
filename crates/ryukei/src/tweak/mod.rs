@@ -24,19 +24,35 @@
 pub(crate) mod chain;
 pub(crate) mod classify;
 pub(crate) mod curves;
+pub mod delete;
 pub mod draft;
 pub(crate) mod engine;
 pub(crate) mod extend;
 pub(crate) mod motion;
+pub(crate) mod retrim;
 pub(crate) mod vertices;
 
 #[cfg(test)]
 mod tests;
 
+pub use delete::{DeleteSpec, Heal, delete_faces, delete_faces_with, feature_faces};
 pub use draft::{
     DraftFace, DraftReport, DraftSpec, FaceAngle, Hinge, MAX_ANGLE, draft, draft_with,
 };
 pub(crate) use motion::Motion;
+
+/// Whether a tweak may change the body's topology (design 399).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Topology {
+    /// Phase 9's: every face, edge and vertex stays, and a tweak that
+    /// would need one made or taken away is refused.
+    #[default]
+    Keep,
+    /// Faces may grow over neighbours, shrink away or split, and edges and
+    /// vertices come and go (the local re-trim). The fixed-topology engine
+    /// runs first, and its result stands wherever it builds.
+    Change,
+}
 
 use crate::geom::Rigid;
 use crate::name::{Event, Journal, Name, OpKey};
@@ -53,6 +69,8 @@ pub struct MoveSpec {
     pub faces: Vec<Name>,
     pub motion: Rigid,
     pub tangent: bool,
+    /// Whether the tweak may change the body's topology.
+    pub topology: Topology,
 }
 
 /// `body` with `spec.faces` moved by `spec.motion`: a new body and the
@@ -93,7 +111,7 @@ fn move_faces_in(
     } else {
         motion
     };
-    rigidly(key, body, motion, meter)
+    rigidly(key, body, motion, spec.topology, meter)
 }
 
 /// Faces moved along their outward normals, each by its own distance
@@ -102,6 +120,8 @@ fn move_faces_in(
 pub struct OffsetFacesSpec {
     pub faces: Vec<(Name, f64)>,
     pub tangent: bool,
+    /// Whether the tweak may change the body's topology.
+    pub topology: Topology,
 }
 
 /// `body` with `spec`'s faces offset, the rest staying: their edges and
@@ -160,7 +180,7 @@ fn offset_faces_in(
         let s = crate::offset::classify::offset_surface(body, f, d).map_err(engine::translate)?;
         surface.insert(f, s);
     }
-    engine::run(
+    engine::run_with(
         key,
         body,
         &Changes {
@@ -168,6 +188,7 @@ fn offset_faces_in(
             surface,
             ..Changes::default()
         },
+        spec.topology,
         meter,
     )
 }
@@ -176,6 +197,8 @@ fn offset_faces_in(
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReplaceSpec {
     pub faces: Vec<(Name, crate::geom::Surface)>,
+    /// Whether the tweak may change the body's topology.
+    pub topology: Topology,
 }
 
 /// `body` with each of `spec`'s faces on its new surface, the face's
@@ -219,7 +242,7 @@ fn replace_faces_in(
         changes.motion.insert(f, Motion::Replace);
         changes.surface.insert(f, s.clone());
     }
-    engine::run(key, body, &changes, meter)
+    engine::run_with(key, body, &changes, spec.topology, meter)
 }
 
 /// The sense on `new` that keeps face `f`'s outward side out: its natural
@@ -297,6 +320,7 @@ fn rigidly(
     key: OpKey,
     body: &Body,
     motion: BTreeMap<FaceId, Motion>,
+    topology: Topology,
     meter: &Meter,
 ) -> Result<(Body, Journal), Error> {
     let first = *motion.values().next().expect("a face");
@@ -331,7 +355,7 @@ fn rigidly(
     }) {
         return Ok((body.clone(), Journal::new()));
     }
-    engine::run(
+    engine::run_with(
         key,
         body,
         &Changes {
@@ -339,6 +363,7 @@ fn rigidly(
             surface,
             ..Changes::default()
         },
+        topology,
         meter,
     )
 }

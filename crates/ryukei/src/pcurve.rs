@@ -42,14 +42,22 @@ pub fn exact(
     interval: [f64; 2],
     tolerance: f64,
 ) -> Option<(Curve2, [f64; 2])> {
+    let fitting =
+        |c: Option<(Curve2, [f64; 2])>| c.filter(|c| fits(surface, curve, interval, tolerance, c));
     let candidate = match surface {
-        Surface::Plane(_) => on_plane(surface.frame()?, curve),
+        Surface::Plane(_) => surface.frame().and_then(|f| on_plane(f, curve)),
         _ => match affine(surface) {
             Some(a) => on_affine(&a, curve),
             None => iso_line(surface, curve, interval),
         },
-    }?;
-    fits(surface, curve, interval, tolerance, &candidate).then_some(candidate)
+    };
+    fitting(candidate).or_else(|| {
+        // A spline whose net is an affine map of its abscissae (a lofted
+        // flat face): after the families above, so what they find is as
+        // it was. A flush pin's bottom edge in the race block's bottom was
+        // fitted, a third of its cut (#254).
+        fitting(on_affine(&affine_net(surface)?, curve))
+    })
 }
 
 /// Gives every fin without a pcurve its exact one. Fails with `NoPcurve`,
@@ -107,22 +115,24 @@ fn on_plane(frame: &Frame, curve: &Curve) -> Option<(Curve2, [f64; 2])> {
     Some((c2, identity))
 }
 
-/// A surface `origin + u a + v b`.
-struct Affine {
-    origin: Point3,
-    a: crate::geom::Vector3,
-    b: crate::geom::Vector3,
+/// A surface `origin + u a + v b`, within `deviation` of the NURBS it
+/// stands for.
+pub(crate) struct Affine {
+    pub(crate) origin: Point3,
+    pub(crate) a: crate::geom::Vector3,
+    pub(crate) b: crate::geom::Vector3,
+    pub(crate) deviation: f64,
 }
 
 impl Affine {
     /// The parameters of the point of the surface nearest `p`.
-    fn local(&self, p: Point3) -> Point2 {
+    pub(crate) fn local(&self, p: Point3) -> Point2 {
         let (x, y) = self.solve(p - self.origin);
         Point2::new(x, y)
     }
 
     /// The parameter step along the surface nearest the step `d`.
-    fn solve(&self, d: crate::geom::Vector3) -> (f64, f64) {
+    pub(crate) fn solve(&self, d: crate::geom::Vector3) -> (f64, f64) {
         let (aa, ab, bb) = (self.a.dot(self.a), self.a.dot(self.b), self.b.dot(self.b));
         let (ad, bd) = (self.a.dot(d), self.b.dot(d));
         let det = aa * bb - ab * ab;
@@ -154,7 +164,90 @@ fn affine(surface: &Surface) -> Option<Affine> {
     let b = (p(0, 1) - p(0, 0)) / (v1 - v0);
     let origin = p(0, 0) - a * u0 - b * v0;
     let det = a.dot(a) * b.dot(b) - a.dot(b) * a.dot(b);
-    (det > 0.0).then_some(Affine { origin, a, b })
+    (det > 0.0).then_some(Affine {
+        origin,
+        a,
+        b,
+        deviation: skew.length(),
+    })
+}
+
+/// How far an affine net may stray from its plane to be met as that
+/// plane (`intersect`'s twins): a tenth of `intersect::SLACK`, so every
+/// certified distance there still holds with room.
+pub(crate) const TWIN_DEVIATION: f64 = 1e-11;
+
+/// A NURBS whose control points are an affine map of its Greville
+/// abscissae, `P_ij = o + a ξ_i + b η_j`, and whose weights are equal: by
+/// linear precision it is that map over its domain (a lofted flat face;
+/// the parallelogram is the case of degree 1 with two points each way).
+/// Clamped both ways (a periodic direction's abscissae wrap). Points `d`
+/// off the map and weights within a part `ε` of the first leave the
+/// surface within `d + 2ε / (1 - ε) (|a| W_u + |b| W_v)` of it (`W` the
+/// domain's widths; see the plan 15.E): its `deviation`, at most
+/// resolution.
+pub(crate) fn affine_net(surface: &Surface) -> Option<Affine> {
+    let Surface::Nurbs(n) = surface else {
+        return None;
+    };
+    let [ku, kv] = n.knots();
+    if ku.is_periodic() || kv.is_periodic() {
+        return None;
+    }
+    let w = n.weights();
+    let w0 = w[0];
+    if w0.is_nan() || w0 <= 0.0 {
+        return None;
+    }
+    let eps = w
+        .iter()
+        .map(|&x| ((x - w0) / w0).abs())
+        .fold(0.0f64, f64::max);
+    if eps.is_nan() || eps > 1e-12 {
+        return None;
+    }
+    let (gu, gv) = (greville(ku), greville(kv));
+    let [nu, nv] = n.counts();
+    let p = |i, j| n.control_point(i, j);
+    let a = (p(nu - 1, 0) - p(0, 0)) / (gu[nu - 1] - gu[0]);
+    let b = (p(0, nv - 1) - p(0, 0)) / (gv[nv - 1] - gv[0]);
+    let origin = p(0, 0) - a * gu[0] - b * gv[0];
+    let det = a.dot(a) * b.dot(b) - a.dot(b) * a.dot(b);
+    if det.is_nan() || det <= 0.0 {
+        return None;
+    }
+    let mut d = 0.0f64;
+    for (i, &x) in gu.iter().enumerate() {
+        for (j, &y) in gv.iter().enumerate() {
+            d = d.max((origin + a * x + b * y).distance(p(i, j)));
+        }
+    }
+    let [[u0, u1], [v0, v1]] = n.domain();
+    let deviation = d + 2.0 * eps / (1.0 - eps) * (a.length() * (u1 - u0) + b.length() * (v1 - v0));
+    (deviation <= crate::tol::LINEAR_RESOLUTION).then_some(Affine {
+        origin,
+        a,
+        b,
+        deviation,
+    })
+}
+
+/// A knot vector's Greville abscissae: each control point's mean of the
+/// `degree` knots after its first.
+fn greville(k: &crate::geom::KnotVector) -> Vec<f64> {
+    let (f, p) = (k.flat(), k.degree());
+    (0..k.control_count())
+        .map(|i| f[i + 1..i + 1 + p].iter().sum::<f64>() / p as f64)
+        .collect()
+}
+
+impl Affine {
+    /// The plane the surface is a map of, its natural normal `a × b` (the
+    /// spline's), its `x` along `a`.
+    pub(crate) fn plane(&self) -> Option<Surface> {
+        let f = Frame::new(self.origin, self.a.cross(self.b), self.a).ok()?;
+        Some(Surface::Plane(crate::geom::Plane::new(f)))
+    }
 }
 
 /// A line or NURBS on an affine surface: the line keeps its parameter up
@@ -269,6 +362,35 @@ pub fn fitted(
     .ok()
 }
 
+/// [`fitted`] where the caller knows the curve's parameters on `surface`
+/// at every point (`uv`, continuous along the curve on its own
+/// parameter), so nothing is projected: a cubic spline through them and
+/// its certified bound, at least
+/// [`LINEAR_RESOLUTION`](crate::tol::LINEAR_RESOLUTION), spans halving
+/// until the bound is within `target`; `None` where no fit certifies.
+/// A curve found on a swept surface keeps its parameters through the
+/// surface's NURBS form's [`Reparam`](crate::geom::Reparam)s, where a
+/// fit by projection can't follow it across the form's period start
+/// (race bodies 482 and 819, #247).
+pub fn fitted_by(
+    surface: &Surface,
+    curve: &Curve,
+    interval: [f64; 2],
+    uv: &dyn Fn(f64) -> Point2,
+    target: f64,
+) -> Option<(NurbsCurve2, f64)> {
+    crate::intersect::fit_pcurve_by(
+        surface,
+        curve,
+        interval,
+        uv,
+        target,
+        // unmetered: pcurve::fitted_by takes no work (export)
+        &crate::work::Meter::free(),
+    )
+    .ok()
+}
+
 /// Whether the surface takes the pcurve to within `tolerance` of the edge
 /// at every sample.
 pub(crate) fn fits(
@@ -297,6 +419,54 @@ mod tests {
     use crate::primitive;
     use crate::tol::LINEAR_RESOLUTION;
     use core::f64::consts::{FRAC_PI_2, PI, TAU};
+
+    /// A clamped degree [1, 3] spline whose net is an affine map of its
+    /// Greville abscissae, weights an ulp off 1 (the race block's lofted
+    /// flat faces, #254), is an affine net with a deviation of a few ulps
+    /// of its size; a planar NURBS curve lying in it gets an exact pcurve;
+    /// a net with one point lifted by a micrometre is not affine.
+    #[test]
+    fn greville_affine_nets_are_affine_surfaces() {
+        use crate::geom::{KnotVector, NurbsCurve, NurbsSurface, Point3};
+        let ku = KnotVector::clamped(1, &[0.0, 1.0], &[2, 2]).unwrap();
+        let kv = KnotVector::clamped(3, &[0.0, 1.0, 2.0], &[4, 1, 4]).unwrap();
+        let gv = [0.0, 1.0 / 3.0, 1.0, 2.0 - 1.0 / 3.0, 2.0];
+        let gv = &gv[..kv.control_count()];
+        let at = |u: f64, v: f64| Point3::new(40.0 * u, 12.5 * v, 0.0);
+        let mut pts = Vec::new();
+        for u in [0.0, 1.0] {
+            for &v in gv {
+                pts.push(at(u, v));
+            }
+        }
+        let w: Vec<f64> = (0..pts.len())
+            .map(|k| [1.0, 1.0 + f64::EPSILON, 1.0 - f64::EPSILON / 2.0][k % 3])
+            .collect();
+        let flat = NurbsSurface::new([ku.clone(), kv.clone()], pts.clone(), Some(w)).unwrap();
+        let s = Surface::Nurbs(Arc::new(flat));
+        let a = affine_net(&s).expect("an affine net");
+        assert!(a.deviation < 1e-12, "{}", a.deviation);
+        // A wavy closed cubic inside it, at z = 0.
+        let n = 12;
+        let ring: Vec<Point3> = (0..n)
+            .map(|i| {
+                let t = core::f64::consts::TAU * f64::from(i) / f64::from(n);
+                let r = 0.3 * (1.0 + 0.06 * crate::math::cos(3.0 * t));
+                let (si, co) = crate::math::sin_cos(t);
+                Point3::new(10.5 + r * co, 7.5 + r * si, 0.0)
+            })
+            .collect();
+        let knots: Vec<f64> = (0..=n).map(f64::from).collect();
+        let k = KnotVector::periodic(3, &knots, &vec![1; knots.len()]).unwrap();
+        let curve = Curve::Nurbs(Arc::new(NurbsCurve::new(k, ring, None).unwrap()));
+        let found = exact(&s, &curve, [0.0, 12.0], 1e-8).expect("an exact pcurve");
+        assert!(matches!(found.0, Curve2::Nurbs2(_)));
+        // Lifted by a micrometre: no longer affine.
+        let mut lifted = pts;
+        lifted[5].z += 1e-6;
+        let bent = Surface::Nurbs(Arc::new(NurbsSurface::new([ku, kv], lifted, None).unwrap()));
+        assert!(affine_net(&bent).is_none());
+    }
 
     const TOL: f64 = LINEAR_RESOLUTION;
 
@@ -352,6 +522,37 @@ mod tests {
             Line::through(f.to_world(2.0, 0.0, 0.0), f.to_world(2.0, 1.0, 0.0)).unwrap(),
         );
         assert!(fitted(&nurbs, &off, [0.0, 1.0], TOL).is_none());
+    }
+
+    #[test]
+    fn fits_by_known_parameters_cross_a_forms_period_start() {
+        // A cylinder's NURBS form over [π, 3π], and a circle round it from
+        // 5.5 to 7.0 rad, across the cylinder's own seam at 2π: the
+        // circle's angle carried through the form's reparameterization
+        // gives the fit its parameters, so nothing is projected.
+        use crate::geom::Reparam;
+        let f = tilted();
+        let cyl = Surface::Cylinder(Cylinder::new(f, 0.5).unwrap());
+        let (n, reparam) = cyl.to_nurbs([[PI, 3.0 * PI], [0.0, 1.0]]).unwrap();
+        assert_eq!(reparam, [Reparam::Angle, Reparam::Identity]);
+        let nurbs = Surface::Nurbs(Arc::new(n));
+        let circle = Curve::Circle(
+            Circle::new(
+                Frame::new(f.to_world(0.0, 0.0, 0.3), f.z().get(), f.x().get()).unwrap(),
+                0.5,
+            )
+            .unwrap(),
+        );
+        let range = [5.5, 7.0];
+        let uv = |t: f64| Point2::new(reparam[0].to_nurbs(t), reparam[1].to_nurbs(0.3));
+        let (c2, bound) = fitted_by(&nurbs, &circle, range, &uv, TOL).unwrap();
+        assert!((TOL..=10.0 * TOL).contains(&bound), "{bound}");
+        assert_eq!(c2.domain(), range);
+        for i in 0..=100 {
+            let t = range[0] + (range[1] - range[0]) * i as f64 / 100.0;
+            let q = c2.point(t);
+            assert!(nurbs.point(q.x, q.y).distance(circle.point(t)) <= bound);
+        }
     }
 
     #[test]

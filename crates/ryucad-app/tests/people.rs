@@ -12,7 +12,7 @@ use std::time::Duration;
 const WAIT: Duration = Duration::from_secs(30);
 
 fn open(p: &Project, name: &str) -> Workspace {
-    let mut ws = Workspace::open(&p.root, ryucad(), name, Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), name, Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.model.meshes.len() == 2));
     ws
 }

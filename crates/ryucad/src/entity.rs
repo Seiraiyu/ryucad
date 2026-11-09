@@ -249,7 +249,7 @@ impl EntityRef {
         let shown = built.shown(&solids);
         let Some(shown) = shown.iter().find(|s| *s.solid == self.feature) else {
             let what = match solids.consumer(&self.feature) {
-                Some(by) => format!("the boolean {by} consumed its solid"),
+                Some(by) => format!("{by} consumed its solid"),
                 None => "the feature founds no solid; name a solid by the feature that founded it"
                     .to_owned(),
             };

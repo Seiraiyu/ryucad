@@ -7,14 +7,13 @@ use ryucad::entity::{EntityKind, Target};
 use ryucad::view::{self, StandardView};
 use ryucad_app::core::nav::Projector;
 use ryucad_app::core::pick::Picker;
-use ryucad_app::core::workspace::Workspace;
 use std::sync::Arc;
 use std::time::Duration;
 
 #[test]
 fn the_middle_of_a_top_view_is_the_boss_top() {
     let p = Project::new().with_part();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.meshes.len() == 2));
     let picker = Picker::new(&ws.model);
@@ -50,7 +49,7 @@ fn edges_are_picked_from_either_side() {
         "feature", "add", "p", "box", "--id", "base", "--param", "x=20", "--param", "y=10",
         "--param", "z=5",
     ]);
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
         && ws.model.meshes.len() == 1));
     let picker = Picker::new(&ws.model);

@@ -10,7 +10,7 @@ use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::{FaceRole, Name, OpKey, Role, ToolKey};
 use ryukei::primitive;
 use ryukei::topo::Body;
-use ryukei::tweak::{DraftFace, DraftSpec, Hinge, draft};
+use ryukei::tweak::{DraftFace, DraftSpec, Hinge, Topology, draft};
 
 const K: OpKey = OpKey(0xe0);
 const T: OpKey = OpKey(0xe1);
@@ -79,6 +79,7 @@ fn spec(faces: &[Name], angle: f64, hinge: Hinge, tangent: bool) -> DraftSpec {
             })
             .collect(),
         tangent,
+        topology: Topology::Keep,
     }
 }
 

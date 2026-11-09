@@ -32,6 +32,8 @@ pub struct View {
     pub sketches: bool,
     /// Draw datums, paths and helices (`display.datums`).
     pub datums: bool,
+    /// Draw annotations' pins (`display.annotations`).
+    pub annotations: bool,
     /// Draw the navigation cube (`display.nav_cube`), the axis triad
     /// (`display.triad`) and the origin's axes and planes
     /// (`display.origin`).
@@ -106,6 +108,8 @@ pub struct View {
     pub filter: crate::core::pick::Filter,
     /// Where the context menu was opened, in the viewport's pixels.
     menu_at: Option<[f64; 2]>,
+    /// The comment box, while it is open.
+    pub composing: Option<crate::core::annotations::Compose>,
     /// Select other…'s list, while open.
     pub others: Option<Others>,
     /// What the pointer has rested on, and since when (seconds): its
@@ -272,6 +276,7 @@ impl View {
             edges: true,
             sketches: true,
             datums: true,
+            annotations: true,
             cube: true,
             triad: true,
             origin: false,
@@ -306,6 +311,7 @@ impl View {
             dragging: None,
             filter: Default::default(),
             menu_at: None,
+            composing: None,
             others: None,
             hover_since: None,
             tree: Default::default(),
@@ -735,6 +741,27 @@ impl View {
             }
         }
         let mut lines = Vec::new();
+        // An unfold chosen: its bend lines; a refold: the strips it
+        // folded. A bend under the pointer in the Part tile's table.
+        let sheet = chosen
+            .as_ref()
+            .map(|k| ws.sheet_paint(k))
+            .unwrap_or_default();
+        for (refs, c) in [
+            (sheet.0, style::CHOSEN),
+            (ws.sheet_hover.clone(), style::HOVER),
+        ] {
+            for r in refs {
+                if let Some(Place::Face(k, i)) = picker.place(&r) {
+                    faces.push((k, i, linear(c)));
+                }
+            }
+        }
+        for r in sheet.1 {
+            if let Some(p @ Place::Edge(_)) = picker.place(&r) {
+                lines.push((p, style::CHOSEN));
+            }
+        }
         // A sketch chosen in the tree: all of it.
         if let Some(d) = chosen_sketch {
             let c = style::CHOSEN;
@@ -883,6 +910,87 @@ impl View {
     /// Sketches' dimensions as labels where they aren't hidden behind a
     /// solid, in their states' colours; clicking one opens its value in
     /// the property panel.
+    /// Each open annotation's pins on what is shown: a numbered marker in
+    /// its author's colour, hollow when a pin is outdated; a click chooses
+    /// the annotation and opens the tile. A pin with no point stands at
+    /// the middle of its entity's mesh points.
+    fn annotation_markers(
+        &mut self,
+        ui: &mut egui::Ui,
+        ws: &mut Workspace,
+        rect: egui::Rect,
+        pr: &Projector,
+    ) {
+        use crate::core::annotations::At;
+        if !self.annotations {
+            return;
+        }
+        let shown: Vec<String> = ws.model.shown().iter().map(|s| s.to_string()).collect();
+        let shown: Vec<&str> = shown.iter().map(String::as_str).collect();
+        let markers = ws.annotations.markers(&shown, |k| ws.model.pose(k));
+        let size = [f64::from(rect.width()), f64::from(rect.height())];
+        let mut chosen = None;
+        for m in markers {
+            let at = match &m.at {
+                At::Point(p) => *p,
+                At::Entity(r) => {
+                    let pts = self.picker(ws).points_of(std::slice::from_ref(r));
+                    if pts.is_empty() {
+                        continue;
+                    }
+                    let n = pts.len() as f64;
+                    let s = pts
+                        .iter()
+                        .fold([0.0; 3], |a, p| [a[0] + p[0], a[1] + p[1], a[2] + p[2]]);
+                    [s[0] / n, s[1] / n, s[2] / n]
+                }
+            };
+            let Some(n) = pr.ndc(at) else { continue };
+            let s = egui::pos2(
+                rect.min.x + ((n[0] + 1.0) / 2.0 * size[0]) as f32,
+                rect.min.y + ((1.0 - n[1]) / 2.0 * size[1]) as f32,
+            );
+            if !rect.contains(s) {
+                continue;
+            }
+            let colour = style::color32(style::participant(&m.by));
+            let picked = ws.chosen_annotation.as_deref() == Some(m.id.as_str());
+            let id = ui.scope_id().with(("annotation", &m.id, m.pin));
+            egui::Area::new(id)
+                .fixed_pos(s)
+                .pivot(egui::Align2::CENTER_CENTER)
+                .constrain_to(rect)
+                .order(egui::Order::Middle)
+                .show(ui.ctx(), |ui| {
+                    let ink = if m.outdated {
+                        colour
+                    } else {
+                        egui::Color32::WHITE
+                    };
+                    let text = egui::RichText::new(format!("#{}", m.number))
+                        .strong()
+                        .color(ink);
+                    let mut b = egui::Button::new(text).small().corner_radius(9.0);
+                    b = if m.outdated {
+                        b.fill(egui::Color32::TRANSPARENT)
+                            .stroke(egui::Stroke::new(1.5, colour))
+                    } else {
+                        b.fill(colour)
+                    };
+                    if picked {
+                        b = b.stroke(egui::Stroke::new(2.0, style::color32(style::SELECTED)));
+                    }
+                    if ui.add(b).on_hover_text(&m.comment).clicked() {
+                        chosen = Some(m.id.clone());
+                    }
+                });
+        }
+        if let Some(id) = chosen {
+            ws.choose_annotation(Some(&id));
+            self.ran = Some(("annotations.show", None));
+        }
+    }
+
     fn dimension_labels(
         &mut self,
         ui: &mut egui::Ui,
@@ -964,6 +1072,42 @@ impl View {
                 &m.reference,
                 font.clone(),
                 style::color32(m.color()),
+            );
+        }
+    }
+
+    /// The flat view's bend notes (`UP 90° R1 K0.44`) at each bend line's
+    /// middle, in its colour, where no face hides it, as `render --flat`
+    /// writes them.
+    fn bend_notes(&mut self, ui: &egui::Ui, ws: &Workspace, rect: egui::Rect, pr: &Projector) {
+        let Some(l) = ws
+            .flat_view
+            .as_ref()
+            .and_then(|v| v.lines.as_ref())
+            .filter(|_| ws.model.flat.is_some())
+        else {
+            return;
+        };
+        let size = [f64::from(rect.width()), f64::from(rect.height())];
+        let painter = ui.painter_at(rect);
+        let font = egui::FontId::proportional(11.0);
+        let picker = self.picker(ws);
+        for b in &l.lines {
+            let at = b.middle();
+            let Some(n) = pr.ndc(at) else { continue };
+            let s = egui::pos2(
+                rect.min.x + ((n[0] + 1.0) / 2.0 * size[0]) as f32,
+                rect.min.y + ((1.0 - n[1]) / 2.0 * size[1]) as f32,
+            );
+            if !rect.contains(s) || picker.hidden(pr, at) {
+                continue;
+            }
+            painter.text(
+                s + egui::vec2(4.0, -4.0),
+                egui::Align2::LEFT_BOTTOM,
+                &b.note,
+                font.clone(),
+                style::color32(b.colour()),
             );
         }
     }
@@ -1124,6 +1268,16 @@ impl View {
             {
                 let key = (h.part.clone(), h.feature.clone());
                 match ws.model.movable(&key) {
+                    Ok(_)
+                        if matches!(
+                            ws.control("assembly.move"),
+                            crate::core::modes::Gate::Refuse(_)
+                        ) && ws.model.parts.get(&h.part).is_some_and(|p| p.assembly) =>
+                    {
+                        // View changes nothing: the drag orbits instead.
+                        ws.drag_note =
+                            Some("View only: Annotate or Direct edit moves an instance".into());
+                    }
                     Ok((part, instance)) if ws.model.parts[&part].assembly => {
                         ws.drag_note = None;
                         self.grab = Some((part, instance, h.point));
@@ -1421,6 +1575,8 @@ impl View {
         if self.datums {
             self.datum_labels(ui, ws, rect, &pr);
         }
+        self.bend_notes(ui, ws, rect, &pr);
+        self.annotation_markers(ui, ws, rect, &pr);
         // The active section plane's handles, a new step's arrows, and an
         // explode's trails from where occurrences are to where it puts
         // them.
@@ -1689,6 +1845,67 @@ impl View {
         self.others_ui(ui.ctx(), ws);
     }
 
+    /// Opens the comment box for `annotation.add` on `target` (an entity
+    /// right-clicked, pinned with the point clicked; or a tree row,
+    /// pinned without one) or `annotation.here` (a bare point where the
+    /// menu opened, on the plane through the camera's target square to
+    /// the line of sight, on the shown part when there is one).
+    pub fn compose(&mut self, ws: &Workspace, id: &str, target: Option<&str>) {
+        use crate::core::annotations::{Compose, point_arg};
+        use ryucad::proto::PinArg;
+        let pin = match (id, &self.menu, target) {
+            ("annotation.add", Some(h), Some(t)) if h.entity == t && h.rev.is_none() => PinArg {
+                reference: Some(t.to_owned()),
+                part: None,
+                point: Some(point_arg(ws.model.pin_point(t, h.point))),
+            },
+            ("annotation.add", _, Some(t)) => PinArg {
+                reference: Some(t.to_owned()),
+                ..PinArg::default()
+            },
+            ("annotation.here", _, _) => {
+                let shown = ws.model.shown();
+                let (Some(at), [one]) = (self.on_target_plane(ws), shown.as_slice()) else {
+                    return;
+                };
+                PinArg {
+                    reference: None,
+                    part: Some(one.to_string()),
+                    point: Some(point_arg(at)),
+                }
+            }
+            _ => return,
+        };
+        self.composing = Some(Compose {
+            pins: vec![pin],
+            text: String::new(),
+            camera: Some(self.nav.camera.clone()),
+        });
+    }
+
+    /// The point where the context menu was opened on the plane through
+    /// the camera's target square to its line of sight.
+    fn on_target_plane(&mut self, ws: &Workspace) -> Option<[f64; 3]> {
+        let at = self.menu_at?;
+        let rect = self.rect;
+        let (w, h) = (f64::from(rect.width()), f64::from(rect.height()));
+        if w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        let aspect = f64::from(rect.width().max(1.0) / rect.height().max(1.0));
+        let pr = self.projector(ws, aspect);
+        let (o, d) = pr.ray([at[0] / w * 2.0 - 1.0, 1.0 - at[1] / h * 2.0]);
+        let c = &self.nav.camera;
+        let f = [0, 1, 2].map(|k| c.target[k] - c.eye[k]);
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let along = dot(d, f);
+        if along.abs() < 1e-300 {
+            return None;
+        }
+        let t = dot([0, 1, 2].map(|k| c.target[k] - o[k]), f) / along;
+        Some([0, 1, 2].map(|k| o[k] + t * d[k]))
+    }
+
     /// Opens Select other…'s list where the context menu was opened:
     /// everything the ray there meets, among the kinds the filter allows.
     pub fn select_other(&mut self, ws: &Workspace) {
@@ -1912,7 +2129,9 @@ impl View {
                     if ws.views.part.is_some() {
                         match &mut naming {
                             None => {
-                                if ui.button("Save view…").clicked() {
+                                if crate::ui::modes::button(ui, ws, "view.save", "Save view…")
+                                    .clicked()
+                                {
                                     naming = Some(String::new());
                                 }
                             }
@@ -2035,6 +2254,15 @@ impl View {
             ));
         }
         overlay.extend(body_lines);
+        // The flat view's bend lines, dashed in their direction's colour.
+        if let Some(l) = ws
+            .flat_view
+            .as_ref()
+            .and_then(|v| v.lines.as_ref())
+            .filter(|_| ws.model.flat.is_some())
+        {
+            overlay.extend(crate::core::flat::overlay(l, pr, size, f64::from(ppp)));
+        }
         // The origin's axes and planes, a tenth of the model's size.
         if self.origin {
             let length = match bounds {

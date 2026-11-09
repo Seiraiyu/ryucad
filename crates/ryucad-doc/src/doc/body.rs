@@ -334,8 +334,9 @@ impl Offset {
     }
 }
 
-/// The expression strings of a shell's or offset's `faces`: each group's
-/// thickness or distance.
+/// The expression strings of a shell's, offset's or thicken's `faces`:
+/// each group's thickness or distance, or a thicken's groups' front and
+/// back.
 pub fn expression_strings(groups: &mut Value) -> Vec<&mut String> {
     let mut out = Vec::new();
     let Value::Array(groups) = groups else {
@@ -344,7 +345,8 @@ pub fn expression_strings(groups: &mut Value) -> Vec<&mut String> {
     for g in groups {
         let Value::Object(g) = g else { continue };
         for (k, x) in g.iter_mut() {
-            if let ("thickness" | "distance", Value::String(s)) = (k.as_str(), x) {
+            if let ("thickness" | "distance" | "front" | "back", Value::String(s)) = (k.as_str(), x)
+            {
                 out.push(s);
             }
         }
@@ -357,7 +359,7 @@ fn target(o: &mut Obj) -> Result<Id> {
 }
 
 /// A field naming a solid by its founder.
-fn solid_id(o: &mut Obj, key: &str) -> Result<Id> {
+pub(super) fn solid_id(o: &mut Obj, key: &str) -> Result<Id> {
     let at = format!("/{key}");
     let t = o.take(key)?;
     let t = t
@@ -418,7 +420,7 @@ fn groups(o: &mut Obj, key: &str, default: Unit, env: &Env) -> Result<Vec<FaceGr
 }
 
 /// A non-empty array of face references.
-fn refs(v: &Value, at: &str) -> Result<Vec<Reference>> {
+pub(super) fn refs(v: &Value, at: &str) -> Result<Vec<Reference>> {
     let a = v
         .as_array()
         .filter(|a| !a.is_empty())
@@ -429,7 +431,7 @@ fn refs(v: &Value, at: &str) -> Result<Vec<Reference>> {
         .collect()
 }
 
-fn refs_json(refs: &[Reference]) -> Value {
+pub(super) fn refs_json(refs: &[Reference]) -> Value {
     Value::Array(refs.iter().map(Reference::to_json).collect())
 }
 

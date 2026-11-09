@@ -325,6 +325,105 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_persons_draft_is_a_revision() {
+        let (_dir, mut s, _) = plate();
+        let dave = By {
+            participant: "dave (window 1)".into(),
+            kind: AuthorKind::Human,
+        };
+        let rel = "parts/plate/features/slab.json";
+        let now = s.snapshot()[rel].clone();
+        let mut v: Value = serde_json::from_slice(&now).unwrap();
+        v["params"]["x"] = json!("50 mm");
+        put(
+            &mut s,
+            &changing(
+                "aaaaaaaaaa",
+                &dave,
+                "2026-11-05T14:00:00Z",
+                rel,
+                Some(&now),
+                v,
+                vec![],
+            ),
+        );
+        let rev = "draft:dave (window 1)";
+        // The draft has dave's change; the working files don't.
+        let i = call(&mut s, "inspect", json!({"part": "plate", "rev": rev})).unwrap();
+        let w = call(&mut s, "inspect", json!({"part": "plate"})).unwrap();
+        assert_ne!(i["bodies"][0]["hash"], w["bodies"][0]["hash"]);
+        let d = call(
+            &mut s,
+            "diff",
+            json!({"from": "working", "to": rev, "model": true}),
+        )
+        .unwrap();
+        assert_eq!(d["to"]["draft"], "dave (window 1)");
+        assert_eq!(d["to"]["annotations"], json!(["aaaaaaaaaa"]));
+        assert_eq!(d["parts"]["plate"]["features"]["slab"]["status"], "changed");
+        // Someone with no open changes has the working files as a draft.
+        let e = call(
+            &mut s,
+            "inspect",
+            json!({"part": "plate", "rev": "draft:erin (window 1)"}),
+        )
+        .unwrap();
+        assert_eq!(e["bodies"][0]["hash"], w["bodies"][0]["hash"]);
+        // A draft names its participant.
+        let e = call(&mut s, "inspect", json!({"part": "plate", "rev": "draft:"})).unwrap_err();
+        assert_eq!(e.code, crate::error::Code::InvalidParam);
+    }
+
+    #[test]
+    fn forms_and_drawings_read_a_draft() {
+        let (_dir, mut s, _) = plate();
+        let dave = By {
+            participant: "dave (window 1)".into(),
+            kind: AuthorKind::Human,
+        };
+        let rel = "parts/plate/features/slab.json";
+        let now = s.snapshot()[rel].clone();
+        let mut v: Value = serde_json::from_slice(&now).unwrap();
+        v["params"]["x"] = json!("50 mm");
+        put(
+            &mut s,
+            &changing(
+                "aaaaaaaaaa",
+                &dave,
+                "2026-11-05T14:00:00Z",
+                rel,
+                Some(&now),
+                v,
+                vec![],
+            ),
+        );
+        let rev = "draft:dave (window 1)";
+        let drafted = call(
+            &mut s,
+            "feature.show",
+            json!({"part": "plate", "id": "slab", "rev": rev}),
+        )
+        .unwrap();
+        assert_eq!(drafted["params"]["x"]["value"], "50 mm", "{drafted}");
+        let working = call(
+            &mut s,
+            "feature.show",
+            json!({"part": "plate", "id": "slab"}),
+        )
+        .unwrap();
+        assert_eq!(working["params"]["x"]["value"], "40 mm", "{working}");
+        // The revision it was read at is the draft's: a proposal made from
+        // it is guarded by it.
+        assert_ne!(drafted["revision"], working["revision"]);
+        for (method, params) in [
+            ("param.list", json!({"part": "plate", "rev": rev})),
+            ("props.get", json!({"part": "plate", "rev": rev})),
+        ] {
+            call(&mut s, method, params).unwrap();
+        }
+    }
+
+    #[test]
     fn a_draft_lays_the_proposers_open_changes_in_order() {
         let (_dir, mut s, _) = plate();
         let dave = By {

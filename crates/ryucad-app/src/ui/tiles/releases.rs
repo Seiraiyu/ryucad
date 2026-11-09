@@ -9,6 +9,10 @@ use eframe::egui;
 /// Obsolete… and Sync tags…, each opening a dialog to confirm.
 pub fn releases(ui: &mut egui::Ui, ws: &mut Workspace, part: Option<&str>) {
     use crate::core::releases::{Confirm, approval_hover, approval_line, record_line};
+    let pdm_gate = ws.control("pdm.init");
+    let propose_gate = ws.control("release.propose");
+    let obsolete_gate = ws.control("release.obsolete");
+    let sync_gate = ws.control("release.sync");
     let Some(part) = part else {
         // No parts yet: an agent makes one, then proposes its release;
         // without PDM the tile offers it here too (#559).
@@ -25,7 +29,10 @@ pub fn releases(ui: &mut egui::Ui, ws: &mut Workspace, part: Option<&str>) {
             },
             Some("ryucad part create bracket"),
             |ui| {
-                if !ready && ui.button("Set up PDM").clicked() {
+                if !ready
+                    && crate::ui::modes::gated(ui, &pdm_gate, egui::Button::new("Set up PDM"))
+                        .clicked()
+                {
                     set_up = true;
                 }
             },
@@ -72,7 +79,14 @@ pub fn releases(ui: &mut egui::Ui, ws: &mut Workspace, part: Option<&str>) {
                     pdm.then(|| format!("ryucad release propose {part}"))
                         .as_deref(),
                     |ui| {
-                        if !pdm && ui.button("Set up PDM").clicked() {
+                        if !pdm
+                            && crate::ui::modes::gated(
+                                ui,
+                                &pdm_gate,
+                                egui::Button::new("Set up PDM"),
+                            )
+                            .clicked()
+                        {
                             set_up = true;
                         }
                     },
@@ -92,18 +106,26 @@ pub fn releases(ui: &mut egui::Ui, ws: &mut Workspace, part: Option<&str>) {
             let obsoletable = t.obsoletable(part);
             ui.horizontal(|ui| {
                 let idle = !t.busy;
-                if ui
-                    .add_enabled(idle, egui::Button::new("Propose…"))
-                    .on_hover_text("Write the record of this part's next revision")
-                    .clicked()
+                if crate::ui::modes::gated_if(
+                    ui,
+                    &propose_gate,
+                    idle,
+                    egui::Button::new("Propose…"),
+                )
+                .on_hover_text("Write the record of this part's next revision")
+                .clicked()
                 {
                     dry = true;
                 }
                 let obsolete = egui::Button::new("Obsolete…");
-                if ui
-                    .add_enabled(idle && obsoletable.is_some(), obsolete)
-                    .on_hover_text("Make this part's latest official revision obsolete")
-                    .clicked()
+                if crate::ui::modes::gated_if(
+                    ui,
+                    &obsolete_gate,
+                    idle && obsoletable.is_some(),
+                    obsolete,
+                )
+                .on_hover_text("Make this part's latest official revision obsolete")
+                .clicked()
                     && let Some(label) = obsoletable.clone()
                 {
                     t.note.clear();
@@ -112,8 +134,7 @@ pub fn releases(ui: &mut egui::Ui, ws: &mut Workspace, part: Option<&str>) {
                         label,
                     });
                 }
-                if ui
-                    .add_enabled(idle, egui::Button::new("Sync tags…"))
+                if crate::ui::modes::gated_if(ui, &sync_gate, idle, egui::Button::new("Sync tags…"))
                     .on_hover_text("Create and move the local ryupdm/ tags to match the records")
                     .clicked()
                 {

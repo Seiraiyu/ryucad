@@ -23,6 +23,7 @@ pub(crate) fn side(v: &serde_json::Value) -> String {
 /// the model. "Show" chooses the feature and marks the entities it
 /// concerns.
 pub fn merge(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
+    let gate = ws.control("merge.resolve");
     let Some(m) = &ws.merge else { return };
     ui.heading(format!("{} in progress", m.step()));
     ui.label(m.summary());
@@ -62,9 +63,13 @@ pub fn merge(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                             // A value is typed: the CLI's `--value`.
                             _ => continue,
                         };
-                        if ui
-                            .add_enabled(!m.resolving, egui::Button::new(label))
-                            .clicked()
+                        if crate::ui::modes::gated_if(
+                            ui,
+                            &gate,
+                            !m.resolving,
+                            egui::Button::new(label),
+                        )
+                        .clicked()
                         {
                             act = Some((id.to_owned(), choice.to_owned(), None));
                         }
@@ -72,7 +77,7 @@ pub fn merge(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                     for r in c["repairs"].as_array().into_iter().flatten() {
                         let summary = r["summary"].as_str().unwrap_or("Repair");
                         let button = egui::Button::new(summary);
-                        if ui.add_enabled(!m.resolving, button).clicked() {
+                        if crate::ui::modes::gated_if(ui, &gate, !m.resolving, button).clicked() {
                             let rid = r["id"].as_str().map(str::to_owned);
                             act = Some((id.to_owned(), "repair".to_owned(), rid));
                         }

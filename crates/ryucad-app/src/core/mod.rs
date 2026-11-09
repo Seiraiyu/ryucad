@@ -1,6 +1,7 @@
 //! The app without a window: what it knows and how it learns it.
 
 pub mod activity;
+pub mod annotations;
 pub mod appearance;
 pub mod bodies;
 pub mod bom;
@@ -17,6 +18,7 @@ pub mod explode;
 pub mod export;
 pub mod feed;
 pub mod feedback;
+pub mod flat;
 pub mod focus;
 pub mod geometry;
 pub mod gizmo;
@@ -29,6 +31,7 @@ pub mod lod;
 pub mod measure;
 pub mod merge;
 pub mod model;
+pub mod modes;
 pub mod nav;
 pub mod palette;
 pub mod params;
@@ -42,6 +45,7 @@ pub mod releases;
 pub mod sample;
 pub mod section;
 pub mod settings;
+pub mod sheet;
 pub mod sketch;
 pub mod start;
 pub mod step;

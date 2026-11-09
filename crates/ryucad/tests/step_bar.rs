@@ -9,8 +9,7 @@
 //! the STEP export, at a chord of 1 mm and 15 degrees: the parts are a
 //! metre or so across, so 1 mm is to them what the default 0.01 mm is to
 //! a 10 mm part (at 0.01 mm the race would be about 5 × 10⁸ triangles).
-//! The usdc holds meshes alone: 169 of the race's 1,598 bodies have no
-//! BrepArray yet (#247), and one refuses the whole export. Release builds
+//! The usdc holds every part's BrepArray and mesh (#247). Release builds
 //! only.
 //!
 //! The race in `ryukei-bench` lays its parts along x 10 m apart, which
@@ -203,8 +202,8 @@ fn the_race_imports_rebuilds_and_exports_within_its_bars() {
         "--time-stamp",
         "2026-10-27T00:00:00",
     ]);
-    // The other formats, from the same warm daemon. usdc meshes every
-    // part (meshes alone, #247); 3MF asks for the same meshes and finds
+    // The other formats, from the same warm daemon. usdc writes every
+    // part's BrepArray and mesh; 3MF asks for the same meshes and finds
     // them in the session's mesh cache.
     let formats = |ext: &str, more: &[&str]| -> (f64, Value) {
         let out = dir.path().join(format!("out.{ext}"));
@@ -223,7 +222,7 @@ fn the_race_imports_rebuilds_and_exports_within_its_bars() {
         args.extend(more);
         ryucad(&args)
     };
-    let (usdc, usdc_v) = formats("usdc", &["--no-brep"]);
+    let (usdc, usdc_v) = formats("usdc", &[]);
     let (three_mf, three_mf_v) = formats("3mf", &[]);
     ryucad(&["daemon", "stop"]);
     let triangles = |v: &Value| -> u64 {

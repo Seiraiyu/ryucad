@@ -29,6 +29,7 @@ pub fn line_name(line: &Line, level: &str) -> String {
 
 /// The BOM tab.
 pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
+    let item_gate = ws.control("bom.renumber");
     let mut flat = ws.bom.flat;
     let mut focus = None;
     ui.horizontal(|ui| {
@@ -194,9 +195,12 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                                     .color(style::color32(style::CHANGED)),
                                 None => tint(RichText::new(shown)),
                             };
-                            let r = ui
-                                .add(egui::Button::new(shown).frame(false))
-                                .on_hover_text("Change this item number");
+                            let r = crate::ui::modes::gated(
+                                ui,
+                                &item_gate,
+                                egui::Button::new(shown).frame(false),
+                            )
+                            .on_hover_text("Change this item number");
                             r.widget_info(|| {
                                 egui::WidgetInfo::labeled(egui::Role::Button, true, &name)
                             });

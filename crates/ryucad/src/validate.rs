@@ -2210,6 +2210,51 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_thicken_of_a_sheet_the_other_side_broke_is_blamed_on_it() {
+        let mut m = boxed();
+        squared(&mut m);
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "planar", "id": "f", "sketch": "s"}),
+        )
+        .unwrap();
+        m.commit("a square, extruded and made a planar face");
+        // Theirs thickens the planar face, consuming it.
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "thicken", "id": "t", "sheet": "f", "front": "1 mm"}),
+        )
+        .unwrap();
+        m.commit("theirs: the face thickened");
+        // Ours opens the square: the planar face has no loop.
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        m.call(
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [{"op": "remove", "id": "l4"}]}),
+        )
+        .unwrap();
+        m.commit("ours: an open square");
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        // The thicken built on theirs; it reads the sheet it consumes,
+        // which ours' change broke.
+        let c: Vec<&Value> = v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["kind"] == "merge_broke")
+            .collect();
+        assert_eq!(c.len(), 1, "{v}");
+        assert_eq!(c[0]["id"], "parts/p/features/t.json#merge_broke");
+        assert_eq!(c[0]["cause"], "ours");
+        assert_eq!(c[0]["built_on"], json!(["theirs"]));
+        assert_eq!(c[0]["error"]["code"], "dependency_failed");
+    }
+
+    #[test]
     fn what_the_merge_broke_names_the_side_that_broke_it() {
         let mut m = boxed();
         squared(&mut m);

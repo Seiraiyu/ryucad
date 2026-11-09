@@ -25,7 +25,7 @@ fn occt(name: &str) -> PathBuf {
 #[test]
 fn a_file_is_planned_imported_updated_and_exported() {
     let p = Project::new();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle()));
     // Planned: nothing is written. Healed, as "Convert to solids (heal)"
     // asks; references are `a_file_imports_as_a_reference_and_converts`'s.
@@ -155,7 +155,7 @@ fn a_file_is_planned_imported_updated_and_exported() {
 #[test]
 fn a_file_imports_as_a_reference_and_converts() {
     let p = Project::new();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle()));
     ws.import = Some(Import::new());
     ws.import.as_mut().unwrap().path = occt("box_ap214.stp").display().to_string();
@@ -239,7 +239,7 @@ fn a_file_imports_as_a_reference_and_converts() {
 #[test]
 fn every_format_is_exported_by_the_daemon() {
     let p = Project::new().with_part();
-    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
     assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.part("p").is_some()));
     let out = tempfile::tempdir().unwrap();
     let mut path = out.path().join("p.step").display().to_string();

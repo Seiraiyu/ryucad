@@ -120,6 +120,9 @@ impl PdmMark {
 pub struct Compare {
     /// The revision as it was given (`HEAD`, a branch, a commit).
     pub rev: String,
+    /// The side compared to: the working files (`None`), or the person's
+    /// draft (`draft:<name>`, while they annotate).
+    pub to: Option<String>,
     /// The commit it named when the diff was made.
     pub commit: Option<String>,
     /// The diff has come.
@@ -305,6 +308,15 @@ impl Compare {
     pub fn new(rev: &str) -> Compare {
         Compare {
             rev: rev.to_owned(),
+            ..Compare::default()
+        }
+    }
+
+    /// A compare from `rev` to `to` (the working files when `None`).
+    pub fn between(rev: &str, to: Option<String>) -> Compare {
+        Compare {
+            rev: rev.to_owned(),
+            to,
             ..Compare::default()
         }
     }

@@ -101,6 +101,7 @@ pub fn toasts(ctx: &egui::Context, o: &mut Opened) {
         return;
     }
     let p = o.view.palette(ctx.theme() == egui::Theme::Dark);
+    let can_undo = o.ws.control("undo") == crate::core::modes::Gate::Send;
     let now = Instant::now();
     let mut acted = Vec::new();
     egui::Area::new(egui::Id::unique("toasts"))
@@ -155,6 +156,11 @@ pub fn toasts(ctx: &egui::Context, o: &mut Opened) {
                                 }
                                 ui.horizontal(|ui| {
                                     for a in &t.actions {
+                                        // Undo writes the project's files:
+                                        // Direct edit's.
+                                        if matches!(a, Action::Undo(_)) && !can_undo {
+                                            continue;
+                                        }
                                         if link(ui, a.title(), &p).clicked() {
                                             acted.push((t.id, Some(a.clone())));
                                         }
@@ -191,6 +197,11 @@ pub fn toasts(ctx: &egui::Context, o: &mut Opened) {
                 }
             }
             Some(Action::Details(i)) => o.ws.card = Some(i),
+            Some(Action::Annotation(id)) => {
+                o.ws.choose_annotation(Some(&id));
+                crate::ui::shell::open(&mut o.tiles, "annotations");
+                o.layout_dirty = true;
+            }
         }
     }
 }
@@ -230,6 +241,7 @@ pub fn card(ctx: &egui::Context, o: &mut Opened) {
         return;
     };
     let c = Card::of(e);
+    let convert_gate = o.ws.control("import.convert");
     let p = o.view.palette(ctx.theme() == egui::Theme::Dark);
     let (mut close, mut go, mut convert) = (false, None, None);
     egui::Area::new(egui::Id::unique("error card"))
@@ -287,12 +299,15 @@ pub fn card(ctx: &egui::Context, o: &mut Opened) {
                             close = true;
                         }
                         if c.convert.is_some()
-                            && ui
-                                .button("Convert to solid")
-                                .on_hover_text(
-                                    "Heal the reference import into a solid features can act on",
-                                )
-                                .clicked()
+                            && crate::ui::modes::gated(
+                                ui,
+                                &convert_gate,
+                                egui::Button::new("Convert to solid"),
+                            )
+                            .on_hover_text(
+                                "Heal the reference import into a solid features can act on",
+                            )
+                            .clicked()
                         {
                             convert = c.convert.clone();
                         }
@@ -344,7 +359,13 @@ pub fn disconnected(ui: &mut egui::Ui, ws: &mut Workspace, p: &Palette) {
 /// The disconnected bar's background: the danger colour over the raised
 /// surface at 14%, as `app.css`'s `.disconnected` mixes it.
 pub fn disconnected_fill(p: &Palette) -> Color32 {
-    let (d, r) = (style::rgb(p.danger), style::rgb(p.raised));
+    tint(p.danger, p)
+}
+
+/// `colour` over the raised surface at 14%, as `app.css` mixes a bar's
+/// background.
+pub fn tint(colour: u32, p: &Palette) -> Color32 {
+    let (d, r) = (style::rgb(colour), style::rgb(p.raised));
     let mix = |a: u8, b: u8| ((f32::from(a) * 0.14) + (f32::from(b) * 0.86)).round() as u8;
     Color32::from_rgb(mix(d.r(), r.r()), mix(d.g(), r.g()), mix(d.b(), r.b()))
 }

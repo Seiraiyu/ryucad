@@ -32,6 +32,7 @@ fn mv(faces: Vec<Name>, motion: Rigid) -> MoveSpec {
         faces,
         motion,
         tangent: false,
+        topology: Topology::Keep,
     }
 }
 
@@ -135,6 +136,7 @@ fn moving_a_top_beside_its_fillet_needs_the_tangent_option() {
         faces: vec![face(FaceRole::PlusZ)],
         motion: up,
         tangent,
+        topology: Topology::Keep,
     };
     assert!(matches!(
         refusal(move_faces(T, &b, &spec(false))),
@@ -151,6 +153,7 @@ fn two_neighbouring_faces_offset_keep_their_sharp_edge() {
     let spec = OffsetFacesSpec {
         faces: vec![(face(FaceRole::PlusZ), 0.1), (face(FaceRole::PlusX), 0.2)],
         tangent: false,
+        topology: Topology::Keep,
     };
     let (o, _) = offset_faces(T, &b, &spec).unwrap();
     assert_eq!((o.faces().count(), o.edges().count()), (6, 12));
@@ -173,6 +176,7 @@ fn offsets_are_checked_as_offsets_are() {
     let spec = |d| OffsetFacesSpec {
         faces: vec![(face(FaceRole::PlusZ), d)],
         tangent: false,
+        topology: Topology::Keep,
     };
     assert_eq!(
         refusal(offset_faces(T, &b, &spec(1e-9))),
@@ -211,6 +215,7 @@ fn a_top_replaced_by_a_higher_plane_either_way_up() {
                     Vector3::new(0.0, 0.0, z),
                 ),
             )],
+            topology: Topology::Keep,
         };
         let (o, _) = replace_faces(T, &b, &spec).unwrap();
         assert_eq!(crate::check::check(&o), []);
@@ -234,6 +239,7 @@ fn a_replacement_square_to_its_face_is_ambiguous() {
                 Vector3::new(1.0, 0.0, 0.0),
             ),
         )],
+        topology: Topology::Keep,
     };
     assert_eq!(
         refusal(replace_faces(T, &b, &spec)),
@@ -266,6 +272,7 @@ fn a_boxs_walls_drafted_about_its_bottom_lean_in_and_report_their_angle() {
             })
             .collect(),
         tangent: false,
+        topology: Topology::Keep,
     };
     let (o, _, report) = draft(T, &b, &spec).unwrap();
     assert_eq!(crate::check::check(&o), []);
@@ -308,6 +315,7 @@ fn a_draft_checks_its_angle_and_faces() {
             flip: false,
         }],
         tangent: false,
+        topology: Topology::Keep,
     };
     assert_eq!(
         refusal(draft(T, &b, &spec(0.0, wall))),
@@ -325,4 +333,174 @@ fn a_draft_checks_its_angle_and_faces() {
         refusal(draft(T, &b, &spec(0.05, top))),
         TweakError::NoHinge { face: top }
     );
+}
+
+#[test]
+fn topology_is_kept_unless_asked_to_change() {
+    assert_eq!(Topology::default(), Topology::Keep);
+    let b = block();
+    let r = Rigid::translation(Vector3::new(0.0, 0.0, 0.1));
+    let keep = MoveSpec {
+        faces: vec![face(FaceRole::PlusZ)],
+        motion: r,
+        tangent: false,
+        topology: Topology::Keep,
+    };
+    let change = MoveSpec {
+        topology: Topology::Change,
+        ..keep.clone()
+    };
+    let (a, ja) = move_faces(T, &b, &keep).unwrap();
+    let (c, jc) = move_faces(T, &b, &change).unwrap();
+    // Where the fixed engine builds, its result stands under Change.
+    assert_eq!(crate::codec::encode_body(&a), crate::codec::encode_body(&c));
+    assert_eq!(ja, jc);
+}
+
+/// A square pyramid: two prisms intersected (as `tests/tweaks.rs` makes it).
+pub(crate) fn pyramid() -> Body {
+    use crate::boolean::{BooleanOp, Tool, boolean};
+    use crate::geom::{Curve2, Frame, Line2, Point2, Point3};
+    use crate::name::ToolKey;
+    use crate::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
+    let tri = |frame: Frame, base: u128| {
+        let pts = [(0.0, 0.0), (1.0, 0.0), (0.5, 0.5)];
+        let segments = (0..3)
+            .map(|i| {
+                let (p, q) = (pts[i], pts[(i + 1) % 3]);
+                let (p, q) = (Point2::new(p.0, p.1), Point2::new(q.0, q.1));
+                Segment {
+                    key: SegmentKey(base + i as u128),
+                    curve: Curve2::Line2(Line2::through(p, q).unwrap()),
+                    t0: 0.0,
+                    t1: p.distance(q),
+                }
+            })
+            .collect();
+        ValidProfile::new(Profile {
+            frame,
+            loops: vec![Loop {
+                key: LoopKey(base),
+                segments,
+            }],
+        })
+        .unwrap()
+    };
+    // Triangles in the yz plane (extruded along x) and the xz plane
+    // (extruded along y).
+    let yz = Frame::new(
+        Point3::ORIGIN,
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+    )
+    .unwrap();
+    let xz = Frame::new(
+        Point3::ORIGIN,
+        Vector3::new(0.0, -1.0, 0.0),
+        Vector3::new(1.0, 0.0, 0.0),
+    )
+    .unwrap();
+    let a = extrude(
+        OpKey(0xd7),
+        &tri(yz, 20),
+        Vector3::new(1.0, 0.0, 0.0),
+        0.0,
+        1.0,
+    )
+    .unwrap()
+    .0;
+    let b = extrude(
+        OpKey(0xd8),
+        &tri(xz, 30),
+        Vector3::new(0.0, -1.0, 0.0),
+        -1.0,
+        0.0,
+    )
+    .unwrap()
+    .0;
+    boolean(
+        OpKey(0xd9),
+        BooleanOp::Intersect,
+        &a,
+        &[Tool {
+            key: ToolKey(2),
+            body: &b,
+            place: Rigid::IDENTITY,
+        }],
+    )
+    .unwrap()
+    .0
+}
+
+#[test]
+fn a_split_vertex_is_re_trimmed_under_change_only() {
+    let b = pyramid();
+    let slanted: Vec<Name> = b
+        .faces()
+        .filter(|&f| match &b.surfaces[b.faces[f].surface] {
+            crate::geom::Surface::Plane(p) => {
+                let z = p.frame().z().get().z.abs();
+                z > 0.1 && z < 0.9
+            }
+            _ => false,
+        })
+        .map(|f| b.faces[f].name)
+        .collect();
+    let keep = OffsetFacesSpec {
+        faces: vec![(slanted[0], 0.02)],
+        tangent: false,
+        topology: Topology::Keep,
+    };
+    assert!(matches!(
+        refusal(offset_faces(T, &b, &keep)),
+        TweakError::VertexSplits { .. }
+    ));
+    let change = OffsetFacesSpec {
+        topology: Topology::Change,
+        ..keep
+    };
+    let (o, _) = offset_faces(T, &b, &change).unwrap();
+    assert_eq!(crate::check::check(&o), []);
+    assert_eq!(crate::check::check_intersections(&o), []);
+    // The apex split into two vertices joined by a new edge.
+    assert_eq!(o.vertices().count(), 6);
+}
+
+#[test]
+fn a_wall_drafted_past_its_neighbour_takes_the_top_away() {
+    use crate::tweak::draft::{DraftFace, DraftSpec, Hinge, draft};
+    let b = block();
+    let wall = face(FaceRole::MinusX);
+    let top = face(FaceRole::PlusZ);
+    let pull = crate::geom::UnitVector3::exact(Vector3::new(0.0, 0.0, 1.0)).unwrap();
+    let spec = DraftSpec {
+        pull,
+        angle: 1.3,
+        hinge: Hinge::Neutral {
+            origin: crate::geom::Point3::ORIGIN,
+        },
+        faces: vec![DraftFace {
+            face: wall,
+            angle: None,
+            flip: false,
+        }],
+        tangent: false,
+        topology: Topology::Keep,
+    };
+    assert!(draft(T, &b, &spec).is_err());
+    let (o, j, report) = draft(
+        T,
+        &b,
+        &DraftSpec {
+            topology: Topology::Change,
+            ..spec
+        },
+    )
+    .unwrap();
+    assert_eq!(crate::check::check(&o), []);
+    assert!(o.by_name(top).is_none());
+    assert!(j.events().contains(&crate::name::Event::Deleted(top)));
+    // The drafted wall is reported at its angle.
+    assert_eq!(report.faces.len(), 1);
+    assert!((report.faces[0].least - 1.3).abs() < 1e-9);
 }

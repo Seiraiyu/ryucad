@@ -17,7 +17,9 @@ use super::reference::Reference;
 use super::sheet_metal::{BaseFlange, Flange, Refold, Unfold};
 use super::sketch::Sketch;
 use super::solid::{Boolean, Combine};
+use super::surface::{Extract, Fill, Sew, Thicken};
 use super::sweep::{Extrude, Loft, Revolve, Sweep};
+use super::tweak::{MoveFace, ReplaceFace};
 use crate::error::{Code, Error, Result};
 use crate::expr::{self, Env, Expr};
 use crate::units::{Quantity, Unit};
@@ -72,24 +74,26 @@ pub const MANIFEST_FORMAT: u64 = 3;
 /// 9 shells and offsets, 10 mirrors and splits, 11 base flanges and
 /// flanges (ryucad 16), 12 surface sweeps and planar faces (ryucad 18),
 /// 13 reference imports (ryucad 21), 14 unfolds and refolds (ryucad
-/// 16.B), 17 a flattened import's place (ryucad 21.D). A feature is
-/// written at the lowest
-/// format that holds it, so one with only literals stays 1.
+/// 16.B), 15 fills, extracts, sews and thickens (ryucad 18), 16 face
+/// tweaks (ryucad 17), 17 a flattened import's place (ryucad 21.D). A
+/// feature is written at the lowest format that holds it, so one with
+/// only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
-    // The largest of every stage's (a later stage merging takes the max).
+    // The largest of every stage's (a later stage merging adds its own).
     let all = [
         super::sweep::SURFACE_FORMAT,
         super::import::MODE_FORMAT,
         super::sheet_metal::UNFOLD_FORMAT,
+        super::surface::FORMAT,
+        super::tweak::FORMAT,
         super::import::PLACE_FORMAT,
     ];
-    let mut max = 0;
-    let mut k = 0;
-    while k < all.len() {
-        if all[k] > max {
-            max = all[k];
+    let (mut max, mut i) = (0, 0);
+    while i < all.len() {
+        if all[i] > max {
+            max = all[i];
         }
-        k += 1;
+        i += 1;
     }
     max
 };
@@ -207,6 +211,10 @@ pub enum Feature {
     Split(Box<Split>),
     /// A profile's closed loops as plane faces of a sheet (ryucad 18).
     Planar(Box<super::sweep::Planar>),
+    Fill(Box<Fill>),
+    Extract(Box<Extract>),
+    Sew(Box<Sew>),
+    Thicken(Box<Thicken>),
     /// A sheet metal solid founded from a sketch, with its settings.
     BaseFlange(Box<BaseFlange>),
     /// Bends and flanges on straight edges of a sheet metal solid.
@@ -215,6 +223,10 @@ pub enum Feature {
     Unfold(Box<Unfold>),
     /// A sheet metal solid folded back by its unfold's flat map.
     Refold(Box<Refold>),
+    /// Faces of a solid moved: translated, turned or offset (ryucad 17).
+    MoveFace(Box<MoveFace>),
+    /// Faces of a solid given another face's surface or a plane.
+    ReplaceFace(Box<ReplaceFace>),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -587,6 +599,7 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
                 }
             }
             // "full" is a word, not a parameter.
+            ("tolerance" | "front" | "back", Value::String(s)) => out.push(s),
             ("angle", Value::String(s)) if s != "full" => out.push(s),
             _ => {}
         }
@@ -683,6 +696,18 @@ pub fn manifest_format(v: &Value) -> u64 {
 pub fn feature_format(v: &Value) -> u64 {
     if v.get("type").and_then(Value::as_str) == Some("import") && v.get("place").is_some() {
         return super::import::PLACE_FORMAT;
+    }
+    if matches!(
+        v.get("type").and_then(Value::as_str),
+        Some("fill" | "extract" | "sew" | "thicken")
+    ) {
+        return super::surface::FORMAT;
+    }
+    if v.get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| super::tweak::TYPES.contains(&t))
+    {
+        return super::tweak::FORMAT;
     }
     if v.get("type").and_then(Value::as_str) == Some("import")
         && v.get("mode").and_then(Value::as_str) == Some("reference")
@@ -806,7 +831,8 @@ pub struct Acts {
     pub founds: bool,
     /// The solids whose chains it joins.
     pub acts_on: Vec<Id>,
-    /// The solids a boolean consumes.
+    /// The bodies it consumes: a boolean's tools, a sew's sheets, a
+    /// thicken's sheet.
     pub consumes: Vec<Id>,
 }
 
@@ -824,7 +850,22 @@ pub fn feature_acts(v: &Value) -> Acts {
     };
     let mut out = Acts::default();
     match v.get("type").and_then(Value::as_str) {
-        Some("import" | "planar") => out.founds = true,
+        Some("import" | "planar" | "fill" | "extract") => out.founds = true,
+        Some("sew") => {
+            out.founds = true;
+            out.consumes = ids(v.get("sheets"));
+        }
+        Some("thicken") => {
+            if v.get("operation")
+                .and_then(Value::as_str)
+                .is_none_or(|o| o == "new")
+            {
+                out.founds = true;
+            } else {
+                out.acts_on = ids(v.get("targets"));
+            }
+            out.consumes = ids(v.pointer("/from/sheet"));
+        }
         Some(
             "box" | "cylinder" | "cone" | "sphere" | "torus" | "extrude" | "revolve" | "sweep"
             | "loft",
@@ -868,6 +909,7 @@ pub fn feature_acts(v: &Value) -> Acts {
         Some("base_flange") => out.founds = true,
         Some("flange" | "unfold" | "refold") => out.acts_on = ids(v.get("target")),
         Some("shell" | "offset") => out.acts_on = ids(v.get("target")),
+        Some("move_face" | "replace_face") => out.acts_on = ids(v.get("target")),
         _ => {}
     }
     out
@@ -903,7 +945,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold, fill, extract, sew, thicken, move_face, replace_face"),
     )
     .with("type", s)
 }
@@ -938,6 +980,12 @@ impl Feature {
             Feature::Unfold(_) => "unfold",
             Feature::Refold(_) => "refold",
             Feature::Planar(_) => "planar",
+            Feature::Fill(_) => "fill",
+            Feature::Extract(_) => "extract",
+            Feature::Sew(_) => "sew",
+            Feature::Thicken(_) => "thicken",
+            Feature::MoveFace(_) => "move_face",
+            Feature::ReplaceFace(_) => "replace_face",
         }
     }
 
@@ -953,8 +1001,27 @@ impl Feature {
         }
     }
 
+    /// Whether it may found a sheet: a surface sweep, a planar face, a
+    /// fill, an extract, or a sew that doesn't make a solid. A part
+    /// holding none holds no sheet, so what its features act on needs no
+    /// rebuild to judge (`server::check_references`).
+    pub fn may_make_sheet(&self) -> bool {
+        self.surface()
+            || matches!(self, Feature::Fill(_) | Feature::Extract(_))
+            || matches!(self, Feature::Sew(s) if !s.solid)
+    }
+
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
+        if matches!(
+            self,
+            Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_)
+        ) {
+            return super::surface::FORMAT;
+        }
+        if matches!(self, Feature::MoveFace(_) | Feature::ReplaceFace(_)) {
+            return super::tweak::FORMAT;
+        }
         if matches!(self, Feature::Unfold(_) | Feature::Refold(_)) {
             return super::sheet_metal::UNFOLD_FORMAT;
         }
@@ -1003,6 +1070,10 @@ impl Feature {
             Feature::Planar(_) => super::sweep::SURFACE_FORMAT,
             Feature::BaseFlange(_) | Feature::Flange(_) => super::sheet_metal::FORMAT,
             Feature::Unfold(_) | Feature::Refold(_) => super::sheet_metal::UNFOLD_FORMAT,
+            Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_) => {
+                super::surface::FORMAT
+            }
+            Feature::MoveFace(_) | Feature::ReplaceFace(_) => super::tweak::FORMAT,
         }
     }
 
@@ -1043,6 +1114,12 @@ impl Feature {
             Feature::Flange(f) => f.fields(),
             Feature::Unfold(u) => u.fields(),
             Feature::Refold(r) => r.fields(),
+            Feature::Fill(x) => x.fields(),
+            Feature::Extract(x) => x.fields(),
+            Feature::Sew(x) => x.fields(),
+            Feature::Thicken(x) => x.fields(),
+            Feature::MoveFace(m) => m.fields(),
+            Feature::ReplaceFace(r) => r.fields(),
         }
     }
 
@@ -1061,11 +1138,19 @@ impl Feature {
             "sweep" => Feature::Sweep(Box::new(Sweep::from_fields(&mut o, env)?)),
             "loft" => Feature::Loft(Box::new(Loft::from_fields(&mut o, env)?)),
             "planar" => Feature::Planar(Box::new(super::sweep::Planar::from_fields(&mut o)?)),
+            "fill" => Feature::Fill(Box::new(Fill::from_fields(&mut o, default, env)?)),
+            "extract" => Feature::Extract(Box::new(Extract::from_fields(&mut o)?)),
+            "sew" => Feature::Sew(Box::new(Sew::from_fields(&mut o, default, env)?)),
+            "thicken" => Feature::Thicken(Box::new(Thicken::from_fields(&mut o, default, env)?)),
             "boolean" => Feature::Boolean(Boolean::from_fields(&mut o)?),
             "fillet" => Feature::Fillet(Fillet::from_fields(&mut o, default, env)?),
             "chamfer" => Feature::Chamfer(Chamfer::from_fields(&mut o, default, env)?),
             "shell" => Feature::Shell(Box::new(Shell::from_fields(&mut o, default, env)?)),
             "offset" => Feature::Offset(Box::new(Offset::from_fields(&mut o, default, env)?)),
+            "move_face" => {
+                Feature::MoveFace(Box::new(MoveFace::from_fields(&mut o, default, env)?))
+            }
+            "replace_face" => Feature::ReplaceFace(Box::new(ReplaceFace::from_fields(&mut o)?)),
             "mirror" => Feature::Mirror(Box::new(Mirror::from_fields(&mut o)?)),
             "split" => Feature::Split(Box::new(Split::from_fields(&mut o)?)),
             "base_flange" => {
@@ -1114,9 +1199,14 @@ impl Feature {
             Feature::Revolve(r) => Some(&r.combine),
             Feature::Sweep(w) => Some(&w.combine),
             Feature::Loft(l) => Some(&l.combine),
-            // An import always founds its own solid, a planar face its
-            // own sheet.
-            Feature::Import(_) | Feature::Planar(_) => Some(&NEW),
+            // An import always founds its own solid, a planar face, a
+            // fill and an extract their own sheet.
+            Feature::Import(_) | Feature::Planar(_) | Feature::Fill(_) | Feature::Extract(_) => {
+                Some(&NEW)
+            }
+            // A sew founds the body it sews.
+            Feature::Sew(_) => Some(&NEW),
+            Feature::Thicken(t) => Some(&t.combine),
             // A base flange always founds its own solid.
             Feature::BaseFlange(_) => Some(&NEW),
             Feature::Mirror(m) => Some(&m.combine),
@@ -1136,13 +1226,15 @@ impl Feature {
             | Feature::Split(_)
             | Feature::Flange(_)
             | Feature::Unfold(_)
-            | Feature::Refold(_) => None,
+            | Feature::Refold(_)
+            | Feature::MoveFace(_)
+            | Feature::ReplaceFace(_) => None,
         }
     }
 
     /// The solids it acts on, by their founders, in the order it names
     /// them: an operation's, a hole's or a pattern's targets, a boolean's
-    /// target then tools, a shell's or offset's target, or the solids a
+    /// target then tools, a sew's sheets, a thicken's targets then its sheet, a shell's or offset's target, or the solids a
     /// fillet's or chamfer's references name, each once (one, unless the
     /// file mixes them).
     pub fn targets(&self) -> Vec<&Id> {
@@ -1165,6 +1257,12 @@ impl Feature {
             Feature::Flange(f) => vec![&f.target],
             Feature::Unfold(u) => vec![&u.target],
             Feature::Refold(r) => vec![&r.target],
+            // The sheets a sew consumes, as a boolean's tools are its.
+            Feature::Sew(s) => s.sheets.iter().collect(),
+            // A thicken's targets, then the sheet it consumes.
+            Feature::Thicken(t) => t.combine.targets.iter().chain(t.sheet()).collect(),
+            Feature::MoveFace(m) => vec![&m.target],
+            Feature::ReplaceFace(r) => vec![&r.target],
             f => f
                 .combine()
                 .map_or(Vec::new(), |c| c.targets.iter().collect()),
@@ -1178,6 +1276,18 @@ impl Feature {
         match self {
             Feature::Split(s) => s.keep == super::body::Keep::Both,
             f => f.combine().is_some_and(Combine::is_new),
+        }
+    }
+
+    /// The bodies it consumes, by founder: a boolean's tools, a sew's
+    /// sheets, a thicken's sheet. Their chains end here: nothing acts on
+    /// them or refers to them after it.
+    pub fn consumes(&self) -> Vec<&Id> {
+        match self {
+            Feature::Boolean(b) => b.tools.iter().collect(),
+            Feature::Sew(s) => s.sheets.iter().collect(),
+            Feature::Thicken(t) => t.sheet().into_iter().collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -1279,7 +1389,9 @@ impl Feature {
     /// with its role in the feature (`plane`, `x`, `target`, `axis`,
     /// `entities.<id>`, `groups.<i>.edges.<j>`, `groups.<i>.face`,
     /// `depth`, `direction`, `direction2`, `plane`, a shell's `open.<i>`
-    /// and a shell's or offset's `faces.<i>.faces.<j>`), in a fixed order.
+    /// a shell's or offset's `faces.<i>.faces.<j>`, and a tweak's
+    /// `faces.<i>`, `groups.<i>.faces.<j>`, `direction`, `axis` and
+    /// `groups.<i>.with`), in a fixed order.
     pub fn references(&self) -> Vec<(String, &Reference)> {
         match self {
             Feature::Sketch(s) => s.references(),
@@ -1290,6 +1402,20 @@ impl Feature {
             Feature::Flange(f) => f.references(),
             Feature::Unfold(u) => u.references(),
             Feature::Refold(r) => r.references(),
+            Feature::Extract(x) => x.references(),
+            Feature::Thicken(x) => x.references(),
+            // A fill's edge sides, then the edges its curve sides name.
+            Feature::Fill(x) => x
+                .references()
+                .into_iter()
+                .chain(
+                    x.geometry()
+                        .into_iter()
+                        .filter_map(|(k, g)| Some((k, g.reference()?))),
+                )
+                .collect(),
+            Feature::MoveFace(m) => m.references(),
+            Feature::ReplaceFace(r) => r.references(),
             _ => self
                 .geometry()
                 .into_iter()
@@ -1323,6 +1449,9 @@ impl Feature {
             Feature::Mirror(m) => vec![("plane".to_owned(), &m.plane)],
             Feature::Split(s) => vec![("plane".to_owned(), &s.plane)],
             Feature::Planar(p) => p.geometry(),
+            Feature::Fill(x) => x.geometry(),
+            Feature::MoveFace(m) => m.geometry(),
+            Feature::ReplaceFace(r) => r.geometry(),
             _ => Vec::new(),
         }
     }
@@ -1768,6 +1897,7 @@ mod tests {
             }
         );
         const { assert!(FEATURE_FORMAT >= super::super::sheet_metal::UNFOLD_FORMAT) };
+        const { assert!(FEATURE_FORMAT >= super::super::tweak::FORMAT) };
     }
 
     #[test]
@@ -2353,5 +2483,135 @@ mod tests {
             expression_fields(&s),
             [("/constraints/d1/value".to_owned(), "w / 2".to_owned())]
         );
+    }
+
+    #[test]
+    fn fills_and_extracts_are_format_15_and_found_sheets() {
+        use super::super::surface::FORMAT;
+        const A: &str = "0123456789abcdef0123456789abcdef";
+        let fill = json!({"format": FORMAT, "kind": FEATURE_KIND, "type": "fill",
+                          "sides": [{"edge": {"feature": "w", "name": A}, "tangent": true},
+                                    {"curve": {"feature": "s", "entity": "l1"}},
+                                    {"curve": {"feature": "p1"}}],
+                          "tolerance": "0.001 mm", "angle": "1 deg"});
+        let f = Feature::from_json(&fill, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!(
+            (f.type_name(), f.format(), feature_format(&fill)),
+            ("fill", FORMAT, FORMAT)
+        );
+        assert!(f.founds() && f.may_make_sheet() && f.targets().is_empty());
+        assert_eq!(f.to_json(), fill);
+        let reads: Vec<&str> = f.geometry_reads().into_iter().map(Id::as_str).collect();
+        assert_eq!(reads, ["s", "p1", "w"]);
+        let a = feature_acts(&fill);
+        assert!(a.founds && a.acts_on.is_empty());
+        let ex = json!({"format": FORMAT, "kind": FEATURE_KIND, "type": "extract",
+                        "faces": [{"feature": "base", "name": A}]});
+        let f = Feature::from_json(&ex, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!(
+            (f.type_name(), f.format(), feature_format(&ex)),
+            ("extract", FORMAT, FORMAT)
+        );
+        assert!(f.founds() && f.may_make_sheet() && f.targets().is_empty());
+        assert_eq!(f.to_json(), ex);
+        assert!(feature_acts(&ex).founds);
+        // The newest format is the largest stage's, at least this one.
+        const { assert!(FEATURE_FORMAT >= FORMAT) };
+        // A fill's tolerance and angle are expressions an equations table lists.
+        let fields: Vec<String> = expression_fields(&fill)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(fields, ["/angle", "/tolerance"]);
+    }
+
+    #[test]
+    fn sews_and_thickens_are_format_15_and_consume_their_sheets() {
+        use super::super::surface::FORMAT;
+        const A: &str = "0123456789abcdef0123456789abcdef";
+        let ids = |v: Vec<&Id>| -> Vec<String> { v.into_iter().map(|i| i.to_string()).collect() };
+        let sew = json!({"format": FORMAT, "kind": FEATURE_KIND, "type": "sew",
+                         "sheets": ["a", "b"], "tolerance": "0.01 mm", "solid": false});
+        let f = Feature::from_json(&sew, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!(
+            (f.type_name(), f.format(), feature_format(&sew)),
+            ("sew", FORMAT, FORMAT)
+        );
+        assert!(f.founds() && f.may_make_sheet());
+        assert_eq!(
+            (ids(f.targets()), ids(f.consumes())),
+            (vec!["a".into(), "b".into()], vec!["a".into(), "b".into()])
+        );
+        assert_eq!(f.to_json(), sew);
+        let a = feature_acts(&sew);
+        assert!(a.founds && a.acts_on.is_empty());
+        assert_eq!(
+            a.consumes,
+            [
+                Id::parse("a", "feature").unwrap(),
+                Id::parse("b", "feature").unwrap()
+            ]
+        );
+        let th = json!({"format": FORMAT, "kind": FEATURE_KIND, "type": "thicken",
+                        "from": {"sheet": "skin"}, "front": "2 mm", "back": "0 mm",
+                        "operation": "join", "targets": ["base"]});
+        let f = Feature::from_json(&th, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!((f.type_name(), f.format()), ("thicken", FORMAT));
+        assert!(!f.founds() && !f.may_make_sheet());
+        assert_eq!(ids(f.targets()), ["base", "skin"]);
+        assert_eq!(ids(f.consumes()), ["skin"]);
+        let a = feature_acts(&th);
+        assert_eq!((a.founds, a.acts_on.len(), a.consumes.len()), (false, 1, 1));
+        // From faces: it consumes nothing, and reads the faces' body.
+        let th = json!({"format": FORMAT, "kind": FEATURE_KIND, "type": "thicken",
+                        "from": {"faces": [{"feature": "base", "name": A}]},
+                        "front": "2 mm", "back": "0 mm", "operation": "new"});
+        let f = Feature::from_json(&th, Unit::Mm, &Env::empty()).unwrap();
+        assert!(f.founds() && f.consumes().is_empty() && f.targets().is_empty());
+        assert_eq!(ids(f.geometry_reads()), ["base"]);
+        let fields: Vec<String> = expression_fields(&th).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(fields, ["/back", "/front"]);
+        // A boolean consumes its tools, as before.
+        let b = json!({"format": 3, "kind": FEATURE_KIND, "type": "boolean", "op": "unite",
+                       "target": "a", "tools": ["t"]});
+        let f = Feature::from_json(&b, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!(ids(f.consumes()), ["t"]);
+    }
+
+    #[test]
+    fn tweaks_load_at_their_format_and_act_on_their_target() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let p = [("d".to_owned(), crate::expr::Expr::parse("2 mm").unwrap())].into();
+        let env = Env::new(&p);
+        let v = json!({"format": super::super::tweak::FORMAT, "kind": "ryucad.feature",
+                       "type": "move_face", "target": "plate", "by": "offset",
+                       "distance": "d", "faces": [{"feature": "plate", "name": n}],
+                       "groups": [{"distance": "d / 2", "faces": [{"feature": "boss", "name": n}]}]});
+        let f = Feature::from_json(&v, Unit::Mm, &env).unwrap();
+        assert_eq!(f.type_name(), "move_face");
+        assert_eq!(f.format(), super::super::tweak::FORMAT);
+        assert_eq!(feature_format(&v), super::super::tweak::FORMAT);
+        assert_eq!(f.to_json(), v);
+        assert_eq!(f.targets(), [&Id::parse("plate", "feature").unwrap()]);
+        assert!(f.combine().is_none() && !f.founds());
+        assert_eq!(
+            feature_acts(&v).acts_on,
+            [Id::parse("plate", "feature").unwrap()]
+        );
+        let roles: Vec<String> = f.references().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(roles, ["faces.0", "groups.0.faces.0"]);
+        // Its distances are expressions an equations table lists.
+        let fields: Vec<String> = expression_fields(&v).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(fields, ["/distance", "/groups/0/distance"]);
+        assert!(feature_names(&v).contains("d"));
+        let v = json!({"format": super::super::tweak::FORMAT, "kind": "ryucad.feature",
+                       "type": "replace_face", "target": "base",
+                       "groups": [{"with": {"feature": "lid"}, "faces": [{"feature": "base", "name": n}]}]});
+        let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!(f.to_json(), v);
+        let reads: Vec<&str> = f.geometry_reads().into_iter().map(Id::as_str).collect();
+        assert_eq!(reads, ["lid", "base"]);
+        // One past the newest is too new.
+        const { assert!(FEATURE_FORMAT >= super::super::tweak::FORMAT) };
     }
 }

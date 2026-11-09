@@ -926,9 +926,90 @@ impl NurbsSurface {
     }
 }
 
+impl NurbsSurface {
+    /// [`Self::jet3_box`] for boxes small against the patches (the fit's
+    /// spans, #254): each patch's part of a box inside one of its Taylor
+    /// cells is enclosed from that cell ([`taylor::jets3`]), any other by
+    /// the cut. Certified as `jet3_box` is, but not the same bits.
+    pub(crate) fn jet3_box_small(&self, [ru, rv]: [[f64; 2]; 2]) -> [V3; 10] {
+        let (pu, pv) = self.periods();
+        let [du, dv] = self.domain();
+        let (cu, cv) = (clip(du, pu, ru), clip(dv, pv, rv));
+        let all = Iv::new(f64::NEG_INFINITY, f64::INFINITY).expect("ordered");
+        let mut out: Option<[V3; 10]> = None;
+        let patches = self.patches();
+        for index in self.patches_meeting(&cu, &cv) {
+            let patch = &patches[index];
+            for &a in &cu {
+                let Some(s) = local(patch.range[0], a) else {
+                    continue;
+                };
+                for &b in &cv {
+                    let Some(t) = local(patch.range[1], b) else {
+                        continue;
+                    };
+                    let j = match taylor::jets3(self.id(), index, patch, s, t) {
+                        Some((at, mut j)) => {
+                            j[0] = add3(j[0], [pt(at.x), pt(at.y), pt(at.z)]);
+                            j
+                        }
+                        None => patch_jet3(patch, s, t).unwrap_or([[all; 3]; 10]),
+                    };
+                    out = Some(match out {
+                        None => j,
+                        Some(o) => core::array::from_fn(|k| hull3(o[k], j[k])),
+                    });
+                }
+            }
+        }
+        out.unwrap_or_else(|| {
+            let u = ru[0].clamp(du[0], du[1]);
+            let v = rv[0].clamp(dv[0], dv[1]);
+            self.jet3_box_small([[u, u], [v, v]])
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `jet3_box_small` meets `jet3_box` on every box and holds `jet3` at
+    /// boxes' middles, on a torus's exact rational form, boxes from a
+    /// point to a tenth of the domain (#254).
+    #[test]
+    fn small_third_order_boxes_hold_and_meet_the_cut() {
+        use crate::geom::{Frame, Surface, Torus};
+        let t = Surface::Torus(Torus::new(Frame::WORLD, 2.0, 0.5).unwrap());
+        let tau = core::f64::consts::TAU;
+        let (n, _) = t.to_nurbs([[0.0, tau], [0.0, tau]]).unwrap();
+        let mut s = 0x1234_5678_9abc_def1u64;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for _ in 0..400 {
+            let w = [0.0, 1e-7, 1e-3, 0.05, 0.6][(next() * 5.0) as usize % 5];
+            let (u0, v0) = (next() * (tau - w), next() * (tau - w));
+            let b = [[u0, u0 + w], [v0, v0 + w]];
+            let (small, cut) = (n.jet3_box_small(b), n.jet3_box(b));
+            let mid = n.jet3(u0 + w / 2.0, v0 + w / 2.0);
+            for k in 0..10 {
+                for c in 0..3 {
+                    let (x, y) = (small[k][c], cut[k][c]);
+                    assert!(x.lo() <= y.hi() && y.lo() <= x.hi(), "{k}[{c}] {b:?}");
+                    let m = [mid[k].x, mid[k].y, mid[k].z][c];
+                    let slack = 1e-9 * (1.0 + m.abs());
+                    assert!(
+                        x.lo() - slack <= m && m <= x.hi() + slack,
+                        "{k}[{c}] {m} {x:?}"
+                    );
+                }
+            }
+        }
+    }
 
     /// #551: the patches a box's clipped ranges reach are found by their
     /// spans, exactly those a scan of every patch with `local` reaches,

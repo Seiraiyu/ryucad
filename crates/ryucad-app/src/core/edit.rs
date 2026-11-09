@@ -8,6 +8,12 @@
 //! human's stale edit fails with `conflict` like an agent's; the form then
 //! reloads and lists what changed instead of overwriting it.
 
+mod sheet_metal;
+pub use sheet_metal::{
+    AllowanceForm, BaseFlangeForm, EndForm, FlangeForm, OverrideForm, RefoldForm, ReliefForm,
+    SheetMetalForm, UnfoldForm,
+};
+
 use ryucad::error::Error;
 use ryucad::proto::{FeatureFields, PlacementArg, Request};
 use ryucad::units::Unit;
@@ -1325,6 +1331,9 @@ pub struct Form {
     pub mirror: Option<MirrorForm>,
     /// A split's flip and what it keeps.
     pub split: Option<SplitForm>,
+    /// A base flange's, flange's, unfold's or refold's settings, sizes
+    /// and what it names.
+    pub sheet: Option<SheetMetalForm>,
     /// An instance's revision (`working` or a label) and whether it is
     /// fixed; its pose is the placement, its origin in [`Form::unit`].
     pub rev: Option<Choice>,
@@ -1470,6 +1479,7 @@ impl Form {
             plane: text(&v["plane"]),
         });
         let split = (ty == "split").then(|| SplitForm::from_show(v));
+        let sheet = SheetMetalForm::from_show(&ty, v);
         Form {
             part: part.to_owned(),
             feature: text(&v["id"]),
@@ -1497,6 +1507,7 @@ impl Form {
             offset,
             mirror,
             split,
+            sheet,
             rev: instance.then(|| {
                 let read = match v["rev"]["label"].as_str() {
                     Some(l) => l.to_owned(),
@@ -1581,6 +1592,7 @@ impl Form {
             .chain(self.loft.iter().flat_map(LoftForm::fields))
             .chain(self.shell.iter().flat_map(ShellForm::fields))
             .chain(self.offset.iter().flat_map(BodyOffsetForm::fields))
+            .chain(self.sheet.iter().flat_map(SheetMetalForm::fields))
     }
 
     /// Every field, to place errors and keep what was typed.
@@ -1632,6 +1644,9 @@ impl Form {
         if let Some(o) = &mut self.offset {
             out.push(&mut o.distance);
             out.extend(o.groups.iter_mut().map(|g| &mut g.quantity));
+        }
+        if let Some(s) = &mut self.sheet {
+            out.extend(s.fields_mut());
         }
         out
     }
@@ -1691,7 +1706,8 @@ impl Form {
                     _ => None,
                 }
             }
-            _ => None,
+            // A sheet metal feature's end, override or relief size.
+            steps => self.sheet.as_mut()?.at_pointer(steps),
         }
     }
 
@@ -1743,6 +1759,7 @@ impl Form {
             || self.shell.as_ref().is_some_and(ShellForm::dirty)
             || self.offset.as_ref().is_some_and(BodyOffsetForm::dirty)
             || self.split.as_ref().is_some_and(SplitForm::dirty)
+            || self.sheet.as_ref().is_some_and(SheetMetalForm::dirty)
     }
 
     /// Everything typed or chosen goes back as it was read.
@@ -1806,6 +1823,9 @@ impl Form {
             o.revert();
         }
         if let Some(s) = &mut self.split {
+            s.revert();
+        }
+        if let Some(s) = &mut self.sheet {
             s.revert();
         }
         // A refusal was about a value now put back (#532).
@@ -1879,6 +1899,9 @@ impl Form {
             o.given(&mut out);
         }
         if let Some(s) = &self.split {
+            s.given(&mut out);
+        }
+        if let Some(s) = &self.sheet {
             s.given(&mut out);
         }
         Ok(out)

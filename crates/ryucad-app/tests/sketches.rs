@@ -12,7 +12,7 @@ use std::time::Duration;
 const WAIT: Duration = Duration::from_secs(30);
 
 fn open(p: &Project) -> Workspace {
-    Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap()
+    common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap()
 }
 
 fn key() -> (String, String) {
