@@ -3398,6 +3398,107 @@ fn datums_from_the_cli() {
 }
 
 #[test]
+fn drafts_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "box"]);
+    p.ok(&[
+        "feature", "add", "box", "box", "--id", "base", "--param", "x=40", "--param", "y=30",
+        "--param", "z=20",
+    ]);
+    let base = p.ok(&["inspect", "box", "base"])["bodies"][0].clone();
+    let wall = |axis: usize, n: f64| -> String {
+        let f = base["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["z"][axis].as_f64().unwrap() * sign == n
+            })
+            .unwrap();
+        format!("box/base/{}", f["name"].as_str().unwrap())
+    };
+    let (east, west, north, south) = (wall(0, 1.0), wall(0, -1.0), wall(1, 1.0), wall(1, -1.0));
+    let north_angle = format!("{north}=5deg");
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "box",
+        "draft",
+        "--id",
+        "d",
+        "--neutral",
+        "xy",
+        "--angle",
+        "2deg",
+        "--face",
+        &east,
+        "--face",
+        &west,
+        "--face",
+        &south,
+        "--face-angle",
+        &north_angle,
+        "--flip",
+        &south,
+    ]);
+    let f = &r["feature"];
+    assert_eq!(f["target"], "base", "{r}");
+    assert_eq!(f["faces"], json!([east, west, south]), "{r}");
+    assert_eq!(f["groups"][0]["faces"], json!([north]), "{r}");
+    assert_eq!(f["flip"], json!([south]), "{r}");
+    // The rebuild reports each face's angle.
+    let built = p.ok(&["rebuild", "box"]);
+    let d = built["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == "d")
+        .unwrap()["draft"]
+        .clone();
+    assert_eq!(d["angles"].as_array().unwrap().len(), 4, "{d}");
+    // A parting line replaces the neutral plane.
+    let rim = format!("box/base/{}", base["edges"][0]["name"].as_str().unwrap());
+    p.ok(&[
+        "feature",
+        "edit",
+        "box",
+        "d",
+        "--parting",
+        &rim,
+        "--pull",
+        "z",
+        "--no-flip",
+    ]);
+    let shown = p.ok(&["feature", "show", "box", "d"]);
+    assert!(
+        shown.get("neutral").is_none() || shown["neutral"].is_null(),
+        "{shown}"
+    );
+    assert_eq!(shown["pull"], "z", "{shown}");
+    assert!(shown.get("flip").is_none(), "{shown}");
+    // An angle out of range is the agent's to fix.
+    p.fails(
+        &["feature", "edit", "box", "d", "--angle", "90deg"],
+        "invalid_param",
+        1,
+    );
+    // The daemon logged the draft: undo takes its file away, redo puts it
+    // back.
+    let file = p.daemon.join("parts/box/features/d.json");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(!file.exists());
+    let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(file.exists());
+}
+
+#[test]
 fn face_tweaks_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
