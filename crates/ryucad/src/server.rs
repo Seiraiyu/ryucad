@@ -4060,6 +4060,11 @@ fn check_resolved(
         Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
             crate::body::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
+        // Faces of its target, its direction, axis or surfaces their
+        // kinds; what the kernel makes of them only rebuild can tell.
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) => {
+            crate::tweak::check(&proposed(p, order, &[(id, f)]), id, f, results)
+        }
         Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
             crate::sheet_metal::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
@@ -4652,7 +4657,12 @@ fn feature_edit(
         || sweep_changed
         || (matches!(
             f,
-            Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_)
+            Feature::Shell(_)
+                | Feature::Offset(_)
+                | Feature::Mirror(_)
+                | Feature::Split(_)
+                | Feature::MoveFace(_)
+                | Feature::ReplaceFace(_)
         ) && f.targets() != old.targets())
         || ((f.base_flange().is_some()
             || f.flange().is_some()

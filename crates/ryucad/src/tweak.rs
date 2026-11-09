@@ -296,6 +296,14 @@ pub fn build(part: &Part, solids: &Solids, id: &Id, f: &Feature, before: &dyn Re
     Ok(Made::new(vec![(r.target.clone(), Arc::new(built))]))
 }
 
+/// Refuses a tweak (feature `id` of `part`, as a write would leave it)
+/// whose target isn't a body before it, whose faces aren't its target's
+/// faces in its view, or whose direction, axis or surfaces don't resolve
+/// to their kinds. What the kernel makes of them only rebuild can tell.
+pub fn check(part: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result<()> {
+    resolve(part, &Solids::of(part), id, f, results).map(drop)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,5 +391,11 @@ mod tests {
         let roles: Vec<&str> = refusal(&T::SelfIntersecting { faces: [n, n] })
             .entities.iter().map(|(r, _)| *r).collect();
         assert_eq!(roles, ["a", "b"]);
+    }
+
+    #[test]
+    fn check_is_resolve() {
+        // The write-time check is the build's resolution, kernel left out.
+        let _: fn(&Part, &Id, &Feature, &dyn Results) -> Result<()> = check;
     }
 }
