@@ -189,6 +189,43 @@ impl Extract {
     }
 }
 
+/// A sew: two or more sheets, by founder, sewn along their laminar edges
+/// within `tolerance` into one body, which the sew founds and which
+/// consumes them; a result that closes up is a solid when `solid` is
+/// true, else a closed sheet.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sew {
+    pub sheets: Vec<Id>,
+    pub tolerance: Quantity,
+    pub solid: bool,
+}
+
+impl Sew {
+    pub fn fields(&self) -> Value {
+        json!({"sheets": self.sheets, "tolerance": self.tolerance.text(), "solid": self.solid})
+    }
+
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj, default: Unit, env: &Env) -> Result<Sew> {
+        new_only(o, "a sew")?;
+        let sheets = targets_from_json(&o.take("sheets")?, "/sheets")?;
+        if sheets.len() < 2 {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "a sew joins two sheets or more: name each by the feature that founded it",
+            )
+            .with("pointer", "/sheets"));
+        }
+        let tolerance = tolerance(o, "0.01 mm", default, env)?;
+        let solid = match o.take_opt("solid") {
+            None => true,
+            Some(Value::Bool(b)) => b,
+            Some(_) => return Err(invalid("/solid", "solid is true or false")),
+        };
+        Ok(Sew { sheets, tolerance, solid })
+    }
+}
+
 /// Refuses an operation or targets on a feature that founds a sheet of
 /// its own (`what`: "an extract").
 fn new_only(o: &Obj, what: &str) -> Result<()> {
@@ -290,6 +327,36 @@ mod tests {
             (json!({"faces": [face(A)], "operation": "join"}), Code::InvalidParam, "/operation"),
         ] {
             let e = extract(v.clone()).unwrap_err();
+            assert_eq!((e.code, e.details["pointer"].as_str()), (code, Some(pointer)), "{v}");
+        }
+    }
+
+    fn sew(v: Value) -> Result<Sew> {
+        let mut o = Obj::new(&v, "")?;
+        let s = Sew::from_fields(&mut o, Unit::Mm, &Env::empty())?;
+        o.finish()?;
+        Ok(s)
+    }
+
+    #[test]
+    fn sews_round_trip_and_are_checked() {
+        let s = sew(json!({"sheets": ["top", "side1", "side2"]})).unwrap();
+        // The tolerance and solid are always written, defaults included.
+        assert_eq!(s.fields(), json!({"sheets": ["top", "side1", "side2"],
+                                      "tolerance": "0.01 mm", "solid": true}));
+        assert_eq!(sew(s.fields()).unwrap(), s);
+        let s = sew(json!({"sheets": ["a", "b"], "tolerance": "0.05 mm", "solid": false})).unwrap();
+        assert!(!s.solid);
+        assert_eq!(s.tolerance.meters(), 5e-5);
+        for (v, code, pointer) in [
+            (json!({}), Code::InvalidDocument, "/sheets"),
+            (json!({"sheets": ["a"]}), Code::InvalidParam, "/sheets"),
+            (json!({"sheets": ["a", "a"]}), Code::InvalidDocument, "/sheets/1"),
+            (json!({"sheets": ["a", "b"], "solid": "yes"}), Code::InvalidDocument, "/solid"),
+            (json!({"sheets": ["a", "b"], "tolerance": "1 mm"}), Code::InvalidParam, "/tolerance"),
+            (json!({"sheets": ["a", "b"], "operation": "join"}), Code::InvalidParam, "/operation"),
+        ] {
+            let e = sew(v.clone()).unwrap_err();
             assert_eq!((e.code, e.details["pointer"].as_str()), (code, Some(pointer)), "{v}");
         }
     }
