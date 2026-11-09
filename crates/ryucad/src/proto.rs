@@ -408,8 +408,9 @@ pub struct FeatureFields {
     /// Which sides a split keeps: `both` (the default) or `behind`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep: Option<String>,
-    /// A base flange's bend allowance: `{"k_factor": n}` or
-    /// `{"deduction": length}`.
+    /// A base flange's or unfold's bend allowance: `{"k_factor": n}`,
+    /// `{"deduction": length}` or (an unfold's) `{"allowance": length}`;
+    /// `""` drops an unfold's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowance: Option<Value>,
     /// A base flange's or flange's relief: `{"kind": none | rectangular |
@@ -438,6 +439,23 @@ pub struct FeatureFields {
     /// `{edge, side}`; `[]` takes every side away.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sides: Option<Value>,
+    /// An unfold's fixed face, a side face of the flange held still
+    /// (`<part>/<solid>/<name>`, written `fixed`); `""` for the kernel's
+    /// default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_face: Option<String>,
+    /// An unfold's or refold's bends, each by one of its faces; given,
+    /// they replace them all (`[]` for every bend).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only: Option<Vec<String>>,
+    /// An unfold's allowance overrides, replacing them all:
+    /// `[{"bend": "<part>/<solid>/<name>", "k_factor" | "deduction" |
+    /// "allowance": Q}]` (`[]` for none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bends: Option<Value>,
+    /// The unfold a refold folds back by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unfold: Option<String>,
 }
 
 impl FeatureFields {
@@ -914,6 +932,26 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// A solid's flat pattern, as the part shows it: unfolded whole in
+    /// memory when folded (about `fixed`, a side face, each bend at its
+    /// override in `bends` else the solid's allowance), else redrawn
+    /// through the unfold in force. Its loops' segments exact in
+    /// millimetres with their edges and polylines, its bend lines with
+    /// their notes. `solid` is the part's one sheet metal solid unless
+    /// named.
+    #[serde(rename = "flat.get")]
+    FlatGet {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        solid: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fixed: Option<String>,
+        /// `{bend, k_factor | deduction | allowance}`, as an unfold's.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bends: Vec<Value>,
+    },
     /// Mass properties of a part or an assembly (its ID), a solid
     /// (`<part>/<solid>`) or an occurrence (`<asm>/<path>`): volume, area,
     /// centre of mass and, where every part has a material with a
@@ -1177,6 +1215,14 @@ pub enum Request {
         pipe_tolerance: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         skip_failing: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        solid: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notes: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fixed: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bends: Vec<Value>,
     },
     #[serde(rename = "rebuild")]
     Rebuild {
@@ -1782,6 +1828,12 @@ pub enum Request {
         /// participant's).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fraction: Option<f64>,
+        /// Draw a sheet metal solid's flat pattern instead of the model:
+        /// the solid's flat body seen from its viewer side, its bend lines
+        /// dashed with their notes; `""` for the part's one sheet metal
+        /// solid.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flat: Option<String>,
     },
     /// Diagnoses the project folder: every problem, with a stable code.
     #[serde(rename = "doctor")]

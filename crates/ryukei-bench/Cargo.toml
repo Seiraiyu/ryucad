@@ -20,6 +20,9 @@ formats = ["dep:cxx", "dep:cxx-build"]
 # USD's references: OpenUSD and usd-brep (its validator and SMLib) from
 # Python, which the devcontainer installs in /opt/usd. No C++ to build.
 usd = []
+# DXF's reference: ezdxf from Python, which the devcontainer installs in
+# /opt/usd beside OpenUSD. No C++ to build.
+dxf = []
 
 [dependencies]
 cxx = { version = "1", optional = true }
@@ -176,6 +179,11 @@ required-features = ["occt", "formats"]
 [[test]]
 name = "usd"
 required-features = ["usd"]
+
+# Flat patterns' DXF read by ezdxf (design 346, plan 16.B).
+[[test]]
+name = "dxf"
+required-features = ["dxf"]
 
 # Every surface against OCCT and SMLib (design 94, plan 8.F): the NURBS
 # race, lofts, sweeps, offsets, shells and intersections.

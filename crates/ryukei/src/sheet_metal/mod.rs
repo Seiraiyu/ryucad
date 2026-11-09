@@ -19,6 +19,9 @@
 //! [`FlatPattern`] of exact plane curves and a [`FlatMap`], what refolding
 //! needs.
 //!
+//! [`redraw`] draws the pattern of a flat cut since it was unfolded, seen
+//! as the unfold's pattern saw it.
+//!
 //! [`flange`] adds bends and flanges on straight sheet edges: each
 //! [`EdgeFlange`] is a bend (a revolve of the sheet's section about the
 //! bend's axis) and a flange (an extrude of its end section), with the
@@ -51,7 +54,7 @@ mod unfold;
 pub(crate) mod tests;
 
 pub use flange::flange;
-pub use pattern::{BendLine, FlatPattern, PatternLoop, PatternSegment};
+pub use pattern::{BendLine, FlatPattern, PatternLoop, PatternSegment, redraw};
 pub use recognize::recognize;
 pub use refold::refold;
 pub use unfold::unfold;

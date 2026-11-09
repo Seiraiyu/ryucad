@@ -1,27 +1,33 @@
 //! The sheet metal report (`sheet.get`): a solid recognized as the part
 //! shows it, in the agent's terms. Every face is a reference
 //! (`<part>/<solid>/<name>`); a bend is named by its least inner face.
+//! Its `state` is `flat` while an unfold of the solid is in force,
+//! `partly` while a partial one is, else `folded`.
 
 use crate::doc::sheet_metal::Allowance;
 use crate::error::{Code, Error, Result};
 use crate::session::Session;
 use crate::solid::Solids;
-use core::f64::consts::PI;
 use ryukei::sheet_metal::{BendDirection, SheetOptions};
 use serde_json::{Value, json};
 
-pub fn get(
-    session: &mut Session,
-    part: &str,
+/// The solid `solid` names among `r`'s shown solids, else its one solid,
+/// else its one solid a base flange founded: its founder, the feature
+/// whose result shows, and the solid as it left it. `not_found` for a
+/// solid it lacks, `invalid_param` when it can't choose, the tip's error
+/// when nothing of the solid built.
+pub(crate) fn pick(
+    p: &crate::doc::project::Part,
+    r: &crate::rebuild::PartResult,
+    solids: &Solids,
     solid: Option<&str>,
-    rev: Option<&str>,
-) -> Result<Value> {
-    let (commit, s) = session.at(rev)?;
-    let pid = crate::server::part_id(part)?;
-    let p = s.project().part(&pid)?.clone();
-    let solids = Solids::of(&p);
-    let r = s.rebuilt(&pid)?.clone();
-    let shown = r.shown(&solids);
+) -> Result<(
+    crate::doc::id::Id,
+    crate::doc::id::Id,
+    std::sync::Arc<crate::rebuild::Built>,
+)> {
+    let pid = &p.id;
+    let shown = r.shown(solids);
     let pick = match solid {
         Some(x) => shown
             .iter()
@@ -37,7 +43,7 @@ pub fn get(
         None => {
             let sheet: Vec<_> = shown
                 .iter()
-                .filter(|y| super::founder(&p, y.solid).is_some())
+                .filter(|y| super::founder(p, y.solid).is_some())
                 .collect();
             match (shown.as_slice(), sheet.as_slice()) {
                 ([one], _) => one,
@@ -54,7 +60,7 @@ pub fn get(
         }
     };
     let solid = pick.solid.clone();
-    let Some((_, built)) = pick.state else {
+    let Some((at, built)) = pick.state else {
         return Err(pick.error.cloned().unwrap_or_else(|| {
             Error::new(
                 Code::DependencyFailed,
@@ -63,6 +69,22 @@ pub fn get(
             .with("solid", &solid)
         }));
     };
+    Ok((solid, at.clone(), built.clone()))
+}
+
+pub fn get(
+    session: &mut Session,
+    part: &str,
+    solid: Option<&str>,
+    rev: Option<&str>,
+) -> Result<Value> {
+    let (commit, s) = session.at(rev)?;
+    let pid = crate::server::part_id(part)?;
+    let p = s.project().part(&pid)?.clone();
+    let solids = Solids::of(&p);
+    let r = s.rebuilt(&pid)?.clone();
+    let (solid, shown, built) = pick(&p, &r, &solids, solid)?;
+    let built = built.as_ref();
     let options = SheetOptions::default();
     let model = ryukei::sheet_metal::recognize(&built.body, &options)
         .map_err(|e| super::refusal(&pid, &solid, "sheet", (&solid, built), e))?;
@@ -76,17 +98,10 @@ pub fn get(
         .map(|b| {
             let (developed, note) = match founder.map(|f| &f.allowance) {
                 None => (None, Some("no base flange founded the solid, so it has no allowance")),
-                Some(Allowance::KFactor(k)) => (Some(b.angle * (b.radius + k.number() * t)), None),
-                Some(Allowance::Deduction(bd)) if b.angle < PI - 1e-9 => {
-                    let ba = 2.0 * (b.radius + t) * ryukei::math::tan(b.angle / 2.0) - bd.meters();
-                    if ba > ryukei::tol::LINEAR_RESOLUTION {
-                        (Some(ba), None)
-                    } else {
-                        (None, Some("the deduction is longer than the bend's own length to its mould lines"))
-                    }
-                }
-                Some(Allowance::Deduction(_)) => (None, Some("a bend deduction is defined under a half turn: give this bend its allowance when unfolding")),
-                Some(Allowance::Length(q)) => (Some(q.meters()), None),
+                Some(a) => match super::allowance::developed(a, b.radius, t, b.angle) {
+                    Ok(ba) => (Some(ba), None),
+                    Err(e) => (None, Some(e.message())),
+                },
             };
             let mut v = json!({
                 "bend": at(&b.inner[0]),
@@ -127,6 +142,16 @@ pub fn get(
         "flanges": flanges,
         "bends": bends,
     });
+    if let Some((u, fl)) = super::unfold::in_force(&p, &solids, &solid, &shown, &r) {
+        v["state"] = json!(if fl.partial { "partly" } else { "flat" });
+        v["unfold"] = json!(u);
+        v["unfolded"] = Value::Array(
+            fl.bends
+                .iter()
+                .map(|b| json!(format!("{pid}/{solid}/{}", b.inner[0])))
+                .collect(),
+        );
+    }
     if let Some(c) = &model.cycle {
         v["cycle"] = json!({"bends": all(&c.bends), "faces": all(&c.faces)});
     }

@@ -118,6 +118,13 @@ pub struct Ask {
     pub mesh: Option<bool>,
     pub pipe_tolerance: Option<String>,
     pub skip_failing: bool,
+    /// DXF: the sheet metal solid (the part's one unless named), whether
+    /// to write bend notes (true), the side face held still and allowance
+    /// overrides, as `flat.get` takes them.
+    pub solid: Option<String>,
+    pub notes: Option<bool>,
+    pub fixed: Option<String>,
+    pub bends: Vec<Value>,
 }
 
 /// The formats `export` writes.
@@ -129,16 +136,18 @@ pub enum Format {
     Usda,
     Usdc,
     Usdz,
+    Dxf,
 }
 
 impl Format {
-    pub const ALL: [Format; 6] = [
+    pub const ALL: [Format; 7] = [
         Format::Step,
         Format::Stl,
         Format::ThreeMf,
         Format::Usda,
         Format::Usdc,
         Format::Usdz,
+        Format::Dxf,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -149,6 +158,7 @@ impl Format {
             Format::Usda => "usda",
             Format::Usdc => "usdc",
             Format::Usdz => "usdz",
+            Format::Dxf => "dxf",
         }
     }
 
@@ -163,7 +173,7 @@ impl Format {
 
     /// The format a file name's extension names, in any case: `.step` or
     /// `.stp`, `.stl`, `.3mf`, `.usda`, `.usdc` or `.usd` (USD's binary
-    /// encoding, as OpenUSD writes `.usd` by default), `.usdz`.
+    /// encoding, as OpenUSD writes `.usd` by default), `.usdz`, `.dxf`.
     pub fn of_path(path: &str) -> Option<Format> {
         let ext = std::path::Path::new(path).extension()?.to_str()?;
         match ext.to_ascii_lowercase().as_str() {
@@ -173,6 +183,7 @@ impl Format {
             "usda" => Some(Format::Usda),
             "usdc" | "usd" => Some(Format::Usdc),
             "usdz" => Some(Format::Usdz),
+            "dxf" => Some(Format::Dxf),
             _ => None,
         }
     }
@@ -204,6 +215,7 @@ enum Options {
         /// None without B-rep.
         pipe_tolerance: Option<Quantity>,
     },
+    Dxf(ryuformats::dxf::DxfOptions),
 }
 
 /// The tolerance pipes and sweeps are written within by default, as
@@ -229,7 +241,27 @@ impl Options {
             not_for("mesh", ask.mesh.is_some())?;
             not_for("pipe_tolerance", ask.pipe_tolerance.is_some())?;
         }
+        if format != Format::Dxf {
+            not_for("solid", ask.solid.is_some())?;
+            not_for("notes", ask.notes.is_some())?;
+            not_for("fixed", ask.fixed.is_some())?;
+            not_for("bends", !ask.bends.is_empty())?;
+        }
         match format {
+            Format::Dxf => {
+                not_for("schema", ask.schema.is_some())?;
+                not_for("ascii", ask.ascii)?;
+                not_for("chord", ask.chord.is_some())?;
+                not_for("angle", ask.angle.is_some())?;
+                not_for("max_edge", ask.max_edge.is_some())?;
+                not_for("skip_failing", ask.skip_failing)?;
+                let unit = ryuformats::dxf::DxfUnit::parse(unit)
+                    .ok_or_else(|| invalid("unit", unit, "mm or in"))?;
+                Ok(Options::Dxf(ryuformats::dxf::DxfOptions {
+                    unit,
+                    notes: ask.notes.unwrap_or(true),
+                }))
+            }
             Format::Usda | Format::Usdc | Format::Usdz => {
                 not_for("schema", ask.schema.is_some())?;
                 not_for("ascii", ask.ascii)?;
@@ -523,6 +555,9 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
         .map(|o| out_path(o, session.root()))
         .transpose()?;
     let part = crate::server::part_id(&ask.part)?;
+    if let Options::Dxf(o) = options {
+        return dxf(session, &ask, part, o, out.as_deref());
+    }
     let (label, git) = match ask.rev.as_deref() {
         Some(r) if r.starts_with("label:") => {
             let l = &r["label:".len()..];
@@ -639,6 +674,7 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
         result["commit"] = json!(c);
     }
     match options {
+        Options::Dxf(_) => unreachable!("written by dxf"),
         Options::Step {
             schema,
             schema_name,
@@ -799,6 +835,62 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
             )
         }
     }
+}
+
+/// A sheet metal solid's flat pattern as DXF (design 346): `flat::of`'s
+/// pattern written by `ryuformats::dxf`. An assembly is `invalid_param`,
+/// as is a release label: a flat is its commit's.
+fn dxf(
+    session: &mut Session,
+    ask: &Ask,
+    part: Id,
+    o: ryuformats::dxf::DxfOptions,
+    out: Option<&std::path::Path>,
+) -> Result<Answer> {
+    if ask.rev.as_deref().is_some_and(|r| r.starts_with("label:")) {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a DXF is of a commit: export the release's commit (--rev <commit>)",
+        )
+        .with("param", "rev"));
+    }
+    let (_, s) = session.at(ask.rev.as_deref())?;
+    let p = s.project().part(&part)?;
+    if crate::server::part_kind(p) == crate::doc::files::PartKind::Assembly {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("{part} is an assembly: a DXF is one sheet metal solid's flat"),
+        )
+        .with("param", "part"));
+    }
+    let flat_options = crate::sheet_metal::flat::Options {
+        fixed: ask.fixed.clone(),
+        bends: ask.bends.clone(),
+    };
+    let (commit, f) = crate::sheet_metal::flat::of(
+        session,
+        part.as_str(),
+        ask.solid.as_deref(),
+        ask.rev.as_deref(),
+        &flat_options,
+    )?;
+    let bytes = ryuformats::dxf::write(&f.pattern, &o)
+        .map_err(|e| Error::new(Code::Internal, format!("writing DXF: {e}")))?;
+    let mut result = json!({
+        "part": part,
+        "solid": f.solid,
+        "format": "dxf",
+        "unit": o.unit.as_str(),
+        "notes": o.notes,
+        "from": match &f.from { crate::sheet_metal::flat::From::Whole => "whole", crate::sheet_metal::flat::From::Unfold(_) => "unfold" },
+        "loops": f.pattern.loops.len(),
+        "bend_lines": f.pattern.bend_lines.len(),
+    });
+    if let Some(c) = commit {
+        result["commit"] = json!(c);
+    }
+    let (_, s) = session.at(ask.rev.as_deref())?;
+    deliver(&s.job, result, out, "dxf", |w| w.write_all(&bytes))
 }
 
 /// USD's model of a scene: each product's solids with their bodies (each
@@ -2162,6 +2254,112 @@ pub(crate) mod tests {
         (0..n)
             .map(|t| [0, 1, 2].map(|v| [0, 1, 2].map(|k| f(84 + 50 * t + 12 + 12 * v + 4 * k))))
             .collect()
+    }
+
+    /// An L base flange `bl` in part `p`, 20 mm deep: runs of 40 and 30 mm
+    /// on the sketch, 1.5 mm thick, 1 mm inside, K 0.44.
+    fn l_bracket(s: &mut Session) {
+        add(s, "p", json!({"type": "sketch", "id": "l", "plane": "xy"}));
+        let mut ops = Vec::new();
+        for (i, at) in [[40.0, 0.0], [0.0, 0.0], [0.0, 30.0]]
+            .into_iter()
+            .enumerate()
+        {
+            ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
+            ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+        }
+        for i in 1..=2 {
+            ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                            "start": format!("p{i}"), "end": format!("p{}", i + 1)}));
+        }
+        crate::server::handle(
+            s,
+            crate::proto::Request::from_rpc(
+                "sketch.edit",
+                Some(json!({"part": "p", "sketch": "l", "ops": ops})),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        add(
+            s,
+            "p",
+            json!({"type": "base_flange", "id": "bl", "sketch": "l", "thickness": "1.5 mm",
+                           "radius": "1 mm", "allowance": {"k_factor": "0.44"}, "depth": "20 mm"}),
+        );
+    }
+
+    #[test]
+    fn a_sheet_metal_part_exports_its_flat_as_dxf() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        l_bracket(&mut s);
+        let (v, bytes) = exported(&mut s, json!({"part": "p", "format": "dxf"})).unwrap();
+        assert_eq!(
+            (
+                v["format"].as_str(),
+                v["solid"].as_str(),
+                v["unit"].as_str()
+            ),
+            (Some("dxf"), Some("bl"), Some("mm"))
+        );
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(text.contains("AC1015") && text.contains("BEND_NOTES") && text.contains("K0.44"));
+        // The same flat as flat.get's, in inches without notes, by extension.
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("l.DXF");
+        let v = answered(
+            &mut s,
+            json!({"part": "p", "out": out, "unit": "in", "notes": false}),
+        )
+        .unwrap()
+        .result;
+        assert_eq!(v["format"], "dxf");
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert!(
+            !text.contains("K0.44") && text.contains("$INSUNITS\n 70\n1\n"),
+            "{text}"
+        );
+        // Twice, the same bytes.
+        assert_eq!(
+            exported(&mut s, json!({"part": "p", "format": "dxf"}))
+                .unwrap()
+                .1,
+            bytes
+        );
+    }
+
+    #[test]
+    fn a_dxf_refuses_what_it_cant_write() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        l_bracket(&mut s);
+        for (params, param) in [
+            (json!({"part": "p", "format": "dxf", "unit": "cm"}), "unit"),
+            (
+                json!({"part": "p", "format": "dxf", "chord": "0.1 mm"}),
+                "chord",
+            ),
+            (
+                json!({"part": "p", "format": "stl", "notes": false}),
+                "notes",
+            ),
+            (
+                json!({"part": "p", "format": "step", "solid": "bl"}),
+                "solid",
+            ),
+            (
+                json!({"part": "p", "format": "dxf", "rev": "label:A"}),
+                "rev",
+            ),
+        ] {
+            let e = exported(&mut s, params.clone()).unwrap_err();
+            assert_eq!(
+                (e.code, e.details["param"].as_str()),
+                (Code::InvalidParam, Some(param)),
+                "{params}: {e}"
+            );
+        }
     }
 
     #[test]

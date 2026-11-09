@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod brep;
+pub mod dxf;
 pub mod usda;
 pub mod usdc;
 

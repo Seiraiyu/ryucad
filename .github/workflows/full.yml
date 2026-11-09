@@ -152,6 +152,7 @@ jobs:
       - run: cargo test -p ryustep --release --test mass
       - run: cargo test -p ryustep --release --test cancel
       - run: cargo test -p ryucad --release --test bar -- --nocapture
+      - run: cargo test -p ryucad --release --test sheet_metal_flat_bar -- --nocapture
       - run: cargo test -p ryucad --release --test assembly_bar -- --nocapture
       - run: cargo test -p ryupdm --release --test api -- --nocapture
       - run: cargo test -p ryucad --release --test step_bar -- --nocapture
@@ -289,6 +290,7 @@ jobs:
             RYUCAD_REQUIRE_CORPUS=1 cargo test -p ryukei-bench --features occt --release --test projection -- --nocapture --test-threads 1
             cargo test -p ryukei-bench --features occt --release --test drafts -- --nocapture
             cargo test -p ryukei-bench --features usd --release --test usd -- --nocapture
+            cargo test -p ryukei-bench --features dxf --release --test dxf -- --nocapture
             cargo test -p ryukei-bench --features occt,usd --release --test nurbs -- --skip race --nocapture
             cargo bench -p ryukei-bench --features occt,smlib --no-run
           push: never

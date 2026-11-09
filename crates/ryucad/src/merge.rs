@@ -433,7 +433,7 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
             if same_type
                 && matches!(
                     ty(b).0.as_ref().and_then(Value::as_str),
-                    Some("base_flange" | "flange")
+                    Some("base_flange" | "flange" | "unfold" | "refold")
                 ) =>
         {
             sheet_metal(walk, b, ours, theirs)
@@ -579,7 +579,9 @@ fn sweep(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Value {
 /// A base flange or flange: per key, but its allowance and relief are one
 /// value each (a form and its sizes go together: two sides changing an
 /// obround's width and making it a tear conflict once, at `/relief`). Its
-/// edges and ends are arrays, one value each already.
+/// edges and ends are arrays, one value each already. An unfold's
+/// allowance is one value as a base flange's is; its and a refold's
+/// `only` and an unfold's `bends` are arrays, one value each.
 fn sheet_metal(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Value {
     let obj = |v: &Value| v.as_object().cloned().unwrap_or_default();
     let (b, o, t) = (obj(base), obj(ours), obj(theirs));
@@ -1412,6 +1414,70 @@ mod tests {
             &flange(json!({"length": "25 mm"})),
         );
         assert!(m.conflicts.is_empty());
+    }
+
+    #[test]
+    fn an_unfolds_allowance_only_and_bends_are_one_value_each() {
+        let r = |n: u8| json!({"feature": "f1", "name": format!("{n:032x}")});
+        let unfold = |extra: Value| {
+            let mut v = json!({"format": 14, "kind": "ryucad.feature", "type": "unfold",
+                               "target": "tray", "allowance": {"k_factor": "0.44"},
+                               "only": [r(1)], "bends": [{"bend": r(1), "deduction": "2 mm"}]});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let base = unfold(json!({}));
+        // A K-factor one way and a deduction the other: one conflict.
+        let m = merge(
+            Some(&base),
+            &unfold(json!({"allowance": {"k_factor": "0.4"}})),
+            &unfold(json!({"allowance": {"deduction": "2 mm"}})),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/allowance"]);
+        // `only` changed both ways: one conflict, never inside it.
+        let m = merge(
+            Some(&base),
+            &unfold(json!({"only": [r(1), r(2)]})),
+            &unfold(json!({"only": [r(3)]})),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/only"]);
+        // An override's size changed both ways: one conflict at /bends.
+        let m = merge(
+            Some(&base),
+            &unfold(json!({"bends": [{"bend": r(1), "deduction": "3 mm"}]})),
+            &unfold(json!({"bends": [{"bend": r(1), "k_factor": "0.5"}]})),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/bends"]);
+        // Disjoint edits merge.
+        let m = merge(
+            Some(&base),
+            &unfold(json!({"fixed": r(9)})),
+            &unfold(json!({"allowance": {"k_factor": "0.5"}})),
+        );
+        assert!(m.conflicts.is_empty());
+        assert_eq!(m.value["fixed"], r(9));
+        assert_eq!(m.value["allowance"], json!({"k_factor": "0.5"}));
+        // A refold's unfold and only per key.
+        let refold = |extra: Value| {
+            let mut v = json!({"format": 14, "kind": "ryucad.feature", "type": "refold",
+                               "target": "tray", "unfold": "u1"});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let m = merge(
+            Some(&refold(json!({}))),
+            &refold(json!({"unfold": "u2"})),
+            &refold(json!({"only": [r(1)]})),
+        );
+        assert!(m.conflicts.is_empty());
+        assert_eq!(
+            (m.value["unfold"].as_str(), m.value["only"][0].clone()),
+            (Some("u2"), r(1))
+        );
     }
 
     /// An import feature file, `mode` reference when asked, against the

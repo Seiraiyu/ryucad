@@ -3645,6 +3645,7 @@ sections! {
     self_union => self_union_section,
     global_offsets => global_offsets_section,
     sheet_metal => sheet_metal_section,
+    flat_patterns => flat_patterns_section,
     bent => bent_section,
     silhouettes => silhouettes_section,
     hidden_lines => hidden_lines_section,
@@ -3964,6 +3965,84 @@ fn sheet_metal_section(golden: &mut Golden) {
     s.str(&format!("{:?}", u.pattern));
     let (back, j) = refold(key, &u.body, &u.map, &RefoldSpec::default()).unwrap();
     hash_body(&mut s, &back, &j);
+}
+
+/// Flat patterns kept and redrawn (ryucad plan 16.B): a jog's pattern
+/// through its codec, and a bracket's flat drilled across its bend line
+/// and redrawn.
+fn flat_patterns_section(golden: &mut Golden) {
+    use core::f64::consts::FRAC_PI_2;
+    use ryukei::boolean::{BooleanOp, Tool, boolean};
+    use ryukei::name::ToolKey;
+    use ryukei::sheet_metal::{Allowance, SheetOptions, UnfoldSpec, recognize, redraw, unfold};
+    use ryukei_testkit::sheet_metal::{Leg, strip};
+    let mut s = golden.section("flat_patterns");
+    let key = OpKey(0x666c_6174);
+    let (t, r) = (0.001, 0.002);
+    let opts = SheetOptions::default();
+    let jog = strip(
+        key,
+        &[
+            Leg::Run(0.01),
+            Leg::Turn {
+                angle: FRAC_PI_2,
+                radius: r,
+            },
+            Leg::Run(0.02),
+            Leg::Turn {
+                angle: -1.0,
+                radius: r,
+            },
+            Leg::Run(0.015),
+        ],
+        t,
+        0.02,
+    );
+    let m = recognize(&jog, &opts).unwrap();
+    let u = unfold(key, &jog, &m, &UnfoldSpec::all(Allowance::KFactor(0.44))).unwrap();
+    let bytes = ryukei::codec::encode_flat_pattern(&u.pattern);
+    s.bytes(&bytes);
+    assert_eq!(
+        ryukei::codec::decode_flat_pattern(&bytes).unwrap(),
+        u.pattern
+    );
+    assert_eq!(redraw(&u.body, &u.pattern, &opts).unwrap(), u.pattern);
+    let bracket = strip(
+        key,
+        &[
+            Leg::Run(0.02),
+            Leg::Turn {
+                angle: FRAC_PI_2,
+                radius: r,
+            },
+            Leg::Run(0.015),
+        ],
+        t,
+        0.02,
+    );
+    let m = recognize(&bracket, &opts).unwrap();
+    let u = unfold(key, &bracket, &m, &UnfoldSpec::all(Allowance::KFactor(0.5))).unwrap();
+    let st = &u.map.strips[0];
+    let place = Rigid::from_frame(
+        &Frame::new(
+            st.frame.to_world(0.5 * st.length, 0.01, -0.0002),
+            st.frame.z().get(),
+            st.frame.x().get(),
+        )
+        .unwrap(),
+    );
+    let pin = primitive::cylinder(key, 0.0008, t + 0.0004, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let tools = [Tool {
+        key: ToolKey(1),
+        body: &pin,
+        place,
+    }];
+    let (cut, _) = boolean(key, BooleanOp::Subtract, &u.body, &tools).unwrap();
+    let p = redraw(&cut, &u.pattern, &opts).unwrap();
+    s.str(&format!("{p:?}"));
+    s.bytes(&ryukei::codec::encode_flat_pattern(&p));
 }
 
 /// The bent surface (design 298, plan 11.B): a round hole's wall and a

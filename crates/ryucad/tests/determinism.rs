@@ -2352,6 +2352,189 @@ fn sheet_metal_report_section(golden: &mut Golden) {
     }
 }
 
+/// Part `sf`: a tray of four flanges set back 5 mm on a 60 × 40 mm plate,
+/// unfolded (`u`), a slot `c` cut across its right bend line in the flat
+/// and refolded (`rf`); and a Z bent section `z`, unfolded (`uz`) and
+/// left flat.
+fn flattened() -> (tempfile::TempDir, ryucad::session::Session) {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("sf");
+        call(s, "feature.add", f);
+    };
+    let points = |s: &mut ryucad::session::Session, sketch: &str, at: &[[i64; 2]], closed: bool| {
+        let mut ops = Vec::new();
+        for (i, p) in at.iter().enumerate() {
+            ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": p}));
+            ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+        }
+        let lines = if closed { at.len() } else { at.len() - 1 };
+        for i in 1..=lines {
+            ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                            "start": format!("p{i}"), "end": format!("p{}", i % at.len() + 1)}));
+        }
+        call(
+            s,
+            "sketch.edit",
+            json!({"part": "sf", "sketch": sketch, "ops": ops}),
+        );
+    };
+    call(&mut s, "part.create", json!({"part": "sf"}));
+    add(&mut s, json!({"type": "sketch", "id": "s", "plane": "xy"}));
+    points(&mut s, "s", &[[0, 0], [60, 0], [60, 40], [0, 40]], true);
+    add(
+        &mut s,
+        json!({"type": "base_flange", "id": "plate", "sketch": "s",
+        "thickness": "1.5 mm", "radius": "1 mm", "allowance": {"k_factor": "0.44"},
+        "relief": {"kind": "rectangular", "width": "1 mm", "depth": "0.5 mm"}}),
+    );
+    let b = call(&mut s, "inspect", json!({"part": "sf", "feature": "plate"}))["bodies"][0].clone();
+    let mm = |p: [f64; 3]| p.map(|x| x / 1000.0);
+    let c = [
+        [0.0, 0.0, 1.5],
+        [60.0, 0.0, 1.5],
+        [60.0, 40.0, 1.5],
+        [0.0, 40.0, 1.5],
+    ];
+    let rims: Vec<String> = (0..4)
+        .map(|i| edge_between(&b, "plate", mm(c[i]), mm(c[(i + 1) % 4])).replace("bl/", "sf/"))
+        .collect();
+    add(
+        &mut s,
+        json!({"type": "flange", "id": "tray", "edges": rims, "angle": "90 deg",
+        "length": "15 mm", "setback": "5 mm"}),
+    );
+    // Held still about the plate: the flange all four bends meet.
+    let sheet = call(&mut s, "sheet.get", json!({"part": "sf", "solid": "plate"}));
+    let mut meets = std::collections::BTreeMap::<String, usize>::new();
+    for b in sheet["bends"].as_array().unwrap() {
+        for f in b["flanges"].as_array().unwrap() {
+            *meets.entry(f.as_str().unwrap().to_owned()).or_default() += 1;
+        }
+    }
+    let base = meets.iter().max_by_key(|(_, n)| **n).unwrap().0.clone();
+    let base = sheet["flanges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["flange"] == base)
+        .unwrap();
+    let fixed = base["sides"][0][0].as_str().unwrap().to_owned();
+    add(
+        &mut s,
+        json!({"type": "unfold", "id": "u", "target": "plate", "fixed_face": fixed}),
+    );
+    // Across the right bend line (57.5 mm in), short of the far one.
+    add(
+        &mut s,
+        json!({"type": "box", "id": "c", "operation": "cut", "targets": ["plate"],
+        "params": {"x": "3 mm", "y": "4 mm", "z": "5 mm"},
+        "placement": {"origin": ["56 mm", "18 mm", "-2 mm"]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "refold", "id": "rf", "target": "plate", "unfold": "u"}),
+    );
+    add(&mut s, json!({"type": "sketch", "id": "zs", "plane": "xy"}));
+    points(
+        &mut s,
+        "zs",
+        &[[100, 0], [120, 0], [120, 25], [145, 25]],
+        false,
+    );
+    add(
+        &mut s,
+        json!({"type": "base_flange", "id": "z", "sketch": "zs",
+        "thickness": "1 mm", "radius": "2 mm", "depth": "30 mm",
+        "allowance": {"deduction": "2.4 mm"}}),
+    );
+    add(&mut s, json!({"type": "unfold", "id": "uz", "target": "z"}));
+    (dir, s)
+}
+
+/// [`flattened`]'s every feature's bodies (as `bodied_section` gives
+/// them), `sheet.get` and `flat.get` of both solids, each one's DXF and
+/// a 320 × 240 `render --flat` of the tray, on one thread and four
+/// alike.
+fn sheet_metal_flat_section(golden: &mut Golden) {
+    let mut s = golden.section("sheet_metal_flat");
+    let (dir, session) = flattened();
+    let p = session
+        .project()
+        .part(&Id::parse("sf", "part").unwrap())
+        .unwrap()
+        .clone();
+    let on = |n: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+            .install(|| ryucad::rebuild::rebuild_part(&p))
+    };
+    let (one, four) = (on(1), on(4));
+    assert_eq!(one.failed(), 0, "{:?}", one.features);
+    assert_eq!(one.hash, four.hash);
+    for (id, o) in &one.features {
+        let o = o.as_ref().unwrap();
+        s.str(id.as_str());
+        for (solid, b) in o.solids() {
+            s.str(solid.as_str());
+            s.str(&b.body.dump());
+            assert_eq!(ryukei::check::check_intersections(&b.body), [], "{id}");
+        }
+        if o.solids().is_empty() {
+            s.str(o.hash());
+        }
+    }
+    s.str(&one.hash);
+    let mut session = Some(session);
+    let mut answer = |threads: usize, m: &str, params: serde_json::Value| {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let req = ryucad::proto::Request::from_rpc(m, Some(params)).unwrap();
+        let a = pool
+            .install(|| ryucad::server::answer_live(session.as_mut().unwrap(), None, None, req))
+            .unwrap_or_else(|e| panic!("{m}: {e}"));
+        // A fresh session for the next question, so nothing is cached.
+        session = Some(ryucad::session::Session::open(dir.path()).unwrap());
+        a
+    };
+    for solid in ["plate", "z"] {
+        for m in ["sheet.get", "flat.get"] {
+            let params = serde_json::json!({"part": "sf", "solid": solid});
+            let (a, b) = (answer(1, m, params.clone()), answer(4, m, params));
+            assert_eq!(a.result, b.result, "{m} {solid}: one thread and four");
+            s.str(&ryucad::doc::canonical::to_string(&a.result));
+        }
+        let params = serde_json::json!({"part": "sf", "solid": solid, "format": "dxf"});
+        let (a, b) = (
+            answer(1, "export", params.clone()),
+            answer(4, "export", params),
+        );
+        let (a, b) = (a.binary.unwrap(), b.binary.unwrap());
+        assert_eq!(a, b, "DXF of {solid}: one thread and four");
+        s.str(&format!("{:x}", md(&a)));
+    }
+    let params = serde_json::json!({"part": "sf", "flat": "plate", "width": 320, "height": 240});
+    let png = answer(1, "render", params).binary.unwrap();
+    let mut r = png::Decoder::new(std::io::Cursor::new(png))
+        .read_info()
+        .unwrap();
+    let mut buf = vec![0; r.output_buffer_size().unwrap()];
+    let info = r.next_frame(&mut buf).unwrap();
+    s.str(&format!("{:x}", md(&buf[..info.buffer_size()])));
+}
+
 /// How the swept part's sketch is drawn: `sketch.get` at each quality,
 /// and renders with its dimensions labelled and an entity highlighted.
 fn sketch_drawing_section(golden: &mut Golden) {
@@ -4207,6 +4390,7 @@ sections! {
     splits => splits_section(&mut golden),
     sheet_metal => sheet_metal_section(&mut golden),
     sheet_metal_report => sheet_metal_report_section(&mut golden),
+    sheet_metal_flat => sheet_metal_flat_section(&mut golden),
     holes => drilled_section(&mut golden, "holes", true),
     patterns => drilled_section(&mut golden, "patterns", false),
     sketch_drawing => sketch_drawing_section(&mut golden),

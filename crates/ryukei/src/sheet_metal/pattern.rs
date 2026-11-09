@@ -163,57 +163,7 @@ pub(super) fn pattern(
             drawn.insert(f);
         }
     }
-    // Boundary fins, each from its start vertex.
-    let mut from: BTreeMap<VertexId, Vec<FinId>> = BTreeMap::new();
-    for &f in &drawn {
-        for fin in shape::fins_of(b, f) {
-            let e = b.fins[fin].edge;
-            let inside = shape::across(b, e, f).is_some_and(|g| drawn.contains(&g));
-            if !inside {
-                from.entry(b.start_of(fin)).or_default().push(fin);
-            }
-        }
-    }
-    let mut used: BTreeSet<FinId> = BTreeSet::new();
-    let mut all: Vec<FinId> = from.values().flatten().copied().collect();
-    all.sort_by_key(|&fin| b.edges[b.fins[fin].edge].name);
-    let mut loops = Vec::new();
-    for start in all {
-        if used.contains(&start) {
-            continue;
-        }
-        let mut segments = Vec::new();
-        let mut fin = start;
-        loop {
-            used.insert(fin);
-            segments.push(segment(b, &frame, fin).ok_or(fallback.clone())?);
-            let next = from
-                .get(&b.end_of(fin))
-                .and_then(|fs| fs.iter().copied().find(|f| !used.contains(f)));
-            match next {
-                Some(f) => fin = f,
-                None => break,
-            }
-        }
-        if b.end_of(fin) != b.start_of(start) {
-            return Err(fallback);
-        }
-        let outer = area(&segments) > 0.0;
-        loops.push(PatternLoop { outer, segments });
-    }
-    loops.sort_by_key(|l| {
-        (
-            !l.outer,
-            l.segments.iter().map(|s| s.edge).min().expect("a segment"),
-        )
-    });
-    let mut bounds: Option<Box2> = None;
-    for l in &loops {
-        for s in &l.segments {
-            let bx = s.curve.bounds([s.t0.min(s.t1), s.t0.max(s.t1)]);
-            bounds = Some(bounds.map_or(bx, |x| x.union(&bx)));
-        }
-    }
+    let (loops, bounds) = draw(b, &frame, &drawn, &fallback)?;
     let bend_lines = p
         .walk
         .order
@@ -276,8 +226,140 @@ pub(super) fn pattern(
         loops,
         bend_lines,
         thickness: model.thickness,
-        bounds: bounds.unwrap_or_else(|| Box2::from_point(Point2::ORIGIN)),
+        bounds,
     })
+}
+
+/// How far from `1` the cosine between a redrawn face's normal and the
+/// pattern's may be.
+const PARALLEL: f64 = 1e-9;
+
+/// The flat pattern of a body that lies flat already, seen as `earlier`
+/// saw it: every face of `body` in `earlier`'s plane (within the
+/// tolerance and the face's own) facing its viewer, their boundary drawn
+/// as [`super::unfold`]'s pattern is, and `earlier`'s frame, thickness and
+/// bend lines, each keeping the edges `body` still has between two drawn
+/// faces. For a flat cut after it was unfolded (holes and slots across
+/// its bend lines show as loops); `redraw(&u.body, &u.pattern, …)` is
+/// `u.pattern`, bit for bit.
+pub fn redraw(
+    body: &Body,
+    earlier: &FlatPattern,
+    options: &super::SheetOptions,
+) -> Result<FlatPattern, crate::Error> {
+    if !options.tolerance.is_finite() {
+        return Err(SheetMetalError::BadTolerance.into());
+    }
+    let tol = options.tolerance.max(crate::tol::LINEAR_RESOLUTION);
+    let frame = earlier.frame;
+    let least = body.faces().map(|f| body.faces[f].name).min();
+    let fallback = SheetMetalError::Uncertain {
+        at: least.unwrap_or(Name::from_u128(0)),
+    };
+    let mut drawn: BTreeSet<FaceId> = BTreeSet::new();
+    for f in body.faces() {
+        let Some(fl) = shape::flat(body, f) else {
+            continue;
+        };
+        let eps = tol + shape::face_tolerance(body, f);
+        // Parallel to the pattern's plane, not merely facing its viewer: a
+        // wall through the plane's line faces it by rounding alone.
+        let facing = fl.normal.get().dot(frame.z().get()) >= 1.0 - PARALLEL;
+        if facing && frame.to_local(fl.origin).z.abs() <= eps {
+            drawn.insert(f);
+        }
+    }
+    if drawn.is_empty() {
+        return Err(fallback.into());
+    }
+    let (loops, bounds) = draw(body, &frame, &drawn, &fallback)?;
+    let bend_lines = earlier
+        .bend_lines
+        .iter()
+        .map(|l| {
+            let mut l = l.clone();
+            l.edges.retain(|&n| match body.by_name(n) {
+                Some(EntityId::Edge(e)) => {
+                    shape::faces_of(body, e).iter().all(|f| drawn.contains(f))
+                }
+                _ => false,
+            });
+            l
+        })
+        .collect();
+    Ok(FlatPattern {
+        frame,
+        loops,
+        bend_lines,
+        thickness: earlier.thickness,
+        bounds,
+    })
+}
+
+/// The boundary of the `drawn` faces of `b` as loops in `frame`'s plane,
+/// outlines first then holes, each group by its least edge name, and
+/// their box: what [`pattern`] and [`redraw`] both draw.
+fn draw(
+    b: &Body,
+    frame: &Frame,
+    drawn: &BTreeSet<FaceId>,
+    fallback: &SheetMetalError,
+) -> Result<(Vec<PatternLoop>, Box2), SheetMetalError> {
+    // Boundary fins, each from its start vertex.
+    let mut from: BTreeMap<VertexId, Vec<FinId>> = BTreeMap::new();
+    for &f in drawn {
+        for fin in shape::fins_of(b, f) {
+            let e = b.fins[fin].edge;
+            let inside = shape::across(b, e, f).is_some_and(|g| drawn.contains(&g));
+            if !inside {
+                from.entry(b.start_of(fin)).or_default().push(fin);
+            }
+        }
+    }
+    let mut used: BTreeSet<FinId> = BTreeSet::new();
+    let mut all: Vec<FinId> = from.values().flatten().copied().collect();
+    all.sort_by_key(|&fin| b.edges[b.fins[fin].edge].name);
+    let mut loops = Vec::new();
+    for start in all {
+        if used.contains(&start) {
+            continue;
+        }
+        let mut segments = Vec::new();
+        let mut fin = start;
+        loop {
+            used.insert(fin);
+            segments.push(segment(b, frame, fin).ok_or(fallback.clone())?);
+            let next = from
+                .get(&b.end_of(fin))
+                .and_then(|fs| fs.iter().copied().find(|f| !used.contains(f)));
+            match next {
+                Some(f) => fin = f,
+                None => break,
+            }
+        }
+        if b.end_of(fin) != b.start_of(start) {
+            return Err(fallback.clone());
+        }
+        let outer = area(&segments) > 0.0;
+        loops.push(PatternLoop { outer, segments });
+    }
+    loops.sort_by_key(|l| {
+        (
+            !l.outer,
+            l.segments.iter().map(|s| s.edge).min().expect("a segment"),
+        )
+    });
+    let mut bounds: Option<Box2> = None;
+    for l in &loops {
+        for s in &l.segments {
+            let bx = s.curve.bounds([s.t0.min(s.t1), s.t0.max(s.t1)]);
+            bounds = Some(bounds.map_or(bx, |x| x.union(&bx)));
+        }
+    }
+    Ok((
+        loops,
+        bounds.unwrap_or_else(|| Box2::from_point(Point2::ORIGIN)),
+    ))
 }
 
 /// A boundary fin as a pattern segment: its pcurve on its face, carried
