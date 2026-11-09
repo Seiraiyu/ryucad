@@ -2236,6 +2236,8 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
         }
         Feature::Instance(i) => i.fields(),
         Feature::Import(i) => i.fields(),
+        Feature::Fill(x) => x.fields(),
+        Feature::Extract(x) => x.fields(),
         Feature::Mate(m) => {
             let mut v = m.fields();
             for (side, c) in [("a", &m.a), ("b", &m.b)] {
@@ -4557,6 +4559,13 @@ fn feature_edit(
                 f
             }
             Feature::Import(_) => return Err(import_not_written_here("edit").with("feature", &fid)),
+            Feature::Fill(_) | Feature::Extract(_) => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("{} {fid} can't be edited by this build", old.type_name()),
+                )
+                .with("feature", &fid));
+            }
             Feature::Datum(d) => {
                 let ty = d.type_name();
                 given.only(ty, crate::datum::request_fields(ty))?;

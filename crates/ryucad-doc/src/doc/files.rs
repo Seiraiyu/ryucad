@@ -17,6 +17,7 @@ use super::reference::Reference;
 use super::sheet_metal::{BaseFlange, Flange, Refold, Unfold};
 use super::sketch::Sketch;
 use super::solid::{Boolean, Combine};
+use super::surface::{Extract, Fill};
 use super::sweep::{Extrude, Loft, Revolve, Sweep};
 use crate::error::{Code, Error, Result};
 use crate::expr::{self, Env, Expr};
@@ -72,17 +73,25 @@ pub const MANIFEST_FORMAT: u64 = 3;
 /// 9 shells and offsets, 10 mirrors and splits, 11 base flanges and
 /// flanges (ryucad 16), 12 surface sweeps and planar faces (ryucad 18),
 /// 13 reference imports (ryucad 21), 14 unfolds and refolds (ryucad
-/// 16.B). A feature is written at the lowest
+/// 16.B), 15 fills, extracts, sews and thickens (ryucad 18). A feature is written at the lowest
 /// format that holds it, so one with only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
-    // The largest of every stage's (a later stage merging takes the max).
-    let (a, b, c) = (
+    // The largest of every stage's; a stage merging adds its constant.
+    let all = [
         super::sweep::SURFACE_FORMAT,
         super::import::MODE_FORMAT,
         super::sheet_metal::UNFOLD_FORMAT,
-    );
-    let ab = if a > b { a } else { b };
-    if ab > c { ab } else { c }
+        super::surface::FORMAT,
+    ];
+    let mut max = 0;
+    let mut i = 0;
+    while i < all.len() {
+        if all[i] > max {
+            max = all[i];
+        }
+        i += 1;
+    }
+    max
 };
 
 pub const PROJECT_KIND: &str = "ryucad.project";
@@ -198,6 +207,8 @@ pub enum Feature {
     Split(Box<Split>),
     /// A profile's closed loops as plane faces of a sheet (ryucad 18).
     Planar(Box<super::sweep::Planar>),
+    Fill(Box<Fill>),
+    Extract(Box<Extract>),
     /// A sheet metal solid founded from a sketch, with its settings.
     BaseFlange(Box<BaseFlange>),
     /// Bends and flanges on straight edges of a sheet metal solid.
@@ -578,6 +589,7 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
                 }
             }
             // "full" is a word, not a parameter.
+            ("tolerance", Value::String(s)) => out.push(s),
             ("angle", Value::String(s)) if s != "full" => out.push(s),
             _ => {}
         }
@@ -672,6 +684,12 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if matches!(
+        v.get("type").and_then(Value::as_str),
+        Some("fill" | "extract" | "sew" | "thicken")
+    ) {
+        return super::surface::FORMAT;
+    }
     if v.get("type").and_then(Value::as_str) == Some("import")
         && v.get("mode").and_then(Value::as_str) == Some("reference")
     {
@@ -812,7 +830,7 @@ pub fn feature_acts(v: &Value) -> Acts {
     };
     let mut out = Acts::default();
     match v.get("type").and_then(Value::as_str) {
-        Some("import" | "planar") => out.founds = true,
+        Some("import" | "planar" | "fill" | "extract") => out.founds = true,
         Some(
             "box" | "cylinder" | "cone" | "sphere" | "torus" | "extrude" | "revolve" | "sweep"
             | "loft",
@@ -891,7 +909,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold, fill, extract, sew, thicken"),
     )
     .with("type", s)
 }
@@ -926,6 +944,8 @@ impl Feature {
             Feature::Unfold(_) => "unfold",
             Feature::Refold(_) => "refold",
             Feature::Planar(_) => "planar",
+            Feature::Fill(_) => "fill",
+            Feature::Extract(_) => "extract",
         }
     }
 
@@ -941,8 +961,19 @@ impl Feature {
         }
     }
 
+    /// Whether it may found a sheet: a surface sweep, a planar face, a
+    /// fill, an extract, or a sew that doesn't make a solid. A part
+    /// holding none holds no sheet, so what its features act on needs no
+    /// rebuild to judge (`server::check_references`).
+    pub fn may_make_sheet(&self) -> bool {
+        self.surface() || matches!(self, Feature::Fill(_) | Feature::Extract(_))
+    }
+
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
+        if matches!(self, Feature::Fill(_) | Feature::Extract(_)) {
+            return super::surface::FORMAT;
+        }
         if matches!(self, Feature::Unfold(_) | Feature::Refold(_)) {
             return super::sheet_metal::UNFOLD_FORMAT;
         }
@@ -991,6 +1022,7 @@ impl Feature {
             Feature::Planar(_) => super::sweep::SURFACE_FORMAT,
             Feature::BaseFlange(_) | Feature::Flange(_) => super::sheet_metal::FORMAT,
             Feature::Unfold(_) | Feature::Refold(_) => super::sheet_metal::UNFOLD_FORMAT,
+            Feature::Fill(_) | Feature::Extract(_) => super::surface::FORMAT,
         }
     }
 
@@ -1031,6 +1063,8 @@ impl Feature {
             Feature::Flange(f) => f.fields(),
             Feature::Unfold(u) => u.fields(),
             Feature::Refold(r) => r.fields(),
+            Feature::Fill(x) => x.fields(),
+            Feature::Extract(x) => x.fields(),
         }
     }
 
@@ -1049,6 +1083,8 @@ impl Feature {
             "sweep" => Feature::Sweep(Box::new(Sweep::from_fields(&mut o, env)?)),
             "loft" => Feature::Loft(Box::new(Loft::from_fields(&mut o, env)?)),
             "planar" => Feature::Planar(Box::new(super::sweep::Planar::from_fields(&mut o)?)),
+            "fill" => Feature::Fill(Box::new(Fill::from_fields(&mut o, default, env)?)),
+            "extract" => Feature::Extract(Box::new(Extract::from_fields(&mut o)?)),
             "boolean" => Feature::Boolean(Boolean::from_fields(&mut o)?),
             "fillet" => Feature::Fillet(Fillet::from_fields(&mut o, default, env)?),
             "chamfer" => Feature::Chamfer(Chamfer::from_fields(&mut o, default, env)?),
@@ -1102,9 +1138,11 @@ impl Feature {
             Feature::Revolve(r) => Some(&r.combine),
             Feature::Sweep(w) => Some(&w.combine),
             Feature::Loft(l) => Some(&l.combine),
-            // An import always founds its own solid, a planar face its
-            // own sheet.
-            Feature::Import(_) | Feature::Planar(_) => Some(&NEW),
+            // An import always founds its own solid, a planar face, a
+            // fill and an extract their own sheet.
+            Feature::Import(_) | Feature::Planar(_) | Feature::Fill(_) | Feature::Extract(_) => {
+                Some(&NEW)
+            }
             // A base flange always founds its own solid.
             Feature::BaseFlange(_) => Some(&NEW),
             Feature::Mirror(m) => Some(&m.combine),
@@ -1278,6 +1316,17 @@ impl Feature {
             Feature::Flange(f) => f.references(),
             Feature::Unfold(u) => u.references(),
             Feature::Refold(r) => r.references(),
+            Feature::Extract(x) => x.references(),
+            // A fill's edge sides, then the edges its curve sides name.
+            Feature::Fill(x) => x
+                .references()
+                .into_iter()
+                .chain(
+                    x.geometry()
+                        .into_iter()
+                        .filter_map(|(k, g)| Some((k, g.reference()?))),
+                )
+                .collect(),
             _ => self
                 .geometry()
                 .into_iter()
@@ -1311,6 +1360,7 @@ impl Feature {
             Feature::Mirror(m) => vec![("plane".to_owned(), &m.plane)],
             Feature::Split(s) => vec![("plane".to_owned(), &s.plane)],
             Feature::Planar(p) => p.geometry(),
+            Feature::Fill(x) => x.geometry(),
             _ => Vec::new(),
         }
     }
@@ -2341,5 +2391,36 @@ mod tests {
             expression_fields(&s),
             [("/constraints/d1/value".to_owned(), "w / 2".to_owned())]
         );
+    }
+
+    #[test]
+    fn fills_and_extracts_are_format_15_and_found_sheets() {
+        use super::super::surface::FORMAT;
+        const A: &str = "0123456789abcdef0123456789abcdef";
+        let fill = json!({"format": FORMAT, "kind": FEATURE_KIND, "type": "fill",
+                          "sides": [{"edge": {"feature": "w", "name": A}, "tangent": true},
+                                    {"curve": {"feature": "s", "entity": "l1"}},
+                                    {"curve": {"feature": "p1"}}],
+                          "tolerance": "0.001 mm", "angle": "1 deg"});
+        let f = Feature::from_json(&fill, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!((f.type_name(), f.format(), feature_format(&fill)), ("fill", FORMAT, FORMAT));
+        assert!(f.founds() && f.may_make_sheet() && f.targets().is_empty());
+        assert_eq!(f.to_json(), fill);
+        let reads: Vec<&str> = f.geometry_reads().into_iter().map(Id::as_str).collect();
+        assert_eq!(reads, ["s", "p1", "w"]);
+        let a = feature_acts(&fill);
+        assert!(a.founds && a.acts_on.is_empty());
+        let ex = json!({"format": FORMAT, "kind": FEATURE_KIND, "type": "extract",
+                        "faces": [{"feature": "base", "name": A}]});
+        let f = Feature::from_json(&ex, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!((f.type_name(), f.format(), feature_format(&ex)), ("extract", FORMAT, FORMAT));
+        assert!(f.founds() && f.may_make_sheet() && f.targets().is_empty());
+        assert_eq!(f.to_json(), ex);
+        assert!(feature_acts(&ex).founds);
+        // The newest format is the largest stage's, at least this one.
+        const { assert!(FEATURE_FORMAT >= FORMAT) };
+        // A fill's tolerance and angle are expressions an equations table lists.
+        let fields: Vec<String> = expression_fields(&fill).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(fields, ["/angle", "/tolerance"]);
     }
 }
