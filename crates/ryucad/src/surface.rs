@@ -108,7 +108,7 @@ pub fn fill(part: &Part, id: &Id, x: &Fill, before: &dyn Results, run: &Run) -> 
     let key = crate::rebuild::op_key(&part.id, id);
     let opts = FillOptions {
         tolerance: x.tolerance.meters(),
-        angle: x.angle.meters(),
+        angle: x.angle.radians(),
     };
     let work = crate::work::work(run.job);
     let (body, journal, report) = ryukei::fill::fill_with(key, &FillBoundary { sides }, &opts, &work)
@@ -350,6 +350,124 @@ pub fn report(part: &Id, f: &Feature) -> Value {
         }
         _ => unreachable!("a fill, an extract, a sew or a thicken"),
     }
+}
+
+/// A fill or extract (`ty`) from `current`'s fields (none for a new one)
+/// with what was given laid over them. A fill: `sides` whole (else its
+/// `edges` as edge sides, or its one `curve`), `tolerance`, `angle`. An
+/// extract: `faces` (else `face_list`, else `face`) whole.
+pub fn from_given(
+    ty: &str,
+    current: Option<&Feature>,
+    f: &crate::proto::FeatureFields,
+    part: &Id,
+    unit: crate::units::Unit,
+    env: &crate::expr::Env,
+) -> Result<Feature> {
+    use crate::doc::files::Obj;
+    use crate::doc::geometry::GeomRef;
+    use crate::doc::reference::Reference;
+    let mut v = match current {
+        Some(Feature::Fill(x)) => x.fields(),
+        Some(Feature::Extract(x)) => x.fields(),
+        _ => json!({}),
+    };
+    let o = v.as_object_mut().expect("fields are an object");
+    let reference = |t: &str, at: &str| -> Result<Value> {
+        Ok(Reference::parse(t, part).map_err(|e| e.with("pointer", at))?.to_json())
+    };
+    let curve = |t: &str, at: &str| -> Result<Value> {
+        Ok(GeomRef::parse(t, part).map_err(|e| e.with("pointer", at))?.to_json())
+    };
+    match ty {
+        "fill" => {
+            let sides: Option<Vec<Value>> = if let Some(Value::Array(given)) = &f.sides {
+                Some(
+                    given
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| {
+                            let at = format!("/sides/{i}");
+                            match s {
+                                Value::String(t) => Ok(json!({"curve": curve(t, &at)?})),
+                                Value::Object(m) => match (m.get("edge"), m.get("curve")) {
+                                    (Some(Value::String(t)), None) => {
+                                        let mut x = json!({"edge": reference(t, &format!("{at}/edge"))?});
+                                        if m.get("tangent") == Some(&Value::Bool(true)) {
+                                            x["tangent"] = json!(true);
+                                        }
+                                        Ok(x)
+                                    }
+                                    (None, Some(Value::String(t))) => {
+                                        Ok(json!({"curve": curve(t, &format!("{at}/curve"))?}))
+                                    }
+                                    _ => Err(Error::new(
+                                        Code::InvalidParam,
+                                        "a fill's side is {\"edge\": text, \"tangent\": bool} or {\"curve\": text}",
+                                    )
+                                    .with("param", "sides")
+                                    .with("pointer", at)),
+                                },
+                                _ => Err(Error::new(Code::InvalidParam, "a fill's sides are a list")
+                                    .with("param", "sides")),
+                            }
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                )
+            } else if let Some(edges) = &f.edges {
+                Some(
+                    edges
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| Ok(json!({"edge": reference(t, &format!("/sides/{i}/edge"))?})))
+                        .collect::<Result<Vec<_>>>()?,
+                )
+            } else if let Some(c) = &f.curve {
+                Some(vec![json!({"curve": curve(c, "/sides/0/curve")?})])
+            } else {
+                None
+            };
+            if let Some(s) = sides {
+                o.insert("sides".into(), Value::Array(s));
+            }
+            if let Some(q) = &f.tolerance {
+                o.insert("tolerance".into(), q.clone());
+            }
+            if let Some(q) = &f.angle {
+                o.insert("angle".into(), q.clone());
+            }
+        }
+        _ => {
+            let given: Option<Vec<String>> = match (&f.faces, &f.face_list, &f.face) {
+                (Some(Value::Array(a)), _, _) => Some(
+                    a.iter()
+                        .map(|x| x.as_str().map(str::to_owned).ok_or_else(|| {
+                            Error::new(Code::InvalidParam, "an extract's faces are text, <part>/<solid>/<name>")
+                                .with("param", "faces")
+                        }))
+                        .collect::<Result<Vec<_>>>()?,
+                ),
+                (_, Some(l), _) => Some(l.clone()),
+                (_, None, Some(one)) => Some(vec![one.clone()]),
+                _ => None,
+            };
+            if let Some(faces) = given {
+                let refs = faces
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| reference(t, &format!("/faces/{i}")))
+                    .collect::<Result<Vec<_>>>()?;
+                o.insert("faces".into(), Value::Array(refs));
+            }
+        }
+    }
+    let mut r = Obj::new(&v, "")?;
+    let out = match ty {
+        "fill" => Feature::Fill(Box::new(Fill::from_fields(&mut r, unit, env)?)),
+        _ => Feature::Extract(Box::new(Extract::from_fields(&mut r)?)),
+    };
+    r.finish()?;
+    Ok(out)
 }
 
 #[cfg(test)]

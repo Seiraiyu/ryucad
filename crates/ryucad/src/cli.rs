@@ -1142,7 +1142,10 @@ enum FeatureCmd {
     /// edges; an unfold (--target, --fixed-face, --only repeated,
     /// --k-factor, --deduction or --bend-allowance, --bend FACE=FORM:VALUE
     /// repeated) laying a sheet metal solid flat; a refold (--target,
-    /// --unfold, --only) folding it back; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
+    /// --unfold, --only) folding it back; a fill (--edge, --curve in
+    /// order, --tangent after an edge, --tolerance, --angle) spanning
+    /// edges and curves; an extract (--face, repeated) of a body's faces as
+    /// a sheet; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
     /// countersink, --bottom) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
@@ -1976,9 +1979,9 @@ struct FieldArgs {
     plane: Option<String>,
     /// A planar face to sketch on, the face a chamfer's first distance runs along, or a
     /// planar face whose loops a sweep carries: <part>/<feature>/<name>, as inspect
-    /// gives it.
-    #[arg(long, value_name = "REFERENCE")]
-    face: Option<String>,
+    /// gives it. Repeat for an extract's faces, or a thicken's.
+    #[arg(long = "face", value_name = "REFERENCE")]
+    face: Vec<String>,
     /// A sketch on a face: a vertex for its origin ("" for the part origin, projected).
     #[arg(long, value_name = "REFERENCE")]
     face_origin: Option<String>,
@@ -2194,9 +2197,21 @@ struct FieldArgs {
     /// The point a parallel plane passes through.
     #[arg(long, value_name = "POINT")]
     through: Option<String>,
-    /// The curve a normal_to plane or an along point is on.
-    #[arg(long, value_name = "CURVE")]
-    curve: Option<String>,
+    /// A datum's curve (the curve a normal_to plane or an along point is
+    /// on); a fill's side, in order with --edge.
+    #[arg(long = "curve", value_name = "CURVE")]
+    curve: Vec<String>,
+    /// The --edge just before meets its face tangentially (a fill's side;
+    /// the edge must have one face).
+    #[arg(long)]
+    tangent: bool,
+    /// A fill's or a sew's tolerance: how far its sides, or the sheets'
+    /// edges, may be apart.
+    #[arg(long, value_name = "LENGTH")]
+    tolerance: Option<String>,
+    /// A fill's sides as written: --edge, --curve and --tangent in order.
+    #[arg(skip)]
+    fill_sides: Vec<Value>,
     /// Where on its curve a normal_to plane is: start, end or a point.
     #[arg(long, value_name = "POINT")]
     at: Option<String>,
@@ -2448,6 +2463,50 @@ fn grown(args: &[String]) -> Result<Vec<bool>> {
 /// command line as written: a loft's loops narrow the section before
 /// them. A `--loop` before the first `--section` of a command that has
 /// some is a usage error.
+/// A fill's sides from the command line as written: each --edge or --curve
+/// a side in order, --tangent qualifying the --edge just before it.
+fn fill_sides(args: &[String]) -> Result<Vec<Value>> {
+    let mut out: Vec<Value> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--" {
+            break;
+        }
+        let value = |flag: &str| -> Option<(String, usize)> {
+            if a == flag {
+                args.get(i + 1).map(|v| (v.clone(), 2))
+            } else {
+                a.strip_prefix(&format!("{flag}="))
+                    .map(|v| (v.to_owned(), 1))
+            }
+        };
+        if let Some((v, step)) = value("--edge") {
+            out.push(json!({"edge": v}));
+            i += step;
+            continue;
+        }
+        if let Some((v, step)) = value("--curve") {
+            out.push(json!({"curve": v}));
+            i += step;
+            continue;
+        }
+        if a == "--tangent" {
+            match out.last_mut() {
+                Some(last) if last.get("edge").is_some() => last["tangent"] = json!(true),
+                _ => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "--tangent goes right after the --edge it qualifies",
+                    ));
+                }
+            }
+        }
+        i += 1;
+    }
+    Ok(out)
+}
+
 fn section_loops(args: &[String]) -> Result<Vec<Vec<String>>> {
     let (mut out, mut early): (Vec<Vec<String>>, bool) = (Vec::new(), false);
     let mut i = 0;
@@ -2497,6 +2556,12 @@ fn json_object(s: &str) -> core::result::Result<Value, String> {
 
 impl FieldArgs {
     fn to_fields(&self) -> FeatureFields {
+        // A fill's sides given in order (--tangent, several --curve, or
+        // --curve beside --edge) go as sides; a lone --curve is a datum's,
+        // --edge alone a blend's edges.
+        let ordered = self.tangent
+            || self.curve.len() > 1
+            || (!self.curve.is_empty() && !self.edges.is_empty());
         let mut extent = Map::new();
         if let Some(t) = &self.extent {
             extent.insert("type".into(), json!(t));
@@ -2539,7 +2604,9 @@ impl FieldArgs {
         }
         FeatureFields {
             plane: self.plane.clone(),
-            face: self.face.clone(),
+            face: (self.face.len() == 1).then(|| self.face[0].clone()),
+            face_list: (self.face.len() > 1).then(|| self.face.clone()),
+            tolerance: self.tolerance.clone().map(Value::String),
             face_origin: self.face_origin.clone(),
             face_x: self.face_x.clone(),
             sketch: self.sketch.clone(),
@@ -2566,7 +2633,7 @@ impl FieldArgs {
             // A path's --propagate is its segments'.
             propagate: self.propagate.filter(|_| self.segments.is_empty()),
             radius: self.radius.clone().map(Value::String),
-            edges: (!self.edges.is_empty()).then(|| self.edges.clone()),
+            edges: (!self.edges.is_empty() && !ordered).then(|| self.edges.clone()),
             form: self.form.clone(),
             d: self.d.clone().map(Value::String),
             d1: self.d1.clone().map(Value::String),
@@ -2621,7 +2688,7 @@ impl FieldArgs {
             from: self.from.clone(),
             about: self.about.clone(),
             through: self.through.clone(),
-            curve: self.curve.clone(),
+            curve: (self.curve.len() == 1 && !ordered).then(|| self.curve[0].clone()),
             at: self.at.clone(),
             between: (!self.between.is_empty()).then(|| self.between.clone()),
             coordinates: self
@@ -2707,14 +2774,18 @@ impl FieldArgs {
             measured: self.measured.clone(),
             position: self.position.clone(),
             setback: self.setback.clone().map(Value::String),
-            sides: (!self.sides.is_empty()).then(|| {
-                json!(
+            sides: if !self.sides.is_empty() {
+                Some(json!(
                     self.sides
                         .iter()
                         .map(|(e, s)| json!({"edge": e, "side": s}))
                         .collect::<Vec<_>>()
-                )
-            }),
+                ))
+            } else if ordered {
+                Some(json!(self.fill_sides))
+            } else {
+                None
+            },
             ends: if self.no_ends {
                 Some(json!([]))
             } else {
@@ -4661,6 +4732,10 @@ pub fn main() -> ExitCode {
             Ok(l) => fields.section_loops = l,
             Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
         }
+        match fill_sides(&args) {
+            Ok(s) => fields.fill_sides = s,
+            Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
+        }
     }
     // Git reads a textconv's output as the file's text, not JSON.
     if let Command::Git(GitCmd::Textconv { file }) = &cli.command {
@@ -4879,5 +4954,20 @@ mod tests {
                 matches!(&cli.command, Command::Open { dir: Some(d) } if d == &PathBuf::from("."))
             );
         });
+    }
+
+    #[test]
+    fn fill_sides_are_read_in_order() {
+        let args: Vec<String> = ["ryucad", "feature", "add", "p", "fill", "--edge", "p/w/aa",
+            "--tangent", "--curve=p/s/l1"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            fill_sides(&args).unwrap(),
+            vec![json!({"edge": "p/w/aa", "tangent": true}), json!({"curve": "p/s/l1"})]
+        );
+        let early: Vec<String> = ["--tangent", "--edge", "x"].into_iter().map(str::to_owned).collect();
+        assert_eq!(fill_sides(&early).unwrap_err().code, Code::Usage);
     }
 }

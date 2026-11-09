@@ -436,9 +436,20 @@ pub struct FeatureFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ends: Option<Value>,
     /// The side face each named edge of a flange folds towards, each
-    /// `{edge, side}`; `[]` takes every side away.
+    /// `{edge, side}`; `[]` takes every side away. A fill's sides in
+    /// order, replacing them all: each `{"edge": text, "tangent": bool}`
+    /// or `{"curve": text}` (an edge `<part>/<solid>/<name>`, a sketch's
+    /// curve `<part>/<sketch>/<entity>`, a path or helix
+    /// `<part>/<feature>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sides: Option<Value>,
+    /// A fill's or a sew's tolerance: a length from 0.00001 mm to 0.1 mm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance: Option<Value>,
+    /// Faces given one by one, two or more (`--face` repeated): an
+    /// extract's faces, or the faces a thicken thickens. One is `face`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_list: Option<Vec<String>>,
     /// An unfold's fixed face, a side face of the flange held still
     /// (`<part>/<solid>/<name>`, written `fixed`); `""` for the kernel's
     /// default.

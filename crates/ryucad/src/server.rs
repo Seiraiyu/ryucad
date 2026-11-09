@@ -4094,7 +4094,7 @@ fn check_up_to(
 }
 
 /// Every feature type `feature.add` makes.
-const FEATURE_TYPES: [&str; 22] = [
+const FEATURE_TYPES: [&str; 24] = [
     "box",
     "cylinder",
     "cone",
@@ -4106,6 +4106,8 @@ const FEATURE_TYPES: [&str; 22] = [
     "sweep",
     "loft",
     "planar",
+    "fill",
+    "extract",
     "boolean",
     "fillet",
     "chamfer",
@@ -4307,6 +4309,10 @@ fn feature_add(
         "planar" => {
             given.only(ty, &crate::doc::sweep::PLANAR_FIELDS)?;
             planar_from(None, &given, &pid)?
+        }
+        "fill" | "extract" => {
+            given.only(ty, crate::doc::surface::request_fields(ty))?;
+            crate::surface::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
         "boolean" => {
             given.only(ty, &BOOLEAN)?;
@@ -4564,12 +4570,10 @@ fn feature_edit(
                 f
             }
             Feature::Import(_) => return Err(import_not_written_here("edit").with("feature", &fid)),
-            Feature::Fill(_) | Feature::Extract(_) => {
-                return Err(Error::new(
-                    Code::InvalidParam,
-                    format!("{} {fid} can't be edited by this build", old.type_name()),
-                )
-                .with("feature", &fid));
+            f @ (Feature::Fill(_) | Feature::Extract(_)) => {
+                let ty = f.type_name();
+                given.only(ty, crate::doc::surface::request_fields(ty))?;
+                crate::surface::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
             }
             Feature::Datum(d) => {
                 let ty = d.type_name();
@@ -4669,6 +4673,7 @@ fn feature_edit(
             || f.unfold().is_some()
             || f.refold().is_some())
             && f != old)
+        || (matches!(f, Feature::Fill(_) | Feature::Extract(_)) && f != old)
         || f.source() != old.source()
     {
         check_references(session, &pid, &list, &fid, &f)?;
@@ -7898,6 +7903,53 @@ pub(crate) mod tests {
             call(&mut s, "feature.add", f).unwrap();
         }
         (dir, s, top)
+    }
+
+    /// Each face of `feature`'s body, as `p/<feature>/<name>`.
+    fn inspect_faces(s: &mut Session, feature: &str) -> Vec<Value> {
+        let v = call(s, "inspect", json!({"part": "p", "feature": feature})).unwrap();
+        v["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| json!(format!("p/{feature}/{}", f["name"].as_str().unwrap())))
+            .collect()
+    }
+
+    #[test]
+    fn fills_and_extracts_through_the_protocol() {
+        let (_dir, mut s) = fresh();
+        let must = |s: &mut Session, m: &str, v: Value| call(s, m, v).unwrap();
+        must(&mut s, "part.create", json!({"part": "p"}));
+        must(&mut s, "feature.add", json!({"part": "p", "type": "box", "id": "b",
+            "params": {"x": 10, "y": 10, "z": 10}}));
+        let b = inspect_faces(&mut s, "b");
+        let x = must(&mut s, "feature.add", json!({"part": "p", "type": "extract", "id": "x",
+            "faces": [b[0].clone()]}));
+        assert_eq!(x["feature"]["type"], "extract", "{x}");
+        // A face of another body beside it is targets_mixed.
+        must(&mut s, "feature.add", json!({"part": "p", "type": "box", "id": "c",
+            "params": {"x": 1, "y": 1, "z": 1}, "placement": {"origin": [20, 0, 0]}}));
+        let c = inspect_faces(&mut s, "c");
+        let e = call(&mut s, "feature.add", json!({"part": "p", "type": "extract",
+            "faces": [b[0].clone(), c[0].clone()]})).unwrap_err();
+        assert_eq!(e.code, Code::TargetsMixed, "{e}");
+        // A fill's sides as text; its tolerance and angle written with defaults.
+        must(&mut s, "feature.add", json!({"part": "p", "type": "sketch", "id": "s", "plane": "xy"}));
+        must(&mut s, "sketch.edit", json!({"part": "p", "sketch": "s", "ops": [
+            {"op": "add", "id": "p1", "type": "point", "at": [0, 0]},
+            {"op": "add", "id": "p2", "type": "point", "at": [10, 0]},
+            {"op": "add", "id": "p3", "type": "point", "at": [0, 10]},
+            {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p1"}]}));
+        let f = must(&mut s, "feature.add", json!({"part": "p", "type": "fill", "id": "f",
+            "sides": [{"curve": "p/s/l1"}, {"curve": "p/s/l2"}, {"curve": "p/s/l3"}]}));
+        assert_eq!(f["feature"]["tolerance"]["value"], "0.001 mm", "{f}");
+        // An edge side that names a face is refused when written.
+        let e = call(&mut s, "feature.add", json!({"part": "p", "type": "fill",
+            "sides": [{"edge": b[0].clone()}, {"curve": "p/s/l2"}, {"curve": "p/s/l3"}]})).unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
     }
 
     #[test]
