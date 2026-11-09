@@ -124,6 +124,8 @@ pub struct SheetBuilt {
     pub template: String,
     /// The scale its views take where they don't say one.
     pub scale: Scale,
+    /// Whether ryucad chose it (the sheet says none).
+    pub scale_chosen: bool,
     pub items: Vec<Item>,
     pub views: Vec<ViewBuilt>,
 }
@@ -1011,6 +1013,7 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
             paper: sheet.size.paper(sheet.orientation),
             template: tid,
             scale: chosen,
+            scale_chosen: fixed.is_none(),
             items,
             views,
         });
@@ -1181,18 +1184,25 @@ fn grown_at(boxes: &[[P; 2]], on: &[usize], scales: &[Scale], placed: &[(P, bool
 }
 
 fn overlap(a: [P; 2], b: [P; 2]) -> bool {
-    a[0][0] < b[1][0] && b[0][0] < a[1][0] && a[0][1] < b[1][1] && b[0][1] < a[1][1]
+    a[0][0] + FIT_SLACK < b[1][0]
+        && b[0][0] + FIT_SLACK < a[1][0]
+        && a[0][1] + FIT_SLACK < b[1][1]
+        && b[0][1] + FIT_SLACK < a[1][1]
 }
+
+/// How far past the area a view may reach and still fit, in sheet
+/// millimetres: places are written back to a thousandth.
+const FIT_SLACK: f64 = 1e-3;
 
 /// Whether every box lies in the template's area, clear of its keep-out
 /// boxes and of each other.
 fn fits(grown: &[[P; 2]], t: &Template) -> bool {
     let [lo, hi] = t.area;
     grown.iter().enumerate().all(|(i, b)| {
-        b[0][0] >= lo[0]
-            && b[0][1] >= lo[1]
-            && b[1][0] <= hi[0]
-            && b[1][1] <= hi[1]
+        b[0][0] >= lo[0] - FIT_SLACK
+            && b[0][1] >= lo[1] - FIT_SLACK
+            && b[1][0] <= hi[0] + FIT_SLACK
+            && b[1][1] <= hi[1] + FIT_SLACK
             && t.keep_out.iter().all(|k| !overlap(*b, *k))
             && grown[i + 1..].iter().all(|c| !overlap(*b, *c))
     })
@@ -1510,6 +1520,135 @@ pub(crate) mod tests {
         // The second build is the session's: no kernel call, the same items.
         let again = build(&mut s, &id("p"), &id("on")).unwrap();
         assert_eq!(again.sheets[0].items, on.sheets[0].items);
+    }
+
+    /// The name of `part`'s solid `b`'s planar face whose outward normal
+    /// is `n`.
+    fn face_along(s: &mut Session, n: [f64; 3]) -> String {
+        let v = call(s, "inspect", json!({"part": "p"})).unwrap();
+        for f in v["bodies"][0]["faces"].as_array().unwrap() {
+            let z = &f["surface"]["frame"]["z"];
+            let k = if f["reversed"] == true { -1.0 } else { 1.0 };
+            let d: f64 = (0..3)
+                .map(|i| k * z[i].as_f64().unwrap_or(0.0) * n[i])
+                .sum();
+            if f["surface"]["type"] == "plane" && d > 1.0 - 1e-9 {
+                return f["name"].as_str().unwrap().to_owned();
+            }
+        }
+        panic!("no face along {n:?}");
+    }
+
+    #[test]
+    fn an_auxiliary_view_shows_a_tilted_face_at_its_true_size() {
+        // A 40 × 20 × 10 box turned 30° about y: its top face's normal
+        // lies in the front view's plane, seen there edge-on.
+        let (dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let (sn, cs) = ryu_math::sin_cos(core::f64::consts::FRAC_PI_6);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 40, "y": 20, "z": 10},
+                   "placement": {"z": [sn, 0, cs], "x": [cs, 0, -sn]}}),
+        )
+        .unwrap();
+        let top = face_along(&mut s, [sn, 0.0, cs]);
+        let file = json!({"format": 1, "kind": "ryucad.drawing", "name": "Tilted",
+        "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b", "scale": "1:1"}},
+        "views": {
+            "v1": {"type": "base", "sheet": "s1", "orient": "front"},
+            "v2": {"type": "auxiliary", "sheet": "s1", "from": "v1",
+                   "normal_to": {"feature": "b", "name": top}}
+        }});
+        let at = dir.path().join("parts/p/drawings");
+        std::fs::create_dir_all(&at).unwrap();
+        crate::doc::project::write_json(&at.join("d.json"), &file).unwrap();
+        s.reload().unwrap();
+        let b = build(&mut s, &id("p"), &id("d")).unwrap();
+        let sheet = &b.sheets[0];
+        let aux = sheet
+            .views
+            .iter()
+            .find(|v| v.key.to_string() == "v2")
+            .unwrap();
+        // Seen along its normal, the top face is its own 40 × 20, every
+        // edge behind it drawn once, where it lies under the outline.
+        let total: f64 = visible_in(sheet, aux).iter().map(length).sum();
+        assert!((total - 120.0).abs() < 1e-6, "{total}");
+        let [lo, hi] = aux.bounds;
+        let (w, h) = (hi[0] - lo[0], hi[1] - lo[1]);
+        assert!(
+            (w.max(h) - 40.0).abs() < 1e-6 && (w.min(h) - 20.0).abs() < 1e-6,
+            "{w} {h}"
+        );
+        // It stands off its parent along the face's normal's image: up and
+        // to the right, at 30° from the vertical, in third angle.
+        let f = sheet
+            .views
+            .iter()
+            .find(|v| v.key.to_string() == "v1")
+            .unwrap();
+        let (dx, dy) = (aux.at[0] - f.at[0], aux.at[1] - f.at[1]);
+        assert!(dx > 0.0 && dy > 0.0, "{dx} {dy}");
+        assert!((dx / dy - (sn / cs)).abs() < 1e-9, "{dx} {dy}");
+        // A face its parent doesn't see edge-on is refused.
+        let side = face_along(&mut s, [0.0, -1.0, 0.0]);
+        let mut bad = file.clone();
+        bad["views"]["v2"]["normal_to"]["name"] = json!(side);
+        crate::doc::project::write_json(&at.join("d.json"), &bad).unwrap();
+        s.reload().unwrap();
+        let e = build(&mut s, &id("p"), &id("d")).unwrap_err();
+        assert_eq!(e.details["reason"], "foreshortened", "{e:?}");
+    }
+
+    #[test]
+    fn first_angle_puts_the_top_view_below_and_the_right_view_left() {
+        let views = json!({
+            "v1": {"type": "base", "sheet": "s1", "orient": "front"},
+            "v2": {"type": "projected", "sheet": "s1", "from": "v1", "side": "top"},
+            "v3": {"type": "projected", "sheet": "s1", "from": "v1", "side": "right"}
+        });
+        let (dir, mut s) = drawn(40.0, 20.0, 10.0, views.clone());
+        let file = json!({"format": 1, "kind": "ryucad.drawing", "name": "Block",
+            "standard": "iso",
+            "sheets": {"s1": {"name": "Sheet 1", "size": "iso_a3"}}, "views": views});
+        crate::doc::project::write_json(&dir.path().join("parts/p/drawings/d.json"), &file)
+            .unwrap();
+        s.reload().unwrap();
+        let b = build(&mut s, &id("p"), &id("d")).unwrap();
+        assert_eq!(b.projection, Angle::First);
+        let at = |k: &str| {
+            b.sheets[0]
+                .views
+                .iter()
+                .find(|v| v.key.to_string() == k)
+                .unwrap()
+                .at
+        };
+        let (f, t, r) = (at("v1"), at("v2"), at("v3"));
+        assert!(t[1] < f[1] && t[0] == f[0], "{f:?} {t:?}");
+        assert!(r[0] < f[0] && r[1] == f[1], "{f:?} {r:?}");
+        // Every view lies in the ISO sheet's area, clear of its title block.
+        let sheet = &b.sheets[0];
+        assert_eq!(sheet.template, "iso-a3");
+        let t = template::compiled("iso-a3", Size::IsoA3, Orientation::Landscape);
+        for v in &sheet.views {
+            let [lo, hi] = v.bounds;
+            assert!(
+                lo[0] >= t.area[0][0] && hi[1] <= t.area[1][1],
+                "{:?}",
+                v.bounds
+            );
+            assert!(!overlap(v.bounds, t.keep_out[0]), "{:?}", v.bounds);
+        }
+        // And its text is ISO 7200's.
+        assert!(
+            sheet
+                .items
+                .iter()
+                .any(|it| matches!(it, Item::Text { text, .. } if text == "Document number"))
+        );
     }
 
     #[test]

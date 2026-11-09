@@ -184,7 +184,7 @@ fn write_built(session: &mut Session, pid: &Id, did: &Id, file: DrawingFile) -> 
 
 /// `file` with the places ryucad chose written in: a view's `at`, or a
 /// projected or auxiliary view's `offset`, in sheet millimetres to a
-/// thousandth.
+/// thousandth, and a sheet's scale where it chose one.
 fn with_placements(file: &DrawingFile, built: &Built) -> DrawingFile {
     let mut v = file.to_json();
     let mm = |x: f64| {
@@ -192,6 +192,10 @@ fn with_placements(file: &DrawingFile, built: &Built) -> DrawingFile {
         let r = if r == 0.0 { 0.0 } else { r };
         json!(format!("{r} mm"))
     };
+    // A scale ryucad chose, as places are: the file is what is drawn.
+    for sheet in built.sheets.iter().filter(|s| s.scale_chosen) {
+        v["sheets"][sheet.key.to_string()]["scale"] = json!(sheet.scale.to_string());
+    }
     for (k, p) in built.placements(file) {
         let at = &mut v["views"][k.to_string()];
         match p {
@@ -404,9 +408,9 @@ pub fn rename(
     Ok(json!({"part": pid, "drawing": new, "from": did, "revision": revision}))
 }
 
-/// `drawing.layout`: the views laid out again from nothing (every `at`
-/// and `offset` taken out and placed by ryucad), written unless a dry
-/// run.
+/// `drawing.layout`: the views laid out again from nothing (every `at`,
+/// `offset` and sheet scale taken out and chosen by ryucad), written
+/// unless a dry run.
 pub fn layout(
     session: &mut Session,
     part: &str,
@@ -423,6 +427,12 @@ pub fn layout(
         if let Some(m) = w.as_object_mut() {
             m.remove("at");
             m.remove("offset");
+        }
+    }
+    // A sheet's scale too: chosen again for the views laid out anew.
+    for (_, sh) in v["sheets"].as_object_mut().into_iter().flatten() {
+        if let Some(m) = sh.as_object_mut() {
+            m.remove("scale");
         }
     }
     let fresh = read_as_param(&v)?;

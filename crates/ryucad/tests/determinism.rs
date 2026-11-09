@@ -4654,6 +4654,97 @@ fn annotations_section(golden: &mut Golden) {
     }
 }
 
+/// The showcase drawn (design 417, plan 9.A): its standard views, and
+/// the top view with hidden lines dashed, laid out by ryucad on an ANSI B
+/// sheet, and an ISO drawing in first angle: each drawing's
+/// `drawing.get` with its items, and its PDF, its sheet's SVG and PNG,
+/// built from nothing on one thread and on four.
+fn drawings_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("drawings");
+    let mut answers = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        answers.push(pool.install(|| {
+            let (dir, session) = showcase();
+            let mut session = Some(session);
+            let call = |s: &mut Option<ryucad::session::Session>, m: &str, p: serde_json::Value| {
+                ryucad::server::handle_safely(
+                    s,
+                    None,
+                    None,
+                    dir.path(),
+                    ryucad::proto::Request::from_rpc(m, Some(p)).unwrap(),
+                )
+                .unwrap_or_else(|e| panic!("{m}: {e}"))
+            };
+            call(
+                &mut session,
+                "drawing.create",
+                json!({"part": "show", "drawing": "main", "name": "Showcase", "views": "standard"}),
+            );
+            call(
+                &mut session,
+                "drawing.edit",
+                json!({"part": "show", "drawing": "main",
+                       "ops": [{"op": "set", "id": "v2", "fields": {"hidden": "dashed"}}]}),
+            );
+            call(
+                &mut session,
+                "drawing.create",
+                json!({"part": "show", "drawing": "iso", "size": "iso_a3", "views": "standard"}),
+            );
+            call(
+                &mut session,
+                "drawing.edit",
+                json!({"part": "show", "drawing": "iso",
+                       "ops": [{"op": "set", "fields": {"standard": "iso"}}]}),
+            );
+            let mut lines = Vec::new();
+            for d in ["main", "iso"] {
+                let get = call(
+                    &mut session,
+                    "drawing.get",
+                    json!({"part": "show", "drawing": d, "items": true}),
+                );
+                let mut get = get.result;
+                get.as_object_mut().unwrap().remove("revision");
+                lines.push(format!(
+                    "{d} get {:x}",
+                    md(ryucad::doc::canonical::to_string(&get).as_bytes())
+                ));
+                for (what, params) in [
+                    (
+                        "pdf",
+                        json!({"part": "show", "drawing": d, "format": "pdf"}),
+                    ),
+                    (
+                        "svg",
+                        json!({"part": "show", "drawing": d, "format": "svg"}),
+                    ),
+                ] {
+                    let a = call(&mut session, "drawing.export", params);
+                    lines.push(format!("{d} {what} {:x}", md(&a.binary.unwrap())));
+                }
+                let a = call(
+                    &mut session,
+                    "drawing.render",
+                    json!({"part": "show", "drawing": d, "scale": 1.0}),
+                );
+                lines.push(format!("{d} png {:x}", md(&a.binary.unwrap())));
+            }
+            lines
+        }));
+    }
+    assert_eq!(answers[0], answers[1], "one thread and four");
+    for l in &answers[0] {
+        s.str(l);
+    }
+}
+
 /// The golden file every section's line is in.
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/rebuild.txt");
 
@@ -4734,4 +4825,5 @@ sections! {
     sews => sews_section(&mut golden),
     thickens => thickens_section(&mut golden),
     annotations => annotations_section(&mut golden),
+    drawings => drawings_section(&mut golden),
 }
