@@ -316,6 +316,17 @@ fn project() -> (tempfile::TempDir, Session) {
         &mut s,
         json!({"type": "planar", "id": "pad", "sketch": "la"}),
     );
+    // A fill of `v`'s rectangle, and the planar face thickened as a solid
+    // of its own (consuming it).
+    let sides: Vec<Value> = ["l1", "l2", "l3", "l4"]
+        .iter()
+        .map(|l| json!({"curve": format!("p/v/{l}")}))
+        .collect();
+    add(&mut s, json!({"type": "fill", "id": "lid", "sides": sides}));
+    add(
+        &mut s,
+        json!({"type": "thicken", "id": "slab", "sheet": "pad", "front": "1 mm"}),
+    );
     // A reference import of OCCT's box, which edits convert and back.
     let file = format!(
         "{}/../ryustep/tests/data/occt/box_ap214.stp",
@@ -334,7 +345,7 @@ fn mm(g: &mut Lcg, lo: u64, hi: u64) -> String {
 /// One random edit. Some are refused, or leave a feature failing; both
 /// must rebuild the same way however they are reached.
 fn edit(g: &mut Lcg, s: &mut Session) {
-    let (method, params) = match g.next_u64() % 24 {
+    let (method, params) = match g.next_u64() % 26 {
         0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
         1 => (
             "param.set",
@@ -450,6 +461,15 @@ fn edit(g: &mut Lcg, s: &mut Session) {
             } else {
                 json!({"id": "lf", "start_tangent": ""})
             },
+        ),
+        24 => (
+            "feature.edit",
+            json!({"id": "slab", "front": mm(g, 1, 4)}),
+        ),
+        25 => (
+            "feature.edit",
+            json!({"id": "lid",
+                   "tolerance": format!("{} mm", [0.001, 0.002, 0.005][(g.next_u64() % 3) as usize])}),
         ),
         // The import made a healed solid, or a reference again.
         23 => (
