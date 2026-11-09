@@ -419,6 +419,9 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
         Some(b) if same_type && ty(b).0 == Some(json!("split")) => {
             split_feature(walk, b, ours, theirs)
         }
+        Some(b) if same_type && ty(b).0 == Some(json!("import")) => {
+            import_feature(walk, b, ours, theirs)
+        }
         // A planar face's profile is one value, as a sweep's is.
         Some(b)
             if same_type
@@ -625,6 +628,27 @@ fn instance(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Valu
     };
     if let Some(pose) = pose.or(o.get("pose")) {
         out.insert("pose".to_owned(), pose.clone());
+    }
+    Value::Object(out)
+}
+
+/// An import feature: per key, but a flattened body's place (its pose and
+/// the usages it follows) is one value: a pose taken from one side and
+/// usages from the other would place no occurrence of the file.
+fn import_feature(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Value {
+    let obj = |v: &Value| v.as_object().cloned().unwrap_or_default();
+    let (b, o, t) = (obj(base), obj(ours), obj(theirs));
+    let mut out = walk.object("", &b, &o, &t, &["place"]);
+    let (pb, po, pt) = (b.get("place"), o.get("place"), t.get("place"));
+    let place = if po == pt || pt == pb {
+        po.cloned()
+    } else if po == pb {
+        pt.cloned()
+    } else {
+        walk.conflict("/place", Kind::Value, pb, po, pt)
+    };
+    if let Some(p) = place {
+        out.insert("place".to_owned(), p);
     }
     Value::Object(out)
 }
@@ -1521,6 +1545,40 @@ mod tests {
         let m = clean(&reference, &base, &reference);
         assert!(m.get("mode").is_none(), "{m}");
         assert_eq!(m["format"], 5);
+    }
+
+    #[test]
+    fn an_imports_place_is_one_value() {
+        let h = "ab".repeat(32);
+        let base = import_file(Some("reference"), &h);
+        let placed = |x: f64| {
+            let mut v = base.clone();
+            v["place"] = json!({
+                "pose": {"origin_m": [x, 0, 0], "x": [1, 0, 0], "z": [0, 0, 1]},
+                "via": [{"product": {"id": "P", "name": "P"}, "usage": "u1"}],
+            });
+            v["format"] = json!(17);
+            v
+        };
+        let (o, t) = (placed(0.01), placed(0.02));
+        let m = merge(Some(&base), &o, &t);
+        let at: Vec<&str> = m.conflicts.keys().map(String::as_str).collect();
+        assert_eq!(at, ["/place"], "{:?}", m.conflicts);
+        // One side placed it: taken whole, at the format that holds it.
+        let m = merge(Some(&base), &o, &base);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(m.value, o);
+        // One side moved it, the other updated the file: both taken.
+        let mut rehashed = o.clone();
+        rehashed["file"]["blake3"] = json!("cd".repeat(32));
+        let m = merge(Some(&o), &placed(0.02), &rehashed);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(m.value["place"], placed(0.02)["place"]);
+        assert_eq!(m.value["file"]["blake3"], "cd".repeat(32));
+        // Cleared on one side: gone, and the format with it.
+        let m = merge(Some(&o), &base, &o);
+        assert!(m.value.get("place").is_none(), "{}", m.value);
+        assert_eq!(m.value["format"], 13);
     }
 
     #[test]
