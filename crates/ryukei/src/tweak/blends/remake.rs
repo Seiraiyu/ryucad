@@ -17,7 +17,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Picked blends closed over their chains and the corners they reach:
 /// the blends' indices and every face to delete.
-pub(crate) fn close(rec: &Recognition, picked: BTreeSet<usize>) -> (BTreeSet<usize>, BTreeSet<Name>) {
+pub(crate) fn close(
+    rec: &Recognition,
+    picked: BTreeSet<usize>,
+) -> (BTreeSet<usize>, BTreeSet<Name>) {
     let mut blends = picked;
     loop {
         let before = blends.len();
@@ -65,7 +68,12 @@ fn holding(rec: &Recognition, faces: &[Name]) -> Result<BTreeSet<usize>, Error> 
 }
 
 /// `faces` deleted by growth.
-fn grow(key: OpKey, body: &Body, faces: &BTreeSet<Name>, m: &Meter) -> Result<(Body, Journal), Error> {
+fn grow(
+    key: OpKey,
+    body: &Body,
+    faces: &BTreeSet<Name>,
+    m: &Meter,
+) -> Result<(Body, Journal), Error> {
     delete_faces_in(
         key,
         body,
@@ -171,7 +179,9 @@ fn reblend(
 /// The feature on face `host` (a cap-closed set across one of its inner
 /// loops) whose loop lies nearest `edge`: its faces.
 fn feature_near(body: &Body, host: Name, edge: Name) -> Option<Vec<Name>> {
-    let (Some(EntityId::Face(h)), Some(EntityId::Edge(e))) = (body.by_name(host), body.by_name(edge)) else {
+    let (Some(EntityId::Face(h)), Some(EntityId::Edge(e))) =
+        (body.by_name(host), body.by_name(edge))
+    else {
         return None;
     };
     let ed = &body.edges[e];
@@ -183,7 +193,10 @@ fn feature_near(body: &Body, host: Name, edge: Name) -> Option<Vec<Name>> {
         if edges.contains(&e) {
             continue;
         }
-        let Some(seed) = fins.first().and_then(|&fin| recognise::across(body, body.fins[fin].edge, h)) else {
+        let Some(seed) = fins
+            .first()
+            .and_then(|&fin| recognise::across(body, body.fins[fin].edge, h))
+        else {
             continue;
         };
         let Ok(faces) = crate::tweak::delete::feature_faces(body, body.faces[seed].name) else {
@@ -276,7 +289,9 @@ fn recut(
     use crate::boolean::{BooleanOp, Tool, boolean_in, divide_in};
     use crate::geom::Rigid;
     use crate::name::{EditRole, Role, ToolKey};
-    let k = |i: u128| OpKey(Name::derive(key, Role::Edit(EditRole::Feature), &[Name::from_u128(i)]).to_u128());
+    let k = |i: u128| {
+        OpKey(Name::derive(key, Role::Edit(EditRole::Feature), &[Name::from_u128(i)]).to_u128())
+    };
     fn tool(b: &Body) -> Tool<'_> {
         Tool {
             key: ToolKey(1),
@@ -284,7 +299,11 @@ fn recut(
             place: Rigid::IDENTITY,
         }
     }
-    let own = |b: &Body, of: &Body| of.faces().filter(|&f| b.by_name(of.faces[f].name).is_some()).count();
+    let own = |b: &Body, of: &Body| {
+        of.faces()
+            .filter(|&f| b.by_name(of.faces[f].name).is_some())
+            .count()
+    };
     // The plug: `capped` cut by the sheet of the features' faces.
     let (walls, _) = crate::sheet::extract(k(1), body, taken)?;
     let mut steps = Vec::new();
@@ -326,7 +345,7 @@ const FEATURES: usize = 8;
 
 /// The one live face of `out` that name `n` became through `steps`'
 /// placings and splits, if there is exactly one.
-fn follow(n: Name, steps: &[Journal], out: &Body) -> Option<EntityId> {
+pub(crate) fn follow(n: Name, steps: &[Journal], out: &Body) -> Option<EntityId> {
     let mut now: BTreeSet<Name> = BTreeSet::from([n]);
     for j in steps {
         let mut next = BTreeSet::new();
@@ -419,7 +438,10 @@ fn reblend_plain(
         }
         for e in found {
             owner.insert(e, b.faces[0]);
-            edges.push(EdgeBlend { edge: e, kind: *kind });
+            edges.push(EdgeBlend {
+                edge: e,
+                kind: *kind,
+            });
         }
     }
     let (mut out, journal) = crate::blend::blend_in(key, body, &edges, m).map_err(|e| {
@@ -460,14 +482,22 @@ fn name_blends(
             if let Event::Replaced { old, new: faces } = e
                 && owner.get(old) == Some(&b.faces[0])
             {
-                new.extend(faces.iter().copied().filter(|n| matches!(out.by_name(*n), Some(EntityId::Face(_)))));
+                new.extend(
+                    faces
+                        .iter()
+                        .copied()
+                        .filter(|n| matches!(out.by_name(*n), Some(EntityId::Face(_)))),
+                );
             }
         }
         // Corner faces replace vertices, not edges: left to `restore`.
         let new: Vec<Name> = new
             .into_iter()
             .filter(|n| match out.by_name(*n) {
-                Some(EntityId::Face(f)) => !matches!(out.surfaces[out.faces[f].surface], crate::geom::Surface::Sphere(_)),
+                Some(EntityId::Face(f)) => !matches!(
+                    out.surfaces[out.faces[f].surface],
+                    crate::geom::Surface::Sphere(_)
+                ),
                 _ => false,
             })
             .collect();
@@ -486,12 +516,23 @@ fn name_blends(
             let on: Vec<Name> = new
                 .iter()
                 .copied()
-                .filter(|&n| surface(out, n).is_some_and(|sn| crate::intersect::coincident(&so, &sn) == Some(true)))
+                .filter(|&n| {
+                    surface(out, n)
+                        .is_some_and(|sn| crate::intersect::coincident(&so, &sn) == Some(true))
+                })
                 .collect();
             let olds = b
                 .faces
                 .iter()
-                .filter(|&&p| surface(orig, p).is_some_and(|sp| on.iter().any(|&n| surface(out, n).is_some_and(|sn| crate::intersect::coincident(&sp, &sn) == Some(true)))))
+                .filter(|&&p| {
+                    surface(orig, p).is_some_and(|sp| {
+                        on.iter().any(|&n| {
+                            surface(out, n).is_some_and(|sn| {
+                                crate::intersect::coincident(&sp, &sn) == Some(true)
+                            })
+                        })
+                    })
+                })
                 .count();
             if let ([n], 1) = (on.as_slice(), olds)
                 && let Some(x) = out.by_name(*n)
@@ -547,7 +588,10 @@ fn restore(input: &Body, out: &mut Body) -> BTreeSet<Name> {
             .faces()
             .filter(|&f| !had.contains(&out.faces[f].name))
             .map(|f| {
-                let ns = neighbours(out, f).into_iter().filter(|n| known(n, out)).collect();
+                let ns = neighbours(out, f)
+                    .into_iter()
+                    .filter(|n| known(n, out))
+                    .collect();
                 (f, ns)
             })
             .collect();
@@ -555,7 +599,10 @@ fn restore(input: &Body, out: &mut Body) -> BTreeSet<Name> {
             .faces()
             .filter(|&f| !has(out, input.faces[f].name))
             .map(|f| {
-                let ns = neighbours(input, f).into_iter().filter(|n| known(n, out)).collect();
+                let ns = neighbours(input, f)
+                    .into_iter()
+                    .filter(|n| known(n, out))
+                    .collect();
                 (input.faces[f].name, ns)
             })
             .collect();
@@ -564,7 +611,11 @@ fn restore(input: &Body, out: &mut Body) -> BTreeSet<Name> {
             if ns.is_empty() {
                 continue;
             }
-            let olds: Vec<&Name> = old.iter().filter(|(_, o)| o == ns).map(|(n, _)| n).collect();
+            let olds: Vec<&Name> = old
+                .iter()
+                .filter(|(_, o)| o == ns)
+                .map(|(n, _)| n)
+                .collect();
             let news = new.iter().filter(|(_, o)| o == ns).count();
             if let ([o], 1) = (olds.as_slice(), news) {
                 rename(input, out, EntityId::Face(*f), **o);
@@ -594,14 +645,22 @@ fn restore(input: &Body, out: &mut Body) -> BTreeSet<Name> {
         .filter(|&x| !has(out, name_of(input, x)))
         .map(|x| (x, name_of(input, x), faces_at(input, x)))
         .collect();
-    let same_kind = |a: EntityId, b: EntityId| matches!((a, b), (EntityId::Edge(_), EntityId::Edge(_)) | (EntityId::Vertex(_), EntityId::Vertex(_)));
+    let same_kind = |a: EntityId, b: EntityId| {
+        matches!(
+            (a, b),
+            (EntityId::Edge(_), EntityId::Edge(_)) | (EntityId::Vertex(_), EntityId::Vertex(_))
+        )
+    };
     for (x, fs) in &new {
         let olds: Vec<Name> = old
             .iter()
             .filter(|(y, _, o)| same_kind(*x, *y) && o == fs)
             .map(|(_, n, _)| *n)
             .collect();
-        let news = new.iter().filter(|(y, o)| same_kind(*x, *y) && o == fs).count();
+        let news = new
+            .iter()
+            .filter(|(y, o)| same_kind(*x, *y) && o == fs)
+            .count();
         if let ([o], 1) = (olds.as_slice(), news)
             && !has(out, *o)
         {
@@ -643,7 +702,9 @@ fn net(input: &Body, out: &Body, steps: &[&Journal], back: &BTreeSet<Name>) -> J
                 Event::Modified(n) | Event::Created(n) | Event::Deleted(n) => {
                     touched.insert(*n);
                 }
-                Event::Split { parent, children } if known(parent) && children.iter().all(known) => {
+                Event::Split { parent, children }
+                    if known(parent) && children.iter().all(known) =>
+                {
                     j.push(e.clone());
                 }
                 Event::Merged { parents, child } if parents.iter().all(known) && known(child) => {
@@ -718,7 +779,12 @@ pub(crate) fn resize(
         };
         // A chamfer's `first_face` names a support; any other face is the
         // blend's own refusal when it is made.
-        if let BlendKind::Chamfer(Chamfer::Distances { first_face, .. } | Chamfer::DistanceAngle { face: first_face, .. }) = kind
+        if let BlendKind::Chamfer(
+            Chamfer::Distances { first_face, .. }
+            | Chamfer::DistanceAngle {
+                face: first_face, ..
+            },
+        ) = kind
             && !rec.blends[i].supports.contains(first_face)
         {
             return Err(TweakError::NotABlend { face: *first_face }.into());
@@ -730,7 +796,9 @@ pub(crate) fn resize(
             }
         }
     }
-    let (out, j, ()) = remake(key, body, &rec, &kinds, m, |b, _| Ok((b.clone(), Journal::new(), ())))?;
+    let (out, j, ()) = remake(key, body, &rec, &kinds, m, |b, _| {
+        Ok((b.clone(), Journal::new(), ()))
+    })?;
     Ok((out, j))
 }
 
@@ -774,9 +842,9 @@ fn blamed(body: &Body, e: &Error) -> BTreeSet<Name> {
 }
 
 /// The tweak `run` made over the blends in its way: those standing on
-/// `faces`, and those holding or standing on the faces round what the
-/// tweak's own refusal `refused` names (a hole moved into a fillet's
-/// strip is refused at the fillet's support). `None` where no blend is in
+/// `faces` or on a face next to one (a hole's wall moved into a fillet's
+/// strip stands on the fillet's support), and those holding or standing
+/// on the faces round what the tweak's own refusal `refused` names. `None` where no blend is in
 /// the way (the tweak's own refusal stands), or where the faces it names
 /// are themselves blends' faces.
 pub(crate) fn rebuild<X>(
@@ -792,13 +860,23 @@ pub(crate) fn rebuild<X>(
         Err(e) => return Some(Err(e)),
     };
     let named: BTreeSet<Name> = faces.iter().copied().collect();
-    let blame = blamed(body, refused);
+    let mut blame = blamed(body, refused);
+    // The faces next to the changed ones: a hole's wall moved into a
+    // fillet's strip stands on the fillet's support.
+    for &n in &named {
+        if let Some(EntityId::Face(f)) = body.by_name(n) {
+            blame.extend(neighbours(body, f));
+        }
+    }
     let kinds: BTreeMap<usize, BlendKind> = rec
         .blends
         .iter()
         .enumerate()
         .filter(|(_, b)| {
-            b.supports.iter().chain(&b.faces).any(|s| named.contains(s) || blame.contains(s))
+            b.supports
+                .iter()
+                .chain(&b.faces)
+                .any(|s| named.contains(s) || blame.contains(s))
         })
         .filter(|(_, b)| !b.faces.iter().any(|f| named.contains(f)))
         .map(|(i, b)| (i, b.kind))

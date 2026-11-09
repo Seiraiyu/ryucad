@@ -726,3 +726,35 @@ fn deleting_faces_is_bounded() {
     });
     eprintln!("delete: cap {capped} units, grow {grown} units");
 }
+
+#[test]
+fn recognising_and_editing_blends_is_bounded() {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend};
+    use ryukei::tweak::{
+        DeleteBlends, RecogniseOptions, delete_blends_with, recognise_blends_with,
+        resize_blends_with,
+    };
+    // A cube with one edge filleted.
+    let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+    let edge = cube.edge(cube.edges().next().unwrap()).unwrap().name;
+    let kind = BlendKind::Fillet { radius: 0.002 };
+    let (r, _) = blend(OpKey(4), &cube, &[EdgeBlend { edge, kind }]).unwrap();
+    let opts = RecogniseOptions::default();
+    let read = bounded("recognise blends", |w| recognise_blends_with(&r, &opts, w));
+    let spec = DeleteBlends {
+        max_size: Some(0.003),
+        ..Default::default()
+    };
+    let deleted = bounded("delete blends", |w| {
+        delete_blends_with(OpKey(9), &r, &spec, w)
+    });
+    let face = recognise_blends_with(&r, &opts, &Work::unlimited())
+        .unwrap()
+        .blends[0]
+        .faces[0];
+    let bigger = [(face, BlendKind::Fillet { radius: 0.003 })];
+    let resized = bounded("resize blends", |w| {
+        resize_blends_with(OpKey(9), &r, &bigger, &opts, w)
+    });
+    eprintln!("blends: recognise {read} units, delete {deleted}, resize {resized}");
+}

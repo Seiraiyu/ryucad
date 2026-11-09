@@ -35,8 +35,8 @@ mod sheet_tests;
 pub(crate) mod table;
 
 pub use crate::name::ToolKey;
-pub use divide::{Divided, divide, divide_with};
 pub(crate) use divide::divide_in;
+pub use divide::{Divided, divide, divide_with};
 
 use crate::geom::{Point3, Rigid};
 use crate::name::{Journal, Name, OpKey};

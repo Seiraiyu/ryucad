@@ -62,8 +62,11 @@ impl Canal {
     /// The stretch of the spine under `edge`: its samples' feet's
     /// parameters, unwrapped across a period, a whole period for a closed
     /// edge round a periodic spine.
-    fn under(&self, body: &Body, edge: EdgeId) -> [f64; 2] {
-        let ts: Vec<f64> = samples(body, edge).into_iter().map(|p| self.param(p)).collect();
+    pub(crate) fn under(&self, body: &Body, edge: EdgeId) -> [f64; 2] {
+        let ts: Vec<f64> = samples(body, edge)
+            .into_iter()
+            .map(|p| self.param(p))
+            .collect();
         let period = self.spine.period();
         let e = &body.edges[edge];
         if let Some(period) = period
@@ -159,7 +162,12 @@ fn canal(body: &Body, f: FaceId, tol: f64) -> Option<(Canal, f64)> {
             let spine = Curve::Circle(Circle::new(*surface.frame()?, t.major()).ok()?);
             Some((Canal { spine }, t.minor()))
         }
-        Surface::Pipe(p) => Some((Canal { spine: p.spine().clone() }, p.radius())),
+        Surface::Pipe(p) => Some((
+            Canal {
+                spine: p.spine().clone(),
+            },
+            p.radius(),
+        )),
         Surface::Nurbs(n) => super::fit::fit(body, f, n, tol),
         _ => None,
     }
@@ -168,7 +176,10 @@ fn canal(body: &Body, f: FaceId, tol: f64) -> Option<(Canal, f64)> {
 /// Whether `edge` runs across the spine: its samples' feet on it lie
 /// within the tolerances of each other.
 fn section(body: &Body, canal: &Canal, edge: EdgeId, tol: f64) -> bool {
-    let feet: Vec<Point3> = samples(body, edge).into_iter().map(|p| canal.foot(p)).collect();
+    let feet: Vec<Point3> = samples(body, edge)
+        .into_iter()
+        .map(|p| canal.foot(p))
+        .collect();
     let reach = 2.0 * (tol + body.edges[edge].tolerance.get());
     feet.iter().all(|p| p.distance(feet[0]) <= reach)
 }
@@ -184,7 +195,15 @@ fn slack(body: &Body, edge: EdgeId, r: f64, tol: f64) -> f64 {
 /// fillet's spine lies at distance `r` from its supports along their
 /// normals. Each offset is met by `intersect::curve_surface`, which must
 /// give one stretch on it covering the whole stretch of spine.
-fn rolls_on(body: &Body, canal: &Canal, r: f64, edge: EdgeId, g: FaceId, tol: f64) -> bool {
+fn rolls_on(
+    body: &Body,
+    canal: &Canal,
+    r: f64,
+    edge: EdgeId,
+    g: FaceId,
+    tol: f64,
+    m: &Meter,
+) -> bool {
     let range = canal.under(body, edge);
     if range[1] - range[0] <= 0.0 {
         return false;
@@ -196,22 +215,24 @@ fn rolls_on(body: &Body, canal: &Canal, r: f64, edge: EdgeId, g: FaceId, tol: f6
             return false;
         };
         matches!(
-            crate::intersect::curve_surface(&canal.spine, range, &off, reach).as_deref(),
+            crate::intersect::curve_surface_in(&canal.spine, range, &off, reach, m).as_deref(),
             Ok([crate::intersect::CurveHit::On { t: [a, b] }]) if *a <= range[0] && *b >= range[1]
         )
     })
 }
 
 /// Face `f` read as a fillet.
-pub(crate) fn fillet(body: &Body, f: FaceId, tol: f64) -> Option<Candidate> {
+pub(crate) fn fillet(body: &Body, f: FaceId, tol: f64, m: &Meter) -> Option<Candidate> {
     let (canal, r) = canal(body, f, tol)?;
     let mut rails: BTreeMap<FaceId, Vec<EdgeId>> = BTreeMap::new();
     for e in edges_of(body, f) {
-        let Some(g) = across(body, e, f) else { continue };
+        let Some(g) = across(body, e, f) else {
+            continue;
+        };
         if section(body, &canal, e, tol) {
             continue;
         }
-        if rolls_on(body, &canal, r, e, g, tol) {
+        if rolls_on(body, &canal, r, e, g, tol, m) {
             rails.entry(g).or_default().push(e);
         }
     }
@@ -352,7 +373,9 @@ fn setback(body: &Body, edge: EdgeId, m: &Meet, tol: f64) -> Option<f64> {
     };
     let (lo, hi) = d
         .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &x| (a.min(x), b.max(x)));
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &x| {
+            (a.min(x), b.max(x))
+        });
     (hi - lo <= reach && lo > 10.0 * LINEAR_RESOLUTION).then_some((lo + hi) / 2.0)
 }
 
@@ -425,7 +448,9 @@ pub(crate) fn chamfer(body: &Body, f: FaceId, tol: f64) -> Option<Candidate> {
             // too, set back farther); two pairs within the tolerance of
             // each other: neither.
             match &found {
-                Some(c) if c.share + tol / width(body, a, &m).max(LINEAR_RESOLUTION) < share => continue,
+                Some(c) if c.share + tol / width(body, a, &m).max(LINEAR_RESOLUTION) < share => {
+                    continue;
+                }
                 Some(c) if (c.share - share).abs() * width(body, a, &m) <= tol => {
                     ambiguous = true;
                     continue;
@@ -474,12 +499,21 @@ pub(crate) fn size(kind: &BlendKind) -> f64 {
 fn alike(a: &BlendKind, b: &BlendKind, tol: f64) -> bool {
     match (a, b) {
         (BlendKind::Fillet { radius: x }, BlendKind::Fillet { radius: y }) => (x - y).abs() <= tol,
-        (BlendKind::Chamfer(Chamfer::Equal { distance: x }), BlendKind::Chamfer(Chamfer::Equal { distance: y })) => {
-            (x - y).abs() <= tol
-        }
         (
-            BlendKind::Chamfer(Chamfer::Distances { first: a1, second: a2, first_face: fa }),
-            BlendKind::Chamfer(Chamfer::Distances { first: b1, second: b2, first_face: fb }),
+            BlendKind::Chamfer(Chamfer::Equal { distance: x }),
+            BlendKind::Chamfer(Chamfer::Equal { distance: y }),
+        ) => (x - y).abs() <= tol,
+        (
+            BlendKind::Chamfer(Chamfer::Distances {
+                first: a1,
+                second: a2,
+                first_face: fa,
+            }),
+            BlendKind::Chamfer(Chamfer::Distances {
+                first: b1,
+                second: b2,
+                first_face: fb,
+            }),
         ) => fa == fb && (a1 - b1).abs() <= tol && (a2 - b2).abs() <= tol,
         _ => false,
     }
@@ -491,9 +525,9 @@ fn alike(a: &BlendKind, b: &BlendKind, tol: f64) -> bool {
 /// along it.
 fn joins(body: &Body, edge: EdgeId, a: FaceId, b: FaceId, kind: &BlendKind, tol: f64) -> bool {
     match kind {
-        BlendKind::Fillet { .. } => [a, b].into_iter().all(|f| {
-            canal(body, f, tol).is_some_and(|(c, _)| section(body, &c, edge, tol))
-        }),
+        BlendKind::Fillet { .. } => [a, b]
+            .into_iter()
+            .all(|f| canal(body, f, tol).is_some_and(|(c, _)| section(body, &c, edge, tol))),
         _ => {
             let r = size(kind).max(10.0 * LINEAR_RESOLUTION);
             tangent_along(body, edge, slack(body, edge, r, tol)) == Some(true)
@@ -502,16 +536,29 @@ fn joins(body: &Body, edge: EdgeId, a: FaceId, b: FaceId, kind: &BlendKind, tol:
 }
 
 /// `body`'s blends and corners.
-pub(crate) fn recognise(body: &Body, opts: &RecogniseOptions, m: &Meter) -> Result<Recognition, Error> {
+pub(crate) fn recognise(
+    body: &Body,
+    opts: &RecogniseOptions,
+    m: &Meter,
+) -> Result<Recognition, Error> {
     let tol = opts.tolerance;
     if !(LINEAR_RESOLUTION..=crate::tol::TOLERANCE_CAP).contains(&tol) {
         return Err(TweakError::BadTolerance.into());
     }
     let faces: Vec<FaceId> = body.faces().collect();
-    let halt = |f: FaceId| -> Error { TweakError::Uncertain { at: body.faces[f].name }.into() };
+    let halt = |f: FaceId| -> Error {
+        TweakError::Uncertain {
+            at: body.faces[f].name,
+        }
+        .into()
+    };
     let read: Vec<Result<Option<Candidate>, Error>> = m.par_map(&faces, |m, &f| {
         m.charge(1).map_err(|_| halt(f))?;
-        Ok(fillet(body, f, tol).or_else(|| chamfer(body, f, tol)))
+        let found = fillet(body, f, tol, m).or_else(|| chamfer(body, f, tol));
+        if m.halted() {
+            return Err(halt(f));
+        }
+        Ok(found)
     });
     let mut found: Vec<Candidate> = Vec::new();
     for r in read {
@@ -529,9 +576,9 @@ pub(crate) fn recognise(body: &Body, opts: &RecogniseOptions, m: &Meter) -> Resu
     let mut kept: Vec<Candidate> = Vec::new();
     for c in found {
         if matches!(c.kind, BlendKind::Chamfer(_)) {
-            let clash = kept.iter().any(|k| {
-                k.sides.contains(&c.face) || c.sides.contains(&k.face)
-            });
+            let clash = kept
+                .iter()
+                .any(|k| k.sides.contains(&c.face) || c.sides.contains(&k.face));
             if clash {
                 continue;
             }
@@ -576,8 +623,12 @@ pub(crate) fn recognise(body: &Body, opts: &RecogniseOptions, m: &Meter) -> Resu
         for &i in members {
             let c = &kept[i];
             for e in edges_of(body, c.face) {
-                let Some(other) = across(body, e, c.face) else { continue };
-                let Some(&h) = group_of.get(&other) else { continue };
+                let Some(other) = across(body, e, c.face) else {
+                    continue;
+                };
+                let Some(&h) = group_of.get(&other) else {
+                    continue;
+                };
                 if h == g || !alike(&kept[groups[h][0]].kind, &c.kind, tol) {
                     continue;
                 }
@@ -595,7 +646,10 @@ pub(crate) fn recognise(body: &Body, opts: &RecogniseOptions, m: &Meter) -> Resu
         let next = ids.len();
         let id = *ids.entry(r).or_insert(next);
         let first = &kept[members[0]];
-        let mut fs: Vec<Name> = members.iter().map(|&i| body.faces[kept[i].face].name).collect();
+        let mut fs: Vec<Name> = members
+            .iter()
+            .map(|&i| body.faces[kept[i].face].name)
+            .collect();
         fs.sort();
         blends.push(Recognised {
             faces: fs,
@@ -616,15 +670,17 @@ pub(crate) fn recognise(body: &Body, opts: &RecogniseOptions, m: &Meter) -> Resu
         let mut joined = BTreeSet::new();
         let mut all = true;
         for e in edges_of(body, f) {
-            let fits = across(body, e, f).and_then(|g| group_of.get(&g).map(|&h| (g, h))).filter(|&(g, h)| {
-                let BlendKind::Fillet { radius } = kept[groups[h][0]].kind else {
-                    return false;
-                };
-                (radius - r).abs() <= tol
-                    && canal(body, g, tol).is_some_and(|(c, _)| {
-                        c.foot(centre).distance(centre) <= tol + body.edges[e].tolerance.get()
-                    })
-            });
+            let fits = across(body, e, f)
+                .and_then(|g| group_of.get(&g).map(|&h| (g, h)))
+                .filter(|&(g, h)| {
+                    let BlendKind::Fillet { radius } = kept[groups[h][0]].kind else {
+                        return false;
+                    };
+                    (radius - r).abs() <= tol
+                        && canal(body, g, tol).is_some_and(|(c, _)| {
+                            c.foot(centre).distance(centre) <= tol + body.edges[e].tolerance.get()
+                        })
+                });
             match fits {
                 Some((_, h)) => {
                     joined.insert(h);

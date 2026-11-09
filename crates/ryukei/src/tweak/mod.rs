@@ -21,10 +21,10 @@
 //! face, edge and vertex keeps its name; the journal is `Modified` for
 //! each that changed. The key names nothing.
 
+pub mod blends;
 pub(crate) mod chain;
 pub(crate) mod classify;
 pub(crate) mod curves;
-pub mod blends;
 pub mod delete;
 pub mod draft;
 pub(crate) mod engine;

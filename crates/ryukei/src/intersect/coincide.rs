@@ -284,8 +284,7 @@ pub(crate) fn within_implicit(imp: &Implicit, n: &NurbsSurface, tol: f64) -> boo
         let Some(local) = local else {
             return false;
         };
-        !imp.box_beyond_apex(local)
-            && imp.distance_bound(f.range().mag(), local) <= tol
+        !imp.box_beyond_apex(local) && imp.distance_bound(f.range().mag(), local) <= tol
     })
 }
 

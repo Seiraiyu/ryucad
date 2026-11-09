@@ -4,7 +4,9 @@
 //! along a curve that is no line or circle is no fillet here.
 
 use super::recognise::Canal;
-use crate::geom::{Circle, Curve, Cylinder, Frame, Line, NurbsSurface, Point3, Surface, Torus, Vector3};
+use crate::geom::{
+    Circle, Curve, Cylinder, Frame, Line, NurbsSurface, Point3, Surface, Torus, Vector3,
+};
 use crate::intersect::coincide::within_implicit;
 use crate::intersect::implicit::Implicit;
 use crate::topo::{Body, FaceId};
@@ -39,7 +41,12 @@ fn circle(a: Point3, b: Point3, c: Point3) -> Option<(Point3, Vector3, f64)> {
 
 /// Face `f` on spline `n` read as a canal surface of one radius about a
 /// line or a circle, certified within `tol`.
-pub(crate) fn fit(body: &Body, f: FaceId, n: &std::sync::Arc<NurbsSurface>, tol: f64) -> Option<(Canal, f64)> {
+pub(crate) fn fit(
+    body: &Body,
+    f: FaceId,
+    n: &std::sync::Arc<NurbsSurface>,
+    tol: f64,
+) -> Option<(Canal, f64)> {
     let s = Surface::Nurbs(n.clone());
     let rect = crate::intersect::face_rect(body, f)?;
     let at = |k: usize, r: [f64; 2]| r[0] + (r[1] - r[0]) * (k as f64 + 0.5) / GRID as f64;
@@ -54,7 +61,10 @@ pub(crate) fn fit(body: &Body, f: FaceId, n: &std::sync::Arc<NurbsSurface>, tol:
         return None;
     }
     let c0 = cs[0].0;
-    let c2 = cs.iter().map(|&(c, _)| c).max_by(|a, b| a.distance(c0).total_cmp(&b.distance(c0)))?;
+    let c2 = cs
+        .iter()
+        .map(|&(c, _)| c)
+        .max_by(|a, b| a.distance(c0).total_cmp(&b.distance(c0)))?;
     if c2.distance(c0) <= tol {
         return None;
     }
@@ -63,9 +73,16 @@ pub(crate) fn fit(body: &Body, f: FaceId, n: &std::sync::Arc<NurbsSurface>, tol:
         let w = c - c0;
         (w - dir * w.dot(dir)).length()
     };
-    let c1 = cs.iter().map(|&(c, _)| c).max_by(|a, b| off(*a).total_cmp(&off(*b)))?;
+    let c1 = cs
+        .iter()
+        .map(|&(c, _)| c)
+        .max_by(|a, b| off(*a).total_cmp(&off(*b)))?;
     let (candidate, canal) = if off(c1) <= tol {
-        let hint = if dir.x.abs() < 0.9 { Vector3::new(1.0, 0.0, 0.0) } else { Vector3::new(0.0, 1.0, 0.0) };
+        let hint = if dir.x.abs() < 0.9 {
+            Vector3::new(1.0, 0.0, 0.0)
+        } else {
+            Vector3::new(0.0, 1.0, 0.0)
+        };
         let fr = Frame::new(c0, dir, hint).ok()?;
         (
             Surface::Cylinder(Cylinder::new(fr, r).ok()?),

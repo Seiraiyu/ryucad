@@ -12,11 +12,11 @@ pub(crate) mod remake;
 #[cfg(test)]
 mod tests;
 
+use crate::Error;
 use crate::blend::BlendKind;
 use crate::name::{Journal, Name, OpKey};
 use crate::topo::Body;
 use crate::work::{Meter, Work};
-use crate::Error;
 
 /// How close a face must be to a blend to be read as one.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -119,7 +119,11 @@ pub struct DeleteBlends {
 /// until they meet, with the whole chain of each and every corner it
 /// reaches: a new body and the journal (each blend face `Replaced` by the
 /// sharp edges it leaves). Picking nothing changes nothing.
-pub fn delete_blends(key: OpKey, body: &Body, spec: &DeleteBlends) -> Result<(Body, Journal), Error> {
+pub fn delete_blends(
+    key: OpKey,
+    body: &Body,
+    spec: &DeleteBlends,
+) -> Result<(Body, Journal), Error> {
     delete_blends_with(key, body, spec, &Work::unlimited())
 }
 
@@ -142,7 +146,13 @@ pub fn resize_blends(
     body: &Body,
     sizes: &[(Name, BlendKind)],
 ) -> Result<(Body, Journal), Error> {
-    resize_blends_with(key, body, sizes, &RecogniseOptions::default(), &Work::unlimited())
+    resize_blends_with(
+        key,
+        body,
+        sizes,
+        &RecogniseOptions::default(),
+        &Work::unlimited(),
+    )
 }
 
 /// [`resize_blends`] with its recognition's options, under `work`.

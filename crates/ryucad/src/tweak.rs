@@ -987,6 +987,15 @@ mod tests {
             (T::CapNotOnFace { face: n }, "cap_not_on_face"),
             (T::GrowWouldCap { face: n }, "grow_would_cap"),
             (T::NoFeature { face: n }, "no_feature"),
+            (T::NotABlend { face: n }, "not_a_blend"),
+            (
+                T::BlendLost {
+                    face: n,
+                    reason: ryukei::BlendLoss::Overflow,
+                },
+                "blend_lost",
+            ),
+            (T::BadTolerance, "bad_tolerance"),
             (T::SelfIntersecting { faces: [n, n] }, "self_intersecting"),
             (T::Uncertain { at: n }, "uncertain"),
             (
