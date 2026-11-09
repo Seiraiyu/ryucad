@@ -420,3 +420,66 @@ fn a_wall_along_a_sheets_edge_puts_it_on_one_side() {
     sound_sheet(&d.back[0], 4);
     assert!((area(&d.back[0]) - 16.0).abs() < 1e-9);
 }
+
+/// The names of every face of `bodies`, sorted.
+fn face_names(bodies: &[&Body]) -> Vec<Name> {
+    let mut out: Vec<Name> = bodies
+        .iter()
+        .flat_map(|b| b.faces().map(|f| b.faces[f].name).collect::<Vec<_>>())
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn sides_are_the_lumps_of_a_division_whole() {
+    // Two blocks in one body, halved: each side one body of two lumps,
+    // holding exactly the faces `divide`'s lumps hold.
+    let a = block(1, [0.0, 0.0, 0.0], [1.0, 1.0, 2.0]);
+    let c = block(2, [3.0, 0.0, 0.0], [1.0, 1.0, 2.0]);
+    let (two, _) = boolean(OpKey(9), BooleanOp::Unite, &a, &[tool(8, &c)]).unwrap();
+    let s = square(3, 1.0, [-1.0, 5.0], [-1.0, 2.0]);
+    let (d, j) = divide(OpKey(4), &two, &[tool(5, &s)]).unwrap();
+    let (sides, k) =
+        divide_sides_with(OpKey(4), &two, &[tool(5, &s)], &Work::unlimited()).unwrap();
+    let (front, back) = (sides.front.unwrap(), sides.back.unwrap());
+    for b in [&front, &back] {
+        assert_eq!(check(b), []);
+        assert!((volume(b) - 2.0).abs() < 1e-9);
+    }
+    assert_eq!(
+        face_names(&[&front]),
+        face_names(&d.front.iter().collect::<Vec<_>>())
+    );
+    assert_eq!(
+        face_names(&[&back]),
+        face_names(&d.back.iter().collect::<Vec<_>>())
+    );
+    assert_eq!(j, k, "the same journal");
+    // A sheet in two pieces, a wall through one: the piece no tool
+    // reaches stays behind with the back.
+    let strip = square(6, 0.0, [0.0, 6.0], [0.0, 1.0]);
+    let gap = block(7, [2.0, -1.0, -1.0], [2.0, 3.0, 2.0]);
+    let (pair, _) = boolean(OpKey(10), BooleanOp::Subtract, &strip, &[tool(11, &gap)]).unwrap();
+    let w = wall(12, 1.0, [-1.0, 2.0], [-1.0, 1.0]);
+    let (d, _) = divide(OpKey(13), &pair, &[tool(14, &w)]).unwrap();
+    let (sides, _) =
+        divide_sides_with(OpKey(13), &pair, &[tool(14, &w)], &Work::unlimited()).unwrap();
+    let (front, back) = (sides.front.unwrap(), sides.back.unwrap());
+    sound_sheet(&front, 4);
+    assert!((area(&front) - 1.0).abs() < 1e-9);
+    assert!((area(&back) - 3.0).abs() < 1e-9);
+    let behind: Vec<&Body> = d.back.iter().chain(&d.apart).collect();
+    assert_eq!(face_names(&[&back]), face_names(&behind));
+}
+
+#[test]
+fn a_side_nothing_lies_on_is_none() {
+    // A wall that misses the sheet: the tool reaches nothing and isn't
+    // closed, so the whole sheet is apart, which stays behind.
+    let s = square(3, 0.0, [0.0, 1.0], [0.0, 1.0]);
+    let w = wall(4, 5.0, [-1.0, 2.0], [-1.0, 1.0]);
+    let (sides, _) = divide_sides_with(OpKey(5), &s, &[tool(6, &w)], &Work::unlimited()).unwrap();
+    assert!(sides.front.is_none());
+    assert!((area(&sides.back.unwrap()) - 1.0).abs() < 1e-9);
+}
