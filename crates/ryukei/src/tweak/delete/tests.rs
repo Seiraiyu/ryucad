@@ -121,3 +121,72 @@ fn a_cap_lays_the_plate_out_without_its_hole() {
     assert_eq!(modified, 2);
     assert_eq!(j.events().len(), 2 + 1 + 2 + 2);
 }
+
+#[test]
+fn a_fillet_grows_back_to_its_sharp_edge() {
+    let (b, _) = primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let top = Name::derive(
+        K,
+        crate::name::Role::Face(crate::name::FaceRole::PlusZ),
+        &[],
+    );
+    let front = Name::derive(
+        K,
+        crate::name::Role::Face(crate::name::FaceRole::MinusY),
+        &[],
+    );
+    let e = b
+        .edges()
+        .find(|&e| {
+            let n: Vec<Name> = sets::faces_of(&b, e)
+                .iter()
+                .map(|&f| b.faces[f].name)
+                .collect();
+            n.contains(&top) && n.contains(&front)
+        })
+        .unwrap();
+    let (r, _) = crate::blend::blend(
+        OpKey(0x13b4),
+        &b,
+        &[crate::blend::EdgeBlend {
+            edge: b.edges[e].name,
+            kind: crate::blend::BlendKind::Fillet { radius: 0.1 },
+        }],
+    )
+    .unwrap();
+    let fillet = cylinders(&r)[0];
+    let EntityId::Face(f) = r.by_name(fillet).unwrap() else {
+        panic!()
+    };
+    // unmetered: a unit test.
+    let m = Meter::free();
+    let (o, j) = grow::grow(D, &r, &BTreeSet::from([f]), &m).unwrap();
+    assert!((volume(&o) - 0.24).abs() < 1e-9);
+    let sharp: Vec<Name> = o
+        .edges()
+        .filter(|&e| {
+            let n: Vec<Name> = sets::faces_of(&o, e)
+                .iter()
+                .map(|&f| o.faces[f].name)
+                .collect();
+            n.contains(&top) && n.contains(&front)
+        })
+        .map(|e| o.edges[e].name)
+        .collect();
+    assert_eq!(sharp.len(), 1);
+    assert!(
+        j.events().contains(&Event::Replaced {
+            old: fillet,
+            new: sharp.clone()
+        }),
+        "{:?}",
+        j.events()
+    );
+    // Both rails go to the sharp edge too.
+    let rails = j
+        .events()
+        .iter()
+        .filter(|e| matches!(e, Event::Replaced { old, new } if *old != fillet && *new == sharp))
+        .count();
+    assert_eq!(rails, 2);
+}

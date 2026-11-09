@@ -8,6 +8,7 @@
 #![allow(dead_code, unused_imports)]
 
 pub(crate) mod cap;
+pub(crate) mod grow;
 pub(crate) mod hole;
 pub(crate) mod sets;
 
