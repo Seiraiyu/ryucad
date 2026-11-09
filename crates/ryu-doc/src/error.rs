@@ -809,6 +809,9 @@ pub enum Code {
     /// A warning: a USD export wrote a reference as meshes alone (a
     /// reference has no BrepArray).
     ExportReferenceMeshOnly,
+    /// A warning: a USD export wrote a sheet as its mesh alone (ryucad
+    /// 18.C writes no BrepArray of a sheet).
+    ExportSheetBrepSkipped,
 }
 
 impl Code {
@@ -935,6 +938,7 @@ mod tests {
             (Code::ReferenceFacesSplit, "reference_faces_split"),
             (Code::ReferenceUnoriented, "reference_unoriented"),
             (Code::ExportReferenceMeshOnly, "export_reference_mesh_only"),
+            (Code::ExportSheetBrepSkipped, "export_sheet_brep_skipped"),
         ] {
             assert_eq!(json!(c), json!(name));
             assert_eq!(c.exit_code(), 1, "{name}");

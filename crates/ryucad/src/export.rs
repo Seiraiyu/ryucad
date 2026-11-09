@@ -725,27 +725,34 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
             mesh,
             pipe_tolerance,
         } => {
-            // A reference has no BrepArray: it is written as its mesh, so
-            // an export without meshes would write nothing of it.
-            let references: Vec<String> = walk
+            // A reference or a sheet has no BrepArray here: each is
+            // written as its mesh, so an export without meshes would write
+            // nothing of it.
+            let alone: Vec<(String, bool)> = walk
                 .scene
                 .products
                 .iter()
                 .flat_map(|p| &p.solids)
-                .filter(|x| x.built.reference)
-                .map(|x| format!("{}/{}", x.part, x.founder))
+                .filter(|x| {
+                    x.built.reference || x.built.body.kind() == ryukei::topo::BodyKind::Sheet
+                })
+                .map(|x| (format!("{}/{}", x.part, x.founder), x.built.reference))
                 .collect();
             if mesh.is_none()
-                && let Some(r) = references.first()
+                && let Some((r, reference)) = alone.first()
             {
-                return Err(Error::new(
-                    Code::InvalidParam,
+                let message = if *reference {
                     format!(
                         "{r} is a reference import, which USD holds only as a mesh: export with meshes, or convert it to a solid"
-                    ),
-                )
-                .with("param", "mesh")
-                .with("solid", r));
+                    )
+                } else {
+                    format!(
+                        "{r} is a sheet, which USD holds only as a mesh here: export with meshes"
+                    )
+                };
+                return Err(Error::new(Code::InvalidParam, message)
+                    .with("param", "mesh")
+                    .with("solid", r));
             }
             let meshes = mesh
                 .as_ref()
@@ -754,11 +761,16 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
             if brep {
                 warn(
                     &mut result,
-                    references
+                    alone
                         .iter()
-                        .map(|r| {
-                            json!({"code": "export_reference_mesh_only", "solid": r,
-                                   "message": format!("{r} is a reference import: written as its mesh alone, with no BrepArray")})
+                        .map(|(r, reference)| {
+                            if *reference {
+                                json!({"code": "export_reference_mesh_only", "solid": r,
+                                       "message": format!("{r} is a reference import: written as its mesh alone, with no BrepArray")})
+                            } else {
+                                json!({"code": "export_sheet_brep_skipped", "solid": r,
+                                       "message": format!("{r} is a sheet: written as its mesh alone, with no BrepArray")})
+                            }
                         })
                         .collect(),
                 );
@@ -890,7 +902,8 @@ fn usd_model(scene: &Scene, meshes: Option<&ryuformats::Scene>) -> ryuformats::u
                 .iter()
                 .enumerate()
                 .map(|(i, x)| ryuformats::usd::stage::Solid {
-                    brep: !x.built.reference,
+                    brep: !x.built.reference
+                        && x.built.body.kind() != ryukei::topo::BodyKind::Sheet,
                     name: x.founder.to_string(),
                     body: Arc::clone(
                         bodies
@@ -1710,6 +1723,63 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(e.code, Code::InvalidParam);
         assert_eq!(e.details["solid"], "p/i");
+    }
+
+    #[test]
+    fn a_sheet_is_written_to_usd_as_its_mesh_alone() {
+        use crate::server::tests::{call, fresh};
+        let (_d, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "plane": "xy"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
+                {"op": "add", "id": "a", "type": "point", "at": [0, 0]},
+                {"op": "add", "id": "b", "type": "point", "at": [10, 0]},
+                {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}]}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "w", "sketch": "s", "surface": true,
+                   "extent": {"type": "blind", "length": "20 mm"}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 5, "y": 5, "z": 5},
+                   "placement": {"origin": [20, 0, 0]}}),
+        )
+        .unwrap();
+        let (v, out) = exported(&mut s, json!({"part": "p", "format": "usda"})).unwrap();
+        let warned: Vec<&Value> = v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|w| w["code"] == "export_sheet_brep_skipped")
+            .collect();
+        assert_eq!(warned.len(), 1, "{v}");
+        assert_eq!(warned[0]["solid"], "p/w");
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.matches("BrepArray").count(), 1, "the box's alone");
+        let e = answered(
+            &mut s,
+            json!({"part": "p", "format": "usda", "mesh": false}),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(
+            (e.code, e.details["solid"].as_str()),
+            (Code::InvalidParam, Some("p/w"))
+        );
     }
 
     #[test]
