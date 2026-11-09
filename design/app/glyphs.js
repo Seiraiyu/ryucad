@@ -1,6 +1,7 @@
-// ryucad's 25 CAD glyphs (design 199, Fonts and icons; design 297 adds
+// ryucad's 29 CAD glyphs (design 199, Fonts and icons; design 297 adds
 // the datum and path glyphs, design 323 the sweep and loft glyphs, design
-// 327 the shell, offset, mirror and split glyphs), on Phosphor's
+// 327 the shell, offset, mirror and split glyphs, design 346 the base
+// flange, edge flange, unfold and refold glyphs), on Phosphor's
 // 256-unit grid with its 16-unit stroke, round caps and joins. Each glyph
 // is a list of strokes: `l` a polyline, `e` an ellipse (cx, cy, rx, ry),
 // `a` an arc of one (cx, cy, rx, ry, from, to: degrees clockwise from +x,
@@ -173,6 +174,28 @@ const GLYPHS = {
     ...box(56, 80, 136, 48, 40, -32),
     ...box(24, 184, 136, 48, 40, -32),
     ...[16, 64, 112, 160, 208].map((x) => ({ l: [[x, 140], [x + 28, 140]], w: 10 })),
+  ],
+  "base-flange": [
+    ...box(24, 144, 160, 40, 48, -48),
+  ],
+  "edge-flange": [
+    { l: [[32, 176], [176, 176]] },
+    { a: [176, 168, 8, 8, 0, 90] },
+    { l: [[184, 168], [184, 40], [216, 40], [216, 168]] },
+    { a: [176, 168, 40, 40, 0, 90] },
+    { l: [[176, 208], [32, 208], [32, 176]] },
+  ],
+  unfold: [
+    { l: [[24, 160], [232, 160], [232, 200], [24, 200], [24, 160]] },
+    ...[148, 172, 196].map((y) => ({ l: [[136, y], [136, y + 12]], w: 10 })),
+    { a: [136, 160, 80, 80, 270, 360] },
+    { l: [[200, 140], [216, 160], [232, 140]] },
+  ],
+  refold: [
+    { l: [[24, 160], [232, 160], [232, 200], [24, 200], [24, 160]] },
+    ...[148, 172, 196].map((y) => ({ l: [[136, y], [136, y + 12]], w: 10 })),
+    { a: [136, 160, 80, 80, 270, 360] },
+    { l: [[156, 64], [136, 80], [156, 96]] },
   ],
 };
 

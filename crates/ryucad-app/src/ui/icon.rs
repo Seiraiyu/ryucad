@@ -1,5 +1,5 @@
 //! Icons (design 199, Fonts and icons): Phosphor Regular's glyphs by code
-//! point, and ryucad's own 25 CAD glyphs as stroke tables
+//! point, and ryucad's own 29 CAD glyphs as stroke tables
 //! ([`glyphs`], ported stroke for stroke from `design/app/glyphs.js`),
 //! drawn alike at any size and tinted by state. An icon never stands
 //! alone: [`button`] gives every icon button its command's title as its
@@ -217,7 +217,7 @@ pub fn button(
 }
 
 pub mod glyphs {
-    //! ryucad's 25 CAD glyphs on Phosphor's 256-unit grid with its
+    //! ryucad's 29 CAD glyphs on Phosphor's 256-unit grid with its
     //! 16-unit stroke, round caps and joins: `design/app/glyphs.js`'s
     //! table, stroke for stroke.
 
@@ -253,10 +253,14 @@ pub mod glyphs {
         Offset,
         MirrorBody,
         Split,
+        BaseFlange,
+        EdgeFlange,
+        Unfold,
+        Refold,
     }
 
     impl Glyph {
-        pub const ALL: [Glyph; 25] = [
+        pub const ALL: [Glyph; 29] = [
             Glyph::Cone,
             Glyph::Torus,
             Glyph::Extrude,
@@ -282,6 +286,10 @@ pub mod glyphs {
             Glyph::Offset,
             Glyph::MirrorBody,
             Glyph::Split,
+            Glyph::BaseFlange,
+            Glyph::EdgeFlange,
+            Glyph::Unfold,
+            Glyph::Refold,
         ];
 
         /// The glyph's name in `glyphs.js`.
@@ -312,6 +320,10 @@ pub mod glyphs {
                 Glyph::Offset => "offset",
                 Glyph::MirrorBody => "mirror-body",
                 Glyph::Split => "split",
+                Glyph::BaseFlange => "base-flange",
+                Glyph::EdgeFlange => "edge-flange",
+                Glyph::Unfold => "unfold",
+                Glyph::Refold => "refold",
             }
         }
     }
@@ -615,6 +627,39 @@ pub mod glyphs {
                 for x in [16.0, 64.0, 112.0, 160.0, 208.0] {
                     s.push(thin(&[[x, 140.0], [x + 28.0, 140.0]], 10.0));
                 }
+            }
+            Glyph::BaseFlange => s.extend(cabinet(24.0, 144.0, 160.0, 40.0, 48.0, -48.0)),
+            Glyph::EdgeFlange => {
+                s.push(line(&[[32.0, 176.0], [176.0, 176.0]]));
+                s.push(arc([176.0, 168.0, 8.0, 8.0], 0.0, 90.0));
+                s.push(line(&[
+                    [184.0, 168.0],
+                    [184.0, 40.0],
+                    [216.0, 40.0],
+                    [216.0, 168.0],
+                ]));
+                s.push(arc([176.0, 168.0, 40.0, 40.0], 0.0, 90.0));
+                s.push(line(&[[176.0, 208.0], [32.0, 208.0], [32.0, 176.0]]));
+            }
+            Glyph::Unfold | Glyph::Refold => {
+                s.push(line(&[
+                    [24.0, 160.0],
+                    [232.0, 160.0],
+                    [232.0, 200.0],
+                    [24.0, 200.0],
+                    [24.0, 160.0],
+                ]));
+                for y in [148.0, 172.0, 196.0] {
+                    s.push(thin(&[[136.0, y], [136.0, y + 12.0]], 10.0));
+                }
+                s.push(arc([136.0, 160.0, 80.0, 80.0], 270.0, 360.0));
+                // The head where the flange goes: down onto the flat for
+                // an unfold, back up for a refold.
+                s.push(line(if g == Glyph::Unfold {
+                    &[[200.0, 140.0], [216.0, 160.0], [232.0, 140.0]]
+                } else {
+                    &[[156.0, 64.0], [136.0, 80.0], [156.0, 96.0]]
+                }));
             }
         }
         s
