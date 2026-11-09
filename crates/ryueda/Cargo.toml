@@ -15,6 +15,8 @@ clap = { version = "4", features = ["derive"] }
 getrandom = "0.3"
 rayon = "1"
 ryu-doc = { path = "../ryu-doc" }
+# The bundled font every ryu drawing writes (design 417).
+ryu-draw = { path = "../ryu-draw" }
 # Part data: the vocabulary, records, searches and their cache (design 347).
 ryueda-parts = { path = "../ryueda-parts" }
 # The exchange structure alone, to check that 3D models parse: no kernel.
@@ -46,6 +48,8 @@ ryueda-parts = { path = "../ryueda-parts", features = ["testing"] }
 # The schematic corpus's references, checked by SHA-256.
 sha2 = "0.11"
 divan = "0.1"
+# The bundled font's widths, which `tests/font_widths.rs` checks ryusch's table against.
+ttf-parser = "0.25"
 tempfile = "3"
 
 [[bench]]

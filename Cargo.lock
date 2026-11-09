@@ -4868,6 +4868,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-draw"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "miniz_oxide 0.8.9",
+ "pdf-writer",
+ "ryu-math",
+ "subsetter",
+ "ttf-parser",
+]
+
+[[package]]
 name = "ryu-math"
 version = "0.0.0"
 dependencies = [
@@ -5018,6 +5030,7 @@ dependencies = [
  "rayon",
  "resvg",
  "ryu-doc",
+ "ryu-draw",
  "ryu-math",
  "ryu-part21",
  "ryu-session",
