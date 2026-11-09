@@ -586,3 +586,31 @@ fn reports_and_inspect_name_a_sheets_laminar_edges() {
     assert_eq!(edges.len(), 4, "{i}");
     assert!(edges.iter().all(|e| e["laminar"] == true), "{i}");
 }
+
+#[test]
+fn a_sheets_laminar_edge_is_refused_before_the_kernel() {
+    let (_dir, mut s) = project();
+    wall(&mut s);
+    let w = body(&mut s, "w");
+    let e = w.edges().find(|&e| w.is_laminar(e)).unwrap();
+    let name = w.edge(e).unwrap().name;
+    let before = must(&mut s, "feature.list", json!({"part": "p"}));
+    let e = call(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "fillet", "radius": "1 mm",
+               "edges": [format!("p/w/{name}")], "propagate": false}),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.details["reason"].as_str()),
+        (Code::BlendFailed, Some("unsupported")),
+        "{e}"
+    );
+    assert!(
+        e.details["hint"].as_str().unwrap().contains("laminar"),
+        "{e}"
+    );
+    assert_eq!(e.details["entities"][0]["reference"], format!("p/w/{name}"));
+    assert_eq!(must(&mut s, "feature.list", json!({"part": "p"})), before);
+}

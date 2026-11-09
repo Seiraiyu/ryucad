@@ -1922,8 +1922,8 @@ fn groups<'a>(
 fn blend_edges<'g>(
     part: &Part,
     id: &Id,
-    solid: &Id,
-    built: &Built,
+    ty: &str,
+    (solid, built): (&Id, &Built),
     groups: &'g [Group],
     propagate: bool,
     before: &dyn Results,
@@ -1946,6 +1946,12 @@ fn blend_edges<'g>(
                     "an edge",
                 ));
             };
+            // The kernel rounds only edges with a face either side; a
+            // tangent chain from an inner edge never reaches a laminar one.
+            if body.is_laminar(e) {
+                let name = body.edge(e).expect("a live edge").name;
+                return Err(laminar_blend(part, id, ty, solid, name));
+            }
             let chain = if propagate {
                 ryukei::blend::tangent_chain(body, e).map_err(|k| {
                     Error::new(Code::Internal, format!("{id}: {k}")).with("feature", id)
@@ -2016,7 +2022,16 @@ pub fn check_blend(part: &Part, id: &Id, f: &Feature, results: &dyn Results) -> 
     let (solid, propagate) = blend_solid(id, f)?;
     let built = read(part, &solids, id, f, "targets", &solid, results)?;
     let groups = groups(part, id, f, results)?;
-    blend_edges(part, id, &solid, built, &groups, propagate, results).map(drop)
+    blend_edges(
+        part,
+        id,
+        f.type_name(),
+        (&solid, built),
+        &groups,
+        propagate,
+        results,
+    )
+    .map(drop)
 }
 
 /// The kernel's refusal of a fillet or chamfer: `blend_failed`, with its
@@ -2129,7 +2144,40 @@ fn blend_error(
     if !entities.is_empty() {
         err = err.with("entities", entities);
     }
+    if let ryukei::Error::InvalidBlend(B::Unsupported { at }) = &e
+        && let Some(EntityId::Edge(x)) = built.body.by_name(*at)
+        && built.body.is_laminar(x)
+    {
+        err = err.with(
+            "hint",
+            laminar_hint(&format!("{}/{solid}/{at}", part.id), solid),
+        );
+    }
     err
+}
+
+/// What to say of boundary (laminar) edge `reference` of sheet `solid`
+/// that a fillet or chamfer names.
+fn laminar_hint(reference: &str, solid: &Id) -> String {
+    format!(
+        "{reference} is a boundary of sheet {solid} (laminar): only a sheet's inner edges are rounded"
+    )
+}
+
+/// `blend_failed` for a fillet or chamfer of a sheet's boundary: the
+/// kernel rounds only edges with a face either side.
+fn laminar_blend(part: &Part, id: &Id, ty: &str, solid: &Id, edge: Name) -> Error {
+    let reference = format!("{}/{solid}/{edge}", part.id);
+    let hint = laminar_hint(&reference, solid);
+    Error::new(Code::BlendFailed, format!("{ty} {id}: {hint}"))
+        .with("feature", id)
+        .with("solid", solid)
+        .with("reason", "unsupported")
+        .with(
+            "entities",
+            json!([{"role": "edge", "reference": reference, "kind": "edge"}]),
+        )
+        .with("hint", hint)
 }
 
 /// A fillet or chamfer: its solid as it sees it, with every edge its
@@ -2146,7 +2194,7 @@ fn build_blend(
     let (solid, propagate) = blend_solid(id, f)?;
     let built = read(part, solids, id, f, "targets", &solid, before)?;
     let groups = groups(part, id, f, before)?;
-    let listed = blend_edges(part, id, &solid, built, &groups, propagate, before)?;
+    let listed = blend_edges(part, id, ty, (&solid, built), &groups, propagate, before)?;
     let edges: Vec<ryukei::blend::EdgeBlend> = listed.iter().map(|(e, _)| *e).collect();
     let work = crate::work::work(run.job);
     let made = ryukei::blend::blend_with(op_key(&part.id, id), &built.body, &edges, &work)
