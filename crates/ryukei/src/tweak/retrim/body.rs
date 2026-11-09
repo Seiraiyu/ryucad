@@ -27,6 +27,8 @@ pub(crate) struct WorkBody {
     /// the region.
     pub(crate) clipped: BTreeSet<EdgeId>,
     /// The frontier edges, as edges of the working body.
+    // Read by the tests; the pairs read `frontier_faces`.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) frontier: BTreeSet<EdgeId>,
     /// Each frontier edge (the working body's) and its input faces.
     pub(crate) frontier_faces: BTreeMap<EdgeId, BTreeSet<FaceId>>,

@@ -356,3 +356,112 @@ fn topology_is_kept_unless_asked_to_change() {
     assert_eq!(crate::codec::encode_body(&a), crate::codec::encode_body(&c));
     assert_eq!(ja, jc);
 }
+
+/// A square pyramid: two prisms intersected (as `tests/tweaks.rs` makes it).
+pub(crate) fn pyramid() -> Body {
+    use crate::boolean::{BooleanOp, Tool, boolean};
+    use crate::geom::{Curve2, Frame, Line2, Point2, Point3};
+    use crate::name::ToolKey;
+    use crate::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
+    let tri = |frame: Frame, base: u128| {
+        let pts = [(0.0, 0.0), (1.0, 0.0), (0.5, 0.5)];
+        let segments = (0..3)
+            .map(|i| {
+                let (p, q) = (pts[i], pts[(i + 1) % 3]);
+                let (p, q) = (Point2::new(p.0, p.1), Point2::new(q.0, q.1));
+                Segment {
+                    key: SegmentKey(base + i as u128),
+                    curve: Curve2::Line2(Line2::through(p, q).unwrap()),
+                    t0: 0.0,
+                    t1: p.distance(q),
+                }
+            })
+            .collect();
+        ValidProfile::new(Profile {
+            frame,
+            loops: vec![Loop {
+                key: LoopKey(base),
+                segments,
+            }],
+        })
+        .unwrap()
+    };
+    // Triangles in the yz plane (extruded along x) and the xz plane
+    // (extruded along y).
+    let yz = Frame::new(
+        Point3::ORIGIN,
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+    )
+    .unwrap();
+    let xz = Frame::new(
+        Point3::ORIGIN,
+        Vector3::new(0.0, -1.0, 0.0),
+        Vector3::new(1.0, 0.0, 0.0),
+    )
+    .unwrap();
+    let a = extrude(
+        OpKey(0xd7),
+        &tri(yz, 20),
+        Vector3::new(1.0, 0.0, 0.0),
+        0.0,
+        1.0,
+    )
+    .unwrap()
+    .0;
+    let b = extrude(
+        OpKey(0xd8),
+        &tri(xz, 30),
+        Vector3::new(0.0, -1.0, 0.0),
+        -1.0,
+        0.0,
+    )
+    .unwrap()
+    .0;
+    boolean(
+        OpKey(0xd9),
+        BooleanOp::Intersect,
+        &a,
+        &[Tool {
+            key: ToolKey(2),
+            body: &b,
+            place: Rigid::IDENTITY,
+        }],
+    )
+    .unwrap()
+    .0
+}
+
+#[test]
+fn a_split_vertex_is_re_trimmed_under_change_only() {
+    let b = pyramid();
+    let slanted: Vec<Name> = b
+        .faces()
+        .filter(|&f| match &b.surfaces[b.faces[f].surface] {
+            crate::geom::Surface::Plane(p) => {
+                let z = p.frame().z().get().z.abs();
+                z > 0.1 && z < 0.9
+            }
+            _ => false,
+        })
+        .map(|f| b.faces[f].name)
+        .collect();
+    let keep = OffsetFacesSpec {
+        faces: vec![(slanted[0], 0.02)],
+        tangent: false,
+        topology: Topology::Keep,
+    };
+    assert!(matches!(
+        refusal(offset_faces(T, &b, &keep)),
+        TweakError::VertexSplits { .. }
+    ));
+    let change = OffsetFacesSpec {
+        topology: Topology::Change,
+        ..keep
+    };
+    let (o, _) = offset_faces(T, &b, &change).unwrap();
+    assert_eq!(crate::check::check(&o), []);
+    assert_eq!(crate::check::check_intersections(&o), []);
+    // The apex split into two vertices joined by a new edge.
+    assert_eq!(o.vertices().count(), 6);
+}

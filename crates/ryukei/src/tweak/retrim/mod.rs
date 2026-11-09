@@ -275,5 +275,24 @@ fn walk_error(w: &WorkBody, e: WalkError, face: FaceId) -> Error {
     .into()
 }
 
+/// Whether the fixed engine's refusal `e` means the topology must change
+/// (so `Topology::Change` re-trims): an edge vanishing, a vertex
+/// splitting, a face collapsing, faces crossing, or a lone vertex.
+pub(crate) fn takes(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::InvalidTweak(
+            TweakError::EdgeVanishes { .. }
+                | TweakError::VertexSplits { .. }
+                | TweakError::FaceCollapses { .. }
+                | TweakError::SelfIntersecting { .. }
+                | TweakError::Unsupported {
+                    case: crate::TweakCase::LoneVertex,
+                    ..
+                }
+        )
+    )
+}
+
 #[cfg(test)]
 pub(crate) mod tests;

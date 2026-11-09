@@ -28,8 +28,6 @@ pub mod draft;
 pub(crate) mod engine;
 pub(crate) mod extend;
 pub(crate) mod motion;
-// Wired into the tweaks by Task 11 of plan 13.A; until then nothing calls it.
-#[allow(dead_code)]
 pub(crate) mod retrim;
 pub(crate) mod vertices;
 
@@ -111,7 +109,7 @@ fn move_faces_in(
     } else {
         motion
     };
-    rigidly(key, body, motion, meter)
+    rigidly(key, body, motion, spec.topology, meter)
 }
 
 /// Faces moved along their outward normals, each by its own distance
@@ -180,7 +178,7 @@ fn offset_faces_in(
         let s = crate::offset::classify::offset_surface(body, f, d).map_err(engine::translate)?;
         surface.insert(f, s);
     }
-    engine::run(
+    engine::run_with(
         key,
         body,
         &Changes {
@@ -188,6 +186,7 @@ fn offset_faces_in(
             surface,
             ..Changes::default()
         },
+        spec.topology,
         meter,
     )
 }
@@ -241,7 +240,7 @@ fn replace_faces_in(
         changes.motion.insert(f, Motion::Replace);
         changes.surface.insert(f, s.clone());
     }
-    engine::run(key, body, &changes, meter)
+    engine::run_with(key, body, &changes, spec.topology, meter)
 }
 
 /// The sense on `new` that keeps face `f`'s outward side out: its natural
@@ -319,6 +318,7 @@ fn rigidly(
     key: OpKey,
     body: &Body,
     motion: BTreeMap<FaceId, Motion>,
+    topology: Topology,
     meter: &Meter,
 ) -> Result<(Body, Journal), Error> {
     let first = *motion.values().next().expect("a face");
@@ -353,7 +353,7 @@ fn rigidly(
     }) {
         return Ok((body.clone(), Journal::new()));
     }
-    engine::run(
+    engine::run_with(
         key,
         body,
         &Changes {
@@ -361,6 +361,7 @@ fn rigidly(
             surface,
             ..Changes::default()
         },
+        topology,
         meter,
     )
 }
