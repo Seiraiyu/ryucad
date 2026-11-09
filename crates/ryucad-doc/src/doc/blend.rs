@@ -208,7 +208,7 @@ impl Chamfer {
 }
 
 /// The expression strings of a fillet's or chamfer's `groups`: their
-/// sizes and angles.
+/// sizes and angles (a move_face's group's `distance` too).
 pub fn expression_strings(groups: &mut Value) -> Vec<&mut String> {
     let mut out = Vec::new();
     let Value::Array(groups) = groups else {
@@ -217,7 +217,9 @@ pub fn expression_strings(groups: &mut Value) -> Vec<&mut String> {
     for g in groups {
         let Value::Object(g) = g else { continue };
         for (k, x) in g.iter_mut() {
-            if let ("radius" | "d" | "d1" | "d2" | "angle", Value::String(s)) = (k.as_str(), x) {
+            if let ("radius" | "d" | "d1" | "d2" | "angle" | "distance", Value::String(s)) =
+                (k.as_str(), x)
+            {
                 out.push(s);
             }
         }

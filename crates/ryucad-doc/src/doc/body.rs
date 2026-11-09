@@ -357,7 +357,7 @@ fn target(o: &mut Obj) -> Result<Id> {
 }
 
 /// A field naming a solid by its founder.
-fn solid_id(o: &mut Obj, key: &str) -> Result<Id> {
+pub(super) fn solid_id(o: &mut Obj, key: &str) -> Result<Id> {
     let at = format!("/{key}");
     let t = o.take(key)?;
     let t = t
@@ -418,7 +418,7 @@ fn groups(o: &mut Obj, key: &str, default: Unit, env: &Env) -> Result<Vec<FaceGr
 }
 
 /// A non-empty array of face references.
-fn refs(v: &Value, at: &str) -> Result<Vec<Reference>> {
+pub(super) fn refs(v: &Value, at: &str) -> Result<Vec<Reference>> {
     let a = v
         .as_array()
         .filter(|a| !a.is_empty())
@@ -429,7 +429,7 @@ fn refs(v: &Value, at: &str) -> Result<Vec<Reference>> {
         .collect()
 }
 
-fn refs_json(refs: &[Reference]) -> Value {
+pub(super) fn refs_json(refs: &[Reference]) -> Value {
     Value::Array(refs.iter().map(Reference::to_json).collect())
 }
 

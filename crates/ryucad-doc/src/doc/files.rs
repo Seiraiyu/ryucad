@@ -18,6 +18,7 @@ use super::sheet_metal::{BaseFlange, Flange, Refold, Unfold};
 use super::sketch::Sketch;
 use super::solid::{Boolean, Combine};
 use super::sweep::{Extrude, Loft, Revolve, Sweep};
+use super::tweak::{MoveFace, ReplaceFace};
 use crate::error::{Code, Error, Result};
 use crate::expr::{self, Env, Expr};
 use crate::units::{Quantity, Unit};
@@ -72,17 +73,24 @@ pub const MANIFEST_FORMAT: u64 = 3;
 /// 9 shells and offsets, 10 mirrors and splits, 11 base flanges and
 /// flanges (ryucad 16), 12 surface sweeps and planar faces (ryucad 18),
 /// 13 reference imports (ryucad 21), 14 unfolds and refolds (ryucad
-/// 16.B). A feature is written at the lowest
+/// 16.B), 16 face tweaks (ryucad 17). A feature is written at the lowest
 /// format that holds it, so one with only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
-    // The largest of every stage's (a later stage merging takes the max).
-    let (a, b, c) = (
+    // The largest of every stage's (a later stage merging adds its own).
+    let all = [
         super::sweep::SURFACE_FORMAT,
         super::import::MODE_FORMAT,
         super::sheet_metal::UNFOLD_FORMAT,
-    );
-    let ab = if a > b { a } else { b };
-    if ab > c { ab } else { c }
+        super::tweak::FORMAT,
+    ];
+    let (mut max, mut i) = (0, 0);
+    while i < all.len() {
+        if all[i] > max {
+            max = all[i];
+        }
+        i += 1;
+    }
+    max
 };
 
 pub const PROJECT_KIND: &str = "ryucad.project";
@@ -206,6 +214,10 @@ pub enum Feature {
     Unfold(Box<Unfold>),
     /// A sheet metal solid folded back by its unfold's flat map.
     Refold(Box<Refold>),
+    /// Faces of a solid moved: translated, turned or offset (ryucad 17).
+    MoveFace(Box<MoveFace>),
+    /// Faces of a solid given another face's surface or a plane.
+    ReplaceFace(Box<ReplaceFace>),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -672,6 +684,12 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if v.get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| super::tweak::TYPES.contains(&t))
+    {
+        return super::tweak::FORMAT;
+    }
     if v.get("type").and_then(Value::as_str) == Some("import")
         && v.get("mode").and_then(Value::as_str) == Some("reference")
     {
@@ -856,6 +874,7 @@ pub fn feature_acts(v: &Value) -> Acts {
         Some("base_flange") => out.founds = true,
         Some("flange" | "unfold" | "refold") => out.acts_on = ids(v.get("target")),
         Some("shell" | "offset") => out.acts_on = ids(v.get("target")),
+        Some("move_face" | "replace_face") => out.acts_on = ids(v.get("target")),
         _ => {}
     }
     out
@@ -891,7 +910,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold, move_face, replace_face"),
     )
     .with("type", s)
 }
@@ -926,6 +945,8 @@ impl Feature {
             Feature::Unfold(_) => "unfold",
             Feature::Refold(_) => "refold",
             Feature::Planar(_) => "planar",
+            Feature::MoveFace(_) => "move_face",
+            Feature::ReplaceFace(_) => "replace_face",
         }
     }
 
@@ -943,6 +964,9 @@ impl Feature {
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
+        if matches!(self, Feature::MoveFace(_) | Feature::ReplaceFace(_)) {
+            return super::tweak::FORMAT;
+        }
         if matches!(self, Feature::Unfold(_) | Feature::Refold(_)) {
             return super::sheet_metal::UNFOLD_FORMAT;
         }
@@ -991,6 +1015,7 @@ impl Feature {
             Feature::Planar(_) => super::sweep::SURFACE_FORMAT,
             Feature::BaseFlange(_) | Feature::Flange(_) => super::sheet_metal::FORMAT,
             Feature::Unfold(_) | Feature::Refold(_) => super::sheet_metal::UNFOLD_FORMAT,
+            Feature::MoveFace(_) | Feature::ReplaceFace(_) => super::tweak::FORMAT,
         }
     }
 
@@ -1031,6 +1056,8 @@ impl Feature {
             Feature::Flange(f) => f.fields(),
             Feature::Unfold(u) => u.fields(),
             Feature::Refold(r) => r.fields(),
+            Feature::MoveFace(m) => m.fields(),
+            Feature::ReplaceFace(r) => r.fields(),
         }
     }
 
@@ -1054,6 +1081,10 @@ impl Feature {
             "chamfer" => Feature::Chamfer(Chamfer::from_fields(&mut o, default, env)?),
             "shell" => Feature::Shell(Box::new(Shell::from_fields(&mut o, default, env)?)),
             "offset" => Feature::Offset(Box::new(Offset::from_fields(&mut o, default, env)?)),
+            "move_face" => {
+                Feature::MoveFace(Box::new(MoveFace::from_fields(&mut o, default, env)?))
+            }
+            "replace_face" => Feature::ReplaceFace(Box::new(ReplaceFace::from_fields(&mut o)?)),
             "mirror" => Feature::Mirror(Box::new(Mirror::from_fields(&mut o)?)),
             "split" => Feature::Split(Box::new(Split::from_fields(&mut o)?)),
             "base_flange" => {
@@ -1124,7 +1155,9 @@ impl Feature {
             | Feature::Split(_)
             | Feature::Flange(_)
             | Feature::Unfold(_)
-            | Feature::Refold(_) => None,
+            | Feature::Refold(_)
+            | Feature::MoveFace(_)
+            | Feature::ReplaceFace(_) => None,
         }
     }
 
@@ -1153,6 +1186,8 @@ impl Feature {
             Feature::Flange(f) => vec![&f.target],
             Feature::Unfold(u) => vec![&u.target],
             Feature::Refold(r) => vec![&r.target],
+            Feature::MoveFace(m) => vec![&m.target],
+            Feature::ReplaceFace(r) => vec![&r.target],
             f => f
                 .combine()
                 .map_or(Vec::new(), |c| c.targets.iter().collect()),
@@ -1267,7 +1302,9 @@ impl Feature {
     /// with its role in the feature (`plane`, `x`, `target`, `axis`,
     /// `entities.<id>`, `groups.<i>.edges.<j>`, `groups.<i>.face`,
     /// `depth`, `direction`, `direction2`, `plane`, a shell's `open.<i>`
-    /// and a shell's or offset's `faces.<i>.faces.<j>`), in a fixed order.
+    /// a shell's or offset's `faces.<i>.faces.<j>`, and a tweak's
+    /// `faces.<i>`, `groups.<i>.faces.<j>`, `direction`, `axis` and
+    /// `groups.<i>.with`), in a fixed order.
     pub fn references(&self) -> Vec<(String, &Reference)> {
         match self {
             Feature::Sketch(s) => s.references(),
@@ -1278,6 +1315,8 @@ impl Feature {
             Feature::Flange(f) => f.references(),
             Feature::Unfold(u) => u.references(),
             Feature::Refold(r) => r.references(),
+            Feature::MoveFace(m) => m.references(),
+            Feature::ReplaceFace(r) => r.references(),
             _ => self
                 .geometry()
                 .into_iter()
@@ -1311,6 +1350,8 @@ impl Feature {
             Feature::Mirror(m) => vec![("plane".to_owned(), &m.plane)],
             Feature::Split(s) => vec![("plane".to_owned(), &s.plane)],
             Feature::Planar(p) => p.geometry(),
+            Feature::MoveFace(m) => m.geometry(),
+            Feature::ReplaceFace(r) => r.geometry(),
             _ => Vec::new(),
         }
     }
@@ -1756,6 +1797,7 @@ mod tests {
             }
         );
         const { assert!(FEATURE_FORMAT >= super::super::sheet_metal::UNFOLD_FORMAT) };
+        const { assert!(FEATURE_FORMAT >= super::super::tweak::FORMAT) };
     }
 
     #[test]
@@ -2341,5 +2383,41 @@ mod tests {
             expression_fields(&s),
             [("/constraints/d1/value".to_owned(), "w / 2".to_owned())]
         );
+    }
+    #[test]
+    fn tweaks_load_at_their_format_and_act_on_their_target() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let p = [("d".to_owned(), crate::expr::Expr::parse("2 mm").unwrap())].into();
+        let env = Env::new(&p);
+        let v = json!({"format": super::super::tweak::FORMAT, "kind": "ryucad.feature",
+                       "type": "move_face", "target": "plate", "by": "offset",
+                       "distance": "d", "faces": [{"feature": "plate", "name": n}],
+                       "groups": [{"distance": "d / 2", "faces": [{"feature": "boss", "name": n}]}]});
+        let f = Feature::from_json(&v, Unit::Mm, &env).unwrap();
+        assert_eq!(f.type_name(), "move_face");
+        assert_eq!(f.format(), super::super::tweak::FORMAT);
+        assert_eq!(feature_format(&v), super::super::tweak::FORMAT);
+        assert_eq!(f.to_json(), v);
+        assert_eq!(f.targets(), [&Id::parse("plate", "feature").unwrap()]);
+        assert!(f.combine().is_none() && !f.founds());
+        assert_eq!(
+            feature_acts(&v).acts_on,
+            [Id::parse("plate", "feature").unwrap()]
+        );
+        let roles: Vec<String> = f.references().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(roles, ["faces.0", "groups.0.faces.0"]);
+        // Its distances are expressions an equations table lists.
+        let fields: Vec<String> = expression_fields(&v).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(fields, ["/distance", "/groups/0/distance"]);
+        assert!(feature_names(&v).contains("d"));
+        let v = json!({"format": super::super::tweak::FORMAT, "kind": "ryucad.feature",
+                       "type": "replace_face", "target": "base",
+                       "groups": [{"with": {"feature": "lid"}, "faces": [{"feature": "base", "name": n}]}]});
+        let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!(f.to_json(), v);
+        let reads: Vec<&str> = f.geometry_reads().into_iter().map(Id::as_str).collect();
+        assert_eq!(reads, ["lid", "base"]);
+        // One past the newest is too new.
+        const { assert!(FEATURE_FORMAT >= super::super::tweak::FORMAT) };
     }
 }

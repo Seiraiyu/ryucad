@@ -331,6 +331,32 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
+        // A tweak's groups, each on one line: a move's
+        // `groups[0] = 1 mm: base/<hex>, base/<hex>`, a replacement's
+        // `groups[0] = lid/<hex>: base/<hex>` (its surface first).
+        Some("ryucad.feature")
+            if matches!(
+                o.get("type").and_then(Value::as_str),
+                Some("move_face" | "replace_face")
+            ) =>
+        {
+            if let Some(Value::Array(groups)) = rest.remove("groups") {
+                for (i, g) in groups.iter().enumerate() {
+                    let head = g
+                        .get("distance")
+                        .or_else(|| g.get("with"))
+                        .map(|x| reference(x).unwrap_or_else(|| scalar(x)))
+                        .unwrap_or_default();
+                    let faces: Vec<String> = g["faces"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|f| reference(f).unwrap_or_else(|| scalar(f)))
+                        .collect();
+                    lines.push(format!("groups[{i}] = {head}: {}", faces.join(", ")));
+                }
+            }
+        }
         // A shell's or offset's face groups, each on one line:
         // `faces[0] = 4 mm: base/<hex>, base/<hex>`.
         Some("ryucad.feature")
@@ -2260,6 +2286,20 @@ mod tests {
     }
 
     #[test]
+    fn a_tweaks_changes_are_by_field() {
+        let n = |k: u8| json!({"feature": "b", "name": format!("{k:032x}")});
+        let before = json!({"format": 16, "kind": "ryucad.feature", "type": "move_face",
+                            "target": "b", "by": "offset", "distance": "1 mm", "faces": [n(1)]});
+        let mut after = before.clone();
+        after["distance"] = json!("2 mm");
+        after["groups"] = json!([{"distance": "3 mm", "faces": [n(2)]}]);
+        let mut out = Vec::new();
+        changes("", Some(&before), Some(&after), &mut out);
+        let pointers: Vec<&str> = out.iter().map(|c| c["at"].as_str().unwrap()).collect();
+        assert_eq!(pointers, ["/distance", "/groups"]);
+    }
+
+    #[test]
     fn a_flanges_changes_are_by_field() {
         let n = |k: u8| format!("{k:032x}");
         let before = json!({"format": 11, "kind": "ryucad.feature", "type": "flange", "target": "plate",
@@ -2344,6 +2384,59 @@ mod tests {
             )
         );
     }
+    #[test]
+    fn a_tweaks_groups_read_on_a_line_each() {
+        let (a, b) = (
+            "0123456789abcdef0123456789abcdef",
+            "fedcba9876543210fedcba9876543210",
+        );
+        let v = json!({"format": 16, "kind": "ryucad.feature", "type": "move_face",
+            "target": "base", "by": "offset", "distance": "0.5 mm",
+            "faces": [{"feature": "base", "name": a}],
+            "groups": [{"distance": "1 mm",
+                        "faces": [{"feature": "base", "name": b}, {"feature": "base", "name": a}]}],
+            "tangent": false});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature move_face (format 16)\n\
+                 by = offset\n\
+                 distance = 0.5 mm\n\
+                 faces = [base/{a}]\n\
+                 groups[0] = 1 mm: base/{b}, base/{a}\n\
+                 tangent = false\n\
+                 target = base\n"
+            )
+        );
+        let v = json!({"format": 16, "kind": "ryucad.feature", "type": "move_face",
+            "target": "base", "by": "rotate", "axis": {"feature": "base", "name": b},
+            "angle": "3 deg", "faces": [{"feature": "base", "name": a}]});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature move_face (format 16)\n\
+                 angle = 3 deg\n\
+                 axis = base/{b}\n\
+                 by = rotate\n\
+                 faces = [base/{a}]\n\
+                 target = base\n"
+            )
+        );
+        let v = json!({"format": 16, "kind": "ryucad.feature", "type": "replace_face",
+            "target": "base",
+            "groups": [{"with": {"feature": "lid", "name": b}, "faces": [{"feature": "base", "name": a}]},
+                       {"with": "xy", "faces": [{"feature": "base", "name": b}]}]});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature replace_face (format 16)\n\
+                 groups[0] = lid/{b}: base/{a}\n\
+                 groups[1] = xy: base/{b}\n\
+                 target = base\n"
+            )
+        );
+    }
+
     use crate::session::Session;
     use serde_json::json;
 

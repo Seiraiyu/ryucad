@@ -608,7 +608,9 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Split(_)
         | Feature::Flange(_)
         | Feature::Unfold(_)
-        | Feature::Refold(_) => Err(Error::new(
+        | Feature::Refold(_)
+        | Feature::MoveFace(_)
+        | Feature::ReplaceFace(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} makes no body of its own", f.type_name()),
         )
@@ -1031,6 +1033,21 @@ pub fn target_as<'a>(
     t: &Id,
     before: &'a dyn Results,
 ) -> Result<&'a Built> {
+    target_kinds(part, solids, id, role, t, before, false)
+}
+
+/// [`target_as`], taking a sheet too where `sheets` is true: face tweaks
+/// act on sheets where the kernel does (design 400), every other feature
+/// on solids only.
+pub fn target_kinds<'a>(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    role: &str,
+    t: &Id,
+    before: &'a dyn Results,
+    sheets: bool,
+) -> Result<&'a Built> {
     if let Some(by) = solids.consumed_by(t, id) {
         return Err(consumed(id, t, by));
     }
@@ -1048,7 +1065,11 @@ pub fn target_as<'a>(
         let role = if role == "target" { "targets" } else { role };
         return Err(reference_body(&part.id, id, t, role));
     }
-    crate::kind::need(id, role, t, &built.body, crate::kind::Want::Solid)?;
+    // A mixed body is never shown (`finish` refuses it), so `sheets`
+    // lets through a sheet or a solid.
+    if !sheets {
+        crate::kind::need(id, role, t, &built.body, crate::kind::Want::Solid)?;
+    }
     Ok(built)
 }
 
@@ -2332,6 +2353,10 @@ fn rebuild_with(
             crate::body::build(part, solids, id, f, before, run).map(solid),
             None,
         ),
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) => (
+            crate::tweak::build(part, solids, id, f, before, run).map(solid),
+            None,
+        ),
         Feature::BaseFlange(b) => (
             crate::sheet_metal::base_flange(part, id, b, before, run)
                 .map(|built| solid(Made::new(vec![(id.clone(), Arc::new(built))]))),
@@ -2602,7 +2627,7 @@ fn from_disk(disk: &Disk, h: &blake3::Hash, part: &Id, id: &Id) -> Option<Result
 /// Whether a feature's refusal is kept in the disk cache by its input
 /// hash, as its solids would be (#503): a kernel's verdict on what the
 /// hash covers (a heal, a boolean, a blend, a sweep, a loft, an offset, a
-/// shell, a mirror), the same every time and dear to reach again (a file's
+/// shell, a mirror, a tweak), the same every time and dear to reach again (a file's
 /// refused bodies healed again took the Switchwire's export 1,746 s).
 /// Anything else (a missing file, a dependency, a cancel, an internal
 /// fault) depends on more than the hash, or costs nothing to find again.
@@ -2618,6 +2643,7 @@ pub fn failure_kept(e: &Error) -> bool {
             | Code::ShellFailed
             | Code::OffsetFailed
             | Code::MirrorFailed
+            | Code::TweakFailed
             | Code::SheetMetalFailed
     )
 }
@@ -4006,5 +4032,10 @@ mod tests {
         );
         assert_ne!(op_key(&id("p"), &id("f")), op_key(&id("q"), &id("f")));
         assert_ne!(op_key(&id("p"), &id("f")), op_key(&id("p"), &id("g")));
+    }
+
+    #[test]
+    fn a_tweaks_refusal_is_kept_on_disk() {
+        assert!(failure_kept(&Error::new(Code::TweakFailed, "refused")));
     }
 }
