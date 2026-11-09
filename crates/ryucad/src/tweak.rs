@@ -18,7 +18,7 @@ use crate::rebuild::{Built, Made, Results, Run};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use crate::solid::Solids;
-use ryukei::geom::{Rigid, UnitVector3};
+use ryukei::geom::{Rigid, Surface, UnitVector3};
 use ryukei::name::{Event, Name};
 use ryukei::topo::EntityId;
 use ryukei::tweak::{MoveSpec, OffsetFacesSpec};
@@ -120,6 +120,31 @@ fn face(
     }
 }
 
+/// The surface `with` names (in `role` of tweak `id`): a face's, whole,
+/// as its body holds it (any solid of the part, the target's own too, in
+/// the feature's view); else a plane's, through its frame.
+fn surface(part: &Part, id: &Id, role: &str, with: &GeomRef, results: &dyn Results) -> Result<Surface> {
+    if let Some(r) = with.reference() {
+        let (b, e) = crate::reference::resolve(part, part.order(), id, role, r, results)?;
+        return match e {
+            EntityId::Face(f) => {
+                let face = b.body.face(f).expect("a live face");
+                Ok(b.body.surface(face.surface).expect("its surface").clone())
+            }
+            e => Err(crate::reference::wrong_kind(
+                part,
+                id,
+                role,
+                r,
+                crate::reference::kind(e),
+                "a face, or a plane",
+            )),
+        };
+    }
+    let p = crate::geometry::one(&at(part, id, results), role, with, Want::Plane)?.plane();
+    Ok(Surface::Plane(ryukei::geom::Plane::new(p.frame)))
+}
+
 /// Resolves a tweak (feature `id` of `part`): its target, through
 /// [`crate::rebuild::target_kinds`] taking sheets, its faces and its
 /// motion or surfaces, everything in its view.
@@ -161,7 +186,22 @@ pub(crate) fn resolve<'a>(
             };
             Ok(Resolved { target: &m.target, built, spec })
         }
-        Feature::ReplaceFace(_) => Err(Error::new(Code::Internal, "replace_face: Task 11")),
+        Feature::ReplaceFace(x) => {
+            let built = crate::rebuild::target_kinds(part, solids, id, "target", &x.target, before, true)?;
+            let mut faces = Vec::new();
+            for (i, g) in x.groups.iter().enumerate() {
+                let s = surface(part, id, &format!("groups.{i}.with"), &g.with, before)?;
+                for (j, r) in g.faces.iter().enumerate() {
+                    let n = face(part, id, &x.target, ty, &format!("groups.{i}.faces.{j}"), r, before)?;
+                    faces.push((n, s.clone()));
+                }
+            }
+            Ok(Resolved {
+                target: &x.target,
+                built,
+                spec: Spec::Replace(ryukei::tweak::ReplaceSpec { faces }),
+            })
+        }
         _ => unreachable!("a tweak"),
     }
 }
@@ -841,5 +881,29 @@ mod tests {
         let refs = i["move_face"]["modified"]["references"].as_array().unwrap();
         assert!(refs.contains(&json!(top)), "{i}");
         assert_eq!(refs.len(), 13);
+    }
+
+    #[test]
+    fn a_replacement_takes_a_faces_surface_or_a_plane() {
+        let (_dir, mut s) = boxes();
+        let top = up(&mut s, "b", "b", 0.02);
+        let lid = up(&mut s, "c", "c", 0.01);
+        // c's top, at 10 mm: b comes down to it.
+        call(&mut s, "feature.add", json!({"part": "p", "type": "replace_face", "id": "r",
+            "groups": [{"with": lid, "faces": [top.clone()]}]})).unwrap();
+        let part = Id::parse("p", "part").unwrap();
+        let built = s.rebuilt(&part).unwrap().clone();
+        let (_, out) = built.features.iter().find(|(i, _)| i.as_str() == "r").unwrap();
+        assert!(out.is_ok(), "{out:?}");
+        // An edge is no surface.
+        let edge = names(&mut s, "b", "edges")[0].clone();
+        let e = call(&mut s, "feature.add", json!({"part": "p", "type": "replace_face",
+            "groups": [{"with": format!("p/b/{edge}"), "faces": [top]}]})).unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+        // A whole solid isn't a plane.
+        let top = up(&mut s, "b", "b", 0.02);
+        let e = call(&mut s, "feature.add", json!({"part": "p", "type": "replace_face",
+            "groups": [{"with": "p/c", "faces": [top]}]})).unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
     }
 }
