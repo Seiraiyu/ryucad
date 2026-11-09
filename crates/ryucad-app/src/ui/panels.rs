@@ -34,14 +34,17 @@ pub fn people(ui: &mut egui::Ui, ws: &mut Workspace) {
                 Kind::Agent => " [agent]",
             };
             let you = if p.id == me { " (you)" } else { "" };
-            ui.label(RichText::new(format!("{}{kind}{you}", p.name)).color(style::color32(colour)));
+            // A human's mode goes in their own label: the strip runs right
+            // to left, so a label of its own read before the name.
+            let mode = match mode_mark(p.mode) {
+                Some(m) if p.kind == Kind::Human => format!(" · {m}"),
+                _ => String::new(),
+            };
+            ui.label(
+                RichText::new(format!("{}{kind}{you}{mode}", p.name)).color(style::color32(colour)),
+            );
             if let Some((text, _)) = &p.status {
                 ui.weak(text);
-            }
-            if p.kind == Kind::Human
-                && let Some(m) = mode_mark(p.mode)
-            {
-                ui.weak(format!("· {m}"));
             }
             // A long request of theirs: `check 3/8 parts`.
             if let Some(r) = ws.progress.of(&p.id, std::time::Instant::now()) {
