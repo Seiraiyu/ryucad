@@ -1940,7 +1940,10 @@ fn a_release_is_proposed_synced_and_made_obsolete_from_the_releases_tab() {
         );
     }
     h.get_by_label("Propose…").click();
-    frames(&mut h, |a| a.opened().ws.releases.proposal.is_some());
+    frames(&mut h, |a| {
+        a.opened().ws.releases.proposal.is_some() || a.opened().ws.releases.error.is_some()
+    });
+    eprintln!("DEBUG error {:?}", h.state().opened().ws.releases.error);
     shown(&mut h, "It will be revision A.");
     h.get_by_label("Note").click();
     h.get_by_label("Note").set_text_value_accesskit("first");
@@ -5307,6 +5310,16 @@ fn a_face_is_annotated_from_its_context_menu() {
     h.run_steps(1);
     // The box's button: the toolbar's mode button is named alike.
     h.get_all_by_label("Annotate").last().unwrap().click();
+    for _ in 0..50 {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    eprintln!(
+        "DEBUG composing {:?} errors {:?} labels {:?}",
+        h.state().opened().view.composing,
+        h.state().opened().ws.errors,
+        h.query_all_by_label("Annotate").count()
+    );
     frames(&mut h, |a| a.opened().ws.annotations.all.len() == 1);
     let list = p.ok(&["annotations", "list"]);
     let a = &list["annotations"][0];
