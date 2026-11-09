@@ -4893,8 +4893,9 @@ pub(crate) fn part_report(
             (!ins.is_empty()).then(|| (fid.clone(), ins.into_iter().cloned().collect()))
         })
         .collect();
-    // What each feature does to solids, and the tools a boolean consumes:
-    // for showing the chains.
+    // What each feature does to solids, and the bodies it consumes (a
+    // boolean's tools, a sew's sheets, a thicken's sheet): for showing the
+    // chains.
     let ops: BTreeMap<Id, (&'static str, Vec<Id>)> = part
         .features
         .iter()
@@ -4911,8 +4912,12 @@ pub(crate) fn part_report(
                 Some((fid.clone(), (op, Vec::new())))
             }
             f => {
-                let c = f.combine().filter(|c| !c.is_new())?;
-                Some((fid.clone(), (c.operation.as_str(), Vec::new())))
+                let consumes: Vec<Id> = f.consumes().into_iter().cloned().collect();
+                match f.combine() {
+                    Some(c) if !c.is_new() => Some((fid.clone(), (c.operation.as_str(), consumes))),
+                    _ if !consumes.is_empty() => Some((fid.clone(), ("new", consumes))),
+                    _ => None,
+                }
             }
         })
         .collect();
