@@ -112,22 +112,23 @@ pub fn need(owner: &Id, role: &str, solid: &Id, body: &Body, want: Want) -> Resu
     }
 }
 
-/// The bodies feature `f` reads where a solid goes, each with its role:
-/// a boolean's target and tools, a mirror's source, every other
-/// feature's targets (`target` for a shell, offset and split).
-pub fn bodies_read(f: &crate::doc::files::Feature) -> Vec<(&'static str, &Id)> {
+/// The bodies feature `f` names, each with its role and what it wants of
+/// it: a boolean's target and tools, a mirror's source, and every other
+/// feature's targets (`target` for a shell, offset and split), all
+/// `Solid`.
+pub fn bodies_read(f: &crate::doc::files::Feature) -> Vec<(&'static str, &Id, Want)> {
     use crate::doc::files::Feature as F;
     match f {
-        F::Boolean(b) => std::iter::once(("target", &b.target))
-            .chain(b.tools.iter().map(|t| ("tools", t)))
+        F::Boolean(b) => std::iter::once(("target", &b.target, Want::Solid))
+            .chain(b.tools.iter().map(|t| ("tools", t, Want::Solid)))
             .collect(),
-        F::Mirror(m) => std::iter::once(("solid", &m.solid))
-            .chain(f.targets().into_iter().map(|t| ("targets", t)))
+        F::Mirror(m) => std::iter::once(("solid", &m.solid, Want::Solid))
+            .chain(f.targets().into_iter().map(|t| ("targets", t, Want::Solid)))
             .collect(),
         F::Shell(_) | F::Offset(_) | F::Split(_) => {
-            f.targets().into_iter().map(|t| ("target", t)).collect()
+            f.targets().into_iter().map(|t| ("target", t, Want::Solid)).collect()
         }
-        _ => f.targets().into_iter().map(|t| ("targets", t)).collect(),
+        _ => f.targets().into_iter().map(|t| ("targets", t, Want::Solid)).collect(),
     }
 }
 
@@ -143,8 +144,9 @@ pub fn check(
     results: &dyn crate::rebuild::Results,
 ) -> Result<()> {
     let solids = crate::solid::Solids::of_order(part, order);
-    for (role, t) in bodies_read(f) {
-        match crate::rebuild::target_as(part, &solids, id, role, t, results) {
+    for (role, t, want) in bodies_read(f) {
+        let need = crate::rebuild::Need { role, want: Some(want), changes: true };
+        match crate::rebuild::body_as(part, &solids, id, t, need, results) {
             Err(e) if e.code == Code::WrongBodyKind => return Err(e),
             _ => {}
         }

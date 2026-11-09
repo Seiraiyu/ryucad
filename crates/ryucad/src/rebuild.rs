@@ -1024,10 +1024,54 @@ pub fn target<'a>(
     target_as(part, solids, id, "targets", t, before)
 }
 
+/// How a feature asks for a body it names: in `role`, of a kind (`None`
+/// for either), and whether it changes it (acts on it or consumes it), so
+/// that a reference import's body is refused.
+#[derive(Clone, Copy, Debug)]
+pub struct Need<'r> {
+    pub role: &'r str,
+    pub want: Option<crate::kind::Want>,
+    pub changes: bool,
+}
+
+/// Body `t` as feature `id` sees it, as `need` asks: refused where it was
+/// consumed, isn't founded before `id`, failed, is a reference import's
+/// and `id` would change it, or is the wrong kind.
+pub fn body_as<'a>(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    t: &Id,
+    need: Need<'_>,
+    before: &'a dyn Results,
+) -> Result<&'a Built> {
+    if let Some(by) = solids.consumed_by(t, id) {
+        return Err(consumed(id, t, by));
+    }
+    let Some(view) = solids.view(t, id) else {
+        if let Some(Ok(f)) = part.features.get(id) {
+            crate::graph::check_order(part, part.order(), id, f)?;
+        }
+        return Err(not_a_solid(part, solids, id, need.role, t));
+    };
+    let out = crate::graph::input(part, id, view, before)?;
+    let built = out.solid(t).expect("a solid's chain holds it");
+    if built.reference && need.changes {
+        // Every role naming one target is `targets`, as `target` names it.
+        let role = if need.role == "target" { "targets" } else { need.role };
+        return Err(reference_body(&part.id, id, t, role));
+    }
+    if let Some(want) = need.want {
+        crate::kind::need(id, need.role, t, &built.body, want)?;
+    }
+    Ok(built)
+}
+
 /// Solid `t` as feature `id` sees it, named in `role`: refused where it
 /// was consumed, isn't founded before `id`, failed, or is a sheet. In
 /// 18.A every feature that acts on a body acts on solids only; 18.C lets
-/// cuts, fillets, offsets, mirrors and splits take sheets.
+/// cuts, fillets, offsets, mirrors and splits take sheets. It is
+/// [`body_as`] wanting a solid that the feature changes.
 pub fn target_as<'a>(
     part: &Part,
     solids: &Solids,
@@ -1036,25 +1080,8 @@ pub fn target_as<'a>(
     t: &Id,
     before: &'a dyn Results,
 ) -> Result<&'a Built> {
-    if let Some(by) = solids.consumed_by(t, id) {
-        return Err(consumed(id, t, by));
-    }
-    let Some(view) = solids.view(t, id) else {
-        // Not listed before `id` at all, or listed but no solid.
-        if let Some(Ok(f)) = part.features.get(id) {
-            crate::graph::check_order(part, part.order(), id, f)?;
-        }
-        return Err(not_a_solid(part, solids, id, role, t));
-    };
-    let out = crate::graph::input(part, id, view, before)?;
-    let built = out.solid(t).expect("a solid's chain holds it");
-    if built.reference {
-        // Every role naming one target is `targets`, as `target` names it.
-        let role = if role == "target" { "targets" } else { role };
-        return Err(reference_body(&part.id, id, t, role));
-    }
-    crate::kind::need(id, role, t, &built.body, crate::kind::Want::Solid)?;
-    Ok(built)
+    let need = Need { role, want: Some(crate::kind::Want::Solid), changes: true };
+    body_as(part, solids, id, t, need, before)
 }
 
 /// `reference_body`: feature `id` of `part` would change solid `t`, a
@@ -1076,34 +1103,25 @@ pub fn reference_body(part: &Id, id: &Id, t: &Id, role: &str) -> Error {
 /// reference import's body, against the current rebuild `results`.
 pub fn check_not_reference(p: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result<()> {
     let solids = Solids::of(p);
-    let tools: Vec<&Id> = match f {
-        Feature::Boolean(b) => b.tools.iter().collect(),
-        _ => Vec::new(),
-    };
-    let named = f
-        .targets()
-        .into_iter()
-        .filter(|t| !tools.contains(t))
-        .map(|t| (t, "targets"))
-        .chain(tools.iter().map(|t| (*t, "tools")))
-        .chain(f.source().map(|s| (s, "solid")));
-    for (t, role) in named {
+    for (role, t, _) in crate::kind::bodies_read(f) {
         if let Some(view) = solids.view(t, id)
             && let Ok(out) = crate::graph::input(p, id, view, results)
             && out.solid(t).is_some_and(|b| b.reference)
         {
+            // A boolean's target, like every one-target role, is `targets`.
+            let role = if matches!(role, "target") { "targets" } else { role };
             return Err(reference_body(&p.id, id, t, role));
         }
     }
     Ok(())
 }
 
-/// `body_consumed`: feature `id` acts on solid `t`, which the boolean
-/// `by` before it consumed.
+/// `body_consumed`: feature `id` acts on body `t`, which `by` before it
+/// consumed.
 pub fn consumed(id: &Id, t: &Id, by: &Id) -> Error {
     Error::new(
         Code::BodyConsumed,
-        format!("{id} acts on {t}, which the boolean {by} consumed: act on its target instead"),
+        format!("{id} acts on {t}, which {by} before it consumed: act on what {by} made instead"),
     )
     .with("feature", id)
     .with("solid", t)
@@ -3070,6 +3088,30 @@ pub fn successors(
 mod tests {
     use super::*;
     use crate::units::{Quantity, Unit};
+
+    #[test]
+    fn a_body_is_asked_for_as_a_solid_a_sheet_or_either() {
+        use crate::kind::Want;
+        use crate::doc::solid::Operation;
+        use crate::solid::tests::{boxed, part};
+        // `later` is listed after the box, so it has a view of it.
+        let part = part(vec![
+            ("b", boxed("0", Operation::New, &[])),
+            ("later", boxed("20", Operation::New, &[])),
+        ]);
+        let r = rebuild_part(&part);
+        let solids = Solids::of(&part);
+        let id = Id::parse("later", "feature").unwrap();
+        let b = Id::parse("b", "feature").unwrap();
+        let any = Need { role: "faces", want: None, changes: false };
+        assert!(body_as(&part, &solids, &id, &b, any, &r).is_ok());
+        let sheet = Need { role: "sheets", want: Some(Want::Sheet), changes: true };
+        let e = body_as(&part, &solids, &id, &b, sheet, &r).unwrap_err();
+        assert_eq!((e.code, e.details["wanted"].as_str(), e.details["got"].as_str()),
+                   (Code::WrongBodyKind, Some("sheet"), Some("solid")));
+        // target_as is body_as wanting a solid.
+        assert!(target_as(&part, &solids, &id, "targets", &b, &r).is_ok());
+    }
 
     #[test]
     fn surface_refusals_are_kept() {
