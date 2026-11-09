@@ -2223,6 +2223,7 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Boolean(b) => b.fields(),
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) => json!({}),
         Feature::Datum(d) => crate::datum::report(part, d),
         Feature::Path(x) => crate::path::report(part, x),
         Feature::Sweep(w) => crate::along::feature_report(part, w),
@@ -4557,6 +4558,9 @@ fn feature_edit(
                 f
             }
             Feature::Import(_) => return Err(import_not_written_here("edit").with("feature", &fid)),
+            Feature::MoveFace(_) | Feature::ReplaceFace(_) => {
+                return Err(Error::new(Code::Internal, "not yet").with("feature", &fid));
+            }
             Feature::Datum(d) => {
                 let ty = d.type_name();
                 given.only(ty, crate::datum::request_fields(ty))?;

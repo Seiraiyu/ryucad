@@ -608,7 +608,9 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Split(_)
         | Feature::Flange(_)
         | Feature::Unfold(_)
-        | Feature::Refold(_) => Err(Error::new(
+        | Feature::Refold(_)
+        | Feature::MoveFace(_)
+        | Feature::ReplaceFace(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} makes no body of its own", f.type_name()),
         )
