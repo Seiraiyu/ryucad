@@ -576,27 +576,6 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
         ..Walk::default()
     };
     walk.product(s, &part, &rev)?;
-    // Sheets are written by every format in 18.C (STEP's surface models,
-    // STL's open meshes, 3MF's surface objects, USD's meshes); until then
-    // they are refused, never written wrong. A reference import is
-    // written as ryucad 21.B writes it.
-    for p in &walk.scene.products {
-        if let Some(x) = p
-            .solids
-            .iter()
-            .find(|x| !x.built.reference && x.built.body.kind() == ryukei::topo::BodyKind::Sheet)
-        {
-            return Err(crate::kind::wrong(
-                &p.part,
-                "export",
-                &x.founder,
-                "sheet",
-                crate::kind::Want::Solid,
-                Some("exports write sheets from ryucad 18.C"),
-            )
-            .with("part", &p.part));
-        }
-    }
     let failing: Vec<Value> = walk.failing.values().cloned().collect();
     if !failing.is_empty() && !ask.skip_failing {
         return Err(Error::new(

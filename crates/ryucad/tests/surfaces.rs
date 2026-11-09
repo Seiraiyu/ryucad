@@ -526,20 +526,91 @@ fn a_sheet_is_measured_by_area_and_left_out_of_mass() {
     );
 }
 
+/// The kind of each body part `part`'s rebuild report lists.
+fn reported_kinds(s: &mut Session, part: &str) -> Vec<String> {
+    let r = must(s, "rebuild", json!({"part": part}));
+    r["parts"][0]["solids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["kind"].as_str().unwrap().to_owned())
+        .collect()
+}
+
 #[test]
-fn an_export_of_a_sheet_is_refused_until_formats_write_it() {
+fn a_sheet_exports_as_step_and_imports_again_to_its_area() {
     let (dir, mut s) = project();
     wall(&mut s);
-    let out = dir.path().join("w.stl");
-    let e = call(
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": 5, "y": 5, "z": 5},
+               "placement": {"origin": [20, 0, 0]}}),
+    );
+    let out = dir.path().join("w.step");
+    let a = must(
         &mut s,
         "export",
-        json!({"part": "p", "out": out.to_str().unwrap()}),
-    )
-    .unwrap_err();
-    assert_eq!(e.code, Code::WrongBodyKind, "{e}");
-    assert_eq!(e.details["solid"], "w");
-    assert!(!out.exists());
+        json!({"part": "p", "out": out.to_str().unwrap(), "time_stamp": "2026-11-09T00:00:00"}),
+    );
+    assert!(a["bytes"].as_u64().unwrap() > 0, "{a}");
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        text.contains("SHELL_BASED_SURFACE_MODEL"),
+        "a surface model"
+    );
+    assert!(text.contains("MANIFOLD_SOLID_BREP"), "the box beside it");
+    // Imported again (solid mode heals sheets): the wall comes back a
+    // sheet of its area, and from the first file written in meters the
+    // bytes go round unchanged.
+    let (d2, mut t) = project();
+    must(
+        &mut t,
+        "import",
+        json!({"solid": true, "path": out, "part": "q"}),
+    );
+    let kinds = reported_kinds(&mut t, "q");
+    assert!(kinds.contains(&"sheet".to_owned()), "{kinds:?}");
+    let sheet = {
+        let part = ryucad::doc::id::Id::parse("q", "part").unwrap();
+        let r = t.rebuilt(&part).unwrap().clone();
+        let solids = ryucad::solid::Solids::of(t.project().part(&part).unwrap());
+        r.shown(&solids)
+            .iter()
+            .filter_map(|x| x.state.map(|(_, b)| b.body.clone()))
+            .find(|b| b.kind() == ryukei::topo::BodyKind::Sheet)
+            .unwrap()
+    };
+    close(area(&sheet), 2e-4, 1e-9);
+    let again = d2.path().join("again.step");
+    must(
+        &mut t,
+        "export",
+        json!({"part": "q", "out": again.to_str().unwrap(),
+               "time_stamp": "2026-11-09T00:00:00", "unit": "m"}),
+    );
+    let (d3, mut u) = project();
+    must(
+        &mut u,
+        "import",
+        json!({"solid": true, "path": again, "part": "q"}),
+    );
+    let third = d3.path().join("third.step");
+    must(
+        &mut u,
+        "export",
+        json!({"part": "q", "out": third.to_str().unwrap(),
+               "time_stamp": "2026-11-09T00:00:00", "unit": "m"}),
+    );
+    // The header names the file; everything else is the same text.
+    let body = |p: &std::path::Path| -> Vec<String> {
+        std::fs::read_to_string(p)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.starts_with("FILE_NAME("))
+            .map(str::to_owned)
+            .collect()
+    };
+    assert_eq!(body(&again), body(&third));
 }
 
 #[test]
