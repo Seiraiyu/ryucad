@@ -35,7 +35,7 @@ pub(crate) mod vertices;
 #[cfg(test)]
 mod tests;
 
-pub use delete::{DeleteSpec, Heal};
+pub use delete::{DeleteSpec, Heal, delete_faces, delete_faces_with};
 pub use draft::{
     DraftFace, DraftReport, DraftSpec, FaceAngle, Hinge, MAX_ANGLE, draft, draft_with,
 };

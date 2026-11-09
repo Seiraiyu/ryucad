@@ -1,8 +1,5 @@
 //! Unit tests of deleting faces.
 
-// Until every fixture has its test (plan 13.B, Task 7).
-#![allow(dead_code, unused_imports)]
-
 use super::*;
 use crate::boolean::{BooleanOp, Tool, boolean};
 use crate::geom::{Rigid, Surface, Vector3};
@@ -92,6 +89,8 @@ fn a_holes_rims_are_holes_of_the_plate_and_its_foot_is_not_the_bosss_tops() {
         .filter(|&f| cylinders(&b).contains(&b.faces[f].name))
         .collect();
     let s = sets::sets(&b, &side);
+    // The foot is a hole of the plate's top; the rim is the boss top's
+    // only loop.
     assert_eq!(s[0].hosts.len(), 2);
     assert!(!s[0].closable(&b));
 }
@@ -120,6 +119,40 @@ fn a_cap_lays_the_plate_out_without_its_hole() {
     // The top and the bottom; the wall, both rims and their vertices go.
     assert_eq!(modified, 2);
     assert_eq!(j.events().len(), 2 + 1 + 2 + 2);
+}
+
+#[test]
+fn a_through_hole_is_capped_bit_for_bit() {
+    let b = drilled();
+    let (o, j) = delete_faces(D, &b, &spec(cylinders(&b), Heal::Auto)).unwrap();
+    assert_eq!(o.faces().count(), 6);
+    assert!((volume(&o) - 0.2).abs() < 1e-9);
+    // The plate's own faces keep their surfaces.
+    for f in o.faces() {
+        let n = o.faces[f].name;
+        let EntityId::Face(g) = b.by_name(n).unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            o.surfaces[o.faces[f].surface],
+            b.surfaces[b.faces[g].surface]
+        );
+    }
+    assert!(j.events().contains(&Event::Deleted(cylinders(&b)[0])));
+    assert_eq!(
+        j.events()
+            .iter()
+            .filter(|e| matches!(e, Event::Modified(_)))
+            .count(),
+        2
+    );
+    assert_eq!(
+        delete_faces(D, &b, &spec(cylinders(&b), Heal::Grow)).unwrap_err(),
+        TweakError::GrowWouldCap {
+            face: cylinders(&b)[0]
+        }
+        .into()
+    );
 }
 
 #[test]
@@ -189,4 +222,23 @@ fn a_fillet_grows_back_to_its_sharp_edge() {
         .filter(|e| matches!(e, Event::Replaced { old, new } if *old != fillet && *new == sharp))
         .count();
     assert_eq!(rails, 2);
+}
+
+#[test]
+fn deleting_a_whole_body_or_a_slabs_side_heals_nothing() {
+    let (b, _) = primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let all: Vec<Name> = b.faces().map(|f| b.faces[f].name).collect();
+    assert!(matches!(
+        delete_faces(D, &b, &spec(all, Heal::Auto)),
+        Err(Error::InvalidTweak(TweakError::GapNotHealed { .. }))
+    ));
+    let side = Name::derive(
+        K,
+        crate::name::Role::Face(crate::name::FaceRole::PlusX),
+        &[],
+    );
+    assert_eq!(
+        delete_faces(D, &b, &spec(vec![side], Heal::Auto)).unwrap_err(),
+        TweakError::GapNotHealed { face: side }.into()
+    );
 }
