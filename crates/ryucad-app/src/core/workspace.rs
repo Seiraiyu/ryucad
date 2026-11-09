@@ -3500,6 +3500,11 @@ impl Workspace {
                 }
             }
             (Pending::Save, Err(e)) => {
+                // A feature that would change a reference import: the
+                // card offers Convert to solid, beside the form's own.
+                if e.code == Code::ReferenceBody {
+                    self.fail(e.clone());
+                }
                 if let Some(f) = &mut self.form {
                     f.saving = false;
                     if e.code == Code::Conflict {
