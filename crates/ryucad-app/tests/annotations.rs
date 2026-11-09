@@ -123,6 +123,37 @@ fn the_window_draws_and_reads_its_persons_draft() {
         && ws.compare.as_ref().is_some_and(|c| c.to.is_some())));
 }
 
+#[test]
+fn a_part_asked_for_as_the_drawn_revision_moves_is_asked_for_again() {
+    let p = Project::new().with_part();
+    let mut ws = open(&p, Mode::Annotate);
+    let working = drawn(&ws).unwrap();
+    ws.open_form(Some(("p".into(), "boss".into())));
+    assert!(ws.wait_until(WAIT, |ws| ws.form.is_some()));
+    set(&mut ws, "radius", "4 mm");
+    ws.save_form();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()
+        && ws.model_rev().is_some()
+        && drawn(ws).is_some_and(|h| h != working)));
+    // The agent's model drawn, the part not yet loaded (a lazily loaded
+    // project's row opened): its first report is asked at the working
+    // files, and the drawn revision moves back to the draft before the
+    // answer comes, which drops it.
+    ws.set_show_agent(true);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.model_rev().is_none()));
+    ws.model.parts.remove("p");
+    ws.load_part("p");
+    ws.set_show_agent(false);
+    // It is asked for again at the draft, not left loading.
+    assert!(
+        ws.wait_until(WAIT, |ws| ws.idle()
+            && ws.loading.is_empty()
+            && drawn(ws).is_some_and(|h| h != working)),
+        "still loading {:?}",
+        ws.loading
+    );
+}
+
 fn radius_on_disk(p: &Project) -> String {
     p.ok(&["feature", "show", "p", "boss"])["params"]["radius"]["value"]
         .as_str()

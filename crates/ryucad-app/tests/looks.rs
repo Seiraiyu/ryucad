@@ -182,9 +182,10 @@ fn the_window_and_the_icon_sheet_look_as_they_did() {
         looks_as_it_did(lavapipe, &h.render().unwrap(), &format!("window-{name}"));
     }
     // Annotate and Direct edit (ryucad 19.B): the sample, Drafting light,
-    // the default tiles. One open comment, pinned with a point, so
-    // Annotate's picture has a marker; the agent's, so the window's own
-    // count is 0.
+    // the default tiles. One open comment, pinned with a point on the
+    // bracket where `rig` places it as `plate` (the window shows `rig`,
+    // and draws markers only of pins on what it shows), so Annotate's
+    // picture has a marker; the agent's, so the window's own count is 0.
     for (key, value) in [
         ("ui.style", "drafting"),
         ("ui.theme", "light"),
@@ -195,7 +196,7 @@ fn the_window_and_the_icon_sheet_look_as_they_did() {
     }
     let body = p.ok(&["inspect", "bracket"])["bodies"][0].clone();
     let pin = format!(
-        "bracket/{}/{}",
+        "rig/plate/{}/{}",
         body["solid"].as_str().unwrap(),
         body["faces"][0]["name"].as_str().unwrap()
     );

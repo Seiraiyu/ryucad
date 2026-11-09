@@ -351,6 +351,8 @@ pub struct Workspace {
     pub model: Model,
     /// Parts whose reports are asked for and not yet answered.
     pub loading: BTreeSet<String>,
+    /// The revision each part in `loading` was last asked for at.
+    asked_at: BTreeMap<String, Option<String>>,
     /// Parts the tree, as it draws, found it wants loaded (its rows
     /// opened): loaded once it is drawn ([`Workspace::load_wanted`]).
     pub wanted: std::cell::RefCell<BTreeSet<String>>,
@@ -563,6 +565,7 @@ impl Workspace {
             annotation_ui: Default::default(),
             model: Model::default(),
             loading: BTreeSet::new(),
+            asked_at: BTreeMap::new(),
             wanted: Default::default(),
             people,
             following: None,
@@ -663,6 +666,7 @@ impl Workspace {
     fn load(&mut self) {
         // What was asked for before a resync may never be answered.
         self.loading.clear();
+        self.asked_at.clear();
         self.send(Request::ProjectInfo {}, Pending::Info);
         self.send(Request::PartList {}, Pending::Parts);
         let log = Request::ActivityLog {
@@ -3054,11 +3058,19 @@ impl Workspace {
             }
             (Pending::Rebuild(id, rev), r) => {
                 // Asked at a revision the window no longer draws: its
-                // answer is dropped, as another is on its way.
-                if rev != self.model_rev() {
+                // answer is dropped, and the part asked for at the one it
+                // draws unless that is on its way already (a part not yet
+                // loaded when the revision moved isn't asked again then).
+                let now = self.model_rev();
+                if rev != now {
+                    if self.asked_at.get(&id) != Some(&now) {
+                        self.loading.remove(&id);
+                        self.ask_part(&id);
+                    }
                     return;
                 }
                 self.loading.remove(&id);
+                self.asked_at.remove(&id);
                 // A failed feature fails the rebuild; the report is in the details.
                 let report = match r {
                     Ok(a) => a.result["parts"][0].clone(),
@@ -4326,6 +4338,7 @@ impl Workspace {
             return;
         }
         let rev = self.model_rev();
+        self.asked_at.insert(id.to_owned(), rev.clone());
         let req = Request::Rebuild {
             part: Some(id.to_owned()),
             rev: rev.clone(),
