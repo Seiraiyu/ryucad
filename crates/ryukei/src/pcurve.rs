@@ -196,14 +196,14 @@ pub(crate) fn affine_net(surface: &Surface) -> Option<Affine> {
     }
     let w = n.weights();
     let w0 = w[0];
-    if !(w0 > 0.0) {
+    if w0.is_nan() || w0 <= 0.0 {
         return None;
     }
     let eps = w
         .iter()
         .map(|&x| ((x - w0) / w0).abs())
         .fold(0.0f64, f64::max);
-    if !(eps <= 1e-12) {
+    if eps.is_nan() || eps > 1e-12 {
         return None;
     }
     let (gu, gv) = (greville(ku), greville(kv));
@@ -213,7 +213,7 @@ pub(crate) fn affine_net(surface: &Surface) -> Option<Affine> {
     let b = (p(0, nv - 1) - p(0, 0)) / (gv[nv - 1] - gv[0]);
     let origin = p(0, 0) - a * gu[0] - b * gv[0];
     let det = a.dot(a) * b.dot(b) - a.dot(b) * a.dot(b);
-    if !(det > 0.0) {
+    if det.is_nan() || det <= 0.0 {
         return None;
     }
     let mut d = 0.0f64;
@@ -247,35 +247,6 @@ impl Affine {
     pub(crate) fn plane(&self) -> Option<Surface> {
         let f = Frame::new(self.origin, self.a.cross(self.b), self.a).ok()?;
         Some(Surface::Plane(crate::geom::Plane::new(f)))
-    }
-
-    /// A pcurve in `frame`'s plane (the point `o + s x + t y`) carried onto
-    /// this surface's parameters, which are affine in `(s, t)`: a NURBS by
-    /// its control points, a line with its parameter's new speed (as
-    /// [`on_affine`] gives it); `None` for a conic.
-    pub(crate) fn from_plane(
-        &self,
-        frame: &Frame,
-        (c, map): &(Curve2, [f64; 2]),
-    ) -> Option<(Curve2, [f64; 2])> {
-        let (x, y) = (frame.x().get(), frame.y().get());
-        let at = |p: Point2| self.local(frame.origin() + x * p.x + y * p.y);
-        match c {
-            Curve2::Line2(l) => {
-                let (du, dv) = self.solve(x * l.dir().x + y * l.dir().y);
-                let d = Vector2::new(du, dv);
-                let k = d.length();
-                let line = Line2::new(at(l.origin()), d).ok()?;
-                Some((Curve2::Line2(line), [map[0] * k, map[1] * k]))
-            }
-            Curve2::Nurbs2(n) => {
-                let pts = n.control_points().map(at).collect();
-                let c =
-                    NurbsCurve2::new(n.knots().clone(), pts, Some(n.weights().to_vec())).ok()?;
-                Some((Curve2::Nurbs2(Arc::new(c)), *map))
-            }
-            _ => None,
-        }
     }
 }
 
