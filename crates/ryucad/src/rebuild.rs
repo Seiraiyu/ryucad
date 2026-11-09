@@ -524,7 +524,9 @@ impl PartResult {
                 if let Output::Solids(m) = o
                     && let Some(rep) = &m.report
                 {
-                    return crate::import::reference_warnings(part, id, rep);
+                    let mut w = crate::import::reference_warnings(part, id, rep);
+                    w.extend(crate::tweak::draft_warnings(part, id, rep));
+                    return w;
                 }
                 o.instance()
                     .and_then(|p| {

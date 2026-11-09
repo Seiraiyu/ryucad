@@ -1153,6 +1153,58 @@ fn angles(part: &Id, rep: &Value) -> Option<Value> {
     ))
 }
 
+/// How far (radians) a face's angle may lie from the angle asked, or
+/// spread, before a draft warns: a millidegree.
+pub const VARIES: f64 = 1e-3 * crate::units::DEG;
+
+/// `draft_angle_varies` for each face of a parting-line draft (feature
+/// `id` of `part`, its report `rep`) whose angle lies more than
+/// [`VARIES`] from the angle its file asks or spreads wider than it. A
+/// neutral-plane draft holds its angle by construction (design 384), so a
+/// spline's certified bounds, wider than a millidegree, aren't a varying
+/// angle; nothing is said for it, nor for a report that isn't a draft's.
+pub fn draft_warnings(part: &Id, id: &Id, rep: &Value) -> Vec<Value> {
+    if rep["hinge"] != "parting" {
+        return Vec::new();
+    }
+    let (Some(target), Some(angles)) = (rep["target"].as_str(), rep["angles"].as_array()) else {
+        return Vec::new();
+    };
+    let deg = |x: f64| x / crate::units::DEG;
+    angles
+        .iter()
+        .filter_map(|a| {
+            let (lo, hi) = (a["least"].as_f64()?, a["greatest"].as_f64()?);
+            let asked = a["asked"].as_f64();
+            let off = asked.is_some_and(|t| (lo - t).abs() > VARIES || (hi - t).abs() > VARIES);
+            if !(off || hi - lo > VARIES) {
+                return None;
+            }
+            let face = format!("{part}/{target}/{}", a["face"].as_str()?);
+            let asked_text = asked
+                .map(|t| format!(", not the {}° asked", crate::measure::number(deg(t))))
+                .unwrap_or_default();
+            let mut w = json!({
+                "code": "draft_angle_varies",
+                "part": part,
+                "feature": id,
+                "face": face,
+                "least_rad": lo,
+                "greatest_rad": hi,
+                "message": format!(
+                    "draft {id}: face {face} lies {}° to {}° from the pull{asked_text}: a parting line climbing along the pull holds the angle in the section square to it, not from the pull",
+                    crate::measure::number(deg(lo)),
+                    crate::measure::number(deg(hi)),
+                ),
+            });
+            if let Some(t) = asked {
+                w["asked_rad"] = json!(t);
+            }
+            Some(w)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1959,5 +2011,46 @@ mod tests {
                 .unwrap()
                 .contains(&json!(east))
         );
+    }
+
+    #[test]
+    fn a_parting_drafts_angle_off_what_it_asks_warns() {
+        let (part, id) = (
+            Id::parse("p", "part").unwrap(),
+            Id::parse("d", "feature").unwrap(),
+        );
+        let t = 3f64.to_radians();
+        let n = "0123456789abcdef0123456789abcdef";
+        let rep = |hinge: &str, lo: f64, hi: f64| {
+            json!({"target": "b", "hinge": hinge,
+                   "angles": [{"face": n, "least": lo, "greatest": hi, "asked": t}]})
+        };
+        // At the angle asked, or within a millidegree: nothing.
+        assert!(draft_warnings(&part, &id, &rep("parting", t, t)).is_empty());
+        let close = t + 0.5e-3f64.to_radians();
+        assert!(draft_warnings(&part, &id, &rep("parting", close, close)).is_empty());
+        // A parting line climbing along the pull: the face is at 2.5°.
+        let w = draft_warnings(
+            &part,
+            &id,
+            &rep("parting", 2.5f64.to_radians(), 2.5f64.to_radians()),
+        );
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0]["code"], "draft_angle_varies");
+        assert_eq!(w[0]["face"], format!("p/b/{n}"));
+        assert_eq!(w[0]["feature"], "d");
+        assert!(
+            w[0]["message"].as_str().unwrap().contains("parting line"),
+            "{}",
+            w[0]
+        );
+        // A spread wider than a millidegree, the asked angle inside it.
+        let w = draft_warnings(&part, &id, &rep("parting", t - 0.01, t + 0.01));
+        assert_eq!(w.len(), 1);
+        // A neutral plane holds the angle by construction: a spline's
+        // certified bounds wider than that say nothing.
+        assert!(draft_warnings(&part, &id, &rep("neutral", t - 0.01, t + 0.01)).is_empty());
+        // Any other report (an import's, a fill's) says nothing here.
+        assert!(draft_warnings(&part, &id, &json!({"sides": []})).is_empty());
     }
 }
