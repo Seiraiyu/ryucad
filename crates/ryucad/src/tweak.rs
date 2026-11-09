@@ -906,4 +906,22 @@ mod tests {
             "groups": [{"with": "p/c", "faces": [top]}]})).unwrap_err();
         assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
     }
+
+    #[test]
+    fn replacement_groups_read_as_the_cli_sends_them() {
+        let (dir, mut s) = boxes();
+        let top = up(&mut s, "b", "b", 0.02);
+        // What `--with p/d --face <top>` sends, `d` a datum plane.
+        call(&mut s, "feature.add", json!({"part": "p", "type": "plane", "id": "d",
+            "by": "offset", "from": "xy", "distance": 22})).unwrap();
+        call(&mut s, "feature.add", json!({"part": "p", "type": "replace_face", "id": "r",
+            "groups": [{"with": "p/d", "faces": [top.clone()]}]})).unwrap();
+        let v = file(&dir, "r");
+        assert_eq!(v["groups"][0]["with"], json!({"feature": "d"}), "{v}");
+        assert_eq!(v["target"], "b");
+        // Faces outside a group are refused, saying where they go.
+        let e = call(&mut s, "feature.edit", json!({"part": "p", "id": "r", "face": top}))
+            .unwrap_err();
+        assert_eq!((e.code, e.details["param"].as_str()), (Code::InvalidParam, Some("faces")));
+    }
 }
