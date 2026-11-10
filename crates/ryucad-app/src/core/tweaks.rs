@@ -186,6 +186,11 @@ fn mark(
     }
 }
 
+/// The cosine and sine of 25°, an arrow head's half angle (the same bits
+/// everywhere: no platform trigonometry).
+const HEAD_COS: f64 = 0.906_307_787_036_649_9;
+const HEAD_SIN: f64 = 0.422_618_261_740_699_44;
+
 /// An arrow `length` long from `from` along unit `dir`: its shaft and the
 /// two strokes of its head, a fifth of its length back at 25° either side
 /// in a plane holding `dir`.
@@ -198,10 +203,7 @@ pub fn arrow(from: [f64; 3], dir: [f64; 3], length: f64) -> Vec<Vec<[f64; 3]>> {
     let mut a = [0.0; 3];
     a[least] = 1.0;
     let side = unit(cross(dir, a));
-    let (back, across) = (
-        0.2 * length * 25f64.to_radians().cos(),
-        0.2 * length * 25f64.to_radians().sin(),
-    );
+    let (back, across) = (0.2 * length * HEAD_COS, 0.2 * length * HEAD_SIN);
     let head = |s: f64| [0, 1, 2].map(|k| tip[k] - back * dir[k] + s * across * side[k]);
     vec![vec![from, tip], vec![head(1.0), tip, head(-1.0)]]
 }
@@ -370,6 +372,13 @@ mod tests {
     }
 
     #[test]
+    fn the_head_is_25_degrees() {
+        let a = 25f64 * core::f64::consts::PI / 180.0;
+        assert!((ryu_math::cos(a) - HEAD_COS).abs() < 1e-16);
+        assert!((ryu_math::sin(a) - HEAD_SIN).abs() < 1e-16);
+    }
+
+    #[test]
     fn an_arrow_runs_its_length_and_its_head_comes_back() {
         let a = arrow([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.01);
         assert_eq!(a[0], vec![[0.0; 3], [0.0, 0.0, 0.01]]);
@@ -377,8 +386,8 @@ mod tests {
         assert_eq!(head[1], [0.0, 0.0, 0.01]);
         for p in [head[0], head[2]] {
             // A fifth back along the shaft, either side of it.
-            assert!((p[2] - (0.01 - 0.002 * 25f64.to_radians().cos())).abs() < 1e-15);
-            assert!((p[0].hypot(p[1]) - 0.002 * 25f64.to_radians().sin()).abs() < 1e-15);
+            assert!((p[2] - (0.01 - 0.002 * HEAD_COS)).abs() < 1e-15);
+            assert!(((p[0] * p[0] + p[1] * p[1]).sqrt() - 0.002 * HEAD_SIN).abs() < 1e-15);
         }
     }
 

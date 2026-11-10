@@ -277,8 +277,20 @@ pub struct Made {
 }
 
 impl Made {
-    /// The faces of an `inspect` of the model whose origin is `feature`.
+    /// The faces of an `inspect` of the model whose origin is `feature`;
+    /// of a tweak's own `inspect`, the faces it modified.
     pub fn from_inspect(feature: &BodyKey, revision: &str, v: &Value) -> Made {
+        if let Some(kind) = crate::core::tweaks::KINDS
+            .into_iter()
+            .find(|k| v[*k].is_object())
+        {
+            return Made {
+                feature: feature.clone(),
+                revision: revision.to_owned(),
+                faces: crate::core::tweaks::modified(v, kind),
+                rims: std::collections::BTreeMap::new(),
+            };
+        }
         let mut faces = std::collections::BTreeMap::new();
         let mut rims = std::collections::BTreeMap::new();
         for b in v["bodies"].as_array().into_iter().flatten() {
@@ -2629,9 +2641,12 @@ impl Workspace {
             return;
         }
         let revision = p.revision.clone();
+        // A tweak makes nothing an origin names: what it modified comes
+        // from inspect of the feature itself.
+        let tweak = p.feature(&key.1).is_some_and(|f| f.tweak.is_some());
         let req = Request::Inspect {
             part: key.0.clone(),
-            feature: None,
+            feature: tweak.then(|| key.1.clone()),
             entity: None,
             rev: self.model_rev(),
         };
@@ -5061,5 +5076,21 @@ mod tests {
         assert!(!m.rims.contains_key(&c));
         assert_eq!(m.rims.len(), 1);
         assert_eq!((m.feature, m.revision.as_str()), (key, "r1"));
+    }
+
+    #[test]
+    fn a_tweaks_made_faces_are_the_faces_it_modified() {
+        let key = ("p".to_owned(), "m".to_owned());
+        // The tweak's own inspect: every face keeps its origin, the box's.
+        let v = json!({"bodies": [{"feature": "m", "solid": "b",
+            "faces": [{"name": "t", "origin": {"feature": "b"}},
+                      {"name": "s", "origin": {"feature": "b"}}],
+            "edges": [{"name": "e", "faces": ["t", "s"]}]}],
+            "move_face": {"modified": {"faces": 1, "edges": 1, "vertices": 0,
+                                       "references": ["p/b/e", "p/b/t"]}}});
+        let m = Made::from_inspect(&key, "r1", &v);
+        let b = ("p".to_owned(), "b".to_owned());
+        assert_eq!(m.faces[&b], BTreeSet::from(["t".to_owned()]));
+        assert!(m.rims.is_empty());
     }
 }
