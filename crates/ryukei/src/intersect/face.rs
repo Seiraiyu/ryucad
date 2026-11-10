@@ -192,6 +192,9 @@ pub(crate) fn face_face_within(
             if super::beside::faces_apart(a, b, FACES_APART, m) {
                 return Ok(FaceMeet::apart());
             }
+            if let Some(meet) = along_rims(a, b, sa, sb, m)? {
+                return Ok(meet);
+            }
             if sharing(a, b) && !ends_together(sa, sb) {
                 return Err(Failure::Uncertain);
             }
@@ -426,6 +429,244 @@ pub(crate) fn face_face_within(
         stretches,
         contacts,
     })
+}
+
+/// How far apart two faces' normals may be, at the middle of edges of
+/// theirs lying along each other, for [`along_rims`] to take them as
+/// tangent there: a hundredth of a radian, the self-intersection check's
+/// rule for faces tangent along an edge they share.
+const NEARLY_TANGENT: f64 = 1e-2;
+
+/// Faces of different bodies, tangent along edges of each that lie on one
+/// curve (a file's two solids glued across a plane, a torus tube running
+/// on into a straight cylinder across the rim both carry: issue #584),
+/// whose surfaces' trace stayed uncertain. As surfaces they may cross
+/// elsewhere too (the torus and the cylinder along a second curve through
+/// two points of the rim, on the cylinder's side), but where one face is
+/// certified to keep off the other's surface outside a strip round those
+/// edges ([`face_beside`](super::beside::face_beside)), as wide as
+/// surfaces meeting tangentially stay within the touch rule's reach of
+/// each other, `sqrt(2 × size × reach)`, the faces meet only along the
+/// edges: the self-intersection check's rule for faces tangent along an
+/// edge they share. Each pair of edges is then a tangent stretch along
+/// the first's curve, placed on both edges. `None` where no such edges
+/// are found or neither face is certified, so the caller goes on as it
+/// would have.
+fn along_rims(
+    a: (&Body, FaceId),
+    b: (&Body, FaceId),
+    sa: &Surface,
+    sb: &Surface,
+    m: &Meter,
+) -> Result<Option<FaceMeet>, Failure> {
+    if core::ptr::eq(a.0, b.0) {
+        return Ok(None);
+    }
+    let mut rims: Vec<(EdgeId, EdgeId, f64)> = Vec::new();
+    for ea in edges(a) {
+        for eb in edges(b) {
+            if let Some(gap) = edges_together((a.0, ea), (b.0, eb)) {
+                let x = &a.0.edges[ea];
+                let p = a.0.curves[x.curve].point(0.5 * (x.interval[0] + x.interval[1]));
+                let normal = |s: &Surface| {
+                    let (u, v) = s.project(p).param;
+                    s.normal(u, v)
+                };
+                if let (Some(na), Some(nb)) = (normal(sa), normal(sb))
+                    && na.get().cross(nb.get()).length() <= NEARLY_TANGENT
+                {
+                    rims.push((ea, eb, gap));
+                }
+            }
+        }
+    }
+    if rims.is_empty() {
+        return Ok(None);
+    }
+    let slack = max_tolerance(a).max(max_tolerance(b));
+    let reach = 100.0 * slack;
+    let size = {
+        let bx = face_box(a.0, a.1).union(&face_box(b.0, b.1));
+        (bx.max() - bx.min()).length()
+    };
+    let strip = (2.0 * size * reach).sqrt();
+    let rails = |k: usize| -> Vec<EdgeId> {
+        let mut r: Vec<EdgeId> = rims
+            .iter()
+            .map(|x| if k == 0 { x.0 } else { x.1 })
+            .collect();
+        r.sort();
+        r.dedup();
+        r
+    };
+    let (ra, rb) = (rails(0), rails(1));
+    let keeps_off = |f: (&Body, FaceId), other: &Surface, rails: &[EdgeId], cells: usize| {
+        super::beside::face_beside(f.0, f.1, other, rails, &[], strip, cells, m).is_ok()
+    };
+    // Each face's search under a growing part limit, the other's between:
+    // the face that keeps off the other's surface usually does in a few
+    // parts, while the other runs on and exhausts any limit.
+    let apart = [1 << 9, 1 << 12, super::BESIDE_CELLS]
+        .into_iter()
+        .any(|cells| keeps_off(a, sb, &ra, cells) || keeps_off(b, sa, &rb, cells))
+        || either_side(a, b, sa, sb, &rims, strip, m);
+    if !apart {
+        return Ok(None);
+    }
+    let fin_pcurve = |(body, face): (&Body, FaceId), e: EdgeId| {
+        body.face_loops(face)
+            .flat_map(|l| body.loop_fins(l).collect::<Vec<_>>())
+            .find(|&fin| body.fins[fin].edge == e)
+            .and_then(|fin| body.fins[fin].pcurve)
+            .map(|pc| (body.curves2[pc.curve].clone(), pc.map))
+    };
+    let mut stretches = Vec::new();
+    for (ea, eb, gap) in rims {
+        let x = &a.0.edges[ea];
+        let y = &b.0.edges[eb];
+        let curve = a.0.curves[x.curve].clone();
+        let range = x.interval;
+        let mut tolerance = x.tolerance.get().max(y.tolerance.get()).max(gap);
+        let pa = fin_pcurve(a, ea).ok_or(Failure::Uncertain)?;
+        // The other face's pcurve is its own edge's where the two edges
+        // are one curve over one interval, else fitted along the first's.
+        let pb = match fin_pcurve(b, eb) {
+            Some(pc) if b.0.curves[y.curve] == curve && y.interval == range => pc,
+            _ => {
+                let (n, bound) = fit_pcurve(sb, &curve, range, m)?;
+                tolerance = tolerance.max(bound);
+                (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0])
+            }
+        };
+        let pcurves = [pa, pb];
+        let mid = 0.5 * (range[0] + range[1]);
+        let mut places = [Place::Outside; 2];
+        for (k, f) in [a, b].into_iter().enumerate() {
+            let (c2, map) = &pcurves[k];
+            let uv = c2.point(map[0] + map[1] * mid);
+            places[k] = point_in_face_near(f.0, f.1, uv, tolerance + super::SLACK)?;
+        }
+        if !places
+            .iter()
+            .all(|p| matches!(p, Place::OnEdge(_) | Place::OnVertex(_)))
+        {
+            return Ok(None);
+        }
+        stretches.push(Stretch {
+            curve,
+            range,
+            tangent: true,
+            tolerance,
+            pcurves,
+            places,
+            ends: [0.0; 2],
+        });
+    }
+    Ok(Some(FaceMeet::Meet {
+        stretches,
+        contacts: Vec::new(),
+    }))
+}
+
+/// Whether two faces lie either side of the plane of the planar curve
+/// their edges [`along_rims`] found lie along, outside the strip round
+/// them: the self-intersection check's rule for blends across a section.
+/// Each face is certified by [`face_beside`](super::beside::face_beside)
+/// against the plane ([`super::section_plane`]), and neither may lie on
+/// both sides of it. As surfaces they may still cross elsewhere (a torus
+/// tube and the cylinder running on from it cross along a curve through
+/// two points of their rim, on both sides of its plane, each surface
+/// beyond its own face), so neither face need keep off the other's
+/// surface, but faces on opposite sides of a plane meet only on it.
+fn either_side(
+    a: (&Body, FaceId),
+    b: (&Body, FaceId),
+    sa: &Surface,
+    sb: &Surface,
+    rims: &[(EdgeId, EdgeId, f64)],
+    strip: f64,
+    m: &Meter,
+) -> bool {
+    let x = &a.0.edges[rims[0].0];
+    let curve = &a.0.curves[x.curve];
+    // Every rim on one curve, the plane's.
+    if rims
+        .iter()
+        .any(|r| &a.0.curves[a.0.edges[r.0].curve] != curve)
+    {
+        return false;
+    }
+    let tolerance = rims.iter().map(|r| r.2).fold(x.tolerance.get(), f64::max);
+    let Some(plane) = super::section_plane(curve, x.interval, tolerance, sa, sb) else {
+        return false;
+    };
+    let rails = |k: usize| -> Vec<EdgeId> {
+        let mut r: Vec<EdgeId> = rims
+            .iter()
+            .map(|x| if k == 0 { x.0 } else { x.1 })
+            .collect();
+        r.sort();
+        r.dedup();
+        r
+    };
+    let on_plane = |f: (&Body, FaceId), rails: &[EdgeId]| {
+        super::beside::face_beside(f.0, f.1, &plane, rails, &[], strip, super::BESIDE_CELLS, m).ok()
+    };
+    match (on_plane(a, &rails(0)), on_plane(b, &rails(1))) {
+        (Some(pa), Some(pb)) => {
+            let one = |s: [bool; 2]| s != [true, true];
+            one(pa)
+                && one(pb)
+                && (pa[0] && pb[1] || pa[1] && pb[0] || pa == [false; 2] || pb == [false; 2])
+        }
+        _ => false,
+    }
+}
+
+/// How far apart an edge of one body and an edge of another lie, where
+/// they lie along each other end to end: both closed, or each one's ends
+/// at the other's (either way round) within the touch rule's reach for
+/// their tolerances, and every point of each certified within a reach of
+/// the other ([`within_reach`]), the least of a ladder from their
+/// tolerances' sum up to that touch reach. `None` otherwise.
+fn edges_together((ba, ea): (&Body, EdgeId), (bb, eb): (&Body, EdgeId)) -> Option<f64> {
+    let (x, y) = (&ba.edges[ea], &bb.edges[eb]);
+    let (ca, cb) = (&ba.curves[x.curve], &bb.curves[y.curve]);
+    let (ta, tb) = (x.tolerance.get(), y.tolerance.get());
+    let most = crate::tol::touch_reach(ta.max(tb));
+    if !ca
+        .bounds(x.interval)
+        .grow(most)
+        .intersects(&cb.bounds(y.interval))
+    {
+        return None;
+    }
+    let at = |b: &Body, v: crate::topo::VertexId| b.vertices[v].point;
+    match (x.start == x.end, y.start == y.end) {
+        (true, true) => {}
+        (false, false) => {
+            let (a0, a1) = (at(ba, x.start), at(ba, x.end));
+            let (b0, b1) = (at(bb, y.start), at(bb, y.end));
+            let near = |p: Point3, q: Point3| p.distance(q) <= most;
+            if !(near(a0, b0) && near(a1, b1) || near(a0, b1) && near(a1, b0)) {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    let mut r = (ta + tb).max(LINEAR_RESOLUTION);
+    loop {
+        let r_now = r.min(most);
+        if within_reach((ca, x.interval), (cb, y.interval), r_now)
+            && within_reach((cb, y.interval), (ca, x.interval), r_now)
+        {
+            return Some(r_now);
+        }
+        if r_now >= most {
+            return None;
+        }
+        r *= 4.0;
+    }
 }
 
 /// Whether `curve` over `range` runs beside an edge of the face: its ends
