@@ -228,6 +228,24 @@ struct Did {
     keyed: Option<bool>,
 }
 
+/// The tree's rows from what the window holds, and whether the project is
+/// small enough to load whole (at most `LOAD_WHOLE` parts), so Expand all
+/// may load what it opens.
+pub fn rows(ws: &Workspace) -> (Vec<Row>, bool) {
+    let pdm = crate::core::palette::pdm_names(&ws.bom);
+    let whole = ws.model.listed.len() <= crate::core::workspace::LOAD_WHOLE;
+    let src = Source {
+        model: &ws.model,
+        compare: ws.compare.as_ref(),
+        states: &ws.states,
+        doctor: ws.doctor.as_ref(),
+        merge: ws.merge.as_ref().map(|m| &m.status),
+        pdm: &pdm,
+        whole,
+    };
+    (crate::core::tree::rows(&src), whole)
+}
+
 /// Draws one row.
 #[allow(clippy::too_many_arguments)]
 fn row_ui(
@@ -384,7 +402,12 @@ fn row_ui(
         None => r,
     };
     did.clicked = r.clicked();
-    // The registry's commands for the row, and a solid's Hide or Show.
+    // A part's row shown by a double click, as View > Show does (#541).
+    if r.double_clicked() && row.menu == Some(crate::core::command::Row::Part) {
+        did.run = row.reference.clone().map(|t| ("view.show_row", t));
+    }
+    // The registry's commands for the row, and a solid's Hide or Unhide
+    // ("Show" is View > Show's: the window's focus, #541).
     // A menu the keyboard opened stays that popup until it closes (a
     // context menu is another popup, so it would never show).
     let keyed = view.tree_menu.as_deref() == Some(row.id.as_str());
@@ -399,7 +422,7 @@ fn row_ui(
             let reference = row.reference.clone().unwrap_or_default();
             if row.solid {
                 let (label, act) = if row.hidden {
-                    ("Show", Act::Show(reference.clone()))
+                    ("Unhide", Act::Show(reference.clone()))
                 } else {
                     ("Hide", Act::Hide(reference.clone()))
                 };
@@ -410,14 +433,22 @@ fn row_ui(
             }
             if let Some(kind) = row.menu {
                 use crate::core::command::Context;
-                if let Some((id, _)) = crate::ui::commands::context_menu(
+                // Expand and Collapse below only where rows come under it.
+                if let Some((id, _)) = crate::ui::commands::context_menu_where(
                     ui,
                     &view.commands,
                     Context::Row(kind),
                     Some(&reference),
                     row.import,
+                    |id| row.children || !crate::core::command::below(id),
                 ) {
-                    did.run = Some((id, reference.clone()));
+                    // The tree's own commands act on the row by its id.
+                    let target = if id.starts_with("tree.") {
+                        row.id.clone()
+                    } else {
+                        reference.clone()
+                    };
+                    did.run = Some((id, target));
                 }
             }
         });
@@ -489,21 +520,12 @@ fn keys(ui: &egui::Ui) -> Vec<Key> {
 /// sketch. In a compare, features are marked by how they differ, and
 /// those only the other side has follow, to be chosen for their changes.
 pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
-    let pdm = crate::core::palette::pdm_names(&ws.bom);
-    let rows = {
-        let src = Source {
-            model: &ws.model,
-            compare: ws.compare.as_ref(),
-            states: &ws.states,
-            doctor: ws.doctor.as_ref(),
-            merge: ws.merge.as_ref().map(|m| &m.status),
-            pdm: &pdm,
-            whole: ws.model.listed.len() <= crate::core::workspace::LOAD_WHOLE,
-        };
-        crate::core::tree::rows(&src)
-    };
+    let (rows, _) = rows(ws);
     let shown = view.tree.shown(&rows, &|b, q| names(ws, b, q));
     search(ui, view, shown.len());
+    if let Some(n) = &view.tree_note {
+        ui.colored_label(ui.visuals().warn_fg_color, n);
+    }
     ui.separator();
     if ws.model.parts.is_empty() && ws.model.listed.is_empty() {
         crate::ui::tiles::empty(
@@ -584,6 +606,24 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                     ws.want(l);
                 }
             }
+            // The space under the rows: the whole tree's commands.
+            let room = (ui.clip_rect().max.y - ui.cursor().min.y).max(ROW);
+            let (_, r) =
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), room), Sense::click());
+            r.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Pane, true, "Space under the tree's rows")
+            });
+            r.context_menu(|ui| {
+                if let Some(ran) = crate::ui::commands::context_menu(
+                    ui,
+                    &view.commands,
+                    crate::core::command::Context::Tree,
+                    None,
+                    None,
+                ) {
+                    run = Some((ran.0, String::new()));
+                }
+            });
         });
     // The rows hold the keyboard: arrows, Enter, Space and the menu key.
     let area = ui.interact(scroll.inner_rect, id, Sense::focusable_noninteractive());
@@ -617,6 +657,7 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     }
     for (row, open) in toggled {
         view.tree.set_open(&row, open);
+        view.tree_note = None;
     }
     ws.load_wanted();
     for a in acts {
@@ -631,6 +672,6 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         }
     }
     if let Some((id, r)) = run {
-        view.ran = Some((id, Some(r)));
+        view.ran = Some((id, (!r.is_empty()).then_some(r)));
     }
 }

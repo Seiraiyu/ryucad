@@ -131,6 +131,9 @@ pub struct View {
     pub tree_menu: Option<String>,
     /// `tree_menu` was just set: its row opens the menu when next drawn.
     pub tree_menu_opening: bool,
+    /// What the last Expand all or Expand below left closed, said under
+    /// the tree's filters until the tree is next opened or closed.
+    pub tree_note: Option<String>,
 }
 
 /// How long the pointer rests on an entity before its tooltip shows,
@@ -326,6 +329,7 @@ impl View {
             tree_focus: None,
             tree_menu: None,
             tree_menu_opening: false,
+            tree_note: None,
         }
     }
 

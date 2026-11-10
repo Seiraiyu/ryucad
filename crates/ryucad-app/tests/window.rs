@@ -4276,6 +4276,83 @@ fn context_menus_follow_what_was_right_clicked() {
     frames(&mut h, |a| shell::is_open(&a.opened().tiles, "history"));
 }
 
+#[test]
+fn the_tree_expands_and_collapses_all_and_below_a_row() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("base (box)");
+    // The space under the rows collapses the whole tree...
+    h.get_by_label("Space under the tree's rows")
+        .click_secondary();
+    context_item(&mut h, "Collapse all");
+    h.run_steps(2);
+    assert!(h.query_by_label("base (box)").is_none());
+    assert!(h.query_by_label("boss (solid)").is_none());
+    // ...and the Edit menu expands it again (the palette lists it too).
+    menu(&mut h, "Edit", "Expand all");
+    h.run_steps(2);
+    h.get_by_label("base (box)");
+    h.get_by_label("boss (cylinder)");
+    // A row closes what is under it alone, and opens it again.
+    h.get_by_label("boss (solid)").click_secondary();
+    context_item(&mut h, "Collapse below");
+    h.run_steps(2);
+    assert!(h.query_by_label("boss (cylinder)").is_none());
+    h.get_by_label("base (box)");
+    h.get_by_label("boss (solid)").click_secondary();
+    context_item(&mut h, "Expand below");
+    h.run_steps(2);
+    h.get_by_label("boss (cylinder)");
+    // A small project loads whole, so nothing was left closed.
+    assert!(h.state().opened().view.tree_note.is_none());
+}
+
+#[test]
+fn a_part_or_instance_row_shows_its_part_as_view_show_does() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    let focus = |a: &App| a.opened().ws.model.focus.clone();
+    // An instance's row shows the part it places.
+    h.get_by_label("b1 (bolt @ working, fixed)")
+        .click_secondary();
+    context_item(&mut h, "Show");
+    frames(&mut h, |a| focus(a).as_deref() == Some("bolt"));
+    // A solid's visibility is Hide and Unhide, so Show means one thing.
+    h.get_all_by_label("shank (solid)")
+        .next()
+        .unwrap()
+        .click_secondary();
+    for _ in 0..10 {
+        h.step();
+    }
+    let solid = h
+        .get_all_by_role(egui::accesskit::Role::Menu)
+        .last()
+        .unwrap();
+    assert!(solid.query_by_label("Hide").is_some());
+    assert!(solid.query_by_label("Show").is_none());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    // A part's row shows that part.
+    h.get_by(|n| {
+        n.label()
+            .is_some_and(|l| l.starts_with("frame") && l.ends_with("(assembly)"))
+    })
+    .click_secondary();
+    context_item(&mut h, "Show");
+    frames(&mut h, |a| focus(a).as_deref() == Some("frame"));
+}
+
 /// Presses or lets go of the primary button at `pos`.
 fn press(h: &Harness<'static, App>, pos: egui::Pos2, pressed: bool) {
     h.event(egui::Event::PointerButton {
