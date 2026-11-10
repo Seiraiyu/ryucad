@@ -67,11 +67,14 @@ pub enum LineKind {
     Cutting,
     /// A section cap's hatching: thin and continuous.
     Hatch,
+    /// Dimension, extension and leader lines, and annotations' frames and
+    /// symbols (plan 9.C): thin and continuous, on a layer of their own.
+    Dimension,
 }
 
 impl LineKind {
     /// Every kind, in the order a DXF lists its layers.
-    pub const ALL: [LineKind; 8] = [
+    pub const ALL: [LineKind; 9] = [
         LineKind::Visible,
         LineKind::Hidden,
         LineKind::Thin,
@@ -80,6 +83,7 @@ impl LineKind {
         LineKind::Border,
         LineKind::Cutting,
         LineKind::Hatch,
+        LineKind::Dimension,
     ];
 
     /// Its DXF layer's name.
@@ -93,6 +97,7 @@ impl LineKind {
             LineKind::Border => "BORDER",
             LineKind::Cutting => "CUTTING",
             LineKind::Hatch => "HATCH",
+            LineKind::Dimension => "DIMENSION",
         }
     }
 }
@@ -125,7 +130,7 @@ impl Standard {
         let (thick, thin) = self.widths();
         let (width, dash) = match (self, kind) {
             (_, LineKind::Visible | LineKind::Border) => (thick, vec![]),
-            (_, LineKind::Thin | LineKind::Hatch) => (thin, vec![]),
+            (_, LineKind::Thin | LineKind::Hatch | LineKind::Dimension) => (thin, vec![]),
             (Standard::Asme, LineKind::Cutting) => (thick, vec![20.0, 1.5, 3.0, 1.5, 3.0, 1.5]),
             (Standard::Iso, LineKind::Cutting) => {
                 (thin, vec![24.0 * thin, 3.0 * thin, 0.5 * thin, 3.0 * thin])
@@ -194,7 +199,7 @@ mod tests {
         let h = Standard::Iso.stroke(LineKind::Hatch);
         assert_eq!((h.width, h.dash.len()), (0.25, 0));
         let layers: Vec<&str> = LineKind::ALL.iter().map(|k| k.layer()).collect();
-        assert_eq!(layers.len(), 8);
+        assert_eq!(layers.len(), 9);
         assert!(layers.windows(2).all(|w| w[0] != w[1]));
     }
 }
