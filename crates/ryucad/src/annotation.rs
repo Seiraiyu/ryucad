@@ -27,6 +27,7 @@ When you start work, run `ryucad annotations list --open` and read what is open.
 Ask the person before acting on annotations they didn't ask you about.
 Claim one before working it: `ryucad annotations claim <id>`.
 A proposed change is a revision: `ryucad diff --to annotation:<id> --model`, `ryucad render --rev annotation:<id> --compare working`.
+Some annotations carry marks: read them in words with `ryucad annotations show <id>` and look at them with `ryucad render --annotation <id> --out a.png`. A mark says where, not exactly how far: ask, or use the measured points, before reading a size off an arrow.
 Take the change if you agree with it (`ryucad annotations apply <id>`), or make your own edit.
 Reply saying what you did: `ryucad annotations reply <id> TEXT`.
 Close it: `ryucad annotations resolve <id> --note TEXT`, or `ryucad annotations reject <id> --reason TEXT`.
@@ -1968,8 +1969,11 @@ pub(crate) mod tests {
             "annotations resolve",
             "annotations reject",
             "--reason",
+            "annotations show",
+            "render --annotation",
         ] {
             assert!(ETIQUETTE.contains(cmd), "{cmd}");
         }
+        assert!(ETIQUETTE.contains("A mark says where"));
     }
 }
