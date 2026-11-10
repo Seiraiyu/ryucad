@@ -82,13 +82,14 @@ pub struct TemplateFile {
 }
 
 /// The files at the project's root that a session tracks.
-pub const ROOT_FILES: [&str; 6] = [
+pub const ROOT_FILES: [&str; 7] = [
     MANIFEST,
     ATTRIBUTES,
     PDM_CONFIG,
     super::materials::MATERIALS,
     super::lock::LOCK,
     PARAMETERS,
+    super::drawing_lint::DRAWING_LINT,
 ];
 
 /// The tag of the piece of a part's revision holding the project
@@ -487,6 +488,7 @@ impl Project {
                 None if path == ATTRIBUTES
                     || path == PDM_CONFIG
                     || path == super::materials::MATERIALS
+                    || path == super::drawing_lint::DRAWING_LINT
                     || path.starts_with(&format!("{RELEASES}/"))
                     || path.starts_with(&format!("{}/", super::annotation::ANNOTATIONS)) =>
                 {
