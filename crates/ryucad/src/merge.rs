@@ -2779,6 +2779,35 @@ mod tests {
     }
 
     #[test]
+    fn a_sections_cut_and_a_details_centre_are_one_value_each() {
+        let file = |cut: Value, centre: Value| {
+            json!({"format": 1, "kind": "ryucad.drawing", "name": "P",
+            "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b"}},
+            "views": {
+                "v1": {"type": "base", "sheet": "s1", "orient": "top"},
+                "v2": {"type": "section", "sheet": "s1", "from": "v1", "label": "A", "cut": cut},
+                "v3": {"type": "detail", "sheet": "s1", "from": "v1", "label": "B",
+                       "centre": centre, "radius": "4 mm"}
+            }})
+        };
+        let base = file(json!({"plane": "zx"}), json!(["0 mm", "0 mm", "0 mm"]));
+        // A plane moved on one side, made points on the other: one conflict.
+        let ours = file(
+            json!({"plane": "zx", "offset": "5 mm"}),
+            json!(["0 mm", "0 mm", "0 mm"]),
+        );
+        let theirs = file(
+            json!({"through": [["0 mm", "0 mm", "0 mm"], ["9 mm", "0 mm", "0 mm"]]}),
+            json!(["1 mm", "0 mm", "0 mm"]),
+        );
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/views/v2/cut"]);
+        // A centre moved on one side alone is taken whole.
+        let v = &m.value["views"]["v3"]["centre"];
+        assert_eq!(v, &json!(["1 mm", "0 mm", "0 mm"]));
+    }
+
+    #[test]
     fn drawings_merge_by_member_and_field_and_a_retyped_view_whole() {
         let file = |views: Value| {
             json!({"format": 1, "kind": "ryucad.drawing", "name": "P",

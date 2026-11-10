@@ -3820,6 +3820,33 @@ mod tests {
     }
 
     #[test]
+    fn sections_details_flats_and_explodes_textconv_a_line_each() {
+        let v = json!({"format": 1, "kind": "ryucad.drawing", "name": "P",
+        "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b"}},
+        "views": {
+            "v1": {"type": "base", "sheet": "s1", "orient": "top"},
+            "v2": {"type": "section", "sheet": "s1", "from": "v1", "label": "A",
+                   "cut": {"plane": {"feature": "b", "name": "0123456789abcdef0123456789abcdef"}, "offset": "5 mm"}},
+            "v3": {"type": "section", "sheet": "s1", "from": "v1", "label": "B", "flip": true,
+                   "cut": {"through": [["0 mm", "1 mm", "0 mm"], "origin"]}},
+            "v4": {"type": "detail", "sheet": "s1", "from": "v2", "label": "C",
+                   "centre": ["1 mm", "2 mm", "3 mm"], "radius": "4 mm"},
+            "v5": {"type": "flat", "sheet": "s1", "solid": "plate"},
+            "v6": {"type": "exploded", "sheet": "s1", "of": "rig", "explode": "e1", "orient": "iso"}
+        }});
+        let t = text(v);
+        for line in [
+            "views.v2 = section A from v1, on b/0123456789abcdef0123456789abcdef offset 5 mm, sheet s1",
+            "views.v3 = section B from v1, through (0 mm, 1 mm, 0 mm) (origin), flip true, sheet s1",
+            "views.v4 = detail C from v2, about 1 mm, 2 mm, 3 mm radius 4 mm, sheet s1",
+            "views.v5 = flat solid plate, sheet s1",
+            "views.v6 = exploded e1 of rig, iso, sheet s1",
+        ] {
+            assert!(t.contains(line), "{line} in\n{t}");
+        }
+    }
+
+    #[test]
     fn drawings_textconv_a_member_a_line_and_diff_per_part() {
         let file = |offset: &str| {
             json!({"format": 1, "kind": "ryucad.drawing", "name": "P",
