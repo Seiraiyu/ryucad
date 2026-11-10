@@ -184,6 +184,66 @@ pub fn drawn(kind: LabelKind, name: &str, at: Point, side: Side) -> Drawn {
     }
 }
 
+/// Which way net `net`'s signal crosses sheet `sid`'s edge, from its pins
+/// in the whole block: out where pins on the sheet drive it, none on
+/// another sheet does and some pin there is on it; in where one elsewhere
+/// drives it and none here does; both ways otherwise. A block port's pin
+/// counts by its kind, as any pin does.
+pub fn flow_on_sheet(
+    block: &crate::input::Block,
+    layout: &crate::layout::Layout,
+    net: usize,
+    sid: &str,
+) -> crate::input::Flow {
+    use crate::input::{Flow, PinKind};
+    let (mut drive_here, mut drive_there, mut rest_there) = (false, false, false);
+    for part in &block.parts {
+        let Some(x) = layout.placed.get(&part.key) else {
+            continue;
+        };
+        let here = x.sheet == sid;
+        for pin in part.pins.iter().filter(|p| p.nets().contains(&net)) {
+            let drives = pin.kind.drives() || pin.kind == PinKind::PowerOut;
+            match (here, drives) {
+                (true, true) => drive_here = true,
+                (false, true) => drive_there = true,
+                (false, false) => rest_there = true,
+                (true, false) => {}
+            }
+        }
+    }
+    if drive_here && !drive_there && rest_there {
+        Flow::Out
+    } else if drive_there && !drive_here {
+        Flow::In
+    } else {
+        Flow::Bidirectional
+    }
+}
+
+/// An off-sheet connector drawn for its signal's way: the outline of
+/// [`drawn`], and its second chevron at the far end (out), turned back at
+/// the anchor end inside the first point (in), or both (both ways). The
+/// box is [`drawn`]'s whatever the flow.
+pub fn drawn_flow(name: &str, at: Point, side: Side, flow: crate::input::Flow) -> Drawn {
+    use crate::input::Flow;
+    let mut d = drawn(LabelKind::OffSheet, name, at, side);
+    let a = |p: Point| along(at, side, p);
+    let h = GRID / 2;
+    // The inner chevron: pointing back at the wire, inside the first point.
+    let inward = vec![a([h, GRID]), a([0, GRID / 2]), a([-h, GRID])];
+    let outward = d.lines.pop().expect("a second chevron");
+    match flow {
+        Flow::Out => d.lines.push(outward),
+        Flow::In => d.lines.push(inward),
+        _ => {
+            d.lines.push(outward);
+            d.lines.push(inward);
+        }
+    }
+    d
+}
+
 /// The box a label takes.
 pub fn label_box(kind: LabelKind, name: &str, at: Point, side: Side) -> Rect {
     drawn(kind, name, at, side).bounds
@@ -398,6 +458,70 @@ mod tests {
         assert_ne!(
             label_box(LabelKind::OffSheet, name, at, Side::Right),
             label_box(LabelKind::Net, name, at, Side::Right)
+        );
+    }
+
+    #[test]
+    fn a_connector_points_the_way_its_signal_goes() {
+        use crate::input::{Flow, NetKind, PinKind};
+        use crate::layout::{Layout, Placed, Sheet};
+        use crate::testing;
+        // u1 drives n on s1; u2 takes it on s2.
+        let mut b = crate::input::Block::default();
+        b.nets.push(testing::net("n", "SIG", NetKind::Signal));
+        let mut u1 = testing::resistor("u1", "R1", "1k", [Some(0), None]);
+        u1.pins[0].kind = PinKind::Output;
+        let mut u2 = testing::resistor("u2", "R2", "1k", [Some(0), None]);
+        u2.pins[0].kind = PinKind::Input;
+        b.parts = vec![u1, u2];
+        let mut l = Layout::default();
+        for (s, k) in [("s1", "u1"), ("s2", "u2")] {
+            l.sheets.insert(s.into(), Sheet::new(s.into(), [0, 0]));
+            l.placed.insert(
+                k.into(),
+                Placed {
+                    sheet: s.into(),
+                    at: [0, 0],
+                    rotation: 0,
+                    mirror: false,
+                    held: false,
+                },
+            );
+        }
+        assert_eq!(flow_on_sheet(&b, &l, 0, "s1"), Flow::Out);
+        assert_eq!(flow_on_sheet(&b, &l, 0, "s2"), Flow::In);
+        b.parts[1].pins[0].kind = PinKind::Bidirectional;
+        assert_eq!(
+            flow_on_sheet(&b, &l, 0, "s1"),
+            Flow::Out,
+            "a driver here, the rest elsewhere"
+        );
+        b.parts[0].pins[0].kind = PinKind::Passive;
+        assert_eq!(flow_on_sheet(&b, &l, 0, "s1"), Flow::Bidirectional);
+        // The second chevron sits at the end the signal leaves by; the box
+        // never moves.
+        let at = [10 * GRID, 10 * GRID];
+        let out = drawn_flow("SIG", at, Side::Right, Flow::Out);
+        let inn = drawn_flow("SIG", at, Side::Right, Flow::In);
+        assert_eq!(out.bounds, inn.bounds);
+        let far = out.bounds.max[0];
+        assert!(
+            out.lines
+                .iter()
+                .skip(1)
+                .all(|l| l.iter().any(|p| p[0] == far))
+        );
+        assert!(
+            inn.lines
+                .iter()
+                .skip(1)
+                .all(|l| l.iter().all(|p| p[0] < at[0] + 2 * GRID))
+        );
+        assert_eq!(
+            drawn_flow("SIG", at, Side::Right, Flow::Bidirectional)
+                .lines
+                .len(),
+            3
         );
     }
 }

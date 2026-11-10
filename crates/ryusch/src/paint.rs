@@ -208,8 +208,19 @@ pub fn name_box(name: &str, at: &crate::shape::PinAt) -> Rect {
 }
 
 /// A label's lines and text.
-fn label_items(items: &mut Vec<Item>, kind: LabelKind, name: &str, at: Point, side: Side) {
-    let d = label::drawn(kind, name, at, side);
+fn label_items(
+    items: &mut Vec<Item>,
+    kind: LabelKind,
+    name: &str,
+    at: Point,
+    side: Side,
+    flow: crate::input::Flow,
+) {
+    let d = if kind == LabelKind::OffSheet {
+        label::drawn_flow(name, at, side, flow)
+    } else {
+        label::drawn(kind, name, at, side)
+    };
     let colour = if kind.signal() { LABEL } else { POWER };
     // A net label's line is the wire it names; a connector's outline is
     // its own.
@@ -371,7 +382,11 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
     }
     for (key, list) in &layout.labels {
         for l in list.iter().filter(|l| l.sheet == sid) {
-            label_items(items, l.kind, &l.text, l.at, l.side);
+            let flow = match (l.kind, block.net(key)) {
+                (LabelKind::OffSheet, Some(n)) => label::flow_on_sheet(block, layout, n, sid),
+                _ => crate::input::Flow::Bidirectional,
+            };
+            label_items(items, l.kind, &l.text, l.at, l.side, flow);
             out.labels.push(Placed {
                 net: key.clone(),
                 on: l.on.clone(),
