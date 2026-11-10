@@ -89,6 +89,9 @@ pub struct Nav {
     /// Whether turns ease and drags glide (`ui.motion`: `animate`); with
     /// `reduce` every move is at once.
     pub animate: bool,
+    /// The camera is held where it is (the Markup bar, design 423): no
+    /// drag, key, scroll, pinch, turn or framing moves it.
+    pub locked: bool,
 }
 
 /// How long a turn to a view takes, in seconds.
@@ -239,13 +242,29 @@ impl Nav {
             turn: None,
             glide: None,
             animate: true,
+            locked: false,
         }
+    }
+
+    /// Holds the camera at `camera`, at once, until [`Nav::unlock`].
+    pub fn lock(&mut self, camera: Camera) {
+        self.camera = camera;
+        self.turn = None;
+        self.glide = None;
+        self.locked = true;
+    }
+
+    pub fn unlock(&mut self) {
+        self.locked = false;
     }
 
     /// Starts turning to `to` at `now` (seconds); with motion reduced it
     /// is there at once, and this says so (true): no step will follow, so
     /// the caller shares the camera itself (#603).
     pub fn turn_to(&mut self, to: Camera, now: f64) -> bool {
+        if self.locked {
+            return false;
+        }
         self.glide = None;
         if !self.animate {
             self.camera = to;
@@ -276,7 +295,7 @@ impl Nav {
         now: f64,
     ) {
         let speed = (velocity[0] * velocity[0] + velocity[1] * velocity[1]).sqrt();
-        if !self.animate || gesture == Gesture::None || speed < GLIDE_FROM {
+        if self.locked || !self.animate || gesture == Gesture::None || speed < GLIDE_FROM {
             return;
         }
         self.glide = Some(Glide {
@@ -346,6 +365,9 @@ impl Nav {
         height: f32,
         pivot: Option<[f64; 3]>,
     ) {
+        if self.locked {
+            return;
+        }
         let (dx, dy) = (f64::from(delta[0] / height), f64::from(delta[1] / height));
         if gesture != Gesture::None {
             // The person's hand stops a turn or a glide where it is.
@@ -374,6 +396,9 @@ impl Nav {
     /// the target as a drag in that direction would be. Returns whether
     /// `id` is one of them.
     pub fn key(&mut self, id: &str) -> bool {
+        if self.locked {
+            return false;
+        }
         let turn = KEY_TURN;
         let c = &self.camera;
         let camera = match id {
@@ -399,6 +424,9 @@ impl Nav {
     /// Scrolling by `points` (up is positive) zooms in towards `toward`,
     /// the point under the mouse, or the target.
     pub fn scroll(&mut self, points: f32, toward: Option<[f64; 3]>) {
+        if self.locked {
+            return;
+        }
         let factor = f64::from((-points * ZOOM_PER_POINT).exp());
         self.turn = None;
         self.glide = None;
@@ -408,6 +436,9 @@ impl Nav {
     /// A pinch by `zoom` (above 1 is closer) zooms towards `toward`, the
     /// point under the mouse, or the target.
     pub fn pinch(&mut self, zoom: f32, toward: Option<[f64; 3]>) {
+        if self.locked {
+            return;
+        }
         self.turn = None;
         self.glide = None;
         self.camera = view::zoom(&self.camera, 1.0 / f64::from(zoom.max(1e-3)), toward);
@@ -416,12 +447,18 @@ impl Nav {
     /// A standard view framing `points` (not empty) in a viewport of
     /// `aspect`.
     pub fn standard(&mut self, v: StandardView, points: &[[f64; 3]], aspect: f64) {
+        if self.locked {
+            return;
+        }
         self.camera = view::frame_points(points, v, self.camera.projection, aspect);
     }
 
     /// The same direction, framing `points` (not empty) in a viewport of
     /// `aspect`, at once.
     pub fn fit(&mut self, points: &[[f64; 3]], aspect: f64) {
+        if self.locked {
+            return;
+        }
         self.camera = view::refit_points(&self.camera, points, aspect);
     }
 
@@ -756,6 +793,36 @@ mod tests {
         n.turn_to(iso(), 0.0);
         n.key("view.orbit_left");
         assert!(!n.moving());
+    }
+
+    #[test]
+    fn a_locked_camera_moves_for_nothing() {
+        let mut n = Nav::new(iso());
+        let held = view::frame(
+            [0.0; 3],
+            [0.02, 0.01, 0.005],
+            StandardView::Front,
+            view::DEFAULT_PROJECTION,
+        );
+        n.turn_to(iso(), 0.0);
+        n.lock(held.clone());
+        assert_eq!(n.camera, held);
+        assert!(!n.moving(), "a turn under way stops");
+        n.drag(Gesture::Orbit, [30.0, 10.0], 120.0, None);
+        n.drag(Gesture::Pan, [30.0, 10.0], 120.0, None);
+        assert!(!n.key("view.orbit_left"));
+        n.scroll(40.0, None);
+        n.pinch(1.5, None);
+        n.let_go(Gesture::Orbit, [900.0, 0.0], 120.0, None, 0.0);
+        n.standard(StandardView::Top, &[[0.0; 3], [0.01; 3]], 1.5);
+        n.fit(&[[0.0; 3], [1.0; 3]], 1.5);
+        n.fit_to(&[[0.0; 3], [1.0; 3]], 1.5, 0.0);
+        assert!(!n.turn_to(iso(), 0.0));
+        assert_eq!(n.camera, held);
+        assert!(!n.moving());
+        n.unlock();
+        n.drag(Gesture::Orbit, [30.0, 10.0], 120.0, None);
+        assert_ne!(n.camera, held);
     }
 
     #[test]
