@@ -521,9 +521,11 @@ fn drawing(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
     Value::Object(out)
 }
 
-/// An annotation's `by`, `view`, `change` and pins are one value each.
+/// An annotation's `by`, `view`, `change`, pins and marks are one value
+/// each: only an annotation's author edits its marks, so two sides
+/// changing them is one person on two branches (design 423).
 fn annotation_atom(at: &str) -> bool {
-    matches!(at, "/by" | "/view" | "/change")
+    matches!(at, "/by" | "/view" | "/change" | "/marks")
 }
 
 /// An annotation: per key, but its status, claim and resolution go
@@ -1424,6 +1426,29 @@ pub fn files_merged(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn marks_are_one_value() {
+        let marked = |x: f64| {
+            let mut v = note(json!({}), "open");
+            v["format"] = json!(2);
+            v["view"] = json!({"eye_m": [1, 0, 0], "target_m": [0, 0, 0], "up": [0, 0, 1],
+                               "projection": "perspective", "fov_deg": 40});
+            v["marks"] = json!({"part": "p", "list": [{"kind": "line", "in": "view",
+                                 "xy_m": [[0, 0], [x, 0]], "touches": []}]});
+            v
+        };
+        let base = marked(0.01);
+        let m = merge(Some(&base), &marked(0.02), &marked(0.03));
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/marks"]);
+        // One side's marks alone are taken whole, with the comment the other changed.
+        let mut theirs = base.clone();
+        theirs["comment"] = json!("other words");
+        let m = merge(Some(&base), &marked(0.02), &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(m.value["marks"], marked(0.02)["marks"]);
+        assert_eq!(m.value["comment"], "other words");
+    }
+
     use super::*;
 
     fn note(replies: serde_json::Value, status: &str) -> Value {

@@ -2459,6 +2459,11 @@ pub(crate) mod tests {
         )
         .unwrap();
         std::fs::write(a.join("notes.txt"), b"hi").unwrap();
+        let mut marked = good.to_json();
+        marked["id"] = json!("dddddddddd");
+        marked["format"] = json!(2);
+        marked["marks"] = json!({"part": "p", "list": [{"kind": "cloud"}]});
+        crate::doc::project::write_json(&a.join("dddddddddd.json"), &marked).unwrap();
         let issues = diagnose(root);
         let of = |code: &str| -> Vec<String> {
             issues
@@ -2468,7 +2473,10 @@ pub(crate) mod tests {
                 .collect()
         };
         assert_eq!(of("non_canonical"), ["annotations/bbbbbbbbbb.json"]);
-        assert_eq!(of("invalid_document"), ["annotations/cccccccccc.json"]);
+        assert_eq!(
+            of("invalid_document"),
+            ["annotations/cccccccccc.json", "annotations/dddddddddd.json"]
+        );
         assert_eq!(of("unknown_file"), ["annotations/notes.txt"]);
     }
 
