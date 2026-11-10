@@ -5,6 +5,7 @@
 //! Each step works in a fixed order (part keys, net keys), never a hash's.
 
 use crate::cluster::Cluster;
+use crate::font;
 use crate::geom::{GRID, Nm, Place, Point, Rect, Side};
 use crate::idiom;
 use crate::input::{Block, NetKind, PartKind, Relayout};
@@ -2496,9 +2497,13 @@ struct BankRow {
     net: usize,
     pin: (usize, usize),
     members: Vec<(usize, usize)>,
+    /// A port is on its net: the row carries the port's name.
+    ported: bool,
+    /// The side of its part the bank stands on.
+    side: Side,
 }
 
-/// The bank rows on port nets, from the idioms and where parts stand.
+/// The banks' rows, from the idioms and where parts stand.
 fn bank_rows(st: &State, idioms: &[idiom::Idiom]) -> Vec<BankRow> {
     let block = st.block;
     let at: BTreeMap<usize, Place> = (0..block.parts.len())
@@ -2514,9 +2519,7 @@ fn bank_rows(st: &State, idioms: &[idiom::Idiom]) -> Vec<BankRow> {
                 matches!(part.kind, PartKind::Port { .. })
                     && part.pins.iter().any(|x| x.net == Some(net))
             });
-            if !ported || block.nets[net].kind != NetKind::Signal {
-                continue;
-            }
+            let ported = ported && block.nets[net].kind == NetKind::Signal;
             let members = list
                 .iter()
                 .filter_map(|i| {
@@ -2532,6 +2535,8 @@ fn bank_rows(st: &State, idioms: &[idiom::Idiom]) -> Vec<BankRow> {
                 net,
                 pin: (b.part, *k),
                 members,
+                ported,
+                side: b.side,
             });
         }
     }
@@ -2629,7 +2634,7 @@ fn draw(
                 if stacked.contains(n) && block.nets[*n].kind == NetKind::Signal {
                     st = NetStyle::Label;
                 }
-                if bank_rows.iter().any(|r| r.net == *n) {
+                if bank_rows.iter().any(|r| r.ported && r.net == *n) {
                     st = NetStyle::Label;
                 }
                 (*n, st)
@@ -2721,10 +2726,25 @@ fn draw(
                 .copied()
                 .filter(|_| unmoved);
             let lines: Vec<&str> = texts.iter().map(|(_, t)| *t).collect();
+            // A bank row's member writes its text on one line.
+            let one_line = bank_rows
+                .iter()
+                .any(|r| r.members.first().map(|m| m.0) == Some(p));
+            let boxes = |at: Point| -> Vec<Rect> {
+                if one_line {
+                    text::row_points(&lines, at)
+                        .iter()
+                        .zip(&lines)
+                        .flat_map(|(q, t)| text::boxes(&[t], *q))
+                        .collect()
+                } else {
+                    text::boxes(&lines, at)
+                }
+            };
             if let Some(at) = at
-                && text::boxes(&lines, at).iter().all(|b| field.clear(*b))
+                && boxes(at).iter().all(|b| field.clear(*b))
             {
-                for b in text::boxes(&lines, at) {
+                for b in boxes(at) {
                     field.block(b);
                 }
                 kept_text.insert(p, at);
@@ -2891,7 +2911,7 @@ fn draw(
             }
             // A bank's row on a port's net: a wire from the pin to its
             // members, a net label on it at the pin.
-            for row in bank_rows {
+            for row in bank_rows.iter().filter(|r| r.ported) {
                 let (p, k) = row.pin;
                 if st.place[p].is_none_or(|x| x.0 != s)
                     || row
@@ -3036,6 +3056,46 @@ fn draw(
             }
             let texts: Vec<&str> = lines.iter().map(|(_, t)| *t).collect();
             let body = st.shape(p).expect("placed").body;
+            // A bank row's first member: one line on its row past its rail
+            // end (rows two steps apart leave no room for two).
+            if let Some(row) = bank_rows
+                .iter()
+                .find(|r| r.members.first().map(|m| m.0) == Some(p))
+            {
+                let ext = st.shape(p).expect("placed").extent;
+                let y = st.shape(row.pin.0).expect("placed").pins[row.pin.1].end[1];
+                let base = (y - font::SIZE / 4).div_euclid(GRID) * GRID;
+                let w = text::row_width(&texts);
+                let start = |d: Nm| match row.side {
+                    Side::Left => [(ext.min[0] - GRID - w).div_euclid(GRID) * GRID - d, base],
+                    _ => [
+                        (ext.max[0] + GRID - 1).div_euclid(GRID) * GRID + GRID + d,
+                        base,
+                    ],
+                };
+                let fits = |at: Point| {
+                    text::row_points(&texts, at)
+                        .iter()
+                        .zip(&texts)
+                        .all(|(q, t)| text::boxes(&[t], *q).iter().all(|b| field.clear(*b)))
+                };
+                let kept = kept_text.get(&p).copied().filter(|at| at[1] == base);
+                let at = kept.or_else(|| (0..=24).map(|k| start(k * GRID)).find(|a| fits(*a)));
+                if let Some(at) = at {
+                    let pts = text::row_points(&texts, at);
+                    let mut fields = BTreeMap::new();
+                    for ((name, t), q) in lines.iter().zip(&pts) {
+                        if kept.is_none() {
+                            for b in text::boxes(&[t], *q) {
+                                field.block(b);
+                            }
+                        }
+                        fields.insert((*name).to_owned(), *q);
+                    }
+                    layout.text.insert(part.key.clone(), fields);
+                    continue;
+                }
+            }
             let at = match kept_text.get(&p) {
                 Some(at) => *at,
                 None => {
@@ -3779,6 +3839,29 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    /// A bank member's designator and value stand on its row, one line, past
+    /// its rail's column: rows two steps apart leave no room for two lines.
+    #[test]
+    fn a_bank_members_text_is_one_line_on_its_row() {
+        let block = crate::testing::dense_block(false);
+        let out = lay(&block);
+        for i in 1..=10 {
+            let key = format!("r{i}");
+            let t = &out.layout.text[&key];
+            let x = &out.layout.placed[&key];
+            let p = block.part(&key).unwrap();
+            let s = Shape::of(&block.parts[p], Place::new(x.at, x.rotation, x.mirror));
+            assert_eq!(t["refdes"][1], t["value"][1], "{key}: one line");
+            let row = s.pins[0].end[1];
+            assert!(
+                (t["refdes"][1] - row).abs() <= GRID,
+                "{key}: on its row ({} against {row})",
+                t["refdes"][1]
+            );
+        }
+        assert_eq!(crate::rules::check(&block, &out.layout), []);
     }
 
     /// A bank's row on a port net carries a net label named as the port,

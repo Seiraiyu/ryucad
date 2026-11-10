@@ -1691,8 +1691,16 @@ fn place_bank(
             .iter()
             .filter(|x| x.2 != f)
             .map(|x| {
-                let r = Cluster::single(x.0, x.1).room(block, [0, 0]);
-                away(r.min[0], x_sig).max(away(r.max[0], x_sig))
+                // Its extent, then its text on one line on its row a step
+                // and a grid's rounding past its rail end.
+                let part = &block.parts[x.0];
+                let e = Shape::of(part, x.1).extent;
+                let lines: Vec<&str> = [part.refdes.as_str(), part.value.as_str()]
+                    .into_iter()
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                let rail = away(e.min[0], x_sig).max(away(e.max[0], x_sig));
+                rail + 2 * GRID + crate::text::row_width(&lines)
             })
             .max()
             .unwrap_or(0);

@@ -26,6 +26,36 @@ pub fn boxes(lines: &[&str], at: Point) -> Vec<Rect> {
         .collect()
 }
 
+/// One line of text from `at`: the first field there, each next one a
+/// step past the last's end, on the grid.
+pub fn row_line<const N: usize>(lines: &[&str; N], at: Point) -> [Point; N] {
+    let mut out = [at; N];
+    for (o, p) in out.iter_mut().zip(row_points(lines, at)) {
+        *o = p;
+    }
+    out
+}
+
+/// `row_line` of any number of lines.
+pub fn row_points(lines: &[&str], at: Point) -> Vec<Point> {
+    let mut out = Vec::new();
+    let mut x = at[0];
+    for t in lines {
+        out.push([x, at[1]]);
+        x = up(x + font::width(t, SIZE)) + GRID;
+    }
+    out
+}
+
+/// How far `row_points` reaches from its start: its last line's end.
+pub fn row_width(lines: &[&str]) -> Nm {
+    let pts = row_points(lines, [0, 0]);
+    match (pts.last(), lines.last()) {
+        (Some(p), Some(t)) => p[0] + font::width(t, SIZE),
+        _ => 0,
+    }
+}
+
 /// Where a block of `lines` may start, best first, round `body`.
 pub fn candidates(body: Rect, lines: &[&str]) -> Vec<Point> {
     let w = lines
@@ -66,5 +96,19 @@ mod tests {
         let b = boxes(&["R1", "10k"], c[0]);
         assert!(b[1].max[1] < b[0].min[1]);
         assert!(!b[0].overlaps(&body));
+    }
+
+    /// A one-line text: the designator, then the value a step past it, both
+    /// on the grid and on one baseline.
+    #[test]
+    fn a_row_line_puts_the_value_after_the_designator() {
+        let at = [10 * GRID, -4 * GRID];
+        let [r, v] = row_line(&["RM1A", "2.2k"], at);
+        assert_eq!(r, at);
+        assert_eq!(v[1], at[1]);
+        assert!(v[0] % GRID == 0);
+        let rb = boxes(&["RM1A"], r)[0];
+        let vb = boxes(&["2.2k"], v)[0];
+        assert!(rb.max[0] < vb.min[0], "apart: {rb:?} {vb:?}");
     }
 }
