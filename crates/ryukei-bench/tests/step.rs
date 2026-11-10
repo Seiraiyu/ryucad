@@ -1249,3 +1249,125 @@ fn pinned_bodies_shell_untightened() {
     );
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// How long one pinned body's defeaturing may run before it is
+/// cancelled and counted as past the deadline: ryustep's `defeature.rs`'s.
+const DEFEATURE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Every body the pinned corpus heals, defeatured (design 399, plan
+/// 13.D): its recognised blends no larger than 2 mm deleted. Each result
+/// checks clean (`check` and `check_intersections`), or is a typed
+/// refusal (`InvalidTweak`), printed with the time it took. One
+/// narrowing of plan 13.D's "checks clean": a `CannotCheck` pair the
+/// body already had before the delete, by its faces' names, may stay
+/// (NIST CTC 02's AP242 edition, #264's `PINNED_UNCHECKED`). That
+/// uncertainty is the import's, not the delete's; a crossing, an overlap,
+/// or a pair that could be checked before still fails. Each delete is
+/// cancelled at [`DEFEATURE_DEADLINE`], as ryustep's `defeature.rs` does
+/// (uncancelled, NIST FTC 07's, FTC 10's and STC 07's took 17 to 24
+/// minutes each to refuse `ExtensionUnsupported` on cox-worker-4). Run
+/// after `scripts/fetch-corpus.sh`, in the devcontainer.
+#[test]
+fn pinned_bodies_defeature() {
+    use ryukei::blend::{BlendKind, Chamfer};
+    use ryukei::check::{check, check_intersections};
+    use ryukei::tweak::{DeleteBlends, RecogniseOptions, delete_blends_with, recognise_blends};
+    use ryukei::work::Work;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // A fillet's radius, a chamfer's larger setback.
+    let size = |kind: &BlendKind| match *kind {
+        BlendKind::Fillet { radius } => radius,
+        BlendKind::Chamfer(Chamfer::Equal { distance }) => distance,
+        BlendKind::Chamfer(Chamfer::Distances { first, second, .. }) => first.max(second),
+        BlendKind::Chamfer(Chamfer::DistanceAngle {
+            distance, angle, ..
+        }) => distance.max(distance * ryukei::math::tan(angle)),
+    };
+    let spec = DeleteBlends {
+        max_size: Some(2e-3),
+        faces: Vec::new(),
+        options: RecogniseOptions::default(),
+    };
+    let (mut defeatured, mut refused, mut none, mut slow) = (0, 0, 0, 0);
+    let start = Instant::now();
+    for name in pinned_files() {
+        for (rep, body) in pinned_bodies(&name, true) {
+            let t = Instant::now();
+            let blends = match recognise_blends(&body, &spec.options) {
+                Ok(r) => r.blends.iter().filter(|b| size(&b.kind) <= 2e-3).count(),
+                Err(ryukei::Error::InvalidTweak(e)) => {
+                    println!("{name} #{rep}: recognition refused {e:?}");
+                    refused += 1;
+                    continue;
+                }
+                Err(e) => panic!("{name} #{rep}: {e:?}"),
+            };
+            if blends == 0 {
+                none += 1;
+                continue;
+            }
+            let flag = AtomicBool::new(false);
+            let done = AtomicBool::new(false);
+            let r = std::thread::scope(|sc| {
+                sc.spawn(|| {
+                    while !done.load(Ordering::Relaxed) && t.elapsed() < DEFEATURE_DEADLINE {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    flag.store(true, Ordering::Relaxed);
+                });
+                let r = delete_blends_with(
+                    OpKey(0x13d),
+                    &body,
+                    &spec,
+                    &Work::unlimited().with_cancel(&flag),
+                );
+                done.store(true, Ordering::Relaxed);
+                r
+            });
+            match r {
+                Ok((o, _)) => {
+                    assert_eq!(check(&o), [], "{name} #{rep}");
+                    // Pairs the body couldn't be checked at before the
+                    // delete may stay unchecked (`PINNED_UNCHECKED`'s,
+                    // #264); anything else is the delete's.
+                    let after = named(&o, &check_intersections(&o));
+                    if !after.is_empty() {
+                        let before = named(&body, &check_intersections(&body));
+                        let new: Vec<_> = after
+                            .iter()
+                            .filter(|f| f.0 != "cannot_check" || !before.contains(f))
+                            .collect();
+                        assert!(new.is_empty(), "{name} #{rep}: {new:?}");
+                        println!("{name} #{rep}: unchecked as before: {after:?}");
+                    }
+                    println!(
+                        "{name} #{rep}: {blends} blends deleted, {} faces to {} in {:.2} s",
+                        body.counts().faces,
+                        o.counts().faces,
+                        t.elapsed().as_secs_f64()
+                    );
+                    defeatured += 1;
+                }
+                Err(ryukei::Error::InvalidTweak(e)) => {
+                    println!(
+                        "{name} #{rep}: {blends} blends, refused {e:?} in {:.2} s",
+                        t.elapsed().as_secs_f64()
+                    );
+                    refused += 1;
+                }
+                Err(ryukei::Error::Cancelled) => {
+                    println!(
+                        "{name} #{rep}: {blends} blends, past the deadline ({:.2} s)",
+                        t.elapsed().as_secs_f64()
+                    );
+                    slow += 1;
+                }
+                Err(e) => panic!("{name} #{rep}: not a tweak's refusal: {e:?}"),
+            }
+        }
+    }
+    println!(
+        "pinned corpus: {defeatured} defeatured, {refused} refused, {slow} past the deadline, {none} with no blend under 2 mm, in {:.1} s",
+        start.elapsed().as_secs_f64()
+    );
+}
