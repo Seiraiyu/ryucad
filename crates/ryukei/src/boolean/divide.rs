@@ -29,11 +29,13 @@
 //! and named as one body, with the tools' entities placed under the
 //! side's tool names ([`BooleanRole::Front`], [`BooleanRole::Back`]) and
 //! faces and edges counted as split across both sides, then cut into its
-//! lumps (a solid region, or a connected sheet), which keep every name.
+//! lumps (a solid region, or a connected sheet), which keep every name
+//! ([`divide`]), or kept whole with what no tool reaches behind
+//! ([`divide_sides_with`]).
 
 use super::build::{self, Kept};
 use super::classify::{self, Class, inner_point};
-use super::names::{self, Sides};
+use super::names::{self, Sides as Named};
 use super::table::{Boundary, GeId, Table};
 use super::{FaceRef, Fail, Tool, checked, error, merged, place};
 use crate::geom::Vector3;
@@ -58,6 +60,18 @@ pub struct Divided {
     /// Lumps the tools don't reach when no closed tool says which side
     /// they are on, as they were.
     pub apart: Vec<Body>,
+}
+
+/// A division's two sides, each one body however many lumps it has
+/// (`None` where nothing lies there), as ryucad's splits keep them: the
+/// lumps no tool reaches and no closed tool places (`apart`) are behind,
+/// with the back. Every name is the one [`divide`]'s lumps would carry.
+#[derive(Clone, Debug, Default)]
+pub struct Sides {
+    /// On the side the tools' normals point to.
+    pub front: Option<Body>,
+    /// Behind the tools, and what they don't reach.
+    pub back: Option<Body>,
 }
 
 /// The least a cut's sides may lean off the tool, as the cosine between
@@ -85,7 +99,24 @@ pub fn divide_with(
     tools: &[Tool],
     work: &Work,
 ) -> Result<(Divided, Journal), Error> {
-    crate::work::run(work, |m| divide_in(key, target, tools, m))
+    crate::work::run(work, |m| divide_in(key, target, tools, m, false))
+}
+
+/// [`divide_with`], each side one body: [`Sides`].
+pub fn divide_sides_with(
+    key: OpKey,
+    target: &Body,
+    tools: &[Tool],
+    work: &Work,
+) -> Result<(Sides, Journal), Error> {
+    let (mut d, j) = crate::work::run(work, |m| divide_in(key, target, tools, m, true))?;
+    Ok((
+        Sides {
+            front: d.front.pop(),
+            back: d.back.pop(),
+        },
+        j,
+    ))
 }
 
 /// Which side a target piece is on.
@@ -96,11 +127,12 @@ enum Side {
     Apart,
 }
 
-fn divide_in(
+pub(crate) fn divide_in(
     key: OpKey,
     target: &Body,
     tools: &[Tool],
     m: &Meter,
+    whole: bool,
 ) -> Result<(Divided, Journal), Error> {
     for t in tools {
         if t.body.kind() == BodyKind::Solid {
@@ -161,6 +193,11 @@ fn divide_in(
             kept[Side::Back as usize].push(keep(false));
         }
     }
+    if whole {
+        // What no tool reaches stays behind (ryucad's splits): one body.
+        let apart = std::mem::take(&mut kept[Side::Apart as usize]);
+        kept[Side::Back as usize].extend(apart);
+    }
     if solid {
         for side in &kept[..2] {
             if let Some(f) = open_arc(side) {
@@ -208,7 +245,7 @@ fn divide_in(
         let Some((mut body, sources)) = m_ else {
             continue;
         };
-        let sides = Sides {
+        let sides = Named {
             role: roles[s],
             kept: &all,
             edges: &edges,
@@ -224,7 +261,11 @@ fn divide_in(
             Some(sides),
         ));
         checked(&body)?;
-        out[s] = lumps(key, &body)?;
+        out[s] = if whole {
+            vec![body]
+        } else {
+            lumps(key, &body)?
+        };
     }
     let live: BTreeSet<Name> = out
         .iter()

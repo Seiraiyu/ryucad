@@ -22,6 +22,11 @@ png = "0.18"
 # An 8×8 bitmap font for labels in renders.
 font8x8 = { version = "0.3", default-features = false }
 rayon = "1"
+# Drawings' PNGs: rasterized from their SVG with the bundled Inter alone,
+# as ryueda's schematics are (design 417, question 338).
+resvg = { version = "0.49", default-features = false, features = ["text"] }
+ryu-draw = { path = "../ryu-draw" }
+ryu-math = { path = "../ryu-math" }
 ryu-session = { path = "../ryu-session" }
 ryucad-doc = { path = "../ryucad-doc" }
 ryuformats = { path = "../ryuformats" }

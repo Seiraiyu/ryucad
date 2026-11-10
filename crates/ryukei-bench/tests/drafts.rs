@@ -80,6 +80,7 @@ fn spec(faces: &[Name], angle: f64, z: f64) -> DraftSpec {
             .collect(),
         tangent: false,
         topology: Topology::Keep,
+        blends: Default::default(),
     }
 }
 
@@ -303,6 +304,7 @@ fn offset_faces_against_occt() {
             faces,
             tangent: false,
             topology: Topology::Keep,
+            blends: Default::default(),
         };
         let (o, _) = offset_faces(OpKey(0xbd4), &b, &spec).expect(name);
         let (v, slack) = ryukei_volume(&o, 1e-4);

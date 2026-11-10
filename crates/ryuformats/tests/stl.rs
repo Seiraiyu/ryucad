@@ -64,3 +64,35 @@ fn ascii_reads_back_as_the_binary_does() {
     };
     assert_eq!(bits(&all), bits(&binary));
 }
+
+#[test]
+fn a_sheets_open_mesh_is_written_as_it_is() {
+    // STL needs nothing for a sheet: its triangles are written, and the
+    // file is open where the sheet is.
+    use ryukei::geom::{Frame, Plane, Surface};
+    use ryukei::mesh::{MeshParams, tessellate};
+    use ryukei::name::OpKey;
+    use std::sync::Arc;
+    let plane = Surface::Plane(Plane::new(Frame::WORLD));
+    let (sheet, _) =
+        ryukei::sheet::from_surface(OpKey::from_bytes(b"sq"), &plane, [[0.0, 0.01], [0.0, 0.01]])
+            .unwrap();
+    let mesh = tessellate(&sheet, &MeshParams::new(1e-5, 0.2)).unwrap();
+    let n = mesh.triangles.len();
+    let scene = Scene {
+        products: vec![ryuformats::Product {
+            id: "p".into(),
+            name: "p".into(),
+            part: "p".into(),
+            solids: vec![ryuformats::Solid {
+                name: "w".into(),
+                mesh: Arc::new(mesh),
+                surface: true,
+            }],
+            children: vec![],
+        }],
+    };
+    let (_, triangles) = read_binary_stl(&written(&scene, &Stl::default()));
+    assert_eq!(triangles.len(), n);
+    assert!(!watertight(&triangles));
+}

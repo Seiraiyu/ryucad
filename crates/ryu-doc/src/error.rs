@@ -809,6 +809,30 @@ pub enum Code {
     /// A warning: a USD export wrote a reference as meshes alone (a
     /// reference has no BrepArray).
     ExportReferenceMeshOnly,
+    /// A warning: a USD export wrote a sheet as its mesh alone (ryucad
+    /// 18.C writes no BrepArray of a sheet).
+    ExportSheetBrepSkipped,
+    /// No drawing of that ID in the part (design 417); the details name
+    /// the part and the drawings it has (`drawings`).
+    DrawingNotFound,
+    /// A view the kernel couldn't project (`ViewError::Uncertain` at a
+    /// face, an edge whose image couldn't be found): its `reason`, the
+    /// kernel's text (`kernel`) and the faces it names as references
+    /// (`faces`). The sheet still builds, the view's frame crossed out.
+    DrawingViewFailed,
+    /// A warning: pieces of a view whose visibility couldn't be certified,
+    /// drawn visible; the details count them (`pieces`) and name their
+    /// edges and faces (`sources`).
+    DrawingViewUncertain,
+    /// A drawing's reference whose entity is gone: `role`, `reference`,
+    /// and `was`, `removed_by` and `candidates` as references give them.
+    DrawingReferenceUnresolved,
+    /// A drawing's reference whose entity is no longer in its view
+    /// (hidden, or behind a section's cut).
+    DrawingReferenceNotShown,
+    /// A sheet's template that is neither built in nor in `templates/`;
+    /// the details name it (`template`).
+    TemplateNotFound,
 }
 
 impl Code {
@@ -926,6 +950,27 @@ mod tests {
     }
 
     #[test]
+    fn drawing_codes_are_the_agents_to_fix() {
+        for (c, name) in [
+            (Code::DrawingNotFound, "drawing_not_found"),
+            (Code::DrawingViewFailed, "drawing_view_failed"),
+            (Code::DrawingViewUncertain, "drawing_view_uncertain"),
+            (
+                Code::DrawingReferenceUnresolved,
+                "drawing_reference_unresolved",
+            ),
+            (
+                Code::DrawingReferenceNotShown,
+                "drawing_reference_not_shown",
+            ),
+            (Code::TemplateNotFound, "template_not_found"),
+        ] {
+            assert_eq!(json!(c), json!(name));
+            assert_eq!(c.exit_code(), 1, "{name}");
+        }
+    }
+
+    #[test]
     fn reference_codes() {
         for (c, name) in [
             (Code::ReferenceBody, "reference_body"),
@@ -935,6 +980,7 @@ mod tests {
             (Code::ReferenceFacesSplit, "reference_faces_split"),
             (Code::ReferenceUnoriented, "reference_unoriented"),
             (Code::ExportReferenceMeshOnly, "export_reference_mesh_only"),
+            (Code::ExportSheetBrepSkipped, "export_sheet_brep_skipped"),
         ] {
             assert_eq!(json!(c), json!(name));
             assert_eq!(c.exit_code(), 1, "{name}");

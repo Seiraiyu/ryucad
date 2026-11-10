@@ -219,17 +219,24 @@ impl Run<'_> {
         })
     }
 
-    /// The volume of `part` and its bound, in m³.
+    /// The volume of `part` and its bound, in m³; a part of sheets, which
+    /// `mass` refuses (`wrong_body_kind`), its first sheet's area in m².
     fn volume(&mut self, dir: &Path, part: &str) -> Step<(f64, f64)> {
-        let v = self.cmd(dir, &["mass", part])?;
-        let vol = &v["volume"];
-        match vol["m3"].as_f64() {
-            Some(m) => Ok((m, vol["bound_m3"].as_f64().unwrap_or(0.0))),
-            None => Err(Outcome::Mismatch {
-                what: "no_volume".into(),
-                details: v,
-            }),
-        }
+        let v = match self.cmd(dir, &["mass", part]) {
+            Err(Outcome::Failed { error, .. }) if error["code"] == "wrong_body_kind" => {
+                let r = self.cmd(dir, &["rebuild", part])?;
+                let solid = r["parts"][0]["solids"][0]["solid"]
+                    .as_str()
+                    .unwrap_or("body")
+                    .to_owned();
+                self.cmd(dir, &["measure", &format!("{part}/{solid}")])?
+            }
+            v => v?,
+        };
+        measure_of(&v).ok_or(Outcome::Mismatch {
+            what: "no_volume".into(),
+            details: v,
+        })
     }
 
     fn end(self, outcome: Outcome) -> Stage {
@@ -315,6 +322,17 @@ fn stage(
     let ok = matches!(outcome, Outcome::Ok | Outcome::Found { .. });
     stages.push(run.end(outcome));
     ok
+}
+
+/// A `mass` answer's volume, or a `measure` answer's area, with its
+/// bound (0 when exact), in m³ or m².
+fn measure_of(v: &Value) -> Option<(f64, f64)> {
+    for (key, unit) in [("volume", "m3"), ("area", "m2")] {
+        if let Some(m) = v[key][unit].as_f64() {
+            return Some((m, v[key][format!("bound_{unit}")].as_f64().unwrap_or(0.0)));
+        }
+    }
+    None
 }
 
 /// Whether two volumes agree within their bounds (and a part in 10⁹ for
@@ -721,6 +739,18 @@ pub fn run(ryucad: &Ryucad, case: &Case, work: &Path, keep: bool) -> Ran {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sheet_is_measured_by_its_area() {
+        use serde_json::json;
+        let mass = json!({"volume": {"m3": 1e-6, "bound_m3": 1e-12}});
+        assert_eq!(measure_of(&mass), Some((1e-6, 1e-12)));
+        let area = json!({"area": {"m2": 2e-4, "bound_m2": 1e-9}});
+        assert_eq!(measure_of(&area), Some((2e-4, 1e-9)));
+        let exact = json!({"area": {"m2": 2e-4, "exact": true}});
+        assert_eq!(measure_of(&exact), Some((2e-4, 0.0)));
+        assert_eq!(measure_of(&json!({})), None);
+    }
 
     #[test]
     fn volumes_agree_within_bounds() {

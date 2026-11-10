@@ -226,6 +226,7 @@ pub(crate) mod tests {
             views: BTreeMap::new(),
             appearance: None,
             explodes: Default::default(),
+            drawings: Default::default(),
             revision: String::new(),
         }
     }
@@ -314,7 +315,7 @@ pub(crate) mod tests {
         use crate::doc::sketch::OriginPlane;
         Feature::Split(Box::new(crate::doc::body::Split {
             target: id(target),
-            plane: GeomRef::Plane(OriginPlane::Xy),
+            by: crate::doc::body::SplitBy::Plane(GeomRef::Plane(OriginPlane::Xy)),
             flip: false,
             keep,
         }))

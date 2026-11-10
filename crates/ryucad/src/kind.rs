@@ -76,12 +76,20 @@ pub fn boundaries(b: &Body) -> usize {
 }
 
 /// `wrong_body_kind`: `owner` was given body `solid` (by founder) in
-/// `role` where it wants `want`, and the body is another kind.
-pub fn wrong(owner: &Id, role: &str, solid: &Id, got: &str, want: Want) -> Error {
-    let hint = match want {
-        Want::Solid => "it acts only on solids; a sheet has no inside to join, cut or round",
+/// `role` where it wants `want`, and the body is another kind; `hint`
+/// says what to do instead (else a general hint for the kind).
+pub fn wrong(
+    owner: &Id,
+    role: &str,
+    solid: &Id,
+    got: &str,
+    want: Want,
+    hint: Option<&str>,
+) -> Error {
+    let hint = hint.unwrap_or(match want {
+        Want::Solid => "it acts only on solids; a sheet has no inside to join or hollow",
         Want::Sheet => "it takes a sheet; a solid's faces can be taken off as a sheet",
-    };
+    });
     Error::new(
         Code::WrongBodyKind,
         format!(
@@ -94,11 +102,19 @@ pub fn wrong(owner: &Id, role: &str, solid: &Id, got: &str, want: Want) -> Error
     .with("solid", solid)
     .with("wanted", want.as_str())
     .with("got", got)
+    .with("hint", hint)
 }
 
 /// Refuses `body` (the state of `solid` that `owner` reads) where it
-/// isn't `want`.
-pub fn need(owner: &Id, role: &str, solid: &Id, body: &Body, want: Want) -> Result<()> {
+/// isn't `want`, saying `hint` (see [`wrong`]).
+pub fn need(
+    owner: &Id,
+    role: &str,
+    solid: &Id,
+    body: &Body,
+    want: Want,
+    hint: Option<&str>,
+) -> Result<()> {
     let ok = match (want, body.kind()) {
         (Want::Solid, BodyKind::Solid) | (Want::Sheet, BodyKind::Sheet) => true,
         // An empty body is refused where it is made (`body_emptied`).
@@ -108,48 +124,138 @@ pub fn need(owner: &Id, role: &str, solid: &Id, body: &Body, want: Want) -> Resu
     if ok {
         Ok(())
     } else {
-        Err(wrong(owner, role, solid, name(body), want))
+        Err(wrong(owner, role, solid, name(body), want, hint))
     }
 }
 
-/// The bodies feature `f` names, each with its role and what it wants of
-/// it: a boolean's target and tools, a mirror's source, a sew's sheets
-/// (`Sheet`), a thicken's sheet (`Sheet`, `from`), and every other
-/// feature's targets (`target` for a shell, offset and split), all
-/// `Solid` but those.
-pub fn bodies_read(f: &crate::doc::files::Feature) -> Vec<(&'static str, &Id, Want)> {
+/// One body a feature names: the role it names it in, the body by its
+/// founder, what kind it wants (`None`: a solid or a sheet), whether the
+/// feature changes it (acts on it or consumes it; a split's tool is only
+/// read), and what to say when it is the wrong kind.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Read<'a> {
+    pub role: &'static str,
+    pub body: &'a Id,
+    pub want: Option<Want>,
+    pub changes: bool,
+    pub hint: Option<&'static str>,
+}
+
+const JOIN: &str = "a sheet has no inside to join: sew sheets into a body, or thicken a sheet";
+const TOOL: &str =
+    "a sheet can't be a boolean's tool: split a body by the sheet instead (split --tool)";
+const SHELL: &str = "a sheet has no inside to hollow: thicken it instead";
+const COPY: &str = "a sheet's mirror image can't be joined, cut or intersected: make it new";
+const SHEET_METAL: &str = "sheet metal is a solid: thicken a sheet into one first";
+
+/// The bodies feature `f` names, each with what it wants of it: the one
+/// table of design 388's "Sheets through other features". A join's
+/// targets and a unite's target are solids, a cut's, intersect's,
+/// hole's, pattern's, subtract's, fillet's, chamfer's, offset's, split's
+/// and tweak's either; a boolean's tools and a shell's target solids; a
+/// mirror's source either when its copy is new, else a solid; sheet
+/// metal solids; a sew's sheets and a thicken's sheet sheets.
+pub fn bodies_read(f: &crate::doc::files::Feature) -> Vec<Read<'_>> {
     use crate::doc::files::Feature as F;
+    use crate::doc::solid::{BooleanOp, Combine, Operation};
+    let read = |role, body, want, hint| Read {
+        role,
+        body,
+        want,
+        changes: true,
+        hint,
+    };
+    // A combine's targets: solids to join, either to cut or intersect.
+    let combined = |c: &Combine| -> (Option<Want>, Option<&'static str>) {
+        match c.operation {
+            Operation::Join => (Some(Want::Solid), Some(JOIN)),
+            _ => (None, None),
+        }
+    };
     match f {
-        F::Boolean(b) => std::iter::once(("target", &b.target, Want::Solid))
-            .chain(b.tools.iter().map(|t| ("tools", t, Want::Solid)))
-            .collect(),
-        F::Mirror(m) => std::iter::once(("solid", &m.solid, Want::Solid))
-            .chain(f.targets().into_iter().map(|t| ("targets", t, Want::Solid)))
-            .collect(),
-        F::Shell(_) | F::Offset(_) | F::Split(_) | F::MoveFace(_) | F::ReplaceFace(_) => f
-            .targets()
-            .into_iter()
-            .map(|t| ("target", t, Want::Solid))
-            .collect(),
-        _ => {
-            let consumes = f.consumes();
-            f.targets()
-                .into_iter()
-                .map(|t| match consumes.contains(&t) {
-                    true => (sheet_role(f), t, Want::Sheet),
-                    false => ("targets", t, Want::Solid),
-                })
+        F::Boolean(b) => {
+            let unite = matches!(b.op, BooleanOp::Unite);
+            let target = read(
+                "target",
+                &b.target,
+                unite.then_some(Want::Solid),
+                unite.then_some(JOIN),
+            );
+            std::iter::once(target)
+                .chain(
+                    b.tools
+                        .iter()
+                        .map(|t| read("tools", t, Some(Want::Solid), Some(TOOL))),
+                )
                 .collect()
         }
-    }
-}
-
-/// The role a feature names the sheets it consumes in: a sew's `sheets`,
-/// a thicken's `from`.
-fn sheet_role(f: &crate::doc::files::Feature) -> &'static str {
-    match f {
-        crate::doc::files::Feature::Thicken(_) => "from",
-        _ => "sheets",
+        F::Mirror(m) => {
+            let new = m.combine.is_new();
+            let (want, hint) = combined(&m.combine);
+            std::iter::once(read(
+                "solid",
+                &m.solid,
+                (!new).then_some(Want::Solid),
+                (!new).then_some(COPY),
+            ))
+            .chain(
+                m.combine
+                    .targets
+                    .iter()
+                    .map(|t| read("targets", t, want, hint)),
+            )
+            .collect()
+        }
+        F::Shell(s) => vec![read("target", &s.target, Some(Want::Solid), Some(SHELL))],
+        F::Split(s) => {
+            let mut out = vec![read("target", &s.target, None, None)];
+            if let Some(t) = s.tool_body() {
+                out.push(Read {
+                    changes: false,
+                    ..read("tool", t, None, None)
+                });
+            }
+            out
+        }
+        F::Offset(_) | F::MoveFace(_) | F::ReplaceFace(_) => f
+            .targets()
+            .into_iter()
+            .map(|t| read("target", t, None, None))
+            .collect(),
+        F::Fillet(_) | F::Chamfer(_) | F::Hole(_) | F::Pattern(_) => f
+            .targets()
+            .into_iter()
+            .map(|t| read("targets", t, None, None))
+            .collect(),
+        F::Flange(_) | F::Unfold(_) | F::Refold(_) => f
+            .targets()
+            .into_iter()
+            .map(|t| read("targets", t, Some(Want::Solid), Some(SHEET_METAL)))
+            .collect(),
+        F::Sew(s) => s
+            .sheets
+            .iter()
+            .map(|t| read("sheets", t, Some(Want::Sheet), None))
+            .collect(),
+        F::Thicken(t) => {
+            let (want, hint) = combined(&t.combine);
+            t.combine
+                .targets
+                .iter()
+                .map(|x| read("targets", x, want, hint))
+                .chain(t.sheet().map(|s| read("from", s, Some(Want::Sheet), None)))
+                .collect()
+        }
+        f => match f.combine() {
+            Some(c) => {
+                let (want, hint) = combined(c);
+                c.targets
+                    .iter()
+                    .map(|t| read("targets", t, want, hint))
+                    .collect()
+            }
+            None => Vec::new(),
+        },
     }
 }
 
@@ -165,15 +271,14 @@ pub fn check(
     results: &dyn crate::rebuild::Results,
 ) -> Result<()> {
     let solids = crate::solid::Solids::of_order(part, order);
-    // A face tweak takes a sheet as well as a solid (design 400).
-    let sheets = crate::tweak::takes_sheets(f);
-    for (role, t, want) in bodies_read(f) {
+    for r in bodies_read(f) {
         let need = crate::rebuild::Need {
-            role,
-            want: (!sheets || want != Want::Solid).then_some(want),
-            changes: true,
+            role: r.role,
+            want: r.want,
+            changes: r.changes,
+            hint: r.hint,
         };
-        match crate::rebuild::body_as(part, &solids, id, t, need, results) {
+        match crate::rebuild::body_as(part, &solids, id, r.body, need, results) {
             Err(e) if e.code == Code::WrongBodyKind => return Err(e),
             _ => {}
         }
@@ -205,6 +310,134 @@ mod tests {
             .0
     }
 
+    fn feature(mut v: serde_json::Value) -> crate::doc::files::Feature {
+        v["kind"] = serde_json::json!("ryucad.feature");
+        v["format"] = serde_json::json!(crate::doc::files::FEATURE_FORMAT);
+        crate::doc::files::Feature::from_json(
+            &v,
+            crate::units::Unit::Mm,
+            &crate::expr::Env::empty(),
+        )
+        .unwrap()
+    }
+
+    /// What `f` wants of body `body` in `role`: `Some(None)` either kind.
+    fn wants(f: &serde_json::Value, role: &str, body: &str) -> Option<Option<Want>> {
+        let f = feature(f.clone());
+        bodies_read(&f)
+            .into_iter()
+            .find(|r| r.role == role && r.body.as_str() == body)
+            .map(|r| r.want)
+    }
+
+    #[test]
+    fn the_table_of_what_each_feature_wants() {
+        use serde_json::json;
+        let edge = json!({"feature": "w", "name": "0123456789abcdef0123456789abcdef"});
+        let boxed = |op: &str| {
+            json!({"type": "box", "params": {"x": 1, "y": 1, "z": 1},
+                                      "operation": op, "targets": ["w"],
+                   "placement": {"origin": [0, 0, 0], "x": [1, 0, 0], "z": [0, 0, 1]}})
+        };
+        let s = Some(Want::Solid);
+        for (f, role, body, want) in [
+            (boxed("join"), "targets", "w", Some(s)),
+            (boxed("cut"), "targets", "w", Some(None)),
+            (boxed("intersect"), "targets", "w", Some(None)),
+            (
+                json!({"type": "boolean", "op": "unite", "target": "w", "tools": ["t"]}),
+                "target",
+                "w",
+                Some(s),
+            ),
+            (
+                json!({"type": "boolean", "op": "subtract", "target": "w", "tools": ["t"]}),
+                "target",
+                "w",
+                Some(None),
+            ),
+            (
+                json!({"type": "boolean", "op": "subtract", "target": "w", "tools": ["t"]}),
+                "tools",
+                "t",
+                Some(s),
+            ),
+            (
+                json!({"type": "shell", "target": "w", "thickness": 1}),
+                "target",
+                "w",
+                Some(s),
+            ),
+            (
+                json!({"type": "offset", "target": "w", "distance": 1}),
+                "target",
+                "w",
+                Some(None),
+            ),
+            (
+                json!({"type": "split", "target": "w", "plane": "xy"}),
+                "target",
+                "w",
+                Some(None),
+            ),
+            (
+                json!({"type": "split", "target": "w", "tool": {"body": "t"}}),
+                "tool",
+                "t",
+                Some(None),
+            ),
+            (
+                json!({"type": "mirror", "solid": "w", "plane": "yz", "operation": "new"}),
+                "solid",
+                "w",
+                Some(None),
+            ),
+            (
+                json!({"type": "mirror", "solid": "w", "plane": "yz", "operation": "join", "targets": ["b"]}),
+                "solid",
+                "w",
+                Some(s),
+            ),
+            (
+                json!({"type": "mirror", "solid": "w", "plane": "yz", "operation": "join", "targets": ["b"]}),
+                "targets",
+                "b",
+                Some(s),
+            ),
+            (
+                json!({"type": "mirror", "solid": "b", "plane": "yz", "operation": "cut", "targets": ["w"]}),
+                "targets",
+                "w",
+                Some(None),
+            ),
+            (
+                json!({"type": "fillet", "groups": [{"radius": 1, "edges": [edge.clone()]}]}),
+                "targets",
+                "w",
+                Some(None),
+            ),
+            (
+                json!({"type": "sew", "sheets": ["w", "v"], "tolerance": "0.01 mm", "solid": true}),
+                "sheets",
+                "w",
+                Some(Some(Want::Sheet)),
+            ),
+        ] {
+            assert_eq!(wants(&f, role, body), want, "{f} {role} {body}");
+        }
+        // A split's tool is read, never changed; its target is changed.
+        let f = feature(json!({"type": "split", "target": "w", "tool": {"body": "t"}}));
+        let read = bodies_read(&f);
+        assert!(read.iter().any(|r| r.role == "tool" && !r.changes));
+        assert!(read.iter().any(|r| r.role == "target" && r.changes));
+        // A shell's refusal says to thicken; a boolean's tool, to split.
+        let shell = feature(json!({"type": "shell", "target": "w", "thickness": 1}));
+        assert!(bodies_read(&shell)[0].hint.unwrap().contains("thicken"));
+        let b =
+            feature(json!({"type": "boolean", "op": "subtract", "target": "w", "tools": ["t"]}));
+        assert!(bodies_read(&b)[1].hint.unwrap().contains("split"));
+    }
+
     #[test]
     fn a_box_is_a_solid_and_its_top_a_sheet_with_one_boundary() {
         let b = block();
@@ -222,8 +455,8 @@ mod tests {
     fn a_sheet_where_a_solid_goes_is_wrong_body_kind() {
         let b = block();
         let sheet = top(&b);
-        assert!(need(&id("c"), "targets", &id("w"), &b, Want::Solid).is_ok());
-        let e = need(&id("c"), "targets", &id("w"), &sheet, Want::Solid).unwrap_err();
+        assert!(need(&id("c"), "targets", &id("w"), &b, Want::Solid, None).is_ok());
+        let e = need(&id("c"), "targets", &id("w"), &sheet, Want::Solid, None).unwrap_err();
         assert_eq!(e.code, Code::WrongBodyKind);
         assert_eq!(e.details["wanted"], "solid");
         assert_eq!(e.details["got"], "sheet");

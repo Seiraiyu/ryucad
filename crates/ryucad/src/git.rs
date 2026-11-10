@@ -210,7 +210,8 @@ impl Repo {
 
     /// The project's files in a commit's tree, by path relative to the
     /// project: the files at its root a session tracks and everything
-    /// under `parts/`, `releases/` and `imports/`.
+    /// under `parts/`, `releases/`, `imports/`, `annotations/` and
+    /// `templates/`.
     fn project_blobs(&self, tree: &gix::Tree<'_>) -> Result<BTreeMap<String, gix::ObjectId>> {
         let mut out = BTreeMap::new();
         for name in crate::doc::project::ROOT_FILES {
@@ -223,6 +224,7 @@ impl Repo {
             crate::doc::project::RELEASES,
             crate::doc::project::IMPORTS,
             crate::doc::annotation::ANNOTATIONS,
+            crate::doc::drawing_template::TEMPLATES,
         ] {
             if let Some(id) = self.entry(tree, &format!("{}{dir}", self.prefix))? {
                 self.blobs(id, &format!("{dir}/"), &mut out)?;
@@ -791,7 +793,8 @@ impl Repo {
 /// Whether `rel` (relative to a project) is one of the files its state
 /// depends on, as `session::files` lists them: the files at its root,
 /// files two and three levels under `parts/`, files two levels under
-/// `releases/`, and files under `imports/` and `annotations/`.
+/// `releases/`, and files under `imports/`, `annotations/` and
+/// `templates/`.
 fn project_file(rel: &str) -> bool {
     if crate::doc::project::ROOT_FILES.contains(&rel) {
         return true;
@@ -802,6 +805,7 @@ fn project_file(rel: &str) -> bool {
         Some(crate::doc::project::RELEASES) => parts.count() == 2,
         Some(crate::doc::project::IMPORTS) => parts.count() == 1,
         Some(crate::doc::annotation::ANNOTATIONS) => parts.count() == 1,
+        Some(crate::doc::drawing_template::TEMPLATES) => parts.count() == 1,
         _ => false,
     }
 }

@@ -1,5 +1,5 @@
 //! Inter Regular's advance widths, in font units: generated from
-//! `crates/ryueda/fonts/Inter-Regular.ttf` by `UPDATE_WIDTHS=1 cargo test
+//! `crates/ryu-draw/fonts/Inter-Regular.ttf` by `UPDATE_WIDTHS=1 cargo test
 //! -p ryueda --test font_widths`. Don't edit by hand.
 
 /// The font's units per em.

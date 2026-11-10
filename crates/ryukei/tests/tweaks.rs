@@ -83,6 +83,7 @@ fn moved(faces: Vec<Name>, motion: Rigid) -> MoveSpec {
         motion,
         tangent: false,
         topology: Topology::Keep,
+        blends: Default::default(),
     }
 }
 
@@ -256,6 +257,7 @@ fn an_ls_end_offset() {
         faces: vec![(end[0], 0.1)],
         tangent: false,
         topology: Topology::Keep,
+        blends: Default::default(),
     };
     let (o, _) = offset_faces(T, &b, &spec).unwrap();
     near(volume(&o, 1e-3), (3.0 + 0.1) * h, 1e-9);
@@ -314,6 +316,7 @@ fn a_rounded_boxs_side_offset_with_its_tangent_chain() {
         faces: vec![(side, d)],
         tangent,
         topology: Topology::Keep,
+        blends: Default::default(),
     };
     assert!(matches!(
         refusal(offset_faces(T, &b, &spec(false))),
@@ -343,6 +346,7 @@ fn a_top_replaced_by_a_tilted_plane_and_by_a_spline() {
         &ReplaceSpec {
             faces: vec![(top, tilted)],
             topology: Topology::Keep,
+            blends: Default::default(),
         },
     )
     .unwrap();
@@ -364,6 +368,7 @@ fn a_top_replaced_by_a_tilted_plane_and_by_a_spline() {
         &ReplaceSpec {
             faces: vec![(top, spline)],
             topology: Topology::Keep,
+            blends: Default::default(),
         },
     )
     .unwrap();
@@ -399,6 +404,7 @@ fn a_top_beside_its_fillet_moves_only_with_its_chain() {
         motion: up,
         tangent: true,
         topology: Topology::Keep,
+        blends: Default::default(),
     };
     let (o, _) = move_faces(T, &b, &spec).unwrap();
     near(
@@ -493,6 +499,7 @@ fn a_pyramids_face_offset_would_split_its_apex() {
         faces: vec![(slanted[0], 0.02)],
         tangent: false,
         topology: Topology::Keep,
+        blends: Default::default(),
     };
     assert!(matches!(
         refusal(offset_faces(T, &b, &spec)),
