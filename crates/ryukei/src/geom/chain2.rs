@@ -160,11 +160,22 @@ fn nurbs(n: &NurbsCurve2, t0: f64, t1: f64) -> Vec<Piece2> {
         None => vec![0.0],
     };
     let mut out = Vec::new();
-    for shift in shifts {
+    for &shift in &shifts {
         for piece in own {
             let [a, b] = piece.range.map(|t| t + shift);
-            if let Some(cut) = cut(piece, [a, b], [lo, hi]) {
+            if let Some(cut) = cut(piece, [a, b], [lo, hi], true) {
                 out.push(cut);
+            }
+        }
+    }
+    // A range no longer than the snap about a knot (a stretch halved
+    // there: the radial engine's crankcase, plan 9.D) snaps to nothing on
+    // both sides of it: the pieces it meets, cut exactly.
+    if out.is_empty() && hi > lo {
+        for &shift in &shifts {
+            for piece in own {
+                let [a, b] = piece.range.map(|t| t + shift);
+                out.extend(cut(piece, [a, b], [lo, hi], false));
             }
         }
     }
@@ -184,22 +195,16 @@ fn at_knot(t: f64, k: f64) -> bool {
 }
 
 /// The part of `piece`, covering `[a, b]`, that lies in `[lo, hi]`, or
-/// `None` when they overlap by no more than a snapped end.
-fn cut(piece: &Piece2, [a, b]: [f64; 2], [lo, hi]: [f64; 2]) -> Option<Piece2> {
+/// `None` when they overlap by no more than a snapped end. With `snap`
+/// off, ends within [`KNOT_SNAP`] of a knot are cut where they are.
+fn cut(piece: &Piece2, [a, b]: [f64; 2], [lo, hi]: [f64; 2], snap: bool) -> Option<Piece2> {
+    let near = |t: f64, k: f64| snap && at_knot(t, k);
     let (c, d) = (lo.max(a), hi.min(b));
-    if d <= c || at_knot(d, a) || at_knot(c, b) {
+    if d <= c || near(d, a) || near(c, b) {
         return None;
     }
-    let u0 = if at_knot(c, a) {
-        0.0
-    } else {
-        (c - a) / (b - a)
-    };
-    let u1 = if at_knot(d, b) {
-        1.0
-    } else {
-        (d - a) / (b - a)
-    };
+    let u0 = if near(c, a) { 0.0 } else { (c - a) / (b - a) };
+    let u1 = if near(d, b) { 1.0 } else { (d - a) / (b - a) };
     let mut out = piece.clone();
     if u1 < 1.0 {
         let [left, _] = out.split(u1);
@@ -341,8 +346,20 @@ mod tests {
             follows(&s, &c, |t| t);
         }
         // A range a few ulps past a knot doesn't leave a sliver piece.
-        let s = seg(n, 0.0, 1.0 + 2.0 * f64::EPSILON);
+        let s = seg(n.clone(), 0.0, 1.0 + 2.0 * f64::EPSILON);
         assert_eq!(chain(&s).pieces.len(), 2);
+        // But a range lying wholly within the snap of a knot is still a
+        // piece, cut exactly (it had none, and panicked).
+        for (t0, t1) in [
+            (1.0, 1.0 + 4.0 * f64::EPSILON),
+            (1.0 - 2.0 * f64::EPSILON, 1.0 + 2.0 * f64::EPSILON),
+            (1.0 + 4.0 * f64::EPSILON, 1.0),
+        ] {
+            let s = seg(n.clone(), t0, t1);
+            let c = chain(&s);
+            let (first, last) = (c.pieces.first().unwrap(), c.pieces.last().unwrap());
+            assert_eq!([first.range[0], last.range[1]], [t0, t1], "{t0}..{t1}");
+        }
     }
 
     #[test]
