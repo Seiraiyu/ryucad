@@ -601,6 +601,77 @@ fn an_ordinates_written_place_moves_its_text_along_its_leader() {
     assert_eq!(ann(&again, "d1")["at_mm"], o["at_mm"]);
 }
 
+/// An ordinate laid out, its place and offset written back, and moved
+/// out along its leader by `to`: the built ordinate.
+fn ordinate_moved(s: &mut Session, to: &str) -> (Value, Value) {
+    let v0 = vertex(s, [0.0, 0.0, 10.0]);
+    let vf = vertex(s, [40.0, 30.0, 10.0]);
+    let g = add(
+        s,
+        json!({"type": "ordinate", "view": "v1", "datum": format!("b/{v0}"),
+        "of": format!("b/{vf}"), "along": "vertical"}),
+    )
+    .unwrap();
+    let first = ann(&g, "d1");
+    let g = must(
+        s,
+        "drawing.edit",
+        json!({"part": "p", "drawing": "d", "ops": [
+        {"op": "move", "id": "d1", "offset": to}]}),
+    );
+    (first, ann(&g, "d1"))
+}
+
+#[test]
+fn a_placed_ordinates_offset_moves_its_leader() {
+    let (d, mut s) = plate();
+    let (first, moved) = ordinate_moved(&mut s, "30 mm");
+    // Its first build wrote its place back, and a move of its offset
+    // still moves the text and the leader's end.
+    let file = file_of(&d, "p")["annotations"]["d1"].clone();
+    assert_eq!(file["offset"], json!("30 mm"), "{file}");
+    assert_ne!(file["at"], Value::Null, "{file}");
+    assert_ne!(moved["at_mm"], first["at_mm"], "{moved}");
+    let x = |o: &Value| o["at_mm"][0].as_f64().unwrap();
+    assert!(x(&moved) > x(&first), "{first} {moved}");
+    // A move of its place in turn takes the offset with it.
+    let at = json!([format!("{} mm", x(&moved) + 10.0), "0 mm"]);
+    let g = must(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "p", "drawing": "d", "ops": [{"op": "move", "id": "d1", "at": at}]}),
+    );
+    assert!((x(&ann(&g, "d1")) - x(&moved) - 10.0).abs() < 1e-6);
+    // And again its offset, the place written last.
+    let g = must(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "p", "drawing": "d", "ops": [{"op": "move", "id": "d1", "offset": "30 mm"}]}),
+    );
+    assert_eq!(ann(&g, "d1")["at_mm"], moved["at_mm"]);
+}
+
+#[test]
+fn the_lints_offset_fix_moves_a_placed_ordinate() {
+    let (_d, mut s) = plate();
+    // Stood far past the sheet, its place written back.
+    let (_, moved) = ordinate_moved(&mut s, "600 mm");
+    let g = get(&mut s);
+    let out = codes(&g, "dwg_outside");
+    let fix = out
+        .iter()
+        .find(|f| f["details"]["annotation"] == "d1")
+        .unwrap_or_else(|| panic!("{}", g["findings"]))["fixes"][0]
+        .clone();
+    assert_ne!(fix[0]["fields"]["offset"], Value::Null, "{fix}");
+    let g = must(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "p", "drawing": "d", "ops": fix}),
+    );
+    assert_ne!(ann(&g, "d1")["at_mm"], moved["at_mm"], "{}", ann(&g, "d1"));
+}
+
 #[test]
 fn a_faces_own_width_is_measured_aligned() {
     let (_d, mut s) = plate();

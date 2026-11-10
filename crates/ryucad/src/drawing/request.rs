@@ -441,6 +441,11 @@ fn apply(v: &mut Value, op: &Value, at: &str) -> Result<()> {
                     x => target[k] = x.clone(),
                 }
             }
+            one_place(
+                target,
+                fields.contains_key("at"),
+                fields.contains_key("offset"),
+            );
         }
         "move" => {
             let id = id.ok_or_else(|| {
@@ -461,6 +466,7 @@ fn apply(v: &mut Value, op: &Value, at: &str) -> Result<()> {
                 (None, Some(d)) => view["offset"] = d.clone(),
                 _ => return Err(bad(at, "move gives at or offset")),
             }
+            one_place(view, op.get("at").is_some(), op.get("offset").is_some());
         }
         _ => {
             return Err(bad(
@@ -470,6 +476,20 @@ fn apply(v: &mut Value, op: &Value, at: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// An ordinate's `at` and `offset` both say how far along its leader its
+/// text stands (its part across the leader isn't the ordinate's to
+/// change), so an edit giving one takes the other out, and ryucad writes it
+/// again from what was given. Otherwise the place last written would win,
+/// and a move of the other would do nothing.
+fn one_place(target: &mut Value, at: bool, offset: bool) {
+    if target["type"].as_str() != Some("ordinate") || at == offset {
+        return;
+    }
+    if let Some(m) = target.as_object_mut() {
+        m.remove(if at { "offset" } else { "at" });
+    }
 }
 
 /// `drawing.delete`: a drawing goes; one that doesn't read can too.
