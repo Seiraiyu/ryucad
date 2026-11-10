@@ -13,6 +13,8 @@ pub use sheet_metal::{
     AllowanceForm, BaseFlangeForm, EndForm, FlangeForm, OverrideForm, RefoldForm, ReliefForm,
     SheetMetalForm, UnfoldForm,
 };
+mod surface;
+pub use surface::{ExtractForm, FillForm, FillSide, SewForm, SideGroup, SurfaceForm, ThickenForm};
 
 use ryucad::error::Error;
 use ryucad::proto::{FeatureFields, PlacementArg, Request};
@@ -1237,12 +1239,15 @@ pub struct MirrorForm {
     pub plane: String,
 }
 
-/// A split's form (design 327): its target and plane shown; whether its
-/// plane is flipped and which sides it keeps edited.
+/// A split's form (design 327): its target and plane or tool shown;
+/// whether it is flipped and which sides it keeps edited.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SplitForm {
     pub target: String,
     pub plane: String,
+    /// A split by a tool (ryucad 18): `body parting`, or `faces …`; none
+    /// for a split by a plane.
+    pub tool: Option<String>,
     pub flip: Flag,
     /// `both` or `behind`.
     pub keep: Choice,
@@ -1252,9 +1257,16 @@ impl SplitForm {
     fn from_show(v: &Value) -> SplitForm {
         let flip = v["flip"] == true;
         let keep = v["keep"].as_str().unwrap_or("both").to_owned();
+        let tool = &v["tool"];
+        let tool = match (tool["body"].as_str(), tool["faces"].as_array()) {
+            (Some(b), _) => Some(format!("body {b}")),
+            (None, Some(fs)) => Some(format!("faces {}", texts(&json!(fs)).join(", "))),
+            (None, None) => None,
+        };
         SplitForm {
             target: text(&v["target"]),
             plane: text(&v["plane"]),
+            tool,
             flip: Flag {
                 name: "flip".to_owned(),
                 read: flip,
@@ -1331,6 +1343,12 @@ pub struct Form {
     pub mirror: Option<MirrorForm>,
     /// A split's flip and what it keeps.
     pub split: Option<SplitForm>,
+    /// Whether an extrude, revolve, sweep or loft makes a sheet (ryucad
+    /// 18's `surface`); its operation is then `new`.
+    pub surface: Option<Flag>,
+    /// A fill's, extract's, sew's or thicken's sides, faces, sheets and
+    /// sizes (ryucad 18).
+    pub surface_form: Option<SurfaceForm>,
     /// A base flange's, flange's, unfold's or refold's settings, sizes
     /// and what it names.
     pub sheet: Option<SheetMetalForm>,
@@ -1437,7 +1455,7 @@ impl Form {
             |v: &Value| -> Vec<String> { v.as_array().into_iter().flatten().map(text).collect() };
         let acts = matches!(
             ty.as_str(),
-            "extrude" | "revolve" | "sweep" | "loft" | "mirror"
+            "extrude" | "revolve" | "sweep" | "loft" | "mirror" | "thicken"
         ) || v["params"].is_object() && v["placement"].is_object();
         let operation = acts.then(|| {
             let read = v["operation"].as_str().unwrap_or("new").to_owned();
@@ -1480,6 +1498,15 @@ impl Form {
         });
         let split = (ty == "split").then(|| SplitForm::from_show(v));
         let sheet = SheetMetalForm::from_show(&ty, v);
+        let surface = matches!(ty.as_str(), "extrude" | "revolve" | "sweep" | "loft").then(|| {
+            let on = v["surface"] == true;
+            Flag {
+                name: "surface".to_owned(),
+                read: on,
+                chosen: on,
+            }
+        });
+        let surface_form = SurfaceForm::from_show(&ty, v);
         Form {
             part: part.to_owned(),
             feature: text(&v["id"]),
@@ -1508,6 +1535,8 @@ impl Form {
             mirror,
             split,
             sheet,
+            surface,
+            surface_form,
             rev: instance.then(|| {
                 let read = match v["rev"]["label"].as_str() {
                     Some(l) => l.to_owned(),
@@ -1593,6 +1622,7 @@ impl Form {
             .chain(self.shell.iter().flat_map(ShellForm::fields))
             .chain(self.offset.iter().flat_map(BodyOffsetForm::fields))
             .chain(self.sheet.iter().flat_map(SheetMetalForm::fields))
+            .chain(self.surface_form.iter().flat_map(SurfaceForm::fields))
     }
 
     /// Every field, to place errors and keep what was typed.
@@ -1646,6 +1676,9 @@ impl Form {
             out.extend(o.groups.iter_mut().map(|g| &mut g.quantity));
         }
         if let Some(s) = &mut self.sheet {
+            out.extend(s.fields_mut());
+        }
+        if let Some(s) = &mut self.surface_form {
             out.extend(s.fields_mut());
         }
         out
@@ -1706,6 +1739,8 @@ impl Form {
                     _ => None,
                 }
             }
+            // A thicken's group's side.
+            steps if self.surface_form.is_some() => self.surface_form.as_mut()?.at_pointer(steps),
             // A sheet metal feature's end, override or relief size.
             steps => self.sheet.as_mut()?.at_pointer(steps),
         }
@@ -1760,6 +1795,8 @@ impl Form {
             || self.offset.as_ref().is_some_and(BodyOffsetForm::dirty)
             || self.split.as_ref().is_some_and(SplitForm::dirty)
             || self.sheet.as_ref().is_some_and(SheetMetalForm::dirty)
+            || self.surface.as_ref().is_some_and(Flag::dirty)
+            || self.surface_form.as_ref().is_some_and(SurfaceForm::dirty)
     }
 
     /// Everything typed or chosen goes back as it was read.
@@ -1828,6 +1865,12 @@ impl Form {
         if let Some(s) = &mut self.sheet {
             s.revert();
         }
+        if let Some(f) = &mut self.surface {
+            f.chosen = f.read;
+        }
+        if let Some(s) = &mut self.surface_form {
+            s.revert();
+        }
         // A refusal was about a value now put back (#532).
         for f in self.fields_mut() {
             f.error = None;
@@ -1841,8 +1884,17 @@ impl Form {
         let chosen =
             |c: &Option<Choice>| c.as_ref().filter(|c| c.dirty()).map(|c| c.chosen.clone());
         let picked = |p: &Option<Picks>| p.as_ref().filter(|p| p.dirty()).map(|p| p.chosen.clone());
+        // Made a surface, a feature founds a sheet: its operation is new.
+        let surfaced = self
+            .surface
+            .as_ref()
+            .filter(|f| f.dirty())
+            .map(|f| f.chosen);
+        let mut operation = chosen(&self.operation);
+        if surfaced == Some(true) && self.operation.as_ref().is_some_and(|o| o.chosen != "new") {
+            operation = Some("new".to_owned());
+        }
         // Back to `new`, a feature has no targets to give.
-        let operation = chosen(&self.operation);
         let targets = match operation.as_deref() {
             Some("new") => None,
             _ => picked(&self.targets),
@@ -1872,8 +1924,12 @@ impl Form {
                 .map(|b| b.propagate.chosen),
             rev: chosen(&self.rev),
             fixed: self.fixed.as_ref().filter(|f| f.dirty()).map(|f| f.chosen),
+            surface: surfaced,
             ..FeatureFields::default()
         };
+        if let Some(s) = &self.surface_form {
+            s.given(&mut out);
+        }
         if let Some(h) = &self.hole {
             h.given(&mut out);
         }
@@ -2211,6 +2267,77 @@ mod tests {
         f.revert();
         let g = given(&f);
         assert_eq!((g.flip, g.keep), (None, None));
+    }
+
+    #[test]
+    fn a_sweeps_surface_is_toggled_and_makes_its_operation_new() {
+        let shown = json!({"id": "w", "type": "extrude", "revision": "r1", "sketch": "s",
+                           "extent": {"type": "blind", "length": {"value": "20 mm"}},
+                           "operation": "join", "targets": ["b"]});
+        let mut f = Form::from_show("p", &shown);
+        assert!(!f.surface.as_ref().unwrap().read);
+        f.surface.as_mut().unwrap().chosen = true;
+        let g = given(&f);
+        // A surface founds a sheet: new, and no targets.
+        assert_eq!(
+            (g.surface, g.operation.as_deref(), &g.targets),
+            (Some(true), Some("new"), &None)
+        );
+        f.revert();
+        assert!(!f.dirty());
+        // Read as a surface, it is shown so; a box has no toggle.
+        let mut on = shown.clone();
+        on["surface"] = json!(true);
+        on["operation"] = json!("new");
+        assert!(Form::from_show("p", &on).surface.unwrap().read);
+        for ty in ["revolve", "sweep", "loft"] {
+            let v = json!({"id": "x", "type": ty, "revision": "r1"});
+            assert!(Form::from_show("p", &v).surface.is_some(), "{ty}");
+        }
+        let v = json!({"id": "b", "type": "box", "revision": "r1",
+                       "params": {"x": "1 mm"}, "placement": {}});
+        assert!(Form::from_show("p", &v).surface.is_none());
+    }
+
+    #[test]
+    fn a_split_by_a_tool_shows_it_and_a_thicken_edits_through_the_form() {
+        let shown = json!({"id": "sp", "type": "split", "revision": "r1", "target": "h",
+                           "tool": {"body": "parting"}, "keep": "both"});
+        let f = Form::from_show("p", &shown);
+        let s = f.split.as_ref().unwrap();
+        assert_eq!(
+            (s.plane.as_str(), s.tool.as_deref()),
+            ("", Some("body parting"))
+        );
+        let shown = json!({"id": "sp", "type": "split", "revision": "r1", "target": "h",
+                           "tool": {"faces": ["p/k/a", "p/k/b"]}});
+        let f = Form::from_show("p", &shown);
+        assert_eq!(f.split.unwrap().tool.as_deref(), Some("faces p/k/a, p/k/b"));
+        // A thicken: its operation and targets the form's own, its sizes
+        // its surface form's; a refusal at a group's side lands there.
+        let shown = json!({"id": "t", "type": "thicken", "revision": "r1",
+                           "from": {"sheet": "skin"}, "front": {"value": "2 mm"},
+                           "back": {"value": "0 mm"},
+                           "faces": [{"front": {"value": "1 mm"}, "back": {"value": "0 mm"},
+                                      "faces": ["p/skin/a"]}],
+                           "operation": "new"});
+        let mut f = Form::from_show("p", &shown);
+        assert_eq!(f.operation.as_ref().unwrap().read, "new");
+        let Some(SurfaceForm::Thicken(t)) = &mut f.surface_form else {
+            panic!("a thicken's form");
+        };
+        t.front.text = "3 mm".into();
+        assert!(f.dirty());
+        let g = given(&f);
+        assert_eq!(g.front, Some(json!("3 mm")));
+        let e =
+            Error::new(ryucad::error::Code::InvalidParam, "no").with("pointer", "/faces/0/back");
+        f.refuse(e);
+        let Some(SurfaceForm::Thicken(t)) = &f.surface_form else {
+            unreachable!()
+        };
+        assert_eq!(t.groups[0].back.error.as_deref(), Some("no"));
+        assert!(t.back.error.is_none() && f.error.is_none());
     }
 
     #[test]
