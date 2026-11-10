@@ -1232,6 +1232,20 @@ impl Annotation {
         } else {
             None
         };
+        // An ISO 286 fit is a feature of size's: a diameter's, a width's,
+        // never a radius's, whose deviations would be read at the radius as
+        // if it were the nominal size.
+        if matches!(kind, Kind::Radius { .. })
+            && matches!(
+                style.as_ref().and_then(|s| s.tolerance.as_ref()),
+                Some(Tolerance::Fit(_))
+            )
+        {
+            return Err(invalid(
+                &p("tolerance"),
+                "a radius takes no ISO 286 fit: fits are for features of size (dimension the diameter)",
+            ));
+        }
         o.finish()?;
         let on_sheet = matches!(kind, Kind::Note { .. } | Kind::BomTable { .. });
         match (view, sheet) {
@@ -1394,6 +1408,11 @@ mod tests {
             (
                 "d1",
                 json!({"type": "chamfer", "view": "v1", "of": e, "tolerance": {"basic": true}}),
+                "/x/tolerance",
+            ),
+            (
+                "d1",
+                json!({"type": "radius", "view": "v1", "of": e, "tolerance": {"fit": "H7"}}),
                 "/x/tolerance",
             ),
             (

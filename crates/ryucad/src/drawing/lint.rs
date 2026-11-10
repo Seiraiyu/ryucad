@@ -191,6 +191,56 @@ fn bbox(boxes: &[[P; 2]], lines: &[[P; 2]]) -> Option<[P; 2]> {
     out
 }
 
+/// A length in sheet millimetres as a file writes it, to a thousandth.
+fn mm(x: f64) -> String {
+    let r = (x * 1000.0).round() / 1000.0;
+    format!("{} mm", if r == 0.0 { 0.0 } else { r })
+}
+
+/// The least move that brings box `b` inside `area` and off every
+/// keep-out box: up out of one, or left of it, the shorter that clears
+/// them all; none where `b` can't fit.
+fn shift_inside(b: [P; 2], area: [P; 2], keep_out: &[[P; 2]]) -> Option<P> {
+    let clamp = |lo: f64, hi: f64, alo: f64, ahi: f64| -> Option<f64> {
+        if hi - lo > ahi - alo + 1e-9 {
+            None
+        } else if lo < alo {
+            Some(alo - lo)
+        } else if hi > ahi {
+            Some(ahi - hi)
+        } else {
+            Some(0.0)
+        }
+    };
+    let base = [
+        clamp(b[0][0], b[1][0], area[0][0], area[1][0])?,
+        clamp(b[0][1], b[1][1], area[0][1], area[1][1])?,
+    ];
+    let at = |d: P| {
+        [
+            [b[0][0] + d[0], b[0][1] + d[1]],
+            [b[1][0] + d[0], b[1][1] + d[1]],
+        ]
+    };
+    let ok = |d: P| {
+        let m = at(d);
+        inside(m, area) && !keep_out.iter().any(|k| overlap(m, *k))
+    };
+    if ok(base) {
+        return Some(base);
+    }
+    let moved = at(base);
+    let mut tries: Vec<P> = Vec::new();
+    for k in keep_out.iter().filter(|k| overlap(moved, **k)) {
+        tries.push([base[0], base[1] + (k[1][1] - moved[0][1]) + 1.0]);
+        tries.push([base[0] + (k[0][0] - moved[1][0]) - 1.0, base[1]]);
+    }
+    tries
+        .into_iter()
+        .filter(|d| ok(*d))
+        .min_by(|a, b| (a[0].abs() + a[1].abs()).total_cmp(&(b[0].abs() + b[1].abs())))
+}
+
 /// Linear dimensions by view and direction: each one's ends (in
 /// micrometres of the image) and its key.
 type Chains = BTreeMap<(String, String), Vec<(i64, i64, String)>>;
@@ -222,6 +272,13 @@ pub(crate) fn run(
         }));
     };
     let set = |id: String, fields: Value| json!([{"op": "set", "id": id, "fields": fields}]);
+    let called: std::collections::BTreeSet<(String, String)> = sheets
+        .iter()
+        .flat_map(|s| &s.annotations)
+        .filter(|a| a.error.is_none())
+        .filter_map(|a| a.hole.as_ref().map(|(p, h)| (p.to_string(), h.to_string())))
+        .collect();
+    let mut judged: std::collections::BTreeSet<(String, String)> = Default::default();
     for s in sheets {
         let sk = s.key.to_string();
         // Views over each other.
@@ -253,7 +310,15 @@ pub(crate) fn run(
                         v.key
                     ),
                     json!({"view": v.key.to_string(), "box_mm": v.bounds}),
-                    vec![set(v.key.to_string(), json!({"at": null, "offset": null}))],
+                    // Moved inside by as little as will do: taking its
+                    // place out would put it back where ryucad put it.
+                    // A view along its parent's row moves only along it,
+                    // so it has no fix of this kind.
+                    match shift_inside(v.bounds, s.area, &s.keep_out) {
+                        Some(d) if !v.along => vec![json!([{"op": "move", "id": v.key.to_string(),
+                            "at": [mm(v.at[0] + d[0]), mm(v.at[1] + d[1])]}])],
+                        _ => Vec::new(),
+                    },
                 );
             }
         }
@@ -271,7 +336,19 @@ pub(crate) fn run(
                         a.key
                     ),
                     json!({"annotation": a.key.to_string(), "box_mm": b}),
-                    vec![set(a.key.to_string(), json!({"at": null, "offset": null}))],
+                    // A dimension stands on the other side of what it
+                    // measures; anything else moves inside by as little
+                    // as will do. Taking either out would put it back.
+                    match (a.offset, shift_inside(b, s.area, &s.keep_out)) {
+                        (Some(o), _) if a.kind != "angular" => {
+                            vec![set(a.key.to_string(), json!({"offset": mm(-o)}))]
+                        }
+                        (None, Some(d)) => vec![set(
+                            a.key.to_string(),
+                            json!({"at": [mm(a.at[0] + d[0]), mm(a.at[1] + d[1])]}),
+                        )],
+                        _ => Vec::new(),
+                    },
                 );
             }
         }
@@ -315,7 +392,21 @@ pub(crate) fn run(
                         a.key.to_string(),
                         json!({"offset": format!("{} mm", ((o + o.signum() * DIM_GAP) * 1000.0).round() / 1000.0), "at": null}),
                     ),
-                    _ => set(a.key.to_string(), json!({"at": null})),
+                    // Text on a leader (or with no offset to stand out by)
+                    // moves a gap away from its view's centre: taking its
+                    // place out would put it back where it is.
+                    _ => {
+                        let r = ryu_math::hypot(a.at[0], a.at[1]);
+                        let u = if a.view.is_some() && r > 1e-9 {
+                            [a.at[0] / r, a.at[1] / r]
+                        } else {
+                            [0.0, 1.0]
+                        };
+                        set(
+                            a.key.to_string(),
+                            json!({"at": [mm(a.at[0] + u[0] * DIM_GAP), mm(a.at[1] + u[1] * DIM_GAP)]}),
+                        )
+                    }
                 };
                 push(
                     "dwg_text_overlap",
@@ -450,14 +541,11 @@ pub(crate) fn run(
                 }
             }
         }
-        // Holes uncalled.
-        let called: Vec<(String, String)> = s
-            .annotations
-            .iter()
-            .filter_map(|a| a.hole.as_ref().map(|(p, h)| (p.to_string(), h.to_string())))
-            .collect();
+        // Holes uncalled: by a callout or a diameter of its wall anywhere
+        // on the drawing, and each hole judged once, where first shown.
         for (part, hole, view, face) in &s.holes {
-            if called.contains(&(part.to_string(), hole.to_string())) {
+            let key = (part.to_string(), hole.to_string());
+            if called.contains(&key) || !judged.insert(key) {
                 continue;
             }
             push(
@@ -483,23 +571,31 @@ pub(crate) fn run(
         .collect();
     for (k, a) in &file.annotations {
         if let Kind::FeatureControlFrame { rows, .. } = &a.kind {
+            // Each letter once a frame, however many rows name it.
+            let mut named: Vec<&str> = Vec::new();
             for r in rows {
                 for (l, _) in &r.datums {
-                    if !letters.contains(&l.as_str()) {
-                        let sheet = sheets
-                            .iter()
-                            .find(|s| s.annotations.iter().any(|b| b.key == *k))
-                            .map(|s| s.key.to_string())
-                            .unwrap_or_default();
-                        push(
-                            "dwg_datum_missing",
-                            &sheet,
-                            format!("frame {k} names datum {l}, which no datum feature gives"),
-                            json!({"annotation": k.to_string(), "datum": l}),
-                            Vec::new(),
-                        );
+                    if !named.contains(&l.as_str()) {
+                        named.push(l.as_str());
                     }
                 }
+            }
+            for l in named {
+                if letters.contains(&l) {
+                    continue;
+                }
+                let sheet = sheets
+                    .iter()
+                    .find(|s| s.annotations.iter().any(|b| b.key == *k))
+                    .map(|s| s.key.to_string())
+                    .unwrap_or_default();
+                push(
+                    "dwg_datum_missing",
+                    &sheet,
+                    format!("frame {k} names datum {l}, which no datum feature gives"),
+                    json!({"annotation": k.to_string(), "datum": l}),
+                    Vec::new(),
+                );
             }
         }
     }
@@ -524,22 +620,34 @@ pub(crate) fn run(
             let Ok(model) = session.model(&v.of, &v.rev) else {
                 continue;
             };
-            // Each part the assembly places itself, by its first instance:
-            // a BOM row wants one balloon, on any instance of its part.
+            // Each part the assembly places itself, by the instances that
+            // place it: a BOM row wants one balloon, on any instance of
+            // its part. A pattern's copy places what its seed does, and a
+            // subassembly's occurrences stand for the subassembly.
+            let root = session.node(&v.of, &v.rev).ok().map(|n| n.0);
             let mut parts: Vec<(String, Vec<String>)> = Vec::new();
             for o in &model.occurrences {
-                let Some(first) = o.path.first() else {
-                    continue;
+                let (top, inst) = match o.path.as_slice() {
+                    [c, seed, ..] if c.copy_of().is_some() => (format!("{c}/{seed}"), seed),
+                    [first, ..] => (first.to_string(), first),
+                    [] => continue,
                 };
-                // A subassembly's occurrences stand for the subassembly.
-                let part = if o.path.len() == 1 {
-                    o.part.to_string()
-                } else {
-                    format!("{first}/…")
-                };
-                match parts.iter_mut().find(|(p, _)| *p == part) {
-                    Some((_, firsts)) => firsts.push(first.to_string()),
-                    None => parts.push((part, vec![first.to_string()])),
+                let placed = root
+                    .as_ref()
+                    .and_then(|r| match r.features.get(inst) {
+                        Some(Ok(crate::doc::files::Feature::Instance(i))) => {
+                            Some(crate::doc::files::item_key(&i.part, &i.rev).to_string())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| o.part.to_string());
+                match parts.iter_mut().find(|(p, _)| *p == placed) {
+                    Some((_, tops)) => {
+                        if !tops.contains(&top) {
+                            tops.push(top);
+                        }
+                    }
+                    None => parts.push((placed, vec![top])),
                 }
             }
             for (part, firsts) in parts {

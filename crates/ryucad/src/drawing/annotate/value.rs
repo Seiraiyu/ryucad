@@ -269,16 +269,35 @@ pub(crate) fn linear(m: &Map, a: &Shape, b: Option<&Shape>, along: Along) -> Res
             },
             None,
         ) => {
-            let other = [model[0] + dir[0], model[1] + dir[1], model[2] + dir[2]];
-            let _ = other;
+            // Each end's model point is where the line's image end lifts
+            // back onto the model line: `model` is a point of it, not one
+            // of its ends (a face's, a circle's or an axis's), and `dir`
+            // any length.
+            let o = m.image(*model);
+            let d2 = m.dir(*dir);
+            let l2 = d2[0] * d2[0] + d2[1] * d2[1];
+            if l2.is_nan() || l2 <= 0.0 {
+                return Err(refused(
+                    "one_end",
+                    "a linear dimension of one entity measures a line seen side on".into(),
+                ));
+            }
+            let lift = |i: P| -> V3 {
+                let t = ((i[0] - o[0]) * d2[0] + (i[1] - o[1]) * d2[1]) / l2;
+                [
+                    model[0] + t * dir[0],
+                    model[1] + t * dir[1],
+                    model[2] + t * dir[2],
+                ]
+            };
             (
                 Shape::Point {
                     img: *p,
-                    model: *model,
+                    model: lift(*p),
                 },
                 Shape::Point {
                     img: *q,
-                    model: [model[0] + dir[0], model[1] + dir[1], model[2] + dir[2]],
+                    model: lift(*q),
                 },
             )
         }
@@ -296,11 +315,18 @@ pub(crate) fn linear(m: &Map, a: &Shape, b: Option<&Shape>, along: Along) -> Res
             let (pa, pb) = (anchor(&a), anchor(&b));
             let d = match (&a, &b) {
                 (Shape::Point { .. }, Shape::Point { .. }) => [pb[0] - pa[0], pb[1] - pa[1]],
-                (Shape::Line { a: p, b: q, .. }, other)
-                | (other, Shape::Line { a: p, b: q, .. }) => {
-                    // Square to the line, towards the other end.
-                    let t = [q[0] - p[0], q[1] - p[1]];
+                (Shape::Line { a: p, dir, .. }, other) | (other, Shape::Line { a: p, dir, .. }) => {
+                    // Square to the line, towards the other end. Its
+                    // direction is its model direction's image: a datum's
+                    // line drawn through one point has ends that meet.
+                    let t = m.dir(*dir);
                     let l = len2(t);
+                    if l.is_nan() || l <= 0.0 {
+                        return Err(refused(
+                            "zero",
+                            "the dimension's line has no direction in this view".into(),
+                        ));
+                    }
                     let nn = [-t[1] / l, t[0] / l];
                     let o = anchor(other);
                     let s = (o[0] - p[0]) * nn[0] + (o[1] - p[1]) * nn[1];
@@ -313,7 +339,7 @@ pub(crate) fn linear(m: &Map, a: &Shape, b: Option<&Shape>, along: Along) -> Res
                 }
             };
             let l = len2(d);
-            if l <= 0.0 {
+            if l.is_nan() || l <= 0.0 {
                 return Err(refused(
                     "zero",
                     "the dimension's ends meet: it measures nothing".into(),
@@ -675,5 +701,43 @@ mod tests {
             angular(&m, &a, &c, None).unwrap_err().details["reason"],
             "foreshortened"
         );
+    }
+
+    #[test]
+    fn one_face_or_circle_aligned_measures_its_own_extent() {
+        let m = front();
+        // A 20 mm top face seen edge on (review of 9.C: refused as
+        // 20 mm seen of 1000 mm).
+        let top = Feat::Plane {
+            p: [0.0, 0.0, 0.01],
+            n: [0.0, 0.0, 1.0],
+            pts: vec![[0.0, 0.0, 0.01], [0.02, 0.0, 0.01], [0.02, 0.01, 0.01]],
+        };
+        let s = shape(&m, &top, "a").unwrap();
+        let l = linear(&m, &s, None, Along::Aligned).unwrap();
+        assert!((l.value - 0.02).abs() < 1e-15, "{l:?}");
+        // A circle of radius 5 mm seen edge on: its diameter.
+        let c = Feat::Circle {
+            c: [0.0, 0.0, 0.02],
+            n: [0.0, 0.0, 1.0],
+            r: 0.005,
+        };
+        let s = shape(&m, &c, "a").unwrap();
+        let l = linear(&m, &s, None, Along::Aligned).unwrap();
+        assert!((l.value - 0.01).abs() < 1e-15, "{l:?}");
+        // A datum axis drawn through one point, aligned to a point: the
+        // distance square to it, never a division by its zero length.
+        let axis = shape(
+            &m,
+            &Feat::Line {
+                o: [0.0; 3],
+                d: [0.0, 0.0, 1.0],
+            },
+            "a",
+        )
+        .unwrap();
+        let p = shape(&m, &Feat::Point([0.03, 0.0, 0.01]), "b").unwrap();
+        let l = linear(&m, &axis, Some(&p), Along::Aligned).unwrap();
+        assert!((l.value - 0.03).abs() < 1e-15, "{l:?}");
     }
 }

@@ -175,7 +175,7 @@ fn write_built(session: &mut Session, pid: &Id, did: &Id, file: DrawingFile) -> 
     let mut proposed = session.proposed(&writes)?;
     let built = build(&mut proposed, pid, did)?;
     refuse_new_faults(session, pid, did, &file, &built)?;
-    let file = with_placements(&file, &built);
+    let file = with_placements(&file, &built)?;
     let replaced = session.project().part(pid)?.drawings.contains_key(did);
     session.write_json(&at, &file.to_json())?;
     session.reload()?;
@@ -231,7 +231,7 @@ fn refuse_new_faults(
 /// `file` with the places ryucad chose written in: a view's `at`, or a
 /// projected or auxiliary view's `offset`, in sheet millimetres to a
 /// thousandth, and a sheet's scale where it chose one.
-fn with_placements(file: &DrawingFile, built: &Built) -> DrawingFile {
+fn with_placements(file: &DrawingFile, built: &Built) -> Result<DrawingFile> {
     let mut v = file.to_json();
     let mm = |x: f64| {
         let r = (x * 1000.0).round() / 1000.0;
@@ -265,7 +265,20 @@ fn with_placements(file: &DrawingFile, built: &Built) -> DrawingFile {
             Placement::Offset(d) => at["offset"] = mm(d),
         }
     }
-    DrawingFile::from_json(&v).unwrap_or_else(|_| file.clone())
+    placed_file(&v)
+}
+
+/// The drawing file `v`, with ryucad's places written in, read back. Its
+/// places are written as quantities it reads, so one that doesn't read is
+/// ryucad's own fault: never the file without them, which would drop every
+/// place ryucad chose.
+fn placed_file(v: &Value) -> Result<DrawingFile> {
+    DrawingFile::from_json(v).map_err(|e| {
+        Error::new(
+            Code::Internal,
+            format!("a drawing with ryucad's places written in doesn't read: {e}"),
+        )
+    })
 }
 
 /// `drawing.edit`: a batch of ops, all or nothing, with one build to
@@ -827,9 +840,24 @@ pub fn lint(
         .iter()
         .filter(|f| f["lint"] == true && sheet.is_none_or(|k| f["sheet"] == k))
         .collect();
+    // Each rule as this project weighs it, as its findings' points are.
+    let prefs = super::lint::prefs(session);
+    let rules: Vec<Value> = super::lint::RULES
+        .iter()
+        .map(|r| {
+            let severity = prefs
+                .severity
+                .get(r.code)
+                .copied()
+                .unwrap_or(crate::doc::drawing_lint::Severity::Warning);
+            json!({"code": r.code, "per": r.per, "default_weight": r.weight,
+                "weight": prefs.weights.get(r.code).copied().unwrap_or(r.weight),
+                "severity": severity.as_str()})
+        })
+        .collect();
     Ok(json!({
         "schema": 1, "part": pid, "drawing": did, "findings": findings, "scores": b.scores,
-        "rules": super::lint::RULES.iter().map(|r| json!({"code": r.code, "weight": r.weight, "per": r.per})).collect::<Vec<_>>(),
+        "rules": rules,
     }))
 }
 
@@ -1062,4 +1090,19 @@ pub fn findings(session: &mut Session, part: &Id) -> Vec<Value> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_with_places_that_doesnt_read_is_an_error_not_the_file_without_them() {
+        let e =
+            placed_file(&json!({"kind": "ryucad.drawing", "format": 1, "name": 3})).unwrap_err();
+        assert_eq!(e.code, Code::Internal, "{e}");
+        let ok = json!({"format": 1, "kind": "ryucad.drawing", "name": "D",
+            "sheets": {"s1": {"name": "Sheet 1", "size": "iso_a3"}}, "views": {}});
+        assert_eq!(placed_file(&ok).unwrap().name, "D");
+    }
 }

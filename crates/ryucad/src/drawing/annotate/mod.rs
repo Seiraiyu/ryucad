@@ -689,6 +689,11 @@ fn build_one(
                     v,
                 ),
             };
+            // A diameter on a hole's wall gives the hole's size: the lint
+            // counts it as calling the hole out.
+            if diameter {
+                out.hole = hole_wall(session, plan, src, &r);
+            }
             out.measure = Some(measure(
                 if diameter { "diameter" } else { "radius" },
                 [0.0, v],
@@ -828,7 +833,9 @@ fn build_one(
         }
         Kind::Balloon { of } => balloon(session, ctx, plan, src, vb, of, written, &m),
         Kind::BomTable { .. } => {
-            bom_table(session, ctx, a, &plan.of, Some(&plan.rev), sheet, written)
+            // Written relative to the view's centre, as notes are.
+            let corner = written.map(|w| addp(vb.at, w));
+            bom_table(session, ctx, a, &plan.of, Some(&plan.rev), sheet, corner)
         }
         Kind::FeatureControlFrame {
             characteristic,
@@ -1253,6 +1260,22 @@ fn ordinate(
             )
         }
     };
+    // A written place moves the text along the leader (its part across
+    // the leader isn't the ordinate's to change), and the leader runs on
+    // to it, as a linear dimension's text slides along its line.
+    let (offset, placed) = match written {
+        Some(w) => {
+            let t = dotp(sub(addp(vb.at, w), foot), n);
+            let s = if t >= 0.0 { 1.0 } else { -1.0 };
+            let o = t - s * 1.0;
+            if style.offset.is_some() {
+                (o, false)
+            } else {
+                ((o * 1000.0).round() / 1000.0, true)
+            }
+        }
+        None => (offset, placed),
+    };
     let s = if offset >= 0.0 { 1.0 } else { -1.0 };
     let a = addp(foot, scale(n, s * EXT_GAP));
     let b = addp(foot, scale(n, offset));
@@ -1290,11 +1313,10 @@ fn ordinate(
         &stroke_d,
     ));
     let tb = text_box(&shown.runs, at, sz, angle, anchor);
-    let _ = written;
     Out {
         items,
         at: sub(at, vb.at),
-        at_placed: true,
+        at_placed: written.is_none(),
         offset: Some(offset),
         offset_placed: placed,
         lines: vec![[a, b]],
@@ -1549,6 +1571,21 @@ fn part_of(
 }
 
 /// A face's origin: the feature that made it, as its solid's origins say.
+/// The hole feature (and its part) whose wall `r` is, if it is one.
+fn hole_wall(session: &mut Session, plan: &Plan, src: &Source, r: &Resolved) -> Option<(Id, Id)> {
+    let o = origin_of(src, r)?;
+    if o["segment"] != "wall" {
+        return None;
+    }
+    let hid = o["seed"]
+        .as_str()
+        .filter(|_| o.get("instance").is_some())
+        .or(o["feature"].as_str())
+        .and_then(|f| Id::parse(f, "feature").ok())?;
+    let (pid, _) = part_of(session, plan, src, r.body?).ok()?;
+    Some((pid, hid))
+}
+
 fn origin_of(src: &Source, r: &Resolved) -> Option<Value> {
     let (b, n) = (r.body?, r.name.as_ref()?);
     src[b].0.origins.get(n).cloned()

@@ -576,6 +576,85 @@ fn renamed_path(k: &str, from: &str, to: &str) -> Option<String> {
     })
 }
 
+/// The pointers under `/annotations` of a drawing file `v` that hold an
+/// entity (`<solid>/<name>`, a datum's ID, or an occurrence's
+/// `<instance>/…/<solid>/<name>`), and those that hold a balloon's
+/// occurrence path. A file that doesn't read names none.
+fn annotation_pointers(
+    v: &Value,
+) -> (
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+) {
+    use crate::doc::drawing_annotation::Kind;
+    let Ok(file) = crate::doc::drawing::DrawingFile::from_json(v) else {
+        return Default::default();
+    };
+    let entities = file
+        .annotation_entities()
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+    let occurrences = file
+        .annotations
+        .iter()
+        .filter(|(_, a)| matches!(a.kind, Kind::Balloon { .. }))
+        .map(|(k, _)| format!("/annotations/{k}/of"))
+        .collect();
+    (entities, occurrences)
+}
+
+/// What an annotation's entity `text`, in a view of `source`, becomes when
+/// feature `from` of `part` is renumbered `to`; `None` when it stays.
+fn annotation_entity(
+    theirs: &Files,
+    names: &BTreeMap<String, BTreeMap<String, String>>,
+    text: &str,
+    source: &str,
+    part: &str,
+    from: &str,
+    to: &str,
+) -> Option<String> {
+    let steps: Vec<&str> = text.split('/').collect();
+    match steps.as_slice() {
+        // A datum of the view's source.
+        [datum] => (source == part && *datum == from).then(|| to.to_owned()),
+        [path @ .., solid, name] => {
+            // The instance path through the source (an assembly), whose
+            // first step may be the renumbered instance or pattern.
+            let path_text = path.join("/");
+            let new_path = if path.is_empty() || source != part {
+                path_text.clone()
+            } else {
+                renamed_path(&path_text, from, to).unwrap_or_else(|| path_text.clone())
+            };
+            // The part the path ends in names the solid and its face.
+            let placed = if path.is_empty() {
+                Some(source.to_owned())
+            } else {
+                let steps: Vec<Value> = path.iter().map(|s| json!(s)).collect();
+                path_part(theirs, source, &steps)
+            };
+            let on_part = placed.as_deref() == Some(part);
+            let name = if on_part {
+                names
+                    .get(*solid)
+                    .and_then(|m| m.get(*name))
+                    .map_or(*name, String::as_str)
+            } else {
+                name
+            };
+            let solid = if on_part && *solid == from { to } else { solid };
+            Some(if new_path.is_empty() {
+                format!("{solid}/{name}")
+            } else {
+                format!("{new_path}/{solid}/{name}")
+            })
+        }
+        [] => None,
+    }
+}
+
 /// The renumbering and its file changes for the collision `c` at
 /// `pointer` of `path`, in the working files, from the three sides' files;
 /// `None` when it can't be planned.
@@ -758,33 +837,38 @@ pub fn plan(
             ) else {
                 continue;
             };
+            // An annotation's entities (plan 9.C) are text, and so are a
+            // balloon's occurrence and a note's words: only the pointers
+            // the file's annotations name entities at are followed.
+            let (entities, occurrences) = annotation_pointers(&v);
             let new = rewrite(&v, "", &mut |pt, n| {
-                // An annotation's entity (plan 9.C): `<solid>/<name>` of
-                // its view's source, written as text.
-                if let (Some(text), Some(rest)) = (n.as_str(), pt.strip_prefix("/annotations/")) {
+                if let Some(rest) = pt.strip_prefix("/annotations/") {
+                    let entity = entities.contains(pt);
+                    if !entity && !occurrences.contains(pt) {
+                        return None;
+                    }
+                    let text = n.as_str()?;
                     let view = rest
                         .split('/')
                         .next()
                         .and_then(|k| v["annotations"][k]["view"].as_str())
                         .map(|w| format!("/views/{w}"))?;
-                    if drawing_source(&v, &view, owner) != part {
-                        return None;
-                    }
-                    let (solid, name) = text.split_once('/').filter(|(_, n)| !n.contains('/'))?;
+                    let source = drawing_source(&v, &view, owner);
                     let mine = o.as_ref().and_then(|o| o.pointer(pt));
                     if t.pointer(pt) != Some(n) || mine == Some(n) {
                         return None;
                     }
-                    let feature = match &r {
-                        Rename::Feature { from, to, .. } if solid == from => to.clone(),
-                        _ => solid.to_owned(),
+                    let Rename::Feature { from, to, .. } = &r else {
+                        return None;
                     };
-                    let name = names
-                        .get(solid)
-                        .and_then(|m| m.get(name))
-                        .cloned()
-                        .unwrap_or_else(|| name.to_owned());
-                    let out = json!(format!("{feature}/{name}"));
+                    let out = if entity {
+                        annotation_entity(theirs, &names, text, source, &part, from, to)?
+                    } else if source == part {
+                        renamed_path(text, from, to)?
+                    } else {
+                        return None;
+                    };
+                    let out = json!(out);
                     return (out != *n).then_some(out);
                 }
                 if !is_reference(n) || drawing_source(&v, pt, owner) != part {
@@ -974,6 +1058,46 @@ mod tests {
             (&to(2), &to(2))
         );
         assert_eq!(read("parts/a/features/n.json")["neutral"], to(4));
+    }
+
+    #[test]
+    fn only_annotations_entities_and_occurrences_are_renumbered() {
+        let h = |k: u8| format!("{k:032x}");
+        let v = json!({"format": 1, "kind": "ryucad.drawing", "name": "D",
+        "sheets": {"s1": {"name": "Sheet 1", "size": "iso_a3"}},
+        "views": {"v1": {"type": "base", "sheet": "s1", "orient": "front"}},
+        "annotations": {
+            "d1": {"type": "linear", "view": "v1", "a": format!("b/{}", h(1)), "b": "q",
+                   "along": "horizontal", "prefix": "b/x"},
+            "n1": {"type": "note", "view": "v1", "text": "b/x"},
+            "b1": {"type": "balloon", "view": "v1", "of": "b"}
+        }});
+        let (entities, occurrences) = annotation_pointers(&v);
+        assert!(entities.contains("/annotations/d1/a") && entities.contains("/annotations/d1/b"));
+        assert!(!entities.contains("/annotations/d1/prefix"));
+        assert!(!entities.contains("/annotations/n1/text"));
+        assert!(occurrences.contains("/annotations/b1/of"));
+        let names = BTreeMap::from([("b".to_owned(), BTreeMap::from([(h(1), h(101))]))]);
+        let none = files(&[]);
+        let e =
+            |t: &str, source: &str| annotation_entity(&none, &names, t, source, "p", "b", "b-1");
+        // A solid's face, a datum, and nothing of another part.
+        assert_eq!(
+            e(&format!("b/{}", h(1)), "p").unwrap(),
+            format!("b-1/{}", h(101))
+        );
+        assert_eq!(e("b", "p").unwrap(), "b-1");
+        assert!(e("q", "p").is_none());
+        assert_eq!(
+            e(&format!("b/{}", h(1)), "other").unwrap(),
+            format!("b/{}", h(1))
+        );
+        // An occurrence's entity in an assembly drawing: the instance
+        // renamed, and the solid left to the part it places.
+        assert_eq!(
+            e(&format!("b/s/{}", h(1)), "p").unwrap(),
+            format!("b-1/s/{}", h(1))
+        );
     }
 
     #[test]

@@ -494,3 +494,254 @@ fn balloons_show_item_numbers_and_a_bom_table_lists_them() {
         g["findings"]
     );
 }
+
+/// The plate placed twice in assembly `asm` (instances `a` and `b`), and
+/// a drawing `d` of it at 1:1 with a front view `v1`.
+fn rig(s: &mut Session) {
+    must(s, "part.create", json!({"part": "asm", "kind": "assembly"}));
+    must(
+        s,
+        "feature.add",
+        json!({"part": "asm", "type": "instance", "id": "a", "of": "p", "fixed": true}),
+    );
+    must(
+        s,
+        "feature.add",
+        json!({"part": "asm", "type": "instance", "id": "b", "of": "p", "fixed": true,
+        "placement": {"origin": [0, 0, 20]}}),
+    );
+    must(
+        s,
+        "drawing.create",
+        json!({"part": "asm", "drawing": "d", "name": "Rig"}),
+    );
+    must(
+        s,
+        "drawing.edit",
+        json!({"part": "asm", "drawing": "d", "ops": [
+        {"op": "set", "id": "s1", "fields": {"scale": "1:1"}},
+        {"op": "add", "kind": "view", "value": {"type": "base", "sheet": "s1", "orient": "front"}}]}),
+    );
+}
+
+fn file_of(dir: &tempfile::TempDir, part: &str) -> Value {
+    serde_json::from_slice(
+        &std::fs::read(dir.path().join(format!("parts/{part}/drawings/d.json"))).unwrap(),
+    )
+    .unwrap()
+}
+
+fn codes(g: &Value, code: &str) -> Vec<Value> {
+    g["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == code)
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_bom_table_on_a_view_builds_twice_to_the_same_place() {
+    let (d, mut s) = plate();
+    rig(&mut s);
+    let g = must(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "asm", "drawing": "d", "ops": [
+        {"op": "add", "kind": "annotation", "value": {"type": "bom_table", "view": "v1", "flat": true}}]}),
+    );
+    let before = file_of(&d, "asm")["annotations"]["t1"].clone();
+    let at = |g: &Value| {
+        g["sheets"][0]["annotations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["annotation"] == "t1")
+            .unwrap()["at_mm"]
+            .clone()
+    };
+    let first = at(&g);
+    assert!(first.is_array(), "{g}");
+    let again = must(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "asm", "drawing": "d", "ops": []}),
+    );
+    assert_eq!(at(&again), first, "{again}");
+    assert_eq!(file_of(&d, "asm")["annotations"]["t1"], before);
+}
+
+#[test]
+fn an_ordinates_written_place_moves_its_text_along_its_leader() {
+    let (d, mut s) = plate();
+    let v0 = vertex(&mut s, [0.0, 0.0, 10.0]);
+    let vf = vertex(&mut s, [40.0, 30.0, 10.0]);
+    let g = add(
+        &mut s,
+        json!({"type": "ordinate", "view": "v1", "datum": format!("b/{v0}"),
+        "of": format!("b/{vf}"), "along": "vertical", "at": ["60 mm", "0 mm"]}),
+    )
+    .unwrap();
+    let o = ann(&g, "d1");
+    // Along a vertical ordinate's leader (x on the sheet) to 60 mm, its
+    // place across the leader the ordinate's own.
+    let x = o["at_mm"][0].as_f64().unwrap();
+    assert!((x - 60.0).abs() < 1e-9, "{o}");
+    // The file keeps what was written, and building again draws the same.
+    assert_eq!(
+        file_of(&d, "p")["annotations"]["d1"]["at"],
+        json!(["60 mm", "0 mm"])
+    );
+    let again = must(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "p", "drawing": "d", "ops": []}),
+    );
+    assert_eq!(ann(&again, "d1")["at_mm"], o["at_mm"]);
+}
+
+#[test]
+fn a_faces_own_width_is_measured_aligned() {
+    let (_d, mut s) = plate();
+    let top = face(&mut s, |f| plane(f, [0.0, 0.0, 1.0]));
+    // The top face seen edge on in the front view: 40 mm.
+    let g = add(
+        &mut s,
+        json!({"type": "linear", "view": "v2", "a": format!("b/{top}"), "along": "aligned"}),
+    )
+    .unwrap();
+    assert!(close(
+        ann(&g, "d1")["value"]["value"].as_f64().unwrap(),
+        0.04
+    ));
+}
+
+#[test]
+fn a_diameter_calls_a_hole_out_and_holes_are_judged_over_the_drawing() {
+    let (_d, mut s) = plate();
+    let wall = face(&mut s, |f| f["surface"]["type"] == "cylinder");
+    let g = add(
+        &mut s,
+        json!({"type": "diameter", "view": "v1", "of": format!("b/{wall}")}),
+    )
+    .unwrap();
+    assert!(
+        codes(&g, "dwg_hole_uncalled").is_empty(),
+        "{}",
+        g["findings"]
+    );
+    // A second sheet showing the plate from above again: the hole is
+    // called out on the first.
+    let g = must(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "p", "drawing": "d", "ops": [
+        {"op": "add", "kind": "sheet", "value": {"name": "Sheet 2", "size": "iso_a3", "scale": "1:1"}},
+        {"op": "add", "kind": "view", "value": {"type": "base", "sheet": "s2", "orient": "top"}}]}),
+    );
+    assert!(
+        codes(&g, "dwg_hole_uncalled").is_empty(),
+        "{}",
+        g["findings"]
+    );
+}
+
+#[test]
+fn a_patterns_copies_want_their_seeds_one_balloon() {
+    let (_d, mut s) = plate();
+    rig(&mut s);
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "asm", "type": "instance_pattern", "id": "ring", "form": "linear",
+        "instances": ["a"], "direction": "x", "spacing": "60 mm", "count": 3}),
+    );
+    let g = must(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "asm", "drawing": "d", "ops": [
+        {"op": "add", "kind": "annotation", "value": {"type": "balloon", "view": "v1", "of": "a"}},
+        {"op": "add", "kind": "annotation", "value": {"type": "bom_table", "sheet": "s1", "flat": true}}]}),
+    );
+    assert!(
+        codes(&g, "dwg_balloon_missing").is_empty(),
+        "{}",
+        g["findings"]
+    );
+}
+
+#[test]
+fn the_lint_answers_the_projects_weights_and_its_fixes_change_something() {
+    let (_d, mut s) = plate();
+    must(
+        &mut s,
+        "drawing.lint.configure",
+        json!({"weights": {"dwg_hole_uncalled": 7}, "severity": {"dwg_untoleranced": "off"}}),
+    );
+    let lint = must(&mut s, "drawing.lint", json!({"part": "p", "drawing": "d"}));
+    let rule = |c: &str| {
+        lint["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["code"] == c)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(rule("dwg_hole_uncalled")["weight"], 7, "{lint}");
+    assert_eq!(rule("dwg_hole_uncalled")["default_weight"], 3);
+    assert_eq!(rule("dwg_untoleranced")["severity"], "off");
+    assert_eq!(codes(&lint, "dwg_hole_uncalled")[0]["points"], 7);
+    // A note far past the sheet's area: its fix moves it inside, and the
+    // finding goes.
+    let g = add(
+        &mut s,
+        json!({"type": "note", "sheet": "s1", "text": "NOTE", "at": ["900 mm", "20 mm"]}),
+    )
+    .unwrap();
+    let out = codes(&g, "dwg_outside");
+    assert_eq!(out.len(), 1, "{}", g["findings"]);
+    let fix = out[0]["fixes"][0].clone();
+    assert_ne!(fix[0]["fields"]["at"], Value::Null, "{fix}");
+    let g = must(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "p", "drawing": "d", "ops": fix}),
+    );
+    assert!(codes(&g, "dwg_outside").is_empty(), "{}", g["findings"]);
+}
+
+#[test]
+fn a_frame_naming_a_missing_datum_twice_is_one_finding() {
+    let (_d, mut s) = plate();
+    let top = face(&mut s, |f| plane(f, [0.0, 0.0, 1.0]));
+    let g = add(&mut s, json!({"type": "feature_control_frame", "view": "v2",
+        "on": format!("b/{top}"), "characteristic": "position",
+        "rows": [{"tolerance": "0.1 mm", "datums": ["B"]}, {"tolerance": "0.05 mm", "datums": ["B"]}]}))
+    .unwrap();
+    assert_eq!(codes(&g, "dwg_datum_missing").len(), 1, "{}", g["findings"]);
+}
+
+#[test]
+fn a_hole_called_out_on_one_sheet_is_called_out_on_every_sheet() {
+    let (_d, mut s) = plate();
+    let wall = face(&mut s, |f| f["surface"]["type"] == "cylinder");
+    add(
+        &mut s,
+        json!({"type": "hole_callout", "view": "v1", "of": format!("b/{wall}")}),
+    )
+    .unwrap();
+    let g = must(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "p", "drawing": "d", "ops": [
+        {"op": "add", "kind": "sheet", "value": {"name": "Sheet 2", "size": "iso_a3", "scale": "1:1"}},
+        {"op": "add", "kind": "view", "value": {"type": "base", "sheet": "s2", "orient": "top"}}]}),
+    );
+    assert!(
+        codes(&g, "dwg_hole_uncalled").is_empty(),
+        "{}",
+        g["findings"]
+    );
+}
