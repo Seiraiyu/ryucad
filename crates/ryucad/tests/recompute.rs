@@ -345,14 +345,7 @@ fn mm(g: &mut Lcg, lo: u64, hi: u64) -> String {
 /// One random edit. Some are refused, or leave a feature failing; both
 /// must rebuild the same way however they are reached.
 fn edit(g: &mut Lcg, s: &mut Session) {
-    let (method, params) = match g.next_u64() % 27 {
-        // The import placed a millimetre or two along x, as a flattened
-        // import places a body, or at its origin again: written by hand,
-        // since no request sets a place.
-        26 => {
-            place_import(s, g.next_u64() % 3);
-            return;
-        }
+    let (method, params) = match g.next_u64() % 26 {
         0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
         1 => (
             "param.set",
@@ -491,7 +484,8 @@ fn edit(g: &mut Lcg, s: &mut Session) {
 }
 
 /// Part `p`'s import placed `mm` millimetres along x (none for 0),
-/// written to its file and the session refreshed.
+/// written by hand, since no request sets a place, and the session
+/// refreshed.
 fn place_import(s: &mut Session, mm: u64) {
     let root = s.root().to_path_buf();
     let dir = root.join("parts/p/features");
@@ -569,6 +563,14 @@ fn incremental_equals_full_from(seed: u64) {
     let mut reused = 0;
     for step in 0..30 {
         edit(&mut g, &mut s);
+        // Every tenth step the import is also placed a millimetre or two
+        // along x, as a flattened import places a body, or at its origin
+        // again, by the seed and step rather than the generator: drawn
+        // from it, a 27th arm reshuffled seed 1 into a countersink edit
+        // after a two-distance bevel that took over 300 s to rebuild.
+        if step % 10 == 9 {
+            place_import(&mut s, (seed + step / 10) % 3);
+        }
         let (one, eight) = (full(&s, 1), full(&s, 8));
         let r = s.rebuilt(&part).unwrap();
         let incremental = (r.hash.clone(), summary(r));
