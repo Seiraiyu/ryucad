@@ -195,7 +195,8 @@ enum Command {
     /// lasting until released ("sheet X... S", "beside X... Y
     /// left|right|above|below", "near X... P", "align X... row|column",
     /// "group X...", "edge X... left|right|top|bottom", "orient X...
-    /// 0|90|180|270 [mirror]", "net N wire|label|port", "idiom X...
+    /// 0|90|180|270 [mirror]", "text X... refdes|value|both
+    /// left|right|above|below", "net N wire|label|port", "idiom X...
     /// KIND|none", "flow X... reversed", "release X..."). Parts by
     /// designator (U3), unit (U1:2), instance (instance:<id>) or port
     /// (port:SDA); pins as U3.VDD or U3.4; nets by name or rail:<name>.

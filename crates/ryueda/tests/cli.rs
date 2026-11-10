@@ -3137,3 +3137,37 @@ fn a_blocked_instruction_says_what_blocks_it() {
         "{why}"
     );
 }
+
+/// `text` reads in the agent's terms, holds, and the listing writes it
+/// back the same; a field or side it doesn't know is invalid_param.
+#[test]
+fn text_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    p.ok(&[
+        "place",
+        "breakout",
+        "text R1 refdes left",
+        "text R2 both below",
+    ]);
+    let list = p.ok(&["place", "breakout", "--list"]);
+    let texts: Vec<&str> = list["instructions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["text"].as_str().unwrap())
+        .collect();
+    assert!(texts.contains(&"text R1 refdes left"), "{list:#}");
+    assert!(texts.contains(&"text R2 both below"), "{list:#}");
+    for i in list["instructions"].as_array().unwrap() {
+        if i["text"].as_str().unwrap().starts_with("text ") {
+            assert_eq!(i["holds"], json!(true), "{i:#}");
+        }
+    }
+    p.fails(
+        &["place", "breakout", "text R1 colour left"],
+        "invalid_param",
+        1,
+    );
+    p.fails(&["place", "breakout", "text R1 refdes"], "invalid_param", 1);
+}

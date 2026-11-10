@@ -509,11 +509,12 @@ pub const FORMS: &[&str] = &[
     "sheet X... SHEET",
     "sheet rename SHEET NAME",
     "beside X... Y left|right|above|below",
-    "near X... P (a pin U1.VDD or a part)",
+    "near X... P (a pin U1.VDD or a part; several parts and a pin: one network off the pin; port:NAME and a pin: the flag on its row)",
     "align X... row|column (X a part, or a pin U1.SCL to line pins up)",
     "group X...",
     "edge X... left|right|top|bottom",
     "orient X... 0|90|180|270 [mirror]",
+    "text X... refdes|value|both left|right|above|below",
     "net N wire|label|port",
     "idiom X... KIND|none",
     "flow X... reversed",
@@ -685,6 +686,20 @@ impl Names<'_> {
                 Instruction::Edge {
                     parts: many(x)?,
                     side: side(&t[0])?,
+                }
+            }
+            "text" => {
+                let (x, t) = last(2)?;
+                let field = match t[0].as_str() {
+                    "refdes" => ryusch::layout::TextField::Refdes,
+                    "value" => ryusch::layout::TextField::Value,
+                    "both" => ryusch::layout::TextField::Both,
+                    _ => return Err(usage(text, form)),
+                };
+                Instruction::Text {
+                    parts: many(x)?,
+                    field,
+                    side: side(&t[1])?,
                 }
             }
             "orient" => {
