@@ -1265,8 +1265,10 @@ const DEFEATURE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(1
 /// or a pair that could be checked before still fails. Each delete is
 /// cancelled at [`DEFEATURE_DEADLINE`], as ryustep's `defeature.rs` does
 /// (uncancelled, NIST FTC 07's, FTC 10's and STC 07's took 17 to 24
-/// minutes each to refuse `ExtensionUnsupported` on cox-worker-4). Run
-/// after `scripts/fetch-corpus.sh`, in the devcontainer.
+/// minutes each to refuse `ExtensionUnsupported` on cox-worker-4). No
+/// body defeatured while plan 13.D ran it; the refusals are filed as the
+/// committed corpus's are (#650 to #654), and those that fit none of
+/// them as #658. Run after `scripts/fetch-corpus.sh`, in the devcontainer.
 #[test]
 fn pinned_bodies_defeature() {
     use ryukei::blend::{BlendKind, Chamfer};
