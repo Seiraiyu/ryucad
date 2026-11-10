@@ -533,6 +533,21 @@ fn attested(
     commit: &str,
     outcome: ryupdm::attest::Outcome,
 ) -> String {
+    attested_with(dir, rel, part, label, kind, commit, outcome, |_| {})
+}
+
+/// [`attested`], changed by `change` before it is signed.
+#[allow(clippy::too_many_arguments)]
+fn attested_with(
+    dir: &Path,
+    rel: &str,
+    part: &str,
+    label: &str,
+    kind: ryupdm::record::Kind,
+    commit: &str,
+    outcome: ryupdm::attest::Outcome,
+    change: impl Fn(&mut ryupdm::attest::Attestation),
+) -> String {
     use ryupdm::attest::*;
     let out = Command::new("git")
         .args(["cat-file", "blob", &format!("{commit}:{rel}")])
@@ -557,6 +572,7 @@ fn attested(
                     login: "alice".into(),
                 },
                 review: 1,
+                via: vec![],
             }]
         } else {
             vec![]
@@ -588,6 +604,8 @@ fn attested(
         rules_at: git(dir, &["rev-parse", &format!("{commit}^")]),
         signed_at: "2026-11-02T09:20:11Z".into(),
     };
+    let mut a = a;
+    change(&mut a);
     sign(&a, &TEST_SEED)
 }
 
@@ -810,4 +828,106 @@ fn forged_moved_lightweight_and_unapproved_tags_are_told_apart() {
         ),
     );
     assert_eq!(statuses(w)[orel], "approved");
+}
+
+#[test]
+fn teams_and_revoked_keys_verify_offline_in_a_clone() {
+    use ryupdm::attest::{Outcome, TEST_SEED, hex, public_key, test_key_id};
+    use ryupdm::record::Kind;
+    let work = tempfile::tempdir().unwrap();
+    let w = work.path();
+    git(w, &["init", "-q", "-b", "main"]);
+    put(
+        w,
+        "ryucad.json",
+        &json!({"default_unit": "mm", "format": 2, "kind": "ryucad.project", "project": PROJECT}),
+    );
+    put(
+        w,
+        "parts/p/part.json",
+        &json!({"features": ["a"], "format": 1, "kind": "ryucad.part"}),
+    );
+    put(w, "parts/p/features/a.json", &json!({"x": 1}));
+    put(
+        w,
+        "parts/p/properties.json",
+        &json!({"format": 1, "kind": "ryupdm.properties", "number": "100"}),
+    );
+    let team_rules = json!([{"count": 1, "from": ["@acme/quality"], "parts": ["*"]}]);
+    let key = hex(&public_key(&TEST_SEED));
+    put(
+        w,
+        "ryupdm.json",
+        &json!({"approvals": {"keys": {test_key_id(): key}, "rules": team_rules},
+                "format": 3, "kind": "ryupdm.config"}),
+    );
+    commit(w, "start, a team's rule");
+    let a = release_a(w);
+    put(w, &a.path(), &a.to_json());
+    let official = commit(w, "release p A");
+    let rel = "releases/p/A.json";
+    let through_team = |a: &mut ryupdm::attest::Attestation| {
+        a.rules[0].from = vec!["@acme/quality".into()];
+        a.approvals[0].github.login = "quinn".into();
+        a.approvals[0].via = vec!["@acme/quality".into()];
+    };
+    annotated(
+        w,
+        "ryupdm/p/A",
+        &official,
+        &attested_with(
+            w,
+            rel,
+            "p",
+            "A",
+            Kind::Release,
+            &official,
+            Outcome::Approved,
+            through_team,
+        ),
+    );
+    assert_eq!(statuses(w)[rel], "approved");
+    let bare = tempfile::tempdir().unwrap();
+    git(
+        bare.path(),
+        &["clone", "-q", "--bare", w.to_str().unwrap(), "."],
+    );
+    assert_eq!(statuses(bare.path())[rel], "approved");
+
+    // Revoked later at the tip: A's attestation, made before, proves
+    // nothing now, though its rules were read where the key was trusted.
+    put(
+        w,
+        "ryupdm.json",
+        &json!({"approvals": {"keys": {test_key_id(): {"key": key, "revoked": "2026-11-10"}},
+                              "rules": team_rules},
+                "format": 3, "kind": "ryupdm.config"}),
+    );
+    commit(w, "revoke the test key");
+    assert_eq!(statuses(w)[rel], "revoked");
+    let src = Folder(w);
+    let repo = gix::open(w).unwrap();
+    let releases = Releases::read(&repo, "", &Config::read(&src).unwrap()).unwrap();
+    let h = History {
+        repo: &repo,
+        prefix: "",
+        releases: &releases,
+    };
+    let found = check::run(&src, Some(h), None).unwrap();
+    let f = found
+        .iter()
+        .find(|f| f.code.contains("attestation"))
+        .expect("a finding");
+    assert_eq!(
+        (
+            f.code,
+            f.details["key"].as_str(),
+            f.details["revoked"].as_str()
+        ),
+        (
+            "release_attestation_revoked",
+            Some(&*test_key_id()),
+            Some("2026-11-10")
+        )
+    );
 }
