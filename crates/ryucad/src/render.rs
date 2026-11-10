@@ -663,12 +663,18 @@ fn unit(a: [f64; 3]) -> [f64; 3] {
 /// The nearest depth drawn: anything closer to the eye is left out.
 const NEAR: f64 = 1e-6;
 
+/// A camera's right, up and forward directions, as renders take them.
+pub fn view_basis(camera: &Camera) -> ([f64; 3], [f64; 3], [f64; 3]) {
+    let forward = unit(sub(camera.target, camera.eye));
+    let right = unit(cross(forward, camera.up));
+    let up = cross(right, forward);
+    (right, up, forward)
+}
+
 impl View {
     /// The view of `camera` on an image `width`×`height` (output pixels).
     pub fn new(camera: &Camera, width: u32, height: u32) -> View {
-        let forward = unit(sub(camera.target, camera.eye));
-        let right = unit(cross(forward, camera.up));
-        let up = cross(right, forward);
+        let (right, up, forward) = view_basis(camera);
         let (half, perspective) = match camera.projection {
             Projection::Perspective { fov_deg } => (
                 ryukei::math::tan(fov_deg * core::f64::consts::PI / 360.0),
