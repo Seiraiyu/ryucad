@@ -410,6 +410,16 @@ impl Markup {
     }
 }
 
+/// View marks as the viewport draws them on the glass (design 423,
+/// Drawing): in their plane, one colour, how opaque.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ViewMarks {
+    pub plane: Plane,
+    pub marks: Vec<Mark>,
+    pub colour: ryucad::render::Rgb,
+    pub alpha: f32,
+}
+
 /// `to` turned about `from` to the nearest [`SNAP_DEG`], its length kept.
 pub fn snap_angle(from: [f64; 2], to: [f64; 2]) -> [f64; 2] {
     let (dx, dy) = (to[0] - from[0], to[1] - from[1]);

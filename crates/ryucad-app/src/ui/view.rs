@@ -72,6 +72,17 @@ pub struct View {
     /// `view.show_all`, and with its keyboard the arrows and + and -),
     /// from the window's keymap.
     pub keys: Vec<(egui::KeyboardShortcut, &'static str)>,
+    /// The Markup bar's keys (`markup.*`, its own scope), from the
+    /// window's keymap: taken while the bar is open, wherever the pointer
+    /// is ([`View::take_keys`]).
+    pub markup_keys: Vec<(egui::KeyboardShortcut, &'static str)>,
+    /// The Markup bar is open (the workspace's, as last drawn).
+    pub marking: bool,
+    /// The text mark being typed takes the keyboard next frame.
+    pub markup_text_focus: bool,
+    /// The Markup bar's commands whose keys were pressed, for the window
+    /// to run.
+    pub markup_pressed: Vec<&'static str>,
     /// The window's commands as this frame shows them, for the context
     /// menu.
     pub commands: crate::ui::commands::Shown,
@@ -213,6 +224,42 @@ impl View {
     /// focus through the menu bar (issue #136). A text field being typed
     /// in keeps its keys.
     pub fn take_keys(&mut self, ctx: &egui::Context, events: &mut Vec<egui::Event>) {
+        // While the Markup bar is open its keys are its, over the bar and
+        // the viewport alike: but a field being typed in keeps its letters
+        // (Mod+Enter still posts).
+        if self.marking {
+            let typing = ctx.text_edit_focused();
+            let (pressed, keys) = (&mut self.markup_pressed, &self.markup_keys);
+            events.retain(|e| match e {
+                egui::Event::Key {
+                    key,
+                    pressed: down,
+                    modifiers,
+                    ..
+                } => {
+                    let as_mod = egui::Modifiers {
+                        command: modifiers.command || modifiers.ctrl,
+                        ..*modifiers
+                    };
+                    let hit = keys.iter().find(|(s, id)| {
+                        s.logical_key == *key
+                            && (modifiers.matches_exact(s.modifiers)
+                                || as_mod.matches_exact(s.modifiers))
+                            && (!typing || crate::core::command::get(id).is_some_and(|c| c.in_text))
+                    });
+                    match hit {
+                        Some((_, id)) => {
+                            if *down {
+                                pressed.push(id);
+                            }
+                            false
+                        }
+                        None => true,
+                    }
+                }
+                _ => true,
+            });
+        }
         if !(self.hovered || self.focused) || ctx.text_edit_focused() {
             return;
         }
@@ -301,6 +348,10 @@ impl View {
             focused: false,
             tabs: Vec::new(),
             mover_focus: false,
+            markup_keys: Vec::new(),
+            marking: false,
+            markup_text_focus: false,
+            markup_pressed: Vec::new(),
             keys: Vec::new(),
             commands: Default::default(),
             ran: None,
@@ -1378,6 +1429,16 @@ impl View {
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         // A turn to a view moves on, and the session hears of each step.
         self.now = ui.input(|i| i.time);
+        // The Markup bar holds the camera at its view (design 423): every
+        // view mark lies in that view's plane.
+        match ws.markup.as_ref() {
+            Some(m) if !self.nav.locked || self.nav.camera != m.camera => {
+                self.nav.lock(m.camera.clone());
+                ws.share_camera(&self.nav.camera);
+            }
+            None if self.nav.locked => self.nav.unlock(),
+            _ => {}
+        }
         if self.nav.moving() {
             if self.nav.step(self.now) {
                 ui.ctx().request_repaint();
@@ -1484,7 +1545,13 @@ impl View {
             })
         };
         let length = self.handle_length(ws);
-        if response.drag_started() {
+        // While the Markup bar is open the left button draws marks: it
+        // picks, selects and moves nothing.
+        let marking = ws.markup.is_some();
+        if marking {
+            self.markup_input(ui, ws, &response, &pr, rect, modifiers.shift);
+        }
+        if response.drag_started() && !marking {
             // Where the button went down: a drag starts only once the
             // pointer has moved a little, maybe onto the model.
             let pressed = ui.input(|i| i.pointer.press_origin());
@@ -1694,7 +1761,7 @@ impl View {
         {
             self.cube_click(ws, hit);
         }
-        let mut clicked = response.clicked() && !over_cube;
+        let mut clicked = response.clicked() && !over_cube && !marking;
         // A click on a Move handle opens its value at 0, to type; it never
         // picks.
         if clicked
@@ -1894,6 +1961,7 @@ impl View {
         }
         self.bend_notes(ui, ws, rect, &pr);
         self.annotation_markers(ui, ws, rect, &pr);
+        self.redline_marks(ui, ws, rect, &pr);
         // The active section plane's handles, a new step's arrows, and an
         // explode's trails from where occurrences are to where it puts
         // them.
@@ -2165,12 +2233,189 @@ impl View {
         self.others_ui(ui.ctx(), ws);
     }
 
+    /// View marks on the glass (design 423, Drawing): the Markup bar's,
+    /// with the mark under way and the text being typed, in this
+    /// window's colour; else the chosen annotation's, in its author's, at
+    /// [`ryucad::redline::CLOSED_ALPHA`] once it is closed. Drawn over
+    /// everything, [`ryucad::render::MARK_WIDTH`] points wide.
+    fn redline_marks(
+        &mut self,
+        ui: &mut egui::Ui,
+        ws: &mut Workspace,
+        rect: egui::Rect,
+        pr: &Projector,
+    ) {
+        use ryucad::redline::{Anchor, Kind, outline};
+        let size = [f64::from(rect.width()), f64::from(rect.height())];
+        let Some(crate::core::markup::ViewMarks {
+            plane,
+            marks,
+            colour,
+            alpha,
+        }) = ws.view_marks()
+        else {
+            return;
+        };
+        let ink = style::color32(colour).gamma_multiply(alpha);
+        let width = ryucad::render::MARK_WIDTH;
+        let painter = ui.painter_at(rect);
+        let at = |xy: [f64; 2]| {
+            crate::core::markup::pixel_of(pr, size, &plane, xy)
+                .map(|p| egui::pos2(rect.min.x + p[0] as f32, rect.min.y + p[1] as f32))
+        };
+        for m in &marks {
+            let Anchor::View(xy) = &m.anchor else {
+                continue;
+            };
+            if m.kind == Kind::Text {
+                if let (Some(p), Some(t)) = (xy.first().and_then(|p| at(*p)), &m.text) {
+                    let back = style::color32(
+                        self.look
+                            .viewport_background(ui.visuals().dark_mode, self.contrast),
+                    )
+                    .gamma_multiply(ryucad::render::NOTE_BOX * alpha);
+                    note(&painter, p, t, ink, back);
+                }
+                continue;
+            }
+            let pts: Vec<egui::Pos2> = outline(m).into_iter().filter_map(at).collect();
+            painter.add(egui::Shape::line(
+                pts.clone(),
+                egui::Stroke::new(width, ink),
+            ));
+            if m.kind == Kind::Arrow
+                && let [a, b] = pts.as_slice()
+            {
+                head(&painter, *a, *b, ink);
+            }
+        }
+        // The text being typed, in place: Enter makes it a mark.
+        let typing = ws.markup.as_ref().and_then(|m| m.typing.clone());
+        if let Some((xy, mut text)) = typing
+            && let Some(p) = at(xy)
+        {
+            let focus = std::mem::take(&mut self.markup_text_focus);
+            let mut done = false;
+            egui::Area::new(ui.scope_id().with("markup-text"))
+                .fixed_pos(p)
+                .pivot(egui::Align2::LEFT_BOTTOM)
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut text)
+                            .hint_text("Text")
+                            .desired_width(160.0),
+                    );
+                    r.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Mark text")
+                    });
+                    if focus {
+                        r.request_focus();
+                    }
+                    done = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                });
+            if let Some(m) = ws.markup.as_mut() {
+                if let Some(t) = m.typing.as_mut() {
+                    t.1 = text;
+                }
+                if done {
+                    m.commit_text();
+                }
+            }
+        }
+    }
+
+    /// The Markup tool's presses, drags and releases (design 423): a
+    /// view mark's points on its view's plane, the pen on faces' on the
+    /// solid under the press in its part's frame, Text's anchor at a click.
+    fn markup_input(
+        &mut self,
+        ui: &egui::Ui,
+        ws: &mut Workspace,
+        response: &egui::Response,
+        pr: &Projector,
+        rect: egui::Rect,
+        shift: bool,
+    ) {
+        use crate::core::markup::{Tool, plane_at};
+        let size = [f64::from(rect.width()), f64::from(rect.height())];
+        let local = |p: egui::Pos2| [f64::from(p.x - rect.min.x), f64::from(p.y - rect.min.y)];
+        let primary = ui.input(|i| i.pointer.primary_down() || i.pointer.primary_released());
+        let Some(tool) = ws.markup.as_ref().map(|m| m.tool) else {
+            return;
+        };
+        // The solid under a pixel and the point there in its part's frame.
+        let on_solid = |view: &mut View, ws: &Workspace, at: [f64; 2]| {
+            let hit =
+                view.picker(ws)
+                    .pick_with(pr, size, at, crate::core::pick::Filter::faces())?;
+            let key = (hit.part.clone(), hit.feature.clone());
+            (hit.rev.is_none()).then(|| {
+                let p = ws.model.pose(&key).unapply(hit.point);
+                (key, p)
+            })
+        };
+        if response.drag_started()
+            && primary
+            && let Some(p) = ui.input(|i| i.pointer.press_origin())
+        {
+            let at = local(p);
+            if tool == Tool::PenFaces {
+                match on_solid(self, ws, at) {
+                    Some((key, point)) => {
+                        let on = ws.model.on_of(&key);
+                        if let Some(m) = ws.markup.as_mut() {
+                            m.press_face(key, on, point);
+                        }
+                    }
+                    None => {
+                        if let Some(m) = ws.markup.as_mut() {
+                            m.note = Some("Press on a face of the model to draw on it.".into());
+                        }
+                    }
+                }
+            } else if let Some(m) = ws.markup.as_mut() {
+                m.press(plane_at(pr, size, at));
+            }
+        }
+        if response.dragged()
+            && primary
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            let at = local(p);
+            if tool == Tool::PenFaces {
+                let under = on_solid(self, ws, at);
+                if let Some(m) = ws.markup.as_mut() {
+                    m.drag_face(under);
+                }
+            } else if let Some(m) = ws.markup.as_mut() {
+                m.drag(plane_at(pr, size, at), shift);
+            }
+            ui.ctx().request_repaint();
+        }
+        if response.drag_stopped() {
+            let pixel = pr.pixel(pr.camera.target, size[1]);
+            if let Some(m) = ws.markup.as_mut() {
+                m.release(pixel);
+            }
+        }
+        // Text takes a click.
+        if response.clicked()
+            && tool == Tool::Text
+            && let Some(p) = response.interact_pointer_pos()
+            && let Some(m) = ws.markup.as_mut()
+        {
+            m.press(plane_at(pr, size, local(p)));
+            self.markup_text_focus = true;
+        }
+    }
+
     /// Opens the comment box for `annotation.add` on `target` (an entity
     /// right-clicked, pinned with the point clicked; or a tree row,
     /// pinned without one) or `annotation.here` (a bare point where the
     /// menu opened, on the plane through the camera's target square to
     /// the line of sight, on the shown part when there is one).
-    pub fn compose(&mut self, ws: &Workspace, id: &str, target: Option<&str>) {
+    pub fn compose(&mut self, ws: &mut Workspace, id: &str, target: Option<&str>) {
         use crate::core::annotations::{Compose, point_arg};
         use ryucad::proto::PinArg;
         let pin = match (id, &self.menu, target) {
@@ -2196,6 +2441,12 @@ impl View {
             }
             _ => return,
         };
+        // With the Markup bar open, the pin goes with its marks (design
+        // 423, Posting).
+        if let Some(m) = ws.markup.as_mut() {
+            m.pins.push(pin);
+            return;
+        }
         self.composing = Some(Compose {
             pins: vec![pin],
             text: String::new(),
@@ -2574,6 +2825,45 @@ impl View {
             ));
         }
         overlay.extend(body_lines);
+        // Redline face strokes (design 423): open annotations' whenever
+        // their pins are drawn, and the Markup bar's, depth-tested as
+        // sketch curves are, in their authors' colours.
+        {
+            let shown = ws.model.shown();
+            let place = |on: &str| ws.model.placed_on(on);
+            let mut strokes = if self.annotations {
+                ws.annotations.face_strokes(&shown, place)
+            } else {
+                Vec::new()
+            };
+            if let Some(m) = &ws.markup {
+                let mut marks = m.marks.clone();
+                marks.extend(m.under_way());
+                let marks = ryucad::redline::Marks {
+                    part: ryucad::doc::id::Id::parse(&m.part, "part").expect("a part's ID"),
+                    list: marks,
+                };
+                strokes.extend(crate::core::annotations::face_strokes_of(
+                    &marks,
+                    ws.my_name(),
+                    &place,
+                ));
+            }
+            crate::core::sketch::bands(
+                strokes.iter().map(|s| {
+                    (
+                        s.points.as_slice(),
+                        ryucad::render::participant(&s.by),
+                        false,
+                    )
+                }),
+                pr,
+                size,
+                f64::from(ppp),
+                f64::from(ryucad::render::MARK_WIDTH),
+                &mut overlay,
+            );
+        }
         // The flat view's bend lines, dashed in their direction's colour.
         if let Some(l) = ws
             .flat_view
@@ -2695,4 +2985,46 @@ struct Mark {
     label: Option<String>,
     lo: [f64; 3],
     hi: [f64; 3],
+}
+
+/// A text mark's size in points (design 423, Drawing).
+const MARK_TEXT: f32 = 14.0;
+
+/// A text mark: its text on a box of the view's background at
+/// [`ryucad::render::NOTE_BOX`].
+fn note(
+    painter: &egui::Painter,
+    at: egui::Pos2,
+    text: &str,
+    ink: egui::Color32,
+    back: egui::Color32,
+) {
+    let font = egui::FontId::proportional(MARK_TEXT);
+    let galley = painter.layout_no_wrap(text.to_owned(), font, ink);
+    let rect = egui::Align2::LEFT_BOTTOM
+        .anchor_size(at, galley.size())
+        .expand(3.0);
+    painter.rect_filled(rect, 2.0, back);
+    painter.galley(rect.min + egui::vec2(3.0, 3.0), galley, ink);
+}
+
+/// An arrow's head at `tip`: a filled triangle
+/// [`ryucad::render::HEAD_LENGTH`] points long and twice
+/// [`ryucad::render::HEAD_HALF`] wide, along `from`→`tip`, as renders
+/// draw it.
+fn head(painter: &egui::Painter, from: egui::Pos2, tip: egui::Pos2, ink: egui::Color32) {
+    let d = tip - from;
+    let len = d.length();
+    if len <= f32::EPSILON {
+        return;
+    }
+    let along = d / len;
+    let across = egui::vec2(-along.y, along.x);
+    let (l, h) = (ryucad::render::HEAD_LENGTH, ryucad::render::HEAD_HALF);
+    let base = tip - along * l;
+    painter.add(egui::Shape::convex_polygon(
+        vec![tip, base + across * h, base - across * h],
+        ink,
+        egui::Stroke::NONE,
+    ));
 }

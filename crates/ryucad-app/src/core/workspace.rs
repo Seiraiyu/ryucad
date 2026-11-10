@@ -1421,6 +1421,9 @@ impl Workspace {
             return Err("Show one part or assembly to mark up (View > Show).".into());
         };
         let part = part.to_string();
+        // One tool at a time.
+        self.cancel_move();
+        self.close_mate();
         self.markup = Some(crate::core::markup::Markup::new(&part, camera));
         Ok(())
     }
@@ -1435,7 +1438,7 @@ impl Workspace {
             .ok_or_else(|| format!("No annotation {id}."))?;
         let m = crate::core::markup::Markup::editing(id, e)
             .ok_or("This annotation has no marks or no view to reopen.")?;
-        if !self.model.shown().iter().any(|s| *s == m.part.as_str()) {
+        if !self.model.shown().contains(&m.part.as_str()) {
             self.set_focus(Some(m.part.clone()));
         }
         self.markup = Some(m);
@@ -1456,6 +1459,36 @@ impl Workspace {
         m.posting = true;
         m.note = None;
         self.send(req, Pending::MarkupPost);
+    }
+
+    /// The view marks the viewport draws on the glass (design 423, When):
+    /// the Markup bar's, with the mark under way, in this window's colour;
+    /// else the chosen annotation's, in its author's, at
+    /// [`ryucad::redline::CLOSED_ALPHA`] once closed; else none, since flat
+    /// marks seen from another view mislead.
+    pub fn view_marks(&self) -> Option<crate::core::markup::ViewMarks> {
+        use crate::core::markup::ViewMarks;
+        if let Some(m) = &self.markup {
+            let mut marks = m.marks.clone();
+            marks.extend(m.under_way());
+            return Some(ViewMarks {
+                plane: m.plane(),
+                marks,
+                colour: ryucad::render::participant(&self.name),
+                alpha: 1.0,
+            });
+        }
+        let e = self.annotations.all.get(self.chosen_annotation.as_ref()?)?;
+        Some(ViewMarks {
+            plane: e.plane()?,
+            marks: e.marks.as_ref()?.list.clone(),
+            colour: ryucad::render::participant(&e.by),
+            alpha: if e.is_open() {
+                1.0
+            } else {
+                ryucad::redline::CLOSED_ALPHA
+            },
+        })
     }
 
     /// Cancel (or Esc with nothing under way): the bar closes and its
