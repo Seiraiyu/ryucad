@@ -6111,3 +6111,100 @@ fn direct_edit_shows_its_bar_and_writes() {
         a.opened().ws.mode == ryucad_app::core::modes::Mode::View
     });
 }
+
+/// Where sheet point `at` (mm) is on screen, as the Drawings tile draws.
+fn on_sheet(h: &Harness<'static, App>, at: [f64; 2]) -> egui::Pos2 {
+    let rect = h.get_by_label("Drawing sheet").rect();
+    let cam = h.state().opened().ws.drawings.camera.unwrap();
+    let px = [f64::from(rect.width()), f64::from(rect.height())];
+    let q = cam.to_screen(at, px);
+    rect.left_top() + egui::vec2(q[0] as f32, q[1] as f32)
+}
+
+#[test]
+fn a_drawing_opens_from_its_row_its_dimension_is_edited_and_a_view_dragged() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_drawing();
+    let mut h = window(&p);
+    frames(&mut h, |a| a.opened().ws.idle());
+    // The drawing's row under its part opens the tile on its first sheet.
+    shown(&mut h, "d (drawing: Block)");
+    h.get_by_label("d (drawing: Block)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .drawings
+            .sheet
+            .as_ref()
+            .is_some_and(|s| !s.notes.is_empty())
+    });
+    h.run_steps(2);
+    let sheet = h.state().opened().ws.drawings.sheet.clone().unwrap();
+    assert_eq!(sheet.views[0].view, "v1");
+    // Each of the view's curves names the box's edges it draws.
+    assert!(sheet.entities.values().all(|e| e.starts_with("p/b/")));
+    // A click on the dimension's text chooses it and opens its form.
+    let d1 = sheet.note("d1").unwrap();
+    let b = sheet.bounds_of(d1.items.clone()).unwrap();
+    let mid = [(b[0][0] + b[1][0]) / 2.0, b[1][1] - 0.5];
+    click(&h, on_sheet(&h, mid));
+    frames(&mut h, |a| a.opened().ws.drawings.form.is_some());
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "Tolerance value")
+        .set_text_value_accesskit("0.2 mm");
+    h.step();
+    h.get_by_label("Apply to dimension").click();
+    frames(&mut h, |a| {
+        let d = &a.opened().ws.drawings;
+        !d.saving && d.sheet.as_ref().and_then(|s| s.note("d1")).is_some_and(|n| n.text.contains("0.20"))
+    });
+    let file: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(p.root.join("parts/p/drawings/d.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(file["annotations"]["d1"]["tolerance"]["symmetric"], "0.2 mm");
+    // A drag of the view, from inside it on no curve, moves it once.
+    let v = h.state().opened().ws.drawings.sheet.clone().unwrap().views[0].clone();
+    let start = on_sheet(&h, [v.at[0] + 3.0, v.at[1] + 2.0]);
+    h.event(egui::Event::PointerMoved(start));
+    h.event(egui::Event::PointerButton {
+        pos: start,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    let end = on_sheet(&h, [v.at[0] + 13.0, v.at[1] + 2.0]);
+    for i in 1..=8 {
+        h.event(egui::Event::PointerMoved(start + (end - start) * (i as f32 / 8.0)));
+        h.step();
+    }
+    h.event(egui::Event::PointerButton {
+        pos: end,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .drawings
+            .sheet
+            .as_ref()
+            .is_some_and(|s| (s.views[0].at[0] - v.at[0] - 10.0).abs() < 0.5)
+    });
+    // Written once, where it was let go.
+    let file: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(p.root.join("parts/p/drawings/d.json")).unwrap(),
+    )
+    .unwrap();
+    let x: f64 = file["views"]["v1"]["at"][0]
+        .as_str()
+        .unwrap()
+        .trim_end_matches(" mm")
+        .parse()
+        .unwrap();
+    assert!((x - 130.0).abs() < 0.5, "{file}");
+}

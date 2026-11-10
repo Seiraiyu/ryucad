@@ -445,6 +445,11 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             o.layout_dirty = true;
         }
         "explode.collapse" => o.ws.show_explode(None, None, true),
+        "drawing.show" => {
+            o.ws.show_drawings(None);
+            crate::ui::shell::open(&mut o.tiles, "drawings");
+            o.layout_dirty = true;
+        }
         "tools.interference" => {
             o.ws.check_interference();
             o.dialogs.interference = true;

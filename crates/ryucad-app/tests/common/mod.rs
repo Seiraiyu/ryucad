@@ -377,6 +377,29 @@ impl Project {
             .unwrap()
     }
 
+    /// A drawing on part `p`: a 40 x 30 x 20 mm box `b`, drawing `d`
+    /// ("Block") of one ANSI B sheet with a top view `v1` at (120, 150)
+    /// mm, and a linear dimension `d1` between the box's east and west
+    /// faces, ±0.1 mm.
+    pub fn with_drawing(self) -> Project {
+        self.ok(&["part", "create", "p"]);
+        self.ok(&[
+            "feature", "add", "p", "box", "--id", "b", "--param", "x=40", "--param", "y=30",
+            "--param", "z=20",
+        ]);
+        let [east, west] = [[1, 0, 0], [-1, 0, 0]]
+            .map(|n| self.box_face(n).trim_start_matches("p/").to_owned());
+        self.ok(&["drawing", "create", "p", "d", "--name", "Block"]);
+        self.ok(&[
+            "drawing", "view", "add", "p", "d", "--orient", "top", "--at", "120,150",
+        ]);
+        self.ok(&[
+            "drawing", "dim", "add", "p", "d", "--view", "v1", "--type", "linear", "--a", &west,
+            "--b", &east, "--along", "horizontal", "--tol", "0.1 mm",
+        ]);
+        self
+    }
+
     /// Face tweaks on part `p`: a 40 x 30 x 20 mm box `b`, a datum plane
     /// `lid` 25 mm over xy, a draft `d` of its east and west walls by 2°
     /// about xy, a move `m` pushing its north wall out 1 mm, and a

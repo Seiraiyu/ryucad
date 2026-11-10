@@ -834,6 +834,63 @@ impl DimensionForm {
     }
 }
 
+/// What the Drawings tile shows and holds between frames.
+#[derive(Clone, Debug, Default)]
+pub struct Tile {
+    /// Whether it has been opened: nothing is read before.
+    pub open: bool,
+    /// The part whose drawings it lists.
+    pub part: Option<String>,
+    pub list: Option<List>,
+    /// The drawing and sheet chosen.
+    pub chosen: Option<(String, String)>,
+    /// A drawing asked for by its tree row: its first sheet is chosen
+    /// once the list has it.
+    pub want: Option<String>,
+    pub sheet: Option<Sheet>,
+    /// A `drawing.get` on its way.
+    pub loading: bool,
+    /// Where the tile looks; `None` fits the sheet on the next frame.
+    pub camera: Option<Camera>,
+    /// What was last clicked.
+    pub selected: Option<Pick>,
+    /// The chosen dimension's form.
+    pub form: Option<DimensionForm>,
+    /// A write on its way.
+    pub saving: bool,
+    /// The last refusal or failure.
+    pub error: Option<ryucad::error::Error>,
+    /// A line said under the sheet (why a drag wrote nothing, a conflict).
+    pub note: Option<String>,
+}
+
+impl Tile {
+    /// The chosen drawing and sheet, else the list's first.
+    pub fn first_choice(&self) -> Option<(String, String)> {
+        if let Some(c) = &self.chosen {
+            return Some(c.clone());
+        }
+        let want = self.want.as_deref();
+        self.list.as_ref()?.entries.iter().filter(|e| want.is_none_or(|w| e.drawing == w)).find_map(|e| {
+            e.sheets
+                .first()
+                .map(|(k, _)| (e.drawing.clone(), k.clone()))
+        })
+    }
+
+    /// Chooses what a click picked: an annotation that is a dimension
+    /// opens its form.
+    pub fn choose(&mut self, pick: Option<Pick>) {
+        self.form = match (&pick, &self.sheet) {
+            (Some(Pick::Annotation(k)), Some(s)) => s
+                .note(k)
+                .and_then(|n| DimensionForm::from_file(&s.file, k, &n.kind)),
+            _ => None,
+        };
+        self.selected = pick;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

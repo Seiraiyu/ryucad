@@ -238,8 +238,14 @@ fn with_placements(file: &DrawingFile, built: &Built) -> Result<DrawingFile> {
         let r = if r == 0.0 { 0.0 } else { r };
         json!(format!("{r} mm"))
     };
-    // A scale ryucad chose, as places are: the file is what is drawn.
-    for sheet in built.sheets.iter().filter(|s| s.scale_chosen) {
+    // A scale ryucad chose, as places are: the file is what is drawn. A
+    // sheet with no view yet has none to choose by (every scale fits
+    // nothing), so it writes none, and its first view is fitted.
+    for sheet in built
+        .sheets
+        .iter()
+        .filter(|s| s.scale_chosen && !s.views.is_empty())
+    {
         v["sheets"][sheet.key.to_string()]["scale"] = json!(sheet.scale.to_string());
     }
     // An annotation's place, and a dimension's offset, where ryucad chose
@@ -1147,6 +1153,37 @@ pub fn findings(session: &mut Session, part: &Id) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_sheet_writes_no_scale_and_its_first_view_is_fitted() {
+        let (_d, mut s) = crate::server::tests::fresh();
+        let call = crate::server::tests::call;
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 40, "y": 30, "z": 20}}),
+        )
+        .unwrap();
+        call(&mut s, "drawing.create", json!({"part": "p", "drawing": "d"})).unwrap();
+        let file = |s: &Session| {
+            let p = s.project().part(&Id::parse("p", "x").unwrap()).unwrap();
+            p.drawings[&Id::parse("d", "x").unwrap()].clone().unwrap().to_json()
+        };
+        assert_eq!(file(&s)["sheets"]["s1"].get("scale"), None);
+        call(
+            &mut s,
+            "drawing.edit",
+            json!({"part": "p", "drawing": "d", "ops": [{"op": "add", "kind": "view",
+                "value": {"type": "base", "sheet": "s1", "orient": "top", "at": ["120 mm", "150 mm"]}}]}),
+        )
+        .unwrap();
+        // ANSI B less its margins holds 40 mm at 5:1 (200 mm and its
+        // room), not at 10:1.
+        let scale = file(&s)["sheets"]["s1"]["scale"].clone();
+        assert_ne!(scale, "10:1", "{}", file(&s));
+        assert!(scale.is_string());
+    }
 
     #[test]
     fn a_file_with_places_that_doesnt_read_is_an_error_not_the_file_without_them() {
