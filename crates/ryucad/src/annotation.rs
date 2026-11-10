@@ -137,6 +137,8 @@ pub fn readable(all: &BTreeMap<Id, Result<Annotation>>) -> BTreeMap<Id, Annotati
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Derived {
     pub outdated: Vec<Value>,
+    /// Marks' touches that don't resolve now, by mark and touch.
+    pub outdated_marks: Vec<Value>,
     pub stale: Vec<Value>,
     pub applied: Option<bool>,
 }
@@ -260,6 +262,22 @@ pub fn derive(
             d.outdated.push(v);
         }
     }
+    for (i, m) in a.marks.iter().flat_map(|m| m.list.iter()).enumerate() {
+        for (j, t) in m.touches.iter().flatten().enumerate() {
+            if let Err(e) = crate::entity::EntityRef::parse(&t.reference)
+                .and_then(|r| r.resolve(session).map(drop))
+            {
+                let mut v = json!({"mark": i, "touch": j, "at": t.at.as_str(),
+                                   "ref": t.reference, "code": e.code});
+                for key in ["was", "removed_by", "candidates"] {
+                    if let Some(x) = e.details.get(key) {
+                        v[key] = x.clone();
+                    }
+                }
+                d.outdated_marks.push(v);
+            }
+        }
+    }
     if let Some(c) = &a.change {
         let working = session.snapshot();
         let all = readable(all);
@@ -293,7 +311,7 @@ pub fn pin_text(pin: &Pin) -> String {
 }
 
 /// An annotation as listings give it: its file's fields, and `outdated`,
-/// `stale` (with `outdated_pins` and `stale_files` when true) and, with a
+/// `stale` (with `outdated_pins`, `outdated_marks` and `stale_files` when true) and, with a
 /// change, `applied`.
 pub fn entry(
     session: &mut Session,
@@ -305,9 +323,15 @@ pub fn entry(
     let o = v.as_object_mut().expect("an object");
     o.remove("kind");
     o.remove("format");
-    o.insert("outdated".into(), json!(!d.outdated.is_empty()));
+    o.insert(
+        "outdated".into(),
+        json!(!d.outdated.is_empty() || !d.outdated_marks.is_empty()),
+    );
     if !d.outdated.is_empty() {
         o.insert("outdated_pins".into(), json!(d.outdated));
+    }
+    if !d.outdated_marks.is_empty() {
+        o.insert("outdated_marks".into(), json!(d.outdated_marks));
     }
     o.insert("stale".into(), json!(!d.stale.is_empty()));
     if !d.stale.is_empty() {
@@ -1478,6 +1502,57 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(v["entity"]["origin"]["feature"], "lid");
+        // The working files have no lid: there the touch is outdated.
+        let e = list(&mut s, &[], None, None, false).unwrap();
+        assert_eq!(e["annotations"][0]["outdated"], true);
+    }
+
+    #[test]
+    fn a_touch_that_no_longer_resolves_makes_its_annotation_outdated() {
+        let (_dir, mut s, view) = drilled();
+        let boss_top = on(&view, [0.045, 0.02, 0.011]);
+        create_marked(
+            &mut s,
+            &view,
+            json!([
+                {"kind": "line", "in": "view", "xy_m": [[0.3, 0.3], boss_top]}
+            ]),
+        )
+        .unwrap();
+        let list = |s: &mut crate::session::Session| {
+            list(s, &[], None, None, false).unwrap()["annotations"][0].clone()
+        };
+        assert_eq!(list(&mut s)["outdated"], false);
+        call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "plate", "id": "boss"}),
+        )
+        .unwrap();
+        let e = list(&mut s);
+        assert_eq!(e["outdated"], true);
+        let o = &e["outdated_marks"][0];
+        assert_eq!(
+            (o["mark"].clone(), o["touch"].clone(), o["at"].clone()),
+            (json!(0), json!(0), json!("end"))
+        );
+        // The resolver's own code, as a pin's (`not_found` for a name
+        // this session never learnt, `reference_unresolved` for one it did).
+        assert!(
+            ["not_found", "reference_unresolved"].contains(&o["code"].as_str().unwrap()),
+            "{o}"
+        );
+        assert!(e.get("outdated_pins").is_none());
+        // The marks themselves are as they were.
+        let file = read_all(&s.snapshot())
+            .into_values()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            file.marks.unwrap().list[0].anchor,
+            Anchor::View(vec![[0.3, 0.3], boss_top])
+        );
     }
 
     pub(crate) fn plate() -> (tempfile::TempDir, crate::session::Session, String) {
