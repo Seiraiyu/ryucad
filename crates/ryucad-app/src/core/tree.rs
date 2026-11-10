@@ -211,8 +211,9 @@ pub fn row_text(f: &Feature, faults: usize) -> String {
         (Some(t), _, None) if t == "instance_pattern" && f.error.is_none() => {
             format!("{t}, {} copies", f.copies.len())
         }
-        (Some(t), Some(op), None) => format!("{t}, {op}"),
-        (Some(t), None, None) => t.clone(),
+        // A new sew or thicken founds its body as any feature does.
+        (Some(t), Some(op), None) if op != "new" => format!("{t}, {op}"),
+        (Some(t), _, None) => t.clone(),
         (None, _, None) => "?".to_owned(),
     };
     let kind = match &f.sketch {
@@ -393,6 +394,11 @@ pub fn type_icon(ty: &str, op: Option<&str>, form: Option<&str>) -> &'static str
         "flange" => "edge-flange",
         "unfold" => "unfold",
         "refold" => "refold",
+        "planar" => "planar-face",
+        "fill" => "fill",
+        "extract" => "extract",
+        "sew" => "sew",
+        "thicken" => "thicken",
         "draft" => "draft",
         "move_face" => "move-face",
         "replace_face" => "replace-face",
@@ -430,6 +436,7 @@ pub fn feature_icon(f: &Feature, assembly: impl Fn(&str) -> bool) -> (&'static s
                 | "sweep"
                 | "loft"
                 | "mirror"
+                | "thicken"
                 | "box"
                 | "cylinder"
                 | "cone"
@@ -438,6 +445,29 @@ pub fn feature_icon(f: &Feature, assembly: impl Fn(&str) -> bool) -> (&'static s
         )
     ) && op == Some("intersect");
     (icon, intersects)
+}
+
+/// What a surface badge says: the feature makes a sheet, not a solid.
+pub const SURFACE_TIP: &str = "surface: it makes a sheet, with no inside";
+
+/// Whether `f` is an extrude, revolve, sweep or loft that makes a sheet
+/// (ryucad 18's `surface`): the body it founds is one.
+fn surface(part: &Part, f: &Feature) -> bool {
+    matches!(
+        f.ty.as_deref(),
+        Some("extrude" | "revolve" | "sweep" | "loft")
+    ) && part.solid(&f.id).is_some_and(|s| s.sheet)
+}
+
+/// A sheet's kind as a solid row says it: `sheet, 1 boundary`, `sheet,
+/// 2 boundaries`, `sheet, closed`, or `sheet` when the report doesn't say.
+pub fn sheet_text(boundaries: Option<u64>) -> String {
+    match boundaries {
+        Some(0) => "sheet, closed".to_owned(),
+        Some(1) => "sheet, 1 boundary".to_owned(),
+        Some(n) => format!("sheet, {n} boundaries"),
+        None => "sheet".to_owned(),
+    }
 }
 
 /// A mate's icon by its form.
@@ -469,6 +499,8 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
             ("Assembly", "assembly", Tint::Accent),
             ("Solid", "cube-focus", Tint::Plain),
             ("Tool solid, consumed", "cube-focus", Tint::Weak),
+            ("Sheet", "sheet", Tint::Plain),
+            ("Sheet, consumed (sewn, thickened)", "sheet", Tint::Weak),
             ("Sketch", "pencil-simple-line", Tint::Plain),
             (
                 "A feature\u{2019}s \u{201c}uses\u{201d} line",
@@ -510,6 +542,11 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
             ("Edge flange", "edge-flange", Tint::Plain),
             ("Unfold", "unfold", Tint::Plain),
             ("Refold", "refold", Tint::Plain),
+            ("Planar face", "planar-face", Tint::Plain),
+            ("Fill", "fill", Tint::Plain),
+            ("Extract", "extract", Tint::Plain),
+            ("Sew", "sew", Tint::Plain),
+            ("Thicken", "thicken", Tint::Plain),
             ("Draft", "draft", Tint::Plain),
             ("Move face", "move-face", Tint::Plain),
             ("Replace face", "replace-face", Tint::Plain),
@@ -563,6 +600,7 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
                 Tint::Weak,
             ),
             ("Reference import", "file-lock", Tint::Info),
+            ("Surface: a sweep that makes a sheet", "sheet", Tint::Info),
             ("Instance fixed", "push-pin", Tint::Plain),
             ("Mate redundant", "warning-circle", Tint::Warn),
             ("Mate conflicting", "x-circle", Tint::Danger),
@@ -675,6 +713,10 @@ impl Builder<'_> {
         if intersects {
             row.badges
                 .push(Badge::new("intersect", Tint::Plain, "intersect"));
+        }
+        if surface(part, f) {
+            row.badges
+                .push(Badge::new("sheet", Tint::Info, SURFACE_TIP));
         }
         if let Some((t, colour, badges)) = mark {
             text.push_str(&t);
@@ -892,8 +934,23 @@ impl Builder<'_> {
             .feature(solid)
             .and_then(|f| f.import.as_ref())
             .map(|i| i.reference);
-        let mut title = if tool {
+        // A consumed body isn't among the shown ones: a sew's or
+        // thicken's is a sheet.
+        let sheet = shown.map_or_else(
+            || {
+                tool && part.features.iter().any(|f| {
+                    f.consumes.iter().any(|c| c == solid)
+                        && matches!(f.ty.as_deref(), Some("sew" | "thicken"))
+                })
+            },
+            |s| s.sheet,
+        );
+        let mut title = if tool && sheet {
+            format!("{solid} (sheet, consumed)")
+        } else if tool {
             format!("{solid} (tool, consumed)")
+        } else if sheet {
+            format!("{solid} ({})", sheet_text(shown.and_then(|s| s.boundaries)))
         } else if import == Some(true) {
             format!("{solid} (solid, reference)")
         } else {
@@ -910,7 +967,8 @@ impl Builder<'_> {
         if hidden {
             title.push_str(" (hidden)");
         }
-        let mut row = Row::new(format!("solid:{reference}"), depth, "cube-focus", title);
+        let icon = if sheet { "sheet" } else { "cube-focus" };
+        let mut row = Row::new(format!("solid:{reference}"), depth, icon, title);
         row.strong = !tool;
         row.open = !tool;
         row.body = Some(key);
@@ -1040,7 +1098,7 @@ impl Builder<'_> {
                 [] => self.feature(part, f, 1, Some(me)),
                 // A solid shows where its founder is listed; what acts on
                 // solids shows in them, a consumed solid under its boolean.
-                [s] if *s == f.id && f.operation.is_none() && part.solid(s).is_some() => {
+                [s] if f.founds() && part.solid(s).is_some() => {
                     let s = s.clone();
                     self.solid(part, &s, false, 1, Some(me));
                 }
@@ -1890,6 +1948,97 @@ mod tests {
         ] {
             assert!(shown.iter().any(|t| t == line), "{line:?} in {shown:#?}");
         }
+    }
+
+    #[test]
+    fn sheets_and_surface_features_take_their_glyphs() {
+        let mut m = Model::default();
+        m.apply_part(&json!({"part": "p", "revision": "r1", "features": [
+            {"id": "s", "type": "sketch", "ok": true, "sketch": {"state": "well", "dof": 0}},
+            {"id": "w", "type": "extrude", "ok": true, "hash": "1", "solids": ["w"],
+             "uses": ["s"]},
+            {"id": "pl", "type": "planar", "ok": true, "hash": "2", "solids": ["pl"],
+             "uses": ["s"]},
+            {"id": "f", "type": "fill", "ok": true, "hash": "3", "solids": ["f"]},
+            {"id": "x", "type": "extract", "ok": true, "hash": "4", "solids": ["x"]},
+            {"id": "sw", "type": "sew", "ok": true, "hash": "5", "solids": ["sw"],
+             "operation": "new", "consumes": ["w", "pl"], "uses": ["w", "pl"]},
+            {"id": "t", "type": "thicken", "ok": true, "hash": "6", "solids": ["t"],
+             "operation": "new", "consumes": ["f"], "uses": ["f"]},
+            {"id": "t2", "type": "thicken", "ok": true, "hash": "7", "solids": ["t"],
+             "operation": "intersect", "uses": ["x"]}],
+            "solids": [
+                {"solid": "x", "ok": true, "features": ["x"], "hash": "4",
+                 "kind": "sheet", "boundaries": 2, "closed": false},
+                {"solid": "sw", "ok": true, "features": ["sw"], "hash": "5",
+                 "kind": "sheet", "boundaries": 0, "closed": true},
+                {"solid": "t", "ok": true, "features": ["t", "t2"], "hash": "7",
+                 "kind": "solid"}]}));
+        let (states, pdm) = (States::default(), BTreeMap::new());
+        let rows = rows(&source(&m, &states, &pdm));
+        let row = |id: &str| {
+            rows.iter()
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("{id}"))
+        };
+        assert_eq!(
+            ["x", "sw", "t"].map(|f| row(&format!("feature:p/{f}")).icon),
+            ["extract", "sew", "thicken"]
+        );
+        // Those under consumed sheets' closed rows, by their types.
+        assert_eq!(
+            ["planar", "fill"].map(|t| type_icon(t, None, None)),
+            ["planar-face", "fill"]
+        );
+        // A sheet's row: the sheet glyph and its boundaries; a solid's as
+        // ever.
+        assert_eq!(row("solid:p/x").icon, "sheet");
+        assert_eq!(row("solid:p/x").text, "x (sheet, 2 boundaries)");
+        assert_eq!(row("solid:p/sw").text, "sw (sheet, closed)");
+        // A new sew founds its body: listed where it is, as `sew` alone.
+        assert_eq!(row("feature:p/sw").text, "sw (sew)");
+        assert_eq!(row("solid:p/t").icon, "cube-focus");
+        // An intersecting thicken takes the intersect badge, as an extrude.
+        assert!(
+            row("feature:p/t2")
+                .badges
+                .iter()
+                .any(|b| b.icon == "intersect")
+        );
+        // The sheets a sew and a thicken consumed, under them, weak.
+        let shown = texts(&rows, &Tree::default());
+        for line in [
+            "w (sheet, consumed)",
+            "pl (sheet, consumed)",
+            "f (sheet, consumed)",
+        ] {
+            assert!(
+                shown.iter().any(|t| t.trim() == line),
+                "{line:?} in {shown:#?}"
+            );
+        }
+        // A surface extrude: a badge says it makes a sheet.
+        let mut m2 = Model::default();
+        m2.apply_part(&json!({"part": "q", "revision": "r", "features": [
+            {"id": "e", "type": "extrude", "ok": true, "hash": "1", "solids": ["e"]},
+            {"id": "b", "type": "extrude", "ok": true, "hash": "2", "solids": ["b"]}],
+            "solids": [
+                {"solid": "e", "ok": true, "features": ["e"], "hash": "1", "kind": "sheet",
+                 "boundaries": 1},
+                {"solid": "b", "ok": true, "features": ["b"], "hash": "2", "kind": "solid"}]}));
+        let rows2 = super::rows(&source(&m2, &states, &pdm));
+        let badged = |id: &str| {
+            rows2
+                .iter()
+                .find(|r| r.id == id)
+                .unwrap()
+                .badges
+                .iter()
+                .any(|b| b.icon == "sheet" && b.tip == SURFACE_TIP)
+        };
+        assert!(badged("feature:q/e"));
+        assert!(!badged("feature:q/b"));
+        assert_eq!(sheet_text(None), "sheet");
     }
 
     #[test]

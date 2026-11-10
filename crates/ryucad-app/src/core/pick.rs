@@ -9,7 +9,8 @@
 //! face the working files no longer have is picked in the ghost, where
 //! nothing of the model is nearer. With section planes, nothing they cut
 //! away is picked, and a cap (where the nearest surface left is a back
-//! face) picks nothing and hides what is behind it.
+//! face) picks nothing and hides what is behind it. A sheet (ryucad 18)
+//! has no inside: its back faces pick as its front, and are never a cap.
 
 use crate::core::compare::Compare;
 use crate::core::datums::Mark;
@@ -54,6 +55,8 @@ struct Body {
     pose: Pose,
     lo: [f64; 3],
     hi: [f64; 3],
+    /// A sheet's body: its back faces pick (ryucad 18).
+    sheet: bool,
 }
 
 /// A box by its least and greatest corners.
@@ -94,6 +97,7 @@ impl Body {
             pose,
             lo,
             hi,
+            sheet: false,
         })
     }
 
@@ -294,6 +298,8 @@ pub struct Seen<'a> {
     pub pose: Pose,
     pub lo: [f64; 3],
     pub hi: [f64; 3],
+    /// A sheet's body, drawn two-sided (ryucad 18).
+    pub sheet: bool,
 }
 
 /// Where an entity is drawn.
@@ -530,7 +536,10 @@ impl Picker {
                     }
                 };
                 let first = model.mesh_of(key).unwrap_or(b);
-                Body::placed(key.clone(), Arc::clone(b), Arc::clone(first), pose, local)
+                let mut body =
+                    Body::placed(key.clone(), Arc::clone(b), Arc::clone(first), pose, local)?;
+                body.sheet = model.is_sheet(key);
+                Some(body)
             })
             .collect();
         drop(boxes);
@@ -865,6 +874,7 @@ impl Picker {
                     pose: b.pose,
                     lo: b.lo,
                     hi: b.hi,
+                    sheet: b.sheet,
                 }
             })
             .collect()
@@ -927,9 +937,10 @@ impl Picker {
                         && !self.cut_away([0, 1, 2].map(|k| wo[k] + wd[k] * t))
                     {
                         // Counterclockwise from outside: its normal points
-                        // out, against a ray that meets its front.
+                        // out, against a ray that meets its front. A
+                        // sheet has no inside: its back is no cap.
                         let n = cross(sub(tri[1], tri[0]), sub(tri[2], tri[0]));
-                        let front = dot(n, d) < 0.0;
+                        let front = dot(n, d) < 0.0 || b.sheet;
                         face = Some((t, name_hex(&f.name), b.key.clone(), i, front));
                     }
                 }
@@ -1449,6 +1460,45 @@ mod tests {
         // Dropping every mesh is a new generation: a new picker.
         model.clear_meshes();
         assert!(picker.stale(&model));
+    }
+
+    #[test]
+    fn a_sheets_back_faces_pick_and_are_never_caps() {
+        // The unit square seen from below: a solid's face is a cap there,
+        // a sheet's is its face.
+        let face = format!("p/f/{}", "01".repeat(16));
+        let camera = view::frame(
+            [0.0; 3],
+            [1.0, 1.0, 0.0],
+            StandardView::Bottom,
+            view::DEFAULT_PROJECTION,
+        );
+        let pr = Projector::new(&camera, 1.0, [0.5, 0.5, 0.0], 1.0);
+        let size = [400.0, 400.0];
+        let n = pr.ndc([0.5, 0.5, 0.0]).unwrap();
+        let px = [(n[0] + 1.0) / 2.0 * size[0], (1.0 - n[1]) / 2.0 * size[1]];
+        let picked = |model: &Model| Picker::new(model).pick(&pr, size, px).map(|h| h.entity);
+        let solid = square_model();
+        assert_eq!(picked(&solid), None);
+        let mut sheet = square_model();
+        sheet.parts.insert(
+            "p".into(),
+            crate::core::model::Part::from_report(&serde_json::json!({"part": "p",
+                "solids": [{"solid": "f", "ok": true, "features": ["f"], "hash": "h",
+                            "kind": "sheet", "boundaries": 1}]})),
+        );
+        assert_eq!(picked(&sheet), Some(face.clone()));
+        let picker = Picker::new(&sheet);
+        assert!(picker.seen(|_, _| Sight::In).iter().all(|b| b.sheet));
+        // Cut away above z = 0.5: the sheet below still picks, uncapped.
+        let above = ryucad::section::Plane::new([0.0, 0.0, 0.5], [0.0, 0.0, 1.0]).unwrap();
+        assert_eq!(
+            Picker::new(&sheet)
+                .with_sections(&[above])
+                .pick(&pr, size, px)
+                .map(|h| h.entity),
+            Some(face)
+        );
     }
 
     #[test]
