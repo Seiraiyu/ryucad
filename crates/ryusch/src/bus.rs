@@ -165,6 +165,46 @@ pub fn stub_len<'a>(names: impl IntoIterator<Item = &'a str>) -> Nm {
     ((w + 2 * GRID - 1) / GRID * GRID).max(STUB)
 }
 
+/// The room a member pin of a bus leaving its part's sheet may need, as
+/// placement reserves a label's: its stub, entry, a trunk out from the
+/// spine and the bus's off-sheet connector. `None` for a pin on no bus of
+/// which its part has [`MIN_MEMBERS`] pins.
+pub fn leaving_room(
+    block: &Block,
+    p: usize,
+    k: usize,
+    end: Point,
+    side: Side,
+) -> Option<crate::geom::Rect> {
+    let n = block.parts[p].pins[k].net?;
+    let b = block.buses.iter().position(|b| {
+        b.members.contains(&n)
+            && b.members
+                .iter()
+                .filter(|m| block.parts[p].pins.iter().any(|x| x.net == Some(**m)))
+                .count()
+                >= MIN_MEMBERS
+    })?;
+    let members: Vec<usize> = block.buses[b]
+        .members
+        .iter()
+        .copied()
+        .filter(|m| block.parts[p].pins.iter().any(|x| x.net == Some(*m)))
+        .collect();
+    let stub = stub_len(members.iter().map(|m| block.nets[*m].name.as_str()));
+    let name = name(block, b, &members);
+    let flag = crate::label::label_box(
+        crate::layout::LabelKind::OffSheet,
+        &name,
+        [0, 0],
+        Side::Right,
+    );
+    let reach = stub + ENTRY + 4 * GRID + flag.width();
+    let d = side.step();
+    let far = [end[0] + d[0] / GRID * reach, end[1]];
+    crate::geom::Rect::of([[end[0], end[1] - 2 * GRID], [far[0], end[1] + 2 * GRID]])
+}
+
 /// From a member pin's end pointing `side`, with stubs `stub` long: the
 /// stub's end and the entry's end on the spine (the entry turns down the
 /// page from the stub, so a column of entries steps one way).

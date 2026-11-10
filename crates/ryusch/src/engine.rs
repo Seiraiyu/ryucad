@@ -3915,6 +3915,50 @@ fn draw_bus(
         spines.push(spine);
     }
     let mut trunk = Vec::new();
+    let name = crate::bus::name(block, i, &bundle.members);
+    let mut connector = None;
+    if let [(mid, side)] = ends[..] {
+        // One end: the members leave the sheet. A short trunk out from the
+        // spine's middle along the pins' way (else from its top going up,
+        // or its bottom going down, then out) ends at the bus's connector.
+        let d = side.step();
+        let out = |p: Point, k: Nm| [p[0] + d[0] * k, p[1]];
+        let [top, bottom] = spines[0];
+        let tries: Vec<Vec<Point>> = vec![
+            vec![mid, out(mid, 4)],
+            vec![
+                top,
+                [top[0], top[1] + 2 * GRID],
+                out([top[0], top[1] + 2 * GRID], 4),
+            ],
+            vec![
+                bottom,
+                [bottom[0], bottom[1] - 2 * GRID],
+                out([bottom[0], bottom[1] - 2 * GRID], 4),
+            ],
+        ];
+        let found = tries.into_iter().find_map(|run| {
+            let at = *run.last().expect("a run");
+            let b = label::label_box(LabelKind::OffSheet, &name, at, side);
+            (field.can_mark(id, &run) && field.clear_label(b)).then_some((run, at, b))
+        });
+        let (run, at, b) = found.ok_or_else(|| {
+            format!(
+                "no room for its off-sheet connector beside {}",
+                block.parts[bundle.ends[0].0.part].refdes
+            )
+        })?;
+        field
+            .mark(id, &run)
+            .map_err(|_| "no room for its trunk".to_owned())?;
+        field.block_label(b);
+        trunk.push(run);
+        connector = Some(crate::layout::BusConnector {
+            at,
+            side,
+            text: name.clone(),
+        });
+    }
     if let [(from, side), _] = ends[..] {
         let target: BTreeSet<route::Node> = route::expand(&spines[1]).into_iter().collect();
         let path = field.search(id, from, side, &target).ok_or_else(|| {
@@ -3930,9 +3974,8 @@ fn draw_bus(
             .map_err(|_| "no way for its trunk".to_owned())?;
         trunk.push(run);
     }
-    // The bundle's name on its trunk.
-    let name = crate::bus::name(block, i, &bundle.members);
-    if let Some(run) = trunk.first() {
+    // The bundle's name on its trunk, where no connector says it.
+    if let Some(run) = trunk.first().filter(|_| connector.is_none()) {
         let side = label::pointing(LabelKind::Net, toward(run[0], run[1]));
         if let Some((p, anchor, _)) = label::drawn(LabelKind::Net, &name, run[0], side).text {
             let b = crate::font::text_box(&name, crate::font::SIZE, p, anchor);
@@ -3945,7 +3988,7 @@ fn draw_bus(
     Ok(DrawnBus {
         trunk,
         entries,
-        connector: None,
+        connector,
     })
 }
 
@@ -6099,5 +6142,38 @@ mod tests {
         let out = lay(&b);
         assert!(out.layout.buses.is_empty());
         assert!(crate::rules::check(&b, &out.layout).is_empty());
+    }
+
+    #[test]
+    fn a_bus_leaving_its_sheet_takes_one_connector() {
+        let mut b = crate::testing::bus_block();
+        b.instructions.insert(
+            "i1".into(),
+            Instruction::Sheet {
+                parts: vec!["u2".into()],
+                sheet: "Away".into(),
+            },
+        );
+        let out = lay(&b);
+        assert!(
+            crate::rules::check(&b, &out.layout).is_empty(),
+            "{:?}",
+            crate::rules::check(&b, &out.layout)
+        );
+        assert_ne!(out.layout.placed["u1"].sheet, out.layout.placed["u2"].sheet);
+        let drawn = out.layout.buses.get("bus:q").expect("drawn");
+        assert_eq!(drawn.len(), 2, "on both sheets: {:?}", out.notes);
+        for bus in drawn.values() {
+            assert_eq!(bus.entries.len(), 4);
+            let c = bus.connector.as_ref().expect("a connector");
+            assert_eq!(c.text, "QSPI_SD[0..3]");
+        }
+        for i in 0..4 {
+            let k = format!("d{i}");
+            assert!(
+                out.layout.labels.get(&k).is_none_or(|v| v.is_empty()),
+                "{k}"
+            );
+        }
     }
 }

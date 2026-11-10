@@ -316,7 +316,7 @@ fn bus_items(block: &Block, layout: &Layout, sid: &str, items: &mut Vec<Item>) {
             Some(b) => crate::bus::name(block, b, &members),
             None => key.clone(),
         };
-        if let Some(run) = drawn.trunk.first()
+        if let Some(run) = drawn.trunk.first().filter(|_| drawn.connector.is_none())
             && run.len() >= 2
         {
             let d = [run[1][0] - run[0][0], run[1][1] - run[0][1]];

@@ -141,6 +141,9 @@ impl Cluster {
                         at.end,
                         at.side,
                     ));
+                    if let Some(b) = crate::bus::leaving_room(block, p, k, at.end, at.side) {
+                        r = r.union(b);
+                    }
                 }
             }
         }
