@@ -6,12 +6,11 @@
           "drawing_view_uncertain": 4,
           "dwg_hole_uncalled": 3,
           "dwg_outside": 1,
-          "dwg_text_overlap": 9,
-          "dwg_view_overlap": 5,
+          "dwg_text_overlap": 4,
           "instances_interfere": 2
         },
         "errors": 0,
-        "warnings": 24
+        "warnings": 14
       },
       "drawings": {
         "gearbox/main": {
@@ -28,12 +27,11 @@
           },
           "findings": {
             "drawing_view_uncertain": 1,
-            "dwg_hole_uncalled": 3,
-            "dwg_text_overlap": 5
+            "dwg_hole_uncalled": 3
           },
-          "pdf": "894ae446cbddf71a59c2f66019c87fbdc34826f4a38f89510132e0c4011bc077",
+          "pdf": "db81075398389e6ad9709b5a9ad401ec4d7505293a15a223d4c2f299c7fcb708",
           "scores": {
-            "s1": 76
+            "s1": 91
           },
           "views": {
             "v1": {
@@ -53,12 +51,11 @@
             "d1": "12X ⌀5.00 ↧14.00"
           },
           "findings": {
-            "dwg_outside": 1,
-            "dwg_view_overlap": 1
+            "dwg_outside": 1
           },
           "pdf": "4a26b1d738791943744f627a2a7fea75064a43d11458ed3d45e707bcb1fec528",
           "scores": {
-            "s1": 85
+            "s1": 95
           },
           "views": {
             "v1": {
@@ -184,12 +181,11 @@
           },
           "findings": {
             "drawing_view_uncertain": 1,
-            "dwg_text_overlap": 1,
-            "dwg_view_overlap": 3
+            "dwg_text_overlap": 1
           },
           "pdf": "b70d33ab13aa9b36c696d562504cb098f7226ccae644eb00e87eec0d4e2222ad",
           "scores": {
-            "s1": 67
+            "s1": 97
           },
           "views": {
             "v1": {
@@ -294,12 +290,11 @@
           },
           "findings": {
             "drawing_view_uncertain": 1,
-            "dwg_text_overlap": 1,
-            "dwg_view_overlap": 1
+            "dwg_text_overlap": 1
           },
           "pdf": "cfacbb3678712a52a735cfc1285ec7ab42e71726ab5b9deceec27cb6965d55d8",
           "scores": {
-            "s1": 87
+            "s1": 97
           },
           "views": {
             "v1": {
@@ -499,11 +494,10 @@
       "check": {
         "codes": {
           "dwg_hole_uncalled": 2,
-          "dwg_outside": 2,
-          "dwg_text_overlap": 2
+          "dwg_outside": 1
         },
         "errors": 0,
-        "warnings": 6
+        "warnings": 3
       },
       "drawings": {
         "corner-bracket/main": {
@@ -570,12 +564,11 @@
           },
           "findings": {
             "dwg_hole_uncalled": 2,
-            "dwg_outside": 2,
-            "dwg_text_overlap": 2
+            "dwg_outside": 1
           },
-          "pdf": "fd656d0872b1748e5b60b116a65390b6000894b0319b217f615f447c26ea496c",
+          "pdf": "226864cd7d6436519e1526171166d1b72e3cddc1328585fbb3bc5eb5a64646b3",
           "scores": {
-            "s1": 78
+            "s1": 89
           },
           "views": {
             "v1": {
@@ -695,23 +688,21 @@
         "codes": {
           "drawing_view_failed": 2,
           "drawing_view_uncertain": 4,
-          "dwg_balloon_missing": 13,
-          "dwg_view_overlap": 4
+          "dwg_balloon_missing": 13
         },
         "errors": 2,
-        "warnings": 21
+        "warnings": 17
       },
       "drawings": {
         "crankcase/main": {
           "annotations": {},
           "findings": {
             "drawing_view_failed": 1,
-            "drawing_view_uncertain": 3,
-            "dwg_view_overlap": 3
+            "drawing_view_uncertain": 3
           },
           "pdf": "86f39645cdf2b08b1731b8283e58c041f1fd2bdbd1109b1b5d6987f1cbf5bfa5",
           "scores": {
-            "s1": 70
+            "s1": 100
           },
           "views": {
             "v1": {
@@ -784,12 +775,11 @@
         "propeller/main": {
           "annotations": {},
           "findings": {
-            "drawing_view_uncertain": 1,
-            "dwg_view_overlap": 1
+            "drawing_view_uncertain": 1
           },
           "pdf": "21d475363a14f3f75f7f6be4db27b83809ee22abcc30821450c4f4a4f91d3193",
           "scores": {
-            "s1": 90
+            "s1": 100
           },
           "views": {
             "v1": {
