@@ -5090,6 +5090,95 @@ fn annotations_section(golden: &mut Golden) {
     }
 }
 
+/// Redline marks (design 423) over the showcase from a corner: an arrow
+/// from the box's top to the sphere, an ellipse round the cone, a face
+/// stroke along the box's top, a text: the marks as the file keeps them
+/// with their touches, `annotation.show`'s words for them, and
+/// `render --annotation`'s pixels, on one thread and on four.
+fn redlines_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("redlines");
+    let run = || {
+        let (dir, mut session) = showcase();
+        let call = |session: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+            ryucad::server::handle(
+                session,
+                ryucad::proto::Request::from_rpc(m, Some(p)).unwrap(),
+            )
+            .unwrap()
+        };
+        let camera = ryucad::view::Camera {
+            eye: [0.16, -0.14, 0.12],
+            target: [0.03, 0.02, 0.012],
+            up: [0.0, 0.0, 1.0],
+            projection: ryucad::view::Projection::Orthographic { height: 0.11 },
+        };
+        let plane = ryucad::redline::Plane::of(&camera);
+        let (top, ball, cone) = (
+            plane.xy([0.005, 0.01, 0.03]),
+            plane.xy([0.0, 0.04, 0.01]),
+            plane.xy([0.06, 0.0, 0.01]),
+        );
+        let a = call(
+            &mut session,
+            "annotation.create",
+            json!({
+            "comment": "move the ball here, and round this",
+            "camera": {"eye": ["160 mm", "-140 mm", "120 mm"], "target": ["30 mm", "20 mm", "12 mm"],
+                       "up": [0, 0, 1], "projection": {"orthographic": {"height": "110 mm"}}},
+            "marks": {"part": "show", "list": [
+                {"kind": "arrow", "in": "view", "xy_m": [ball, top]},
+                {"kind": "ellipse", "in": "view", "xy_m": [[cone[0] - 0.012, cone[1] - 0.012], [cone[0] + 0.012, cone[1] + 0.012]]},
+                {"kind": "stroke", "in": "face", "on": "show/box",
+                 "points_m": [[0.001, 0.005, 0.03], [0.005, 0.01, 0.03], [0.009, 0.015, 0.03]]},
+                {"kind": "text", "in": "view", "xy_m": [[0.02, 0.03]], "text": "R2"}]}}),
+        );
+        let id = a["annotation"]["id"].as_str().unwrap().to_owned();
+        let file: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join(format!("annotations/{id}.json"))).unwrap(),
+        )
+        .unwrap();
+        let mut out = vec![ryucad::doc::canonical::to_string(&file["marks"])];
+        let shown = call(&mut session, "annotation.show", json!({"id": id}));
+        // Each touch's `now` is `inspect`'s, which other sections pin.
+        let mut words = shown["marks"].clone();
+        for m in words.as_array_mut().unwrap() {
+            for t in m["touches"].as_array_mut().unwrap() {
+                t.as_object_mut().unwrap().remove("now");
+            }
+        }
+        out.push(ryucad::doc::canonical::to_string(&words));
+        let req = ryucad::proto::Request::from_rpc(
+            "render",
+            Some(json!({"annotation": id, "width": 320, "height": 240})),
+        )
+        .unwrap();
+        let png = ryucad::server::handle_safely(&mut Some(session), None, None, dir.path(), req)
+            .unwrap()
+            .binary
+            .unwrap();
+        let mut r = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; r.output_buffer_size().unwrap()];
+        let info = r.next_frame(&mut buf).unwrap();
+        out.push(format!("{:x}", md(&buf[..info.buffer_size()])));
+        out
+    };
+    let on = |n: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+            .install(run)
+    };
+    let (one, four) = (on(1), on(4));
+    assert_eq!(one, four);
+    for line in &one {
+        s.str(line);
+    }
+}
+
 /// The showcase drawn (design 417, plan 9.A): its standard views, and
 /// the top view with hidden lines dashed, laid out by ryucad on an ANSI B
 /// sheet, and an ISO drawing in first angle: each drawing's
@@ -5475,6 +5564,7 @@ sections! {
     trims => trims_section(&mut golden),
     thickens => thickens_section(&mut golden),
     annotations => annotations_section(&mut golden),
+    redlines => redlines_section(&mut golden),
     drawings => drawings_section(&mut golden),
     drawing_sections => drawing_sections_section(&mut golden),
     drawing_annotations => drawing_annotations_section(&mut golden),

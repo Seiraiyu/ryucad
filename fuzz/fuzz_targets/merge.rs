@@ -7,7 +7,7 @@
 //! import made, `0xfd` the material library, `0xfc` a named view (its
 //! sections and explode too), `0xfb` an appearance, `0xfa` an explode,
 //! `0xf9` a lock, `0xf8` a manifest's dependencies, `0xf7` a datum
-//! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft, `0xf2` a mirror or split, `0xf1` an annotation, `0xf0` a base
+//! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft, `0xf2` a mirror or split, `0xf1` an annotation (marks on either side, design 423), `0xf0` a base
 //! flange or flange, `0xef` a planar face or a surface extrude, `0xee` an
 //! unfold or refold, `0xed` a face tweak, `0xec` a thicken or a fill (by the
 //! parity of the edit bytes), `0xeb` a draft, `0xea` a split by a tool. Merging must never panic, must give the same bytes twice,
@@ -1202,7 +1202,7 @@ fn text(v: &Value) -> Vec<u8> {
 fn edit_annotation(v: &mut Value, op: u8, arg: u8) {
     let o = v.as_object_mut().unwrap();
     let who = |n: u8| json!({"participant": format!("p{}", n % 3), "kind": "agent"});
-    match op % 5 {
+    match op % 7 {
         // A reply, numbered one past the largest, as ryucad numbers it.
         0 => {
             let replies = o.get_mut("replies").unwrap().as_object_mut().unwrap();
@@ -1235,6 +1235,26 @@ fn edit_annotation(v: &mut Value, op: u8, arg: u8) {
         }
         3 => {
             o.insert("comment".into(), json!(format!("c{arg}")));
+        }
+        // Marks on either side (design 423): a line whose end is the
+        // byte, or an arrow and a face stroke, at format 2.
+        4 => {
+            let x = f64::from(arg) / 1000.0;
+            let list = if arg % 2 == 0 {
+                json!([{"kind": "line", "in": "view", "xy_m": [[0, 0], [x, 0.001]], "touches": []}])
+            } else {
+                json!([{"kind": "arrow", "in": "view", "xy_m": [[0, 0], [0.001, x]],
+                        "touches": [{"at": "tip", "ref": format!("p/b/{:032x}", arg)}]},
+                       {"kind": "stroke", "in": "face", "on": "p/b",
+                        "points_m": [[0, 0, 0], [x, 0, 0]], "touches": []}])
+            };
+            o.insert("format".into(), json!(2));
+            o.insert("marks".into(), json!({"part": "p", "list": list}));
+        }
+        // Marks taken away: format 1 again.
+        5 => {
+            o.remove("marks");
+            o.insert("format".into(), json!(1));
         }
         _ => {
             o.insert(
@@ -1331,7 +1351,10 @@ fuzz_target!(|data: &[u8]| {
                          "by": {"participant": "dave", "kind": "human"},
                          "at": "2026-11-05T14:02:11Z", "status": "open", "claimed_by": null,
                          "pins": [{"ref": format!("p/b/{:032x}", 1)}],
-                         "comment": "move it", "view": null, "change": null,
+                         "comment": "move it",
+                         "view": {"eye_m": [0.3, -0.3, 0.3], "target_m": [0, 0, 0], "up": [0, 0, 1],
+                                  "projection": "perspective", "fov_deg": 40},
+                         "change": null,
                          "replies": {"r1": {"by": {"participant": "agent", "kind": "agent"},
                                             "at": "2026-11-05T14:05:00Z", "text": "ok"}},
                          "resolution": null}),
