@@ -5534,6 +5534,70 @@ fn a_shells_thickness_and_a_splits_flip_are_edited_from_their_forms() {
 }
 
 #[test]
+fn a_thickens_front_and_a_fills_tolerance_are_edited_from_their_forms() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_surfaces();
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        loaded(a)
+            && ["t", "f"].iter().all(|f| {
+                a.opened().ws.model.parts["p"]
+                    .feature(f)
+                    .is_some_and(|f| f.hash.is_some())
+            })
+    });
+    h.step();
+    // The sheets' rows say what they are.
+    h.get_by_label("f (sheet, 1 boundary)");
+    h.get_by_label("sw (sheet, closed)");
+    let saved = |h: &mut Harness<'static, App>| {
+        frames(h, |a| {
+            a.opened()
+                .ws
+                .form
+                .as_ref()
+                .is_some_and(|f| !f.saving && !f.dirty())
+        });
+    };
+    h.get_by_label("t (thicken)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| f.surface_form.is_some())
+    });
+    h.step();
+    let front = h.get_by_role_and_label(egui::accesskit::Role::TextInput, "front");
+    front.set_text_value_accesskit("3 mm");
+    h.step();
+    h.get_by_label("Apply").click();
+    saved(&mut h);
+    let shown = p.ok(&["feature", "show", "p", "t"]);
+    assert_eq!(shown["front"]["value"], "3 mm");
+    h.get_by_label("f (fill)").click();
+    frames(&mut h, |a| {
+        a.opened().ws.form.as_ref().is_some_and(|f| {
+            matches!(
+                f.surface_form,
+                Some(ryucad_app::core::edit::SurfaceForm::Fill(_))
+            )
+        })
+    });
+    h.step();
+    let tolerance = h.get_by_role_and_label(egui::accesskit::Role::TextInput, "tolerance");
+    tolerance.set_text_value_accesskit("0.002 mm");
+    h.step();
+    h.get_by_label("Apply").click();
+    saved(&mut h);
+    let shown = p.ok(&["feature", "show", "p", "f"]);
+    assert_eq!(shown["tolerance"]["value"], "0.002 mm");
+}
+
+#[test]
 fn a_flanges_angle_and_a_base_flanges_k_factor_are_edited_and_the_part_laid_flat() {
     let _one = one_at_a_time();
     if !gpu() {
