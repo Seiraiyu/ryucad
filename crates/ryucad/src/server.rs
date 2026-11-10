@@ -6985,15 +6985,23 @@ pub(crate) fn render_scene(
     }
     let files = session.snapshot();
     let none = BTreeMap::new();
+    // The annotation `render --annotation` names is drawn once, by its
+    // own block below; the others `--annotations` asks for keep their
+    // numbers.
+    let asked = ask.annotation.as_ref().map(|a| &a.id);
+    let numbers = crate::annotation::numbers(&files);
     if ask.annotations {
         for part in &parts {
             let on = poses.get(part.as_str()).unwrap_or(&none);
-            for (at, n) in crate::annotation::markers(&files, part.as_str(), on) {
+            for (at, n) in crate::annotation::markers(&files, part.as_str(), on, asked) {
                 g.add_marker(at, &n);
             }
         }
         let all = crate::annotation::readable(&crate::annotation::read_all(&files));
-        for a in all.values().filter(|a| a.status.is_open()) {
+        for a in all
+            .values()
+            .filter(|a| a.status.is_open() && Some(&a.id) != asked)
+        {
             if let (Some(m), Some(v)) = (&a.marks, &a.view)
                 && parts.contains(&m.part)
             {
@@ -7010,11 +7018,15 @@ pub(crate) fn render_scene(
         }
     }
     if let Some(a) = &ask.annotation {
+        // Beside the other open annotations, an open one's pins carry its
+        // number, as theirs do; alone, or closed, their place in it.
+        let number = numbers.get(&a.id).filter(|_| ask.annotations);
         for (k, pin) in a.pins.iter().enumerate() {
+            let label = number.map_or_else(|| (k + 1).to_string(), |n| n.to_string());
             for part in &parts {
                 let on = poses.get(part.as_str()).unwrap_or(&none);
                 if let Some(at) = crate::annotation::pin_on(pin, part.as_str(), on) {
-                    g.add_marker(at, &(k + 1).to_string());
+                    g.add_marker(at, &label);
                 }
             }
         }
@@ -8428,6 +8440,70 @@ pub(crate) mod tests {
             before,
             "--annotations draws open marks"
         );
+    }
+
+    #[test]
+    fn an_annotation_rendered_beside_the_open_ones_is_drawn_once() {
+        let (_dir, mut s, view) = crate::annotation::tests::drilled();
+        let boss = crate::annotation::tests::on(&view, [0.045, 0.02, 0.011]);
+        let pin = |x: f64| {
+            vec![crate::proto::PinArg {
+                reference: None,
+                part: Some("plate".into()),
+                point: Some([x, 0.02, 0.005].map(|v| json!(format!("{v} m")))),
+            }]
+        };
+        crate::annotation::create(
+            &mut s,
+            crate::annotation::By::agent("agent"),
+            &pin(0.01),
+            "older",
+            Some(view.clone()),
+            None,
+            &Default::default(),
+        )
+        .unwrap();
+        let marks = crate::proto::MarksArg {
+            part: "plate".into(),
+            short: Vec::new(),
+            list: vec![json!({"kind": "arrow", "in": "view", "xy_m": [[0.0, 0.0], boss]})],
+        };
+        let asked = crate::annotation::create(
+            &mut s,
+            crate::annotation::By::agent("agent"),
+            &pin(0.02),
+            "move it",
+            Some(view.clone()),
+            Some(&marks),
+            &Default::default(),
+        )
+        .unwrap();
+        let id = asked["annotation"]["id"].as_str().unwrap().to_owned();
+        let a = crate::annotation::one(&mut s, &id, None).unwrap();
+        let scene = |s: &mut Session, all: bool| {
+            let mut ask = RenderAsk::pick(
+                "plate",
+                crate::view::Camera::from(&view),
+                Vec::new(),
+                Default::default(),
+            );
+            ask.pick = false;
+            ask.annotations = all;
+            ask.annotation = Some(a.clone());
+            render_scene(s, None, Vec::new(), ask).unwrap().g
+        };
+        // Alone: its arrow (a line and a head) and its pin by its place.
+        let g = scene(&mut s, false);
+        assert_eq!(g.overlay.len(), 2);
+        let labels: Vec<&str> = g.labels.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(labels, ["1"]);
+        // Beside the open ones: still drawn once, its pin under its number
+        // (the second open), the older one's under its own.
+        let g = scene(&mut s, true);
+        assert_eq!(g.overlay.len(), 2, "its marks once");
+        let mut labels: Vec<&str> = g.labels.iter().map(|l| l.text.as_str()).collect();
+        labels.sort_unstable();
+        assert_eq!(labels, ["1", "2"], "each pin once, one numbering");
     }
 
     #[test]
