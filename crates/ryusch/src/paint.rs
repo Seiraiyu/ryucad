@@ -12,7 +12,7 @@ use crate::label;
 use crate::layout::{LabelKind, Layout};
 use crate::route;
 use crate::shape::Shape;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Symbols' lines.
 pub const INK: &str = "#7a1f1f";
@@ -98,6 +98,11 @@ pub struct Painted {
     pub labels: Vec<Placed>,
     /// Each child block's symbol (`instance:<id>`) and its body's box.
     pub blocks: Vec<(String, Rect)>,
+    /// Each block port's flag: its net's key and its body's box (plan 2.C:
+    /// cross-references go under it).
+    pub ports: Vec<(String, Rect)>,
+    /// The keys of every net a pin on the sheet is on.
+    pub nets: BTreeSet<String>,
 }
 
 fn line(items: &mut Vec<Item>, points: Vec<Point>, stroke: &'static str) {
@@ -288,6 +293,16 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
         let shape = Shape::of(part, Place::new(x.at, x.rotation, x.mirror));
         if part.kind == PartKind::Block {
             out.blocks.push((part.key.clone(), shape.body));
+        }
+        for pin in &part.pins {
+            for n in pin.nets() {
+                out.nets.insert(block.nets[n].key.clone());
+            }
+        }
+        if matches!(part.kind, PartKind::Port { .. })
+            && let Some(n) = part.pins.first().and_then(|p| p.drawn_net())
+        {
+            out.ports.push((block.nets[n].key.clone(), shape.body));
         }
         for g in &part.graphics {
             graphic(items, &shape, g);

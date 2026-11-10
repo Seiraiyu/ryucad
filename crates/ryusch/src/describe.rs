@@ -11,7 +11,7 @@ use crate::instr;
 use crate::lint::{Finding, Score};
 use crate::shape::Shape;
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// How far a neighbour may be and still be named.
 const NEAR: i64 = 40 * GRID;
@@ -191,6 +191,29 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
             if fell_back {
                 v["why"] = json!("its wires would run too long or cross too many");
             }
+            // An off-sheet connector's net: the other sheets it continues
+            // on (plan 2.C).
+            let connector = layout.labels.get(&net.key).is_some_and(|l| {
+                l.iter()
+                    .any(|x| &x.sheet == sid && x.kind == crate::layout::LabelKind::OffSheet)
+            });
+            if connector && let Some(n) = block.net(&net.key) {
+                let on: BTreeSet<&String> = block
+                    .parts
+                    .iter()
+                    .filter(|p| p.pins.iter().any(|x| x.nets().contains(&n)))
+                    .filter_map(|p| layout.placed.get(&p.key))
+                    .map(|x| &x.sheet)
+                    .filter(|s| *s != sid)
+                    .collect();
+                v["continues_on"] = json!(on);
+                v["connectors"] = json!(
+                    layout.labels[&net.key]
+                        .iter()
+                        .filter(|x| &x.sheet == sid && x.kind == crate::layout::LabelKind::OffSheet)
+                        .count()
+                );
+            }
             nets.push(v);
         }
         let score = scores.iter().find(|s| &s.sheet == sid);
@@ -317,5 +340,28 @@ mod tests {
             d,
             describe(&b, &crate::engine::lay_out(&b).unwrap(), &f, &s)
         );
+    }
+
+    #[test]
+    fn a_connector_says_where_its_net_continues() {
+        let b = crate::testing::leaving_block();
+        let out = crate::engine::lay_out(&b).unwrap();
+        let (found, scores) = crate::lint::lint(&b, &out);
+        let v = describe(&b, &out, &found, &scores);
+        let away = &out.layout.placed["u2"].sheet;
+        let home = &out.layout.placed["u1"].sheet;
+        let sheets = v["sheets"].as_array().unwrap();
+        let mut seen = 0;
+        for sh in sheets {
+            let id = sh["sheet"].as_str().unwrap();
+            for n in sh["nets"].as_array().unwrap() {
+                if n["net"] == "sig" {
+                    let other = if id == home { away } else { home };
+                    assert_eq!(n["continues_on"], json!([other]), "{n}");
+                    seen += 1;
+                }
+            }
+        }
+        assert_eq!(seen, 2);
     }
 }

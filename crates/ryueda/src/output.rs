@@ -189,6 +189,17 @@ fn xref(pages: &[usize]) -> String {
 
 /// `output`: design `design`'s PDF and what it holds.
 pub fn output(p: &Project, design: Option<&str>, layers: Layers) -> Result<(Value, Vec<u8>)> {
+    let (v, design_name, pages, tree) = output_pages(p, design, layers)?;
+    Ok((v, pdf::write(&design_name, &pages, &tree)))
+}
+
+/// What [`output`] pages: its listing, the design's name, each page and
+/// the bookmarks, before they are written as a PDF.
+fn output_pages(
+    p: &Project,
+    design: Option<&str>,
+    layers: Layers,
+) -> Result<(Value, String, Vec<Page>, Vec<Mark>)> {
     let d = netlist::one_design(p, design)?;
     let root = netlist::design_root(p, &d)?;
     let mut laid: BTreeMap<Id, Laid> = BTreeMap::new();
@@ -282,9 +293,12 @@ pub fn output(p: &Project, design: Option<&str>, layers: Layers) -> Result<(Valu
         let mut built = l.built.clone();
         built.designators(&refdes[s.node]);
         let paint = ryusch::paint::sheet(&built.input, &l.outcome.layout, &s.sheet);
-        for lab in &paint.labels {
-            if let Some(f) = flat_net(&flat_of[s.node], lab) {
-                net_pages.entry(f).or_default().insert(pg);
+        // Every flattened net a pin on the page is on (plan 2.C): a
+        // connector's or a port's cross-reference names the pages its net
+        // is drawn on.
+        for key in &paint.nets {
+            if let Some(f) = flat_of[s.node].get(key) {
+                net_pages.entry(*f).or_default().insert(pg);
             }
         }
         painted.push(paint);
@@ -327,38 +341,36 @@ pub fn output(p: &Project, design: Option<&str>, layers: Layers) -> Result<(Valu
                 });
             }
         }
-        // Each net label: the net's other pages, under it, each a link.
-        for lab in paint.labels.iter().filter(|l| l.kind == LabelKind::Net) {
-            let Some(f) = flat_net(&flat_of[s.node], lab) else {
+        // Each off-sheet connector and each block port's flag: its net's
+        // other pages, under it, each a link (plan 2.C; zones are 2.E's).
+        // A local net label continues nowhere, so it carries none.
+        let mut under: Vec<(String, Rect)> = paint
+            .labels
+            .iter()
+            .filter(|l| l.kind == LabelKind::OffSheet)
+            .map(|l| (l.net.clone(), l.rect))
+            .collect();
+        under.extend(paint.ports.iter().cloned());
+        for (net, rect) in under {
+            let Some(f) = flat_of[s.node].get(&net) else {
                 continue;
             };
-            let others: Vec<usize> = net_pages[&f].iter().copied().filter(|x| *x != pg).collect();
+            let others: Vec<usize> = net_pages
+                .get(f)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|x| *x != pg)
+                .collect();
             if others.is_empty() {
                 continue;
             }
-            let at = [lab.rect.min[0], lab.rect.min[1] - MIN_SIZE];
-            let text = xref(&others);
-            let mut x = at[0] + ryusch::font::width("→ ", MIN_SIZE);
-            for (k, o) in others.iter().enumerate() {
-                let num = (o + 1).to_string();
-                let wn = ryusch::font::width(&num, MIN_SIZE);
-                links.push(Link {
-                    rect: Rect::new([x, at[1] - MIN_SIZE / 4], [x + wn, at[1] + MIN_SIZE]),
-                    to: *o,
-                });
-                x += wn;
-                if k + 1 < others.len() {
-                    x += ryusch::font::width(", ", MIN_SIZE);
-                }
-            }
-            items.push(Item::Text {
-                text,
-                at,
-                size: MIN_SIZE,
-                anchor: Anchor::Start,
-                vertical: false,
-                colour: LABEL,
-            });
+            xref_items(
+                [rect.min[0], rect.min[1] - MIN_SIZE],
+                &others,
+                &mut items,
+                &mut links,
+            );
         }
         listing.push(json!({
             "page": pg + 1,
@@ -433,7 +445,6 @@ pub fn output(p: &Project, design: Option<&str>, layers: Layers) -> Result<(Valu
     } else {
         vec![marks(0, &nodes, &first_page, &sheet_marks, &title)]
     };
-    let bytes = pdf::write(&design_name, &pages, &tree);
     let mut v = json!({
         "design": d,
         "layers": layers,
@@ -453,7 +464,7 @@ pub fn output(p: &Project, design: Option<&str>, layers: Layers) -> Result<(Valu
             .collect();
         v["failed"] = json!(list);
     }
-    Ok((v, bytes))
+    Ok((v, design_name, pages, tree))
 }
 
 /// The layout key of what a pin's connection names.
@@ -466,9 +477,36 @@ fn net_key(n: &crate::conn::Node) -> Option<String> {
     }
 }
 
-/// The flattened net a label of a block occurrence draws.
-fn flat_net(flat: &BTreeMap<String, usize>, lab: &ryusch::paint::Placed) -> Option<usize> {
-    flat.get(&lab.net).copied()
+/// A cross-reference's text at `at` (`→ 2, 3`) and a link on each page
+/// number.
+fn xref_items(
+    at: ryusch::geom::Point,
+    others: &[usize],
+    items: &mut Vec<Item>,
+    links: &mut Vec<Link>,
+) {
+    let text = xref(others);
+    let mut x = at[0] + ryusch::font::width("→ ", MIN_SIZE);
+    for (k, o) in others.iter().enumerate() {
+        let num = (o + 1).to_string();
+        let wn = ryusch::font::width(&num, MIN_SIZE);
+        links.push(Link {
+            rect: Rect::new([x, at[1] - MIN_SIZE / 4], [x + wn, at[1] + MIN_SIZE]),
+            to: *o,
+        });
+        x += wn;
+        if k + 1 < others.len() {
+            x += ryusch::font::width(", ", MIN_SIZE);
+        }
+    }
+    items.push(Item::Text {
+        text,
+        at,
+        size: MIN_SIZE,
+        anchor: Anchor::Start,
+        vertical: false,
+        colour: LABEL,
+    });
 }
 
 #[cfg(test)]
@@ -524,5 +562,83 @@ mod tests {
             .collect();
         assert_eq!(failed, [("s", "ch_a"), ("s", "ch_b")]);
         assert!(bytes.starts_with(b"%PDF-"));
+    }
+
+    /// Each page's texts.
+    fn texts(pages: &[Page]) -> Vec<Vec<String>> {
+        pages
+            .iter()
+            .map(|pg| {
+                pg.items
+                    .iter()
+                    .filter_map(|i| match i {
+                        Item::Text { text, .. } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cross_references_go_on_connectors_and_ports_not_local_labels() {
+        use serde_json::json;
+        // The top block's R2 asked onto a sheet of its own: SDA continues
+        // there from R1's sheet. Block s's port goes back to the top.
+        let r2 = json!({
+            "format": 1,
+            "kind": crate::conn::COMPONENT_KIND,
+            "of": {"id": "r_100k"},
+            "refdes": "R2",
+            "pins": {"1": "sda", "2": {"rail": "gnd"}},
+        });
+        let (dir, _) = crate::netlist::tests::project(&[("blocks/top/components/r2.json", r2)]);
+        let mut session = crate::session::Session::open(&dir.path().join("board")).unwrap();
+        crate::schemcmd::place(
+            &mut session,
+            "top",
+            &["idiom R2 none".to_owned(), "sheet R2 Away".to_owned()],
+            &[],
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        session.reload().unwrap();
+        let p = session.project();
+        let (v, _, pages, _) = output_pages(p, None, Layers::All).unwrap();
+        let listing: Vec<(&str, &str)> = v["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| (x["block"].as_str().unwrap(), x["path"].as_str().unwrap()))
+            .collect();
+        let t = texts(&pages);
+        // The top's two sheets point at each other.
+        assert_eq!(&listing[..2], [("top", ""), ("top", "")], "{listing:?}");
+        assert!(
+            t[0].iter().any(|x| x.starts_with("→") && x.contains('2')),
+            "{:?}",
+            t[0]
+        );
+        assert!(
+            t[1].iter().any(|x| x.starts_with("→") && x.contains('1')),
+            "{:?}",
+            t[1]
+        );
+        // Each layer of block s: its SDA port's flag points back up.
+        for (pg, (b, _)) in listing.iter().enumerate().skip(2) {
+            assert_eq!(*b, "s");
+            assert!(
+                t[pg].iter().any(|x| x.starts_with("→")),
+                "page {}: {:?}",
+                pg + 1,
+                t[pg]
+            );
+        }
+        // A local net label carries none: block s's sheets have no label
+        // but its port's.
+        let arrows = |pg: usize| t[pg].iter().filter(|x| x.starts_with("→")).count();
+        assert_eq!(arrows(2), 1);
     }
 }
