@@ -56,6 +56,7 @@ pub fn state(o: &mut Opened) -> State {
             .and_then(|r| movable_of(&o.ws, &r)),
         moving: o.ws.mover.is_some(),
         mating: o.ws.mating.is_some(),
+        marking: o.ws.markup.as_ref().map(|m| m.tool),
     }
 }
 
