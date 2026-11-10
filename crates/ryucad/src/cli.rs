@@ -1859,6 +1859,38 @@ enum DrawingCmd {
         #[arg(long)]
         rev: Option<String>,
     },
+    /// The drawing lint: its findings with their fixes and each sheet's
+    /// score; --explain CODE gives a rule's entry.
+    Lint {
+        part: Option<String>,
+        drawing: Option<String>,
+        #[arg(long)]
+        rev: Option<String>,
+        #[arg(long)]
+        sheet: Option<String>,
+        #[arg(long, value_name = "CODE")]
+        explain: Option<String>,
+    },
+    /// Sets the drawing lint's rules' weights and severities
+    /// (`default` puts one back), in drawing_lint.json.
+    LintConfigure {
+        #[arg(long, value_name = "CODE=N")]
+        weight: Vec<String>,
+        #[arg(long, value_name = "CODE=off|warning|error|default")]
+        severity: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Add a dimension or a hole callout: the op `edit` sends.
+    #[command(subcommand)]
+    Dim(DrawingDimCmd),
+    /// Add a note: the op `edit` sends.
+    #[command(subcommand)]
+    Note(DrawingNoteCmd),
+    /// Add a feature control frame or a datum feature: the op `edit`
+    /// sends.
+    #[command(subcommand)]
+    Gdt(DrawingGdtCmd),
     /// Lay the views out again from nothing.
     Layout {
         part: String,
@@ -1954,6 +1986,149 @@ enum DrawingViewCmd {
         #[command(flatten)]
         expect: Expect,
     },
+}
+
+#[derive(Subcommand)]
+enum DrawingDimCmd {
+    /// A dimension on a view: linear (--a, --b, --along), angular (--a,
+    /// --b), radius or diameter (--of), ordinate (--datum, --of,
+    /// --along), chamfer or hole_callout (--of). Entities are
+    /// `<solid>/<name>` (in an assembly `<instance>/…/<solid>/<name>`) or
+    /// a datum's ID.
+    Add {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        view: String,
+        #[arg(long = "type", value_parser = ["linear", "angular", "radius", "diameter", "ordinate", "chamfer", "hole_callout"])]
+        kind: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        a: Option<String>,
+        #[arg(long)]
+        b: Option<String>,
+        #[arg(long)]
+        of: Option<String>,
+        #[arg(long)]
+        datum: Option<String>,
+        #[arg(long)]
+        vertex: Option<String>,
+        #[arg(long, value_parser = ["horizontal", "vertical", "aligned"])]
+        along: Option<String>,
+        /// Its line's distance from its feature on the sheet (signed).
+        #[arg(long, allow_hyphen_values = true)]
+        offset: Option<String>,
+        /// Its text's place, relative to the view's centre.
+        #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
+        at: Option<String>,
+        /// Text with <> for the value.
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        prefix: Option<String>,
+        #[arg(long)]
+        suffix: Option<String>,
+        /// ± this.
+        #[arg(long, value_name = "Q", conflicts_with_all = ["deviation", "limits", "fit", "basic", "reference"])]
+        tol: Option<String>,
+        /// Upper and lower deviations, stacked.
+        #[arg(long, value_name = "UPPER,LOWER", allow_hyphen_values = true)]
+        deviation: Option<String>,
+        /// Upper and lower deviations, shown as the limits.
+        #[arg(long, value_name = "UPPER,LOWER", allow_hyphen_values = true)]
+        limits: Option<String>,
+        /// An ISO 286 class or fit: H7, g6, H7/g6.
+        #[arg(long)]
+        fit: Option<String>,
+        #[arg(long)]
+        basic: bool,
+        #[arg(long)]
+        reference: bool,
+        #[arg(long)]
+        precision: Option<u32>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum DrawingNoteCmd {
+    /// A note on a sheet (--sheet) or a view (--view, with an optional
+    /// --leader to an entity); fields `{name}` filled as the title
+    /// block's.
+    Add {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        text: String,
+        #[arg(long, conflicts_with = "view")]
+        sheet: Option<String>,
+        #[arg(long)]
+        view: Option<String>,
+        #[arg(long, requires = "view")]
+        leader: Option<String>,
+        #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
+        at: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum DrawingGdtCmd {
+    /// A feature control frame (--characteristic, --tol, its datums,
+    /// --on an entity or --to a dimension), or a datum feature (--letter
+    /// --on an entity).
+    Add {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        view: String,
+        #[arg(long, conflicts_with = "letter", required_unless_present = "letter")]
+        characteristic: Option<String>,
+        #[arg(long, requires = "characteristic")]
+        tol: Option<String>,
+        #[arg(long)]
+        diameter: bool,
+        /// m, l, e, p, f or t.
+        #[arg(long)]
+        condition: Option<String>,
+        /// A datum letter, repeated in order of precedence (A or A:m).
+        #[arg(long = "datum")]
+        datums: Vec<String>,
+        #[arg(long)]
+        on: Option<String>,
+        #[arg(long, conflicts_with = "on")]
+        to: Option<String>,
+        /// A datum feature's letter.
+        #[arg(long, requires = "on")]
+        letter: Option<String>,
+        #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
+        at: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+/// A pair of lengths `A,B` as two quantities.
+fn pair_of(text: &str) -> core::result::Result<Value, Error> {
+    match text
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [a, b] => Ok(json!([a, b])),
+        _ => Err(Error::new(
+            Code::Usage,
+            format!("{text:?}: expected UPPER,LOWER"),
+        )),
+    }
 }
 
 /// A geometric reference as a drawing writes it: a word (`xy`, `x`,
@@ -5532,6 +5707,205 @@ fn drawing_request(d: &DrawingCmd) -> Result<Request> {
                     .into_owned(),
             ),
         },
+        DrawingCmd::Lint {
+            part,
+            drawing,
+            rev,
+            sheet,
+            explain,
+        } => Request::DrawingLint {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            rev: rev.clone(),
+            sheet: sheet.clone(),
+            explain: explain.clone(),
+        },
+        DrawingCmd::LintConfigure {
+            weight,
+            severity,
+            expect,
+        } => {
+            let split = |t: &String| -> Result<(String, String)> {
+                t.split_once('=')
+                    .map(|(a, b)| (a.to_owned(), b.to_owned()))
+                    .ok_or_else(|| Error::new(Code::Usage, format!("{t:?}: expected CODE=VALUE")))
+            };
+            let mut weights = std::collections::BTreeMap::new();
+            for w in weight {
+                let (c, v) = split(w)?;
+                weights.insert(c, v.parse::<i64>().map_or_else(|_| json!(v), |n| json!(n)));
+            }
+            let mut sev = std::collections::BTreeMap::new();
+            for x in severity {
+                let (c, v) = split(x)?;
+                sev.insert(c, v);
+            }
+            Request::DrawingLintConfigure {
+                weights,
+                severity: sev,
+                expected_revision: expect.revision.clone(),
+            }
+        }
+        DrawingCmd::Dim(DrawingDimCmd::Add {
+            part,
+            drawing,
+            view,
+            kind,
+            id,
+            a,
+            b,
+            of,
+            datum,
+            vertex,
+            along,
+            offset,
+            at,
+            text,
+            prefix,
+            suffix,
+            tol,
+            deviation,
+            limits,
+            fit,
+            basic,
+            reference,
+            precision,
+            expect,
+        }) => {
+            let mut v = json!({"type": kind, "view": view});
+            for (k, x) in [
+                ("a", a),
+                ("b", b),
+                ("of", of),
+                ("datum", datum),
+                ("vertex", vertex),
+                ("along", along),
+                ("offset", offset),
+                ("text", text),
+                ("prefix", prefix),
+                ("suffix", suffix),
+            ] {
+                if let Some(x) = x {
+                    v[k] = json!(x);
+                }
+            }
+            if let Some(a) = at {
+                v["at"] = sheet_point(a)?;
+            }
+            if let Some(p) = precision {
+                v["precision"] = json!(p);
+            }
+            let tolerance = match (tol, deviation, limits, fit) {
+                (Some(t), ..) => Some(json!({"symmetric": t})),
+                (_, Some(d), ..) => Some(json!({"deviation": pair_of(d)?})),
+                (_, _, Some(l), _) => Some(json!({"limits": pair_of(l)?})),
+                (_, _, _, Some(f)) => Some(json!({"fit": f})),
+                _ if *basic => Some(json!({"basic": true})),
+                _ if *reference => Some(json!({"reference": true})),
+                _ => None,
+            };
+            if let Some(t) = tolerance {
+                v["tolerance"] = t;
+            }
+            let mut op = json!({"op": "add", "kind": "annotation", "value": v});
+            if let Some(id) = id {
+                op["id"] = json!(id);
+            }
+            edit(part, drawing, json!([op]), expect)
+        }
+        DrawingCmd::Note(DrawingNoteCmd::Add {
+            part,
+            drawing,
+            text,
+            sheet,
+            view,
+            leader,
+            at,
+            id,
+            expect,
+        }) => {
+            let mut v = json!({"type": "note", "text": text.replace("\\n", "\n")});
+            match (sheet, view) {
+                (_, Some(w)) => v["view"] = json!(w),
+                (Some(sh), None) => v["sheet"] = json!(sh),
+                (None, None) => v["sheet"] = json!("s1"),
+            }
+            if let Some(l) = leader {
+                v["leader"] = json!(l);
+            }
+            if let Some(a) = at {
+                v["at"] = sheet_point(a)?;
+            }
+            let mut op = json!({"op": "add", "kind": "annotation", "value": v});
+            if let Some(id) = id {
+                op["id"] = json!(id);
+            }
+            edit(part, drawing, json!([op]), expect)
+        }
+        DrawingCmd::Gdt(DrawingGdtCmd::Add {
+            part,
+            drawing,
+            view,
+            characteristic,
+            tol,
+            diameter,
+            condition,
+            datums,
+            on,
+            to,
+            letter,
+            at,
+            id,
+            expect,
+        }) => {
+            let mut v = json!({"view": view});
+            match (characteristic, letter) {
+                (Some(c), _) => {
+                    v["type"] = json!("feature_control_frame");
+                    v["characteristic"] = json!(c);
+                    let mut row =
+                        json!({"tolerance": tol.clone().unwrap_or_else(|| "0 mm".into())});
+                    if *diameter {
+                        row["diameter"] = json!(true);
+                    }
+                    if let Some(c) = condition {
+                        row["condition"] = json!(c);
+                    }
+                    if !datums.is_empty() {
+                        row["datums"] = json!(
+                            datums
+                                .iter()
+                                .map(|d| match d.split_once(':') {
+                                    Some((l, c)) => json!({"datum": l, "condition": c}),
+                                    None => json!(d),
+                                })
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                    v["rows"] = json!([row]);
+                    if let Some(o) = on {
+                        v["on"] = json!(o);
+                    }
+                    if let Some(t) = to {
+                        v["to"] = json!(t);
+                    }
+                }
+                (None, Some(l)) => {
+                    v["type"] = json!("datum_feature");
+                    v["letter"] = json!(l);
+                    v["on"] = json!(on);
+                }
+                (None, None) => unreachable!("clap requires one"),
+            }
+            if let Some(a) = at {
+                v["at"] = sheet_point(a)?;
+            }
+            let mut op = json!({"op": "add", "kind": "annotation", "value": v});
+            if let Some(id) = id {
+                op["id"] = json!(id);
+            }
+            edit(part, drawing, json!([op]), expect)
+        }
         DrawingCmd::Layout {
             part,
             drawing,

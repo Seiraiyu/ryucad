@@ -1417,6 +1417,34 @@ pub(crate) fn dispatch(
                 commit,
             )
         }),
+        Request::DrawingLint {
+            part,
+            drawing,
+            rev,
+            sheet,
+            explain,
+        } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+            noted(
+                crate::drawing::request::lint(
+                    s,
+                    part.as_deref(),
+                    drawing.as_deref(),
+                    sheet.as_deref(),
+                    explain.as_deref(),
+                ),
+                commit,
+            )
+        }),
+        Request::DrawingLintConfigure {
+            weights,
+            severity,
+            expected_revision,
+        } => crate::drawing::request::lint_configure(
+            session,
+            &weights,
+            &severity,
+            expected_revision.as_deref(),
+        ),
         Request::ExplodeList { part } => crate::explode::list(session, part.as_deref()),
         Request::ExplodeSave {
             part,

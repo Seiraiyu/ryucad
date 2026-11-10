@@ -6,10 +6,12 @@
 use super::{Built, Placement, SheetBuilt, ViewBuilt, build, output};
 use crate::doc::drawing::{DrawingFile, Key, Size, drawing_file};
 use crate::doc::id::Id;
+use crate::doc::source::Source as _;
 use crate::error::{Code, Error, Result};
 use crate::session::Session;
 use ryu_session::rpc::Answer;
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 
 fn path(session: &Session, part: &Id, drawing: &Id) -> std::path::PathBuf {
     crate::doc::project::part_dir(session.root(), part).join(drawing_file(drawing))
@@ -172,6 +174,7 @@ fn write_built(session: &mut Session, pid: &Id, did: &Id, file: DrawingFile) -> 
     let writes = [(rel.clone(), Some(bytes))].into_iter().collect();
     let mut proposed = session.proposed(&writes)?;
     let built = build(&mut proposed, pid, did)?;
+    refuse_new_faults(session, pid, did, &file, &built)?;
     let file = with_placements(&file, &built);
     let replaced = session.project().part(pid)?.drawings.contains_key(did);
     session.write_json(&at, &file.to_json())?;
@@ -180,6 +183,49 @@ fn write_built(session: &mut Session, pid: &Id, did: &Id, file: DrawingFile) -> 
     v["replaced"] = json!(replaced);
     v["revision"] = json!(session.project().part(pid)?.revision);
     Ok(v)
+}
+
+/// Refuses a write whose annotations, added or changed by it, can't be
+/// built (an entity that doesn't resolve, a foreshortened dimension, a
+/// fit the standard doesn't define): with every one's fault, the first's
+/// code its own. Annotations it leaves as they were may fail: they are
+/// the model's doing, kept and reported, never refused.
+fn refuse_new_faults(
+    session: &Session,
+    pid: &Id,
+    did: &Id,
+    file: &DrawingFile,
+    built: &Built,
+) -> Result<()> {
+    let before = session
+        .project()
+        .part(pid)
+        .ok()
+        .and_then(|p| p.drawings.get(did))
+        .and_then(|f| f.as_ref().ok())
+        .map(|f| f.annotations.clone())
+        .unwrap_or_default();
+    let mut faults: Vec<&Error> = Vec::new();
+    for a in built.sheets.iter().flat_map(|s| &s.annotations) {
+        let (Some(e), Some(now)) = (&a.error, file.annotations.get(&a.key)) else {
+            continue;
+        };
+        if before.get(&a.key).is_some_and(|b| b == now) {
+            continue;
+        }
+        faults.push(e);
+    }
+    let Some(first) = faults.first() else {
+        return Ok(());
+    };
+    let mut e = (*first).clone().with(
+        "faults",
+        faults.iter().map(|e| json!(e)).collect::<Vec<_>>(),
+    );
+    if let Some(k) = first.details.get("annotation").and_then(Value::as_str) {
+        e = e.with("pointer", format!("/annotations/{k}"));
+    }
+    Err(e)
 }
 
 /// `file` with the places ryucad chose written in: a view's `at`, or a
@@ -195,6 +241,22 @@ fn with_placements(file: &DrawingFile, built: &Built) -> DrawingFile {
     // A scale ryucad chose, as places are: the file is what is drawn.
     for sheet in built.sheets.iter().filter(|s| s.scale_chosen) {
         v["sheets"][sheet.key.to_string()]["scale"] = json!(sheet.scale.to_string());
+    }
+    // An annotation's place, and a dimension's offset, where ryucad chose
+    // them.
+    for a in built.sheets.iter().flat_map(|s| &s.annotations) {
+        let Some(w) = file.annotations.get(&a.key).filter(|_| a.error.is_none()) else {
+            continue;
+        };
+        let at = &mut v["annotations"][a.key.to_string()];
+        if a.at_placed && w.at.is_none() {
+            at["at"] = json!([mm(a.at[0]), mm(a.at[1])]);
+        }
+        if let (true, Some(o)) = (a.offset_placed, a.offset)
+            && w.style.as_ref().is_some_and(|s| s.offset.is_none())
+        {
+            at["offset"] = mm(o);
+        }
     }
     for (k, p) in built.placements(file) {
         let at = &mut v["views"][k.to_string()];
@@ -248,6 +310,7 @@ fn group(id: &str) -> Option<&'static str> {
     match id.chars().next()? {
         's' => Some("sheets"),
         'v' => Some("views"),
+        c if crate::doc::drawing_annotation::LETTERS.contains(&c) => Some("annotations"),
         _ => None,
     }
 }
@@ -261,7 +324,18 @@ fn apply(v: &mut Value, op: &Value, at: &str) -> Result<()> {
             let (letter, g) = match kind {
                 "sheet" => ('s', "sheets"),
                 "view" => ('v', "views"),
-                _ => return Err(bad(&format!("{at}/kind"), "add a sheet or a view")),
+                "annotation" => {
+                    let ty = op["value"]["type"].as_str().unwrap_or_default();
+                    let l = crate::doc::drawing_annotation::letter_of(ty)
+                        .ok_or_else(|| bad(&format!("{at}/value/type"), "an annotation's type"))?;
+                    (l, "annotations")
+                }
+                _ => {
+                    return Err(bad(
+                        &format!("{at}/kind"),
+                        "add a sheet, a view or an annotation",
+                    ));
+                }
             };
             let have: Vec<Key> = v[g]
                 .as_object()
@@ -339,7 +413,9 @@ fn apply(v: &mut Value, op: &Value, at: &str) -> Result<()> {
                 }
             };
             for (k, x) in fields {
-                if ["format", "kind", "sheets", "views"].contains(&k.as_str()) && id.is_none() {
+                if ["format", "kind", "sheets", "views", "annotations"].contains(&k.as_str())
+                    && id.is_none()
+                {
                     return Err(bad(
                         &format!("{at}/fields/{k}"),
                         format!("{k} isn't set by set"),
@@ -354,9 +430,17 @@ fn apply(v: &mut Value, op: &Value, at: &str) -> Result<()> {
             }
         }
         "move" => {
-            let id = id.ok_or_else(|| bad(&format!("{at}/id"), "move names the view it moves"))?;
-            let view = v["views"].get_mut(id).ok_or_else(|| {
-                Error::new(Code::NotFound, format!("the drawing has no view {id}"))
+            let id = id.ok_or_else(|| {
+                bad(
+                    &format!("{at}/id"),
+                    "move names the view or annotation it moves",
+                )
+            })?;
+            let g = group(id)
+                .filter(|g| *g != "sheets")
+                .ok_or_else(|| bad(&format!("{at}/id"), "a view's or an annotation's key"))?;
+            let view = v[g].get_mut(id).ok_or_else(|| {
+                Error::new(Code::NotFound, format!("the drawing has no {id}"))
                     .with("pointer", format!("{at}/id"))
             })?;
             match (op.get("at"), op.get("offset")) {
@@ -490,12 +574,33 @@ fn view_json(v: &ViewBuilt) -> Value {
     out
 }
 
+fn annotation_json(a: &super::annotate::Built) -> Value {
+    let mut out = json!({
+        "annotation": a.key.to_string(), "type": a.kind, "sheet": a.sheet.to_string(),
+        "text": a.text, "at_mm": a.at, "entities": a.entities,
+    });
+    if let Some(v) = a.view {
+        out["view"] = json!(v.to_string());
+    }
+    if !a.report.is_null() {
+        out["value"] = a.report.clone();
+    }
+    if let Some(o) = a.offset {
+        out["offset_mm"] = json!(o);
+    }
+    if let Some(e) = &a.error {
+        out["error"] = json!(e);
+    }
+    out
+}
+
 fn sheet_json(s: &SheetBuilt, items: bool) -> Value {
     let mut out = json!({
         "sheet": s.key.to_string(), "name": s.name, "size": s.size.as_str(),
         "orientation": s.orientation.as_str(), "paper_mm": s.paper,
         "template": s.template, "scale": s.scale.to_string(),
         "views": s.views.iter().map(view_json).collect::<Vec<_>>(),
+        "annotations": s.annotations.iter().map(annotation_json).collect::<Vec<_>>(),
     });
     if items {
         out["items"] = json!(s.items.iter().map(item_json).collect::<Vec<_>>());
@@ -559,7 +664,7 @@ fn summary(b: &Built) -> Value {
         "schema": 1, "part": b.part, "drawing": b.drawing, "name": b.name,
         "standard": b.standard.as_str(), "projection": b.projection.as_str(),
         "sheets": b.sheets.iter().map(|s| sheet_json(s, false)).collect::<Vec<_>>(),
-        "findings": b.findings,
+        "findings": b.findings, "scores": b.scores,
     })
 }
 
@@ -643,8 +748,39 @@ pub fn describe(
                     json!({"view": v.key.to_string(), "text": text, "near": near})
                 })
                 .collect();
+            let annotations: Vec<Value> = s
+                .annotations
+                .iter()
+                .map(|a| {
+                    let on = a
+                        .view
+                        .map_or_else(|| format!("sheet {}", s.key), |v| format!("view {v}"));
+                    let mut text = match &a.error {
+                        None => format!("{} ({}) on {on}: {}", a.key, a.kind, a.text),
+                        Some(e) => format!(
+                            "{} ({}) on {on}: can't be built: {}",
+                            a.key, a.kind, e.message
+                        ),
+                    };
+                    if let Some(v) = a.view.and_then(|v| s.views.iter().find(|x| x.key == v)) {
+                        let abs = [v.at[0] + a.at[0], v.at[1] + a.at[1]];
+                        let (dx, dy) = (abs[0] - v.at[0], abs[1] - v.at[1]);
+                        let side = if dx.abs() >= dy.abs() {
+                            if dx >= 0.0 { "right of" } else { "left of" }
+                        } else if dy >= 0.0 {
+                            "above"
+                        } else {
+                            "below"
+                        };
+                        text.push_str(&format!("; its text stands {side} the view's centre"));
+                    }
+                    json!({"annotation": a.key.to_string(), "text": text})
+                })
+                .collect();
             json!({
                 "sheet": s.key.to_string(),
+                "annotations": annotations,
+                "score": b.scores.get(&s.key.to_string()),
                 "text": format!(
                     "{} ({}), {} {}, {:.1} × {:.1} mm at {}, template {}",
                     s.key, s.name, s.size.as_str(), s.orientation.as_str(),
@@ -657,8 +793,118 @@ pub fn describe(
     Ok(json!({
         "schema": 1, "part": pid, "drawing": did, "name": b.name,
         "standard": b.standard.as_str(), "projection": b.projection.as_str(),
-        "sheets": sheets, "findings": b.findings,
+        "sheets": sheets, "findings": b.findings, "scores": b.scores,
     }))
+}
+
+/// `drawing.lint`: the lint's findings of a drawing (its sheet's, with
+/// `sheet`) and each sheet's score; with `explain`, a rule's entry
+/// instead (no drawing needed).
+pub fn lint(
+    session: &mut Session,
+    part: Option<&str>,
+    drawing: Option<&str>,
+    sheet: Option<&str>,
+    explain: Option<&str>,
+) -> Result<Value> {
+    if let Some(code) = explain {
+        return super::lint::explain(session, code);
+    }
+    let (Some(part), Some(drawing)) = (part, drawing) else {
+        return Err(Error::new(
+            Code::Usage,
+            "drawing lint names a part and a drawing, or --explain a rule",
+        ));
+    };
+    let pid = crate::server::part_id(part)?;
+    let (did, _) = file_of(session, &pid, drawing)?;
+    let b = build(session, &pid, &did)?;
+    if let Some(k) = sheet {
+        b.sheet(Some(k))?;
+    }
+    let findings: Vec<&Value> = b
+        .findings
+        .iter()
+        .filter(|f| f["lint"] == true && sheet.is_none_or(|k| f["sheet"] == k))
+        .collect();
+    Ok(json!({
+        "schema": 1, "part": pid, "drawing": did, "findings": findings, "scores": b.scores,
+        "rules": super::lint::RULES.iter().map(|r| json!({"code": r.code, "weight": r.weight, "per": r.per})).collect::<Vec<_>>(),
+    }))
+}
+
+/// `drawing.lint.configure`: sets rules' weights and severities in
+/// `drawing_lint.json` (`default` puts one back), deleting the file when
+/// it holds nothing; one logged change guarded by the project's revision.
+pub fn lint_configure(
+    session: &mut Session,
+    weights: &BTreeMap<String, Value>,
+    severity: &BTreeMap<String, String>,
+    expected: Option<&str>,
+) -> Result<Value> {
+    use crate::doc::drawing_lint::{DRAWING_LINT, Prefs, Severity};
+    session.check_project_revision(expected)?;
+    let mut p: Prefs =
+        crate::doc::drawing_lint::read(&session.files(), &super::lint::known)?.unwrap_or_default();
+    let unknown = |c: &str| {
+        Error::new(Code::InvalidParam, format!("{c} is no drawing lint rule")).with(
+            "rules",
+            super::lint::RULES
+                .iter()
+                .map(|r| r.code)
+                .collect::<Vec<_>>(),
+        )
+    };
+    for (c, w) in weights {
+        if !super::lint::known(c) {
+            return Err(unknown(c).with("param", "weights"));
+        }
+        match w {
+            Value::String(d) if d == "default" => {
+                p.weights.remove(c);
+            }
+            w => {
+                let n = w
+                    .as_i64()
+                    .filter(|n| (0..=100).contains(n))
+                    .ok_or_else(|| {
+                        Error::new(
+                            Code::InvalidParam,
+                            format!("{c}'s weight is a whole number from 0 to 100"),
+                        )
+                        .with("param", "weights")
+                    })?;
+                p.weights.insert(c.clone(), n);
+            }
+        }
+    }
+    for (c, sv) in severity {
+        if !super::lint::known(c) {
+            return Err(unknown(c).with("param", "severity"));
+        }
+        if sv == "default" {
+            p.severity.remove(c);
+        } else {
+            let x = Severity::parse(sv).ok_or_else(|| {
+                Error::new(
+                    Code::InvalidParam,
+                    format!("{sv:?}: off, warning, error or default"),
+                )
+                .with("param", "severity")
+            })?;
+            p.severity.insert(c.clone(), x);
+        }
+    }
+    let path = session.root().join(DRAWING_LINT);
+    if p == Prefs::default() {
+        if session.files().read(DRAWING_LINT)?.is_some() {
+            session.remove_file(&path)?;
+        }
+    } else {
+        session.write_json(&path, &p.to_json())?;
+    }
+    session.reload()?;
+    Ok(json!({"prefs": p.to_json(), "revision": session.project_revision()?}))
 }
 
 /// `drawing.render`: a sheet as PNG (the default) or SVG, the bytes after
