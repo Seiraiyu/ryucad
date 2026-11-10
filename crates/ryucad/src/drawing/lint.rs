@@ -134,15 +134,15 @@ pub fn prefs(session: &Session) -> Prefs {
         .unwrap_or_default()
 }
 
-fn overlap(a: [P; 2], b: [P; 2]) -> bool {
+pub(super) fn overlap(a: [P; 2], b: [P; 2]) -> bool {
     a[0][0] < b[1][0] && b[0][0] < a[1][0] && a[0][1] < b[1][1] && b[0][1] < a[1][1]
 }
 
-fn grow(b: [P; 2], d: f64) -> [P; 2] {
+pub(super) fn grow(b: [P; 2], d: f64) -> [P; 2] {
     [[b[0][0] - d, b[0][1] - d], [b[1][0] + d, b[1][1] + d]]
 }
 
-fn inside(b: [P; 2], area: [P; 2]) -> bool {
+pub(super) fn inside(b: [P; 2], area: [P; 2]) -> bool {
     b[0][0] >= area[0][0] - 1e-6
         && b[0][1] >= area[0][1] - 1e-6
         && b[1][0] <= area[1][0] + 1e-6
@@ -160,7 +160,7 @@ fn cross(a: [P; 2], b: [P; 2]) -> bool {
 }
 
 /// Whether segment `s` passes through box `b`.
-fn hits(s: [P; 2], b: [P; 2]) -> bool {
+pub(super) fn hits(s: [P; 2], b: [P; 2]) -> bool {
     let inb = |p: P| p[0] > b[0][0] && p[0] < b[1][0] && p[1] > b[0][1] && p[1] < b[1][1];
     if inb(s[0]) || inb(s[1]) {
         return true;
