@@ -305,3 +305,174 @@ fn a_freehand_drag_in_annotate_is_a_rough_suggestion_with_a_comment_to_edit() {
         .unwrap();
     assert!((x - 0.04).abs() < 1e-12, "{x}");
 }
+
+/// Looking straight down at `p`'s block (20 × 10 × 5 mm at the origin):
+/// the view's plane is the model's xy about (10, 5) mm.
+fn from_above() -> ryucad::view::Camera {
+    ryucad::view::Camera {
+        eye: [0.01, 0.005, 1.0],
+        target: [0.01, 0.005, 0.0025],
+        up: [0.0, 1.0, 0.0],
+        projection: ryucad::view::Projection::Orthographic { height: 0.03 },
+    }
+}
+
+/// An annotation's marks as `annotation.list` gives them.
+fn listed_marks(p: &Project, id: &str) -> serde_json::Value {
+    let list = p.ok(&["annotations", "list"]);
+    list["annotations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == id)
+        .unwrap()["marks"]
+        .clone()
+}
+
+#[test]
+fn a_markup_is_posted_with_what_its_marks_touch_and_edited_again() {
+    use ryucad_app::core::markup::Tool;
+    let p = Project::new().with_part();
+    let top = format!("p/base/{}", common::face_up(&p, "p", "base", 1.0));
+    let mut ws = open(&p, Mode::Annotate);
+    ws.open_markup(from_above()).unwrap();
+    let m = ws.markup.as_mut().unwrap();
+    assert_eq!(m.part, "p");
+    // An arrow across the block's top, clear of the boss.
+    m.press([0.005, 0.002]);
+    m.drag([0.007, 0.004], false);
+    m.release(1e-4);
+    // A stroke on the block's top face, in its part's frame.
+    m.choose(Tool::PenFaces);
+    let key = ("p".to_owned(), "base".to_owned());
+    m.press_face(key.clone(), "p/base".into(), [0.012, 0.002, 0.005]);
+    m.drag_face(Some((key.clone(), [0.016, 0.002, 0.005])));
+    m.drag_face(Some((key, [0.018, 0.006, 0.005])));
+    m.release(1e-4);
+    // Post wants words: a mark says where.
+    ws.post_markup();
+    assert!(ws.markup.as_ref().unwrap().note.is_some());
+    ws.markup.as_mut().unwrap().comment = "Round this edge 2 mm".into();
+    ws.post_markup();
+    assert!(ws.wait_until(WAIT, |ws| ws.markup.is_none()
+        && ws.annotations.all.len() == 1));
+    let id = ws.annotations.all.keys().next().unwrap().clone();
+    assert_eq!(ws.chosen_annotation.as_deref(), Some(id.as_str()));
+    // The daemon worked out what each touches: the block's top.
+    let marks = listed_marks(&p, &id);
+    assert_eq!(marks["kinds"], serde_json::json!(["arrow", "stroke"]));
+    let list = marks["list"].as_array().unwrap();
+    assert_eq!(list[0]["touches"][0]["ref"], top.as_str(), "{marks}");
+    assert_eq!(list[0]["touches"][1]["ref"], top.as_str(), "{marks}");
+    assert_eq!(list[1]["on"], "p/base");
+    assert_eq!(list[1]["touches"][0]["ref"], top.as_str(), "{marks}");
+    // The window draws its face stroke, and its marker at its arrow's tail.
+    let e = &ws.annotations.all[&id];
+    assert_eq!(e.mark_count(), 2);
+    let strokes = ws
+        .annotations
+        .face_strokes(&["p"], |on| ws.model.placed_on(on));
+    assert_eq!(strokes.len(), 1);
+    assert_eq!(strokes[0].points.len(), 3);
+    let at = ws
+        .annotations
+        .markers(&["p"], |k| ws.model.pose(k), |on| ws.model.placed_on(on));
+    assert_eq!(at.len(), 1);
+    // Its author edits it: the bar reopens at its view with its marks; the
+    // stroke undone, Save sends the arrow alone.
+    ws.edit_markup(&id).unwrap();
+    let m = ws.markup.as_mut().unwrap();
+    assert_eq!((m.marks.len(), m.camera.clone()), (2, from_above()));
+    assert_eq!(m.editing.as_deref(), Some(id.as_str()));
+    m.undo();
+    ws.post_markup();
+    assert!(ws.wait_until(WAIT, |ws| ws.markup.is_none()
+        && ws.annotations.all[&id].mark_count() == 1));
+    assert_eq!(listed_marks(&p, &id)["kinds"], serde_json::json!(["arrow"]));
+}
+
+#[test]
+fn an_agents_marks_from_the_cli_are_the_windows_to_draw() {
+    let p = Project::new().with_part();
+    p.ok(&[
+        "view",
+        "save",
+        "p",
+        "above",
+        "--eye",
+        "10,5,1000",
+        "--target",
+        "10,5,2.5",
+        "--up",
+        "0,1,0",
+        "--ortho",
+        "30 mm",
+    ]);
+    let mut ws = open(&p, Mode::Annotate);
+    let stroke = r#"{"part": "p", "list": [{"kind": "stroke", "in": "face", "on": "p/base",
+        "points_m": [[0.012, 0.002, 0.005], [0.018, 0.006, 0.005]]}]}"#;
+    let a = p.ok(&[
+        "annotations",
+        "add",
+        "--comment",
+        "here",
+        "--model",
+        "p",
+        "--of",
+        "above",
+        "--marks",
+        stroke,
+        "--arrow",
+        "-5,-3:-3,-1",
+    ]);
+    let id = a["annotation"]["id"].as_str().unwrap().to_owned();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.annotations
+            .all
+            .get(&id)
+            .is_some_and(|e| e.mark_count() == 2)
+    }));
+    let e = &ws.annotations.all[&id];
+    assert!(e.view.is_some());
+    assert_eq!(
+        ws.annotations
+            .face_strokes(&["p"], |on| ws.model.placed_on(on))
+            .len(),
+        1
+    );
+    // Resolved, its face strokes go with its pins.
+    p.ok(&["annotations", "resolve", &id, "--note", "done"]);
+    assert!(ws.wait_until(WAIT, |ws| !ws.annotations.all[&id].is_open()));
+    assert!(
+        ws.annotations
+            .face_strokes(&["p"], |on| ws.model.placed_on(on))
+            .is_empty()
+    );
+}
+
+#[test]
+fn markup_is_refused_in_view_and_a_refusal_keeps_the_marks() {
+    let p = Project::new().with_part();
+    let mut ws = open(&p, Mode::Annotate);
+    ws.open_markup(from_above()).unwrap();
+    let m = ws.markup.as_mut().unwrap();
+    m.press([0.0, 0.0]);
+    m.drag([0.002, 0.0], false);
+    m.release(1e-4);
+    m.comment = "here".into();
+    // The window's mode turns to View under it: the daemon refuses Post.
+    ws.set_mode(Mode::View);
+    ws.post_markup();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.markup
+            .as_ref()
+            .is_some_and(|m| !m.posting && m.note.is_some())
+    }));
+    assert_eq!(ws.markup.as_ref().unwrap().marks.len(), 1, "kept");
+    assert!(
+        p.ok(&["annotations", "list"])["annotations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
