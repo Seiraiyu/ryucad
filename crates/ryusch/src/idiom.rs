@@ -944,6 +944,12 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                 .filter_map(|(k, _)| block.parts[b.part].pins[*k].net)
         })
         .collect();
+    // Every bank's parts: decoupling on a bank's side stands past them.
+    let banked_parts: BTreeSet<usize> = banks
+        .iter()
+        .flat_map(|b| b.rows.iter().flat_map(|(_, l)| l.iter()))
+        .flat_map(|i| idioms[*i].parts.iter().copied())
+        .collect();
     let mut banks_done = banks.is_empty();
     // What hangs off sideways pins stands in stairs before decoupling is
     // placed, which then stands past it.
@@ -1067,8 +1073,9 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                             let reach = members
                                 .iter()
                                 .filter(|(q, _)| *q != a && !decoupling.contains(q))
-                                .map(|(q, pl)| Cluster::single(*q, *pl).room(block, [0, 0]))
-                                .filter(|r| r.min[1] < base)
+                                .map(|(q, pl)| (*q, Cluster::single(*q, *pl).room(block, [0, 0])))
+                                .filter(|(q, r)| r.min[1] < base || banked_parts.contains(q))
+                                .map(|(_, r)| r)
                                 .filter_map(|r| match side {
                                     Side::Left if r.max[0] < pin.end[0] => {
                                         Some(pin.end[0] - r.min[0])

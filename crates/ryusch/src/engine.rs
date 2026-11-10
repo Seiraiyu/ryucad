@@ -3841,6 +3841,52 @@ mod tests {
         lay_out(b).unwrap()
     }
 
+    /// A bypass capacitor on a dense part's banked side stands past the bank
+    /// and is wired to its pin; nothing crosses its wire.
+    #[test]
+    fn decoupling_stands_past_a_bank() {
+        use crate::testing::capacitor;
+        let mut block = crate::testing::dense_block(false);
+        // A supply pin on the banked side, decoupled: the right side's last
+        // row (S11) joins the supply instead of the connector.
+        let k = block.parts[0]
+            .pins
+            .iter()
+            .position(|p| p.name == "S11")
+            .unwrap();
+        block.parts[0].pins[k].net = Some(0);
+        block.parts[0].pins[k].kind = crate::input::PinKind::PowerIn;
+        // VDD (on the left) off the supply, so S11 is the pin decoupled.
+        let vdd = block.parts[0]
+            .pins
+            .iter()
+            .position(|p| p.name == "VDD")
+            .unwrap();
+        block.parts[0].pins[vdd].net = None;
+        block
+            .parts
+            .push(capacitor("c9", "C9", "100n", [Some(0), Some(1)]));
+        let out = lay(&block);
+        assert_eq!(crate::rules::check(&block, &out.layout), []);
+        let (found, _) = crate::lint::lint(&block, &out);
+        for code in ["sch_bypass_apart", "sch_crossings"] {
+            assert!(
+                !found
+                    .iter()
+                    .any(|f| f.code == code && f.refs.iter().any(|r| r == "c9")),
+                "{code}: {found:#?}"
+            );
+        }
+        let bank_far = (1..=10)
+            .map(|i| {
+                let x = &out.layout.placed[&format!("r{i}")];
+                x.at[0]
+            })
+            .max()
+            .unwrap();
+        assert!(out.layout.placed["c9"].at[0] > bank_far, "past the bank");
+    }
+
     /// A bank member's designator and value stand on its row, one line, past
     /// its rail's column: rows two steps apart leave no room for two lines.
     #[test]
