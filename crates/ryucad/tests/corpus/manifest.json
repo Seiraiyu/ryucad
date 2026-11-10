@@ -3,10 +3,347 @@
     "gearbox": {
       "check": {
         "codes": {
+          "drawing_view_uncertain": 4,
+          "dwg_hole_uncalled": 3,
+          "dwg_outside": 1,
+          "dwg_text_overlap": 9,
+          "dwg_view_overlap": 5,
           "instances_interfere": 2
         },
         "errors": 0,
-        "warnings": 2
+        "warnings": 24
+      },
+      "drawings": {
+        "gearbox/main": {
+          "annotations": {
+            "b1": "1",
+            "b2": "2",
+            "b3": "3",
+            "b4": "4",
+            "b5": "5",
+            "b6": "6",
+            "b7": "7",
+            "b8": "8",
+            "t1": "BOM of gearbox, 8 rows"
+          },
+          "findings": {
+            "drawing_view_uncertain": 1,
+            "dwg_hole_uncalled": 3,
+            "dwg_text_overlap": 5
+          },
+          "pdf": "894ae446cbddf71a59c2f66019c87fbdc34826f4a38f89510132e0c4011bc077",
+          "scores": {
+            "s1": 76
+          },
+          "views": {
+            "v1": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 2,
+                "visible": 1612
+              },
+              "scale": "1:1",
+              "type": "base"
+            }
+          }
+        },
+        "housing/main": {
+          "annotations": {
+            "d1": "12X ⌀5.00 ↧14.00"
+          },
+          "findings": {
+            "dwg_outside": 1,
+            "dwg_view_overlap": 1
+          },
+          "pdf": "4a26b1d738791943744f627a2a7fea75064a43d11458ed3d45e707bcb1fec528",
+          "scores": {
+            "s1": 85
+          },
+          "views": {
+            "v1": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 29
+              },
+              "scale": "1:2",
+              "type": "base"
+            },
+            "v2": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 56
+              },
+              "scale": "1:2",
+              "type": "projected"
+            },
+            "v3": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 34
+              },
+              "scale": "1:2",
+              "type": "projected"
+            },
+            "v4": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 159
+              },
+              "scale": "1:2",
+              "type": "projected"
+            },
+            "v5": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 30
+              },
+              "scale": "1:2",
+              "type": "section"
+            },
+            "v6": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 5
+              },
+              "scale": "1:1",
+              "type": "detail"
+            }
+          }
+        },
+        "pinion-1/main": {
+          "annotations": {
+            "d1": "⌀20.00 H7 (+0.021/0)"
+          },
+          "findings": {
+            "drawing_view_uncertain": 1,
+            "dwg_text_overlap": 1
+          },
+          "pdf": "9b495f9a06d41f9eef558a4bde4d20e2c31a824b1747b752fea4d2f1d00bc97f",
+          "scores": {
+            "s1": 97
+          },
+          "views": {
+            "v1": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 86
+              },
+              "scale": "2:1",
+              "type": "base"
+            },
+            "v2": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 1,
+                "visible": 58
+              },
+              "scale": "2:1",
+              "type": "projected"
+            },
+            "v3": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 100
+              },
+              "scale": "2:1",
+              "type": "projected"
+            },
+            "v4": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 272
+              },
+              "scale": "2:1",
+              "type": "projected"
+            }
+          }
+        },
+        "pinion-2/main": {
+          "annotations": {
+            "d1": "⌀24.00 H7 (+0.021/0)"
+          },
+          "findings": {
+            "drawing_view_uncertain": 1,
+            "dwg_text_overlap": 1,
+            "dwg_view_overlap": 3
+          },
+          "pdf": "b70d33ab13aa9b36c696d562504cb098f7226ccae644eb00e87eec0d4e2222ad",
+          "scores": {
+            "s1": 67
+          },
+          "views": {
+            "v1": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 102
+              },
+              "scale": "2:1",
+              "type": "base"
+            },
+            "v2": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 1,
+                "visible": 66
+              },
+              "scale": "2:1",
+              "type": "projected"
+            },
+            "v3": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 104
+              },
+              "scale": "2:1",
+              "type": "projected"
+            },
+            "v4": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 272
+              },
+              "scale": "2:1",
+              "type": "projected"
+            }
+          }
+        },
+        "wheel-1/main": {
+          "annotations": {
+            "d1": "⌀24.00 H7 (+0.021/0)"
+          },
+          "findings": {
+            "dwg_text_overlap": 1
+          },
+          "pdf": "742824ecc4afa061ff52dd149eea846c6af6bb900b6a4d330096405e698e075a",
+          "scores": {
+            "s1": 97
+          },
+          "views": {
+            "v1": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 134
+              },
+              "scale": "1:1",
+              "type": "base"
+            },
+            "v2": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 90
+              },
+              "scale": "1:1",
+              "type": "projected"
+            },
+            "v3": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 142
+              },
+              "scale": "1:1",
+              "type": "projected"
+            },
+            "v4": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 364
+              },
+              "scale": "1:1",
+              "type": "projected"
+            }
+          }
+        },
+        "wheel-2/main": {
+          "annotations": {
+            "d1": "⌀30.00 H7 (+0.021/0)"
+          },
+          "findings": {
+            "drawing_view_uncertain": 1,
+            "dwg_text_overlap": 1,
+            "dwg_view_overlap": 1
+          },
+          "pdf": "cfacbb3678712a52a735cfc1285ec7ab42e71726ab5b9deceec27cb6965d55d8",
+          "scores": {
+            "s1": 87
+          },
+          "views": {
+            "v1": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 148
+              },
+              "scale": "1:1",
+              "type": "base"
+            },
+            "v2": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 1,
+                "visible": 98
+              },
+              "scale": "1:1",
+              "type": "projected"
+            },
+            "v3": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 150
+              },
+              "scale": "1:1",
+              "type": "projected"
+            },
+            "v4": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 427
+              },
+              "scale": "1:1",
+              "type": "projected"
+            }
+          }
+        }
       },
       "parts": {
         "gearbox": {
@@ -160,9 +497,99 @@
     },
     "printer-frame": {
       "check": {
-        "codes": {},
+        "codes": {
+          "dwg_hole_uncalled": 2,
+          "dwg_outside": 2,
+          "dwg_text_overlap": 2
+        },
         "errors": 0,
-        "warnings": 0
+        "warnings": 6
+      },
+      "drawings": {
+        "corner-bracket/main": {
+          "annotations": {
+            "d1": "⌀5.50 THRU",
+            "d2": "⌀5.50 THRU"
+          },
+          "findings": {},
+          "pdf": "a87d0a483fb6aa76c6efdd224de461cf711306d61bfe199b8ea9bc571e4b706b",
+          "scores": {
+            "s1": 100
+          },
+          "views": {
+            "v1": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 17
+              },
+              "scale": "2:1",
+              "type": "base"
+            },
+            "v2": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 15
+              },
+              "scale": "2:1",
+              "type": "projected"
+            },
+            "v3": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 17
+              },
+              "scale": "2:1",
+              "type": "projected"
+            },
+            "v4": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 35
+              },
+              "scale": "2:1",
+              "type": "projected"
+            }
+          }
+        },
+        "frame/main": {
+          "annotations": {
+            "b1": "1",
+            "b2": "2",
+            "b3": "3",
+            "b4": "4",
+            "b5": "5",
+            "t1": "BOM of frame, 5 rows"
+          },
+          "findings": {
+            "dwg_hole_uncalled": 2,
+            "dwg_outside": 2,
+            "dwg_text_overlap": 2
+          },
+          "pdf": "fd656d0872b1748e5b60b116a65390b6000894b0319b217f615f447c26ea496c",
+          "scores": {
+            "s1": 78
+          },
+          "views": {
+            "v1": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 2792
+              },
+              "scale": "1:2",
+              "type": "base"
+            }
+          }
+        }
       },
       "parts": {
         "bolt": {
@@ -265,9 +692,148 @@
     },
     "radial-engine": {
       "check": {
-        "codes": {},
-        "errors": 0,
-        "warnings": 0
+        "codes": {
+          "drawing_view_failed": 2,
+          "drawing_view_uncertain": 4,
+          "dwg_balloon_missing": 13,
+          "dwg_view_overlap": 4
+        },
+        "errors": 2,
+        "warnings": 21
+      },
+      "drawings": {
+        "crankcase/main": {
+          "annotations": {},
+          "findings": {
+            "drawing_view_failed": 1,
+            "drawing_view_uncertain": 3,
+            "dwg_view_overlap": 3
+          },
+          "pdf": "86f39645cdf2b08b1731b8283e58c041f1fd2bdbd1109b1b5d6987f1cbf5bfa5",
+          "scores": {
+            "s1": 70
+          },
+          "views": {
+            "v1": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 656,
+                "visible": 517
+              },
+              "scale": "1:2",
+              "type": "base"
+            },
+            "v2": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 1753,
+                "visible": 333
+              },
+              "scale": "1:2",
+              "type": "projected"
+            },
+            "v3": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 133,
+                "visible": 508
+              },
+              "scale": "1:2",
+              "type": "projected"
+            },
+            "v4": {
+              "failed": "drawing_view_failed",
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 0
+              },
+              "scale": "1:2",
+              "type": "projected"
+            }
+          }
+        },
+        "engine/main": {
+          "annotations": {
+            "t1": "BOM of engine, 13 rows"
+          },
+          "findings": {
+            "drawing_view_failed": 1,
+            "dwg_balloon_missing": 13
+          },
+          "pdf": "34aa170b7139026e2eb715303764e321da77ca91f625aac72bbee77e49095164",
+          "scores": {
+            "s1": 74
+          },
+          "views": {
+            "v1": {
+              "failed": "drawing_view_failed",
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 0
+              },
+              "scale": "1:2",
+              "type": "base"
+            }
+          }
+        },
+        "propeller/main": {
+          "annotations": {},
+          "findings": {
+            "drawing_view_uncertain": 1,
+            "dwg_view_overlap": 1
+          },
+          "pdf": "21d475363a14f3f75f7f6be4db27b83809ee22abcc30821450c4f4a4f91d3193",
+          "scores": {
+            "s1": 90
+          },
+          "views": {
+            "v1": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 1025
+              },
+              "scale": "1:5",
+              "type": "base"
+            },
+            "v2": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 10,
+                "visible": 965
+              },
+              "scale": "1:5",
+              "type": "projected"
+            },
+            "v3": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 1190
+              },
+              "scale": "1:5",
+              "type": "projected"
+            },
+            "v4": {
+              "failed": null,
+              "pieces": {
+                "hidden": 0,
+                "uncertain": 0,
+                "visible": 1153
+              },
+              "scale": "1:5",
+              "type": "projected"
+            }
+          }
+        }
       },
       "parts": {
         "crankcase": {
