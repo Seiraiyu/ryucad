@@ -270,16 +270,16 @@ fn enclosing(
 ) -> Result<Result<Vec<Vec<bool>>, Name>, Error> {
     let n = shells.len();
     let mut inside: Vec<Vec<bool>> = vec![vec![false; n]; n];
-    let triangles: Vec<Vec<[Point3; 3]>> = shells
+    let triangles: Vec<Tris> = shells
         .iter()
-        .map(|s| shell_triangles(body, made, &s.faces).map(|(t, _)| t))
+        .map(|s| shell_triangles(body, made, &s.faces).map(|(t, _)| Tris::new(t)))
         .collect::<Result<_, _>>()
         .map_err(|at| HealError::Uncertain { at })?;
     for i in 0..n {
         let mut points = shell_points(body, &shells[i].faces);
         if points.is_empty() {
             // A sphere or torus with no loops: a point of its mesh.
-            points.extend(triangles[i].first().map(|t| t[0]));
+            points.extend(triangles[i].tris.first().map(|t| t[0]));
         }
         for j in 0..n {
             if i == j || !shells[j].bounds.intersects(&shells[i].bounds) {
@@ -288,11 +288,14 @@ fn enclosing(
             let band = chord + shells[j].tolerance + LINEAR_RESOLUTION;
             let mut seen: Option<bool> = None;
             for &p in &points {
-                // Each triangle a ray is tested against.
-                if m.charge(triangles[j].len() as u64).is_err() {
+                let (x, tested) = classify(&triangles[j], &shells[j].bounds, p, band);
+                // The point, and each triangle it is tested against (#618:
+                // every vertex against every triangle of the other shell
+                // was 77 million units for a board and its parts).
+                if m.charge(1 + tested).is_err() {
                     return Err(Error::Cancelled);
                 }
-                let Some(x) = classify(&triangles[j], &shells[j].bounds, p, band) else {
+                let Some(x) = x else {
                     continue;
                 };
                 match seen {
@@ -689,55 +692,235 @@ fn shell_points(b: &Body, faces: &[FaceId]) -> Vec<Point3> {
     out.into_values().collect()
 }
 
-/// Whether `p` lies inside the closed mesh `triangles`, unless it lies
-/// within `band` of it or no ray settles it.
-fn classify(triangles: &[[Point3; 3]], bounds: &Box3, p: Point3, band: f64) -> Option<bool> {
+/// Whether `p` lies inside the closed mesh `tris`, unless it lies within
+/// `band` of it or no ray settles it, and how many triangles it was
+/// tested against: only those whose boxes come within `band` of it or
+/// meet a ray (#618), so the verdict is the brute force's but where the
+/// brute force gave up a ray for a triangle the ray never reaches.
+fn classify(tris: &Tris, bounds: &Box3, p: Point3, band: f64) -> (Option<bool>, u64) {
     let grown = bounds.grow(band);
     if !grown.intersects(&Box3::from_point(p)) {
-        return Some(false);
+        return (Some(false), 0);
     }
-    if triangles.iter().any(|&t| near(p, t) <= band) {
-        return None;
+    let mut tested = 0u64;
+    // Only triangles whose boxes come within `band` of `p` can be.
+    let reach_near = band * (1.0 + 1e-9);
+    let mut close = false;
+    tris.visit(
+        |b| b.near(p, reach_near),
+        |t| {
+            tested += 1;
+            close = near(p, *t) <= band;
+            !close
+        },
+    );
+    if close {
+        return (None, tested);
     }
     let reach = 2.0 * (grown.max() - grown.min()).length() + 1.0;
-    'rays: for d in DIRECTIONS {
+    for d in DIRECTIONS {
         let q = p + Vector3::new(d[0], d[1], d[2]) * reach;
         let mut crossings = 0usize;
-        for &[a, b, c] in triangles {
-            let (sp, sq) = (orient3d(a, b, c, p), orient3d(a, b, c, q));
-            if sq == Sign::Zero {
-                continue 'rays;
-            }
-            if sp == Sign::Zero {
-                // `p` lies in the triangle's plane, further than `band`
-                // from it: the ray meets that plane only at `p`, outside
-                // the triangle (a vertex in a planar face's plane).
-                continue;
-            }
-            if sp == sq {
-                continue;
-            }
-            let s = [
-                orient3d(p, q, a, b),
-                orient3d(p, q, b, c),
-                orient3d(p, q, c, a),
-            ];
-            if s.contains(&Sign::Zero) {
-                // Unless the ray misses it plainly.
-                let pos = s.contains(&Sign::Positive);
-                let neg = s.contains(&Sign::Negative);
-                if pos && neg {
-                    continue;
+        // A triangle whose box the segment misses is neither crossed nor
+        // touched by it, so it can't change the count or make the ray
+        // unclean: testing it (the brute force) only gave the ray up when
+        // `q` happened to lie in its plane.
+        let clean = tris.visit(
+            |b| b.meets(p, q),
+            |&[a, b, c]| {
+                tested += 1;
+                let (sp, sq) = (orient3d(a, b, c, p), orient3d(a, b, c, q));
+                if sq == Sign::Zero {
+                    return false;
                 }
-                continue 'rays;
+                if sp == Sign::Zero || sp == sq {
+                    // `p` in the triangle's plane, further than `band`
+                    // from it: the ray meets that plane only at `p`,
+                    // outside the triangle (a vertex in a planar face's
+                    // plane); or both ends on one side.
+                    return true;
+                }
+                let s = [
+                    orient3d(p, q, a, b),
+                    orient3d(p, q, b, c),
+                    orient3d(p, q, c, a),
+                ];
+                if s.contains(&Sign::Zero) {
+                    // Unless the ray misses it plainly.
+                    let pos = s.contains(&Sign::Positive);
+                    let neg = s.contains(&Sign::Negative);
+                    return pos && neg;
+                }
+                if s[0] == s[1] && s[1] == s[2] {
+                    crossings += 1;
+                }
+                true
+            },
+        );
+        if clean {
+            return (Some(crossings % 2 == 1), tested);
+        }
+    }
+    (None, tested)
+}
+
+/// A box of a node of [`Tris`]'s tree, grown a little past rounding.
+#[derive(Clone, Copy, Debug)]
+struct Aabb {
+    lo: [f64; 3],
+    hi: [f64; 3],
+}
+
+impl Aabb {
+    /// Whether `p` lies within `d` of the box (by each axis: a box
+    /// within `d` of a point holds every point that is).
+    fn near(&self, p: Point3, d: f64) -> bool {
+        let p = [p.x, p.y, p.z];
+        (0..3).all(|k| p[k] >= self.lo[k] - d && p[k] <= self.hi[k] + d)
+    }
+
+    /// Whether the segment from `p` to `q` meets the box.
+    fn meets(&self, p: Point3, q: Point3) -> bool {
+        let (p, q) = ([p.x, p.y, p.z], [q.x, q.y, q.z]);
+        let (mut t0, mut t1) = (0.0f64, 1.0f64);
+        for k in 0..3 {
+            let d = q[k] - p[k];
+            if d == 0.0 {
+                if p[k] < self.lo[k] || p[k] > self.hi[k] {
+                    return false;
+                }
+                continue;
             }
-            if s[0] == s[1] && s[1] == s[2] {
-                crossings += 1;
+            let (a, b) = ((self.lo[k] - p[k]) / d, (self.hi[k] - p[k]) / d);
+            let (a, b) = if a <= b { (a, b) } else { (b, a) };
+            t0 = t0.max(a);
+            t1 = t1.min(b);
+            if t0 > t1 {
+                return false;
             }
         }
-        return Some(crossings % 2 == 1);
+        true
     }
-    None
+}
+
+/// A node: its box, its triangles' range in `order`, and its children.
+struct Node {
+    bounds: Aabb,
+    start: usize,
+    end: usize,
+    kids: Option<(usize, usize)>,
+}
+
+/// A shell's triangles with a box tree over them, so a point is tested
+/// only against the triangles near it or along its rays (#618).
+struct Tris {
+    tris: Vec<[Point3; 3]>,
+    order: Vec<usize>,
+    nodes: Vec<Node>,
+    /// How far boxes are grown past their triangles: a part in 10⁹ of the
+    /// coordinates' size, far past what rounding the tests can do.
+    pad: f64,
+}
+
+/// Triangles in a leaf.
+const LEAF: usize = 8;
+
+impl Tris {
+    fn new(tris: Vec<[Point3; 3]>) -> Self {
+        let scale = tris
+            .iter()
+            .flat_map(|t| t.iter())
+            .map(|p| p.x.abs().max(p.y.abs()).max(p.z.abs()))
+            .fold(0.0f64, f64::max);
+        let mut t = Tris {
+            order: (0..tris.len()).collect(),
+            tris,
+            nodes: Vec::new(),
+            pad: scale * 1e-9 + 1e-300,
+        };
+        if !t.tris.is_empty() {
+            t.build(0, t.tris.len());
+        }
+        t
+    }
+
+    fn build(&mut self, start: usize, end: usize) -> usize {
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for &i in &self.order[start..end] {
+            for p in &self.tris[i] {
+                for (k, c) in [p.x, p.y, p.z].into_iter().enumerate() {
+                    lo[k] = lo[k].min(c);
+                    hi[k] = hi[k].max(c);
+                }
+            }
+        }
+        for k in 0..3 {
+            lo[k] -= self.pad;
+            hi[k] += self.pad;
+        }
+        let at = self.nodes.len();
+        self.nodes.push(Node {
+            bounds: Aabb { lo, hi },
+            start,
+            end,
+            kids: None,
+        });
+        if end - start > LEAF {
+            let axis = (0..3)
+                .max_by(|&a, &b| (hi[a] - lo[a]).total_cmp(&(hi[b] - lo[b])))
+                .expect("three axes");
+            let tris = &self.tris;
+            let mid = start + (end - start) / 2;
+            let key = |i: usize| {
+                let t = &tris[i];
+                [t[0], t[1], t[2]]
+                    .iter()
+                    .map(|p| [p.x, p.y, p.z][axis])
+                    .sum::<f64>()
+            };
+            self.order[start..end].select_nth_unstable_by(mid - start, |&a, &b| {
+                key(a).total_cmp(&key(b)).then(a.cmp(&b))
+            });
+            let left = self.build(start, mid);
+            let right = self.build(mid, end);
+            self.nodes[at].kids = Some((left, right));
+        }
+        at
+    }
+
+    /// Calls `each` on every triangle in a node `wanted` takes, every
+    /// ancestor taken too, until it answers false; whether it never did.
+    fn visit(
+        &self,
+        wanted: impl Fn(&Aabb) -> bool,
+        mut each: impl FnMut(&[Point3; 3]) -> bool,
+    ) -> bool {
+        let mut stack = Vec::new();
+        if !self.nodes.is_empty() {
+            stack.push(0);
+        }
+        while let Some(n) = stack.pop() {
+            let node = &self.nodes[n];
+            if !wanted(&node.bounds) {
+                continue;
+            }
+            match node.kids {
+                Some((l, r)) => {
+                    stack.push(r);
+                    stack.push(l);
+                }
+                None => {
+                    for &i in &self.order[node.start..node.end] {
+                        if !each(&self.tris[i]) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
 }
 
 /// The distance from `p` to the triangle `[a, b, c]`.
@@ -864,5 +1047,93 @@ mod tests {
         assert_eq!(wound(&turned, band, &m).unwrap(), Some(false));
         // Thinner than two bands, no point inside is clear of it.
         assert_eq!(wound(&slab(1.0, 1.0, 3e-3), band, &m).unwrap(), None);
+    }
+
+    /// The brute force `classify` replaced (#618): every triangle for the
+    /// band, every triangle for each ray.
+    fn every_triangle(t: &[[Point3; 3]], bounds: &Box3, p: Point3, band: f64) -> Option<bool> {
+        let grown = bounds.grow(band);
+        if !grown.intersects(&Box3::from_point(p)) {
+            return Some(false);
+        }
+        if t.iter().any(|&t| near(p, t) <= band) {
+            return None;
+        }
+        let reach = 2.0 * (grown.max() - grown.min()).length() + 1.0;
+        'rays: for d in DIRECTIONS {
+            let q = p + Vector3::new(d[0], d[1], d[2]) * reach;
+            let mut crossings = 0usize;
+            for &[a, b, c] in t {
+                let (sp, sq) = (orient3d(a, b, c, p), orient3d(a, b, c, q));
+                if sq == Sign::Zero {
+                    continue 'rays;
+                }
+                if sp == Sign::Zero || sp == sq {
+                    continue;
+                }
+                let s = [
+                    orient3d(p, q, a, b),
+                    orient3d(p, q, b, c),
+                    orient3d(p, q, c, a),
+                ];
+                if s.contains(&Sign::Zero) {
+                    if s.contains(&Sign::Positive) && s.contains(&Sign::Negative) {
+                        continue;
+                    }
+                    continue 'rays;
+                }
+                if s[0] == s[1] && s[1] == s[2] {
+                    crossings += 1;
+                }
+            }
+            return Some(crossings % 2 == 1);
+        }
+        None
+    }
+
+    /// Points round a torus's mesh, its vertices among them, are judged
+    /// by the box tree as by testing every triangle, at a small part of
+    /// the tests (#618: a board's vertices against its parts' meshes).
+    #[test]
+    fn the_box_tree_classifies_as_every_triangle_does() {
+        use crate::geom::Rigid;
+        let (body, _) =
+            crate::primitive::torus(crate::name::OpKey(5), 0.02, 0.006, &Rigid::IDENTITY).unwrap();
+        let faces: Vec<FaceId> = body.faces().collect();
+        let m = crate::mesh::tessellate(&body, &MeshParams::new(1e-4, 0.3)).unwrap();
+        let (t, _) = shell_triangles(&body, &m, &faces).unwrap();
+        assert!(t.len() > 2000, "{}", t.len());
+        let bounds = Box3::from_points(t.iter().flatten().copied()).unwrap();
+        let tree = Tris::new(t.clone());
+        let mut points: Vec<Point3> = t.iter().step_by(37).map(|x| x[1]).collect();
+        let n = 9;
+        for i in 0..n {
+            for j in 0..n {
+                for k in 0..n {
+                    let f = |i: usize, s: f64| (i as f64 / (n - 1) as f64 - 0.5) * s;
+                    points.push(Point3::new(f(i, 0.06), f(j, 0.06), f(k, 0.016)));
+                }
+            }
+        }
+        let (mut tested, mut inside, mut unsure) = (0u64, 0, 0);
+        for &p in &points {
+            for band in [1e-4, 1e-6] {
+                let (got, n) = classify(&tree, &bounds, p, band);
+                assert_eq!(
+                    got,
+                    every_triangle(&t, &bounds, p, band),
+                    "at {p:?}, band {band}"
+                );
+                tested += n;
+                inside += usize::from(got == Some(true));
+                unsure += usize::from(got.is_none());
+            }
+        }
+        assert!(
+            inside > 50 && unsure > 50,
+            "{inside} inside, {unsure} unsure"
+        );
+        let brute = (2 * points.len() * t.len()) as u64;
+        assert!(tested * 10 < brute, "{tested} tests against {brute}");
     }
 }
