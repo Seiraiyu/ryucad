@@ -554,4 +554,31 @@ mod tests {
                 .any(|v| v.rule == "region_holds")
         );
     }
+
+    #[test]
+    fn an_off_sheet_connector_joins_its_pin_and_keeps_off_the_rest() {
+        use crate::layout::LabelKind;
+        let b = crate::testing::seeded(7, 2);
+        let mut out = crate::engine::lay_out(&b).expect("lays out");
+        // A label made a connector still joins its pin.
+        let (key, i) = out
+            .layout
+            .labels
+            .iter()
+            .find_map(|(k, v)| {
+                v.iter()
+                    .position(|l| l.kind == LabelKind::Net)
+                    .map(|i| (k.clone(), i))
+            })
+            .expect("a net label");
+        out.layout.labels.get_mut(&key).unwrap()[i].kind = LabelKind::OffSheet;
+        let broken = check(&b, &out.layout);
+        assert!(broken.iter().all(|v| v.rule != "connected"), "{broken:?}");
+        // Its box is its own: one laid over a part is an overlap.
+        let part = out.layout.placed.values().next().unwrap().clone();
+        let l = &mut out.layout.labels.get_mut(&key).unwrap()[i];
+        l.sheet = part.sheet;
+        l.at = part.at;
+        assert!(check(&b, &out.layout).iter().any(|v| v.rule == "overlap"));
+    }
 }

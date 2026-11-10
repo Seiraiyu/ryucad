@@ -642,4 +642,24 @@ mod tests {
         let out = resolve(&b, &base, &l1, &l2, &m, &[Repair::Theirs]).unwrap();
         assert_eq!(out.layout.sheets[&first].name, "B");
     }
+
+    #[test]
+    fn a_label_made_a_connector_on_one_side_merges_cleanly() {
+        use crate::layout::LabelKind;
+        let block = crate::testing::leaving_block();
+        let base = crate::engine::lay_out(&block).unwrap().layout;
+        let mut ours = base.clone();
+        let l = ours
+            .labels
+            .get_mut("o3")
+            .and_then(|v| v.first_mut())
+            .expect("O3's label");
+        l.kind = LabelKind::OffSheet;
+        let mut theirs = base.clone();
+        theirs.placed.get_mut("r1").unwrap().rotation = 270;
+        let m = merge(&block, &base, &ours, &theirs);
+        assert!(m.conflicts.is_empty(), "{:#?}", m.conflicts);
+        assert_eq!(m.layout.labels["o3"][0].kind, LabelKind::OffSheet);
+        assert_eq!(m.layout.placed["r1"].rotation, 270);
+    }
 }
