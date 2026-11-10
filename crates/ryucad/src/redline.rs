@@ -214,6 +214,74 @@ pub fn touches(
     }
 }
 
+/// How opaque a resolved or rejected annotation's marks are.
+pub const CLOSED_ALPHA: f32 = 0.4;
+
+/// Draws `marks` into `g` in `color`, `alpha` opaque: view marks on the
+/// glass over `plane` (lines and outlines, an arrow's head, text as a
+/// note), face strokes as depth-tested lines on the model, placed by
+/// `poses` (decision 8), [`crate::render::MARK_WIDTH`] wide.
+pub fn draw(
+    g: &mut crate::render::Geometry,
+    plane: &Plane,
+    marks: &Marks,
+    poses: &BTreeMap<String, BTreeMap<String, ryukei::geom::Rigid>>,
+    color: crate::render::Rgb,
+    alpha: f32,
+) {
+    use crate::render::{Label, Line, Overlay};
+    for m in &marks.list {
+        match &m.anchor {
+            Anchor::View(xy) if m.kind == Kind::Text => {
+                if let (Some(p), Some(t)) = (xy.first(), &m.text) {
+                    g.notes.push(Label {
+                        at: plane.point(*p),
+                        text: t.clone(),
+                    });
+                }
+            }
+            Anchor::View(_) => {
+                let base = g.positions.len() as u32;
+                let pts = outline(m);
+                g.positions.extend(pts.iter().map(|p| plane.point(*p)));
+                let points: Vec<u32> = (base..base + pts.len() as u32).collect();
+                g.overlay.push(Overlay::Line {
+                    points: points.clone(),
+                    color,
+                    alpha,
+                });
+                if m.kind == Kind::Arrow && points.len() == 2 {
+                    g.overlay.push(Overlay::Head {
+                        from: points[0],
+                        tip: points[1],
+                        color,
+                        alpha,
+                    });
+                }
+            }
+            Anchor::Face { on, points_m } => {
+                let pose = placed(on, poses);
+                let base = g.positions.len() as u32;
+                g.positions.extend(points_m.iter().map(|p| {
+                    let q = pose.apply_point(ryukei::geom::Point3::new(p[0], p[1], p[2]));
+                    [q.x, q.y, q.z]
+                }));
+                let line = Line {
+                    points: (base..base + points_m.len() as u32).collect(),
+                    color,
+                    width: crate::render::MARK_WIDTH,
+                    dash: false,
+                };
+                if alpha < 1.0 {
+                    g.translucent_lines.push((line, alpha));
+                } else {
+                    g.lines.push(line);
+                }
+            }
+        }
+    }
+}
+
 /// Each of `a`'s marks in words (design 423's Reading marks), in the
 /// project's default unit.
 pub fn words(
@@ -326,6 +394,68 @@ pub(crate) mod tests {
             up: [0.0, 0.0, 1.0],
             projection,
         }
+    }
+
+    #[test]
+    fn marks_are_drawn_on_the_glass_and_face_strokes_on_the_model() {
+        let cam = corner(Projection::Orthographic { height: 0.08 });
+        let plane = Plane::of(&cam);
+        let marks = Marks {
+            part: crate::doc::id::Id::parse("p", "part").unwrap(),
+            list: vec![
+                Mark {
+                    kind: Kind::Arrow,
+                    anchor: Anchor::View(vec![[0.0, 0.0], [0.01, 0.0]]),
+                    text: None,
+                    touches: Some(vec![]),
+                },
+                Mark {
+                    kind: Kind::Ellipse,
+                    anchor: Anchor::View(vec![[0.0, 0.0], [0.01, 0.01]]),
+                    text: None,
+                    touches: Some(vec![]),
+                },
+                Mark {
+                    kind: Kind::Text,
+                    anchor: Anchor::View(vec![[0.0, 0.0]]),
+                    text: Some("2 mm".into()),
+                    touches: Some(vec![]),
+                },
+                Mark {
+                    kind: Kind::Stroke,
+                    anchor: Anchor::Face {
+                        on: "p/b".into(),
+                        points_m: vec![[0.0; 3], [0.01, 0.0, 0.0]],
+                    },
+                    text: None,
+                    touches: Some(vec![]),
+                },
+            ],
+        };
+        let mut g = crate::render::Geometry::default();
+        let red = [1.0, 0.0, 0.0];
+        draw(&mut g, &plane, &marks, &Default::default(), red, 1.0);
+        // The arrow's shaft and head, and the ellipse's outline, on the glass.
+        assert_eq!(g.overlay.len(), 3);
+        assert!(matches!(g.overlay[1], crate::render::Overlay::Head { .. }));
+        assert_eq!(g.notes.len(), 1);
+        assert_eq!(g.lines.len(), 1, "the face stroke is depth-tested");
+        assert_eq!(g.lines[0].width, crate::render::MARK_WIDTH);
+        // A closed annotation's marks fade, the face stroke too.
+        let mut faded = crate::render::Geometry::default();
+        draw(
+            &mut faded,
+            &plane,
+            &marks,
+            &Default::default(),
+            red,
+            CLOSED_ALPHA,
+        );
+        assert!(faded.lines.is_empty());
+        assert_eq!(faded.translucent_lines.len(), 1);
+        assert!(
+            matches!(faded.overlay[0], crate::render::Overlay::Line { alpha, .. } if alpha == CLOSED_ALPHA)
+        );
     }
 
     #[test]

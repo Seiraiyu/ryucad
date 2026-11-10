@@ -358,6 +358,24 @@ impl Geometry {
     }
 }
 
+/// Participants' colours, in turn: apart from each other for colour-blind
+/// eyes too. A participant's marks and pins are drawn in theirs, in the
+/// window and in renders alike.
+pub const PARTICIPANTS: [Rgb; 6] = [
+    [0.79, 0.34, 0.73],
+    [0.97, 0.59, 0.34],
+    [0.35, 0.57, 0.07],
+    [0.54, 0.47, 0.99],
+    [0.90, 0.35, 0.40],
+    [0.28, 0.63, 0.61],
+];
+
+/// A participant's colour: the same everywhere, from their ID or name.
+pub fn participant(id: &str) -> Rgb {
+    let n: usize = id.bytes().map(usize::from).sum();
+    PARTICIPANTS[n % PARTICIPANTS.len()]
+}
+
 /// Datums' colour, and how opaque a datum plane's square is.
 pub const DATUM: Rgb = [0.55, 0.36, 0.86];
 /// An annotation's pin (`render --annotations`): a dot and its number.
@@ -2356,6 +2374,15 @@ pub(crate) mod tests {
             render(&g, &cam, 160, 120, Options::default()).unwrap().rgba,
             a.rgba
         );
+    }
+
+    #[test]
+    fn a_participants_colour_is_the_same_from_their_name() {
+        assert_eq!(
+            participant("dave (window 1)"),
+            participant("dave (window 1)")
+        );
+        assert!(PARTICIPANTS.contains(&participant("agent")));
     }
 
     #[test]
