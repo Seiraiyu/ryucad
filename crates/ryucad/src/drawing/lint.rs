@@ -284,7 +284,10 @@ pub(crate) fn run(
         // Views over each other.
         for (i, a) in s.views.iter().enumerate() {
             for b in &s.views[i + 1..] {
-                if overlap(grow(a.bounds, DIM_ROOM), grow(b.bounds, DIM_ROOM)) {
+                // As layout judges views apart (#644): it stands each
+                // just clear of its neighbour and writes places to a
+                // thousandth, so their rooms may meet by that much.
+                if super::overlap(grow(a.bounds, DIM_ROOM), grow(b.bounds, DIM_ROOM)) {
                     push(
                         "dwg_view_overlap",
                         &sk,
@@ -716,6 +719,51 @@ mod tests {
         assert!(!cross([[0.0, 0.0], [1.0, 0.0]], [[1.0, 0.0], [1.0, 1.0]]));
         assert!(hits([[-1.0, 0.5], [2.0, 0.5]], [[0.0, 0.0], [1.0, 1.0]]));
         assert!(!hits([[-1.0, 2.0], [2.0, 2.0]], [[0.0, 0.0], [1.0, 1.0]]));
+    }
+
+    /// The `dwg_view_overlap` findings of a 40 × 30 × 20 mm box's front
+    /// view at (100, 100) and its right view `at` mm right of it, at 1:1.
+    fn view_overlaps(right_at: f64) -> usize {
+        use crate::doc::id::Id;
+        let (dir, mut s) = crate::server::tests::fresh();
+        let call = crate::server::tests::call;
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 40, "y": 30, "z": 20}}),
+        )
+        .unwrap();
+        let file = json!({"format": 1, "kind": "ryucad.drawing", "name": "Block",
+        "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b", "scale": "1:1"}},
+        "views": {
+            "v1": {"type": "base", "sheet": "s1", "orient": "front", "at": ["100 mm", "100 mm"]},
+            "v2": {"type": "base", "sheet": "s1", "orient": "right",
+                   "at": [format!("{right_at} mm"), "100 mm"]},
+        }});
+        let at = dir.path().join("parts/p/drawings");
+        std::fs::create_dir_all(&at).unwrap();
+        crate::doc::project::write_json(&at.join("d.json"), &file).unwrap();
+        s.reload().unwrap();
+        let id = |x: &str| Id::parse(x, "x").unwrap();
+        let b = super::super::build(&mut s, &id("p"), &id("d")).unwrap();
+        b.findings
+            .iter()
+            .filter(|f| f["code"] == "dwg_view_overlap")
+            .count()
+    }
+
+    #[test]
+    fn views_meeting_by_a_written_places_rounding_are_apart() {
+        // The front reaches 20 mm right of its centre and the right view
+        // 15 mm left of its own, each with 12 mm of room: they meet with
+        // the right view's centre at 159 mm.
+        assert_eq!(view_overlaps(160.0), 0);
+        assert_eq!(view_overlaps(159.0), 0);
+        // Within a written place's thousandth (#644).
+        assert_eq!(view_overlaps(158.9995), 0);
+        assert_eq!(view_overlaps(158.99), 1);
+        assert_eq!(view_overlaps(150.0), 1);
     }
 
     #[test]
