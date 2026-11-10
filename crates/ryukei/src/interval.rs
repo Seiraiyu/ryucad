@@ -24,19 +24,23 @@ pub struct Interval {
 
 impl Interval {
     /// The interval holding exactly `x`.
+    #[inline]
     pub fn point(x: f64) -> Self {
         Self { lo: x, hi: x }
     }
 
     /// `[lo, hi]`, or `None` unless `lo <= hi` (so never NaN).
+    #[inline]
     pub fn new(lo: f64, hi: f64) -> Option<Self> {
         (lo <= hi).then_some(Self { lo, hi })
     }
 
+    #[inline]
     pub fn lo(self) -> f64 {
         self.lo
     }
 
+    #[inline]
     pub fn hi(self) -> f64 {
         self.hi
     }
@@ -46,6 +50,7 @@ impl Interval {
     }
 
     /// Widen round-to-nearest bounds by one ulp each way.
+    #[inline]
     fn outward(lo: f64, hi: f64) -> Self {
         Self {
             lo: down(lo),
@@ -54,6 +59,7 @@ impl Interval {
     }
 
     /// The smallest interval holding both.
+    #[inline]
     pub fn hull(self, other: Self) -> Self {
         Self {
             lo: self.lo.min(other.lo),
@@ -62,12 +68,14 @@ impl Interval {
     }
 
     /// The largest magnitude of any value inside: `max(|lo|, |hi|)`.
+    #[inline]
     pub fn mag(self) -> f64 {
         self.lo.abs().max(self.hi.abs())
     }
 
     /// `x²` for every `x` inside, tighter than `self * self` when the
     /// interval straddles zero.
+    #[inline]
     pub fn square(self) -> Self {
         if self.lo >= 0.0 {
             Self::outward(self.lo * self.lo, self.hi * self.hi)
@@ -199,6 +207,7 @@ const NEG_INF_BITS: u64 = f64::NEG_INFINITY.to_bits();
 /// For bounds that are sums and products of non-negative terms, where only
 /// the upper ends are wanted, this is the same float without the lower
 /// ends' work (#308).
+#[inline]
 pub(crate) fn add_up(a: f64, b: f64) -> f64 {
     up(a + b)
 }
@@ -209,20 +218,24 @@ pub(crate) fn add_up(a: f64, b: f64) -> f64 {
 /// least `TINY` when its lower end is below zero): [`Mul`] then takes the
 /// product of the upper ends, stepped up by [`up`], whatever their signs'
 /// cases, and the same float for infinities and NaN.
+#[inline]
 pub(crate) fn mul_up(a: f64, b: f64) -> f64 {
     up(a * b)
 }
 
+#[inline]
 fn min4(v: [f64; 4]) -> f64 {
     v[0].min(v[1]).min(v[2]).min(v[3])
 }
 
+#[inline]
 fn max4(v: [f64; 4]) -> f64 {
     v[0].max(v[1]).max(v[2]).max(v[3])
 }
 
 impl Add for Interval {
     type Output = Self;
+    #[inline]
     fn add(self, rhs: Self) -> Self {
         Self::outward(self.lo + rhs.lo, self.hi + rhs.hi)
     }
@@ -230,6 +243,7 @@ impl Add for Interval {
 
 impl Sub for Interval {
     type Output = Self;
+    #[inline]
     fn sub(self, rhs: Self) -> Self {
         Self::outward(self.lo - rhs.hi, self.hi - rhs.lo)
     }
@@ -237,6 +251,7 @@ impl Sub for Interval {
 
 impl Neg for Interval {
     type Output = Self;
+    #[inline]
     fn neg(self) -> Self {
         Self {
             lo: -self.hi,
@@ -247,6 +262,7 @@ impl Neg for Interval {
 
 impl Mul for Interval {
     type Output = Self;
+    #[inline]
     fn mul(self, rhs: Self) -> Self {
         let (a, b) = (self, rhs);
         if a.lo.is_finite() && a.hi.is_finite() && b.lo.is_finite() && b.hi.is_finite() {

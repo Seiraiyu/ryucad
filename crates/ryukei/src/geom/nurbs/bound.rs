@@ -178,20 +178,26 @@ fn hom(p: Vector3, w: f64) -> H {
 
 /// The parts of `[t0, t1]` inside a spline's domain, unwrapped into it
 /// when periodic.
-fn clip(domain: [f64; 2], period: Option<f64>, [t0, t1]: [f64; 2]) -> Vec<[f64; 2]> {
+fn clip(domain: [f64; 2], period: Option<f64>, range: [f64; 2]) -> Vec<[f64; 2]> {
+    let (ranges, n) = clip_in(domain, period, range);
+    ranges[..n].to_vec()
+}
+
+/// [`clip`]'s ranges in place: the first `n` of the array.
+fn clip_in(domain: [f64; 2], period: Option<f64>, [t0, t1]: [f64; 2]) -> ([[f64; 2]; 2], usize) {
     let [d0, d1] = domain;
     match period {
         Some(p) if t1 - t0 < p => {
             let a = d0 + (t0 - d0).rem_euclid(p);
             let b = a + (t1 - t0);
             if b <= d1 {
-                vec![[a, b]]
+                ([[a, b], [0.0; 2]], 1)
             } else {
-                vec![[a, d1], [d0, (b - p).min(d1)]]
+                ([[a, d1], [d0, (b - p).min(d1)]], 2)
             }
         }
-        Some(_) => vec![domain],
-        None => vec![[t0.max(d0), t1.min(d1).max(t0.max(d0))]],
+        Some(_) => ([domain, [0.0; 2]], 1),
+        None => ([[t0.max(d0), t1.min(d1).max(t0.max(d0))], [0.0; 2]], 1),
     }
 }
 
@@ -843,24 +849,38 @@ impl NurbsSurface {
     /// holding it by a point value and a mean-value remainder
     /// ([`taylor`]), a larger one by the cut. Certified as `jet_box` is,
     /// but not the same bits.
-    pub(crate) fn jet_box_small(&self, [ru, rv]: [[f64; 2]; 2]) -> [V3; 6] {
+    #[cfg(test)]
+    pub(crate) fn jet_box_small(&self, range: [[f64; 2]; 2]) -> [V3; 6] {
+        self.jet_box_small_with(range, true)
+    }
+
+    /// [`Self::jet_box_small`]'s derivatives, the point's enclosure
+    /// (`[0]`) perhaps entire: the mesher's bounds read only derivatives,
+    /// and a polynomial patch's don't need its point (#308). The
+    /// derivatives have `jet_box_small`'s bits.
+    pub(crate) fn derivative_box_small(&self, range: [[f64; 2]; 2]) -> [V3; 6] {
+        self.jet_box_small_with(range, false)
+    }
+
+    fn jet_box_small_with(&self, [ru, rv]: [[f64; 2]; 2], point: bool) -> [V3; 6] {
         let (pu, pv) = self.periods();
         let [du, dv] = self.domain();
-        let (cu, cv) = (clip(du, pu, ru), clip(dv, pv, rv));
+        let ((cu, nu), (cv, nv)) = (clip_in(du, pu, ru), clip_in(dv, pv, rv));
+        let (cu, cv) = (&cu[..nu], &cv[..nv]);
         let all = Iv::new(f64::NEG_INFINITY, f64::INFINITY).expect("ordered");
         let mut out: Option<[V3; 6]> = None;
         let patches = self.patches();
-        for index in self.patches_meeting(&cu, &cv) {
+        let mut visit = |index: usize| {
             let patch = &patches[index];
-            for &a in &cu {
+            for &a in cu {
                 let Some(s) = local(patch.range[0], a) else {
                     continue;
                 };
-                for &b in &cv {
+                for &b in cv {
                     let Some(t) = local(patch.range[1], b) else {
                         continue;
                     };
-                    let j = match taylor::jets(self.id(), index, patch, s, t)
+                    let j = match taylor::jets(self.id(), index, patch, s, t, point)
                         .or_else(|| patch_jets(patch, s, t))
                     {
                         Some((at, mut j)) => {
@@ -875,11 +895,18 @@ impl NurbsSurface {
                     });
                 }
             }
+        };
+        // A box in one patch, the mesher's usual case, finds it without
+        // the lists `patches_meeting` allocates (five a box tested, #308):
+        // the same patch, so the same bits.
+        match self.patch_meeting(cu, cv) {
+            Some(index) => visit(index),
+            None => self.patches_meeting(cu, cv).into_iter().for_each(visit),
         }
         out.unwrap_or_else(|| {
             let u = ru[0].clamp(du[0], du[1]);
             let v = rv[0].clamp(dv[0], dv[1]);
-            self.jet_box_small([[u, u], [v, v]])
+            self.jet_box_small_with([[u, u], [v, v]], point)
         })
     }
 }

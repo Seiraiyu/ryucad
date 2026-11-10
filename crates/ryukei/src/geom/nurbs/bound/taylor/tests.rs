@@ -112,7 +112,7 @@ fn enclosures_hold_sampled_values() {
                 if let (Some(s), Some(t)) = (
                     super::super::local(patch.range[0], range[0]),
                     super::super::local(patch.range[1], range[1]),
-                ) && jets(n.id(), index, patch, s, t).is_some()
+                ) && jets(n.id(), index, patch, s, t, true).is_some()
                 {
                     taken += 1;
                 }
@@ -278,8 +278,8 @@ fn polynomial_jets_are_no_wider_than_the_quotients() {
                 };
                 assert!(c.polynomial);
                 let (Some(p), Some(q)) = (
-                    enclose(&c, patch.range, [s, t], [ks, kt], true),
-                    enclose(&c, patch.range, [s, t], [ks, kt], false),
+                    enclose(&c, patch.range, [s, t], [ks, kt], true, true),
+                    enclose(&c, patch.range, [s, t], [ks, kt], false, true),
                 ) else {
                     continue;
                 };
@@ -302,6 +302,51 @@ fn polynomial_jets_are_no_wider_than_the_quotients() {
     assert!(
         narrower > compared / 2,
         "only {narrower} of {compared} narrower"
+    );
+}
+
+/// The mesher's derivative-only enclosures are `jet_box_small`'s
+/// derivatives bit for bit, over rational and polynomial surfaces and
+/// boxes from a point to most of the domain, within a patch and across
+/// patches (#308): leaving out a polynomial patch's point changes no
+/// derivative, and the one-patch path finds the patch the list does.
+#[test]
+fn derivative_boxes_keep_the_jets_bits() {
+    let mut rng = Rng(0x308_0002);
+    let (mut skipped, mut boxes) = (0usize, 0usize);
+    for case in 0..160 {
+        let n = if case % 2 == 0 {
+            surface(&mut rng)
+        } else {
+            polynomial_surface(&mut rng)
+        };
+        let [du, dv] = n.domain();
+        for _ in 0..16 {
+            let fu = [0.0, 1e-9, 1e-4, 0.01, 0.05, 0.3, 0.9][rng.below(7)];
+            let fv = [0.0, 1e-9, 1e-4, 0.01, 0.05, 0.3, 0.9][rng.below(7)];
+            let wu = (du[1] - du[0]) * fu;
+            let wv = (dv[1] - dv[0]) * fv;
+            let u0 = rng.range(du[0], du[1] - wu);
+            let v0 = rng.range(dv[0], dv[1] - wv);
+            let range = [[u0, u0 + wu], [v0, v0 + wv]];
+            let (all, some) = (n.jet_box_small(range), n.derivative_box_small(range));
+            let bits = |j: &[V3]| -> Vec<u64> {
+                j.iter()
+                    .flatten()
+                    .flat_map(|x| [x.lo().to_bits(), x.hi().to_bits()])
+                    .collect()
+            };
+            assert_eq!(bits(&all[1..]), bits(&some[1..]), "case {case}, {range:?}");
+            if some[0] != all[0] {
+                assert!(some[0].iter().all(|x| x.lo() == f64::NEG_INFINITY));
+                skipped += 1;
+            }
+            boxes += 1;
+        }
+    }
+    assert!(
+        skipped > boxes / 4,
+        "only {skipped} of {boxes} left the point out"
     );
 }
 
