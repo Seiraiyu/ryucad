@@ -202,7 +202,19 @@ fn the_references_read_every_seeded_body() {
 fn every_race_body_is_valid_and_imports() {
     use rayon::prelude::*;
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let bodies = ryukei_testkit::race::writable(1600);
+    // `RYUCAD_RACE_KEEP=<dir>` writes the files there, to look at after.
+    let kept = std::env::var("RYUCAD_RACE_KEEP").ok().map(PathBuf::from);
+    let dir = kept.clone().unwrap_or_else(|| dir.path().to_path_buf());
+    std::fs::create_dir_all(&dir).unwrap();
+    // `RYUCAD_RACE_BODIES=155,200` judges those bodies alone.
+    let only: Option<Vec<usize>> = std::env::var("RYUCAD_RACE_BODIES")
+        .ok()
+        .map(|s| s.split(',').map(|k| k.trim().parse().unwrap()).collect());
+    let bodies: Vec<(usize, Body)> = ryukei_testkit::race::writable(1600)
+        .into_iter()
+        .enumerate()
+        .filter(|(k, _)| only.as_ref().is_none_or(|o| o.contains(k)))
+        .collect();
     let opts = Options {
         unit: Unit::Millimeter,
         brep: true,
@@ -216,8 +228,8 @@ fn every_race_body_is_valid_and_imports() {
     type Written = Result<(PathBuf, Option<(f64, f64)>), String>;
     let written: Vec<Written> = bodies
         .par_iter()
-        .enumerate()
         .map(|(k, b)| {
+            let k = *k;
             let model = Model {
                 products: vec![Product {
                     id: format!("B-{k}"),
@@ -234,7 +246,7 @@ fn every_race_body_is_valid_and_imports() {
                 }],
             };
             let l = layer(&model, &opts).map_err(|e| format!("{k}: {e}"))?;
-            let path = dir.path().join(format!("b{k}.usda"));
+            let path = dir.join(format!("b{k}.usda"));
             std::fs::write(&path, usda::to_string(&l).unwrap()).unwrap();
             Ok((path, measured(b, Unit::Millimeter)))
         })
@@ -246,7 +258,7 @@ fn every_race_body_is_valid_and_imports() {
     let unmeasured: Vec<usize> = (0..volumes.len())
         .filter(|&k| volumes[k].is_none())
         .collect();
-    let report = reference(dir.path(), &files);
+    let report = reference(&dir, &files);
     let wrong: Vec<String> = report
         .iter()
         .zip(&volumes)

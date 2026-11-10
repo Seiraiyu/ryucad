@@ -96,7 +96,7 @@ mod unseam;
 
 pub use names::{Names as ImportNames, names as import_names};
 pub use reference::{ReferenceOptions, ReferenceReport, reference, reference_with};
-pub use seamed::{Origins, seamed, seamed_with_origins};
+pub use seamed::{Origins, seamed, seamed_with_origins, seamed_with_origins_unpinched};
 pub use sewing::{SewOptions, sew, sew_with};
 
 use crate::geom::{Curve, Curve2, Point3, Surface};
