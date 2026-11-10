@@ -27,6 +27,7 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepOffsetAPI_DraftAngle.hxx>
+#include <BRepAlgoAPI_Defeaturing.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <GeomLProp_SLProps.hxx>
 #include <Geom_Surface.hxx>
@@ -954,6 +955,48 @@ std::unique_ptr<Shape> draft_angle(const Shape &s, rust::Slice<const double> fac
     return wrap(draft.Shape());
   } catch (const Standard_Failure &e) {
     throw std::runtime_error(std::string("DraftAngle: ") + e.GetMessageString());
+  }
+}
+
+// The solid with the faces nearest each point of `faces` (x, y, z
+// flattened), or with `select` 1 every cylindrical face and 2 every face
+// that isn't a plane, removed and the
+// gaps healed by BRepAlgoAPI_Defeaturing (neighbours extended to close
+// them). `seconds` is the time AddFacesToRemove and Build took, leaving
+// out finding the faces.
+std::unique_ptr<Shape> defeature(const Shape &s, rust::Slice<const double> faces,
+                                 uint32_t select, double &seconds) {
+  try {
+    std::vector<TopoDS_Face> chosen;
+    if (select != 0) {
+      for (TopExp_Explorer ex(s.shape, TopAbs_FACE); ex.More(); ex.Next()) {
+        TopoDS_Face f = TopoDS::Face(ex.Current());
+        GeomAbs_SurfaceType t = BRepAdaptor_Surface(f).GetType();
+        if (select == 1 ? t == GeomAbs_Cylinder : t != GeomAbs_Plane) {
+          chosen.push_back(f);
+        }
+      }
+    } else {
+      for (size_t k = 0; k + 2 < faces.size(); k += 3) {
+        chosen.push_back(nearest_face(s.shape, faces[k], faces[k + 1], faces[k + 2]));
+      }
+    }
+    auto start = std::chrono::steady_clock::now();
+    BRepAlgoAPI_Defeaturing df;
+    df.SetShape(s.shape);
+    for (const TopoDS_Face &f : chosen) {
+      df.AddFaceToRemove(f);
+    }
+    df.SetRunParallel(Standard_False);
+    df.SetToFillHistory(Standard_False);
+    df.Build();
+    seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    if (!df.IsDone() || df.HasErrors()) {
+      throw std::runtime_error("BRepAlgoAPI_Defeaturing failed");
+    }
+    return wrap(df.Shape());
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("Defeaturing: ") + e.GetMessageString());
   }
 }
 
