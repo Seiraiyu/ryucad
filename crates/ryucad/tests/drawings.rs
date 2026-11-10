@@ -157,3 +157,48 @@ fn a_flat_view_draws_the_pattern_flat_get_gives() {
         "{texts:?}"
     );
 }
+#[test]
+fn an_exploded_view_draws_its_parts_apart() {
+    let (_d, mut s) = project();
+    must(&mut s, "part.create", json!({"part": "blk"}));
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "blk", "type": "box", "id": "b", "params": {"x": 10, "y": 10, "z": 10}}),
+    );
+    must(
+        &mut s,
+        "part.create",
+        json!({"part": "asm", "kind": "assembly"}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "asm", "type": "instance", "id": "a", "of": "blk", "fixed": true}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "asm", "type": "instance", "id": "b", "of": "blk", "fixed": true,
+               "placement": {"origin": [0, 0, 10]}}),
+    );
+    must(
+        &mut s,
+        "explode.save",
+        json!({"part": "asm", "explode": "up", "steps": [{"instances": ["b"], "translate": [0, 0, 30]}]}),
+    );
+    let get = drawing(
+        &mut s,
+        "asm",
+        json!({
+            "v1": {"type": "base", "sheet": "s1", "orient": "front"},
+            "v2": {"type": "exploded", "sheet": "s1", "explode": "up", "orient": "front", "trails": true}
+        }),
+    );
+    assert_eq!(get["findings"], json!([]));
+    let height =
+        |v: &Value| v["box_mm"][1][1].as_f64().unwrap() - v["box_mm"][0][1].as_f64().unwrap();
+    // Stacked, 20 mm tall; exploded, 50.
+    assert!((height(view(&get, "v1")) - 20.0).abs() < 1e-9);
+    assert!((height(view(&get, "v2")) - 50.0).abs() < 1e-9);
+}
