@@ -188,6 +188,8 @@ enum Pending {
     /// The Mate dialog's preview of an assembly, and its add.
     MatePreview(String, u64),
     MateAdd(String),
+    /// The Markup bar's Post (`annotation.create` or `annotation.edit`).
+    MarkupPost,
     /// A part's named views (`view.list`).
     Views(String),
     /// A named view of a part, saved (`view.save`).
@@ -564,6 +566,8 @@ pub struct Workspace {
     mover_waiting: bool,
     /// The Mate dialog, while it is open.
     pub mating: Option<crate::core::mating::Mating>,
+    /// The Markup bar, while it is open (design 423).
+    pub markup: Option<crate::core::markup::Markup>,
     /// How many mate previews the window has asked for.
     mate_previews: u64,
     /// A tile the window should open (the app opens it next frame): the
@@ -730,6 +734,7 @@ impl Workspace {
             mover_asked: None,
             mover_waiting: false,
             mating: None,
+            markup: None,
             mate_previews: 0,
             wants_tile: None,
             views: Default::default(),
@@ -1422,6 +1427,124 @@ impl Workspace {
             self.model.preview.retain(|(p, _), _| *p != d.part);
             self.model.generation += 1;
         }
+    }
+
+    /// Opens the Markup bar on the shown part or assembly, looking through
+    /// `camera`, which it locks (design 423).
+    pub fn open_markup(&mut self, camera: Camera) -> std::result::Result<(), String> {
+        let shown = self.model.shown();
+        let [part] = shown.as_slice() else {
+            return Err("Show one part or assembly to mark up (View > Show).".into());
+        };
+        let part = part.to_string();
+        // One tool at a time.
+        self.cancel_move();
+        self.close_mate();
+        self.markup = Some(crate::core::markup::Markup::new(&part, camera));
+        Ok(())
+    }
+
+    /// Reopens the Markup bar on annotation `id`'s view and marks (its
+    /// author's Edit), showing the model they were drawn on.
+    pub fn edit_markup(&mut self, id: &str) -> std::result::Result<(), String> {
+        let e = self
+            .annotations
+            .all
+            .get(id)
+            .ok_or_else(|| format!("No annotation {id}."))?;
+        let m = crate::core::markup::Markup::editing(id, e)
+            .ok_or("This annotation has no marks or no view to reopen.")?;
+        if !self.model.shown().contains(&m.part.as_str()) {
+            self.set_focus(Some(m.part.clone()));
+        }
+        self.markup = Some(m);
+        Ok(())
+    }
+
+    /// Post: the marks and the comment as one annotation, or the edited
+    /// one's; the bar stays open, its marks kept, until the daemon answers.
+    pub fn post_markup(&mut self) {
+        let Some(m) = self.markup.as_mut() else {
+            return;
+        };
+        m.commit_text();
+        let Some(req) = m.request() else {
+            m.note = Some("Type what should change: a mark says where, words say what.".into());
+            return;
+        };
+        m.posting = true;
+        m.note = None;
+        self.send(req, Pending::MarkupPost);
+    }
+
+    /// The view marks the viewport draws on the glass (design 423, When):
+    /// the Markup bar's, with the mark under way, in this window's colour;
+    /// else the chosen annotation's, in its author's, at
+    /// [`ryucad::redline::CLOSED_ALPHA`] once closed; else none, since flat
+    /// marks seen from another view mislead.
+    pub fn view_marks(&self) -> Option<crate::core::markup::ViewMarks> {
+        use crate::core::markup::ViewMarks;
+        if let Some(m) = &self.markup {
+            let mut marks = m.marks.clone();
+            marks.extend(m.under_way());
+            return Some(ViewMarks {
+                plane: m.plane(),
+                marks,
+                colour: ryucad::render::participant(&self.name),
+                alpha: 1.0,
+            });
+        }
+        let e = self.annotations.all.get(self.chosen_annotation.as_ref()?)?;
+        Some(ViewMarks {
+            plane: e.plane()?,
+            marks: e.marks.as_ref()?.list.clone(),
+            colour: ryucad::render::participant(&e.by),
+            alpha: if e.is_open() {
+                1.0
+            } else {
+                ryucad::redline::CLOSED_ALPHA
+            },
+        })
+    }
+
+    /// The annotation the Markup bar edits, if it edits one: the bar
+    /// draws its marks, so the listing's are left out.
+    pub fn markup_editing(&self) -> Option<&str> {
+        self.markup.as_ref().and_then(|m| m.editing.as_deref())
+    }
+
+    /// The face strokes the window draws (design 423): open annotations'
+    /// when `pins` are drawn, but the one the bar edits, then the bar's,
+    /// with the mark under way, in this window's colour.
+    pub fn face_strokes(&self, pins: bool) -> Vec<crate::core::annotations::Stroke> {
+        let shown = self.model.shown();
+        let place = |on: &str| self.model.placed_on(on);
+        let mut strokes = if pins {
+            self.annotations
+                .face_strokes(&shown, place, self.markup_editing())
+        } else {
+            Vec::new()
+        };
+        if let Some(m) = &self.markup {
+            let mut marks = m.marks.clone();
+            marks.extend(m.under_way());
+            let marks = ryucad::redline::Marks {
+                part: ryucad::doc::id::Id::parse(&m.part, "part").expect("a part's ID"),
+                list: marks,
+            };
+            strokes.extend(crate::core::annotations::face_strokes_of(
+                &marks,
+                self.my_name(),
+                &place,
+            ));
+        }
+        strokes
+    }
+
+    /// Cancel (or Esc with nothing under way): the bar closes and its
+    /// marks go.
+    pub fn cancel_markup(&mut self) {
+        self.markup = None;
     }
 
     /// Asks what importing the open import's file would do: `import` as
@@ -4188,6 +4311,25 @@ impl Workspace {
                     }
                 }
             }
+            (Pending::MarkupPost, a) => match a {
+                // Posted: the bar closes, and the annotation is chosen, so
+                // its marks are drawn in its view.
+                Ok(a) => {
+                    self.markup = None;
+                    if let Some(id) = a.result["annotation"]["id"].as_str() {
+                        let id = id.to_owned();
+                        self.choose_annotation(Some(&id));
+                    }
+                }
+                // Refused: said on the bar, the marks kept.
+                Err(e) => match self.markup.as_mut() {
+                    Some(m) => {
+                        m.posting = false;
+                        m.note = Some(e.message.clone());
+                    }
+                    None => self.fail(e),
+                },
+            },
             (Pending::MateAdd(_), Err(e)) => self.fail(e),
             (Pending::MateAdd(_), Ok(_)) => {}
             (Pending::MoveWrite(part), a) => {

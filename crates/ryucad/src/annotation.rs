@@ -311,7 +311,8 @@ pub fn pin_text(pin: &Pin) -> String {
     }
 }
 
-/// An annotation as listings give it: its file's fields, and `outdated`,
+/// An annotation as listings give it: its file's fields (its marks as
+/// `{part, count, kinds, list}`: the window draws them), and `outdated`,
 /// `stale` (with `outdated_pins`, `outdated_marks` and `stale_files` when true) and, with a
 /// change, `applied`.
 pub fn entry(
@@ -345,7 +346,8 @@ pub fn entry(
         o.insert(
             "marks".into(),
             json!({"part": m.part, "count": m.list.len(),
-                   "kinds": m.list.iter().map(|k| k.kind.as_str()).collect::<Vec<_>>()}),
+                   "kinds": m.list.iter().map(|k| k.kind.as_str()).collect::<Vec<_>>(),
+                   "list": m.list.iter().map(crate::redline::Mark::to_json).collect::<Vec<_>>()}),
         );
     }
     v
@@ -728,25 +730,44 @@ pub fn pin_on(
     }
 }
 
+/// Each open annotation's number: its place among the open ones,
+/// oldest first, from 1, as `render --annotations` and the app number
+/// them.
+pub fn numbers(files: &Files) -> BTreeMap<Id, usize> {
+    let all = readable(&read_all(files));
+    let mut open: Vec<&Annotation> = all.values().filter(|a| a.status.is_open()).collect();
+    open.sort_by(|a, b| (&a.at, &a.id).cmp(&(&b.at, &b.id)));
+    open.iter()
+        .enumerate()
+        .map(|(n, a)| (a.id.clone(), n + 1))
+        .collect()
+}
+
 /// Where `render --annotations` draws pins on `part`: each open
 /// annotation's pins that carry a point and lie on `part` (or on one of
 /// its occurrences, placed by `poses`, keyed by instance path), with the
-/// annotation's number among the open ones, oldest first, from 1. A pin
-/// with no point is the app's to draw at its entity.
+/// annotation's number among the open ones ([`numbers`]), but `skip`'s
+/// (the annotation `render --annotation` draws itself). A pin with no
+/// point is the app's to draw at its entity.
 pub fn markers(
     files: &Files,
     part: &str,
     poses: &BTreeMap<String, ryukei::geom::Rigid>,
+    skip: Option<&Id>,
 ) -> Vec<([f64; 3], String)> {
     let all = readable(&read_all(files));
-    let mut open: Vec<&Annotation> = all.values().filter(|a| a.status.is_open()).collect();
-    open.sort_by(|a, b| (&a.at, &a.id).cmp(&(&b.at, &b.id)));
+    let numbers = numbers(files);
     let mut out = Vec::new();
-    for (n, a) in open.iter().enumerate() {
+    let mut open: Vec<(&usize, &Annotation)> = numbers
+        .iter()
+        .filter(|(id, _)| Some(*id) != skip)
+        .filter_map(|(id, n)| all.get(id).map(|a| (n, a)))
+        .collect();
+    open.sort_by_key(|(n, _)| **n);
+    for (n, a) in open {
         for pin in &a.pins {
-            let at = pin_on(pin, part, poses);
-            if let Some(at) = at {
-                out.push((at, (n + 1).to_string()));
+            if let Some(at) = pin_on(pin, part, poses) {
+                out.push((at, n.to_string()));
             }
         }
     }
@@ -1052,7 +1073,7 @@ pub(crate) mod tests {
         for x in [&a, &b, &c, &closed] {
             put(&mut s, x);
         }
-        let m = markers(&s.snapshot(), "plate", &BTreeMap::new());
+        let m = markers(&s.snapshot(), "plate", &BTreeMap::new(), None);
         assert_eq!(
             m,
             vec![
@@ -1060,7 +1081,16 @@ pub(crate) mod tests {
                 ([0.0, 0.01, 0.0], "2".to_owned())
             ]
         );
-        assert!(markers(&s.snapshot(), "other", &BTreeMap::new()).is_empty());
+        assert!(markers(&s.snapshot(), "other", &BTreeMap::new(), None).is_empty());
+        // `render --annotation` draws its own: the others keep their numbers.
+        let skip = Id::parse("aaaaaaaaaa", "annotation").unwrap();
+        assert_eq!(
+            markers(&s.snapshot(), "plate", &BTreeMap::new(), Some(&skip)),
+            vec![([0.0, 0.01, 0.0], "2".to_owned())]
+        );
+        let n = numbers(&s.snapshot());
+        assert_eq!(n.len(), 3, "the open ones");
+        assert_eq!(n[&skip], 1);
     }
 
     /// Every project write a handler makes goes through the session, so a
@@ -1628,10 +1658,17 @@ pub(crate) mod tests {
         assert_eq!(m[2]["count"], 2);
         assert_eq!(m[3]["text"], "2 mm");
         assert!(m[3]["touches"].as_array().unwrap().is_empty());
-        // Listings give a summary.
+        // Listings give a summary, and the marks themselves for the window
+        // to draw, as the file has them.
         assert_eq!(
             v["annotation"]["marks"]["kinds"],
             json!(["arrow", "rectangle", "stroke", "text"])
+        );
+        let id = v["annotation"]["id"].as_str().unwrap();
+        let file = one(&s, id, None).unwrap();
+        assert_eq!(
+            v["annotation"]["marks"]["list"],
+            file.marks.unwrap().to_json()["list"]
         );
     }
 

@@ -1184,6 +1184,37 @@ impl Model {
         self.pose(&key).unapply(at)
     }
 
+    /// Where what a redline mark's `on` names is drawn (design 423): an
+    /// occurrence's (`<asm>/<path>`) pose, through any solid it places, or
+    /// a part's own solid (`<part>/<founder>`), where its part puts it.
+    pub fn placed_on(&self, on: &str) -> Pose {
+        let (part, path) = on.split_once('/').unwrap_or((on, ""));
+        let Some(p) = self.parts.get(part).filter(|p| p.assembly) else {
+            return Pose::IDENTITY;
+        };
+        let solid = p
+            .occurrences
+            .iter()
+            .find(|o| o.path == path)
+            .and_then(|o| o.solids.first())
+            .map(|(s, _)| s.clone());
+        match solid {
+            Some(s) => self.pose(&(part.to_owned(), format!("{path}/{s}"))),
+            None => Pose::IDENTITY,
+        }
+    }
+
+    /// What a redline face stroke drawn on `key`'s body names as `on`: an
+    /// occurrence's `<asm>/<path>` (its solid dropped), else
+    /// `<part>/<founder>`.
+    pub fn on_of(&self, key: &BodyKey) -> String {
+        let assembly = self.parts.get(&key.0).is_some_and(|p| p.assembly);
+        match key.1.rsplit_once('/') {
+            Some((path, _)) if assembly => format!("{}/{path}", key.0),
+            _ => format!("{}/{}", key.0, key.1),
+        }
+    }
+
     /// Where `key`'s body is drawn: its occurrence's pose in an assembly
     /// (moved with its instance while it is dragged), else where its part
     /// puts it.

@@ -6292,3 +6292,154 @@ fn a_drawing_opens_from_its_row_its_dimension_is_edited_and_a_view_dragged() {
         .unwrap();
     assert!((x - 130.0).abs() < 0.5, "{file}");
 }
+
+#[test]
+fn markup_draws_in_a_locked_view_its_keys_choose_tools_and_post_unlocks_it() {
+    use ryucad_app::core::markup::Tool;
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.step();
+    h.get_by_label("Markup").click();
+    waited(&mut h, "the bar", |a| a.opened().ws.markup.is_some());
+    shown(&mut h, "Pen on faces");
+    h.run_steps(2);
+    let held = h.state().opened().view.nav.camera.clone();
+    assert!(h.state().opened().view.nav.locked);
+    let rect = h.state().opened().view.rect;
+    // A left-drag draws an arrow: it neither orbits nor picks.
+    let from = rect.center() + egui::vec2(-80.0, 60.0);
+    drag(&mut h, from, from + egui::vec2(120.0, 40.0), 6);
+    waited(&mut h, "an arrow", |a| {
+        a.opened().ws.markup.as_ref().unwrap().marks.len() == 1
+    });
+    // The wheel zooms nothing.
+    h.event(egui::Event::PointerMoved(rect.center()));
+    for _ in 0..4 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.step();
+    }
+    assert_eq!(h.state().opened().view.nav.camera, held);
+    assert!(h.state().opened().ws.myself().unwrap().selection.is_empty());
+    // E is Ellipse while the bar is open, and Mod+Z undoes a mark, not
+    // the project.
+    hooked(&mut h, egui::Key::E, egui::Modifiers::NONE);
+    h.run_steps(2);
+    assert_eq!(
+        h.state().opened().ws.markup.as_ref().unwrap().tool,
+        Tool::Ellipse
+    );
+    drag(&mut h, from, from + egui::vec2(60.0, 30.0), 4);
+    waited(&mut h, "an ellipse", |a| {
+        a.opened().ws.markup.as_ref().unwrap().marks.len() == 2
+    });
+    // Ctrl on Linux and Windows is the platform's Mod, as winit sends it.
+    let ctrl = egui::Modifiers {
+        ctrl: !cfg!(target_os = "macos"),
+        mac_cmd: cfg!(target_os = "macos"),
+        command: true,
+        ..egui::Modifiers::NONE
+    };
+    hooked(&mut h, egui::Key::Z, ctrl);
+    h.run_steps(2);
+    assert_eq!(
+        h.state().opened().ws.markup.as_ref().unwrap().marks.len(),
+        1
+    );
+    // The camera's own commands say why they are off.
+    assert!(
+        ryucad_app::core::command::enabled("view.fit", &h.state().opened().view.commands.state)
+            .unwrap_err()
+            .contains("locks the camera")
+    );
+    // Post, with what should change.
+    h.get_by_label("Comment").focus();
+    h.run_steps(2);
+    h.get_by_label("Comment").type_text("Move it here");
+    h.run_steps(2);
+    h.get_by_label("Post").click();
+    waited(&mut h, "posted", |a| {
+        a.opened().ws.markup.is_none() && a.opened().ws.annotations.all.len() == 1
+    });
+    h.run_steps(2);
+    assert!(!h.state().opened().view.nav.locked);
+    let list = p.ok(&["annotations", "list"]);
+    assert_eq!(list["annotations"][0]["comment"], "Move it here");
+    assert_eq!(
+        list["annotations"][0]["marks"]["kinds"],
+        serde_json::json!(["arrow"])
+    );
+    // Chosen, its marks are drawn; unchosen, not.
+    assert!(h.state().opened().ws.view_marks().is_some());
+    h.state_mut().opened_mut().ws.choose_annotation(None);
+    h.run_steps(2);
+    assert!(h.state().opened().ws.view_marks().is_none());
+}
+
+#[test]
+fn markup_waits_for_words_esc_leaves_the_mark_then_the_tool_and_view_cant_open_it() {
+    use egui_kittest::kittest::NodeT;
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.step();
+    h.get_by_label("Markup").click();
+    shown(&mut h, "Pen on faces");
+    h.run_steps(2);
+    // Post waits for a comment.
+    assert!(h.get_by_label("Post").accesskit_node().is_disabled());
+    // Esc leaves the mark under way, then the tool.
+    let rect = h.state().opened().view.rect;
+    let at = rect.center() + egui::vec2(-40.0, 60.0);
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    press(&h, at, true);
+    h.step();
+    for i in 1..=4 {
+        h.event(egui::Event::PointerMoved(
+            at + egui::vec2(10.0 * i as f32, 0.0),
+        ));
+        h.step();
+    }
+    assert!(
+        h.state()
+            .opened()
+            .ws
+            .markup
+            .as_ref()
+            .unwrap()
+            .drawing
+            .is_some()
+    );
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    press(&h, at + egui::vec2(40.0, 0.0), false);
+    h.run_steps(2);
+    let m = h.state().opened().ws.markup.clone().unwrap();
+    assert!(m.drawing.is_none() && m.marks.is_empty());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().opened().ws.markup.is_none());
+    assert!(!h.state().opened().view.nav.locked);
+    // In View the tool is off, and says why.
+    h.state_mut()
+        .opened_mut()
+        .ws
+        .set_mode(ryucad_app::core::modes::Mode::View);
+    h.run_steps(2);
+    assert!(h.get_by_label("Markup").accesskit_node().is_disabled());
+}

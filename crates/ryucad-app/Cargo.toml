@@ -20,7 +20,8 @@ pollster = "0.4"
 rayon = "1"
 # Native Open dialogs: the XDG portal on Linux (all Rust), AppKit, Win32.
 rfd = "0.17"
-# The Drawings tile cuts arcs and ellipses by the same functions everywhere.
+# The Drawings tile cuts arcs and ellipses, and Markup snaps its angles,
+# by the same functions everywhere.
 ryu-math = { path = "../ryu-math" }
 ryucad = { path = "../ryucad" }
 serde_json = { version = "1", features = ["float_roundtrip"] }

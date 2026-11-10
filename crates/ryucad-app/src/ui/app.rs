@@ -573,6 +573,14 @@ impl Opened {
         crate::ui::deps::picker(&ctx, &mut self.ws, view);
         crate::ui::annotate::compose(&ctx, &mut self.view, &mut self.ws, view);
         crate::ui::mate::window(&ctx, &mut self.ws, view);
+        // The Markup bar over the viewport, and its keys: each a command.
+        let mut marked = crate::ui::markup::bar(&ctx, &mut self.view, &mut self.ws, view);
+        marked.extend(std::mem::take(&mut self.view.markup_pressed));
+        let mut action = action;
+        for id in marked {
+            action = action.or(commands::run(self, &ctx, id, None));
+        }
+        self.view.marking = self.ws.markup.is_some();
         if let Some(tile) = self.ws.wants_tile.take() {
             crate::ui::shell::open(&mut self.tiles, tile);
             self.layout_dirty = true;
@@ -766,6 +774,16 @@ impl Opened {
             .filter(|(id, _)| {
                 crate::core::command::get(id)
                     .is_some_and(|c| c.scope == crate::core::command::Scope::Viewport)
+            })
+            .flat_map(|(id, chords)| chords.iter().map(move |c| (c.shortcut(mac), id)))
+            .collect();
+        // The Markup bar's, taken while it is open.
+        self.view.markup_keys = self
+            .keymap
+            .all()
+            .filter(|(id, _)| {
+                crate::core::command::get(id)
+                    .is_some_and(|c| c.scope == crate::core::command::Scope::Markup)
             })
             .flat_map(|(id, chords)| chords.iter().map(move |c| (c.shortcut(mac), id)))
             .collect();

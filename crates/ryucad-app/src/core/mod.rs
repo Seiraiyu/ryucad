@@ -29,6 +29,7 @@ pub mod keys;
 pub mod layout;
 pub mod link;
 pub mod lod;
+pub mod markup;
 pub mod mating;
 pub mod measure;
 pub mod merge;
