@@ -5,6 +5,17 @@ use crate::geom::{Nm, Point, Side};
 use crate::layout::{Instruction, Layout};
 use std::collections::BTreeMap;
 
+/// A block's bus: nets the grammar may draw as one bundle (plan 2.C).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bus {
+    /// `bus:<id>`: what a layout keys it by.
+    pub key: String,
+    pub name: String,
+    /// Its member nets, by index into the block's nets, in its file's
+    /// order.
+    pub members: Vec<usize>,
+}
+
 /// One block to lay out.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Block {
@@ -19,6 +30,8 @@ pub struct Block {
     pub papers: Vec<Paper>,
     pub parts: Vec<Part>,
     pub nets: Vec<Net>,
+    /// The block's buses (plan 2.C).
+    pub buses: Vec<Bus>,
     /// The lasting instructions, by ID.
     pub instructions: BTreeMap<String, Instruction>,
     /// One-off moves: applied once, their results held as placements.
@@ -290,6 +303,11 @@ impl Block {
         self.nets.iter().position(|n| n.key == key)
     }
 
+    /// The bus keyed `key`.
+    pub fn bus(&self, key: &str) -> Option<usize> {
+        self.buses.iter().position(|b| b.key == key)
+    }
+
     /// What a label on pin `k` of part `p` says: its net's name, or on a
     /// stacked pin each layer's net's name in layer order, each once.
     pub fn label_text(&self, p: usize, k: usize) -> String {
@@ -347,5 +365,20 @@ mod tests {
             None,
             "the largest grows no further"
         );
+    }
+
+    #[test]
+    fn a_bus_is_found_by_its_key_and_lists_its_members() {
+        let block = Block {
+            buses: vec![Bus {
+                key: "bus:b1".into(),
+                name: "D".into(),
+                members: vec![0, 1],
+            }],
+            ..Block::default()
+        };
+        assert_eq!(block.bus("bus:b1"), Some(0));
+        assert_eq!(block.bus("b1"), None);
+        assert_eq!(block.buses[0].members, vec![0, 1]);
     }
 }

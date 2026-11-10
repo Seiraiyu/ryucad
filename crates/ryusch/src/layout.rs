@@ -182,6 +182,8 @@ pub enum NetStyle {
     Label,
     /// Power ports (a rail's).
     Port,
+    /// A bus wire with entries (a bus's style, by its key; plan 2.C).
+    Bus,
 }
 
 /// The connectivity patterns drawn in canonical shapes.

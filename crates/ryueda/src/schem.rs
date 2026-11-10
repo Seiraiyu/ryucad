@@ -490,6 +490,21 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
             kind: NetKind::Signal,
         });
     }
+    // The block's buses (plan 2.C), their members by index in the file's
+    // order; a member that isn't one of the block's nets is left out.
+    let buses: Vec<input::Bus> = block
+        .buses
+        .iter()
+        .map(|(id, bus)| input::Bus {
+            key: format!("bus:{id}"),
+            name: bus.name.clone(),
+            members: bus
+                .nets
+                .iter()
+                .filter_map(|n| index.get(n.as_str()).copied())
+                .collect(),
+        })
+        .collect();
     let net_of = |n: Option<&Node>| n.and_then(node_key).and_then(|k| index.get(&k).copied());
     let all_layers = layers(p, &b.id);
     let room_for = widest(&all_layers);
@@ -725,6 +740,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
             papers: papers(&p.manifest.schematic.sheet),
             parts,
             nets,
+            buses,
             ..input::Block::default()
         },
         of,
@@ -996,5 +1012,34 @@ mod tests {
             read_layout(b"{}", "x").unwrap_err().code,
             Code::LayoutInvalid
         );
+    }
+
+    #[test]
+    fn a_blocks_buses_reach_the_engine() {
+        use serde_json::json;
+        let (_dir, p) = project(&[
+            (
+                "blocks/top/block.json",
+                json!({"format": 1, "kind": crate::conn::BLOCK_KIND, "name": "Top",
+                    "buses": {"b1": {"name": "D", "nets": ["sda", "scl"]}}}),
+            ),
+            (
+                "blocks/top/nets/scl.json",
+                json!({"format": 1, "kind": crate::conn::NET_KIND, "name": "SCL"}),
+            ),
+        ]);
+        let top = p.conn.block(&Id::parse("top", "b").unwrap()).unwrap();
+        let built = build(&p, top).unwrap();
+        let input = &built.input;
+        assert_eq!(input.buses.len(), 1);
+        let bus = &input.buses[0];
+        assert_eq!(bus.key, "bus:b1");
+        assert_eq!(bus.name, "D");
+        let keys: Vec<&str> = bus
+            .members
+            .iter()
+            .map(|n| input.nets[*n].key.as_str())
+            .collect();
+        assert_eq!(keys, ["sda", "scl"], "in the file's order");
     }
 }

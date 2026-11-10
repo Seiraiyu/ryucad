@@ -415,6 +415,7 @@ impl Names<'_> {
                     NetStyle::Wire => "wire",
                     NetStyle::Label => "label",
                     NetStyle::Port => "port",
+                    NetStyle::Bus => "bus",
                 }
             ),
             Instruction::Idiom { parts: l, kind } => format!(

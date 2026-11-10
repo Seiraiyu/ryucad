@@ -1010,6 +1010,8 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
             match style {
                 NetStyle::Wire => wired,
                 NetStyle::Label | NetStyle::Port => labelled,
+                // Drawn buses are the layout's from plan 2.C's Task 10.
+                NetStyle::Bus => false,
             }
         }
         Instruction::Idiom { .. } | Instruction::Flow { .. } => true,
