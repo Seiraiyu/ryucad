@@ -318,16 +318,81 @@ pub(crate) fn mirror(ui: &mut egui::Ui, m: &mut crate::core::edit::MirrorForm) -
     })
 }
 
-/// A split's target and plane (an agent's to change); whether its plane is
-/// flipped and which sides it keeps.
+/// A split's target and plane or tool (an agent's to change); whether it
+/// is flipped and which sides it keeps.
 pub(crate) fn split(ui: &mut egui::Ui, s: &mut crate::core::edit::SplitForm) -> Keys {
     form::grid(ui, "split", |rows| {
         rows.read_only("target", &s.target, true, None);
-        rows.read_only("plane", &s.plane, true, Some(&s.plane.clone()));
-        rows.flag("flip the plane", &mut s.flip);
+        match &s.tool {
+            Some(t) => rows.read_only("tool", t, true, Some(&t.clone())),
+            None => rows.read_only("plane", &s.plane, true, Some(&s.plane.clone())),
+        }
+        let flip = if s.tool.is_some() {
+            "flip"
+        } else {
+            "flip the plane"
+        };
+        rows.flag(flip, &mut s.flip);
         let name = s.keep.name.clone();
         rows.choice(&name, &mut s.keep);
     })
+}
+
+/// A fill's sides in order (an agent's to change), each edge side's
+/// tangency; its tolerance and angle.
+pub(crate) fn fill(ui: &mut egui::Ui, f: &mut crate::core::edit::FillForm) -> Keys {
+    form::grid(ui, "fill", |rows| {
+        for (k, side) in f.sides.iter_mut().enumerate() {
+            rows.read_only(&format!("side {}", k + 1), &side.text, true, None);
+            if let Some(t) = &mut side.tangent {
+                rows.flag(&format!("side {} tangent to its face", k + 1), t);
+            }
+        }
+        rows.quantity("tolerance", &mut f.tolerance);
+        rows.quantity("angle", &mut f.angle);
+    })
+}
+
+/// An extract's faces, each a checkbox to take it out.
+pub(crate) fn extract(ui: &mut egui::Ui, x: &mut crate::core::edit::ExtractForm) -> Keys {
+    removable(ui, &mut x.faces, "face");
+    Keys::default()
+}
+
+/// A sew's sheets, each a checkbox to take it out; its tolerance and
+/// whether it makes a solid when it closes up.
+pub(crate) fn sew(ui: &mut egui::Ui, s: &mut crate::core::edit::SewForm) -> Keys {
+    removable(ui, &mut s.sheets, "sheet");
+    form::grid(ui, "sew", |rows| {
+        rows.quantity("tolerance", &mut s.tolerance);
+        rows.flag("a solid when it closes up", &mut s.solid);
+    })
+}
+
+/// A thicken's sheet or faces (its faces each a checkbox to take out), its
+/// front and back, and its groups' sides and faces.
+pub(crate) fn thicken(ui: &mut egui::Ui, t: &mut crate::core::edit::ThickenForm) -> Keys {
+    let mut keys = form::grid(ui, "thicken", |rows| {
+        if let Some(s) = &t.sheet {
+            rows.read_only("sheet", s, true, None);
+        }
+        rows.quantity("front", &mut t.front);
+        rows.quantity("back", &mut t.back);
+    });
+    if let Some(p) = &mut t.faces {
+        removable(ui, p, "face");
+    }
+    for (i, g) in t.groups.iter_mut().enumerate() {
+        let k = form::grid(ui, ("thicken group", i), |rows| {
+            let (front, back) = (g.front.name.clone(), g.back.name.clone());
+            rows.quantity(&front, &mut g.front);
+            rows.quantity(&back, &mut g.back);
+        });
+        keys.apply |= k.apply;
+        keys.revert |= k.revert;
+        removable(ui, &mut g.faces, "face");
+    }
+    keys
 }
 
 /// A relief's kind, and the sizes that kind takes.
@@ -548,11 +613,19 @@ fn fields(rows: &mut Rows<'_>, form: &mut crate::core::edit::Form) {
             rows.flag("both ways", &mut e.both);
         }
     }
+    surface_toggle(rows, form);
+    // A surface's operation is new: it isn't offered.
+    let surfaced = form.surface.as_ref().is_some_and(|f| f.chosen);
+    let operation = if surfaced {
+        None
+    } else {
+        form.operation.as_mut()
+    };
     for c in [
-        &mut form.operation,
-        &mut form.op,
-        &mut form.target,
-        &mut form.rev,
+        operation,
+        form.op.as_mut(),
+        form.target.as_mut(),
+        form.rev.as_mut(),
     ]
     .into_iter()
     .flatten()
@@ -562,6 +635,14 @@ fn fields(rows: &mut Rows<'_>, form: &mut crate::core::edit::Form) {
     }
     if let Some(f) = &mut form.fixed {
         rows.flag("fixed where it is", f);
+    }
+}
+
+/// The surface toggle of an extrude, revolve, sweep or loft: a sheet
+/// founds itself, so its operation goes with it.
+fn surface_toggle(rows: &mut Rows<'_>, form: &mut crate::core::edit::Form) {
+    if let Some(f) = &mut form.surface {
+        rows.flag("surface (makes a sheet)", f);
     }
 }
 
@@ -629,6 +710,15 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         form.offset.as_mut().map(|o| body_offset(ui, o)),
         form.mirror.as_mut().map(|m| mirror(ui, m)),
         form.split.as_mut().map(|s| split(ui, s)),
+        form.surface_form.as_mut().map(|s| {
+            use crate::core::edit::SurfaceForm as S;
+            match s {
+                S::Fill(f) => fill(ui, f),
+                S::Extract(x) => extract(ui, x),
+                S::Sew(w) => sew(ui, w),
+                S::Thicken(t) => thicken(ui, t),
+            }
+        }),
         form.sheet.as_mut().map(|s| {
             use crate::core::edit::SheetMetalForm as S;
             match s {
@@ -660,8 +750,9 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         names(ui, ws, &key);
         return;
     }
-    // What it acts on: none for a new solid.
-    let new = form.operation.as_ref().is_some_and(|o| o.chosen == "new");
+    // What it acts on: none for a new solid, nor a surface.
+    let new = form.operation.as_ref().is_some_and(|o| o.chosen == "new")
+        || form.surface.as_ref().is_some_and(|f| f.chosen);
     for p in [&mut form.targets, &mut form.tools].into_iter().flatten() {
         if !new {
             picks(ui, p);
