@@ -15,6 +15,7 @@
 pub mod curves;
 pub mod output;
 pub mod request;
+pub mod section;
 pub mod template;
 
 use crate::doc::assembly::Rev;
@@ -29,6 +30,7 @@ use crate::session::Session;
 use ryu_draw::{Anchor, Colour, Item, LineKind, P, Path, Segment};
 use ryukei::geom::Vector3;
 use ryukei::project::{Class, Placed, Projection, Visibility};
+use ryukei::topo::FaceId;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -99,6 +101,9 @@ pub struct ViewBuilt {
     /// no `offset`, written).
     pub at: P,
     pub placed: bool,
+    /// Whether it lies along its parent's row or column (placed by an
+    /// offset, not an at).
+    pub along: bool,
     pub scale: Scale,
     /// Its drawing's box on the sheet (dimension room not included).
     pub bounds: [P; 2],
@@ -202,13 +207,9 @@ impl Built {
             let Some(v) = by_key.get(k).filter(|v| v.placed) else {
                 continue;
             };
-            match (&w.kind, w.parent().and_then(|p| by_key.get(&p))) {
-                (ViewKind::Projected { side, .. }, Some(p))
-                    if !matches!(side, Side::Diagonal(_)) =>
-                {
-                    out.insert(*k, Placement::Offset(distance(p.at, v.at)));
-                }
-                (ViewKind::Auxiliary { .. }, Some(p)) => {
+            match w.parent().and_then(|p| by_key.get(&p)) {
+                // On its parent's row or column: its distance along it.
+                Some(p) if v.along => {
                     out.insert(*k, Placement::Offset(distance(p.at, v.at)));
                 }
                 _ => {
@@ -343,6 +344,47 @@ struct Plan {
     tangent: Tangent,
     label: Option<String>,
     place: Place,
+    /// What it draws beyond its projection's pieces.
+    extra: Extra,
+    /// Each source solid's caps once cut (a section, or a detail of one),
+    /// by solid; empty for a view that cuts nothing.
+    caps: Vec<Vec<FaceId>>,
+    /// Why it can't be drawn, found before its projection (a cut the
+    /// kernel refused).
+    failed: Option<Error>,
+}
+
+/// What a view draws beyond its projection's pieces.
+#[derive(Clone, Debug)]
+enum Extra {
+    None,
+    Section(section::Cutting),
+    /// Its parent's pieces kept inside the circle about `centre` (model
+    /// metres) of `radius`.
+    Detail {
+        parent: Key,
+        centre: [f64; 3],
+        radius: f64,
+    },
+    /// A flat pattern, drawn from the pattern itself: no projection.
+    Flat {
+        flat: Arc<crate::sheet_metal::flat::FlatOf>,
+        notes: bool,
+    },
+    /// An explode's trails, each a polyline in model space.
+    Exploded {
+        trails: Vec<Vec<[f64; 3]>>,
+    },
+}
+
+/// How far past every solid of `src` a cut's tool reaches: their box's
+/// diagonal and a millimetre.
+fn reach(src: &Source) -> f64 {
+    src.iter()
+        .filter_map(|(b, pose, _)| crate::interference::world_box(&b.body, pose))
+        .reduce(|a, b| a.union(&b))
+        .map_or(0.0, |b| (b.max() - b.min()).length())
+        + 1e-3
 }
 
 /// A source's placed solids: each body, where it is, and how references
@@ -493,7 +535,7 @@ fn plans(
                     .map(|[x, y]| [x.meters() * 1000.0, y.meters() * 1000.0])
             };
             let mm = |q: &Option<crate::units::Quantity>| q.as_ref().map(|q| q.meters() * 1000.0);
-            let (of, rev, frame, anchor, place, kind) = match (&w.kind, parent) {
+            let (of, rev, frame, anchor, place, kind, extra, own) = match (&w.kind, parent) {
                 (
                     ViewKind::Base {
                         of,
@@ -511,7 +553,16 @@ fn plans(
                     }
                     let anchor = middle(&sources[&key]);
                     let (t, u) = orient(session, &of, &rev, o)?;
-                    (of, rev, Frame::new(t, u)?, anchor, Place::At(at(w)), "base")
+                    (
+                        of,
+                        rev,
+                        Frame::new(t, u)?,
+                        anchor,
+                        Place::At(at(w)),
+                        "base",
+                        Extra::None,
+                        None,
+                    )
                 }
                 (ViewKind::Projected { side, offset, .. }, Some(i)) => {
                     let p = &out[i].0;
@@ -540,6 +591,8 @@ fn plans(
                         p.anchor,
                         place,
                         "projected",
+                        Extra::None,
+                        None,
                     )
                 }
                 (
@@ -584,23 +637,181 @@ fn plans(
                         p.anchor,
                         place,
                         "auxiliary",
+                        Extra::None,
+                        None,
                     )
                 }
                 (
-                    ViewKind::Section { .. }
-                    | ViewKind::Detail { .. }
-                    | ViewKind::Flat { .. }
-                    | ViewKind::Exploded { .. },
+                    ViewKind::Section {
+                        cut,
+                        flip,
+                        unsectioned,
+                        offset,
+                        ..
+                    },
+                    Some(i),
+                ) => {
+                    let p = &out[i].0;
+                    let letter = w.label.clone().unwrap_or_default();
+                    let c = section::cutting(
+                        session,
+                        &p.of,
+                        &p.rev,
+                        *k,
+                        (p.key, &p.frame),
+                        cut,
+                        *flip,
+                        unsectioned,
+                        &letter,
+                    )?;
+                    let frame = section::frame_of(c.normal, &p.frame)?;
+                    // Along its parent's row or column where it looks along
+                    // the parent's plane, as a projected view; else by its at.
+                    let img = p.frame.image(c.normal);
+                    let len = ryu_math::hypot(img[0], img[1]);
+                    let along = c.normal[0] * p.frame.towards[0]
+                        + c.normal[1] * p.frame.towards[1]
+                        + c.normal[2] * p.frame.towards[2];
+                    let flip = if angle == Angle::First { -1.0 } else { 1.0 };
+                    let place = if along.abs() < 1e-9 && len > 1e-9 {
+                        Place::Along {
+                            parent: p.key,
+                            dir: [flip * img[0] / len, flip * img[1] / len],
+                            offset: mm(offset),
+                            reach: 1,
+                        }
+                    } else if offset.is_some() {
+                        return Err(Error::new(
+                            Code::InvalidParam,
+                            format!(
+                                "view {k} doesn't look along its parent {}'s plane: place it by at",
+                                p.key
+                            ),
+                        )
+                        .with("pointer", format!("/views/{k}/offset")));
+                    } else {
+                        Place::At(at(w))
+                    };
+                    (
+                        p.of.clone(),
+                        p.rev.clone(),
+                        frame,
+                        p.anchor,
+                        place,
+                        "section",
+                        Extra::Section(c),
+                        None,
+                    )
+                }
+                (ViewKind::Detail { centre, radius, .. }, Some(i)) => {
+                    let p = &out[i].0;
+                    let (of, rev, frame, pk) = (p.of.clone(), p.rev.clone(), p.frame, p.key);
+                    let c = section::point_at(
+                        session,
+                        &of,
+                        &rev,
+                        centre,
+                        &format!("/views/{k}/centre"),
+                    )?;
+                    (
+                        of,
+                        rev,
+                        frame,
+                        c,
+                        Place::At(at(w)),
+                        "detail",
+                        Extra::Detail {
+                            parent: pk,
+                            centre: c,
+                            radius: radius.meters(),
+                        },
+                        None,
+                    )
+                }
+                (ViewKind::Flat { of, solid, notes }, _) => {
+                    let of = of.clone().unwrap_or_else(|| part.clone());
+                    let (_, flat) = crate::sheet_metal::flat::of(
+                        session,
+                        of.as_str(),
+                        solid.as_ref().map(Id::as_str),
+                        None,
+                        &crate::sheet_metal::flat::Options::default(),
+                    )?;
+                    let f = flat.pattern.frame;
+                    let b = flat.pattern.bounds;
+                    let (lo, hi) = (b.min(), b.max());
+                    let mid = [(lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0];
+                    let o = f.origin().to_array();
+                    let (x, y, z) = (
+                        f.x().get().to_array(),
+                        f.y().get().to_array(),
+                        f.z().get().to_array(),
+                    );
+                    let anchor = [0, 1, 2].map(|i| o[i] + mid[0] * x[i] + mid[1] * y[i]);
+                    (
+                        of,
+                        Rev::Working,
+                        Frame::new(z, y)?,
+                        anchor,
+                        Place::At(at(w)),
+                        "flat",
+                        Extra::Flat {
+                            flat,
+                            notes: *notes,
+                        },
+                        Some(Vec::new()),
+                    )
+                }
+                (
+                    ViewKind::Exploded {
+                        of,
+                        explode,
+                        fraction,
+                        orient: o,
+                        trails,
+                    },
                     _,
                 ) => {
-                    return Err(Error::new(
-                        Code::InvalidParam,
-                        format!(
-                            "view {k}: {} views are drawn from plan 9.B's Task 8 on",
-                            w.type_name()
-                        ),
+                    let of = of.clone().unwrap_or_else(|| part.clone());
+                    let resolved = crate::explode::resolve(session, &of, explode.as_str())?;
+                    let offsets = crate::explode::offsets(&resolved.steps, *fraction);
+                    let src: Source = source(session, &of, &Rev::Working)?
+                        .into_iter()
+                        .map(|(b, pose, name)| {
+                            let path = name
+                                .split_once('/')
+                                .and_then(|(_, r)| r.rsplit_once('/'))
+                                .map_or("", |(p, _)| p);
+                            let pose = offsets.get(path).map_or(pose, |m| m.0.then_after(&pose));
+                            (b, pose, name)
+                        })
+                        .collect();
+                    let mut lines = Vec::new();
+                    if *trails {
+                        let model = session.model(&of, &Rev::Working)?;
+                        for (path, start) in crate::explode::middles(&model) {
+                            if offsets.contains_key(&path) {
+                                lines.push(crate::explode::trail(
+                                    &resolved.steps,
+                                    &path,
+                                    start,
+                                    *fraction,
+                                ));
+                            }
+                        }
+                    }
+                    let anchor = middle(&src);
+                    let (t, u) = orient(session, &of, &Rev::Working, o)?;
+                    (
+                        of,
+                        Rev::Working,
+                        Frame::new(t, u)?,
+                        anchor,
+                        Place::At(at(w)),
+                        "exploded",
+                        Extra::Exploded { trails: lines },
+                        Some(src),
                     )
-                    .with("pointer", format!("/views/{k}/type")));
                 }
                 (_, None) => unreachable!("a derived view waits for its parent"),
             };
@@ -609,9 +820,13 @@ fn plans(
                 let s = source(session, &of, &rev)?;
                 sources.insert(key.clone(), s);
             }
-            let scale = w
-                .scale
-                .or_else(|| parent.and_then(|i| out[i].0.scale.filter(|_| w.scale.is_none())));
+            // A detail takes its own scale, else twice its sheet's.
+            let scale = match extra {
+                Extra::Detail { .. } => w.scale,
+                _ => w
+                    .scale
+                    .or_else(|| parent.and_then(|i| out[i].0.scale.filter(|_| w.scale.is_none()))),
+            };
             done.insert(*k, out.len());
             out.push((
                 Plan {
@@ -627,8 +842,11 @@ fn plans(
                     tangent: w.tangent,
                     label: w.label.clone(),
                     place,
+                    extra,
+                    caps: Vec::new(),
+                    failed: None,
                 },
-                sources[&key].clone(),
+                own.unwrap_or_else(|| sources[&key].clone()),
             ));
         }
         if done.len() == before {
@@ -1046,6 +1264,7 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
                 kind: plan.kind,
                 at,
                 placed: placed[j].1,
+                along: matches!(plan.place, Place::Along { .. }),
                 scale: s,
                 bounds,
                 towards: plan.frame.towards,
@@ -1210,18 +1429,12 @@ fn layout(
         }
     }
     let [lo, hi] = t.area;
-    // Families whose root has a written place: placed from it.
-    let mut x = lo[0];
-    for (j, i) in on.iter().enumerate() {
-        if root[j] != j {
-            continue;
-        }
-        let members: Vec<usize> = (0..on.len()).filter(|m| root[*m] == j).collect();
-        let fam_box = members
-            .iter()
+    let fam_box = |j: usize| -> [P; 2] {
+        (0..on.len())
+            .filter(|m| root[*m] == j)
             .map(|m| {
-                let r = rel[*m].unwrap_or([0.0, 0.0]);
-                let b = grown(*m);
+                let r = rel[m].unwrap_or([0.0, 0.0]);
+                let b = grown(m);
                 [
                     [r[0] + b[0][0], r[1] + b[0][1]],
                     [r[0] + b[1][0], r[1] + b[1][1]],
@@ -1233,18 +1446,69 @@ fn layout(
                     [a[1][0].max(b[1][0]), a[1][1].max(b[1][1])],
                 ]
             })
-            .expect("a family has its root");
-        let diagonal = plans[*i].0.kind == "projected";
-        let origin = match plans[*i].0.place {
+            .expect("a family has its root")
+    };
+    let written_root = |j: usize| matches!(plans[on[j]].0.place, Place::At(Some(_)));
+    let moved = |b: [P; 2], o: P| {
+        [
+            [b[0][0] + o[0], b[0][1] + o[1]],
+            [b[1][0] + o[0], b[1][1] + o[1]],
+        ]
+    };
+    // Families whose root has a written place first, from it: they hold
+    // their room; then the others, each where the rule puts it (the
+    // area's upper left, the next family to its right; a diagonal view's
+    // at the upper right), or, where that meets a family already placed,
+    // the first free room down the area from its top left.
+    let mut held: Vec<[P; 2]> = Vec::new();
+    let mut x = lo[0];
+    let roots: Vec<usize> = (0..on.len()).filter(|j| root[*j] == *j).collect();
+    for j in roots
+        .iter()
+        .copied()
+        .filter(|j| written_root(*j))
+        .chain(roots.iter().copied().filter(|j| !written_root(*j)))
+    {
+        let fb = fam_box(j);
+        let diagonal = plans[on[j]].0.kind == "projected";
+        let origin = match plans[on[j]].0.place {
             Place::At(Some(p)) => p,
-            _ if diagonal => [hi[0] - fam_box[1][0], hi[1] - fam_box[1][1]],
             _ => {
-                let o = [x - fam_box[0][0], hi[1] - fam_box[1][1]];
-                x = o[0] + fam_box[1][0];
+                let rule = if diagonal {
+                    [hi[0] - fb[1][0], hi[1] - fb[1][1]]
+                } else {
+                    [x - fb[0][0], hi[1] - fb[1][1]]
+                };
+                let free = |o: P| held.iter().all(|h| !overlap(moved(fb, o), *h));
+                let o = if free(rule) {
+                    rule
+                } else {
+                    let step = 5.0;
+                    let (w, h) = (fb[1][0] - fb[0][0], fb[1][1] - fb[0][1]);
+                    let mut found = None;
+                    let mut y = hi[1] - h;
+                    'rows: while y >= lo[1] {
+                        let mut cx = lo[0];
+                        while cx + w <= hi[0] {
+                            let o = [cx - fb[0][0], y - fb[0][1]];
+                            if free(o) {
+                                found = Some(o);
+                                break 'rows;
+                            }
+                            cx += step;
+                        }
+                        y -= step;
+                    }
+                    found.unwrap_or(rule)
+                };
+                if !diagonal {
+                    x = x.max(o[0] + fb[1][0]);
+                }
                 o
             }
         };
-        for m in members {
+        held.push(moved(fb, origin));
+        for m in (0..on.len()).filter(|m| root[*m] == j) {
             let r = rel[m].unwrap_or([0.0, 0.0]);
             let written = match plans[on[m]].0.place {
                 Place::At(p) => p.is_some(),
