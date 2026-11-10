@@ -1161,7 +1161,9 @@ enum FeatureCmd {
     /// face tweak: move_face (--by translate with --direction and --distance,
     /// rotate with --axis and --angle, or offset with --distance and
     /// --face-distance; --face repeated, --no-tangent) or replace_face (--with,
-    /// then the --face values it replaces) of a solid, keeping every name (offset
+    /// then the --face values it replaces) or draft (--neutral, or --parting with
+    /// --pull; --angle; --face repeated, --face-angle, --flip, --reverse, --no-tangent)
+    /// of a solid, keeping every name (offset
     /// moves every face, filling where they part; move_face --by offset moves
     /// only the faces named, keeping the topology); a
     /// mirror (--solid, --plane, --operation) of a whole solid, joined to
@@ -1838,8 +1840,9 @@ enum DrawingCmd {
         #[arg(long)]
         rev: Option<String>,
     },
-    /// Every sheet as one PDF, or one sheet as SVG, by --out's extension
-    /// unless --format; the daemon writes it (never over a project file).
+    /// Every sheet as one PDF, or one sheet as SVG or DXF, by --out's
+    /// extension unless --format; the daemon writes it (never over a
+    /// project file).
     Export {
         part: String,
         drawing: String,
@@ -1847,8 +1850,11 @@ enum DrawingCmd {
         out: std::path::PathBuf,
         #[arg(long)]
         sheet: Option<String>,
-        #[arg(long, value_parser = ["pdf", "svg"])]
+        #[arg(long, value_parser = ["pdf", "svg", "dxf"])]
         format: Option<String>,
+        /// A DXF's unit.
+        #[arg(long, value_parser = ["mm", "in"])]
+        unit: Option<String>,
         /// A Git revision, `label:<L>`, `annotation:<id>` or `draft:<name>`.
         #[arg(long)]
         rev: Option<String>,
@@ -1880,13 +1886,55 @@ enum DrawingViewCmd {
         /// --normal-to unset a face's reference to look normal to.
         #[arg(long, conflicts_with = "from")]
         orient: Option<String>,
-        /// The part or assembly a base view draws (the drawing's own).
-        #[arg(long = "of", requires = "orient")]
+        /// The part or assembly a base, flat or exploded view draws (the
+        /// drawing's own).
+        #[arg(long = "of")]
         of: Option<String>,
         #[arg(long, requires = "orient")]
         label_rev: Option<String>,
-        #[arg(long, required_unless_present = "orient")]
+        #[arg(long, required_unless_present_any = ["orient", "flat"])]
         from: Option<String>,
+        /// A section (with --from) on a plane: xy, yz, zx, a planar face's
+        /// or a datum plane's reference.
+        #[arg(long, requires = "from", conflicts_with_all = ["through", "side", "normal_to", "centre"])]
+        cut: Option<String>,
+        /// Moves --cut's plane along its normal.
+        #[arg(long, requires = "cut", allow_hyphen_values = true)]
+        cut_offset: Option<String>,
+        /// An offset section (with --from) through these points in order:
+        /// X,Y,Z lengths, a vertex's or datum point's reference, or origin.
+        #[arg(long, requires = "from", conflicts_with_all = ["side", "normal_to", "centre"])]
+        through: Vec<String>,
+        /// Sees a section from the other side.
+        #[arg(long)]
+        flip: bool,
+        /// An instance path an assembly's section leaves whole.
+        #[arg(long)]
+        unsectioned: Vec<String>,
+        /// A detail (with --from) about this point, X,Y,Z or a reference.
+        #[arg(long, requires_all = ["from", "radius"], conflicts_with_all = ["side", "normal_to"])]
+        centre: Option<String>,
+        /// A detail's radius in the model.
+        #[arg(long, requires = "centre")]
+        radius: Option<String>,
+        /// A sheet metal solid's flat pattern.
+        #[arg(long, conflicts_with_all = ["orient", "from"])]
+        flat: bool,
+        /// The flat view's solid (the part's one sheet metal solid).
+        #[arg(long, requires = "flat")]
+        solid: Option<String>,
+        /// A flat view without its bend notes.
+        #[arg(long, requires = "flat")]
+        no_notes: bool,
+        /// An exploded view (with --orient) of this explode.
+        #[arg(long, requires = "orient")]
+        explode: Option<String>,
+        /// How far through the explode, 0 to 1 (all of it).
+        #[arg(long, requires = "explode")]
+        fraction: Option<f64>,
+        /// Draws the explode's trails.
+        #[arg(long, requires = "explode")]
+        trails: bool,
         /// top, bottom, left, right, back, or iso and the cube's corners.
         #[arg(long, requires = "from", conflicts_with = "normal_to")]
         side: Option<String>,
@@ -1906,6 +1954,27 @@ enum DrawingViewCmd {
         #[command(flatten)]
         expect: Expect,
     },
+}
+
+/// A geometric reference as a drawing writes it: a word (`xy`, `x`,
+/// `origin`), `<part>/<feature>` (a datum) or `<part>/<feature>/<name>`.
+fn drawing_geom(text: &str) -> core::result::Result<Value, Error> {
+    let parts: Vec<&str> = text.split('/').collect();
+    match parts.as_slice() {
+        [w] => Ok(json!(w)),
+        [_, f] => Ok(json!({"feature": f})),
+        _ => drawing_ref(text),
+    }
+}
+
+/// A model point as a drawing writes it: `X,Y,Z` lengths, else a
+/// geometric reference.
+fn drawing_point(text: &str) -> core::result::Result<Value, Error> {
+    let xyz: Vec<&str> = text.split(',').map(str::trim).collect();
+    match xyz.as_slice() {
+        [x, y, z] => Ok(json!([x, y, z])),
+        _ => drawing_geom(text),
+    }
 }
 
 /// A reference `<part>/<feature>/<name>` as a drawing writes it.
@@ -2144,6 +2213,11 @@ struct ImportArgs {
     /// reference (shown, measured and mated to, never changed).
     #[arg(long)]
     solid: bool,
+    /// Make one part of every body of the file, each placed where its assemblies put it,
+    /// rather than a part per product and an assembly per assembly: a vendor PCBA as one
+    /// part of references.
+    #[arg(long)]
+    flatten: bool,
     /// Write nothing: say what it would store and make, and what each body would be
     /// (a reference, or with --solid how it heals).
     #[arg(long)]
@@ -2262,7 +2336,7 @@ struct FieldArgs {
     /// A planar face to sketch on, the face a chamfer's first distance runs along, or a
     /// planar face whose loops a sweep carries: <part>/<feature>/<name>, as inspect
     /// gives it. Repeat for an extract's faces, a thicken's or a move_face's; a
-    /// replace_face's, after the --with they take.
+    /// replace_face's, after the --with they take; or a draft's (repeat for each).
     #[arg(long = "face", value_name = "REFERENCE")]
     face: Vec<String>,
     /// A sketch on a face: a vertex for its origin ("" for the part origin, projected).
@@ -2300,7 +2374,7 @@ struct FieldArgs {
     #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
     offset: Option<String>,
     /// Extrude against the sketch's normal, or a linear pattern against its direction
-    /// (or --reverse false).
+    /// (or --reverse false); a draft's pull, turned round.
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     reverse: Option<bool>,
     /// Sweep the profile's loops and open chains into a sheet of its own: an
@@ -2315,7 +2389,9 @@ struct FieldArgs {
     /// A revolve's angle: 90, "90 deg", or full; a chamfer's angle to its face
     /// (distance_angle). A circular pattern's span, which it needs: 360 spaces --count
     /// evenly round a whole turn, less spans the first instance to the last. A
-    /// move_face's turn about its --axis (right-handed; a minus sign turns it back).
+    /// move_face's turn about its --axis (right-handed; a minus sign turns it back). A
+    /// draft's angle from its pull (a positive one tapers a boss inward along it and
+    /// opens a hole).
     #[arg(long, allow_hyphen_values = true)]
     angle: Option<String>,
     /// Revolve half the angle each side of the sketch's plane (or --symmetric false).
@@ -2541,10 +2617,38 @@ struct FieldArgs {
     /// What a projection point is projected onto: a plane or an axis.
     #[arg(long, value_name = "REFERENCE")]
     onto: Option<String>,
-    /// Turn a datum plane's normal, or a datum axis's direction (or --flip false). A
-    /// split's plane, turned: the target keeps the side behind it.
-    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
-    flip: Option<bool>,
+    /// Turn a datum plane's normal, or a datum axis's direction (or --flip false); a
+    /// split's plane, turned: the target keeps the side behind it. A draft's: a face it
+    /// drafts against its pull, <part>/<solid>/<name>; repeat for each (given, they
+    /// replace a draft's flipped faces).
+    #[arg(long, value_name = "BOOL|FACE", num_args = 0..=1, default_missing_value = "true")]
+    flip: Vec<String>,
+    /// Flip none of a draft's faces.
+    #[arg(long, conflicts_with = "flip")]
+    no_flip: bool,
+    /// A draft's neutral plane: xy, yz, zx, a datum plane <part>/<datum>, a sketch, or a
+    /// planar face <part>/<solid>/<name>; its normal is the pull (--reverse turns it
+    /// round). The faces turn about where the plane crosses them.
+    #[arg(long, value_name = "PLANE", conflicts_with = "parting")]
+    neutral: Option<String>,
+    /// An edge of a draft's parting line, which the faces it bounds turn about:
+    /// <part>/<solid>/<name>; repeat for each. Needs --pull.
+    #[arg(long = "parting", value_name = "EDGE")]
+    parting: Vec<String>,
+    /// A parting-line draft's pull: x, y, z, a datum axis, a straight edge, or a plane's
+    /// normal (--reverse turns it round).
+    #[arg(long, value_name = "DIRECTION")]
+    pull: Option<String>,
+    /// A face a draft drafts at its own angle: REFERENCE=ANGLE, of either sign; repeat for
+    /// several. Faces of one angle are one group. Given, they replace a draft's groups.
+    #[arg(
+        long = "face-angle",
+        value_name = "REFERENCE=ANGLE",
+        value_parser = param,
+        allow_hyphen_values = true,
+        conflicts_with_all = ["face_thickness", "face_distance"]
+    )]
+    face_angle: Vec<(String, String)>,
     /// A path's segment, in order; repeat for each: an edge <part>/<solid>/<name>
     /// (--propagate right after it grows it to its tangent chain), a sketch's line, arc
     /// or circle <part>/<sketch>/<entity>, or a path or helix (<part>/<feature> or its
@@ -2646,10 +2750,11 @@ struct FieldArgs {
         conflicts_with = "face_thickness"
     )]
     face_distance: Vec<(String, String)>,
-    /// Give no face of a shell or offset a thickness or distance of its own.
-    #[arg(long, conflicts_with_all = ["face_thickness", "face_distance"])]
+    /// Give no face of a shell or offset a thickness or distance of its own, nor of a
+    /// draft an angle of its own.
+    #[arg(long, conflicts_with_all = ["face_thickness", "face_distance", "face_angle"])]
     no_faces: bool,
-    /// Move a face tweak's tangent neighbours with the faces it names (the default;
+    /// Move or draft a face tweak's tangent neighbours with the faces it names (the default;
     /// --tangent false or --no-tangent keeps the kernel's tangency_broken). In a
     /// fill, the --edge just before meets its face tangentially (the edge must have
     /// one face).
@@ -2938,6 +3043,9 @@ impl FieldArgs {
         }
         FeatureFields {
             plane: self.plane.clone(),
+            neutral: self.neutral.clone(),
+            parting: (!self.parting.is_empty()).then(|| self.parting.clone()),
+            pull: self.pull.clone(),
             // One --face is a chamfer's, a sketch's or a sweep's `face`;
             // several are a move's `faces`, beside any --face-distance
             // groups; with --with they are a replacement's groups.
@@ -3087,7 +3195,7 @@ impl FieldArgs {
             onto: self.onto.clone(),
             origin: None,
             x: None,
-            flip: self.flip,
+            flip: flip_of(&self.flip, self.no_flip),
             segments: (!self.segments.is_empty()).then(|| {
                 self.segments
                     .iter()
@@ -3144,6 +3252,8 @@ impl FieldArgs {
                     face_groups(&self.face_thickness, "thickness")
                 } else if !self.face_distance.is_empty() {
                     face_groups(&self.face_distance, "distance")
+                } else if !self.face_angle.is_empty() {
+                    face_groups(&self.face_angle, "angle")
                 } else {
                     json!([])
                 };
@@ -3392,6 +3502,21 @@ fn ends_json(setbacks: &[(String, String)], reliefs: &[(String, String)]) -> Opt
     Some(Value::Array(
         order.iter().map(|v| ends[v].clone()).collect(),
     ))
+}
+
+/// `--flip` as a request takes it: a bool where every value is `true` or
+/// `false` (the last one counting: a datum's or split's), else a draft's
+/// faces; `--no-flip` none.
+fn flip_of(values: &[String], none: bool) -> Option<ryucad::proto::Flip> {
+    use ryucad::proto::Flip;
+    if none {
+        return Some(Flip::Faces(Vec::new()));
+    }
+    let last = values.last()?;
+    if values.iter().all(|v| v == "true" || v == "false") {
+        return Some(Flip::On(last == "true"));
+    }
+    Some(Flip::Faces(values.to_vec()))
 }
 
 fn face_groups(pairs: &[(String, String)], key: &str) -> Value {
@@ -4149,6 +4274,7 @@ fn request(cmd: &Command) -> Option<Request> {
                     into,
                     product,
                     solid,
+                    flatten,
                     dry_run,
                     expect,
                 },
@@ -4167,6 +4293,7 @@ fn request(cmd: &Command) -> Option<Request> {
                 expected_revision: expect.revision.clone(),
                 update: update.clone(),
                 solid: *solid,
+                flatten: *flatten,
             }
         }
         Command::Export {
@@ -5172,6 +5299,19 @@ fn drawing_request(d: &DrawingCmd) -> Result<Request> {
             of,
             label_rev,
             from,
+            cut,
+            cut_offset,
+            through,
+            flip,
+            unsectioned,
+            centre,
+            radius,
+            flat,
+            solid,
+            no_notes,
+            explode,
+            fraction,
+            trails,
             side,
             normal_to,
             at,
@@ -5183,6 +5323,64 @@ fn drawing_request(d: &DrawingCmd) -> Result<Request> {
         }) => {
             let mut v = json!({"sheet": sheet});
             match (orient, from) {
+                _ if *flat => {
+                    v["type"] = json!("flat");
+                    if let Some(of) = of {
+                        v["of"] = json!(of);
+                    }
+                    if let Some(s) = solid {
+                        v["solid"] = json!(s);
+                    }
+                    if *no_notes {
+                        v["notes"] = json!(false);
+                    }
+                }
+                (Some(o), _) if explode.is_some() => {
+                    v["type"] = json!("exploded");
+                    v["explode"] = json!(explode);
+                    v["orient"] = if o.contains('/') {
+                        json!({"normal_to": drawing_ref(o)?})
+                    } else {
+                        json!(o)
+                    };
+                    if let Some(of) = of {
+                        v["of"] = json!(of);
+                    }
+                    if let Some(f) = fraction {
+                        v["fraction"] = json!(f);
+                    }
+                    if *trails {
+                        v["trails"] = json!(true);
+                    }
+                }
+                (None, Some(f)) if cut.is_some() || !through.is_empty() => {
+                    v["type"] = json!("section");
+                    v["from"] = json!(f);
+                    v["cut"] = match cut {
+                        Some(c) => {
+                            let mut c = json!({"plane": drawing_geom(c)?});
+                            if let Some(d) = cut_offset {
+                                c["offset"] = json!(d);
+                            }
+                            c
+                        }
+                        None => {
+                            json!({"through": through.iter().map(|p| drawing_point(p)).collect::<core::result::Result<Vec<_>, _>>()?})
+                        }
+                    };
+                    if *flip {
+                        v["flip"] = json!(true);
+                    }
+                    if !unsectioned.is_empty() {
+                        v["unsectioned"] = json!(unsectioned);
+                    }
+                }
+                (None, Some(f)) if centre.is_some() => {
+                    v["type"] = json!("detail");
+                    v["from"] = json!(f);
+                    v["centre"] = drawing_point(centre.as_deref().unwrap_or_default())?;
+                    v["radius"] = json!(radius);
+                }
                 (Some(o), _) => {
                     v["type"] = json!("base");
                     v["orient"] = if o.contains('/') {
@@ -5325,6 +5523,7 @@ fn drawing_request(d: &DrawingCmd) -> Result<Request> {
             out,
             sheet,
             format,
+            unit,
             rev,
         } => Request::DrawingExport {
             part: part.clone(),
@@ -5332,6 +5531,7 @@ fn drawing_request(d: &DrawingCmd) -> Result<Request> {
             rev: rev.clone(),
             sheet: sheet.clone(),
             format: format.clone(),
+            unit: unit.clone(),
             out: Some(
                 std::path::absolute(out)
                     .unwrap_or_else(|_| out.clone())
@@ -5770,6 +5970,92 @@ mod tests {
             }
             _ => panic!("not a feature write"),
         }
+    }
+
+    #[test]
+    fn drafts_from_the_command_line() {
+        on_cli_stack(|| {
+            use ryucad::proto::Flip;
+            // About a neutral plane: faces, a group at its own angle, a face
+            // flipped, the pull reversed, tangency off.
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "draft",
+                "--neutral",
+                "xy",
+                "--angle",
+                "2deg",
+                "--face",
+                "p/b/a",
+                "--face",
+                "p/b/c",
+                "--face-angle",
+                "p/b/d=-5deg",
+                "--flip",
+                "p/b/d",
+                "--reverse",
+                "--no-tangent",
+            ])
+            .unwrap();
+            assert_eq!(f.neutral.as_deref(), Some("xy"));
+            assert_eq!(
+                f.faces,
+                Some(json!(["p/b/a", "p/b/c", {"angle": "-5deg", "faces": ["p/b/d"]}]))
+            );
+            assert_eq!(f.flip, Some(Flip::Faces(vec!["p/b/d".to_owned()])));
+            assert_eq!((f.reverse, f.tangent), (Some(true), Some(false)));
+            assert_eq!(f.angle, Some(json!("2deg")));
+            // From a parting line of two edges, with a pull.
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "draft",
+                "--parting",
+                "p/b/e1",
+                "--parting",
+                "p/b/e2",
+                "--pull",
+                "z",
+                "--angle",
+                "3deg",
+                "--face",
+                "p/b/a",
+            ])
+            .unwrap();
+            assert_eq!(
+                f.parting,
+                Some(vec!["p/b/e1".to_owned(), "p/b/e2".to_owned()])
+            );
+            assert_eq!(f.pull.as_deref(), Some("z"));
+            assert_eq!(f.face.as_deref(), Some("p/b/a"));
+            // --flip alone, and --flip false, are a datum's or a split's.
+            let f = sent(&["ryucad", "feature", "edit", "p", "d1", "--flip"]).unwrap();
+            assert_eq!(f.flip, Some(Flip::On(true)));
+            let f = sent(&["ryucad", "feature", "edit", "p", "d1", "--flip", "false"]).unwrap();
+            assert_eq!(f.flip, Some(Flip::On(false)));
+            // --no-flip: no face of a draft flipped.
+            let f = sent(&["ryucad", "feature", "edit", "p", "d", "--no-flip"]).unwrap();
+            assert_eq!(f.flip, Some(Flip::Faces(Vec::new())));
+            // A neutral plane and a parting line together is a usage error.
+            let e = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "draft",
+                "--neutral",
+                "xy",
+                "--parting",
+                "p/b/e",
+            ])
+            .unwrap_err();
+            assert_eq!(e.code, Code::Usage);
+        });
     }
 
     #[test]

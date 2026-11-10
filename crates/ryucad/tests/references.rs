@@ -295,7 +295,76 @@ fn check_warns_of_a_reference_and_never_runs_the_intersection_check_on_it() {
 }
 
 #[test]
-fn interference_of_references_is_unchecked_until_21d() {
+fn references_interfere_on_their_meshes() {
+    let (_dir, mut s) = project(); // r: OCCT's box as a reference; b: a 10 mm box
+    must(
+        &mut s,
+        "part.create",
+        json!({"part": "rig", "kind": "assembly"}),
+    );
+    for id in ["a", "c"] {
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "rig", "type": "instance", "id": id, "of": "p", "fixed": true}),
+        );
+    }
+    // Two copies of one part standing in each other: every pair overlaps,
+    // and those with a reference side are judged on their meshes.
+    let v = must(&mut s, "interference", json!({"part": "rig"}));
+    assert_eq!(v["unchecked"], json!([]), "{v}");
+    let approximate: Vec<&serde_json::Value> = v["interferences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["approximate"] == true)
+        .collect();
+    assert!(!approximate.is_empty(), "{v}");
+    for i in &approximate {
+        assert!(i["volume_m3"].is_null(), "{v}");
+        assert!(!i["faces"]["a"].as_array().unwrap().is_empty(), "{v}");
+        assert!(!i["faces"]["b"].as_array().unwrap().is_empty(), "{v}");
+    }
+    // The reference against its own copy, its surfaces on the copy's: the
+    // whole volume is shared.
+    assert!(
+        approximate.iter().any(|i| {
+            let (a, b) = (i["a"].as_str().unwrap(), i["b"].as_str().unwrap());
+            a.ends_with("/r") && b.ends_with("/r")
+        }),
+        "{v}"
+    );
+    // The solid pair is still a boolean's, with its volume.
+    assert!(
+        v["interferences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["volume_m3"].is_f64()),
+        "{v}"
+    );
+    let v = must(&mut s, "check", json!({"part": "rig"}));
+    assert!(
+        v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["code"] != "cannot_check"),
+        "{v}"
+    );
+    // Moved a metre off, nothing is paired.
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "rig", "id": "c", "placement": {"origin": [1000, 0, 0]}}),
+    );
+    let v = must(&mut s, "interference", json!({"part": "rig"}));
+    assert_eq!(v["interferences"], json!([]), "{v}");
+    assert_eq!(v["unchecked"], json!([]), "{v}");
+}
+
+#[test]
+fn check_and_clearance_read_reference_pairs() {
     let (_dir, mut s) = project();
     must(
         &mut s,
@@ -310,15 +379,23 @@ fn interference_of_references_is_unchecked_until_21d() {
         );
     }
     let v = must(&mut s, "check", json!({"part": "rig"}));
-    let codes: Vec<&str> = v["findings"]
+    let f = v["findings"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|f| f["code"].as_str().unwrap())
-        .collect();
-    // The two references overlap where they stand: the kernel's boolean
-    // takes no sheet, so the pairs with a reference side can't be checked.
-    assert!(codes.contains(&"cannot_check"), "{v}");
+        .find(|f| f["code"] == "instances_interfere" && f["approximate"] == true)
+        .cloned()
+        .unwrap_or_else(|| panic!("{v}"));
+    assert!(f["volume_m3"].is_null(), "{f}");
+    assert!(
+        f["message"]
+            .as_str()
+            .unwrap()
+            .contains("judged on their meshes"),
+        "{f}"
+    );
+    let v = must(&mut s, "clearance", json!({"part": "rig"}));
+    assert_eq!(v["unchecked"], json!([]), "{v}");
 }
 
 #[test]
@@ -416,4 +493,68 @@ fn a_closed_reference_weighs_from_its_mesh_and_an_open_one_is_refused() {
     let e = call(&mut o, "mass", json!({"of": sheet})).unwrap_err();
     assert_eq!(e.code, ryucad::error::Code::ReferenceNotSolid, "{e:?}");
     assert_eq!(e.details["reason"], "open");
+}
+
+/// The box of a binary STL's points.
+fn stl_box(bytes: &[u8]) -> ([f32; 3], [f32; 3]) {
+    let n = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize;
+    let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    for t in 0..n {
+        let at = 84 + 50 * t + 12;
+        for v in 0..9 {
+            let o = at + 4 * v;
+            let x = f32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+            lo[v % 3] = lo[v % 3].min(x);
+            hi[v % 3] = hi[v % 3].max(x);
+        }
+    }
+    (lo, hi)
+}
+
+#[test]
+fn a_flattened_part_exports_and_reads_back_where_it_stands() {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let path = src.path().join("asm.step");
+    std::fs::write(&path, occt("assembly.stp")).unwrap();
+    let path = path.display().to_string();
+    must(
+        &mut s,
+        "import",
+        json!({"path": path, "flatten": true, "part": "board"}),
+    );
+    // As imported whole: the assembly's occurrences, where the file puts them.
+    must(&mut s, "import", json!({"path": path, "part": "whole"}));
+    let stl = |s: &mut Session, part: &str| {
+        let out = src.path().join(format!("{part}.stl"));
+        must(
+            s,
+            "export",
+            json!({"part": part, "out": out.display().to_string(), "unit": "m"}),
+        );
+        stl_box(&std::fs::read(&out).unwrap())
+    };
+    let near = |a: ([f32; 3], [f32; 3]), b: ([f32; 3], [f32; 3])| {
+        (0..3).all(|k| (a.0[k] - b.0[k]).abs() < 1e-6 && (a.1[k] - b.1[k]).abs() < 1e-6)
+    };
+    let board = stl(&mut s, "board");
+    let whole = stl(&mut s, "whole");
+    assert!(near(board, whole), "{board:?} {whole:?}");
+    // Through STEP and back: each placed reference is a child product at
+    // its place, so what is read back stands where the part does.
+    let out = src.path().join("board.step");
+    must(
+        &mut s,
+        "export",
+        json!({"part": "board", "out": out.display().to_string()}),
+    );
+    must(
+        &mut s,
+        "import",
+        json!({"path": out.display().to_string(), "part": "again"}),
+    );
+    let again = stl(&mut s, "again");
+    assert!(near(board, again), "{board:?} {again:?}");
 }

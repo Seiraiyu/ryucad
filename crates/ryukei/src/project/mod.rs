@@ -10,6 +10,7 @@
 //! [`view`]'s. [`section`] cuts a body by a plane through the boolean,
 //! giving the faces the cut makes.
 
+mod clip;
 mod closed;
 mod curve;
 mod edge_on;
@@ -25,6 +26,7 @@ mod silhouette;
 mod trim;
 mod view;
 
+pub use clip::inside_circle;
 pub use curve::{Image, ImageCurve, ImageMap, project_curve};
 pub use hidden::{
     Class, Piece, Placed, Projection, Source, ViewOptions, Visibility, view, view_with,

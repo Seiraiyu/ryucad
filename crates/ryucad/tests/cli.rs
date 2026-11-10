@@ -3408,6 +3408,107 @@ fn datums_from_the_cli() {
 }
 
 #[test]
+fn drafts_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "box"]);
+    p.ok(&[
+        "feature", "add", "box", "box", "--id", "base", "--param", "x=40", "--param", "y=30",
+        "--param", "z=20",
+    ]);
+    let base = p.ok(&["inspect", "box", "base"])["bodies"][0].clone();
+    let wall = |axis: usize, n: f64| -> String {
+        let f = base["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["z"][axis].as_f64().unwrap() * sign == n
+            })
+            .unwrap();
+        format!("box/base/{}", f["name"].as_str().unwrap())
+    };
+    let (east, west, north, south) = (wall(0, 1.0), wall(0, -1.0), wall(1, 1.0), wall(1, -1.0));
+    let north_angle = format!("{north}=5deg");
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "box",
+        "draft",
+        "--id",
+        "d",
+        "--neutral",
+        "xy",
+        "--angle",
+        "2deg",
+        "--face",
+        &east,
+        "--face",
+        &west,
+        "--face",
+        &south,
+        "--face-angle",
+        &north_angle,
+        "--flip",
+        &south,
+    ]);
+    let f = &r["feature"];
+    assert_eq!(f["target"], "base", "{r}");
+    assert_eq!(f["faces"], json!([east, west, south]), "{r}");
+    assert_eq!(f["groups"][0]["faces"], json!([north]), "{r}");
+    assert_eq!(f["flip"], json!([south]), "{r}");
+    // The rebuild reports each face's angle.
+    let built = p.ok(&["rebuild", "box"]);
+    let d = built["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == "d")
+        .unwrap()["draft"]
+        .clone();
+    assert_eq!(d["angles"].as_array().unwrap().len(), 4, "{d}");
+    // A parting line replaces the neutral plane.
+    let rim = format!("box/base/{}", base["edges"][0]["name"].as_str().unwrap());
+    p.ok(&[
+        "feature",
+        "edit",
+        "box",
+        "d",
+        "--parting",
+        &rim,
+        "--pull",
+        "z",
+        "--no-flip",
+    ]);
+    let shown = p.ok(&["feature", "show", "box", "d"]);
+    assert!(
+        shown.get("neutral").is_none() || shown["neutral"].is_null(),
+        "{shown}"
+    );
+    assert_eq!(shown["pull"], "z", "{shown}");
+    assert!(shown.get("flip").is_none(), "{shown}");
+    // An angle out of range is the agent's to fix.
+    p.fails(
+        &["feature", "edit", "box", "d", "--angle", "90deg"],
+        "invalid_param",
+        1,
+    );
+    // The daemon logged the draft: undo takes its file away, redo puts it
+    // back.
+    let file = p.daemon.join("parts/box/features/d.json");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(!file.exists());
+    let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(file.exists());
+}
+
+#[test]
 fn face_tweaks_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
@@ -5386,6 +5487,34 @@ fn drawings_from_the_cli() {
     let views = got["sheets"][0]["views"].as_array().unwrap();
     assert_eq!(views.len(), 5);
     assert_eq!(views[0]["at_mm"], json!([150.0, 180.0]), "{got}");
+    // A section of the top view at x = 20 mm: its letter given, placed
+    // on the top view's row and its offset written back.
+    p.ok(&[
+        "drawing",
+        "view",
+        "add",
+        "plate",
+        "main",
+        "--from",
+        "v2",
+        "--cut",
+        "yz",
+        "--cut-offset",
+        "20",
+    ]);
+    let text = fs::read_to_string(p.direct.join("parts/plate/drawings/main.json")).unwrap();
+    let file: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(file["views"]["v6"]["type"], "section", "{file}");
+    assert_eq!(file["views"]["v6"]["label"], "A", "{file}");
+    assert!(file["views"]["v6"]["offset"].is_string(), "{file}");
+    // A detail of the front view about its corner.
+    p.ok(&[
+        "drawing", "view", "add", "plate", "main", "--from", "v1", "--centre", "0,0,0", "--radius",
+        "5",
+    ]);
+    let got = p.ok(&["drawing", "get", "plate", "main"]);
+    assert_eq!(got["findings"], json!([]), "{got}");
+    assert_eq!(got["sheets"][0]["views"].as_array().unwrap().len(), 7);
     // What the agent reads in words.
     let d = p.ok(&["drawing", "describe", "plate", "main"]);
     let words = d["sheets"][0]["views"][0]["text"].as_str().unwrap();
@@ -5404,6 +5533,27 @@ fn drawings_from_the_cli() {
         fs::read_to_string(p.direct.join("s1.svg"))
             .unwrap()
             .starts_with("<svg")
+    );
+    // A sheet as DXF, in inches.
+    let dxf = p.ok(&[
+        "drawing", "export", "plate", "main", "--out", "s1.dxf", "--unit", "in",
+    ]);
+    assert_eq!(
+        (dxf["format"].as_str(), dxf["unit"].as_str()),
+        (Some("dxf"), Some("in")),
+        "{dxf}"
+    );
+    let bytes = fs::read_to_string(p.direct.join("s1.dxf")).unwrap();
+    assert!(
+        bytes.contains("AC1015") && bytes.contains("HATCH\n"),
+        "{bytes}"
+    );
+    p.fails(
+        &[
+            "drawing", "export", "plate", "main", "--out", "x.pdf", "--unit", "in",
+        ],
+        "invalid_param",
+        1,
     );
     let pdf = p.ok(&["drawing", "export", "plate", "main", "--out", "main.pdf"]);
     assert_eq!(pdf["sheets"], 1, "{pdf}");
@@ -6043,6 +6193,42 @@ fn imports_from_the_cli() {
 /// exported as STEP, STL and USD (warning that USD holds it as a mesh),
 /// converted to a solid the fillet then builds on, undone through the
 /// daemon, and refused to convert back while a feature acts on it.
+#[test]
+fn flattened_imports_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let occt = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/occt");
+    let beside = p.direct.parent().unwrap();
+    fs::copy(occt.join("assembly.stp"), beside.join("asm.stp")).unwrap();
+    // The same file imported whole makes parts and an assembly.
+    let whole = p.ok(&["import", "../asm.stp", "--dry-run"]);
+    assert!(whole["parts"].as_array().unwrap().len() > 1, "{whole}");
+    let v = p.ok(&["import", "../asm.stp", "--flatten", "--part", "board"]);
+    let parts = v["parts"].as_array().unwrap();
+    assert_eq!(parts.len(), 1, "{v}");
+    assert_eq!(parts[0]["part"], "board");
+    assert_eq!(parts[0]["kind"], "part", "{v}");
+    let features = parts[0]["features"].as_array().unwrap();
+    assert!(features.len() > 1, "{v}");
+    assert!(features.iter().all(|f| f["mode"] == "reference"), "{v}");
+    let built = p.ok(&["rebuild", "board"]);
+    let solids = built["parts"][0]["solids"].as_array().unwrap();
+    assert_eq!(solids.len(), features.len(), "{built}");
+    assert!(solids.iter().all(|s| s["ok"] == true), "{built}");
+    for bad in [
+        &["import", "../asm.stp", "--flatten", "--into", "board"][..],
+        &[
+            "import",
+            "../asm.stp",
+            "--flatten",
+            "--update",
+            "imports/asm.step",
+        ][..],
+    ] {
+        p.fails(bad, "usage", 2);
+    }
+}
+
 #[test]
 fn reference_imports_from_the_cli() {
     let p = Pair::new();

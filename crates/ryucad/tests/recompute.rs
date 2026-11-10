@@ -527,6 +527,32 @@ fn edit(g: &mut Lcg, s: &mut Session) {
     let _ = call(s, method, params);
 }
 
+/// Part `p`'s import placed `mm` millimetres along x (none for 0),
+/// written by hand, since no request sets a place, and the session
+/// refreshed.
+fn place_import(s: &mut Session, mm: u64) {
+    let root = s.root().to_path_buf();
+    let dir = root.join("parts/p/features");
+    for e in std::fs::read_dir(&dir).unwrap() {
+        let path = e.unwrap().path();
+        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        if v["type"] != "import" {
+            continue;
+        }
+        if mm == 0 {
+            v.as_object_mut().unwrap().remove("place");
+        } else {
+            v["place"] = json!({
+                "pose": {"origin_m": [mm as f64 / 1000.0, 0, 0], "x": [1, 0, 0], "z": [0, 0, 1]},
+                "via": [{"product": {"id": "part 2", "name": "part 2"}, "usage": "1"}],
+            });
+        }
+        v["format"] = json!(ryucad::doc::files::feature_format(&v));
+        ryucad::doc::project::write_json(&path, &v).unwrap();
+    }
+    s.refresh().unwrap();
+}
+
 /// The rebuild from nothing on `threads` threads: its hash and each
 /// feature's hash or error.
 fn full(s: &Session, threads: usize) -> (String, Vec<String>) {
@@ -581,6 +607,14 @@ fn incremental_equals_full_from(seed: u64) {
     let mut reused = 0;
     for step in 0..30 {
         edit(&mut g, &mut s);
+        // Every tenth step the import is also placed a millimetre or two
+        // along x, as a flattened import places a body, or at its origin
+        // again, by the seed and step rather than the generator: drawn
+        // from it, a 27th arm reshuffled seed 1 into a countersink edit
+        // after a two-distance bevel that took over 300 s to rebuild.
+        if step % 10 == 9 {
+            place_import(&mut s, (seed + step / 10) % 3);
+        }
         let (one, eight) = (full(&s, 1), full(&s, 8));
         let r = s.rebuilt(&part).unwrap();
         let incremental = (r.hash.clone(), summary(r));
@@ -590,6 +624,22 @@ fn incremental_equals_full_from(seed: u64) {
     }
     // Edits touch a few features each; most results are reused.
     assert!(reused > 30 * 14 / 2, "seed {seed}: reused {reused}");
+}
+
+#[test]
+fn a_placed_import_recomputes_as_from_nothing() {
+    let (_dir, mut s) = project();
+    let part = Id::parse("p", "part").unwrap();
+    let start = s.rebuilt(&part).unwrap().hash.clone();
+    for mm in [1, 2, 0] {
+        place_import(&mut s, mm);
+        let (one, eight) = (full(&s, 1), full(&s, 8));
+        let r = s.rebuilt(&part).unwrap();
+        let incremental = (r.hash.clone(), summary(r));
+        assert_eq!(incremental, one, "{mm} mm");
+        assert_eq!(incremental, eight, "{mm} mm");
+        assert_eq!(r.hash == start, mm == 0, "{mm} mm");
+    }
 }
 
 /// Part `p`: a box `b` (`w` × 12 × 8 mm) shelled open at its top as `sh`
@@ -1664,4 +1714,90 @@ fn a_cancel_inside_a_kernel_call_keeps_nothing() {
     );
     let again = ryucad::rebuild::rebuild_part_with(&part, &stopped.cache).0;
     assert_eq!(again.hash, whole.1);
+}
+
+/// Part `p`: a datum plane `lvl` up from xy (`lvl`), a box `b`
+/// (`w` × 12 × 8 mm) whose walls `d` drafts by `a` about xy. Returns the
+/// walls' references, +x first and +y third.
+fn drafted() -> (tempfile::TempDir, Session, Vec<String>) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    must(
+        &mut s,
+        "param.set",
+        json!({"part": "p", "parameters": {"w": "20 mm", "a": "2 deg", "lvl": "4 mm"}}),
+    );
+    let add = |s: &mut Session, f: Value| {
+        let mut f = f;
+        f["part"] = json!("p");
+        must(s, "feature.add", f);
+    };
+    add(
+        &mut s,
+        json!({"type": "plane", "id": "lvl", "by": "offset", "from": "xy", "distance": "lvl"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": "w", "y": "12 mm", "z": "8 mm"}}),
+    );
+    let walls: Vec<String> = [
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+    ]
+    .iter()
+    .map(|n| face(&mut s, "b", *n))
+    .collect();
+    add(
+        &mut s,
+        json!({"type": "draft", "id": "d", "angle": "a", "neutral": "xy", "faces": walls.clone()}),
+    );
+    (dir, s, walls)
+}
+
+/// One random edit of [`drafted`]'s part.
+fn draft_edit(g: &mut Lcg, s: &mut Session, walls: &[String]) {
+    let (method, params) = match g.next_u64() % 7 {
+        0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
+        1 => (
+            "param.set",
+            json!({"parameters": {"a": format!("{} deg", 1 + g.next_u64() % 4)}}),
+        ),
+        2 => ("param.set", json!({"parameters": {"lvl": mm(g, 2, 6)}})),
+        3 => ("feature.edit", json!({"id": "d", "neutral": "p/lvl"})),
+        4 => ("feature.edit", json!({"id": "d", "neutral": "xy"})),
+        5 => (
+            "feature.edit",
+            json!({"id": "d", "flip": if g.next_u64().is_multiple_of(2) { json!([walls[2]]) } else { json!([]) }}),
+        ),
+        _ => (
+            "feature.edit",
+            json!({"id": "d", "tangent": g.next_u64().is_multiple_of(2)}),
+        ),
+    };
+    let mut params = params;
+    params["part"] = json!("p");
+    let _ = call(s, method, params);
+}
+
+#[test]
+fn drafts_recompute_as_from_nothing() {
+    for seed in [10, 11] {
+        let (_dir, mut s, walls) = drafted();
+        let part = Id::parse("p", "part").unwrap();
+        let first = s.rebuilt(&part).unwrap();
+        assert_eq!(first.failed(), 0, "{:?}", summary(first));
+        let mut g = Lcg::new(seed);
+        for step in 0..10 {
+            draft_edit(&mut g, &mut s, &walls);
+            let (one, eight) = (full(&s, 1), full(&s, 8));
+            let r = s.rebuilt(&part).unwrap();
+            let incremental = (r.hash.clone(), summary(r));
+            assert_eq!(incremental, one, "seed {seed}, step {step}");
+            assert_eq!(incremental, eight, "seed {seed}, step {step}");
+        }
+    }
 }

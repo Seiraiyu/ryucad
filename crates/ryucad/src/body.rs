@@ -684,7 +684,7 @@ fn mirror_or_split(
     if let Some(t) = target {
         o.insert("target".into(), json!(t));
     }
-    if let Some(flip) = f.flip {
+    if let Some(flip) = f.flip.as_ref().map(crate::proto::Flip::on).transpose()? {
         o.insert("flip".into(), json!(flip));
     }
     if let Some(k) = &f.keep {

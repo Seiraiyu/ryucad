@@ -901,7 +901,7 @@ pub fn from_given(
             }
         }
     }
-    match f.flip {
+    match f.flip.as_ref().map(crate::proto::Flip::on).transpose()? {
         Some(true) => set(&mut v, "flip", json!(true)),
         Some(false) => unset(&mut v, "flip"),
         None => {}

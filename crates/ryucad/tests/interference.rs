@@ -312,3 +312,104 @@ fn parts_placed_in_single_precision_stand_on_the_board() {
     assert_eq!(pairs(&v), []);
     assert_eq!(v["unchecked"], json!([]), "{v}");
 }
+
+#[test]
+fn mesh_verdicts_agree_with_booleans_on_solids() {
+    use ryucad::interference::{Prepared, Verdict, mesh_verdict, verdict};
+    use ryukei::geom::{Rigid, UnitVector3, Vector3};
+    use ryukei::name::OpKey;
+    let mut g = ryukei_testkit::Lcg::new(364);
+    let (mut agreed, mut judged) = (0, 0);
+    for k in 0..48 {
+        let key = OpKey::from_bytes(format!("a{k}").as_bytes());
+        let a = if k % 2 == 0 {
+            ryukei::primitive::block(key, 0.01, 0.008, 0.006, &Rigid::IDENTITY)
+                .unwrap()
+                .0
+        } else {
+            ryukei::primitive::cylinder(key, 0.004, 0.01, &Rigid::IDENTITY)
+                .unwrap()
+                .0
+        };
+        let b = ryukei::primitive::block(
+            OpKey::from_bytes(b"b"),
+            0.004,
+            0.004,
+            0.004,
+            &Rigid::IDENTITY,
+        )
+        .unwrap()
+        .0;
+        let rel = Rigid::rotation(UnitVector3::Z, g.next_f64(0.0, 1.0));
+        let rel = Rigid::translation(Vector3::new(
+            g.next_f64(-0.006, 0.012),
+            g.next_f64(-0.006, 0.010),
+            g.next_f64(-0.006, 0.008),
+        ))
+        .then_after(&rel);
+        let exact = verdict(&a, &b, rel);
+        let (pa, pb) = (Prepared::new(&a).unwrap(), Prepared::new(&b).unwrap());
+        let meshed = mesh_verdict(&pa, &pb, &rel).unwrap();
+        match exact {
+            Verdict::Interferes { volume_m3, .. } if volume_m3 > 1e-9 => {
+                judged += 1;
+                assert!(
+                    matches!(meshed, Verdict::Approximate { open: false, .. }),
+                    "{k}: {meshed:?}"
+                );
+                agreed += 1;
+            }
+            Verdict::Clear => {
+                judged += 1;
+                assert!(
+                    !matches!(meshed, Verdict::Approximate { .. }),
+                    "{k}: {meshed:?}"
+                );
+                agreed += 1;
+            }
+            _ => {}
+        }
+    }
+    // A part placed twice at one pose, or a micrometre off it: its surfaces
+    // coincide, so no surface point of either is deep in the other, yet
+    // the boolean gives the whole volume.
+    for k in 0..2 {
+        let key = OpKey::from_bytes(format!("c{k}").as_bytes());
+        let a = if k == 0 {
+            ryukei::primitive::block(key, 0.01, 0.008, 0.006, &Rigid::IDENTITY)
+                .unwrap()
+                .0
+        } else {
+            ryukei::primitive::cylinder(key, 0.004, 0.01, &Rigid::IDENTITY)
+                .unwrap()
+                .0
+        };
+        let pa = Prepared::new(&a).unwrap();
+        for rel in [
+            Rigid::IDENTITY,
+            Rigid::translation(Vector3::new(1e-6, 0.0, 0.0)),
+        ] {
+            let exact = verdict(&a, &a, rel);
+            let meshed = mesh_verdict(&pa, &pa, &rel).unwrap();
+            if let Verdict::Interferes { volume_m3, .. } = exact {
+                assert!(volume_m3 > 1e-9, "coincident {k}: {exact:?}");
+                judged += 1;
+                assert!(
+                    matches!(meshed, Verdict::Approximate { open: false, .. }),
+                    "coincident {k} {rel:?}: {meshed:?}"
+                );
+                agreed += 1;
+            } else {
+                // Whatever the boolean says of coincident copies, the
+                // meshes must certify the shared volume.
+                assert!(
+                    matches!(meshed, Verdict::Approximate { open: false, .. }),
+                    "coincident {k} {rel:?}: {exact:?} {meshed:?}"
+                );
+            }
+        }
+    }
+    println!("mesh verdicts: {agreed} of {judged} judged agree");
+    assert!(judged >= 24, "{judged}");
+    assert_eq!(agreed, judged);
+}

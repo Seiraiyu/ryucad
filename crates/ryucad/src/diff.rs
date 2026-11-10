@@ -405,17 +405,19 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
         }
         // A tweak's groups, each on one line: a move's
         // `groups[0] = 1 mm: base/<hex>, base/<hex>`, a replacement's
-        // `groups[0] = lid/<hex>: base/<hex>` (its surface first).
+        // `groups[0] = lid/<hex>: base/<hex>` (its surface first), a
+        // draft's `groups[0] = 5 deg: base/<hex>`.
         Some("ryucad.feature")
             if matches!(
                 o.get("type").and_then(Value::as_str),
-                Some("move_face" | "replace_face")
+                Some("move_face" | "replace_face" | "draft")
             ) =>
         {
             if let Some(Value::Array(groups)) = rest.remove("groups") {
                 for (i, g) in groups.iter().enumerate() {
                     let head = g
                         .get("distance")
+                        .or_else(|| g.get("angle"))
                         .or_else(|| g.get("with"))
                         .map(|x| reference(x).unwrap_or_else(|| scalar(x)))
                         .unwrap_or_default();
@@ -452,6 +454,41 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                         .collect();
                     lines.push(format!("faces[{i}] = {q}: {}", faces.join(", ")));
                 }
+            }
+        }
+        // A flattened import's place on one line: the usages from a root
+        // down (each with its ordinal past the first, and the product it
+        // places), then the pose, in meters as written.
+        Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("import") => {
+            if let Some(p) = rest.remove("place") {
+                let via: Vec<String> = p["via"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|u| {
+                        let mut t = u["usage"].as_str().unwrap_or_default().to_owned();
+                        if let Some(n) = u.get("ordinal") {
+                            t.push_str(&format!("#{n}"));
+                        }
+                        format!("{t} of {}", u["product"]["id"].as_str().unwrap_or_default())
+                    })
+                    .collect();
+                let list = |k: &str| {
+                    let v: Vec<String> = p["pose"][k]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(scalar)
+                        .collect();
+                    v.join(", ")
+                };
+                lines.push(format!(
+                    "place = {} at ({}) m, z [{}], x [{}]",
+                    via.join(" > "),
+                    list("origin_m"),
+                    list("z"),
+                    list("x")
+                ));
             }
         }
         // An instance's revision in words, its pose last: solver state.
@@ -772,6 +809,87 @@ fn drawing_view(m: &Value) -> String {
             (
                 format!("{ty} from {from}, {how}"),
                 &["type", "from", "side", "normal_to"],
+            )
+        }
+        "section" => {
+            let from = m.get("from").map(scalar).unwrap_or_default();
+            let letter = m.get("label").map(scalar).unwrap_or_default();
+            let point = |p: &Value| match p {
+                Value::Array(a) => a.iter().map(scalar).collect::<Vec<_>>().join(", "),
+                p => reference(p).unwrap_or_else(|| scalar(p)),
+            };
+            let cut = match m.get("cut") {
+                Some(c) if c.get("plane").is_some() => {
+                    let mut t = format!("on {}", point(&c["plane"]));
+                    if let Some(o) = c.get("offset") {
+                        t.push_str(&format!(" offset {}", scalar(o)));
+                    }
+                    t
+                }
+                Some(c) if c.get("through").is_some() => format!(
+                    "through {}",
+                    c["through"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|p| format!("({})", point(p)))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+                Some(c) => format!(
+                    "at {} normal {}",
+                    point(c.get("origin").unwrap_or(&Value::Null)),
+                    point(c.get("normal").unwrap_or(&Value::Null))
+                ),
+                None => String::new(),
+            };
+            (
+                format!("section {letter} from {from}, {cut}"),
+                &["type", "from", "label", "cut"],
+            )
+        }
+        "detail" => {
+            let from = m.get("from").map(scalar).unwrap_or_default();
+            let letter = m.get("label").map(scalar).unwrap_or_default();
+            let centre = match m.get("centre") {
+                Some(Value::Array(a)) => a.iter().map(scalar).collect::<Vec<_>>().join(", "),
+                Some(p) => reference(p).unwrap_or_else(|| scalar(p)),
+                None => String::new(),
+            };
+            let r = m.get("radius").map(scalar).unwrap_or_default();
+            (
+                format!("detail {letter} from {from}, about {centre} radius {r}"),
+                &["type", "from", "label", "centre", "radius"],
+            )
+        }
+        "flat" => {
+            let of = m
+                .get("of")
+                .map(|p| format!(" of {}", scalar(p)))
+                .unwrap_or_default();
+            let solid = m
+                .get("solid")
+                .map(|p| format!(" solid {}", scalar(p)))
+                .unwrap_or_default();
+            (format!("flat{of}{solid}"), &["type", "of", "solid"])
+        }
+        "exploded" => {
+            let e = m.get("explode").map(scalar).unwrap_or_default();
+            let of = m
+                .get("of")
+                .map(|p| format!(" of {}", scalar(p)))
+                .unwrap_or_default();
+            let orient = match m.get("orient") {
+                Some(Value::Object(o)) => o
+                    .get("normal_to")
+                    .map(|r| format!("normal to {}", reference(r).unwrap_or_else(|| scalar(r))))
+                    .unwrap_or_default(),
+                Some(o) => scalar(o),
+                None => String::new(),
+            };
+            (
+                format!("exploded {e}{of}, {orient}"),
+                &["type", "explode", "of", "orient"],
             )
         }
         _ => (scalar(&json!(ty)), &["type"]),
@@ -2704,6 +2822,62 @@ mod tests {
         );
     }
     #[test]
+    fn a_drafts_groups_read_on_a_line_each() {
+        let (a, b) = (
+            "0123456789abcdef0123456789abcdef",
+            "fedcba9876543210fedcba9876543210",
+        );
+        let v = json!({"format": 18, "kind": "ryucad.feature", "type": "draft",
+            "target": "base", "angle": "2 deg", "neutral": "xy", "reverse": true,
+            "faces": [{"feature": "base", "name": a}],
+            "groups": [{"angle": "5 deg", "faces": [{"feature": "base", "name": b}]}],
+            "flip": [{"feature": "base", "name": b}], "tangent": false});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature draft (format 18)\n\
+                 angle = 2 deg\n\
+                 faces = [base/{a}]\n\
+                 flip = [base/{b}]\n\
+                 groups[0] = 5 deg: base/{b}\n\
+                 neutral = xy\n\
+                 reverse = true\n\
+                 tangent = false\n\
+                 target = base\n"
+            )
+        );
+        let v = json!({"format": 18, "kind": "ryucad.feature", "type": "draft",
+            "target": "base", "angle": "3 deg",
+            "parting": [{"feature": "base", "name": b}], "pull": "z",
+            "faces": [{"feature": "base", "name": a}]});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature draft (format 18)\n\
+                 angle = 3 deg\n\
+                 faces = [base/{a}]\n\
+                 parting = [base/{b}]\n\
+                 pull = z\n\
+                 target = base\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_drafts_changes_are_by_field() {
+        let n = |k: u8| json!({"feature": "b", "name": format!("{k:032x}")});
+        let before = json!({"format": 18, "kind": "ryucad.feature", "type": "draft",
+                            "target": "b", "angle": "2 deg", "neutral": "xy", "faces": [n(1)]});
+        let mut after = before.clone();
+        after["angle"] = json!("3 deg");
+        after["flip"] = json!([n(1)]);
+        let mut out = Vec::new();
+        changes("", Some(&before), Some(&after), &mut out);
+        let pointers: Vec<&str> = out.iter().map(|c| c["at"].as_str().unwrap()).collect();
+        assert_eq!(pointers, ["/angle", "/flip"]);
+    }
+
+    #[test]
     fn a_tweaks_groups_read_on_a_line_each() {
         let (a, b) = (
             "0123456789abcdef0123456789abcdef",
@@ -3052,6 +3226,25 @@ mod tests {
         let v = json!({"body": 0, "file": {"blake3": h, "path": "imports/b.step"}, "format": 13,
                        "kind": "ryucad.feature", "type": "import", "mode": "reference"});
         assert!(text(v).contains("\nmode = reference\n"));
+    }
+
+    #[test]
+    fn an_imports_place_is_one_line() {
+        let h = "ab".repeat(32);
+        let v = json!({"body": 0, "file": {"blake3": h, "path": "imports/b.step"}, "format": 17,
+                       "kind": "ryucad.feature", "type": "import", "mode": "reference",
+                       "place": {"pose": {"origin_m": [0.01, 0, 0], "x": [1, 0, 0], "z": [0, 0, 1]},
+                                 "via": [{"product": {"id": "S-1", "name": "Sub"}, "usage": "1"},
+                                         {"ordinal": 1, "product": {"id": "P-1", "name": "Pin"},
+                                          "usage": "1"}]}});
+        let t = text(v);
+        assert!(
+            t.contains(
+                "\nplace = 1 of S-1 > 1#1 of P-1 at (0.01, 0, 0) m, z [0, 0, 1], x [1, 0, 0]\n"
+            ),
+            "{t}"
+        );
+        assert!(!t.contains("place."), "{t}");
     }
 
     #[test]
@@ -3772,6 +3965,33 @@ mod tests {
         assert_eq!(d["changed"][0]["changes"][0]["at"], "/steps");
         assert_eq!(v["parts"]["a"]["status"], "changed");
         assert!(v["parts"]["a"].get("views").is_none());
+    }
+
+    #[test]
+    fn sections_details_flats_and_explodes_textconv_a_line_each() {
+        let v = json!({"format": 1, "kind": "ryucad.drawing", "name": "P",
+        "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b"}},
+        "views": {
+            "v1": {"type": "base", "sheet": "s1", "orient": "top"},
+            "v2": {"type": "section", "sheet": "s1", "from": "v1", "label": "A",
+                   "cut": {"plane": {"feature": "b", "name": "0123456789abcdef0123456789abcdef"}, "offset": "5 mm"}},
+            "v3": {"type": "section", "sheet": "s1", "from": "v1", "label": "B", "flip": true,
+                   "cut": {"through": [["0 mm", "1 mm", "0 mm"], "origin"]}},
+            "v4": {"type": "detail", "sheet": "s1", "from": "v2", "label": "C",
+                   "centre": ["1 mm", "2 mm", "3 mm"], "radius": "4 mm"},
+            "v5": {"type": "flat", "sheet": "s1", "solid": "plate"},
+            "v6": {"type": "exploded", "sheet": "s1", "of": "rig", "explode": "e1", "orient": "iso"}
+        }});
+        let t = text(v);
+        for line in [
+            "views.v2 = section A from v1, on b/0123456789abcdef0123456789abcdef offset 5 mm, sheet s1",
+            "views.v3 = section B from v1, through (0 mm, 1 mm, 0 mm) (origin), flip true, sheet s1",
+            "views.v4 = detail C from v2, about 1 mm, 2 mm, 3 mm radius 4 mm, sheet s1",
+            "views.v5 = flat solid plate, sheet s1",
+            "views.v6 = exploded e1 of rig, iso, sheet s1",
+        ] {
+            assert!(t.contains(line), "{line} in\n{t}");
+        }
     }
 
     #[test]

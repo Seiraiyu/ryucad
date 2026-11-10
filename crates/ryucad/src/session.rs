@@ -85,6 +85,8 @@ pub struct Session {
     pub interference: crate::interference::Cache,
     /// Drawing views' projections, by their placed bodies and the view.
     pub projections: crate::drawing::Cache,
+    /// Section views' cut bodies and caps, by body, pose and cut.
+    pub sections: crate::drawing::section::Cache,
     /// Mass properties worked out, for `mass`.
     pub mass: crate::mass::Cache,
     /// Distances between placed solids, for `clearance`.
@@ -243,6 +245,7 @@ impl Session {
             flats: Default::default(),
             interference: crate::interference::Cache::default(),
             projections: crate::drawing::Cache::default(),
+            sections: crate::drawing::section::Cache::default(),
             mass: crate::mass::Cache::default(),
             clearance: crate::clearance::Cache::default(),
             frozen: false,
@@ -449,6 +452,7 @@ impl Session {
             flats: Default::default(),
             interference: from.interference.clone(),
             projections: from.projections.clone(),
+            sections: from.sections.clone(),
             mass: from.mass.clone(),
             clearance: from.clearance.clone(),
             frozen: true,

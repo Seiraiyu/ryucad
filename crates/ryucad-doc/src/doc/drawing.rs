@@ -29,6 +29,7 @@
 //! (sections, details, flat and exploded views, annotations).
 
 use super::files::{Obj, header, invalid};
+use super::geometry::GeomRef;
 use super::id::Id;
 use super::reference::Reference;
 #[cfg(test)]
@@ -392,6 +393,39 @@ impl Side {
     }
 }
 
+/// A point in the model a drawing names: a geometric reference that
+/// stands for one (a vertex, a datum point, the origin), resolved in what
+/// the view draws, or a point in model space.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ModelPoint {
+    Ref(GeomRef),
+    /// Lengths in the model, bare numbers millimetres.
+    At([Quantity; 3]),
+}
+
+/// Where a section cuts. What lies on the side the plane's normal points
+/// to is cut away, and the section is seen from there (`flip` turns it).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Cut {
+    /// A full section on a plane reference of what the view draws (an
+    /// origin plane, a planar face, a datum plane), moved by `offset`
+    /// along its normal.
+    Plane {
+        plane: GeomRef,
+        offset: Option<Quantity>,
+    },
+    /// A full section on the plane through `origin` square to `normal`.
+    At {
+        origin: [Quantity; 3],
+        normal: [f64; 3],
+    },
+    /// An offset section through two or more points in order, stepped
+    /// square to its parent's view: the cut runs along each pair's line
+    /// seen in the parent, and what lies to the cut's left (as its first
+    /// segment runs, seen in the parent) is cut away.
+    Through(Vec<ModelPoint>),
+}
+
 /// What a view draws, and where from.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ViewKind {
@@ -418,6 +452,74 @@ pub enum ViewKind {
         normal_to: Reference,
         offset: Option<Quantity>,
     },
+    /// Its parent's source cut by `cut`, seen square to the cut from the
+    /// side cut away (`flip` turns it): placed along its parent's row or
+    /// column by `offset` where it looks along the parent's plane, else by
+    /// its own `at`. Its `label` is its letter.
+    Section {
+        from: Key,
+        cut: Cut,
+        flip: bool,
+        /// Instance paths (`p1`, `p1/left`) an assembly's section leaves
+        /// whole: fasteners, shafts.
+        unsectioned: Vec<String>,
+        offset: Option<Quantity>,
+    },
+    /// Its parent at its own scale (twice its parent's unless written),
+    /// kept inside the circle of `radius` (in the model) about `centre`.
+    /// Its `label` is its letter.
+    Detail {
+        from: Key,
+        centre: ModelPoint,
+        radius: Quantity,
+    },
+    /// A sheet metal solid's flat pattern (the drawing's own part's unless
+    /// `of`; its one sheet metal solid unless `solid`), with its bend
+    /// lines and, unless `notes` is false, their notes.
+    Flat {
+        of: Option<Id>,
+        solid: Option<Id>,
+        notes: bool,
+    },
+    /// An assembly's explode `explode`, `fraction` of the way (all of it
+    /// unless written), seen from `orient`, its trails drawn when
+    /// `trails`.
+    Exploded {
+        of: Option<Id>,
+        explode: Id,
+        fraction: f64,
+        orient: Orient,
+        trails: bool,
+    },
+}
+
+/// Whether `s` is a section's or detail's letter: one or two capitals,
+/// none of I, O and Q (ASME Y14.3 and ISO 128-3 leave them out, being
+/// read as 1 and 0).
+pub fn letter_ok(s: &str) -> bool {
+    (1..=2).contains(&s.len())
+        && s.chars()
+            .all(|c| c.is_ascii_uppercase() && !matches!(c, 'I' | 'O' | 'Q'))
+}
+
+/// The first letter none of `used` is: A to Z less I, O, Q and (as
+/// ASME Y14.3 advises) S, X and Z, then AA, AB and on.
+pub fn next_letter<'a>(used: impl IntoIterator<Item = &'a str>) -> String {
+    let used: Vec<&str> = used.into_iter().collect();
+    let singles: Vec<char> = ('A'..='Z')
+        .filter(|c| !matches!(c, 'I' | 'O' | 'Q' | 'S' | 'X' | 'Z'))
+        .collect();
+    let candidates = singles.iter().map(|c| c.to_string()).chain(
+        singles
+            .iter()
+            .flat_map(|a| singles.iter().map(move |b| format!("{a}{b}"))),
+    );
+    for c in candidates {
+        if !used.contains(&c.as_str()) {
+            return c;
+        }
+    }
+    "ZZ".to_owned()
 }
 
 /// One view.
@@ -438,8 +540,19 @@ impl View {
     /// The view it derives from, if any.
     pub fn parent(&self) -> Option<Key> {
         match &self.kind {
-            ViewKind::Base { .. } => None,
-            ViewKind::Projected { from, .. } | ViewKind::Auxiliary { from, .. } => Some(*from),
+            ViewKind::Base { .. } | ViewKind::Flat { .. } | ViewKind::Exploded { .. } => None,
+            ViewKind::Projected { from, .. }
+            | ViewKind::Auxiliary { from, .. }
+            | ViewKind::Section { from, .. }
+            | ViewKind::Detail { from, .. } => Some(*from),
+        }
+    }
+
+    /// A section's or detail's letter: its label.
+    pub fn letter(&self) -> Option<&str> {
+        match self.kind {
+            ViewKind::Section { .. } | ViewKind::Detail { .. } => self.label.as_deref(),
+            _ => None,
         }
     }
 
@@ -448,6 +561,10 @@ impl View {
             ViewKind::Base { .. } => "base",
             ViewKind::Projected { .. } => "projected",
             ViewKind::Auxiliary { .. } => "auxiliary",
+            ViewKind::Section { .. } => "section",
+            ViewKind::Detail { .. } => "detail",
+            ViewKind::Flat { .. } => "flat",
+            ViewKind::Exploded { .. } => "exploded",
         }
     }
 }
@@ -505,6 +622,102 @@ fn position(v: &Value, at: &str) -> Result<[Quantity; 2]> {
     ])
 }
 
+/// A model point: three lengths (bare numbers millimetres) or a
+/// geometric reference.
+fn model_point(v: &Value, at: &str) -> Result<ModelPoint> {
+    match v {
+        Value::Array(a) if a.len() == 3 => Ok(ModelPoint::At([
+            length(&a[0], &format!("{at}/0"))?,
+            length(&a[1], &format!("{at}/1"))?,
+            length(&a[2], &format!("{at}/2"))?,
+        ])),
+        Value::Array(_) => Err(invalid(at, "a point in the model is three lengths")),
+        _ => Ok(ModelPoint::Ref(GeomRef::from_json(v, at)?)),
+    }
+}
+
+impl ModelPoint {
+    fn to_json(&self) -> Value {
+        match self {
+            ModelPoint::Ref(g) => g.to_json(),
+            ModelPoint::At(q) => json!([q[0].text(), q[1].text(), q[2].text()]),
+        }
+    }
+}
+
+impl Cut {
+    fn to_json(&self) -> Value {
+        match self {
+            Cut::Plane { plane, offset } => {
+                let mut v = json!({"plane": plane.to_json()});
+                if let Some(o) = offset {
+                    v["offset"] = json!(o.text());
+                }
+                v
+            }
+            Cut::At { origin, normal } => json!({
+                "origin": [origin[0].text(), origin[1].text(), origin[2].text()],
+                "normal": normal,
+            }),
+            Cut::Through(points) => {
+                json!({"through": points.iter().map(ModelPoint::to_json).collect::<Vec<_>>()})
+            }
+        }
+    }
+
+    fn from_json(v: &Value, at: &str) -> Result<Cut> {
+        let mut o = Obj::new(v, at)?;
+        let p = |k: &str| format!("{at}/{k}");
+        let cut = if let Some(plane) = o.take_opt("plane") {
+            let plane = GeomRef::from_json(&plane, &p("plane"))?;
+            let offset = match o.take_opt("offset") {
+                None => None,
+                Some(x) => Some(length(&x, &p("offset"))?),
+            };
+            Cut::Plane { plane, offset }
+        } else if let Some(through) = o.take_opt("through") {
+            let a = through
+                .as_array()
+                .filter(|a| (2..=32).contains(&a.len()))
+                .ok_or_else(|| {
+                    invalid(
+                        &p("through"),
+                        "an offset section runs through 2 to 32 points",
+                    )
+                })?;
+            Cut::Through(
+                a.iter()
+                    .enumerate()
+                    .map(|(i, x)| model_point(x, &format!("{at}/through/{i}")))
+                    .collect::<Result<_>>()?,
+            )
+        } else {
+            let origin = o.take("origin")?;
+            let origin = match model_point(&origin, &p("origin"))? {
+                ModelPoint::At(q) => q,
+                ModelPoint::Ref(_) => {
+                    return Err(invalid(&p("origin"), "a cut's origin is three lengths"));
+                }
+            };
+            let n = o.take("normal")?;
+            let normal: [f64; 3] = n
+                .as_array()
+                .filter(|a| a.len() == 3)
+                .and_then(|a| {
+                    let f: Vec<f64> = a.iter().filter_map(Value::as_f64).collect();
+                    (f.len() == 3).then(|| [f[0], f[1], f[2]])
+                })
+                .filter(|n| n.iter().all(|x| x.is_finite()) && n.iter().any(|x| *x != 0.0))
+                .ok_or_else(|| {
+                    invalid(&p("normal"), "a cut's normal is three numbers, not all 0")
+                })?;
+            Cut::At { origin, normal }
+        };
+        o.finish()?;
+        Ok(cut)
+    }
+}
+
 fn key_of(v: &Value, at: &str, kind: char, what: &str) -> Result<Key> {
     v.as_str()
         .and_then(|s| Key::parse(s, kind))
@@ -518,6 +731,32 @@ fn scale_of(v: &Value, at: &str) -> Result<Scale> {
             "a scale is two whole numbers from 1 to 1000, such as \"1:2\"",
         )
     })
+}
+
+fn orient_json(o: &Orient) -> Value {
+    match o {
+        Orient::Named(n) => json!(n),
+        Orient::NormalTo(r) => json!({"normal_to": r.to_json()}),
+    }
+}
+
+fn orient_of(v: Value, at: &str) -> Result<Orient> {
+    match v {
+        Value::String(s) if !s.is_empty() => Ok(Orient::Named(s)),
+        Value::Object(m) if m.len() == 1 && m.contains_key("normal_to") => Ok(Orient::NormalTo(
+            Reference::from_json(&m["normal_to"], &format!("{at}/normal_to"))?,
+        )),
+        _ => Err(invalid(
+            at,
+            "a view's orient is a standard or named view, or {\"normal_to\": a face}",
+        )),
+    }
+}
+
+fn id_of(v: &Value, at: &str, what: &str) -> Result<Id> {
+    v.as_str()
+        .and_then(|s| Id::parse(s, what).ok())
+        .ok_or_else(|| invalid(at, &format!("a {what}'s ID")))
 }
 
 impl Sheet {
@@ -605,10 +844,7 @@ impl View {
                 if let Some(l) = label {
                     v["rev"] = json!({"label": l});
                 }
-                v["orient"] = match orient {
-                    Orient::Named(n) => json!(n),
-                    Orient::NormalTo(r) => json!({"normal_to": r.to_json()}),
-                };
+                v["orient"] = orient_json(orient);
             }
             ViewKind::Projected { from, side, offset } => {
                 v["from"] = json!(from.to_string());
@@ -626,6 +862,64 @@ impl View {
                 v["normal_to"] = normal_to.to_json();
                 if let Some(o) = offset {
                     v["offset"] = json!(o.text());
+                }
+            }
+            ViewKind::Section {
+                from,
+                cut,
+                flip,
+                unsectioned,
+                offset,
+            } => {
+                v["from"] = json!(from.to_string());
+                v["cut"] = cut.to_json();
+                if *flip {
+                    v["flip"] = json!(true);
+                }
+                if !unsectioned.is_empty() {
+                    v["unsectioned"] = json!(unsectioned);
+                }
+                if let Some(o) = offset {
+                    v["offset"] = json!(o.text());
+                }
+            }
+            ViewKind::Detail {
+                from,
+                centre,
+                radius,
+            } => {
+                v["from"] = json!(from.to_string());
+                v["centre"] = centre.to_json();
+                v["radius"] = json!(radius.text());
+            }
+            ViewKind::Flat { of, solid, notes } => {
+                if let Some(of) = of {
+                    v["of"] = json!(of);
+                }
+                if let Some(s) = solid {
+                    v["solid"] = json!(s);
+                }
+                if !notes {
+                    v["notes"] = json!(false);
+                }
+            }
+            ViewKind::Exploded {
+                of,
+                explode,
+                fraction,
+                orient,
+                trails,
+            } => {
+                if let Some(of) = of {
+                    v["of"] = json!(of);
+                }
+                v["explode"] = json!(explode);
+                if *fraction != 1.0 {
+                    v["fraction"] = json!(fraction);
+                }
+                v["orient"] = orient_json(orient);
+                if *trails {
+                    v["trails"] = json!(true);
                 }
             }
         }
@@ -705,21 +999,7 @@ impl View {
                         )
                     }
                 };
-                let orient = match o.take("orient")? {
-                    Value::String(s) if !s.is_empty() => Orient::Named(s),
-                    Value::Object(m) if m.len() == 1 && m.contains_key("normal_to") => {
-                        Orient::NormalTo(Reference::from_json(
-                            &m["normal_to"],
-                            &p("orient/normal_to"),
-                        )?)
-                    }
-                    _ => {
-                        return Err(invalid(
-                            &p("orient"),
-                            "a view's orient is a standard or named view, or {\"normal_to\": a face}",
-                        ));
-                    }
-                };
+                let orient = orient_of(o.take("orient")?, &p("orient"))?;
                 ViewKind::Base { of, label, orient }
             }
             Some("projected") => {
@@ -770,13 +1050,133 @@ impl View {
                     offset,
                 }
             }
+            Some("section") => {
+                let from = key_of(&o.take("from")?, &p("from"), 'v', "a view's parent")?;
+                let cut = Cut::from_json(&o.take("cut")?, &p("cut"))?;
+                let flip = match o.take_opt("flip") {
+                    None => false,
+                    Some(f) => f
+                        .as_bool()
+                        .ok_or_else(|| invalid(&p("flip"), "flip is true or false"))?,
+                };
+                let unsectioned = match o.take_opt("unsectioned") {
+                    None => Vec::new(),
+                    Some(u) => {
+                        let a = u.as_array().ok_or_else(|| {
+                            invalid(&p("unsectioned"), "a list of instance paths")
+                        })?;
+                        let mut out: Vec<String> = Vec::new();
+                        for (i, x) in a.iter().enumerate() {
+                            let at = format!("{at}/unsectioned/{i}");
+                            let path = x
+                                .as_str()
+                                .filter(|t| {
+                                    t.split('/')
+                                        .all(|step| super::id::parse_step(step, "").is_ok())
+                                })
+                                .ok_or_else(|| invalid(&at, "an instance path such as p1/left"))?;
+                            if out.iter().any(|o| o == path) {
+                                return Err(invalid(&at, "an instance path listed twice"));
+                            }
+                            out.push(path.to_owned());
+                        }
+                        out
+                    }
+                };
+                let offset = match o.take_opt("offset") {
+                    None => None,
+                    Some(x) => Some(length(&x, &p("offset"))?),
+                };
+                if offset.is_some() && pos.is_some() {
+                    return Err(invalid(
+                        &p("offset"),
+                        "a section is placed by its offset or its at, not both",
+                    ));
+                }
+                ViewKind::Section {
+                    from,
+                    cut,
+                    flip,
+                    unsectioned,
+                    offset,
+                }
+            }
+            Some("detail") => {
+                let from = key_of(&o.take("from")?, &p("from"), 'v', "a view's parent")?;
+                let centre = model_point(&o.take("centre")?, &p("centre"))?;
+                let radius = length(&o.take("radius")?, &p("radius"))?;
+                if radius.meters().is_nan() || radius.meters() <= 0.0 {
+                    return Err(invalid(&p("radius"), "a detail's radius is more than 0"));
+                }
+                ViewKind::Detail {
+                    from,
+                    centre,
+                    radius,
+                }
+            }
+            Some("flat") => {
+                let of = match o.take_opt("of") {
+                    None => None,
+                    Some(x) => Some(id_of(&x, &p("of"), "part")?),
+                };
+                let solid = match o.take_opt("solid") {
+                    None => None,
+                    Some(x) => Some(id_of(&x, &p("solid"), "solid")?),
+                };
+                let notes = match o.take_opt("notes") {
+                    None => true,
+                    Some(n) => n
+                        .as_bool()
+                        .ok_or_else(|| invalid(&p("notes"), "notes is true or false"))?,
+                };
+                ViewKind::Flat { of, solid, notes }
+            }
+            Some("exploded") => {
+                let of = match o.take_opt("of") {
+                    None => None,
+                    Some(x) => Some(id_of(&x, &p("of"), "part")?),
+                };
+                let explode = id_of(&o.take("explode")?, &p("explode"), "explode")?;
+                let fraction = match o.take_opt("fraction") {
+                    None => 1.0,
+                    Some(f) => f
+                        .as_f64()
+                        .filter(|f| (0.0..=1.0).contains(f))
+                        .ok_or_else(|| invalid(&p("fraction"), "a fraction from 0 to 1"))?,
+                };
+                let orient = orient_of(o.take("orient")?, &p("orient"))?;
+                let trails = match o.take_opt("trails") {
+                    None => false,
+                    Some(t) => t
+                        .as_bool()
+                        .ok_or_else(|| invalid(&p("trails"), "trails is true or false"))?,
+                };
+                ViewKind::Exploded {
+                    of,
+                    explode,
+                    fraction,
+                    orient,
+                    trails,
+                }
+            }
             _ => {
                 return Err(invalid(
                     &p("type"),
-                    "expected one of base, projected, auxiliary",
+                    "expected one of base, projected, auxiliary, section, detail, flat, exploded",
                 ));
             }
         };
+        if matches!(kind, ViewKind::Section { .. } | ViewKind::Detail { .. }) {
+            match &label {
+                Some(l) if letter_ok(l) => {}
+                _ => {
+                    return Err(invalid(
+                        &p("label"),
+                        "a section's or detail's label is its letter: one or two capitals, not I, O or Q",
+                    ));
+                }
+            }
+        }
         o.finish()?;
         Ok(View {
             sheet,
@@ -933,6 +1333,17 @@ impl DrawingFile {
     /// What a drawing's members must say of each other: each view's sheet
     /// and parent exist, and no view derives from itself.
     pub fn check(&self) -> Result<()> {
+        let mut letters: BTreeMap<&str, Key> = BTreeMap::new();
+        for (k, w) in &self.views {
+            if let Some(l) = w.letter()
+                && let Some(first) = letters.insert(l, *k)
+            {
+                return Err(invalid(
+                    &format!("/views/{k}/label"),
+                    &format!("view {k} takes letter {l}, which view {first} has"),
+                ));
+            }
+        }
         for (k, w) in &self.views {
             if !self.sheets.contains_key(&w.sheet) {
                 return Err(invalid(
@@ -993,6 +1404,35 @@ impl DrawingFile {
                 } => out.push((format!("/views/{k}/orient/normal_to"), r)),
                 ViewKind::Auxiliary { normal_to, .. } => {
                     out.push((format!("/views/{k}/normal_to"), normal_to));
+                }
+                ViewKind::Exploded {
+                    orient: Orient::NormalTo(r),
+                    ..
+                } => out.push((format!("/views/{k}/orient/normal_to"), r)),
+                ViewKind::Section { cut, .. } => match cut {
+                    Cut::Plane { plane, .. } => {
+                        if let Some(r) = plane.reference() {
+                            out.push((format!("/views/{k}/cut/plane"), r));
+                        }
+                    }
+                    Cut::Through(points) => {
+                        for (i, pt) in points.iter().enumerate() {
+                            if let ModelPoint::Ref(g) = pt
+                                && let Some(r) = g.reference()
+                            {
+                                out.push((format!("/views/{k}/cut/through/{i}"), r));
+                            }
+                        }
+                    }
+                    Cut::At { .. } => {}
+                },
+                ViewKind::Detail {
+                    centre: ModelPoint::Ref(g),
+                    ..
+                } => {
+                    if let Some(r) = g.reference() {
+                        out.push((format!("/views/{k}/centre"), r));
+                    }
                 }
                 _ => {}
             }
@@ -1132,6 +1572,130 @@ mod tests {
             DrawingFile::from_json(&v).unwrap_err().code,
             Code::FormatTooNew
         );
+    }
+
+    fn more() -> Value {
+        let mut v = bracket();
+        let views = v["views"].as_object_mut().unwrap();
+        views.insert(
+            "v5".into(),
+            json!({"type": "section", "sheet": "s1", "from": "v1",
+            "cut": {"plane": "zx", "offset": "5 mm"}, "label": "A", "offset": "90 mm"}),
+        );
+        views.insert("v6".into(), json!({"type": "section", "sheet": "s1", "from": "v1",
+            "cut": {"through": [["0 mm", 0, 0], {"feature": "base", "name": "0123456789abcdef0123456789abcdef"}, "origin"]},
+            "flip": true, "unsectioned": ["p1/left", "ring:2/pin"], "label": "B", "at": [300, 100]}));
+        views.insert(
+            "v7".into(),
+            json!({"type": "detail", "sheet": "s1", "from": "v5",
+            "centre": ["10 mm", 0, "5 mm"], "radius": "8 mm", "scale": "4:1", "label": "C"}),
+        );
+        views.insert(
+            "v8".into(),
+            json!({"type": "flat", "sheet": "s1", "of": "tray", "notes": false}),
+        );
+        views.insert(
+            "v9".into(),
+            json!({"type": "exploded", "sheet": "s1", "of": "rig",
+            "explode": "apart", "fraction": 0.5, "orient": "iso", "trails": true}),
+        );
+        v
+    }
+
+    #[test]
+    fn sections_details_flats_and_explodes_read_and_write_themselves() {
+        let d = DrawingFile::from_json(&more()).unwrap();
+        assert_eq!(DrawingFile::from_json(&d.to_json()).unwrap(), d);
+        let k = |s: &str| Key::parse(s, 'v').unwrap();
+        assert_eq!(d.views[&k("v7")].parent(), Some(k("v5")));
+        assert_eq!(d.views[&k("v6")].letter(), Some("B"));
+        assert_eq!(d.views[&k("v8")].type_name(), "flat");
+        // The base view's face, the auxiliary's, v4's and v6's through point.
+        assert_eq!(d.references().len(), 3);
+        let ViewKind::Section {
+            cut: Cut::Through(p),
+            flip: true,
+            unsectioned,
+            ..
+        } = &d.views[&k("v6")].kind
+        else {
+            panic!()
+        };
+        assert_eq!((p.len(), unsectioned.len()), (3, 2));
+        let ViewKind::Exploded { fraction, .. } = d.views[&k("v9")].kind else {
+            panic!()
+        };
+        assert_eq!(fraction, 0.5);
+        // Defaults are written as nothing.
+        let mut v = more();
+        v["views"]["v8"].as_object_mut().unwrap().remove("notes");
+        let f = DrawingFile::from_json(&v).unwrap().to_json();
+        assert!(f["views"]["v8"].get("notes").is_none());
+    }
+
+    #[test]
+    fn letters_cuts_and_details_are_refused_at_their_pointers() {
+        let at = |f: &dyn Fn(&mut Value)| {
+            let mut v = more();
+            f(&mut v);
+            let e = DrawingFile::from_json(&v).unwrap_err();
+            e.details
+                .get("pointer")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert_eq!(
+            at(&|v| v["views"]["v5"]["label"] = json!("I")),
+            "/views/v5/label"
+        );
+        assert_eq!(
+            at(&|v| {
+                v["views"]["v5"].as_object_mut().unwrap().remove("label");
+            }),
+            "/views/v5/label"
+        );
+        assert_eq!(
+            at(&|v| v["views"]["v6"]["label"] = json!("A")),
+            "/views/v6/label"
+        );
+        assert_eq!(
+            at(&|v| v["views"]["v5"]["at"] = json!([1, 2])),
+            "/views/v5/offset"
+        );
+        assert_eq!(
+            at(&|v| v["views"]["v5"]["cut"] = json!({"origin": [0, 0, 0], "normal": [0, 0, 0]})),
+            "/views/v5/cut/normal"
+        );
+        assert_eq!(
+            at(&|v| v["views"]["v6"]["cut"] = json!({"through": ["origin"]})),
+            "/views/v5/cut/through".replace("v5", "v6")
+        );
+        assert_eq!(
+            at(&|v| v["views"]["v6"]["unsectioned"] = json!(["p1", "p1"])),
+            "/views/v6/unsectioned/1"
+        );
+        assert_eq!(
+            at(&|v| v["views"]["v7"]["radius"] = json!("0 mm")),
+            "/views/v7/radius"
+        );
+        assert_eq!(
+            at(&|v| v["views"]["v9"]["fraction"] = json!(2)),
+            "/views/v9/fraction"
+        );
+        assert_eq!(
+            at(&|v| v["views"]["v7"]["from"] = json!("v7")),
+            "/views/v7/from"
+        );
+        assert!(letter_ok("AB") && !letter_ok("Ab") && !letter_ok("ABC") && !letter_ok("Q"));
+        assert_eq!(
+            next_letter([
+                "A", "B", "C", "D", "E", "F", "G", "H", "J", "K", "L", "M", "N", "P", "R", "T",
+                "U", "V", "W", "Y"
+            ]),
+            "AA"
+        );
+        assert_eq!(next_letter(["A", "C"]), "B");
     }
 
     #[test]

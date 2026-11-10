@@ -10,7 +10,7 @@
 //! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft, `0xf2` a mirror or split, `0xf1` an annotation, `0xf0` a base
 //! flange or flange, `0xef` a planar face or a surface extrude, `0xee` an
 //! unfold or refold, `0xed` a face tweak, `0xec` a thicken or a fill (by the
-//! parity of the edit bytes), `0xea` a split by a tool. Merging must never panic, must give the same bytes twice,
+//! parity of the edit bytes), `0xeb` a draft, `0xea` a split by a tool. Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -298,20 +298,30 @@ fn edit_mate(v: &mut Value, op: u8, arg: u8) {
 }
 
 /// Applies edit `(op, arg)` to an import feature: the file re-imported
-/// (a new hash), another body, another product or none, its ordinal, or
-/// its mode (a reference at format 13, else a solid with no field).
+/// (a new hash), another body, another product or none, its ordinal, its
+/// mode (a reference, else a solid with no field), or its place (a
+/// flattened body `arg` millimetres along x by usage `u<arg>`, or none);
+/// the format follows, 17 with a place, 13 for a reference, else 5.
 fn edit_import(v: &mut Value, op: u8, arg: u8) {
-    if op % 5 == 4 {
-        if arg & 1 == 1 {
-            v["mode"] = json!("reference");
-            v["format"] = json!(13);
-        } else {
-            v.as_object_mut().unwrap().remove("mode");
-            v["format"] = json!(5);
+    match op % 6 {
+        4 => {
+            if arg & 1 == 1 {
+                v["mode"] = json!("reference");
+            } else {
+                v.as_object_mut().unwrap().remove("mode");
+            }
         }
-        return;
-    }
-    match op % 4 {
+        5 => {
+            if arg & 1 == 1 {
+                v["place"] = json!({
+                    "pose": {"origin_m": [f64::from(arg) / 1000.0, 0, 0],
+                             "x": [1, 0, 0], "z": [0, 0, 1]},
+                    "via": [{"product": {"id": "S-0", "name": "Sub"}, "usage": format!("u{arg}")}],
+                });
+            } else {
+                v.as_object_mut().unwrap().remove("place");
+            }
+        }
         0 => v["file"]["blake3"] = json!(format!("{arg:064x}")),
         1 => v["body"] = json!(arg % 4),
         2 => match arg % 3 {
@@ -331,6 +341,13 @@ fn edit_import(v: &mut Value, op: u8, arg: u8) {
             }
         }
     }
+    v["format"] = json!(if v.get("place").is_some() {
+        17
+    } else if v.get("mode").is_some() {
+        13
+    } else {
+        5
+    });
 }
 
 /// Applies edit `(op, arg)` to an instance an import made: its pose (as
@@ -721,6 +738,79 @@ fn edit_path(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// Edits a draft: its angle, its faces, a face flipped or not, its
+/// tangency, its pull reversed, or a new hinge (a neutral plane, or a
+/// parting line with its pull).
+fn edit_draft(v: &mut Value, op: u8, arg: u8) {
+    let face = |a: u8| json!({"feature": "b", "name": format!("{:032x}", a % 5)});
+    let o = v.as_object_mut().unwrap();
+    match op % 6 {
+        0 => {
+            o.insert("angle".into(), json!(format!("{} deg", 1 + arg % 6)));
+        }
+        1 => {
+            let mut faces: Vec<Value> = o
+                .get("faces")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let f = face(arg);
+            match faces.iter().position(|x| *x == f) {
+                Some(i) if faces.len() > 1 => {
+                    faces.remove(i);
+                }
+                Some(_) => {}
+                None => faces.push(f),
+            }
+            o.insert("faces".into(), json!(faces));
+            // A flipped face no longer drafted goes from flip too.
+            if let Some(Value::Array(fl)) = o.get_mut("flip") {
+                fl.retain(|x| faces.contains(x));
+            }
+        }
+        2 => {
+            let first = o.get("faces").and_then(|f| f.get(0)).cloned();
+            match (arg % 2, first) {
+                (0, Some(f)) => {
+                    o.insert("flip".into(), json!([f]));
+                }
+                _ => {
+                    o.remove("flip");
+                }
+            }
+        }
+        3 if arg % 2 == 0 => {
+            o.insert("tangent".into(), json!(false));
+        }
+        3 => {
+            o.remove("tangent");
+        }
+        4 if arg % 2 == 0 => {
+            o.insert("reverse".into(), json!(true));
+        }
+        4 => {
+            o.remove("reverse");
+        }
+        _ => {
+            for k in ["neutral", "parting", "pull"] {
+                o.remove(k);
+            }
+            if arg % 2 == 0 {
+                o.insert(
+                    "neutral".into(),
+                    json!(["xy", "yz", "zx"][(arg / 2 % 3) as usize]),
+                );
+            } else {
+                o.insert("parting".into(), json!([face(arg.wrapping_add(2))]));
+                o.insert(
+                    "pull".into(),
+                    json!(["x", "y", "z"][(arg / 2 % 3) as usize]),
+                );
+            }
+        }
+    }
+}
+
 /// Edits a move_face: its distance or angle, its faces, its tangency, or a
 /// new `by` with the fields it takes.
 fn edit_tweak(v: &mut Value, op: u8, arg: u8) {
@@ -728,13 +818,20 @@ fn edit_tweak(v: &mut Value, op: u8, arg: u8) {
     let o = v.as_object_mut().unwrap();
     match op % 5 {
         0 => {
-            let k = if o.get("by").and_then(Value::as_str) == Some("rotate") { "angle" } else { "distance" };
+            let k = if o.get("by").and_then(Value::as_str) == Some("rotate") {
+                "angle"
+            } else {
+                "distance"
+            };
             let unit = if k == "angle" { "deg" } else { "mm" };
             o.insert(k.into(), json!(format!("{} {unit}", 1 + arg % 6)));
         }
         1 => {
-            let mut faces: Vec<Value> =
-                o.get("faces").and_then(Value::as_array).cloned().unwrap_or_default();
+            let mut faces: Vec<Value> = o
+                .get("faces")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             let f = face(arg);
             match faces.iter().position(|x| *x == f) {
                 Some(i) if faces.len() > 1 => {
@@ -758,7 +855,10 @@ fn edit_tweak(v: &mut Value, op: u8, arg: u8) {
             match arg % 3 {
                 0 => {
                     o.insert("by".into(), json!("translate"));
-                    o.insert("direction".into(), json!(["x", "y", "z"][(arg / 3 % 3) as usize]));
+                    o.insert(
+                        "direction".into(),
+                        json!(["x", "y", "z"][(arg / 3 % 3) as usize]),
+                    );
                     o.insert("distance".into(), json!("2 mm"));
                 }
                 1 => {
@@ -774,8 +874,11 @@ fn edit_tweak(v: &mut Value, op: u8, arg: u8) {
         }
         _ => {
             if o.get("by").and_then(Value::as_str) == Some("offset") {
-                o.insert("groups".into(), json!([{"distance": format!("{} mm", 1 + arg % 3),
-                                                  "faces": [face(arg.wrapping_add(1))]}]));
+                o.insert(
+                    "groups".into(),
+                    json!([{"distance": format!("{} mm", 1 + arg % 3),
+                                                  "faces": [face(arg.wrapping_add(1))]}]),
+                );
             }
         }
     }
@@ -992,7 +1095,8 @@ fn edit_surface_feature(v: &mut Value, op: u8, arg: u8) {
             0 => {
                 if let Some(Value::Array(sides)) = o.get_mut("sides") {
                     let i = arg as usize % sides.len();
-                    sides[i] = json!({"curve": {"feature": "s", "entity": format!("l{}", 4 + arg % 3)}});
+                    sides[i] =
+                        json!({"curve": {"feature": "s", "entity": format!("l{}", 4 + arg % 3)}});
                 }
             }
             1 => {
@@ -1153,10 +1257,12 @@ fuzz_target!(|data: &[u8]| {
     // (21), `0xf2` a mirror or split (22), `0xf1` an annotation (23),
     // `0xf0` a base flange or flange (24), `0xef` a planar face or a
     // surface extrude (25), `0xee` an unfold or refold (26), `0xed` a face
-    // tweak (27), `0xec` a thicken or a fill (28), `0xea` a split by a
-    // tool (30); every other byte picks as it did before them.
+    // tweak (27), `0xec` a thicken or a fill (28), `0xeb` a draft (29),
+    // `0xea` a split by a tool (30); every other byte picks as it did
+    // before them.
     let kind = match mode {
         0xea => 30,
+        0xeb => 29,
         0xec => 28,
         0xed => 27,
         0xee => 26,
@@ -1244,6 +1350,9 @@ fuzz_target!(|data: &[u8]| {
             }
             27 => json!({"format": 16, "kind": "ryucad.feature", "type": "move_face",
                          "target": "b", "by": "translate", "direction": "z", "distance": "5 mm",
+                         "faces": [{"feature": "b", "name": format!("{:032x}", 1)}]}),
+            29 => json!({"format": 18, "kind": "ryucad.feature", "type": "draft",
+                         "target": "b", "angle": "2 deg", "neutral": "xy",
                          "faces": [{"feature": "b", "name": format!("{:032x}", 1)}]}),
             30 => json!({"format": 19, "kind": "ryucad.feature", "type": "split",
                          "target": "h", "tool": {"body": "t"}}),
@@ -1335,6 +1444,7 @@ fuzz_target!(|data: &[u8]| {
             26 => edit_unfold(v, op, arg),
             27 => edit_tweak(v, op, arg),
             28 => edit_surface_feature(v, op, arg),
+            29 => edit_draft(v, op, arg),
             30 => edit_split_tool(v, op, arg),
             _ => edit_record(v, op, arg),
         };
@@ -1500,6 +1610,31 @@ fuzz_target!(|data: &[u8]| {
                 );
             }
         }
+        // A draft's hinge is one value: its fields conflict together or
+        // not at all, and its lists are never conflicted inside.
+        if kind == 29 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            let rec = record(&v);
+            let keys: Vec<&String> = rec.keys().collect();
+            let hinge = ["/neutral", "/parting", "/pull", "/reverse"];
+            let held = hinge
+                .iter()
+                .filter(|k| keys.iter().any(|x| x == *k))
+                .count();
+            assert!(
+                held == 0 || held == 4,
+                "a draft's hinge conflicted in part: {v}"
+            );
+            for k in keys {
+                assert!(
+                    !k.starts_with("/faces/")
+                        && !k.starts_with("/groups/")
+                        && !k.starts_with("/flip/"),
+                    "conflicted inside a draft's list at {k}: {v}"
+                );
+            }
+        }
         // A split's plane, tool and flip are one value together, never
         // conflicting inside the tool, and a clean merge reads.
         if kind == 30 {
@@ -1558,6 +1693,15 @@ fuzz_target!(|data: &[u8]| {
             assert!(
                 record(&v).keys().all(|k| k == "/steps"),
                 "an explode conflicted inside its steps: {v}"
+            );
+        }
+        // A place is one value: never a conflict inside it.
+        if kind == 9 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            assert!(
+                record(&v).keys().all(|k| !k.starts_with("/place/")),
+                "a place conflicted inside itself: {v}"
             );
         }
         // Two re-imports of different bytes conflict on the hash.
