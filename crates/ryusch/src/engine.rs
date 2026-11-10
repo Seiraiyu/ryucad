@@ -670,7 +670,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
     }
     pin_papers(&mut st, r);
     let rows = bank_rows(&st, &idioms);
-    let mut out = draw(st, prev, &styles, &bypass, &rows);
+    let mut out = draw(st, prev, &styles, &bypass, &rows, &r.text);
     out.layout.instructions = block.instructions.clone();
     out.idioms = idioms;
     out.flow = r.flow.iter().map(|p| block.parts[*p].key.clone()).collect();
@@ -2558,6 +2558,7 @@ fn draw(
     asked: &BTreeMap<usize, NetStyle>,
     bypass: &[Bypass],
     bank_rows: &[BankRow],
+    asks: &BTreeMap<usize, Vec<(crate::layout::TextField, Side)>>,
 ) -> Outcome {
     let block = st.block;
     let mut layout = Layout::default();
@@ -2718,6 +2719,9 @@ fn draw(
         // Text the previous layout put beside a part that hasn't moved
         // stays, and nothing new may take its place.
         let mut kept_text: BTreeMap<usize, Point> = BTreeMap::new();
+        // A part's text an instruction places, kept field by field where
+        // every ask still holds in the previous layout.
+        let mut kept_fields: BTreeMap<usize, BTreeMap<String, Point>> = BTreeMap::new();
         for &p in &parts {
             let part = &block.parts[p];
             let texts = text_lines(part);
@@ -2728,6 +2732,40 @@ fn draw(
                 let (s0, pl, _) = st.place[p].expect("placed");
                 st.sheets[s0].0 == x.sheet && pl == Place::new(x.at, x.rotation, x.mirror)
             });
+            if let Some(list) = asks.get(&p) {
+                let Some(prev) = prev.filter(|_| unmoved) else {
+                    continue;
+                };
+                let holds = list.iter().all(|(f, side)| {
+                    instr::text_sides(block, prev, p, *f)
+                        .iter()
+                        .all(|(_, at)| *at == Some(*side))
+                });
+                let Some(was) = prev.text.get(&part.key) else {
+                    continue;
+                };
+                let fields: Option<BTreeMap<String, Point>> = texts
+                    .iter()
+                    .map(|(n, _)| was.get(*n).map(|at| ((*n).to_owned(), *at)))
+                    .collect();
+                let Some(fields) = fields.filter(|_| holds) else {
+                    continue;
+                };
+                let clear = texts.iter().all(|(n, t)| {
+                    text::boxes(&[t], fields[*n])
+                        .iter()
+                        .all(|b| field.clear(*b))
+                });
+                if clear {
+                    for (n, t) in &texts {
+                        for b in text::boxes(&[t], fields[*n]) {
+                            field.block(b);
+                        }
+                    }
+                    kept_fields.insert(p, fields);
+                }
+                continue;
+            }
             let at = prev
                 .and_then(|l| l.text.get(&part.key))
                 .and_then(|f| f.get(*first))
@@ -3064,6 +3102,73 @@ fn draw(
             }
             let texts: Vec<&str> = lines.iter().map(|(_, t)| *t).collect();
             let body = st.shape(p).expect("placed").body;
+            // Text an instruction places: each asked group on its side,
+            // then the rest as one block where phase 1 puts it.
+            if let Some(list) = asks.get(&p) {
+                let fields = match kept_fields.get(&p) {
+                    Some(f) => f.clone(),
+                    None => {
+                        let mut fields: BTreeMap<String, Point> = BTreeMap::new();
+                        fn place(
+                            field: &mut Field,
+                            fields: &mut BTreeMap<String, Point>,
+                            group: Vec<(&str, &str)>,
+                            at: Option<Point>,
+                            fallback: Point,
+                        ) {
+                            let at = at.unwrap_or(fallback);
+                            let ts: Vec<&str> = group.iter().map(|(_, t)| *t).collect();
+                            for b in text::boxes(&ts, at) {
+                                field.block(b);
+                            }
+                            for (i, (n, _)) in group.iter().enumerate() {
+                                fields
+                                    .insert((*n).to_owned(), [at[0], at[1] - text::LINE * i as Nm]);
+                            }
+                        }
+                        let mut done: BTreeSet<&str> = BTreeSet::new();
+                        for (f, side) in list {
+                            let group: Vec<(&str, &str)> = lines
+                                .iter()
+                                .copied()
+                                .filter(|(n, _)| f.covers(n) && !done.contains(n))
+                                .collect();
+                            if group.is_empty() {
+                                continue;
+                            }
+                            done.extend(group.iter().map(|(n, _)| *n));
+                            let ts: Vec<&str> = group.iter().map(|(_, t)| *t).collect();
+                            let cands = text::candidates_on(body, &ts, *side);
+                            let at = cands
+                                .iter()
+                                .copied()
+                                .find(|c| text::boxes(&ts, *c).iter().all(|b| field.clear(*b)));
+                            let fallback = cands
+                                .first()
+                                .copied()
+                                .unwrap_or_else(|| text::candidates(body, &ts)[0]);
+                            place(&mut field, &mut fields, group, at, fallback);
+                        }
+                        let rest: Vec<(&str, &str)> = lines
+                            .iter()
+                            .copied()
+                            .filter(|(n, _)| !done.contains(n))
+                            .collect();
+                        if !rest.is_empty() {
+                            let ts: Vec<&str> = rest.iter().map(|(_, t)| *t).collect();
+                            let cands = text::candidates(body, &ts);
+                            let at = cands
+                                .iter()
+                                .copied()
+                                .find(|c| text::boxes(&ts, *c).iter().all(|b| field.clear(*b)));
+                            place(&mut field, &mut fields, rest, at, cands[0]);
+                        }
+                        fields
+                    }
+                };
+                layout.text.insert(part.key.clone(), fields);
+                continue;
+            }
             // A bank row's first member: one line on its row past its rail
             // end (rows two steps apart leave no room for two).
             if let Some(row) = bank_rows
@@ -3856,6 +3961,48 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    /// `text X refdes left` puts the designator left of X's body and leaves
+    /// its value where phase 1 puts it; `both below` moves the whole block;
+    /// laid out again the text stays.
+    #[test]
+    fn text_goes_on_the_side_asked() {
+        use crate::layout::TextField;
+        let block = seeded(7, 1);
+        let first = lay(&block);
+        let key = block
+            .parts
+            .iter()
+            .find(|p| p.key.starts_with('r') && !p.value.is_empty())
+            .expect("a resistor")
+            .key
+            .clone();
+        for (field, side) in [
+            (TextField::Refdes, Side::Left),
+            (TextField::Both, Side::Down),
+        ] {
+            let mut b = block.clone();
+            b.previous = Some(first.layout.clone());
+            b.instructions.insert(
+                "i1".into(),
+                Instruction::Text {
+                    parts: vec![key.clone()],
+                    field,
+                    side,
+                },
+            );
+            let out = lay(&b);
+            assert_eq!(crate::rules::check(&b, &out.layout), []);
+            let ins = &b.instructions["i1"];
+            assert!(
+                crate::instr::achieved(&b, &out.layout, ins),
+                "{field:?} {side:?}"
+            );
+            let mut again = b.clone();
+            again.previous = Some(out.layout.clone());
+            assert_eq!(lay(&again).layout, out.layout, "kept");
+        }
     }
 
     /// A one-symbol network pulling four of a dense part's rows stands beside

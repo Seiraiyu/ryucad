@@ -83,6 +83,37 @@ pub fn candidates(body: Rect, lines: &[&str]) -> Vec<Point> {
     out
 }
 
+/// Where a block of `lines` may start on one side of `body`, best first:
+/// `candidates`' places on that side (and further out), sliding along it.
+pub fn candidates_on(body: Rect, lines: &[&str], side: crate::geom::Side) -> Vec<Point> {
+    use crate::geom::Side;
+    let on = |at: &Point| {
+        boxes(lines, *at).iter().all(|b| match side {
+            Side::Left => b.max[0] <= body.min[0],
+            Side::Right => b.min[0] >= body.max[0],
+            Side::Up => b.min[1] >= body.max[1],
+            Side::Down => b.max[1] <= body.min[1],
+        })
+    };
+    let mut out: Vec<Point> = candidates(body, lines).into_iter().filter(on).collect();
+    // Along the side too: the block slid a step at a time either way.
+    let base = out.first().copied();
+    if let Some(b0) = base {
+        for k in 1..=12 {
+            let d = k * GRID;
+            for at in match side {
+                Side::Left | Side::Right => [[b0[0], b0[1] - d], [b0[0], b0[1] + d]],
+                Side::Up | Side::Down => [[b0[0] - d, b0[1]], [b0[0] + d, b0[1]]],
+            } {
+                if on(&at) && !out.contains(&at) {
+                    out.push(at);
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,5 +141,27 @@ mod tests {
         let rb = boxes(&["RM1A"], r)[0];
         let vb = boxes(&["2.2k"], v)[0];
         assert!(rb.max[0] < vb.min[0], "apart: {rb:?} {vb:?}");
+    }
+
+    /// Candidates on one side lie wholly on that side of the body.
+    #[test]
+    fn candidates_on_a_side_stay_on_it() {
+        let body = Rect::new([0, 0], [3 * GRID, 6 * GRID]);
+        let lines = ["R1", "10k"];
+        for side in crate::geom::Side::ALL {
+            let c = candidates_on(body, &lines, side);
+            assert!(!c.is_empty());
+            for at in c {
+                for b in boxes(&lines, at) {
+                    let ok = match side {
+                        crate::geom::Side::Left => b.max[0] <= body.min[0],
+                        crate::geom::Side::Right => b.min[0] >= body.max[0],
+                        crate::geom::Side::Up => b.min[1] >= body.max[1],
+                        crate::geom::Side::Down => b.max[1] <= body.min[1],
+                    };
+                    assert!(ok, "{side:?}: {b:?}");
+                }
+            }
+        }
     }
 }
