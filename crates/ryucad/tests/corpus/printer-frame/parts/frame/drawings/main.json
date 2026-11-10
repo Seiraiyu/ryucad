@@ -1,0 +1,78 @@
+{
+  "annotations": {
+    "b1": {
+      "at": [
+        "-153.051 mm",
+        "4.164 mm"
+      ],
+      "of": "z-fl",
+      "type": "balloon",
+      "view": "v1"
+    },
+    "b2": {
+      "at": [
+        "-72.697 mm",
+        "-138.829 mm"
+      ],
+      "of": "x-bottom-front",
+      "type": "balloon",
+      "view": "v1"
+    },
+    "b3": {
+      "at": [
+        "-75.013 mm",
+        "-58.416 mm"
+      ],
+      "of": "y-bottom-left",
+      "type": "balloon",
+      "view": "v1"
+    },
+    "b4": {
+      "at": [
+        "-143.069 mm",
+        "-85.805 mm"
+      ],
+      "of": "bracket-1",
+      "type": "balloon",
+      "view": "v1"
+    },
+    "b5": {
+      "at": [
+        "-128.528 mm",
+        "94.699 mm"
+      ],
+      "of": "bolt-1",
+      "type": "balloon",
+      "view": "v1"
+    },
+    "t1": {
+      "at": [
+        "546.1 mm",
+        "54.7 mm"
+      ],
+      "sheet": "s1",
+      "type": "bom_table"
+    }
+  },
+  "format": 1,
+  "kind": "ryucad.drawing",
+  "name": "Frame",
+  "sheets": {
+    "s1": {
+      "name": "Sheet 1",
+      "scale": "1:2",
+      "size": "ansi_c"
+    }
+  },
+  "views": {
+    "v1": {
+      "at": [
+        "159.757 mm",
+        "244.209 mm"
+      ],
+      "orient": "front_top_right",
+      "sheet": "s1",
+      "type": "base"
+    }
+  }
+}

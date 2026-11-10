@@ -1,0 +1,67 @@
+{
+  "annotations": {
+    "d1": {
+      "at": [
+        "19.889 mm",
+        "15.889 mm"
+      ],
+      "of": "body/a6eecf0ad216ccfcc1ffeb69f05d023b",
+      "type": "hole_callout",
+      "view": "v2"
+    },
+    "d2": {
+      "at": [
+        "15.889 mm",
+        "19.889 mm"
+      ],
+      "of": "body/57b3a21dcf75995d19e4af78216c1851",
+      "type": "hole_callout",
+      "view": "v3"
+    }
+  },
+  "format": 1,
+  "kind": "ryucad.drawing",
+  "name": "Corner bracket",
+  "sheets": {
+    "s1": {
+      "name": "Sheet 1",
+      "scale": "2:1",
+      "size": "ansi_b"
+    }
+  },
+  "views": {
+    "v1": {
+      "at": [
+        "42 mm",
+        "177.4 mm"
+      ],
+      "orient": "front",
+      "sheet": "s1",
+      "type": "base"
+    },
+    "v2": {
+      "from": "v1",
+      "offset": "62 mm",
+      "sheet": "s1",
+      "side": "top",
+      "type": "projected"
+    },
+    "v3": {
+      "from": "v1",
+      "offset": "62 mm",
+      "sheet": "s1",
+      "side": "right",
+      "type": "projected"
+    },
+    "v4": {
+      "at": [
+        "382.93 mm",
+        "225.557 mm"
+      ],
+      "from": "v1",
+      "sheet": "s1",
+      "side": "iso",
+      "type": "projected"
+    }
+  }
+}

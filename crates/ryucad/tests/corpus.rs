@@ -122,7 +122,57 @@ fn summary(root: &Path) -> Value {
     json!({
         "parts": parts,
         "check": {"errors": checked["errors"], "warnings": checked["warnings"], "codes": codes},
+        "drawings": drawings(&mut s),
     })
+}
+
+/// Each drawing of the project (design 417, plan 9.D), by `<part>/<id>`:
+/// its views with their pieces drawn, its annotations' texts, its
+/// findings by code, each sheet's score, and the BLAKE3 of its PDF as the
+/// daemon writes it: the bytes are the same on every platform.
+fn drawings(s: &mut Session) -> Value {
+    let out_dir = tempfile::tempdir().unwrap();
+    let listed = call(s, "drawing.list", json!({})).unwrap();
+    let mut out = Map::new();
+    for d in listed["drawings"].as_array().unwrap() {
+        let (part, id) = (d["part"].as_str().unwrap(), d["drawing"].as_str().unwrap());
+        let got = call(s, "drawing.get", json!({"part": part, "drawing": id})).unwrap();
+        let mut views = Map::new();
+        let mut notes = Map::new();
+        for sheet in got["sheets"].as_array().unwrap() {
+            for v in sheet["views"].as_array().unwrap() {
+                views.insert(
+                    v["view"].as_str().unwrap().into(),
+                    json!({"type": v["type"], "scale": v["scale"], "pieces": v["pieces"],
+                           "failed": v.get("error").map(|e| e["code"].clone())}),
+                );
+            }
+            for a in sheet["annotations"].as_array().unwrap() {
+                notes.insert(a["annotation"].as_str().unwrap().into(), a["text"].clone());
+            }
+        }
+        let mut codes = Map::new();
+        for f in got["findings"].as_array().unwrap() {
+            let code = f["code"].as_str().unwrap().to_owned();
+            let n = codes.get(&code).and_then(Value::as_u64).unwrap_or(0);
+            codes.insert(code, json!(n + 1));
+        }
+        let pdf = out_dir.path().join(format!("{part}-{id}.pdf"));
+        call(
+            s,
+            "drawing.export",
+            json!({"part": part, "drawing": id, "out": pdf.to_str().unwrap()}),
+        )
+        .unwrap();
+        let bytes = std::fs::read(&pdf).unwrap();
+        std::fs::remove_file(&pdf).unwrap();
+        out.insert(
+            format!("{part}/{id}"),
+            json!({"views": views, "annotations": notes, "findings": codes,
+                   "scores": got["scores"], "pdf": blake3::hash(&bytes).to_hex().to_string()}),
+        );
+    }
+    Value::Object(out)
 }
 
 #[test]

@@ -1,0 +1,33 @@
+{
+  "annotations": {
+    "t1": {
+      "at": [
+        "546.1 mm",
+        "54.7 mm"
+      ],
+      "sheet": "s1",
+      "type": "bom_table"
+    }
+  },
+  "format": 1,
+  "kind": "ryucad.drawing",
+  "name": "Engine",
+  "sheets": {
+    "s1": {
+      "name": "Sheet 1",
+      "scale": "1:2",
+      "size": "ansi_c"
+    }
+  },
+  "views": {
+    "v1": {
+      "at": [
+        "164.177 mm",
+        "275.542 mm"
+      ],
+      "orient": "front_top_right",
+      "sheet": "s1",
+      "type": "base"
+    }
+  }
+}

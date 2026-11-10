@@ -1,0 +1,47 @@
+{
+  "format": 1,
+  "kind": "ryucad.drawing",
+  "name": "Crankcase",
+  "sheets": {
+    "s1": {
+      "name": "Sheet 1",
+      "scale": "1:2",
+      "size": "ansi_b"
+    }
+  },
+  "views": {
+    "v1": {
+      "at": [
+        "58.326 mm",
+        "129.643 mm"
+      ],
+      "orient": "front",
+      "sheet": "s1",
+      "type": "base"
+    },
+    "v2": {
+      "from": "v1",
+      "offset": "91.378 mm",
+      "sheet": "s1",
+      "side": "top",
+      "type": "projected"
+    },
+    "v3": {
+      "from": "v1",
+      "offset": "96.704 mm",
+      "sheet": "s1",
+      "side": "right",
+      "type": "projected"
+    },
+    "v4": {
+      "at": [
+        "358.39 mm",
+        "202.407 mm"
+      ],
+      "from": "v1",
+      "sheet": "s1",
+      "side": "iso",
+      "type": "projected"
+    }
+  }
+}
