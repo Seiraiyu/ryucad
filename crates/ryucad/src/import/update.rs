@@ -635,7 +635,7 @@ fn signatures(
     let key = ryukei::name::OpKey::from_bytes(format!("ryucad.diff.import\0{path}").as_bytes());
     let opts = ryustep::ReadOptions {
         key,
-        heal: Default::default(),
+        heal: crate::import::heal_options(),
     };
     let hashes: Vec<String> = (0..opened.held.len())
         .into_par_iter()

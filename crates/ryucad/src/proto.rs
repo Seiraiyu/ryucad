@@ -115,6 +115,14 @@ pub struct FeatureFields {
     /// or a planar face as `<part>/<feature>/<name>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plane: Option<String>,
+    /// The body a split cuts with, by its founder: a sheet divides, a
+    /// solid's inside is behind. Replaces its plane or faces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// Faces of one body a split cuts with, taken off as a sheet:
+    /// `<part>/<solid>/<name>`. Replaces its plane or tool body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_faces: Option<Vec<String>>,
     /// A planar face to sketch on, the face a chamfer's first distance
     /// runs along, or the planar face whose loops a sweep carries:
     /// `<part>/<feature>/<name>`.
@@ -592,6 +600,10 @@ pub struct InstanceMove {
     pub axis: Option<[f64; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub angle: Option<Value>,
+    /// The point the turn's axis runs through; the instance's origin when
+    /// left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<[Value; 3]>,
 }
 
 /// How one merge conflict is settled: by one side's value, a value given,
@@ -976,7 +988,8 @@ pub enum Request {
     },
     /// Moves an instance of an assembly: to the pose `placement` gives
     /// (what it leaves out stays), then by `translate` and a turn of
-    /// `angle` about `axis` through its origin, in the assembly's frame.
+    /// `angle` about `axis` through `about` (else its origin), in the
+    /// assembly's frame.
     #[serde(rename = "assembly.move")]
     AssemblyMove {
         part: String,
@@ -989,6 +1002,10 @@ pub enum Request {
         axis: Option<[f64; 3]>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         angle: Option<Value>,
+        /// The point the turn's axis runs through, in the assembly's
+        /// frame (three quantities); the instance's origin when left out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        about: Option<[Value; 3]>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -996,7 +1013,8 @@ pub enum Request {
     /// `moves` held where they put instances for a first solve. Each
     /// instance's pose and the solve's report. With `component`, only
     /// what the moved instances' mates reach is solved and answered, from
-    /// the poses the assembly's rebuild has (a drag's preview).
+    /// the poses the assembly's rebuild has (a drag's preview). At `rev`, and
+    /// with `mates` added in memory, it previews over a draft or a mate.
     #[serde(rename = "assembly.solve")]
     AssemblySolve {
         part: String,
@@ -1004,6 +1022,15 @@ pub enum Request {
         moves: Vec<InstanceMove>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         component: bool,
+        /// The revision to solve over (the working files when left out):
+        /// any a read takes, a person's `draft:` included.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        /// Mates to solve with, as `feature.add` of a mate takes their
+        /// fields (`form`, `a`, `b`, `a_offset`, `b_offset`, `angle`,
+        /// `distance`), added to the assembly in memory and never written.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mates: Vec<Map<String, Value>>,
     },
     /// An assembly's instances as a tree: each with its part, revision and
     /// how it resolved, its pose in the assembly, and a subassembly's own.

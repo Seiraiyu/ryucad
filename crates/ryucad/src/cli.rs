@@ -1076,7 +1076,7 @@ enum PartCmd {
 enum AssemblyCmd {
     /// Move an instance: to a pose (--origin, --z, --x; what is left out
     /// stays), then by --translate and a turn of --angle about --axis
-    /// through its origin, in the assembly's frame.
+    /// through --about (else its origin), in the assembly's frame.
     Move {
         part: String,
         instance: String,
@@ -1091,6 +1091,9 @@ enum AssemblyCmd {
         /// How far to turn it (with --axis): 90deg.
         #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
         angle: Option<String>,
+        /// The point the turn's axis runs through (with --axis): 10mm,0,0.
+        #[arg(long, value_name = "VECTOR", value_parser = triple, allow_hyphen_values = true)]
+        about: Option<[String; 3]>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1112,10 +1115,21 @@ enum AssemblyCmd {
         /// How far to turn it (with --axis): 90deg.
         #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
         angle: Option<String>,
+        /// The point the turn's axis runs through (with --axis): 10mm,0,0.
+        #[arg(long, value_name = "VECTOR", value_parser = triple, allow_hyphen_values = true)]
+        about: Option<[String; 3]>,
         /// Solve only what the instance's mates reach, from the poses the
         /// assembly's rebuild has, as a drag's preview does.
         #[arg(long, requires = "instance")]
         component: bool,
+        /// Solve over this revision rather than the working files: a Git
+        /// revision, worktree:<path>, annotation:<id> or draft:<name>.
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
+        /// A mate to solve with, writing nothing, as JSON of the fields
+        /// feature add takes for a mate: {"form": "revolute", "a": REF, "b": REF}.
+        #[arg(long = "mate", value_name = "JSON", value_parser = json_object)]
+        mates: Vec<Value>,
     },
     /// The instances as a tree: parts, revisions, poses, freedom,
     /// subassemblies.
@@ -1153,8 +1167,10 @@ enum FeatureCmd {
     /// moves every face, filling where they part; move_face --by offset moves
     /// only the faces named, keeping the topology); a
     /// mirror (--solid, --plane, --operation) of a whole solid, joined to
-    /// it unless told otherwise; a split (--target, --plane, --flip,
-    /// --keep) of a solid by a plane; a base flange (--sketch, --thickness,
+    /// it unless told otherwise; a split (--target, --plane, or --tool
+    /// BODY, or --tool-face FACE...; --flip, --keep): the target keeps the
+    /// side behind, `--keep behind` trims it, `--keep both` founds what is
+    /// in front; a base flange (--sketch, --thickness,
     /// --radius, --k-factor or --deduction, --relief, a bent section's
     /// --depth) founding a sheet metal solid; an edge flange (--edge,
     /// --side, --angle, --length, --measured, --position, --radius,
@@ -2323,8 +2339,14 @@ struct FieldArgs {
     #[arg(long)]
     op: Option<String>,
     /// A solid a boolean uses as a tool, and consumes; repeat for several.
+    /// A split's tool: a sheet or solid it cuts with, never changed.
     #[arg(long = "tool", value_name = "SOLID")]
     tools: Vec<String>,
+    /// A face a split cuts with (its faces are taken off as a sheet):
+    /// <part>/<solid>/<name>; repeat for several. A split's tool body is
+    /// --tool.
+    #[arg(long = "tool-face", value_name = "FACE")]
+    tool_faces: Vec<String>,
     /// A fillet's radius, or a cylinder's, cone's or sphere's (its radius parameter).
     #[arg(long, value_name = "QUANTITY")]
     radius: Option<String>,
@@ -3014,6 +3036,8 @@ impl FieldArgs {
             op: self.op.clone(),
             target: None,
             tools: (!self.tools.is_empty()).then(|| self.tools.clone()),
+            tool: None,
+            tool_faces: (!self.tool_faces.is_empty()).then(|| self.tool_faces.clone()),
             groups: if self.with_groups.is_empty() {
                 self.groups.clone().map(|g| g.0)
             } else {
@@ -3594,6 +3618,7 @@ fn request(cmd: &Command) -> Option<Request> {
             translate,
             axis,
             angle,
+            about,
             expect,
         }) => Request::AssemblyMove {
             part: part.clone(),
@@ -3602,6 +3627,7 @@ fn request(cmd: &Command) -> Option<Request> {
             translate: translate.clone().map(|t| t.map(Value::String)),
             axis: *axis,
             angle: angle.clone().map(Value::String),
+            about: about.clone().map(|t| t.map(Value::String)),
             expected_revision: expect.revision.clone(),
         },
         Command::Assembly(AssemblyCmd::Tree { part, path, depth }) => Request::AssemblyTree {
@@ -3616,10 +3642,18 @@ fn request(cmd: &Command) -> Option<Request> {
             translate,
             axis,
             angle,
+            about,
             component,
+            rev,
+            mates,
         }) => Request::AssemblySolve {
             part: part.clone(),
             component: *component,
+            rev: rev.clone(),
+            mates: mates
+                .iter()
+                .filter_map(|m| m.as_object().cloned())
+                .collect(),
             moves: instance
                 .iter()
                 .map(|i| ryucad::proto::InstanceMove {
@@ -3628,6 +3662,7 @@ fn request(cmd: &Command) -> Option<Request> {
                     translate: translate.clone().map(|t| t.map(Value::String)),
                     axis: *axis,
                     angle: angle.clone().map(Value::String),
+                    about: about.clone().map(|t| t.map(Value::String)),
                 })
                 .collect(),
         },

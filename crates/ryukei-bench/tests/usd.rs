@@ -399,3 +399,72 @@ fn the_references_read_what_ryucad_exports() {
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
+
+/// A part `skin` of a 10 x 10 mm planar sheet and a 5 mm box beside it,
+/// exported as usda: OpenUSD opens and flattens it, usd-brep's validator
+/// passes it, SMLib imports its one BrepArray (the box's: a sheet is
+/// written as its mesh alone, issue #624), and it holds both meshes.
+#[test]
+fn a_sheet_reads_through_openusd_as_its_mesh() {
+    use ryucad::doc::assembly::Rev;
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: Value| {
+        let req = ryucad::proto::Request::from_rpc(m, Some(p)).unwrap();
+        ryucad::server::handle(s, req).unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    call(&mut s, "part.create", json!({"part": "skin"}));
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "skin", "type": "sketch", "id": "s", "plane": "xy"}),
+    );
+    call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "skin", "sketch": "s", "ops": [
+            {"op": "add", "id": "p1", "type": "point", "at": [0, 0]},
+            {"op": "add", "id": "p2", "type": "point", "at": [10, 0]},
+            {"op": "add", "id": "p3", "type": "point", "at": [10, 10]},
+            {"op": "add", "id": "p4", "type": "point", "at": [0, 10]},
+            {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}]}),
+    );
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "skin", "type": "planar", "id": "w", "sketch": "s"}),
+    );
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "skin", "type": "box", "id": "b", "params": {"x": 5, "y": 5, "z": 5},
+               "placement": {"origin": [20, 0, 0]}}),
+    );
+    let out = dir.path().join("skin.usda");
+    let params = json!({"part": "skin", "out": out, "time_stamp": "2026-11-09T00:00:00"});
+    let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
+    ryucad::server::answer_live(&mut s, None, None, req).unwrap();
+    let id = ryucad::doc::id::Id::parse("skin", "part").unwrap();
+    let boxes: Vec<(f64, f64)> = s
+        .model(&id, &Rev::Working)
+        .unwrap()
+        .occurrences
+        .iter()
+        .flat_map(|o| &o.solids)
+        .filter(|sd| sd.built.body.kind() == ryukei::topo::BodyKind::Solid)
+        .map(|sd| exact(&sd.built.body, Unit::Millimeter))
+        .collect();
+    let report = reference(dir.path(), &[out]);
+    let r = &report[0];
+    println!("skin: {r}");
+    judge(r, &boxes).unwrap();
+    assert_eq!(
+        (&r["breparrays"], &r["meshes"]),
+        (&json!(1), &json!(2)),
+        "{r}"
+    );
+}

@@ -422,7 +422,7 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
             instance(walk, b, ours, theirs)
         }
         Some(b) if same_type && ty(b).0 == Some(json!("split")) => {
-            paired(walk, b, ours, theirs, &["plane", "flip"])
+            paired(walk, b, ours, theirs, &["plane", "tool", "flip"], true)
         }
         Some(b) if same_type && ty(b).0 == Some(json!("draft")) => paired(
             walk,
@@ -430,6 +430,7 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
             ours,
             theirs,
             &["neutral", "parting", "pull", "reverse"],
+            false,
         ),
         // A planar face's profile is one value, as a sweep's is.
         Some(b)
@@ -712,13 +713,21 @@ fn instance(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Valu
 
 /// A feature merged per key but for `keys`, one value together: a side
 /// changing any of them takes them all, and both changing them
-/// differently is one conflict at each of them, ours' standing in the file
-/// as ours' value stands at every conflict, so taking one side at all of
-/// them gives that side's whole. A split's plane and flip (a flip changed
+/// differently is a conflict at each of them (with `differing`, only at
+/// those the sides give differently), ours' standing in the file as ours'
+/// value stands at every conflict, so taking one side at all of them gives
+/// that side's whole. A split's plane or tool and flip (a flip changed
 /// alone means the other side is kept), a draft's hinge (`neutral`,
 /// `parting`, `pull` and `reverse`: a parting line changed alone leaves a
 /// pull it doesn't take), as a sweep's law and direction are.
-fn paired(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value, keys: &[&str]) -> Value {
+fn paired(
+    walk: &mut Walk,
+    base: &Value,
+    ours: &Value,
+    theirs: &Value,
+    keys: &[&str],
+    differing: bool,
+) -> Value {
     let obj = |v: &Value| v.as_object().cloned().unwrap_or_default();
     let (b, o, t) = (obj(base), obj(ours), obj(theirs));
     let mut out = walk.object("", &b, &o, &t, keys);
@@ -730,6 +739,9 @@ fn paired(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value, keys: &[&
         st
     } else {
         for k in keys {
+            if differing && o.get(*k) == t.get(*k) {
+                continue;
+            }
             walk.conflict(
                 &format!("/{k}"),
                 Kind::Value,
@@ -1719,6 +1731,39 @@ mod tests {
         };
         let m = merge(Some(&rp("xy")), &rp("yz"), &rp("zx"));
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/groups"]);
+    }
+
+    #[test]
+    fn a_splits_tool_merges_with_its_plane_and_flip() {
+        let split = |extra: Value| {
+            let mut v = json!({"format": 19, "kind": "ryucad.feature", "type": "split",
+                               "target": "h"});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let base = split(json!({"plane": "xy"}));
+        // Ours takes a tool, theirs flips: a conflict at each key they
+        // give differently.
+        let ours = split(json!({"tool": {"body": "parting"}}));
+        let theirs = split(json!({"plane": "xy", "flip": true}));
+        let m = merge(Some(&base), &ours, &theirs);
+        let pointers: Vec<&str> = m.conflicts.keys().map(String::as_str).collect();
+        assert!(pointers.contains(&"/tool"), "{pointers:?}");
+        assert!(pointers.contains(&"/plane"), "{pointers:?}");
+        // Ours' tool stands in the file, without the base's plane.
+        assert_eq!(m.value["tool"], json!({"body": "parting"}));
+        assert!(m.value.get("plane").is_none());
+        // One side changing the tool, the other the keep: clean.
+        let theirs = split(json!({"plane": "xy", "keep": "behind"}));
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            (m.value["tool"]["body"].as_str(), m.value["keep"].as_str()),
+            (Some("parting"), Some("behind"))
+        );
+        assert!(m.value.get("plane").is_none());
     }
 
     #[test]

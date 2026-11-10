@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{Project, ryucad};
+use common::{Project, ryucad, two_bolts, two_bolts_as};
 use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
@@ -2512,29 +2512,6 @@ fn a_mates_angle_is_edited_in_the_property_panel() {
 }
 
 /// A bolt, and an assembly `frame` placing it twice, 40 mm apart.
-fn two_bolts() -> Project {
-    two_bolts_as("cylinder", &["radius=3", "height=20"])
-}
-
-/// [`two_bolts`] with each bolt's shank a `kind` primitive of `params`.
-fn two_bolts_as(kind: &str, params: &[&str]) -> Project {
-    let p = Project::new();
-    p.ok(&["part", "create", "bolt"]);
-    let mut add = vec!["feature", "add", "bolt", kind, "--id", "shank"];
-    for x in params {
-        add.extend(["--param", x]);
-    }
-    p.ok(&add);
-    p.ok(&["part", "create", "frame", "--assembly"]);
-    p.ok(&[
-        "feature", "add", "frame", "instance", "--id", "b1", "--of", "bolt", "--fixed",
-    ]);
-    p.ok(&[
-        "feature", "add", "frame", "instance", "--id", "b2", "--of", "bolt", "--origin", "40,0,0",
-    ]);
-    p
-}
-
 /// Runs frames until both bolts are drawn.
 fn both_bolts(h: &mut Harness<'static, App>) {
     frames(h, |a| match &a.screen {
@@ -2679,6 +2656,342 @@ fn occurrences_hide_and_show_with_tab_and_the_tree() {
         },
     );
     frames(&mut h, |a| hidden(a).is_empty());
+}
+
+/// [`frames`], saying what it waited for and the Move tool's state when
+/// it times out.
+fn waited(h: &mut Harness<'static, App>, what: &str, done: impl Fn(&App) -> bool) {
+    let t = Instant::now();
+    loop {
+        h.step();
+        if done(h.state()) {
+            return;
+        }
+        let o = h.state().opened();
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "timed out waiting for {what}: {:?}, {:?}, {:?}, {} meshes, idle {}",
+            o.ws.mover,
+            o.ws.mating,
+            o.ws.drag_note,
+            o.ws.model.meshes.len(),
+            o.ws.idle()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Where the Move tool's handle `k` (an arrow, or with `ring` a ring's
+/// rightmost point) is in the window now.
+fn move_handle(h: &mut Harness<'static, App>, k: usize, ring: bool) -> egui::Pos2 {
+    let o = h.state_mut().opened_mut();
+    let length = o.view.handle_length(&o.ws);
+    let m = o.ws.mover.clone().expect("the Move tool is on");
+    let (arrows, rings) = m.handles(length);
+    let p = if ring {
+        let r = rings[k];
+        // Off the arrows: the ring's point half way between the two axes
+        // its plane holds.
+        let axes = m.axes();
+        let (a, b) = (axes[(k + 1) % 3], axes[(k + 2) % 3]);
+        let h = std::f64::consts::FRAC_1_SQRT_2;
+        [0, 1, 2].map(|i| r.centre[i] + r.radius * h * (a[i] + b[i]))
+    } else {
+        let a = arrows[k];
+        [0, 1, 2].map(|i| a.from[i] + a.dir[i] * a.length * 0.7)
+    };
+    on_screen(h, p)
+}
+
+#[test]
+fn a_typed_move_by_the_handle_is_written_in_direct_edit_and_proposed_in_annotate() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    let x_of = |p: &Project| {
+        p.ok(&["feature", "show", "frame", "b2"])["pose"]["origin_m"][0]
+            .as_f64()
+            .unwrap()
+    };
+    // Select b2 and press Move: three arrows and rings at its middle.
+    let at = over_body(&mut h, "b2/shank");
+    click(&h, at);
+    waited(&mut h, "b2 selected", |a| {
+        !a.opened().ws.myself().unwrap().selection.is_empty()
+    });
+    h.get_by_label("Move").click();
+    waited(&mut h, "the Move tool on", |a| {
+        a.opened().ws.mover.is_some()
+    });
+    h.run_steps(2);
+    // A click on x's arrow opens the field at 0; 20 typed and Enter.
+    let x = move_handle(&mut h, 0, false);
+    click(&h, x);
+    waited(&mut h, "a handle's value", |a| {
+        a.opened()
+            .ws
+            .mover
+            .as_ref()
+            .is_some_and(|m| m.grip.is_some())
+    });
+    h.run_steps(2);
+    h.get_by_label("Move value").type_text("20");
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    waited(&mut h, "the move sent", |a| {
+        a.opened().ws.mover.is_none() && a.opened().ws.idle()
+    });
+    let t = Instant::now();
+    while (x_of(&p) - 0.06).abs() > 1e-9 {
+        assert!(t.elapsed() < Duration::from_secs(30), "{}", x_of(&p));
+        h.step();
+    }
+    // In Annotate the same edit is a proposal: nothing moves.
+    h.state_mut()
+        .opened_mut()
+        .ws
+        .set_mode(ryucad_app::core::modes::Mode::Annotate);
+    // The window reads its draft now: wait until both bolts are drawn
+    // from it.
+    frames(&mut h, |a| a.opened().ws.idle());
+    both_bolts(&mut h);
+    h.run_steps(2);
+    h.get_by_label("Move").click();
+    waited(&mut h, "the Move tool on", |a| {
+        a.opened().ws.mover.is_some()
+    });
+    h.run_steps(2);
+    // Framed again: the draft's reading may leave b2 out of the view.
+    {
+        let o = h.state_mut().opened_mut();
+        o.view.fit(&mut o.ws, None);
+    }
+    for _ in 0..30 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let x = move_handle(&mut h, 0, false);
+    assert!(
+        h.state().opened().view.rect.contains(x),
+        "{x:?} out of the view"
+    );
+    click(&h, x);
+    waited(&mut h, "a handle's value in Annotate", |a| {
+        a.opened()
+            .ws
+            .mover
+            .as_ref()
+            .is_some_and(|m| m.grip.is_some())
+    });
+    h.run_steps(2);
+    h.get_by_label("Move value").type_text("5");
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    let t = Instant::now();
+    loop {
+        let listed = p.ok(&["annotations", "list"]);
+        if let Some(a) = listed["annotations"].as_array().unwrap().first() {
+            assert_eq!(a["change"]["request"]["method"], "assembly.move", "{a}");
+            assert_eq!(a["change"]["rough"], false, "{a}");
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(30), "no proposal");
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!((x_of(&p) - 0.06).abs() < 1e-9, "unchanged: {}", x_of(&p));
+}
+
+#[test]
+fn a_dragged_ring_previews_and_esc_drops_the_value_then_the_tool() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    let at = over_body(&mut h, "b2/shank");
+    click(&h, at);
+    frames(&mut h, |a| {
+        !a.opened().ws.myself().unwrap().selection.is_empty()
+    });
+    h.get_by_label("Move").click();
+    frames(&mut h, |a| a.opened().ws.mover.is_some());
+    h.run_steps(2);
+    // Round z's ring by a drag: it snaps to 15° steps and previews.
+    let from = move_handle(&mut h, 2, true);
+    h.event(egui::Event::PointerMoved(from));
+    h.event(egui::Event::PointerButton {
+        pos: from,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    let middle = on_screen(&h, h.state().opened().ws.mover.as_ref().unwrap().middle);
+    let r = from - middle;
+    for i in 1..=12 {
+        let t = std::f32::consts::FRAC_PI_2 * i as f32 / 12.0;
+        let (s, c) = t.sin_cos();
+        let q = middle + egui::vec2(r.x * c - r.y * s, r.x * s + r.y * c);
+        h.event(egui::Event::PointerMoved(q));
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    h.event(egui::Event::PointerButton {
+        pos: middle + egui::vec2(-r.y, r.x),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    frames(&mut h, |a| !a.opened().ws.model.preview.is_empty());
+    {
+        let m = h.state().opened().ws.mover.clone().unwrap();
+        assert_eq!(m.grip, Some(ryucad_app::core::mover::Grip::Ring(2)));
+        let steps = m.value / ryucad_app::core::mover::ANGLE_STEP;
+        assert!(
+            m.value != 0.0 && (steps - steps.round()).abs() < 1e-9,
+            "{}",
+            m.value
+        );
+    }
+    // Esc drops the value and its preview, a second Esc the tool; nothing
+    // was written.
+    h.run_steps(2);
+    h.key_press(egui::Key::Escape);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .mover
+            .as_ref()
+            .is_some_and(|m| m.grip.is_none())
+            && a.opened().ws.model.preview.is_empty()
+    });
+    h.run_steps(2);
+    h.key_press(egui::Key::Escape);
+    frames(&mut h, |a| a.opened().ws.mover.is_none());
+    let x = p.ok(&["feature", "show", "frame", "b2"])["pose"]["x"].clone();
+    assert_eq!(x, serde_json::json!([1, 0, 0]));
+}
+
+#[test]
+fn a_fixed_instance_shows_no_handles_and_says_why() {
+    use egui_kittest::kittest::NodeT;
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    let at = over_body(&mut h, "b1/shank");
+    click(&h, at);
+    frames(&mut h, |a| {
+        !a.opened().ws.myself().unwrap().selection.is_empty()
+    });
+    h.run_steps(2);
+    assert!(h.get_by_label("Move").accesskit_node().is_disabled());
+    h.get_by_label("Move").click();
+    h.run_steps(2);
+    assert!(h.state().opened().ws.mover.is_none());
+}
+
+#[test]
+fn a_mate_is_picked_previewed_and_added_from_its_dialog() {
+    use egui_kittest::kittest::NodeT;
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let (p, _, _) = common::plate_and_bolt();
+    let mut h = window(&p);
+    waited(&mut h, "the frame drawn", |a| {
+        a.opened().ws.idle() && a.opened().ws.model.middles("frame").len() == 2
+    });
+    h.step();
+    menu(&mut h, "Edit", "Mate…");
+    waited(&mut h, "step 2", |a| a.opened().ws.mating.is_some());
+    shown(&mut h, "Mate");
+    // The bolt, then the plate: each click picks for the next side.
+    let pin = over_body(&mut h, "pin/shank");
+    click(&h, pin);
+    waited(&mut h, "step 3", |a| {
+        a.opened().ws.mating.as_ref().unwrap().a.is_some()
+    });
+    // A second pick on the same instance is refused in the dialog.
+    click(&h, pin);
+    waited(&mut h, "step 4", |a| {
+        a.opened().ws.mating.as_ref().unwrap().note.is_some()
+    });
+    assert!(h.state().opened().ws.mating.as_ref().unwrap().b.is_none());
+    let base = over_body(&mut h, "base/slab");
+    click(&h, base);
+    waited(&mut h, "step 5", |a| {
+        a.opened().ws.mating.as_ref().unwrap().b.is_some()
+    });
+    // Fastened holds wherever they are: Add is enabled once it solved.
+    waited(&mut h, "step 6", |a| {
+        a.opened().ws.mating.as_ref().is_some_and(|d| d.addable())
+    });
+    assert!(
+        h.state().opened().ws.myself().unwrap().selection.is_empty(),
+        "picks don't select"
+    );
+    h.run_steps(2);
+    let add = h.get_by_label("Add");
+    assert!(!add.accesskit_node().is_disabled());
+    add.click();
+    waited(&mut h, "step 7", |a| {
+        a.opened().ws.mating.is_none() && a.opened().ws.idle()
+    });
+    let t = Instant::now();
+    while !p
+        .ok(&["feature", "list", "frame"])
+        .to_string()
+        .contains("\"mate\"")
+    {
+        assert!(t.elapsed() < Duration::from_secs(30), "no mate written");
+        h.step();
+    }
+}
+
+#[test]
+fn the_mate_dialogs_add_waits_for_both_picks_and_esc_closes_it() {
+    use egui_kittest::kittest::NodeT;
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let (p, _, _) = common::plate_and_bolt();
+    let mut h = window(&p);
+    waited(&mut h, "the frame drawn", |a| {
+        a.opened().ws.idle() && a.opened().ws.model.middles("frame").len() == 2
+    });
+    h.step();
+    menu(&mut h, "Edit", "Mate…");
+    shown(&mut h, "Mate");
+    let pin = over_body(&mut h, "pin/shank");
+    click(&h, pin);
+    waited(&mut h, "step 2", |a| {
+        a.opened().ws.mating.as_ref().unwrap().a.is_some()
+    });
+    h.run_steps(2);
+    assert!(h.get_by_label("Add").accesskit_node().is_disabled());
+    // In View it can't be opened at all.
+    h.key_press(egui::Key::Escape);
+    waited(&mut h, "step 3", |a| a.opened().ws.mating.is_none());
+    h.state_mut()
+        .opened_mut()
+        .ws
+        .set_mode(ryucad_app::core::modes::Mode::View);
+    waited(&mut h, "step 4", |a| a.opened().ws.idle());
+    menu(&mut h, "Edit", "Mate…");
+    h.run_steps(2);
+    assert!(h.state().opened().ws.mating.is_none());
 }
 
 #[test]

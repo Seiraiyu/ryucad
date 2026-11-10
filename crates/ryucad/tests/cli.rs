@@ -4647,7 +4647,8 @@ fn surfaces_from_the_cli() {
     assert_eq!(v["feature"]["surface"], true, "{v}");
     let r = p.ok(&["rebuild", "skin"]);
     assert_eq!(r["parts"][0]["solids"][0]["kind"], "sheet", "{r}");
-    // A cut of the wall is refused in the agent's terms.
+    // A join to the wall is refused in the agent's terms (a cut trims
+    // it since 18.C).
     let e = p.fails(
         &[
             "feature",
@@ -4661,7 +4662,7 @@ fn surfaces_from_the_cli() {
             "--param",
             "z=1",
             "--operation",
-            "cut",
+            "join",
             "--target",
             "wall",
         ],
@@ -4919,6 +4920,117 @@ fn sew_and_thicken_from_the_cli() {
     assert_eq!(code, 0, "{v}");
     let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
     assert_eq!(code, 0, "{v}");
+}
+
+#[test]
+fn trims_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    // A wall across where box `h` stands, and a box `k` over its top half.
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--plane", "xy",
+    ]);
+    let line = serde_json::json!([
+        {"op": "add", "id": "a", "type": "point", "at": [5, -5]},
+        {"op": "add", "id": "b", "type": "point", "at": [5, 15]},
+        {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}
+    ])
+    .to_string();
+    p.ok(&["sketch", "edit", "p", "s", &line]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "extrude",
+        "--sketch",
+        "s",
+        "--surface",
+        "--length",
+        "20mm",
+        "--id",
+        "w",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "h", "--param", "x=10", "--param", "y=10", "--param",
+        "z=10",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "box",
+        "--id",
+        "k",
+        "--param",
+        "x=20",
+        "--param",
+        "y=30",
+        "--param",
+        "z=20",
+        "--origin",
+        "-5,-10,10",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "split", "--target", "h", "--tool", "w", "--id", "sp",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "split", "--target", "w", "--tool", "k", "--keep", "behind", "--id",
+        "t",
+    ]);
+    let line_of = |r: &Value, id: &str| -> Value {
+        r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id}: {r}"))
+    };
+    let r = p.ok(&["rebuild", "p"]);
+    let sp = line_of(&r, "sp");
+    let sides = sp["split"]["sides"].as_array().unwrap();
+    assert_eq!(sides.len(), 2, "{sp}");
+    assert!(sides.iter().all(|x| x["kind"] == "solid"), "{sp}");
+    assert_eq!(line_of(&r, "t")["split"]["trim"], true, "{r}");
+    p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "x.step",
+        "--time-stamp",
+        "2026-11-09T00:00:00",
+    ]);
+    let step = fs::read_to_string(p.direct.join("x.step")).unwrap();
+    assert!(step.contains("SHELL_BASED_SURFACE_MODEL"));
+    p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "x.3mf",
+        "--time-stamp",
+        "2026-11-09T00:00:00",
+    ]);
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(
+        fs::read(p.daemon.join("x.3mf")).unwrap(),
+    ))
+    .unwrap();
+    let mut model = String::new();
+    std::io::Read::read_to_string(&mut z.by_name("3D/3dmodel.model").unwrap(), &mut model).unwrap();
+    assert!(model.contains("type=\"surface\""), "{model}");
+    // Through the daemon: undo takes the trim back.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["rebuild", "p"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(
+        v["result"]["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["id"] != "t"),
+        "{v}"
+    );
 }
 
 #[test]
@@ -5691,10 +5803,10 @@ fn interference_from_the_cli() {
     p.fails(&["clearance", "bolt"], "wrong_part_kind", 1);
 }
 
-#[test]
-fn mates_from_the_cli() {
-    let p = Pair::new();
-    p.ok(&["init", "--unit", "mm"]);
+/// A plate `base` (100 × 50 × 5 mm, fixed) and a bolt `pin` (radius 3,
+/// height 20) placed 50 mm along x in assembly `frame`; the plate's top
+/// and the bolt's foot as entity references.
+fn plate_and_bolt(p: &Pair) -> (String, String) {
     let params: [(&str, &str, &str, &[&str]); 2] = [
         ("plate", "box", "slab", &["x=100", "y=50", "z=5"]),
         ("bolt", "cylinder", "shank", &["radius=3", "height=20"]),
@@ -5728,8 +5840,48 @@ fn mates_from_the_cli() {
             .map(|f| f["name"].as_str().unwrap().to_owned())
             .unwrap()
     };
-    let top = format!("frame/base/slab/{}", face("plate", "slab", 1.0));
-    let foot = format!("frame/pin/shank/{}", face("bolt", "shank", -1.0));
+    (
+        format!("frame/base/slab/{}", face("plate", "slab", 1.0)),
+        format!("frame/pin/shank/{}", face("bolt", "shank", -1.0)),
+    )
+}
+
+#[test]
+fn controlled_edits_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let (top, foot) = plate_and_bolt(&p);
+    // A mate previewed, nothing written.
+    let mate = format!(
+        r#"{{"form": "revolute", "a": "{top}", "b": "{foot}", "b_offset": {{"flip": true}}}}"#
+    );
+    let v = p.ok(&["assembly", "solve", "frame", "--mate", &mate]);
+    assert_eq!(v["converged"], true, "{v}");
+    assert_eq!(v["solve"]["instances"]["pin"]["dof"], 1, "{v}");
+    let listed = p.ok(&["feature", "list", "frame"]);
+    assert!(!listed.to_string().contains("\"mate\""), "{listed}");
+    // A turn about a point, written.
+    let v = p.ok(&[
+        "assembly", "move", "frame", "pin", "--axis", "0,0,1", "--angle", "90deg", "--about",
+        "60mm,0,0",
+    ]);
+    let o = &v["pose"]["origin_m"];
+    assert!((o[0].as_f64().unwrap() - 0.06).abs() < 1e-12, "{v}");
+    assert!((o[1].as_f64().unwrap() + 0.01).abs() < 1e-12, "{v}");
+    // About alone is refused.
+    let e = p.fails(
+        &["assembly", "move", "frame", "pin", "--about", "0,0,0"],
+        "invalid_param",
+        1,
+    );
+    assert_eq!(e["details"]["param"], "about", "{e}");
+}
+
+#[test]
+fn mates_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let (top, foot) = plate_and_bolt(&p);
     let added = p.ok(&[
         "feature",
         "add",

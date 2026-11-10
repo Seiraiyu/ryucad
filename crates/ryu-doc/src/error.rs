@@ -815,6 +815,9 @@ pub enum Code {
     /// holds the angle in the section square to it instead). The face,
     /// both angles and the angle asked are in the details.
     DraftAngleVaries,
+    /// A warning: a USD export wrote a sheet as its mesh alone (ryucad
+    /// 18.C writes no BrepArray of a sheet).
+    ExportSheetBrepSkipped,
     /// No drawing of that ID in the part (design 417); the details name
     /// the part and the drawings it has (`drawings`).
     DrawingNotFound,
@@ -983,6 +986,7 @@ mod tests {
             (Code::ReferenceFacesSplit, "reference_faces_split"),
             (Code::ReferenceUnoriented, "reference_unoriented"),
             (Code::ExportReferenceMeshOnly, "export_reference_mesh_only"),
+            (Code::ExportSheetBrepSkipped, "export_sheet_brep_skipped"),
         ] {
             assert_eq!(json!(c), json!(name));
             assert_eq!(c.exit_code(), 1, "{name}");

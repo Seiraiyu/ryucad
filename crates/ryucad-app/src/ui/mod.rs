@@ -14,6 +14,7 @@ pub mod fonts;
 pub mod form;
 pub mod help;
 pub mod icon;
+pub mod mate;
 pub mod menu;
 pub mod modes;
 pub mod palette;
