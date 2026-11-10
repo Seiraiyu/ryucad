@@ -598,6 +598,50 @@ fn a_flat_pattern_looks_as_it_did() {
     looks_as_it_did(&adapter, &px, "flat");
 }
 
+/// Sheets (ryucad 18) cut at 5 mm and seen from above, framed on the sewn
+/// box: open, the inside of its walls and floor tinted towards
+/// `SHEET_BACK` and never capped.
+#[test]
+fn sheets_look_as_they_did() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::named("snapshot").with_surfaces();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(120), |ws| ws.idle()
+        && ws.model.meshes.len() == 6));
+    p.ok(&["section", "xy", "--offset", "5"]);
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.sections.planes.len() == 1));
+    // Box `b`, whose faces were sewn, coincides with the sewn box: left
+    // out, so the box's inside shows.
+    ws.model.meshes.remove(&("p".to_owned(), "b".to_owned()));
+    let picker = Picker::new(&ws.model);
+    // Framed on the sewn box.
+    let (lo, hi) = picker
+        .body_bounds(&("p".to_owned(), "sw".to_owned()))
+        .unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.015);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    scene.cut(scene::Cut::of(&ws.sections.planes, &camera));
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: theme::BACKGROUND,
+        light: scene::light(&camera),
+        edges: true,
+        faces: &[],
+        overlay: &[],
+        glass: &[],
+    };
+    scene.render(&device, &queue, [W, H], &list);
+    let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
+    looks_as_it_did(&adapter, &px, "sheets");
+}
+
 /// Compares `px` with `tests/snapshots/<name>-lavapipe.png` on lavapipe,
 /// or only checks something was drawn on other adapters.
 /// The part in steel blue, the base's top red, the boss translucent: the
