@@ -239,6 +239,7 @@ fn part(f: Feature, reference: bool, placed: bool) -> Part {
         views: BTreeMap::new(),
         appearance: None,
         explodes: BTreeMap::new(),
+        drawings: BTreeMap::new(),
         revision: String::new(),
     }
 }
