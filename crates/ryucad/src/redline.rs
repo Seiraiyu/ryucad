@@ -214,16 +214,104 @@ pub fn touches(
     }
 }
 
-/// Each of `a`'s marks in words (Task 11).
+/// Each of `a`'s marks in words (design 423's Reading marks), in the
+/// project's default unit.
 pub fn words(
-    _session: &mut crate::session::Session,
+    session: &mut crate::session::Session,
     a: &crate::annotation::Annotation,
 ) -> crate::error::Result<Vec<serde_json::Value>> {
-    Ok(a.marks
-        .iter()
-        .flat_map(|m| &m.list)
-        .map(Mark::to_json)
-        .collect())
+    use crate::measure::{Kind as M, point, value};
+    use ryukei::geom::Point3;
+    use ryukei::measure::Value as Measured;
+    use serde_json::json;
+    let unit = session.project().manifest.default_unit;
+    let (Some(marks), Some(view)) = (&a.marks, &a.view) else {
+        return Ok(Vec::new());
+    };
+    let plane = Plane::of(&crate::view::Camera::from(view));
+    let f = unit.factor();
+    let two = |p: [f64; 2]| {
+        let c = |x: f64| crate::measure::number(x / f);
+        json!({"m": p, "value": format!("({} {u}, {} {u})", c(p[0]), c(p[1]), u = unit.as_str())})
+    };
+    let three = |p: [f64; 3]| point(Point3::new(p[0], p[1], p[2]), unit);
+    let mut out = Vec::new();
+    for (i, m) in marks.list.iter().enumerate() {
+        let mut v = json!({"index": i, "kind": m.kind.as_str()});
+        match &m.anchor {
+            Anchor::View(xy) => {
+                v["in"] = json!("view");
+                v["points"] = json!(
+                    xy.iter()
+                        .map(|p| json!({"plane": two(*p), "model": three(plane.point(*p))}))
+                        .collect::<Vec<_>>()
+                );
+                if let ([a0, b0], Kind::Line | Kind::Arrow) = (xy.as_slice(), m.kind) {
+                    let d = [b0[0] - a0[0], b0[1] - a0[1]];
+                    let len = ryukei::math::sqrt(d[0] * d[0] + d[1] * d[1]);
+                    v["length"] = value(Measured::Exact(len), M::Length, unit);
+                    if len > 0.0 {
+                        let w =
+                            [0, 1, 2].map(|k| (plane.right[k] * d[0] + plane.up[k] * d[1]) / len);
+                        v["direction"] = json!(w);
+                    }
+                }
+                if m.kind != Kind::Text && (m.closed() || m.kind == Kind::Stroke) {
+                    let pts = outline(m);
+                    let lo = [0, 1].map(|k| pts.iter().map(|p| p[k]).fold(f64::INFINITY, f64::min));
+                    let hi =
+                        [0, 1].map(|k| pts.iter().map(|p| p[k]).fold(f64::NEG_INFINITY, f64::max));
+                    v["box"] = json!({"plane": {"min": two(lo), "max": two(hi),
+                                                "size": two([hi[0] - lo[0], hi[1] - lo[1]])}});
+                }
+            }
+            Anchor::Face { on, points_m } => {
+                v["in"] = json!("face");
+                v["on"] = json!(on);
+                v["count"] = json!(points_m.len());
+                let lo =
+                    [0, 1, 2].map(|k| points_m.iter().map(|p| p[k]).fold(f64::INFINITY, f64::min));
+                let hi = [0, 1, 2].map(|k| {
+                    points_m
+                        .iter()
+                        .map(|p| p[k])
+                        .fold(f64::NEG_INFINITY, f64::max)
+                });
+                v["box"] = json!({"part": {"min": three(lo), "max": three(hi)}});
+            }
+        }
+        if let Some(t) = &m.text {
+            v["text"] = json!(t);
+        }
+        let mut touches = Vec::new();
+        for t in m.touches.iter().flatten() {
+            let mut tv = json!({"at": t.at.as_str(), "ref": t.reference});
+            match crate::entity::EntityRef::parse(&t.reference).and_then(|r| r.resolve(session)) {
+                Ok(target) => {
+                    tv["kind"] = json!(target.as_str());
+                    tv["outdated"] = json!(false);
+                    let part = t.reference.split('/').next().unwrap_or_default().to_owned();
+                    let req = crate::proto::Request::Inspect {
+                        part,
+                        feature: None,
+                        entity: Some(t.reference.clone()),
+                        rev: None,
+                    };
+                    if let Ok(now) = crate::server::dispatch(session, None, None, req) {
+                        tv["now"] = now;
+                    }
+                }
+                Err(e) => {
+                    tv["outdated"] = json!(true);
+                    tv["error"] = json!(e);
+                }
+            }
+            touches.push(tv);
+        }
+        v["touches"] = json!(touches);
+        out.push(v);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

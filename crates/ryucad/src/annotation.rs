@@ -779,7 +779,11 @@ pub fn show(session: &mut Session, id: &str) -> Result<Value> {
                              "deletes": a.change.as_ref().expect("a change").writes[p].is_none()})
         })
         .collect();
-    Ok(json!({"annotation": entry(session, &all, &a), "pins": pins, "files": files}))
+    let marks = crate::redline::words(session, &a)?;
+    Ok(
+        json!({"annotation": entry(session, &all, &a), "pins": pins, "files": files,
+              "marks": marks}),
+    )
 }
 
 /// `annotation.reply`.
@@ -1552,6 +1556,61 @@ pub(crate) mod tests {
         assert_eq!(
             file.marks.unwrap().list[0].anchor,
             Anchor::View(vec![[0.3, 0.3], boss_top])
+        );
+    }
+
+    #[test]
+    fn show_reads_each_mark_in_words() {
+        let (_dir, mut s, view) = drilled();
+        let boss_top = on(&view, [0.045, 0.02, 0.011]);
+        let plate_top = on(&view, [0.008, 0.008, 0.005]);
+        let a = create_marked(
+            &mut s,
+            &view,
+            json!([
+                {"kind": "arrow", "in": "view", "xy_m": [boss_top, plate_top]},
+                {"kind": "rectangle", "in": "view", "xy_m": [[0, 0], [0.01, 0.005]]},
+                {"kind": "stroke", "in": "face", "on": "plate/slab",
+                 "points_m": [[0.005, 0.005, 0.005], [0.015, 0.005, 0.005]]},
+                {"kind": "text", "in": "view", "xy_m": [[0, 0]], "text": "2 mm"}
+            ]),
+        )
+        .unwrap();
+        let id = a["annotation"]["id"].as_str().unwrap().to_owned();
+        let v = show(&mut s, &id).unwrap();
+        let m = &v["marks"];
+        assert_eq!(m[0]["kind"], "arrow");
+        assert_eq!(m[0]["in"], "view");
+        assert_eq!(
+            m[0]["points"][0]["plane"]["value"]
+                .as_str()
+                .unwrap()
+                .matches("mm")
+                .count(),
+            2
+        );
+        assert!(m[0]["points"][1]["model"]["m"].is_array());
+        // The arrow's length is measured in the view's plane, exactly.
+        let d = [plate_top[0] - boss_top[0], plate_top[1] - boss_top[1]];
+        let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
+        assert!((m[0]["length"]["m"].as_f64().unwrap() - len).abs() < 1e-12);
+        assert_eq!(m[0]["touches"][0]["at"], "tail");
+        assert_eq!(m[0]["touches"][0]["kind"], "face");
+        assert_eq!(m[0]["touches"][0]["outdated"], false);
+        assert_eq!(
+            m[0]["touches"][0]["now"]["entity"]["origin"]["feature"],
+            "boss"
+        );
+        assert_eq!(m[1]["box"]["plane"]["size"]["value"], "(10 mm, 5 mm)");
+        assert_eq!(m[2]["in"], "face");
+        assert_eq!(m[2]["on"], "plate/slab");
+        assert_eq!(m[2]["count"], 2);
+        assert_eq!(m[3]["text"], "2 mm");
+        assert!(m[3]["touches"].as_array().unwrap().is_empty());
+        // Listings give a summary.
+        assert_eq!(
+            v["annotation"]["marks"]["kinds"],
+            json!(["arrow", "rectangle", "stroke", "text"])
         );
     }
 
