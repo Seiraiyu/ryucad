@@ -3041,3 +3041,51 @@ fn digikey_from_the_cli() {
     assert_eq!(e["details"]["warnings"][0]["code"], "parts_rate_limited");
     assert_eq!(e["details"]["warnings"][0]["details"]["retry_after_s"], 30);
 }
+
+/// `place --dry-run --render FILE --sheet S` and `layout --relayout B
+/// --dry-run --render FILE --sheet S` draw that sheet alone; an unknown
+/// sheet is not_found. Both ways (`Pair` runs every command in process
+/// and through the daemon).
+#[test]
+fn a_dry_run_renders_one_sheet() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    let v = p.ok(&[
+        "place",
+        "breakout",
+        "--dry-run",
+        "--render",
+        "one.svg",
+        "--sheet",
+        "s1",
+    ]);
+    assert_eq!(v["format"], json!("svg"));
+    for top in [&p.direct, &p.daemon] {
+        let svg = fs::read_to_string(top.join("board/one.svg")).unwrap();
+        assert_eq!(svg.matches("<g id=\"sheet-").count(), 1, "{svg:.400}");
+    }
+    p.fails(
+        &[
+            "place",
+            "breakout",
+            "--dry-run",
+            "--render",
+            "one.svg",
+            "--sheet",
+            "nope",
+        ],
+        "not_found",
+        1,
+    );
+    let v = p.ok(&[
+        "layout",
+        "--relayout",
+        "breakout",
+        "--dry-run",
+        "--render",
+        "two.svg",
+        "--sheet",
+        "s1",
+    ]);
+    assert_eq!(v["format"], json!("svg"));
+}

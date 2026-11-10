@@ -185,6 +185,9 @@ enum Command {
         /// Crop the picture to what is drawn.
         #[arg(long, requires = "render")]
         fit: bool,
+        /// Draw one sheet (by ID or name) with --render.
+        #[arg(long, requires = "render")]
+        sheet: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -222,6 +225,9 @@ enum Command {
         /// Crop the picture to what is drawn.
         #[arg(long, requires = "render")]
         fit: bool,
+        /// Draw one sheet (by ID or name) with --render.
+        #[arg(long, requires = "render")]
+        sheet: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1845,6 +1851,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             format,
             scale,
             fit,
+            sheet,
             expect,
         } => Request::Layout {
             design: design.clone(),
@@ -1858,6 +1865,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                     format: picture_format(format.as_deref(), out)?,
                     scale: *scale,
                     fit: *fit,
+                    sheet: sheet.clone(),
                 }),
             },
         },
@@ -1875,6 +1883,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             format,
             scale,
             fit,
+            sheet,
             expect,
             ..
         } => Request::LayoutPlace {
@@ -1889,6 +1898,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                     format: picture_format(format.as_deref(), out)?,
                     scale: *scale,
                     fit: *fit,
+                    sheet: sheet.clone(),
                 }),
             },
         },

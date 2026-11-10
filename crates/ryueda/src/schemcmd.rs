@@ -117,7 +117,7 @@ pub fn layout(
         })
         .transpose()?;
     // The one block a picture is of: --block, else --relayout's.
-    let pictured: Option<Id> = render.and(match block {
+    let pictured: Option<Id> = render.as_ref().and(match block {
         Some(_) => list.first().map(|b| b.id.clone()),
         None => fresh.as_ref().map(|(id, _)| id.clone()),
     });
@@ -167,7 +167,7 @@ pub fn layout(
             )
             .with("param", "render")
         })?;
-        let (mime, bytes, px) = picture(&laid, &[], ask)?;
+        let (mime, bytes, px) = picture(&laid, &[], &ask)?;
         let mut v = json!({"blocks": out, "dry_run": dry_run, "format": ask.format});
         if let Some(px) = px {
             v["scale"] = json!(px);
@@ -585,7 +585,7 @@ pub fn place(
     if dry_run {
         v["description"] = json!({"blocks": [description]});
         if let Some(ask) = render {
-            let (mime, bytes, px) = picture(&laid, &[], ask)?;
+            let (mime, bytes, px) = picture(&laid, &[], &ask)?;
             v["format"] = json!(ask.format);
             if let Some(px) = px {
                 v["scale"] = json!(px);
@@ -762,13 +762,16 @@ pub enum Format {
 }
 
 /// A picture asked of a dry run (`place --dry-run --render FILE`).
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RenderAsk {
     pub format: Format,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<f32>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fit: bool,
+    /// One sheet (by ID or name), else the whole canvas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<String>,
 }
 
 /// A layout drawn as `render` draws it: the bytes, their type, and the
@@ -776,13 +779,32 @@ pub struct RenderAsk {
 fn picture(
     laid: &Laid,
     refs: &[&str],
-    ask: RenderAsk,
+    ask: &RenderAsk,
 ) -> Result<(&'static str, Vec<u8>, Option<f32>)> {
     let layout = &laid.outcome.layout;
-    let svg = if ask.fit {
-        ryusch::svg::draw_fit(&laid.built.input, layout, refs)
+    let one: Vec<String> = match &ask.sheet {
+        None => Vec::new(),
+        Some(s) => vec![
+            layout
+                .sheets
+                .iter()
+                .find(|(k, v)| *k == s || v.name == *s)
+                .map(|(k, _)| k.clone())
+                .ok_or_else(|| {
+                    Error::new(Code::NotFound, format!("the layout has no sheet {s}"))
+                        .with("sheet", s.as_str())
+                })?,
+        ],
+    };
+    let refs: Vec<&str> = if one.is_empty() {
+        refs.to_vec()
     } else {
-        ryusch::svg::draw(&laid.built.input, layout, refs)
+        one.iter().map(String::as_str).collect()
+    };
+    let svg = if ask.fit {
+        ryusch::svg::draw_fit(&laid.built.input, layout, &refs)
+    } else {
+        ryusch::svg::draw(&laid.built.input, layout, &refs)
     };
     Ok(match ask.format {
         Format::Svg => ("image/svg+xml", svg.into_bytes(), None),
@@ -912,7 +934,16 @@ pub fn render(
     if laid.stale {
         v["stale"] = json!(true);
     }
-    let (mime, bytes, px) = picture(&laid, &refs, RenderAsk { format, scale, fit })?;
+    let (mime, bytes, px) = picture(
+        &laid,
+        &refs,
+        &RenderAsk {
+            format,
+            scale,
+            fit,
+            sheet: None,
+        },
+    )?;
     if let Some(px) = px {
         v["scale"] = json!(px);
     }
