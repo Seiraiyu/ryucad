@@ -17,3 +17,54 @@ The design is document 417 in the Coxswain planning project `ryucad-ryukei`; thi
 - **Check.** `check` builds every drawing of the parts it checks (`source: drawing`): a view that fails is an error, uncertain pieces a warning; a drawing that doesn't read is doctor's.
 - **Testing.** Unit tests per module (`ryu-draw`'s writers and styles, `doc::drawing`'s and `doc::drawing_template`'s round trips and refusals, templates fitting their paper, curves keeping their ends and kinds, a block's three views and isometric against its edges' lengths, hidden bores dashed only when asked, an auxiliary view's true size and its foreshortened refusal, first angle's placement on an ISO sheet, doctor, merge, renumbering, the content hash, `diff --model`); `tests/cli.rs`'s `drawings_from_the_cli` both ways; the `drawings` golden section (the showcase's standard views and an ISO drawing: `drawing.get` with items, PDF, SVG and PNG, one thread and four).
 - **Limits.** Sections, details, flat and exploded views and DXF are 9.B's; dimensions, annotation and the lint 9.C's; the app, corpus drawings, property test, fuzzing and bars 9.D's. Layout fills from the upper left and never moves a view the file places.
+
+## Sections, details, flat and exploded views (decided in ryucad phase 9)
+
+The design is document 417 in the Coxswain planning project `ryucad-ryukei`; this is its plan 9.B (phase 4).
+
+- **Files.** Drawings stay format 1 and gain four view types:
+  - `section`: `from`, `cut`, `flip`, `unsectioned` (instance paths left whole), placed by `offset` or `at`. The `cut` is one of:
+    - `{plane, offset?}`: a plane reference of what the view draws, an origin plane `xy`/`yz`/`zx`, a planar face `{feature, name}` or a datum plane `{feature}`;
+    - `{origin, normal}`;
+    - `{through: [point…]}`, 2 to 32 points, each three lengths or a reference.
+  - `detail`: `from`, `centre` (a point), `radius` (in the model), and an optional `scale`.
+  - `flat`: `of`, `solid`, `notes` (true unless written).
+  - `exploded`: `of`, `explode`, `fraction` (1 unless written), `orient`, `trails`.
+
+  A section's and a detail's `label` is its letter: one or two capitals but I, O and Q, required, and unique in the drawing (`letter_ok`). `drawing.edit`'s `add` gives one left out the next free letter, skipping S, X and Z too (`next_letter`). The merge driver takes `cut`, `centre` and `unsectioned` as one value each. Textconv writes a line per view (`section A from v1, on b/<hex> offset 5 mm`).
+- **The cut.** A full section cuts away what its plane's normal points to, flipped by `flip`. An offset section cuts away what lies left of its first segment, as its parent sees it, flipped by `flip`; a step turning back along the first segment is `invalid_param` with `reason: folds`. The plane is resolved in the model the view reads (`section::named_at`, a label's commit). The view looks along the cut's normal reversed, up its parent's up unless that runs along the normal, else away from its parent's eye.
+- **Placement.** A section that looks along its parent's plane is placed on the parent's row or column by the drawing's projection angle, as a projected view is, and its `offset` is written back. Any other is placed by its `at`. Layout places families with written places first. A new family goes where 9.A's rule puts it, unless that would meet a family already placed; then it takes the first free room down the area from the top left, in 5 mm steps. 9.A's drawings keep their bits.
+- **Cutting** (`drawing::section::cut_all`). Each solid of the source is cut side by side under the request's cancel (`Phase::Project`, unit `sections`), and an `unsectioned` path leaves its solids whole.
+  - A full section goes through `project::section_with`, the plane brought into the body's frame.
+  - An offset section goes through `boolean_with`, subtracting a stepped tool. The tool is the polygon of the points seen along the parent's line of sight, run on past both ends by the solids' diagonal, closed round the side cut away, and extruded that far each way. Its caps are the result's faces named from the tool's.
+  - Cut bodies are kept by body hash, pose and cut, in the session and on disk (`Kind::Section`, folder `sections`, this machine only, `ryucad.section.1`: the caps' names, then `encode_body`).
+  - A kernel refusal fails that view alone (`drawing_view_failed`).
+  - Each distinct view is projected once: a detail reuses its parent's projection, cut source and caps.
+- **Drawing.** Caps facing the view are hatched with lines `ryu_draw::hatch` computes, even-odd over their exact boundaries, in thin lines on DXF's `HATCH` layer: no clip groups, no DXF `HATCH` entity.
+  - Solids alternate 45° and 135°, every other pair at six tenths the spacing.
+  - The spacing is 2.5 mm up to ANSI B and A3, 3.5 mm up to ANSI D and A1, else 5 mm.
+  - An offset section's steps are edge-on: neither hatched nor drawn.
+- **Marks.** A cutting-plane line goes on each section's parent, on whatever sheet the parent is drawn on.
+  - It is stroked as `LineKind::Cutting`. ISO adds thick 5 mm ends and thick lengths at each bend.
+  - Each end has a 6 mm stem, a filled arrowhead along the line of sight, and the letter 5 mm high.
+  - A cut square to the parent's plane draws no line.
+  - A detail's circle and letter go on its parent.
+  - Captions read `SECTION A-A` and `DETAIL B (2:1)` for ASME, `A-A` and `B (2:1)` for ISO.
+- **Details.** A detail keeps its parent's pieces inside its circle through `ryukei::project::inside_circle`, the one kernel function this plan added. An uncertain crossing counts the piece uncertain and names it. Its hatch is kept inside the circle. Its scale is its own, else twice its parent's (the parent's own, else the sheet's), in lowest terms.
+- **Flat and exploded views.**
+  - A flat view comes from `sheet_metal::flat::of` and draws the pattern itself, not a projection: loops thick, bend lines thin phantoms, and their notes (`ryuformats::dxf::note` with `°`).
+  - An exploded view projects the assembly with each occurrence's offset applied after its pose, and draws its trails as thin phantoms.
+- **DXF.** `ryu_draw::dxf::write` writes AutoCAD R2000 on the skeleton of `ryuformats::dxf`.
+  - There is a layer per line kind, with that kind's linetype and lineweight, and `TEXT` in a style naming Inter.
+  - Each segment is its own entity: `LINE`, `ARC`, `CIRCLE`, `ELLIPSE` on principal axes, or `SPLINE` (a Bézier piece of its degree, rational when it is). A filled arrowhead is a `SOLID`, and a colour other than black is ACI 30.
+  - `drawing.export --format dxf [--unit mm|in] [--sheet S]` writes one sheet. `unit` is refused for PDF and SVG.
+- **Testing.**
+  - Unit tests: `ryu-draw`'s hatch and DXF, and `tests/dxf.rs`, which reads through `ryuformats`' test reader. `ryukei`'s `project::clip`. `doc::drawing`'s new kinds and refusals. `drawing`'s full section, offset section and detail. Textconv and merge.
+  - `tests/drawings.rs`: caps against their areas through one hole and two, a flat view against `flat.get`, an exploded assembly, and a cut on a face across an edit.
+  - `tests/cli.rs`'s `drawings_from_the_cli`: a section, a detail and a DXF in inches.
+  - The `drawing_sections` golden section: the showcase cut and detailed, with `get`, PDF, SVG, DXF in mm and in, and PNG, on one thread and four. It runs in 3.2 s in a debug build on bc2 (Intel Core Ultra 5 250K Plus). An offset section in it took 146 s, so it is left out.
+- **Limits.**
+  - A cut square to its parent's plane has no cutting-plane line; draw the section from a view that sees the cut edge-on.
+  - An assembly's section hatches each solid by its order, with no check of neighbours' caps.
+  - Half, broken-out, removed and revolved sections are out of scope (design 417).
+  - ezdxf references, the corpus drawings, the property test, fuzzing and the bars are 9.D's.
