@@ -1094,6 +1094,7 @@ impl Scene {
                 base: Arc::clone(mesh),
                 pose,
                 edges: true,
+                sheet: model.is_sheet(key),
             })
             .collect();
         self.set_looks(&model.looks);
