@@ -31,8 +31,9 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 pub const KIND: &str = "ryupdm.config";
-/// The newest format this build reads: 2 added `approvals`.
-pub const FORMAT: u64 = 2;
+/// The newest format this build reads: 2 added `approvals`, 3
+/// `packages` (design 436).
+pub const FORMAT: u64 = 3;
 
 /// How a part's revisions are labelled. Labels are always derived from the
 /// scheme, never typed.
@@ -337,6 +338,9 @@ pub struct Config {
     /// projects' parts this project places (`dependencies.bump`, format
     /// 2): `None` unless the file says `pr`.
     pub bump: Bump,
+    /// What a release's package holds (`packages.formats`, format 3):
+    /// `None` for the default, [`crate::package::Format::DEFAULT`].
+    pub packages: Option<Vec<crate::package::Format>>,
 }
 
 impl Default for Config {
@@ -348,6 +352,7 @@ impl Default for Config {
             properties: BTreeMap::new(),
             approvals: None,
             bump: Bump::None,
+            packages: None,
         }
     }
 }
@@ -369,7 +374,9 @@ impl Config {
 
     /// The lowest format that holds these settings.
     pub fn format(&self) -> u64 {
-        if self.approvals.is_some() || self.bump != Bump::None {
+        if self.packages.is_some() {
+            3
+        } else if self.approvals.is_some() || self.bump != Bump::None {
             2
         } else {
             1
@@ -400,7 +407,17 @@ impl Config {
         if self.bump != Bump::None {
             v["dependencies"] = json!({"bump": self.bump.as_str()});
         }
+        if let Some(f) = &self.packages {
+            v["packages"] = json!({"formats": f.iter().map(|f| f.as_str()).collect::<Vec<_>>()});
+        }
         v
+    }
+
+    /// The formats a release's package holds.
+    pub fn package_formats(&self) -> Vec<crate::package::Format> {
+        self.packages
+            .clone()
+            .unwrap_or_else(|| crate::package::Format::DEFAULT.to_vec())
     }
 
     pub fn from_json(v: &Value) -> Result<Config> {
@@ -467,6 +484,20 @@ impl Config {
                     .ok_or_else(|| invalid("/dependencies/bump", "bump must be none or pr"))?;
             }
             d.finish()?;
+        }
+        if let Some(p) = o.take_opt("packages") {
+            if declared < 3 {
+                return Err(invalid(
+                    "/packages",
+                    "packages needs format 3: write the file at format 3 (pdm configure does)",
+                ));
+            }
+            let mut po = Obj::new(&p, "/packages")?;
+            c.packages = Some(crate::package::formats_from(
+                &po.take("formats")?,
+                "/packages/formats",
+            )?);
+            po.finish()?;
         }
         o.finish()?;
         Ok(c)
@@ -646,7 +677,7 @@ mod tests {
                 "{v}"
             );
         }
-        let newer = json!({"format": 3, "kind": "ryupdm.config"});
+        let newer = json!({"format": FORMAT + 1, "kind": "ryupdm.config"});
         assert_eq!(
             Config::from_json(&newer).unwrap_err().code,
             Code::FormatTooNew
@@ -720,6 +751,41 @@ mod tests {
         assert!(c.decl("number").unwrap().required);
         assert!(!c.decl("description").unwrap().revising);
         assert_eq!(c.decl("nothing"), None);
+    }
+
+    #[test]
+    fn packages_are_the_default_unless_written_and_need_format_3() {
+        let c = Config::default();
+        assert_eq!(
+            c.package_formats(),
+            crate::package::Format::DEFAULT.to_vec()
+        );
+        let set = Config {
+            packages: Some(vec![
+                crate::package::Format::Dxf,
+                crate::package::Format::Step,
+            ]),
+            ..Config::default()
+        };
+        let v = set.to_json();
+        assert_eq!(
+            (v["format"].clone(), v["packages"].clone()),
+            (json!(3), json!({"formats": ["dxf", "step"]}))
+        );
+        assert_eq!(Config::from_json(&v).unwrap(), set);
+        let mut old = v.clone();
+        old["format"] = json!(2);
+        assert_eq!(
+            Config::from_json(&old).unwrap_err().details["pointer"],
+            json!("/packages")
+        );
+        let mut unknown = v.clone();
+        unknown["packages"]["formats"] = json!(["step", "stl"]);
+        let e = Config::from_json(&unknown).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["pointer"]),
+            (Code::PackagesFormatUnknown, &json!("/packages/formats/1"))
+        );
     }
 
     #[test]
