@@ -108,13 +108,15 @@ fn allowed(choices: &BTreeMap<usize, IdiomChoice>, p: usize, kind: IdiomKind) ->
 }
 
 /// The active pin a passive on net `n` serves: the first active part's
-/// pin, by part key, of more than `region::DENSE` pins where one is on the
-/// net, else of any; and how many it chose among.
+/// pin, by part key (for a pull, `dense`, of more than `region::DENSE`
+/// pins where one is on the net), else of any; and how many it chose
+/// among.
 fn served(
     block: &Block,
     by_net: &BTreeMap<usize, Vec<(usize, usize)>>,
     n: usize,
     not: &[usize],
+    dense: bool,
 ) -> Option<((usize, usize), usize)> {
     let list: Vec<(usize, usize)> = by_net
         .get(&n)?
@@ -122,12 +124,12 @@ fn served(
         .copied()
         .filter(|(p, _)| !not.contains(p) && is_active(block, *p))
         .collect();
-    // The part of more than `region::DENSE` pins among them first: a bank
-    // stands on its rows (plan 2.B).
+    // For a pull, the part of more than `region::DENSE` pins among them
+    // first: a bank stands on its rows (plan 2.B).
     let first = list
         .iter()
         .copied()
-        .find(|(p, _)| block.parts[*p].pins.len() > crate::region::DENSE)
+        .find(|(p, _)| dense && block.parts[*p].pins.len() > crate::region::DENSE)
         .or_else(|| list.first().copied())?;
     Some((first, list.len()))
 }
@@ -375,7 +377,7 @@ pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom>
             });
             parts.extend(cap);
         }
-        let anchor = served(block, &by_net, nets[0], &parts);
+        let anchor = served(block, &by_net, nets[0], &parts, false);
         used.extend(parts.iter().copied());
         out.push(Idiom {
             kind: IdiomKind::Crystal,
@@ -412,7 +414,7 @@ pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom>
                     }
             });
             if let Some(bottom) = bottom
-                && let Some((a, count)) = served(block, &by_net, mid, &[top, bottom])
+                && let Some((a, count)) = served(block, &by_net, mid, &[top, bottom], false)
             {
                 used.extend([top, bottom]);
                 out.push(Idiom {
@@ -555,7 +557,8 @@ pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom>
             if !signal(e[sig_i]) || !allowed(choices, r, kind) {
                 continue;
             }
-            if let Some((a, count)) = served(block, &by_net, e[sig_i].expect("signal"), &[r]) {
+            if let Some((a, count)) = served(block, &by_net, e[sig_i].expect("signal"), &[r], true)
+            {
                 used.insert(r);
                 // A jumper strapping the same pin to the same rail (two
                 // pins, a connector's prefix) stands beside the resistor:
