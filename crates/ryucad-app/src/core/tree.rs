@@ -1204,6 +1204,19 @@ pub fn hex_query(q: &str) -> bool {
     q.len() >= 4 && q.bytes().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Which rows are `of` or under it (every row for `None`), by index:
+/// rows come in order, each after its parent.
+fn subtree(rows: &[Row], of: Option<&str>) -> Vec<bool> {
+    let Some(of) = of else {
+        return vec![true; rows.len()];
+    };
+    let mut inside = vec![false; rows.len()];
+    for (i, r) in rows.iter().enumerate() {
+        inside[i] = r.id == of || r.parent.is_some_and(|p| inside[p]);
+    }
+    inside
+}
+
 /// A row kept by [`Tree::shown`], with where the query is in its text.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Shown {
@@ -1274,6 +1287,42 @@ impl Tree {
 
     pub fn set_open(&mut self, id: &str, open: bool) {
         self.open.insert(id.to_owned(), open);
+    }
+
+    /// Opens every row with rows under it (Expand all, `None`), or `of`
+    /// and every row under it (Expand below, by row id). A part or
+    /// subassembly the window hasn't loaded opens, and so loads, only
+    /// when `load` says the window may load what it opens (a project of
+    /// at most `LOAD_WHOLE` parts): at scale it is left closed, so one
+    /// command never starts thousands of rebuilds (#446). Returns how
+    /// many were left closed. A search or filter shows rows open whatever
+    /// this sets: only the hand-set state underneath changes.
+    pub fn expand(&mut self, rows: &[Row], of: Option<&str>, load: bool) -> usize {
+        let mut left = 0;
+        for (i, inside) in subtree(rows, of).into_iter().enumerate() {
+            let r = &rows[i];
+            if !inside || !r.children {
+                continue;
+            }
+            if r.load.is_some() && !load {
+                left += 1;
+                self.set_open(&r.id, false);
+            } else {
+                self.set_open(&r.id, true);
+            }
+        }
+        left
+    }
+
+    /// Closes every row with rows under it (Collapse all, `None`), or
+    /// `of` and every row under it (Collapse below), so opening one again
+    /// shows its own rows closed.
+    pub fn collapse(&mut self, rows: &[Row], of: Option<&str>) {
+        for (i, inside) in subtree(rows, of).into_iter().enumerate() {
+            if inside && rows[i].children {
+                self.set_open(&rows[i].id, false);
+            }
+        }
     }
 
     /// Whether anything narrows the rows: a query or a filter.
@@ -2399,6 +2448,65 @@ mod tests {
             texts(&rows, &tree),
             ["big (assembly) (2 failed)", "  loading…"]
         );
+        assert_eq!(tree.loads(&rows[0]), Some("big"));
+    }
+
+    #[test]
+    fn expand_and_collapse_all_and_below() {
+        let m = model();
+        let (states, pdm) = (States::default(), BTreeMap::new());
+        let rows = rows(&source(&m, &states, &pdm));
+        let none = |_: &BodyKey, _: &str| false;
+        let mut tree = Tree::default();
+        let shown = |t: &Tree| t.shown(&rows, &none);
+        // Collapse all leaves the top rows alone.
+        tree.collapse(&rows, None);
+        let tops = rows.iter().filter(|r| r.parent.is_none()).count();
+        assert_eq!(shown(&tree).len(), tops);
+        assert!(tops < rows.len());
+        // Expand all shows every row, whatever started closed.
+        assert_eq!(tree.expand(&rows, None, true), 0);
+        assert_eq!(shown(&tree).len(), rows.len());
+        // Collapse below closes a part's rows and nothing else's.
+        // The rows under `of`, not counting itself.
+        let under = |of: &str| {
+            super::subtree(&rows, Some(of))
+                .iter()
+                .filter(|x| **x)
+                .count()
+                - 1
+        };
+        let below = under("part:bracket");
+        assert!(below > 0);
+        tree.collapse(&rows, Some("part:bracket"));
+        assert_eq!(shown(&tree).len(), rows.len() - below);
+        // And its own rows stay closed when it opens again by hand...
+        tree.set_open("part:bracket", true);
+        assert!(shown(&tree).len() < rows.len());
+        // ...until Expand below opens all of them.
+        tree.expand(&rows, Some("part:bracket"), true);
+        assert_eq!(shown(&tree).len(), rows.len());
+        // A search still shows rows open past the hand-set state.
+        tree.collapse(&rows, None);
+        tree.query = "base".into();
+        assert!(shown(&tree).len() > tops);
+    }
+
+    #[test]
+    fn expand_all_at_scale_leaves_unloaded_parts_closed() {
+        let mut m = Model::default();
+        m.listed.insert(
+            "big".into(),
+            crate::core::model::Listed::from_json(&json!({"part": "big", "kind": "assembly"})),
+        );
+        let (states, pdm) = (States::default(), BTreeMap::new());
+        let rows = rows(&source(&m, &states, &pdm));
+        let mut tree = Tree::default();
+        // At scale it opens nothing it would have to load, and says so.
+        assert_eq!(tree.expand(&rows, None, false), 1);
+        assert_eq!(tree.loads(&rows[0]), None);
+        // In a small project it opens it, which loads it.
+        assert_eq!(tree.expand(&rows, None, true), 0);
         assert_eq!(tree.loads(&rows[0]), Some("big"));
     }
 }

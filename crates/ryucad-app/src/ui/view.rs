@@ -131,6 +131,9 @@ pub struct View {
     pub tree_menu: Option<String>,
     /// `tree_menu` was just set: its row opens the menu when next drawn.
     pub tree_menu_opening: bool,
+    /// What the last Expand all or Expand below left closed, said under
+    /// the tree's filters until the tree is next opened or closed.
+    pub tree_note: Option<String>,
 }
 
 /// How long the pointer rests on an entity before its tooltip shows,
@@ -326,6 +329,7 @@ impl View {
             tree_focus: None,
             tree_menu: None,
             tree_menu_opening: false,
+            tree_note: None,
         }
     }
 
@@ -516,12 +520,16 @@ impl View {
     }
 
     /// Starts turning the camera to `to` over [`crate::core::nav::TURN_SECONDS`]:
-    /// following stops, and the session hears of each step (see `show`).
+    /// following stops, and the session hears of each step (see `show`), or
+    /// of where it landed when motion is reduced.
     pub fn turn(&mut self, ws: &mut Workspace, to: Camera) {
         self.framed = true;
         ws.following = None;
-        // From the next step, wherever it was asked for.
-        self.nav.turn_to(to, f64::NAN);
+        // From the next step, wherever it was asked for; with motion
+        // reduced it is there now, and no step follows to share it (#603).
+        if self.nav.turn_to(to, f64::NAN) {
+            ws.share_camera(&self.nav.camera);
+        }
     }
 
     /// The navigation cube where this viewport draws it.
@@ -1409,8 +1417,7 @@ impl View {
             && self.nav.turn.as_ref().is_none_or(|t| t.to != *c)
         {
             // Eased there, as a turn to a view is.
-            self.nav.turn_to(c.clone(), self.now);
-            if !self.nav.moving() {
+            if self.nav.turn_to(c.clone(), self.now) {
                 ws.share_camera(&self.nav.camera);
             }
             ui.ctx().request_repaint();
