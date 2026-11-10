@@ -10,13 +10,20 @@ fn pt(p: ryukei::geom::Point2) -> P {
     [p.x, p.y]
 }
 
+/// A stretch of an image curve that can't be drawn exactly: a NURBS the
+/// kernel can't cut to it, or a curve and map no case here takes. The view
+/// counts it and reports it (`drawing_view_uncertain`), never leaves it
+/// out unsaid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Uncut;
+
 /// The image of `c` in the view's frame (model metres), from the 3D
-/// curve's start of the stretch to its end; `None` for an end-on edge,
-/// whose image is a point, and for a NURBS stretch the kernel can't cut.
-pub fn path(c: &ImageCurve) -> Option<Path> {
+/// curve's start of the stretch to its end; `Ok(None)` for an end-on edge,
+/// whose image is a point, and `Err(Uncut)` for a stretch it can't draw.
+pub fn path(c: &ImageCurve) -> Result<Option<Path>, Uncut> {
     let [t0, t1] = c.range;
     let (curve, map) = match &c.image {
-        Image::Point(_) => return None,
+        Image::Point(_) => return Ok(None),
         Image::Curve { curve, map } => (curve, map),
     };
     let start = pt(c.point(t0));
@@ -54,17 +61,17 @@ pub fn path(c: &ImageCurve) -> Option<Path> {
         (Curve2::Nurbs2(n), ImageMap::Affine(_)) => {
             let [s0, s1] = [map.apply(t0), map.apply(t1)];
             let forward = s0 <= s1;
-            let part = n.part([s0.min(s1), s0.max(s1)]).ok()?;
+            let part = n.part([s0.min(s1), s0.max(s1)]).map_err(|_| Uncut)?;
             let part = if forward { part } else { part.reversed() };
-            bezier_pieces(&part)?
+            bezier_pieces(&part).ok_or(Uncut)?
         }
-        _ => return None,
+        _ => return Err(Uncut),
     };
-    Some(Path {
+    Ok(Some(Path {
         start,
         segments,
         closed: false,
-    })
+    }))
 }
 
 /// A clamped NURBS's Bézier pieces, in order: each interior knot raised
@@ -124,7 +131,7 @@ mod tests {
             },
             range: [0.0, 1.5],
         };
-        let p = path(&c).unwrap();
+        let p = path(&c).unwrap().unwrap();
         assert!(near(ends(&p).0, [1.0, 2.0]) && near(ends(&p).1, [4.0, 2.0]));
         // A clockwise circle's quarter: an arc turning negatively.
         let f = Frame2::new(Point2::new(0.0, 0.0), Vector2::new(0.0, 1.0), false).unwrap();
@@ -136,7 +143,7 @@ mod tests {
             },
             range: [0.0, core::f64::consts::FRAC_PI_2],
         };
-        let p = path(&c).unwrap();
+        let p = path(&c).unwrap().unwrap();
         let (a, b) = ends(&p);
         assert!(near(a, [0.0, 2.0]) && near(b, [2.0, 0.0]), "{a:?} {b:?}");
         match &p.segments[0] {
@@ -164,7 +171,7 @@ mod tests {
             },
             range: [0.25, 1.0],
         };
-        let p = path(&c).unwrap();
+        let p = path(&c).unwrap().unwrap();
         assert_eq!(p.segments.len(), 2);
         let q = n.point(0.25);
         assert!(near(p.start, [q.x, q.y]));
@@ -174,6 +181,26 @@ mod tests {
             image: Image::Point(Point2::new(0.0, 0.0)),
             range: [0.0, 1.0],
         };
-        assert!(path(&c).is_none());
+        assert_eq!(path(&c), Ok(None));
+    }
+
+    #[test]
+    fn a_spline_stretch_that_cant_be_cut_is_uncut_not_nothing() {
+        let knots = ryukei::geom::KnotVector::clamped(1, &[0.0, 1.0], &[2, 2]).unwrap();
+        let n = NurbsCurve2::new(
+            knots,
+            vec![Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)],
+            None,
+        )
+        .unwrap();
+        // A stretch past the clamped domain: the kernel refuses to cut it.
+        let c = ImageCurve {
+            image: Image::Curve {
+                curve: Curve2::Nurbs2(std::sync::Arc::new(n)),
+                map: ImageMap::Affine([0.0, 1.0]),
+            },
+            range: [0.5, 1.5],
+        };
+        assert_eq!(path(&c), Err(Uncut));
     }
 }

@@ -53,10 +53,22 @@ fn named(body: &ryukei::topo::Body, name: &str) -> Option<Entity> {
 /// The bodies `reference` reaches in the session's current rebuild; its
 /// faults are [`EntityRef::resolve`]'s (`not_found` with how far it got).
 pub fn locate(session: &mut Session, reference: &str) -> Result<Vec<Located>> {
+    locate_at(session, reference, &crate::doc::assembly::Rev::Working)
+}
+
+/// [`locate`] in the model `rev` gives (a drawing's view pinned at a
+/// label reads its faces there).
+pub fn locate_at(
+    session: &mut Session,
+    reference: &str,
+    rev: &crate::doc::assembly::Rev,
+) -> Result<Vec<Located>> {
     let r = EntityRef::parse(reference)?;
     let assembly = crate::server::part_kind(session.project().part(&r.part)?) == PartKind::Assembly;
     let whole_solid = !assembly && (r.is_occurrence() || !r.path.is_empty());
-    if !whole_solid {
+    // Resolving judges the working files; at another revision the model's
+    // own names decide (a sketch entity there reaches no solid).
+    if !whole_solid && *rev == crate::doc::assembly::Rev::Working {
         match r.resolve(session)? {
             Target::Sketch(_) => {
                 return Err(Error::new(
@@ -69,7 +81,7 @@ pub fn locate(session: &mut Session, reference: &str) -> Result<Vec<Located>> {
         }
     }
     let r = if assembly { r.in_assembly() } else { r };
-    let model = session.model(&r.part, &crate::doc::assembly::Rev::Working)?;
+    let model = session.model(&r.part, rev)?;
     let mut out = Vec::new();
     for o in &model.occurrences {
         let take = match (assembly, r.is_occurrence()) {

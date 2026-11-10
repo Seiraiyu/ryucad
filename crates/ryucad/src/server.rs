@@ -6055,6 +6055,15 @@ pub(crate) fn normal_to_face(
     session: &mut Session,
     reference: &str,
 ) -> Result<([f64; 3], [f64; 3])> {
+    normal_to_face_at(session, reference, &crate::doc::assembly::Rev::Working)
+}
+
+/// [`normal_to_face`] with the face read in the model `rev` gives.
+pub(crate) fn normal_to_face_at(
+    session: &mut Session,
+    reference: &str,
+    rev: &crate::doc::assembly::Rev,
+) -> Result<([f64; 3], [f64; 3])> {
     use ryukei::geom::{Curve, Surface};
     use ryukei::measure::Entity;
     // A datum plane: along its normal, its x level; a datum axis: along it.
@@ -6073,7 +6082,7 @@ pub(crate) fn normal_to_face(
             .with("entity", reference)),
         };
     }
-    let located = crate::measure::locate(session, reference)?;
+    let located = crate::measure::locate_at(session, reference, rev)?;
     let not_a_face = || {
         Error::new(
             Code::InvalidParam,

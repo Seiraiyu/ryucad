@@ -428,7 +428,7 @@ fn key_of(src: &Source, frame: &Frame) -> String {
 }
 
 /// The direction `towards` and `up` a base view looks with.
-fn orient(session: &mut Session, part: &Id, of: &Id, o: &Orient) -> Result<([f64; 3], [f64; 3])> {
+fn orient(session: &mut Session, of: &Id, rev: &Rev, o: &Orient) -> Result<([f64; 3], [f64; 3])> {
     match o {
         Orient::Named(n) => {
             if let Ok(v) = crate::view::StandardView::parse(n) {
@@ -453,9 +453,12 @@ fn orient(session: &mut Session, part: &Id, of: &Id, o: &Orient) -> Result<([f64
                 ),
             }
         }
-        Orient::NormalTo(r) => {
-            crate::server::normal_to_face(session, &format!("{}/{}/{}", part, r.feature, r.name))
-        }
+        // A face of the view's own part, at the revision it is drawn at.
+        Orient::NormalTo(r) => crate::server::normal_to_face_at(
+            session,
+            &format!("{}/{}/{}", of, r.feature, r.name),
+            rev,
+        ),
     }
 }
 
@@ -504,7 +507,7 @@ fn plans(
                         sources.insert(key.clone(), s);
                     }
                     let anchor = middle(&sources[&key]);
-                    let (t, u) = orient(session, part, &of, o)?;
+                    let (t, u) = orient(session, &of, &rev, o)?;
                     (of, rev, Frame::new(t, u)?, anchor, Place::At(at(w)), "base")
                 }
                 (ViewKind::Projected { side, offset, .. }, Some(i)) => {
@@ -543,7 +546,7 @@ fn plans(
                 ) => {
                     let p = &out[i].0;
                     let text = format!("{}/{}/{}", p.of, normal_to.feature, normal_to.name);
-                    let (n, _) = crate::server::normal_to_face(session, &text)?;
+                    let (n, _) = crate::server::normal_to_face_at(session, &text, &p.rev)?;
                     // Along the normal's image in the parent: it must lie
                     // in the parent's plane, or the view is foreshortened.
                     let img = p.frame.image(n);
@@ -671,8 +674,25 @@ fn drawn(p: &Projection, plan: &Plan, src: &Source) -> Drawn {
         let Some((kind, unsure)) = line_of(piece, plan) else {
             continue;
         };
-        let Some(path) = curves::path(&piece.image) else {
-            continue;
+        let source = || {
+            let (body, what, name) = match piece.source {
+                ryukei::project::Source::Edge { body, name, .. } => (body, "edge", name),
+                ryukei::project::Source::Silhouette {
+                    body, face_name, ..
+                } => (body, "face", face_name),
+            };
+            let solid = src.get(body as usize).map_or("", |(_, _, r)| r.as_str());
+            format!("{what} {solid}/{name}")
+        };
+        let path = match curves::path(&piece.image) {
+            Ok(Some(path)) => path,
+            Ok(None) => continue,
+            // Not drawn, but never silently: counted uncertain and named.
+            Err(curves::Uncut) => {
+                counts[2] += 1;
+                uncertain.push(format!("{} (not drawn: its image can't be cut)", source()));
+                continue;
+            }
         };
         let path = path.moved([-c[0], -c[1]]);
         let [a, b] = path.bounds();
@@ -684,14 +704,7 @@ fn drawn(p: &Projection, plan: &Plan, src: &Source) -> Drawn {
             _ => 0,
         }] += 1;
         if unsure {
-            let (body, what, name) = match piece.source {
-                ryukei::project::Source::Edge { body, name, .. } => (body, "edge", name),
-                ryukei::project::Source::Silhouette {
-                    body, face_name, ..
-                } => (body, "face", face_name),
-            };
-            let solid = src.get(body as usize).map_or("", |(_, _, r)| r.as_str());
-            uncertain.push(format!("{what} {solid}/{name}"));
+            uncertain.push(source());
         }
         // One source's next piece, drawn alike, from where the last ended:
         // the same path.
@@ -1115,8 +1128,10 @@ fn layout(
                 };
                 let base = rel[pj].unwrap_or([0.0, 0.0]);
                 let d = offset.unwrap_or_else(|| {
-                    // Just clear of the parent, both grown by their room.
-                    let (a, b) = (grown(pj), grown(j));
+                    // Just clear of the parent, both grown by their room,
+                    // then past every view of the family already placed
+                    // that it would meet there (a back view goes past the
+                    // right view on its row).
                     let reach = |bx: [P; 2], s: f64| {
                         let along = |q: P| q[0] * dir[0] + q[1] * dir[1];
                         let c = [bx[0], [bx[1][0], bx[0][1]], bx[1], [bx[0][0], bx[1][1]]];
@@ -1124,7 +1139,30 @@ fn layout(
                             .map(|q| s * along(*q))
                             .fold(f64::NEG_INFINITY, f64::max)
                     };
-                    reach(a, 1.0) + reach(b, -1.0)
+                    let shift = |bx: [P; 2], r: P| {
+                        [
+                            [bx[0][0] + r[0], bx[0][1] + r[1]],
+                            [bx[1][0] + r[0], bx[1][1] + r[1]],
+                        ]
+                    };
+                    let b = grown(j);
+                    let mut d = reach(grown(pj), 1.0) + reach(b, -1.0);
+                    loop {
+                        let here = shift(b, [base[0] + d * dir[0], base[1] + d * dir[1]]);
+                        let past = (0..on.len())
+                            .filter(|m| *m != j && root[*m] == root[j])
+                            .filter_map(|m| rel[m].map(|r| shift(grown(m), r)))
+                            .filter(|o| overlap(here, *o))
+                            .map(|o| {
+                                let o = shift(o, [-base[0], -base[1]]);
+                                reach(o, 1.0) + reach(b, -1.0)
+                            })
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        if past <= d {
+                            break d;
+                        }
+                        d = past;
+                    }
                 });
                 rel[j] = Some([base[0] + d * dir[0], base[1] + d * dir[1]]);
             }
@@ -1174,7 +1212,6 @@ fn layout(
             at[m] = Some(([origin[0] + r[0], origin[1] + r[1]], !written));
         }
     }
-    let _ = lo[1];
     at.into_iter()
         .map(|a| a.unwrap_or(([0.0, 0.0], true)))
         .collect()
@@ -1543,7 +1580,12 @@ pub(crate) mod tests {
     /// The name of `part`'s solid `b`'s planar face whose outward normal
     /// is `n`.
     fn face_along(s: &mut Session, n: [f64; 3]) -> String {
-        let v = call(s, "inspect", json!({"part": "p"})).unwrap();
+        face_along_in(s, "p", n)
+    }
+
+    /// [`face_along`] of `part`'s one solid.
+    fn face_along_in(s: &mut Session, part: &str, n: [f64; 3]) -> String {
+        let v = call(s, "inspect", json!({"part": part})).unwrap();
         for f in v["bodies"][0]["faces"].as_array().unwrap() {
             let z = &f["surface"]["frame"]["z"];
             let k = if f["reversed"] == true { -1.0 } else { 1.0 };
@@ -1555,6 +1597,93 @@ pub(crate) mod tests {
             }
         }
         panic!("no face along {n:?}");
+    }
+
+    #[test]
+    fn a_back_view_goes_past_the_right_view_and_no_two_views_overlap() {
+        let views = json!({
+            "v1": {"type": "base", "sheet": "s1", "orient": "front"},
+            "v2": {"type": "projected", "sheet": "s1", "from": "v1", "side": "top"},
+            "v3": {"type": "projected", "sheet": "s1", "from": "v1", "side": "right"},
+            "v5": {"type": "projected", "sheet": "s1", "from": "v1", "side": "back"}
+        });
+        let (_d, mut s) = drawn(60.0, 40.0, 20.0, views);
+        let apart = |views: &[ViewBuilt]| {
+            for (i, a) in views.iter().enumerate() {
+                for b in &views[i + 1..] {
+                    assert!(
+                        !overlap(a.bounds, b.bounds),
+                        "{} {:?} meets {} {:?}",
+                        a.key,
+                        a.bounds,
+                        b.key,
+                        b.bounds
+                    );
+                }
+            }
+        };
+        let b = build(&mut s, &id("p"), &id("d")).unwrap();
+        let sheet = &b.sheets[0];
+        apart(&sheet.views);
+        let at = |k: &str| {
+            sheet
+                .views
+                .iter()
+                .find(|v| v.key.to_string() == k)
+                .unwrap()
+                .at
+        };
+        // Third angle: the back view on the front's row, past the right.
+        assert_eq!(at("v5")[1], at("v1")[1]);
+        assert!(at("v5")[0] > at("v3")[0]);
+        // `drawing layout` lays them out alike, at a scale that fits.
+        let v = call(
+            &mut s,
+            "drawing.layout",
+            json!({"part": "p", "drawing": "d", "dry_run": true}),
+        )
+        .unwrap();
+        let sh = &v["sheets"][0];
+        assert_ne!(sh["scale"], "1:1000", "{sh}");
+        let boxes: Vec<[P; 2]> = sh["views"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| serde_json::from_value(w["box_mm"].clone()).unwrap())
+            .collect();
+        for (i, a) in boxes.iter().enumerate() {
+            for c in &boxes[i + 1..] {
+                assert!(!overlap(*a, *c), "{a:?} meets {c:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_base_view_of_another_part_looks_normal_to_that_parts_face() {
+        let (_d, mut s) = drawn(
+            40.0,
+            20.0,
+            10.0,
+            json!({"v1": {"type": "base", "sheet": "s1", "orient": "front"}}),
+        );
+        call(&mut s, "part.create", json!({"part": "q"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "q", "type": "box", "id": "qb", "params": {"x": 30, "y": 20, "z": 10}}),
+        )
+        .unwrap();
+        let right = face_along_in(&mut s, "q", [1.0, 0.0, 0.0]);
+        let file = json!({"format": 1, "kind": "ryucad.drawing", "name": "Other",
+            "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b"}},
+            "views": {"v1": {"type": "base", "sheet": "s1", "of": "q",
+                "orient": {"normal_to": {"feature": "qb", "name": right}}}}});
+        crate::doc::project::write_json(&s.root().join("parts/p/drawings/d.json"), &file).unwrap();
+        s.reload().unwrap();
+        let b = build(&mut s, &id("p"), &id("d")).unwrap();
+        let v = &b.sheets[0].views[0];
+        assert!(v.error.is_none(), "{:?}", v.error);
+        assert!((v.towards[0] - 1.0).abs() < 1e-12, "{:?}", v.towards);
     }
 
     #[test]
