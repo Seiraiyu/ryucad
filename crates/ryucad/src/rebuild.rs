@@ -1548,16 +1548,18 @@ fn apply(
     // A tool counts if any of it is left, or any of the target went: a
     // join inside the target, a cut or an intersect that misses nothing,
     // changes nothing. A sheet trimmed keeps its face's name, the face
-    // `Modified`, and none of the tool is left.
+    // `Modified`, and none of the tool is left: for a sheet a modified
+    // face counts too. (Not for a solid, where a tool that misses beside
+    // others that drill one face would be hidden by them.)
+    let sheet = target.body.kind() == ryukei::topo::BodyKind::Sheet;
     let target_faces: BTreeSet<Name> = target
         .body
         .faces()
         .map(|f| target.body.face(f).expect("live").name)
         .collect();
     let changed = journal.events().iter().any(|e| match e {
-        Event::Deleted(n) | Event::Modified(n) | Event::Split { parent: n, .. } => {
-            target_faces.contains(n)
-        }
+        Event::Deleted(n) | Event::Split { parent: n, .. } => target_faces.contains(n),
+        Event::Modified(n) => sheet && target_faces.contains(n),
         _ => false,
     });
     for x in tools {
