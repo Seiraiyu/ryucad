@@ -141,6 +141,64 @@ pub(crate) fn bend(body: &Body, edge: EdgeId) -> Result<Bend, BendFail> {
     Ok(if convex { Bend::Convex } else { Bend::Concave })
 }
 
+/// Whether `body`'s edge has its faces tangent all along it, within
+/// `slack` radians: the normals' cross product, enclosed over pieces of
+/// the edge (halved up to [`MAX_DEPTH`] times, [`MAX_PIECES`] pieces at
+/// most), certified no longer than `sin slack` with the normals pointing
+/// one way. `Some(false)` where a sample is certainly farther apart;
+/// `None` where rounding leaves it open, which a caller reads as not
+/// tangent. Its two fins must have pcurves.
+pub(crate) fn tangent_along(body: &Body, edge: EdgeId, slack: f64) -> Option<bool> {
+    let e = &body.edges[edge];
+    let fins: Vec<FinId> = body.edge_fins(edge).collect();
+    if fins.len() != 2 || fins.iter().any(|&f| body.fins[f].pcurve.is_none()) {
+        return None;
+    }
+    let sides = [Side::of(body, fins[0]), Side::of(body, fins[1])];
+    let curve = &body.curves[e.curve];
+    let [t0, t1] = e.interval;
+    for i in 0..SAMPLES {
+        let t = t0 + (t1 - t0) * i as f64 / (SAMPLES - 1) as f64;
+        if !within(sides[0].normal(t), sides[1].normal(t), slack) {
+            return Some(false);
+        }
+    }
+    let sin = crate::math::sin_cos(slack).0;
+    let mut stack: Vec<([f64; 2], u32)> = (0..PIECES)
+        .rev()
+        .map(|i| {
+            let at = |k: usize| t0 + (t1 - t0) * k as f64 / PIECES as f64;
+            ([at(i), if i + 1 == PIECES { t1 } else { at(i + 1) }], 0)
+        })
+        .collect();
+    let mut budget = MAX_PIECES;
+    while let Some((r, depth)) = stack.pop() {
+        let jets = curve.jet_box(r);
+        let n = [
+            sides[0].normal_box(r, jets[0]),
+            sides[1].normal_box(r, jets[0]),
+        ];
+        let held = match n {
+            [Some(a), Some(b)] => {
+                let c = cross(a, b);
+                dot(c, c).hi() <= sin * sin && dot(a, b).lo() > 0.0
+            }
+            _ => false,
+        };
+        if held {
+            continue;
+        }
+        if depth >= MAX_DEPTH || budget <= 1 {
+            return None;
+        }
+        budget -= 1;
+        let m = (r[0] + r[1]) / 2.0;
+        stack.push(([m, r[1]], depth + 1));
+        stack.push(([r[0], m], depth + 1));
+    }
+    Some(true)
+}
+
 /// Whether two unit normals are within [`ANGULAR_RESOLUTION`] of each
 /// other.
 fn tangent_normals(a: Vector3, b: Vector3) -> bool {
