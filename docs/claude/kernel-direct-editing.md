@@ -42,3 +42,84 @@ The design is document 399 in the Coxswain planning project `ryucad-ryukei`; thi
 - **Work.** Recognition charges a unit a face and its curve searches; deleting and making again charge as growth, blends and booleans do.
 - **Testing.** Unit tests in `tweak::blends::tests`; `tests/blend_recognition.rs` (a rounded box's 12 fillets and 8 corners, a chamfered box's 12 mitred chamfers, a boss's concave foot, a hole's two-distance rim, spline forms, near-blends and plain bodies left out, refusals, one thread and eight); `tests/blend_edits.rs` (against exact volumes: blends under a size deleted, a named blend deleted, a fillet, a chamfer and a whole rounded box resized with every name kept, a top raised and a side offset past their fillet rebuilt, a hole moved into a fillet's strip, a tweak naming a blend face left alone); `tests/work.rs`' `recognising_and_editing_blends_is_bounded`. No golden moved; the `blend_recognition` golden section, the property test, the corpus and fuzzing are 13.D's.
 - **Limits.** A hole moved into a fillet's strip is cut back through the remade fillet by a boolean that comes out `Uncertain` at some positions (a 0.05 hole in a 0.1 fillet's strip at 0.1 and 0.13 from the edge, but not at 0.07), naming one face twice: a boolean limit (#626). Resizing one edge of a rounded box with ball corners makes rolled corners the blend refuses (`BlendLost`, `Uncertain`). A hole moved through the support's side as well is the re-trim's own refusal. Ruled-spline chamfers aren't blends here.
+
+## Hardening and references (decided in ryukei phase 13)
+
+The design is document 399 in the Coxswain planning project `ryucad-ryukei`; this is its plan 13.D (phase 5).
+
+- **Cases from bytes.** `ryukei_testkit::edit_bytes` makes direct edits from bytes:
+  - a body as `tweak_bytes` makes it;
+  - faces or a feature deleted (`Heal::Auto`, `Cap` or `Grow`);
+  - a tweak with `Topology::Change`, half the time with `Blends::Rebuild`;
+  - blends deleted (those under a fraction of the body's size, or one by face);
+  - one blend resized: to its own size, half or one and a half.
+
+  Blend edits take blended bodies. `run` recognises blends and finds features under the case's `Work`.
+- **Property test.** `tests/edit_props.rs` (release only, its own full.yml step) runs 128 seeds. Every result must:
+  - check clean;
+  - mesh;
+  - hold mass's bound;
+  - account in its journal for every face;
+  - give the same bits on one thread and eight.
+
+  A resize to its own size must give back every name, and every refusal must be typed. On cox-worker-4 (AMD Opteron 6380, release, load 5 to 7), 2026-11-10:
+  - 39 built, 38 refused, and seed 76 past the 120 s deadline, in about 317 s;
+  - by kind:
+
+    | Kind | Built | Refused |
+    |---|---|---|
+    | delete | 4 | 9 |
+    | delete feature | 0 | 6 |
+    | delete blends | 9 | 9 |
+    | resize | 9 | 5 |
+    | move | 5 | 1 |
+    | offset | 6 | 2 |
+    | replace | 5 | 3 |
+    | draft | 1 | 3 |
+
+  `KNOWN_SLOW` is seed 76 (#659). Seeded blends are recognised back: 55 judged and 5 ruled chamfers counted, in 66 s. Not read back:
+  - 32 and 92, by design (`CHAMFER_SHARE`);
+  - 39, 100 and 102 (#660).
+- **The fixes found.**
+  - **A capped rim's chamfer** (`recognise::chamfer`): a support every edge of which the chamfer bounds (a disc capping a rim) has share 0. Its width had been read from its one vertex, which lies on the rail, so the chamfer was never read. No golden moved.
+  - **A cancel that didn't land:**
+    - What was unmetered: the local re-trim's ladder and its working sheets, whose sides were fitted on a free meter.
+    - What changed: the re-trim polls before each rung and working face, and fits its working sheets' sides on its own meter (`sheet::from_surface_in`; `from_surface` is unchanged).
+    - What it cured: NIST FTC 10's blends, cancelled at 20 s, answered after 1,037 s while planning. The `edit` fuzz target's first find, cancelled at 30 s, answered at 40 to 43 s on cox-worker-4 (release, one rayon thread), and under instrumentation ran past libFuzzer's 600 s. Both now answer at the cancel.
+    - Its tests: `fuzz_regressions.rs`' `a_cancel_stops_an_edits_working_sheets` and ryustep's `a_cancel_stops_deleting_ftc_10s_blends`.
+    - No golden or work unit moved in the existing suites.
+- **Fuzzing.** The `edit` target is in fuzz.yml (6 GiB, a 600 s timeout). On cox-worker-4 (load 8 to 27, other sessions):
+  - before the cancel fix: a three-minute smoke made 787 runs with no find, and the first hour stopped at 43 minutes on the timeout above;
+  - after it: 2,097 runs over the hour, a corpus of 824, peak RSS 2,951 MB, and no crash, timeout or running out of memory. The old timeout's input became a slow unit, cancelled at the deadline.
+
+  Uncancelled, that input still refuses `Uncertain` after about 200 s in release (#647).
+- **Goldens.** `retrim`, `delete_faces` and `blend_recognition` are new; every other section is unmoved.
+- **The committed corpus** (ryustep's `tests/defeature.rs`, release only; cox-worker-4, load 9 to 18, 440 s): 0 defeatured, 8 refused, 3 past the 120 s deadline, 16 with no blend under 2 mm. The refusals:
+  - CTC 01, 03 and 05 `Uncertain` (#650);
+  - FTC 06 and 09 `HealAmbiguous` (#651);
+  - FTC 07 and 10 past the deadline (#652);
+  - FTC 08 `Uncertain` (#653);
+  - CTC 04 past the deadline (#654).
+
+  A rounded box written to STEP in millimetres and healed back is defeatured to the box.
+- **The pinned corpus** (`ryukei-bench`'s `pinned_bodies_defeature`, by hand in the devcontainer; cox-worker-4, load 5 to 11): `pinned corpus: 0 defeatured, 19 refused, 9 past the deadline, 5 with no blend under 2 mm, in 1360.4 s`. The refusals are the committed corpus's kinds in other editions (comments on #650 to #654), and six fitting none of them (#658):
+  - FTC 06's and STC 06's AP242 editions `Uncertain`;
+  - FTC 11's and STC 09's `HealAmbiguous`;
+  - STC 10 `Uncertain`;
+  - OCCT's `linkrods.step` past the deadline.
+
+  Two departures from the plan's test:
+  - Each delete is cancelled at 120 s, as `defeature.rs`'s are. Uncancelled, FTC 07, FTC 10 and STC 07 took 17 to 24 minutes each to refuse `ExtensionUnsupported`.
+  - Only blends under 2 mm count. Bodies whose blends were all larger had been counted as defeatured.
+
+  One narrowing of "checks clean": a `CannotCheck` pair the body already had before the delete, by its faces' names, may stay. That uncertainty is the import's (CTC 02's AP242 edition, #264). A crossing, an overlap, or a pair that could be checked before still fails.
+- **References.** `ryukei-bench`'s `defeaturing` test (devcontainer, `--features occt`) runs `BRepAlgoAPI_Defeaturing` through the shim (`Solid::defeature`, on one thread, without history). Five cases are held to their closed forms: a through hole, a boss, an edge's fillet, its chamfer and a rounded box's every blend. ryukei and OCCT agree on each; OCCT's volumes and times are printed.
+- **The bar.** OCCT ran past an hour on the 1,000-hole plate, so it is timed on 100 holes, a lower bound for 1,000; that is a departure from design 399's like-for-like race. Three runs on cox-worker-4 (AMD Opteron 6380, devcontainer, OCCT 7.8.1, release, one test thread, `RYUKEI_BARS=1`), 2026-11-10:
+
+  | Run | Load | ryukei, 1,000 holes, one thread | OCCT, 100 holes | Ratio |
+  |---|---|---|---|---|
+  | 1 | 9.0 → 6.9 | 0.226 s | 73.2 s | 0.0031 |
+  | 2 | 6.9 → 6.4 | 0.218 s | 67.0 s | 0.0033 |
+  | 3 | 6.4 → 9.2 | 0.224 s | 68.9 s | 0.0033 |
+
+  OCCT's volume agrees in every run.
