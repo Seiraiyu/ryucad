@@ -12,7 +12,7 @@ diff 6e4d4e0ad7ff6060
 display 575d87fadbd3cdc4
 draft_reports 86d7a57e0c81c9ca
 drafts 40c270a0531dbacb
-drawing_annotations f010c83dc1473b66
+drawing_annotations 7828eb7931584de4
 drawing_sections 84166c6429153241
 drawings c694bdec3da5bd37
 explodes 24f373106cb30113
