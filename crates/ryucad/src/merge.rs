@@ -1482,7 +1482,7 @@ mod tests {
     fn annotations_are_driven_and_their_format_known() {
         assert!(driven("annotations/aaaaaaaaaa.json"));
         assert!(!driven("annotations/notes.txt"));
-        assert_eq!(newest("ryucad.annotation"), Some(1));
+        assert_eq!(newest("ryucad.annotation"), Some(2));
     }
 
     #[test]
