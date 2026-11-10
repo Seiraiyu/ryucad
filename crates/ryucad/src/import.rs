@@ -1818,6 +1818,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_products_lone_surface_model_imports_as_a_sheet_both_ways() {
+        // Issue #442: a product whose shape is a manifold surface
+        // representation of one open shell, a planar face bounded by a
+        // circle (a board outline or a marking beside an MCAD export's
+        // solids). Written by us in that shape; it was `open_shell`.
+        let file = format!(
+            "{}/tests/data/surface_disc.step",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let call = crate::server::tests::call;
+        for (part, solid) in [("r", false), ("s", true)] {
+            let (_dir, mut s) = crate::server::tests::fresh();
+            let v = call(
+                &mut s,
+                "import",
+                json!({"path": file, "part": part, "solid": solid}),
+            )
+            .unwrap();
+            let f = &v["parts"][0]["features"][0];
+            assert_eq!(f["ok"], true, "{v}");
+            let r = call(&mut s, "rebuild", json!({"part": part})).unwrap();
+            let x = &r["parts"][0]["solids"][0];
+            assert_eq!(x["kind"], "sheet", "{r}");
+            assert_eq!(x["closed"], false, "{r}");
+            assert_eq!(x["boundaries"], 1, "{r}");
+        }
+    }
+
+    #[test]
     fn imports_are_references_unless_asked_for_solids() {
         let (dir, mut s) = crate::server::tests::fresh();
         let file = occt_path("box_ap214.stp");
