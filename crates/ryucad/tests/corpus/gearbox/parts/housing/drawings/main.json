@@ -1,0 +1,84 @@
+{
+  "annotations": {
+    "d1": {
+      "at": [
+        "-61.116 mm",
+        "-37.116 mm"
+      ],
+      "of": "shell/96715f5644b71b744683b045c1c24457",
+      "type": "hole_callout",
+      "view": "v2"
+    }
+  },
+  "format": 1,
+  "kind": "ryucad.drawing",
+  "name": "Housing",
+  "sheets": {
+    "s1": {
+      "name": "Sheet 1",
+      "scale": "1:2",
+      "size": "ansi_c"
+    }
+  },
+  "views": {
+    "v1": {
+      "at": [
+        "80.7 mm",
+        "214.1 mm"
+      ],
+      "orient": "front",
+      "sheet": "s1",
+      "type": "base"
+    },
+    "v2": {
+      "from": "v1",
+      "offset": "81.5 mm",
+      "sheet": "s1",
+      "side": "top",
+      "type": "projected"
+    },
+    "v3": {
+      "from": "v1",
+      "offset": "107.5 mm",
+      "sheet": "s1",
+      "side": "right",
+      "type": "projected"
+    },
+    "v4": {
+      "at": [
+        "476.713 mm",
+        "349.247 mm"
+      ],
+      "from": "v1",
+      "sheet": "s1",
+      "side": "iso",
+      "type": "projected"
+    },
+    "v5": {
+      "cut": {
+        "plane": "zx"
+      },
+      "from": "v2",
+      "label": "A",
+      "offset": "81.5 mm",
+      "sheet": "s1",
+      "type": "section"
+    },
+    "v6": {
+      "at": [
+        "251.7 mm",
+        "395.1 mm"
+      ],
+      "centre": [
+        "-100 mm",
+        "-52 mm",
+        "120 mm"
+      ],
+      "from": "v2",
+      "label": "B",
+      "radius": "12 mm",
+      "sheet": "s1",
+      "type": "detail"
+    }
+  }
+}

@@ -13,7 +13,7 @@ pub const FORMAT: u64 = 1;
 
 /// Every tile, by id, with its tab title: the order View > Panels lists
 /// them in.
-pub const TILES: [(&str, &str); 18] = [
+pub const TILES: [(&str, &str); 19] = [
     ("viewport", "Viewport"),
     ("tree", "Tree"),
     ("properties", "Properties"),
@@ -32,6 +32,7 @@ pub const TILES: [(&str, &str); 18] = [
     ("explode", "Explode"),
     ("equations", "Equations"),
     ("annotations", "Annotations"),
+    ("drawings", "Drawings"),
 ];
 
 /// A tile's title.
@@ -75,7 +76,7 @@ pub enum Home {
 pub fn home(id: &str) -> Home {
     match id {
         "tree" => Home::Left,
-        "viewport" | "shortcuts" => Home::Centre,
+        "viewport" | "shortcuts" | "drawings" => Home::Centre,
         "properties" | "parameters" | "part" | "conflicts" | "changes" | "section" | "explode"
         | "annotations" => Home::Right,
         _ => Home::Bottom,
@@ -311,6 +312,7 @@ mod tests {
                 "explode",
                 "equations",
                 "annotations",
+                "drawings",
             ]
             .contains(&id);
             assert_eq!(d.tiles().contains(&id), !on_demand, "{id}");

@@ -12,6 +12,7 @@ pub mod cube;
 pub mod datums;
 pub mod deps;
 pub mod doctor;
+pub mod drawings;
 pub mod edit;
 pub mod equations;
 pub mod explode;

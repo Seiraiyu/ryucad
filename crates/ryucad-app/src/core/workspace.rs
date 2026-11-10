@@ -93,6 +93,14 @@ enum Pending {
     Equations(bool),
     /// A row of the Equations tile written.
     EquationSave,
+    /// The Drawings tile's list of this part's drawings.
+    DrawingList(String),
+    /// Every part's drawings, for the tree.
+    DrawingsAll,
+    /// The Drawings tile's sheet: part, drawing and sheet asked for.
+    DrawingSheet(String, String, String),
+    /// A drag or form of the Drawings tile written.
+    DrawingWrite,
     Activity,
     History,
     /// The Branches tab's worktrees (`worktree.list`).
@@ -458,6 +466,11 @@ pub struct Workspace {
     /// The Equations tile's table, once it is open (see `show_equations`).
     pub equations: Option<Equations>,
     equations_open: bool,
+    /// The Drawings tile (see `show_drawings`).
+    pub drawings: crate::core::drawings::Tile,
+    /// Every part's drawings, for the tree: ID, name, and whether its
+    /// file doesn't read (`drawing.list` of the project).
+    pub drawing_rows: BTreeMap<String, Vec<(String, String, bool)>>,
     pub activity: Activity,
     /// The project's Git history (`history.log`), once asked for.
     pub history: Option<Value>,
@@ -667,6 +680,8 @@ impl Workspace {
             params_part: None,
             equations: None,
             equations_open: false,
+            drawings: Default::default(),
+            drawing_rows: BTreeMap::new(),
             activity: Activity::default(),
             history: None,
             history_at: None,
@@ -761,6 +776,7 @@ impl Workspace {
         self.asked_at.clear();
         self.send(Request::ProjectInfo {}, Pending::Info);
         self.send(Request::PartList {}, Pending::Parts);
+        self.read_drawn();
         let log = Request::ActivityLog {
             limit: Some(LOADED),
             before: None,
@@ -1462,6 +1478,16 @@ impl Workspace {
         // over to a part with none.
         e.sheet = self.sheet_solid(part, None).map(|k| k.1);
         if e.sheet.is_none() && e.choices.format == crate::core::export::Format::Dxf {
+            e.choices.format = crate::core::export::Format::Step;
+        }
+        // The drawing the Drawings tile shows of this part, if any.
+        e.drawing = self
+            .drawings
+            .sheet
+            .as_ref()
+            .filter(|s| self.drawings.open && s.part == part)
+            .map(|s| (s.drawing.clone(), s.sheet.clone()));
+        if e.drawing.is_none() && e.choices.format == crate::core::export::Format::Drawing {
             e.choices.format = crate::core::export::Format::Step;
         }
         self.export = Some(e);
@@ -2778,6 +2804,132 @@ impl Workspace {
         }
         if !self.equations.as_ref().is_some_and(|e| e.saving.is_some()) {
             self.read_equations(false);
+        }
+    }
+
+    /// Opens the Drawings tile on `part` (else the first part shown),
+    /// reading its drawings the first time or when the part changes.
+    pub fn show_drawings(&mut self, part: Option<&str>) {
+        let part = part
+            .map(str::to_owned)
+            .or_else(|| self.drawings.part.clone())
+            .or_else(|| self.model.shown().first().map(|p| p.to_string()));
+        let Some(part) = part else { return };
+        let fresh = !self.drawings.open || self.drawings.part.as_deref() != Some(&part);
+        self.drawings.open = true;
+        if fresh {
+            self.drawings = crate::core::drawings::Tile {
+                open: true,
+                part: Some(part),
+                ..Default::default()
+            };
+            self.read_drawing_list();
+        }
+    }
+
+    /// Reads every part's drawings again, for the tree's rows.
+    pub fn read_drawn(&mut self) {
+        self.send(Request::DrawingList { part: None }, Pending::DrawingsAll);
+    }
+
+    /// A drawing's tree row chosen: the Drawings tile opens on it, its
+    /// first sheet shown.
+    pub fn open_drawing(&mut self, part: &str, drawing: &str) {
+        self.show_drawings(Some(part));
+        self.drawings.chosen = None;
+        self.drawings.sheet = None;
+        self.drawings.camera = None;
+        self.drawings.want = Some(drawing.to_owned());
+        if self.drawings.list.is_some() {
+            self.read_drawing_sheet();
+        }
+        self.wants_tile = Some("drawings");
+    }
+
+    fn read_drawing_list(&mut self) {
+        let Some(part) = self.drawings.part.clone() else {
+            return;
+        };
+        self.send(
+            Request::DrawingList {
+                part: Some(part.clone()),
+            },
+            Pending::DrawingList(part),
+        );
+    }
+
+    /// Shows `drawing`'s `sheet` in the Drawings tile.
+    pub fn choose_drawing(&mut self, drawing: &str, sheet: &str) {
+        let same = self
+            .drawings
+            .chosen
+            .as_ref()
+            .is_some_and(|(d, k)| d == drawing && k == sheet);
+        self.drawings.chosen = Some((drawing.to_owned(), sheet.to_owned()));
+        if !same {
+            self.drawings.camera = None;
+            self.drawings.choose(None);
+            self.drawings.sheet = None;
+        }
+        self.read_drawing_sheet();
+    }
+
+    /// Reads the chosen sheet again (`drawing.get --items`), at the
+    /// revision forms read: a person's draft in Annotate.
+    fn read_drawing_sheet(&mut self) {
+        let (Some(part), Some((drawing, sheet))) =
+            (self.drawings.part.clone(), self.drawings.first_choice())
+        else {
+            return;
+        };
+        self.drawings.chosen = Some((drawing.clone(), sheet.clone()));
+        self.drawings.loading = true;
+        let req = Request::DrawingGet {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            rev: self.form_rev(),
+            sheet: Some(sheet.clone()),
+            items: true,
+        };
+        self.send(req, Pending::DrawingSheet(part, drawing, sheet));
+    }
+
+    /// Writes `ops` to the shown drawing, guarded by the part's revision
+    /// it was built at: a drag's or the form's one write.
+    fn write_drawing(&mut self, ops: Value) {
+        let Some(s) = &self.drawings.sheet else {
+            return;
+        };
+        let req = Request::DrawingEdit {
+            part: s.part.clone(),
+            drawing: s.drawing.clone(),
+            ops,
+            expected_revision: s.revision.clone(),
+        };
+        self.drawings.saving = true;
+        self.drawings.error = None;
+        self.drawings.note = None;
+        self.send(req, Pending::DrawingWrite);
+    }
+
+    /// A drag of what was picked on the sheet, let go `d` mm from where it
+    /// started: one `drawing.edit`, or a note saying why none.
+    pub fn drag_drawing(&mut self, pick: &crate::core::drawings::Pick, d: [f64; 2]) {
+        let Some(s) = &self.drawings.sheet else {
+            return;
+        };
+        match crate::core::drawings::drag_ops(s, pick, d) {
+            Ok(ops) => self.write_drawing(ops),
+            Err(why) => self.drawings.note = Some(why.to_owned()),
+        }
+    }
+
+    /// Writes the Drawings tile's dimension form as typed.
+    pub fn save_drawing_dimension(&mut self) {
+        let Some(f) = &self.drawings.form else { return };
+        match f.op() {
+            Ok(op) => self.write_drawing(json!([op])),
+            Err(why) => self.drawings.note = Some(why),
         }
     }
 
@@ -4296,6 +4448,82 @@ impl Workspace {
                 table.error = Some(e);
                 self.equations = Some(table);
             }
+            (Pending::DrawingList(part), Ok(a)) => {
+                if self.drawings.part.as_deref() == Some(&part) {
+                    let list = crate::core::drawings::List::from_answer(&part, &a.result);
+                    // A drawing or sheet that went: the first left.
+                    if let Some((d, k)) = &self.drawings.chosen
+                        && !list
+                            .entries
+                            .iter()
+                            .any(|e| &e.drawing == d && e.sheets.iter().any(|(s, _)| s == k))
+                    {
+                        self.drawings.chosen = None;
+                        self.drawings.sheet = None;
+                        self.drawings.camera = None;
+                    }
+                    self.drawings.list = Some(list);
+                    self.read_drawing_sheet();
+                }
+            }
+            (Pending::DrawingList(_), Err(e)) => self.drawings.error = Some(e),
+            (Pending::DrawingsAll, Ok(a)) => {
+                let mut drawn: BTreeMap<String, Vec<(String, String, bool)>> = BTreeMap::new();
+                for d in a.result["drawings"].as_array().into_iter().flatten() {
+                    let (Some(p), Some(id)) = (d["part"].as_str(), d["drawing"].as_str()) else {
+                        continue;
+                    };
+                    drawn.entry(p.to_owned()).or_default().push((
+                        id.to_owned(),
+                        d["name"].as_str().unwrap_or("").to_owned(),
+                        d.get("error").is_some(),
+                    ));
+                }
+                if drawn != self.drawing_rows {
+                    self.drawing_rows = drawn;
+                    self.model.generation += 1;
+                }
+            }
+            (Pending::DrawingsAll, Err(_)) => {}
+            (Pending::DrawingSheet(part, drawing, sheet), r) => {
+                let current = self.drawings.part.as_deref() == Some(&part)
+                    && self.drawings.chosen == Some((drawing, sheet));
+                if current {
+                    self.drawings.loading = false;
+                    match r {
+                        Ok(a) => {
+                            self.drawings.sheet =
+                                crate::core::drawings::Sheet::from_answer(&a.result);
+                            // What was chosen, chosen again in what was read:
+                            // a form reads the file as it is now.
+                            let keep = self.drawings.selected.take();
+                            if !self.drawings.form.as_ref().is_some_and(|f| f.dirty()) {
+                                self.drawings.choose(keep);
+                            } else {
+                                self.drawings.selected = keep;
+                            }
+                        }
+                        Err(e) => self.drawings.error = Some(e),
+                    }
+                }
+            }
+            (Pending::DrawingWrite, r) => {
+                self.drawings.saving = false;
+                match r {
+                    Ok(_) => {
+                        self.drawings.form = None;
+                        self.read_drawing_sheet();
+                    }
+                    Err(e) if e.code == Code::Conflict => {
+                        self.drawings.note = Some(
+                            "Someone changed the drawing while you edited it: read again".into(),
+                        );
+                        self.drawings.form = None;
+                        self.read_drawing_list();
+                    }
+                    Err(e) => self.drawings.error = Some(e),
+                }
+            }
             (Pending::EquationSave, Ok(_)) => {
                 if let Some(e) = &mut self.equations {
                     // What was written reads back as written.
@@ -4594,6 +4822,18 @@ impl Workspace {
                 }
                 // Any assembly may now reach the part, or no longer.
                 self.read_where_used();
+                // The Drawings tile's part's revision (its drawings') moved.
+                if self.drawings.open
+                    && let Some(part) = self.drawings.part.clone()
+                {
+                    let read = self.drawings.list.as_ref().and_then(|l| l.revision.clone());
+                    let moved = params["parts"].as_array().into_iter().flatten().any(|r| {
+                        r["part"] == part.as_str() && r["revision"].as_str() != read.as_deref()
+                    });
+                    if moved {
+                        self.read_drawing_list();
+                    }
+                }
                 for report in params["parts"].as_array().into_iter().flatten() {
                     let Some(id) = report["part"].as_str() else {
                         continue;
@@ -4637,6 +4877,8 @@ impl Workspace {
                 self.reload_branches();
                 self.load_deps();
                 self.reload_equations();
+                // A drawing came, went or changed its name.
+                self.read_drawn();
             }
             "project.changed" => {
                 // The project's parameters may have changed.

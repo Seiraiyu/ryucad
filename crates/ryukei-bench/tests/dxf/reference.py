@@ -1,7 +1,8 @@
 """What ezdxf reads of each DXF ryuformats writes (plan 16.B): the
 audit's errors and fixes, the layers, each layer's closed loops' areas
 (entities chained end to end, flattened within a micrometre's
-thousandth), the bend lines' ends and the notes. Reads a manifest
+thousandth), the bend lines' ends and the notes, and (plan 9.D, for
+drawings) how many entities of each type the model space holds. Reads a manifest
 {"files": [...]} and prints a JSON list, one entry per file."""
 
 import json
@@ -46,6 +47,13 @@ def loops(entities):
     return sorted(out)
 
 
+def counts(msp):
+    out = {}
+    for e in msp:
+        out[e.dxftype()] = out.get(e.dxftype(), 0) + 1
+    return out
+
+
 def main():
     files = json.load(open(sys.argv[1]))["files"]
     result = []
@@ -68,6 +76,7 @@ def main():
             "inner": loops(list(msp.query('*[layer=="INNER"]'))),
             "bend_lines": lines,
             "notes": [e.dxf.text for e in msp.query('TEXT[layer=="BEND_NOTES"]')],
+            "counts": counts(msp),
         })
     json.dump(result, sys.stdout)
 

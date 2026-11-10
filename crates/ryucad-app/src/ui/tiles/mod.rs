@@ -7,6 +7,7 @@ pub mod branches;
 pub mod changes;
 pub mod conflicts;
 pub mod deps;
+pub mod drawings;
 pub mod equations;
 pub mod explode;
 pub mod history;
@@ -149,6 +150,7 @@ pub fn show(
         "section" => scroll_both(ui, &mut |ui| section::section(ui, &mut o.ws, &mut o.view)),
         "explode" => scroll_both(ui, &mut |ui| explode::explode(ui, &mut o.ws)),
         "equations" => scroll(ui, &mut |ui| equations::equations(ui, &mut o.ws)),
+        "drawings" => drawings::drawings(ui, &mut o.ws, &mut o.view),
         "annotations" => scroll(ui, &mut |ui| {
             annotations::annotations(ui, &mut o.ws, &mut o.view)
         }),
