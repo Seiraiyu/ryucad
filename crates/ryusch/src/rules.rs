@@ -175,6 +175,77 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                 });
             }
         }
+        // Buses (plan 2.C): each member's stub a wire of its net, each
+        // spine and trunk run a wire of the bus; the 45° entries between
+        // stubs and spines are the bus's own, judged by nothing but the
+        // grid of their ends. Member names and the bundle's name read on
+        // their wires as net labels' do; a connector takes its box.
+        let mut bus_runs: Vec<(String, Vec<Point>)> = Vec::new();
+        for (key, by) in &layout.buses {
+            let Some(bus) = by.get(sid) else { continue };
+            let names: Vec<&str> = bus
+                .entries
+                .iter()
+                .filter_map(|e| block.net(&e.net).map(|n| block.nets[n].name.as_str()))
+                .collect();
+            let stub = crate::bus::stub_len(names.iter().copied());
+            let mut columns: BTreeMap<crate::geom::Nm, Vec<Point>> = BTreeMap::new();
+            for e in &bus.entries {
+                let (s, on_spine) = crate::bus::entry(e.at, e.side, stub);
+                if !on_grid(e.at) || !on_grid(s) || !on_grid(on_spine) {
+                    out.push(v(
+                        "grid",
+                        format!("an entry of {key} is off the grid"),
+                        vec![key.clone()],
+                    ));
+                }
+                bus_runs.push((e.net.clone(), vec![e.at, s]));
+                columns.entry(on_spine[0]).or_default().push(on_spine);
+                if let Some(n) = block.net(&e.net) {
+                    let name = block.nets[n].name.as_str();
+                    let d = label::drawn(crate::layout::LabelKind::Net, name, e.at, e.side);
+                    if let Some((at, anchor, _)) = d.text {
+                        let text = crate::font::text_box(name, crate::font::SIZE, at, anchor);
+                        items.push(Item {
+                            what: format!("{key}'s entry at {}", e.on),
+                            rect: text,
+                            kind: LABEL,
+                            ink: Vec::new(),
+                            row: None,
+                            on_wire: Some((e.net.clone(), Rect::new(e.at, s), text)),
+                        });
+                    }
+                }
+            }
+            for pts in columns.values() {
+                if let Some([a, b]) = crate::bus::spine(pts)
+                    && a != b
+                {
+                    bus_runs.push((key.clone(), vec![a, b]));
+                }
+            }
+            for run in &bus.trunk {
+                bus_runs.push((key.clone(), run.clone()));
+            }
+            if let Some(c) = &bus.connector {
+                let b = label::label_box(crate::layout::LabelKind::OffSheet, &c.text, c.at, c.side);
+                if !area.contains(&b) {
+                    out.push(v(
+                        "inside",
+                        format!("{key}'s connector runs past its sheet"),
+                        vec![key.clone()],
+                    ));
+                }
+                items.push(Item {
+                    what: format!("{key}'s connector"),
+                    rect: b,
+                    kind: LABEL,
+                    ink: Vec::new(),
+                    row: None,
+                    on_wire: None,
+                });
+            }
+        }
         // Overlaps between things that take room. Parts keep a step apart;
         // a part's own text may sit beside it; nothing overlaps.
         for i in 0..items.len() {
@@ -205,11 +276,15 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
         }
         // Wires.
         let mut arms: BTreeMap<(String, route::Node), u8> = BTreeMap::new();
+        let mut wires: Vec<(&String, &Vec<Point>)> = Vec::new();
         for (key, by_sheet) in &layout.routes {
-            let Some(runs) = by_sheet.get(sid) else {
-                continue;
-            };
-            for run in runs {
+            if let Some(runs) = by_sheet.get(sid) {
+                wires.extend(runs.iter().map(|r| (key, r)));
+            }
+        }
+        wires.extend(bus_runs.iter().map(|(k, r)| (k, r)));
+        for (key, run) in wires {
+            {
                 if run.iter().any(|p| !on_grid(*p)) {
                     out.push(v(
                         "grid",
@@ -586,5 +661,47 @@ mod tests {
         l.sheet = part.sheet;
         l.at = part.at;
         assert!(check(&b, &out.layout).iter().any(|v| v.rule == "overlap"));
+    }
+
+    #[test]
+    fn a_bus_joins_its_members_and_keeps_off_bodies() {
+        let b = crate::testing::bus_block();
+        let mut out = crate::engine::lay_out(&b).expect("lays out");
+        assert!(check(&b, &out.layout).is_empty());
+        let sid = out.layout.placed["u1"].sheet.clone();
+        // An entry taken away leaves its pin joined to nothing.
+        let mut gone = out.layout.clone();
+        let e = gone
+            .buses
+            .get_mut("bus:q")
+            .unwrap()
+            .get_mut(&sid)
+            .unwrap()
+            .entries
+            .remove(0);
+        let broken = check(&b, &gone);
+        assert!(
+            broken
+                .iter()
+                .any(|v| v.rule == "connected" && v.refs.contains(&e.on)),
+            "{broken:?}"
+        );
+        // A trunk run through U1's body crosses it.
+        let u1 = &out.layout.placed["u1"];
+        let shape = Shape::of(&b.parts[0], Place::new(u1.at, u1.rotation, u1.mirror));
+        let c = shape.body;
+        let bus = out
+            .layout
+            .buses
+            .get_mut("bus:q")
+            .unwrap()
+            .get_mut(&sid)
+            .unwrap();
+        bus.trunk.push(vec![
+            [c.min[0] - GRID, (c.min[1] + c.max[1]) / 2 / GRID * GRID],
+            [c.max[0] + GRID, (c.min[1] + c.max[1]) / 2 / GRID * GRID],
+        ]);
+        let broken = check(&b, &out.layout);
+        assert!(broken.iter().any(|v| v.rule == "through"), "{broken:?}");
     }
 }

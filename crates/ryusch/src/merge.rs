@@ -28,7 +28,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// net's wires on one sheet.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct Key {
-    /// `sheets`, `regions`, `placed`, `text`, `labels` or `routes`.
+    /// `sheets`, `regions`, `placed`, `text`, `labels`, `routes` or
+    /// `buses` (`<bus>|<sheet>`, plan 2.C).
     pub section: &'static str,
     pub key: String,
 }
@@ -44,6 +45,12 @@ impl Key {
                 let part = on.rsplit_once('/').map_or(on, |(p, _)| p);
                 format!("part {part}")
             }
+            "buses" => format!(
+                "bus {}",
+                self.key
+                    .split_once('|')
+                    .map_or(self.key.as_str(), |(b, _)| b)
+            ),
             s => format!("{s} {}", self.key),
         }
     }
@@ -125,6 +132,17 @@ fn values(l: &Layout) -> BTreeMap<Key, serde_json::Value> {
             );
         }
     }
+    for (bus, by_sheet) in &l.buses {
+        for (sheet, drawn) in by_sheet {
+            out.insert(
+                Key {
+                    section: "buses",
+                    key: format!("{bus}|{sheet}"),
+                },
+                json(drawn),
+            );
+        }
+    }
     out
 }
 
@@ -166,6 +184,24 @@ fn set(l: &mut Layout, k: &Key, v: Option<&serde_json::Value>) {
             }
             if list.is_empty() {
                 l.labels.remove(net);
+            }
+        }
+        "buses" => {
+            let (bus, sheet) = k.key.split_once('|').expect("a bus's key");
+            let by_sheet = l.buses.entry(bus.to_owned()).or_default();
+            match v {
+                Some(v) => {
+                    by_sheet.insert(
+                        sheet.to_owned(),
+                        serde_json::from_value(v.clone()).expect("a drawn bus"),
+                    );
+                }
+                None => {
+                    by_sheet.remove(sheet);
+                }
+            }
+            if by_sheet.is_empty() {
+                l.buses.remove(bus);
             }
         }
         _ => {
@@ -234,6 +270,20 @@ fn boxes(block: &Block, l: &Layout, k: &Key) -> Vec<(String, Rect)> {
                     lab.sheet.clone(),
                     label::label_box(lab.kind, &lab.text, lab.at, lab.side),
                 ));
+            }
+        }
+        "buses" => {
+            let (bus, sheet) = k.key.split_once('|').expect("a bus's key");
+            if let Some(d) = l.buses.get(bus).and_then(|b| b.get(sheet)) {
+                let pts = d
+                    .entries
+                    .iter()
+                    .map(|e| e.at)
+                    .chain(d.trunk.iter().flatten().copied())
+                    .chain(d.connector.iter().map(|c| c.at));
+                if let Some(r) = Rect::of(pts) {
+                    out.push((sheet.to_owned(), r.grow(crate::geom::GRID)));
+                }
             }
         }
         _ => {
@@ -661,5 +711,44 @@ mod tests {
         assert!(m.conflicts.is_empty(), "{:#?}", m.conflicts);
         assert_eq!(m.layout.labels["o3"][0].kind, LabelKind::OffSheet);
         assert_eq!(m.layout.placed["r1"].rotation, 270);
+    }
+
+    #[test]
+    fn a_bus_merges_as_one_key_a_sheet() {
+        let block = crate::testing::bus_block();
+        let base = crate::engine::lay_out(&block).unwrap().layout;
+        let sid = base.placed["u1"].sheet.clone();
+        let key = format!("buses/bus:q|{sid}");
+        // Ours moves the trunk; theirs changes nothing near it.
+        let mut ours = base.clone();
+        let bus = ours.buses.get_mut("bus:q").unwrap().get_mut(&sid).unwrap();
+        for p in bus.trunk.iter_mut().flatten() {
+            p[1] += crate::geom::GRID;
+        }
+        let mut theirs = base.clone();
+        theirs.instructions.insert(
+            "i1".into(),
+            Instruction::Flow {
+                parts: vec!["u2".into()],
+            },
+        );
+        let m = merge(&block, &base, &ours, &theirs);
+        assert!(m.conflicts.is_empty(), "{:#?}", m.conflicts);
+        assert_eq!(m.layout.buses, ours.buses);
+        assert!(m.layout.instructions.contains_key("i1"));
+        // Both change it differently: one conflict naming it.
+        let mut theirs2 = base.clone();
+        let bus = theirs2
+            .buses
+            .get_mut("bus:q")
+            .unwrap()
+            .get_mut(&sid)
+            .unwrap();
+        for p in bus.trunk.iter_mut().flatten() {
+            p[1] -= crate::geom::GRID;
+        }
+        let m = merge(&block, &base, &ours, &theirs2);
+        assert_eq!(m.conflicts.len(), 1);
+        assert!(m.conflicts[0].ours.contains(&key), "{:?}", m.conflicts[0]);
     }
 }

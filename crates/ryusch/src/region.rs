@@ -184,7 +184,10 @@ pub fn propose(block: &Block, idioms: &[Idiom], r: &instr::Resolved) -> Vec<Prop
         root.insert(p, x);
         x
     }
-    let mut on_net: BTreeMap<usize, usize> = BTreeMap::new();
+    // By net and the sheet a `sheet` instruction asks for (plan 2.C): a
+    // part asked onto another sheet is grouped with what goes there, not
+    // with its neighbours left behind, or its region would span sheets.
+    let mut on_net: BTreeMap<(usize, Option<&String>), usize> = BTreeMap::new();
     for &p in &rest {
         for pin in &block.parts[p].pins {
             for net in pin.nets() {
@@ -196,7 +199,7 @@ pub fn propose(block: &Block, idioms: &[Idiom], r: &instr::Resolved) -> Vec<Prop
                 if r.edge.contains_key(&p) {
                     continue;
                 }
-                match on_net.get(&net) {
+                match on_net.get(&(net, r.sheet.get(&p))) {
                     Some(&q) => {
                         let (a, b) = (find(&mut root, p), find(&mut root, q));
                         if a != b {
@@ -209,7 +212,7 @@ pub fn propose(block: &Block, idioms: &[Idiom], r: &instr::Resolved) -> Vec<Prop
                         }
                     }
                     None => {
-                        on_net.insert(net, p);
+                        on_net.insert((net, r.sheet.get(&p)), p);
                     }
                 }
             }
@@ -342,6 +345,50 @@ fn frames_once(block: &Block, layout: &mut Layout) {
                 let part = l.on.rsplit_once('/').map_or(l.on.as_str(), |(p, _)| p);
                 if r.parts.iter().any(|k| k == part) {
                     add(crate::label::label_box(l.kind, &l.text, l.at, l.side));
+                }
+            }
+        }
+        // A bus's entries at its parts, their names and a connector the
+        // bus leaves the sheet by (plan 2.C).
+        for by in layout.buses.values() {
+            let Some(bus) = by.get(&r.sheet) else {
+                continue;
+            };
+            let names: Vec<&str> = bus
+                .entries
+                .iter()
+                .filter_map(|e| block.net(&e.net).map(|n| block.nets[n].name.as_str()))
+                .collect();
+            let stub = crate::bus::stub_len(names.iter().copied());
+            let mut mine = false;
+            for e in &bus.entries {
+                let part = e.on.rsplit_once('/').map_or(e.on.as_str(), |(p, _)| p);
+                if !r.parts.iter().any(|k| k == part) {
+                    continue;
+                }
+                mine = true;
+                let (_, on_spine) = crate::bus::entry(e.at, e.side, stub);
+                add(Rect::new(e.at, on_spine));
+                if let Some(n) = block.net(&e.net) {
+                    let name = block.nets[n].name.as_str();
+                    if let Some((at, anchor, _)) =
+                        crate::label::drawn(crate::layout::LabelKind::Net, name, e.at, e.side).text
+                    {
+                        add(crate::font::text_box(name, crate::font::SIZE, at, anchor));
+                    }
+                }
+            }
+            if mine && let Some(c) = &bus.connector {
+                add(crate::label::label_box(
+                    crate::layout::LabelKind::OffSheet,
+                    &c.text,
+                    c.at,
+                    c.side,
+                ));
+                for run in &bus.trunk {
+                    if let Some(x) = Rect::of(run.iter().copied()) {
+                        add(x);
+                    }
                 }
             }
         }
