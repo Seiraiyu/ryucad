@@ -6227,7 +6227,7 @@ fn markup_draws_in_a_locked_view_its_keys_choose_tools_and_post_unlocks_it() {
     assert!(h.state().opened().ws.myself().unwrap().selection.is_empty());
     // E is Ellipse while the bar is open, and Mod+Z undoes a mark, not
     // the project.
-    h.key_press(egui::Key::E);
+    hooked(&mut h, egui::Key::E, egui::Modifiers::NONE);
     h.run_steps(2);
     assert_eq!(
         h.state().opened().ws.markup.as_ref().unwrap().tool,
@@ -6237,7 +6237,14 @@ fn markup_draws_in_a_locked_view_its_keys_choose_tools_and_post_unlocks_it() {
     waited(&mut h, "an ellipse", |a| {
         a.opened().ws.markup.as_ref().unwrap().marks.len() == 2
     });
-    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    // Ctrl on Linux and Windows is the platform's Mod, as winit sends it.
+    let ctrl = egui::Modifiers {
+        ctrl: !cfg!(target_os = "macos"),
+        mac_cmd: cfg!(target_os = "macos"),
+        command: true,
+        ..egui::Modifiers::NONE
+    };
+    hooked(&mut h, egui::Key::Z, ctrl);
     h.run_steps(2);
     assert_eq!(
         h.state().opened().ws.markup.as_ref().unwrap().marks.len(),
@@ -6250,6 +6257,8 @@ fn markup_draws_in_a_locked_view_its_keys_choose_tools_and_post_unlocks_it() {
             .contains("locks the camera")
     );
     // Post, with what should change.
+    h.get_by_label("Comment").focus();
+    h.run_steps(2);
     h.get_by_label("Comment").type_text("Move it here");
     h.run_steps(2);
     h.get_by_label("Post").click();
@@ -6266,7 +6275,7 @@ fn markup_draws_in_a_locked_view_its_keys_choose_tools_and_post_unlocks_it() {
     );
     // Chosen, its marks are drawn; unchosen, not.
     assert!(h.state().opened().ws.view_marks().is_some());
-    h.key_press(egui::Key::Escape);
+    h.state_mut().opened_mut().ws.choose_annotation(None);
     h.run_steps(2);
     assert!(h.state().opened().ws.view_marks().is_none());
 }
