@@ -267,13 +267,21 @@ struct Retry {
 
 /// The faces a feature made, as the model shows them: by solid, by name
 /// (hex), at a part revision; and the edges where they meet faces it
-/// didn't make (a shell's opening, a fillet's rails), by solid.
+/// didn't make (a shell's opening, a fillet's rails), by solid. A fill's
+/// sides and a sew's sewn edges (`lines`), and a thicken's walls
+/// (`walls`), by their origins (ryucad 18).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Made {
     pub feature: BodyKey,
     pub revision: String,
     pub faces: std::collections::BTreeMap<BodyKey, std::collections::BTreeSet<String>>,
     pub rims: std::collections::BTreeMap<BodyKey, std::collections::BTreeSet<String>>,
+    /// Edges whose origin is the feature's `side` (a fill's) or `sewn` (a
+    /// sew's): drawn dashed when it is chosen.
+    pub lines: std::collections::BTreeMap<BodyKey, std::collections::BTreeSet<String>>,
+    /// Faces whose origin is the feature's `wall_of` (a thicken's walls):
+    /// painted in place of all it made.
+    pub walls: std::collections::BTreeMap<BodyKey, std::collections::BTreeSet<String>>,
 }
 
 impl Made {
@@ -281,19 +289,36 @@ impl Made {
     pub fn from_inspect(feature: &BodyKey, revision: &str, v: &Value) -> Made {
         let mut faces = std::collections::BTreeMap::new();
         let mut rims = std::collections::BTreeMap::new();
+        let mut lines = std::collections::BTreeMap::new();
+        let mut walls = std::collections::BTreeMap::new();
+        // The names in `list` whose origin is this feature's and, given
+        // `keys`, holds one of them.
+        let named = |list: &Value, keys: &[&str]| -> std::collections::BTreeSet<String> {
+            list.as_array()
+                .into_iter()
+                .flatten()
+                .filter(|e| e["origin"]["feature"] == feature.1.as_str())
+                .filter(|e| keys.is_empty() || keys.iter().any(|k| e["origin"].get(*k).is_some()))
+                .filter_map(|e| e["name"].as_str().map(str::to_owned))
+                .collect()
+        };
         for b in v["bodies"].as_array().into_iter().flatten() {
             let Some(solid) = b["solid"].as_str() else {
                 continue;
             };
-            let names: std::collections::BTreeSet<String> = b["faces"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|f| f["origin"]["feature"] == feature.1.as_str())
-                .filter_map(|f| f["name"].as_str().map(str::to_owned))
-                .collect();
+            let key = (feature.0.clone(), solid.to_owned());
+            // A sew makes no face of its own: its sheets' faces keep theirs.
+            let marked = named(&b["edges"], &["side", "sewn"]);
+            if !marked.is_empty() {
+                lines.insert(key.clone(), marked);
+            }
+            let names = named(&b["faces"], &[]);
             if names.is_empty() {
                 continue;
+            }
+            let wall = named(&b["faces"], &["wall_of"]);
+            if !wall.is_empty() {
+                walls.insert(key.clone(), wall);
             }
             // An edge between a face it made and one it didn't.
             let rim: std::collections::BTreeSet<String> = b["edges"]
@@ -312,7 +337,6 @@ impl Made {
                 })
                 .filter_map(|e| e["name"].as_str().map(str::to_owned))
                 .collect();
-            let key = (feature.0.clone(), solid.to_owned());
             if !rim.is_empty() {
                 rims.insert(key.clone(), rim);
             }
@@ -323,6 +347,8 @@ impl Made {
             revision: revision.to_owned(),
             faces,
             rims,
+            lines,
+            walls,
         }
     }
 }
@@ -2620,7 +2646,7 @@ impl Workspace {
                 feature: key.clone(),
                 revision: p.revision.clone(),
                 faces,
-                rims: std::collections::BTreeMap::new(),
+                ..Made::default()
             });
             self.model.generation += 1;
             return;
@@ -5061,5 +5087,41 @@ mod tests {
         assert!(!m.rims.contains_key(&c));
         assert_eq!(m.rims.len(), 1);
         assert_eq!((m.feature, m.revision.as_str()), (key, "r1"));
+        assert!(m.lines.is_empty() && m.walls.is_empty());
+    }
+
+    #[test]
+    fn a_fills_sides_a_sews_seams_and_a_thickens_walls_are_found_by_origin() {
+        let names = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<BTreeSet<_>>();
+        let edge = |n: &str, origin: Value| json!({"name": n, "faces": ["a"], "origin": origin});
+        // A fill: its patch and its sides, laminar, from its own origins.
+        let fill = json!({"bodies": [{"solid": "f",
+            "faces": [{"name": "a", "origin": {"feature": "f", "fill": "patch"}}],
+            "edges": [edge("s1", json!({"feature": "f", "side": 0})),
+                      edge("s2", json!({"feature": "f", "side": 1, "piece": 0})),
+                      edge("i1", json!({"feature": "f"}))]}]});
+        let m = Made::from_inspect(&("p".into(), "f".into()), "r", &fill);
+        let f = ("p".to_owned(), "f".to_owned());
+        assert_eq!(m.faces[&f], names(&["a"]));
+        assert_eq!(m.lines[&f], names(&["s1", "s2"]));
+        // A sew: the sheets' faces keep their own origins, only the edges
+        // it sewed are its.
+        let sew = json!({"bodies": [{"solid": "sw",
+            "faces": [{"name": "a", "origin": {"feature": "top"}}],
+            "edges": [edge("e1", json!({"feature": "sw", "sewn": ["x", "y"]})),
+                      edge("e2", json!({"feature": "top"}))]}]});
+        let m = Made::from_inspect(&("p".into(), "sw".into()), "r", &sew);
+        let sw = ("p".to_owned(), "sw".to_owned());
+        assert!(m.faces.is_empty());
+        assert_eq!(m.lines[&sw], names(&["e1"]));
+        // A thicken: its walls apart from its sides' faces.
+        let thicken = json!({"bodies": [{"solid": "t",
+            "faces": [{"name": "w", "origin": {"feature": "t", "wall_of": ["e"]}},
+                      {"name": "s", "origin": {"feature": "t", "front_of": "a"}}],
+            "edges": []}]});
+        let m = Made::from_inspect(&("p".into(), "t".into()), "r", &thicken);
+        let t = ("p".to_owned(), "t".to_owned());
+        assert_eq!(m.faces[&t], names(&["w", "s"]));
+        assert_eq!(m.walls[&t], names(&["w"]));
     }
 }

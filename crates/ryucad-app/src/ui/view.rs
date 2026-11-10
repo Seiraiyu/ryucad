@@ -797,14 +797,19 @@ impl View {
             .and_then(|k| ws.model.sketches.get(k));
         let picker = self.picker(ws);
         let mut faces = Vec::new();
-        // What the chosen feature made, in the solids that show it.
+        // What the chosen feature made, in the solids that show it; of a
+        // thicken, its walls.
         if let Some(made) = ws
             .made
             .as_ref()
             .filter(|m| chosen.as_ref() == Some(&m.feature))
         {
             let c = linear(style::CHOSEN);
-            for ((part, solid), names) in &made.faces {
+            let painted = match made.walls.is_empty() {
+                true => &made.faces,
+                false => &made.walls,
+            };
+            for ((part, solid), names) in painted {
                 for n in names {
                     if let Some(Place::Face(k, i)) = picker.place(&format!("{part}/{solid}/{n}")) {
                         faces.push((k, i, c));
@@ -928,7 +933,8 @@ impl View {
     /// What a shell, offset, mirror or split chosen in the tree adds to
     /// the scene: a shell's opening (the edges between the faces it made
     /// and the rest) dashed in the chosen colour, a mirror's or split's
-    /// plane as a datum plane is drawn, its square added to `glass`.
+    /// plane as a datum plane is drawn, its square added to `glass`. A
+    /// fill's sides and a sew's sewn edges are dashed too (ryucad 18).
     fn body_overlay(
         &mut self,
         ws: &Workspace,
@@ -946,6 +952,24 @@ impl View {
         let Some((part, id)) = self.chosen.clone() else {
             return (lines, glass);
         };
+        let size = [f64::from(px[0]), f64::from(px[1])];
+        if let Some(made) = ws
+            .made
+            .as_ref()
+            .filter(|m| m.feature == (part.clone(), id.clone()) && !m.lines.is_empty())
+        {
+            let picker = self.picker(ws);
+            let seams: Vec<Vec<[f64; 3]>> = made
+                .lines
+                .iter()
+                .flat_map(|((p, s), es)| es.iter().map(move |e| format!("{p}/{s}/{e}")))
+                .filter_map(|r| match picker.place(&r) {
+                    Some(Place::Edge(ps)) => Some(ps),
+                    _ => None,
+                })
+                .collect();
+            lines.extend(bodies::rim_overlay(&seams, style::CHOSEN, pr, size, scale));
+        }
         let Some(b) = ws
             .model
             .parts
@@ -955,7 +979,6 @@ impl View {
         else {
             return (lines, glass);
         };
-        let size = [f64::from(px[0]), f64::from(px[1])];
         if b.kind == "shell"
             && let Some(made) = ws
                 .made
