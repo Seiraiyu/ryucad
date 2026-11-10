@@ -53,6 +53,8 @@ pub struct Resolved {
     pub regions: Vec<(String, BTreeSet<usize>)>,
     /// Parts a `region none` instruction leaves to the proposal.
     pub no_region: BTreeSet<usize>,
+    /// Each part's text fields and the side each goes on.
+    pub text: BTreeMap<usize, Vec<(crate::layout::TextField, Side)>>,
     /// Each `paper` instruction's paper, by sheet ID or name: pinned.
     pub papers: BTreeMap<String, (String, Option<crate::layout::Orientation>)>,
     pub notes: Vec<Note>,
@@ -428,6 +430,26 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
                 }
                 set(&mut r.styles, &mut by, "style", &[n], *style, &id, block)?;
             }
+            Instruction::Text { field, side, .. } => {
+                for &p in &parts {
+                    let list = r.text.entry(p).or_default();
+                    for (f, s) in list.iter() {
+                        let overlaps = *f == *field
+                            || *f == crate::layout::TextField::Both
+                            || *field == crate::layout::TextField::Both;
+                        if overlaps && s != side {
+                            let other = by.get(&("text", p)).cloned().unwrap_or_else(|| id.clone());
+                            return Err(conflict(
+                                &other,
+                                &id,
+                                &format!("both say where {}'s text goes", block.parts[p].key),
+                            ));
+                        }
+                    }
+                    list.push((*field, *side));
+                    by.insert(("text", p), id.clone());
+                }
+            }
             Instruction::Idiom { kind, .. } => {
                 set(&mut r.idiom, &mut by, "idiom", &parts, *kind, &id, block)?;
             }
@@ -739,6 +761,20 @@ pub fn judge(block: &Block, layout: &Layout, ins: &Instruction) -> Result<(), St
                 _ => format!("{n} is drawn by wires"),
             })
         }
+        Instruction::Text { field, side, .. } => {
+            for &p in &parts {
+                for (n, at) in text_sides(block, layout, p, *field) {
+                    if at != Some(*side) {
+                        let place = match at {
+                            Some(s) => side_word(s),
+                            None => "over",
+                        };
+                        return Err(format!("{}'s {n} is {place} its body", name(p)));
+                    }
+                }
+            }
+            Ok(())
+        }
         _ => {
             if achieved(block, layout, ins) {
                 Ok(())
@@ -897,12 +933,89 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
             .iter()
             .find(|(id, s)| *id == sheet || &s.name == sheet)
             .is_some_and(|(_, s)| s.pinned && s.size.as_deref() == Some(size.as_str())),
+        Instruction::Text { field, side, .. } => all(&|p| {
+            text_sides(block, layout, p, *field)
+                .iter()
+                .all(|(_, at)| *at == Some(*side))
+        }),
     }
+}
+
+/// Which side of part `p`'s body each of its text fields `field` names
+/// lies wholly on (`None`: over it, or not placed), field by field.
+pub fn text_sides(
+    block: &Block,
+    layout: &Layout,
+    p: usize,
+    field: crate::layout::TextField,
+) -> Vec<(&'static str, Option<Side>)> {
+    let part = &block.parts[p];
+    let body = layout
+        .placed
+        .get(&part.key)
+        .map(|x| Shape::of(part, Place::new(x.at, x.rotation, x.mirror)).body);
+    let texts = layout.text.get(&part.key);
+    [
+        ("refdes", part.refdes.as_str()),
+        ("value", part.value.as_str()),
+    ]
+    .into_iter()
+    .filter(|(n, t)| field.covers(n) && !t.is_empty())
+    .map(|(n, t)| {
+        let side = match (body, texts.and_then(|f| f.get(n))) {
+            (Some(body), Some(at)) => {
+                let b = crate::text::boxes(&[t], *at)[0];
+                if b.max[0] <= body.min[0] {
+                    Some(Side::Left)
+                } else if b.min[0] >= body.max[0] {
+                    Some(Side::Right)
+                } else if b.min[1] >= body.max[1] {
+                    Some(Side::Up)
+                } else if b.max[1] <= body.min[1] {
+                    Some(Side::Down)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        (n, side)
+    })
+    .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two `text` instructions saying different sides for one part's field
+    /// conflict; `text` holds where the field's box lies on that side.
+    #[test]
+    fn text_instructions_resolve_and_conflict() {
+        use crate::layout::TextField;
+        let mut block = crate::testing::seeded(3, 1);
+        let key = block.parts[1].key.clone();
+        block.instructions.insert(
+            "i1".into(),
+            Instruction::Text {
+                parts: vec![key.clone()],
+                field: TextField::Refdes,
+                side: Side::Left,
+            },
+        );
+        let r = resolve(&block).unwrap();
+        assert_eq!(r.text.get(&1), Some(&vec![(TextField::Refdes, Side::Left)]));
+        block.instructions.insert(
+            "i2".into(),
+            Instruction::Text {
+                parts: vec![key],
+                field: TextField::Both,
+                side: Side::Right,
+            },
+        );
+        let e = resolve(&block).unwrap_err();
+        assert_eq!(e.code, "instruction_conflict", "{e:?}");
+    }
     use crate::testing::seeded;
 
     #[test]

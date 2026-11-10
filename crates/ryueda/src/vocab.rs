@@ -457,6 +457,13 @@ impl Names<'_> {
                     None => "",
                 }
             ),
+            Instruction::Text {
+                parts: l,
+                field,
+                side: s,
+            } => {
+                format!("text {} {} {}", parts(l), field.as_str(), side(*s))
+            }
         }
     }
 }

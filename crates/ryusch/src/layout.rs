@@ -302,6 +302,38 @@ pub enum Instruction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         orientation: Option<Orientation>,
     },
+    /// The parts' text field (or both) on that side of the body: the
+    /// first free place there (lasting).
+    Text {
+        parts: Vec<String>,
+        field: TextField,
+        side: Side,
+    },
+}
+
+/// Which of a part's text fields an instruction places.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextField {
+    Refdes,
+    Value,
+    /// Both, as one block.
+    Both,
+}
+
+impl TextField {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TextField::Refdes => "refdes",
+            TextField::Value => "value",
+            TextField::Both => "both",
+        }
+    }
+
+    /// Whether it places field `name` (`refdes`, `value`).
+    pub fn covers(self, name: &str) -> bool {
+        self == TextField::Both || self.as_str() == name
+    }
 }
 
 impl Instruction {
@@ -319,7 +351,8 @@ impl Instruction {
             | Instruction::Flow { parts }
             | Instruction::Shift { parts, .. }
             | Instruction::Region { parts, .. }
-            | Instruction::RegionNone { parts } => parts,
+            | Instruction::RegionNone { parts }
+            | Instruction::Text { parts, .. } => parts,
             Instruction::Net { .. } | Instruction::Paper { .. } => &[],
         }
     }
@@ -354,6 +387,7 @@ impl Instruction {
             Instruction::Shift { .. } => "shift",
             Instruction::Region { .. } | Instruction::RegionNone { .. } => "region",
             Instruction::Paper { .. } => "paper",
+            Instruction::Text { .. } => "text",
         }
     }
 }
@@ -382,6 +416,7 @@ impl Layout {
                     Instruction::Region { .. }
                         | Instruction::RegionNone { .. }
                         | Instruction::Paper { .. }
+                        | Instruction::Text { .. }
                 )
             });
         if three {
@@ -438,6 +473,26 @@ pub fn next_id(ids: impl IntoIterator<Item = impl AsRef<str>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `text` reads and writes as JSON, and a layout holding one is format 3.
+    #[test]
+    fn a_text_instruction_round_trips_at_format_3() {
+        let ins = Instruction::Text {
+            parts: vec!["r1".into()],
+            field: TextField::Both,
+            side: Side::Left,
+        };
+        let json = serde_json::to_value(&ins).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"op": "text", "parts": ["r1"], "field": "both", "side": "left"})
+        );
+        assert_eq!(serde_json::from_value::<Instruction>(json).unwrap(), ins);
+        let mut l = Layout::default();
+        l.instructions.insert("i1".into(), ins);
+        assert_eq!(l.format(), 3);
+        assert_eq!(l.instructions["i1"].verb(), "text");
+    }
     use serde_json::json;
 
     #[test]
