@@ -697,6 +697,20 @@ pub struct Model {
 }
 
 impl Model {
+    /// The part a tree row's reference shows (#541): a part's own
+    /// (`bracket`, loaded or only listed), or the part an instance places
+    /// (`frame/b1`) when it is this project's.
+    pub fn part_of_row(&self, reference: &str) -> Option<String> {
+        match reference.split_once('/') {
+            None => (self.parts.contains_key(reference) || self.listed.contains_key(reference))
+                .then(|| reference.to_owned()),
+            Some((asm, inst)) => {
+                let placed = self.parts.get(asm)?.feature(inst)?.instance.as_ref()?;
+                placed.project.is_none().then(|| placed.part.clone())
+            }
+        }
+    }
+
     /// Takes a part's report. Returns the bodies whose meshes are now
     /// missing or stale: they need fetching ([`Model::sketches_wanted`]
     /// says the same of sketches).
@@ -1770,6 +1784,30 @@ mod tests {
             Some("1e-7 m")
         );
         assert_eq!(info(Value::Null).tolerance_text(), None);
+    }
+
+    #[test]
+    fn a_rows_part_is_its_own_or_the_one_its_instance_places() {
+        let mut m = Model::default();
+        m.apply_part(&json!({
+            "part": "frame", "revision": "r1", "kind": "assembly",
+            "features": [
+                {"id": "pin", "type": "instance", "ok": true, "hash": "x",
+                 "instance": {"part": "p", "rev": "working"}},
+                {"id": "b1", "type": "instance", "ok": true, "hash": "y",
+                 "instance": {"part": "m6-bolt", "rev": {"label": "B", "project": "aa"}}}],
+        }));
+        m.listed.insert(
+            "big".into(),
+            Listed::from_json(&json!({"part": "big", "kind": "assembly"})),
+        );
+        assert_eq!(m.part_of_row("frame").as_deref(), Some("frame"));
+        assert_eq!(m.part_of_row("big").as_deref(), Some("big"));
+        assert_eq!(m.part_of_row("frame/pin").as_deref(), Some("p"));
+        // Another project's part isn't this window's to show.
+        assert_eq!(m.part_of_row("frame/b1"), None);
+        assert_eq!(m.part_of_row("nothing"), None);
+        assert_eq!(m.part_of_row("frame/nothing"), None);
     }
 
     #[test]

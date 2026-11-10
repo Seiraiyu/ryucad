@@ -130,6 +130,8 @@ pub enum Context {
     Viewport,
     /// A tile's tab.
     Tab,
+    /// The Tree tile's space under its rows.
+    Tree,
 }
 
 const ROWS: [Context; 8] = [
@@ -195,6 +197,24 @@ const REFERENCED: [Context; 14] = [
     Context::Entity(Pick::Datum),
     Context::Ghost,
 ];
+
+/// Every row and the tree's space under them: where the whole tree
+/// opens or closes.
+const TREE: [Context; 9] = [
+    Context::Row(Row::Part),
+    Context::Row(Row::Solid),
+    Context::Row(Row::Feature),
+    Context::Row(Row::Sketch),
+    Context::Row(Row::Instance),
+    Context::Row(Row::Mate),
+    Context::Row(Row::Pattern),
+    Context::Row(Row::Copy),
+    Context::Tree,
+];
+
+/// The rows that show a part: a part's, and an instance's for the part
+/// it places (#541).
+const SHOWABLE: [Context; 2] = [Context::Row(Row::Part), Context::Row(Row::Instance)];
 
 /// The rows that can be hidden: a solid, an instance, a copy.
 const HIDEABLE: [Context; 3] = [
@@ -398,6 +418,22 @@ pub const COMMANDS: &[Command] = &[
         .icon("arrows-out")
         .context(&ROWS)
         .hidden(),
+    // View > Show for the part a row is or places, so "Show" means the
+    // window's focus everywhere (#541).
+    cmd("view.show_row", "Show", View)
+        .icon("eye")
+        .context(&SHOWABLE)
+        .hidden(),
+    // A row and everything under it opened or closed (#540), offered on
+    // rows with rows under them.
+    cmd("tree.expand_below", "Expand below", View)
+        .icon("caret-down")
+        .context(&ROWS)
+        .hidden(),
+    cmd("tree.collapse_below", "Collapse below", View)
+        .icon("caret-right")
+        .context(&ROWS)
+        .hidden(),
     cmd("view.fit_selection", "Zoom to selection", View)
         .icon("selection")
         .toolbar(),
@@ -437,6 +473,14 @@ pub const COMMANDS: &[Command] = &[
     cmd("view.triad", "Axis triad", View).toggle(),
     cmd("view.origin", "Origin", View).toggle(),
     cmd("view.show", "Show", View).choices(),
+    // Every row of the tree opened or closed by hand (#540): in the Edit
+    // menu beside Find in tree, listed here for the rows' menus' order.
+    cmd("tree.expand_all", "Expand all", Edit)
+        .icon("caret-down")
+        .context(&TREE),
+    cmd("tree.collapse_all", "Collapse all", Edit)
+        .icon("caret-right")
+        .context(&TREE),
     cmd("view.isolate", "Isolate", View)
         .icon("eye")
         .context(&HIDEABLE)
@@ -769,6 +813,12 @@ pub fn enabled_on(id: &str, target: &str) -> Result<(), &'static str> {
     }
 }
 
+/// Whether a command opens or closes the rows under the row it runs on:
+/// a tree's context menu offers it only on a row with rows under it.
+pub fn below(id: &str) -> bool {
+    matches!(id, "tree.expand_below" | "tree.collapse_below")
+}
+
 /// Whether a context menu lists `id` for what was right-clicked: an
 /// import's mode commands only on an import's rows (`import`: whether it
 /// is a reference), each where it changes the mode; every other command
@@ -1069,8 +1119,35 @@ mod tests {
         }
         assert_eq!(
             ids(Context::Row(Row::Part)),
-            ["edit.copy_reference", "view.fit_row", "annotation.add"]
+            [
+                "edit.copy_reference",
+                "view.fit_row",
+                "view.show_row",
+                "tree.expand_below",
+                "tree.collapse_below",
+                "tree.expand_all",
+                "tree.collapse_all",
+                "annotation.add"
+            ]
         );
+        // A part's or an instance's row shows its part; every row opens
+        // and closes the tree, and so does the space under the rows.
+        for r in Row::ALL {
+            let got = ids(Context::Row(r));
+            let showable = matches!(r, Row::Part | Row::Instance);
+            assert_eq!(got.contains(&"view.show_row"), showable, "{r:?}");
+            for id in [
+                "tree.expand_below",
+                "tree.collapse_below",
+                "tree.expand_all",
+                "tree.collapse_all",
+            ] {
+                assert!(got.contains(&id), "{r:?} {id}");
+            }
+        }
+        assert_eq!(ids(Context::Tree), ["tree.expand_all", "tree.collapse_all"]);
+        assert!(below("tree.expand_below") && !below("tree.expand_all"));
+
         for k in Pick::ALL {
             let mut want = vec![
                 "edit.copy_reference",
