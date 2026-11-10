@@ -1178,7 +1178,9 @@ impl View {
         }
         let shown: Vec<String> = ws.model.shown().iter().map(|s| s.to_string()).collect();
         let shown: Vec<&str> = shown.iter().map(String::as_str).collect();
-        let markers = ws.annotations.markers(&shown, |k| ws.model.pose(k));
+        let markers =
+            ws.annotations
+                .markers(&shown, |k| ws.model.pose(k), |on| ws.model.placed_on(on));
         let size = [f64::from(rect.width()), f64::from(rect.height())];
         let mut chosen = None;
         for m in markers {
