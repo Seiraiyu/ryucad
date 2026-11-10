@@ -428,6 +428,116 @@ impl Project {
     /// A part with a sketch on xy: a 20 x 10 rectangle from the origin,
     /// fully defined (its width a parameter), with a construction diagonal,
     /// and a 5 mm extrude of it.
+    /// Part `p` with surface features (ryucad 18): `w`, an open chain of
+    /// two lines extruded into a wall (a sheet of one boundary); `f`, a
+    /// 10 mm square filled (a sheet); `sw`, box `b`'s six faces extracted
+    /// and sewn into a closed sheet; `t`, box `c`'s top extracted and
+    /// thickened 2 mm into a solid.
+    pub fn with_surfaces(self) -> Project {
+        self.ok(&["part", "create", "p"]);
+        let sketch = |id: &str, ops: &[Value]| {
+            self.ok(&["feature", "add", "p", "sketch", "--id", id, "--plane", "xy"]);
+            self.ok(&["sketch", "edit", "p", id, &ops_text(ops)]);
+        };
+        let point =
+            |id: &str, at: [f64; 2]| json!({"op": "add", "id": id, "type": "point", "at": at});
+        let line = |id: &str, a: &str, b: &str| json!({"op": "add", "id": id, "type": "line", "start": a, "end": b});
+        sketch(
+            "s1",
+            &[
+                point("o", [0.0, 0.0]),
+                point("a", [10.0, 0.0]),
+                point("b", [10.0, 10.0]),
+                line("l1", "o", "a"),
+                line("l2", "a", "b"),
+            ],
+        );
+        self.ok(&[
+            "feature",
+            "add",
+            "p",
+            "extrude",
+            "--id",
+            "w",
+            "--sketch",
+            "s1",
+            "--surface",
+            "--length",
+            "20mm",
+        ]);
+        let mut square = Vec::new();
+        for (i, at) in [[30.0, 0.0], [40.0, 0.0], [40.0, 10.0], [30.0, 10.0]]
+            .into_iter()
+            .enumerate()
+        {
+            square.push(point(&format!("q{}", i + 1), at));
+        }
+        for i in 1..=4 {
+            square.push(line(
+                &format!("l{i}"),
+                &format!("q{i}"),
+                &format!("q{}", i % 4 + 1),
+            ));
+        }
+        sketch("s2", &square);
+        self.ok(&[
+            "feature", "add", "p", "fill", "--id", "f", "--curve", "p/s2/l1", "--curve", "p/s2/l2",
+            "--curve", "p/s2/l3", "--curve", "p/s2/l4",
+        ]);
+        let faces = |solid: &str| -> Vec<(String, f64)> {
+            let body = self.ok(&["inspect", "p", solid])["bodies"][0].clone();
+            let mut out: Vec<(String, f64)> = body["faces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| {
+                    let z = f["surface"]["frame"]["origin"][2].as_f64().unwrap_or(0.0);
+                    (format!("p/{solid}/{}", f["name"].as_str().unwrap()), z)
+                })
+                .collect();
+            out.sort_by(|a, b| a.1.total_cmp(&b.1));
+            out
+        };
+        for (id, x) in [("b", "60"), ("c", "90")] {
+            self.ok(&[
+                "feature",
+                "add",
+                "p",
+                "box",
+                "--id",
+                id,
+                "--param",
+                "x=10",
+                "--param",
+                "y=10",
+                "--param",
+                "z=10",
+                "--origin",
+                &format!("{x},0,0"),
+            ]);
+        }
+        let mut sew = vec!["feature", "add", "p", "sew", "--id", "sw", "--no-solid"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        for (k, (face, _)) in faces("b").iter().enumerate() {
+            let id = format!("x{k}");
+            self.ok(&[
+                "feature", "add", "p", "extract", "--id", &id, "--face", face,
+            ]);
+            sew.extend(["--sheet".to_owned(), id]);
+        }
+        self.ok(&sew.iter().map(String::as_str).collect::<Vec<_>>());
+        let top = faces("c").last().unwrap().0.clone();
+        self.ok(&[
+            "feature", "add", "p", "extract", "--id", "xt", "--face", &top,
+        ]);
+        self.ok(&[
+            "feature", "add", "p", "thicken", "--id", "t", "--sheet", "xt", "--front", "2mm",
+        ]);
+        self
+    }
+
     pub fn with_sketch(self) -> Project {
         self.ok(&["part", "create", "p"]);
         self.ok(&["param", "set", "p", "width=20 mm"]);
