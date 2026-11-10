@@ -1372,7 +1372,23 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
             .filter(|i| plans[*i].0.sheet == *sk)
             .collect();
         let scales = |s: Scale| -> Vec<Scale> {
-            on.iter().map(|i| plans[*i].0.scale.unwrap_or(s)).collect()
+            on.iter()
+                .map(|i| {
+                    let p = &plans[*i].0;
+                    p.scale.unwrap_or(match p.extra {
+                        // Twice its parent's: the parent's own, else this
+                        // sheet's.
+                        Extra::Detail { parent, .. } => doubled(
+                            plans
+                                .iter()
+                                .find(|(q, _)| q.key == parent)
+                                .and_then(|(q, _)| q.scale)
+                                .unwrap_or(s),
+                        ),
+                        _ => s,
+                    })
+                })
+                .collect()
         };
         let fixed = sheet.scale;
         let chosen = match fixed {
@@ -2184,6 +2200,37 @@ pub(crate) mod tests {
         // Two caps facing the view, 20 × 10 each, at the scale of 1.
         let area = hatched(sheet) * section::spacing(sheet.paper);
         assert!((area - 400.0).abs() < 400.0 * 0.05, "{area}");
+    }
+
+    #[test]
+    fn a_detail_draws_its_parent_inside_its_circle_at_twice_its_scale() {
+        let views = json!({
+            "v1": {"type": "base", "sheet": "s1", "orient": "front", "scale": "1:1"},
+            "v2": {"type": "detail", "sheet": "s1", "from": "v1", "label": "C",
+                   "centre": [0, 0, 0], "radius": "5 mm"}
+        });
+        let (_d, mut s) = drawn(40.0, 20.0, 10.0, views);
+        let b = build(&mut s, &id("p"), &id("d")).unwrap();
+        assert!(b.findings.is_empty(), "{:?}", b.findings);
+        let sheet = &b.sheets[0];
+        let v2 = sheet
+            .views
+            .iter()
+            .find(|v| v.key.to_string() == "v2")
+            .unwrap();
+        assert_eq!(v2.scale.to_string(), "2:1");
+        // The block's corner at the circle's centre: two edges of 5 mm at 2:1.
+        let total: f64 = visible_in(sheet, v2).iter().map(length).sum();
+        assert!((total - 20.0).abs() < 1e-6, "{total}");
+        let texts: Vec<&str> = sheet
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Item::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&"DETAIL C (2:1)"), "{texts:?}");
     }
 
     #[test]
