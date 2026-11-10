@@ -1,13 +1,19 @@
 //! Unit tests of blend recognition and editing.
 
 use super::recognise::{self, Canal};
+use super::remake::{close, follow};
 use super::*;
 use crate::blend::{Chamfer, EdgeBlend, blend};
 use crate::geom::{Circle, Curve, Frame, Point3, Rigid, Vector3};
-use crate::name::OpKey;
+use crate::name::{Event, FaceRole, Role};
 use crate::primitive;
+use crate::topo::EntityId;
 
 const K: OpKey = OpKey(0x13c0);
+
+fn face(r: FaceRole) -> Name {
+    Name::derive(K, Role::Face(r), &[])
+}
 
 fn block() -> Body {
     primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY)
@@ -67,4 +73,36 @@ fn a_mitred_chamfer_takes_the_supports_it_sets_back_least() {
         }
     }
     assert_eq!(found, 12);
+}
+
+#[test]
+fn picking_one_blend_closes_over_the_corners_it_reaches() {
+    let r = every_edge(&block(), BlendKind::Fillet { radius: 0.05 });
+    // unmetered: a test
+    let rec = recognise::recognise(&r, &RecogniseOptions::default(), &Meter::free()).unwrap();
+    // One edge's fillet reaches two corners, and through them every
+    // edge: a rounded box's fillets go together.
+    let (blends, faces) = close(&rec, [0].into());
+    assert_eq!(blends.len(), 12);
+    assert_eq!(faces.len(), 20);
+}
+
+#[test]
+fn a_name_is_followed_through_placings_and_one_live_piece() {
+    let b = block();
+    let top = face(FaceRole::PlusZ);
+    let (placed, piece) = (Name::from_u128(1), face(FaceRole::MinusZ));
+    let mut j = Journal::new();
+    j.push(Event::Placed {
+        tool: crate::name::ToolKey(1),
+        from: top,
+        to: placed,
+    });
+    j.push(Event::Split {
+        parent: placed,
+        children: vec![piece, Name::from_u128(2)],
+    });
+    // Of the two pieces only `piece` lives in `b`.
+    assert_eq!(follow(top, &[j], &b), b.by_name(piece));
+    assert!(matches!(b.by_name(piece), Some(EntityId::Face(_))));
 }
