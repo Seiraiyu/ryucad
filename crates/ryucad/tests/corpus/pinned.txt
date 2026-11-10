@@ -22,11 +22,9 @@ licence voron/Voron_2.4r2_Assembly_STEP.zip GPL-3.0 VoronDesign/Voron-2, CAD/, a
 licence voron/V0.2R1_Master_Assembly_STEP.zip GPL-3.0 VoronDesign/Voron-0, CAD/, at 6f454a9c (1,158 products, 390 bodies)
 licence voron/Switchwire_Assembly_v1_STEP.zip GPL-3.0 VoronDesign/Voron-Switchwire, CAD/, at df450909 (415 products, 345 bodies)
 #
-slow 297 voron/Switchwire_Assembly_v1_STEP.step
-slow 344 voron/V0.2R1 Master Assembly v63.step
-slow 0 voron/Voron_2.4r2_Assembly.step
+builds 324 voron/Switchwire_Assembly_v1_STEP.step
+builds 381 voron/V0.2R1 Master Assembly v63.step
+builds 1291 voron/Voron_2.4r2_Assembly.step
 #
-# #234 (healing depends on the import key): ryukei 8.F fixes it; remove
-# these two lines when it lands and the slow test says they come back.
-roundtrip 120x120mm-mic6 #234 voron/V0.2R1 Master Assembly v63.step
-roundtrip heatsink #234 voron/Switchwire_Assembly_v1_STEP.step
+# #618: v0-display-pcb builds but comes back through STEP as nothing.
+roundtrip v0-display-pcb #618 voron/V0.2R1 Master Assembly v63.step
