@@ -132,6 +132,66 @@ fn served(
     Some((first, list.len()))
 }
 
+/// A bank: two or more pull-ups and pull-downs (their jumpers with them)
+/// on one sideways side of a part of more than `region::DENSE` pins,
+/// each to stand across the page on its pin's row (design 348's figure
+/// 2, option A).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bank {
+    pub part: usize,
+    pub side: Side,
+    /// Its rows, top to bottom: each pin and the indices (into the idioms
+    /// given) of the pulls on it, resistors first, then by part key.
+    pub rows: Vec<(usize, Vec<usize>)>,
+}
+
+/// The banks of `idioms`, each anchor placed as `at` says (in the frame
+/// its cluster places it in).
+pub fn banks(block: &Block, idioms: &[Idiom], at: &BTreeMap<usize, Place>) -> Vec<Bank> {
+    let mut by: BTreeMap<(usize, Side), BTreeMap<usize, Vec<usize>>> = BTreeMap::new();
+    for (i, idiom) in idioms.iter().enumerate() {
+        if !matches!(idiom.kind, IdiomKind::PullUp | IdiomKind::PullDown) {
+            continue;
+        }
+        let Some((a, k)) = idiom.anchor else { continue };
+        if !matches!(block.parts[a].kind, PartKind::Symbol { .. })
+            || block.parts[a].pins.len() <= crate::region::DENSE
+        {
+            continue;
+        }
+        let Some(place) = at.get(&a) else { continue };
+        let side = Shape::of(&block.parts[a], *place).pins[k].side;
+        if side.horizontal() {
+            by.entry((a, side))
+                .or_default()
+                .entry(k)
+                .or_default()
+                .push(i);
+        }
+    }
+    let mut out = Vec::new();
+    for ((a, side), rows) in by {
+        if rows.values().map(Vec::len).sum::<usize>() < 2 {
+            continue;
+        }
+        let shape = Shape::of(&block.parts[a], at[&a]);
+        let mut rows: Vec<(usize, Vec<usize>)> = rows.into_iter().collect();
+        for (_, list) in &mut rows {
+            list.sort_by_key(|i| {
+                let p = idioms[*i].parts[0];
+                (!is_resistor(block, p), block.parts[p].key.clone())
+            });
+        }
+        rows.sort_by_key(|(k, _)| (std::cmp::Reverse(shape.pins[*k].end[1]), *k));
+        out.push(Bank {
+            part: a,
+            side,
+            rows,
+        });
+    }
+    out
+}
+
 /// Finds every idiom, in kind order then part key order.
 pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom> {
     let by_net = pins_by_net(block);
@@ -2072,5 +2132,64 @@ mod tests {
             .find(|i| i.kind == IdiomKind::PullUp)
             .expect("a pull-up");
         assert_eq!(pull.anchor, Some((1, 0)), "U4's TXP, not A1's IO1");
+    }
+
+    /// A part of more than 8 pins with two pulls or more on one side has a
+    /// bank there, its rows top to bottom; a side with one pull, or a part
+    /// of 8 pins or fewer, has none.
+    #[test]
+    fn banks_are_a_dense_parts_sides_of_two_pulls_or_more() {
+        let sig = |n: usize| Some(n);
+        let mut left: Vec<(&str, PinKind, Option<usize>)> = vec![("L0", PinKind::Input, sig(6))];
+        for name in ["L1", "L2", "L3", "L4"] {
+            left.push((name, PinKind::Input, None));
+        }
+        let right: Vec<(&str, PinKind, Option<usize>)> = vec![
+            ("A", PinKind::Bidirectional, sig(2)),
+            ("B", PinKind::Bidirectional, sig(3)),
+            ("C", PinKind::Bidirectional, None),
+            ("D", PinKind::Bidirectional, sig(4)),
+            ("E", PinKind::Bidirectional, sig(5)),
+        ];
+        let mut parts = vec![ic("u1", "U1", "PHY", &left, &right)];
+        parts.push(resistor("r1", "R1", "10k", [sig(2), Some(0)]));
+        parts.push(resistor("r2", "R2", "10k", [sig(3), Some(1)]));
+        parts.push(resistor("r3", "R3", "10k", [sig(5), Some(0)]));
+        parts.push(resistor("r4", "R4", "10k", [sig(6), Some(1)]));
+        let block = Block {
+            parts,
+            nets: vec![
+                net("rail:v", "3V3", NetKind::Supply),
+                net("rail:gnd", "GND", NetKind::Ground),
+                net("a", "A", NetKind::Signal),
+                net("b", "B", NetKind::Signal),
+                net("d", "D", NetKind::Signal),
+                net("e", "E", NetKind::Signal),
+                net("l0", "L0", NetKind::Signal),
+            ],
+            ..Block::default()
+        };
+        let idioms = find(&block, &BTreeMap::new());
+        let at: BTreeMap<usize, Place> = [(0, Place::new([0, 0], 0, false))].into();
+        let found = banks(&block, &idioms, &at);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        let b = &found[0];
+        assert_eq!((b.part, b.side), (0, Side::Right));
+        let pins: Vec<&str> = b
+            .rows
+            .iter()
+            .map(|(k, _)| block.parts[0].pins[*k].name.as_str())
+            .collect();
+        assert_eq!(pins, ["A", "B", "E"], "top to bottom");
+        for (_, list) in &b.rows {
+            assert_eq!(list.len(), 1);
+        }
+        // The same pulls on a part of 8 pins: no bank.
+        let mut small = block.clone();
+        small.parts[0] = ic("u1", "U1", "PHY", &left[..3], &right);
+        assert!(
+            banks(&small, &find(&small, &BTreeMap::new()), &at).is_empty(),
+            "8 pins"
+        );
     }
 }
