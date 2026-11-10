@@ -1822,8 +1822,9 @@ enum DrawingCmd {
         #[arg(long)]
         rev: Option<String>,
     },
-    /// Every sheet as one PDF, or one sheet as SVG, by --out's extension
-    /// unless --format; the daemon writes it (never over a project file).
+    /// Every sheet as one PDF, or one sheet as SVG or DXF, by --out's
+    /// extension unless --format; the daemon writes it (never over a
+    /// project file).
     Export {
         part: String,
         drawing: String,
@@ -1864,13 +1865,55 @@ enum DrawingViewCmd {
         /// --normal-to unset a face's reference to look normal to.
         #[arg(long, conflicts_with = "from")]
         orient: Option<String>,
-        /// The part or assembly a base view draws (the drawing's own).
-        #[arg(long = "of", requires = "orient")]
+        /// The part or assembly a base, flat or exploded view draws (the
+        /// drawing's own).
+        #[arg(long = "of")]
         of: Option<String>,
         #[arg(long, requires = "orient")]
         label_rev: Option<String>,
-        #[arg(long, required_unless_present = "orient")]
+        #[arg(long, required_unless_present_any = ["orient", "flat"])]
         from: Option<String>,
+        /// A section (with --from) on a plane: xy, yz, zx, a planar face's
+        /// or a datum plane's reference.
+        #[arg(long, requires = "from", conflicts_with_all = ["through", "side", "normal_to", "centre"])]
+        cut: Option<String>,
+        /// Moves --cut's plane along its normal.
+        #[arg(long, requires = "cut", allow_hyphen_values = true)]
+        cut_offset: Option<String>,
+        /// An offset section (with --from) through these points in order:
+        /// X,Y,Z lengths, a vertex's or datum point's reference, or origin.
+        #[arg(long, requires = "from", conflicts_with_all = ["side", "normal_to", "centre"])]
+        through: Vec<String>,
+        /// Sees a section from the other side.
+        #[arg(long)]
+        flip: bool,
+        /// An instance path an assembly's section leaves whole.
+        #[arg(long)]
+        unsectioned: Vec<String>,
+        /// A detail (with --from) about this point, X,Y,Z or a reference.
+        #[arg(long, requires_all = ["from", "radius"], conflicts_with_all = ["side", "normal_to"])]
+        centre: Option<String>,
+        /// A detail's radius in the model.
+        #[arg(long, requires = "centre")]
+        radius: Option<String>,
+        /// A sheet metal solid's flat pattern.
+        #[arg(long, conflicts_with_all = ["orient", "from"])]
+        flat: bool,
+        /// The flat view's solid (the part's one sheet metal solid).
+        #[arg(long, requires = "flat")]
+        solid: Option<String>,
+        /// A flat view without its bend notes.
+        #[arg(long, requires = "flat")]
+        no_notes: bool,
+        /// An exploded view (with --orient) of this explode.
+        #[arg(long, requires = "orient")]
+        explode: Option<String>,
+        /// How far through the explode, 0 to 1 (all of it).
+        #[arg(long, requires = "explode")]
+        fraction: Option<f64>,
+        /// Draws the explode's trails.
+        #[arg(long, requires = "explode")]
+        trails: bool,
         /// top, bottom, left, right, back, or iso and the cube's corners.
         #[arg(long, requires = "from", conflicts_with = "normal_to")]
         side: Option<String>,
@@ -1890,6 +1933,27 @@ enum DrawingViewCmd {
         #[command(flatten)]
         expect: Expect,
     },
+}
+
+/// A geometric reference as a drawing writes it: a word (`xy`, `x`,
+/// `origin`), `<part>/<feature>` (a datum) or `<part>/<feature>/<name>`.
+fn drawing_geom(text: &str) -> core::result::Result<Value, Error> {
+    let parts: Vec<&str> = text.split('/').collect();
+    match parts.as_slice() {
+        [w] => Ok(json!(w)),
+        [_, f] => Ok(json!({"feature": f})),
+        _ => drawing_ref(text),
+    }
+}
+
+/// A model point as a drawing writes it: `X,Y,Z` lengths, else a
+/// geometric reference.
+fn drawing_point(text: &str) -> core::result::Result<Value, Error> {
+    let xyz: Vec<&str> = text.split(',').map(str::trim).collect();
+    match xyz.as_slice() {
+        [x, y, z] => Ok(json!([x, y, z])),
+        _ => drawing_geom(text),
+    }
 }
 
 /// A reference `<part>/<feature>/<name>` as a drawing writes it.
@@ -5137,6 +5201,19 @@ fn drawing_request(d: &DrawingCmd) -> Result<Request> {
             of,
             label_rev,
             from,
+            cut,
+            cut_offset,
+            through,
+            flip,
+            unsectioned,
+            centre,
+            radius,
+            flat,
+            solid,
+            no_notes,
+            explode,
+            fraction,
+            trails,
             side,
             normal_to,
             at,
@@ -5148,6 +5225,64 @@ fn drawing_request(d: &DrawingCmd) -> Result<Request> {
         }) => {
             let mut v = json!({"sheet": sheet});
             match (orient, from) {
+                _ if *flat => {
+                    v["type"] = json!("flat");
+                    if let Some(of) = of {
+                        v["of"] = json!(of);
+                    }
+                    if let Some(s) = solid {
+                        v["solid"] = json!(s);
+                    }
+                    if *no_notes {
+                        v["notes"] = json!(false);
+                    }
+                }
+                (Some(o), _) if explode.is_some() => {
+                    v["type"] = json!("exploded");
+                    v["explode"] = json!(explode);
+                    v["orient"] = if o.contains('/') {
+                        json!({"normal_to": drawing_ref(o)?})
+                    } else {
+                        json!(o)
+                    };
+                    if let Some(of) = of {
+                        v["of"] = json!(of);
+                    }
+                    if let Some(f) = fraction {
+                        v["fraction"] = json!(f);
+                    }
+                    if *trails {
+                        v["trails"] = json!(true);
+                    }
+                }
+                (None, Some(f)) if cut.is_some() || !through.is_empty() => {
+                    v["type"] = json!("section");
+                    v["from"] = json!(f);
+                    v["cut"] = match cut {
+                        Some(c) => {
+                            let mut c = json!({"plane": drawing_geom(c)?});
+                            if let Some(d) = cut_offset {
+                                c["offset"] = json!(d);
+                            }
+                            c
+                        }
+                        None => {
+                            json!({"through": through.iter().map(|p| drawing_point(p)).collect::<core::result::Result<Vec<_>, _>>()?})
+                        }
+                    };
+                    if *flip {
+                        v["flip"] = json!(true);
+                    }
+                    if !unsectioned.is_empty() {
+                        v["unsectioned"] = json!(unsectioned);
+                    }
+                }
+                (None, Some(f)) if centre.is_some() => {
+                    v["type"] = json!("detail");
+                    v["from"] = json!(f);
+                    v["centre"] = drawing_point(centre.as_deref().unwrap_or_default())?;
+                    v["radius"] = json!(radius);
+                }
                 (Some(o), _) => {
                     v["type"] = json!("base");
                     v["orient"] = if o.contains('/') {

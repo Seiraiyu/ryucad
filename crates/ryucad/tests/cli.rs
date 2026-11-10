@@ -5274,6 +5274,34 @@ fn drawings_from_the_cli() {
     let views = got["sheets"][0]["views"].as_array().unwrap();
     assert_eq!(views.len(), 5);
     assert_eq!(views[0]["at_mm"], json!([150.0, 180.0]), "{got}");
+    // A section of the top view at x = 20 mm: its letter given, placed
+    // on the top view's row and its offset written back.
+    p.ok(&[
+        "drawing",
+        "view",
+        "add",
+        "plate",
+        "main",
+        "--from",
+        "v2",
+        "--cut",
+        "yz",
+        "--cut-offset",
+        "20",
+    ]);
+    let text = fs::read_to_string(p.direct.join("parts/plate/drawings/main.json")).unwrap();
+    let file: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(file["views"]["v6"]["type"], "section", "{file}");
+    assert_eq!(file["views"]["v6"]["label"], "A", "{file}");
+    assert!(file["views"]["v6"]["offset"].is_string(), "{file}");
+    // A detail of the front view about its corner.
+    p.ok(&[
+        "drawing", "view", "add", "plate", "main", "--from", "v1", "--centre", "0,0,0", "--radius",
+        "5",
+    ]);
+    let got = p.ok(&["drawing", "get", "plate", "main"]);
+    assert_eq!(got["findings"], json!([]), "{got}");
+    assert_eq!(got["sheets"][0]["views"].as_array().unwrap().len(), 7);
     // What the agent reads in words.
     let d = p.ok(&["drawing", "describe", "plate", "main"]);
     let words = d["sheets"][0]["views"][0]["text"].as_str().unwrap();

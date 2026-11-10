@@ -288,7 +288,23 @@ fn apply(v: &mut Value, op: &Value, at: &str) -> Result<()> {
             if !op["value"].is_object() {
                 return Err(bad(&format!("{at}/value"), format!("a {kind}'s fields")));
             }
-            v[g][key.to_string()] = op["value"].clone();
+            let mut value = op["value"].clone();
+            // A section or detail added with no letter takes the next free.
+            if matches!(value["type"].as_str(), Some("section" | "detail"))
+                && value.get("label").is_none()
+            {
+                let used: Vec<String> = v["views"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter(|(_, w)| matches!(w["type"].as_str(), Some("section" | "detail")))
+                    .filter_map(|(_, w)| w["label"].as_str().map(str::to_owned))
+                    .collect();
+                value["label"] = json!(crate::doc::drawing::next_letter(
+                    used.iter().map(String::as_str)
+                ));
+            }
+            v[g][key.to_string()] = value;
         }
         "remove" => {
             let id = id.ok_or_else(|| bad(&format!("{at}/id"), "remove names what it removes"))?;
