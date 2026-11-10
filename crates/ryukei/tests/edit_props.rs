@@ -37,7 +37,7 @@ const MIN_BUILT: usize = 32;
 /// Seeds known to run past the deadline, each with its issue.
 ///
 /// - 76: an offset of a face of a 19-face body traces past two minutes
-///   (filed by Task 3 of plan 13.D).
+///   (#659).
 ///
 /// The `edit` fuzz target's first find is slow the same way, and isn't a
 /// seed here: an offset with `Topology::Change` of a face of a 16-face
@@ -53,7 +53,7 @@ const KNOWN_SLOW: &[u64] = &[76];
 ///   out by design (plan 13.C);
 /// - 39, 100 and 102: a chamfer along a line of three edges a cylinder's
 ///   hole splits, a chamfer ending on a torus, and a chamfer between a
-///   disc and a cone coaxial with another (filed by Task 4 of plan 13.D).
+///   disc and a cone coaxial with another (#660).
 const KNOWN_UNRECOGNISED: &[u64] = &[32, 39, 92, 100, 102];
 
 /// Seeds whose result the mesher refuses at a thousandth of its size,
