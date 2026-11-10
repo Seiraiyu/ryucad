@@ -368,10 +368,17 @@ fn a_drawings_pdf_reads_back_its_sheets_text_and_bookmarks() {
         assert_eq!(page.1, texts, "{}", sheet["sheet"]);
     }
     // The fit reads back as drawn: ⌀ is a stroke, its value text.
-    assert!(r.pages[0].1.iter().any(|t| t.contains("H7")), "{:?}", r.pages[0].1);
+    assert!(
+        r.pages[0].1.iter().any(|t| t.contains("H7")),
+        "{:?}",
+        r.pages[0].1
+    );
     assert_eq!(r.fonts.len(), 1);
     // A bookmark for each sheet and each of its views.
-    let views: usize = sheets.iter().map(|s| s["views"].as_array().unwrap().len()).sum();
+    let views: usize = sheets
+        .iter()
+        .map(|s| s["views"].as_array().unwrap().len())
+        .sum();
     assert_eq!(r.bookmarks.len(), sheets.len() + views, "{:?}", r.bookmarks);
     assert_eq!(r.title.as_deref(), Some("p · Plate"));
 }

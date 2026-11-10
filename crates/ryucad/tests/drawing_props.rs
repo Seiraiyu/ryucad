@@ -184,9 +184,21 @@ fn judge(seed: u64) -> Result<(), String> {
     // x in the top view, z in the front, y in the right, the hole's
     // diameter in the top: each true length there.
     let dims = [
-        ("v2", "linear", json!({"a": xs[0], "b": xs[1], "along": "horizontal"})),
-        ("v1", "linear", json!({"a": zs[0], "b": zs[1], "along": "vertical"})),
-        ("v3", "linear", json!({"a": ys[0], "b": ys[1], "along": "horizontal"})),
+        (
+            "v2",
+            "linear",
+            json!({"a": xs[0], "b": xs[1], "along": "horizontal"}),
+        ),
+        (
+            "v1",
+            "linear",
+            json!({"a": zs[0], "b": zs[1], "along": "vertical"}),
+        ),
+        (
+            "v3",
+            "linear",
+            json!({"a": ys[0], "b": ys[1], "along": "horizontal"}),
+        ),
         ("v2", "diameter", json!({"of": wall})),
     ];
     let mut ops = Vec::new();
@@ -219,7 +231,11 @@ fn judge(seed: u64) -> Result<(), String> {
             .as_f64()
             .ok_or_else(|| format!("seed {seed}: d{} has no value: {a}", i + 1))?;
         let want = if *ty == "diameter" {
-            let m = must(&mut s, "measure", json!({"entities": [format!("p/{}", ends["of"].as_str().unwrap())]}));
+            let m = must(
+                &mut s,
+                "measure",
+                json!({"entities": [format!("p/{}", ends["of"].as_str().unwrap())]}),
+            );
             2.0 * m["shape"]["radius"]["m"].as_f64().unwrap()
         } else {
             let refs: Vec<String> = ["a", "b"]
@@ -231,7 +247,10 @@ fn judge(seed: u64) -> Result<(), String> {
                 .unwrap()
         };
         if (value - want).abs() > 1e-12 {
-            return Err(format!("seed {seed}: d{} reads {value}, measure {want}", i + 1));
+            return Err(format!(
+                "seed {seed}: d{} reads {value}, measure {want}",
+                i + 1
+            ));
         }
     }
     // Every item on its sheet.
@@ -242,14 +261,21 @@ fn judge(seed: u64) -> Result<(), String> {
     for (i, it) in sheet["items"].as_array().unwrap().iter().enumerate() {
         let [lo, hi] = item_box(it);
         if lo[0] < -1e-9 || lo[1] < -1e-9 || hi[0] > paper[0] + 1e-9 || hi[1] > paper[1] + 1e-9 {
-            return Err(format!("seed {seed}: item {i} leaves the {} sheet: {lo:?} {hi:?}", c.sheet));
+            return Err(format!(
+                "seed {seed}: item {i} leaves the {} sheet: {lo:?} {hi:?}",
+                c.sheet
+            ));
         }
     }
     // The same twice, from a fresh session each time: the built drawing
     // and the PDF.
     let pdf = |root: &Path| -> (Value, Vec<u8>) {
         let mut s = Session::open(root).unwrap();
-        let g = must(&mut s, "drawing.get", json!({"part": "p", "drawing": "d", "items": true}));
+        let g = must(
+            &mut s,
+            "drawing.get",
+            json!({"part": "p", "drawing": "d", "items": true}),
+        );
         let out = tempfile::tempdir().unwrap();
         let f = out.path().join("d.pdf");
         must(
@@ -265,7 +291,9 @@ fn judge(seed: u64) -> Result<(), String> {
         return Err(format!("seed {seed}: two builds differ"));
     }
     if g1["sheets"] != got["sheets"] {
-        return Err(format!("seed {seed}: a fresh session builds it differently"));
+        return Err(format!(
+            "seed {seed}: a fresh session builds it differently"
+        ));
     }
     Ok(())
 }

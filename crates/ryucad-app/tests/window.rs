@@ -6159,13 +6159,20 @@ fn a_drawing_opens_from_its_row_its_dimension_is_edited_and_a_view_dragged() {
     h.get_by_label("Apply to dimension").click();
     frames(&mut h, |a| {
         let d = &a.opened().ws.drawings;
-        !d.saving && d.sheet.as_ref().and_then(|s| s.note("d1")).is_some_and(|n| n.text.contains("0.20"))
+        !d.saving
+            && d.sheet
+                .as_ref()
+                .and_then(|s| s.note("d1"))
+                .is_some_and(|n| n.text.contains("0.20"))
     });
     let file: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(p.root.join("parts/p/drawings/d.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(file["annotations"]["d1"]["tolerance"]["symmetric"], "0.2 mm");
+    assert_eq!(
+        file["annotations"]["d1"]["tolerance"]["symmetric"],
+        "0.2 mm"
+    );
     // A drag of the view, from inside it on no curve, moves it once.
     let v = h.state().opened().ws.drawings.sheet.clone().unwrap().views[0].clone();
     let start = on_sheet(&h, [v.at[0] + 3.0, v.at[1] + 2.0]);
@@ -6178,7 +6185,9 @@ fn a_drawing_opens_from_its_row_its_dimension_is_edited_and_a_view_dragged() {
     });
     let end = on_sheet(&h, [v.at[0] + 13.0, v.at[1] + 2.0]);
     for i in 1..=8 {
-        h.event(egui::Event::PointerMoved(start + (end - start) * (i as f32 / 8.0)));
+        h.event(egui::Event::PointerMoved(
+            start + (end - start) * (i as f32 / 8.0),
+        ));
         h.step();
     }
     h.event(egui::Event::PointerButton {

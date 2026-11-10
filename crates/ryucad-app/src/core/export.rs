@@ -226,13 +226,10 @@ impl Export {
             return;
         }
         let p = std::path::Path::new(path);
-        let known = p
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| {
-                ryucad::export::Format::of_path(&format!("x.{e}")).is_some()
-                    || DRAWING_FORMATS.contains(&e.to_ascii_lowercase().as_str())
-            });
+        let known = p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+            ryucad::export::Format::of_path(&format!("x.{e}")).is_some()
+                || DRAWING_FORMATS.contains(&e.to_ascii_lowercase().as_str())
+        });
         let ext = self.choices.extension();
         self.path = if known {
             p.with_extension(ext).display().to_string()

@@ -85,8 +85,10 @@ fn literal(s: &[u8]) -> (Vec<u8>, usize) {
 fn text_string(b: &[u8]) -> String {
     if b.starts_with(&[0xfe, 0xff]) {
         let u: Vec<u16> = b[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_be_bytes(*c))
             .collect();
         String::from_utf16_lossy(&u)
     } else {
@@ -98,9 +100,16 @@ fn text_string(b: &[u8]) -> String {
 fn number_after(dict: &[u8], key: &[u8]) -> Option<f64> {
     let at = find(dict, key, 0)? + key.len();
     // Up to the line's end: a stream's binary bytes may follow.
-    let end = dict[at..].iter().position(|c| *c == b'\n').map_or(dict.len(), |e| at + e);
+    let end = dict[at..]
+        .iter()
+        .position(|c| *c == b'\n')
+        .map_or(dict.len(), |e| at + e);
     let rest = std::str::from_utf8(&dict[at..end]).ok()?;
-    rest.split_whitespace().next()?.trim_end_matches(['/', '>']).parse().ok()
+    rest.split_whitespace()
+        .next()?
+        .trim_end_matches(['/', '>'])
+        .parse()
+        .ok()
 }
 
 fn reference_after(dict: &[u8], key: &[u8]) -> Option<u32> {
@@ -188,8 +197,10 @@ pub fn read(bytes: &[u8]) -> Result<Read, String> {
                 } else if l == "endbfchar" {
                     inside = false;
                 } else if inside {
-                    let hex: Vec<&str> =
-                        l.split(['<', '>']).filter(|x| !x.trim().is_empty()).collect();
+                    let hex: Vec<&str> = l
+                        .split(['<', '>'])
+                        .filter(|x| !x.trim().is_empty())
+                        .collect();
                     let g = u16::from_str_radix(hex[0], 16).map_err(|_| "a glyph id")?;
                     let u: Vec<u16> = (0..hex[1].len() / 4)
                         .map(|k| u16::from_str_radix(&hex[1][4 * k..4 * k + 4], 16).unwrap())
@@ -243,12 +254,17 @@ pub fn read(bytes: &[u8]) -> Result<Read, String> {
             let (s, used) = literal(&content[open + 1..]);
             i = open + 1 + used;
             let rest = &content[i..];
-            let op = rest.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(0);
+            let op = rest
+                .iter()
+                .position(|c| !c.is_ascii_whitespace())
+                .unwrap_or(0);
             if rest[op..].starts_with(b"Tj") {
                 let t: String = s
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|c| {
-                        let g = u16::from_be_bytes([c[0], c[1]]);
+                        let g = u16::from_be_bytes(*c);
                         glyphs.get(&g).cloned().unwrap_or_else(|| "\u{fffd}".into())
                     })
                     .collect();

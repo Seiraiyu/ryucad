@@ -387,15 +387,30 @@ impl Project {
             "feature", "add", "p", "box", "--id", "b", "--param", "x=40", "--param", "y=30",
             "--param", "z=20",
         ]);
-        let [east, west] = [[1, 0, 0], [-1, 0, 0]]
-            .map(|n| self.box_face(n).trim_start_matches("p/").to_owned());
+        let [east, west] =
+            [[1, 0, 0], [-1, 0, 0]].map(|n| self.box_face(n).trim_start_matches("p/").to_owned());
         self.ok(&["drawing", "create", "p", "d", "--name", "Block"]);
         self.ok(&[
             "drawing", "view", "add", "p", "d", "--orient", "top", "--at", "120,150",
         ]);
         self.ok(&[
-            "drawing", "dim", "add", "p", "d", "--view", "v1", "--type", "linear", "--a", &west,
-            "--b", &east, "--along", "horizontal", "--tol", "0.1 mm",
+            "drawing",
+            "dim",
+            "add",
+            "p",
+            "d",
+            "--view",
+            "v1",
+            "--type",
+            "linear",
+            "--a",
+            &west,
+            "--b",
+            &east,
+            "--along",
+            "horizontal",
+            "--tol",
+            "0.1 mm",
         ]);
         self
     }

@@ -645,7 +645,11 @@ fn sheet_json(s: &SheetBuilt, items: bool) -> Value {
         // Each view's and annotation's items, as a range of the sheet's,
         // and the model entity each of a view's curves draws: what the
         // app picks.
-        for (v, j) in s.views.iter().zip(out["views"].as_array_mut().into_iter().flatten()) {
+        for (v, j) in s
+            .views
+            .iter()
+            .zip(out["views"].as_array_mut().into_iter().flatten())
+        {
             j["items"] = json!([v.items.start, v.items.end]);
         }
         for (a, j) in s
@@ -1165,10 +1169,18 @@ mod tests {
             json!({"part": "p", "type": "box", "id": "b", "params": {"x": 40, "y": 30, "z": 20}}),
         )
         .unwrap();
-        call(&mut s, "drawing.create", json!({"part": "p", "drawing": "d"})).unwrap();
+        call(
+            &mut s,
+            "drawing.create",
+            json!({"part": "p", "drawing": "d"}),
+        )
+        .unwrap();
         let file = |s: &Session| {
             let p = s.project().part(&Id::parse("p", "x").unwrap()).unwrap();
-            p.drawings[&Id::parse("d", "x").unwrap()].clone().unwrap().to_json()
+            p.drawings[&Id::parse("d", "x").unwrap()]
+                .clone()
+                .unwrap()
+                .to_json()
         };
         assert_eq!(file(&s)["sheets"]["s1"].get("scale"), None);
         call(

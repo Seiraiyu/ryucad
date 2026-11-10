@@ -101,8 +101,7 @@ pub fn drawings(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             );
         }
     }
-    if r.dragged_by(egui::PointerButton::Middle) || r.dragged_by(egui::PointerButton::Secondary)
-    {
+    if r.dragged_by(egui::PointerButton::Middle) || r.dragged_by(egui::PointerButton::Secondary) {
         let d = r.drag_delta();
         cam.pan([f64::from(d.x), f64::from(d.y)]);
     }
@@ -119,7 +118,8 @@ pub fn drawings(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             .or_else(|| r.interact_pointer_pos())
     {
         let at = to_sheet(&cam, p);
-        dragging = crate::core::drawings::pick(&sheet, at, reach).map(|pick| Dragging { pick, from: at });
+        dragging =
+            crate::core::drawings::pick(&sheet, at, reach).map(|pick| Dragging { pick, from: at });
     }
     let mut moved = [0.0, 0.0];
     if let Some(d) = &dragging
@@ -193,7 +193,14 @@ pub fn drawings(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             [0.0, 0.0]
         };
         let picked = chosen.as_ref().is_some_and(|c| c.contains(&i));
-        paint(&painter, it, chord, cam.zoom, &|p| screen(p, off), picked.then_some(accent));
+        paint(
+            &painter,
+            it,
+            chord,
+            cam.zoom,
+            &|p| screen(p, off),
+            picked.then_some(accent),
+        );
     }
     if let Some(n) = &ws.drawings.note {
         ui.colored_label(ui.visuals().warn_fg_color, n);
@@ -242,7 +249,10 @@ fn header(ui: &mut egui::Ui, ws: &mut Workspace, list: &crate::core::drawings::L
                 .selected_text(k)
                 .show_ui(ui, |ui| {
                     for (s, name) in &e.sheets {
-                        if ui.selectable_label(s == k, format!("{s} ({name})")).clicked() {
+                        if ui
+                            .selectable_label(s == k, format!("{s} ({name})"))
+                            .clicked()
+                        {
                             choose = Some((d.clone(), s.clone()));
                         }
                     }
@@ -334,7 +344,10 @@ fn paint(
                 Anchor::Middle => -w / 2.0,
                 Anchor::End => -w,
             };
-            let rows = galley.rows.first().map_or(pt * 0.8, |r| r.row.size.y * 0.78);
+            let rows = galley
+                .rows
+                .first()
+                .map_or(pt * 0.8, |r| r.row.size.y * 0.78);
             let a = -*angle as f32;
             let (s, co) = (a.sin(), a.cos());
             let o = to(*at);
@@ -391,7 +404,13 @@ fn chosen_ui(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                 dirty = f.dirty();
             }
             if ws.drawings.form.is_some() {
-                let foot = form::foot(ui, dirty, saving, ("Apply to dimension", "Revert dimension"), &gate);
+                let foot = form::foot(
+                    ui,
+                    dirty,
+                    saving,
+                    ("Apply to dimension", "Revert dimension"),
+                    &gate,
+                );
                 if foot.revert || keys.revert {
                     if let Some(f) = &mut ws.drawings.form {
                         f.revert();

@@ -169,11 +169,19 @@ fn item(v: &Value) -> Option<Item> {
                 .flatten()
                 .filter_map(Value::as_f64)
                 .collect();
-            (colour(&st["colour"]), st["width"].as_f64().unwrap_or(0.25), dash)
+            (
+                colour(&st["colour"]),
+                st["width"].as_f64().unwrap_or(0.25),
+                dash,
+            )
         });
         return Some(Item::Path {
             start: point(&p["start"])?,
-            segments: p["segments"].as_array()?.iter().filter_map(segment).collect(),
+            segments: p["segments"]
+                .as_array()?
+                .iter()
+                .filter_map(segment)
+                .collect(),
             closed: p["closed"] == true,
             stroke,
             fill: v.get("fill").map(colour),
@@ -231,7 +239,12 @@ impl Note {
     /// precision).
     pub fn is_dimension(&self) -> bool {
         [
-            "linear", "angular", "radius", "diameter", "ordinate", "chamfer",
+            "linear",
+            "angular",
+            "radius",
+            "diameter",
+            "ordinate",
+            "chamfer",
             "hole_callout",
         ]
         .contains(&self.kind.as_str())
@@ -415,8 +428,9 @@ fn bezier_at(ctrl: &[P], w: &[f64], t: f64) -> P {
     let n = q.len();
     for k in 1..n {
         for i in 0..n - k {
-            for c in 0..3 {
-                q[i][c] = (1.0 - t) * q[i][c] + t * q[i + 1][c];
+            let next = q[i + 1];
+            for (c, x) in q[i].iter_mut().enumerate() {
+                *x = (1.0 - t) * *x + t * next[c];
             }
         }
     }
@@ -501,9 +515,14 @@ pub fn outline(it: &Item, chord: f64) -> Vec<P> {
                 Anchor::End => -w,
             };
             let (s, c) = ryu_math::sin_cos(*angle);
-            [[x0, -0.25 * size], [x0 + w, -0.25 * size], [x0 + w, 0.75 * size], [x0, 0.75 * size]]
-                .map(|q| [at[0] + c * q[0] - s * q[1], at[1] + s * q[0] + c * q[1]])
-                .to_vec()
+            [
+                [x0, -0.25 * size],
+                [x0 + w, -0.25 * size],
+                [x0 + w, 0.75 * size],
+                [x0, 0.75 * size],
+            ]
+            .map(|q| [at[0] + c * q[0] - s * q[1], at[1] + s * q[0] + c * q[1]])
+            .to_vec()
         }
     }
 }
@@ -583,7 +602,10 @@ impl Camera {
 pub enum Pick {
     /// A model entity a view draws (`<part>/<solid>/<name>`), in that
     /// view.
-    Entity { entity: String, view: String },
+    Entity {
+        entity: String,
+        view: String,
+    },
     Annotation(String),
     View(String),
 }
@@ -600,7 +622,10 @@ fn segment_distance(p: P, a: P, b: P) -> f64 {
 }
 
 fn inside(p: P, b: [P; 2], grow: f64) -> bool {
-    p[0] >= b[0][0] - grow && p[0] <= b[1][0] + grow && p[1] >= b[0][1] - grow && p[1] <= b[1][1] + grow
+    p[0] >= b[0][0] - grow
+        && p[0] <= b[1][0] + grow
+        && p[1] >= b[0][1] - grow
+        && p[1] <= b[1][1] + grow
 }
 
 /// What lies at sheet point `p` within `reach` mm: an annotation first
@@ -756,13 +781,21 @@ impl DimensionForm {
             Some((k, x)) => (
                 k.as_str(),
                 match x {
-                    Value::Array(pair) => pair.iter().map(quantity_text).collect::<Vec<_>>().join(", "),
+                    Value::Array(pair) => pair
+                        .iter()
+                        .map(quantity_text)
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     Value::Bool(_) => String::new(),
                     other => quantity_text(other),
                 },
             ),
         };
-        let form = TOLERANCES.iter().find(|f| **f == form).copied().unwrap_or("none");
+        let form = TOLERANCES
+            .iter()
+            .find(|f| **f == form)
+            .copied()
+            .unwrap_or("none");
         Some(DimensionForm {
             annotation: key.to_owned(),
             text: Field::new("text", a["text"].as_str().unwrap_or("").to_owned()),
@@ -770,7 +803,10 @@ impl DimensionForm {
             value: Field::new("tolerance value", value),
             precision: Field::new(
                 "precision",
-                a["precision"].as_u64().map(|p| p.to_string()).unwrap_or_default(),
+                a["precision"]
+                    .as_u64()
+                    .map(|p| p.to_string())
+                    .unwrap_or_default(),
             ),
         })
     }
@@ -791,7 +827,11 @@ impl DimensionForm {
     fn tolerance_json(&self) -> Result<Value, String> {
         let v = self.value.text.trim();
         let two = || -> Result<Value, String> {
-            let parts: Vec<&str> = v.split(',').map(str::trim).filter(|x| !x.is_empty()).collect();
+            let parts: Vec<&str> = v
+                .split(',')
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .collect();
             match parts.as_slice() {
                 [u, l] => Ok(json!([u, l])),
                 _ => Err("give the upper and the lower, a comma between".into()),
@@ -814,7 +854,10 @@ impl DimensionForm {
         let mut fields = serde_json::Map::new();
         if self.text.dirty() {
             let t = self.text.text.trim();
-            fields.insert("text".into(), if t.is_empty() { Value::Null } else { json!(t) });
+            fields.insert(
+                "text".into(),
+                if t.is_empty() { Value::Null } else { json!(t) },
+            );
         }
         if self.tolerance.dirty() || self.value.dirty() {
             fields.insert("tolerance".into(), self.tolerance_json()?);
@@ -826,7 +869,10 @@ impl DimensionForm {
                 if p.is_empty() {
                     Value::Null
                 } else {
-                    json!(p.parse::<u64>().map_err(|_| "precision is a whole number of decimals".to_owned())?)
+                    json!(
+                        p.parse::<u64>()
+                            .map_err(|_| "precision is a whole number of decimals".to_owned())?
+                    )
                 },
             );
         }
@@ -871,11 +917,16 @@ impl Tile {
             return Some(c.clone());
         }
         let want = self.want.as_deref();
-        self.list.as_ref()?.entries.iter().filter(|e| want.is_none_or(|w| e.drawing == w)).find_map(|e| {
-            e.sheets
-                .first()
-                .map(|(k, _)| (e.drawing.clone(), k.clone()))
-        })
+        self.list
+            .as_ref()?
+            .entries
+            .iter()
+            .filter(|e| want.is_none_or(|w| e.drawing == w))
+            .find_map(|e| {
+                e.sheets
+                    .first()
+                    .map(|(k, _)| (e.drawing.clone(), k.clone()))
+            })
     }
 
     /// Chooses what a click picked: an annotation that is a dimension
@@ -926,7 +977,7 @@ mod tests {
                      "stroke": {"colour": "#000000", "width": 0.6, "dash": []}, "entity": "p/b/aa"},
                     {"path": {"start": [110.0, 80.0],
                               "segments": [{"arc": {"centre": [100.0, 80.0], "radius": 10.0,
-                                                    "from": 0.0, "sweep": 6.283185307179586}}],
+                                                    "from": 0.0, "sweep": std::f64::consts::TAU}}],
                               "closed": true},
                      "stroke": {"colour": "#000000", "width": 0.6, "dash": []}, "entity": "p/b/bb"},
                     {"path": {"start": [150.0, 70.0], "segments": [{"line": [170.0, 70.0]}], "closed": false},
@@ -948,7 +999,10 @@ mod tests {
         ], "revisions": {"p": "r1"}});
         let l = List::from_answer("p", &v);
         assert_eq!(l.entries.len(), 2);
-        assert_eq!(l.entries[0].sheets, [("s1".to_owned(), "Sheet 1".to_owned())]);
+        assert_eq!(
+            l.entries[0].sheets,
+            [("s1".to_owned(), "Sheet 1".to_owned())]
+        );
         assert_eq!(l.entries[1].error.as_deref(), Some("bad"));
         assert_eq!(l.revision.as_deref(), Some("r1"));
     }
@@ -1019,7 +1073,10 @@ mod tests {
     #[test]
     fn picking_takes_an_annotation_then_the_nearest_curve_then_a_view() {
         let s = Sheet::from_answer(&answer()).unwrap();
-        assert_eq!(pick(&s, [100.0, 100.5], 0.5), Some(Pick::Annotation("d1".into())));
+        assert_eq!(
+            pick(&s, [100.0, 100.5], 0.5),
+            Some(Pick::Annotation("d1".into()))
+        );
         assert_eq!(
             pick(&s, [84.0, 70.2], 0.5),
             Some(Pick::Entity {

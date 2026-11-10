@@ -61,8 +61,14 @@ fn plate(s: &mut Session) {
         f["part"] = json!("p");
         must(s, "feature.add", f)
     };
-    add(s, json!({"type": "box", "id": "b", "params": {"x": 40, "y": 25, "z": 0.5}}));
-    add(s, json!({"type": "sketch", "id": "t", "placement": {"origin": [0, 0, 0.5]}}));
+    add(
+        s,
+        json!({"type": "box", "id": "b", "params": {"x": 40, "y": 25, "z": 0.5}}),
+    );
+    add(
+        s,
+        json!({"type": "sketch", "id": "t", "placement": {"origin": [0, 0, 0.5]}}),
+    );
     must(
         s,
         "sketch.edit",
@@ -102,7 +108,12 @@ fn the_1000_hole_plates_drawing_builds_within_its_bars() {
     let views = made["sheets"][0]["views"].as_array().unwrap().clone();
     assert_eq!(views.len(), 4, "{made}");
     // ryukei alone, on the same body and the same four views.
-    let model = s.model(&Id::parse("p", "part").unwrap(), &ryucad::doc::assembly::Rev::Working).unwrap();
+    let model = s
+        .model(
+            &Id::parse("p", "part").unwrap(),
+            &ryucad::doc::assembly::Rev::Working,
+        )
+        .unwrap();
     let body = model.occurrences[0].solids[0].built.body.clone();
     let vec3 = |v: &Value| {
         Vector3::new(

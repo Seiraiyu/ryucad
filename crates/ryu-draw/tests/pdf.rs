@@ -35,7 +35,10 @@ fn a_pdf_reads_back_its_pages_text_fonts_and_bookmarks() {
             text("FRONT", [10.0, 10.0]),
             text("40.00 ±0.10", [10.0, 20.0]),
         ],
-        vec![text("SECTION A-A", [10.0, 10.0]), text("4× 90° (2:1)", [10.0, 30.0])],
+        vec![
+            text("SECTION A-A", [10.0, 10.0]),
+            text("4× 90° (2:1)", [10.0, 30.0]),
+        ],
     ];
     let all: Vec<Item> = pages_items.iter().flatten().cloned().collect();
     let doc = Doc {
@@ -74,7 +77,11 @@ fn a_pdf_reads_back_its_pages_text_fonts_and_bookmarks() {
     let r = read(&bytes).unwrap();
     assert_eq!(r.pages.len(), 2);
     let pt = |mm: f64| f64::from((mm * PT_PER_MM) as f32);
-    assert!((r.pages[0].0[0] - pt(279.4)).abs() < 1e-3, "{:?}", r.pages[0].0);
+    assert!(
+        (r.pages[0].0[0] - pt(279.4)).abs() < 1e-3,
+        "{:?}",
+        r.pages[0].0
+    );
     assert!((r.pages[1].0[1] - pt(297.0)).abs() < 1e-3);
     assert_eq!(r.pages[0].1, ["FRONT", "40.00 ±0.10"]);
     assert_eq!(r.pages[1].1, ["SECTION A-A", "4× 90° (2:1)"]);
@@ -97,7 +104,9 @@ fn a_damaged_pdf_is_refused() {
         size: [100.0, 100.0],
         links: vec![],
     }];
-    let mut bytes = write(&doc, &pages, &[], &mut |_, c| c.items(&[text("X", [0.0, 0.0])]));
+    let mut bytes = write(&doc, &pages, &[], &mut |_, c| {
+        c.items(&[text("X", [0.0, 0.0])])
+    });
     assert!(read(&bytes).is_ok());
     // An object moved by a byte no longer stands where the table says.
     let at = bytes.windows(7).position(|w| w == b"2 0 obj").unwrap();

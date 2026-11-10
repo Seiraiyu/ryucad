@@ -239,7 +239,10 @@ fn drawn_counts(items: &[Value]) -> std::collections::BTreeMap<String, u64> {
                 let (c, ea, eb) = (pt(&e["centre"]), pt(&e["a"]), pt(&e["b"]));
                 let t = e["from"].as_f64().unwrap() + e["sweep"].as_f64().unwrap();
                 let (sn, cs) = ryukei::math::sin_cos(t);
-                [c[0] + (ea[0] * cs + eb[0] * sn), c[1] + (ea[1] * cs + eb[1] * sn)]
+                [
+                    c[0] + (ea[0] * cs + eb[0] * sn),
+                    c[1] + (ea[1] * cs + eb[1] * sn),
+                ]
             } else {
                 pt(sg["bezier"]["points"].as_array().unwrap().last().unwrap())
             }
@@ -298,7 +301,11 @@ fn ezdxf_reads_every_drawing_dxf() {
         .unwrap();
     let ops = json!([{"op": "add", "kind": "annotation",
         "value": {"type": "diameter", "view": "v2", "of": wall, "tolerance": {"fit": "H7"}}}]);
-    call(&mut s, "drawing.edit", json!({"part": "p", "drawing": "d", "ops": ops}));
+    call(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "p", "drawing": "d", "ops": ops}),
+    );
     call(
         &mut s,
         "drawing.edit",
@@ -308,8 +315,16 @@ fn ezdxf_reads_every_drawing_dxf() {
             {"op": "add", "kind": "view", "value": {"type": "detail", "sheet": "s1", "from": "v2",
              "label": "B", "centre": ["30 mm", "20 mm", "12 mm"], "radius": "10 mm"}}]}),
     );
-    call(&mut s, "drawing.layout", json!({"part": "p", "drawing": "d"}));
-    let got = call(&mut s, "drawing.get", json!({"part": "p", "drawing": "d", "items": true}));
+    call(
+        &mut s,
+        "drawing.layout",
+        json!({"part": "p", "drawing": "d"}),
+    );
+    let got = call(
+        &mut s,
+        "drawing.get",
+        json!({"part": "p", "drawing": "d", "items": true}),
+    );
     let items = got["sheets"][0]["items"].as_array().unwrap().clone();
     let want = drawn_counts(&items);
     let out = tempfile::tempdir().unwrap();
@@ -329,7 +344,15 @@ fn ezdxf_reads_every_drawing_dxf() {
         assert_eq!(r["version"], "AC1015", "{f}");
         assert_eq!(r["errors"], json!([]), "{f}");
         assert_eq!(r["fixes"], 0, "{f}: ezdxf fixed something");
-        for l in ["VISIBLE", "THIN", "BORDER", "HATCH", "CUTTING", "DIMENSION", "TEXT"] {
+        for l in [
+            "VISIBLE",
+            "THIN",
+            "BORDER",
+            "HATCH",
+            "CUTTING",
+            "DIMENSION",
+            "TEXT",
+        ] {
             assert!(
                 r["layers"].as_array().unwrap().iter().any(|x| x == l),
                 "{f}: {l}"
@@ -339,5 +362,8 @@ fn ezdxf_reads_every_drawing_dxf() {
             serde_json::from_value(r["counts"].clone()).unwrap();
         assert_eq!(counts, want, "{f}");
     }
-    eprintln!("ezdxf read {} drawing DXF files clean: {want:?}", files.len());
+    eprintln!(
+        "ezdxf read {} drawing DXF files clean: {want:?}",
+        files.len()
+    );
 }

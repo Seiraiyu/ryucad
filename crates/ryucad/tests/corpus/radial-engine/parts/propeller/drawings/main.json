@@ -1,0 +1,47 @@
+{
+  "format": 1,
+  "kind": "ryucad.drawing",
+  "name": "Propeller",
+  "sheets": {
+    "s1": {
+      "name": "Sheet 1",
+      "scale": "1:5",
+      "size": "ansi_b"
+    }
+  },
+  "views": {
+    "v1": {
+      "at": [
+        "97.3 mm",
+        "218.497 mm"
+      ],
+      "orient": "front",
+      "sheet": "s1",
+      "type": "base"
+    },
+    "v2": {
+      "from": "v1",
+      "offset": "34.951 mm",
+      "sheet": "s1",
+      "side": "top",
+      "type": "projected"
+    },
+    "v3": {
+      "from": "v1",
+      "offset": "102.9 mm",
+      "sheet": "s1",
+      "side": "right",
+      "type": "projected"
+    },
+    "v4": {
+      "at": [
+        "355.752 mm",
+        "228.26 mm"
+      ],
+      "from": "v1",
+      "sheet": "s1",
+      "side": "iso",
+      "type": "projected"
+    }
+  }
+}

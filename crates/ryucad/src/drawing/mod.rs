@@ -1140,7 +1140,12 @@ fn drawn_flat(flat: &crate::sheet_metal::flat::FlatOf, notes: bool) -> Drawn {
             [b.start.x - m[0], b.start.y - m[1]],
             [b.end.x - m[0], b.end.y - m[1]],
         );
-        lines.push((Path::polyline(&[a, e], false), LineKind::Phantom, false, None));
+        lines.push((
+            Path::polyline(&[a, e], false),
+            LineKind::Phantom,
+            false,
+            None,
+        ));
         if notes {
             // Reading left to right, at the line's middle.
             let (mut dx, mut dy) = (e[0] - a[0], e[1] - a[1]);
@@ -2215,14 +2220,19 @@ pub(crate) mod tests {
 
     #[test]
     fn every_curve_of_a_view_names_the_entity_it_draws() {
-        let views = json!({"v1": {"type": "base", "sheet": "s1", "orient": "front", "scale": "1:1"}});
+        let views =
+            json!({"v1": {"type": "base", "sheet": "s1", "orient": "front", "scale": "1:1"}});
         let (_d, mut s) = drawn(40.0, 20.0, 10.0, views);
         let b = build(&mut s, &id("p"), &id("d")).unwrap();
         let sheet = &b.sheets[0];
         let v = &sheet.views[0];
         // The front of a box: its four visible edges, each named, inside
         // the view's own items.
-        let named: Vec<&String> = v.items.clone().filter_map(|i| sheet.sources.get(&i)).collect();
+        let named: Vec<&String> = v
+            .items
+            .clone()
+            .filter_map(|i| sheet.sources.get(&i))
+            .collect();
         assert_eq!(named.len(), visible_in(sheet, v).len(), "{named:?}");
         assert_eq!(named.len(), 4);
         for e in &named {

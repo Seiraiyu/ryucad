@@ -2815,7 +2815,9 @@ impl Workspace {
     }
 
     fn read_drawing_list(&mut self) {
-        let Some(part) = self.drawings.part.clone() else { return };
+        let Some(part) = self.drawings.part.clone() else {
+            return;
+        };
         self.send(
             Request::DrawingList {
                 part: Some(part.clone()),
@@ -2826,7 +2828,11 @@ impl Workspace {
 
     /// Shows `drawing`'s `sheet` in the Drawings tile.
     pub fn choose_drawing(&mut self, drawing: &str, sheet: &str) {
-        let same = self.drawings.chosen.as_ref().is_some_and(|(d, k)| d == drawing && k == sheet);
+        let same = self
+            .drawings
+            .chosen
+            .as_ref()
+            .is_some_and(|(d, k)| d == drawing && k == sheet);
         self.drawings.chosen = Some((drawing.to_owned(), sheet.to_owned()));
         if !same {
             self.drawings.camera = None;
@@ -2859,7 +2865,9 @@ impl Workspace {
     /// Writes `ops` to the shown drawing, guarded by the part's revision
     /// it was built at: a drag's or the form's one write.
     fn write_drawing(&mut self, ops: Value) {
-        let Some(s) = &self.drawings.sheet else { return };
+        let Some(s) = &self.drawings.sheet else {
+            return;
+        };
         let req = Request::DrawingEdit {
             part: s.part.clone(),
             drawing: s.drawing.clone(),
@@ -2875,7 +2883,9 @@ impl Workspace {
     /// A drag of what was picked on the sheet, let go `d` mm from where it
     /// started: one `drawing.edit`, or a note saying why none.
     pub fn drag_drawing(&mut self, pick: &crate::core::drawings::Pick, d: [f64; 2]) {
-        let Some(s) = &self.drawings.sheet else { return };
+        let Some(s) = &self.drawings.sheet else {
+            return;
+        };
         match crate::core::drawings::drag_ops(s, pick, d) {
             Ok(ops) => self.write_drawing(ops),
             Err(why) => self.drawings.note = Some(why.to_owned()),
@@ -4450,7 +4460,8 @@ impl Workspace {
                     self.drawings.loading = false;
                     match r {
                         Ok(a) => {
-                            self.drawings.sheet = crate::core::drawings::Sheet::from_answer(&a.result);
+                            self.drawings.sheet =
+                                crate::core::drawings::Sheet::from_answer(&a.result);
                             // What was chosen, chosen again in what was read:
                             // a form reads the file as it is now.
                             let keep = self.drawings.selected.take();

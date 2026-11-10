@@ -1,0 +1,61 @@
+{
+  "annotations": {
+    "d1": {
+      "at": [
+        "24.042 mm",
+        "24.042 mm"
+      ],
+      "of": "disc/5b79741abdcccf555e90b3deebcc44e7",
+      "tolerance": {
+        "fit": "H7"
+      },
+      "type": "diameter",
+      "view": "v2"
+    }
+  },
+  "format": 1,
+  "kind": "ryucad.drawing",
+  "name": "Pinion-2",
+  "sheets": {
+    "s1": {
+      "name": "Sheet 1",
+      "scale": "2:1",
+      "size": "ansi_b"
+    }
+  },
+  "views": {
+    "v1": {
+      "at": [
+        "75.737 mm",
+        "103.926 mm"
+      ],
+      "orient": "front",
+      "sheet": "s1",
+      "type": "base"
+    },
+    "v2": {
+      "from": "v1",
+      "offset": "99.737 mm",
+      "sheet": "s1",
+      "side": "top",
+      "type": "projected"
+    },
+    "v3": {
+      "from": "v1",
+      "offset": "131.474 mm",
+      "sheet": "s1",
+      "side": "right",
+      "type": "projected"
+    },
+    "v4": {
+      "at": [
+        "356.063 mm",
+        "208.412 mm"
+      ],
+      "from": "v1",
+      "sheet": "s1",
+      "side": "iso",
+      "type": "projected"
+    }
+  }
+}
