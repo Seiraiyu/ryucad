@@ -169,6 +169,12 @@ required-features = ["occt"]
 name = "drafts"
 required-features = ["occt"]
 
+# Deleting faces against BRepAlgoAPI_Defeaturing, and the 1,000-hole bar
+# (design 399, plan 13.D).
+[[test]]
+name = "defeaturing"
+required-features = ["occt"]
+
 # STL and 3MF read by OCCT and lib3mf (design 193, plan 8.A).
 [[test]]
 name = "formats"
