@@ -511,7 +511,7 @@ impl Tolerance {
         Ok(match k.as_str() {
             "symmetric" => {
                 let q = amount(x, &p, angular)?;
-                if !(q.si() > 0.0) {
+                if q.si().is_nan() || q.si() <= 0.0 {
                     return Err(invalid(&p, "a symmetric tolerance is more than 0"));
                 }
                 Tolerance::Symmetric(q)
@@ -679,7 +679,7 @@ impl Row {
         let mut o = Obj::new(v, at)?;
         let p = |k: &str| format!("{at}/{k}");
         let tolerance = length(&o.take("tolerance")?, &p("tolerance"))?;
-        if !(tolerance.si() >= 0.0) {
+        if tolerance.si().is_nan() || tolerance.si() < 0.0 {
             return Err(invalid(&p("tolerance"), "a tolerance zone is 0 or more"));
         }
         let diameter = match o.take_opt("diameter") {
@@ -1203,7 +1203,7 @@ impl Annotation {
                     Some(x) => {
                         let q = Quantity::from_json(&x, Unit::Um)
                             .map_err(|e| e.with("pointer", p("ra")))?;
-                        if !(q.si() > 0.0) {
+                        if q.si().is_nan() || q.si() <= 0.0 {
                             return Err(invalid(&p("ra"), "a roughness is more than 0"));
                         }
                         Some(q)

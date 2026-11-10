@@ -473,6 +473,11 @@ fn drawing_atom(at: &str) -> bool {
             "views",
             _,
             "orient" | "rev" | "cut" | "centre" | "unsectioned"
+        ] | [
+            "",
+            "annotations",
+            _,
+            "tolerance" | "rows" | "columns" | "at"
         ]
     )
 }
@@ -486,35 +491,42 @@ fn drawing(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
     };
     let obj = |v: &Value| v.as_object().cloned().unwrap_or_default();
     let (b, o, t) = (obj(base), obj(ours), obj(theirs));
-    let mut out = walk.object("", &b, &o, &t, &["views"]);
-    let views = |m: &Map<String, Value>| obj(m.get("views").unwrap_or(&Value::Null));
-    let (bv, ov, tv) = (views(&b), views(&o), views(&t));
-    let keys: BTreeSet<&String> = bv.keys().chain(ov.keys()).chain(tv.keys()).collect();
-    let mut merged = Map::new();
-    for k in keys {
-        let at = format!("/views/{k}");
-        let (bk, ok, tk) = (bv.get(k), ov.get(k), tv.get(k));
-        let ty = |v: Option<&Value>| v.and_then(|v| v.get("type")).cloned();
-        let retyped = match (bk, ok, tk) {
-            (Some(_), Some(_), Some(_)) => ty(bk) != ty(ok) || ty(bk) != ty(tk),
-            (None, Some(_), Some(_)) => ok != tk,
-            _ => false,
-        };
-        let v = if retyped {
-            let kind = if bk.is_none() {
-                Kind::IdCollision
-            } else {
-                Kind::Value
+    let mut out = walk.object("", &b, &o, &t, &["views", "annotations"]);
+    // Views and annotations by member: one retyped on either side, or
+    // added by both differently, is one value.
+    for group in ["views", "annotations"] {
+        let members = |m: &Map<String, Value>| obj(m.get(group).unwrap_or(&Value::Null));
+        let (bv, ov, tv) = (members(&b), members(&o), members(&t));
+        let keys: BTreeSet<&String> = bv.keys().chain(ov.keys()).chain(tv.keys()).collect();
+        let mut merged = Map::new();
+        for k in keys {
+            let at = format!("/{group}/{k}");
+            let (bk, ok, tk) = (bv.get(k), ov.get(k), tv.get(k));
+            let ty = |v: Option<&Value>| v.and_then(|v| v.get("type")).cloned();
+            let retyped = match (bk, ok, tk) {
+                (Some(_), Some(_), Some(_)) => ty(bk) != ty(ok) || ty(bk) != ty(tk),
+                (None, Some(_), Some(_)) => ok != tk,
+                _ => false,
             };
-            walk.conflict(&at, kind, bk, ok, tk)
-        } else {
-            walk.value(&at, bk, ok, tk)
-        };
-        if let Some(v) = v {
-            merged.insert(k.clone(), v);
+            let v = if retyped {
+                let kind = if bk.is_none() {
+                    Kind::IdCollision
+                } else {
+                    Kind::Value
+                };
+                walk.conflict(&at, kind, bk, ok, tk)
+            } else {
+                walk.value(&at, bk, ok, tk)
+            };
+            if let Some(v) = v {
+                merged.insert(k.clone(), v);
+            }
+        }
+        // Annotations are written only when there are some.
+        if group == "views" || !merged.is_empty() {
+            out.insert(group.to_owned(), Value::Object(merged));
         }
     }
-    out.insert("views".to_owned(), Value::Object(merged));
     Value::Object(out)
 }
 
@@ -2918,6 +2930,47 @@ mod tests {
         // A centre moved on one side alone is taken whole.
         let v = &m.value["views"]["v3"]["centre"];
         assert_eq!(v, &json!(["1 mm", "0 mm", "0 mm"]));
+    }
+
+    #[test]
+    fn annotations_merge_by_member_and_field_a_tolerance_whole() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let file = |annotations: Value| {
+            json!({"format": 1, "kind": "ryucad.drawing", "name": "P",
+                "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b"}},
+                "views": {"v1": {"type": "base", "sheet": "s1", "orient": "top"}},
+                "annotations": annotations})
+        };
+        let d = json!({"type": "linear", "view": "v1", "a": format!("b/{n}"), "along": "horizontal",
+                       "offset": "10 mm", "tolerance": {"symmetric": "0.1 mm"}});
+        let base = file(json!({"d1": d}));
+        let mut ours = base.clone();
+        ours["annotations"]["d1"]["offset"] = json!("18 mm");
+        let mut theirs = base.clone();
+        theirs["annotations"]["d1"]["precision"] = json!(3);
+        theirs["annotations"]["n1"] = json!({"type": "note", "sheet": "s1", "text": "X"});
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        assert_eq!(m.value["annotations"]["d1"]["offset"], "18 mm");
+        assert_eq!(m.value["annotations"]["d1"]["precision"], 3);
+        assert_eq!(m.value["annotations"]["n1"]["text"], "X");
+        assert!(crate::doc::drawing::DrawingFile::from_json(&m.value).is_ok());
+        // Two tolerances: one conflict at the tolerance, never inside it.
+        let mut a = base.clone();
+        a["annotations"]["d1"]["tolerance"] = json!({"fit": "H7"});
+        let mut b = base.clone();
+        b["annotations"]["d1"]["tolerance"] = json!({"symmetric": "0.2 mm"});
+        let m = merge(Some(&base), &a, &b);
+        assert_eq!(
+            m.conflicts.keys().collect::<Vec<_>>(),
+            ["/annotations/d1/tolerance"]
+        );
+        // A drawing with none on any side keeps none.
+        let plain = file(json!({}));
+        let mut p = plain.clone();
+        p.as_object_mut().unwrap().remove("annotations");
+        let m = merge(Some(&p), &p, &p);
+        assert!(m.value.get("annotations").is_none());
     }
 
     #[test]

@@ -57,7 +57,7 @@ impl Map {
 }
 
 fn len2(a: P) -> f64 {
-    a[0].hypot(a[1])
+    ryu_math::hypot(a[0], a[1])
 }
 
 /// What an entity is in a view's plane: a point, or a line (a segment

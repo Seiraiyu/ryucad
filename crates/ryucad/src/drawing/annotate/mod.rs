@@ -142,7 +142,7 @@ fn dotp(a: P, b: P) -> f64 {
 }
 
 fn unit(a: P) -> P {
-    let l = a[0].hypot(a[1]);
+    let l = ryu_math::hypot(a[0], a[1]);
     if l > 0.0 {
         [a[0] / l, a[1] / l]
     } else {
@@ -524,7 +524,7 @@ fn build_one(
             let p = m.sheet(r.feat.point());
             let c = m.sheet(centre);
             if r.body.is_some()
-                && (p[0] - c[0]).hypot(p[1] - c[1]) > m.k * radius + 1e-6
+                && ryu_math::hypot(p[0] - c[0], p[1] - c[1]) > m.k * radius + 1e-6
                 && r.paths.is_empty()
             {
                 return Err(Error::new(
@@ -547,7 +547,7 @@ fn build_one(
         let best = r.paths.iter().max_by(|x, y| {
             let l = |p: &Path| {
                 let b = p.bounds();
-                (b[1][0] - b[0][0]).hypot(b[1][1] - b[0][1])
+                ryu_math::hypot(b[1][0] - b[0][0], b[1][1] - b[0][1])
             };
             l(x).total_cmp(&l(y))
         });
@@ -705,7 +705,7 @@ fn build_one(
             let r = get("of", of)?;
             let runs = chamfer_text(session, plan, src, &r, units, ctx.standard)?;
             let tip = meet(&r);
-            let mut out = leader_text(ctx, vb, &[runs.clone()], tip, written, sz);
+            let mut out = leader_text(ctx, vb, std::slice::from_ref(&runs), tip, written, sz);
             out.text = plain(&runs);
             out.report = json!({"text": out.text});
             Ok(out)
@@ -932,7 +932,7 @@ fn build_one(
             let tip0 = meet(&r);
             let tip = written.map_or(tip0, |w| addp(vb.at, w));
             let mut out = finish(ctx, units, tip, ra.as_ref().map(|q| q.si()), *process);
-            if written.is_some() && (tip[0] - tip0[0]).hypot(tip[1] - tip0[1]) > 1e-6 {
+            if written.is_some() && ryu_math::hypot(tip[0] - tip0[0], tip[1] - tip0[1]) > 1e-6 {
                 out.items
                     .push(stroke(st, LineKind::Dimension, &[tip, tip0], Colour::BLACK));
                 out.items.push(symbol::arrow(
@@ -1143,7 +1143,7 @@ fn linear_dim(
         }
     }
     let span = sub(d[1], d[0]);
-    let len = span[0].hypot(span[1]);
+    let len = ryu_math::hypot(span[0], span[1]);
     let u = if len > 0.0 {
         scale(span, 1.0 / len)
     } else {
@@ -1435,7 +1435,7 @@ fn leader_dim(
     let mut out = leader_text(
         ctx,
         vb,
-        &[shown.runs.clone()],
+        std::slice::from_ref(&shown.runs),
         tip,
         Some(sub(text_at, vb.at)),
         sz,
@@ -1863,7 +1863,7 @@ fn balloon(
             }
             for p in &n.paths {
                 let bx = p.bounds();
-                let l = (bx[1][0] - bx[0][0]).hypot(bx[1][1] - bx[0][1]);
+                let l = ryu_math::hypot(bx[1][0] - bx[0][0], bx[1][1] - bx[0][1]);
                 if best.is_none_or(|(x, _)| l > x) {
                     best = Some((l, m.sheet_of(addp(p.middle(), m.centre))));
                 }

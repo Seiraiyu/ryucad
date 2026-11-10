@@ -44,9 +44,14 @@ impl Units {
     }
 }
 
+/// Ten to the `p`, exactly (`p` at most 6).
+fn ten(p: u32) -> f64 {
+    [1.0, 10.0, 100.0, 1e3, 1e4, 1e5, 1e6][p.min(6) as usize]
+}
+
 /// `x` at `places` decimals, rounded half to even, `-0` as `0`.
 pub(crate) fn decimal(x: f64, places: u32, drop_lead: bool) -> String {
-    let k = 10f64.powi(places as i32);
+    let k = ten(places);
     let mut r = (x * k).round_ties_even() / k;
     if r == 0.0 {
         r = 0.0;
@@ -66,7 +71,7 @@ pub(crate) fn decimal(x: f64, places: u32, drop_lead: bool) -> String {
 pub(crate) fn needs(x: f64) -> u32 {
     (0u32..=6)
         .find(|p| {
-            let k = 10f64.powi(*p as i32);
+            let k = ten(*p);
             ((x * k).round() / k - x).abs() <= 1e-9 * x.abs().max(1e-9)
         })
         .unwrap_or(6)
@@ -111,7 +116,10 @@ impl Shown {
             })
             .collect();
         if let Some((a, b)) = &self.stack {
-            s.push_str(&format!(" {a}/{b}"));
+            if !s.is_empty() {
+                s.push(' ');
+            }
+            s.push_str(&format!("{a}/{b}"));
         }
         s
     }
@@ -300,7 +308,9 @@ mod tests {
     #[test]
     fn values_round_half_to_even_in_the_drawings_unit() {
         let mm = units(Unit::Mm, Standard::Iso);
-        assert_eq!(mm.number(0.012345, 2, false), "12.35");
+        assert_eq!(mm.number(0.012346, 2, false), "12.35");
+        // 12.345 mm is 12.3449… as a double: it rounds down.
+        assert_eq!(mm.number(0.012345, 2, false), "12.34");
         assert_eq!(decimal(0.125, 2, false), "0.12");
         assert_eq!(decimal(0.375, 2, false), "0.38");
         assert_eq!(decimal(-0.0001, 2, false), "0.00");
@@ -342,7 +352,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(s.plain(), " 12.10/11.90".trim_start());
+        assert_eq!(s.plain(), "12.10/11.90");
         let s = shown(
             &mm,
             &st(Tolerance::Fit("H7".into())),

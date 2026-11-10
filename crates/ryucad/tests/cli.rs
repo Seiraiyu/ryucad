@@ -1216,6 +1216,8 @@ fn every_protocol_method_has_a_command() {
         ("redo", &["redo"]),
         ("app.open", &["open"]),
         ("request.cancel", &["cancel"]),
+        ("drawing.lint", &["drawing", "lint"]),
+        ("drawing.lint.configure", &["drawing", "lint-configure"]),
     ];
     let methods = protocol_methods();
     assert!(methods.len() >= 26, "{methods:?}");
@@ -5513,7 +5515,15 @@ fn drawings_from_the_cli() {
         "5",
     ]);
     let got = p.ok(&["drawing", "get", "plate", "main"]);
-    assert_eq!(got["findings"], json!([]), "{got}");
+    // Only the lint's findings (plan 9.C), none of the drawing's own.
+    assert!(
+        got["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["lint"] == true),
+        "{got}"
+    );
     assert_eq!(got["sheets"][0]["views"].as_array().unwrap().len(), 7);
     // What the agent reads in words.
     let d = p.ok(&["drawing", "describe", "plate", "main"]);
@@ -5592,11 +5602,121 @@ fn drawings_from_the_cli() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|f| f["source"] != "drawing"),
+            .all(|f| f["source"] != "drawing" || f["lint"] == true),
         "{checked}"
     );
     p.ok(&["drawing", "delete", "plate", "front"]);
     assert_eq!(p.ok(&["drawing", "list"])["drawings"], json!([]));
+}
+
+#[test]
+fn drawing_annotations_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "base", "--param", "x=60", "--param", "y=30",
+        "--param", "z=6",
+    ]);
+    p.ok(&["drawing", "create", "plate", "d"]);
+    p.ok(&[
+        "drawing", "view", "add", "plate", "d", "--orient", "top", "--at", "120,150",
+    ]);
+    // The end faces, seen edge on from above.
+    let body = p.ok(&["inspect", "plate"])["bodies"][0].clone();
+    let end = |x: f64| -> String {
+        body["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["frame"]["z"][0].as_f64().unwrap() * sign == x
+            })
+            .map(|f| format!("base/{}", f["name"].as_str().unwrap()))
+            .unwrap()
+    };
+    let (left, right) = (end(-1.0), end(1.0));
+    let got = p.ok(&[
+        "drawing",
+        "dim",
+        "add",
+        "plate",
+        "d",
+        "--view",
+        "v1",
+        "--type",
+        "linear",
+        "--a",
+        &left,
+        "--b",
+        &right,
+        "--along",
+        "horizontal",
+        "--tol",
+        "0.1 mm",
+    ]);
+    let d1 = &got["sheets"][0]["annotations"][0];
+    assert_eq!(d1["text"], "60.00 ±0.10", "{got}");
+    p.ok(&[
+        "drawing", "gdt", "add", "plate", "d", "--view", "v1", "--letter", "A", "--on", &left,
+    ]);
+    p.ok(&[
+        "drawing",
+        "gdt",
+        "add",
+        "plate",
+        "d",
+        "--view",
+        "v1",
+        "--characteristic",
+        "perpendicularity",
+        "--tol",
+        "0.05 mm",
+        "--datum",
+        "A",
+        "--on",
+        &right,
+    ]);
+    p.ok(&[
+        "drawing", "note", "add", "plate", "d", "--text", "DEBURR", "--at", "30,30",
+    ]);
+    let file: Value = serde_json::from_str(
+        &fs::read_to_string(p.direct.join("parts/plate/drawings/d.json")).unwrap(),
+    )
+    .unwrap();
+    let keys: Vec<&String> = file["annotations"].as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["d1", "g1", "g2", "n1"], "{file}");
+    // The dimension's offset ryucad chose is written back.
+    assert!(file["annotations"]["d1"]["offset"].is_string(), "{file}");
+    // The lint, a rule's entry, and a rule turned off.
+    let lint = p.ok(&["drawing", "lint", "plate", "d"]);
+    assert!(lint["scores"]["s1"].is_i64(), "{lint}");
+    let e = p.ok(&["drawing", "lint", "--explain", "dwg_untoleranced"]);
+    assert_eq!(e["weight"], 1);
+    p.ok(&[
+        "drawing",
+        "lint-configure",
+        "--severity",
+        "dwg_untoleranced=off",
+    ]);
+    assert!(p.direct.join("drawing_lint.json").is_file());
+    p.ok(&[
+        "drawing",
+        "lint-configure",
+        "--severity",
+        "dwg_untoleranced=default",
+    ]);
+    assert!(!p.direct.join("drawing_lint.json").exists());
+    // A dimension that can't be measured is refused, naming why.
+    p.fails(
+        &[
+            "drawing", "dim", "add", "plate", "d", "--view", "v1", "--type", "radius", "--of",
+            &left,
+        ],
+        "invalid_param",
+        1,
+    );
 }
 
 #[test]

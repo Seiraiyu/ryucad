@@ -191,6 +191,10 @@ fn bbox(boxes: &[[P; 2]], lines: &[[P; 2]]) -> Option<[P; 2]> {
     out
 }
 
+/// Linear dimensions by view and direction: each one's ends (in
+/// micrometres of the image) and its key.
+type Chains = BTreeMap<(String, String), Vec<(i64, i64, String)>>;
+
 /// Runs the lint over `sheets`, adding its findings; each sheet's score.
 pub(crate) fn run(
     session: &mut Session,
@@ -387,7 +391,7 @@ pub(crate) fn run(
         }
         // Closed chains: per view and direction, ends joined by
         // dimensions; one that joins two already joined closes a chain.
-        let mut groups: BTreeMap<(String, String), Vec<(i64, i64, String)>> = BTreeMap::new();
+        let mut groups: Chains = BTreeMap::new();
         for a in &dims {
             let m = a.measure.as_ref().expect("a dimension");
             if m.free || !(m.along == "horizontal" || m.along == "vertical") {

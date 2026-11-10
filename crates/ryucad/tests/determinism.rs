@@ -5141,6 +5141,133 @@ fn drawing_sections_section(golden: &mut Golden) {
     }
 }
 
+/// Dimensions and annotations (plan 9.C): a drilled plate's drawing with
+/// every dimension type, a hole callout, a centre mark, a note with a
+/// field, a datum feature, a feature control frame and a surface finish,
+/// its lint, and every sheet's bytes; one thread and four.
+fn drawing_annotations_section(golden: &mut Golden) {
+    use serde_json::{Value, json};
+    let mut s = golden.section("drawing_annotations");
+    let mut answers = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        answers.push(pool.install(|| {
+            let dir = tempfile::tempdir().unwrap();
+            ryucad::server::init(dir.path(), None).unwrap();
+            let mut session = Some(ryucad::session::Session::open(dir.path()).unwrap());
+            let call = |s: &mut Option<ryucad::session::Session>, m: &str, p: Value| {
+                ryucad::server::handle_safely(
+                    s,
+                    None,
+                    None,
+                    dir.path(),
+                    ryucad::proto::Request::from_rpc(m, Some(p)).unwrap(),
+                )
+                .unwrap_or_else(|e| panic!("{m}: {e}"))
+            };
+            call(&mut session, "part.create", json!({"part": "p"}));
+            call(&mut session, "feature.add",
+                json!({"part": "p", "type": "box", "id": "b", "params": {"x": 40, "y": 30, "z": 10}}));
+            let body = |s: &mut Option<ryucad::session::Session>| {
+                call(s, "inspect", json!({"part": "p"})).result["bodies"][0].clone()
+            };
+            let b = body(&mut session);
+            let face = |b: &Value, pick: &dyn Fn(&Value) -> bool| -> String {
+                b["faces"].as_array().unwrap().iter().find(|f| pick(f)).unwrap()["name"]
+                    .as_str().unwrap().to_owned()
+            };
+            let plane = |n: [f64; 3]| move |f: &Value| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && (0..3).all(|i| (f["surface"]["frame"]["z"][i].as_f64().unwrap() * sign - n[i]).abs() < 1e-12)
+            };
+            let top = face(&b, &plane([0.0, 0.0, 1.0]));
+            call(&mut session, "feature.add",
+                json!({"part": "p", "type": "sketch", "id": "s", "face": format!("p/b/{top}")}));
+            call(&mut session, "sketch.edit", json!({"part": "p", "sketch": "s", "ops": [
+                {"op": "add", "type": "point", "at": [10, 15]}, {"op": "add", "type": "fix", "a": "p1"},
+                {"op": "add", "type": "point", "at": [30, 15]}, {"op": "add", "type": "fix", "a": "p2"}]}));
+            call(&mut session, "feature.add", json!({"part": "p", "type": "hole", "id": "h", "sketch": "s",
+                "diameter": "6 mm", "depth": "through_all", "targets": ["b"]}));
+            let b = body(&mut session);
+            let left = face(&b, &plane([-1.0, 0.0, 0.0]));
+            let right = face(&b, &plane([1.0, 0.0, 0.0]));
+            let top = face(&b, &plane([0.0, 0.0, 1.0]));
+            let wall = face(&b, &|f: &Value| f["surface"]["type"] == "cylinder");
+            let vertex = |p: [f64; 3]| -> String {
+                b["vertices"].as_array().unwrap().iter()
+                    .find(|v| (0..3).all(|i| (v["point"][i].as_f64().unwrap() * 1000.0 - p[i]).abs() < 1e-9))
+                    .unwrap()["name"].as_str().unwrap().to_owned()
+            };
+            let edge = |a: [f64; 3], c: [f64; 3]| -> String {
+                let (va, vc) = (vertex(a), vertex(c));
+                b["edges"].as_array().unwrap().iter()
+                    .find(|e| (e["start"] == va.as_str() && e["end"] == vc.as_str())
+                        || (e["start"] == vc.as_str() && e["end"] == va.as_str()))
+                    .unwrap()["name"].as_str().unwrap().to_owned()
+            };
+            let (v0, v1) = (vertex([0.0, 0.0, 0.0]), vertex([0.0, 0.0, 10.0]));
+            let vf = vertex([40.0, 30.0, 10.0]);
+            let (ex, ey) = (edge([0.0, 0.0, 10.0], [40.0, 0.0, 10.0]), edge([0.0, 0.0, 10.0], [0.0, 30.0, 10.0]));
+            call(&mut session, "drawing.create", json!({"part": "p", "drawing": "d", "name": "Plate"}));
+            let ann = |v: Value| json!({"op": "add", "kind": "annotation", "value": v});
+            call(&mut session, "drawing.edit", json!({"part": "p", "drawing": "d", "ops": [
+                {"op": "set", "id": "s1", "fields": {"scale": "2:1"}},
+                {"op": "set", "fields": {"general_tolerance": "ISO 2768-m"}},
+                {"op": "add", "kind": "view", "value": {"type": "base", "sheet": "s1", "orient": "top"}},
+                {"op": "add", "kind": "view", "value": {"type": "projected", "sheet": "s1", "from": "v1", "side": "bottom"}},
+                ann(json!({"type": "linear", "view": "v1", "a": format!("b/{left}"), "b": format!("b/{right}"),
+                    "along": "horizontal", "tolerance": {"symmetric": "0.1 mm"}})),
+                ann(json!({"type": "linear", "view": "v1", "a": format!("b/{ey}"), "along": "vertical",
+                    "tolerance": {"deviation": ["0.1 mm", "0 mm"]}})),
+                ann(json!({"type": "diameter", "view": "v1", "of": format!("b/{wall}"), "tolerance": {"fit": "H7"}})),
+                ann(json!({"type": "radius", "view": "v1", "of": format!("b/{wall}"), "tolerance": {"reference": true}})),
+                ann(json!({"type": "angular", "view": "v1", "a": format!("b/{ex}"), "b": format!("b/{ey}")})),
+                ann(json!({"type": "ordinate", "view": "v1", "datum": format!("b/{v1}"), "of": format!("b/{vf}"), "along": "horizontal"})),
+                ann(json!({"type": "hole_callout", "view": "v1", "of": format!("b/{wall}")})),
+                ann(json!({"type": "linear", "view": "v2", "a": format!("b/{v0}"), "b": format!("b/{v1}"),
+                    "along": "vertical", "tolerance": {"limits": ["0.05 mm", "-0.05 mm"]}})),
+                ann(json!({"type": "centre_mark", "view": "v1", "of": format!("b/{wall}")})),
+                ann(json!({"type": "note", "sheet": "s1", "text": "BREAK ALL EDGES\nPART {number}"})),
+                ann(json!({"type": "datum_feature", "view": "v2", "letter": "A", "on": format!("b/{top}")})),
+                ann(json!({"type": "feature_control_frame", "view": "v1", "on": format!("b/{wall}"),
+                    "characteristic": "position", "rows": [{"tolerance": "0.1 mm", "diameter": true,
+                    "condition": "m", "datums": ["A"]}]})),
+                ann(json!({"type": "surface_finish", "view": "v2", "on": format!("b/{top}"), "ra": "1.6 um",
+                    "process": "removal"}))
+            ]}));
+            let mut lines = Vec::new();
+            let get = call(&mut session, "drawing.get", json!({"part": "p", "drawing": "d", "items": true}));
+            let mut get = get.result;
+            get.as_object_mut().unwrap().remove("revision");
+            lines.push(format!("plate get {:x}", md(ryucad::doc::canonical::to_string(&get).as_bytes())));
+            let lint = call(&mut session, "drawing.lint", json!({"part": "p", "drawing": "d"}));
+            lines.push(format!("plate lint {:x}", md(ryucad::doc::canonical::to_string(&lint.result).as_bytes())));
+            for (what, params) in [
+                ("pdf", json!({"format": "pdf"})),
+                ("svg", json!({"format": "svg"})),
+                ("dxf", json!({"format": "dxf"})),
+            ] {
+                let mut p = params;
+                p["part"] = json!("p");
+                p["drawing"] = json!("d");
+                let a = call(&mut session, "drawing.export", p);
+                lines.push(format!("plate {what} {:x}", md(&a.binary.unwrap())));
+            }
+            let a = call(&mut session, "drawing.render", json!({"part": "p", "drawing": "d", "scale": 1.0}));
+            lines.push(format!("plate png {:x}", md(&a.binary.unwrap())));
+            lines
+        }));
+    }
+    assert_eq!(answers[0], answers[1], "one thread and four");
+    for l in &answers[0] {
+        s.str(l);
+    }
+}
+
 /// One test per section (`section::<name>`), each checking only its own
 /// line of the golden file, so no one test runs long and they run in
 /// parallel (issue #441); `section::listed` keeps the file to these
@@ -5223,4 +5350,5 @@ sections! {
     annotations => annotations_section(&mut golden),
     drawings => drawings_section(&mut golden),
     drawing_sections => drawing_sections_section(&mut golden),
+    drawing_annotations => drawing_annotations_section(&mut golden),
 }
