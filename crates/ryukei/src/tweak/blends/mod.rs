@@ -122,3 +122,32 @@ pub fn delete_blends_with(
 ) -> Result<(Body, Journal), Error> {
     crate::work::run(work, |m| remake::delete_blends(key, body, spec, m))
 }
+
+/// `body` with each named face's blend made again at the kind given
+/// (its chain and corners with it, at their own sizes): its faces, edges
+/// and vertices keep their names where the new blend has one in the same
+/// place.
+pub fn resize_blends(
+    key: OpKey,
+    body: &Body,
+    sizes: &[(Name, BlendKind)],
+) -> Result<(Body, Journal), Error> {
+    resize_blends_with(
+        key,
+        body,
+        sizes,
+        &RecogniseOptions::default(),
+        &Work::unlimited(),
+    )
+}
+
+/// [`resize_blends`] with its recognition's options, under `work`.
+pub fn resize_blends_with(
+    key: OpKey,
+    body: &Body,
+    sizes: &[(Name, BlendKind)],
+    opts: &RecogniseOptions,
+    work: &Work,
+) -> Result<(Body, Journal), Error> {
+    crate::work::run(work, |m| remake::resize(key, body, sizes, opts, m))
+}

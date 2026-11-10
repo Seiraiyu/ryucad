@@ -762,3 +762,45 @@ fn remake<X>(
     let j = net(body, &out, &[&j1, &j2, &j3], &back);
     Ok((out, j, x))
 }
+
+pub(crate) fn resize(
+    key: OpKey,
+    body: &Body,
+    sizes: &[(Name, BlendKind)],
+    opts: &RecogniseOptions,
+    m: &Meter,
+) -> Result<(Body, Journal), Error> {
+    if sizes.is_empty() {
+        return Err(TweakError::NoFaces.into());
+    }
+    let rec = recognise::recognise(body, opts, m)?;
+    let mut kinds = BTreeMap::new();
+    for (face, kind) in sizes {
+        let i = match rec.holding(*face) {
+            Some(Ok(i)) => i,
+            _ => return Err(TweakError::NotABlend { face: *face }.into()),
+        };
+        // A chamfer's `first_face` names a support; any other face is the
+        // blend's own refusal when it is made.
+        if let BlendKind::Chamfer(
+            Chamfer::Distances { first_face, .. }
+            | Chamfer::DistanceAngle {
+                face: first_face, ..
+            },
+        ) = kind
+            && !rec.blends[i].supports.contains(first_face)
+        {
+            return Err(TweakError::NotABlend { face: *first_face }.into());
+        }
+        // Every blend of a chain at the one size.
+        for (j, b) in rec.blends.iter().enumerate() {
+            if b.chain == rec.blends[i].chain {
+                kinds.insert(j, *kind);
+            }
+        }
+    }
+    let (out, j, ()) = remake(key, body, &rec, &kinds, m, |b, _| {
+        Ok((b.clone(), Journal::new(), ()))
+    })?;
+    Ok((out, j))
+}

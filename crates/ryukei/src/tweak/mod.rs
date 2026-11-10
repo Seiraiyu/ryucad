@@ -38,7 +38,8 @@ mod tests;
 
 pub use blends::{
     Corner, DEFAULT_TOLERANCE, DeleteBlends, RecogniseOptions, Recognised, Recognition,
-    delete_blends, delete_blends_with, recognise_blends, recognise_blends_with,
+    delete_blends, delete_blends_with, recognise_blends, recognise_blends_with, resize_blends,
+    resize_blends_with,
 };
 pub use delete::{DeleteSpec, Heal, delete_faces, delete_faces_with, feature_faces};
 pub use draft::{
