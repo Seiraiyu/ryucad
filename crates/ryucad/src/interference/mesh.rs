@@ -184,6 +184,63 @@ pub fn deep_point(
     Ok(None)
 }
 
+/// A point inside both closed meshes and farther than `reach` from each,
+/// found among `own`'s triangles' centroids stepped inwards (against the
+/// triangle's front, the side its corners wind counterclockwise about) by
+/// twice `reach`: kept where `own` winds it non-zero and it lies farther
+/// than `reach` from `own`'s mesh, a certificate where `other` winds it
+/// non-zero too and it lies farther than `reach` from `other`'s mesh. So
+/// two closed sides whose surfaces coincide, or nearly (a part placed twice
+/// at one pose, which no surface point of either certifies), interfere.
+/// Only points inside `other`'s box grown by `reach` are judged; each
+/// costs a piece of [`BUDGET`], counted in `spent`.
+pub fn interior_point(
+    own: &MeshTree,
+    other: &MeshTree,
+    reach: f64,
+    spent: &mut u64,
+) -> Result<Option<Point3>, OverBudget> {
+    let Some((lo, hi)) = other.bounds() else {
+        return Ok(None);
+    };
+    let near = Box3::new(lo, hi).grow(reach);
+    for t in own.triangles() {
+        // Divided by its own length, not `normalize`d: a small triangle's
+        // cross product falls under the resolution.
+        let n = (t[1] - t[0]).cross(t[2] - t[0]);
+        let len = n.length();
+        if !(len > 0.0 && len.is_finite()) {
+            continue;
+        }
+        let c = Point3::new(
+            (t[0].x + t[1].x + t[2].x) / 3.0,
+            (t[0].y + t[1].y + t[2].y) / 3.0,
+            (t[0].z + t[1].z + t[2].z) / 3.0,
+        );
+        let p = c - n * (2.0 * reach / len);
+        if !near.intersects(&Box3::from_point(p)) {
+            continue;
+        }
+        *spent += 1;
+        if *spent > BUDGET {
+            return Err(OverBudget);
+        }
+        if !matches!(own.winding(p), Some(w) if w != 0) {
+            continue;
+        }
+        if own.nearest_to(p).is_none_or(|(d, _, _)| d <= reach) {
+            continue;
+        }
+        if !matches!(other.winding(p), Some(w) if w != 0) {
+            continue;
+        }
+        if other.nearest_to(p).is_some_and(|(d, _, _)| d > reach) {
+            return Ok(Some(p));
+        }
+    }
+    Ok(None)
+}
+
 /// `a` against `b` placed at `rel` in `a`'s frame, on their meshes;
 /// `spent` counts the search's pieces. `None` past [`BUDGET`].
 pub fn verdict(a: &Prepared, b: &Prepared, rel: &Rigid, spent: &mut u64) -> Option<Verdict> {
@@ -202,6 +259,12 @@ pub fn verdict(a: &Prepared, b: &Prepared, rel: &Rigid, spent: &mut u64) -> Opti
     }
     if deep.is_none() && bp.closed {
         deep = deep_point(&bp.tree, a.tree.triangles(), reach, spent).ok()?;
+    }
+    if deep.is_none() && a.closed && bp.closed && nearest <= reach {
+        deep = interior_point(&a.tree, &bp.tree, reach, spent).ok()?;
+        if deep.is_none() {
+            deep = interior_point(&bp.tree, &a.tree, reach, spent).ok()?;
+        }
     }
     if deep.is_some() {
         let (mut faces_a, mut faces_b) = (
@@ -304,6 +367,24 @@ mod tests {
         assert!(
             (min[0] - 0.005).abs() < 1e-9 && (max[0] - 0.01).abs() < 1e-9,
             "{min:?} {max:?}"
+        );
+    }
+
+    #[test]
+    fn coincident_and_nearly_coincident_blocks_interfere() {
+        let a = Prepared::new(&block(0.01)).unwrap();
+        let b = Prepared::new(&block(0.01)).unwrap();
+        for rel in [Rigid::IDENTITY, at(1e-6, 0.0, 0.0), at(0.0, -1e-6, 1e-6)] {
+            let v = verdict(&a, &b, &rel, &mut 0).unwrap();
+            assert!(
+                matches!(v, Verdict::Approximate { open: false, .. }),
+                "{rel:?}: {v:?}"
+            );
+        }
+        // A block standing on another, flush, still only touches.
+        assert_eq!(
+            verdict(&a, &b, &at(0.0, 0.0, 0.01), &mut 0).unwrap(),
+            Verdict::Touching
         );
     }
 

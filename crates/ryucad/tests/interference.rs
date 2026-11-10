@@ -370,6 +370,45 @@ fn mesh_verdicts_agree_with_booleans_on_solids() {
             _ => {}
         }
     }
+    // A part placed twice at one pose, or a micrometre off it: its surfaces
+    // coincide, so no surface point of either is deep in the other, yet
+    // the boolean gives the whole volume.
+    for k in 0..2 {
+        let key = OpKey::from_bytes(format!("c{k}").as_bytes());
+        let a = if k == 0 {
+            ryukei::primitive::block(key, 0.01, 0.008, 0.006, &Rigid::IDENTITY)
+                .unwrap()
+                .0
+        } else {
+            ryukei::primitive::cylinder(key, 0.004, 0.01, &Rigid::IDENTITY)
+                .unwrap()
+                .0
+        };
+        let pa = Prepared::new(&a).unwrap();
+        for rel in [
+            Rigid::IDENTITY,
+            Rigid::translation(Vector3::new(1e-6, 0.0, 0.0)),
+        ] {
+            let exact = verdict(&a, &a, rel);
+            let meshed = mesh_verdict(&pa, &pa, &rel).unwrap();
+            if let Verdict::Interferes { volume_m3, .. } = exact {
+                assert!(volume_m3 > 1e-9, "coincident {k}: {exact:?}");
+                judged += 1;
+                assert!(
+                    matches!(meshed, Verdict::Approximate { open: false, .. }),
+                    "coincident {k} {rel:?}: {meshed:?}"
+                );
+                agreed += 1;
+            } else {
+                // Whatever the boolean says of coincident copies, the
+                // meshes must certify the shared volume.
+                assert!(
+                    matches!(meshed, Verdict::Approximate { open: false, .. }),
+                    "coincident {k} {rel:?}: {exact:?} {meshed:?}"
+                );
+            }
+        }
+    }
     println!("mesh verdicts: {agreed} of {judged} judged agree");
     assert!(judged >= 24, "{judged}");
     assert_eq!(agreed, judged);

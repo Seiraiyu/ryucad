@@ -95,10 +95,19 @@ impl MeshTree {
     pub fn winding(&self, p: Point3) -> Option<i64> {
         let (lo, hi) = self.bounds()?;
         let reach = 2.0 * (hi - lo).length() + 2.0 * lo.distance(p) + 1.0;
+        // A triangle in an axis-aligned plane has a box of no thickness, so
+        // the ray's slab test against it, rounded, could drop a crossing on
+        // its side: pad the boxes by a few ulps of the coordinates' size.
+        // More candidates cost only exact tests.
+        let size = [lo, hi, p]
+            .iter()
+            .map(|c| c.x.abs() + c.y.abs() + c.z.abs())
+            .sum::<f64>();
+        let pad = 1e-12 * size;
         'rays: for d in DIRECTIONS {
             let q = p + Vector3::new(d[0], d[1], d[2]) * reach;
             let mut w = 0i64;
-            for k in self.tree.along(p, q, 0.0) {
+            for k in self.tree.along(p, q, pad) {
                 let [a, b, c] = self.triangles[k as usize];
                 let (sp, sq) = (orient3d(a, b, c, p), orient3d(a, b, c, q));
                 if sq == Sign::Zero {
@@ -191,5 +200,34 @@ mod tests {
         let s = MeshTree::new(mesh_of(&ball));
         assert_eq!(s.winding(Point3::new(0.0, 0.0, 0.0049)), Some(1));
         assert_eq!(s.winding(Point3::new(0.0, 0.0, 0.0051)), Some(0));
+    }
+
+    #[test]
+    fn rays_grazing_an_axis_aligned_face_still_count_it() {
+        // Blocks far from the origin, their faces axis-aligned, so each
+        // face's triangles have boxes of no thickness; points just inside
+        // a face send their first ray within rounding of that face's box.
+        for at in [[0.0; 3], [123.456, -77.7, 3.3], [-400.0, 400.0, -400.0]] {
+            let side = 0.01;
+            let a = MeshTree::new(mesh_of(&block(at, side)));
+            for eps in [1e-9, 1e-7, 1e-5] {
+                for (k, sign) in [
+                    (0, 1.0),
+                    (0, -1.0),
+                    (1, 1.0),
+                    (1, -1.0),
+                    (2, 1.0),
+                    (2, -1.0),
+                ] {
+                    let mut c = [at[0] + side / 2.0, at[1] + side / 2.0, at[2] + side / 2.0];
+                    c[k] += sign * (side / 2.0 - eps);
+                    let inside = Point3::new(c[0], c[1], c[2]);
+                    assert_eq!(a.winding(inside), Some(1), "{at:?} {eps} {k} {sign}");
+                    c[k] += sign * 2.0 * eps;
+                    let outside = Point3::new(c[0], c[1], c[2]);
+                    assert_eq!(a.winding(outside), Some(0), "{at:?} {eps} {k} {sign}");
+                }
+            }
+        }
     }
 }

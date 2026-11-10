@@ -325,6 +325,15 @@ fn references_interfere_on_their_meshes() {
         assert!(!i["faces"]["a"].as_array().unwrap().is_empty(), "{v}");
         assert!(!i["faces"]["b"].as_array().unwrap().is_empty(), "{v}");
     }
+    // The reference against its own copy, its surfaces on the copy's: the
+    // whole volume is shared.
+    assert!(
+        approximate.iter().any(|i| {
+            let (a, b) = (i["a"].as_str().unwrap(), i["b"].as_str().unwrap());
+            a.ends_with("/r") && b.ends_with("/r")
+        }),
+        "{v}"
+    );
     // The solid pair is still a boolean's, with its volume.
     assert!(
         v["interferences"]
