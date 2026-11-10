@@ -4046,17 +4046,14 @@ mod tests {
             assert_eq!(xs.len(), 1, "rail {rail}'s far ends in one column: {xs:?}");
         }
         let (found, _) = crate::lint::lint(&block, &out);
-        // sch_idiom_missed: the far rail's members stand past the near
-        // ones and their text; the lint judges them along their rows
-        // (Task 8).
-        // The banked rows' nets (s0 to s9): J1's two rows run round U1 to
-        // its other side, as they do without banks.
+        // The banked rows' nets (s0 to s9) and parts: J1's two rows run
+        // round U1 to its other side, as they do without banks.
         let banked = |f: &crate::lint::Finding| {
-            f.refs
-                .iter()
-                .any(|r| (0..10).any(|i| *r == format!("s{i}") || *r == format!("r{}", i + 1)))
+            f.refs.iter().any(|r| {
+                r == "c1" || (0..10).any(|i| *r == format!("s{i}") || *r == format!("r{}", i + 1))
+            })
         };
-        for code in ["sch_floating", "sch_jog"] {
+        for code in ["sch_idiom_missed", "sch_floating", "sch_jog"] {
             assert!(
                 !found.iter().any(|f| f.code == code && banked(f)),
                 "{code}: {:#?}",

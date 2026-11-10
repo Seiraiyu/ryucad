@@ -174,10 +174,10 @@ pub const RULES: &[Rule] = &[
         code: "sch_idiom_missed",
         weight: 3,
         unit: "a part",
-        what: "A part of an idiom (a decoupling capacitor, a pull resistor, a divider, a crystal's capacitors) stands more than 16 grid steps from the part it serves.",
+        what: "A part of an idiom (a decoupling capacitor, a pull resistor, a divider, a crystal's capacitors) stands more than 16 grid steps from the part it serves; a bypass capacitor on its pin's line and a pull wired on its pin's row are the pin's however far out.",
         why: "An idiom reads at a glance only drawn together; scattered, the reader must work out again what each part is for.",
         fix: "Bring the part back (near X P, with P the pin it serves), or re-form the idiom (idiom X KIND).",
-        evidence: "Design 236 names the idioms the engine draws and their canonical shapes, after the drafting convention of drawing decoupling at its pin and pull resistors beside the pin they pull. In round 2's blind review (plan 1.D, three judges a pair), the idiom rules' points fell on the Ethernet PHY (42 to 30) and the judges' idioms score rose (+0.7); against the hand-drawn references the judges scored our idioms 2 to 2.3 of 5 and the references' 3.7 to 5.",
+        evidence: "Design 236 names the idioms the engine draws and their canonical shapes, after the drafting convention of drawing decoupling at its pin and pull resistors beside the pin they pull. In round 2's blind review (plan 1.D, three judges a pair), the idiom rules' points fell on the Ethernet PHY (42 to 30) and the judges' idioms score rose (+0.7); against the hand-drawn references the judges scored our idioms 2 to 2.3 of 5 and the references' 3.7 to 5. A pull wired on its pin's row reads as the pin's however far out it stands (design 348, #429: banks past a column of flags).",
     },
     Rule {
         code: "sch_power_sideways",
@@ -1485,6 +1485,11 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 if idiom.kind == IdiomKind::Decoupling && !bypass_apart.contains(p) {
                     continue;
                 }
+                // So does a pull wired on its pin's row (a bank's member, or
+                // what hangs two steps off its row), however far out (#429).
+                if pull && i == 0 && wired_on_row(block, layout, sid, &shapes, idiom, *p) {
+                    continue;
+                }
                 if !s.extent.grow(IDIOM_REACH).overlaps(&anchor.extent) {
                     let key = block.parts[*p].key.clone();
                     found.push(f(
@@ -1860,9 +1865,120 @@ fn spanning(pts: &[[Nm; 2]]) -> Nm {
     total
 }
 
+/// Whether pull `p` of `idiom` is wired to the pin it serves along that
+/// pin's row: its pin on the pin's net within two steps of the row (on
+/// it, or hanging off its wire), the two joined by the net's wires on
+/// the sheet.
+fn wired_on_row(
+    block: &Block,
+    layout: &crate::layout::Layout,
+    sid: &str,
+    shapes: &BTreeMap<usize, Shape>,
+    idiom: &crate::idiom::Idiom,
+    p: usize,
+) -> bool {
+    let Some((a, k)) = idiom.anchor else {
+        return false;
+    };
+    let (Some(sa), Some(sp)) = (shapes.get(&a), shapes.get(&p)) else {
+        return false;
+    };
+    if !sa.pins[k].side.horizontal() {
+        return false;
+    }
+    let Some(n) = block.parts[a].pins[k].net else {
+        return false;
+    };
+    let Some(kp) = block.parts[p].pins.iter().position(|x| x.net == Some(n)) else {
+        return false;
+    };
+    let (row, end) = (sa.pins[k].end, sp.pins[kp].end);
+    if (end[1] - row[1]).abs() > 2 * crate::geom::GRID {
+        return false;
+    }
+    let runs: Vec<BTreeSet<route::Node>> = layout
+        .routes
+        .get(&block.nets[n].key)
+        .and_then(|r| r.get(sid))
+        .into_iter()
+        .flatten()
+        .map(|run| route::expand(run).into_iter().collect())
+        .collect();
+    // The runs joined to the pin, through shared nodes.
+    let mut reached: BTreeSet<route::Node> = [route::node_of(row)].into();
+    let mut taken = vec![false; runs.len()];
+    loop {
+        let mut grew = false;
+        for (i, set) in runs.iter().enumerate() {
+            if !taken[i] && set.iter().any(|x| reached.contains(x)) {
+                taken[i] = true;
+                reached.extend(set.iter().copied());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    reached.contains(&route::node_of(end)) && reached.len() > 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pull wired on its pin's row is the pin's however far out along it
+    /// (a bank past a column of flags, #429); moved off the row it is judged
+    /// by its distance from the part, as before.
+    #[test]
+    fn a_pull_wired_on_its_row_is_in_reach() {
+        let block = crate::testing::dense_block(false);
+        let out = crate::engine::lay_out(&block).unwrap();
+        // Push R1 and its row out by 20 steps: still on its row, and wired.
+        let mut far = out.clone();
+        let shift = 20 * GRID;
+        if let Some(x) = far.layout.placed.get_mut("r1") {
+            x.at[0] += shift;
+        }
+        // Its row's wire rebuilt from U1's pin to R1's moved signal pin.
+        let end = |key: &str, net: usize| {
+            let p = block.part(key).unwrap();
+            let x = &far.layout.placed[key];
+            let k = block.parts[p]
+                .pins
+                .iter()
+                .position(|q| q.net == Some(net))
+                .unwrap();
+            Shape::of(&block.parts[p], Place::new(x.at, x.rotation, x.mirror)).pins[k].end
+        };
+        let run = vec![end("u1", 2), end("r1", 2)];
+        let runs = far
+            .layout
+            .routes
+            .get_mut("s0")
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap();
+        *runs = vec![run];
+        let (found, _) = lint(&block, &far);
+        assert!(
+            !found
+                .iter()
+                .any(|f| f.code == "sch_idiom_missed" && f.refs[0] == "r1"),
+            "{:#?}",
+            found
+                .iter()
+                .filter(|f| f.code == "sch_idiom_missed")
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|f| f.code == "sch_floating" && f.refs.iter().any(|r| r == "r1")),
+            "wired on its row, it floats nowhere"
+        );
+    }
 
     /// A part on a net that leaves its sheet, whose pin carries the net's
     /// label (its off-sheet connector until plan 2.C draws one), isn't
