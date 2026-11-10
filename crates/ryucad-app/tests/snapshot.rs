@@ -10,7 +10,7 @@ use common::{Project, gpu, ryucad};
 use ryucad::view::{self, StandardView};
 use ryucad_app::core::compare::FaceMark;
 use ryucad_app::core::nav::Projector;
-use ryucad_app::core::pick::Picker;
+use ryucad_app::core::pick::{Picker, Place};
 use ryucad_app::ui::scene::{self, DrawList, Scene, linear, theme};
 use ryucad_app::ui::style;
 use std::path::Path;
@@ -552,6 +552,81 @@ fn a_chosen_split_looks_as_it_did() {
     scene.render(&device, &queue, [W, H], &list);
     let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
     looks_as_it_did(&adapter, &px, "split");
+}
+
+/// A draft chosen (design 400, The app): the walls it drafted painted in
+/// the chosen colour, its neutral plane drawn as a datum plane is, and its
+/// pull as an arrow from the plane's middle.
+#[test]
+fn a_chosen_draft_looks_as_it_did() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::named("snapshot").with_tweaks();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(120), |ws| ws.idle()
+        && ws.model.meshes.len() == 1));
+    ws.choose(Some(("p".to_owned(), "d".to_owned())));
+    assert!(ws.wait_until(Duration::from_secs(120), |ws| ws.idle()
+        && ws.made.is_some()));
+    let t = ws.model.parts["p"]
+        .feature("d")
+        .unwrap()
+        .tweak
+        .clone()
+        .unwrap();
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.015);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    let c = scene::linear(style::CHOSEN);
+    let faces: Vec<scene::PaintedFace> = ws
+        .made
+        .as_ref()
+        .unwrap()
+        .faces
+        .iter()
+        .flat_map(|((part, solid), names)| {
+            names
+                .iter()
+                .filter_map(|n| match picker.place(&format!("{part}/{solid}/{n}")) {
+                    Some(Place::Face(k, i)) => Some((k, i, c)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(faces.len(), 2);
+    let size = [f64::from(W), f64::from(H)];
+    let mark = t.neutral_mark("p", "d", Some((lo, hi))).unwrap();
+    let (mut overlay, glass) = ryucad_app::core::bodies::plane_overlay(&mark, &pr, size, 1.0);
+    let d = [0, 1, 2].map(|k| hi[k] - lo[k]);
+    let length = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() / 5.0;
+    let arrow = ryucad_app::core::tweaks::arrow(t.neutral.unwrap().origin, t.pull.unwrap(), length);
+    overlay.extend(ryucad_app::core::tweaks::lines_overlay(
+        &arrow,
+        ryucad::render::DATUM,
+        &pr,
+        size,
+        1.0,
+    ));
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: theme::BACKGROUND,
+        light: scene::light(&camera),
+        edges: true,
+        faces: &faces,
+        overlay: &overlay,
+        glass: &glass,
+    };
+    scene.render(&device, &queue, [W, H], &list);
+    let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
+    looks_as_it_did(&adapter, &px, "draft");
 }
 
 /// A sheet metal part in the flat view (design 346, The app): its plate
