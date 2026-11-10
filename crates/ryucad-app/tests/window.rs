@@ -5000,6 +5000,35 @@ fn framing_eases_and_reduced_motion_lands_at_once() {
 }
 
 #[test]
+fn with_reduced_motion_a_turn_to_a_view_is_shared_with_the_session() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["config", "set", "ui.motion", "reduce"]);
+    let mut h = window(&p);
+    frames(&mut h, |a| loaded(a) && !a.opened().view.nav.animate);
+    h.step();
+    // View > Front lands at once, and the session hears where (#603).
+    menu(&mut h, "View", "Front");
+    h.step();
+    let shown = h.state().opened().view.nav.camera.clone();
+    assert!(h.state().opened().view.nav.turn.is_none());
+    let t0 = Instant::now();
+    while p.ok(&["camera"])["camera"]["eye"] != serde_json::json!(shown.eye) {
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "the session never heard of the front view: {} against {:?}",
+            p.ok(&["camera"]),
+            shown.eye
+        );
+        h.step();
+    }
+    p.ok(&["config", "set", "ui.motion", "animate"]);
+}
+
+#[test]
 fn a_dependency_is_added_from_its_tab_and_its_part_placed_from_the_picker() {
     let _one = one_at_a_time();
     if !gpu() {

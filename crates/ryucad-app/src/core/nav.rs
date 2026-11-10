@@ -243,19 +243,21 @@ impl Nav {
     }
 
     /// Starts turning to `to` at `now` (seconds); with motion reduced it
-    /// is there at once.
-    pub fn turn_to(&mut self, to: Camera, now: f64) {
+    /// is there at once, and this says so (true): no step will follow, so
+    /// the caller shares the camera itself (#603).
+    pub fn turn_to(&mut self, to: Camera, now: f64) -> bool {
         self.glide = None;
         if !self.animate {
             self.camera = to;
             self.turn = None;
-            return;
+            return true;
         }
         self.turn = Some(Turn {
             from: self.camera.clone(),
             to,
             start: now,
         });
+        false
     }
 
     /// Whether a turn or a glide is under way.
@@ -899,9 +901,22 @@ mod tests {
             eye: [1.0, 2.0, 3.0],
             ..iso()
         };
-        nav.turn_to(to.clone(), 2.0);
+        assert!(nav.turn_to(to.clone(), 2.0));
         assert!(!nav.moving());
         assert_eq!(nav.camera, to);
+        // A turn begun outside a frame lands at once too, and says so, so
+        // its caller shares it: no step will (#603).
+        let front = Camera {
+            eye: [0.0, -5.0, 0.0],
+            ..iso()
+        };
+        assert!(nav.turn_to(front.clone(), f64::NAN));
+        assert!(!nav.moving());
+        assert_eq!(nav.camera, front);
+        // Animated, a turn says it isn't there yet.
+        nav.animate = true;
+        assert!(!nav.turn_to(iso(), f64::NAN));
+        assert!(nav.moving());
     }
 
     #[test]
