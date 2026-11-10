@@ -647,6 +647,45 @@ pub fn check_bytes(data: &[u8]) {
     }
 }
 
+/// A block for plan 2.C's off-sheet connectors: an IC and two resistors
+/// on SIG in one region, a second IC on SIG asked onto another sheet.
+pub fn leaving_block() -> Block {
+    use crate::input::PinKind::Bidirectional as Bd;
+    use crate::layout::Instruction;
+    let mut b = Block {
+        sheet: [400_000_000, 277_000_000],
+        ..Default::default()
+    };
+    b.nets.push(net("sig", "SIG", NetKind::Signal));
+    b.nets.push(net("o1", "O1", NetKind::Signal));
+    b.nets.push(net("o2", "O2", NetKind::Signal));
+    b.nets.push(net("o3", "O3", NetKind::Signal));
+    b.parts.push(ic(
+        "u1",
+        "U1",
+        "MCU",
+        &[("A", Bd, Some(0)), ("B", Bd, Some(1)), ("C", Bd, Some(2))],
+        &[("D", Bd, None)],
+    ));
+    b.parts.push(resistor("r1", "R1", "1k", [Some(0), Some(1)]));
+    b.parts.push(resistor("r2", "R2", "1k", [Some(0), Some(2)]));
+    b.parts.push(ic(
+        "u2",
+        "U2",
+        "ADC",
+        &[("IN", Bd, Some(0)), ("X", Bd, Some(3))],
+        &[("Y", Bd, None)],
+    ));
+    b.instructions.insert(
+        "i1".into(),
+        Instruction::Sheet {
+            parts: vec!["u2".into()],
+            sheet: "Away".into(),
+        },
+    );
+    b
+}
+
 /// A block for plan 2.A's regions: a dense IC (U1, 10 pins) with a bypass
 /// capacitor and a pull-up, a buck (U2 TPS54331 with L1 and C2 on its own
 /// output rail), a connector (J1) on U1's D+, a loose RC on its own nets,

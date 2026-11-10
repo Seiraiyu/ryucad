@@ -3243,11 +3243,25 @@ fn draw(
                     }
                 }
             }
+            // A net leaving its sheet takes one off-sheet connector a
+            // region (plan 2.C): its pins are grouped by their part's
+            // region (a part in no region a group of its own); the pin of
+            // the part with the most pins carries the connector, the
+            // group's others are wired to it, else take local labels.
+            let carriers = carriers(
+                &st,
+                &mut want_label,
+                &net_sheets,
+                &stacked,
+                bank_rows,
+                &prev_labels,
+            );
             let stuck = place_labels(
                 block,
                 &st,
                 &mut field,
                 &want_label,
+                &carriers,
                 &prev_labels,
                 &runs_before,
                 &sid,
@@ -3677,11 +3691,110 @@ fn route_net(
 /// for the pin if it still fits, else the first candidate that does, else
 /// the first.
 #[allow(clippy::too_many_arguments)]
+/// Gives each net in `want` that leaves its sheet one off-sheet connector
+/// a region: in each group of its pins (by their part's region), the pin
+/// of the part with the most pins (then the least part key, then the
+/// least pin number) is turned into `LabelKind::OffSheet`; the group's
+/// other pins keep `Net` and are mapped to their carrier, by `(part,
+/// pin)`. A stacked pin's net and a bank row's port net keep their net
+/// labels (their labels say more than one net, or stand in a row). Over a
+/// previous layout, a pin whose label was a connector stays one, so an
+/// edit that joins two regions moves no connector.
+fn carriers(
+    st: &State,
+    want: &mut [(usize, usize, usize, LabelKind)],
+    net_sheets: &BTreeMap<usize, BTreeSet<usize>>,
+    stacked: &BTreeSet<usize>,
+    bank_rows: &[BankRow],
+    prev_labels: &dyn Fn(usize) -> Vec<Label>,
+) -> BTreeMap<(usize, usize), (usize, usize)> {
+    let block = st.block;
+    let region_of: BTreeMap<&str, &str> = st
+        .regions
+        .iter()
+        .flat_map(|(id, r)| r.parts.iter().map(move |k| (k.as_str(), id.as_str())))
+        .collect();
+    // By net and group, the indices into `want`.
+    let mut groups: BTreeMap<(usize, &str), Vec<usize>> = BTreeMap::new();
+    for (i, &(n, p, _, kind)) in want.iter().enumerate() {
+        let leaves = net_sheets.get(&n).is_some_and(|s| s.len() > 1);
+        if !leaves
+            || kind != LabelKind::Net
+            || block.nets[n].kind != NetKind::Signal
+            || stacked.contains(&n)
+            || bank_rows.iter().any(|r| r.ported && r.net == n)
+        {
+            continue;
+        }
+        let key = block.parts[p].key.as_str();
+        let group = region_of.get(key).copied().unwrap_or(key);
+        groups.entry((n, group)).or_default().push(i);
+    }
+    let mut out = BTreeMap::new();
+    for (&(n, _), list) in &groups {
+        let was: BTreeSet<String> = prev_labels(n)
+            .into_iter()
+            .filter(|l| l.kind == LabelKind::OffSheet)
+            .map(|l| l.on)
+            .collect();
+        let on = |i: usize| {
+            let (_, p, k, _) = want[i];
+            format!("{}/{}", block.parts[p].key, block.parts[p].pins[k].number)
+        };
+        let kept: Vec<usize> = list
+            .iter()
+            .copied()
+            .filter(|i| was.contains(&on(*i)))
+            .collect();
+        if let Some(&first) = kept.first() {
+            for &i in &kept {
+                want[i].3 = LabelKind::OffSheet;
+            }
+            let (_, cp, ck, _) = want[first];
+            for &i in list {
+                if !kept.contains(&i) {
+                    out.insert((want[i].1, want[i].2), (cp, ck));
+                }
+            }
+            continue;
+        }
+        let &carrier = list
+            .iter()
+            .min_by(|&&a, &&b| {
+                let (_, pa, ka, _) = want[a];
+                let (_, pb, kb, _) = want[b];
+                let (x, y) = (&block.parts[pa], &block.parts[pb]);
+                y.pins
+                    .len()
+                    .cmp(&x.pins.len())
+                    .then(x.key.cmp(&y.key))
+                    .then(x.pins[ka].number.cmp(&y.pins[kb].number))
+            })
+            .expect("a group");
+        want[carrier].3 = LabelKind::OffSheet;
+        let (_, cp, ck, _) = want[carrier];
+        for &i in list {
+            if i != carrier {
+                out.insert((want[i].1, want[i].2), (cp, ck));
+            }
+        }
+    }
+    out
+}
+
+/// Whether a previous label of kind `was` stands for one of kind `now`:
+/// the same kind, or a net label where an off-sheet connector is wanted
+/// (a layout from before plan 2.C), which keeps its place as one.
+fn was_kind(was: LabelKind, now: LabelKind) -> bool {
+    was == now || (now == LabelKind::OffSheet && was == LabelKind::Net)
+}
+
 fn place_labels(
     block: &Block,
     st: &State,
     field: &mut Field,
     want: &[(usize, usize, usize, LabelKind)],
+    carriers: &BTreeMap<(usize, usize), (usize, usize)>,
     prev_labels: &dyn Fn(usize) -> Vec<Label>,
     prev_runs: &BTreeMap<usize, Vec<Vec<Point>>>,
     sid: &str,
@@ -3697,7 +3810,7 @@ fn place_labels(
         let on = format!("{}/{}", block.parts[p].key, block.parts[p].pins[k].number);
         let had = prev_labels(n)
             .into_iter()
-            .find(|l| l.on == on && l.kind == kind);
+            .find(|l| l.on == on && was_kind(l.kind, kind));
         // A pin of a net the previous layout labelled, wired then to the
         // net's own (no label of its own), keeps that wire with the labels
         // that keep theirs.
@@ -3710,7 +3823,7 @@ fn place_labels(
                 .flatten()
                 .any(|r| r[0] == end || r[r.len() - 1] == end);
         let rank = match had {
-            Some(l) if l.text == block.label_text(p, k) => 0,
+            Some(l) if l.text == block.label_text(p, k) && l.kind == kind => 0,
             Some(_) => 1,
             None if wired_before => 0,
             None => 2,
@@ -3733,17 +3846,18 @@ fn place_labels(
     let mut order: Vec<usize> = order.into_iter().map(|(_, _, _, _, i)| i).collect();
     // A label left with no place is tried again first: a neighbour's stub
     // may have taken the place it needs. The fewest left so wins.
-    let mut best: Option<(usize, Field, Labels, Routes, Vec<usize>)> = None;
+    let mut best: Option<((usize, usize), Field, Labels, Routes, Vec<usize>)> = None;
     let mut tried: BTreeSet<usize> = BTreeSet::new();
     loop {
         let mut f = field.clone();
         let mut l = labels.clone();
         let mut r = routes.clone();
-        let stuck = place_labels_in(
+        let (stuck, demoted) = place_labels_in(
             block,
             st,
             &mut f,
             want,
+            carriers,
             &order,
             prev_labels,
             prev_runs,
@@ -3751,12 +3865,18 @@ fn place_labels(
             &mut l,
             &mut r,
         );
-        let count = stuck.len();
+        // Labels with no place first, then off-sheet connectors drawn as
+        // net labels for want of room: the fewest of both wins.
+        let count = (stuck.len(), demoted.len());
         if best.as_ref().is_none_or(|b| count < b.0) {
             best = Some((count, f, l, r, stuck.iter().map(|i| want[*i].1).collect()));
         }
-        match stuck.into_iter().find(|i| !tried.contains(i)) {
-            Some(i) if count > 0 => {
+        let again = stuck
+            .into_iter()
+            .chain(demoted)
+            .find(|i| !tried.contains(i));
+        match again {
+            Some(i) if count != (0, 0) => {
                 tried.insert(i);
                 order.retain(|j| *j != i);
                 order.insert(0, i);
@@ -3896,14 +4016,16 @@ fn place_labels_in(
     st: &State,
     field: &mut Field,
     want: &[(usize, usize, usize, LabelKind)],
+    carriers: &BTreeMap<(usize, usize), (usize, usize)>,
     order: &[usize],
     prev_labels: &dyn Fn(usize) -> Vec<Label>,
     prev_runs: &BTreeMap<usize, Vec<Vec<Point>>>,
     sid: &str,
     labels: &mut BTreeMap<usize, Vec<Label>>,
     routes: &mut Routes,
-) -> Vec<usize> {
+) -> (Vec<usize>, Vec<usize>) {
     let mut stuck = Vec::new();
+    let mut demoted = Vec::new();
     // A labelled net's pin the previous layout wired to another of its
     // pins (with no label of its own) keeps that wire while it holds,
     // before any label is placed, so no new label takes its way.
@@ -3962,6 +4084,9 @@ fn place_labels_in(
                 continue;
             }
             let pin = st.shape(p).expect("placed").pins[k];
+            // A pin of a net leaving its sheet joins its region's carrier
+            // alone, however far inside the region (plan 2.C).
+            let carrier = carriers.get(&(p, k)).copied();
             // Each target's label as it would stand straight out of its pin.
             let mut boxes: BTreeMap<route::Node, Rect> = BTreeMap::new();
             let tree: BTreeSet<route::Node> = order
@@ -3969,7 +4094,10 @@ fn place_labels_in(
                 .filter(|j| **j != i && !done.contains(*j))
                 .filter_map(|&j| {
                     let (m, q, l, kind2) = want[j];
-                    if m != n || kind2 != LabelKind::Net || q == p {
+                    if m != n || !kind2.signal() || q == p {
+                        return None;
+                    }
+                    if carrier.is_some_and(|c| c != (q, l)) {
                         return None;
                     }
                     if !matches!(block.parts[q].kind, PartKind::Symbol { .. }) {
@@ -3977,10 +4105,10 @@ fn place_labels_in(
                     }
                     let at = st.shape(q).expect("placed").pins[l];
                     let e = at.end;
-                    let near = (e[0] - pin.end[0]).abs() + (e[1] - pin.end[1]).abs() <= LOCAL_REACH;
+                    let near = carrier.is_some()
+                        || (e[0] - pin.end[0]).abs() + (e[1] - pin.end[1]).abs() <= LOCAL_REACH;
                     near.then(|| {
-                        let b =
-                            label::label_box(LabelKind::Net, &block.label_text(q, l), e, at.side);
+                        let b = label::label_box(kind2, &block.label_text(q, l), e, at.side);
                         boxes.insert(route::node_of(e), b);
                         route::node_of(e)
                     })
@@ -4001,7 +4129,8 @@ fn place_labels_in(
                 run.windows(2)
                     .any(|w| Rect::new(w[0], w[1]).overlaps(&inner))
             });
-            if !through_label && route::length(&run) <= LOCAL_REACH && field.mark(n, &run).is_ok() {
+            let short = carrier.is_some() || route::length(&run) <= LOCAL_REACH;
+            if !through_label && short && field.mark(n, &run).is_ok() {
                 routes.entry(n).or_default().push(run);
                 done.insert(i);
             }
@@ -4037,16 +4166,23 @@ fn place_labels_in(
         );
         let kept = prev_runs.get(&n).map(|r| (r, &net_pins));
         let name = &block.label_text(p, k);
-        let fits = |field: &Field, stub: &[Point], at: Point, side: Side| -> bool {
+        let fits_as = |field: &Field, kind: LabelKind, stub: &[Point], at: Point, side: Side| {
             if !field.clear_label(label::label_box(kind, name, at, side)) {
                 return false;
             }
             stub.is_empty() || field.can_mark(n, stub)
         };
+        let fits = |field: &Field, stub: &[Point], at: Point, side: Side| -> bool {
+            fits_as(field, kind, stub, at, side)
+        };
+        // An off-sheet connector with no room for its longer outline is
+        // drawn as a net label where one fits (plan 2.C): kept labels
+        // keep their places, and the lint says what the sheet lacks.
+        let mut kind = kind;
         // The previous label, its stub one of the net's previous runs.
         let before = prev_labels(n)
             .into_iter()
-            .find(|l| l.on == on && l.kind == kind);
+            .find(|l| l.on == on && was_kind(l.kind, kind));
         let mut chosen: Option<(Vec<Point>, Point, Side)> = None;
         if let Some(l) = before {
             let stub = if l.at == pin.end {
@@ -4059,10 +4195,17 @@ fn place_labels_in(
                     .get(&n)
                     .and_then(|runs| runs.iter().find_map(|r| cut_at(r, pin.end, l.at)))
             };
-            if let Some(stub) = stub
-                && fits(field, &stub, l.at, l.side)
-            {
-                chosen = Some((stub, l.at, l.side));
+            if let Some(stub) = stub {
+                if fits(field, &stub, l.at, l.side) {
+                    chosen = Some((stub, l.at, l.side));
+                } else if kind == LabelKind::OffSheet
+                    && l.kind == LabelKind::Net
+                    && fits_as(field, LabelKind::Net, &stub, l.at, l.side)
+                {
+                    kind = LabelKind::Net;
+                    demoted.push(i);
+                    chosen = Some((stub, l.at, l.side));
+                }
             }
         }
         let cands = label::candidates(kind, pin.end, pin.side);
@@ -4071,7 +4214,7 @@ fn place_labels_in(
         // A rail's pin beside another of its rail's (a part's row of
         // supply pins) joins it by a short wire first: one port, a comb.
         let mut wired = chosen.is_none()
-            && kind != LabelKind::Net
+            && !kind.signal()
             && wire_own(
                 field, routes, labels, n, sid, pin.end, pin.side, NEAR_RAIL, kept,
             );
@@ -4110,11 +4253,7 @@ fn place_labels_in(
                 // rail's only nearby, since further off a port of its own
                 // reads better than a long wire.
                 if !wired {
-                    let reach = if kind == LabelKind::Net {
-                        Nm::MAX
-                    } else {
-                        RAIL_REACH
-                    };
+                    let reach = if kind.signal() { Nm::MAX } else { RAIL_REACH };
                     wired = wire_own(
                         field, routes, labels, n, sid, pin.end, pin.side, reach, kept,
                     );
@@ -4130,6 +4269,22 @@ fn place_labels_in(
                     .chain(&last)
                     .find(|(s, a, side)| fits(field, s, *a, *side))
                     .cloned()
+            })
+            .or_else(|| {
+                if wired || kind != LabelKind::OffSheet {
+                    return None;
+                }
+                let c = cands
+                    .iter()
+                    .chain(&detours)
+                    .chain(&last)
+                    .find(|(s, a, side)| fits_as(field, LabelKind::Net, s, *a, *side))
+                    .cloned();
+                if c.is_some() {
+                    kind = LabelKind::Net;
+                    demoted.push(i);
+                }
+                c
             })
             .unwrap_or_else(|| {
                 if !wired {
@@ -4153,7 +4308,7 @@ fn place_labels_in(
             on,
         });
     }
-    stuck
+    (stuck, demoted)
 }
 
 #[cfg(test)]
@@ -5644,5 +5799,90 @@ mod tests {
         let ends2: BTreeSet<Point> = [g(0, 0), g(4, 0)].into();
         assert!(!holds(&runs, &ends2));
         assert!(!holds(&runs[..1], &ends));
+    }
+
+    #[test]
+    fn a_net_leaving_its_sheet_takes_one_connector_a_region() {
+        let b = crate::testing::leaving_block();
+        let out = lay(&b);
+        assert!(
+            crate::rules::check(&b, &out.layout).is_empty(),
+            "{:?}",
+            crate::rules::check(&b, &out.layout)
+        );
+        let away = &out.layout.placed["u2"].sheet;
+        assert_ne!(away, &out.layout.placed["u1"].sheet, "u2 on its own sheet");
+        let labels = out.layout.labels.get("sig").cloned().unwrap_or_default();
+        let here: Vec<&Label> = labels.iter().filter(|l| &l.sheet != away).collect();
+        let there: Vec<&Label> = labels.iter().filter(|l| &l.sheet == away).collect();
+        // One connector on each sheet: u1's (the part with the most pins)
+        // here, u2's there.
+        let connectors: Vec<&&Label> = here
+            .iter()
+            .filter(|l| l.kind == LabelKind::OffSheet)
+            .collect();
+        assert_eq!(connectors.len(), 1, "{here:?}");
+        assert!(connectors[0].on.starts_with("u1/"));
+        assert_eq!(
+            there
+                .iter()
+                .filter(|l| l.kind == LabelKind::OffSheet)
+                .count(),
+            1
+        );
+        // r1 and r2 are wired to it, or take local labels.
+        for r in ["r1", "r2"] {
+            let on_label = here
+                .iter()
+                .any(|l| l.on.starts_with(&format!("{r}/")) && l.kind == LabelKind::Net);
+            let wired = out
+                .layout
+                .routes
+                .get("sig")
+                .is_some_and(|by| !by.is_empty());
+            assert!(on_label || wired, "{r} joins SIG");
+        }
+        // Nothing on one sheet takes a connector.
+        for (key, list) in &out.layout.labels {
+            if key != "sig" {
+                assert!(list.iter().all(|l| l.kind != LabelKind::OffSheet), "{key}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_layout_from_before_off_sheet_connectors_keeps_its_places() {
+        // The leaving block laid out once, its connectors turned back
+        // into net labels (a format 3 file), then laid out over that.
+        let b = crate::testing::leaving_block();
+        let first = lay(&b);
+        let mut old = first.layout.clone();
+        for list in old.labels.values_mut() {
+            for l in list.iter_mut().filter(|l| l.kind == LabelKind::OffSheet) {
+                l.kind = LabelKind::Net;
+            }
+        }
+        let again = lay(&Block {
+            previous: Some(old.clone()),
+            ..b.clone()
+        });
+        assert!(crate::rules::check(&b, &again.layout).is_empty());
+        // Every part where it was, and each connector at its old label's
+        // place where its box is clear there.
+        assert_eq!(again.layout.placed, old.placed);
+        let mut connectors = 0;
+        for (key, list) in &again.layout.labels {
+            for l in list.iter().filter(|l| l.kind == LabelKind::OffSheet) {
+                connectors += 1;
+                assert!(
+                    old.labels[key]
+                        .iter()
+                        .any(|o| o.on == l.on && o.at == l.at && o.side == l.side),
+                    "{key} {} moved",
+                    l.on
+                );
+            }
+        }
+        assert_eq!(connectors, 2, "a connector on each sheet again");
     }
 }
