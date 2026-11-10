@@ -400,6 +400,7 @@ pub fn build(
         ImportError::Work(w) => stopped(id, i, &w, (read.representation, &read.items), run.job),
         e => failed(id, i, &e, &read.instances, &read.solids),
     })?;
+    let body = placed(id, i, body)?;
     let step = |n: &Name| read.instances.get(n).map(|k| format!("#{k}"));
     let origins: crate::rebuild::Origins = crate::rebuild::names(&body)
         .into_iter()
@@ -440,6 +441,7 @@ fn build_reference(
         ImportError::Work(w) => stopped(id, i, &w, (read.representation, &read.items), run.job),
         e => failed(id, i, &e, &read.instances, &read.solids),
     })?;
+    let body = placed(id, i, body)?;
     let step = |n: &Name| read.instances.get(n).map(|k| format!("#{k}"));
     let origins: crate::rebuild::Origins = crate::rebuild::names(&body)
         .into_iter()
@@ -459,6 +461,24 @@ fn build_reference(
         crate::rebuild::finish_reference(id, (body, journal), origins)?,
         v,
     ))
+}
+
+/// `body` moved where a flattened import's `place` puts it; as it is
+/// with none. Names don't depend on where the body stands, so a placed
+/// import's names are its file's.
+fn placed(id: &Id, i: &Import, body: ryukei::topo::Body) -> Result<ryukei::topo::Body> {
+    let Some(p) = &i.place else {
+        return Ok(body);
+    };
+    let r = crate::assembly::pose_rigid(&p.pose).map_err(|e| e.with("feature", id))?;
+    body.transformed(&r).map_err(|e| {
+        Error::new(
+            Code::ImportFailed,
+            format!("import {id}: its place puts it where it can't stand: {e:?}"),
+        )
+        .with("feature", id)
+        .with("reason", "place")
+    })
 }
 
 /// A heal its work stopped: the request's `cancelled`, or
@@ -681,6 +701,9 @@ pub struct Ask {
     /// Heal each body into a checked solid, rather than keep it as a
     /// reference (design 364).
     pub solid: bool,
+    /// Make one part of every body of the file, placed where its
+    /// assemblies put it (#499).
+    pub flatten: bool,
 }
 
 impl Ask {
@@ -783,6 +806,12 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
         path: stored.clone(),
         blake3: file.blake3.clone(),
     };
+    if ask.flatten && (ask.into.is_some() || ask.product.is_some()) {
+        return Err(Error::new(
+            Code::Usage,
+            "flatten makes a part of the whole file: leave out into and product",
+        ));
+    }
     let plan: Vec<Planned> = match &ask.into {
         Some(into) => {
             if ask.part.is_some() {
@@ -821,16 +850,31 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
             let taken = |s: &str| {
                 Id::parse(s, "part").is_ok_and(|id| project.parts.contains_key(&id)) || retired(s)
             };
-            plan::Fresh {
-                opened: &opened,
-                file: &file_ref,
-                stem: &stem,
-                part,
-                taken: &taken,
-                pdm: root.join(PDM_CONFIG).is_file(),
-                mode: ask.mode(),
+            if ask.flatten {
+                vec![
+                    plan::Flat {
+                        opened: &opened,
+                        file: &file_ref,
+                        stem: &stem,
+                        part,
+                        taken: &taken,
+                        pdm: root.join(PDM_CONFIG).is_file(),
+                        mode: ask.mode(),
+                    }
+                    .plan()?,
+                ]
+            } else {
+                plan::Fresh {
+                    opened: &opened,
+                    file: &file_ref,
+                    stem: &stem,
+                    part,
+                    taken: &taken,
+                    pdm: root.join(PDM_CONFIG).is_file(),
+                    mode: ask.mode(),
+                }
+                .plan()?
             }
-            .plan()?
         }
     };
     let warnings = mapped_warnings(&opened, &ask.path);
@@ -870,10 +914,10 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
     use crate::doc::import::FileRef;
     use crate::doc::project::PDM_CONFIG;
     let target = ask.update.clone().expect("an update");
-    if ask.part.is_some() || ask.into.is_some() || ask.product.is_some() {
+    if ask.part.is_some() || ask.into.is_some() || ask.product.is_some() || ask.flatten {
         return Err(Error::new(
             Code::Usage,
-            "an update replaces a file the project holds: part, into and product don't apply",
+            "an update replaces a file the project holds: part, into, product and flatten don't apply (a flattened part follows its file as it was imported)",
         ));
     }
     let root = session.root().to_path_buf();
@@ -931,6 +975,11 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
             "import_usage_missing: {a}/{i}'s usage is gone from {target}, but a mate or pattern reads it, so it stays"
         ));
     }
+    for (p, f) in &u.kept_bodies {
+        warnings.push(format!(
+            "import_usage_missing: {p}/{f}'s body is gone from {target}, but another feature reads it, so it stays"
+        ));
+    }
     // What builds now and wouldn't after, from the files as they would be.
     let now = failing(session)?;
     let mut proposed = session.proposed(&writes)?;
@@ -952,11 +1001,16 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
         if !vanished.is_empty() {
             v["vanished"] = json!(vanished);
         }
-        if !u.kept.is_empty() {
+        if !u.kept.is_empty() || !u.kept_bodies.is_empty() {
             let kept: Vec<Value> = u
                 .kept
                 .iter()
                 .map(|(a, i)| json!({"part": a, "instance": i}))
+                .chain(
+                    u.kept_bodies
+                        .iter()
+                        .map(|(p, f)| json!({"part": p, "feature": f})),
+                )
                 .collect();
             v["kept"] = json!(kept);
         }
@@ -1433,6 +1487,7 @@ pub(crate) mod tests {
             }),
             body,
             mode: None,
+            place: None,
         }
     }
 
@@ -1607,6 +1662,53 @@ pub(crate) mod tests {
         match crate::server::tests::call(s, "rebuild", json!({"part": "p"})) {
             Ok(v) => v["parts"][0].clone(),
             Err(e) => e.details["parts"][0].clone(),
+        }
+    }
+
+    #[test]
+    fn a_placed_import_stands_where_its_place_puts_it() {
+        use crate::doc::files::Feature;
+        use crate::doc::import::{Mode, Place, Via};
+        use crate::doc::project::{feature_path, write_json};
+        let bytes = occt("box_ap214.stp");
+        for mode in [None, Some(Mode::Reference)] {
+            let (dir, mut s) = with_import_as(&bytes, Some(("part 2", "part 2")), mode);
+            let bounds = |s: &mut crate::session::Session| {
+                let v = crate::server::tests::call(s, "inspect", json!({"part": "p"})).unwrap();
+                let b = &v["bodies"][0]["bounds"];
+                [0, 1, 2].map(|k| b["min"][k].as_f64().unwrap())
+            };
+            let before = bounds(&mut s);
+            let f = ImportFile::new(bytes.clone());
+            let i = Feature::Import(Import {
+                mode,
+                place: Some(Place {
+                    pose: crate::doc::assembly::Pose {
+                        origin_m: [0.1, 0.0, 0.0],
+                        ..crate::doc::assembly::Pose::IDENTITY
+                    },
+                    via: vec![Via {
+                        usage: "u1".into(),
+                        product: crate::doc::import::ProductRef {
+                            id: "part 2".into(),
+                            name: "part 2".into(),
+                            ordinal: 0,
+                        },
+                        ordinal: 0,
+                    }],
+                }),
+                ..import(&f, Some(("part 2", "part 2")), 0)
+            });
+            let p = Id::parse("p", "part").unwrap();
+            write_json(&feature_path(dir.path(), &p, &id("i")), &i.to_json()).unwrap();
+            s.reload().unwrap();
+            let after = bounds(&mut s);
+            assert!(
+                (after[0] - before[0] - 0.1).abs() < 1e-12,
+                "{mode:?}: {before:?} {after:?}"
+            );
+            assert!((after[1] - before[1]).abs() < 1e-12);
+            assert!((after[2] - before[2]).abs() < 1e-12);
         }
     }
 

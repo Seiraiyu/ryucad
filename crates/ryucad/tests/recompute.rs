@@ -527,6 +527,32 @@ fn edit(g: &mut Lcg, s: &mut Session) {
     let _ = call(s, method, params);
 }
 
+/// Part `p`'s import placed `mm` millimetres along x (none for 0),
+/// written by hand, since no request sets a place, and the session
+/// refreshed.
+fn place_import(s: &mut Session, mm: u64) {
+    let root = s.root().to_path_buf();
+    let dir = root.join("parts/p/features");
+    for e in std::fs::read_dir(&dir).unwrap() {
+        let path = e.unwrap().path();
+        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        if v["type"] != "import" {
+            continue;
+        }
+        if mm == 0 {
+            v.as_object_mut().unwrap().remove("place");
+        } else {
+            v["place"] = json!({
+                "pose": {"origin_m": [mm as f64 / 1000.0, 0, 0], "x": [1, 0, 0], "z": [0, 0, 1]},
+                "via": [{"product": {"id": "part 2", "name": "part 2"}, "usage": "1"}],
+            });
+        }
+        v["format"] = json!(ryucad::doc::files::feature_format(&v));
+        ryucad::doc::project::write_json(&path, &v).unwrap();
+    }
+    s.refresh().unwrap();
+}
+
 /// The rebuild from nothing on `threads` threads: its hash and each
 /// feature's hash or error.
 fn full(s: &Session, threads: usize) -> (String, Vec<String>) {
@@ -581,6 +607,14 @@ fn incremental_equals_full_from(seed: u64) {
     let mut reused = 0;
     for step in 0..30 {
         edit(&mut g, &mut s);
+        // Every tenth step the import is also placed a millimetre or two
+        // along x, as a flattened import places a body, or at its origin
+        // again, by the seed and step rather than the generator: drawn
+        // from it, a 27th arm reshuffled seed 1 into a countersink edit
+        // after a two-distance bevel that took over 300 s to rebuild.
+        if step % 10 == 9 {
+            place_import(&mut s, (seed + step / 10) % 3);
+        }
         let (one, eight) = (full(&s, 1), full(&s, 8));
         let r = s.rebuilt(&part).unwrap();
         let incremental = (r.hash.clone(), summary(r));
@@ -590,6 +624,22 @@ fn incremental_equals_full_from(seed: u64) {
     }
     // Edits touch a few features each; most results are reused.
     assert!(reused > 30 * 14 / 2, "seed {seed}: reused {reused}");
+}
+
+#[test]
+fn a_placed_import_recomputes_as_from_nothing() {
+    let (_dir, mut s) = project();
+    let part = Id::parse("p", "part").unwrap();
+    let start = s.rebuilt(&part).unwrap().hash.clone();
+    for mm in [1, 2, 0] {
+        place_import(&mut s, mm);
+        let (one, eight) = (full(&s, 1), full(&s, 8));
+        let r = s.rebuilt(&part).unwrap();
+        let incremental = (r.hash.clone(), summary(r));
+        assert_eq!(incremental, one, "{mm} mm");
+        assert_eq!(incremental, eight, "{mm} mm");
+        assert_eq!(r.hash == start, mm == 0, "{mm} mm");
+    }
 }
 
 /// Part `p`: a box `b` (`w` × 12 × 8 mm) shelled open at its top as `sh`

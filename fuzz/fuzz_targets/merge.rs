@@ -298,20 +298,30 @@ fn edit_mate(v: &mut Value, op: u8, arg: u8) {
 }
 
 /// Applies edit `(op, arg)` to an import feature: the file re-imported
-/// (a new hash), another body, another product or none, its ordinal, or
-/// its mode (a reference at format 13, else a solid with no field).
+/// (a new hash), another body, another product or none, its ordinal, its
+/// mode (a reference, else a solid with no field), or its place (a
+/// flattened body `arg` millimetres along x by usage `u<arg>`, or none);
+/// the format follows, 17 with a place, 13 for a reference, else 5.
 fn edit_import(v: &mut Value, op: u8, arg: u8) {
-    if op % 5 == 4 {
-        if arg & 1 == 1 {
-            v["mode"] = json!("reference");
-            v["format"] = json!(13);
-        } else {
-            v.as_object_mut().unwrap().remove("mode");
-            v["format"] = json!(5);
+    match op % 6 {
+        4 => {
+            if arg & 1 == 1 {
+                v["mode"] = json!("reference");
+            } else {
+                v.as_object_mut().unwrap().remove("mode");
+            }
         }
-        return;
-    }
-    match op % 4 {
+        5 => {
+            if arg & 1 == 1 {
+                v["place"] = json!({
+                    "pose": {"origin_m": [f64::from(arg) / 1000.0, 0, 0],
+                             "x": [1, 0, 0], "z": [0, 0, 1]},
+                    "via": [{"product": {"id": "S-0", "name": "Sub"}, "usage": format!("u{arg}")}],
+                });
+            } else {
+                v.as_object_mut().unwrap().remove("place");
+            }
+        }
         0 => v["file"]["blake3"] = json!(format!("{arg:064x}")),
         1 => v["body"] = json!(arg % 4),
         2 => match arg % 3 {
@@ -331,6 +341,13 @@ fn edit_import(v: &mut Value, op: u8, arg: u8) {
             }
         }
     }
+    v["format"] = json!(if v.get("place").is_some() {
+        17
+    } else if v.get("mode").is_some() {
+        13
+    } else {
+        5
+    });
 }
 
 /// Applies edit `(op, arg)` to an instance an import made: its pose (as
@@ -1676,6 +1693,15 @@ fuzz_target!(|data: &[u8]| {
             assert!(
                 record(&v).keys().all(|k| k == "/steps"),
                 "an explode conflicted inside its steps: {v}"
+            );
+        }
+        // A place is one value: never a conflict inside it.
+        if kind == 9 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            assert!(
+                record(&v).keys().all(|k| !k.starts_with("/place/")),
+                "a place conflicted inside itself: {v}"
             );
         }
         // Two re-imports of different bytes conflict on the hash.

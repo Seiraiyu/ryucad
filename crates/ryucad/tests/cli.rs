@@ -6194,6 +6194,42 @@ fn imports_from_the_cli() {
 /// converted to a solid the fillet then builds on, undone through the
 /// daemon, and refused to convert back while a feature acts on it.
 #[test]
+fn flattened_imports_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let occt = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/occt");
+    let beside = p.direct.parent().unwrap();
+    fs::copy(occt.join("assembly.stp"), beside.join("asm.stp")).unwrap();
+    // The same file imported whole makes parts and an assembly.
+    let whole = p.ok(&["import", "../asm.stp", "--dry-run"]);
+    assert!(whole["parts"].as_array().unwrap().len() > 1, "{whole}");
+    let v = p.ok(&["import", "../asm.stp", "--flatten", "--part", "board"]);
+    let parts = v["parts"].as_array().unwrap();
+    assert_eq!(parts.len(), 1, "{v}");
+    assert_eq!(parts[0]["part"], "board");
+    assert_eq!(parts[0]["kind"], "part", "{v}");
+    let features = parts[0]["features"].as_array().unwrap();
+    assert!(features.len() > 1, "{v}");
+    assert!(features.iter().all(|f| f["mode"] == "reference"), "{v}");
+    let built = p.ok(&["rebuild", "board"]);
+    let solids = built["parts"][0]["solids"].as_array().unwrap();
+    assert_eq!(solids.len(), features.len(), "{built}");
+    assert!(solids.iter().all(|s| s["ok"] == true), "{built}");
+    for bad in [
+        &["import", "../asm.stp", "--flatten", "--into", "board"][..],
+        &[
+            "import",
+            "../asm.stp",
+            "--flatten",
+            "--update",
+            "imports/asm.step",
+        ][..],
+    ] {
+        p.fails(bad, "usage", 2);
+    }
+}
+
+#[test]
 fn reference_imports_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);

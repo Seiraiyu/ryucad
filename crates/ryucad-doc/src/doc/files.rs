@@ -76,9 +76,10 @@ pub const MANIFEST_FORMAT: u64 = 4;
 /// flanges (ryucad 16), 12 surface sweeps and planar faces (ryucad 18),
 /// 13 reference imports (ryucad 21), 14 unfolds and refolds (ryucad
 /// 16.B), 15 fills, extracts, sews and thickens (ryucad 18), 16 face
-/// tweaks (ryucad 17), 18 drafts (ryucad 17.B), 19 splits by a body or
-/// faces (ryucad 18.C). A feature is written at the lowest format that
-/// holds it, so one with only literals stays 1.
+/// tweaks (ryucad 17), 17 a flattened import's place (ryucad 21.D), 18
+/// drafts (ryucad 17.B), 19 splits by a body or faces (ryucad 18.C). A
+/// feature is written at the lowest format that holds it, so one with
+/// only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
     // The largest of every stage's (a later stage merging adds its own).
     let all = [
@@ -87,6 +88,7 @@ pub const FEATURE_FORMAT: u64 = {
         super::sheet_metal::UNFOLD_FORMAT,
         super::surface::FORMAT,
         super::tweak::FORMAT,
+        super::import::PLACE_FORMAT,
         super::tweak::DRAFT_FORMAT,
         super::body::TOOL_FORMAT,
     ];
@@ -723,6 +725,9 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if v.get("type").and_then(Value::as_str) == Some("import") && v.get("place").is_some() {
+        return super::import::PLACE_FORMAT;
+    }
     if v.get("type").and_then(Value::as_str) == Some("draft") {
         return super::tweak::DRAFT_FORMAT;
     }

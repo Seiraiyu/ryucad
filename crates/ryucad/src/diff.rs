@@ -456,6 +456,41 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
+        // A flattened import's place on one line: the usages from a root
+        // down (each with its ordinal past the first, and the product it
+        // places), then the pose, in meters as written.
+        Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("import") => {
+            if let Some(p) = rest.remove("place") {
+                let via: Vec<String> = p["via"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|u| {
+                        let mut t = u["usage"].as_str().unwrap_or_default().to_owned();
+                        if let Some(n) = u.get("ordinal") {
+                            t.push_str(&format!("#{n}"));
+                        }
+                        format!("{t} of {}", u["product"]["id"].as_str().unwrap_or_default())
+                    })
+                    .collect();
+                let list = |k: &str| {
+                    let v: Vec<String> = p["pose"][k]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(scalar)
+                        .collect();
+                    v.join(", ")
+                };
+                lines.push(format!(
+                    "place = {} at ({}) m, z [{}], x [{}]",
+                    via.join(" > "),
+                    list("origin_m"),
+                    list("z"),
+                    list("x")
+                ));
+            }
+        }
         // An instance's revision in words, its pose last: solver state.
         Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("instance") => {
             let project = rest.remove("project");
@@ -3191,6 +3226,25 @@ mod tests {
         let v = json!({"body": 0, "file": {"blake3": h, "path": "imports/b.step"}, "format": 13,
                        "kind": "ryucad.feature", "type": "import", "mode": "reference"});
         assert!(text(v).contains("\nmode = reference\n"));
+    }
+
+    #[test]
+    fn an_imports_place_is_one_line() {
+        let h = "ab".repeat(32);
+        let v = json!({"body": 0, "file": {"blake3": h, "path": "imports/b.step"}, "format": 17,
+                       "kind": "ryucad.feature", "type": "import", "mode": "reference",
+                       "place": {"pose": {"origin_m": [0.01, 0, 0], "x": [1, 0, 0], "z": [0, 0, 1]},
+                                 "via": [{"product": {"id": "S-1", "name": "Sub"}, "usage": "1"},
+                                         {"ordinal": 1, "product": {"id": "P-1", "name": "Pin"},
+                                          "usage": "1"}]}});
+        let t = text(v);
+        assert!(
+            t.contains(
+                "\nplace = 1 of S-1 > 1#1 of P-1 at (0.01, 0, 0) m, z [0, 0, 1], x [1, 0, 0]\n"
+            ),
+            "{t}"
+        );
+        assert!(!t.contains("place."), "{t}");
     }
 
     #[test]

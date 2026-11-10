@@ -125,6 +125,92 @@ impl Tree {
         }
         best
     }
+
+    /// The root's box, `None` for an empty tree.
+    pub(crate) fn bounds(&self) -> Option<(Point3, Point3)> {
+        self.nodes.first().map(|n| (n.lo, n.hi))
+    }
+
+    /// Every pair of pieces of `self` and `other` within `d` of each
+    /// other, by tag, sorted.
+    pub(crate) fn within(&self, other: &Tree, d: f64) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        if self.is_empty() || other.is_empty() {
+            return out;
+        }
+        let mut stack = vec![(0usize, 0usize)];
+        while let Some((i, j)) = stack.pop() {
+            let (a, b) = (&self.nodes[i], &other.nodes[j]);
+            if box_gap([a.lo, a.hi], [b.lo, b.hi]) > d {
+                continue;
+            }
+            match (a.kids, b.kids) {
+                (None, None) => {
+                    for p in &self.pieces[a.range[0]..a.range[1]] {
+                        for q in &other.pieces[b.range[0]..b.range[1]] {
+                            if between(&p.prim, &q.prim).0 <= d {
+                                out.push((p.tag, q.tag));
+                            }
+                        }
+                    }
+                }
+                (Some([k0, k1]), None) => stack.extend([(k0, j), (k1, j)]),
+                (None, Some([k0, k1])) => stack.extend([(i, k0), (i, k1)]),
+                (Some([a0, a1]), Some([b0, b1])) => {
+                    stack.extend([(a0, b0), (a0, b1), (a1, b0), (a1, b1)]);
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The tags of the pieces in leaves whose boxes the segment `p`–`q`
+    /// meets (each box grown by `pad`), sorted.
+    pub(crate) fn along(&self, p: Point3, q: Point3, pad: f64) -> Vec<u32> {
+        let mut out = Vec::new();
+        if self.is_empty() {
+            return out;
+        }
+        let d = q - p;
+        let meets = |lo: Point3, hi: Point3| {
+            let (mut t0, mut t1) = (0.0f64, 1.0f64);
+            for (o, dv, l, h) in [
+                (p.x, d.x, lo.x - pad, hi.x + pad),
+                (p.y, d.y, lo.y - pad, hi.y + pad),
+                (p.z, d.z, lo.z - pad, hi.z + pad),
+            ] {
+                if dv == 0.0 {
+                    if o < l || o > h {
+                        return false;
+                    }
+                    continue;
+                }
+                let (a, b) = ((l - o) / dv, (h - o) / dv);
+                let (a, b) = if a <= b { (a, b) } else { (b, a) };
+                t0 = t0.max(a);
+                t1 = t1.min(b);
+                if t0 > t1 {
+                    return false;
+                }
+            }
+            true
+        };
+        let mut stack = vec![0usize];
+        while let Some(i) = stack.pop() {
+            let n = &self.nodes[i];
+            if !meets(n.lo, n.hi) {
+                continue;
+            }
+            match n.kids {
+                Some([a, b]) => stack.extend([a, b]),
+                None => out.extend(self.pieces[n.range[0]..n.range[1]].iter().map(|p| p.tag)),
+            }
+        }
+        out.sort_unstable();
+        out
+    }
 }
 
 fn build(pieces: &mut [Piece], start: usize, end: usize, nodes: &mut Vec<Node>) -> usize {

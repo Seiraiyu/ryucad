@@ -12,8 +12,11 @@ pub struct Pair {
     /// Each side's solid, as `<asm>/<path>/<solid>`.
     pub a: String,
     pub b: String,
-    /// The volume they share, estimated from a mesh.
-    pub volume_m3: f64,
+    /// The volume they share, estimated from a mesh; none where it was
+    /// judged on meshes (a reference import's side).
+    pub volume_m3: Option<f64>,
+    /// Judged on the two meshes, with no volume (a reference import).
+    pub approximate: bool,
     /// The faces of each side the shared volume touches, as entity
     /// references.
     pub faces: Vec<String>,
@@ -21,7 +24,8 @@ pub struct Pair {
 
 impl Pair {
     /// How the panel lists it: the two solids under the assembly and the
-    /// volume in cubic millimetres.
+    /// volume in cubic millimetres, or `overlap (approximate)` where it
+    /// was judged on meshes.
     pub fn label(&self, part: &str) -> String {
         let short = |s: &str| {
             s.strip_prefix(part)
@@ -29,12 +33,19 @@ impl Pair {
                 .unwrap_or(s)
                 .to_owned()
         };
-        format!(
-            "{} and {}: {:.3} mm³",
-            short(&self.a),
-            short(&self.b),
-            self.volume_m3 * 1e9
-        )
+        match self.volume_m3 {
+            Some(v) => format!(
+                "{} and {}: {:.3} mm³",
+                short(&self.a),
+                short(&self.b),
+                v * 1e9
+            ),
+            None => format!(
+                "{} and {}: overlap (approximate)",
+                short(&self.a),
+                short(&self.b)
+            ),
+        }
     }
 }
 
@@ -72,7 +83,8 @@ impl Interference {
             .map(|i| Pair {
                 a: text(&i["a"]),
                 b: text(&i["b"]),
-                volume_m3: i["volume_m3"].as_f64().unwrap_or_default(),
+                volume_m3: i["volume_m3"].as_f64(),
+                approximate: i["approximate"] == true,
                 faces: ["a", "b"]
                     .iter()
                     .flat_map(|s| i["faces"][s].as_array().into_iter().flatten())
@@ -135,5 +147,21 @@ mod tests {
         i.failed(Error::new(ryucad::error::Code::WrongPartKind, "a part"));
         assert_eq!((i.part.as_str(), i.pairs.len()), ("frame", 0));
         assert!(i.error.is_some());
+    }
+
+    #[test]
+    fn a_pair_judged_on_meshes_has_no_volume() {
+        let mut i = Interference::asked("rig");
+        i.take(&json!({
+            "part": "rig",
+            "interferences": [{"a": "rig/a/r", "b": "rig/c/r", "volume_m3": null,
+                               "approximate": true,
+                               "faces": {"a": ["rig/a/r/aa"], "b": ["rig/c/r/bb"]}}],
+            "touching": [], "unchecked": [],
+        }));
+        let p = &i.pairs[0];
+        assert_eq!(p.volume_m3, None);
+        assert!(p.approximate);
+        assert_eq!(p.label("rig"), "a/r and c/r: overlap (approximate)");
     }
 }

@@ -1286,7 +1286,8 @@ pub enum Request {
     /// replace that imported file and what was made of it follows.
     /// `dry_run` answers the plan, writing nothing. Bodies are kept as
     /// references (the file's topology, shown and read, never changed)
-    /// unless `solid` asks for healed solids.
+    /// unless `solid` asks for healed solids. With `flatten`, one part of
+    /// every body.
     #[serde(rename = "import")]
     Import {
         path: String,
@@ -1308,6 +1309,10 @@ pub enum Request {
         /// a reference (design 364).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         solid: bool,
+        /// Make one part of every body of every product, placed where
+        /// the file's assemblies put it (#499).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        flatten: bool,
     },
     /// Sets an import feature's mode (`feature`), or every import feature
     /// of `part`'s: a healed solid, or with `reference` a reference
