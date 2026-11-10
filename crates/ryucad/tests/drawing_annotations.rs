@@ -443,3 +443,54 @@ fn look() {
     )
     .unwrap();
 }
+
+#[test]
+fn balloons_show_item_numbers_and_a_bom_table_lists_them() {
+    let (_d, mut s) = plate();
+    must(
+        &mut s,
+        "part.create",
+        json!({"part": "asm", "kind": "assembly"}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "asm", "type": "instance", "id": "a", "of": "p", "fixed": true}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "asm", "type": "instance", "id": "b", "of": "p", "fixed": true,
+        "placement": {"origin": [0, 0, 20]}}),
+    );
+    must(
+        &mut s,
+        "drawing.create",
+        json!({"part": "asm", "drawing": "d", "name": "Rig"}),
+    );
+    let g = must(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "asm", "drawing": "d", "ops": [
+        {"op": "set", "id": "s1", "fields": {"scale": "1:1"}},
+        {"op": "add", "kind": "view", "value": {"type": "base", "sheet": "s1", "orient": "front"}},
+        {"op": "add", "kind": "annotation", "value": {"type": "balloon", "view": "v1", "of": "a"}},
+        {"op": "add", "kind": "annotation", "value": {"type": "bom_table", "sheet": "s1", "flat": true}}]}),
+    );
+    let anns = g["sheets"][0]["annotations"].as_array().unwrap();
+    let balloon = anns.iter().find(|a| a["annotation"] == "b1").unwrap();
+    // Both instances place one part: item 1.
+    assert_eq!(balloon["text"], "1", "{balloon}");
+    let table = anns.iter().find(|a| a["annotation"] == "t1").unwrap();
+    assert_eq!(table["value"]["rows"], 1, "{table}");
+    // The lint asks for no balloon: the only part is ballooned.
+    assert!(
+        !g["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "dwg_balloon_missing"),
+        "{}",
+        g["findings"]
+    );
+}

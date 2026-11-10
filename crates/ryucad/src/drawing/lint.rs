@@ -109,10 +109,10 @@ pub const RULES: [Rule; 11] = [
     Rule {
         code: "dwg_balloon_missing",
         weight: 2,
-        per: "instance",
-        what: "An assembly drawing with a BOM table has an instance no balloon names.",
+        per: "part",
+        what: "An assembly drawing with a BOM table places a part on no instance of which a balloon stands.",
         why: "A BOM row no balloon points to can't be found on the drawing.",
-        fix: "Add a balloon on the instance in a view that shows it.",
+        fix: "Add a balloon on one of the part's instances in a view that shows it.",
     },
 ];
 
@@ -524,24 +524,39 @@ pub(crate) fn run(
             let Ok(model) = session.model(&v.of, &v.rev) else {
                 continue;
             };
-            let mut firsts: Vec<String> = model
-                .occurrences
-                .iter()
-                .filter_map(|o| o.path.first().map(|p| p.to_string()))
-                .collect();
-            firsts.dedup();
-            for f in firsts {
-                if ballooned
-                    .iter()
-                    .any(|b| *b == f || b.starts_with(&format!("{f}/")))
-                {
+            // Each part the assembly places itself, by its first instance:
+            // a BOM row wants one balloon, on any instance of its part.
+            let mut parts: Vec<(String, Vec<String>)> = Vec::new();
+            for o in &model.occurrences {
+                let Some(first) = o.path.first() else {
+                    continue;
+                };
+                // A subassembly's occurrences stand for the subassembly.
+                let part = if o.path.len() == 1 {
+                    o.part.to_string()
+                } else {
+                    format!("{first}/…")
+                };
+                match parts.iter_mut().find(|(p, _)| *p == part) {
+                    Some((_, firsts)) => firsts.push(first.to_string()),
+                    None => parts.push((part, vec![first.to_string()])),
+                }
+            }
+            for (part, firsts) in parts {
+                let named = firsts.iter().any(|f| {
+                    ballooned
+                        .iter()
+                        .any(|b| b == f || b.starts_with(&format!("{f}/")))
+                });
+                if named {
                     continue;
                 }
+                let f = &firsts[0];
                 push(
                     "dwg_balloon_missing",
                     &s.key.to_string(),
-                    format!("instance {f} has no balloon, though a BOM table lists it"),
-                    json!({"instance": f, "view": v.key.to_string()}),
+                    format!("{part} (instance {f}) has no balloon, though a BOM table lists it"),
+                    json!({"part": part, "instance": f, "view": v.key.to_string()}),
                     vec![json!([{"op": "add", "kind": "annotation",
                         "value": {"type": "balloon", "view": v.key.to_string(), "of": f}}])],
                 );
