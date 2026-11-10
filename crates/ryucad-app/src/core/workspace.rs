@@ -1480,6 +1480,16 @@ impl Workspace {
         if e.sheet.is_none() && e.choices.format == crate::core::export::Format::Dxf {
             e.choices.format = crate::core::export::Format::Step;
         }
+        // The drawing the Drawings tile shows of this part, if any.
+        e.drawing = self
+            .drawings
+            .sheet
+            .as_ref()
+            .filter(|s| self.drawings.open && s.part == part)
+            .map(|s| (s.drawing.clone(), s.sheet.clone()));
+        if e.drawing.is_none() && e.choices.format == crate::core::export::Format::Drawing {
+            e.choices.format = crate::core::export::Format::Step;
+        }
         self.export = Some(e);
     }
 
