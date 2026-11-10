@@ -27,6 +27,9 @@ pub struct Block {
     pub previous: Option<Layout>,
     /// What to lay out from nothing, keeping the instructions.
     pub relayout: Relayout,
+    /// Where parts a released instruction moved stood before it, by key:
+    /// put back there where still free, before anything else is placed.
+    pub restore: BTreeMap<String, crate::layout::Placed>,
 }
 
 /// A paper a sheet may take: its size's name, its orientation and its

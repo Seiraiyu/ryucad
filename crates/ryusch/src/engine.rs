@@ -300,6 +300,61 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
     Ok(out)
 }
 
+/// Parts a released instruction moved, back where they stood before it:
+/// not placed yet, named by no lasting instruction, their sheet still
+/// there and their room there clear of every part placed.
+fn restore(st: &mut State, idioms: &[idiom::Idiom]) {
+    let block = st.block;
+    let named: BTreeSet<usize> = block
+        .instructions
+        .values()
+        .flat_map(|i| i.parts().iter().flat_map(|s| instr::parts_named(block, s)))
+        .collect();
+    for (key, at) in &block.restore {
+        let Some(p) = block.part(key) else { continue };
+        if st.place[p].is_some() || named.contains(&p) {
+            continue;
+        }
+        let Some(s) = st.sheets.iter().position(|(id, _)| *id == at.sheet) else {
+            continue;
+        };
+        // Its extent a step clear of every placed part's, as the spacing
+        // rule asks (text and labels find their places when drawn).
+        let place = Place::new(at.at, at.rotation, at.mirror);
+        let e = Shape::of(&block.parts[p], place).extent;
+        let clear = (0..block.parts.len()).all(|q| match st.place[q] {
+            Some((sq, _, _)) if sq == s && q != p => {
+                let o = st.shape(q).expect("placed").extent;
+                !e.grow(GRID / 2).overlaps(&o.grow(GRID / 2 - 1))
+            }
+            _ => true,
+        });
+        if clear && Rect::new([0, 0], st.size(s)).contains(&e) {
+            st.place[p] = Some((s, place, false));
+            // Back in the region of the part its idiom serves, where that
+            // is on its sheet.
+            let host = idioms
+                .iter()
+                .find(|i| i.parts.contains(&p))
+                .and_then(|i| i.anchor)
+                .map(|(a, _)| block.parts[a].key.clone());
+            if let Some(host) = host
+                && let Some(i) = st
+                    .regions
+                    .iter()
+                    .position(|(_, r)| r.sheet == at.sheet && r.parts.contains(&host))
+            {
+                for (_, r) in st.regions.iter_mut() {
+                    r.parts.retain(|k| k != key);
+                }
+                let parts = &mut st.regions[i].1.parts;
+                parts.push(key.clone());
+                parts.sort();
+            }
+        }
+    }
+}
+
 /// One layout of `block` under `r`, its columns spread by `spread`.
 fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usize>) -> Outcome {
     // A network's parts the walk from its pin never reaches are moved near
@@ -496,6 +551,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
         }
     }
     keep(&mut st, prev, fresh_sheet, &unkeep);
+    restore(&mut st, &idioms);
     named_regions(&mut st, r);
     pin_papers(&mut st, r);
     // What `relate` may not move: kept parts no relative instruction moves.
@@ -736,6 +792,15 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
     let rows = bank_rows(&st, &idioms);
     let mut out = draw(st, prev, &styles, &bypass, &rows, &r.text);
     out.layout.instructions = block.instructions.clone();
+    // What each lasting instruction moved stood before it, while it lasts.
+    if let Some(p) = &block.previous {
+        out.layout.before = p
+            .before
+            .iter()
+            .filter(|(id, _)| block.instructions.contains_key(*id))
+            .map(|(id, m)| (id.clone(), m.clone()))
+            .collect();
+    }
     out.idioms = idioms;
     out.flow = r.flow.iter().map(|p| block.parts[*p].key.clone()).collect();
     out
@@ -4025,6 +4090,42 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    /// What a released instruction moved goes back where the layout before
+    /// it had it, where that place is still free.
+    #[test]
+    fn a_released_part_goes_back_where_it_was() {
+        let block = seeded(11, 2);
+        let first = lay(&block);
+        let key = block
+            .parts
+            .iter()
+            .find(|p| p.key.starts_with('r'))
+            .expect("a resistor")
+            .key
+            .clone();
+        let mut b = block.clone();
+        b.previous = Some(first.layout.clone());
+        b.instructions.insert(
+            "i1".into(),
+            Instruction::Edge {
+                parts: vec![key.clone()],
+                side: Side::Left,
+            },
+        );
+        let moved = lay(&b);
+        assert_ne!(moved.layout.placed[&key].at, first.layout.placed[&key].at);
+        let mut back = block.clone();
+        back.previous = Some(moved.layout.clone());
+        back.relayout = Relayout::Parts(vec![key.clone()]);
+        back.restore = [(key.clone(), first.layout.placed[&key].clone())].into();
+        let out = lay(&back);
+        assert_eq!(
+            out.layout.placed[&key], first.layout.placed[&key],
+            "restored"
+        );
+        assert_eq!(crate::rules::check(&back, &out.layout), []);
     }
 
     /// `orient UA 180` (and `0 mirror`) keeps UA's op-amp stage: the stage is

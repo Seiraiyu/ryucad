@@ -750,7 +750,21 @@ pub fn lay(
     moves: &[ryusch::layout::Instruction],
     relayout: ryusch::input::Relayout,
 ) -> Result<Laid> {
+    lay_restoring(p, b, instructions, moves, relayout, BTreeMap::new())
+}
+
+/// `lay`, putting parts a released instruction moved back where they
+/// stood before it (`restore`, by key) where still free.
+pub fn lay_restoring(
+    p: &Project,
+    b: &BlockFiles,
+    instructions: Option<&BTreeMap<String, ryusch::layout::Instruction>>,
+    moves: &[ryusch::layout::Instruction],
+    relayout: ryusch::input::Relayout,
+    restore: BTreeMap<String, ryusch::layout::Placed>,
+) -> Result<Laid> {
     let mut built = build(p, b)?;
+    built.input.restore = restore;
     let stored = match &b.layout {
         Some(Ok(l)) => Some(l.clone()),
         _ => None,

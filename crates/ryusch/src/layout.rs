@@ -22,6 +22,11 @@ pub struct Layout {
     /// largest).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub instructions: BTreeMap<String, Instruction>,
+    /// For each lasting instruction a batch added, where the parts it
+    /// moved stood in the layout before it: what releasing it restores
+    /// (format 3).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub before: BTreeMap<String, BTreeMap<String, Placed>>,
     /// Every part's place, by part key.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub placed: BTreeMap<String, Placed>,
@@ -406,6 +411,7 @@ impl Layout {
     /// pin-level `align`; else 1.
     pub fn format(&self) -> u64 {
         let three = !self.regions.is_empty()
+            || !self.before.is_empty()
             || self
                 .sheets
                 .values()
@@ -454,6 +460,12 @@ impl Layout {
                 if let Some(p) = out.placed.get_mut(k) {
                     p.at = [p.at[0] + sign * r.at[0], p.at[1] + sign * r.at[1]];
                 }
+                // Where it stood before an instruction, in its region now.
+                for list in out.before.values_mut() {
+                    if let Some(p) = list.get_mut(k) {
+                        p.at = [p.at[0] + sign * r.at[0], p.at[1] + sign * r.at[1]];
+                    }
+                }
             }
         }
         out
@@ -473,6 +485,29 @@ pub fn next_id(ids: impl IntoIterator<Item = impl AsRef<str>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `before` round-trips and makes the file format 3.
+    #[test]
+    fn before_is_format_3() {
+        let mut l = Layout::default();
+        l.before.insert(
+            "i1".into(),
+            [(
+                "r1".to_owned(),
+                Placed {
+                    sheet: "s1".into(),
+                    at: [0, 0],
+                    rotation: 0,
+                    mirror: false,
+                    held: false,
+                },
+            )]
+            .into(),
+        );
+        assert_eq!(l.format(), 3);
+        let text = serde_json::to_string(&l).unwrap();
+        assert_eq!(serde_json::from_str::<Layout>(&text).unwrap(), l);
+    }
 
     /// `text` reads and writes as JSON, and a layout holding one is format 3.
     #[test]

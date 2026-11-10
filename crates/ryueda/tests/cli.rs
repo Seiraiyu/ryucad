@@ -3089,3 +3089,33 @@ fn a_dry_run_renders_one_sheet() {
     ]);
     assert_eq!(v["format"], json!("svg"));
 }
+
+/// `place "edge R1 left"` then `place "release R1"` puts R1 back where it
+/// stood, and the layout file forgets what it remembered for it.
+#[test]
+fn release_restores_the_drawing() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    let read = || -> Value {
+        serde_json::from_slice(
+            &fs::read(p.direct.join("board/blocks/breakout/layout.json")).unwrap(),
+        )
+        .unwrap()
+    };
+    let before = read();
+    p.ok(&["place", "breakout", "edge R1 left"]);
+    let moved = read();
+    let id = moved["instructions"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, i)| i["op"] == json!("edge"))
+        .map(|(k, _)| k.clone())
+        .unwrap();
+    assert!(moved["before"][&id]["r1"].is_object(), "{moved:#}");
+    assert_ne!(moved["placed"]["r1"], before["placed"]["r1"]);
+    p.ok(&["place", "breakout", "release R1"]);
+    let after = read();
+    assert_eq!(after["placed"]["r1"]["at"], before["placed"]["r1"]["at"]);
+    assert!(after.get("before").is_none_or(|b| b.get(&id).is_none()));
+}

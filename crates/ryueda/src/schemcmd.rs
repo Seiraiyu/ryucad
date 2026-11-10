@@ -452,7 +452,16 @@ pub fn place(
     } else {
         Relayout::Parts(replace)
     };
-    let laid = match schem::lay(p, b, Some(&lasting), &move_list, relayout) {
+    // Where the released instructions' parts stood before them.
+    let restore: BTreeMap<String, ryusch::layout::Placed> = match &b.layout {
+        Some(Ok(l)) => released
+            .iter()
+            .filter_map(|id| l.before.get(id))
+            .flat_map(|m| m.iter().map(|(k, x)| (k.clone(), x.clone())))
+            .collect(),
+        _ => BTreeMap::new(),
+    };
+    let laid = match schem::lay_restoring(p, b, Some(&lasting), &move_list, relayout, restore) {
         Ok(l) => l,
         Err(e) if matches!(e.code, Code::InstructionConflict | Code::LayoutRule) => {
             let f = fixes(&names, &before, &batch, &e);
@@ -489,6 +498,24 @@ pub fn place(
         .with("fixes", json!(fixes)));
     }
     let bid = b.id.clone();
+    let mut laid = laid;
+    // What each lasting instruction this batch added moved: where those
+    // parts stood before it, which releasing it restores.
+    if let Some(Ok(prev)) = &b.layout {
+        let moved: BTreeMap<String, ryusch::layout::Placed> = prev
+            .placed
+            .iter()
+            .filter(|(k, x)| laid.outcome.layout.placed.get(*k) != Some(*x))
+            .map(|(k, x)| (k.clone(), x.clone()))
+            .collect();
+        if !moved.is_empty() {
+            for id in &added {
+                if lasting.contains_key(id) {
+                    laid.outcome.layout.before.insert(id.clone(), moved.clone());
+                }
+            }
+        }
+    }
     let mut listing = listing(&names, &laid);
     // What changed nothing says so: a lasting instruction added in this
     // batch, a move.
@@ -575,7 +602,6 @@ pub fn place(
     });
     // One shape with describe's: the block's description and its scores,
     // written or not.
-    let mut laid = laid;
     let mut description = block_description(p, b, &mut laid, None)?;
     let scores: Vec<Value> = description["sheets"]
         .as_array()
