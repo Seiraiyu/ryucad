@@ -1762,6 +1762,32 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// The drawing lint's findings and each sheet's score; with
+    /// `explain`, a rule's entry (no drawing needed).
+    #[serde(rename = "drawing.lint")]
+    DrawingLint {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drawing: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explain: Option<String>,
+    },
+    /// Sets the drawing lint's weights and severities by rule
+    /// (`drawing_lint.json`; `default` puts one back).
+    #[serde(rename = "drawing.lint.configure")]
+    DrawingLintConfigure {
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        weights: std::collections::BTreeMap<String, Value>,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        severity: std::collections::BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Records a proposed change: `request` (`{method, params}`, one of
     /// `annotation::PROPOSABLE`) run over the caller's draft in memory,
     /// what it would have written kept in a new annotation.
@@ -2215,6 +2241,7 @@ impl Request {
                 | Request::DrawingDelete { .. }
                 | Request::DrawingRename { .. }
                 | Request::DrawingLayout { dry_run: false, .. }
+                | Request::DrawingLintConfigure { .. }
                 | Request::AnnotationPropose { .. }
                 | Request::AnnotationApply { .. }
                 | Request::AnnotationCreate { .. }
