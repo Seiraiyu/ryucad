@@ -740,7 +740,7 @@ pub fn get(
     items: bool,
 ) -> Result<Value> {
     let pid = crate::server::part_id(part)?;
-    let (did, _) = file_of(session, &pid, drawing)?;
+    let (did, file) = file_of(session, &pid, drawing)?;
     let b = build(session, &pid, &did)?;
     let sheets: Vec<Value> = match sheet {
         Some(k) => vec![sheet_json(b.sheet(Some(k))?, items)],
@@ -749,6 +749,10 @@ pub fn get(
     let mut v = summary(&b);
     v["sheets"] = json!(sheets);
     v["revision"] = json!(session.project().part(&pid)?.revision);
+    if items {
+        // The drawing as written: what a form edits and a drag moves.
+        v["file"] = file.to_json();
+    }
     Ok(v)
 }
 

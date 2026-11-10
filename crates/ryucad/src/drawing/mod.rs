@@ -2240,6 +2240,8 @@ pub(crate) mod tests {
             .filter(|i| i.get("entity").is_some())
             .collect();
         assert_eq!(with.len(), 4);
+        // And the file as written, for the app's forms and drags.
+        assert_eq!(r["file"]["views"]["v1"]["orient"], "front");
     }
 
     #[test]
