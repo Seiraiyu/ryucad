@@ -275,12 +275,19 @@ pub fn path_text(path: &[Id]) -> String {
 
 impl Occurrence {
     /// How reports give it: its path, part and revision, its solids by
-    /// founder with their hashes, and its pose.
+    /// founder with their hashes (a sheet with `kind`, so a window draws it
+    /// two-sided; ryucad 18), and its pose.
     pub fn to_json(&self) -> serde_json::Value {
         let solids: Vec<serde_json::Value> = self
             .solids
             .iter()
-            .map(|s| serde_json::json!({"solid": s.founder, "hash": s.built.hash}))
+            .map(|s| {
+                let mut v = serde_json::json!({"solid": s.founder, "hash": s.built.hash});
+                if s.built.body.kind() == ryukei::topo::BodyKind::Sheet {
+                    v["kind"] = serde_json::json!("sheet");
+                }
+                v
+            })
             .collect();
         serde_json::json!({
             "path": path_text(&self.path),
@@ -3392,6 +3399,43 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(shown_parts(s.project()), [id("bolt"), id("plate")]);
+    }
+
+    #[test]
+    fn an_occurrences_sheet_says_so_and_its_solids_dont() {
+        let (dir, mut s) = project();
+        call(&mut s, "part.create", json!({"part": "skin"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "skin", "type": "sketch", "id": "s", "plane": "xy"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "skin", "sketch": "s", "ops": [
+                {"op": "add", "id": "a", "type": "point", "at": [0, 0]},
+                {"op": "add", "id": "b", "type": "point", "at": [10, 0]},
+                {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}]}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "skin", "type": "extrude", "id": "w", "sketch": "s",
+                   "surface": true, "extent": {"type": "blind", "length": "20 mm"}}),
+        )
+        .unwrap();
+        let r = dir.path();
+        place_in(r, "frame", "w1", "skin", json!("working"), [0.0; 3]);
+        place_in(r, "frame", "b1", "bolt", json!("working"), [0.05, 0.0, 0.0]);
+        s.refresh().unwrap();
+        let v = call(&mut s, "rebuild", json!({"part": "frame"})).unwrap();
+        let occ = v["parts"][0]["occurrences"].as_array().unwrap();
+        let of = |path: &str| &occ.iter().find(|o| o["path"] == path).unwrap()["solids"][0];
+        assert_eq!(of("w1")["kind"], "sheet", "{v}");
+        assert!(of("b1").get("kind").is_none(), "{v}");
     }
 
     #[test]
