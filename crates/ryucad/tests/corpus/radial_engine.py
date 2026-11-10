@@ -121,16 +121,16 @@ def engine(p):
 
 def drawings(p):
     """The crankcase's and the propeller's standard views; the engine in
-    isometric with a balloon on every part and its BOM."""
+    isometric with its BOM. ryukei can't certify a silhouette of the
+    engine's view (`drawing_view_failed`): the sheet keeps its view's
+    crossed frame and the BOM, and the manifest records the failure, so
+    balloons, which stand on the view, wait for the kernel."""
     p.drawing("crankcase", "main", "Crankcase")
     p.drawing("propeller", "main", "Propeller")
     p.drawing("engine", "main", "Engine", size="ansi_c", standard=False)
-    # Its isometric is refused (a silhouette ryukei can't certify): the
-    # front.
-    p.drawing_add("engine", "main", "view", "add", id="v1", orient="front")
+    p.drawing_add("engine", "main", "view", "add", id="v1", orient="front_top_right")
     p.drawing_ops("engine", "main", [{"op": "add", "kind": "annotation",
                                        "value": {"type": "bom_table", "sheet": "s1"}}])
-    p.take_fixes("engine", "main", ["dwg_balloon_missing"])
 
 
 def build(p):
