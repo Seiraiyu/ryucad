@@ -311,7 +311,8 @@ pub fn pin_text(pin: &Pin) -> String {
     }
 }
 
-/// An annotation as listings give it: its file's fields, and `outdated`,
+/// An annotation as listings give it: its file's fields (its marks as
+/// `{part, count, kinds, list}`: the window draws them), and `outdated`,
 /// `stale` (with `outdated_pins`, `outdated_marks` and `stale_files` when true) and, with a
 /// change, `applied`.
 pub fn entry(
@@ -345,7 +346,8 @@ pub fn entry(
         o.insert(
             "marks".into(),
             json!({"part": m.part, "count": m.list.len(),
-                   "kinds": m.list.iter().map(|k| k.kind.as_str()).collect::<Vec<_>>()}),
+                   "kinds": m.list.iter().map(|k| k.kind.as_str()).collect::<Vec<_>>(),
+                   "list": m.list.iter().map(crate::redline::Mark::to_json).collect::<Vec<_>>()}),
         );
     }
     v
@@ -1656,10 +1658,17 @@ pub(crate) mod tests {
         assert_eq!(m[2]["count"], 2);
         assert_eq!(m[3]["text"], "2 mm");
         assert!(m[3]["touches"].as_array().unwrap().is_empty());
-        // Listings give a summary.
+        // Listings give a summary, and the marks themselves for the window
+        // to draw, as the file has them.
         assert_eq!(
             v["annotation"]["marks"]["kinds"],
             json!(["arrow", "rectangle", "stroke", "text"])
+        );
+        let id = v["annotation"]["id"].as_str().unwrap();
+        let file = one(&mut s, id, None).unwrap();
+        assert_eq!(
+            v["annotation"]["marks"]["list"],
+            file.marks.unwrap().to_json()["list"]
         );
     }
 
