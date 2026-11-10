@@ -197,8 +197,29 @@ pub fn answer_live(
             explode,
             fraction,
             annotations,
+            annotation,
             flat,
         } => {
+            let annotation = match annotation {
+                None => None,
+                Some(_) if camera.is_some() || view.is_some() => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "--annotation renders its own view: give no camera or view",
+                    ));
+                }
+                Some(id) => {
+                    let a = crate::annotation::one(session, &id, None)?;
+                    if a.view.is_none() {
+                        return Err(Error::new(
+                            Code::InvalidParam,
+                            format!("annotation {id} keeps no view to render"),
+                        )
+                        .with("annotation", &id));
+                    }
+                    Some(a)
+                }
+            };
             // A flat pattern's render draws one solid flat: no section or
             // explode applies, the request's own refused and the window's
             // left out.
@@ -233,7 +254,21 @@ pub fn answer_live(
                 }
                 _ => None,
             };
-            let saved_sections = named.as_ref().map(|s| s.sections.clone());
+            let saved_sections: Option<Vec<crate::section::Plane>> = match &annotation {
+                Some(a) => Some(
+                    a.view
+                        .as_ref()
+                        .expect("checked")
+                        .sections
+                        .iter()
+                        .map(|s| crate::section::Plane {
+                            origin_m: s.origin_m,
+                            normal: s.normal,
+                        })
+                        .collect(),
+                ),
+                None => named.as_ref().map(|s| s.sections.clone()),
+            };
             let explode = match &named {
                 Some(saved) => explode.or_else(|| {
                     Some(
@@ -305,6 +340,16 @@ pub fn answer_live(
                 },
             };
             let target = participant.as_deref().map(|p| (p, live.as_deref()));
+            // An annotation's render shows the model its marks name, else
+            // its first pin's part.
+            let part = part.or_else(|| {
+                let a = annotation.as_ref()?;
+                let p = match &a.marks {
+                    Some(m) => m.part.to_string(),
+                    None => a.pins.first()?.part().to_owned(),
+                };
+                (!p.is_empty()).then_some(p)
+            });
             // A participant's render shows what their window shows.
             let part = part.or_else(|| {
                 let l = live.as_deref()?;
@@ -345,7 +390,11 @@ pub fn answer_live(
                 explode,
                 annotations,
                 flat,
-                camera_m: None,
+                camera_m: annotation
+                    .as_ref()
+                    .and_then(|a| a.view.as_ref())
+                    .map(crate::view::Camera::from),
+                annotation,
                 pick: false,
             };
             render_noting(session, target, shown, ask)
@@ -6301,6 +6350,8 @@ pub(crate) struct RenderAsk {
     pub(crate) camera_m: Option<crate::view::Camera>,
     /// Tag every entity drawn, for a pick pass.
     pub(crate) pick: bool,
+    /// An annotation to draw, its pins and marks.
+    pub(crate) annotation: Option<crate::annotation::Annotation>,
 }
 
 impl RenderAsk {
@@ -6337,6 +6388,7 @@ impl RenderAsk {
             flat: None,
             camera_m: Some(camera),
             pick: true,
+            annotation: None,
         }
     }
 }
@@ -6903,16 +6955,59 @@ pub(crate) fn render_scene(
     if ask.origin {
         g.add_origin();
     }
+    let files = session.snapshot();
+    let none = BTreeMap::new();
     if ask.annotations {
-        let files = session.snapshot();
-        let none = BTreeMap::new();
         for part in &parts {
             let on = poses.get(part.as_str()).unwrap_or(&none);
             for (at, n) in crate::annotation::markers(&files, part.as_str(), on) {
                 g.add_marker(at, &n);
             }
         }
+        let all = crate::annotation::readable(&crate::annotation::read_all(&files));
+        for a in all.values().filter(|a| a.status.is_open()) {
+            if let (Some(m), Some(v)) = (&a.marks, &a.view)
+                && parts.contains(&m.part)
+            {
+                let plane = crate::redline::Plane::of(&crate::view::Camera::from(v));
+                crate::redline::draw(
+                    &mut g,
+                    &plane,
+                    m,
+                    &poses,
+                    r::participant(&a.by.participant),
+                    1.0,
+                );
+            }
+        }
     }
+    if let Some(a) = &ask.annotation {
+        for (k, pin) in a.pins.iter().enumerate() {
+            for part in &parts {
+                let on = poses.get(part.as_str()).unwrap_or(&none);
+                if let Some(at) = crate::annotation::pin_on(pin, part.as_str(), on) {
+                    g.add_marker(at, &(k + 1).to_string());
+                }
+            }
+        }
+        if let (Some(m), Some(v)) = (&a.marks, &a.view) {
+            let plane = crate::redline::Plane::of(&crate::view::Camera::from(v));
+            let alpha = if a.status.is_open() {
+                1.0
+            } else {
+                crate::redline::CLOSED_ALPHA
+            };
+            crate::redline::draw(
+                &mut g,
+                &plane,
+                m,
+                &poses,
+                r::participant(&a.by.participant),
+                alpha,
+            );
+        }
+    }
+
     g.sections = ask.sections.clone();
     let fixed = ask.camera_m.clone();
     let camera = match (ask.camera, target, ask.view.as_deref()) {
@@ -8199,6 +8294,112 @@ pub(crate) mod tests {
 
     pub(crate) fn call(s: &mut Session, method: &str, params: Value) -> Result<Value> {
         handle(s, Request::from_rpc(method, Some(params))?)
+    }
+
+    #[test]
+    fn a_render_of_an_annotation_shows_its_view_and_marks() {
+        let (_dir, mut s, view) = crate::annotation::tests::drilled();
+        let boss = crate::annotation::tests::on(&view, [0.045, 0.02, 0.011]);
+        let marks = crate::proto::MarksArg {
+            part: "plate".into(),
+            short: Vec::new(),
+            list: vec![json!({"kind": "arrow", "in": "view", "xy_m": [[0.0, 0.0], boss]})],
+        };
+        let a = crate::annotation::create(
+            &mut s,
+            crate::annotation::By::agent("agent"),
+            &[],
+            "move it",
+            Some(view.clone()),
+            Some(&marks),
+            &Default::default(),
+        )
+        .unwrap();
+        let id = a["annotation"]["id"].as_str().unwrap().to_owned();
+        let png = |s: &mut Session, p: Value| {
+            let a =
+                answer_live(s, None, None, Request::from_rpc("render", Some(p)).unwrap()).unwrap();
+            (a.result.clone(), a.binary.unwrap())
+        };
+        let (r, marked) = png(
+            &mut s,
+            json!({"annotation": id, "width": 400, "height": 300}),
+        );
+        assert_eq!(r["camera"], json!(crate::view::Camera::from(&view)));
+        // The same view without the annotation: the arrow is the difference.
+        let camera = json!({"eye": ["120 mm", "-100 mm", "90 mm"], "target": ["30 mm", "20 mm", "2.5 mm"],
+                            "up": [0, 0, 1], "projection": {"orthographic": {"height": "80 mm"}}});
+        let (_, bare) = png(
+            &mut s,
+            json!({"part": "plate", "camera": camera, "width": 400, "height": 300}),
+        );
+        assert_ne!(marked, bare);
+        // Asked with a camera too, it is a usage error.
+        let e = answer_live(
+            &mut s,
+            None,
+            None,
+            Request::from_rpc("render", Some(json!({"annotation": id, "camera": camera}))).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Usage);
+        // An annotation with no view can't be rendered so.
+        let plain = crate::annotation::create(
+            &mut s,
+            crate::annotation::By::agent("agent"),
+            &[],
+            "words only",
+            None,
+            None,
+            &Default::default(),
+        )
+        .unwrap();
+        let e = answer_live(
+            &mut s,
+            None,
+            None,
+            Request::from_rpc(
+                "render",
+                Some(json!({"annotation": plain["annotation"]["id"]})),
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+    }
+
+    #[test]
+    fn renders_without_marks_asked_for_are_unchanged() {
+        let (_dir, mut s, view) = crate::annotation::tests::drilled();
+        let render = |s: &mut Session, annotations: bool| {
+            let p = json!({"part": "plate", "view": "iso", "width": 200, "height": 150, "annotations": annotations});
+            answer_live(s, None, None, Request::from_rpc("render", Some(p)).unwrap())
+                .unwrap()
+                .binary
+                .unwrap()
+        };
+        let before = render(&mut s, false);
+        let marks = crate::proto::MarksArg {
+            part: "plate".into(),
+            short: Vec::new(),
+            list: vec![json!({"kind": "line", "in": "view", "xy_m": [[0.0, 0.0], [0.01, 0.0]]})],
+        };
+        crate::annotation::create(
+            &mut s,
+            crate::annotation::By::agent("agent"),
+            &[],
+            "a line",
+            Some(view),
+            Some(&marks),
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(render(&mut s, false), before);
+        assert_ne!(
+            render(&mut s, true),
+            before,
+            "--annotations draws open marks"
+        );
     }
 
     #[test]

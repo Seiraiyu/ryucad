@@ -694,6 +694,39 @@ pub fn list(
     Ok(v)
 }
 
+/// Where a pin with a point is drawn on `part`: its point, placed by its
+/// occurrence's pose (`poses`, by instance path) when it names one; `None`
+/// for a pin with no point, or one on another part.
+pub fn pin_on(
+    pin: &Pin,
+    part: &str,
+    poses: &BTreeMap<String, ryukei::geom::Rigid>,
+) -> Option<[f64; 3]> {
+    match pin {
+        Pin::Point { part: p, point_m } if p.as_str() == part => Some(*point_m),
+        Pin::Entity {
+            reference,
+            point_m: Some(p),
+        } => {
+            let steps: Vec<&str> = reference.split('/').collect();
+            if steps.first() != Some(&part) {
+                None
+            } else if steps.len() > 3 {
+                // `<asm>/<path>…/<solid>/<name>`: the point is in
+                // the occurrence's own part's frame.
+                let path = steps[1..steps.len() - 2].join("/");
+                poses.get(&path).map(|r| {
+                    let q = r.apply_point(ryukei::geom::Point3::new(p[0], p[1], p[2]));
+                    [q.x, q.y, q.z]
+                })
+            } else {
+                Some(*p)
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Where `render --annotations` draws pins on `part`: each open
 /// annotation's pins that carry a point and lie on `part` (or on one of
 /// its occurrences, placed by `poses`, keyed by instance path), with the
@@ -710,29 +743,7 @@ pub fn markers(
     let mut out = Vec::new();
     for (n, a) in open.iter().enumerate() {
         for pin in &a.pins {
-            let at = match pin {
-                Pin::Point { part: p, point_m } if p.as_str() == part => Some(*point_m),
-                Pin::Entity {
-                    reference,
-                    point_m: Some(p),
-                } => {
-                    let steps: Vec<&str> = reference.split('/').collect();
-                    if steps.first() != Some(&part) {
-                        None
-                    } else if steps.len() > 3 {
-                        // `<asm>/<path>…/<solid>/<name>`: the point is in
-                        // the occurrence's own part's frame.
-                        let path = steps[1..steps.len() - 2].join("/");
-                        poses.get(&path).map(|r| {
-                            let q = r.apply_point(ryukei::geom::Point3::new(p[0], p[1], p[2]));
-                            [q.x, q.y, q.z]
-                        })
-                    } else {
-                        Some(*p)
-                    }
-                }
-                _ => None,
-            };
+            let at = pin_on(pin, part, poses);
             if let Some(at) = at {
                 out.push((at, (n + 1).to_string()));
             }

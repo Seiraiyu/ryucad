@@ -4645,6 +4645,7 @@ fn request(cmd: &Command) -> Option<Request> {
             },
             fraction: *fraction,
             annotations: *annotations,
+            annotation: None,
             flat: flat.clone(),
         },
         Command::Highlight {

@@ -2129,9 +2129,14 @@ pub enum Request {
         /// Draw the origin's axes and planes (default false).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         origin: bool,
-        /// Draw open annotations' pins, numbered (default false).
+        /// Draw open annotations' pins, numbered, and their marks
+        /// (default false).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         annotations: bool,
+        /// Render this annotation: its view, its pins and its marks (design
+        /// 423). With `camera` or `view` it is `usage`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        annotation: Option<String>,
         /// Draw faces in their appearance (default true); false draws the
         /// fixed theme.
         #[serde(default, skip_serializing_if = "Option::is_none")]
