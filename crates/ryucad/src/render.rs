@@ -90,6 +90,32 @@ pub struct Geometry {
     /// cut away from everything above (but labels). At most
     /// [`crate::section::MAX_PLANES`].
     pub sections: Vec<crate::section::Plane>,
+    /// Which entity each triangle, line and point is, for [`pick`];
+    /// `None` (renders) records nothing.
+    pub tags: Option<Tags>,
+}
+
+/// Entity references for a pick pass ([`pick`]): runs of
+/// [`Geometry::triangles`] and [`Geometry::sheets`] by face, the lines
+/// of [`Geometry::lines`] that are edges or sketch curves, and the
+/// positions that are vertices or sketch points. A name is the entity's
+/// reference as pins write it (`<part>/<founder>/<hex>`,
+/// `<asm>/<path>/…/<solid>/<hex>`, `<part>/<sketch>/<entity>`).
+#[derive(Clone, Debug, Default)]
+pub struct Tags {
+    pub names: Vec<String>,
+    pub triangles: Vec<(std::ops::Range<usize>, u32)>,
+    pub sheets: Vec<(std::ops::Range<usize>, u32)>,
+    pub lines: Vec<(usize, u32)>,
+    pub points: Vec<(u32, u32)>,
+}
+
+impl Tags {
+    /// `reference`'s index among the names, added.
+    pub fn name(&mut self, reference: &str) -> u32 {
+        self.names.push(reference.to_owned());
+        (self.names.len() - 1) as u32
+    }
 }
 
 /// Text drawn at a model point, on top of everything.
@@ -1574,6 +1600,19 @@ pub(crate) mod tests {
     use super::*;
 
     #[test]
+    fn tags_are_kept_only_when_asked_and_cost_no_bytes() {
+        let mut g = Geometry::default();
+        assert!(g.tags.is_none());
+        g.tags = Some(Tags::default());
+        let t = g.tags.as_mut().unwrap();
+        let a = t.name("p/b/aa");
+        let b = t.name("p/b/bb");
+        assert_eq!((a, b), (0, 1));
+        assert_eq!(t.names, ["p/b/aa", "p/b/bb"]);
+        assert_eq!(g.bytes(), 0);
+    }
+
+    #[test]
     fn geometry_counts_its_bytes() {
         use std::mem::size_of;
         let mut g = Geometry::default();
@@ -1691,6 +1730,7 @@ pub(crate) mod tests {
             translucent: Vec::new(),
             translucent_lines: Vec::new(),
             sections: Vec::new(),
+            tags: None,
         }
     }
 

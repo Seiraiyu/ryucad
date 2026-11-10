@@ -7106,6 +7106,7 @@ fn draw_body(
         if let Some(a) = alpha {
             glass.insert(f.face, a);
         }
+        let (start, sheet_start) = (g.triangles.len(), g.sheets.len());
         for t in &mesh.triangles[f.triangles.start as usize..f.triangles.end as usize] {
             let c = t.map(|i| mesh.corners[i as usize]);
             let t = Triangle {
@@ -7121,6 +7122,15 @@ fn draw_body(
                 Some(a) => g.translucent.push((t, a)),
                 None if sheet => g.sheets.push(t),
                 None => g.triangles.push(t),
+            }
+        }
+        if let Some(t) = g.tags.as_mut() {
+            let id = t.name(&key(name.clone()));
+            if g.triangles.len() > start {
+                t.triangles.push((start..g.triangles.len(), id));
+            }
+            if g.sheets.len() > sheet_start {
+                t.sheets.push((sheet_start..g.sheets.len(), id));
             }
         }
         if let Some((_, text)) = mark {
@@ -7143,6 +7153,10 @@ fn draw_body(
                     width: 3.0,
                     dash: false,
                 });
+                if let Some(t) = g.tags.as_mut() {
+                    let id = t.name(&key(name.clone()));
+                    t.lines.push((g.lines.len() - 1, id));
+                }
             }
             None if edges => {
                 let line = Line {
@@ -7162,6 +7176,10 @@ fn draw_body(
                     g.translucent_lines.push((line, alpha));
                 } else {
                     g.lines.push(line);
+                    if let Some(t) = g.tags.as_mut() {
+                        let id = t.name(&key(name.clone()));
+                        t.lines.push((g.lines.len() - 1, id));
+                    }
                 }
             }
             None => {}
@@ -7169,6 +7187,10 @@ fn draw_body(
     }
     for (i, v) in m.body.vertices().enumerate() {
         let name = m.body.vertex(v).expect("live").name.to_string();
+        if let Some(t) = g.tags.as_mut() {
+            let id = t.name(&key(name.clone()));
+            t.points.push((base + i as u32, id));
+        }
         if let Some((color, text)) = marks.get(&key(name.clone())) {
             label(g, &name, text, &[i as u32]);
             g.lines.push(Line {
@@ -7229,6 +7251,10 @@ fn sketches(
                 width,
                 dash: c.construction,
             });
+            if let Some(t) = g.tags.as_mut() {
+                let id = t.name(&format!("{part}/{fid}/{}", c.entity));
+                t.lines.push((g.lines.len() - 1, id));
+            }
         }
         for p in &d.dots {
             g.positions.push(p.at);
@@ -7242,6 +7268,10 @@ fn sketches(
                 width,
                 dash: false,
             });
+            if let Some(t) = g.tags.as_mut() {
+                let id = t.name(&format!("{part}/{fid}/{}", p.entity));
+                t.points.push((g.positions.len() as u32 - 1, id));
+            }
         }
         if labels {
             g.labels.extend(d.labels.into_iter().map(|l| Label {
@@ -8035,6 +8065,51 @@ pub(crate) mod tests {
 
     pub(crate) fn call(s: &mut Session, method: &str, params: Value) -> Result<Value> {
         handle(s, Request::from_rpc(method, Some(params))?)
+    }
+
+    #[test]
+    fn a_tagged_scene_names_every_face_edge_and_vertex() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 10, "y": 10, "z": 10}}),
+        )
+        .unwrap();
+        let part = Id::parse("p", "part").unwrap();
+        let (_, m) = meshes(&mut s, &part, None, mesh::Quality::Normal)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let m = m.unwrap();
+        let mut g = crate::render::Geometry {
+            tags: Some(Default::default()),
+            ..Default::default()
+        };
+        draw_body(
+            &mut g,
+            &m,
+            &ryukei::geom::Rigid::IDENTITY,
+            "p/b",
+            &BTreeMap::new(),
+            (None, &BTreeMap::new(), None),
+            (false, true),
+        );
+        let t = g.tags.unwrap();
+        assert_eq!(t.triangles.len(), 6, "a run of triangles per face");
+        assert_eq!(
+            t.triangles.iter().map(|(r, _)| r.len()).sum::<usize>(),
+            g.triangles.len()
+        );
+        assert_eq!(t.lines.len(), 12, "every edge");
+        assert_eq!(t.points.len(), 8, "every vertex");
+        assert!(
+            t.names
+                .iter()
+                .all(|n| n.starts_with("p/b/") && n.len() == 4 + 32)
+        );
     }
 
     #[test]
