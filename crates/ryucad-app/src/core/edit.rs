@@ -2817,7 +2817,7 @@ mod tests {
         d.flag.as_mut().unwrap().chosen = false;
         let g = given(&f);
         assert_eq!(g.angle, Some(json!("20 deg")));
-        assert_eq!(g.flip, Some(false));
+        assert_eq!(g.flip, Some(false.into()));
         assert_eq!((g.distance.clone(), g.from.clone()), (None, None));
         f.revert();
         assert!(!f.dirty());

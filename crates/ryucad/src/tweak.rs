@@ -1730,13 +1730,14 @@ mod tests {
         Feature::from_json(&v, crate::units::Unit::Mm, &crate::expr::Env::empty()).unwrap()
     }
 
+    /// A draft's spec, whether its hinge is a parting line, and each
+    /// listed face's asked angle.
+    type Drafted = (DraftSpec, bool, Vec<(Name, f64)>);
+
     /// Part `p` of `s` with draft `d` written last, and what it resolves
     /// to: the kernel's spec, whether its hinge is a parting line, and each
     /// listed face's asked angle.
-    fn resolved_draft(
-        s: &mut crate::session::Session,
-        v: Value,
-    ) -> Result<(DraftSpec, bool, Vec<(Name, f64)>)> {
+    fn resolved_draft(s: &mut crate::session::Session, v: Value) -> Result<Drafted> {
         let pid = Id::parse("p", "part").unwrap();
         let part = s.project().part(&pid).unwrap().clone();
         let d = Id::parse("d", "feature").unwrap();

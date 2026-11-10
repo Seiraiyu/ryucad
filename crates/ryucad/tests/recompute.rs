@@ -1677,11 +1677,11 @@ fn draft_edit(g: &mut Lcg, s: &mut Session, walls: &[String]) {
         4 => ("feature.edit", json!({"id": "d", "neutral": "xy"})),
         5 => (
             "feature.edit",
-            json!({"id": "d", "flip": if g.next_u64() % 2 == 0 { json!([walls[2]]) } else { json!([]) }}),
+            json!({"id": "d", "flip": if g.next_u64().is_multiple_of(2) { json!([walls[2]]) } else { json!([]) }}),
         ),
         _ => (
             "feature.edit",
-            json!({"id": "d", "tangent": g.next_u64() % 2 == 0}),
+            json!({"id": "d", "tangent": g.next_u64().is_multiple_of(2)}),
         ),
     };
     let mut params = params;
