@@ -58,6 +58,13 @@ pub struct Feature {
 }
 
 impl Feature {
+    /// Whether it founds the body named by its own ID: its operation is
+    /// none, or `new`, as a sew's or a thicken's from a sheet reports it
+    /// beside the sheets it consumes (ryucad 18).
+    pub fn founds(&self) -> bool {
+        self.operation.as_deref().is_none_or(|o| o == "new") && self.solids == [self.id.clone()]
+    }
+
     /// A path or helix that built: one `path.get` draws.
     pub fn is_path(&self) -> bool {
         matches!(self.ty.as_deref(), Some("path" | "helix")) && self.error.is_none()
@@ -569,7 +576,7 @@ impl Part {
     pub fn founders(&self) -> Vec<String> {
         self.features
             .iter()
-            .filter(|f| f.operation.is_none() && f.solids == [f.id.clone()])
+            .filter(|f| f.founds())
             .map(|f| f.id.clone())
             .collect()
     }
