@@ -778,6 +778,7 @@ pub(crate) fn dispatch(
             translate,
             axis,
             angle,
+            about,
             expected_revision,
         } => crate::assembly::moved(
             session,
@@ -788,6 +789,7 @@ pub(crate) fn dispatch(
                 translate,
                 axis,
                 angle,
+                about,
             },
             expected_revision.as_deref(),
         ),
@@ -931,10 +933,10 @@ pub(crate) fn dispatch(
             part,
             moves,
             component,
-        } => crate::mate::solve_request(
-            session,
-            &part,
-            moves
+            rev,
+            mates,
+        } => {
+            let moves = moves
                 .into_iter()
                 .map(|m| {
                     (
@@ -944,12 +946,13 @@ pub(crate) fn dispatch(
                             translate: m.translate,
                             axis: m.axis,
                             angle: m.angle,
+                            about: m.about,
                         },
                     )
                 })
-                .collect(),
-            component,
-        ),
+                .collect();
+            solve_at(session, &part, moves, component, rev.as_deref(), mates)
+        }
         Request::FeatureShow { part, id, rev } => {
             let (_, session) = session.at(rev.as_deref())?;
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
@@ -2398,7 +2401,9 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Boolean(b) => b.fields(),
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) => crate::tweak::report(part, f),
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
+            crate::tweak::report(part, f)
+        }
         Feature::Datum(d) => crate::datum::report(part, d),
         Feature::Path(x) => crate::path::report(part, x),
         Feature::Sweep(w) => crate::along::feature_report(part, w),
@@ -3740,7 +3745,7 @@ fn check_solids(q: &Part, written: &[&Id]) -> Result<()> {
 
 /// The part as a write would leave it: `writes` in place, listed as
 /// `order`.
-fn proposed(p: &Part, order: &[Id], writes: &[(&Id, &Feature)]) -> Part {
+pub(crate) fn proposed(p: &Part, order: &[Id], writes: &[(&Id, &Feature)]) -> Part {
     let mut q = p.clone();
     for (id, f) in writes {
         q.features.insert((*id).clone(), Ok((*f).clone()));
@@ -4275,7 +4280,7 @@ fn check_resolved(
         }
         // Faces of its target, its direction, axis or surfaces their
         // kinds; what the kernel makes of them only rebuild can tell.
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) => {
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
             crate::tweak::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
         Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
@@ -4591,7 +4596,7 @@ fn feature_add(
             given.only(ty, crate::doc::body::request_fields(ty))?;
             crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
-        "move_face" | "replace_face" => {
+        "move_face" | "replace_face" | "draft" => {
             given.only(ty, crate::doc::tweak::request_fields(ty))?;
             crate::tweak::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
@@ -4832,7 +4837,7 @@ fn feature_edit(
                 given.only(ty, crate::doc::surface::request_fields(ty))?;
                 crate::surface::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
             }
-            f @ (Feature::MoveFace(_) | Feature::ReplaceFace(_)) => {
+            f @ (Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_)) => {
                 let ty = f.type_name();
                 crate::tweak::take_given(ty, &mut given.fields)?;
                 given.only(ty, crate::doc::tweak::request_fields(ty))?;
@@ -4935,6 +4940,7 @@ fn feature_edit(
                 | Feature::Split(_)
                 | Feature::MoveFace(_)
                 | Feature::ReplaceFace(_)
+                | Feature::Draft(_)
         ) && f.targets() != old.targets())
         || ((f.base_flange().is_some()
             || f.flange().is_some()
@@ -5242,7 +5248,9 @@ pub(crate) fn part_report(
                 // A fill's rebuild report is what it measured (see
                 // `Made::report`), an extract's its faces.
                 Feature::Extract(_) => crate::surface::report(id, f),
-                Feature::MoveFace(_) | Feature::ReplaceFace(_) => crate::tweak::report(id, f),
+                Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
+                    crate::tweak::report(id, f)
+                }
                 _ => return None,
             };
             Some((fid.clone(), (f.type_name(), report)))
@@ -5274,6 +5282,7 @@ pub(crate) fn part_report(
                             | Feature::Split(_)
                             | Feature::MoveFace(_)
                             | Feature::ReplaceFace(_)
+                            | Feature::Draft(_)
                     )
             })
         })
@@ -5297,12 +5306,16 @@ pub(crate) fn part_report(
                         && let Some(i) = &m.report
                     {
                         // A fill's report under its own type, else an
-                        // import's.
+                        // import's; a draft's angles come with its own
+                        // report (`tweak::resolved`).
                         let key = match types.get(fid).and_then(Value::as_str) {
-                            Some("fill") => "fill",
-                            _ => "import",
+                            Some("fill") => Some("fill"),
+                            Some("draft") => None,
+                            _ => Some("import"),
                         };
-                        v[key] = i.as_ref().clone();
+                        if let Some(key) = key {
+                            v[key] = i.as_ref().clone();
+                        }
                     }
                     if let crate::rebuild::Output::Solids(m) = o
                         && let Some(f) = &m.flat
@@ -7541,6 +7554,7 @@ fn inspect(
                                 | Feature::Split(_)
                                 | Feature::MoveFace(_)
                                 | Feature::ReplaceFace(_)
+                                | Feature::Draft(_)
                         ))
             }) =>
         {
@@ -7708,7 +7722,8 @@ fn inspect(
             | Feature::Mirror(_)
             | Feature::Split(_)
             | Feature::MoveFace(_)
-            | Feature::ReplaceFace(_)),
+            | Feature::ReplaceFace(_)
+            | Feature::Draft(_)),
         )) = features.iter().find(|(i, _)| i == f)
     {
         let k = x.type_name();
@@ -7736,6 +7751,55 @@ fn inspect(
             features.iter().find(|(i, _)| i == f)
     {
         v[x.type_name()] = crate::surface::report(&pid, x);
+    }
+    Ok(v)
+}
+
+/// `assembly.solve` answered for `rev` (the working files when `None`):
+/// any revision a read takes, a person's draft included, named in the
+/// answer's `rev`. `mates` are each run as `feature.add` of a mate in a
+/// capture session over those files and solved with the rest, never
+/// written; a refusal is `feature.add`'s own, at `/mates/<i>`.
+fn solve_at(
+    session: &mut Session,
+    part: &str,
+    moves: Vec<(String, crate::assembly::Move)>,
+    component: bool,
+    rev: Option<&str>,
+    mates: Vec<serde_json::Map<String, Value>>,
+) -> Result<Value> {
+    let rev = rev.filter(|r| *r != "working");
+    let (named, files) = match rev {
+        None => (None, None),
+        Some(r) => {
+            let (n, f) = files_at(session, r)?;
+            (Some(n), Some(f))
+        }
+    };
+    let mut v = if mates.is_empty() {
+        let (_, s) = session.at(rev)?;
+        crate::mate::solve_request(s, part, moves, component)?
+    } else {
+        let files = files.unwrap_or_else(|| session.snapshot());
+        let mut capture = session.capturing(files)?;
+        for (i, m) in mates.into_iter().enumerate() {
+            let at = |mut e: Error| {
+                if let Some(p) = e.details.get("pointer").cloned() {
+                    e = e.with("field", p);
+                }
+                e.with("pointer", format!("/mates/{i}"))
+            };
+            let mut params = json!({"part": part, "type": "mate"});
+            for (k, v) in m {
+                params[k] = v;
+            }
+            let req = Request::from_rpc("feature.add", Some(params)).map_err(at)?;
+            dispatch(&mut capture, None, None, req).map_err(at)?;
+        }
+        crate::mate::solve_request(&mut capture, part, moves, component)?
+    };
+    if let Some(n) = named {
+        v["rev"] = n;
     }
     Ok(v)
 }

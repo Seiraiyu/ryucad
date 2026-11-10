@@ -524,7 +524,9 @@ impl PartResult {
                 if let Output::Solids(m) = o
                     && let Some(rep) = &m.report
                 {
-                    return crate::import::reference_warnings(part, id, rep);
+                    let mut w = crate::import::reference_warnings(part, id, rep);
+                    w.extend(crate::tweak::draft_warnings(part, id, rep));
+                    return w;
                 }
                 o.instance()
                     .and_then(|p| {
@@ -612,7 +614,8 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Unfold(_)
         | Feature::Refold(_)
         | Feature::MoveFace(_)
-        | Feature::ReplaceFace(_) => Err(Error::new(
+        | Feature::ReplaceFace(_)
+        | Feature::Draft(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} makes no body of its own", f.type_name()),
         )
@@ -2588,7 +2591,7 @@ fn rebuild_with(
             crate::body::build(part, solids, id, f, before, run).map(solid),
             None,
         ),
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) => (
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => (
             crate::tweak::build(part, solids, id, f, before, run).map(solid),
             None,
         ),

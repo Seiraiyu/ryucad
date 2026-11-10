@@ -2413,6 +2413,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-draw"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "miniz_oxide 0.8.9",
+ "pdf-writer",
+ "ryu-math",
+ "subsetter",
+ "ttf-parser",
+]
+
+[[package]]
 name = "ryu-math"
 version = "0.0.0"
 dependencies = [
@@ -2457,6 +2469,9 @@ dependencies = [
  "mimalloc",
  "png",
  "rayon",
+ "resvg",
+ "ryu-draw",
+ "ryu-math",
  "ryu-session",
  "ryucad-doc",
  "ryuformats",
@@ -2513,11 +2528,11 @@ dependencies = [
  "clap",
  "getrandom 0.3.4",
  "mimalloc",
- "miniz_oxide 0.8.9",
  "pdf-writer",
  "rayon",
  "resvg",
  "ryu-doc",
+ "ryu-draw",
  "ryu-math",
  "ryu-part21",
  "ryu-session",
@@ -2525,8 +2540,6 @@ dependencies = [
  "ryusch",
  "serde",
  "serde_json",
- "subsetter",
- "ttf-parser",
  "ureq",
 ]
 

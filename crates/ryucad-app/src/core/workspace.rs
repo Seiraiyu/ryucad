@@ -49,7 +49,7 @@ enum Pending {
     Mode(crate::core::modes::Mode),
     /// A model edit sent as a proposal in Annotate: what its own answer
     /// was for.
-    Proposal(Box<Pending>),
+    Proposal(Box<Pending>, bool),
     /// `annotation.list`.
     Annotations,
     /// An annotation made, answered or closed from the window.
@@ -174,6 +174,12 @@ enum Pending {
     DragSolve(String),
     /// A drag's move, written (`assembly.move`).
     DragMove(String),
+    /// The Move tool's preview of an assembly, and its write.
+    MoveSolve(String),
+    MoveWrite(String),
+    /// The Mate dialog's preview of an assembly, and its add.
+    MatePreview(String, u64),
+    MateAdd(String),
     /// A part's named views (`view.list`).
     Views(String),
     /// A named view of a part, saved (`view.save`).
@@ -208,6 +214,16 @@ enum Pending {
 
 /// How often a drag asks the daemon to solve at most.
 pub const DRAG_EVERY: Duration = Duration::from_millis(50);
+
+/// A freehand drag's suggestion says this until the person says more.
+pub const ROUGH_COMMENT: &str = "Move about here";
+
+/// What a request proposed in Annotate says beside its change.
+#[derive(Clone, Debug, Default)]
+struct Proposal {
+    comment: Option<String>,
+    rough: bool,
+}
 
 /// An instance being dragged: its assembly, how far it has been moved
 /// from where it was, when the last preview was asked for and whether
@@ -487,6 +503,19 @@ pub struct Workspace {
     pub export_choices: crate::core::export::Choices,
     /// The instance being dragged, if any.
     pub drag: Option<Drag>,
+    /// The Move tool, while it is on one instance.
+    pub mover: Option<crate::core::mover::Mover>,
+    /// When the Move tool's preview was last asked and for which value,
+    /// and whether one is on its way.
+    mover_asked: Option<(Instant, Option<crate::core::mover::Grip>, f64)>,
+    mover_waiting: bool,
+    /// The Mate dialog, while it is open.
+    pub mating: Option<crate::core::mating::Mating>,
+    /// How many mate previews the window has asked for.
+    mate_previews: u64,
+    /// A tile the window should open (the app opens it next frame): the
+    /// Annotations tile after a rough drag's proposal.
+    pub wants_tile: Option<&'static str>,
     /// The named views of the part the window shows, for the cube's menu
     /// and the view selector.
     pub views: crate::core::views::NamedViews,
@@ -561,10 +590,6 @@ pub struct Workspace {
 
 impl Workspace {
     /// The project's default unit, for forms.
-    fn unit(&self) -> ryucad::units::Unit {
-        ryucad::units::Unit::parse(&self.model.default_unit).unwrap_or(ryucad::units::Unit::Mm)
-    }
-
     /// Opens the project at `root` (canonical) as the human `name`, and
     /// starts loading it.
     pub fn open(root: &Path, daemon: &Daemon, name: &str, wake: Wake) -> Result<Workspace> {
@@ -646,6 +671,12 @@ impl Workspace {
             export: None,
             export_choices: Default::default(),
             drag: None,
+            mover: None,
+            mover_asked: None,
+            mover_waiting: false,
+            mating: None,
+            mate_previews: 0,
+            wants_tile: None,
             views: Default::default(),
             sections: Default::default(),
             explodes: Default::default(),
@@ -1107,6 +1138,8 @@ impl Workspace {
                 ..Default::default()
             }],
             component: true,
+            rev: None,
+            mates: Vec::new(),
         };
         let part = d.part.clone();
         self.send(req, Pending::DragSolve(part));
@@ -1152,9 +1185,187 @@ impl Workspace {
             translate: Some(meters(d.translate)),
             axis: None,
             angle: None,
+            about: None,
             expected_revision: revision,
         };
-        self.send(req, Pending::DragMove(d.part));
+        // In Annotate a freehand drag is a rough suggestion, its comment
+        // for the person to say more in.
+        self.send_with(
+            req,
+            Pending::DragMove(d.part),
+            Proposal {
+                comment: Some(ROUGH_COMMENT.into()),
+                rough: true,
+            },
+        );
+    }
+
+    /// Puts the Move tool's handles on instance `instance` of assembly
+    /// `part`, at the middle of its drawn boxes, or says why it can't
+    /// move (fixed, a pattern's copy, no freedom left).
+    pub fn start_move(&mut self, part: &str, instance: &str) -> Result<(), String> {
+        let key = (part.to_owned(), format!("{instance}/"));
+        self.model.movable(&key)?;
+        let middle = self
+            .model
+            .middles(part)
+            .get(instance)
+            .copied()
+            .ok_or_else(|| format!("{instance} isn't drawn yet"))?;
+        let body = self
+            .model
+            .meshes
+            .keys()
+            .find(|k| k.0 == part && k.1.split('/').next() == Some(instance))
+            .cloned();
+        let pose = body.map_or(crate::core::model::Pose::IDENTITY, |k| self.model.pose(&k));
+        let own = self.mover.as_ref().is_some_and(|m| m.own);
+        self.cancel_move();
+        self.mover = Some(crate::core::mover::Mover::new(
+            part, instance, middle, pose, own,
+        ));
+        Ok(())
+    }
+
+    /// The project's default unit.
+    pub fn unit(&self) -> ryucad::units::Unit {
+        ryucad::units::Unit::parse(&self.model.default_unit).unwrap_or(ryucad::units::Unit::Mm)
+    }
+
+    /// Reads the Move tool's value field.
+    pub fn type_move(&mut self, text: &str) {
+        let unit = self.unit();
+        if let Some(m) = self.mover.as_mut() {
+            m.typed(text, unit);
+        }
+    }
+
+    /// Asks where the Move tool's value puts what the instance's mates
+    /// reach, at the drawn revision: when the value has changed since it
+    /// last asked, one at a time, at most every [`DRAG_EVERY`]. The view
+    /// calls it every frame the tool is on.
+    pub fn preview_move(&mut self) {
+        let Some(m) = &self.mover else { return };
+        if self.mover_waiting {
+            return;
+        }
+        let asked = (m.grip, m.value);
+        if self
+            .mover_asked
+            .is_some_and(|(at, g, v)| (g, v) == asked || at.elapsed() < DRAG_EVERY)
+        {
+            return;
+        }
+        let part = m.part.clone();
+        if m.grip.is_none() || m.value == 0.0 || m.error.is_some() {
+            // Nothing to move: drawn where it is.
+            self.mover_asked = Some((Instant::now(), asked.0, asked.1));
+            if self.model.preview.keys().any(|(p, _)| *p == part) {
+                self.model.preview.retain(|(p, _), _| *p != part);
+                self.model.generation += 1;
+            }
+            return;
+        }
+        let req = m.preview(self.model_rev());
+        self.mover_asked = Some((Instant::now(), asked.0, asked.1));
+        self.mover_waiting = true;
+        self.send(req, Pending::MoveSolve(part));
+    }
+
+    /// Sends the Move tool's value as `assembly.move` (proposed in
+    /// Annotate) against the assembly's revision as the window last saw
+    /// it; the handles go.
+    pub fn send_move(&mut self) {
+        let Some(m) = self.mover.take() else { return };
+        if !m.ready() {
+            self.mover = Some(m);
+            return;
+        }
+        let revision = self.model.parts.get(&m.part).map(|p| p.revision.clone());
+        let part = m.part.clone();
+        self.mover_asked = None;
+        self.mover_waiting = false;
+        self.send(m.request(revision), Pending::MoveWrite(part));
+    }
+
+    /// Drops the Move tool's value and its preview; the handles stay.
+    pub fn clear_move(&mut self) {
+        let Some(m) = self.mover.as_mut() else { return };
+        m.clear();
+        let part = m.part.clone();
+        self.model.preview.retain(|(p, _), _| *p != part);
+        self.model.generation += 1;
+    }
+
+    /// Drops the Move tool and its preview.
+    pub fn cancel_move(&mut self) {
+        if let Some(m) = self.mover.take() {
+            self.model.preview.retain(|(p, _), _| *p != m.part);
+            self.model.generation += 1;
+        }
+        self.mover_asked = None;
+        self.mover_waiting = false;
+    }
+
+    /// Opens the Mate dialog on assembly `part`, from instance `from`.
+    pub fn open_mate(&mut self, part: &str, from: Option<&str>) {
+        self.close_mate();
+        self.mating = Some(crate::core::mating::Mating::new(part, from));
+    }
+
+    /// Takes a pick for the dialog's next side, previewing once both are
+    /// in; a pick it refuses is said in the dialog.
+    pub fn mate_pick(&mut self, entity: &str) -> std::result::Result<(), String> {
+        let d = self.mating.as_mut().ok_or("no Mate dialog")?;
+        match d.pick(entity) {
+            Ok(_) => d.note = None,
+            Err(why) => {
+                d.note = Some(why.clone());
+                return Err(why);
+            }
+        }
+        self.preview_mate();
+        Ok(())
+    }
+
+    /// Asks where the dialog's mate puts the instances, at the drawn
+    /// revision, writing nothing.
+    pub fn preview_mate(&mut self) {
+        let rev = self.model_rev();
+        let Some(d) = self.mating.as_mut() else {
+            return;
+        };
+        let Some(req) = d.preview(rev) else { return };
+        self.mate_previews += 1;
+        d.asked = self.mate_previews;
+        d.waiting = true;
+        let part = d.part.clone();
+        let asked = d.asked;
+        self.send(req, Pending::MatePreview(part, asked));
+    }
+
+    /// Sends the dialog's mate (`feature.add`; proposed in Annotate)
+    /// against the assembly's revision as the window last saw it.
+    pub fn add_mate(&mut self) {
+        let Some(d) = self.mating.take() else { return };
+        if !d.addable() {
+            self.mating = Some(d);
+            return;
+        }
+        let revision = self.model.parts.get(&d.part).map(|p| p.revision.clone());
+        let part = d.part.clone();
+        let Some(req) = d.add(revision) else { return };
+        self.model.preview.retain(|(p, _), _| *p != part);
+        self.model.generation += 1;
+        self.send(req, Pending::MateAdd(part));
+    }
+
+    /// Closes the Mate dialog and drops its preview.
+    pub fn close_mate(&mut self) {
+        if let Some(d) = self.mating.take() {
+            self.model.preview.retain(|(p, _), _| *p != d.part);
+            self.model.generation += 1;
+        }
     }
 
     /// Asks what importing the open import's file would do: `import` as
@@ -1850,19 +2061,26 @@ impl Workspace {
     /// not at all, its refusal answered where its answer would have gone
     /// (a form's error, else an error card), saying which mode allows it.
     fn send(&mut self, req: Request, why: Pending) {
+        self.send_with(req, why, Proposal::default());
+    }
+
+    /// [`Workspace::send`], with what a proposal of it says: its comment,
+    /// and whether it is rough (a freehand drag's).
+    fn send_with(&mut self, req: Request, why: Pending, proposal: Proposal) {
         use crate::core::modes::{Gate, gate};
         match gate(self.mode, &req) {
             Gate::Send => self.send_now(req, why),
             Gate::Propose => {
                 let request = json!({"method": req.method(), "params": req.params()});
+                let rough = proposal.rough;
                 let wrapped = Request::AnnotationPropose {
                     request,
-                    comment: None,
+                    comment: proposal.comment,
                     pins: Vec::new(),
-                    rough: false,
+                    rough,
                     author: None,
                 };
-                self.send_now(wrapped, Pending::Proposal(Box::new(why)));
+                self.send_now(wrapped, Pending::Proposal(Box::new(why), rough));
             }
             Gate::Refuse(because) => {
                 let method = req.method();
@@ -3231,7 +3449,22 @@ impl Workspace {
 
     fn answer(&mut self, why: Pending, answer: Result<Answer>) {
         match (why, answer) {
-            (Pending::Proposal(inner), r) => {
+            (Pending::Proposal(inner, rough), r) => {
+                // A rough suggestion's comment opens to edit, its
+                // annotation chosen in the Annotations tile.
+                if rough
+                    && let Ok(a) = &r
+                    && let Some(id) = a.result["annotation"]["id"].as_str()
+                {
+                    let id = id.to_owned();
+                    let comment = a.result["annotation"]["comment"]
+                        .as_str()
+                        .unwrap_or(ROUGH_COMMENT)
+                        .to_owned();
+                    self.choose_annotation(Some(&id));
+                    self.annotation_ui.editing = Some((id, comment));
+                    self.wants_tile = Some("annotations");
+                }
                 let r = r.map(|a| Answer {
                     result: a.result["answer"].clone(),
                     binary: None,
@@ -3715,6 +3948,54 @@ impl Workspace {
                 }
                 if again {
                     self.ask_drag();
+                }
+            }
+            (Pending::MoveSolve(part), a) => {
+                self.mover_waiting = false;
+                let on = self.mover.as_ref().is_some_and(|m| m.part == part);
+                match a {
+                    // A late answer after the tool went would undo the
+                    // written move's look.
+                    Ok(a) if on => self.preview_poses(&part, &a.result),
+                    Ok(_) => {}
+                    Err(e) => {
+                        if let Some(m) = self.mover.as_mut().filter(|_| on) {
+                            m.error = Some(e.message.clone());
+                        }
+                    }
+                }
+            }
+            (Pending::MatePreview(part, asked), a) => {
+                let Some(d) = self
+                    .mating
+                    .as_mut()
+                    .filter(|d| d.part == part && d.asked == asked)
+                else {
+                    return;
+                };
+                match a {
+                    Ok(a) => {
+                        d.previewed(Ok(a.result["converged"].as_bool().unwrap_or(false)));
+                        self.model.preview.retain(|(p, _), _| *p != part);
+                        self.preview_poses(&part, &a.result);
+                    }
+                    Err(e) => {
+                        let code = serde_json::to_value(e.code)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_owned));
+                        d.previewed(Err((code.unwrap_or_default(), e.message.clone())));
+                        self.model.preview.retain(|(p, _), _| *p != part);
+                        self.model.generation += 1;
+                    }
+                }
+            }
+            (Pending::MateAdd(_), Err(e)) => self.fail(e),
+            (Pending::MateAdd(_), Ok(_)) => {}
+            (Pending::MoveWrite(part), a) => {
+                self.model.preview.retain(|(p, _), _| *p != part);
+                self.model.generation += 1;
+                if let Err(e) = a {
+                    self.fail(e);
                 }
             }
             (Pending::DragMove(part), a) => {

@@ -572,6 +572,11 @@ impl Opened {
         crate::ui::bom::export(&ctx, &mut self.ws, &mut self.browse, view);
         crate::ui::deps::picker(&ctx, &mut self.ws, view);
         crate::ui::annotate::compose(&ctx, &mut self.view, &mut self.ws, view);
+        crate::ui::mate::window(&ctx, &mut self.ws, view);
+        if let Some(tile) = self.ws.wants_tile.take() {
+            crate::ui::shell::open(&mut self.tiles, tile);
+            self.layout_dirty = true;
+        }
         // What a context menu chose, with what it was opened on.
         let action = match self.view.ran.take() {
             Some((id, target)) => action.or(commands::run(self, &ctx, id, target.as_deref())),

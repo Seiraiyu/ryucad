@@ -927,3 +927,51 @@ fn a_kernels_refusal_comes_from_the_cache_as_a_result_does() {
         "gone"
     )));
 }
+
+#[test]
+fn a_drafts_angles_come_back_from_a_warm_cache() {
+    let (dir, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    init(dir.path(), None).unwrap();
+    let mut first = open(dir.path(), cache.path());
+    must(&mut first, "part.create", json!({"part": "p"}));
+    must(
+        &mut first,
+        "feature.add",
+        json!({"part": "p", "type": "box", "id": "b", "params": {"x": 40, "y": 30, "z": 20}}),
+    );
+    let b = must(&mut first, "inspect", json!({"part": "p", "feature": "b"}));
+    let east = b["bodies"][0]["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+            f["surface"]["type"] == "plane"
+                && f["surface"]["frame"]["z"][0].as_f64().unwrap() * sign == 1.0
+        })
+        .map(|f| format!("p/b/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    must(
+        &mut first,
+        "feature.add",
+        json!({"part": "p", "type": "draft", "id": "d", "angle": "2 deg", "neutral": "xy",
+               "faces": [east]}),
+    );
+    let angles = |s: &mut Session| {
+        let r = must(s, "rebuild", json!({"part": "p"}));
+        r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "d")
+            .unwrap()["draft"]["angles"]
+            .clone()
+    };
+    let want = angles(&mut first);
+    assert_eq!(want.as_array().unwrap().len(), 1);
+    // A second session over the warm cache builds nothing and gives them.
+    let mut second = open(dir.path(), cache.path());
+    assert_eq!(angles(&mut second), want);
+    let r = second.rebuilt(&id("p")).unwrap();
+    assert_eq!(names(&r.disk), ["b", "d"]);
+}

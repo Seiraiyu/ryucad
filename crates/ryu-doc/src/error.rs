@@ -809,6 +809,12 @@ pub enum Code {
     /// A warning: a USD export wrote a reference as meshes alone (a
     /// reference has no BrepArray).
     ExportReferenceMeshOnly,
+    /// A warning: a parting-line draft's face whose certified angle from
+    /// its pull lies more than a millidegree from the angle asked, or
+    /// spreads wider than that (a parting line climbing along the pull
+    /// holds the angle in the section square to it instead). The face,
+    /// both angles and the angle asked are in the details.
+    DraftAngleVaries,
     /// A warning: a USD export wrote a sheet as its mesh alone (ryucad
     /// 18.C writes no BrepArray of a sheet).
     ExportSheetBrepSkipped,
@@ -993,6 +999,12 @@ mod tests {
         assert_eq!(json!(Code::OffsetFailed), json!("offset_failed"));
         assert_eq!(Code::ShellFailed.exit_code(), 1);
         assert_eq!(Code::OffsetFailed.exit_code(), 1);
+    }
+
+    #[test]
+    fn draft_angle_varies_code() {
+        assert_eq!(json!(Code::DraftAngleVaries), json!("draft_angle_varies"));
+        assert_eq!(Code::DraftAngleVaries.exit_code(), 1);
     }
 
     #[test]

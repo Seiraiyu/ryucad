@@ -896,7 +896,7 @@ impl DatumForm {
         if let Some(f) = self.flag.as_ref().filter(|f| f.dirty()) {
             match self.kind.as_str() {
                 "path" => out.reverse = Some(f.chosen),
-                _ => out.flip = Some(f.chosen),
+                _ => out.flip = Some(f.chosen.into()),
             }
         }
         if let Some(h) = self.hand.as_ref().filter(|h| h.dirty()) {
@@ -1275,7 +1275,7 @@ impl SplitForm {
 
     fn given(&self, out: &mut FeatureFields) {
         if self.flip.dirty() {
-            out.flip = Some(self.flip.chosen);
+            out.flip = Some(self.flip.chosen.into());
         }
         if self.keep.dirty() {
             out.keep = Some(self.keep.chosen.clone());
@@ -2207,7 +2207,10 @@ mod tests {
         s.flip.chosen = true;
         s.keep.chosen = "behind".into();
         let g = given(&f);
-        assert_eq!((g.flip, g.keep.as_deref()), (Some(true), Some("behind")));
+        assert_eq!(
+            (g.flip, g.keep.as_deref()),
+            (Some(true.into()), Some("behind"))
+        );
         f.revert();
         let g = given(&f);
         assert_eq!((g.flip, g.keep), (None, None));
@@ -2814,7 +2817,7 @@ mod tests {
         d.flag.as_mut().unwrap().chosen = false;
         let g = given(&f);
         assert_eq!(g.angle, Some(json!("20 deg")));
-        assert_eq!(g.flip, Some(false));
+        assert_eq!(g.flip, Some(false.into()));
         assert_eq!((g.distance.clone(), g.from.clone()), (None, None));
         f.revert();
         assert!(!f.dirty());
