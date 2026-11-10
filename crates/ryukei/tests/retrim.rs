@@ -67,6 +67,7 @@ fn a_wall_drafted_past_its_neighbour_is_a_wedge() {
         }],
         tangent: false,
         topology: Topology::Change,
+        blends: Default::default(),
     };
     let (o, j, _) = draft(T, &b, &spec).unwrap();
     let h = 1.0 / ryukei::math::tan(1.3);
@@ -122,6 +123,7 @@ fn a_groove_run_through_splits_the_top() {
         faces: ends.iter().map(|&n| (n, -0.3)).collect(),
         tangent: false,
         topology: Topology::Change,
+        blends: Default::default(),
     };
     let (o, j) = offset_faces(T, &b, &spec).unwrap();
     near(volume(&o, 1e-4), 0.2 - 0.1 * 1.0 * 0.1, 1e-9);
@@ -145,6 +147,7 @@ fn a_pyramids_apex_splits() {
         faces: vec![(slanted, 0.02)],
         tangent: false,
         topology: Topology::Change,
+        blends: Default::default(),
     };
     let (o, _) = offset_faces(T, &b, &spec).unwrap();
     let (want, _) = pyramid(0.02);
@@ -288,6 +291,7 @@ fn a_boss_slid_over_its_plates_edge() {
         motion: Rigid::translation(Vector3::new(-0.45, 0.0, 0.0)),
         tangent: false,
         topology: Topology::Change,
+        blends: Default::default(),
     };
     let (o, _) = move_faces(T, &b, &spec).unwrap();
     // The boss whole, now centred at x = 0.05: 0.05 of it overhangs.
@@ -321,6 +325,7 @@ fn phase_9s_tweaks_are_the_same_bits_under_change() {
     let both = |keep: MoveSpec| {
         let change = MoveSpec {
             topology: Topology::Change,
+            blends: Default::default(),
             ..keep.clone()
         };
         let (a, ja) = move_faces(T, &b, &keep).unwrap();
@@ -336,11 +341,13 @@ fn phase_9s_tweaks_are_the_same_bits_under_change() {
         motion: up,
         tangent: false,
         topology: Topology::Keep,
+        blends: Default::default(),
     });
     let keep = OffsetFacesSpec {
         faces: vec![(top, 0.05), (side, -0.1)],
         tangent: false,
         topology: Topology::Keep,
+        blends: Default::default(),
     };
     let (a, ja) = offset_faces(T, &b, &keep).unwrap();
     let (c, jc) = offset_faces(
@@ -348,6 +355,7 @@ fn phase_9s_tweaks_are_the_same_bits_under_change() {
         &b,
         &OffsetFacesSpec {
             topology: Topology::Change,
+            blends: Default::default(),
             ..keep
         },
     )
@@ -383,6 +391,7 @@ fn a_broken_tangency_is_still_refused_under_change() {
         motion: Rigid::translation(Vector3::new(0.0, 0.0, 0.05)),
         tangent: false,
         topology: Topology::Keep,
+        blends: Default::default(),
     };
     let kept = refusal(move_faces(T, &b, &keep));
     assert!(
@@ -391,6 +400,7 @@ fn a_broken_tangency_is_still_refused_under_change() {
     );
     let change = MoveSpec {
         topology: Topology::Change,
+        blends: Default::default(),
         ..keep
     };
     assert_eq!(refusal(move_faces(T, &b, &change)), kept);
@@ -415,6 +425,7 @@ fn one_thread_and_eight_alike() {
         faces: ends.iter().map(|&n| (n, -0.3)).collect(),
         tangent: false,
         topology: Topology::Change,
+        blends: Default::default(),
     };
     let run = |threads| {
         let pool = rayon::ThreadPoolBuilder::new()

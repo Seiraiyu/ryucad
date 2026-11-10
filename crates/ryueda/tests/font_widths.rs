@@ -1,5 +1,6 @@
 //! `ryusch` measures text with Inter's advance widths, a table generated
-//! from the font ryueda bundles (`fonts/Inter-Regular.ttf`), so it reads
+//! from the font every ryu drawing bundles (`ryu_draw::font::INTER`,
+//! `crates/ryu-draw/fonts/Inter-Regular.ttf`), so it reads
 //! no font itself. The table must be the font's: after changing the font,
 //! regenerate it with `UPDATE_WIDTHS=1 cargo test -p ryueda --test
 //! font_widths` and review the diff.
@@ -18,12 +19,7 @@ fn characters() -> Vec<char> {
 }
 
 fn table() -> String {
-    let bytes = std::fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/fonts/Inter-Regular.ttf"
-    ))
-    .unwrap();
-    let face = ttf_parser::Face::parse(&bytes, 0).unwrap();
+    let face = ttf_parser::Face::parse(ryu_draw::font::INTER, 0).unwrap();
     let mut rows = String::new();
     for c in characters() {
         let Some(g) = face.glyph_index(c) else {
@@ -34,7 +30,7 @@ fn table() -> String {
     }
     format!(
         "//! Inter Regular's advance widths, in font units: generated from\n\
-         //! `crates/ryueda/fonts/Inter-Regular.ttf` by `UPDATE_WIDTHS=1 cargo test\n\
+         //! `crates/ryu-draw/fonts/Inter-Regular.ttf` by `UPDATE_WIDTHS=1 cargo test\n\
          //! -p ryueda --test font_widths`. Don't edit by hand.\n\
          \n\
          /// The font's units per em.\n\

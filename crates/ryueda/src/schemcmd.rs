@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 /// Inter Regular, the one face of every schematic.
-pub const INTER: &[u8] = include_bytes!("../fonts/Inter-Regular.ttf");
+pub const INTER: &[u8] = ryu_draw::font::INTER;
 
 /// The blocks a request names: one block, else a design's (named, or the
 /// project's only one), its root first.

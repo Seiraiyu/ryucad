@@ -1587,6 +1587,117 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// A part's drawings, or every part's (design 417).
+    #[serde(rename = "drawing.list")]
+    DrawingList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
+    /// A drawing of one sheet; with `views: standard` a base front view,
+    /// its top and right and an isometric, laid out.
+    #[serde(rename = "drawing.create")]
+    DrawingCreate {
+        part: String,
+        drawing: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        template: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        views: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A batch of `add`, `remove`, `set` and `move` ops on a drawing's
+    /// sheets and views, all or nothing, with one build to check it.
+    #[serde(rename = "drawing.edit")]
+    DrawingEdit {
+        part: String,
+        drawing: String,
+        ops: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "drawing.delete")]
+    DrawingDelete {
+        part: String,
+        drawing: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A drawing takes a new ID.
+    #[serde(rename = "drawing.rename")]
+    DrawingRename {
+        part: String,
+        drawing: String,
+        to: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// The built drawing: sheets, views with their boxes and frames, the
+    /// findings, and with `items` every item's exact geometry.
+    #[serde(rename = "drawing.get")]
+    DrawingGet {
+        part: String,
+        drawing: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        items: bool,
+    },
+    /// Each sheet in words, for an agent.
+    #[serde(rename = "drawing.describe")]
+    DrawingDescribe {
+        part: String,
+        drawing: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<String>,
+    },
+    /// A sheet as PNG or SVG, the bytes after the answer.
+    #[serde(rename = "drawing.render")]
+    DrawingRender {
+        part: String,
+        drawing: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale: Option<f32>,
+    },
+    /// Every sheet as PDF, or one as SVG, written by the daemon to `out`
+    /// (an absolute path, never a project file), else after the answer.
+    #[serde(rename = "drawing.export")]
+    DrawingExport {
+        part: String,
+        drawing: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        out: Option<String>,
+    },
+    /// The views laid out again from nothing; written unless `dry_run`.
+    #[serde(rename = "drawing.layout")]
+    DrawingLayout {
+        part: String,
+        drawing: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Records a proposed change: `request` (`{method, params}`, one of
     /// `annotation::PROPOSABLE`) run over the caller's draft in memory,
     /// what it would have written kept in a new annotation.
@@ -2035,6 +2146,11 @@ impl Request {
                 | Request::ViewRename { .. }
                 | Request::ExplodeSave { .. }
                 | Request::ExplodeDelete { .. }
+                | Request::DrawingCreate { .. }
+                | Request::DrawingEdit { .. }
+                | Request::DrawingDelete { .. }
+                | Request::DrawingRename { .. }
+                | Request::DrawingLayout { dry_run: false, .. }
                 | Request::AnnotationPropose { .. }
                 | Request::AnnotationApply { .. }
                 | Request::AnnotationCreate { .. }

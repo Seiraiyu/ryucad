@@ -632,6 +632,16 @@ pub struct Located {
 /// the caller reads it as it always has. A step names an instance while
 /// the part before it is an assembly and a feature once it is a part.
 pub fn locate(session: &mut crate::session::Session, reference: &str) -> Result<Option<Located>> {
+    locate_at(session, reference, &crate::doc::assembly::Rev::Working)
+}
+
+/// [`locate`] in the model of the part at `rev` (a drawing's view pinned
+/// at a label reads its datums there, not in the working files).
+pub fn locate_at(
+    session: &mut crate::session::Session,
+    reference: &str,
+    rev: &crate::doc::assembly::Rev,
+) -> Result<Option<Located>> {
     use crate::doc::files::PartKind;
     let mut steps = reference.split('/');
     let Some(first) = steps.next() else {
@@ -662,14 +672,16 @@ pub fn locate(session: &mut crate::session::Session, reference: &str) -> Result<
     } else {
         Vec::new()
     };
-    let model = session.model(&part, &crate::doc::assembly::Rev::Working)?;
+    let model = session.model(&part, rev)?;
     let Some(o) = model.occurrences.iter().find(|o| o.path == path) else {
         return Ok(None);
     };
     let Some((_, made)) = o.datums.iter().find(|(id, _)| *id == datum) else {
-        // A datum of the part that didn't build says why.
+        // A datum of the part that didn't build says why (in the working
+        // files: a release's failures are its own).
         let leaf = o.part.clone();
-        if let Some(Ok(f)) = session.project().part(&leaf)?.features.get(&datum).cloned()
+        if *rev == crate::doc::assembly::Rev::Working
+            && let Some(Ok(f)) = session.project().part(&leaf)?.features.get(&datum).cloned()
             && matches!(f, crate::doc::files::Feature::Datum(_))
         {
             let r = session.rebuilt(&leaf)?;

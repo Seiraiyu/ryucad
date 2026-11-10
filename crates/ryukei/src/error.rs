@@ -771,6 +771,15 @@ pub enum TweakError {
     /// No set of faces holding the face named, at most half the body's,
     /// is closed by a cap.
     NoFeature { face: Name },
+    /// The face named is no recognised blend's or corner's (or, for a
+    /// chamfer's size, no support of its blend).
+    NotABlend { face: Name },
+    /// The blend holding the face named couldn't be made again after its
+    /// edit: why, in a word.
+    BlendLost { face: Name, reason: BlendLoss },
+    /// A recognition tolerance that isn't finite or lies outside
+    /// `[LINEAR_RESOLUTION, TOLERANCE_CAP]`.
+    BadTolerance,
     /// Two faces of the result meet away from the edges they share.
     SelfIntersecting { faces: [Name; 2] },
     /// A decision rounding left uncertain at the entity named.
@@ -780,6 +789,41 @@ pub enum TweakError {
     ToleranceTooLarge { at: Name, needed: f64 },
     /// What tweaks don't build yet, at the entity named.
     Unsupported { at: Name, case: TweakCase },
+}
+
+/// Why a blend made again was lost ([`TweakError::BlendLost`]): the
+/// blend's own refusal, in a word (it names edges the caller never had).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlendLoss {
+    /// The edit left no edge between the blend's supports.
+    NoEdge,
+    /// The blend would run off a face it lies on, or into another feature
+    /// there (`BlendError::Overflow`).
+    Overflow,
+    /// Too large for the faces' or the edge's curvature now.
+    RadiusTooLarge,
+    /// The supports now meet tangentially: nothing to round.
+    SmoothEdge,
+    /// A face or a vertex the blend can't build.
+    Unsupported,
+    /// Blends that would meet only at an edge or a point.
+    NonManifold,
+    /// Rounding left a decision open.
+    Uncertain,
+}
+
+impl fmt::Display for BlendLoss {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NoEdge => "no edge is left between its supports",
+            Self::Overflow => "it would run off a face it lies on",
+            Self::RadiusTooLarge => "it is too large for the faces now",
+            Self::SmoothEdge => "its supports now meet tangentially",
+            Self::Unsupported => "a face or vertex the blend can't build",
+            Self::NonManifold => "blends would meet only at an edge or a point",
+            Self::Uncertain => "rounding left it uncertain",
+        })
+    }
 }
 
 /// The kinds of geometry [`TweakError::Unsupported`] refuses.
@@ -851,6 +895,11 @@ impl fmt::Display for TweakError {
                 write!(f, "the gap at face {face} is closed by a cap, not by growth")
             }
             Self::NoFeature { face } => write!(f, "face {face} is part of no feature a cap closes"),
+            Self::NotABlend { face } => write!(f, "face {face} is no recognised blend's"),
+            Self::BlendLost { face, reason } => {
+                write!(f, "the blend at face {face} can't be made again: {reason}")
+            }
+            Self::BadTolerance => write!(f, "the recognition tolerance is out of range"),
             Self::HealAmbiguous { face } => {
                 write!(f, "which side of face {face} is kept can't be decided")
             }

@@ -77,7 +77,7 @@ pub fn laid(session: &Session, by: &By) -> (Files, Vec<Annotation>) {
 /// subset of `Request::mutates`. Releases, PDM settings, dependencies,
 /// imports, doctor's repairs, merge resolutions, undo and redo need
 /// Direct edit.
-pub const PROPOSABLE: [&str; 18] = [
+pub const PROPOSABLE: [&str; 23] = [
     "feature.add",
     "feature.edit",
     "feature.delete",
@@ -96,6 +96,11 @@ pub const PROPOSABLE: [&str; 18] = [
     "view.save",
     "explode.save",
     "explode.delete",
+    "drawing.create",
+    "drawing.edit",
+    "drawing.delete",
+    "drawing.rename",
+    "drawing.layout",
 ];
 
 /// What `annotation.propose` is given.
@@ -607,6 +612,18 @@ pub(crate) mod tests {
             "materials.set",
             json!({"name": "spare", "density": "1000 kg/m^3"}),
         );
+        c(
+            &mut s,
+            "drawing.create",
+            json!({"part": "plate", "drawing": "main", "views": "standard"}),
+        );
+        // Moved by hand: laying it out again moves it back.
+        c(
+            &mut s,
+            "drawing.edit",
+            json!({"part": "plate", "drawing": "main",
+                   "ops": [{"op": "move", "id": "v1", "at": ["200 mm", "200 mm"]}]}),
+        );
         (dir, s)
     }
 
@@ -672,6 +689,27 @@ pub(crate) mod tests {
                                     "steps": [{"instances": ["p1"], "translate": [0, 0, 10]}]}),
             ),
             ("explode.delete", json!({"part": "rig", "explode": "apart"})),
+            (
+                "drawing.create",
+                json!({"part": "plate", "drawing": "second", "size": "iso_a4"}),
+            ),
+            (
+                "drawing.edit",
+                json!({"part": "plate", "drawing": "main",
+                       "ops": [{"op": "set", "id": "v2", "fields": {"hidden": "dashed"}}]}),
+            ),
+            (
+                "drawing.delete",
+                json!({"part": "plate", "drawing": "main"}),
+            ),
+            (
+                "drawing.rename",
+                json!({"part": "plate", "drawing": "main", "to": "front"}),
+            ),
+            (
+                "drawing.layout",
+                json!({"part": "plate", "drawing": "main"}),
+            ),
         ]
     }
 

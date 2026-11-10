@@ -394,6 +394,44 @@ pub fn answer_live(
                 bends,
             },
         ),
+        Request::DrawingRender {
+            part,
+            drawing,
+            rev,
+            sheet,
+            format,
+            scale,
+        } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+            let mut a = crate::drawing::request::render(
+                s,
+                &part,
+                &drawing,
+                sheet.as_deref(),
+                format.as_deref(),
+                scale,
+            )?;
+            a.result = noted(Ok(a.result), commit)?;
+            Ok(a)
+        }),
+        Request::DrawingExport {
+            part,
+            drawing,
+            rev,
+            sheet,
+            format,
+            out,
+        } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+            let mut a = crate::drawing::request::export(
+                s,
+                &part,
+                &drawing,
+                sheet.as_deref(),
+                format.as_deref(),
+                out.as_deref(),
+            )?;
+            a.result = noted(Ok(a.result), commit)?;
+            Ok(a)
+        }),
         Request::Rebuild { part, rev } => session.at(rev.as_deref()).and_then(|(commit, s)| {
             rebuild(s, part.as_deref(), commit.as_deref())
                 .map_err(|e| noted(Err(e), commit).expect_err("an error"))
@@ -1290,6 +1328,93 @@ pub(crate) fn dispatch(
             live.set_hidden(&id, hidden)?;
             Ok(json!({"participant": id, "hidden": live.get(&id)?.view.hidden}))
         }
+        Request::DrawingList { part } => crate::drawing::request::list(session, part.as_deref()),
+        Request::DrawingCreate {
+            part,
+            drawing,
+            name,
+            template,
+            size,
+            views,
+            expected_revision,
+        } => crate::drawing::request::create(
+            session,
+            &part,
+            &drawing,
+            &crate::drawing::request::Create {
+                name,
+                template,
+                size,
+                views,
+            },
+            expected_revision.as_deref(),
+        ),
+        Request::DrawingEdit {
+            part,
+            drawing,
+            ops,
+            expected_revision,
+        } => crate::drawing::request::edit(
+            session,
+            &part,
+            &drawing,
+            &ops,
+            expected_revision.as_deref(),
+        ),
+        Request::DrawingDelete {
+            part,
+            drawing,
+            expected_revision,
+        } => {
+            crate::drawing::request::delete(session, &part, &drawing, expected_revision.as_deref())
+        }
+        Request::DrawingRename {
+            part,
+            drawing,
+            to,
+            expected_revision,
+        } => crate::drawing::request::rename(
+            session,
+            &part,
+            &drawing,
+            &to,
+            expected_revision.as_deref(),
+        ),
+        Request::DrawingLayout {
+            part,
+            drawing,
+            dry_run,
+            expected_revision,
+        } => crate::drawing::request::layout(
+            session,
+            &part,
+            &drawing,
+            dry_run,
+            expected_revision.as_deref(),
+        ),
+        Request::DrawingGet {
+            part,
+            drawing,
+            rev,
+            sheet,
+            items,
+        } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+            noted(
+                crate::drawing::request::get(s, &part, &drawing, sheet.as_deref(), items),
+                commit,
+            )
+        }),
+        Request::DrawingDescribe {
+            part,
+            drawing,
+            rev,
+            sheet,
+        } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+            noted(
+                crate::drawing::request::describe(s, &part, &drawing, sheet.as_deref()),
+                commit,
+            )
+        }),
         Request::ExplodeList { part } => crate::explode::list(session, part.as_deref()),
         Request::ExplodeSave {
             part,
@@ -1573,6 +1698,10 @@ pub(crate) fn dispatch(
         // A render's answer is bytes: `answer_live` handles it.
         Request::Render { .. } => Err(Error::new(Code::Internal, "render answers with bytes")),
         Request::Export { .. } => Err(Error::new(Code::Internal, "export answers with bytes")),
+        Request::DrawingRender { .. } | Request::DrawingExport { .. } => Err(Error::new(
+            Code::Internal,
+            "drawings render and export with bytes",
+        )),
         // The session is current: doctor reuses its rebuilds (#125).
         Request::Doctor {} => {
             let root = session.root().to_owned();
@@ -1622,11 +1751,7 @@ pub(crate) fn dispatch(
         Request::CacheWarm { part } => cache_warm(session, part.as_deref()),
         Request::ConfigGet { key, scope } => {
             let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
-            let mut v = config::get(
-                session.project().manifest.default_unit,
-                key.as_deref(),
-                scope,
-            )?;
+            let mut v = config::get(&session.project().manifest, key.as_deref(), scope)?;
             v["project_revision"] = json!(session.project_revision()?);
             Ok(v)
         }
@@ -1640,15 +1765,11 @@ pub(crate) fn dispatch(
             let v = match config::validate(&key, &value, scope)? {
                 config::Scope::Project => {
                     session.check_project_revision(expected_revision.as_deref())?;
-                    let unit = Unit::parse(value.as_str().expect("validated")).expect("validated");
                     // The rest of the manifest (the project's ID) stays.
-                    let m = Manifest {
-                        default_unit: unit,
-                        ..session.project().manifest.clone()
-                    };
+                    let m = config::set_project(&session.project().manifest, &key, &value);
                     session.write_json(&session.root().join(MANIFEST), &m.to_json())?;
                     session.reload()?;
-                    let mut v = config::get(unit, Some(&key), None)?;
+                    let mut v = config::get(&m, Some(&key), None)?;
                     v["project_revision"] = json!(session.project_revision()?);
                     v
                 }
@@ -5933,11 +6054,23 @@ fn framed(
 /// `reference` names (`<part>/<solid>/<name>`, or an occurrence's face,
 /// placed by its pose): along a planar face's outward normal or a
 /// revolved face's axis, its longest straight edge level.
-fn normal_to_face(session: &mut Session, reference: &str) -> Result<([f64; 3], [f64; 3])> {
+pub(crate) fn normal_to_face(
+    session: &mut Session,
+    reference: &str,
+) -> Result<([f64; 3], [f64; 3])> {
+    normal_to_face_at(session, reference, &crate::doc::assembly::Rev::Working)
+}
+
+/// [`normal_to_face`] with the face read in the model `rev` gives.
+pub(crate) fn normal_to_face_at(
+    session: &mut Session,
+    reference: &str,
+    rev: &crate::doc::assembly::Rev,
+) -> Result<([f64; 3], [f64; 3])> {
     use ryukei::geom::{Curve, Surface};
     use ryukei::measure::Entity;
     // A datum plane: along its normal, its x level; a datum axis: along it.
-    if let Some(d) = crate::geometry::locate(session, reference)? {
+    if let Some(d) = crate::geometry::locate_at(session, reference, rev)? {
         let a = |v: ryukei::geom::Vector3| [v.x, v.y, v.z];
         return match d.geom {
             crate::geometry::Geom::Plane(p) => Ok(crate::view::normal_to(
@@ -5952,7 +6085,7 @@ fn normal_to_face(session: &mut Session, reference: &str) -> Result<([f64; 3], [
             .with("entity", reference)),
         };
     }
-    let located = crate::measure::locate(session, reference)?;
+    let located = crate::measure::locate_at(session, reference, rev)?;
     let not_a_face = || {
         Error::new(
             Code::InvalidParam,
@@ -7653,6 +7786,37 @@ fn rebuilt_at(session: &mut Session, rev: &str) -> Result<BTreeMap<String, crate
     Ok(out)
 }
 
+/// Each drawing of every part at `rev`, built: by part and drawing, each
+/// view's fingerprint by key, or why it didn't build.
+fn drawn_at(session: &mut Session, rev: &str) -> Result<crate::diff::Drawn> {
+    let (_, s) = session.at(Some(rev))?;
+    let mut out = crate::diff::Drawn::new();
+    let ids: Vec<(Id, Vec<Id>)> = s
+        .project()
+        .parts
+        .iter()
+        .map(|(id, p)| (id.clone(), p.drawings.keys().cloned().collect()))
+        .collect();
+    for (pid, drawings) in ids {
+        for d in drawings {
+            let views = match crate::drawing::build(s, &pid, &d) {
+                Ok(b) => Ok(b
+                    .sheets
+                    .iter()
+                    .flat_map(|sh| {
+                        sh.views
+                            .iter()
+                            .map(move |v| (v.key.to_string(), v.fingerprint(sh)))
+                    })
+                    .collect()),
+                Err(e) => Err(e.code),
+            };
+            out.insert((pid.to_string(), d.to_string()), views);
+        }
+    }
+    Ok(out)
+}
+
 /// `diff`: what changed from one revision to another.
 pub(crate) fn diff(
     session: &mut Session,
@@ -7666,6 +7830,7 @@ pub(crate) fn diff(
     }
     let (a, fa) = files_at(session, from)?;
     let (b, fb) = files_at(session, to)?;
+    let (a_rev, b_rev) = (from.to_owned(), to.to_owned());
     let releases = crate::release::history(session)
         .map(|(_, r)| r)
         .unwrap_or_default();
@@ -7681,6 +7846,9 @@ pub(crate) fn diff(
         let to = rebuilt_at(session, to)?;
         drop(stage);
         crate::diff::model(&mut v, &from, &to, opts);
+        // Each drawing whose built views differ (design 417).
+        let (dfrom, dto) = (drawn_at(session, &a_rev)?, drawn_at(session, &b_rev)?);
+        crate::diff::drawings_model(&mut v, &dfrom, &dto, opts);
         // Each imported file that differs, by product.
         if let Some(Value::Array(files)) = v.get_mut("imports") {
             for f in files {
