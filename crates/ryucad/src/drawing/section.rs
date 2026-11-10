@@ -665,3 +665,93 @@ pub(super) fn hatch_of(i: usize, base: f64) -> (f64, f64) {
     };
     (angle, spacing)
 }
+
+/// The items marking a cut on its parent: the cutting-plane line through
+/// `line` (sheet millimetres, in order), an arrow at each end pointing
+/// along `sight` (the section's line of sight on the sheet, unit), and the
+/// letter beyond each.
+pub(super) fn cutting_marks(
+    line: &[P],
+    sight: P,
+    letter: &str,
+    style: ryu_draw::Standard,
+) -> Vec<Item> {
+    let mut out = Vec::new();
+    out.push(Item::Path {
+        path: Path::polyline(line, false),
+        stroke: Some(style.stroke(LineKind::Cutting)),
+        fill: None,
+    });
+    // ISO 128-3: thick at its ends (and its bends) over 5 mm.
+    if style == ryu_draw::Standard::Iso {
+        let thick = style.stroke(LineKind::Visible);
+        let along = |a: P, b: P, l: f64| {
+            let d = ryu_math::hypot(b[0] - a[0], b[1] - a[1]).max(1e-12);
+            [a[0] + (b[0] - a[0]) * l / d, a[1] + (b[1] - a[1]) * l / d]
+        };
+        let n = line.len();
+        let mut stubs = vec![
+            [line[0], along(line[0], line[1], 5.0)],
+            [line[n - 1], along(line[n - 1], line[n - 2], 5.0)],
+        ];
+        for w in line.windows(3) {
+            stubs.push([along(w[1], w[0], 2.5), w[1]]);
+            stubs.push([w[1], along(w[1], w[2], 2.5)]);
+        }
+        for [a, b] in stubs {
+            out.push(Item::Path {
+                path: Path::polyline(&[a, b], false),
+                stroke: Some(thick.clone()),
+                fill: None,
+            });
+        }
+    }
+    let thin = style.stroke(LineKind::Thin);
+    let n = line.len();
+    for (end, next) in [(line[0], line[1]), (line[n - 1], line[n - 2])] {
+        // A stem of 6 mm along the sight, an arrowhead 3.5 by 1.2 at its tip.
+        let tip = [end[0] + 6.0 * sight[0], end[1] + 6.0 * sight[1]];
+        out.push(Item::Path {
+            path: Path::polyline(&[end, tip], false),
+            stroke: Some(thin.clone()),
+            fill: None,
+        });
+        let back = [tip[0] - 3.5 * sight[0], tip[1] - 3.5 * sight[1]];
+        let side = [-sight[1] * 0.6, sight[0] * 0.6];
+        out.push(Item::Path {
+            path: Path::polyline(
+                &[
+                    tip,
+                    [back[0] + side[0], back[1] + side[1]],
+                    [back[0] - side[0], back[1] - side[1]],
+                ],
+                true,
+            ),
+            stroke: None,
+            fill: Some(Colour::BLACK),
+        });
+        // The letter beyond the line's end, along it.
+        let d = ryu_math::hypot(end[0] - next[0], end[1] - next[1]).max(1e-12);
+        let out_dir = [(end[0] - next[0]) / d, (end[1] - next[1]) / d];
+        out.push(Item::Text {
+            text: letter.to_owned(),
+            at: [
+                end[0] + 4.0 * out_dir[0] + 3.0 * sight[0],
+                end[1] + 4.0 * out_dir[1] + 3.0 * sight[1] - 2.5,
+            ],
+            size: 5.0,
+            angle: 0.0,
+            anchor: Anchor::Middle,
+            colour: Colour::BLACK,
+        });
+    }
+    out
+}
+
+/// A section's caption: ASME's `SECTION A-A`, ISO's `A-A`.
+pub(super) fn caption(letter: &str, standard: crate::doc::drawing::Standard) -> String {
+    match standard {
+        crate::doc::drawing::Standard::Asme => format!("SECTION {letter}-{letter}"),
+        crate::doc::drawing::Standard::Iso => format!("{letter}-{letter}"),
+    }
+}

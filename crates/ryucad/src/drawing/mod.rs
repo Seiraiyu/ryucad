@@ -1458,7 +1458,18 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
                     ([0; 3], Some(e.clone()))
                 }
             };
-            if let Some(l) = &plan.label {
+            let caption = match &plan.extra {
+                Extra::Section(c) => Some(section::caption(&c.letter, standard)),
+                Extra::Detail { .. } => plan.label.as_ref().map(|l| {
+                    let s = format!("({s})");
+                    match standard {
+                        Standard::Asme => format!("DETAIL {l} {s}"),
+                        Standard::Iso => format!("{l} {s}"),
+                    }
+                }),
+                _ => plan.label.clone(),
+            };
+            if let Some(l) = &caption {
                 items.push(Item::Text {
                     text: l.clone(),
                     at: [(bounds[0][0] + bounds[1][0]) / 2.0, bounds[0][1] - 8.0],
@@ -1499,6 +1510,7 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
             views,
         });
     }
+    marks(&plans, &mut sheets, style);
     Ok(Built {
         part: part.clone(),
         drawing: id.clone(),
@@ -1508,6 +1520,120 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
         sheets,
         findings,
     })
+}
+
+/// Twice `s`, in lowest terms: a detail's scale where none is written.
+fn doubled(s: Scale) -> Scale {
+    let (a, b) = (2 * s.sheet, s.model);
+    let g = gcd(a, b);
+    Scale {
+        sheet: (a / g).min(crate::doc::drawing::MAX_SCALE),
+        model: b / g,
+    }
+}
+
+fn gcd(a: u32, b: u32) -> u32 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+/// Each section's cutting-plane line and each detail's circle, with
+/// their letters, on the sheet their parent is drawn on.
+fn marks(plans: &[(Plan, Source)], sheets: &mut [SheetBuilt], style: ryu_draw::Standard) {
+    let index: BTreeMap<Key, usize> = plans
+        .iter()
+        .enumerate()
+        .map(|(i, (p, _))| (p.key, i))
+        .collect();
+    for (plan, _) in plans {
+        let parent = match &plan.extra {
+            Extra::Section(c) => c.parent,
+            Extra::Detail { parent, .. } => *parent,
+            _ => continue,
+        };
+        let Some((si, pv)) = sheets.iter().enumerate().find_map(|(si, s)| {
+            s.views
+                .iter()
+                .find(|v| v.key == parent)
+                .map(|v| (si, v.clone()))
+        }) else {
+            continue;
+        };
+        let pp = &plans[index[&parent]].0;
+        let k = pv.scale.mm_per_m();
+        let c = pp.frame.image(pp.anchor);
+        let on_sheet = |q: [f64; 3]| {
+            let i = pp.frame.image(q);
+            [pv.at[0] + k * (i[0] - c[0]), pv.at[1] + k * (i[1] - c[1])]
+        };
+        let items = match &plan.extra {
+            Extra::Section(cut) => {
+                let n = pp.frame.image(cut.normal);
+                let len = ryu_math::hypot(n[0], n[1]);
+                // A cut square to the parent's plane shows as a line on it.
+                if len < 1e-9 {
+                    continue;
+                }
+                let sight = [-n[0] / len, -n[1] / len];
+                let along = [-sight[1], sight[0]];
+                let mut line: Vec<P> = match &cut.how {
+                    section::How::Plane(p) => {
+                        // The plane's line across the parent's drawing and
+                        // 5 mm past it each way.
+                        let o = on_sheet(p.origin_m);
+                        let [lo, hi] = pv.bounds;
+                        let ts = [lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]]
+                            .map(|q| (q[0] - o[0]) * along[0] + (q[1] - o[1]) * along[1]);
+                        let t0 = ts.iter().copied().fold(f64::INFINITY, f64::min) - 5.0;
+                        let t1 = ts.iter().copied().fold(f64::NEG_INFINITY, f64::max) + 5.0;
+                        vec![
+                            [o[0] + t0 * along[0], o[1] + t0 * along[1]],
+                            [o[0] + t1 * along[0], o[1] + t1 * along[1]],
+                        ]
+                    }
+                    section::How::Steps { points, .. } => {
+                        points.iter().map(|q| on_sheet(*q)).collect()
+                    }
+                };
+                if let section::How::Steps { .. } = cut.how {
+                    // Run on past the first and last points by 5 mm.
+                    let ext = |a: P, b: P| {
+                        let d = ryu_math::hypot(a[0] - b[0], a[1] - b[1]).max(1e-12);
+                        [
+                            a[0] + 5.0 * (a[0] - b[0]) / d,
+                            a[1] + 5.0 * (a[1] - b[1]) / d,
+                        ]
+                    };
+                    let n = line.len();
+                    let (first, last) = (ext(line[0], line[1]), ext(line[n - 1], line[n - 2]));
+                    line[0] = first;
+                    line[n - 1] = last;
+                }
+                section::cutting_marks(&line, sight, &cut.letter, style)
+            }
+            Extra::Detail { centre, radius, .. } => {
+                let m = on_sheet(*centre);
+                let r = k * radius;
+                let d = std::f64::consts::FRAC_1_SQRT_2 * (r + 3.0);
+                vec![
+                    Item::Path {
+                        path: Path::circle(m, r),
+                        stroke: Some(style.stroke(LineKind::Thin)),
+                        fill: None,
+                    },
+                    Item::Text {
+                        text: plan.label.clone().unwrap_or_default(),
+                        at: [m[0] + d, m[1] + d],
+                        size: 5.0,
+                        angle: 0.0,
+                        anchor: Anchor::Start,
+                        colour: Colour::BLACK,
+                    },
+                ]
+            }
+            _ => continue,
+        };
+        sheets[si].items.extend(items);
+    }
 }
 
 /// A failed view's frame: its box, crossed corner to corner.
@@ -1983,6 +2109,62 @@ pub(crate) mod tests {
                 _ => None,
             })
             .sum()
+    }
+
+    #[test]
+    fn a_full_section_hatches_its_cap_at_its_area() {
+        let views = json!({
+            "v1": {"type": "base", "sheet": "s1", "orient": "front", "scale": "1:1"},
+            "v2": {"type": "section", "sheet": "s1", "from": "v1", "label": "A",
+                   "cut": {"origin": ["20 mm", 0, 0], "normal": [1, 0, 0]}}
+        });
+        let (_d, mut s) = drawn(40.0, 20.0, 10.0, views);
+        let b = build(&mut s, &id("p"), &id("d")).unwrap();
+        assert!(b.findings.is_empty(), "{:?}", b.findings);
+        let sheet = &b.sheets[0];
+        let v2 = sheet
+            .views
+            .iter()
+            .find(|v| v.key.to_string() == "v2")
+            .unwrap();
+        // Looking along -x at the half that stays: its cap is 20 × 10 mm.
+        assert_eq!(v2.towards, [1.0, 0.0, 0.0]);
+        let [lo, hi] = v2.bounds;
+        assert!((hi[0] - lo[0] - 20.0).abs() < 1e-9 && (hi[1] - lo[1] - 10.0).abs() < 1e-9);
+        let area = hatched(sheet) * section::spacing(sheet.paper);
+        assert!((area - 200.0).abs() < 200.0 * 0.05, "{area}");
+        // Third angle: it stands right of its parent, on its row.
+        let v1 = sheet
+            .views
+            .iter()
+            .find(|v| v.key.to_string() == "v1")
+            .unwrap();
+        assert_eq!(v1.at[1], v2.at[1]);
+        assert!(v2.at[0] > v1.at[0]);
+        // The caption, and the cutting line's two letters on the parent.
+        let texts: Vec<&str> = sheet
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Item::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&"SECTION A-A"), "{texts:?}");
+        // The letters at the cutting line's ends (5 mm high; the border's
+        // zone letters are smaller).
+        let letters = sheet
+            .items
+            .iter()
+            .filter(|it| matches!(it, Item::Text { text, size, .. } if text == "A" && *size == 5.0))
+            .count();
+        assert_eq!(letters, 2);
+        // Built again, from the session's cut and projection.
+        let again = build(&mut s, &id("p"), &id("d")).unwrap();
+        assert_eq!(
+            format!("{:?}", again.sheets[0].items),
+            format!("{:?}", sheet.items)
+        );
     }
 
     #[test]
