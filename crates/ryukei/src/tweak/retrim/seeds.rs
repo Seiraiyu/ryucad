@@ -256,10 +256,10 @@ mod tests {
                 )
             })
             .collect();
-        let w = work_body(K, &b, &r, &ws).unwrap();
-        let ops = [w.body.clone()];
         // unmetered: a unit test.
         let m = Meter::free();
+        let w = work_body(K, &b, &r, &ws, &m).unwrap();
+        let ops = [w.body.clone()];
         let table = build_in(&ops, Scope::Pairs(&w.pairs()), &m).unwrap();
         let pieces = split_all(&ops, &table, &m).unwrap();
         let arr = arrangement(&w, &table, &pieces);

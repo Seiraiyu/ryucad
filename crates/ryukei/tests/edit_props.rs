@@ -38,6 +38,11 @@ const MIN_BUILT: usize = 32;
 ///
 /// - 76: an offset of a face of a 19-face body traces past two minutes
 ///   (filed by Task 3 of plan 13.D).
+///
+/// The `edit` fuzz target's first find is slow the same way, and isn't a
+/// seed here: an offset with `Topology::Change` of a face of a 16-face
+/// body refuses `Uncertain` after about 200 s (#647; replayed, cancelled,
+/// by `fuzz_regressions.rs`' `a_cancel_stops_an_edits_working_sheets`).
 const KNOWN_SLOW: &[u64] = &[76];
 
 /// Seeds of `seeded_blends_are_recognised_back` whose blend isn't read
