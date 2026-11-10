@@ -10,6 +10,7 @@ deps 009688e76b92122f
 deps_structure 5bdb14dac47749ae
 diff 6e4d4e0ad7ff6060
 display 575d87fadbd3cdc4
+drawing_sections 9a898d96ca8148fd
 drawings 59fe688efbf17b58
 explodes 24f373106cb30113
 exports 1341c77f1539e1a3

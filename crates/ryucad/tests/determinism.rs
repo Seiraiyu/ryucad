@@ -4748,6 +4748,88 @@ fn drawings_section(golden: &mut Golden) {
 /// The golden file every section's line is in.
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/rebuild.txt");
 
+/// Section, detail and flat views (plan 9.B): a section through the
+/// showcase's tilted cylinder hatched, a detail of it, and every sheet's
+/// bytes, DXF in millimetres and inches too; one thread and four.
+fn drawing_sections_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("drawing_sections");
+    let mut answers = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        answers.push(pool.install(|| {
+            let (dir, session) = showcase();
+            let mut session = Some(session);
+            let call = |s: &mut Option<ryucad::session::Session>, m: &str, p: serde_json::Value| {
+                ryucad::server::handle_safely(
+                    s,
+                    None,
+                    None,
+                    dir.path(),
+                    ryucad::proto::Request::from_rpc(m, Some(p)).unwrap(),
+                )
+                .unwrap_or_else(|e| panic!("{m}: {e}"))
+            };
+            call(
+                &mut session,
+                "drawing.create",
+                json!({"part": "show", "drawing": "cuts", "name": "Cuts"}),
+            );
+            call(
+                &mut session,
+                "drawing.edit",
+                json!({"part": "show", "drawing": "cuts", "ops": [
+                    {"op": "add", "kind": "view", "value": {"type": "base", "sheet": "s1", "orient": "front"}},
+                    {"op": "add", "kind": "view", "value": {"type": "section", "sheet": "s1", "from": "v1",
+                        "cut": {"origin": ["30 mm", 0, 0], "normal": [1, 0, 0]}}},
+                    {"op": "add", "kind": "view", "value": {"type": "section", "sheet": "s1", "from": "v1",
+                        "cut": {"through": [["-10 mm", 0, "5 mm"], ["30 mm", 0, "5 mm"], ["30 mm", 0, "12 mm"], ["70 mm", 0, "12 mm"]]}}},
+                    {"op": "add", "kind": "view", "value": {"type": "detail", "sheet": "s1", "from": "v2",
+                        "centre": ["30 mm", 0, "10 mm"], "radius": "8 mm"}}
+                ]}),
+            );
+            let mut lines = Vec::new();
+            let get = call(
+                &mut session,
+                "drawing.get",
+                json!({"part": "show", "drawing": "cuts", "items": true}),
+            );
+            let mut get = get.result;
+            get.as_object_mut().unwrap().remove("revision");
+            lines.push(format!(
+                "cuts get {:x}",
+                md(ryucad::doc::canonical::to_string(&get).as_bytes())
+            ));
+            for (what, params) in [
+                ("pdf", json!({"format": "pdf"})),
+                ("svg", json!({"format": "svg"})),
+                ("dxf", json!({"format": "dxf"})),
+                ("dxf_in", json!({"format": "dxf", "unit": "in"})),
+            ] {
+                let mut p = params;
+                p["part"] = json!("show");
+                p["drawing"] = json!("cuts");
+                let a = call(&mut session, "drawing.export", p);
+                lines.push(format!("cuts {what} {:x}", md(&a.binary.unwrap())));
+            }
+            let a = call(
+                &mut session,
+                "drawing.render",
+                json!({"part": "show", "drawing": "cuts", "scale": 1.0}),
+            );
+            lines.push(format!("cuts png {:x}", md(&a.binary.unwrap())));
+            lines
+        }));
+    }
+    assert_eq!(answers[0], answers[1], "one thread and four");
+    for l in &answers[0] {
+        s.str(l);
+    }
+}
+
 /// One test per section (`section::<name>`), each checking only its own
 /// line of the golden file, so no one test runs long and they run in
 /// parallel (issue #441); `section::listed` keeps the file to these
@@ -4826,4 +4908,5 @@ sections! {
     thickens => thickens_section(&mut golden),
     annotations => annotations_section(&mut golden),
     drawings => drawings_section(&mut golden),
+    drawing_sections => drawing_sections_section(&mut golden),
 }
