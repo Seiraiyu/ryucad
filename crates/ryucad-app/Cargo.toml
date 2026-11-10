@@ -21,6 +21,9 @@ rayon = "1"
 # Native Open dialogs: the XDG portal on Linux (all Rust), AppKit, Win32.
 rfd = "0.17"
 ryucad = { path = "../ryucad" }
+# Markup's Shift-snapped angles, and the colour-blindness test's arithmetic:
+# the same on every platform (already in the build through ryucad).
+ryu-math = { path = "../ryu-math" }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
 # Only for a feature of eframe's winit: on Wayland compositors that leave
@@ -43,8 +46,6 @@ egui_kittest = { version = "0.37", features = ["eframe", "snapshot", "wgpu"] }
 tempfile = "3"
 # Signed attestations for the approvals window test.
 ryupdm = { path = "../ryupdm", features = ["testing"] }
-# The colour-blindness test's arithmetic, the same on every platform.
-ryu-math = { path = "../ryu-math" }
 # Whole-window and icon sheet pictures: egui_kittest renders to its images.
 image = { version = "0.25", default-features = false, features = ["png"] }
 
