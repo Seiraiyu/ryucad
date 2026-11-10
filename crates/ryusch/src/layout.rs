@@ -22,6 +22,11 @@ pub struct Layout {
     /// largest).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub instructions: BTreeMap<String, Instruction>,
+    /// For each lasting instruction a batch added, where the parts it
+    /// moved stood in the layout before it: what releasing it restores
+    /// (format 3).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub before: BTreeMap<String, BTreeMap<String, Placed>>,
     /// Every part's place, by part key.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub placed: BTreeMap<String, Placed>,
@@ -302,6 +307,38 @@ pub enum Instruction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         orientation: Option<Orientation>,
     },
+    /// The parts' text field (or both) on that side of the body: the
+    /// first free place there (lasting).
+    Text {
+        parts: Vec<String>,
+        field: TextField,
+        side: Side,
+    },
+}
+
+/// Which of a part's text fields an instruction places.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextField {
+    Refdes,
+    Value,
+    /// Both, as one block.
+    Both,
+}
+
+impl TextField {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TextField::Refdes => "refdes",
+            TextField::Value => "value",
+            TextField::Both => "both",
+        }
+    }
+
+    /// Whether it places field `name` (`refdes`, `value`).
+    pub fn covers(self, name: &str) -> bool {
+        self == TextField::Both || self.as_str() == name
+    }
 }
 
 impl Instruction {
@@ -319,7 +356,8 @@ impl Instruction {
             | Instruction::Flow { parts }
             | Instruction::Shift { parts, .. }
             | Instruction::Region { parts, .. }
-            | Instruction::RegionNone { parts } => parts,
+            | Instruction::RegionNone { parts }
+            | Instruction::Text { parts, .. } => parts,
             Instruction::Net { .. } | Instruction::Paper { .. } => &[],
         }
     }
@@ -354,6 +392,7 @@ impl Instruction {
             Instruction::Shift { .. } => "shift",
             Instruction::Region { .. } | Instruction::RegionNone { .. } => "region",
             Instruction::Paper { .. } => "paper",
+            Instruction::Text { .. } => "text",
         }
     }
 }
@@ -372,6 +411,7 @@ impl Layout {
     /// pin-level `align`; else 1.
     pub fn format(&self) -> u64 {
         let three = !self.regions.is_empty()
+            || !self.before.is_empty()
             || self
                 .sheets
                 .values()
@@ -382,6 +422,7 @@ impl Layout {
                     Instruction::Region { .. }
                         | Instruction::RegionNone { .. }
                         | Instruction::Paper { .. }
+                        | Instruction::Text { .. }
                 )
             });
         if three {
@@ -419,6 +460,12 @@ impl Layout {
                 if let Some(p) = out.placed.get_mut(k) {
                     p.at = [p.at[0] + sign * r.at[0], p.at[1] + sign * r.at[1]];
                 }
+                // Where it stood before an instruction, in its region now.
+                for list in out.before.values_mut() {
+                    if let Some(p) = list.get_mut(k) {
+                        p.at = [p.at[0] + sign * r.at[0], p.at[1] + sign * r.at[1]];
+                    }
+                }
             }
         }
         out
@@ -438,6 +485,49 @@ pub fn next_id(ids: impl IntoIterator<Item = impl AsRef<str>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `before` round-trips and makes the file format 3.
+    #[test]
+    fn before_is_format_3() {
+        let mut l = Layout::default();
+        l.before.insert(
+            "i1".into(),
+            [(
+                "r1".to_owned(),
+                Placed {
+                    sheet: "s1".into(),
+                    at: [0, 0],
+                    rotation: 0,
+                    mirror: false,
+                    held: false,
+                },
+            )]
+            .into(),
+        );
+        assert_eq!(l.format(), 3);
+        let text = serde_json::to_string(&l).unwrap();
+        assert_eq!(serde_json::from_str::<Layout>(&text).unwrap(), l);
+    }
+
+    /// `text` reads and writes as JSON, and a layout holding one is format 3.
+    #[test]
+    fn a_text_instruction_round_trips_at_format_3() {
+        let ins = Instruction::Text {
+            parts: vec!["r1".into()],
+            field: TextField::Both,
+            side: Side::Left,
+        };
+        let json = serde_json::to_value(&ins).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"op": "text", "parts": ["r1"], "field": "both", "side": "left"})
+        );
+        assert_eq!(serde_json::from_value::<Instruction>(json).unwrap(), ins);
+        let mut l = Layout::default();
+        l.instructions.insert("i1".into(), ins);
+        assert_eq!(l.format(), 3);
+        assert_eq!(l.instructions["i1"].verb(), "text");
+    }
     use serde_json::json;
 
     #[test]

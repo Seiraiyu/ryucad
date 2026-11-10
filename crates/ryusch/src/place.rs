@@ -26,6 +26,9 @@ pub struct Hints {
     /// between rows: what a layout from nothing spreads by when its labels
     /// or text don't fit.
     pub spread: Nm,
+    /// Nets whose port flags stand with the block's ports, never moved
+    /// onto a pin's line: a bank's rows, which end in their pulls (#429).
+    pub apart: BTreeSet<usize>,
 }
 
 /// Where each cluster goes on one sheet: its origin, or `None` for those
@@ -554,7 +557,9 @@ pub fn flow(
             'search: for (p, place) in cl.places(o) {
                 let shape = crate::shape::Shape::of(&block.parts[p], place);
                 for (k, pin) in block.parts[p].pins.iter().enumerate() {
-                    let Some(n) = pin.net else { continue };
+                    let Some(n) = pin.net.filter(|n| !hints.apart.contains(n)) else {
+                        continue;
+                    };
                     if let Some(list) = pin_y.get(&n)
                         && let Some(&(_, y, _)) = list.first()
                     {
@@ -631,7 +636,10 @@ pub fn flow(
     for c in ports.iter().chain(ports.iter()).copied() {
         let cl = &clusters[c];
         let p = cl.first();
-        let Some(n) = block.parts[p].pins[0].net else {
+        let Some(n) = block.parts[p].pins[0]
+            .net
+            .filter(|n| !hints.apart.contains(n))
+        else {
             continue;
         };
         let o = origins[&c];

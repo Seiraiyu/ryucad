@@ -317,8 +317,21 @@ pub fn merge(block: &Block, base: &Layout, ours: &Layout, theirs: &Layout) -> Me
         values(&shifted_by_base(theirs, base, 1)),
     );
     let all: BTreeSet<&Key> = b.keys().chain(o.keys()).chain(t.keys()).collect();
+    let merged = instructions(base, ours, theirs);
+    // What each merged instruction moved stood before it: as the side its
+    // instruction came from remembered it.
+    let before = merged
+        .iter()
+        .filter_map(|(id, i)| {
+            [ours, theirs, base].into_iter().find_map(|l| {
+                let (k, _) = l.instructions.iter().find(|(_, x)| *x == i)?;
+                l.before.get(k).map(|m| (id.clone(), m.clone()))
+            })
+        })
+        .collect();
     let mut layout = Layout {
-        instructions: instructions(base, ours, theirs),
+        instructions: merged,
+        before,
         ..Layout::default()
     };
     let mut ours_changed: BTreeSet<Key> = BTreeSet::new();

@@ -117,7 +117,7 @@ pub fn layout(
         })
         .transpose()?;
     // The one block a picture is of: --block, else --relayout's.
-    let pictured: Option<Id> = render.and(match block {
+    let pictured: Option<Id> = render.as_ref().and(match block {
         Some(_) => list.first().map(|b| b.id.clone()),
         None => fresh.as_ref().map(|(id, _)| id.clone()),
     });
@@ -167,7 +167,7 @@ pub fn layout(
             )
             .with("param", "render")
         })?;
-        let (mime, bytes, px) = picture(&laid, &[], ask)?;
+        let (mime, bytes, px) = picture(&laid, &[], &ask)?;
         let mut v = json!({"blocks": out, "dry_run": dry_run, "format": ask.format});
         if let Some(px) = px {
             v["scale"] = json!(px);
@@ -452,7 +452,16 @@ pub fn place(
     } else {
         Relayout::Parts(replace)
     };
-    let laid = match schem::lay(p, b, Some(&lasting), &move_list, relayout) {
+    // Where the released instructions' parts stood before them.
+    let restore: BTreeMap<String, ryusch::layout::Placed> = match &b.layout {
+        Some(Ok(l)) => released
+            .iter()
+            .filter_map(|id| l.before.get(id))
+            .flat_map(|m| m.iter().map(|(k, x)| (k.clone(), x.clone())))
+            .collect(),
+        _ => BTreeMap::new(),
+    };
+    let laid = match schem::lay_restoring(p, b, Some(&lasting), &move_list, relayout, restore) {
         Ok(l) => l,
         Err(e) if matches!(e.code, Code::InstructionConflict | Code::LayoutRule) => {
             let f = fixes(&names, &before, &batch, &e);
@@ -489,6 +498,24 @@ pub fn place(
         .with("fixes", json!(fixes)));
     }
     let bid = b.id.clone();
+    let mut laid = laid;
+    // What each lasting instruction this batch added moved: where those
+    // parts stood before it, which releasing it restores.
+    if let Some(Ok(prev)) = &b.layout {
+        let moved: BTreeMap<String, ryusch::layout::Placed> = prev
+            .placed
+            .iter()
+            .filter(|(k, x)| laid.outcome.layout.placed.get(*k) != Some(*x))
+            .map(|(k, x)| (k.clone(), x.clone()))
+            .collect();
+        if !moved.is_empty() {
+            for id in &added {
+                if lasting.contains_key(id) {
+                    laid.outcome.layout.before.insert(id.clone(), moved.clone());
+                }
+            }
+        }
+    }
     let mut listing = listing(&names, &laid);
     // What changed nothing says so: a lasting instruction added in this
     // batch, a move.
@@ -515,6 +542,9 @@ pub fn place(
             });
             if let Err(why) = ryusch::instr::judge(&laid.built.input, &laid.outcome.layout, ins) {
                 n["details"]["why"] = json!(why);
+            }
+            if let Some(b) = blocker(&laid, ins) {
+                n["details"]["blocked"] = json!(b);
             }
             if let Some(a) = notes.as_array_mut() {
                 a.push(n);
@@ -575,7 +605,6 @@ pub fn place(
     });
     // One shape with describe's: the block's description and its scores,
     // written or not.
-    let mut laid = laid;
     let mut description = block_description(p, b, &mut laid, None)?;
     let scores: Vec<Value> = description["sheets"]
         .as_array()
@@ -585,7 +614,7 @@ pub fn place(
     if dry_run {
         v["description"] = json!({"blocks": [description]});
         if let Some(ask) = render {
-            let (mime, bytes, px) = picture(&laid, &[], ask)?;
+            let (mime, bytes, px) = picture(&laid, &[], &ask)?;
             v["format"] = json!(ask.format);
             if let Some(px) = px {
                 v["scale"] = json!(px);
@@ -621,11 +650,27 @@ fn listing(names: &Names, laid: &Laid) -> Vec<Value> {
                 "holds": verdict.is_ok(),
             });
             if let Err(why) = verdict {
-                v["why"] = json!(why);
+                v["why"] = json!(match blocker(laid, i) {
+                    Some(b) => format!("{why}; {b}"),
+                    None => why,
+                });
             }
             v
         })
         .collect()
+}
+
+/// What the engine found standing where `ins` wanted one of its parts.
+fn blocker(laid: &Laid, ins: &Instruction) -> Option<String> {
+    ins.parts()
+        .iter()
+        .flat_map(|s| ryusch::instr::parts_named(&laid.built.input, s))
+        .find_map(|p| {
+            laid.outcome
+                .blocked
+                .get(&laid.built.input.parts[p].key)
+                .cloned()
+        })
 }
 
 /// Whether what `ins` speaks of is drawn as it was: its parts' places, or
@@ -696,9 +741,18 @@ fn block_description(
     sheet: Option<&str>,
 ) -> Result<Value> {
     let (layers, shown) = show_layer(p, b, laid, None)?;
-    let (findings, scores) =
-        ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
+    let prefs = crate::lint::prefs(p);
+    let (_, scores) = ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &prefs);
+    // Every fix tried by a dry run first: those that don't hold aren't
+    // offered.
+    let (findings, checked) = schem::checked_findings(laid, &prefs);
     let mut d = ryusch::describe::describe(&laid.built.input, &laid.outcome, &findings, &scores);
+    let unchecked: Vec<(&str, &str, &Vec<String>)> = findings
+        .iter()
+        .zip(&checked)
+        .filter(|(_, ok)| !**ok)
+        .map(|(f, _)| (f.code, f.sheet.as_str(), &f.refs))
+        .collect();
     let names = Names {
         p,
         b,
@@ -715,8 +769,15 @@ fn block_description(
     // Findings' fixes in the agent's names, ready to send.
     if let Some(sheets) = d["sheets"].as_array_mut() {
         for s in sheets {
+            let sid = s["sheet"].as_str().unwrap_or_default().to_owned();
             if let Some(found) = s["findings"].as_array_mut() {
                 for f in found {
+                    let past = unchecked.iter().any(|(code, sheet, refs)| {
+                        f["code"] == *code && *sheet == sid && f["refs"] == json!(refs)
+                    });
+                    if past {
+                        f["fixes_checked"] = json!(false);
+                    }
                     names.fixes_in(f);
                 }
             }
@@ -762,13 +823,16 @@ pub enum Format {
 }
 
 /// A picture asked of a dry run (`place --dry-run --render FILE`).
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RenderAsk {
     pub format: Format,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<f32>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fit: bool,
+    /// One sheet (by ID or name), else the whole canvas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<String>,
 }
 
 /// A layout drawn as `render` draws it: the bytes, their type, and the
@@ -776,13 +840,32 @@ pub struct RenderAsk {
 fn picture(
     laid: &Laid,
     refs: &[&str],
-    ask: RenderAsk,
+    ask: &RenderAsk,
 ) -> Result<(&'static str, Vec<u8>, Option<f32>)> {
     let layout = &laid.outcome.layout;
-    let svg = if ask.fit {
-        ryusch::svg::draw_fit(&laid.built.input, layout, refs)
+    let one: Vec<String> = match &ask.sheet {
+        None => Vec::new(),
+        Some(s) => vec![
+            layout
+                .sheets
+                .iter()
+                .find(|(k, v)| *k == s || v.name == *s)
+                .map(|(k, _)| k.clone())
+                .ok_or_else(|| {
+                    Error::new(Code::NotFound, format!("the layout has no sheet {s}"))
+                        .with("sheet", s.as_str())
+                })?,
+        ],
+    };
+    let refs: Vec<&str> = if one.is_empty() {
+        refs.to_vec()
     } else {
-        ryusch::svg::draw(&laid.built.input, layout, refs)
+        one.iter().map(String::as_str).collect()
+    };
+    let svg = if ask.fit {
+        ryusch::svg::draw_fit(&laid.built.input, layout, &refs)
+    } else {
+        ryusch::svg::draw(&laid.built.input, layout, &refs)
     };
     Ok(match ask.format {
         Format::Svg => ("image/svg+xml", svg.into_bytes(), None),
@@ -912,7 +995,16 @@ pub fn render(
     if laid.stale {
         v["stale"] = json!(true);
     }
-    let (mime, bytes, px) = picture(&laid, &refs, RenderAsk { format, scale, fit })?;
+    let (mime, bytes, px) = picture(
+        &laid,
+        &refs,
+        &RenderAsk {
+            format,
+            scale,
+            fit,
+            sheet: None,
+        },
+    )?;
     if let Some(px) = px {
         v["scale"] = json!(px);
     }

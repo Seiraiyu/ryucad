@@ -37,6 +37,13 @@ struct Item {
     /// What a part draws: its body and its pins' lines, which text and
     /// labels may not touch (the rest of its box is empty).
     ink: Vec<Rect>,
+    /// A part of two pins lying across the page, its pins' row: two such
+    /// on different rows may stand closer than a step (a bank's members,
+    /// rows two steps apart), their extents still apart.
+    row: Option<i64>,
+    /// A net label's net and its line (a name on its wire): a wire of
+    /// that net may run along the line, clear of the text alone.
+    on_wire: Option<(String, Rect, Rect)>,
 }
 
 const PART: u8 = 0;
@@ -86,11 +93,17 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
             }
             let mut ink = vec![shape.body];
             ink.extend(shape.pins.iter().map(|p| Rect::new(p.base, p.end)));
+            let row = (shape.pins.len() == 2
+                && shape.pins.iter().all(|p| p.side.horizontal())
+                && shape.pins[0].end[1] == shape.pins[1].end[1])
+                .then(|| shape.pins[0].end[1]);
             items.push(Item {
                 what: part.key.clone(),
                 rect: shape.extent,
                 kind: PART,
                 ink,
+                row,
+                on_wire: None,
             });
             if let Some(fields) = layout.text.get(&part.key) {
                 for (field, value) in [("refdes", &part.refdes), ("value", &part.value)] {
@@ -115,6 +128,8 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                             rect: b,
                             kind: TEXT,
                             ink: Vec::new(),
+                            row: None,
+                            on_wire: None,
                         });
                     }
                 }
@@ -139,11 +154,24 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                         vec![key.clone()],
                     ));
                 }
+                let on_wire = (l.kind == crate::layout::LabelKind::Net).then(|| {
+                    let d = label::drawn(l.kind, name, l.at, l.side);
+                    let line = Rect::of(d.lines.iter().flatten().copied()).expect("a line");
+                    let text = d
+                        .text
+                        .map(|(at, anchor, _)| {
+                            crate::font::text_box(name, crate::font::SIZE, at, anchor)
+                        })
+                        .unwrap_or(line);
+                    (key.clone(), line, text)
+                });
                 items.push(Item {
                     what: format!("label {key} at {}", l.on),
                     rect: b,
                     kind: LABEL,
                     ink: Vec::new(),
+                    row: None,
+                    on_wire,
                 });
             }
         }
@@ -153,7 +181,10 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
             for j in i + 1..items.len() {
                 let (a, b) = (&items[i], &items[j]);
                 let overlap = match (a.kind == PART, b.kind == PART) {
-                    (true, true) => a.rect.grow(GRID / 2).overlaps(&b.rect.grow(GRID / 2 - 1)),
+                    (true, true) => match (a.row, b.row) {
+                        (Some(ra), Some(rb)) if ra != rb => a.rect.overlaps(&b.rect),
+                        _ => a.rect.grow(GRID / 2).overlaps(&b.rect.grow(GRID / 2 - 1)),
+                    },
                     (true, false) => a.ink.iter().any(|r| touches(r, &b.rect)),
                     (false, true) => b.ink.iter().any(|r| touches(r, &a.rect)),
                     (false, false) => a.rect.overlaps(&b.rect),
@@ -204,7 +235,23 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                         ));
                     }
                     for it in &items {
-                        if it.kind != PART && it.rect.overlaps(&seg) {
+                        // A net label lies along a wire of its own net: the
+                        // wire may run on its line, never through its text.
+                        let rect = match &it.on_wire {
+                            Some((net, line, text))
+                                if net == key
+                                    && (line.min[1] == line.max[1]
+                                        && seg.min[1] == seg.max[1]
+                                        && seg.min[1] == line.min[1]
+                                        || line.min[0] == line.max[0]
+                                            && seg.min[0] == seg.max[0]
+                                            && seg.min[0] == line.min[0]) =>
+                            {
+                                *text
+                            }
+                            _ => it.rect,
+                        };
+                        if it.kind != PART && rect.overlaps(&seg) {
                             out.push(v(
                                 "overlap",
                                 format!("a wire of {key} runs through {}", it.what),
@@ -430,6 +477,57 @@ mod tests {
             rules.contains(&"overlap") && rules.contains(&"orthogonal"),
             "{rules:?}"
         );
+    }
+
+    /// Two parts of two pins lying across the page on rows two steps
+    /// apart (a bank's members) may stand closer than a step; on one row,
+    /// or with extents overlapping, they break `spacing` or `overlap`.
+    #[test]
+    fn parts_across_the_page_on_different_rows_may_stand_close() {
+        use crate::layout::Placed;
+        let b = crate::testing::dense_block(false);
+        let l = crate::engine::lay_out(&b).unwrap().layout;
+        assert_eq!(check(&b, &l), [], "the bank's rows two steps apart");
+        // R2 standing up a step past R1's end: not across the page, too
+        // close.
+        let mut close = l.clone();
+        let r1: Placed = close.placed["r1"].clone();
+        let r2 = close.placed.get_mut("r2").unwrap();
+        r2.at = [r1.at[0] + 4 * GRID, r1.at[1]];
+        r2.rotation = 0;
+        let rules: Vec<&str> = check(&b, &close).iter().map(|v| v.rule).collect();
+        assert!(rules.contains(&"spacing"), "{rules:?}");
+        // R2 a step under R1: their extents overlap.
+        let mut over = l.clone();
+        over.placed.get_mut("r2").unwrap().at = [r1.at[0], r1.at[1] - GRID];
+        let rules: Vec<&str> = check(&b, &over).iter().map(|v| v.rule).collect();
+        assert!(rules.contains(&"overlap"), "{rules:?}");
+    }
+
+    /// A net label lies along a wire of its own net (a bank's row on a
+    /// port's net), but no wire may cross its text.
+    #[test]
+    fn a_net_label_lies_along_its_wire_but_not_across_its_text() {
+        let b = crate::testing::dense_block(true);
+        let l = crate::engine::lay_out(&b).unwrap().layout;
+        assert_eq!(check(&b, &l), []);
+        let label = l.labels["s0"]
+            .iter()
+            .find(|x| x.kind == crate::layout::LabelKind::Net && x.on.starts_with("u1/"))
+            .expect("the row's label")
+            .clone();
+        // A wire of S0 down through the label's text.
+        let x = label.at[0] + 2 * GRID;
+        let mut across = l.clone();
+        across
+            .routes
+            .get_mut("s0")
+            .unwrap()
+            .get_mut(&label.sheet)
+            .unwrap()
+            .push(vec![[x, label.at[1] + 3 * GRID], [x, label.at[1]]]);
+        let rules: Vec<&str> = check(&b, &across).iter().map(|v| v.rule).collect();
+        assert!(rules.contains(&"overlap"), "{rules:?}");
     }
 
     #[test]

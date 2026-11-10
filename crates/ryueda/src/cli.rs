@@ -185,6 +185,9 @@ enum Command {
         /// Crop the picture to what is drawn.
         #[arg(long, requires = "render")]
         fit: bool,
+        /// Draw one sheet (by ID or name) with --render.
+        #[arg(long, requires = "render")]
+        sheet: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -192,7 +195,8 @@ enum Command {
     /// lasting until released ("sheet X... S", "beside X... Y
     /// left|right|above|below", "near X... P", "align X... row|column",
     /// "group X...", "edge X... left|right|top|bottom", "orient X...
-    /// 0|90|180|270 [mirror]", "net N wire|label|port", "idiom X...
+    /// 0|90|180|270 [mirror]", "text X... refdes|value|both
+    /// left|right|above|below", "net N wire|label|port", "idiom X...
     /// KIND|none", "flow X... reversed", "release X..."). Parts by
     /// designator (U3), unit (U1:2), instance (instance:<id>) or port
     /// (port:SDA); pins as U3.VDD or U3.4; nets by name or rail:<name>.
@@ -222,6 +226,9 @@ enum Command {
         /// Crop the picture to what is drawn.
         #[arg(long, requires = "render")]
         fit: bool,
+        /// Draw one sheet (by ID or name) with --render.
+        #[arg(long, requires = "render")]
+        sheet: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1845,6 +1852,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             format,
             scale,
             fit,
+            sheet,
             expect,
         } => Request::Layout {
             design: design.clone(),
@@ -1858,6 +1866,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                     format: picture_format(format.as_deref(), out)?,
                     scale: *scale,
                     fit: *fit,
+                    sheet: sheet.clone(),
                 }),
             },
         },
@@ -1875,6 +1884,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             format,
             scale,
             fit,
+            sheet,
             expect,
             ..
         } => Request::LayoutPlace {
@@ -1889,6 +1899,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                     format: picture_format(format.as_deref(), out)?,
                     scale: *scale,
                     fit: *fit,
+                    sheet: sheet.clone(),
                 }),
             },
         },

@@ -553,6 +553,68 @@ pub fn check_bytes(data: &[u8]) {
         };
         block.instructions.insert(format!("r{}", i + 1), ins);
     }
+    // Plan 2.B, from the bytes past the 80th: an op-amp stage, `text`,
+    // networks and ports near a pin, and the stage's amplifier turned.
+    let mut more = Bytes(data.get(80..).unwrap_or(&[]), 0);
+    if more.next() & 1 == 1 {
+        block = with_stage(block);
+    }
+    let keys: Vec<String> = block.parts.iter().map(|p| p.key.clone()).collect();
+    // A pin of a part of three pins or more: what a network stands off.
+    let wide: Vec<usize> = (0..block.parts.len())
+        .filter(|p| block.parts[*p].pins.len() >= 3)
+        .collect();
+    let pin_of = |b: &mut Bytes| -> Option<String> {
+        let part = &block.parts[*wide.get(b.next() % wide.len().max(1))?];
+        let pin = part.pins.get(b.next() % part.pins.len().max(1))?;
+        Some(format!("{}/{}", part.key, pin.number))
+    };
+    for i in 0..more.next() % 4 {
+        let ins = match more.next() % 3 {
+            0 => Instruction::Text {
+                parts: vec![keys[more.next() % keys.len()].clone()],
+                field: [
+                    crate::layout::TextField::Refdes,
+                    crate::layout::TextField::Value,
+                    crate::layout::TextField::Both,
+                ][more.next() % 3],
+                side: SIDES[more.next() % 4],
+            },
+            1 => {
+                // A network: two or three parts of two pins.
+                let two: Vec<&String> = block
+                    .parts
+                    .iter()
+                    .filter(|p| p.pins.len() == 2 && matches!(p.kind, PartKind::Symbol { .. }))
+                    .map(|p| &p.key)
+                    .collect();
+                if two.is_empty() {
+                    continue;
+                }
+                let mut parts = Vec::new();
+                for _ in 0..2 + more.next() % 2 {
+                    parts.push(two[more.next() % two.len()].clone());
+                }
+                parts.sort();
+                parts.dedup();
+                let Some(to) = pin_of(&mut more) else {
+                    continue;
+                };
+                Instruction::Near { parts, to }
+            }
+            _ => {
+                if block.part("ua").is_none() {
+                    continue;
+                }
+                Instruction::Orient {
+                    parts: vec!["ua".into()],
+                    rotation: [0, 180][more.next() % 2],
+                    mirror: more.next() % 2 == 1,
+                }
+            }
+        };
+        block.instructions.insert(format!("t{}", i + 1), ins);
+    }
     let out = match crate::engine::lay_out(&block) {
         Ok(o) => o,
         Err(r) => {
@@ -646,4 +708,109 @@ pub fn regions_block() -> Block {
         sheet: [400_000_000, 277_000_000],
         ..Block::default()
     }
+}
+
+/// A dense part (#429's shape): a 24-pin IC whose right side's rows each
+/// carry a signal, ten of them pulled, pull-ups and pull-downs
+/// interleaved as the Ethernet PHY's are (from the top: up, up, up, down,
+/// down, down, up, up, up, down), two of the pulled nets block ports
+/// (`with_ports`), and one row (the ninth) with a capacitor to ground as
+/// well. Nets: 0 the supply, 1 ground, 2.. one a row.
+pub fn dense_block(with_ports: bool) -> Block {
+    use crate::input::Flow;
+    let ups = [
+        true, true, true, false, false, false, true, true, true, false,
+    ];
+    let names: Vec<String> = (0..12).map(|i| format!("S{i}")).collect();
+    let mut nets = vec![
+        net("rail:v", "3V3", NetKind::Supply),
+        net("rail:gnd", "GND", NetKind::Ground),
+    ];
+    for n in &names {
+        nets.push(net(&n.to_lowercase(), n, NetKind::Signal));
+    }
+    let right: Vec<(&str, PinKind, Option<usize>)> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), PinKind::Bidirectional, Some(2 + i)))
+        .collect();
+    let left: Vec<(&str, PinKind, Option<usize>)> = vec![
+        ("VDD", PinKind::PowerIn, Some(0)),
+        ("GND", PinKind::PowerIn, Some(1)),
+    ]
+    .into_iter()
+    .chain((0..10).map(|_| ("NC", PinKind::Passive, None)))
+    .collect();
+    let mut parts = vec![ic("u1", "U1", "PHY", &left, &right)];
+    for (i, up) in ups.iter().enumerate() {
+        let rail = if *up { Some(0) } else { Some(1) };
+        parts.push(resistor(
+            &format!("r{}", i + 1),
+            &format!("R{}", i + 1),
+            "10k",
+            [Some(2 + i), rail],
+        ));
+    }
+    parts.push(capacitor("c1", "C1", "100n", [Some(10), Some(1)]));
+    // Two signals out of the block, each pulled: ports.
+    if with_ports {
+        parts.push(port("port:a", "S0", Flow::Bidirectional, Some(2)));
+        parts.push(port("port:b", "S6", Flow::Bidirectional, Some(8)));
+    }
+    // The two unpulled rows go somewhere: a connector.
+    parts.push(connector("j1", "J1", &[Some(12), Some(13)]));
+    Block {
+        parts,
+        nets,
+        sheet: [400_000_000, 277_000_000],
+        ..Block::default()
+    }
+}
+
+/// A one-symbol resistor network of `n` elements (prefix RN): element
+/// `k` between pin `k` on the left and pin `2n + 1 - k` on the right,
+/// level, two steps apart, top to bottom; `nets` gives each pin's net in
+/// pin number order.
+pub fn network(key: &str, refdes: &str, value: &str, nets: &[Option<usize>]) -> Part {
+    let n = nets.len() / 2;
+    let h = 2 * GRID * n as Nm;
+    let mut pins = Vec::new();
+    for (k, net) in nets[..n].iter().enumerate() {
+        let y = h / 2 - GRID - 2 * GRID * k as Nm;
+        pins.push(pin(
+            &(k + 1).to_string(),
+            "",
+            [-3 * GRID, y],
+            Side::Left,
+            2 * GRID,
+            PinKind::Passive,
+            *net,
+        ));
+    }
+    for k in (0..n).rev() {
+        let y = h / 2 - GRID - 2 * GRID * k as Nm;
+        let number = 2 * n - k;
+        pins.push(pin(
+            &number.to_string(),
+            "",
+            [3 * GRID, y],
+            Side::Right,
+            2 * GRID,
+            PinKind::Passive,
+            nets[number - 1],
+        ));
+    }
+    pins.sort_by_key(|p| p.number.parse::<usize>().unwrap_or(0));
+    symbol(
+        key,
+        "RN",
+        refdes,
+        value,
+        vec![Graphic::Rect {
+            start: [-GRID, h / 2],
+            end: [GRID, -h / 2],
+            fill: Fill::Body,
+        }],
+        pins,
+    )
 }

@@ -3041,3 +3041,133 @@ fn digikey_from_the_cli() {
     assert_eq!(e["details"]["warnings"][0]["code"], "parts_rate_limited");
     assert_eq!(e["details"]["warnings"][0]["details"]["retry_after_s"], 30);
 }
+
+/// `place --dry-run --render FILE --sheet S` and `layout --relayout B
+/// --dry-run --render FILE --sheet S` draw that sheet alone; an unknown
+/// sheet is not_found. Both ways (`Pair` runs every command in process
+/// and through the daemon).
+#[test]
+fn a_dry_run_renders_one_sheet() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    let v = p.ok(&[
+        "place",
+        "breakout",
+        "--dry-run",
+        "--render",
+        "one.svg",
+        "--sheet",
+        "s1",
+    ]);
+    assert_eq!(v["format"], json!("svg"));
+    for top in [&p.direct, &p.daemon] {
+        let svg = fs::read_to_string(top.join("board/one.svg")).unwrap();
+        assert_eq!(svg.matches("<g id=\"sheet-").count(), 1, "{svg:.400}");
+    }
+    p.fails(
+        &[
+            "place",
+            "breakout",
+            "--dry-run",
+            "--render",
+            "one.svg",
+            "--sheet",
+            "nope",
+        ],
+        "not_found",
+        1,
+    );
+    let v = p.ok(&[
+        "layout",
+        "--relayout",
+        "breakout",
+        "--dry-run",
+        "--render",
+        "two.svg",
+        "--sheet",
+        "s1",
+    ]);
+    assert_eq!(v["format"], json!("svg"));
+}
+
+/// `place "edge R1 left"` then `place "release R1"` puts R1 back where it
+/// stood, and the layout file forgets what it remembered for it.
+#[test]
+fn release_restores_the_drawing() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    let read = || -> Value {
+        serde_json::from_slice(
+            &fs::read(p.direct.join("board/blocks/breakout/layout.json")).unwrap(),
+        )
+        .unwrap()
+    };
+    let before = read();
+    p.ok(&["place", "breakout", "edge R1 left"]);
+    let moved = read();
+    let id = moved["instructions"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, i)| i["op"] == json!("edge"))
+        .map(|(k, _)| k.clone())
+        .unwrap();
+    assert!(moved["before"][&id]["r1"].is_object(), "{moved:#}");
+    assert_ne!(moved["placed"]["r1"], before["placed"]["r1"]);
+    p.ok(&["place", "breakout", "release R1"]);
+    let after = read();
+    assert_eq!(after["placed"]["r1"]["at"], before["placed"]["r1"]["at"]);
+    assert!(after.get("before").is_none_or(|b| b.get(&id).is_none()));
+}
+
+/// An instruction that doesn't hold says what stood where it wanted its
+/// part: a designator, or that the sheet had no room there (plan 2.B
+/// Task 18). Both ways.
+#[test]
+fn a_blocked_instruction_says_what_blocks_it() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    // J1 asked right of U2: something stands there.
+    let v = p.ok(&["place", "breakout", "--dry-run", "beside J1 U2 right"]);
+    let ins = &v["instructions"][0];
+    assert_eq!(ins["holds"], json!(false), "{ins}");
+    let why = ins["why"].as_str().unwrap();
+    assert!(
+        why.contains("where it would go") || why.contains("no free place"),
+        "{why}"
+    );
+}
+
+/// `text` reads in the agent's terms, holds, and the listing writes it
+/// back the same; a field or side it doesn't know is invalid_param.
+#[test]
+fn text_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    p.ok(&[
+        "place",
+        "breakout",
+        "text R1 refdes left",
+        "text R2 both below",
+    ]);
+    let list = p.ok(&["place", "breakout", "--list"]);
+    let texts: Vec<&str> = list["instructions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["text"].as_str().unwrap())
+        .collect();
+    assert!(texts.contains(&"text R1 refdes left"), "{list:#}");
+    assert!(texts.contains(&"text R2 both below"), "{list:#}");
+    for i in list["instructions"].as_array().unwrap() {
+        if i["text"].as_str().unwrap().starts_with("text ") {
+            assert_eq!(i["holds"], json!(true), "{i:#}");
+        }
+    }
+    p.fails(
+        &["place", "breakout", "text R1 colour left"],
+        "invalid_param",
+        1,
+    );
+    p.fails(&["place", "breakout", "text R1 refdes"], "invalid_param", 1);
+}

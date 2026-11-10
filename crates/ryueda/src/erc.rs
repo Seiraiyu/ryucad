@@ -1021,13 +1021,14 @@ pub fn schematic_warnings(p: &Project) -> Vec<Fault> {
             );
         }
         let prefs = crate::lint::prefs(p);
-        let (findings, _) = ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &prefs);
+        // Every fix tried by a dry run before it is offered.
+        let (findings, checked) = crate::schem::checked_findings(&laid, &prefs);
         let names = crate::vocab::Names {
             p,
             b,
             built: &laid.built,
         };
-        for f in findings {
+        for (f, ok) in findings.into_iter().zip(checked) {
             let code: Code = serde_json::from_value(json!(f.code)).expect("lint codes are codes");
             let fixes = names.fixes(&f.fixes);
             // A rule `lint.json` makes an error fails the check.
@@ -1041,6 +1042,9 @@ pub fn schematic_warnings(p: &Project) -> Vec<Fault> {
                 .with("refs", &f.refs);
             if !fixes.is_empty() {
                 fault = fault.with("fixes", fixes);
+            }
+            if !ok {
+                fault = fault.with("fixes_checked", false);
             }
             out.push(fault);
         }
