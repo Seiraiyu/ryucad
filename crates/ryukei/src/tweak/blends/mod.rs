@@ -7,13 +7,14 @@
 
 pub(crate) mod fit;
 pub(crate) mod recognise;
+pub(crate) mod remake;
 
 #[cfg(test)]
 mod tests;
 
 use crate::Error;
 use crate::blend::BlendKind;
-use crate::name::Name;
+use crate::name::{Journal, Name, OpKey};
 use crate::topo::Body;
 use crate::work::Work;
 
@@ -88,4 +89,36 @@ pub fn recognise_blends_with(
     work: &Work,
 ) -> Result<Recognition, Error> {
     crate::work::run(work, |m| recognise::recognise(body, opts, m))
+}
+
+/// Which blends [`delete_blends`] takes away: every one no larger than
+/// `max_size`, and those holding `faces`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DeleteBlends {
+    pub max_size: Option<f64>,
+    pub faces: Vec<Name>,
+    /// How recognition reads the body.
+    pub options: RecogniseOptions,
+}
+
+/// `body` with the blends `spec` picks deleted, their supports grown
+/// until they meet, with the whole chain of each and every corner it
+/// reaches: a new body and the journal (each blend face `Replaced` by the
+/// sharp edges it leaves). Picking nothing changes nothing.
+pub fn delete_blends(
+    key: OpKey,
+    body: &Body,
+    spec: &DeleteBlends,
+) -> Result<(Body, Journal), Error> {
+    delete_blends_with(key, body, spec, &Work::unlimited())
+}
+
+/// [`delete_blends`] under `work`.
+pub fn delete_blends_with(
+    key: OpKey,
+    body: &Body,
+    spec: &DeleteBlends,
+    work: &Work,
+) -> Result<(Body, Journal), Error> {
+    crate::work::run(work, |m| remake::delete_blends(key, body, spec, m))
 }
