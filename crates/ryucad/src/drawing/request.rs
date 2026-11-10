@@ -636,7 +636,39 @@ fn sheet_json(s: &SheetBuilt, items: bool) -> Value {
         "annotations": s.annotations.iter().map(annotation_json).collect::<Vec<_>>(),
     });
     if items {
-        out["items"] = json!(s.items.iter().map(item_json).collect::<Vec<_>>());
+        // Each view's and annotation's items, as a range of the sheet's,
+        // and the model entity each of a view's curves draws: what the
+        // app picks.
+        for (v, j) in s
+            .views
+            .iter()
+            .zip(out["views"].as_array_mut().into_iter().flatten())
+        {
+            j["items"] = json!([v.items.start, v.items.end]);
+        }
+        for (a, j) in s
+            .annotations
+            .iter()
+            .zip(out["annotations"].as_array_mut().into_iter().flatten())
+        {
+            j["items"] = json!([a.items.start, a.items.end]);
+            if let Some(n) = a.normal {
+                j["normal"] = json!(n);
+            }
+        }
+        let items: Vec<Value> = s
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, it)| {
+                let mut v = item_json(it);
+                if let Some(e) = s.sources.get(&i) {
+                    v["entity"] = json!(e);
+                }
+                v
+            })
+            .collect();
+        out["items"] = json!(items);
     }
     out
 }
@@ -712,7 +744,7 @@ pub fn get(
     items: bool,
 ) -> Result<Value> {
     let pid = crate::server::part_id(part)?;
-    let (did, _) = file_of(session, &pid, drawing)?;
+    let (did, file) = file_of(session, &pid, drawing)?;
     let b = build(session, &pid, &did)?;
     let sheets: Vec<Value> = match sheet {
         Some(k) => vec![sheet_json(b.sheet(Some(k))?, items)],
@@ -721,6 +753,10 @@ pub fn get(
     let mut v = summary(&b);
     v["sheets"] = json!(sheets);
     v["revision"] = json!(session.project().part(&pid)?.revision);
+    if items {
+        // The drawing as written: what a form edits and a drag moves.
+        v["file"] = file.to_json();
+    }
     Ok(v)
 }
 
