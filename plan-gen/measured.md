@@ -1,0 +1,8 @@
+- **One package through the CLI** (`release package bracket`, a 40 × 20 × 5 mm box with a standard drawing on ANSI B, formats step, pdf, dxf, render; in process, the disk cache warm): 4.79, 4.89 and 4.94 s at a load of 10.5 to 10.8. Built twice, through the daemon and in process: the same bytes. 41,008 bytes, 6 entries, 79,602 bytes unpacked: `package.json` 1,571, `drawings/d-s1.dxf` 16,020, `drawings/d.pdf` 17,083, `record.json` 543, `render/iso.png` 32,682, `step/100-0042-A.step` 11,703. `zipinfo` lists each `-rw-r--r--  2.0 unx … defN 80-Jan-01 00:00`; Python's `zipfile.testzip()` gives `None`; `release package verify --rebuild` says `unattested`, `rebuilt: true`; a STEP with a byte added is `package_invalid`, clause `file_changed`, exit 1.
+- **ryupdm** (`cargo test -p ryupdm`, load 17.6 to 18): lib 130 passed in 8.87 s, `api` 6 passed (1 ignored) in 7.22 s, `structure_props` 4 passed (1 ignored) in 1.01 s. `ryu-session` 59 passed in 0.30 s.
+- **ryucad's unit tests** these tasks touch (`cargo test -p ryucad --lib -- proto:: release:: pdm:: daemon:: review:: package:: config::`): 58 passed in 33.96 s at a load of 17 to 21; `package::tests` alone 6 passed in 19.55 s at a load of 10.
+- **CLI** (`cargo test -p ryucad --test cli -- packages_from_the_cli review_against_a_fake_service releases_from_the_cli every_protocol_method_has_a_command`): TIME_CLI.
+- **Golden** (`section::packages`): TIME_GOLDEN; regenerating it added one line to `rebuild.txt` and changed nothing else.
+- **Fuzzing**: FUZZ.
+- **Clippy** (`-p ryupdm -p ryu-doc -p ryu-session -p ryucad --all-targets -D warnings`): clean.
+- The prototype merges cleanly with `main` at `857abe17` (ryukei 13.D).
