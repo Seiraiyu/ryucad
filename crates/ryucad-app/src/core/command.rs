@@ -46,19 +46,27 @@ impl Category {
 pub enum Scope {
     Window,
     Viewport,
+    /// The Markup bar's keys, only while it is open (design 423): they
+    /// meet only each other, so A, F and Mod+Z there never shadow the
+    /// window's or the presets' keys elsewhere.
+    Markup,
 }
 
 impl Scope {
     /// Whether a key could reach both: a window key works over the
     /// viewport too.
     pub fn meets(self, other: Scope) -> bool {
-        self == other || self == Scope::Window || other == Scope::Window
+        self == other
+            || (self != Scope::Markup
+                && other != Scope::Markup
+                && (self == Scope::Window || other == Scope::Window))
     }
 
     pub fn title(self) -> &'static str {
         match self {
             Scope::Window => "Anywhere",
             Scope::Viewport => "Viewport (while the pointer is over it, or it has the keyboard)",
+            Scope::Markup => "Markup bar (while it is open)",
         }
     }
 }
@@ -319,6 +327,13 @@ impl Command {
             ..self
         }
     }
+    const fn markup(self) -> Command {
+        Command {
+            scope: Scope::Markup,
+            menu: false,
+            ..self
+        }
+    }
     const fn focused(self) -> Command {
         Command {
             scope: Scope::Viewport,
@@ -518,6 +533,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("section.clear", "Remove section planes", View),
     cmd("explode.edit", "Exploded view", View).icon("arrows-out-cardinal"),
     cmd("explode.collapse", "Collapse exploded view", View),
+    cmd("drawing.show", "Drawings", View).icon("drawing"),
     // The viewport's keys while it has the keyboard (F6 or a click).
     cmd("view.orbit_left", "Orbit left", View)
         .keys(&["Left"])
@@ -649,6 +665,56 @@ pub const COMMANDS: &[Command] = &[
         .icon("pencil-simple")
         .toolbar()
         .toggle(),
+    // Redline marks (design 423): the Markup bar, after the modes it works in, and its
+    // tools, whose keys work only while it is open.
+    cmd("annotation.markup", "Markup", Tools)
+        .icon("pencil-line")
+        .toolbar()
+        .toggle(),
+    cmd("markup.arrow", "Arrow", Tools)
+        .icon("arrow-up-right")
+        .keys(&["A"])
+        .markup()
+        .toggle(),
+    cmd("markup.line", "Line", Tools)
+        .icon("line-segment")
+        .keys(&["L"])
+        .markup()
+        .toggle(),
+    cmd("markup.ellipse", "Ellipse", Tools)
+        .icon("circle")
+        .keys(&["E"])
+        .markup()
+        .toggle(),
+    cmd("markup.rectangle", "Rectangle", Tools)
+        .icon("rectangle")
+        .keys(&["R"])
+        .markup()
+        .toggle(),
+    cmd("markup.pen", "Pen", Tools)
+        .icon("pen-nib")
+        .keys(&["P"])
+        .markup()
+        .toggle(),
+    cmd("markup.pen_faces", "Pen on faces", Tools)
+        .icon("paint-brush")
+        .keys(&["F"])
+        .markup()
+        .toggle(),
+    cmd("markup.text", "Text", Tools)
+        .icon("text-t")
+        .keys(&["T"])
+        .markup()
+        .toggle(),
+    cmd("markup.undo", "Undo mark", Tools)
+        .icon("arrow-counter-clockwise")
+        .keys(&["Mod+Z"])
+        .markup(),
+    cmd("markup.post", "Post", Tools)
+        .icon("paper-plane-tilt")
+        .keys(&["Mod+Enter"])
+        .in_text()
+        .markup(),
 ];
 
 /// The size `ui.scale` takes after Zoom in (`up`) or Zoom out from
@@ -716,7 +782,42 @@ pub struct State {
     pub moving: bool,
     /// The Mate dialog is open.
     pub mating: bool,
+    /// The Markup bar is open, and its tool.
+    pub marking: Option<crate::core::markup::Tool>,
 }
+
+/// What moves the camera, off while the Markup bar locks it (design 423:
+/// every view mark lies in its one view's plane), and what shows another
+/// model, which the marks aren't drawn on.
+const CAMERA: [&str; 27] = [
+    "view.front",
+    "view.back",
+    "view.left",
+    "view.right",
+    "view.top",
+    "view.bottom",
+    "view.front_top_right",
+    "view.dimetric",
+    "view.trimetric",
+    "view.normal_to",
+    "view.named",
+    "view.selector",
+    "view.fit",
+    "view.fit_row",
+    "view.fit_selection",
+    "view.show_row",
+    "view.show",
+    "view.orbit_left",
+    "view.orbit_right",
+    "view.orbit_up",
+    "view.orbit_down",
+    "view.pan_left",
+    "view.pan_right",
+    "view.pan_up",
+    "view.pan_down",
+    "view.closer",
+    "view.farther",
+];
 
 /// Whether the window's mode allows `id`, or which mode would: the part
 /// of [`enabled`] that holds whatever was right-clicked, so a context
@@ -728,7 +829,7 @@ pub fn mode_allows(id: &str, s: &State) -> Result<(), &'static str> {
             s.mode != crate::core::modes::Mode::View,
             "Annotate does this: press Annotate first.",
         ),
-        "edit.move" | "edit.mate" => need(
+        "edit.move" | "edit.mate" | "annotation.markup" => need(
             s.mode != crate::core::modes::Mode::View,
             "Annotate or Direct edit does this: View changes nothing.",
         ),
@@ -750,6 +851,9 @@ pub fn mode_allows(id: &str, s: &State) -> Result<(), &'static str> {
 pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
     mode_allows(id, s)?;
     let need = |ok: bool, why: &'static str| if ok { Ok(()) } else { Err(why) };
+    if s.marking.is_some() && CAMERA.contains(&id) {
+        return Err("The Markup bar locks the camera: Post or Cancel first.");
+    }
     match id {
         "file.update_import" if !s.chosen_import => {
             Err("Choose an imported feature in the tree first.")
@@ -764,7 +868,13 @@ pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
         // Esc also closes the view selector or Select other's list and
         // leaves the Measure tool.
         "edit.clear_selection" => need(
-            s.selected > 0 || s.chosen || s.selector || s.measuring || s.moving || s.mating,
+            s.selected > 0
+                || s.chosen
+                || s.selector
+                || s.measuring
+                || s.moving
+                || s.mating
+                || s.marking.is_some(),
             "Nothing is selected or chosen.",
         ),
         "view.normal_to" => need(s.planar_face, "Select a planar face first."),
@@ -780,11 +890,21 @@ pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
         "section.clear" => need(s.sectioned, "The view isn't cut."),
         "explode.edit" => need(s.assembly_shown, "Show an assembly first (View > Show)."),
         "explode.collapse" => need(s.exploded, "No exploded view is shown."),
+        "drawing.show" => need(s.one_shown, "Show one part first (View > Show)."),
         "measure.mass" => need(s.weighable, "Show one part or assembly, or select a solid."),
         "measure.clearance" | "tools.interference" => {
             need(s.assembly_shown, "Show an assembly first (View > Show).")
         }
         "deps.place" => need(s.assembly_shown, "Show an assembly first (View > Show)."),
+        "annotation.markup" if s.marking.is_some() => Ok(()),
+        "annotation.markup" => need(
+            s.one_shown,
+            "Show one part or assembly first (View > Show).",
+        ),
+        id if id.starts_with("markup.") => need(
+            s.marking.is_some(),
+            "Markup does this: open Tools > Markup first.",
+        ),
         "edit.move" if s.moving => Ok(()),
         "edit.move" => match &s.movable {
             Some(Ok(_)) => Ok(()),
@@ -853,6 +973,11 @@ pub fn checked(id: &str, s: &State) -> Option<bool> {
         "view.annotations" => s.annotations,
         "view.flat" => s.flat,
         "edit.move" => s.moving,
+        "annotation.markup" => s.marking.is_some(),
+        id if id.starts_with("markup.") => {
+            let t = crate::core::markup::Tool::of_command(id)?;
+            s.marking == Some(t)
+        }
         _ => return None,
     })
 }
@@ -921,10 +1046,15 @@ mod tests {
     fn modes_are_toolbar_toggles_and_annotating_needs_a_mode() {
         use crate::core::modes::Mode;
         let bar: Vec<&str> = toolbar().map(|c| c.id).collect();
-        // Last on the toolbar, before the People strip, in order.
+        // Last on the toolbar but Markup, before the People strip, in order.
         assert_eq!(
-            &bar[bar.len() - 3..],
-            ["mode.view", "mode.annotate", "mode.edit"]
+            &bar[bar.len() - 4..],
+            [
+                "mode.view",
+                "mode.annotate",
+                "mode.edit",
+                "annotation.markup"
+            ]
         );
         for m in ["mode.view", "mode.annotate", "mode.edit"] {
             assert_eq!(get(m).unwrap().kind, Kind::Toggle, "{m}");
@@ -1057,8 +1187,70 @@ mod tests {
             movable: Some(Ok(("frame".into(), "b2".into()))),
             ..State::default()
         };
-        for c in COMMANDS {
+        // The Markup bar's own need it open, and are judged apart.
+        for c in COMMANDS.iter().filter(|c| c.scope != Scope::Markup) {
             assert_eq!(enabled(c.id, &some), Ok(()), "{}", c.id);
+        }
+    }
+
+    #[test]
+    fn markup_locks_the_camera_and_its_keys_meet_only_each_other() {
+        use crate::core::markup::Tool;
+        use crate::core::modes::Mode;
+        let mut s = State {
+            one_shown: true,
+            mode: Mode::Annotate,
+            ..State::default()
+        };
+        assert_eq!(enabled("annotation.markup", &s), Ok(()));
+        assert!(enabled("markup.arrow", &s).unwrap_err().contains("Markup"));
+        assert_eq!(enabled("view.front", &s), Ok(()));
+        s.marking = Some(Tool::Pen);
+        for id in [
+            "markup.arrow",
+            "markup.undo",
+            "markup.post",
+            "annotation.markup",
+        ] {
+            assert_eq!(enabled(id, &s), Ok(()), "{id}");
+        }
+        for id in [
+            "view.front",
+            "view.fit",
+            "view.orbit_left",
+            "view.closer",
+            "view.show",
+        ] {
+            assert!(
+                enabled(id, &s).unwrap_err().contains("locks the camera"),
+                "{id}"
+            );
+        }
+        assert_eq!(checked("markup.pen", &s), Some(true));
+        assert_eq!(checked("markup.arrow", &s), Some(false));
+        assert_eq!(checked("annotation.markup", &s), Some(true));
+        assert_eq!(enabled("edit.clear_selection", &s), Ok(()), "Esc leaves it");
+        // In View, nothing marks.
+        s = State {
+            one_shown: true,
+            mode: Mode::View,
+            ..State::default()
+        };
+        assert!(enabled("annotation.markup", &s).is_err());
+        // Its keys never meet the window's: F is Zoom to fit, Mod+Z Undo.
+        assert!(!Scope::Markup.meets(Scope::Window));
+        assert!(!Scope::Window.meets(Scope::Markup));
+        assert!(!Scope::Markup.meets(Scope::Viewport));
+        assert!(Scope::Markup.meets(Scope::Markup));
+        let tools: Vec<&str> = COMMANDS
+            .iter()
+            .filter(|c| c.scope == Scope::Markup)
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(tools.len(), 9);
+        assert!(tools.iter().all(|id| !get(id).unwrap().menu));
+        for t in Tool::ALL {
+            assert!(tools.contains(&t.command()), "{t:?}");
         }
     }
 

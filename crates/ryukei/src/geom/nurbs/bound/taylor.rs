@@ -312,16 +312,21 @@ fn step(s0: f64, s1: f64) -> Option<Span> {
 /// gives them (relative to the returned centre), by a cell's evaluation;
 /// `None` where the box isn't inside one cell, or the cell or the result
 /// isn't finite.
+///
+/// With `point` false the point's own enclosure (`[0]`) may be left
+/// entire: a polynomial patch's derivatives don't read it, so its net,
+/// the largest a cell evaluates, isn't evaluated (#308).
 pub(super) fn jets(
     surface: u64,
     index: usize,
     patch: &BezierPatch,
     s: [f64; 2],
     t: [f64; 2],
+    point: bool,
 ) -> Option<(Vector3, [V3; 6])> {
     let (ks, kt) = (step(s[0], s[1])?, step(t[0], t[1])?);
     let cell = cell(surface, index, patch, ks, kt)?;
-    let jets = enclose(&cell, patch.range, [s, t], [ks, kt], cell.polynomial)?;
+    let jets = enclose(&cell, patch.range, [s, t], [ks, kt], cell.polynomial, point)?;
     Some((cell.at, jets))
 }
 
@@ -423,19 +428,33 @@ fn place([a, b]: [f64; 2], span: Span, [r0, r1]: [f64; 2]) -> (f64, f64) {
 
 /// The jets over the local box `[s, t]` from its cells `[ks, kt]` of a
 /// patch over `range`, by the quotient rule unless `polynomial` (which the
-/// cell must be: tests compare both ways).
+/// cell must be: tests compare both ways). A polynomial patch's point
+/// is left entire unless `point`: its derivatives don't read it.
 fn enclose(
     cell: &Cell,
     [ru, rv]: [[f64; 2]; 2],
     [s, t]: [[f64; 2]; 2],
     [ks, kt]: [Span; 2],
     polynomial: bool,
+    point: bool,
 ) -> Option<[V3; 6]> {
     let (su, hu) = place(s, ks, ru);
     let (sv, hv) = place(t, kt, rv);
+    // Without the point, its value is never evaluated. It would be a
+    // convex combination of finite midpoints whose magnitudes are within
+    // `mags[0]`, each lerp within `(1 + 6u)` of the hull (see the module's
+    // notes), so finite whenever `mags[0]` is well short of overflow: then
+    // leaving it out never takes a box from the cut that the cut would
+    // have served (a value that isn't finite sends the box there).
+    let skip = polynomial && !point && cell.mags[0][..3].iter().all(|m| *m < f64::MAX / 4.0);
     // Every evaluated net's value at the point, and its own error.
-    let at_point: [[f64; 4]; EVALUATED] =
-        core::array::from_fn(|k| evaluate(&cell.values[k], su, sv));
+    let at_point: [[f64; 4]; EVALUATED] = core::array::from_fn(|k| {
+        if k == 0 && skip {
+            [0.0; 4]
+        } else {
+            evaluate(&cell.values[k], su, sv)
+        }
+    });
     // A polynomial patch's weight is 1 exactly and every derivative of it
     // 0, so its jets are the first three components' enclosures: no
     // weight's radii and no quotient rule, which in intervals only
@@ -450,6 +469,25 @@ fn enclose(
         let (kuu, kuv, kvv) = (idx(i + 2, j), idx(i + 1, j + 1), idx(i, j + 2));
         for c in 0..comps {
             let value = at_point[k][c];
+            if k == 0 && skip {
+                // The point's radius only for the same finiteness check as
+                // the value's: the lesser of two forms, so finite when the
+                // mean value form is, and else worked out whole.
+                let finite = first_radius(cell, [k, ku, kv], c, [hu, hv]).is_finite()
+                    || radius(
+                        cell,
+                        [k, ku, kv, kuu, kuv, kvv],
+                        c,
+                        [at_point[ku][c], at_point[kv][c]],
+                        [hu, hv],
+                    )
+                    .is_finite();
+                if !finite {
+                    return None;
+                }
+                o[c] = Iv::new(f64::NEG_INFINITY, f64::INFINITY).expect("ordered");
+                continue;
+            }
             let r = radius(
                 cell,
                 [k, ku, kv, kuu, kuv, kvv],
@@ -470,7 +508,13 @@ fn enclose(
     };
     if polynomial {
         let jets = out.map(|o| [o[0], o[1], o[2]]);
-        return finite(&jets).then_some(jets);
+        // A point left entire was checked as its value would have been.
+        let checked = if skip { &jets[1..] } else { &jets[..] };
+        return checked
+            .iter()
+            .flatten()
+            .all(|x| x.lo().is_finite() && x.hi().is_finite())
+            .then_some(jets);
     }
     let [a0, au, av, auu, auv, avv] = out.map(parts);
     let (a, w) = a0;
@@ -560,7 +604,11 @@ fn evaluate(v: &Values, su: f64, sv: f64) -> [f64; 4] {
     // The same arithmetic in either size: a small net (bicubic and
     // below, most of what files hold) takes stack rows of 8 rather than
     // clearing rows for the largest degree on every evaluation (#308).
-    if v.rows <= SMALL && v.cols <= SMALL {
+    // Bicubic nets and their derivatives' take rows of 4: clearing rows of
+    // 8 for each of a box's ten evaluations was a tenth of its enclosure.
+    if v.rows <= 4 && v.cols <= 4 {
+        evaluate_in::<4>(v, su, sv)
+    } else if v.rows <= SMALL && v.cols <= SMALL {
         evaluate_in::<SMALL>(v, su, sv)
     } else {
         evaluate_in::<{ crate::geom::nurbs::MAX_DEGREE + 1 }>(v, su, sv)

@@ -128,6 +128,18 @@ def frame(p):
               direction=direction, spacing="40 mm", count="8")
 
 
+def drawings(p):
+    """The corner bracket's standard views with its holes called out; the
+    frame in isometric with a balloon on every part and its BOM."""
+    p.drawing("corner-bracket", "main", "Corner bracket")
+    p.take_fixes("corner-bracket", "main", ["dwg_hole_uncalled"])
+    p.drawing("frame", "main", "Frame", size="ansi_c", standard=False)
+    p.drawing_add("frame", "main", "view", "add", id="v1", orient="front_top_right")
+    p.drawing_ops("frame", "main", [{"op": "add", "kind": "annotation",
+                                      "value": {"type": "bom_table", "sheet": "s1"}}])
+    p.take_fixes("frame", "main", ["dwg_balloon_missing"])
+
+
 def build(p):
     p.run("init", "--unit", "mm")
     for pid, length in RAILS.items():
@@ -135,6 +147,7 @@ def build(p):
     bracket(p)
     bolt(p)
     frame(p)
+    drawings(p)
 
 
 main(build)

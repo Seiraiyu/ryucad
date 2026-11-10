@@ -486,8 +486,9 @@ fn drawing_atom(at: &str) -> bool {
 }
 
 /// A drawing: per member and field (a position, a list, a reference one
-/// value), but a view whose `type` changes on either side, or that both
-/// sides added differently, is one value: its fields mean other things.
+/// value), but a view whose `type` changes on either side while the other
+/// changes it too, or that both sides added differently, is one value: its
+/// fields mean other things.
 fn drawing(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) -> Value {
     let Some(base) = base else {
         return walk.whole(None, ours, theirs);
@@ -507,7 +508,11 @@ fn drawing(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
             let (bk, ok, tk) = (bv.get(k), ov.get(k), tv.get(k));
             let ty = |v: Option<&Value>| v.and_then(|v| v.get("type")).cloned();
             let retyped = match (bk, ok, tk) {
-                (Some(_), Some(_), Some(_)) => ty(bk) != ty(ok) || ty(bk) != ty(tk),
+                // Retyped on one side and left alone on the other takes
+                // the side that changed, as any value does.
+                (Some(_), Some(_), Some(_)) => {
+                    (ty(bk) != ty(ok) || ty(bk) != ty(tk)) && ok != bk && tk != bk && ok != tk
+                }
                 (None, Some(_), Some(_)) => ok != tk,
                 _ => false,
             };
@@ -533,9 +538,11 @@ fn drawing(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
     Value::Object(out)
 }
 
-/// An annotation's `by`, `view`, `change` and pins are one value each.
+/// An annotation's `by`, `view`, `change`, pins and marks are one value
+/// each: only an annotation's author edits its marks, so two sides
+/// changing them is one person on two branches (design 423).
 fn annotation_atom(at: &str) -> bool {
-    matches!(at, "/by" | "/view" | "/change")
+    matches!(at, "/by" | "/view" | "/change" | "/marks")
 }
 
 /// An annotation: per key, but its status, claim and resolution go
@@ -1436,6 +1443,29 @@ pub fn files_merged(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn marks_are_one_value() {
+        let marked = |x: f64| {
+            let mut v = note(json!({}), "open");
+            v["format"] = json!(2);
+            v["view"] = json!({"eye_m": [1, 0, 0], "target_m": [0, 0, 0], "up": [0, 0, 1],
+                               "projection": "perspective", "fov_deg": 40});
+            v["marks"] = json!({"part": "p", "list": [{"kind": "line", "in": "view",
+                                 "xy_m": [[0, 0], [x, 0]], "touches": []}]});
+            v
+        };
+        let base = marked(0.01);
+        let m = merge(Some(&base), &marked(0.02), &marked(0.03));
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/marks"]);
+        // One side's marks alone are taken whole, with the comment the other changed.
+        let mut theirs = base.clone();
+        theirs["comment"] = json!("other words");
+        let m = merge(Some(&base), &marked(0.02), &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(m.value["marks"], marked(0.02)["marks"]);
+        assert_eq!(m.value["comment"], "other words");
+    }
+
     use super::*;
 
     fn note(replies: serde_json::Value, status: &str) -> Value {
@@ -1494,7 +1524,7 @@ mod tests {
     fn annotations_are_driven_and_their_format_known() {
         assert!(driven("annotations/aaaaaaaaaa.json"));
         assert!(!driven("annotations/notes.txt"));
-        assert_eq!(newest("ryucad.annotation"), Some(1));
+        assert_eq!(newest("ryucad.annotation"), Some(2));
     }
 
     #[test]
@@ -3067,6 +3097,14 @@ mod tests {
             "normal_to": {"feature": "b", "name": "0123456789abcdef0123456789abcdef"}});
         let m = merge(Some(&base), &ours, &retyped);
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/views/v2"]);
+        // Retyped on one side and left alone on the other is that side's
+        // (the merge fuzz target's find).
+        let m = merge(Some(&base), &base, &retyped);
+        assert!(m.conflicts.is_empty());
+        assert_eq!(m.value, retyped);
+        let m = merge(Some(&base), &retyped, &base);
+        assert!(m.conflicts.is_empty());
+        assert_eq!(m.value, retyped);
         // A named orient against a face's is one value.
         let mut normal = base.clone();
         normal["views"]["v1"]["orient"] =

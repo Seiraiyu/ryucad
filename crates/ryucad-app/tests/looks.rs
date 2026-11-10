@@ -116,7 +116,7 @@ fn the_window_and_the_icon_sheet_look_as_they_did() {
         );
         let dark = theme == "dark";
         let mut sheet = Harness::builder()
-            .with_size(egui::vec2(800.0, 1920.0))
+            .with_size(egui::vec2(800.0, 2000.0))
             .wgpu()
             .build_ui(move |ui| {
                 ryucad_app::ui::fonts::install(ui.ctx());
@@ -240,4 +240,63 @@ fn the_window_and_the_icon_sheet_look_as_they_did() {
         );
         looks_as_it_did(lavapipe, &h.render().unwrap(), name);
     }
+    // Marking up (ryucad 20.B): the Markup bar open in Annotate on the
+    // sample, an arrow, an ellipse and a note on the glass and a stroke on
+    // the bracket's top, in the person's colour, the camera locked.
+    let root = p.root.clone();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .wgpu()
+        .build_eframe(move |cc| App::open(&cc.egui_ctx, Some(&root), ryucad()));
+    frames(
+        &mut h,
+        |a| {
+            matches!(&a.screen, Screen::Opened(o) if o.ws.idle()
+                && o.ws.model.meshes.len() >= 2
+                && o.ws.annotations.loaded)
+        },
+        |_| "loading".into(),
+    );
+    for _ in 0..10 {
+        h.step();
+    }
+    {
+        use ryucad_app::core::markup::Tool;
+        let o = h.state_mut().opened_mut();
+        o.ws.set_mode(ryucad_app::core::modes::Mode::Annotate);
+        let camera = o.view.nav.camera.clone();
+        let hh = camera.half_height(camera.distance());
+        o.ws.open_markup(camera).unwrap();
+        let m = o.ws.markup.as_mut().unwrap();
+        let at = |x: f64, y: f64| [x * hh, y * hh];
+        m.press(at(-0.6, 0.5));
+        m.drag(at(-0.2, 0.15), false);
+        m.release(1e-4);
+        m.choose(Tool::Ellipse);
+        m.press(at(0.1, -0.1));
+        m.drag(at(0.45, 0.2), false);
+        m.release(1e-4);
+        m.choose(Tool::PenFaces);
+        let key = ("rig".to_owned(), "plate/e1".to_owned());
+        m.press_face(key.clone(), "rig/plate".into(), [0.01, 0.025, 0.008]);
+        m.drag_face(Some((key.clone(), [0.02, 0.03, 0.008])));
+        m.drag_face(Some((key, [0.035, 0.025, 0.008])));
+        m.release(1e-4);
+        m.choose(Tool::Text);
+        m.press(at(-0.6, 0.6));
+        m.typing.as_mut().unwrap().1 = "move the pin here".into();
+        m.commit_text();
+        m.comment = "And round this edge 2 mm".into();
+    }
+    h.event(egui::Event::PointerGone);
+    for _ in 0..20 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    frames(
+        &mut h,
+        |a| a.opened().ws.idle(),
+        |a| format!("idle {}", a.opened().ws.idle()),
+    );
+    looks_as_it_did(lavapipe, &h.render().unwrap(), "redlines");
 }

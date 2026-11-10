@@ -645,6 +645,25 @@ impl NurbsSurface {
         out
     }
 
+    /// The one patch [`Self::patches_meeting`] gives, when it gives one
+    /// and the ranges are one each way, without allocating; `None`
+    /// otherwise (ask `patches_meeting`).
+    pub(crate) fn patch_meeting(&self, cu: &[[f64; 2]], cv: &[[f64; 2]]) -> Option<usize> {
+        let (&[[a0, b0]], &[[a1, b1]]) = (cu, cv) else {
+            return None;
+        };
+        if [a0, b0, a1, b1].iter().any(|x| x.is_nan()) {
+            return None;
+        }
+        let [su, sv] = self.patch_spans();
+        let one = |spans: &[[f64; 2]], a: f64, b: f64| {
+            let lo = spans.partition_point(|r| r[1] < a);
+            let hi = spans.partition_point(|r| r[0] <= b);
+            (hi == lo + 1).then_some(lo)
+        };
+        Some(one(su, a0, b0)? * sv.len() + one(sv, a1, b1)?)
+    }
+
     /// The Bézier patches, row-major over the spans, built once.
     pub(crate) fn patches(&self) -> &[BezierPatch] {
         self.patches.get_or_init(|| {

@@ -82,3 +82,74 @@ fn the_corpus_weighs_in_under_the_mark() {
     }
     assert!(slow.is_empty(), "past {bar} s: {slow:#?}");
 }
+
+/// KiCad 9.0.9's `Symbol.3dshapes/Smolhaj_Scale_0.1.step`, body 5 (116
+/// faces, 100 of them splines): the slowest mass #308 names, healed under
+/// the key ryucad's import gives part `body` (step-hunt's), weighed on one
+/// thread to the same volume and bound, bit for bit. The file is the
+/// pinned KiCad corpus's (`sh scripts/fetch-kicad.sh`, into `target/kicad`
+/// or `$RYUEDA_KICAD_CORPUS`), never committed, so this runs by name:
+///
+/// ```text
+/// RYUKEI_BARS=1 cargo test -p ryustep --release --test mass -- --ignored smolhaj --nocapture
+/// ```
+///
+/// Measured 37.0 to 37.9 s on cox-worker-2 (AMD Ryzen 7 9700X, one thread,
+/// load 1.1 to 2.5, 2026-11-10; main before #308's follow-up 39.8 to 40.5
+/// s), so the bar is a regression guard, not step-hunt's 30 s mark (#308
+/// stays open for that): 45 s with `RYUKEI_BARS=1`, else ten times looser.
+#[test]
+#[ignore = "needs the pinned KiCad corpus: sh scripts/fetch-kicad.sh"]
+fn smolhaj_body_5_weighs_in_bit_for_bit() {
+    let bar = if std::env::var("RYUKEI_BARS").as_deref() == Ok("1") {
+        45.0
+    } else {
+        450.0
+    };
+    let corpus = std::env::var_os("RYUEDA_KICAD_CORPUS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/kicad")
+        });
+    let path = corpus.join("kicad-packages3D-9.0.9/Symbol.3dshapes/Smolhaj_Scale_0.1.step");
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let opened = ryustep::open(&bytes).unwrap();
+    let opts = ReadOptions {
+        key: OpKey::from_bytes(b"ryucad.feature\0body\0body"),
+        heal: Default::default(),
+    };
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let read = pool.install(|| opened.body(5, &opts));
+    let body = &read.result.as_ref().unwrap().0;
+    let t = Instant::now();
+    let m = pool
+        .install(|| mass(body, 1.0, &MassOptions::default()))
+        .unwrap();
+    let s = t.elapsed().as_secs_f64();
+    println!(
+        "Smolhaj body 5: mass {s:.2} s, {:?}, area {:?}",
+        m.volume, m.area
+    );
+    let bits = |v: Value| match v {
+        Value::Bounded { value, bound } => (value.to_bits(), bound.to_bits()),
+        Value::Exact(x) => panic!("an exact value {x}"),
+    };
+    assert_eq!(
+        bits(m.volume),
+        (
+            2.1423404921823934e-6f64.to_bits(),
+            3.831909103299148e-8f64.to_bits()
+        )
+    );
+    assert_eq!(
+        bits(m.area),
+        (
+            0.0021604480982536293f64.to_bits(),
+            5.222247636179033e-5f64.to_bits()
+        )
+    );
+    assert!(s <= bar, "{s:.1} s, past {bar} s");
+}

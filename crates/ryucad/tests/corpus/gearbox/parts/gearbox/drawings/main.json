@@ -1,0 +1,105 @@
+{
+  "annotations": {
+    "b1": {
+      "at": [
+        "46.374 mm",
+        "87.892 mm"
+      ],
+      "of": "housing",
+      "type": "balloon",
+      "view": "v1"
+    },
+    "b2": {
+      "at": [
+        "-99.196 mm",
+        "3.345 mm"
+      ],
+      "of": "input",
+      "type": "balloon",
+      "view": "v1"
+    },
+    "b3": {
+      "at": [
+        "-55.232 mm",
+        "-30.408 mm"
+      ],
+      "of": "middle",
+      "type": "balloon",
+      "view": "v1"
+    },
+    "b4": {
+      "at": [
+        "6.225 mm",
+        "-63.269 mm"
+      ],
+      "of": "output",
+      "type": "balloon",
+      "view": "v1"
+    },
+    "b5": {
+      "at": [
+        "-34.662 mm",
+        "74.371 mm"
+      ],
+      "of": "pinion-1",
+      "type": "balloon",
+      "view": "v1"
+    },
+    "b6": {
+      "at": [
+        "36.79 mm",
+        "27.566 mm"
+      ],
+      "of": "wheel-1",
+      "type": "balloon",
+      "view": "v1"
+    },
+    "b7": {
+      "at": [
+        "12.916 mm",
+        "27.899 mm"
+      ],
+      "of": "pinion-2",
+      "type": "balloon",
+      "view": "v1"
+    },
+    "b8": {
+      "at": [
+        "51.021 mm",
+        "2.071 mm"
+      ],
+      "of": "wheel-2",
+      "type": "balloon",
+      "view": "v1"
+    },
+    "t1": {
+      "at": [
+        "546.1 mm",
+        "54.7 mm"
+      ],
+      "sheet": "s1",
+      "type": "bom_table"
+    }
+  },
+  "format": 1,
+  "kind": "ryucad.drawing",
+  "name": "Gearbox",
+  "sheets": {
+    "s1": {
+      "name": "Sheet 1",
+      "scale": "1:1",
+      "size": "ansi_c"
+    }
+  },
+  "views": {
+    "v1": {
+      "at": [
+        "140.389 mm",
+        "290.866 mm"
+      ],
+      "orient": "front_top_right",
+      "sheet": "s1",
+      "type": "base"
+    }
+  }
+}

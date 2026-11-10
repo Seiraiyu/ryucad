@@ -130,6 +130,32 @@ def assembly(p):
               b=f"gearbox/{name}", b_offset="{}")
 
 
+def drawings(p):
+    """The housing's standard views with its holes called out, a section
+    through its bores and a detail of a bolt hole; each gear's standard
+    views with its bore's diameter; the gearbox in isometric with a
+    balloon on every part and its BOM."""
+    p.drawing("housing", "main", "Housing", size="ansi_c")
+    p.take_fixes("housing", "main", ["dwg_hole_uncalled"])
+    p.drawing_add("housing", "main", "view", "add", id="v5", **{"from": "v2"}, cut="zx",
+                  label="A")
+    p.drawing_add("housing", "main", "view", "add", id="v6", **{"from": "v2"},
+                  centre="-100mm,-52mm,120mm", radius="12mm", label="B")
+    p.run("drawing", "layout", "housing", "main")
+    for name, (on, _teeth, _pitch, _width, _along) in GEARS.items():
+        bore = SHAFTS[on][1]
+        p.drawing(name, "main", name.capitalize())
+        wall = p.faces(name, "disc", lambda f: f["surface"]["type"] == "cylinder"
+                       and abs(f["surface"]["radius"] - bore / 1000) < 1e-9)
+        p.drawing_add(name, "main", "dim", "add", view="v2", type="diameter",
+                      of=wall[0].split("/", 1)[1], fit="H7")
+    p.drawing("gearbox", "main", "Gearbox", size="ansi_c", standard=False)
+    p.drawing_add("gearbox", "main", "view", "add", id="v1", orient="front_top_right")
+    p.drawing_ops("gearbox", "main", [{"op": "add", "kind": "annotation",
+                                        "value": {"type": "bom_table", "sheet": "s1"}}])
+    p.take_fixes("gearbox", "main", ["dwg_balloon_missing"])
+
+
 def build(p):
     p.run("init", "--unit", "mm")
     housing(p)
@@ -138,6 +164,7 @@ def build(p):
     for name, (on, teeth, pitch, width, _along) in GEARS.items():
         gear(p, name, teeth, pitch, width, SHAFTS[on][1])
     assembly(p)
+    drawings(p)
 
 
 main(build)

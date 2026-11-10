@@ -7,4 +7,5 @@ ryucad.lock merge=ryucad diff=ryucad text eol=lf
 parts/**/*.json merge=ryucad diff=ryucad text eol=lf
 releases/**/*.json merge=ryucad diff=ryucad text eol=lf
 annotations/*.json merge=ryucad diff=ryucad text eol=lf
+templates/*.json merge=ryucad diff=ryucad text eol=lf
 .gitattributes text eol=lf

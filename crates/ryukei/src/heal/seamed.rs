@@ -57,6 +57,9 @@ struct Cut {
     s: Shape,
     names: Vec<Name>,
     origins: Origins,
+    /// Seams never run through a vertex two winding loops share (a
+    /// loop cut at a vertex it touches itself at: [`unpinched`]).
+    unpinching: bool,
 }
 
 /// Where each entity of a [`seamed_with_origins`] shape comes from in the
@@ -83,6 +86,25 @@ pub fn seamed(body: &Body, pipe_tolerance: f64) -> Result<Shape, Error> {
 /// [`seamed`], with where each entity of the shape comes from in the
 /// body: what a writer needs to carry the body's names and pcurves over.
 pub fn seamed_with_origins(body: &Body, pipe_tolerance: f64) -> Result<(Shape, Origins), Error> {
+    cut_open(body, pipe_tolerance, false)
+}
+
+/// [`seamed_with_origins`], but a loop on a periodic face that touches
+/// itself at a vertex, and whose pieces either side of that vertex wind
+/// round the period one each way, is cut there into those pieces and
+/// given a seam between them, as a band between two loops is. A reader
+/// that rebuilds a face's curves from its edges inside one period (SMLib,
+/// for USD's BrepArrays) can't place such a loop, which covers the whole
+/// period without crossing a seam, and trims the wrong part of the
+/// surface (#620: race body 1318's cylinder). STEP keeps the loop whole.
+pub fn seamed_with_origins_unpinched(
+    body: &Body,
+    pipe_tolerance: f64,
+) -> Result<(Shape, Origins), Error> {
+    cut_open(body, pipe_tolerance, true)
+}
+
+fn cut_open(body: &Body, pipe_tolerance: f64, unpinch: bool) -> Result<(Shape, Origins), Error> {
     let mut cut = copy(body);
     // Faces are cut in the order of the names their geometry gives them:
     // a seam may split an edge another face then ends its own seam on,
@@ -97,6 +119,9 @@ pub fn seamed_with_origins(body: &Body, pipe_tolerance: f64) -> Result<(Shape, O
         bent_to_nurbs(&mut cut, k, pipe_tolerance)?;
     }
     for &k in &order {
+        if unpinch && unpinched(&mut cut, k)? {
+            continue;
+        }
         seam(&mut cut, k)?;
     }
     debug_assert_eq!(cut.origins.edges.len(), cut.s.edges.len());
@@ -346,7 +371,12 @@ fn copy(b: &Body) -> Cut {
             closed,
         });
     }
-    Cut { s, names, origins }
+    Cut {
+        s,
+        names,
+        origins,
+        unpinching: false,
+    }
 }
 
 /// A spline pcurve on its edge's own parameter: its knots moved through
@@ -1056,6 +1086,54 @@ fn seam(cut: &mut Cut, k: usize) -> Result<(), Error> {
     }
 }
 
+/// Cuts a face's loop that touches itself at a vertex into its pieces
+/// either side of it and seams the face between them, where its loops
+/// wind round neither direction and those pieces wind round one: true
+/// when it did, false (the face left as it was) otherwise.
+fn unpinched(cut: &mut Cut, k: usize) -> Result<bool, Error> {
+    let surface = cut.s.surfaces[cut.s.faces[k].surface].clone();
+    let periods = surface.periods();
+    if periods == (None, None) {
+        return Ok(false);
+    }
+    let info = loops(cut, k, periods);
+    if info.iter().any(|x| x.wind != [0, 0]) {
+        return Ok(false);
+    }
+    for (l, lp) in cut.s.faces[k].loops.iter().enumerate() {
+        let Loop::Edges(uses) = lp else { continue };
+        let starts: Vec<usize> = uses.iter().map(|u| start_of(&cut.s, u)).collect();
+        let n = starts.len();
+        let Some((i, j)) = (0..n)
+            .flat_map(|i| (i + 1..n).map(move |j| (i, j)))
+            .find(|&(i, j)| starts[i] == starts[j])
+        else {
+            continue;
+        };
+        let a: Vec<Use> = uses[i..j].to_vec();
+        let b: Vec<Use> = uses[j..].iter().chain(&uses[..i]).cloned().collect();
+        let mut trial = Cut {
+            s: cut.s.clone(),
+            names: cut.names.clone(),
+            origins: cut.origins.clone(),
+            unpinching: true,
+        };
+        let face = &mut trial.s.faces[k];
+        face.loops[l] = Loop::Edges(a);
+        face.loops.insert(l + 1, Loop::Edges(b));
+        let split = loops(&trial, k, periods);
+        let winds = |x: &Info| x.wind != [0, 0];
+        if !(winds(&split[l]) && winds(&split[l + 1])) {
+            continue;
+        }
+        if seam(&mut trial, k).is_ok() {
+            *cut = trial;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The parameter lines a seam in direction `j` may take, in order: each
 /// vertex's on the winding loops, as the surface projects it, the
 /// surface's own seam, the middles between those, and a grid over the
@@ -1116,7 +1194,39 @@ fn candidates(cut: &Cut, k: usize, info: &[Info], j: usize, period: f64) -> Vec<
 /// along none of its edges, and keeps clear of every other loop.
 fn choose(cut: &Cut, k: usize, info: &[Info], j: usize, period: f64) -> Option<f64> {
     let clear = 1e-6 * period;
+    // A vertex two winding loops share: a seam through it would run from
+    // it to itself (#620), so it takes another line.
+    let surface = &cut.s.surfaces[cut.s.faces[k].surface];
+    let on = |l: usize| -> Vec<usize> {
+        match &cut.s.faces[k].loops[l] {
+            Loop::Edges(uses) => uses.iter().map(|u| start_of(&cut.s, u)).collect(),
+            Loop::Vertex(_) => vec![],
+        }
+    };
+    let winding: Vec<usize> = (0..info.len()).filter(|&l| info[l].wind[j] != 0).collect();
+    let shared: Vec<f64> = match winding.as_slice() {
+        [a, b] if cut.unpinching => {
+            let (va, vb) = (on(*a), on(*b));
+            va.into_iter()
+                .filter(|v| vb.contains(v))
+                .map(|v| {
+                    let (u, w) = surface.project(cut.s.vertices[v].point).param;
+                    [u, w][j]
+                })
+                .collect()
+        }
+        _ => vec![],
+    };
+    let through = |c: f64| {
+        shared.iter().any(|&x| {
+            let d = (c - x).rem_euclid(period);
+            d.min(period - d) <= clear
+        })
+    };
     candidates(cut, k, info, j, period).into_iter().find(|&c| {
+        if through(c) {
+            return false;
+        }
         info.iter().enumerate().all(|(l, x)| {
             if x.lone.is_some() {
                 return true;
@@ -1125,11 +1235,54 @@ fn choose(cut: &Cut, k: usize, info: &[Info], j: usize, period: f64) -> Option<f
             if x.wind[j] != 0 {
                 found.len() == 1 && !runs
             } else {
-                found.is_empty() && nearest > clear
+                found.is_empty() && nearest > clear && clear_of(cut, k, l, j, c, period, clear)
             }
         })
     })
 }
+
+/// Whether loop `l` keeps clear of `j = c` at `FINE` samples a use: a
+/// loop the line misses at [`SAMPLES`] samples may still dip across it
+/// and back between two of them (#620: race body 469's hole, a closed
+/// spline round most of a torus's tube, passed its seam by 0.45 degrees
+/// between samples, so the seam crossed it).
+fn clear_of(cut: &Cut, k: usize, l: usize, j: usize, c: f64, period: f64, clear: f64) -> bool {
+    let Loop::Edges(uses) = &cut.s.faces[k].loops[l] else {
+        return true;
+    };
+    let surface = &cut.s.surfaces[cut.s.faces[k].surface];
+    let mut side: Option<bool> = None;
+    let mut last: Option<f64> = None;
+    for u in uses {
+        let e = &cut.s.edges[u.edge];
+        let curve = &cut.s.curves[e.curve];
+        let [t0, t1] = e.interval;
+        for m in 0..=FINE {
+            let f = m as f64 / FINE as f64;
+            let f = if u.sense == crate::topo::Sense::Forward {
+                f
+            } else {
+                1.0 - f
+            };
+            let t = t0 + (t1 - t0) * f;
+            let (pu, pv) = surface.project(curve.point(t)).param;
+            let g = offset([pu, pv][j], c, period);
+            if g.abs() <= clear {
+                return false;
+            }
+            // A jump of half a period passes the far side of the line.
+            if last.is_some_and(|x| (g - x).abs() < period / 2.0) && side != Some(g < 0.0) {
+                return false;
+            }
+            side = Some(g < 0.0);
+            last = Some(g);
+        }
+    }
+    true
+}
+
+/// Samples a use at when judging whether a loop keeps clear of a seam.
+const FINE: usize = 512;
 
 /// The start vertex of use `i` of a loop.
 fn start_of(s: &Shape, u: &Use) -> usize {

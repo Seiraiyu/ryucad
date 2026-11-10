@@ -67,6 +67,8 @@ ryukei-testkit = { path = "../ryukei-testkit" }
 # Signed attestations for the approval scenarios.
 ryupdm = { path = "../ryupdm", features = ["testing"] }
 tempfile = "3"
+# Drawings' PDFs read back in tests (their font file inflated).
+miniz_oxide = "0.8"
 # 3MF exports read back in tests.
 zip = { version = "2", default-features = false, features = ["deflate"] }
 

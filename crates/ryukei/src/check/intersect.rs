@@ -35,7 +35,7 @@
 //! other's complement.
 
 use super::Fault;
-use crate::geom::{Curve, Frame, Plane, Point3, Surface};
+use crate::geom::Surface;
 use crate::intersect::broad::BoxTree;
 use crate::intersect::coincide::coincident;
 use crate::intersect::{
@@ -505,44 +505,9 @@ fn section_plane(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> Option
     {
         return None;
     }
-    let frame = match &body.curves[body.edges[*e].curve] {
-        Curve::Line(l) => {
-            let x = &body.edges[*e];
-            let p = body.curves[x.curve].point((x.interval[0] + x.interval[1]) / 2.0);
-            let normal = |f: FaceId| {
-                let s = &body.surfaces[body.faces[f].surface];
-                let (u, v) = s.project(p).param;
-                s.normal(u, v)
-            };
-            let n = normal(a)?.get() + normal(b)?.get();
-            let d = l.dir().get();
-            Frame::new(p, d.cross(n), d).ok()?
-        }
-        Curve::Circle(c) => *c.frame(),
-        Curve::Ellipse(c) => *c.frame(),
-        Curve::Nurbs(n) => {
-            let pts: Vec<Point3> = n.control_points().collect();
-            // Three control points spread as far apart as they go: the
-            // first, the farthest from it, and the farthest from the line
-            // through both.
-            let a = pts[0];
-            let far = |f: &dyn Fn(Point3) -> f64| {
-                pts.iter()
-                    .copied()
-                    .max_by(|p, q| f(*p).total_cmp(&f(*q)))
-                    .expect("control points")
-            };
-            let b = far(&|p| p.distance(a));
-            let c = far(&|p| (p - a).cross(b - a).length());
-            let frame = Frame::new(a, (b - a).cross(c - a), b - a).ok()?;
-            let off = |p: Point3| (p - a).dot(frame.z().get()).abs();
-            if pts.iter().any(|&p| off(p) > body.edges[*e].tolerance.get()) {
-                return None;
-            }
-            frame
-        }
-    };
-    Some(Surface::Plane(Plane::new(frame)))
+    let x = &body.edges[*e];
+    let surface = |f: FaceId| &body.surfaces[body.faces[f].surface];
+    crate::intersect::section_plane(curve, x.interval, x.tolerance.get(), surface(a), surface(b))
 }
 
 /// The largest tolerance on a face's boundary.

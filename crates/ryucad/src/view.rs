@@ -95,6 +95,12 @@ impl CameraArg {
 }
 
 impl Camera {
+    /// The camera with another up.
+    pub fn with_up(mut self, up: [f64; 3]) -> Camera {
+        self.up = up;
+        self
+    }
+
     /// Refuses a camera that can't define a view.
     pub fn check(&self) -> Result<()> {
         let finite = |a: [f64; 3]| a.iter().all(|x| x.is_finite());

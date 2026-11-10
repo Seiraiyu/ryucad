@@ -192,6 +192,9 @@ pub(crate) fn face_face_within(
             if super::beside::faces_apart(a, b, FACES_APART, m) {
                 return Ok(FaceMeet::apart());
             }
+            if let Some(meet) = along_rims(a, b, sa, sb, m)? {
+                return Ok(meet);
+            }
             if sharing(a, b) && !ends_together(sa, sb) {
                 return Err(Failure::Uncertain);
             }
@@ -426,6 +429,244 @@ pub(crate) fn face_face_within(
         stretches,
         contacts,
     })
+}
+
+/// How far apart two faces' normals may be, at the middle of edges of
+/// theirs lying along each other, for [`along_rims`] to take them as
+/// tangent there: a hundredth of a radian, the self-intersection check's
+/// rule for faces tangent along an edge they share.
+const NEARLY_TANGENT: f64 = 1e-2;
+
+/// Faces of different bodies, tangent along edges of each that lie on one
+/// curve (a file's two solids glued across a plane, a torus tube running
+/// on into a straight cylinder across the rim both carry: issue #584),
+/// whose surfaces' trace stayed uncertain. As surfaces they may cross
+/// elsewhere too (the torus and the cylinder along a second curve through
+/// two points of the rim, on the cylinder's side), but where one face is
+/// certified to keep off the other's surface outside a strip round those
+/// edges ([`face_beside`](super::beside::face_beside)), as wide as
+/// surfaces meeting tangentially stay within the touch rule's reach of
+/// each other, `sqrt(2 × size × reach)`, the faces meet only along the
+/// edges: the self-intersection check's rule for faces tangent along an
+/// edge they share. Each pair of edges is then a tangent stretch along
+/// the first's curve, placed on both edges. `None` where no such edges
+/// are found or neither face is certified, so the caller goes on as it
+/// would have.
+fn along_rims(
+    a: (&Body, FaceId),
+    b: (&Body, FaceId),
+    sa: &Surface,
+    sb: &Surface,
+    m: &Meter,
+) -> Result<Option<FaceMeet>, Failure> {
+    if core::ptr::eq(a.0, b.0) {
+        return Ok(None);
+    }
+    let mut rims: Vec<(EdgeId, EdgeId, f64)> = Vec::new();
+    for ea in edges(a) {
+        for eb in edges(b) {
+            if let Some(gap) = edges_together((a.0, ea), (b.0, eb)) {
+                let x = &a.0.edges[ea];
+                let p = a.0.curves[x.curve].point(0.5 * (x.interval[0] + x.interval[1]));
+                let normal = |s: &Surface| {
+                    let (u, v) = s.project(p).param;
+                    s.normal(u, v)
+                };
+                if let (Some(na), Some(nb)) = (normal(sa), normal(sb))
+                    && na.get().cross(nb.get()).length() <= NEARLY_TANGENT
+                {
+                    rims.push((ea, eb, gap));
+                }
+            }
+        }
+    }
+    if rims.is_empty() {
+        return Ok(None);
+    }
+    let slack = max_tolerance(a).max(max_tolerance(b));
+    let reach = 100.0 * slack;
+    let size = {
+        let bx = face_box(a.0, a.1).union(&face_box(b.0, b.1));
+        (bx.max() - bx.min()).length()
+    };
+    let strip = (2.0 * size * reach).sqrt();
+    let rails = |k: usize| -> Vec<EdgeId> {
+        let mut r: Vec<EdgeId> = rims
+            .iter()
+            .map(|x| if k == 0 { x.0 } else { x.1 })
+            .collect();
+        r.sort();
+        r.dedup();
+        r
+    };
+    let (ra, rb) = (rails(0), rails(1));
+    let keeps_off = |f: (&Body, FaceId), other: &Surface, rails: &[EdgeId], cells: usize| {
+        super::beside::face_beside(f.0, f.1, other, rails, &[], strip, cells, m).is_ok()
+    };
+    // Each face's search under a growing part limit, the other's between:
+    // the face that keeps off the other's surface usually does in a few
+    // parts, while the other runs on and exhausts any limit.
+    let apart = [1 << 9, 1 << 12, super::BESIDE_CELLS]
+        .into_iter()
+        .any(|cells| keeps_off(a, sb, &ra, cells) || keeps_off(b, sa, &rb, cells))
+        || either_side(a, b, sa, sb, &rims, strip, m);
+    if !apart {
+        return Ok(None);
+    }
+    let fin_pcurve = |(body, face): (&Body, FaceId), e: EdgeId| {
+        body.face_loops(face)
+            .flat_map(|l| body.loop_fins(l).collect::<Vec<_>>())
+            .find(|&fin| body.fins[fin].edge == e)
+            .and_then(|fin| body.fins[fin].pcurve)
+            .map(|pc| (body.curves2[pc.curve].clone(), pc.map))
+    };
+    let mut stretches = Vec::new();
+    for (ea, eb, gap) in rims {
+        let x = &a.0.edges[ea];
+        let y = &b.0.edges[eb];
+        let curve = a.0.curves[x.curve].clone();
+        let range = x.interval;
+        let mut tolerance = x.tolerance.get().max(y.tolerance.get()).max(gap);
+        let pa = fin_pcurve(a, ea).ok_or(Failure::Uncertain)?;
+        // The other face's pcurve is its own edge's where the two edges
+        // are one curve over one interval, else fitted along the first's.
+        let pb = match fin_pcurve(b, eb) {
+            Some(pc) if b.0.curves[y.curve] == curve && y.interval == range => pc,
+            _ => {
+                let (n, bound) = fit_pcurve(sb, &curve, range, m)?;
+                tolerance = tolerance.max(bound);
+                (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0])
+            }
+        };
+        let pcurves = [pa, pb];
+        let mid = 0.5 * (range[0] + range[1]);
+        let mut places = [Place::Outside; 2];
+        for (k, f) in [a, b].into_iter().enumerate() {
+            let (c2, map) = &pcurves[k];
+            let uv = c2.point(map[0] + map[1] * mid);
+            places[k] = point_in_face_near(f.0, f.1, uv, tolerance + super::SLACK)?;
+        }
+        if !places
+            .iter()
+            .all(|p| matches!(p, Place::OnEdge(_) | Place::OnVertex(_)))
+        {
+            return Ok(None);
+        }
+        stretches.push(Stretch {
+            curve,
+            range,
+            tangent: true,
+            tolerance,
+            pcurves,
+            places,
+            ends: [0.0; 2],
+        });
+    }
+    Ok(Some(FaceMeet::Meet {
+        stretches,
+        contacts: Vec::new(),
+    }))
+}
+
+/// Whether two faces lie either side of the plane of the planar curve
+/// their edges [`along_rims`] found lie along, outside the strip round
+/// them: the self-intersection check's rule for blends across a section.
+/// Each face is certified by [`face_beside`](super::beside::face_beside)
+/// against the plane ([`super::section_plane`]), and neither may lie on
+/// both sides of it. As surfaces they may still cross elsewhere (a torus
+/// tube and the cylinder running on from it cross along a curve through
+/// two points of their rim, on both sides of its plane, each surface
+/// beyond its own face), so neither face need keep off the other's
+/// surface, but faces on opposite sides of a plane meet only on it.
+fn either_side(
+    a: (&Body, FaceId),
+    b: (&Body, FaceId),
+    sa: &Surface,
+    sb: &Surface,
+    rims: &[(EdgeId, EdgeId, f64)],
+    strip: f64,
+    m: &Meter,
+) -> bool {
+    let x = &a.0.edges[rims[0].0];
+    let curve = &a.0.curves[x.curve];
+    // Every rim on one curve, the plane's.
+    if rims
+        .iter()
+        .any(|r| &a.0.curves[a.0.edges[r.0].curve] != curve)
+    {
+        return false;
+    }
+    let tolerance = rims.iter().map(|r| r.2).fold(x.tolerance.get(), f64::max);
+    let Some(plane) = super::section_plane(curve, x.interval, tolerance, sa, sb) else {
+        return false;
+    };
+    let rails = |k: usize| -> Vec<EdgeId> {
+        let mut r: Vec<EdgeId> = rims
+            .iter()
+            .map(|x| if k == 0 { x.0 } else { x.1 })
+            .collect();
+        r.sort();
+        r.dedup();
+        r
+    };
+    let on_plane = |f: (&Body, FaceId), rails: &[EdgeId]| {
+        super::beside::face_beside(f.0, f.1, &plane, rails, &[], strip, super::BESIDE_CELLS, m).ok()
+    };
+    match (on_plane(a, &rails(0)), on_plane(b, &rails(1))) {
+        (Some(pa), Some(pb)) => {
+            let one = |s: [bool; 2]| s != [true, true];
+            one(pa)
+                && one(pb)
+                && (pa[0] && pb[1] || pa[1] && pb[0] || pa == [false; 2] || pb == [false; 2])
+        }
+        _ => false,
+    }
+}
+
+/// How far apart an edge of one body and an edge of another lie, where
+/// they lie along each other end to end: both closed, or each one's ends
+/// at the other's (either way round) within the touch rule's reach for
+/// their tolerances, and every point of each certified within a reach of
+/// the other ([`within_reach`]), the least of a ladder from their
+/// tolerances' sum up to that touch reach. `None` otherwise.
+fn edges_together((ba, ea): (&Body, EdgeId), (bb, eb): (&Body, EdgeId)) -> Option<f64> {
+    let (x, y) = (&ba.edges[ea], &bb.edges[eb]);
+    let (ca, cb) = (&ba.curves[x.curve], &bb.curves[y.curve]);
+    let (ta, tb) = (x.tolerance.get(), y.tolerance.get());
+    let most = crate::tol::touch_reach(ta.max(tb));
+    if !ca
+        .bounds(x.interval)
+        .grow(most)
+        .intersects(&cb.bounds(y.interval))
+    {
+        return None;
+    }
+    let at = |b: &Body, v: crate::topo::VertexId| b.vertices[v].point;
+    match (x.start == x.end, y.start == y.end) {
+        (true, true) => {}
+        (false, false) => {
+            let (a0, a1) = (at(ba, x.start), at(ba, x.end));
+            let (b0, b1) = (at(bb, y.start), at(bb, y.end));
+            let near = |p: Point3, q: Point3| p.distance(q) <= most;
+            if !(near(a0, b0) && near(a1, b1) || near(a0, b1) && near(a1, b0)) {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    let mut r = (ta + tb).max(LINEAR_RESOLUTION);
+    loop {
+        let r_now = r.min(most);
+        if within_reach((ca, x.interval), (cb, y.interval), r_now)
+            && within_reach((cb, y.interval), (ca, x.interval), r_now)
+        {
+            return Some(r_now);
+        }
+        if r_now >= most {
+            return None;
+        }
+        r *= 4.0;
+    }
 }
 
 /// Whether `curve` over `range` runs beside an edge of the face: its ends
@@ -1040,23 +1281,65 @@ fn coincident_by(
     Ok(FaceMeet::Coincident { same, rims, whole })
 }
 
-/// The pcurve a fin of `edge` in `face` has, when the face's surface is
-/// the one wanted (`same`).
+/// The pcurve a fin of `edge` in `face` has, carried onto the surface
+/// wanted by `turn` ([`turned`]).
 fn own_pcurve(
     body: &Body,
     face: FaceId,
     edge: EdgeId,
-    shift: Option<Vector2>,
+    turn: Option<Turn>,
 ) -> Option<(Curve2, [f64; 2])> {
-    let shift = shift?;
+    let turn = turn?;
     body.edge_fins(edge).find_map(|fin| {
         let f = &body.fins[fin];
         let pc = f.pcurve?;
         if body.loops[f.loop_].face != face {
             return None;
         }
-        Some((shifted(&body.curves2[pc.curve], shift)?, pc.map))
+        Some((turn.carry(&body.curves2[pc.curve])?, pc.map))
     })
+}
+
+/// How a point's parameters on one copy of a surface move to the same
+/// point's on another ([`turned`]): `(u, v)` to `(u, v) + shift`, or,
+/// for a cylinder whose copy's axis runs the other way, to
+/// `shift - (u, v)` (a half turn of the parameter plane: `u` runs round
+/// the other way and `v` along the other way, so the natural normal, the
+/// radius, is the same).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Turn {
+    shift: Vector2,
+    reversed: bool,
+}
+
+impl Turn {
+    const NONE: Self = Self {
+        shift: Vector2::ZERO,
+        reversed: false,
+    };
+
+    /// Where the point at `p` goes.
+    #[cfg(test)]
+    fn apply(&self, p: Point2) -> Point2 {
+        if self.reversed {
+            Point2::new(self.shift.x - p.x, self.shift.y - p.y)
+        } else {
+            p + self.shift
+        }
+    }
+
+    /// A plane curve carried by the map, on its own parameter.
+    fn carry(&self, c: &Curve2) -> Option<Curve2> {
+        if self.reversed {
+            use crate::geom::ParamFlip;
+            Some(
+                c.mirrored(ParamFlip::U(self.shift.x))
+                    .mirrored(ParamFlip::V(self.shift.y)),
+            )
+        } else {
+            shifted(c, self.shift)
+        }
+    }
 }
 
 /// How a point's parameters on `own` move to the same point's on `onto`,
@@ -1067,11 +1350,14 @@ fn own_pcurve(
 /// within [`crate::tol::ANGULAR_RESOLUTION`] of the other's (a file's frames, one
 /// `(1, 1.8e-32, 0)` and the other `(1, 0, 0)`: a gear's shaft in its
 /// bore, #240), its `v` then moving by the origins' offset along the
-/// axis. `None` for any other pair, or a copy whose axis runs the other
-/// way.
-fn turned(own: &Surface, onto: &Surface) -> Option<Vector2> {
+/// axis; or of its reverse (two solids of a file glued across a plane,
+/// each holding a copy of one cylinder framed the other way: Voron's Z
+/// Belt Drive, #584), `(u, v)` then going to `(α - u, d - v)`, `α` that
+/// angle and `d` the offset along `onto`'s axis. `None` for any other
+/// pair.
+fn turned(own: &Surface, onto: &Surface) -> Option<Turn> {
     if own == onto {
-        return Some(Vector2::ZERO);
+        return Some(Turn::NONE);
     }
     let same_kind = matches!(
         (own, onto),
@@ -1085,20 +1371,23 @@ fn turned(own: &Surface, onto: &Surface) -> Option<Vector2> {
     if !same_kind {
         return None;
     }
-    let along = if a.z().get() == axis && a.origin().distance(b.origin()) <= LINEAR_RESOLUTION {
-        0.0
-    } else if matches!(own, Surface::Cylinder(_))
-        && a.z().dot(b.z()) > 0.0
+    let cylinder_on_axis = matches!(own, Surface::Cylinder(_))
         && super::coincide::parallel(a.z(), b.z())
-        && super::coincide::off_axis(b, a.origin()) <= LINEAR_RESOLUTION
-    {
-        (a.origin() - b.origin()).dot(axis)
-    } else {
-        return None;
-    };
+        && super::coincide::off_axis(b, a.origin()) <= LINEAR_RESOLUTION;
+    let (along, reversed) =
+        if a.z().get() == axis && a.origin().distance(b.origin()) <= LINEAR_RESOLUTION {
+            (0.0, false)
+        } else if cylinder_on_axis {
+            ((a.origin() - b.origin()).dot(axis), a.z().dot(b.z()) < 0.0)
+        } else {
+            return None;
+        };
     let (ax, bx) = (a.x().get(), b.x().get());
     let angle = crate::math::atan2(bx.cross(ax).dot(axis), bx.dot(ax));
-    Some(Vector2::new(angle, along))
+    Some(Turn {
+        shift: Vector2::new(angle, along),
+        reversed,
+    })
 }
 
 /// The shifts by whole periods that bring curve `b` near curve `a` in the
@@ -1176,7 +1465,7 @@ mod tests {
         for e in edges((&b, side)) {
             let edge = &b.edges[e];
             let curve = &b.curves[edge.curve];
-            let (oc, om) = own_pcurve(&b, side, e, Some(Vector2::ZERO)).expect("own");
+            let (oc, om) = own_pcurve(&b, side, e, Some(Turn::NONE)).expect("own");
             let (xc, xm) =
                 crate::pcurve::exact(surface, curve, edge.interval, edge.tolerance.get())
                     .expect("exact");
@@ -1203,12 +1492,14 @@ mod tests {
         let onto =
             Surface::Torus(Torus::new(frame(Vector3::new(-0.6, 0.8, 0.0)), 2.0, 0.5).unwrap());
         let d = turned(&own, &onto).unwrap();
+        assert!(!d.reversed);
         for (u, v) in [(0.0, 0.0), (1.0, 2.0), (4.0, -1.0)] {
             let p = own.point(u, v);
-            let q = onto.point(u + d.x, v + d.y);
+            let q = d.apply(Point2::new(u, v));
+            let q = onto.point(q.x, q.y);
             assert!(p.distance(q) <= 1e-12, "({u}, {v})");
         }
-        assert_eq!(turned(&own, &own), Some(Vector2::ZERO));
+        assert_eq!(turned(&own, &own), Some(Turn::NONE));
         // Upside down, or another kind, it isn't a turn.
         let flipped = Surface::Torus(
             Torus::new(
@@ -1231,6 +1522,53 @@ mod tests {
     /// and whose axes differ by 1.8e-32 in y. The copy's parameters map by
     /// the turn and the offset along the axis; a cone's don't (its radius
     /// changes along it), nor a cylinder's off the axis.
+    /// #584: Voron's Z Belt Drive A holds a 29 mm cylinder in each of its
+    /// two solids, framed opposite ways along one axis (the file's own
+    /// frames, its z within 5e-13 of +x and of -x, its origins 1.2 nm
+    /// apart). A point's parameters on one go to the other's by a half
+    /// turn of the parameter plane, and its pcurves are carried so.
+    #[test]
+    fn a_cylinders_copy_framed_the_other_way_maps_parameters_by_a_half_turn() {
+        use crate::geom::{Cylinder, Frame, Line2, Point3};
+        let frame = |o: (f64, f64, f64), z: (f64, f64, f64), x: (f64, f64, f64)| {
+            Frame::new(
+                Point3::new(o.0, o.1, o.2),
+                Vector3::new(z.0, z.1, z.2),
+                Vector3::new(x.0, x.1, x.2),
+            )
+            .unwrap()
+        };
+        let cyl = |f: Frame| Surface::Cylinder(Cylinder::new(f, 0.029).unwrap());
+        let own = cyl(frame(
+            (0.0435585471878337, 0.00084712953816565, 0.144052266354309),
+            (-1.0, 7.73833776444511e-15, -5.40445820287305e-13),
+            (-7.73833776444472e-15, -1.0, -6.76774011079913e-16),
+        ));
+        let onto = cyl(frame(
+            (0.043558545946657604, 0.00084712953816565, 0.144052266354309),
+            (1.0, -7.73785684805121e-15, 5.27255052488395e-13),
+            (-7.73785684805081e-15, -1.0, -6.76774011734469e-16),
+        ));
+        let d = turned(&own, &onto).unwrap();
+        assert!(d.reversed);
+        for (u, v) in [(0.0, 0.0), (1.0, -0.01), (4.0, -0.018), (6.0, -0.005)] {
+            let p = own.point(u, v);
+            let q = d.apply(Point2::new(u, v));
+            let q = onto.point(q.x, q.y);
+            assert!(p.distance(q) <= 1e-12, "({u}, {v}): {}", p.distance(q));
+        }
+        // A pcurve carried so traces the same points.
+        let line =
+            Curve2::Line2(Line2::new(Point2::new(0.5, -0.002), Vector2::new(0.6, -0.8)).unwrap());
+        let moved = d.carry(&line).unwrap();
+        for t in [0.0, 0.004, 0.01] {
+            let (a, b) = (line.point(t), moved.point(t));
+            assert!(own.point(a.x, a.y).distance(onto.point(b.x, b.y)) <= 1e-12);
+        }
+        // Back the other way it is a half turn too.
+        assert!(turned(&onto, &own).unwrap().reversed);
+    }
+
     #[test]
     fn a_cylinders_copy_along_its_axis_maps_parameters_by_the_offset() {
         use crate::geom::{Cone, Cylinder, Frame, Point3};
@@ -1254,9 +1592,11 @@ mod tests {
             (0.0, 1.0, 0.0),
         ));
         let d = turned(&own, &onto).unwrap();
+        assert!(!d.reversed);
         for (u, v) in [(0.0, 0.0), (1.0, 2e-3), (4.0, -1e-3)] {
             let p = own.point(u, v);
-            let q = onto.point(u + d.x, v + d.y);
+            let q = d.apply(Point2::new(u, v));
+            let q = onto.point(q.x, q.y);
             assert!(p.distance(q) <= 1e-15, "({u}, {v}): {}", p.distance(q));
         }
         let off = cyl(frame((0.0, 0.0036, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)));

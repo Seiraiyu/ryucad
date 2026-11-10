@@ -86,6 +86,19 @@ pub fn saved(session: &Session, part: &Id, view: &str) -> Result<Saved> {
     }
 }
 
+/// Named view `view` of `part` as its file holds it, without its
+/// explode (an annotation keeps where it looked and what it cut).
+pub fn view_file(session: &Session, part: &Id, view: &str) -> Result<crate::doc::views::ViewFile> {
+    let p = session.project().part(part)?;
+    let found = Id::parse(view, "view")
+        .ok()
+        .and_then(|id| p.views.get(&id))
+        .ok_or_else(|| not_found(session, part, view))?;
+    let mut v = found.clone()?;
+    v.explode = None;
+    Ok(v)
+}
+
 /// [`named`], all it restores.
 pub fn named_saved(session: &Session, part: Option<&Id>, view: &str) -> Result<Saved> {
     match part {

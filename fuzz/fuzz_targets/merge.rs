@@ -7,7 +7,7 @@
 //! import made, `0xfd` the material library, `0xfc` a named view (its
 //! sections and explode too), `0xfb` an appearance, `0xfa` an explode,
 //! `0xf9` a lock, `0xf8` a manifest's dependencies, `0xf7` a datum
-//! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft, `0xf2` a mirror or split, `0xf1` an annotation, `0xf0` a base
+//! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft, `0xf2` a mirror or split, `0xf1` an annotation (marks on either side, design 423), `0xf0` a base
 //! flange or flange, `0xef` a planar face or a surface extrude, `0xee` an
 //! unfold or refold, `0xed` a face tweak, `0xec` a thicken or a fill (by the
 //! parity of the edit bytes), `0xeb` a draft, `0xea` a split by a tool. Merging must never panic, must give the same bytes twice,
@@ -1113,6 +1113,72 @@ fn edit_surface_feature(v: &mut Value, op: u8, arg: u8) {
 
 /// A split by a tool: its tool a body (`t`, `u`) or a face of `t`, a
 /// plane in its place, its flip or what it keeps.
+fn edit_drawing(v: &mut Value, op: u8, arg: u8) {
+    let mm = |a: u8| json!(format!("{} mm", u32::from(a) % 200 + 10));
+    let o = v.as_object_mut().unwrap();
+    match op % 8 {
+        // A view moved, or its parent's distance changed.
+        0 => {
+            o["views"]["v1"]["at"] = json!([mm(arg), mm(arg / 2)]);
+        }
+        // Only a projected view has an offset (a retyped one is a detail).
+        1 => {
+            if o["views"]["v2"]["type"] == "projected" {
+                o["views"]["v2"]["offset"] = mm(arg);
+            }
+        }
+        // A view seen otherwise, or drawn with its hidden lines.
+        2 => {
+            let orient = ["front", "top", "right", "back"][usize::from(arg % 4)];
+            o["views"]["v1"]["orient"] = json!(orient);
+        }
+        3 => match arg % 2 {
+            0 => o["views"]["v1"]["hidden"] = json!("dashed"),
+            _ => {
+                o["views"]["v1"].as_object_mut().unwrap().remove("hidden");
+            }
+        },
+        // A view retyped: a detail of its parent.
+        4 => {
+            o["views"]["v2"] = json!({"type": "detail", "sheet": "s1", "from": "v1",
+                "centre": ["0 mm", "0 mm", "0 mm"], "radius": mm(arg / 8), "label": "B"});
+        }
+        // A dimension's tolerance, place or line.
+        5 => {
+            let t = match arg % 3 {
+                0 => json!({"symmetric": "0.1 mm"}),
+                1 => json!({"fit": "H7"}),
+                _ => json!({"deviation": ["0.05 mm", "-0.02 mm"]}),
+            };
+            o["annotations"]["d1"]["tolerance"] = t;
+        }
+        6 => match arg % 2 {
+            0 => o["annotations"]["d1"]["offset"] = mm(arg / 4),
+            // Only a note that is there is moved: indexing a removed one
+            // would write a note with no type.
+            _ => {
+                if let Some(n1) = o["annotations"].get_mut("n1") {
+                    n1["at"] = json!([mm(arg), mm(arg / 3)]);
+                }
+            }
+        },
+        // An annotation added or taken away, the sheet's scale set.
+        _ => match arg % 3 {
+            0 => {
+                o["annotations"].as_object_mut().unwrap().insert(
+                    format!("n{}", arg % 5 + 2),
+                    json!({"type": "note", "sheet": "s1", "text": "X",
+                           "at": [mm(arg), mm(arg)]}),
+                );
+            }
+            1 => {
+                o["annotations"].as_object_mut().unwrap().remove("n1");
+            }
+            _ => o["sheets"]["s1"]["scale"] = json!(["1:1", "1:2", "2:1"][usize::from(arg % 3)]),
+        },
+    }
+}
+
 fn edit_split_tool(v: &mut Value, op: u8, arg: u8) {
     let o = v.as_object_mut().unwrap();
     match op % 4 {
@@ -1202,7 +1268,7 @@ fn text(v: &Value) -> Vec<u8> {
 fn edit_annotation(v: &mut Value, op: u8, arg: u8) {
     let o = v.as_object_mut().unwrap();
     let who = |n: u8| json!({"participant": format!("p{}", n % 3), "kind": "agent"});
-    match op % 5 {
+    match op % 7 {
         // A reply, numbered one past the largest, as ryucad numbers it.
         0 => {
             let replies = o.get_mut("replies").unwrap().as_object_mut().unwrap();
@@ -1236,6 +1302,26 @@ fn edit_annotation(v: &mut Value, op: u8, arg: u8) {
         3 => {
             o.insert("comment".into(), json!(format!("c{arg}")));
         }
+        // Marks on either side (design 423): a line whose end is the
+        // byte, or an arrow and a face stroke, at format 2.
+        4 => {
+            let x = f64::from(arg) / 1000.0;
+            let list = if arg % 2 == 0 {
+                json!([{"kind": "line", "in": "view", "xy_m": [[0, 0], [x, 0.001]], "touches": []}])
+            } else {
+                json!([{"kind": "arrow", "in": "view", "xy_m": [[0, 0], [0.001, x]],
+                        "touches": [{"at": "tip", "ref": format!("p/b/{:032x}", arg)}]},
+                       {"kind": "stroke", "in": "face", "on": "p/b",
+                        "points_m": [[0, 0, 0], [x, 0, 0]], "touches": []}])
+            };
+            o.insert("format".into(), json!(2));
+            o.insert("marks".into(), json!({"part": "p", "list": list}));
+        }
+        // Marks taken away: format 1 again.
+        5 => {
+            o.remove("marks");
+            o.insert("format".into(), json!(1));
+        }
         _ => {
             o.insert(
                 "pins".into(),
@@ -1258,9 +1344,10 @@ fuzz_target!(|data: &[u8]| {
     // `0xf0` a base flange or flange (24), `0xef` a planar face or a
     // surface extrude (25), `0xee` an unfold or refold (26), `0xed` a face
     // tweak (27), `0xec` a thicken or a fill (28), `0xeb` a draft (29),
-    // `0xea` a split by a tool (30); every other byte picks as it did
-    // before them.
+    // `0xea` a split by a tool (30), `0xe9` a drawing (31); every other
+    // byte picks as it did before them.
     let kind = match mode {
+        0xe9 => 31,
         0xea => 30,
         0xeb => 29,
         0xec => 28,
@@ -1331,7 +1418,10 @@ fuzz_target!(|data: &[u8]| {
                          "by": {"participant": "dave", "kind": "human"},
                          "at": "2026-11-05T14:02:11Z", "status": "open", "claimed_by": null,
                          "pins": [{"ref": format!("p/b/{:032x}", 1)}],
-                         "comment": "move it", "view": null, "change": null,
+                         "comment": "move it",
+                         "view": {"eye_m": [0.3, -0.3, 0.3], "target_m": [0, 0, 0], "up": [0, 0, 1],
+                                  "projection": "perspective", "fov_deg": 40},
+                         "change": null,
                          "replies": {"r1": {"by": {"participant": "agent", "kind": "agent"},
                                             "at": "2026-11-05T14:05:00Z", "text": "ok"}},
                          "resolution": null}),
@@ -1356,6 +1446,17 @@ fuzz_target!(|data: &[u8]| {
                          "faces": [{"feature": "b", "name": format!("{:032x}", 1)}]}),
             30 => json!({"format": 19, "kind": "ryucad.feature", "type": "split",
                          "target": "h", "tool": {"body": "t"}}),
+            31 => json!({"format": 1, "kind": "ryucad.drawing", "name": "D",
+                "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b"}},
+                "views": {"v1": {"type": "base", "sheet": "s1", "orient": "front",
+                                 "at": ["100 mm", "100 mm"]},
+                          "v2": {"type": "projected", "sheet": "s1", "from": "v1", "side": "top",
+                                 "offset": "60 mm"}},
+                "annotations": {"d1": {"type": "linear", "view": "v1",
+                                       "a": format!("b/{:032x}", 0), "b": format!("b/{:032x}", 1),
+                                       "along": "horizontal", "offset": "10 mm"},
+                                "n1": {"type": "note", "sheet": "s1", "text": "DEBURR",
+                                       "at": ["20 mm", "20 mm"]}}}),
             // A thicken when the edits leave no odd byte over, else a fill.
             28 if rest.len() % 2 == 0 => json!({"format": 15, "kind": "ryucad.feature",
                 "type": "thicken", "from": {"sheet": "s"}, "front": "1 mm", "back": "0 mm",
@@ -1446,6 +1547,7 @@ fuzz_target!(|data: &[u8]| {
             28 => edit_surface_feature(v, op, arg),
             29 => edit_draft(v, op, arg),
             30 => edit_split_tool(v, op, arg),
+            31 => edit_drawing(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -1633,6 +1735,23 @@ fuzz_target!(|data: &[u8]| {
                         && !k.starts_with("/flip/"),
                     "conflicted inside a draft's list at {k}: {v}"
                 );
+            }
+        }
+        // A drawing merges per member and field: a place, a tolerance and
+        // a view's orient are one value each, never conflicting inside, a
+        // retyped view conflicts whole, and a clean merge reads.
+        if kind == 31 {
+            let (merged, outcome) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            for k in record(&v).keys() {
+                assert!(
+                    !k.contains("/at/") && !k.contains("/tolerance/") && !k.contains("/orient/"),
+                    "conflicted inside a drawing's value at {k}: {v}"
+                );
+            }
+            if outcome == Outcome::Clean {
+                ryucad::doc::drawing::DrawingFile::from_json(&v)
+                    .expect("a clean merge of a drawing reads");
             }
         }
         // A split's plane, tool and flip are one value together, never

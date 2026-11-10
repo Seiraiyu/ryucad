@@ -197,8 +197,29 @@ pub fn answer_live(
             explode,
             fraction,
             annotations,
+            annotation,
             flat,
         } => {
+            let annotation = match annotation {
+                None => None,
+                Some(_) if camera.is_some() || view.is_some() => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "--annotation renders its own view: give no camera or view",
+                    ));
+                }
+                Some(id) => {
+                    let a = crate::annotation::one(session, &id, None)?;
+                    if a.view.is_none() {
+                        return Err(Error::new(
+                            Code::InvalidParam,
+                            format!("annotation {id} keeps no view to render"),
+                        )
+                        .with("annotation", &id));
+                    }
+                    Some(a)
+                }
+            };
             // A flat pattern's render draws one solid flat: no section or
             // explode applies, the request's own refused and the window's
             // left out.
@@ -233,7 +254,21 @@ pub fn answer_live(
                 }
                 _ => None,
             };
-            let saved_sections = named.as_ref().map(|s| s.sections.clone());
+            let saved_sections: Option<Vec<crate::section::Plane>> = match &annotation {
+                Some(a) => Some(
+                    a.view
+                        .as_ref()
+                        .expect("checked")
+                        .sections
+                        .iter()
+                        .map(|s| crate::section::Plane {
+                            origin_m: s.origin_m,
+                            normal: s.normal,
+                        })
+                        .collect(),
+                ),
+                None => named.as_ref().map(|s| s.sections.clone()),
+            };
             let explode = match &named {
                 Some(saved) => explode.or_else(|| {
                     Some(
@@ -305,6 +340,16 @@ pub fn answer_live(
                 },
             };
             let target = participant.as_deref().map(|p| (p, live.as_deref()));
+            // An annotation's render shows the model its marks name, else
+            // its first pin's part.
+            let part = part.or_else(|| {
+                let a = annotation.as_ref()?;
+                let p = match &a.marks {
+                    Some(m) => m.part.to_string(),
+                    None => a.pins.first()?.part().to_owned(),
+                };
+                (!p.is_empty()).then_some(p)
+            });
             // A participant's render shows what their window shows.
             let part = part.or_else(|| {
                 let l = live.as_deref()?;
@@ -345,6 +390,12 @@ pub fn answer_live(
                 explode,
                 annotations,
                 flat,
+                camera_m: annotation
+                    .as_ref()
+                    .and_then(|a| a.view.as_ref())
+                    .map(crate::view::Camera::from),
+                annotation,
+                pick: false,
             };
             render_noting(session, target, shown, ask)
         }
@@ -1480,13 +1531,33 @@ pub(crate) fn dispatch(
             comment,
             camera,
             with_view,
+            marks,
+            view: named,
             author,
         } => {
             let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
             let unit = session.project().manifest.default_unit;
-            let view = match (camera, with_view) {
-                (Some(c), _) => Some(c.resolve(unit)?.to_view_file()),
-                (None, true) => {
+            let view = match (camera, with_view, named) {
+                (Some(c), false, None) => Some(c.resolve(unit)?.to_view_file()),
+                (None, false, Some(v)) => {
+                    let part = marks
+                        .as_ref()
+                        .map(|m| m.part.clone())
+                        .or_else(|| {
+                            pins.first().and_then(|p| {
+                                let r = p.reference.clone().or(p.part.clone())?;
+                                Some(r.split('/').next().unwrap_or_default().to_owned())
+                            })
+                        })
+                        .ok_or_else(|| {
+                            Error::new(
+                                Code::Usage,
+                                "a named view is of the marks' part: give marks or a pin",
+                            )
+                        })?;
+                    Some(crate::views::view_file(session, &part_id(&part)?, &v)?)
+                }
+                (None, true, None) => {
                     let l = live
                         .as_deref()
                         .ok_or_else(|| live::no_live_session("annotation.create --view"))?;
@@ -1501,9 +1572,16 @@ pub(crate) fn dispatch(
                         })?;
                     Some(camera.to_view_file())
                 }
-                (None, false) => None,
+                (None, false, None) => None,
+                _ => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "give one of camera, --view and --of",
+                    ));
+                }
             };
-            crate::annotation::create(session, by, &pins, &comment, view)
+            let from = pick_from(live.as_deref(), me);
+            crate::annotation::create(session, by, &pins, &comment, view, marks.as_ref(), &from)
         }
         Request::AnnotationList {
             status,
@@ -1550,15 +1628,27 @@ pub(crate) fn dispatch(
             id,
             comment,
             pins,
+            marks,
+            no_marks,
             expect,
             author,
         } => {
+            if no_marks && marks.is_some() {
+                return Err(Error::new(
+                    Code::Usage,
+                    "--no-marks takes them away: give no marks with it",
+                ));
+            }
             let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            let from = pick_from(live.as_deref(), me);
             crate::annotation::edit(
                 session,
                 &id,
                 comment.as_deref(),
                 pins.as_deref(),
+                marks.as_ref(),
+                no_marks,
+                &from,
                 expect.as_deref(),
                 by,
             )
@@ -6240,41 +6330,111 @@ pub(crate) fn normal_to_face_at(
     ))
 }
 
+/// What a pick pass for `me`'s marks leaves out: their participant's
+/// hidden set, when the request came from one.
+fn pick_from(live: Option<&Live>, me: Option<&str>) -> crate::annotation::PickFrom {
+    crate::annotation::PickFrom {
+        hidden: live
+            .zip(me)
+            .and_then(|(l, m)| l.get(m).ok())
+            .map(|p| p.view.hidden.clone())
+            .unwrap_or_default(),
+    }
+}
+
 /// A render request, unpacked.
-struct RenderAsk {
-    part: Option<String>,
-    camera: Option<crate::view::CameraArg>,
-    view: Option<String>,
-    width: u32,
-    height: u32,
-    highlight: Vec<String>,
-    edges: bool,
-    labels: bool,
-    sketches: bool,
+pub(crate) struct RenderAsk {
+    pub(crate) part: Option<String>,
+    pub(crate) camera: Option<crate::view::CameraArg>,
+    pub(crate) view: Option<String>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) highlight: Vec<String>,
+    pub(crate) edges: bool,
+    pub(crate) labels: bool,
+    pub(crate) sketches: bool,
     /// Draw the shown parts' datums.
-    datums: bool,
-    rev: Option<String>,
-    frame: Vec<String>,
-    compare: Option<String>,
+    pub(crate) datums: bool,
+    pub(crate) rev: Option<String>,
+    pub(crate) frame: Vec<String>,
+    pub(crate) compare: Option<String>,
     /// What to leave out: occurrences and solids, at the leaves.
-    hidden: std::collections::BTreeSet<String>,
+    pub(crate) hidden: std::collections::BTreeSet<String>,
     /// Draw the origin's axes and planes.
-    origin: bool,
+    pub(crate) origin: bool,
     /// Draw each face in its appearance, else the fixed theme.
-    appearance: bool,
+    pub(crate) appearance: bool,
     /// Cut away what lies beyond these planes.
-    sections: Vec<crate::section::Plane>,
+    pub(crate) sections: Vec<crate::section::Plane>,
     /// An explode to draw.
-    explode: Option<DrawExplode>,
+    pub(crate) explode: Option<DrawExplode>,
     /// Draw open annotations' pins, numbered.
-    annotations: bool,
+    pub(crate) annotations: bool,
     /// A sheet metal solid whose flat pattern to draw instead (`""`: the
     /// part's one).
-    flat: Option<String>,
+    pub(crate) flat: Option<String>,
+    /// A camera in metres that wins over `camera`, a participant's and
+    /// `view` (a pick pass, `render --annotation`).
+    pub(crate) camera_m: Option<crate::view::Camera>,
+    /// Tag every entity drawn, for a pick pass.
+    pub(crate) pick: bool,
+    /// An annotation to draw, its pins and marks.
+    pub(crate) annotation: Option<crate::annotation::Annotation>,
+}
+
+impl RenderAsk {
+    /// What a pick pass draws of `part` seen through `camera`: the
+    /// working model (or the session's draft), every edge and sketch,
+    /// no datums, labels, appearance, compare or explode, cut by
+    /// `sections` and leaving out `hidden`.
+    pub(crate) fn pick(
+        part: &str,
+        camera: crate::view::Camera,
+        sections: Vec<crate::section::Plane>,
+        hidden: std::collections::BTreeSet<String>,
+    ) -> RenderAsk {
+        RenderAsk {
+            part: Some(part.to_owned()),
+            camera: None,
+            view: None,
+            width: 800,
+            height: 600,
+            highlight: Vec::new(),
+            edges: true,
+            labels: false,
+            sketches: true,
+            datums: false,
+            rev: None,
+            frame: Vec::new(),
+            compare: None,
+            hidden,
+            origin: false,
+            appearance: false,
+            sections,
+            explode: None,
+            annotations: false,
+            flat: None,
+            camera_m: Some(camera),
+            pick: true,
+            annotation: None,
+        }
+    }
+}
+
+/// What a render draws and from where: its geometry, camera, each
+/// assembly's occurrences' poses by instance path, the
+/// commit read, the compare's revision and commit, and its warnings.
+pub(crate) struct Scene {
+    pub(crate) g: crate::render::Geometry,
+    pub(crate) camera: crate::view::Camera,
+    pub(crate) poses: BTreeMap<String, BTreeMap<String, ryukei::geom::Rigid>>,
+    pub(crate) commit: Option<String>,
+    pub(crate) compare: Option<Value>,
+    pub(crate) warnings: Vec<Value>,
 }
 
 /// An explode a render draws.
-struct DrawExplode {
+pub(crate) struct DrawExplode {
     /// The assembly of the explode a participant's window shows, which the
     /// render draws only if it draws that assembly; `None` for one the
     /// request (or a named view) names, of the one part rendered.
@@ -6510,11 +6670,41 @@ fn render(
     shown: Vec<live::Highlight>,
     ask: RenderAsk,
 ) -> Result<Answer> {
-    use crate::render::{self as r, Geometry, Options};
-    r::check_size(ask.width, ask.height)?;
+    crate::render::check_size(ask.width, ask.height)?;
     if let Some(solid) = ask.flat.clone() {
         return render_flat(session, ask, solid);
     }
+    let (width, height, edges, part) = (ask.width, ask.height, ask.edges, ask.part.clone());
+    let scene = render_scene(session, target, shown, ask)?;
+    let options = crate::render::Options {
+        silhouettes: edges,
+        triad: true,
+    };
+    let img = crate::render::render(&scene.g, &scene.camera, width, height, options)?;
+    let mut result =
+        json!({"part": part, "width": width, "height": height, "camera": scene.camera});
+    if let Some(c) = scene.commit {
+        result["commit"] = json!(c);
+    }
+    if let Some(c) = scene.compare {
+        result["compare"] = c;
+    }
+    if !scene.warnings.is_empty() {
+        result["warnings"] = json!(scene.warnings);
+    }
+    Ok(Answer::bytes(result, "image/png", img.png()))
+}
+
+/// The geometry and camera a render draws, without its image: what
+/// `render` rasterizes, and what a pick pass ([`crate::render::pick`])
+/// reads with `ask.pick`.
+pub(crate) fn render_scene(
+    session: &mut Session,
+    target: Option<(&str, Option<&Live>)>,
+    shown: Vec<live::Highlight>,
+    ask: RenderAsk,
+) -> Result<Scene> {
+    use crate::render::{self as r, Geometry};
     let parts = render_parts(session.at(ask.rev.as_deref())?.1, ask.part.as_deref())?;
     // Other revisions' models only widen the framing.
     let mut extra: Vec<[f64; 3]> = Vec::new();
@@ -6559,6 +6749,9 @@ fn render(
         marks.insert(e.to_string(), (r::NOTE, None));
     }
     let mut g = Geometry::default();
+    if ask.pick {
+        g.tags = Some(Default::default());
+    }
     // Each assembly's occurrences' poses, by instance path, for the pins
     // `annotations` draws on them.
     let mut poses: BTreeMap<String, BTreeMap<String, ryukei::geom::Rigid>> = BTreeMap::new();
@@ -6790,18 +6983,75 @@ fn render(
     if ask.origin {
         g.add_origin();
     }
+    let files = session.snapshot();
+    let none = BTreeMap::new();
+    // The annotation `render --annotation` names is drawn once, by its
+    // own block below; the others `--annotations` asks for keep their
+    // numbers.
+    let asked = ask.annotation.as_ref().map(|a| &a.id);
+    let numbers = crate::annotation::numbers(&files);
     if ask.annotations {
-        let files = session.snapshot();
-        let none = BTreeMap::new();
         for part in &parts {
             let on = poses.get(part.as_str()).unwrap_or(&none);
-            for (at, n) in crate::annotation::markers(&files, part.as_str(), on) {
+            for (at, n) in crate::annotation::markers(&files, part.as_str(), on, asked) {
                 g.add_marker(at, &n);
             }
         }
+        let all = crate::annotation::readable(&crate::annotation::read_all(&files));
+        for a in all
+            .values()
+            .filter(|a| a.status.is_open() && Some(&a.id) != asked)
+        {
+            if let (Some(m), Some(v)) = (&a.marks, &a.view)
+                && parts.contains(&m.part)
+            {
+                let plane = crate::redline::Plane::of(&crate::view::Camera::from(v));
+                crate::redline::draw(
+                    &mut g,
+                    &plane,
+                    m,
+                    &poses,
+                    r::participant(&a.by.participant),
+                    1.0,
+                );
+            }
+        }
     }
+    if let Some(a) = &ask.annotation {
+        // Beside the other open annotations, an open one's pins carry its
+        // number, as theirs do; alone, or closed, their place in it.
+        let number = numbers.get(&a.id).filter(|_| ask.annotations);
+        for (k, pin) in a.pins.iter().enumerate() {
+            let label = number.map_or_else(|| (k + 1).to_string(), |n| n.to_string());
+            for part in &parts {
+                let on = poses.get(part.as_str()).unwrap_or(&none);
+                if let Some(at) = crate::annotation::pin_on(pin, part.as_str(), on) {
+                    g.add_marker(at, &label);
+                }
+            }
+        }
+        if let (Some(m), Some(v)) = (&a.marks, &a.view) {
+            let plane = crate::redline::Plane::of(&crate::view::Camera::from(v));
+            let alpha = if a.status.is_open() {
+                1.0
+            } else {
+                crate::redline::CLOSED_ALPHA
+            };
+            crate::redline::draw(
+                &mut g,
+                &plane,
+                m,
+                &poses,
+                r::participant(&a.by.participant),
+                alpha,
+            );
+        }
+    }
+
     g.sections = ask.sections.clone();
+    let fixed = ask.camera_m.clone();
     let camera = match (ask.camera, target, ask.view.as_deref()) {
+        _ if fixed.is_some() => fixed.expect("checked"),
         (Some(c), _, _) => c.resolve(session.project().manifest.default_unit)?,
         (None, Some((p, live)), _) => {
             let live =
@@ -6833,23 +7083,14 @@ fn render(
             }
         }
     };
-    let options = Options {
-        silhouettes: ask.edges,
-        triad: true,
-    };
-    let img = r::render(&g, &camera, ask.width, ask.height, options)?;
-    let mut result =
-        json!({"part": ask.part, "width": ask.width, "height": ask.height, "camera": camera});
-    if let Some(c) = commit {
-        result["commit"] = json!(c);
-    }
-    if let Some((rev, (commit, _))) = other {
-        result["compare"] = json!({"rev": rev, "commit": commit});
-    }
-    if !warnings.is_empty() {
-        result["warnings"] = json!(warnings);
-    }
-    Ok(Answer::bytes(result, "image/png", img.png()))
+    Ok(Scene {
+        g,
+        camera,
+        poses,
+        commit,
+        compare: other.map(|(rev, (commit, _))| json!({"rev": rev, "commit": commit})),
+        warnings,
+    })
 }
 
 /// `render --flat`: `solid`'s flat pattern (`""`: the part's one sheet
@@ -7134,6 +7375,7 @@ fn draw_body(
         if let Some(a) = alpha {
             glass.insert(f.face, a);
         }
+        let (start, sheet_start) = (g.triangles.len(), g.sheets.len());
         for t in &mesh.triangles[f.triangles.start as usize..f.triangles.end as usize] {
             let c = t.map(|i| mesh.corners[i as usize]);
             let t = Triangle {
@@ -7149,6 +7391,15 @@ fn draw_body(
                 Some(a) => g.translucent.push((t, a)),
                 None if sheet => g.sheets.push(t),
                 None => g.triangles.push(t),
+            }
+        }
+        if let Some(t) = g.tags.as_mut() {
+            let id = t.name(&key(name.clone()));
+            if g.triangles.len() > start {
+                t.triangles.push((start..g.triangles.len(), id));
+            }
+            if g.sheets.len() > sheet_start {
+                t.sheets.push((sheet_start..g.sheets.len(), id));
             }
         }
         if let Some((_, text)) = mark {
@@ -7171,6 +7422,10 @@ fn draw_body(
                     width: 3.0,
                     dash: false,
                 });
+                if let Some(t) = g.tags.as_mut() {
+                    let id = t.name(&key(name.clone()));
+                    t.lines.push((g.lines.len() - 1, id));
+                }
             }
             None if edges => {
                 let line = Line {
@@ -7190,6 +7445,10 @@ fn draw_body(
                     g.translucent_lines.push((line, alpha));
                 } else {
                     g.lines.push(line);
+                    if let Some(t) = g.tags.as_mut() {
+                        let id = t.name(&key(name.clone()));
+                        t.lines.push((g.lines.len() - 1, id));
+                    }
                 }
             }
             None => {}
@@ -7197,6 +7456,10 @@ fn draw_body(
     }
     for (i, v) in m.body.vertices().enumerate() {
         let name = m.body.vertex(v).expect("live").name.to_string();
+        if let Some(t) = g.tags.as_mut() {
+            let id = t.name(&key(name.clone()));
+            t.points.push((base + i as u32, id));
+        }
         if let Some((color, text)) = marks.get(&key(name.clone())) {
             label(g, &name, text, &[i as u32]);
             g.lines.push(Line {
@@ -7257,6 +7520,10 @@ fn sketches(
                 width,
                 dash: c.construction,
             });
+            if let Some(t) = g.tags.as_mut() {
+                let id = t.name(&format!("{part}/{fid}/{}", c.entity));
+                t.lines.push((g.lines.len() - 1, id));
+            }
         }
         for p in &d.dots {
             g.positions.push(p.at);
@@ -7270,6 +7537,10 @@ fn sketches(
                 width,
                 dash: false,
             });
+            if let Some(t) = g.tags.as_mut() {
+                let id = t.name(&format!("{part}/{fid}/{}", p.entity));
+                t.points.push((g.positions.len() as u32 - 1, id));
+            }
         }
         if labels {
             g.labels.extend(d.labels.into_iter().map(|l| Label {
@@ -8063,6 +8334,244 @@ pub(crate) mod tests {
 
     pub(crate) fn call(s: &mut Session, method: &str, params: Value) -> Result<Value> {
         handle(s, Request::from_rpc(method, Some(params))?)
+    }
+
+    #[test]
+    fn a_render_of_an_annotation_shows_its_view_and_marks() {
+        let (_dir, mut s, view) = crate::annotation::tests::drilled();
+        let boss = crate::annotation::tests::on(&view, [0.045, 0.02, 0.011]);
+        let marks = crate::proto::MarksArg {
+            part: "plate".into(),
+            short: Vec::new(),
+            list: vec![json!({"kind": "arrow", "in": "view", "xy_m": [[0.0, 0.0], boss]})],
+        };
+        let a = crate::annotation::create(
+            &mut s,
+            crate::annotation::By::agent("agent"),
+            &[],
+            "move it",
+            Some(view.clone()),
+            Some(&marks),
+            &Default::default(),
+        )
+        .unwrap();
+        let id = a["annotation"]["id"].as_str().unwrap().to_owned();
+        let png = |s: &mut Session, p: Value| {
+            let a =
+                answer_live(s, None, None, Request::from_rpc("render", Some(p)).unwrap()).unwrap();
+            (a.result.clone(), a.binary.unwrap())
+        };
+        let (r, marked) = png(
+            &mut s,
+            json!({"annotation": id, "width": 400, "height": 300}),
+        );
+        assert_eq!(r["camera"], json!(crate::view::Camera::from(&view)));
+        // The same view without the annotation: the arrow is the difference.
+        let camera = json!({"eye": ["120 mm", "-100 mm", "90 mm"], "target": ["30 mm", "20 mm", "2.5 mm"],
+                            "up": [0, 0, 1], "projection": {"orthographic": {"height": "80 mm"}}});
+        let (_, bare) = png(
+            &mut s,
+            json!({"part": "plate", "camera": camera, "width": 400, "height": 300}),
+        );
+        assert_ne!(marked, bare);
+        // Asked with a camera too, it is a usage error.
+        let e = answer_live(
+            &mut s,
+            None,
+            None,
+            Request::from_rpc("render", Some(json!({"annotation": id, "camera": camera}))).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Usage);
+        // An annotation with no view can't be rendered so.
+        let plain = crate::annotation::create(
+            &mut s,
+            crate::annotation::By::agent("agent"),
+            &[],
+            "words only",
+            None,
+            None,
+            &Default::default(),
+        )
+        .unwrap();
+        let e = answer_live(
+            &mut s,
+            None,
+            None,
+            Request::from_rpc(
+                "render",
+                Some(json!({"annotation": plain["annotation"]["id"]})),
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+    }
+
+    #[test]
+    fn renders_without_marks_asked_for_are_unchanged() {
+        let (_dir, mut s, view) = crate::annotation::tests::drilled();
+        let render = |s: &mut Session, annotations: bool| {
+            let p = json!({"part": "plate", "view": "iso", "width": 200, "height": 150, "annotations": annotations});
+            answer_live(s, None, None, Request::from_rpc("render", Some(p)).unwrap())
+                .unwrap()
+                .binary
+                .unwrap()
+        };
+        let before = render(&mut s, false);
+        let marks = crate::proto::MarksArg {
+            part: "plate".into(),
+            short: Vec::new(),
+            list: vec![json!({"kind": "line", "in": "view", "xy_m": [[0.0, 0.0], [0.01, 0.0]]})],
+        };
+        crate::annotation::create(
+            &mut s,
+            crate::annotation::By::agent("agent"),
+            &[],
+            "a line",
+            Some(view),
+            Some(&marks),
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(render(&mut s, false), before);
+        assert_ne!(
+            render(&mut s, true),
+            before,
+            "--annotations draws open marks"
+        );
+    }
+
+    #[test]
+    fn an_annotation_rendered_beside_the_open_ones_is_drawn_once() {
+        let (_dir, mut s, view) = crate::annotation::tests::drilled();
+        let boss = crate::annotation::tests::on(&view, [0.045, 0.02, 0.011]);
+        let pin = |x: f64| {
+            vec![crate::proto::PinArg {
+                reference: None,
+                part: Some("plate".into()),
+                point: Some([x, 0.02, 0.005].map(|v| json!(format!("{v} m")))),
+            }]
+        };
+        crate::annotation::create(
+            &mut s,
+            crate::annotation::By::agent("agent"),
+            &pin(0.01),
+            "older",
+            Some(view.clone()),
+            None,
+            &Default::default(),
+        )
+        .unwrap();
+        let marks = crate::proto::MarksArg {
+            part: "plate".into(),
+            short: Vec::new(),
+            list: vec![json!({"kind": "arrow", "in": "view", "xy_m": [[0.0, 0.0], boss]})],
+        };
+        let asked = crate::annotation::create(
+            &mut s,
+            crate::annotation::By::agent("agent"),
+            &pin(0.02),
+            "move it",
+            Some(view.clone()),
+            Some(&marks),
+            &Default::default(),
+        )
+        .unwrap();
+        let id = asked["annotation"]["id"].as_str().unwrap().to_owned();
+        let a = crate::annotation::one(&s, &id, None).unwrap();
+        let scene = |s: &mut Session, all: bool| {
+            let mut ask = RenderAsk::pick(
+                "plate",
+                crate::view::Camera::from(&view),
+                Vec::new(),
+                Default::default(),
+            );
+            ask.pick = false;
+            ask.annotations = all;
+            ask.annotation = Some(a.clone());
+            render_scene(s, None, Vec::new(), ask).unwrap().g
+        };
+        // Alone: its arrow (a line and a head) and its pin by its place.
+        let g = scene(&mut s, false);
+        assert_eq!(g.overlay.len(), 2);
+        let labels: Vec<&str> = g.labels.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(labels, ["1"]);
+        // Beside the open ones: still drawn once, its pin under its number
+        // (the second open), the older one's under its own.
+        let g = scene(&mut s, true);
+        assert_eq!(g.overlay.len(), 2, "its marks once");
+        let mut labels: Vec<&str> = g.labels.iter().map(|l| l.text.as_str()).collect();
+        labels.sort_unstable();
+        assert_eq!(labels, ["1", "2"], "each pin once, one numbering");
+    }
+
+    #[test]
+    fn a_scene_for_a_fixed_camera_holds_the_tagged_model() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 10, "y": 10, "z": 10}}),
+        )
+        .unwrap();
+        let camera = crate::view::Camera {
+            eye: [0.1, -0.1, 0.1],
+            target: [0.005, 0.005, 0.005],
+            up: [0.0, 0.0, 1.0],
+            projection: crate::view::Projection::Orthographic { height: 0.05 },
+        };
+        let ask = RenderAsk::pick("p", camera.clone(), Vec::new(), Default::default());
+        let scene = render_scene(&mut s, None, Vec::new(), ask).unwrap();
+        assert_eq!(scene.camera, camera);
+        assert_eq!(scene.g.tags.as_ref().unwrap().triangles.len(), 6);
+        assert!(scene.g.labels.is_empty());
+    }
+
+    #[test]
+    fn a_tagged_scene_names_every_face_edge_and_vertex() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 10, "y": 10, "z": 10}}),
+        )
+        .unwrap();
+        let part = Id::parse("p", "part").unwrap();
+        let (_, m) = meshes(&mut s, &part, None, mesh::Quality::Normal)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let m = m.unwrap();
+        let mut g = crate::render::Geometry {
+            tags: Some(Default::default()),
+            ..Default::default()
+        };
+        draw_body(
+            &mut g,
+            &m,
+            &ryukei::geom::Rigid::IDENTITY,
+            "p/b",
+            &BTreeMap::new(),
+            (None, &BTreeMap::new(), None),
+            (false, true),
+        );
+        let t = g.tags.unwrap();
+        assert_eq!(t.triangles.len(), 6, "a run of triangles per face");
+        assert_eq!(
+            t.triangles.iter().map(|(r, _)| r.len()).sum::<usize>(),
+            g.triangles.len()
+        );
+        assert_eq!(t.lines.len(), 12, "every edge");
+        assert_eq!(t.points.len(), 8, "every vertex");
+        assert!(
+            t.names
+                .iter()
+                .all(|n| n.starts_with("p/b/") && n.len() == 4 + 32)
+        );
     }
 
     #[test]
@@ -11033,6 +11542,14 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.details["needs"], json!(["annotate", "edit"]));
+        // A mark is an annotation write like any other.
+        let marked = json!({"pins": [], "comment": "here",
+                            "camera": {"eye": [1, -1, 1], "target": [0, 0, 0], "up": [0, 0, 1],
+                                       "projection": {"perspective": {"fov_deg": 40}}},
+                            "marks": {"part": "p", "list": [{"kind": "line", "in": "view",
+                                                             "xy_m": [[0, 0], [0.01, 0]]}]}});
+        let e = call_live(&mut s, &mut live, Some(&h), "annotation.create", marked).unwrap_err();
+        assert_eq!(e.code, Code::ParticipantMode);
         // Reading is never refused.
         call_live(&mut s, &mut live, Some(&h), "part.list", json!({})).unwrap();
         call_live(

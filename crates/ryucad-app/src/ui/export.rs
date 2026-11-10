@@ -4,8 +4,8 @@
 //! The daemon writes the file, so the window never holds its bytes.
 
 use crate::core::export::{
-    Choices, DXF_UNITS, ENCODINGS, Export, Format, SCHEMAS, STEP_UNITS, UNITS, failing, shown_refs,
-    skippable,
+    Choices, DRAWING_FORMATS, DXF_UNITS, ENCODINGS, Export, Format, SCHEMAS, STEP_UNITS, UNITS,
+    failing, shown_refs, skippable,
 };
 use crate::core::workspace::Workspace;
 use crate::ui::dialogs::window;
@@ -44,16 +44,17 @@ fn field(ui: &mut egui::Ui, label: &str, value: &mut String, enabled: bool) {
 /// The format's options, in the dialog's grid; true when the extension
 /// it writes changed.
 /// DXF is offered only when `sheet` (the part has sheet metal).
-fn options(ui: &mut egui::Ui, c: &mut Choices, sheet: bool) -> bool {
+fn options(ui: &mut egui::Ui, c: &mut Choices, sheet: bool, drawing: bool) -> bool {
     let name = crate::ui::form::label(ui, "Format", false);
     let before = c.format;
     egui::ComboBox::from_id_salt("Format")
         .selected_text(c.format.title())
         .show_ui(ui, |ui| {
-            for f in Format::ALL
-                .into_iter()
-                .filter(|f| *f != Format::Dxf || sheet)
-            {
+            for f in Format::ALL.into_iter().filter(|f| match f {
+                Format::Dxf => sheet,
+                Format::Drawing => drawing,
+                _ => true,
+            }) {
                 ui.selectable_value(&mut c.format, f, f.title());
             }
         })
@@ -95,6 +96,12 @@ fn options(ui: &mut egui::Ui, c: &mut Choices, sheet: bool) -> bool {
             ui.label("");
             ui.checkbox(&mut c.notes, "Bend notes");
             ui.end_row();
+        }
+        Format::Drawing => {
+            changed |= combo(ui, "As", &mut c.drawing_format, &DRAWING_FORMATS);
+            if c.drawing_format == "dxf" {
+                combo(ui, "Unit", &mut c.dxf_unit, &DXF_UNITS);
+            }
         }
     }
     ui.label("");
@@ -165,8 +172,9 @@ pub fn dialog(
         .show(ctx, |ui| {
             ui.label("As the working files have it.");
             let sheet = e.sheet.is_some();
+            let drawing = e.drawing.is_some();
             let changed = crate::ui::form::plain_grid("export", 2)
-                .show(ui, |ui| options(ui, &mut e.choices, sheet))
+                .show(ui, |ui| options(ui, &mut e.choices, sheet, drawing))
                 .inner;
             if changed {
                 e.follow_format();
@@ -203,6 +211,7 @@ pub fn ask_os(parent: &eframe::Frame, c: &Choices) -> Option<std::path::PathBuf>
         Format::ThreeMf => ("3MF", vec!["3mf"]),
         Format::Usd => ("USD", vec![c.encoding.as_str()]),
         Format::Dxf => ("DXF", vec!["dxf"]),
+        Format::Drawing => ("Drawing", vec![c.drawing_format.as_str()]),
     };
     rfd::FileDialog::new()
         .set_parent(parent)

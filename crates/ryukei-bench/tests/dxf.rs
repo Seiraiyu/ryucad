@@ -190,3 +190,180 @@ fn ezdxf_reads_ryucads_export() {
     let got = r["outline"][0].as_f64().unwrap();
     assert!((got - want).abs() <= 1e-6 * want, "{got} against {want}");
 }
+
+/// The entities `ryu_draw::dxf` writes for `drawing.get`'s items, by DXF
+/// type: a segment each (a whole arc a `CIRCLE`), a closing line where a
+/// closed path doesn't end at its start, a `SOLID` for a filled path of
+/// two or three lines (an arrowhead), a `TEXT` for each text.
+fn drawn_counts(items: &[Value]) -> std::collections::BTreeMap<String, u64> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut add = |k: &str| *out.entry(k.to_owned()).or_insert(0) += 1;
+    for it in items {
+        let Some(p) = it.get("path") else {
+            add("TEXT");
+            continue;
+        };
+        if it.get("stroke").is_none() && it.get("fill").is_none() {
+            continue;
+        }
+        let segs = p["segments"].as_array().unwrap();
+        let lines = segs.iter().all(|s| s.get("line").is_some());
+        if it.get("fill").is_some() && lines && (2..=3).contains(&segs.len()) {
+            add("SOLID");
+            continue;
+        }
+        for sg in segs {
+            if sg.get("line").is_some() {
+                add("LINE");
+            } else if let Some(a) = sg.get("arc") {
+                let whole = a["sweep"].as_f64().unwrap().abs() >= std::f64::consts::TAU - 1e-12;
+                add(if whole { "CIRCLE" } else { "ARC" });
+            } else if sg.get("ellipse").is_some() {
+                add("ELLIPSE");
+            } else {
+                add("SPLINE");
+            }
+        }
+        // The writer closes a closed path whose last segment doesn't end
+        // at its start, by the same arithmetic.
+        let pt = |v: &Value| [v[0].as_f64().unwrap(), v[1].as_f64().unwrap()];
+        let end = segs.last().map_or(pt(&p["start"]), |sg| {
+            if let Some(q) = sg.get("line") {
+                pt(q)
+            } else if let Some(a) = sg.get("arc") {
+                let (c, r) = (pt(&a["centre"]), a["radius"].as_f64().unwrap());
+                let t = a["from"].as_f64().unwrap() + a["sweep"].as_f64().unwrap();
+                let (sn, cs) = ryukei::math::sin_cos(t);
+                [c[0] + r * cs, c[1] + r * sn]
+            } else if let Some(e) = sg.get("ellipse") {
+                let (c, ea, eb) = (pt(&e["centre"]), pt(&e["a"]), pt(&e["b"]));
+                let t = e["from"].as_f64().unwrap() + e["sweep"].as_f64().unwrap();
+                let (sn, cs) = ryukei::math::sin_cos(t);
+                [
+                    c[0] + (ea[0] * cs + eb[0] * sn),
+                    c[1] + (ea[1] * cs + eb[1] * sn),
+                ]
+            } else {
+                pt(sg["bezier"]["points"].as_array().unwrap().last().unwrap())
+            }
+        });
+        if p["closed"] == true && end != pt(&p["start"]) {
+            add("LINE");
+        }
+    }
+    out
+}
+
+/// Every drawing a ryucad project makes, each sheet's DXF in millimetres
+/// and inches, read by ezdxf (plan 9.D): R2000, audited with no error and
+/// nothing fixed, a layer for each line kind and text, and as many
+/// entities of each type as the sheet's items make.
+#[test]
+fn ezdxf_reads_every_drawing_dxf() {
+    use ryucad::proto::Request;
+    use ryucad::server::handle;
+    use ryucad::session::Session;
+    let call = |s: &mut Session, m: &str, p: Value| {
+        handle(s, Request::from_rpc(m, Some(p)).unwrap()).unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    ryucad::server::init(&root, None).unwrap();
+    let mut s = Session::open(&root).unwrap();
+    call(&mut s, "part.create", json!({"part": "p"}));
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "box", "id": "b", "params": {"x": 60, "y": 40, "z": 12}}),
+    );
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "cylinder", "id": "h", "operation": "cut", "targets": ["b"],
+               "params": {"radius": 6, "height": 12}, "placement": {"origin": [30, 20, 0]}}),
+    );
+    // The standard views, the bore's diameter with its fit, a full
+    // section through the hole and a detail of it: every item kind,
+    // hatching and dimension lines.
+    call(
+        &mut s,
+        "drawing.create",
+        json!({"part": "p", "drawing": "d", "name": "Plate", "size": "ansi_c", "views": "standard"}),
+    );
+    let body = call(&mut s, "inspect", json!({"part": "p"}))["bodies"][0].clone();
+    let wall = body["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["surface"]["type"] == "cylinder")
+        .map(|f| format!("b/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    let ops = json!([{"op": "add", "kind": "annotation",
+        "value": {"type": "diameter", "view": "v2", "of": wall, "tolerance": {"fit": "H7"}}}]);
+    call(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "p", "drawing": "d", "ops": ops}),
+    );
+    call(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "p", "drawing": "d", "ops": [
+            {"op": "add", "kind": "view", "value": {"type": "section", "sheet": "s1", "from": "v2",
+             "label": "A", "cut": {"origin": ["0 mm", "20 mm", "0 mm"], "normal": [0, 1, 0]}}},
+            {"op": "add", "kind": "view", "value": {"type": "detail", "sheet": "s1", "from": "v2",
+             "label": "B", "centre": ["30 mm", "20 mm", "12 mm"], "radius": "10 mm"}}]}),
+    );
+    call(
+        &mut s,
+        "drawing.layout",
+        json!({"part": "p", "drawing": "d"}),
+    );
+    let got = call(
+        &mut s,
+        "drawing.get",
+        json!({"part": "p", "drawing": "d", "items": true}),
+    );
+    let items = got["sheets"][0]["items"].as_array().unwrap().clone();
+    let want = drawn_counts(&items);
+    let out = tempfile::tempdir().unwrap();
+    let mut files = Vec::new();
+    for unit in ["mm", "in"] {
+        let f = out.path().join(format!("d-{unit}.dxf"));
+        call(
+            &mut s,
+            "drawing.export",
+            json!({"part": "p", "drawing": "d", "format": "dxf", "unit": unit, "out": f.to_str().unwrap()}),
+        );
+        files.push(f);
+    }
+    let got = reference(out.path(), &files);
+    for r in &got {
+        let f = r["file"].as_str().unwrap();
+        assert_eq!(r["version"], "AC1015", "{f}");
+        assert_eq!(r["errors"], json!([]), "{f}");
+        assert_eq!(r["fixes"], 0, "{f}: ezdxf fixed something");
+        for l in [
+            "VISIBLE",
+            "THIN",
+            "BORDER",
+            "HATCH",
+            "CUTTING",
+            "DIMENSION",
+            "TEXT",
+        ] {
+            assert!(
+                r["layers"].as_array().unwrap().iter().any(|x| x == l),
+                "{f}: {l}"
+            );
+        }
+        let counts: std::collections::BTreeMap<String, u64> =
+            serde_json::from_value(r["counts"].clone()).unwrap();
+        assert_eq!(counts, want, "{f}");
+    }
+    eprintln!(
+        "ezdxf read {} drawing DXF files clean: {want:?}",
+        files.len()
+    );
+}

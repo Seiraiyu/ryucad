@@ -34,22 +34,10 @@ pub use ryucad::render::{
     COMPARE_REMOVED as REMOVED,
 };
 
-/// Colours for other participants, in turn: apart from each other for
-/// colour-blind eyes too.
-pub const PALETTE: [Rgb; 6] = [
-    [0.79, 0.34, 0.73],
-    [0.97, 0.59, 0.34],
-    [0.35, 0.57, 0.07],
-    [0.54, 0.47, 0.99],
-    [0.90, 0.35, 0.40],
-    [0.28, 0.63, 0.61],
-];
-
-/// A participant's colour: the same in every window, from their ID.
-pub fn participant(id: &str) -> Rgb {
-    let n: usize = id.bytes().map(usize::from).sum();
-    PALETTE[n % PALETTE.len()]
-}
+/// Colours for other participants, in turn, and a participant's colour
+/// from their ID: `ryucad::render`'s, so marks and pins are one colour in
+/// the window and in renders.
+pub use ryucad::render::{PARTICIPANTS as PALETTE, participant};
 
 /// A highlight's colour by style.
 pub fn highlight(style: Style) -> Rgb {

@@ -297,3 +297,10 @@ path = "fuzz_targets/parts.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "drawing"
+path = "fuzz_targets/drawing.rs"
+test = false
+doc = false
+bench = false

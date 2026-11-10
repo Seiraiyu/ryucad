@@ -98,11 +98,30 @@ fn one(
         if let Some(c) = &e.claimed_by {
             ui.weak(format!("claimed by {c}"));
         }
-        if !e.outdated.is_empty() {
+        if !e.outdated.is_empty() || !e.outdated_marks.is_empty() {
+            let why: Vec<String> = e
+                .outdated
+                .iter()
+                .chain(&e.outdated_marks)
+                .cloned()
+                .collect();
             ui.label(
                 RichText::new("outdated").color(style::color32(ryucad::render::COMPARE_CHANGED)),
             )
-            .on_hover_text(e.outdated.join("\n"));
+            .on_hover_text(why.join("\n"));
+        }
+        // Redline marks (design 423): a badge and how many.
+        let marks = e.mark_count();
+        if marks > 0 {
+            let text = if marks == 1 {
+                "1 mark".to_owned()
+            } else {
+                format!("{marks} marks")
+            };
+            crate::ui::icon::show(ui, Icon::PENCIL_LINE, 14.0, colour)
+                .on_hover_text("Redline marks");
+            ui.label(RichText::new(text).color(colour))
+                .on_hover_text("Choosing it restores its view and draws its marks.");
         }
         if e.stale {
             ui.label("stale")
@@ -158,6 +177,31 @@ fn one(
             }
         });
     }
+    // What its marks touch, each a chip with Show, as pins are.
+    let touches: Vec<String> = e
+        .marks
+        .iter()
+        .flat_map(|m| m.list.iter())
+        .flat_map(|m| m.touches.iter().flatten())
+        .map(|t| t.reference.clone())
+        .fold(Vec::new(), |mut all, r| {
+            if !all.contains(&r) {
+                all.push(r);
+            }
+            all
+        });
+    if !touches.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.weak("marks touch");
+            for r in &touches {
+                ui.label(RichText::new(r).monospace().small());
+                if ui.small_button("Show").clicked() {
+                    ws.select(vec![r.clone()], ryucad::live::SelectMode::Replace);
+                    view.fit_entities(ws, std::slice::from_ref(r));
+                }
+            }
+        });
+    }
     for r in &e.replies {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(&r.by).color(style::color32(style::participant(&r.by))));
@@ -196,7 +240,14 @@ fn one(
             && ws.annotation_ui.editing.is_none()
             && modes::button(ui, ws, "annotation.edit", "Edit").clicked()
         {
-            ws.annotation_ui.editing = Some((e.id.clone(), e.comment.clone()));
+            // With marks, the Markup bar reopens at its view with them.
+            if e.mark_count() > 0 {
+                if let Err(why) = ws.edit_markup(&e.id) {
+                    ws.drag_note = Some(why);
+                }
+            } else {
+                ws.annotation_ui.editing = Some((e.id.clone(), e.comment.clone()));
+            }
         }
         if (open_mine || !e.is_open())
             && modes::button(ui, ws, "annotation.delete", "Delete").clicked()

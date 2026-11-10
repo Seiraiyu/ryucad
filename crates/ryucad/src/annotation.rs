@@ -27,6 +27,7 @@ When you start work, run `ryucad annotations list --open` and read what is open.
 Ask the person before acting on annotations they didn't ask you about.
 Claim one before working it: `ryucad annotations claim <id>`.
 A proposed change is a revision: `ryucad diff --to annotation:<id> --model`, `ryucad render --rev annotation:<id> --compare working`.
+Some annotations carry marks: read them in words with `ryucad annotations show <id>` and look at them with `ryucad render --annotation <id> --out a.png`. A mark says where, not exactly how far: ask, or use the measured points, before reading a size off an arrow.
 Take the change if you agree with it (`ryucad annotations apply <id>`), or make your own edit.
 Reply saying what you did: `ryucad annotations reply <id> TEXT`.
 Close it: `ryucad annotations resolve <id> --note TEXT`, or `ryucad annotations reject <id> --reason TEXT`.
@@ -137,6 +138,8 @@ pub fn readable(all: &BTreeMap<Id, Result<Annotation>>) -> BTreeMap<Id, Annotati
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Derived {
     pub outdated: Vec<Value>,
+    /// Marks' touches that don't resolve now, by mark and touch.
+    pub outdated_marks: Vec<Value>,
     pub stale: Vec<Value>,
     pub applied: Option<bool>,
 }
@@ -260,6 +263,22 @@ pub fn derive(
             d.outdated.push(v);
         }
     }
+    for (i, m) in a.marks.iter().flat_map(|m| m.list.iter()).enumerate() {
+        for (j, t) in m.touches.iter().flatten().enumerate() {
+            if let Err(e) = crate::entity::EntityRef::parse(&t.reference)
+                .and_then(|r| r.resolve(session).map(drop))
+            {
+                let mut v = json!({"mark": i, "touch": j, "at": t.at.as_str(),
+                                   "ref": t.reference, "code": e.code});
+                for key in ["was", "removed_by", "candidates"] {
+                    if let Some(x) = e.details.get(key) {
+                        v[key] = x.clone();
+                    }
+                }
+                d.outdated_marks.push(v);
+            }
+        }
+    }
     if let Some(c) = &a.change {
         let working = session.snapshot();
         let all = readable(all);
@@ -292,8 +311,9 @@ pub fn pin_text(pin: &Pin) -> String {
     }
 }
 
-/// An annotation as listings give it: its file's fields, and `outdated`,
-/// `stale` (with `outdated_pins` and `stale_files` when true) and, with a
+/// An annotation as listings give it: its file's fields (its marks as
+/// `{part, count, kinds, list}`: the window draws them), and `outdated`,
+/// `stale` (with `outdated_pins`, `outdated_marks` and `stale_files` when true) and, with a
 /// change, `applied`.
 pub fn entry(
     session: &mut Session,
@@ -305,9 +325,15 @@ pub fn entry(
     let o = v.as_object_mut().expect("an object");
     o.remove("kind");
     o.remove("format");
-    o.insert("outdated".into(), json!(!d.outdated.is_empty()));
+    o.insert(
+        "outdated".into(),
+        json!(!d.outdated.is_empty() || !d.outdated_marks.is_empty()),
+    );
     if !d.outdated.is_empty() {
         o.insert("outdated_pins".into(), json!(d.outdated));
+    }
+    if !d.outdated_marks.is_empty() {
+        o.insert("outdated_marks".into(), json!(d.outdated_marks));
     }
     o.insert("stale".into(), json!(!d.stale.is_empty()));
     if !d.stale.is_empty() {
@@ -315,6 +341,14 @@ pub fn entry(
     }
     if let Some(applied) = d.applied {
         o.insert("applied".into(), json!(applied));
+    }
+    if let Some(m) = &a.marks {
+        o.insert(
+            "marks".into(),
+            json!({"part": m.part, "count": m.list.len(),
+                   "kinds": m.list.iter().map(|k| k.kind.as_str()).collect::<Vec<_>>(),
+                   "list": m.list.iter().map(crate::redline::Mark::to_json).collect::<Vec<_>>()}),
+        );
     }
     v
 }
@@ -380,6 +414,132 @@ pub fn pins_from(session: &mut Session, args: &[crate::proto::PinArg]) -> Result
     Ok(out)
 }
 
+/// What a pick pass leaves out beside the view's own section planes:
+/// the author's participant's hidden set, when the request came from one.
+#[derive(Clone, Debug, Default)]
+pub struct PickFrom {
+    pub hidden: std::collections::BTreeSet<String>,
+}
+
+/// Marks as a request gives them, read in `drafted` (the author's draft)
+/// and seen through `view`: shorthand marks read in the default unit,
+/// touches given checked to resolve, the rest worked out by one pick
+/// pass of the view over the draft.
+pub fn marks_from(
+    drafted: &mut Session,
+    arg: &crate::proto::MarksArg,
+    view: Option<&crate::doc::views::ViewFile>,
+    from: &PickFrom,
+) -> Result<crate::doc::redline::Marks> {
+    use crate::doc::redline::{Anchor, Kind, Mark, Marks};
+    let unit = drafted.project().manifest.default_unit;
+    let list = json!({"part": arg.part, "list": arg.list});
+    let mut marks = Marks::from_json(&list, "/marks", false)?;
+    drafted.project().part(&marks.part)?;
+    for (i, s) in arg.short.iter().enumerate() {
+        let bad = |why: &str| {
+            Error::new(
+                Code::InvalidParam,
+                format!("--{} {:?}: {why}", s.kind, s.at),
+            )
+            .with("pointer", format!("/marks/short/{i}"))
+        };
+        let q = |t: &str| -> Result<f64> {
+            crate::units::Quantity::parse(t.trim(), unit)
+                .map(|q| q.meters())
+                .map_err(|_| bad("each coordinate is a length"))
+        };
+        let xy = |t: &str| -> Result<[f64; 2]> {
+            let (x, y) = t.split_once(',').ok_or_else(|| bad("a point is X,Y"))?;
+            Ok([q(x)?, q(y)?])
+        };
+        let kind = Kind::parse(&s.kind)
+            .filter(|k| *k != Kind::Stroke)
+            .ok_or_else(|| bad("line, arrow, ellipse, rectangle or text"))?;
+        let (points, text) = if kind == Kind::Text {
+            let (p, t) =
+                s.at.split_once('=')
+                    .ok_or_else(|| bad("text is X,Y=TEXT"))?;
+            (vec![xy(p)?], Some(t.to_owned()))
+        } else {
+            let (a, b) =
+                s.at.split_once(':')
+                    .ok_or_else(|| bad("two points: X1,Y1:X2,Y2"))?;
+            (vec![xy(a)?, xy(b)?], None)
+        };
+        let mark = Mark {
+            kind,
+            anchor: Anchor::View(points),
+            text,
+            touches: None,
+        };
+        // Read back as the file reads it, so a shorthand keeps the same
+        // limits a mark given whole keeps.
+        let at = format!("/marks/list/{}", marks.list.len());
+        marks.list.push(
+            Marks::from_json(
+                &json!({"part": marks.part, "list": [mark.to_json()]}),
+                "/marks",
+                false,
+            )
+            .map_err(|e| e.with("pointer", at))?
+            .list
+            .remove(0),
+        );
+    }
+    if marks.list.len() > crate::doc::redline::MAX_MARKS {
+        return Err(crate::doc::files::invalid(
+            "/marks/list",
+            "a list of at most 64 marks",
+        ));
+    }
+    let Some(view) = view else {
+        return Err(crate::doc::files::invalid(
+            "/view",
+            "marks need the view they were drawn in: give a camera, --view or --of",
+        ));
+    };
+    for m in &marks.list {
+        for t in m.touches.iter().flatten() {
+            crate::entity::EntityRef::parse(&t.reference)?.resolve(drafted)?;
+        }
+    }
+    if marks.list.iter().any(|m| m.touches.is_none()) {
+        let camera = crate::view::Camera::from(view);
+        let sections = view
+            .sections
+            .iter()
+            .map(|s| crate::section::Plane {
+                origin_m: s.origin_m,
+                normal: s.normal,
+            })
+            .collect();
+        let ask = crate::server::RenderAsk::pick(
+            marks.part.as_str(),
+            camera.clone(),
+            sections,
+            from.hidden.clone(),
+        );
+        let scene = crate::server::render_scene(drafted, None, Vec::new(), ask)?;
+        let plane = crate::redline::Plane::of(&camera);
+        let (w, h) = crate::redline::pick_size(&plane, &camera, &marks.list);
+        let picked = crate::render::pick(&scene.g, &camera, w, h)?;
+        let seen = crate::render::View::new(&camera, w, h);
+        for m in &mut marks.list {
+            if m.touches.is_none() {
+                m.touches = Some(crate::redline::touches(
+                    &picked,
+                    &seen,
+                    &plane,
+                    m,
+                    &scene.poses,
+                ));
+            }
+        }
+    }
+    Ok(marks)
+}
+
 /// Writes `a` into `annotations/` through the session and takes it in.
 pub fn save(session: &mut Session, a: &Annotation) -> Result<()> {
     let at = crate::doc::annotation::path(session.root(), &a.id);
@@ -426,9 +586,14 @@ fn closed(a: &Annotation) -> bool {
 
 /// Writes `a` and answers it as listings give it.
 fn written(session: &mut Session, a: &Annotation) -> Result<Value> {
+    Annotation::from_json(&a.to_json())?;
     save(session, a)?;
     let all = read_all(&session.snapshot());
-    Ok(json!({"annotation": entry(session, &all, a)}))
+    let mut v = json!({"annotation": entry(session, &all, a)});
+    if a.marks.is_some() {
+        v["marks"] = json!(crate::redline::words(session, a)?);
+    }
+    Ok(v)
 }
 
 fn nonempty(text: &str, what: &str) -> Result<String> {
@@ -447,10 +612,15 @@ pub fn create(
     pins: &[crate::proto::PinArg],
     comment: &str,
     view: Option<crate::doc::views::ViewFile>,
+    marks: Option<&crate::proto::MarksArg>,
+    from: &PickFrom,
 ) -> Result<Value> {
     let comment = nonempty(comment, "comment")?;
     let mut drafted = session.capturing(propose::draft(session, &by))?;
     let pins = pins_from(&mut drafted, pins)?;
+    let marks = marks
+        .map(|m| marks_from(&mut drafted, m, view.as_ref(), from))
+        .transpose()?;
     let taken = taken(session);
     let a = Annotation {
         id: new_id(|s| taken.contains(s))?,
@@ -461,6 +631,7 @@ pub fn create(
         pins,
         comment,
         view,
+        marks,
         change: None,
         replies: Default::default(),
         resolution: None,
@@ -526,47 +697,77 @@ pub fn list(
     Ok(v)
 }
 
+/// Where a pin with a point is drawn on `part`: its point, placed by its
+/// occurrence's pose (`poses`, by instance path) when it names one; `None`
+/// for a pin with no point, or one on another part.
+pub fn pin_on(
+    pin: &Pin,
+    part: &str,
+    poses: &BTreeMap<String, ryukei::geom::Rigid>,
+) -> Option<[f64; 3]> {
+    match pin {
+        Pin::Point { part: p, point_m } if p.as_str() == part => Some(*point_m),
+        Pin::Entity {
+            reference,
+            point_m: Some(p),
+        } => {
+            let steps: Vec<&str> = reference.split('/').collect();
+            if steps.first() != Some(&part) {
+                None
+            } else if steps.len() > 3 {
+                // `<asm>/<path>…/<solid>/<name>`: the point is in
+                // the occurrence's own part's frame.
+                let path = steps[1..steps.len() - 2].join("/");
+                poses.get(&path).map(|r| {
+                    let q = r.apply_point(ryukei::geom::Point3::new(p[0], p[1], p[2]));
+                    [q.x, q.y, q.z]
+                })
+            } else {
+                Some(*p)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Each open annotation's number: its place among the open ones,
+/// oldest first, from 1, as `render --annotations` and the app number
+/// them.
+pub fn numbers(files: &Files) -> BTreeMap<Id, usize> {
+    let all = readable(&read_all(files));
+    let mut open: Vec<&Annotation> = all.values().filter(|a| a.status.is_open()).collect();
+    open.sort_by(|a, b| (&a.at, &a.id).cmp(&(&b.at, &b.id)));
+    open.iter()
+        .enumerate()
+        .map(|(n, a)| (a.id.clone(), n + 1))
+        .collect()
+}
+
 /// Where `render --annotations` draws pins on `part`: each open
 /// annotation's pins that carry a point and lie on `part` (or on one of
 /// its occurrences, placed by `poses`, keyed by instance path), with the
-/// annotation's number among the open ones, oldest first, from 1. A pin
-/// with no point is the app's to draw at its entity.
+/// annotation's number among the open ones ([`numbers`]), but `skip`'s
+/// (the annotation `render --annotation` draws itself). A pin with no
+/// point is the app's to draw at its entity.
 pub fn markers(
     files: &Files,
     part: &str,
     poses: &BTreeMap<String, ryukei::geom::Rigid>,
+    skip: Option<&Id>,
 ) -> Vec<([f64; 3], String)> {
     let all = readable(&read_all(files));
-    let mut open: Vec<&Annotation> = all.values().filter(|a| a.status.is_open()).collect();
-    open.sort_by(|a, b| (&a.at, &a.id).cmp(&(&b.at, &b.id)));
+    let numbers = numbers(files);
     let mut out = Vec::new();
-    for (n, a) in open.iter().enumerate() {
+    let mut open: Vec<(&usize, &Annotation)> = numbers
+        .iter()
+        .filter(|(id, _)| Some(*id) != skip)
+        .filter_map(|(id, n)| all.get(id).map(|a| (n, a)))
+        .collect();
+    open.sort_by_key(|(n, _)| **n);
+    for (n, a) in open {
         for pin in &a.pins {
-            let at = match pin {
-                Pin::Point { part: p, point_m } if p.as_str() == part => Some(*point_m),
-                Pin::Entity {
-                    reference,
-                    point_m: Some(p),
-                } => {
-                    let steps: Vec<&str> = reference.split('/').collect();
-                    if steps.first() != Some(&part) {
-                        None
-                    } else if steps.len() > 3 {
-                        // `<asm>/<path>…/<solid>/<name>`: the point is in
-                        // the occurrence's own part's frame.
-                        let path = steps[1..steps.len() - 2].join("/");
-                        poses.get(&path).map(|r| {
-                            let q = r.apply_point(ryukei::geom::Point3::new(p[0], p[1], p[2]));
-                            [q.x, q.y, q.z]
-                        })
-                    } else {
-                        Some(*p)
-                    }
-                }
-                _ => None,
-            };
-            if let Some(at) = at {
-                out.push((at, (n + 1).to_string()));
+            if let Some(at) = pin_on(pin, part, poses) {
+                out.push((at, n.to_string()));
             }
         }
     }
@@ -611,7 +812,11 @@ pub fn show(session: &mut Session, id: &str) -> Result<Value> {
                              "deletes": a.change.as_ref().expect("a change").writes[p].is_none()})
         })
         .collect();
-    Ok(json!({"annotation": entry(session, &all, &a), "pins": pins, "files": files}))
+    let marks = crate::redline::words(session, &a)?;
+    Ok(
+        json!({"annotation": entry(session, &all, &a), "pins": pins, "files": files,
+              "marks": marks}),
+    )
 }
 
 /// `annotation.reply`.
@@ -768,11 +973,15 @@ fn authors(a: &Annotation, by: &By) -> Result<()> {
 }
 
 /// `annotation.edit`.
+#[allow(clippy::too_many_arguments)] // one per field a request edits
 pub fn edit(
     session: &mut Session,
     id: &str,
     comment: Option<&str>,
     pins: Option<&[crate::proto::PinArg]>,
+    marks: Option<&crate::proto::MarksArg>,
+    no_marks: bool,
+    from: &PickFrom,
     expect: Option<&str>,
     by: By,
 ) -> Result<Value> {
@@ -787,6 +996,13 @@ pub fn edit(
     if let Some(p) = pins {
         let mut drafted = session.capturing(propose::draft(session, &by))?;
         a.pins = pins_from(&mut drafted, p)?;
+    }
+    if no_marks {
+        a.marks = None;
+    }
+    if let Some(m) = marks {
+        let mut drafted = session.capturing(propose::draft(session, &by))?;
+        a.marks = Some(marks_from(&mut drafted, m, a.view.as_ref(), from)?);
     }
     written(session, &a)
 }
@@ -806,6 +1022,7 @@ pub fn delete(session: &mut Session, id: &str, expect: Option<&str>, by: By) -> 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::redline::{Anchor, At, Touch};
     use crate::server::tests::{call, fresh};
     use serde_json::json;
 
@@ -856,7 +1073,7 @@ pub(crate) mod tests {
         for x in [&a, &b, &c, &closed] {
             put(&mut s, x);
         }
-        let m = markers(&s.snapshot(), "plate", &BTreeMap::new());
+        let m = markers(&s.snapshot(), "plate", &BTreeMap::new(), None);
         assert_eq!(
             m,
             vec![
@@ -864,7 +1081,16 @@ pub(crate) mod tests {
                 ([0.0, 0.01, 0.0], "2".to_owned())
             ]
         );
-        assert!(markers(&s.snapshot(), "other", &BTreeMap::new()).is_empty());
+        assert!(markers(&s.snapshot(), "other", &BTreeMap::new(), None).is_empty());
+        // `render --annotation` draws its own: the others keep their numbers.
+        let skip = Id::parse("aaaaaaaaaa", "annotation").unwrap();
+        assert_eq!(
+            markers(&s.snapshot(), "plate", &BTreeMap::new(), Some(&skip)),
+            vec![([0.0, 0.01, 0.0], "2".to_owned())]
+        );
+        let n = numbers(&s.snapshot());
+        assert_eq!(n.len(), 3, "the open ones");
+        assert_eq!(n[&skip], 1);
     }
 
     /// Every project write a handler makes goes through the session, so a
@@ -955,6 +1181,497 @@ pub(crate) mod tests {
     }
 
     /// A part `plate` with a box `slab`, and one of its faces' references.
+    /// A 60 × 40 × 5 mm plate with two through holes (at x 20 and 30,
+    /// y 20) and a boss on its top (at x 45, y 20, 6 mm tall), and a
+    /// view from a corner above it.
+    pub(crate) fn drilled() -> (
+        tempfile::TempDir,
+        crate::session::Session,
+        crate::doc::views::ViewFile,
+    ) {
+        let (dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "plate"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "plate", "type": "box", "id": "slab",
+             "params": {"x": 60, "y": 40, "z": 5}}),
+        )
+        .unwrap();
+        for (id, x) in [("h1", 20), ("h2", 30)] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "plate", "type": "cylinder", "id": id,
+                 "operation": "cut", "targets": ["slab"], "params": {"radius": 3, "height": 9},
+                 "placement": {"origin": [x, 20, -2]}}),
+            )
+            .unwrap();
+        }
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "plate", "type": "cylinder", "id": "boss",
+             "operation": "join", "targets": ["slab"], "params": {"radius": 4, "height": 6},
+             "placement": {"origin": [45, 20, 5]}}),
+        )
+        .unwrap();
+        let camera = crate::view::Camera {
+            eye: [0.12, -0.10, 0.09],
+            target: [0.03, 0.02, 0.0025],
+            up: [0.0, 0.0, 1.0],
+            projection: crate::view::Projection::Orthographic { height: 0.08 },
+        };
+        (dir, s, camera.to_view_file())
+    }
+
+    /// Where model point `p` (metres) is in `view`'s plane.
+    pub(crate) fn on(view: &crate::doc::views::ViewFile, p: [f64; 3]) -> [f64; 2] {
+        crate::redline::Plane::of(&crate::view::Camera::from(view)).xy(p)
+    }
+
+    /// The feature that made entity `r` of the plate, as `inspect` says.
+    fn made_by(s: &mut crate::session::Session, r: &str) -> String {
+        let v = call(s, "inspect", json!({"part": "plate", "entity": r})).unwrap();
+        v["entity"]["origin"]["feature"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    fn create_marked(
+        s: &mut crate::session::Session,
+        view: &crate::doc::views::ViewFile,
+        list: Value,
+    ) -> Result<Value> {
+        let marks = crate::proto::MarksArg {
+            part: "plate".into(),
+            list: serde_json::from_value(list).unwrap(),
+            short: Vec::new(),
+        };
+        create(
+            s,
+            By::agent("agent"),
+            &[],
+            "look",
+            Some(view.clone()),
+            Some(&marks),
+            &Default::default(),
+        )
+    }
+
+    #[test]
+    fn each_kind_touches_what_lies_under_it() {
+        let (_dir, mut s, view) = drilled();
+        let boss_top = on(&view, [0.045, 0.02, 0.011]);
+        let plate_top = on(&view, [0.008, 0.008, 0.005]);
+        // A hole's wall seen from the corner: the far side of h1's bore,
+        // just under the top.
+        let wall = on(&view, [0.020, 0.023, 0.004]);
+        let (h1, h2) = (
+            on(&view, [0.017, 0.017, 0.005]),
+            on(&view, [0.033, 0.023, 0.005]),
+        );
+        let a = create_marked(&mut s, &view, json!([
+            {"kind": "arrow", "in": "view", "xy_m": [boss_top, plate_top]},
+            {"kind": "line", "in": "view", "xy_m": [plate_top, wall]},
+            {"kind": "ellipse", "in": "view", "xy_m": [[h1[0] - 0.002, h1[1] - 0.002], [h2[0] + 0.002, h2[1] + 0.002]]},
+            {"kind": "line", "in": "view", "xy_m": [[0.3, 0.3], [0.31, 0.3]]},
+            {"kind": "text", "in": "view", "xy_m": [[0, 0]], "text": "2 mm"}
+        ])).unwrap();
+        let list = &a["annotation"]["marks"];
+        assert_eq!(list["count"], 5);
+        let file = read_all(&s.snapshot())
+            .into_values()
+            .next()
+            .unwrap()
+            .unwrap();
+        let marks = file.marks.unwrap().list;
+        let t = |i: usize| marks[i].touches.clone().unwrap();
+        assert_eq!(t(0)[0].at, At::Tail);
+        assert_eq!(made_by(&mut s, &t(0)[0].reference), "boss");
+        assert_eq!(t(0)[1].at, At::Tip);
+        assert_eq!(made_by(&mut s, &t(0)[1].reference), "slab");
+        assert_eq!(
+            made_by(&mut s, &t(1)[1].reference),
+            "h1",
+            "the line's end on a bore's wall"
+        );
+        let inside: Vec<String> = t(2).iter().map(|x| made_by(&mut s, &x.reference)).collect();
+        assert!(
+            inside.contains(&"h1".to_owned()) && inside.contains(&"h2".to_owned()),
+            "{inside:?}"
+        );
+        assert!(
+            t(3).is_empty(),
+            "a mark over the background touches nothing"
+        );
+        assert!(t(4).is_empty(), "text touches nothing");
+    }
+
+    #[test]
+    fn a_face_stroke_lies_on_the_faces_under_its_points() {
+        let (_dir, mut s, view) = drilled();
+        let a = create_marked(
+            &mut s,
+            &view,
+            json!([
+                {"kind": "stroke", "in": "face", "on": "plate/slab",
+                 "points_m": [[0.005, 0.005, 0.005], [0.015, 0.005, 0.005], [0.025, 0.005, 0.005]]}
+            ]),
+        )
+        .unwrap();
+        let file = read_all(&s.snapshot())
+            .into_values()
+            .next()
+            .unwrap()
+            .unwrap();
+        let t = file.marks.unwrap().list[0].touches.clone().unwrap();
+        assert_eq!(t.len(), 1);
+        assert_eq!(made_by(&mut s, &t[0].reference), "slab");
+        assert!(
+            a["marks"][0]["touches"][0]["ref"].is_string(),
+            "the answer reads the marks"
+        );
+    }
+
+    #[test]
+    fn touches_given_are_kept_and_checked() {
+        let (_dir, mut s, view) = drilled();
+        let face = call(&mut s, "inspect", json!({"part": "plate"})).unwrap()["bodies"][0]["faces"]
+            [0]["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let given = format!("plate/slab/{face}");
+        create_marked(
+            &mut s,
+            &view,
+            json!([
+                {"kind": "line", "in": "view", "xy_m": [[0, 0], [0.01, 0]],
+                 "touches": [{"at": "end", "ref": given}]}
+            ]),
+        )
+        .unwrap();
+        let file = read_all(&s.snapshot())
+            .into_values()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            file.marks.unwrap().list[0].touches.clone().unwrap(),
+            vec![Touch {
+                at: At::End,
+                reference: given
+            }]
+        );
+        let e = create_marked(
+            &mut s,
+            &view,
+            json!([
+                {"kind": "line", "in": "view", "xy_m": [[0, 0], [0.01, 0]],
+                 "touches": [{"at": "end", "ref": "plate/slab/00000000000000000000000000000000"}]}
+            ]),
+        )
+        .unwrap_err();
+        // The resolver's own refusal: a name the session never built is not
+        // found, one it built and lost is unresolved.
+        assert!(
+            matches!(e.code, Code::NotFound | Code::ReferenceUnresolved),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn marks_need_a_view_and_keep_to_their_limits() {
+        let (_dir, mut s, _view) = drilled();
+        let marks = crate::proto::MarksArg {
+            part: "plate".into(),
+            list: vec![json!({"kind": "line", "in": "view", "xy_m": [[0, 0], [0.01, 0]]})],
+            short: Vec::new(),
+        };
+        let e = create(
+            &mut s,
+            By::agent("agent"),
+            &[],
+            "look",
+            None,
+            Some(&marks),
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].clone()),
+            (Code::InvalidDocument, json!("/view"))
+        );
+        let (_dir, mut s, view) = drilled();
+        let e = create_marked(
+            &mut s,
+            &view,
+            json!(vec![
+                json!({"kind": "text", "in": "view", "xy_m": [[0, 0]], "text": "x"});
+                65
+            ]),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["pointer"], "/marks/list");
+        let e = create_marked(
+            &mut s,
+            &view,
+            json!([{"kind": "line", "in": "view", "xy_m": [[0, 0], [0.01, 0]]}])
+                .as_array()
+                .unwrap()
+                .iter()
+                .cloned()
+                .map(|mut m| {
+                    m["kind"] = json!("cloud");
+                    m
+                })
+                .collect::<Value>(),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["pointer"], "/marks/list/0/kind");
+    }
+
+    #[test]
+    fn shorthand_marks_read_in_the_default_unit() {
+        let (_dir, mut s, view) = drilled();
+        let marks = crate::proto::MarksArg {
+            part: "plate".into(),
+            list: Vec::new(),
+            short: vec![
+                crate::proto::ShortMark {
+                    kind: "arrow".into(),
+                    at: "-20,11:9,-4".into(),
+                },
+                crate::proto::ShortMark {
+                    kind: "text".into(),
+                    at: "20,15=2 mm".into(),
+                },
+            ],
+        };
+        create(
+            &mut s,
+            By::agent("agent"),
+            &[],
+            "look",
+            Some(view.clone()),
+            Some(&marks),
+            &Default::default(),
+        )
+        .unwrap();
+        let file = read_all(&s.snapshot())
+            .into_values()
+            .next()
+            .unwrap()
+            .unwrap();
+        let m = file.marks.unwrap();
+        // One multiplication from millimetres, as every quantity.
+        let Anchor::View(xy) = &m.list[0].anchor else {
+            panic!()
+        };
+        for (p, w) in xy.iter().zip([[-0.02, 0.011], [0.009, -0.004]]) {
+            assert!(
+                (p[0] - w[0]).abs() < 1e-15 && (p[1] - w[1]).abs() < 1e-15,
+                "{xy:?}"
+            );
+        }
+        assert_eq!(m.list[1].text.as_deref(), Some("2 mm"));
+        let bad = crate::proto::MarksArg {
+            part: "plate".into(),
+            list: Vec::new(),
+            short: vec![crate::proto::ShortMark {
+                kind: "arrow".into(),
+                at: "1,2".into(),
+            }],
+        };
+        let e = create(
+            &mut s,
+            By::agent("agent"),
+            &[],
+            "look",
+            Some(view),
+            Some(&bad),
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].clone()),
+            (Code::InvalidParam, json!("/marks/short/0"))
+        );
+    }
+
+    #[test]
+    fn touches_are_read_from_the_authors_draft() {
+        // A person proposes a lid on the plate's top; their mark's end
+        // lands on it, which only their draft has.
+        use crate::server::tests::call_live;
+        let (_dir, mut s, view) = drilled();
+        let mut live = crate::live::Live::new();
+        let h = live
+            .hello(crate::live::Kind::Human, Some("Dana"), None)
+            .unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "annotate"}),
+        )
+        .unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "annotation.propose",
+            json!({"request": {
+            "method": "feature.add", "params": {"part": "plate", "type": "box", "id": "lid",
+            "operation": "join", "targets": ["slab"], "params": {"x": 10, "y": 10, "z": 4},
+            "placement": {"origin": [2, 2, 5]}}}}),
+        )
+        .unwrap();
+        let end = on(&view, [0.007, 0.007, 0.009]);
+        let a = call_live(&mut s, &mut live, Some(&h), "annotation.create", json!({
+            "comment": "here",
+            "camera": {"eye": ["120 mm", "-100 mm", "90 mm"], "target": ["30 mm", "20 mm", "2.5 mm"],
+                       "up": [0, 0, 1], "projection": {"orthographic": {"height": "80 mm"}}},
+            "marks": {"part": "plate", "list": [{"kind": "line", "in": "view", "xy_m": [[0.3, 0.3], end]}]}})).unwrap();
+        let r = a["marks"][0]["touches"][0]["ref"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let name = live.get(&h).unwrap().name.clone();
+        let v = call(
+            &mut s,
+            "inspect",
+            json!({"part": "plate", "entity": r, "rev": format!("draft:{name}")}),
+        )
+        .unwrap();
+        assert_eq!(v["entity"]["origin"]["feature"], "lid");
+        // The working files have no lid: there the touch is outdated. The
+        // proposal and the mark are made in one second and listed by time,
+        // then by their random IDs, so find the mark by its own ID.
+        let id = a["annotation"]["id"].clone();
+        let e = list(&mut s, &[], None, None, false).unwrap();
+        let mine = e["annotations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == id)
+            .unwrap();
+        assert_eq!(mine["outdated"], true);
+    }
+
+    #[test]
+    fn a_touch_that_no_longer_resolves_makes_its_annotation_outdated() {
+        let (_dir, mut s, view) = drilled();
+        let boss_top = on(&view, [0.045, 0.02, 0.011]);
+        create_marked(
+            &mut s,
+            &view,
+            json!([
+                {"kind": "line", "in": "view", "xy_m": [[0.3, 0.3], boss_top]}
+            ]),
+        )
+        .unwrap();
+        let list = |s: &mut crate::session::Session| {
+            list(s, &[], None, None, false).unwrap()["annotations"][0].clone()
+        };
+        assert_eq!(list(&mut s)["outdated"], false);
+        call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "plate", "id": "boss"}),
+        )
+        .unwrap();
+        let e = list(&mut s);
+        assert_eq!(e["outdated"], true);
+        let o = &e["outdated_marks"][0];
+        assert_eq!(
+            (o["mark"].clone(), o["touch"].clone(), o["at"].clone()),
+            (json!(0), json!(0), json!("end"))
+        );
+        // The resolver's own code, as a pin's (`not_found` for a name
+        // this session never learnt, `reference_unresolved` for one it did).
+        assert!(
+            ["not_found", "reference_unresolved"].contains(&o["code"].as_str().unwrap()),
+            "{o}"
+        );
+        assert!(e.get("outdated_pins").is_none());
+        // The marks themselves are as they were.
+        let file = read_all(&s.snapshot())
+            .into_values()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            file.marks.unwrap().list[0].anchor,
+            Anchor::View(vec![[0.3, 0.3], boss_top])
+        );
+    }
+
+    #[test]
+    fn show_reads_each_mark_in_words() {
+        let (_dir, mut s, view) = drilled();
+        let boss_top = on(&view, [0.045, 0.02, 0.011]);
+        let plate_top = on(&view, [0.008, 0.008, 0.005]);
+        let a = create_marked(
+            &mut s,
+            &view,
+            json!([
+                {"kind": "arrow", "in": "view", "xy_m": [boss_top, plate_top]},
+                {"kind": "rectangle", "in": "view", "xy_m": [[0, 0], [0.01, 0.005]]},
+                {"kind": "stroke", "in": "face", "on": "plate/slab",
+                 "points_m": [[0.005, 0.005, 0.005], [0.015, 0.005, 0.005]]},
+                {"kind": "text", "in": "view", "xy_m": [[0, 0]], "text": "2 mm"}
+            ]),
+        )
+        .unwrap();
+        let id = a["annotation"]["id"].as_str().unwrap().to_owned();
+        let v = show(&mut s, &id).unwrap();
+        let m = &v["marks"];
+        assert_eq!(m[0]["kind"], "arrow");
+        assert_eq!(m[0]["in"], "view");
+        assert_eq!(
+            m[0]["points"][0]["plane"]["value"]
+                .as_str()
+                .unwrap()
+                .matches("mm")
+                .count(),
+            2
+        );
+        assert!(m[0]["points"][1]["model"]["m"].is_array());
+        // The arrow's length is measured in the view's plane, exactly.
+        let d = [plate_top[0] - boss_top[0], plate_top[1] - boss_top[1]];
+        let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
+        assert!((m[0]["length"]["m"].as_f64().unwrap() - len).abs() < 1e-12);
+        assert_eq!(m[0]["touches"][0]["at"], "tail");
+        assert_eq!(m[0]["touches"][0]["kind"], "face");
+        assert_eq!(m[0]["touches"][0]["outdated"], false);
+        assert_eq!(
+            m[0]["touches"][0]["now"]["entity"]["origin"]["feature"],
+            "boss"
+        );
+        assert_eq!(m[1]["box"]["plane"]["size"]["value"], "(10 mm, 5 mm)");
+        assert_eq!(m[2]["in"], "face");
+        assert_eq!(m[2]["on"], "plate/slab");
+        assert_eq!(m[2]["count"], 2);
+        assert_eq!(m[3]["text"], "2 mm");
+        assert!(m[3]["touches"].as_array().unwrap().is_empty());
+        // Listings give a summary, and the marks themselves for the window
+        // to draw, as the file has them.
+        assert_eq!(
+            v["annotation"]["marks"]["kinds"],
+            json!(["arrow", "rectangle", "stroke", "text"])
+        );
+        let id = v["annotation"]["id"].as_str().unwrap();
+        let file = one(&s, id, None).unwrap();
+        assert_eq!(
+            v["annotation"]["marks"]["list"],
+            file.marks.unwrap().to_json()["list"]
+        );
+    }
+
     pub(crate) fn plate() -> (tempfile::TempDir, crate::session::Session, String) {
         let (dir, mut s) = fresh();
         call(&mut s, "part.create", json!({"part": "plate"})).unwrap();
@@ -988,6 +1705,7 @@ pub(crate) mod tests {
             pins,
             comment: "look here".into(),
             view: None,
+            marks: None,
             change: None,
             replies: Default::default(),
             resolution: None,
@@ -1297,8 +2015,11 @@ pub(crate) mod tests {
             "annotations resolve",
             "annotations reject",
             "--reason",
+            "annotations show",
+            "render --annotation",
         ] {
             assert!(ETIQUETTE.contains(cmd), "{cmd}");
         }
+        assert!(ETIQUETTE.contains("A mark says where"));
     }
 }

@@ -93,6 +93,14 @@ enum Pending {
     Equations(bool),
     /// A row of the Equations tile written.
     EquationSave,
+    /// The Drawings tile's list of this part's drawings.
+    DrawingList(String),
+    /// Every part's drawings, for the tree.
+    DrawingsAll,
+    /// The Drawings tile's sheet: part, drawing and sheet asked for.
+    DrawingSheet(String, String, String),
+    /// A drag or form of the Drawings tile written.
+    DrawingWrite,
     Activity,
     History,
     /// The Branches tab's worktrees (`worktree.list`).
@@ -180,6 +188,8 @@ enum Pending {
     /// The Mate dialog's preview of an assembly, and its add.
     MatePreview(String, u64),
     MateAdd(String),
+    /// The Markup bar's Post (`annotation.create` or `annotation.edit`).
+    MarkupPost,
     /// A part's named views (`view.list`).
     Views(String),
     /// A named view of a part, saved (`view.save`).
@@ -458,6 +468,11 @@ pub struct Workspace {
     /// The Equations tile's table, once it is open (see `show_equations`).
     pub equations: Option<Equations>,
     equations_open: bool,
+    /// The Drawings tile (see `show_drawings`).
+    pub drawings: crate::core::drawings::Tile,
+    /// Every part's drawings, for the tree: ID, name, and whether its
+    /// file doesn't read (`drawing.list` of the project).
+    pub drawing_rows: BTreeMap<String, Vec<(String, String, bool)>>,
     pub activity: Activity,
     /// The project's Git history (`history.log`), once asked for.
     pub history: Option<Value>,
@@ -551,6 +566,8 @@ pub struct Workspace {
     mover_waiting: bool,
     /// The Mate dialog, while it is open.
     pub mating: Option<crate::core::mating::Mating>,
+    /// The Markup bar, while it is open (design 423).
+    pub markup: Option<crate::core::markup::Markup>,
     /// How many mate previews the window has asked for.
     mate_previews: u64,
     /// A tile the window should open (the app opens it next frame): the
@@ -667,6 +684,8 @@ impl Workspace {
             params_part: None,
             equations: None,
             equations_open: false,
+            drawings: Default::default(),
+            drawing_rows: BTreeMap::new(),
             activity: Activity::default(),
             history: None,
             history_at: None,
@@ -715,6 +734,7 @@ impl Workspace {
             mover_asked: None,
             mover_waiting: false,
             mating: None,
+            markup: None,
             mate_previews: 0,
             wants_tile: None,
             views: Default::default(),
@@ -761,6 +781,7 @@ impl Workspace {
         self.asked_at.clear();
         self.send(Request::ProjectInfo {}, Pending::Info);
         self.send(Request::PartList {}, Pending::Parts);
+        self.read_drawn();
         let log = Request::ActivityLog {
             limit: Some(LOADED),
             before: None,
@@ -1408,6 +1429,124 @@ impl Workspace {
         }
     }
 
+    /// Opens the Markup bar on the shown part or assembly, looking through
+    /// `camera`, which it locks (design 423).
+    pub fn open_markup(&mut self, camera: Camera) -> std::result::Result<(), String> {
+        let shown = self.model.shown();
+        let [part] = shown.as_slice() else {
+            return Err("Show one part or assembly to mark up (View > Show).".into());
+        };
+        let part = part.to_string();
+        // One tool at a time.
+        self.cancel_move();
+        self.close_mate();
+        self.markup = Some(crate::core::markup::Markup::new(&part, camera));
+        Ok(())
+    }
+
+    /// Reopens the Markup bar on annotation `id`'s view and marks (its
+    /// author's Edit), showing the model they were drawn on.
+    pub fn edit_markup(&mut self, id: &str) -> std::result::Result<(), String> {
+        let e = self
+            .annotations
+            .all
+            .get(id)
+            .ok_or_else(|| format!("No annotation {id}."))?;
+        let m = crate::core::markup::Markup::editing(id, e)
+            .ok_or("This annotation has no marks or no view to reopen.")?;
+        if !self.model.shown().contains(&m.part.as_str()) {
+            self.set_focus(Some(m.part.clone()));
+        }
+        self.markup = Some(m);
+        Ok(())
+    }
+
+    /// Post: the marks and the comment as one annotation, or the edited
+    /// one's; the bar stays open, its marks kept, until the daemon answers.
+    pub fn post_markup(&mut self) {
+        let Some(m) = self.markup.as_mut() else {
+            return;
+        };
+        m.commit_text();
+        let Some(req) = m.request() else {
+            m.note = Some("Type what should change: a mark says where, words say what.".into());
+            return;
+        };
+        m.posting = true;
+        m.note = None;
+        self.send(req, Pending::MarkupPost);
+    }
+
+    /// The view marks the viewport draws on the glass (design 423, When):
+    /// the Markup bar's, with the mark under way, in this window's colour;
+    /// else the chosen annotation's, in its author's, at
+    /// [`ryucad::redline::CLOSED_ALPHA`] once closed; else none, since flat
+    /// marks seen from another view mislead.
+    pub fn view_marks(&self) -> Option<crate::core::markup::ViewMarks> {
+        use crate::core::markup::ViewMarks;
+        if let Some(m) = &self.markup {
+            let mut marks = m.marks.clone();
+            marks.extend(m.under_way());
+            return Some(ViewMarks {
+                plane: m.plane(),
+                marks,
+                colour: ryucad::render::participant(&self.name),
+                alpha: 1.0,
+            });
+        }
+        let e = self.annotations.all.get(self.chosen_annotation.as_ref()?)?;
+        Some(ViewMarks {
+            plane: e.plane()?,
+            marks: e.marks.as_ref()?.list.clone(),
+            colour: ryucad::render::participant(&e.by),
+            alpha: if e.is_open() {
+                1.0
+            } else {
+                ryucad::redline::CLOSED_ALPHA
+            },
+        })
+    }
+
+    /// The annotation the Markup bar edits, if it edits one: the bar
+    /// draws its marks, so the listing's are left out.
+    pub fn markup_editing(&self) -> Option<&str> {
+        self.markup.as_ref().and_then(|m| m.editing.as_deref())
+    }
+
+    /// The face strokes the window draws (design 423): open annotations'
+    /// when `pins` are drawn, but the one the bar edits, then the bar's,
+    /// with the mark under way, in this window's colour.
+    pub fn face_strokes(&self, pins: bool) -> Vec<crate::core::annotations::Stroke> {
+        let shown = self.model.shown();
+        let place = |on: &str| self.model.placed_on(on);
+        let mut strokes = if pins {
+            self.annotations
+                .face_strokes(&shown, place, self.markup_editing())
+        } else {
+            Vec::new()
+        };
+        if let Some(m) = &self.markup {
+            let mut marks = m.marks.clone();
+            marks.extend(m.under_way());
+            let marks = ryucad::redline::Marks {
+                part: ryucad::doc::id::Id::parse(&m.part, "part").expect("a part's ID"),
+                list: marks,
+            };
+            strokes.extend(crate::core::annotations::face_strokes_of(
+                &marks,
+                self.my_name(),
+                &place,
+            ));
+        }
+        strokes
+    }
+
+    /// Cancel (or Esc with nothing under way): the bar closes and its
+    /// marks go.
+    pub fn cancel_markup(&mut self) {
+        self.markup = None;
+    }
+
     /// Asks what importing the open import's file would do: `import` as
     /// a dry run, an update's when it replaces a file the project holds.
     pub fn plan_import(&mut self) {
@@ -1462,6 +1601,16 @@ impl Workspace {
         // over to a part with none.
         e.sheet = self.sheet_solid(part, None).map(|k| k.1);
         if e.sheet.is_none() && e.choices.format == crate::core::export::Format::Dxf {
+            e.choices.format = crate::core::export::Format::Step;
+        }
+        // The drawing the Drawings tile shows of this part, if any.
+        e.drawing = self
+            .drawings
+            .sheet
+            .as_ref()
+            .filter(|s| self.drawings.open && s.part == part)
+            .map(|s| (s.drawing.clone(), s.sheet.clone()));
+        if e.drawing.is_none() && e.choices.format == crate::core::export::Format::Drawing {
             e.choices.format = crate::core::export::Format::Step;
         }
         self.export = Some(e);
@@ -2298,6 +2447,8 @@ impl Workspace {
             comment,
             camera: camera.as_ref().map(camera_arg),
             with_view: false,
+            marks: None,
+            view: None,
             author: None,
         };
         self.send(req, Pending::AnnotationWrite);
@@ -2318,6 +2469,8 @@ impl Workspace {
             id: id.to_owned(),
             comment: Some(comment),
             pins: None,
+            marks: None,
+            no_marks: false,
             expect: None,
             author: None,
         };
@@ -2774,6 +2927,132 @@ impl Workspace {
         }
         if !self.equations.as_ref().is_some_and(|e| e.saving.is_some()) {
             self.read_equations(false);
+        }
+    }
+
+    /// Opens the Drawings tile on `part` (else the first part shown),
+    /// reading its drawings the first time or when the part changes.
+    pub fn show_drawings(&mut self, part: Option<&str>) {
+        let part = part
+            .map(str::to_owned)
+            .or_else(|| self.drawings.part.clone())
+            .or_else(|| self.model.shown().first().map(|p| p.to_string()));
+        let Some(part) = part else { return };
+        let fresh = !self.drawings.open || self.drawings.part.as_deref() != Some(&part);
+        self.drawings.open = true;
+        if fresh {
+            self.drawings = crate::core::drawings::Tile {
+                open: true,
+                part: Some(part),
+                ..Default::default()
+            };
+            self.read_drawing_list();
+        }
+    }
+
+    /// Reads every part's drawings again, for the tree's rows.
+    pub fn read_drawn(&mut self) {
+        self.send(Request::DrawingList { part: None }, Pending::DrawingsAll);
+    }
+
+    /// A drawing's tree row chosen: the Drawings tile opens on it, its
+    /// first sheet shown.
+    pub fn open_drawing(&mut self, part: &str, drawing: &str) {
+        self.show_drawings(Some(part));
+        self.drawings.chosen = None;
+        self.drawings.sheet = None;
+        self.drawings.camera = None;
+        self.drawings.want = Some(drawing.to_owned());
+        if self.drawings.list.is_some() {
+            self.read_drawing_sheet();
+        }
+        self.wants_tile = Some("drawings");
+    }
+
+    fn read_drawing_list(&mut self) {
+        let Some(part) = self.drawings.part.clone() else {
+            return;
+        };
+        self.send(
+            Request::DrawingList {
+                part: Some(part.clone()),
+            },
+            Pending::DrawingList(part),
+        );
+    }
+
+    /// Shows `drawing`'s `sheet` in the Drawings tile.
+    pub fn choose_drawing(&mut self, drawing: &str, sheet: &str) {
+        let same = self
+            .drawings
+            .chosen
+            .as_ref()
+            .is_some_and(|(d, k)| d == drawing && k == sheet);
+        self.drawings.chosen = Some((drawing.to_owned(), sheet.to_owned()));
+        if !same {
+            self.drawings.camera = None;
+            self.drawings.choose(None);
+            self.drawings.sheet = None;
+        }
+        self.read_drawing_sheet();
+    }
+
+    /// Reads the chosen sheet again (`drawing.get --items`), at the
+    /// revision forms read: a person's draft in Annotate.
+    fn read_drawing_sheet(&mut self) {
+        let (Some(part), Some((drawing, sheet))) =
+            (self.drawings.part.clone(), self.drawings.first_choice())
+        else {
+            return;
+        };
+        self.drawings.chosen = Some((drawing.clone(), sheet.clone()));
+        self.drawings.loading = true;
+        let req = Request::DrawingGet {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            rev: self.form_rev(),
+            sheet: Some(sheet.clone()),
+            items: true,
+        };
+        self.send(req, Pending::DrawingSheet(part, drawing, sheet));
+    }
+
+    /// Writes `ops` to the shown drawing, guarded by the part's revision
+    /// it was built at: a drag's or the form's one write.
+    fn write_drawing(&mut self, ops: Value) {
+        let Some(s) = &self.drawings.sheet else {
+            return;
+        };
+        let req = Request::DrawingEdit {
+            part: s.part.clone(),
+            drawing: s.drawing.clone(),
+            ops,
+            expected_revision: s.revision.clone(),
+        };
+        self.drawings.saving = true;
+        self.drawings.error = None;
+        self.drawings.note = None;
+        self.send(req, Pending::DrawingWrite);
+    }
+
+    /// A drag of what was picked on the sheet, let go `d` mm from where it
+    /// started: one `drawing.edit`, or a note saying why none.
+    pub fn drag_drawing(&mut self, pick: &crate::core::drawings::Pick, d: [f64; 2]) {
+        let Some(s) = &self.drawings.sheet else {
+            return;
+        };
+        match crate::core::drawings::drag_ops(s, pick, d) {
+            Ok(ops) => self.write_drawing(ops),
+            Err(why) => self.drawings.note = Some(why.to_owned()),
+        }
+    }
+
+    /// Writes the Drawings tile's dimension form as typed.
+    pub fn save_drawing_dimension(&mut self) {
+        let Some(f) = &self.drawings.form else { return };
+        match f.op() {
+            Ok(op) => self.write_drawing(json!([op])),
+            Err(why) => self.drawings.note = Some(why),
         }
     }
 
@@ -4032,6 +4311,25 @@ impl Workspace {
                     }
                 }
             }
+            (Pending::MarkupPost, a) => match a {
+                // Posted: the bar closes, and the annotation is chosen, so
+                // its marks are drawn in its view.
+                Ok(a) => {
+                    self.markup = None;
+                    if let Some(id) = a.result["annotation"]["id"].as_str() {
+                        let id = id.to_owned();
+                        self.choose_annotation(Some(&id));
+                    }
+                }
+                // Refused: said on the bar, the marks kept.
+                Err(e) => match self.markup.as_mut() {
+                    Some(m) => {
+                        m.posting = false;
+                        m.note = Some(e.message.clone());
+                    }
+                    None => self.fail(e),
+                },
+            },
             (Pending::MateAdd(_), Err(e)) => self.fail(e),
             (Pending::MateAdd(_), Ok(_)) => {}
             (Pending::MoveWrite(part), a) => {
@@ -4291,6 +4589,82 @@ impl Workspace {
                 table.saving = None;
                 table.error = Some(e);
                 self.equations = Some(table);
+            }
+            (Pending::DrawingList(part), Ok(a)) => {
+                if self.drawings.part.as_deref() == Some(&part) {
+                    let list = crate::core::drawings::List::from_answer(&part, &a.result);
+                    // A drawing or sheet that went: the first left.
+                    if let Some((d, k)) = &self.drawings.chosen
+                        && !list
+                            .entries
+                            .iter()
+                            .any(|e| &e.drawing == d && e.sheets.iter().any(|(s, _)| s == k))
+                    {
+                        self.drawings.chosen = None;
+                        self.drawings.sheet = None;
+                        self.drawings.camera = None;
+                    }
+                    self.drawings.list = Some(list);
+                    self.read_drawing_sheet();
+                }
+            }
+            (Pending::DrawingList(_), Err(e)) => self.drawings.error = Some(e),
+            (Pending::DrawingsAll, Ok(a)) => {
+                let mut drawn: BTreeMap<String, Vec<(String, String, bool)>> = BTreeMap::new();
+                for d in a.result["drawings"].as_array().into_iter().flatten() {
+                    let (Some(p), Some(id)) = (d["part"].as_str(), d["drawing"].as_str()) else {
+                        continue;
+                    };
+                    drawn.entry(p.to_owned()).or_default().push((
+                        id.to_owned(),
+                        d["name"].as_str().unwrap_or("").to_owned(),
+                        d.get("error").is_some(),
+                    ));
+                }
+                if drawn != self.drawing_rows {
+                    self.drawing_rows = drawn;
+                    self.model.generation += 1;
+                }
+            }
+            (Pending::DrawingsAll, Err(_)) => {}
+            (Pending::DrawingSheet(part, drawing, sheet), r) => {
+                let current = self.drawings.part.as_deref() == Some(&part)
+                    && self.drawings.chosen == Some((drawing, sheet));
+                if current {
+                    self.drawings.loading = false;
+                    match r {
+                        Ok(a) => {
+                            self.drawings.sheet =
+                                crate::core::drawings::Sheet::from_answer(&a.result);
+                            // What was chosen, chosen again in what was read:
+                            // a form reads the file as it is now.
+                            let keep = self.drawings.selected.take();
+                            if !self.drawings.form.as_ref().is_some_and(|f| f.dirty()) {
+                                self.drawings.choose(keep);
+                            } else {
+                                self.drawings.selected = keep;
+                            }
+                        }
+                        Err(e) => self.drawings.error = Some(e),
+                    }
+                }
+            }
+            (Pending::DrawingWrite, r) => {
+                self.drawings.saving = false;
+                match r {
+                    Ok(_) => {
+                        self.drawings.form = None;
+                        self.read_drawing_sheet();
+                    }
+                    Err(e) if e.code == Code::Conflict => {
+                        self.drawings.note = Some(
+                            "Someone changed the drawing while you edited it: read again".into(),
+                        );
+                        self.drawings.form = None;
+                        self.read_drawing_list();
+                    }
+                    Err(e) => self.drawings.error = Some(e),
+                }
             }
             (Pending::EquationSave, Ok(_)) => {
                 if let Some(e) = &mut self.equations {
@@ -4590,6 +4964,18 @@ impl Workspace {
                 }
                 // Any assembly may now reach the part, or no longer.
                 self.read_where_used();
+                // The Drawings tile's part's revision (its drawings') moved.
+                if self.drawings.open
+                    && let Some(part) = self.drawings.part.clone()
+                {
+                    let read = self.drawings.list.as_ref().and_then(|l| l.revision.clone());
+                    let moved = params["parts"].as_array().into_iter().flatten().any(|r| {
+                        r["part"] == part.as_str() && r["revision"].as_str() != read.as_deref()
+                    });
+                    if moved {
+                        self.read_drawing_list();
+                    }
+                }
                 for report in params["parts"].as_array().into_iter().flatten() {
                     let Some(id) = report["part"].as_str() else {
                         continue;
@@ -4633,6 +5019,8 @@ impl Workspace {
                 self.reload_branches();
                 self.load_deps();
                 self.reload_equations();
+                // A drawing came, went or changed its name.
+                self.read_drawn();
             }
             "project.changed" => {
                 // The project's parameters may have changed.

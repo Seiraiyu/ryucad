@@ -194,6 +194,7 @@ pub fn propose(
         pins,
         comment: ask.comment.unwrap_or_default(),
         view: None,
+        marks: None,
         change: Some(Change {
             request: json!({"method": method, "params": params}),
             rough: ask.rough,
