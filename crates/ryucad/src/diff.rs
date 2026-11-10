@@ -505,6 +505,24 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
+        // Each sheet and view on one line: `views.v2 = projected from v1,
+        // top, offset 70 mm, sheet s1`.
+        Some(crate::doc::drawing::KIND) => {
+            for key in ["sheets", "views"] {
+                if let Some(Value::Object(members)) = rest.remove(key) {
+                    let mut members: Vec<(&String, &Value)> = members.iter().collect();
+                    members.sort_by_key(|(k, _)| member_order(k));
+                    for (k, m) in members {
+                        let line = if key == "sheets" {
+                            drawing_sheet(m)
+                        } else {
+                            drawing_view(m)
+                        };
+                        out.push(format!("{key}.{k} = {line}"));
+                    }
+                }
+            }
+        }
         // Each step on one line, in order: what it moves, then how.
         Some(crate::doc::explode::KIND) => {
             if let Some(Value::Array(steps)) = rest.remove("steps") {
@@ -677,6 +695,89 @@ fn look(v: &Value) -> String {
             parts.push(format!("{k} {}", scalar(x)));
         }
     }
+    parts.join(", ")
+}
+
+/// A drawing member's key in its natural order: `v2` before `v10`.
+fn member_order(k: &str) -> (String, u64) {
+    let digits = k.trim_start_matches(|c: char| c.is_ascii_alphabetic());
+    (
+        k[..k.len() - digits.len()].to_owned(),
+        digits.parse().unwrap_or(u64::MAX),
+    )
+}
+
+/// The fields of a drawing member not yet written, `name value`, in key
+/// order.
+fn rest_of(m: &Value, done: &[&str]) -> Vec<String> {
+    m.as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(k, _)| !done.contains(&k.as_str()))
+        .map(|(k, v)| {
+            let text = match v.as_array() {
+                Some(a) => a.iter().map(scalar).collect::<Vec<_>>().join(", "),
+                None => reference(v).unwrap_or_else(|| scalar(v)),
+            };
+            format!("{k} {text}")
+        })
+        .collect()
+}
+
+/// A drawing's sheet on one line: `Sheet 1, ansi_b, scale 1:2`.
+fn drawing_sheet(m: &Value) -> String {
+    let mut parts = vec![
+        m.get("name").map(scalar).unwrap_or_default(),
+        m.get("size").map(scalar).unwrap_or_default(),
+    ];
+    parts.extend(rest_of(m, &["name", "size"]));
+    parts.join(", ")
+}
+
+/// A drawing's view on one line: what it is and where from, then the
+/// rest of its fields in key order.
+fn drawing_view(m: &Value) -> String {
+    let ty = m.get("type").and_then(Value::as_str).unwrap_or_default();
+    let (head, done): (String, &[&str]) = match ty {
+        "base" => {
+            let orient = match m.get("orient") {
+                Some(Value::Object(o)) => o
+                    .get("normal_to")
+                    .map(|r| format!("normal to {}", reference(r).unwrap_or_else(|| scalar(r))))
+                    .unwrap_or_default(),
+                Some(o) => scalar(o),
+                None => String::new(),
+            };
+            let of = match (m.get("of"), m.get("rev").and_then(|r| r.get("label"))) {
+                (Some(p), Some(l)) => format!(" of {} @ label {}", scalar(p), scalar(l)),
+                (Some(p), None) => format!(" of {}", scalar(p)),
+                (None, Some(l)) => format!(" @ label {}", scalar(l)),
+                (None, None) => String::new(),
+            };
+            (
+                format!("base {orient}{of}"),
+                &["type", "orient", "of", "rev"],
+            )
+        }
+        "projected" | "auxiliary" => {
+            let from = m.get("from").map(scalar).unwrap_or_default();
+            let how = m
+                .get("side")
+                .map(scalar)
+                .or_else(|| {
+                    m.get("normal_to")
+                        .map(|r| format!("normal to {}", reference(r).unwrap_or_else(|| scalar(r))))
+                })
+                .unwrap_or_default();
+            (
+                format!("{ty} from {from}, {how}"),
+                &["type", "from", "side", "normal_to"],
+            )
+        }
+        _ => (scalar(&json!(ty)), &["type"]),
+    };
+    let mut parts = vec![head];
+    parts.extend(rest_of(m, done));
     parts.join(", ")
 }
 
@@ -1487,6 +1588,14 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
         if let Some(d) = explodes {
             v["explodes"] = d;
         }
+        // Its drawings, each by ID, likewise.
+        if let Some(d) = folder_diff(
+            &folder(from, part, crate::doc::drawing::DRAWINGS),
+            &folder(to, part, crate::doc::drawing::DRAWINGS),
+            "drawing",
+        ) {
+            v["drawings"] = d;
+        }
         // Its appearance by pointer, when either side has one: no result
         // changes, so never under `--model`.
         let at = format!("parts/{part}/{}", crate::doc::appearance::APPEARANCE);
@@ -1563,6 +1672,20 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
     }
     if let Some(a) = annotation_changes(from, to) {
         v["annotations"] = a;
+    }
+    // The project's drawing templates, by ID, when either side has any.
+    let templates = |files: &Files| -> BTreeMap<String, Value> {
+        let dir = format!("{}/", crate::doc::drawing_template::TEMPLATES);
+        files
+            .keys()
+            .filter_map(|p| {
+                let id = p.strip_prefix(&dir)?.strip_suffix(".json")?;
+                (!id.contains('/')).then(|| Some((id.to_owned(), json_at(files, p)?)))?
+            })
+            .collect()
+    };
+    if let Some(d) = folder_diff(&templates(from), &templates(to), "template") {
+        v["templates"] = d;
     }
     v
 }
@@ -2025,6 +2148,65 @@ fn find<'a>(
     id: &crate::doc::id::Id,
 ) -> Option<&'a crate::error::Result<crate::rebuild::Output>> {
     side.features.iter().find(|(x, _)| x == id).map(|(_, r)| r)
+}
+
+/// Each drawing built at a revision: by part and drawing, each view's
+/// fingerprint by key, or the code of why it didn't build.
+pub type Drawn =
+    BTreeMap<(String, String), std::result::Result<BTreeMap<String, String>, crate::error::Code>>;
+
+/// Adds to a structural diff `v` each drawing whose built views differ
+/// (design 417): under its part's `drawings`, `model` by drawing, each
+/// `{views: {added, removed, changed}}`, or `{from, to}` with what didn't
+/// build.
+pub fn drawings_model(v: &mut Value, from: &Drawn, to: &Drawn, opts: &Options) {
+    let keys: BTreeSet<&(String, String)> = from.keys().chain(to.keys()).collect();
+    for key in keys {
+        let (part, drawing) = key;
+        if opts.part.as_ref().is_some_and(|p| p != part) {
+            continue;
+        }
+        let (a, b) = (from.get(key), to.get(key));
+        if a == b {
+            continue;
+        }
+        let m = match (a, b) {
+            (Some(Ok(a)), Some(Ok(b))) => {
+                let added: Vec<&String> = b.keys().filter(|k| !a.contains_key(*k)).collect();
+                let removed: Vec<&String> = a.keys().filter(|k| !b.contains_key(*k)).collect();
+                let changed: Vec<&String> = a
+                    .iter()
+                    .filter(|(k, x)| b.get(*k).is_some_and(|y| y != *x))
+                    .map(|(k, _)| k)
+                    .collect();
+                json!({"views": {"added": added, "removed": removed, "changed": changed}})
+            }
+            _ => {
+                let side = |x: Option<
+                    &std::result::Result<BTreeMap<String, String>, crate::error::Code>,
+                >| match x {
+                    None => Value::Null,
+                    Some(Ok(_)) => json!({"ok": true}),
+                    Some(Err(c)) => json!({"ok": false, "error": c}),
+                };
+                json!({"from": side(a), "to": side(b)})
+            }
+        };
+        let p = &mut v["parts"][part.as_str()];
+        if p.is_null() {
+            *p = json!({
+                "status": "same",
+                "order": {"added": [], "removed": [], "moved": []},
+                "parameters": {"added": [], "removed": [], "changed": []},
+                "features": {},
+            });
+        }
+        let d = &mut p["drawings"];
+        if d.is_null() {
+            *d = json!({"added": [], "removed": [], "changed": []});
+        }
+        d["model"][drawing.as_str()] = m;
+    }
 }
 
 /// Adds to a structural diff `v` what the change did to the model, from
@@ -3592,6 +3774,62 @@ mod tests {
         assert!(v["parts"]["a"].get("views").is_none());
     }
 
+    #[test]
+    fn drawings_textconv_a_member_a_line_and_diff_per_part() {
+        let file = |offset: &str| {
+            json!({"format": 1, "kind": "ryucad.drawing", "name": "P",
+                "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b", "scale": "1:2"}},
+                "views": {
+                    "v1": {"type": "base", "sheet": "s1", "at": ["120 mm", "160 mm"], "orient": "front"},
+                    "v10": {"type": "projected", "sheet": "s1", "from": "v1", "side": "iso", "at": ["300 mm", "200 mm"]},
+                    "v2": {"type": "projected", "sheet": "s1", "from": "v1", "side": "top", "offset": offset},
+                    "v3": {"type": "auxiliary", "sheet": "s1", "from": "v1",
+                           "normal_to": {"feature": "b", "name": "0123456789abcdef0123456789abcdef"}}
+                },
+                "fields": {"drawn_by": "agent"}})
+        };
+        assert_eq!(
+            text(file("70 mm")),
+            "ryucad.drawing (format 1)\n\
+             sheets.s1 = Sheet 1, ansi_b, scale 1:2\n\
+             views.v1 = base front, at 120 mm, 160 mm, sheet s1\n\
+             views.v2 = projected from v1, top, offset 70 mm, sheet s1\n\
+             views.v3 = auxiliary from v1, normal to b/0123456789abcdef0123456789abcdef, sheet s1\n\
+             views.v10 = projected from v1, iso, at 300 mm, 200 mm, sheet s1\n\
+             fields.drawn_by = agent\n\
+             name = P\n"
+        );
+        let manifest = (
+            "ryucad.json",
+            json!({"default_unit": "mm", "format": 1, "kind": "ryucad.project"}),
+        );
+        let part = (
+            "parts/p/part.json",
+            json!({"features": [], "format": 1, "kind": "ryucad.part"}),
+        );
+        let template = json!({"format": 1, "kind": "ryucad.drawing_template",
+            "size": "ansi_b", "area": [[10, 10], [421.8, 269.4]]});
+        let from = files(&[
+            manifest.clone(),
+            part.clone(),
+            ("parts/p/drawings/d1.json", file("70 mm")),
+        ]);
+        let to = files(&[
+            manifest,
+            part,
+            ("parts/p/drawings/d1.json", file("80 mm")),
+            ("parts/p/drawings/d2.json", file("70 mm")),
+            ("templates/ours.json", template),
+        ]);
+        let v = structural(&from, &to, &Options::default(), &Releases::default());
+        let d = &v["parts"]["p"]["drawings"];
+        assert_eq!(d["added"], json!(["d2"]), "{v}");
+        assert_eq!(d["changed"][0]["drawing"], "d1");
+        assert_eq!(d["changed"][0]["changes"][0]["at"], "/views/v2/offset");
+        assert_eq!(v["parts"]["p"]["status"], "changed");
+        assert_eq!(v["templates"]["added"], json!(["ours"]));
+    }
+
     fn files(list: &[(&str, Value)]) -> Files {
         list.iter()
             .map(|(p, v)| {
@@ -3807,6 +4045,51 @@ mod tests {
             v["parts"]["p"]["features"]["a"],
             json!({"status": "changed", "invalid": ["to"]})
         );
+    }
+
+    #[test]
+    fn a_models_change_shows_in_the_drawings_views_it_moves() {
+        use crate::git::tests::git;
+        use crate::server::tests::{call, fresh};
+        let (dir, mut s) = fresh();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 40, "y": 20, "z": 10}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "drawing.create",
+            json!({"part": "p", "drawing": "main", "views": "standard"}),
+        )
+        .unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "a block drawn"]);
+        let v = call(&mut s, "diff", json!({"model": true})).unwrap();
+        assert!(v["parts"]["p"].get("drawings").is_none(), "{v}");
+        // Taller: the drawing's file doesn't change, every view it shows
+        // the box's height in does; the top view doesn't.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"z": 15}}),
+        )
+        .unwrap();
+        let v = call(&mut s, "diff", json!({"model": true})).unwrap();
+        let d = &v["parts"]["p"]["drawings"];
+        assert_eq!(d["changed"], json!([]), "{v}");
+        assert_eq!(
+            d["model"]["main"]["views"]["changed"],
+            json!(["v1", "v3", "v4"]),
+            "{v}"
+        );
+        // Without --model, no built views.
+        let v = call(&mut s, "diff", json!({})).unwrap();
+        assert!(v["parts"]["p"]["drawings"].get("model").is_none(), "{v}");
     }
 
     #[test]

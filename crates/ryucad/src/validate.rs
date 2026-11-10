@@ -3410,6 +3410,70 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_solid_added_under_one_id_is_renumbered_in_its_drawing() {
+        let mut m = boxed();
+        let add_box = |m: &mut Merging, x: i32| {
+            m.call(
+                "feature.add",
+                json!({"part": "p", "type": "box", "id": "box-2",
+                       "params": {"x": x, "y": 10, "z": 10},
+                       "placement": {"origin": [40, 0, 0]}}),
+            )
+            .unwrap();
+        };
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        add_box(&mut m, 30);
+        let v = m.call("inspect", json!({"part": "p"})).unwrap();
+        let face = v["bodies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["solid"] == "box-2")
+            .unwrap()["faces"][0]["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let drawing = json!({"format": 1, "kind": "ryucad.drawing", "name": "P",
+        "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b"}},
+        "views": {
+            "v1": {"type": "base", "sheet": "s1", "at": ["100 mm", "100 mm"], "orient": "front"},
+            "v2": {"type": "auxiliary", "sheet": "s1", "from": "v1",
+                   "normal_to": {"feature": "box-2", "name": face}}
+        }});
+        let dir = m.root().join("parts/p/drawings");
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::doc::project::write_json(&dir.join("main.json"), &drawing).unwrap();
+        m.commit("theirs: a box and a view normal to its face");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        add_box(&mut m, 5);
+        m.commit("ours: a short box");
+        m.merge("theirs");
+        let r = renumber(&mut m, "parts/p/features/box-2.json#");
+        assert_eq!(r["status"]["clean"], true, "{r}");
+        // Theirs' view follows its box to its new ID, by the name the
+        // renumbered box gives the face; the face is still a face of it.
+        let text = std::fs::read_to_string(dir.join("main.json")).unwrap();
+        let d = crate::doc::canonical::parse(&text).unwrap();
+        let normal = &d["views"]["v2"]["normal_to"];
+        assert_eq!(normal["feature"], "box-1", "{d}");
+        let v = m.call("inspect", json!({"part": "p"})).unwrap();
+        let faces: Vec<&str> = v["bodies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["solid"] == "box-1")
+            .unwrap()["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        assert!(faces.contains(&normal["name"].as_str().unwrap()), "{d}");
+    }
+
+    #[test]
     fn an_instance_added_under_one_id_is_renumbered_in_its_explode() {
         let mut m = boxed();
         m.call("part.create", json!({"part": "asm", "kind": "assembly"}))

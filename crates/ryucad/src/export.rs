@@ -418,7 +418,7 @@ fn format(ask: &Ask) -> Result<Format> {
 /// write: it is neither logged nor undoable, and a person in View mode may
 /// ask for one, so it may never replace a project's file. Elsewhere in the
 /// project folder (`<project>/p.step`) it may write.
-fn out_path(out: &str, root: &std::path::Path) -> Result<std::path::PathBuf> {
+pub(crate) fn out_path(out: &str, root: &std::path::Path) -> Result<std::path::PathBuf> {
     let path = std::path::PathBuf::from(out);
     if !path.is_absolute() || path.file_name().is_none() {
         return Err(Error::new(
@@ -478,7 +478,7 @@ fn out_path(out: &str, root: &std::path::Path) -> Result<std::path::PathBuf> {
 /// `out` it is a write, as an import's is (#268): it finishes, the file
 /// in place, and a cancel that came too late answers `ok` with
 /// `cancel_ignored`. So a cancelled export never leaves its file.
-fn deliver(
+pub(crate) fn deliver(
     job: &ryu_session::job::Job,
     mut result: Value,
     out: Option<&std::path::Path>,

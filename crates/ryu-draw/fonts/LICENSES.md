@@ -1,8 +1,9 @@
-# Fonts in ryueda
+# Fonts in ryu-draw
 
-ryueda draws schematics in one face (design 236): SVG names it, PNGs are
-rasterized with it, and from plan 1.B PDFs embed a subset of it. `ryusch`
-reads only its advance widths, from `crates/ryusch/src/widths.rs`, which
+Every ryu drawing is written in one face: ryueda's schematics (design 236)
+and ryucad's drawings (design 417). SVG names it, PNGs are rasterized with
+it, and PDFs embed a subset of it (`ryu_draw::font::INTER`). `ryusch` reads
+only its advance widths, from `crates/ryusch/src/widths.rs`, which ryueda's
 `tests/font_widths.rs` generates from this file and checks against it.
 
 | File | What | Version | Licence | Text |
