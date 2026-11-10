@@ -1,10 +1,10 @@
 //! Body features: a solid hollowed to a wall (`shell`); a solid grown,
 //! shrunk, or its faces pushed and pulled (`offset`); a solid's mirror
 //! image (`mirror`: a solid of its own, or joined to, cut from or
-//! intersected with solids, as an extrude's body is); and a solid split
-//! by a plane (`split`: the target keeps the side behind the plane, and
-//! the side in front founds a solid named by the split, or is thrown
-//! away). A shell, offset or split acts on one solid, its `target`, named
+//! intersected with solids, as an extrude's body is); and a solid or
+//! sheet split by a plane, a body or faces (`split`: the target keeps the
+//! side behind, and the side in front founds a body named by the split,
+//! or is thrown away; `keep: behind` trims). A shell, offset or split acts on one solid, its `target`, named
 //! by its founder; the faces it names are references into that solid as
 //! the feature sees it.
 
@@ -23,6 +23,10 @@ pub const FORMAT: u64 = 9;
 
 /// The feature format mirrors and splits are new in.
 pub const MIRROR_FORMAT: u64 = 10;
+
+/// The feature format splits by a body or faces are new in (a split by a
+/// plane stays [`MIRROR_FORMAT`]).
+pub const TOOL_FORMAT: u64 = 19;
 
 /// Which sides of its plane a split keeps.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -62,13 +66,23 @@ pub struct Mirror {
     pub combine: Combine,
 }
 
-/// A split: `target` cut by `plane` (its normal turned round by `flip`).
-/// The target keeps the side behind the plane, against its normal; with
-/// `keep: both` the side in front founds a solid named by the split.
+/// What a split cuts with: a plane (behind is against its normal), a
+/// body (a sheet divides, a solid's inside is behind), or faces of one
+/// body, taken off as a sheet.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SplitBy {
+    Plane(GeomRef),
+    Body(Id),
+    Faces(Vec<Reference>),
+}
+
+/// A split: `target` cut by its tool (its sides swapped by `flip`). The
+/// target keeps the side behind; with `keep: both` the side in front
+/// founds a body named by the split. `keep: behind` is a trim.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Split {
     pub target: Id,
-    pub plane: GeomRef,
+    pub by: SplitBy,
     pub flip: bool,
     pub keep: Keep,
 }
@@ -133,7 +147,12 @@ impl Mirror {
 impl Split {
     /// Its fields; no flip and both sides kept are written as nothing.
     pub fn fields(&self) -> Value {
-        let mut v = json!({"target": self.target, "plane": self.plane.to_json()});
+        let mut v = json!({"target": self.target});
+        match &self.by {
+            SplitBy::Plane(p) => v["plane"] = p.to_json(),
+            SplitBy::Body(b) => v["tool"] = json!({"body": b}),
+            SplitBy::Faces(f) => v["tool"] = json!({"faces": refs_json(f)}),
+        }
         if self.flip {
             v["flip"] = json!(true);
         }
@@ -143,10 +162,82 @@ impl Split {
         v
     }
 
+    /// Its plane, if it splits by one.
+    pub fn plane(&self) -> Option<&GeomRef> {
+        match &self.by {
+            SplitBy::Plane(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// The body it splits by, if it names one.
+    pub fn tool_body(&self) -> Option<&Id> {
+        match &self.by {
+            SplitBy::Body(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// Its references, each with its role: `tool.faces.<i>`.
+    pub fn references(&self) -> Vec<(String, &Reference)> {
+        match &self.by {
+            SplitBy::Faces(f) => f
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (format!("tool.faces.{i}"), r))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The lowest format that holds it.
+    pub fn format(&self) -> u64 {
+        match self.by {
+            SplitBy::Plane(_) => MIRROR_FORMAT,
+            _ => TOOL_FORMAT,
+        }
+    }
+
     #[doc(hidden)]
     pub fn from_fields(o: &mut Obj) -> Result<Split> {
         let target = target(o)?;
-        let plane = GeomRef::from_json(&o.take("plane")?, "/plane")?;
+        let by = match (o.take_opt("plane"), o.take_opt("tool")) {
+            (Some(p), None) => SplitBy::Plane(GeomRef::from_json(&p, "/plane")?),
+            (None, Some(t)) => {
+                let mut f = Obj::new(&t, "/tool")?;
+                let by = match (f.take_opt("body"), f.take_opt("faces")) {
+                    (Some(Value::String(b)), None) => SplitBy::Body(
+                        Id::parse(&b, "feature").map_err(|e| e.with("pointer", "/tool/body"))?,
+                    ),
+                    (None, Some(faces)) => {
+                        let faces = refs(&faces, "/tool/faces")?;
+                        for (k, r) in faces.iter().enumerate() {
+                            if faces[..k].contains(r) {
+                                return Err(invalid(
+                                    &format!("/tool/faces/{k}"),
+                                    "a split's tool names each face once",
+                                ));
+                            }
+                        }
+                        SplitBy::Faces(faces)
+                    }
+                    _ => {
+                        return Err(invalid(
+                            "/tool",
+                            "tool is {\"body\": <founder>} or {\"faces\": [faces of one body]}",
+                        ));
+                    }
+                };
+                f.finish()?;
+                by
+            }
+            (Some(_), Some(_)) => {
+                return Err(invalid("/tool", "a split has a plane or a tool, not both"));
+            }
+            (None, None) => {
+                return Err(invalid("/plane", "a split has a plane or a tool"));
+            }
+        };
         let flip = match o.take_opt("flip") {
             None => false,
             Some(Value::Bool(b)) => b,
@@ -161,7 +252,7 @@ impl Split {
         };
         Ok(Split {
             target,
-            plane,
+            by,
             flip,
             keep,
         })
@@ -229,7 +320,16 @@ pub struct Offset {
 pub fn request_fields(ty: &str) -> &'static [&'static str] {
     match ty {
         "mirror" => &["solid", "plane", "operation", "targets"],
-        "split" => &["target", "targets", "plane", "flip", "keep"],
+        "split" => &[
+            "target",
+            "targets",
+            "plane",
+            "tool",
+            "tool_faces",
+            "tools",
+            "flip",
+            "keep",
+        ],
         "shell" => &[
             "target",
             "targets",
@@ -701,6 +801,56 @@ mod tests {
                               "targets": ["base"]}))
         .unwrap();
         assert_eq!(mirror(m.fields()).unwrap(), m);
+    }
+
+    #[test]
+    fn a_split_takes_a_plane_a_body_or_faces_as_its_tool() {
+        let face = json!({"feature": "base", "name": A});
+        let by_plane = split(json!({"target": "h", "plane": "xy"})).unwrap();
+        assert!(matches!(by_plane.by, SplitBy::Plane(_)));
+        assert_eq!(by_plane.fields(), json!({"target": "h", "plane": "xy"}));
+        let by_body =
+            split(json!({"target": "h", "tool": {"body": "parting"}, "keep": "behind"})).unwrap();
+        assert_eq!(
+            by_body.by,
+            SplitBy::Body(Id::parse("parting", "feature").unwrap())
+        );
+        assert_eq!(
+            by_body.fields(),
+            json!({"target": "h", "tool": {"body": "parting"}, "keep": "behind"})
+        );
+        let by_faces =
+            split(json!({"target": "h", "tool": {"faces": [face.clone()]}, "flip": true})).unwrap();
+        assert_eq!(split(by_faces.fields()).unwrap(), by_faces);
+        assert_eq!(by_faces.references().len(), 1);
+        assert_eq!(by_faces.references()[0].0, "tool.faces.0");
+        assert_eq!(by_faces.tool_body(), None);
+        assert_eq!(by_body.tool_body().map(Id::as_str), Some("parting"));
+        assert!(by_plane.plane().is_some() && by_body.plane().is_none());
+        assert_eq!(
+            (by_plane.format(), by_body.format(), by_faces.format()),
+            (MIRROR_FORMAT, TOOL_FORMAT, TOOL_FORMAT)
+        );
+        // Exactly one of plane and tool.
+        for (v, at) in [
+            (json!({"target": "h"}), "/plane"),
+            (
+                json!({"target": "h", "plane": "xy", "tool": {"body": "p"}}),
+                "/tool",
+            ),
+            (json!({"target": "h", "tool": {}}), "/tool"),
+            (
+                json!({"target": "h", "tool": {"body": "p", "faces": [face.clone()]}}),
+                "/tool",
+            ),
+            (json!({"target": "h", "tool": {"faces": []}}), "/tool/faces"),
+        ] {
+            let e = split(v.clone()).unwrap_err();
+            assert_eq!(e.details["pointer"], at, "{v}: {e}");
+        }
+        // A face named twice.
+        let e = split(json!({"target": "h", "tool": {"faces": [face.clone(), face]}})).unwrap_err();
+        assert_eq!(e.details["pointer"], "/tool/faces/1");
     }
 
     #[test]

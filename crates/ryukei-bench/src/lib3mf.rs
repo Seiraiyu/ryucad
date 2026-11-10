@@ -9,14 +9,16 @@
 mod ffi {
     /// What lib3mf read: its warnings (none for a sound file), the
     /// model's unit, each metadata entry as `[namespace:]name=value`, each
-    /// object as `name|partnumber`, the build's item count, and the
-    /// triangles and volume the build places, in the file's unit.
+    /// object as `name|partnumber` and its type (`model`, `surface`, …)
+    /// in `types`, the build's item count, and the triangles and volume
+    /// the build places, in the file's unit.
     #[derive(Debug, Default)]
     struct Read3mf {
         warnings: Vec<String>,
         unit: String,
         metadata: Vec<String>,
         objects: Vec<String>,
+        types: Vec<String>,
         items: u32,
         triangles: u64,
         volume: f64,

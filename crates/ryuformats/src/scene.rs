@@ -70,11 +70,14 @@ pub struct Product {
 }
 
 /// A solid's name (its founder's ID) and its mesh in its product's frame,
-/// in meters: welded, watertight, triangles counterclockwise from outside.
+/// in meters: welded, triangles counterclockwise from outside, watertight
+/// but for a sheet's (`surface`), which is open at its boundaries and has
+/// no inside.
 #[derive(Clone, Debug)]
 pub struct Solid {
     pub name: String,
     pub mesh: Arc<BodyMesh>,
+    pub surface: bool,
 }
 
 /// One placing of a product (an index into the scene's products) in
@@ -166,6 +169,7 @@ pub(crate) mod tests {
         let solid = |name: &str, mesh| Solid {
             name: name.into(),
             mesh,
+            surface: false,
         };
         Scene {
             products: vec![

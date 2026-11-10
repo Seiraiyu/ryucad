@@ -45,7 +45,8 @@
 //! pass them too: seeds sweep `s` as surfaces (an extrude, a revolve about
 //! its first line, a sweep along `b`'s edge, a loft of `s` to `t`, a
 //! typed refusal), a planar face of `s`, and a surface joined to `b` (a
-//! typed refusal).
+//! typed refusal). Seeds split `b` by `m` and by `c`, `m` by `b`, `c` by a
+//! face of `b`, and cut, offset and mirror `m` (ryucad 18.C's trims).
 //! A mate or an instance pattern is built the same way, after instances
 //! `i1` (free) and `i2` (fixed) of `fz`: what it solves and places must be
 //! finite and sound too. Each assembly's interference and clearances are
@@ -408,8 +409,11 @@ fuzz_target!(|data: &[u8]| {
     // Inputs of odd length make the import `m` a reference: nothing may
     // act on it, and its body checks only its topology.
     let reference = data.len() % 2 == 1;
-    let acts_on_m = f.targets().iter().any(|t| t.as_str() == "m")
-        || f.source().is_some_and(|t| t.as_str() == "m");
+    // A feature that changes `m`, as the table of what each feature wants
+    // says: a split's tool is only read, which a reference allows.
+    let acts_on_m = ryucad::kind::bodies_read(&f)
+        .iter()
+        .any(|r| r.changes && r.body.as_str() == "m");
     let part = part(f, reference);
     let r = rebuild_part(&part);
     let me = id("f");

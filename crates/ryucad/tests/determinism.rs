@@ -1544,6 +1544,217 @@ fn fills_section(golden: &mut Golden) {
     });
 }
 
+/// Trims and splits by tools (ryucad 18.C): a 20 mm planar sheet trimmed
+/// by a box over its middle, its twin split both ways; a 10 mm box split
+/// by a wall, its twin by another box's face; a wall cut by a box, offset
+/// by 1 mm, and mirrored as a new sheet. Every body checked clean, one
+/// thread and four alike; then the part as STEP in meters, binary STL,
+/// 3MF and usda (each file's hash a line) with the warnings' codes.
+fn trims_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("trims");
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+    let part = "tr";
+    {
+        let mut call = |m: &str, p: serde_json::Value| {
+            ryucad::server::handle(
+                &mut session,
+                ryucad::proto::Request::from_rpc(m, Some(p)).unwrap(),
+            )
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+        };
+        let add = |call: &mut Call<'_>, f: serde_json::Value| {
+            let mut f = f;
+            f["part"] = json!(part);
+            call("feature.add", f);
+        };
+        call("part.create", json!({"part": part}));
+        // A sheet trimmed by a box, and its twin split both ways.
+        for (k, x, keep) in [("a", 0.0, "behind"), ("b", 40.0, "both")] {
+            add(
+                &mut call,
+                json!({"type": "sketch", "id": format!("k{k}"), "plane": "xy"}),
+            );
+            call(
+                "sketch.edit",
+                json!({"part": part, "sketch": format!("k{k}"), "ops": square_ops(x, 0.0, 20.0)}),
+            );
+            add(
+                &mut call,
+                json!({"type": "planar", "id": format!("s{k}"), "sketch": format!("k{k}")}),
+            );
+            add(
+                &mut call,
+                json!({"type": "box", "id": format!("b{k}"), "params": {"x": 10, "y": 30, "z": 10},
+                       "placement": {"origin": [x + 5.0, -5, -5]}}),
+            );
+            add(
+                &mut call,
+                json!({"type": "split", "id": format!("t{k}"), "target": format!("s{k}"),
+                       "tool": format!("b{k}"), "keep": keep}),
+            );
+        }
+        // A box split by a wall, and its twin by another box's face.
+        add(
+            &mut call,
+            json!({"type": "box", "id": "h", "params": {"x": 10, "y": 10, "z": 10},
+                              "placement": {"origin": [80, 0, 0]}}),
+        );
+        add(
+            &mut call,
+            json!({"type": "sketch", "id": "kc", "plane": "xy"}),
+        );
+        call(
+            "sketch.edit",
+            json!({"part": part, "sketch": "kc", "ops": [
+                {"op": "add", "id": "p1", "type": "point", "at": [84, -5]},
+                {"op": "add", "id": "p2", "type": "point", "at": [84, 15]},
+                {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"}]}),
+        );
+        add(
+            &mut call,
+            json!({"type": "extrude", "id": "w", "sketch": "kc", "surface": true,
+                              "extent": {"type": "symmetric", "length": "40 mm"}}),
+        );
+        add(
+            &mut call,
+            json!({"type": "split", "id": "hs", "target": "h", "tool": "w"}),
+        );
+        add(
+            &mut call,
+            json!({"type": "box", "id": "h2", "params": {"x": 10, "y": 10, "z": 10},
+                              "placement": {"origin": [100, 0, 0]}}),
+        );
+        add(
+            &mut call,
+            json!({"type": "box", "id": "k", "params": {"x": 4, "y": 20, "z": 20},
+                              "placement": {"origin": [103, -5, -5]}}),
+        );
+        let inspected = call("inspect", json!({"part": part, "feature": "k"}));
+        let face = inspected["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let fr = &f["surface"]["frame"];
+                f["surface"]["type"] == "plane"
+                    && fr["z"][0].as_f64().unwrap().abs() > 0.5
+                    && (fr["origin"][0].as_f64().unwrap() - 0.103).abs() < 1e-9
+            })
+            .unwrap_or_else(|| panic!("k's face at x = 103: {inspected}"))["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        add(
+            &mut call,
+            json!({"type": "split", "id": "hk", "target": "h2",
+                              "tool_faces": [format!("{part}/k/{face}")]}),
+        );
+        // A wall cut by a box, offset, and mirrored as a new sheet.
+        add(
+            &mut call,
+            json!({"type": "sketch", "id": "kd", "plane": "xy"}),
+        );
+        call(
+            "sketch.edit",
+            json!({"part": part, "sketch": "kd", "ops": [
+                {"op": "add", "id": "p1", "type": "point", "at": [130, 0]},
+                {"op": "add", "id": "p2", "type": "point", "at": [140, 0]},
+                {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"}]}),
+        );
+        add(
+            &mut call,
+            json!({"type": "extrude", "id": "w2", "sketch": "kd", "surface": true,
+                              "extent": {"type": "blind", "length": "20 mm"}}),
+        );
+        add(
+            &mut call,
+            json!({"type": "box", "id": "c", "params": {"x": 20, "y": 4, "z": 20},
+                              "placement": {"origin": [125, -2, 10]}, "operation": "cut",
+                              "targets": ["w2"]}),
+        );
+        add(
+            &mut call,
+            json!({"type": "offset", "id": "o", "target": "w2", "distance": "1 mm"}),
+        );
+        add(
+            &mut call,
+            json!({"type": "mirror", "id": "m", "solid": "w2", "plane": "zx"}),
+        );
+        let report = call("rebuild", json!({"part": part}));
+        for f in report["parts"][0]["features"].as_array().unwrap() {
+            if let Some(v) = f.get("split") {
+                s.str(&format!(
+                    "{} split {}",
+                    f["id"],
+                    ryucad::doc::canonical::to_string(v)
+                ));
+            }
+        }
+    }
+    let p = session
+        .project()
+        .part(&Id::parse(part, "part").unwrap())
+        .unwrap()
+        .clone();
+    let on = |n: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+            .install(|| rebuild_part(&p))
+    };
+    let (one, four) = (on(1), on(4));
+    assert_eq!(one.failed(), 0, "{:?}", one.features);
+    assert_eq!(one.hash, four.hash, "one thread and four");
+    for (id, o) in &one.features {
+        let o = o.as_ref().unwrap();
+        for (solid, b) in o.solids() {
+            assert_eq!(ryukei::check::check_intersections(&b.body), [], "{id}");
+            s.str(&format!(
+                "{id} {solid} {} {} faces {} boundaries {}",
+                b.hash,
+                ryucad::kind::name(&b.body),
+                b.body.faces().count(),
+                ryucad::kind::boundaries(&b.body)
+            ));
+            s.str(&b.body.dump());
+        }
+    }
+    s.str(&one.hash);
+    for (format, unit) in [
+        ("step", Some("m")),
+        ("stl", None),
+        ("3mf", None),
+        ("usda", None),
+    ] {
+        let ask = ryucad::export::Ask {
+            part: part.into(),
+            format: Some(format.into()),
+            unit: unit.map(str::to_owned),
+            time_stamp: Some("2026-11-09T00:00:00".into()),
+            chord: (format != "step").then(|| "0.05 mm".into()),
+            angle: (format != "step").then(|| "20 deg".into()),
+            ..Default::default()
+        };
+        let a = ryucad::export::export_stamped(&mut session, ask, "0.0.0")
+            .unwrap_or_else(|e| panic!("{format}: {e}"));
+        let codes: Vec<String> = a.result["warnings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|w| w["code"].as_str().unwrap_or("").to_owned())
+            .collect();
+        s.str(&format!(
+            "{format} {:x} warnings {}",
+            md(&a.binary.unwrap()),
+            codes.join(",")
+        ));
+    }
+}
+
 /// A box's faces extracted and sewn back as a solid, and as a closed
 /// sheet in a second sew of the same faces' twins.
 fn sews_section(golden: &mut Golden) {
@@ -4823,6 +5034,7 @@ sections! {
     surfaces => surfaces_section(&mut golden),
     fills => fills_section(&mut golden),
     sews => sews_section(&mut golden),
+    trims => trims_section(&mut golden),
     thickens => thickens_section(&mut golden),
     annotations => annotations_section(&mut golden),
     drawings => drawings_section(&mut golden),

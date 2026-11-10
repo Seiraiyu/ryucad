@@ -315,7 +315,7 @@ pub(crate) mod tests {
         use crate::doc::sketch::OriginPlane;
         Feature::Split(Box::new(crate::doc::body::Split {
             target: id(target),
-            plane: GeomRef::Plane(OriginPlane::Xy),
+            by: crate::doc::body::SplitBy::Plane(GeomRef::Plane(OriginPlane::Xy)),
             flip: false,
             keep,
         }))

@@ -408,17 +408,30 @@ fn a_face_swept_as_a_surface_has_no_caps() {
 }
 
 #[test]
-fn every_acting_feature_refuses_a_sheet() {
-    // A surface wall `w` and a box `b`; each feature that acts on a body
+fn features_that_need_a_solid_refuse_a_sheet() {
+    // A surface wall `w` and a box `b`; each feature that needs a solid
     // is refused naming `w`, at write, and nothing is written.
-    for f in [
-        json!({"type": "box", "params": {"x": 1, "y": 1, "z": 1}, "operation": "join", "targets": ["w"]}),
-        json!({"type": "box", "params": {"x": 1, "y": 1, "z": 1}, "operation": "cut", "targets": ["w"]}),
-        json!({"type": "boolean", "op": "unite", "target": "b", "tools": ["w"]}),
-        json!({"type": "shell", "target": "w", "thickness": "1 mm"}),
-        json!({"type": "offset", "target": "w", "distance": "1 mm"}),
-        json!({"type": "mirror", "solid": "w", "plane": "yz", "operation": "new"}),
-        json!({"type": "split", "target": "w", "plane": "yz"}),
+    for (f, hint) in [
+        (
+            json!({"type": "box", "params": {"x": 1, "y": 1, "z": 1}, "operation": "join", "targets": ["w"]}),
+            "sew",
+        ),
+        (
+            json!({"type": "boolean", "op": "unite", "target": "w", "tools": ["b"]}),
+            "sew",
+        ),
+        (
+            json!({"type": "boolean", "op": "subtract", "target": "b", "tools": ["w"]}),
+            "split",
+        ),
+        (
+            json!({"type": "shell", "target": "w", "thickness": "1 mm"}),
+            "thicken",
+        ),
+        (
+            json!({"type": "mirror", "solid": "w", "plane": "yz", "operation": "join", "targets": ["b"]}),
+            "new",
+        ),
     ] {
         let (_dir, mut s) = project();
         wall(&mut s);
@@ -436,6 +449,7 @@ fn every_acting_feature_refuses_a_sheet() {
             "{f}: {e}"
         );
         assert_eq!(e.details["got"], "sheet");
+        assert!(e.details["hint"].as_str().unwrap().contains(hint), "{e}");
         assert_eq!(
             must(&mut s, "feature.list", json!({"part": "p"})),
             before,
@@ -445,8 +459,23 @@ fn every_acting_feature_refuses_a_sheet() {
 }
 
 #[test]
+fn a_cut_trims_a_sheet_at_write_and_at_rebuild() {
+    // The wall (x 0..10, z 0..20 on y = 0) less a box over its top half.
+    let (_dir, mut s) = project();
+    wall(&mut s);
+    add(
+        &mut s,
+        json!({"type": "box", "id": "c", "params": {"x": 20, "y": 4, "z": 20},
+               "placement": {"origin": [-5, -2, 10]}, "operation": "cut", "targets": ["w"]}),
+    );
+    let r = reported(&mut s, "c");
+    assert_eq!(r["ok"], true, "{r}");
+    close(area(&body(&mut s, "w")), 1e-4, 1e-9);
+}
+
+#[test]
 fn a_sheet_written_by_hand_where_a_solid_goes_fails_at_rebuild() {
-    // The write is refused, so a cut of a sheet reaches rebuild only from
+    // The write is refused, so a join to a sheet reaches rebuild only from
     // a file written by hand (a merge, an older build): it fails there,
     // as wrong_body_kind.
     let (dir, mut s) = project();
@@ -457,7 +486,7 @@ fn a_sheet_written_by_hand_where_a_solid_goes_fails_at_rebuild() {
     );
     let feature = dir.path().join("parts/p/features/k.json");
     let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&feature).unwrap()).unwrap();
-    v["operation"] = json!("cut");
+    v["operation"] = json!("join");
     v["targets"] = json!(["w"]);
     v["format"] = json!(3);
     std::fs::write(&feature, ryucad::doc::canonical::to_string(&v)).unwrap();
@@ -497,20 +526,91 @@ fn a_sheet_is_measured_by_area_and_left_out_of_mass() {
     );
 }
 
+/// The kind of each body part `part`'s rebuild report lists.
+fn reported_kinds(s: &mut Session, part: &str) -> Vec<String> {
+    let r = must(s, "rebuild", json!({"part": part}));
+    r["parts"][0]["solids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["kind"].as_str().unwrap().to_owned())
+        .collect()
+}
+
 #[test]
-fn an_export_of_a_sheet_is_refused_until_formats_write_it() {
+fn a_sheet_exports_as_step_and_imports_again_to_its_area() {
     let (dir, mut s) = project();
     wall(&mut s);
-    let out = dir.path().join("w.stl");
-    let e = call(
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": 5, "y": 5, "z": 5},
+               "placement": {"origin": [20, 0, 0]}}),
+    );
+    let out = dir.path().join("w.step");
+    let a = must(
         &mut s,
         "export",
-        json!({"part": "p", "out": out.to_str().unwrap()}),
-    )
-    .unwrap_err();
-    assert_eq!(e.code, Code::WrongBodyKind, "{e}");
-    assert_eq!(e.details["solid"], "w");
-    assert!(!out.exists());
+        json!({"part": "p", "out": out.to_str().unwrap(), "time_stamp": "2026-11-09T00:00:00"}),
+    );
+    assert!(a["bytes"].as_u64().unwrap() > 0, "{a}");
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        text.contains("SHELL_BASED_SURFACE_MODEL"),
+        "a surface model"
+    );
+    assert!(text.contains("MANIFOLD_SOLID_BREP"), "the box beside it");
+    // Imported again (solid mode heals sheets): the wall comes back a
+    // sheet of its area, and from the first file written in meters the
+    // bytes go round unchanged.
+    let (d2, mut t) = project();
+    must(
+        &mut t,
+        "import",
+        json!({"solid": true, "path": out, "part": "q"}),
+    );
+    let kinds = reported_kinds(&mut t, "q");
+    assert!(kinds.contains(&"sheet".to_owned()), "{kinds:?}");
+    let sheet = {
+        let part = ryucad::doc::id::Id::parse("q", "part").unwrap();
+        let r = t.rebuilt(&part).unwrap().clone();
+        let solids = ryucad::solid::Solids::of(t.project().part(&part).unwrap());
+        r.shown(&solids)
+            .iter()
+            .filter_map(|x| x.state.map(|(_, b)| b.body.clone()))
+            .find(|b| b.kind() == ryukei::topo::BodyKind::Sheet)
+            .unwrap()
+    };
+    close(area(&sheet), 2e-4, 1e-9);
+    let again = d2.path().join("again.step");
+    must(
+        &mut t,
+        "export",
+        json!({"part": "q", "out": again.to_str().unwrap(),
+               "time_stamp": "2026-11-09T00:00:00", "unit": "m"}),
+    );
+    let (d3, mut u) = project();
+    must(
+        &mut u,
+        "import",
+        json!({"solid": true, "path": again, "part": "q"}),
+    );
+    let third = d3.path().join("third.step");
+    must(
+        &mut u,
+        "export",
+        json!({"part": "q", "out": third.to_str().unwrap(),
+               "time_stamp": "2026-11-09T00:00:00", "unit": "m"}),
+    );
+    // The header names the file; everything else is the same text.
+    let body = |p: &std::path::Path| -> Vec<String> {
+        std::fs::read_to_string(p)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.starts_with("FILE_NAME("))
+            .map(str::to_owned)
+            .collect()
+    };
+    assert_eq!(body(&again), body(&third));
 }
 
 #[test]
@@ -556,4 +656,71 @@ fn reports_and_inspect_name_a_sheets_laminar_edges() {
     let edges = body["edges"].as_array().unwrap();
     assert_eq!(edges.len(), 4, "{i}");
     assert!(edges.iter().all(|e| e["laminar"] == true), "{i}");
+}
+
+#[test]
+fn a_sheets_laminar_edge_is_refused_before_the_kernel() {
+    let (_dir, mut s) = project();
+    wall(&mut s);
+    let w = body(&mut s, "w");
+    let e = w.edges().find(|&e| w.is_laminar(e)).unwrap();
+    let name = w.edge(e).unwrap().name;
+    let before = must(&mut s, "feature.list", json!({"part": "p"}));
+    let e = call(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "fillet", "radius": "1 mm",
+               "edges": [format!("p/w/{name}")], "propagate": false}),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.details["reason"].as_str()),
+        (Code::BlendFailed, Some("unsupported")),
+        "{e}"
+    );
+    assert!(
+        e.details["hint"].as_str().unwrap().contains("laminar"),
+        "{e}"
+    );
+    assert_eq!(e.details["entities"][0]["reference"], format!("p/w/{name}"));
+    assert_eq!(must(&mut s, "feature.list", json!({"part": "p"})), before);
+}
+
+#[test]
+fn a_sheet_exports_as_stl_and_3mf() {
+    let (dir, mut s) = project();
+    wall(&mut s);
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": 5, "y": 5, "z": 5},
+               "placement": {"origin": [20, 0, 0]}}),
+    );
+    let stl = dir.path().join("w.stl");
+    let a = must(
+        &mut s,
+        "export",
+        json!({"part": "p", "out": stl.to_str().unwrap()}),
+    );
+    // Binary STL: the count after the 80-byte header, every triangle the
+    // export meshed, the open wall's among them.
+    let bytes = std::fs::read(&stl).unwrap();
+    let n = u32::from_le_bytes(bytes[80..84].try_into().unwrap());
+    let meshed: u64 = a["products"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["triangles"].as_u64().unwrap())
+        .sum();
+    assert_eq!(u64::from(n), meshed, "{a}");
+    let three = dir.path().join("w.3mf");
+    must(
+        &mut s,
+        "export",
+        json!({"part": "p", "out": three.to_str().unwrap(), "time_stamp": "2026-11-09T00:00:00"}),
+    );
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(std::fs::read(&three).unwrap())).unwrap();
+    let mut model = String::new();
+    std::io::Read::read_to_string(&mut z.by_name("3D/3dmodel.model").unwrap(), &mut model).unwrap();
+    assert_eq!(model.matches("type=\"surface\"").count(), 1, "{model}");
+    assert!(model.contains("type=\"model\""), "{model}");
 }

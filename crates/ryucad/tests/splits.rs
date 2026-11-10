@@ -151,8 +151,8 @@ fn a_u_shaped_part_splits_into_a_solid_of_two_lumps() {
         .clone();
     assert_eq!(
         sp["split"]["sides"],
-        json!([{"side": "behind", "solid": "h", "lumps": 1},
-               {"side": "front", "solid": "s", "lumps": 2}]),
+        json!([{"side": "behind", "solid": "h", "lumps": 1, "kind": "solid"},
+               {"side": "front", "solid": "s", "lumps": 2, "kind": "solid"}]),
         "{sp}"
     );
     // The two prongs, 10 × 30 × 10 each.

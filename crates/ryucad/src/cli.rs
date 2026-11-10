@@ -1151,8 +1151,10 @@ enum FeatureCmd {
     /// moves every face, filling where they part; move_face --by offset moves
     /// only the faces named, keeping the topology); a
     /// mirror (--solid, --plane, --operation) of a whole solid, joined to
-    /// it unless told otherwise; a split (--target, --plane, --flip,
-    /// --keep) of a solid by a plane; a base flange (--sketch, --thickness,
+    /// it unless told otherwise; a split (--target, --plane, or --tool
+    /// BODY, or --tool-face FACE...; --flip, --keep): the target keeps the
+    /// side behind, `--keep behind` trims it, `--keep both` founds what is
+    /// in front; a base flange (--sketch, --thickness,
     /// --radius, --k-factor or --deduction, --relief, a bent section's
     /// --depth) founding a sheet metal solid; an edge flange (--edge,
     /// --side, --angle, --length, --measured, --position, --radius,
@@ -2319,8 +2321,14 @@ struct FieldArgs {
     #[arg(long)]
     op: Option<String>,
     /// A solid a boolean uses as a tool, and consumes; repeat for several.
+    /// A split's tool: a sheet or solid it cuts with, never changed.
     #[arg(long = "tool", value_name = "SOLID")]
     tools: Vec<String>,
+    /// A face a split cuts with (its faces are taken off as a sheet):
+    /// <part>/<solid>/<name>; repeat for several. A split's tool body is
+    /// --tool.
+    #[arg(long = "tool-face", value_name = "FACE")]
+    tool_faces: Vec<String>,
     /// A fillet's radius, or a cylinder's, cone's or sphere's (its radius parameter).
     #[arg(long, value_name = "QUANTITY")]
     radius: Option<String>,
@@ -2978,6 +2986,8 @@ impl FieldArgs {
             op: self.op.clone(),
             target: None,
             tools: (!self.tools.is_empty()).then(|| self.tools.clone()),
+            tool: None,
+            tool_faces: (!self.tool_faces.is_empty()).then(|| self.tool_faces.clone()),
             groups: if self.with_groups.is_empty() {
                 self.groups.clone().map(|g| g.0)
             } else {
