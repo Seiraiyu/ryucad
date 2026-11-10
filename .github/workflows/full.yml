@@ -270,6 +270,22 @@ jobs:
         # The app's dependencies (wgpu, egui) fill the runner's small disk.
         name: room on the disk
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /usr/share/swift /usr/local/share/chromium /opt/microsoft /opt/google /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go /opt/hostedtoolcache/node /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Ruby /opt/hostedtoolcache/Java_* && df -h /
+      # The image's pinned .debs (KiCad's, from snapshot.debian.org) from
+      # an Actions cache keyed by their SHA-256s, fetched with retries
+      # only when the cache lacks them and saved at once, so a run never
+      # waits on the snapshot service answering (#557).
+      - id: debs
+        uses: actions/cache/restore@v4
+        with:
+          path: .devcontainer/debs/*.deb
+          key: devcontainer-debs-${{ hashFiles('.devcontainer/debs.txt') }}
+      - if: steps.debs.outputs.cache-hit != 'true'
+        run: sh .devcontainer/fetch-debs.sh .devcontainer/debs amd64
+      - if: steps.debs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .devcontainer/debs/*.deb
+          key: devcontainer-debs-${{ hashFiles('.devcontainer/debs.txt') }}
       - uses: devcontainers/ci@v0.3
         with:
           # The workspace, then the OCCT, SMLib, lib3mf and USD references,
