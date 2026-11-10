@@ -1998,6 +1998,7 @@ fn a_release_approved_by_the_services_tag_says_who_approved_it() {
                 login: "alice".into(),
             },
             review: 1,
+            via: vec![],
         }],
         commit: commit.clone(),
         label: "A".into(),

@@ -637,15 +637,30 @@ fn approval(a: &ryupdm::history::Approval) -> Value {
         "rules_at": a.rules_at,
         "status": a.verdict.as_ref().map_or("moved", Verdict::status),
     });
-    if let Some(Verdict::Invalid(c)) = &a.verdict {
-        v["clause"] = json!(c.name());
+    match &a.verdict {
+        Some(Verdict::Invalid(c)) => v["clause"] = json!(c.name()),
+        Some(Verdict::Revoked { key, revoked }) => {
+            v["key"] = json!(key);
+            v["revoked"] = json!(revoked);
+        }
+        Some(Verdict::Unknown { key, format }) => {
+            v["key"] = json!(key);
+            v["format"] = json!(format);
+        }
+        _ => {}
     }
     if let Some((at, key)) = a.verdict.as_ref().and_then(Verdict::attestation) {
         v["outcome"] = json!(at.outcome.as_str());
         v["approvers"] = json!(
             at.approvals
                 .iter()
-                .map(|x| json!({"login": x.github.login, "id": x.github.id, "at": x.at}))
+                .map(|x| {
+                    let mut a = json!({"login": x.github.login, "id": x.github.id, "at": x.at});
+                    if !x.via.is_empty() {
+                        a["via"] = json!(x.via);
+                    }
+                    a
+                })
                 .collect::<Vec<_>>()
         );
         v["proposed_by"] = json!({"login": at.proposed_by.login, "id": at.proposed_by.id});
@@ -1667,6 +1682,7 @@ pub(crate) mod tests {
                         login: "alice".into(),
                     },
                     review: 1,
+                    via: vec![],
                 }]
             } else {
                 vec![]

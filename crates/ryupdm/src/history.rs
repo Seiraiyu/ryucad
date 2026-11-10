@@ -387,9 +387,10 @@ fn verdict(repo: &gix::Repository, object: gix::ObjectId, expect: &attest::Expec
     }
 }
 
-/// What a verdict depends on: the tag's object, and the record's path,
-/// bytes and official commit (which fix the rules and keys).
-type MemoKey = (gix::ObjectId, String, gix::ObjectId, String);
+/// What a verdict depends on: the tag's object, the record's path, bytes
+/// and official commit (which fix the rules and keys), and the keys
+/// revoked at the tip, as text.
+type MemoKey = (gix::ObjectId, String, gix::ObjectId, String, String);
 
 /// Verdicts already reached, so a tip that moves verifies nothing again.
 fn memo() -> &'static std::sync::Mutex<BTreeMap<MemoKey, Verdict>> {
@@ -405,7 +406,12 @@ fn judged(
     prefix: &str,
     official: &BTreeMap<String, Official>,
     tags: &TagRefs,
+    tip_revoked: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, Approval>> {
+    let tip_text: String = tip_revoked
+        .iter()
+        .map(|(id, day)| format!("{id} {day}\n"))
+        .collect();
     let mut configs: BTreeMap<String, Option<Config>> = BTreeMap::new();
     let mut out = BTreeMap::new();
     for (path, o) in official {
@@ -447,12 +453,22 @@ fn judged(
         let verdict = match tags.get(&key) {
             None => Some(Verdict::Missing),
             Some((Some(c), Some(object))) if *c == o.commit => {
-                let memo_key = (*object, path.clone(), o.blob, o.commit.clone());
+                let memo_key = (
+                    *object,
+                    path.clone(),
+                    o.blob,
+                    o.commit.clone(),
+                    tip_text.clone(),
+                );
                 let known = memo().lock().expect("the memo").get(&memo_key).cloned();
                 Some(match known {
                     Some(v) => v,
                     None => {
                         let keys = attest::trusted(&approvals.keys);
+                        let mut revoked = attest::revoked(&approvals.revoked);
+                        for (id, day) in tip_revoked {
+                            revoked.entry(id.clone()).or_insert_with(|| day.clone());
+                        }
                         let record = blake3::hash(&bytes).to_hex().to_string();
                         let v = verdict(
                             repo,
@@ -467,6 +483,7 @@ fn judged(
                                 rules: &rules,
                                 rules_at: &parent,
                                 keys: &keys,
+                                revoked: &revoked,
                             },
                         );
                         let mut m = memo().lock().expect("the memo");
@@ -620,10 +637,16 @@ impl Releases {
                 },
             );
         }
-        let approvals = judged(repo, prefix, &official, &refs)?;
         let tip_approvals = config_at(repo, &branch.tip, prefix)
             .ok()
             .and_then(|c| c.approvals);
+        // A key revoked now proves nothing it signed earlier: revocations
+        // are read at the tip as well as where each record's rules are.
+        let tip_revoked = tip_approvals
+            .as_ref()
+            .map(|a| a.revoked.clone())
+            .unwrap_or_default();
+        let approvals = judged(repo, prefix, &official, &refs, &tip_revoked)?;
         Ok(Releases {
             branch: Some(branch),
             official,
@@ -984,6 +1007,7 @@ pub(crate) mod tests {
                     login: "alice".into(),
                 },
                 review: 9,
+                via: vec![],
             }],
             commit: commit.into(),
             label: label.into(),
