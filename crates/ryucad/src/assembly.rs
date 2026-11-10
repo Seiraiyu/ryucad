@@ -283,7 +283,9 @@ impl Occurrence {
             .iter()
             .map(|s| {
                 let mut v = serde_json::json!({"solid": s.founder, "hash": s.built.hash});
-                if s.built.body.kind() == ryukei::topo::BodyKind::Sheet {
+                // A reference import is shown as the file has it, as a
+                // solid's is (ryucad 21), though its body is a sheet.
+                if s.built.body.kind() == ryukei::topo::BodyKind::Sheet && !s.built.reference {
                     v["kind"] = serde_json::json!("sheet");
                 }
                 v

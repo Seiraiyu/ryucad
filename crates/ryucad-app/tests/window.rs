@@ -5541,12 +5541,23 @@ fn a_thickens_front_and_a_fills_tolerance_are_edited_from_their_forms() {
     }
     let p = Project::new().with_surfaces();
     let mut h = window(&p);
+    // `loaded` counts the default project's two meshes: this one has a
+    // body for each surface feature, so wait for every shown solid's.
     frames(&mut h, |a| {
-        loaded(a)
-            && ["t", "f"].iter().all(|f| {
-                a.opened().ws.model.parts["p"]
-                    .feature(f)
-                    .is_some_and(|f| f.hash.is_some())
+        let ryucad_app::ui::app::Screen::Opened(o) = &a.screen else {
+            return false;
+        };
+        let Some(part) = o.ws.model.parts.get("p") else {
+            return false;
+        };
+        o.ws.idle()
+            && ["t", "f"]
+                .iter()
+                .all(|f| part.feature(f).is_some_and(|f| f.hash.is_some()))
+            && part.solids.iter().all(|s| {
+                o.ws.model
+                    .meshes
+                    .contains_key(&("p".to_owned(), s.id.clone()))
             })
     });
     h.step();

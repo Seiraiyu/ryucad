@@ -482,7 +482,9 @@ impl Part {
                 features: texts(&s["features"]),
                 hash: s["hash"].as_str().map(str::to_owned),
                 error: (s["ok"] == false).then(|| s["error"].clone()),
-                sheet: s["kind"] == "sheet",
+                // A reference import's body is a sheet, but it is drawn,
+                // picked and listed as the file has it (ryucad 21.C).
+                sheet: s["kind"] == "sheet" && s["reference"] != true,
                 boundaries: s["boundaries"].as_u64(),
             })
             .collect();
@@ -1964,7 +1966,9 @@ mod tests {
             "solids": [
                 {"solid": "w", "ok": true, "features": ["w"], "hash": "h",
                  "kind": "sheet", "boundaries": 1, "closed": false},
-                {"solid": "b", "ok": true, "features": ["b"], "hash": "k", "kind": "solid"}]}));
+                {"solid": "b", "ok": true, "features": ["b"], "hash": "k", "kind": "solid"},
+                {"solid": "r", "ok": true, "features": ["r"], "hash": "q",
+                 "kind": "sheet", "boundaries": 0, "closed": true, "reference": true}]}));
         let skin = &m.parts["skin"];
         assert_eq!(
             (
@@ -1974,6 +1978,10 @@ mod tests {
             (true, Some(1))
         );
         assert!(!skin.solid("b").unwrap().sheet);
+        assert!(
+            !skin.solid("r").unwrap().sheet,
+            "a reference import isn't drawn as a sheet"
+        );
         assert!(m.is_sheet(&("skin".into(), "w".into())));
         assert!(!m.is_sheet(&("skin".into(), "b".into())));
         // An assembly's occurrence of it: its sheet says so, by path.
