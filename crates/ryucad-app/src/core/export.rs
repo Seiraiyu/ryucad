@@ -21,15 +21,19 @@ pub enum Format {
     /// A sheet metal solid's flat pattern (design 346): offered only for
     /// a part with sheet metal features.
     Dxf,
+    /// The drawing the Drawings tile shows (design 417): every sheet as
+    /// PDF, or its sheet as SVG or DXF, by `drawing.export`.
+    Drawing,
 }
 
 impl Format {
-    pub const ALL: [Format; 5] = [
+    pub const ALL: [Format; 6] = [
         Format::Step,
         Format::Stl,
         Format::ThreeMf,
         Format::Usd,
         Format::Dxf,
+        Format::Drawing,
     ];
 
     /// As the dialog's choice shows it.
@@ -40,6 +44,7 @@ impl Format {
             Format::ThreeMf => "3MF",
             Format::Usd => "USD",
             Format::Dxf => "DXF (flat pattern)",
+            Format::Drawing => "Drawing",
         }
     }
 
@@ -56,6 +61,9 @@ pub const STEP_UNITS: [&str; 2] = ["mm", "m"];
 pub const UNITS: [&str; 3] = ["mm", "cm", "m"];
 /// The units a DXF is written in.
 pub const DXF_UNITS: [&str; 2] = ["mm", "in"];
+/// What a drawing is written as: every sheet as PDF, or one as SVG or
+/// DXF.
+pub const DRAWING_FORMATS: [&str; 3] = ["pdf", "svg", "dxf"];
 /// The schemas STEP is written in.
 pub const SCHEMAS: [&str; 2] = ["ap242", "ap214"];
 /// The daemon's defaults for a mesh's chord and angle, shown as typed.
@@ -88,6 +96,8 @@ pub struct Choices {
     /// A DXF's unit (`mm` or `in`), and whether it writes its bend notes.
     pub dxf_unit: String,
     pub notes: bool,
+    /// A drawing's format, one of [`DRAWING_FORMATS`].
+    pub drawing_format: String,
 }
 
 impl Default for Choices {
@@ -106,6 +116,7 @@ impl Default for Choices {
             skip_failing: false,
             dxf_unit: DXF_UNITS[0].to_owned(),
             notes: true,
+            drawing_format: DRAWING_FORMATS[0].to_owned(),
         }
     }
 }
@@ -119,6 +130,7 @@ impl Choices {
             Format::ThreeMf => "3mf",
             Format::Usd => self.encoding.as_str(),
             Format::Dxf => "dxf",
+            Format::Drawing => self.drawing_format.as_str(),
         }
     }
 
@@ -174,6 +186,9 @@ pub struct Export {
     /// The sheet metal solid a DXF writes (`""` for the part's one), when
     /// the part has sheet metal features: only then is DXF offered.
     pub sheet: Option<String>,
+    /// The drawing and sheet the Drawings tile shows, if it shows one of
+    /// this part's: only then is Drawing offered.
+    pub drawing: Option<(String, String)>,
 }
 
 impl Export {
@@ -188,14 +203,18 @@ impl Export {
             faults: Vec::new(),
             waiting: false,
             sheet: None,
+            drawing: None,
         }
     }
 
-    /// The formats the dialog offers: DXF only for sheet metal.
+    /// The formats the dialog offers: DXF only for sheet metal, Drawing
+    /// only while a drawing of the part is shown.
     pub fn formats(&self) -> impl Iterator<Item = Format> + '_ {
-        Format::ALL
-            .into_iter()
-            .filter(|f| *f != Format::Dxf || self.sheet.is_some())
+        Format::ALL.into_iter().filter(|f| match f {
+            Format::Dxf => self.sheet.is_some(),
+            Format::Drawing => self.drawing.is_some(),
+            _ => true,
+        })
     }
 
     /// Makes the typed path's extension the chosen format's: one an
@@ -210,7 +229,10 @@ impl Export {
         let known = p
             .extension()
             .and_then(|e| e.to_str())
-            .is_some_and(|e| ryucad::export::Format::of_path(&format!("x.{e}")).is_some());
+            .is_some_and(|e| {
+                ryucad::export::Format::of_path(&format!("x.{e}")).is_some()
+                    || DRAWING_FORMATS.contains(&e.to_ascii_lowercase().as_str())
+            });
         let ext = self.choices.extension();
         self.path = if known {
             p.with_extension(ext).display().to_string()
@@ -247,6 +269,20 @@ impl Export {
     /// files, the format and the options it takes, nothing else.
     pub fn request(&self, out: &std::path::Path) -> Request {
         let c = &self.choices;
+        if c.format == Format::Drawing
+            && let Some((drawing, sheet)) = &self.drawing
+        {
+            let pdf = c.drawing_format == "pdf";
+            return Request::DrawingExport {
+                part: self.part.clone(),
+                drawing: drawing.clone(),
+                rev: None,
+                sheet: (!pdf).then(|| sheet.clone()),
+                format: Some(c.drawing_format.clone()),
+                out: Some(out.display().to_string()),
+                unit: (c.drawing_format == "dxf").then(|| c.dxf_unit.clone()),
+            };
+        }
         let mesh = c.writes_meshes();
         let some = |s: &str| Some(s.trim().to_owned());
         let (unit, schema) = match c.format {
@@ -398,6 +434,35 @@ mod tests {
     use super::*;
     use ryucad::error::Code;
     use serde_json::json;
+
+    #[test]
+    fn a_shown_drawing_is_offered_and_exported_by_drawing_export() {
+        let mut e = Export::new("p", Choices::default());
+        assert!(!e.formats().any(|f| f == Format::Drawing));
+        e.drawing = Some(("d".into(), "s2".into()));
+        assert!(e.formats().any(|f| f == Format::Drawing));
+        e.choices.format = Format::Drawing;
+        e.path = "/tmp/out/p.step".into();
+        e.follow_format();
+        assert_eq!(e.path, "/tmp/out/p.pdf");
+        let v = serde_json::to_value(e.request(std::path::Path::new("/tmp/out/p.pdf"))).unwrap();
+        assert_eq!(v["method"], "drawing.export");
+        assert_eq!(
+            v["params"],
+            json!({"part": "p", "drawing": "d", "format": "pdf", "out": "/tmp/out/p.pdf"})
+        );
+        // One sheet as DXF, in inches.
+        e.choices.drawing_format = "dxf".into();
+        e.choices.dxf_unit = "in".into();
+        e.follow_format();
+        assert_eq!(e.path, "/tmp/out/p.dxf");
+        let v = serde_json::to_value(e.request(std::path::Path::new("/tmp/out/p.dxf"))).unwrap();
+        assert_eq!(
+            v["params"],
+            json!({"part": "p", "drawing": "d", "format": "dxf", "sheet": "s2",
+                   "out": "/tmp/out/p.dxf", "unit": "in"})
+        );
+    }
 
     fn requested(e: &Export) -> Value {
         let r = e.request(std::path::Path::new("/tmp/out/p.x"));

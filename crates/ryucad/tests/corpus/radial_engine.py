@@ -125,7 +125,9 @@ def drawings(p):
     p.drawing("crankcase", "main", "Crankcase")
     p.drawing("propeller", "main", "Propeller")
     p.drawing("engine", "main", "Engine", size="ansi_c", standard=False)
-    p.drawing_add("engine", "main", "view", "add", id="v1", orient="front_top_right")
+    # Its isometric is refused (a silhouette ryukei can't certify): the
+    # front.
+    p.drawing_add("engine", "main", "view", "add", id="v1", orient="front")
     p.drawing_ops("engine", "main", [{"op": "add", "kind": "annotation",
                                        "value": {"type": "bom_table", "sheet": "s1"}}])
     p.take_fixes("engine", "main", ["dwg_balloon_missing"])
