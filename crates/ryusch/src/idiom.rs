@@ -36,8 +36,12 @@ fn two_pin(block: &Block, p: usize, prefixes: &[&str]) -> bool {
     block.parts[p].pins.len() == 2 && prefixes.contains(&prefix(block, p))
 }
 
+/// A resistor of two pins: prefix R, or an array's unit (RN, RM, RA...),
+/// as `lint::resistor_style` reads one.
 fn is_resistor(block: &Block, p: usize) -> bool {
-    two_pin(block, p, &["R"])
+    let pre = prefix(block, p);
+    block.parts[p].pins.len() == 2
+        && (pre == "R" || ["RN", "RM", "RA"].iter().any(|x| pre.starts_with(x)))
 }
 
 fn is_capacitor(block: &Block, p: usize) -> bool {
@@ -104,7 +108,8 @@ fn allowed(choices: &BTreeMap<usize, IdiomChoice>, p: usize, kind: IdiomKind) ->
 }
 
 /// The active pin a passive on net `n` serves: the first active part's
-/// pin that isn't power, by part key; and how many it chose among.
+/// pin, by part key, of more than `region::DENSE` pins where one is on the
+/// net, else of any; and how many it chose among.
 fn served(
     block: &Block,
     by_net: &BTreeMap<usize, Vec<(usize, usize)>>,
@@ -117,7 +122,13 @@ fn served(
         .copied()
         .filter(|(p, _)| !not.contains(p) && is_active(block, *p))
         .collect();
-    let first = *list.first()?;
+    // The part of more than `region::DENSE` pins among them first: a bank
+    // stands on its rows (plan 2.B).
+    let first = list
+        .iter()
+        .copied()
+        .find(|(p, _)| block.parts[*p].pins.len() > crate::region::DENSE)
+        .or_else(|| list.first().copied())?;
     Some((first, list.len()))
 }
 
@@ -1982,5 +1993,84 @@ mod tests {
         let (found, _) = crate::lint::lint(&block, &out);
         let floating: Vec<_> = found.iter().filter(|f| f.code == "sch_floating").collect();
         assert!(floating.is_empty(), "{floating:#?}");
+    }
+
+    /// An array's two-pin unit (prefix RM, as the Ethernet PHY's RM1A) is a
+    /// resistor, as `lint::resistor_style` reads it: a pull-up with its
+    /// jumper, by the primary pull rule.
+    #[test]
+    fn an_arrays_units_are_resistors() {
+        use crate::testing::connector;
+        let mut unit = resistor("rm1:1", "RM1A", "2.2k", [Some(1), Some(0)]);
+        unit.kind = PartKind::Symbol {
+            prefix: "RM".into(),
+        };
+        let block = Block {
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "PHY",
+                    &[
+                        ("A", PinKind::Input, Some(1)),
+                        ("B", PinKind::Input, None),
+                        ("C", PinKind::Input, None),
+                    ],
+                    &[],
+                ),
+                unit,
+                connector("j1", "J1", &[Some(1), Some(0)]),
+            ],
+            nets: vec![
+                net("rail:v", "3V3", NetKind::Supply),
+                net("a", "A", NetKind::Signal),
+            ],
+            ..Block::default()
+        };
+        let found = find(&block, &BTreeMap::new());
+        let pull = found
+            .iter()
+            .find(|i| i.kind == IdiomKind::PullUp)
+            .expect("a pull-up");
+        assert_eq!(pull.parts, [1, 2], "the unit and its jumper");
+        assert_eq!(pull.anchor, Some((0, 0)));
+    }
+
+    /// A pull on a net several active parts share serves the part of more
+    /// than 8 pins among them (its bank's), whatever their keys.
+    #[test]
+    fn a_pull_serves_the_dense_part_on_its_net() {
+        let mut many: Vec<(&str, PinKind, Option<usize>)> = vec![("TXP", PinKind::Output, Some(1))];
+        for name in ["A", "B", "C", "D", "E", "F", "G", "H"] {
+            many.push((name, PinKind::Passive, None));
+        }
+        let block = Block {
+            parts: vec![
+                ic(
+                    "a1",
+                    "A1",
+                    "ESD",
+                    &[
+                        ("IO1", PinKind::Passive, Some(1)),
+                        ("X", PinKind::Passive, None),
+                        ("Y", PinKind::Passive, None),
+                    ],
+                    &[],
+                ),
+                ic("u4", "U4", "PHY", &many, &[]),
+                resistor("r13", "R13", "49.9", [Some(1), Some(0)]),
+            ],
+            nets: vec![
+                net("rail:v", "3V3A", NetKind::Supply),
+                net("td", "TD+", NetKind::Signal),
+            ],
+            ..Block::default()
+        };
+        let found = find(&block, &BTreeMap::new());
+        let pull = found
+            .iter()
+            .find(|i| i.kind == IdiomKind::PullUp)
+            .expect("a pull-up");
+        assert_eq!(pull.anchor, Some((1, 0)), "U4's TXP, not A1's IO1");
     }
 }
