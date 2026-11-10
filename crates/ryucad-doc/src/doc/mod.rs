@@ -9,6 +9,8 @@ pub mod body;
 pub mod datum;
 pub mod deps;
 pub mod drawing;
+pub mod drawing_annotation;
+pub mod drawing_lint;
 pub mod drawing_template;
 pub mod explode;
 pub mod files;
