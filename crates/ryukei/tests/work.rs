@@ -674,3 +674,50 @@ fn units_follow_time_across_surfaces() {
         );
     }
 }
+
+#[test]
+fn deleting_faces_is_bounded() {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend};
+    use ryukei::geom::Surface;
+    use ryukei::tweak::{DeleteSpec, Heal, delete_faces_with};
+    let not_plane = |b: &Body| {
+        b.faces()
+            .filter(|&f| {
+                !matches!(
+                    b.surface(b.face(f).unwrap().surface).unwrap(),
+                    Surface::Plane(_)
+                )
+            })
+            .map(|f| b.face(f).unwrap().name)
+            .collect::<Vec<_>>()
+    };
+    // The drilled cube's bore, capped.
+    let b = drilled();
+    let spec = DeleteSpec {
+        faces: not_plane(&b),
+        heal: Heal::Auto,
+    };
+    let capped = bounded("delete (cap)", |w| {
+        delete_faces_with(OpKey(9), &b, &spec, w)
+    });
+    // A cube's filleted edge, grown back.
+    let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+    let edge = cube.edge(cube.edges().next().unwrap()).unwrap().name;
+    let (r, _) = blend(
+        OpKey(4),
+        &cube,
+        &[EdgeBlend {
+            edge,
+            kind: BlendKind::Fillet { radius: 0.002 },
+        }],
+    )
+    .unwrap();
+    let spec = DeleteSpec {
+        faces: not_plane(&r),
+        heal: Heal::Auto,
+    };
+    let grown = bounded("delete (grow)", |w| {
+        delete_faces_with(OpKey(9), &r, &spec, w)
+    });
+    eprintln!("delete: cap {capped} units, grow {grown} units");
+}

@@ -4,7 +4,7 @@
 #![allow(dead_code)]
 
 use ryucad::client::Daemon;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -361,6 +361,70 @@ impl Project {
 }
 
 impl Project {
+    /// A sheet metal part `p`: a 60 x 40 mm plate 1.5 mm thick (base
+    /// flange `plate`, K-factor 0.44), a 20 mm flange `f` down its right
+    /// top edge, and an unfold `u` of it, which the tip shows flat.
+    pub fn with_sheet_metal(self) -> Project {
+        self.ok(&["part", "create", "p"]);
+        self.ok(&[
+            "feature", "add", "p", "sketch", "--id", "s", "--plane", "xy",
+        ]);
+        let mut ops = Vec::new();
+        for (i, at) in [[0, 0], [60, 0], [60, 40], [0, 40]].into_iter().enumerate() {
+            ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
+            ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+        }
+        for i in 1..=4 {
+            ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                            "start": format!("p{i}"), "end": format!("p{}", i % 4 + 1)}));
+        }
+        self.ok(&["sketch", "edit", "p", "s", &ops_text(&ops)]);
+        self.ok(&[
+            "feature",
+            "add",
+            "p",
+            "base_flange",
+            "--id",
+            "plate",
+            "--sketch",
+            "s",
+            "--thickness",
+            "1.5mm",
+            "--radius",
+            "1mm",
+            "--k-factor",
+            "0.44",
+        ]);
+        let body = self.ok(&["inspect", "p", "plate"])["bodies"][0].clone();
+        let at = |q: [f64; 3]| -> String {
+            body["vertices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| {
+                    (0..3).all(|k| (v["point"][k].as_f64().unwrap() - q[k] * 1e-3).abs() < 1e-9)
+                })
+                .map(|v| v["name"].as_str().unwrap().to_owned())
+                .unwrap()
+        };
+        let (a, b) = (at([60.0, 0.0, 1.5]), at([60.0, 40.0, 1.5]));
+        let edge = body["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| (e["start"] == a && e["end"] == b) || (e["start"] == b && e["end"] == a))
+            .map(|e| format!("p/plate/{}", e["name"].as_str().unwrap()))
+            .unwrap();
+        self.ok(&[
+            "feature", "add", "p", "flange", "--id", "f", "--edge", &edge, "--angle", "90deg",
+            "--length", "20mm",
+        ]);
+        self.ok(&[
+            "feature", "add", "p", "unfold", "--id", "u", "--target", "plate",
+        ]);
+        self
+    }
+
     /// A part with a sketch on xy: a 20 x 10 rectangle from the origin,
     /// fully defined (its width a parameter), with a construction diagonal,
     /// and a 5 mm extrude of it.
@@ -544,4 +608,9 @@ pub fn release_again(lib: &Project) {
     lib.ok(&["release", "propose", "p"]);
     lib.git(&["add", "."]);
     lib.git(&["commit", "-q", "-m", "p B"]);
+}
+
+/// Sketch ops as the CLI takes them.
+fn ops_text(ops: &[Value]) -> String {
+    serde_json::to_string(ops).unwrap()
 }

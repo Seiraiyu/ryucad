@@ -1,5 +1,5 @@
 //! File > Export…: the shown part or assembly written as STEP, STL, 3MF
-//! or USD. The window says which format and how, and where; the daemon
+//! or USD, or a sheet metal solid's flat pattern as DXF. The window says which format and how, and where; the daemon
 //! (on this machine) writes the file itself, as it does for an agent's
 //! `ryucad export --out`, and answers what it wrote or why it refused.
 //! Nothing is worked out here but the request and how to read the answer:
@@ -18,10 +18,19 @@ pub enum Format {
     Stl,
     ThreeMf,
     Usd,
+    /// A sheet metal solid's flat pattern (design 346): offered only for
+    /// a part with sheet metal features.
+    Dxf,
 }
 
 impl Format {
-    pub const ALL: [Format; 4] = [Format::Step, Format::Stl, Format::ThreeMf, Format::Usd];
+    pub const ALL: [Format; 5] = [
+        Format::Step,
+        Format::Stl,
+        Format::ThreeMf,
+        Format::Usd,
+        Format::Dxf,
+    ];
 
     /// As the dialog's choice shows it.
     pub fn title(self) -> &'static str {
@@ -30,6 +39,7 @@ impl Format {
             Format::Stl => "STL",
             Format::ThreeMf => "3MF",
             Format::Usd => "USD",
+            Format::Dxf => "DXF (flat pattern)",
         }
     }
 
@@ -44,6 +54,8 @@ pub const ENCODINGS: [&str; 3] = ["usda", "usdc", "usdz"];
 /// The units STEP takes, and those the other formats take.
 pub const STEP_UNITS: [&str; 2] = ["mm", "m"];
 pub const UNITS: [&str; 3] = ["mm", "cm", "m"];
+/// The units a DXF is written in.
+pub const DXF_UNITS: [&str; 2] = ["mm", "in"];
 /// The schemas STEP is written in.
 pub const SCHEMAS: [&str; 2] = ["ap242", "ap214"];
 /// The daemon's defaults for a mesh's chord and angle, shown as typed.
@@ -73,6 +85,9 @@ pub struct Choices {
     /// Write what builds, leaving out what failing features would have
     /// made (`skip_failing`, #435), and list what was left out.
     pub skip_failing: bool,
+    /// A DXF's unit (`mm` or `in`), and whether it writes its bend notes.
+    pub dxf_unit: String,
+    pub notes: bool,
 }
 
 impl Default for Choices {
@@ -89,6 +104,8 @@ impl Default for Choices {
             brep: true,
             mesh: true,
             skip_failing: false,
+            dxf_unit: DXF_UNITS[0].to_owned(),
+            notes: true,
         }
     }
 }
@@ -101,6 +118,7 @@ impl Choices {
             Format::Stl => "stl",
             Format::ThreeMf => "3mf",
             Format::Usd => self.encoding.as_str(),
+            Format::Dxf => "dxf",
         }
     }
 
@@ -153,6 +171,9 @@ pub struct Export {
     /// The faces a refusal names, each to show.
     pub faults: Vec<Fault>,
     pub waiting: bool,
+    /// The sheet metal solid a DXF writes (`""` for the part's one), when
+    /// the part has sheet metal features: only then is DXF offered.
+    pub sheet: Option<String>,
 }
 
 impl Export {
@@ -166,7 +187,15 @@ impl Export {
             error: None,
             faults: Vec::new(),
             waiting: false,
+            sheet: None,
         }
+    }
+
+    /// The formats the dialog offers: DXF only for sheet metal.
+    pub fn formats(&self) -> impl Iterator<Item = Format> + '_ {
+        Format::ALL
+            .into_iter()
+            .filter(|f| *f != Format::Dxf || self.sheet.is_some())
     }
 
     /// Makes the typed path's extension the chosen format's: one an
@@ -222,8 +251,10 @@ impl Export {
         let some = |s: &str| Some(s.trim().to_owned());
         let (unit, schema) = match c.format {
             Format::Step => (some(&c.step_unit), some(&c.schema)),
+            Format::Dxf => (some(&c.dxf_unit), None),
             _ => (some(&c.unit), None),
         };
+        let dxf = c.format == Format::Dxf;
         let usd = c.format == Format::Usd;
         Request::Export {
             part: self.part.clone(),
@@ -242,8 +273,8 @@ impl Export {
             mesh: usd.then_some(c.mesh),
             pipe_tolerance: None,
             skip_failing: c.skip_failing,
-            solid: None,
-            notes: None,
+            solid: self.sheet.clone().filter(|s| dxf && !s.is_empty()),
+            notes: dxf.then_some(c.notes),
             fixed: None,
             bends: Vec::new(),
         }
@@ -371,6 +402,32 @@ mod tests {
     fn requested(e: &Export) -> Value {
         let r = e.request(std::path::Path::new("/tmp/out/p.x"));
         serde_json::to_value(&r).unwrap()["params"].clone()
+    }
+
+    #[test]
+    fn a_sheet_metal_part_offers_its_flat_pattern_as_dxf() {
+        let mut e = Export::new("tray", Choices::default());
+        assert!(!e.formats().any(|f| f == Format::Dxf));
+        e.sheet = Some("plate".into());
+        assert!(e.formats().any(|f| f == Format::Dxf));
+        e.choices.format = Format::Dxf;
+        e.choices.dxf_unit = "in".into();
+        e.path = "/tmp/out/tray.step".into();
+        e.follow_format();
+        assert_eq!(e.path, "/tmp/out/tray.dxf");
+        let v = requested(&e);
+        assert_eq!(
+            (&v["format"], &v["unit"], &v["solid"], &v["notes"]),
+            (&json!("dxf"), &json!("in"), &json!("plate"), &json!(true))
+        );
+        assert!(v["chord"].is_null() && v["schema"].is_null());
+        // The part's one sheet metal solid is the daemon's to find.
+        e.sheet = Some(String::new());
+        assert!(requested(&e)["solid"].is_null());
+        // Other formats name no solid and write no notes.
+        e.choices.format = Format::Step;
+        let v = requested(&e);
+        assert!(v["solid"].is_null() && v["notes"].is_null());
     }
 
     #[test]

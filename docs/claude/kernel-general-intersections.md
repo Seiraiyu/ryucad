@@ -121,3 +121,19 @@ The design is document 296 in the Coxswain planning project `ryucad-ryukei`; thi
   Volumes: ryukei 371.067383 m³ (± 2.3, its mesh's bound), SMLib 371.0673833694355, OCCT 371.435832 (its own `GProp`, printed, not judged). The flush row of 40: ryukei 1.8 to 1.9 s, 1.4 times the clear row per pin (1.2 to 1.3 s), OCCT 2.4 to 2.7 s, SMLib 0.88 to 0.93 s.
 - **Testing.** `split::tests::points_beyond_a_loops_bounds_wind_round_it_zero_times`, `table::tests::close_pairs_are_every_pair_whose_grown_boxes_meet`, `taylor::tests::third_order_jets_hold_sampled_values`, `bound::tests::small_third_order_boxes_hold_and_meet_the_cut`, `fit::tests::the_third_order_bound_holds_and_is_tight` (both ways), `pcurve::tests::greville_affine_nets_are_affine_surfaces`, `cs::tests::an_affine_spline_is_met_as_its_plane`; `ryukei-bench`'s `examples/race-probe.rs`; the race in `tests/nurbs.rs` asserting ryukei under OCCT and the flush row within 2× (devcontainer).
 - **Limits.** Two affine nets meeting each other, and a surface with no implicit form meeting one, still go through the spline paths; the race on slower CPUs is unmeasured.
+
+## Phase 15's bars (decided in ryukei phase 15)
+
+The design is document 296 in the Coxswain planning project `ryucad-ryukei`; this is its plan 15.F (phase 10). Every bar of phase 15 recorded on one machine, cox-worker-2 (AMD Ryzen 7 9700X, 8 cores, 32 GB, Debian 13, Linux 6.17.2-1-pve), at `a4f21095` on 2026-11-09, three runs back to back, each with its one-minute load before and after.
+
+- **The NURBS race** (`ryukei-bench`'s `nurbs` test, in the devcontainer, release, one rayon thread, `RYUKEI_BARS=1`). All three runs pass both bars (ryukei under OCCT's time, the flush row within twice the clear row per pin):
+
+  | Run | Load | ryukei | OCCT | Ratio | SMLib |
+  |---|---|---|---|---|---|
+  | 1 | 1.78 → 1.01 | 33.0 s | 43.6 s | 0.76 | 117.1 s |
+  | 2 | 1.01 → 1.07 | 32.9 s | 43.6 s | 0.76 | 117.5 s |
+  | 3 | 1.07 → 1.28 | 33.2 s | 43.6 s | 0.76 | 118.0 s |
+
+  Run 1's five-minute load was 3.5, from the builds just before it.
+- **The flush row of 40.** ryukei 1.8 s, 1.4 times the clear row per pin (1.3 s), OCCT 2.4 s, SMLib 0.86 to 0.88 s, every run.
+- **Volumes**, every run: ryukei 371.067383 m³ (± 2.3, its mesh's bound), SMLib 371.0673833694355, OCCT 371.435832 (its own `GProp`, printed, not judged). 15.E's own runs on this machine were 32.4 to 33.1 s against 43.5 to 46.1 s; #254 is closed.

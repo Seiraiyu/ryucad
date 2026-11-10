@@ -195,6 +195,13 @@ enum Pending {
     /// An assembly's explode written or deleted, to show `explode` next
     /// if it is still there.
     ExplodeSaved(String, Option<String>),
+    /// A sheet metal solid's table (`sheet.get`): its part and the solid
+    /// asked for, at a part revision.
+    SheetTable(BodyKey, String),
+    /// A sheet metal solid's flat bend lines (`flat.get`), likewise.
+    FlatLines(BodyKey, String),
+    /// The flat view's body (`mesh.get` with `flat`), likewise.
+    FlatMesh(BodyKey, String),
     /// Only a failure matters.
     Quiet,
 }
@@ -373,6 +380,15 @@ pub struct Workspace {
     /// The part revision the chosen feature was last looked at for a
     /// sweep's or loft's drawing.
     swept_at: Option<String>,
+    /// Sheet metal solids' tables and flats, as read (design 346, The
+    /// app): the Part tile's sheet metal section and what a chosen unfold
+    /// or refold paints.
+    pub sheets: crate::core::sheet::Cache,
+    /// The flat view (View > Flat pattern), while on.
+    pub flat_view: Option<crate::core::flat::FlatView>,
+    /// The faces of the bend under the pointer in the Part tile's bend
+    /// table, painted in the hover colour.
+    pub sheet_hover: Vec<String>,
     /// The property panel's form for a dimension chosen by its label;
     /// shown instead of `form`.
     pub dimension: Option<DimForm>,
@@ -576,6 +592,9 @@ impl Workspace {
             made_for: None,
             swept: None,
             swept_at: None,
+            sheets: Default::default(),
+            flat_view: None,
+            sheet_hover: Vec::new(),
             dimension: None,
             form_for: None,
             dimension_for: None,
@@ -1187,10 +1206,14 @@ impl Workspace {
 
     /// Opens File > Export… on `part`, with the last export's choices.
     pub fn open_export(&mut self, part: &str) {
-        self.export = Some(crate::core::export::Export::new(
-            part,
-            self.export_choices.clone(),
-        ));
+        let mut e = crate::core::export::Export::new(part, self.export_choices.clone());
+        // DXF only for sheet metal; the last export's DXF doesn't carry
+        // over to a part with none.
+        e.sheet = self.sheet_solid(part, None).map(|k| k.1);
+        if e.sheet.is_none() && e.choices.format == crate::core::export::Format::Dxf {
+            e.choices.format = crate::core::export::Format::Step;
+        }
+        self.export = Some(e);
     }
 
     /// Exports the open export's part: the daemon, on this machine,
@@ -1816,6 +1839,7 @@ impl Workspace {
                 quality: None,
                 transfer: Some(Transfer::Compact),
                 rev: Some(rev.clone()),
+                flat: None,
             };
             self.send(req, Pending::Ghost(key, hash));
         }
@@ -2128,7 +2152,212 @@ impl Workspace {
         self.made_for.clone_from(&feature);
         if let Some(key) = feature {
             self.ask_swept(&key);
+            self.ask_sheet_paint(&key);
             self.ask_made(key);
+        }
+    }
+
+    /// Reads `key`'s sheet metal table (the part and the solid, `""` for
+    /// its one sheet metal solid) unless it was read at the part's
+    /// revision or is on its way: the Part tile's sheet metal section asks
+    /// every frame it shows.
+    pub fn show_sheet(&mut self, key: &BodyKey) {
+        let Some(revision) = self.revision_of(&key.0) else {
+            return;
+        };
+        if self.sheets.want_table(key, &revision) {
+            let req = Request::SheetGet {
+                part: key.0.clone(),
+                solid: (!key.1.is_empty()).then(|| key.1.clone()),
+                rev: self.model_rev(),
+            };
+            self.send(req, Pending::SheetTable(key.clone(), revision));
+        }
+    }
+
+    /// The sheet metal solid the Part tile's section shows of `part`: the
+    /// chosen feature's solid when it is in `part`, else the solid a base
+    /// flange founds, else `""` (the part's one sheet metal solid, as the
+    /// daemon finds it); `None` for a part with no sheet metal feature.
+    pub fn sheet_solid(&self, part: &str, chosen: Option<&BodyKey>) -> Option<BodyKey> {
+        let p = self.model.parts.get(part)?;
+        let sheet = |f: &crate::core::model::Feature| f.sheet.is_some();
+        if !p.features.iter().any(sheet) {
+            return None;
+        }
+        if let Some(k) = chosen.filter(|k| k.0 == part)
+            && p.feature(&k.1).is_some_and(sheet)
+            && let Some(s) = self.model.solid_of(k)
+        {
+            return Some(s);
+        }
+        let founder = p
+            .features
+            .iter()
+            .find(|f| f.sheet.as_ref().is_some_and(|s| s.kind == "base_flange"))
+            .map_or_else(String::new, |f| f.id.clone());
+        Some((part.to_owned(), founder))
+    }
+
+    /// Reads `key`'s flat bend lines, as [`Workspace::show_sheet`] its
+    /// table.
+    fn ask_flat_lines(&mut self, key: &BodyKey) {
+        let Some(revision) = self.revision_of(&key.0) else {
+            return;
+        };
+        if self.sheets.want_flat(key, &revision) {
+            let req = Request::FlatGet {
+                part: key.0.clone(),
+                solid: (!key.1.is_empty()).then(|| key.1.clone()),
+                rev: self.model_rev(),
+                fixed: None,
+                bends: Vec::new(),
+            };
+            self.send(req, Pending::FlatLines(key.clone(), revision));
+        }
+    }
+
+    /// What a chosen unfold or refold paints needs: its target's table,
+    /// and an unfold's flat too.
+    fn ask_sheet_paint(&mut self, key: &BodyKey) {
+        let Some(info) = self
+            .model
+            .parts
+            .get(&key.0)
+            .and_then(|p| p.feature(&key.1))
+            .filter(|f| f.error.is_none())
+            .and_then(|f| f.sheet.clone())
+        else {
+            return;
+        };
+        let Some(target) = info.target else {
+            return;
+        };
+        let solid = (key.0.clone(), target);
+        match info.kind.as_str() {
+            "unfold" => {
+                self.show_sheet(&solid);
+                self.ask_flat_lines(&solid);
+            }
+            "refold" => self.show_sheet(&solid),
+            _ => {}
+        }
+    }
+
+    /// The faces and edges a chosen unfold or refold paints, from what
+    /// the window has read ([`crate::core::sheet::painted`]).
+    pub fn sheet_paint(&self, key: &BodyKey) -> (Vec<String>, Vec<String>) {
+        let none = (Vec::new(), Vec::new());
+        let Some(p) = self.model.parts.get(&key.0) else {
+            return none;
+        };
+        let Some(info) = p.feature(&key.1).and_then(|f| f.sheet.as_ref()) else {
+            return none;
+        };
+        let Some(target) = &info.target else {
+            return none;
+        };
+        let solid = (key.0.clone(), target.clone());
+        let table = match self.sheets.table(&solid, &p.revision) {
+            Some(crate::core::sheet::Shown::Table(t)) => Some(t),
+            _ => None,
+        };
+        let flat = self
+            .sheets
+            .flat(&solid, &p.revision)
+            .and_then(|f| f.as_ref().ok());
+        let unfold_only = info
+            .unfold
+            .as_ref()
+            .and_then(|u| p.feature(u))
+            .and_then(|f| f.sheet.as_ref())
+            .map(|u| u.only.clone())
+            .unwrap_or_default();
+        crate::core::sheet::painted(&key.1, info, &unfold_only, table, flat)
+    }
+
+    /// Turns the flat view on, for `solid` (a part and its solid, `""` for
+    /// the part's one sheet metal solid), or off.
+    pub fn show_flat_view(&mut self, solid: Option<BodyKey>) {
+        self.model.show_flat(None);
+        self.flat_view = None;
+        let Some(key) = solid else {
+            return;
+        };
+        let Some(revision) = self.revision_of(&key.0) else {
+            return;
+        };
+        self.flat_view = Some(crate::core::flat::FlatView {
+            part: key.0.clone(),
+            solid: key.1.clone(),
+            revision: revision.clone(),
+            lines: None,
+            error: None,
+            turned: false,
+        });
+        self.read_flat_view();
+    }
+
+    /// Reads the flat view's bend lines and body again, at its part's
+    /// revision.
+    fn read_flat_view(&mut self) {
+        let Some(v) = &self.flat_view else {
+            return;
+        };
+        let key = (v.part.clone(), v.solid.clone());
+        let revision = v.revision.clone();
+        self.ask_flat_lines(&key);
+        let req = Request::MeshGet {
+            part: key.0.clone(),
+            feature: None,
+            features: Vec::new(),
+            quality: None,
+            transfer: Some(Transfer::Compact),
+            rev: self.model_rev(),
+            flat: Some(key.1.clone()),
+        };
+        self.send(req, Pending::FlatMesh(key, revision));
+    }
+
+    /// Turns the camera to the flat view, once its body and lines have
+    /// come: along the pattern's `z`, from its viewer side (where its bend
+    /// lines lie), as `render --flat` looks at it; the view frames it.
+    fn turn_to_flat(&mut self) {
+        let Some(v) = self.flat_view.as_mut().filter(|v| !v.turned) else {
+            return;
+        };
+        let (Some(l), Some((_, body))) = (&v.lines, &self.model.flat) else {
+            return;
+        };
+        let points: Vec<[f64; 3]> = match &body.mesh {
+            Ok(m) => m
+                .positions
+                .iter()
+                .map(|p| [0, 1, 2].map(|k| m.origin[k] + f64::from(p[k])))
+                .collect(),
+            Err(_) => l.lines.iter().flat_map(|b| [b.from, b.to]).collect(),
+        };
+        v.turned = true;
+        self.looked = Some(l.camera(&points, 1.0));
+    }
+
+    /// The solid View > Flat pattern lays flat: the chosen feature's
+    /// solid, else the one part shown (not an assembly), its one sheet
+    /// metal solid; `None` where neither is.
+    pub fn flat_candidate(&self, chosen: Option<&BodyKey>) -> Option<BodyKey> {
+        let shown = self.model.shown();
+        if let Some(k) = chosen
+            && shown.contains(&k.0.as_str())
+            && let Some(s) = self.model.solid_of(k)
+            && self.model.parts.get(&k.0).is_some_and(|p| !p.assembly)
+        {
+            return Some(s);
+        }
+        match shown.as_slice() {
+            [one] if self.model.parts.get(*one).is_some_and(|p| !p.assembly) => {
+                Some(((*one).to_owned(), String::new()))
+            }
+            _ => None,
         }
     }
 
@@ -3855,6 +4084,72 @@ impl Workspace {
                     self.model.generation += 1;
                 }
             }
+            (Pending::SheetTable(key, revision), a) => {
+                use crate::core::sheet::{SheetTable, Shown};
+                let t = match a {
+                    Ok(a) => Shown::Table(SheetTable::from_answer(&revision, &a.result)),
+                    Err(e) => Shown::Failed(e),
+                };
+                self.sheets.take_table(key, revision, t);
+                self.model.generation += 1;
+            }
+            (Pending::FlatLines(key, revision), a) => {
+                let f = a.map(|a| crate::core::flat::FlatLines::from_answer(&a.result));
+                if let Some(v) = self
+                    .flat_view
+                    .as_mut()
+                    .filter(|v| (v.part.clone(), v.solid.clone()) == key && v.revision == revision)
+                {
+                    match &f {
+                        Ok(l) => v.lines = Some(l.clone()),
+                        Err(e) => {
+                            // The flat no longer reads: draw the folded
+                            // body again, not the last revision's flat.
+                            v.lines = None;
+                            v.error = Some(e.clone());
+                            self.model.show_flat(None);
+                        }
+                    }
+                }
+                self.sheets.take_flat(key, revision, f);
+                self.turn_to_flat();
+                self.model.generation += 1;
+            }
+            (Pending::FlatMesh(key, revision), a) => {
+                let wanted = self.flat_view.as_ref().is_some_and(|v| {
+                    (v.part.clone(), v.solid.clone()) == key && v.revision == revision
+                });
+                if !wanted {
+                    return;
+                }
+                match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
+                    Ok(Some(Ok(mut bodies))) if bodies.len() == 1 => {
+                        let body = bodies.remove(0);
+                        // The solid it is, named now the daemon has chosen it.
+                        let solid = (key.0.clone(), body.feature.clone());
+                        if let Some(v) = &mut self.flat_view {
+                            v.solid.clone_from(&body.feature);
+                        }
+                        self.model.show_flat(Some((solid, body)));
+                        self.turn_to_flat();
+                    }
+                    Ok(Some(Err(e))) | Err(e) => {
+                        // Refused (an edit left the solid unfolding no
+                        // more): the folded body is drawn again, and the
+                        // view keeps the refusal, not the stale flat.
+                        if let Some(v) = &mut self.flat_view {
+                            v.lines = None;
+                            v.error = Some(e.clone());
+                        }
+                        self.model.show_flat(None);
+                        self.fail(e);
+                    }
+                    Ok(_) => {
+                        self.model.show_flat(None);
+                        self.fail(Error::new(Code::Daemon, "a flat came without its body"));
+                    }
+                }
+            }
             (Pending::Made(key, revision), a) => {
                 if self.made_for.as_ref() == Some(&key) {
                     match a {
@@ -4226,6 +4521,23 @@ impl Workspace {
         {
             self.ask_made(key);
         }
+        // So does what a chosen unfold or refold paints.
+        if let Some(key) = self.made_for.clone()
+            && report["part"] == key.0.as_str()
+        {
+            self.ask_sheet_paint(&key);
+        }
+        // And the flat view, read again at the part's new revision.
+        if let Some(v) = &mut self.flat_view
+            && report["part"] == v.part.as_str()
+            && let Some(r) = report["revision"].as_str()
+            && r != v.revision
+        {
+            v.revision = r.to_owned();
+            v.lines = None;
+            v.error = None;
+            self.read_flat_view();
+        }
         // So does how the chosen sweep or loft is drawn.
         if let Some(key) = self.made_for.clone()
             && report["part"] == key.0.as_str()
@@ -4288,6 +4600,7 @@ impl Workspace {
                         quality: quality.clone(),
                         transfer: Some(Transfer::Compact),
                         rev: self.model_rev(),
+                        flat: None,
                     };
                     self.send(req, Pending::Mesh(key, hash));
                 }
@@ -4306,6 +4619,7 @@ impl Workspace {
                     quality: quality.clone(),
                     transfer: Some(Transfer::Compact),
                     rev: self.model_rev(),
+                    flat: None,
                 };
                 self.send(req, Pending::Meshes(batch.to_vec()));
             }
@@ -4335,6 +4649,7 @@ impl Workspace {
                 quality: Some(level.as_str().to_owned()),
                 transfer: Some(Transfer::Compact),
                 rev: self.model_rev(),
+                flat: None,
             };
             self.send(req, Pending::Level(hash, level));
         }

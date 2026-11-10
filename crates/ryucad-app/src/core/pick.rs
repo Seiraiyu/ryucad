@@ -517,7 +517,7 @@ impl Picker {
                         l
                     }
                 };
-                let first = model.meshes.get(key).unwrap_or(b);
+                let first = model.mesh_of(key).unwrap_or(b);
                 Body::placed(key.clone(), Arc::clone(b), Arc::clone(first), pose, local)
             })
             .collect();

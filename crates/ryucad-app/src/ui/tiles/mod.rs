@@ -114,6 +114,9 @@ pub fn show(
         "part" => scroll(ui, &mut |ui| {
             part::part_section(ui, &mut o.ws, &o.view);
             ui.separator();
+            if part::sheet_section(ui, &mut o.ws, &o.view) {
+                ui.separator();
+            }
             crate::ui::bom::where_used(ui, &mut o.ws, &o.view);
         }),
         "conflicts" => scroll(ui, &mut |ui| conflicts::merge(ui, &mut o.ws, &mut o.view)),

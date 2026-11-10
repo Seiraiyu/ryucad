@@ -489,6 +489,21 @@ pub(crate) fn refusal(e: &ryukei::TweakError) -> Refusal {
             "this face reaches past the region its re-trim works in",
             vec![("face", face)],
         ),
+        T::CapNotOnFace { face } => r(
+            "cap_not_on_face",
+            "the gap the deleted faces leave at this face doesn't lie on a hole of one face, so no cap closes it",
+            vec![("face", face)],
+        ),
+        T::GrowWouldCap { face } => r(
+            "grow_would_cap",
+            "the gap the deleted faces leave at this face is closed by a cap, not by growing its neighbours",
+            vec![("face", face)],
+        ),
+        T::NoFeature { face } => r(
+            "no_feature",
+            "this face is part of no feature (at most half the body's faces) that a cap closes",
+            vec![("face", face)],
+        ),
         T::SelfIntersecting { faces: [a, b] } => r(
             "self_intersecting",
             "two faces of the result would cross",
@@ -531,6 +546,13 @@ pub(crate) fn hint(r: &Refusal) -> Option<&'static str> {
             Some("split the face along the parting line first (a split, or a sketch's cut)")
         }
         ("hinge_along_pull", _) => Some("give a pull more nearly square to the face"),
+        ("cap_not_on_face", _) => {
+            Some("heal the gap by growing its neighbours instead, or delete the faces round it too")
+        }
+        ("grow_would_cap", _) => Some("heal the gap by a cap instead"),
+        ("no_feature", _) => Some(
+            "name the feature's faces yourself: a hole's or a boss's faces, which leave a gap a cap closes",
+        ),
         _ => None,
     }
 }
@@ -1274,6 +1296,9 @@ mod tests {
             (T::GapNotHealed { face: n }, "gap_not_healed"),
             (T::HealAmbiguous { face: n }, "heal_ambiguous"),
             (T::RegionTooSmall { face: n }, "region_too_small"),
+            (T::CapNotOnFace { face: n }, "cap_not_on_face"),
+            (T::GrowWouldCap { face: n }, "grow_would_cap"),
+            (T::NoFeature { face: n }, "no_feature"),
             (T::SelfIntersecting { faces: [n, n] }, "self_intersecting"),
             (T::Uncertain { at: n }, "uncertain"),
             (
@@ -1327,6 +1352,9 @@ mod tests {
                 .unwrap()
                 .contains("pull")
         );
+        assert!(hint(T::CapNotOnFace { face: n }).unwrap().contains("grow"));
+        assert!(hint(T::GrowWouldCap { face: n }).unwrap().contains("cap"));
+        assert!(hint(T::NoFeature { face: n }).unwrap().contains("faces"));
         assert_eq!(hint(T::Uncertain { at: n }), None);
         assert_eq!(
             refusal(&T::Unsupported {

@@ -159,6 +159,7 @@ fn window_open(root: &Path) -> (f64, f64, usize, usize) {
             quality: Some("coarse".into()),
             transfer: Some(Transfer::Compact),
             rev: None,
+            flat: None,
         };
         bytes += conn
             .call_answer(&req)
