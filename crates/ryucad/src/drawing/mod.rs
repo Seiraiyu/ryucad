@@ -586,6 +586,22 @@ fn plans(
                         "auxiliary",
                     )
                 }
+                (
+                    ViewKind::Section { .. }
+                    | ViewKind::Detail { .. }
+                    | ViewKind::Flat { .. }
+                    | ViewKind::Exploded { .. },
+                    _,
+                ) => {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        format!(
+                            "view {k}: {} views are drawn from plan 9.B's Task 8 on",
+                            w.type_name()
+                        ),
+                    )
+                    .with("pointer", format!("/views/{k}/type")));
+                }
                 (_, None) => unreachable!("a derived view waits for its parent"),
             };
             let key = (of.clone(), format!("{rev:?}"));
