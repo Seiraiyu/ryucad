@@ -119,6 +119,42 @@ class Project:
         self.run("sketch", "edit", part, sid, json.dumps(ops))
         return sid
 
+    def drawing(self, part, did, name, size=None, standard=True):
+        """`drawing create`: a drawing of one sheet, with the standard
+        views laid out unless `standard` is false."""
+        args = ["drawing", "create", part, did, "--name", name]
+        if size:
+            args += ["--size", size]
+        if standard:
+            args += ["--views", "standard"]
+        return self.run(*args)
+
+    def drawing_add(self, part, did, *what, **flags):
+        """`drawing view add`, `dim add`, `note add` or `gdt add` (`what`,
+        as `("view", "add")`), flags as `add` takes them."""
+        args = ["drawing", *what, part, did]
+        for k, v in flags.items():
+            flag = "--" + k.replace("_", "-")
+            for one in v if isinstance(v, list) else [v]:
+                if one is True:
+                    args.append(flag)
+                else:
+                    args.append(f"{flag}={one}")
+        return self.run(*args)
+
+    def drawing_ops(self, part, did, ops):
+        return self.run("drawing", "edit", part, did, "--ops", json.dumps(ops))
+
+    def take_fixes(self, part, did, codes):
+        """Takes the drawing lint's first fix for each of its findings of
+        `codes`, as an agent following the lint does: one batch."""
+        lint = self.run("drawing", "lint", part, did)
+        ops = [op for f in lint["findings"] if f["code"] in codes and f.get("fixes")
+               for op in f["fixes"][0]]
+        if ops:
+            self.drawing_ops(part, did, ops)
+        return len(ops)
+
     def bodies(self, part):
         return self.run("inspect", part)["bodies"]
 
