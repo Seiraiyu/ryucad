@@ -21,6 +21,7 @@
 //! face, edge and vertex keeps its name; the journal is `Modified` for
 //! each that changed. The key names nothing.
 
+pub mod blends;
 pub(crate) mod chain;
 pub(crate) mod classify;
 pub(crate) mod curves;
@@ -35,6 +36,7 @@ pub(crate) mod vertices;
 #[cfg(test)]
 mod tests;
 
+pub use blends::{Corner, DEFAULT_TOLERANCE, RecogniseOptions, Recognised, Recognition};
 pub use delete::{DeleteSpec, Heal, delete_faces, delete_faces_with, feature_faces};
 pub use draft::{
     DraftFace, DraftReport, DraftSpec, FaceAngle, Hinge, MAX_ANGLE, draft, draft_with,
