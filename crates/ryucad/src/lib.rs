@@ -66,6 +66,7 @@ pub mod dependents;
 pub mod deps;
 pub mod diff;
 pub mod doctor;
+pub mod drawing;
 pub mod drivers;
 pub mod endpoint;
 pub mod entity;

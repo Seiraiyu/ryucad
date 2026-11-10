@@ -12,7 +12,9 @@
 //! display meshes beside the bodies they mesh, [`encode_rigid`] a
 //! [`Rigid`] motion, for callers that keep where they placed a body, and
 //! [`encode_flat_map`] a sheet's [`FlatMap`], what refolding its flat
-//! needs, and [`encode_flat_pattern`] its [`FlatPattern`].
+//! needs, and [`encode_flat_pattern`] its [`FlatPattern`], and
+//! [`encode_projection`] a view's [`Projection`], for a cache of
+//! drawings' views (design 417).
 //!
 //! The format starts with `ryukei.body.1` (`ryukei.journal.1` for a
 //! [`Journal`], `ryukei.mesh.1` for a mesh); integers are little-endian, counts `u32`, an absent ID
@@ -32,12 +34,17 @@ use crate::geom::{
 };
 use crate::mesh::{BodyMesh, Corner, EdgePolyline, FaceFault, FaceMesh, MeshFaultKind};
 use crate::name::{Event, Journal, Name, ToolKey};
+use crate::project::{
+    Class, Image, ImageCurve, ImageMap, Piece, Projection, Silhouette, Silhouettes, Source,
+    Visibility,
+};
 use crate::sheet_metal::{
     Allowance, BendDirection, BendLine, FlatMap, FlatPattern, PatternLoop, PatternSegment, Strip,
 };
 use crate::tol::Tolerance;
 use crate::topo::{
-    Arena, Body, Edge, Face, Fin, Id, Loop, Pcurve, Region, RegionKind, Sense, Shell, Vertex,
+    Arena, Body, Edge, EdgeId, Face, FaceId, Fin, Id, Loop, Pcurve, Region, RegionKind, Sense,
+    Shell, Vertex,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -53,6 +60,9 @@ pub const FLAT_MAP_MAGIC: &[u8] = b"ryukei.flatmap.1";
 
 /// What a sheet's flat pattern's bytes start with.
 pub const FLAT_PATTERN_MAGIC: &[u8] = b"ryukei.pattern.1";
+
+/// What a view's projection's bytes start with.
+pub const PROJECTION_MAGIC: &[u8] = b"ryukei.projection.1";
 
 fn invalid(what: &'static str) -> Error {
     Error::InvalidEncoding { what }
@@ -1592,6 +1602,229 @@ pub fn decode_flat_pattern(bytes: &[u8]) -> Result<FlatPattern, Error> {
         bend_lines,
         thickness,
         bounds,
+    })
+}
+
+/// A view's projection as bytes: each piece (its source, its image and
+/// stretch, its depth, visibility, overlaps, class and whether it lies on
+/// a silhouette), then each placed body's silhouettes (each branch's
+/// face, name, ordinal, 3D curve, stretch, pcurve and its map, and
+/// tolerance; the edges silhouettes run along; the faces seen edge-on).
+/// Curves a NURBS shares are written once.
+pub fn encode_projection(p: &Projection) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.out.extend_from_slice(PROJECTION_MAGIC);
+    w.len(p.pieces.len());
+    for piece in &p.pieces {
+        match piece.source {
+            Source::Edge { body, edge, name } => {
+                w.u8(0);
+                w.u32(body);
+                w.id(edge);
+                w.name(name);
+            }
+            Source::Silhouette {
+                body,
+                face,
+                face_name,
+                ordinal,
+            } => {
+                w.u8(1);
+                w.u32(body);
+                w.id(face);
+                w.name(face_name);
+                w.u32(ordinal);
+            }
+        }
+        match &piece.image.image {
+            Image::Point(q) => {
+                w.u8(0);
+                w.point2(*q);
+            }
+            Image::Curve { curve, map } => {
+                w.u8(1);
+                w.curve2(curve);
+                match map {
+                    ImageMap::Affine([a, b]) => {
+                        w.u8(0);
+                        w.f64(*a);
+                        w.f64(*b);
+                    }
+                    ImageMap::Cosine { amplitude, phase } => {
+                        w.u8(1);
+                        w.f64(*amplitude);
+                        w.f64(*phase);
+                    }
+                }
+            }
+        }
+        w.f64(piece.image.range[0]);
+        w.f64(piece.image.range[1]);
+        w.f64(piece.depth[0]);
+        w.f64(piece.depth[1]);
+        match piece.visibility {
+            Visibility::Visible => w.u8(0),
+            Visibility::Hidden(n) => {
+                w.u8(1);
+                w.u32(n);
+            }
+            Visibility::Uncertain => w.u8(2),
+        }
+        w.len(piece.overlaps.len());
+        for &o in &piece.overlaps {
+            w.u32(o);
+        }
+        w.u8(match piece.class {
+            Class::Sharp => 0,
+            Class::Smooth => 1,
+            Class::Boundary => 2,
+            Class::Silhouette => 3,
+            Class::Uncertain => 4,
+        });
+        w.u8(u8::from(piece.on_silhouette));
+    }
+    w.len(p.silhouettes.len());
+    for s in &p.silhouettes {
+        w.len(s.branches.len());
+        for b in &s.branches {
+            w.id(b.face);
+            w.name(b.face_name);
+            w.u32(b.ordinal);
+            w.curve(&b.curve);
+            w.f64(b.range[0]);
+            w.f64(b.range[1]);
+            w.curve2(&b.pcurve.0);
+            w.f64(b.pcurve.1[0]);
+            w.f64(b.pcurve.1[1]);
+            w.f64(b.tolerance);
+        }
+        w.len(s.on_edges.len());
+        for &e in &s.on_edges {
+            w.id(e);
+        }
+        w.len(s.edge_on.len());
+        for &f in &s.edge_on {
+            w.id(f);
+        }
+    }
+    w.out
+}
+
+/// The projection `bytes` encode, bit for bit. Fails with
+/// [`Error::InvalidEncoding`] for bytes of another format or version, cut
+/// short or running on, an unknown tag, a number that isn't finite where
+/// a coordinate goes, an overlap naming no piece, or a curve its
+/// constructor refuses.
+pub fn decode_projection(bytes: &[u8]) -> Result<Projection, Error> {
+    let mut r = Reader::new(bytes);
+    r.magic(PROJECTION_MAGIC)?;
+    let n = r.count(1 + 4 + 4 + 16 + 1 + 16 + 32 + 1 + 4 + 2)?;
+    let mut pieces = Vec::with_capacity(n);
+    for _ in 0..n {
+        let source = match r.u8()? {
+            0 => Source::Edge {
+                body: r.u32()?,
+                edge: r.id::<EdgeId>()?,
+                name: r.name()?,
+            },
+            1 => Source::Silhouette {
+                body: r.u32()?,
+                face: r.id::<FaceId>()?,
+                face_name: r.name()?,
+                ordinal: r.u32()?,
+            },
+            _ => return Err(invalid("an unknown piece source")),
+        };
+        let image = match r.u8()? {
+            0 => Image::Point(r.point2()?),
+            1 => {
+                let curve = r.curve2()?;
+                let map = match r.u8()? {
+                    0 => ImageMap::Affine([r.finite()?, r.finite()?]),
+                    1 => ImageMap::Cosine {
+                        amplitude: r.finite()?,
+                        phase: r.finite()?,
+                    },
+                    _ => return Err(invalid("an unknown image map")),
+                };
+                Image::Curve { curve, map }
+            }
+            _ => return Err(invalid("an unknown image")),
+        };
+        let range = [r.finite()?, r.finite()?];
+        let depth = [r.finite()?, r.finite()?];
+        let visibility = match r.u8()? {
+            0 => Visibility::Visible,
+            1 => Visibility::Hidden(r.u32()?),
+            2 => Visibility::Uncertain,
+            _ => return Err(invalid("an unknown visibility")),
+        };
+        let m = r.count(4)?;
+        let overlaps = (0..m).map(|_| r.u32()).collect::<R<Vec<_>>>()?;
+        let class = match r.u8()? {
+            0 => Class::Sharp,
+            1 => Class::Smooth,
+            2 => Class::Boundary,
+            3 => Class::Silhouette,
+            4 => Class::Uncertain,
+            _ => return Err(invalid("an unknown piece class")),
+        };
+        let on_silhouette = r.flag()?;
+        pieces.push(Piece {
+            source,
+            image: ImageCurve { image, range },
+            depth,
+            visibility,
+            overlaps,
+            class,
+            on_silhouette,
+        });
+    }
+    if pieces
+        .iter()
+        .flat_map(|p| &p.overlaps)
+        .any(|&o| o as usize >= pieces.len())
+    {
+        return Err(invalid("an overlap naming no piece"));
+    }
+    let n = r.count(12)?;
+    let mut silhouettes = Vec::with_capacity(n);
+    for _ in 0..n {
+        let m = r.count(4 + 16 + 4 + 1 + 16 + 1 + 16 + 8)?;
+        let mut branches = Vec::with_capacity(m);
+        for _ in 0..m {
+            let face = r.id::<FaceId>()?;
+            let face_name = r.name()?;
+            let ordinal = r.u32()?;
+            let curve = r.curve()?;
+            let range = [r.finite()?, r.finite()?];
+            let pc = r.curve2()?;
+            let map = [r.finite()?, r.finite()?];
+            let tolerance = r.finite()?;
+            branches.push(Silhouette {
+                face,
+                face_name,
+                ordinal,
+                curve,
+                range,
+                pcurve: (pc, map),
+                tolerance,
+            });
+        }
+        let k = r.count(4)?;
+        let on_edges = (0..k).map(|_| r.id::<EdgeId>()).collect::<R<Vec<_>>>()?;
+        let k = r.count(4)?;
+        let edge_on = (0..k).map(|_| r.id::<FaceId>()).collect::<R<Vec<_>>>()?;
+        silhouettes.push(Silhouettes {
+            branches,
+            on_edges,
+            edge_on,
+        });
+    }
+    r.end()?;
+    Ok(Projection {
+        pieces,
+        silhouettes,
     })
 }
 

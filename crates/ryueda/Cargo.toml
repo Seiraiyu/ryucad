@@ -24,14 +24,11 @@ ryusch = { path = "../ryusch" }
 # PNGs an agent looks at, rasterized from the SVG with the bundled font
 # only (no system fonts): Rust, no C.
 resvg = { version = "0.49", default-features = false, features = ["text"] }
-# The output job's PDF: its objects, and the bundled font subset and
-# embedded so text is real (Rust, no C; design 236).
+# The output job's PDF, written through the drawings every ryu product
+# shares (design 417), and the bundled font.
+ryu-draw = { path = "../ryu-draw" }
+# Line caps and joins on the PDF's canvas.
 pdf-writer = "0.15"
-subsetter = { version = "0.2", default-features = false }
-# The bundled font's glyphs and widths, for the PDF's text.
-ttf-parser = "0.25"
-# The embedded font deflated, the same bytes everywhere.
-miniz_oxide = "0.8"
 # The PDF's arcs: sines and tangents with the same bits everywhere.
 ryu-math = { path = "../ryu-math" }
 ryu-session = { path = "../ryu-session" }
@@ -46,6 +43,8 @@ ryueda-parts = { path = "../ryueda-parts", features = ["testing"] }
 # The schematic corpus's references, checked by SHA-256.
 sha2 = "0.11"
 divan = "0.1"
+# The bundled font's widths, which `tests/font_widths.rs` checks ryusch's table against.
+ttf-parser = "0.25"
 tempfile = "3"
 
 [[bench]]
