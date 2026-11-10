@@ -543,6 +543,9 @@ pub fn place(
             if let Err(why) = ryusch::instr::judge(&laid.built.input, &laid.outcome.layout, ins) {
                 n["details"]["why"] = json!(why);
             }
+            if let Some(b) = blocker(&laid, ins) {
+                n["details"]["blocked"] = json!(b);
+            }
             if let Some(a) = notes.as_array_mut() {
                 a.push(n);
             }
@@ -647,11 +650,27 @@ fn listing(names: &Names, laid: &Laid) -> Vec<Value> {
                 "holds": verdict.is_ok(),
             });
             if let Err(why) = verdict {
-                v["why"] = json!(why);
+                v["why"] = json!(match blocker(laid, i) {
+                    Some(b) => format!("{why}; {b}"),
+                    None => why,
+                });
             }
             v
         })
         .collect()
+}
+
+/// What the engine found standing where `ins` wanted one of its parts.
+fn blocker(laid: &Laid, ins: &Instruction) -> Option<String> {
+    ins.parts()
+        .iter()
+        .flat_map(|s| ryusch::instr::parts_named(&laid.built.input, s))
+        .find_map(|p| {
+            laid.outcome
+                .blocked
+                .get(&laid.built.input.parts[p].key)
+                .cloned()
+        })
 }
 
 /// Whether what `ins` speaks of is drawn as it was: its parts' places, or

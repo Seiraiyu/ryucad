@@ -732,7 +732,7 @@ fn holds_is_what_the_drawing_shows() {
     assert_eq!(ins["holds"], false, "{ins}");
     let why = ins["why"].as_str().unwrap();
     assert!(
-        why.starts_with("R22 is ") && why.ends_with(" mm from R9; beside means within 20.3 mm"),
+        why.starts_with("R22 is ") && why.contains(" mm from R9; beside means within 20.3 mm"),
         "{why}"
     );
     assert_eq!(ins["unchanged"], true, "{ins}");

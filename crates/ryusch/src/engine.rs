@@ -67,6 +67,9 @@ pub struct Outcome {
     pub flow: BTreeSet<String>,
     /// Parts a label of which found no place where they stand.
     pub crowded: BTreeSet<usize>,
+    /// What stood where a relative instruction wanted a part, by part key:
+    /// why it couldn't hold.
+    pub blocked: BTreeMap<String, String>,
 }
 
 /// A part's sheet, place and whether a move holds it, if placed.
@@ -82,6 +85,8 @@ pub(crate) struct State<'a> {
     /// The regions, by ID: their sheets, origins, titles and parts (their
     /// frames are worked out from what they hold once drawn).
     pub regions: Vec<(String, crate::layout::Region)>,
+    /// What blocked a relative instruction's parts, by part key.
+    pub blocked: BTreeMap<String, String>,
 }
 
 impl<'a> State<'a> {
@@ -92,6 +97,7 @@ impl<'a> State<'a> {
             place: vec![None; block.parts.len()],
             notes: Vec::new(),
             regions: Vec::new(),
+            blocked: BTreeMap::new(),
         }
     }
 
@@ -1170,6 +1176,34 @@ fn relate(
         let found = axis
             .and_then(|a| spot_along(st, s, e0, want, a, SPACING, &blocked))
             .or_else(|| spot(st, s, e0, want, SPACING, &blocked));
+        // Not where it was asked: say what stood there.
+        if found != Some(want) {
+            let at = e0.shift(want).grow(SPACING);
+            let mut who: Vec<String> = (0..st.block.parts.len())
+                .filter(|q| !list.contains(q))
+                .filter(|q| st.place[*q].is_some_and(|x| x.0 == s))
+                .filter(|q| st.room(*q).overlaps(&at))
+                .map(|q| crate::lint::who(&st.block.parts[q]))
+                .collect();
+            who.sort();
+            who.dedup();
+            if blocked.iter().any(|b| b.overlaps(&at)) {
+                who.push("a wire or label".into());
+            }
+            let why = if who.is_empty() {
+                format!(
+                    "sheet {} has no free place for it there",
+                    st.sheets[s].1.name
+                )
+            } else {
+                let verb = if who.len() == 1 { "stands" } else { "stand" };
+                format!("{} {verb} where it would go", who.join(", "))
+            };
+            for p in list {
+                st.blocked
+                    .insert(st.block.parts[*p].key.clone(), why.clone());
+            }
+        }
         match found {
             Some(o) => {
                 for (p, pl) in &rel {
@@ -3396,6 +3430,7 @@ fn draw(
         layout.sheets.retain(|id, _| used.contains(id));
     }
     crate::canvas::arrange(block, &mut layout, prev);
+    let blocked = st.blocked;
     let mut notes = st.notes;
     for (n, why) in not_held {
         notes.push(Note {
@@ -3415,6 +3450,7 @@ fn draw(
         idioms: Vec::new(),
         flow: BTreeSet::new(),
         crowded,
+        blocked,
     }
 }
 
@@ -4090,6 +4126,41 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    /// A `beside` that can't hold records what stood where it wanted the
+    /// part: a part, by key, or that its sheet had no room.
+    #[test]
+    fn a_blocked_instruction_says_what_blocks_it() {
+        let block = seeded(13, 3);
+        let first = lay(&block);
+        let keys: Vec<String> = block
+            .parts
+            .iter()
+            .filter(|p| p.key.starts_with('r'))
+            .map(|p| p.key.clone())
+            .take(6)
+            .collect();
+        let mut b = block.clone();
+        b.previous = Some(first.layout.clone());
+        // Five parts all asked to the left of one: some can't fit there.
+        for (i, k) in keys[1..].iter().enumerate() {
+            b.instructions.insert(
+                format!("i{}", i + 1),
+                Instruction::Beside {
+                    parts: vec![k.clone()],
+                    of: keys[0].clone(),
+                    side: Side::Left,
+                },
+            );
+        }
+        let out = lay(&b);
+        for (ins, k) in b.instructions.values().zip(&keys[1..]) {
+            if crate::instr::judge(&b, &out.layout, ins).is_err() {
+                let why = out.blocked.get(k).expect("a blocker recorded");
+                assert!(!why.is_empty());
+            }
+        }
     }
 
     /// What a released instruction moved goes back where the layout before

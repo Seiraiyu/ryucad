@@ -3119,3 +3119,21 @@ fn release_restores_the_drawing() {
     assert_eq!(after["placed"]["r1"]["at"], before["placed"]["r1"]["at"]);
     assert!(after.get("before").is_none_or(|b| b.get(&id).is_none()));
 }
+
+/// An instruction that doesn't hold says what stood where it wanted its
+/// part: a designator, or that the sheet had no room there (plan 2.B
+/// Task 18). Both ways.
+#[test]
+fn a_blocked_instruction_says_what_blocks_it() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    // J1 asked right of U2: something stands there.
+    let v = p.ok(&["place", "breakout", "--dry-run", "beside J1 U2 right"]);
+    let ins = &v["instructions"][0];
+    assert_eq!(ins["holds"], json!(false), "{ins}");
+    let why = ins["why"].as_str().unwrap();
+    assert!(
+        why.contains("where it would go") || why.contains("no free place"),
+        "{why}"
+    );
+}
