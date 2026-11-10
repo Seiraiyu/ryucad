@@ -16,7 +16,7 @@ The design is document 417 in the Coxswain planning project `ryucad-ryukei`; thi
 - **Writers.** `drawing::output`: SVG on white (`ryu_draw::svg`), PNG by resvg over it with the bundled Inter only (ryucad gains `resvg`, question 338), PDF through `ryu_draw::pdf`. The same drawing gives the same bytes on every platform and thread count.
 - **Check.** `check` builds every drawing of the parts it checks (`source: drawing`): a view that fails is an error, uncertain pieces a warning; a drawing that doesn't read is doctor's.
 - **Testing.** Unit tests per module (`ryu-draw`'s writers and styles, `doc::drawing`'s and `doc::drawing_template`'s round trips and refusals, templates fitting their paper, curves keeping their ends and kinds, a block's three views and isometric against its edges' lengths, hidden bores dashed only when asked, an auxiliary view's true size and its foreshortened refusal, first angle's placement on an ISO sheet, doctor, merge, renumbering, the content hash, `diff --model`); `tests/cli.rs`'s `drawings_from_the_cli` both ways; the `drawings` golden section (the showcase's standard views and an ISO drawing: `drawing.get` with items, PDF, SVG and PNG, one thread and four).
-- **Limits.** Sections, details, flat and exploded views and DXF are 9.B's; dimensions, annotation and the lint 9.C's; the app, corpus drawings, property test, fuzzing and bars 9.D's. Layout fills from the upper left and never moves a view the file places.
+- **Limits.** Dimensions, annotation and the lint are 9.C's; the app, corpus drawings, property test, fuzzing and bars 9.D's. Layout fills from the upper left and never moves a view the file places.
 
 ## Sections, details, flat and exploded views (decided in ryucad phase 9)
 
