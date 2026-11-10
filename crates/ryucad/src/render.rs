@@ -1451,6 +1451,361 @@ pub fn render(
     Ok(img)
 }
 
+/// How far, in pixels, a pick pass reaches from an edge or a vertex: as
+/// far as the window's picker.
+pub const PICK_REACH: f32 = 6.0;
+
+/// No entity at a pixel.
+const NONE: u32 = u32::MAX;
+
+/// What a pick pass ([`pick`]) found at each output pixel: the nearest
+/// face, the nearest visible edge (or sketch curve) within
+/// [`PICK_REACH`], and the nearest visible vertex (or sketch point)
+/// within it, as indices into `names`.
+#[derive(Clone, Debug)]
+pub struct Picked {
+    pub width: u32,
+    pub height: u32,
+    pub names: Vec<String>,
+    pub(crate) face: Vec<u32>,
+    pub(crate) edge: Vec<u32>,
+    pub(crate) vertex: Vec<u32>,
+}
+
+impl Picked {
+    fn index(&self, x: f32, y: f32) -> Option<usize> {
+        let (x, y) = (x.floor(), y.floor());
+        (x >= 0.0 && y >= 0.0 && x < self.width as f32 && y < self.height as f32)
+            .then(|| y as usize * self.width as usize + x as usize)
+    }
+
+    fn named(&self, id: u32) -> Option<&str> {
+        (id != NONE).then(|| self.names[id as usize].as_str())
+    }
+
+    /// The face at pixel `(x, y)` (output pixels, y down).
+    pub fn face(&self, x: f32, y: f32) -> Option<&str> {
+        self.index(x, y).and_then(|i| self.named(self.face[i]))
+    }
+
+    /// The edge within reach of `(x, y)`, else the face there.
+    pub fn edge_or_face(&self, x: f32, y: f32) -> Option<&str> {
+        let i = self.index(x, y)?;
+        self.named(self.edge[i])
+            .or_else(|| self.named(self.face[i]))
+    }
+
+    /// What the window's picker would pick at `(x, y)`: a vertex within
+    /// reach, else an edge, else the face.
+    pub fn top(&self, x: f32, y: f32) -> Option<&str> {
+        let i = self.index(x, y)?;
+        self.named(self.vertex[i])
+            .or_else(|| self.named(self.edge[i]))
+            .or_else(|| self.named(self.face[i]))
+    }
+
+    /// The faces with pixels whose centres lie inside `outline` (a
+    /// polygon in output pixels, even-odd), with how many, most first,
+    /// ties by name.
+    pub fn faces_inside(&self, outline: &[(f32, f32)]) -> Vec<(String, usize)> {
+        let mut counts: std::collections::BTreeMap<u32, usize> = Default::default();
+        if outline.len() >= 3 {
+            let lo_x = outline
+                .iter()
+                .map(|p| p.0)
+                .fold(f32::INFINITY, f32::min)
+                .floor()
+                .max(0.0) as usize;
+            let hi_x = (outline
+                .iter()
+                .map(|p| p.0)
+                .fold(f32::NEG_INFINITY, f32::max)
+                .ceil() as usize)
+                .min(self.width as usize);
+            let lo_y = outline
+                .iter()
+                .map(|p| p.1)
+                .fold(f32::INFINITY, f32::min)
+                .floor()
+                .max(0.0) as usize;
+            let hi_y = (outline
+                .iter()
+                .map(|p| p.1)
+                .fold(f32::NEG_INFINITY, f32::max)
+                .ceil() as usize)
+                .min(self.height as usize);
+            for y in lo_y..hi_y {
+                let py = y as f32 + 0.5;
+                for x in lo_x..hi_x {
+                    let px = x as f32 + 0.5;
+                    let mut inside = false;
+                    for k in 0..outline.len() {
+                        let (a, b) = (outline[k], outline[(k + 1) % outline.len()]);
+                        if (a.1 > py) != (b.1 > py)
+                            && px < a.0 + (py - a.1) / (b.1 - a.1) * (b.0 - a.0)
+                        {
+                            inside = !inside;
+                        }
+                    }
+                    let f = self.face[y * self.width as usize + x];
+                    if inside && f != NONE {
+                        *counts.entry(f).or_default() += 1;
+                    }
+                }
+            }
+        }
+        self.ranked(counts)
+    }
+
+    /// The edges (else faces) a polyline in output pixels passes over,
+    /// sampled every half pixel and counted once a pixel, most first,
+    /// ties by name.
+    pub fn under(&self, polyline: &[(f32, f32)]) -> Vec<(String, usize)> {
+        let mut counts: std::collections::BTreeMap<u32, usize> = Default::default();
+        let mut last = None;
+        let mut visit = |x: f32, y: f32| {
+            if let Some(i) = self.index(x, y)
+                && last != Some(i)
+            {
+                last = Some(i);
+                let id = if self.edge[i] != NONE {
+                    self.edge[i]
+                } else {
+                    self.face[i]
+                };
+                if id != NONE {
+                    *counts.entry(id).or_default() += 1;
+                }
+            }
+        };
+        if let [p] = polyline {
+            visit(p.0, p.1);
+        }
+        for w in polyline.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let n = ((b.0 - a.0).abs().max((b.1 - a.1).abs()) * 2.0)
+                .ceil()
+                .max(1.0) as usize;
+            for k in 0..=n {
+                let t = k as f32 / n as f32;
+                visit(a.0 + t * (b.0 - a.0), a.1 + t * (b.1 - a.1));
+            }
+        }
+        self.ranked(counts)
+    }
+
+    /// Counts by name, most first, ties by name, at most
+    /// `doc::redline::MAX_TOUCHES`.
+    fn ranked(&self, counts: std::collections::BTreeMap<u32, usize>) -> Vec<(String, usize)> {
+        let mut by: std::collections::BTreeMap<&str, usize> = Default::default();
+        for (id, n) in counts {
+            *by.entry(self.names[id as usize].as_str()).or_default() += n;
+        }
+        let mut out: Vec<(String, usize)> =
+            by.into_iter().map(|(k, n)| (k.to_owned(), n)).collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        out.truncate(crate::doc::redline::MAX_TOUCHES);
+        out
+    }
+}
+
+/// What a render of `geometry` from `camera` would draw at each output
+/// pixel of a `width` × `height` image, by entity (`geometry.tags`; an
+/// untagged geometry picks nothing). The same arithmetic as [`render`]'s
+/// projection; one thread, so the same answer on any number.
+pub fn pick(geometry: &Geometry, camera: &Camera, width: u32, height: u32) -> Result<Picked> {
+    check_size(width, height)?;
+    camera.check()?;
+    let view = View::new(camera, width, height);
+    let planes = &geometry.sections[..geometry.sections.len().min(PLANES)];
+    let ss = SS as f32;
+    let screen: Vec<Option<Screen>> = geometry
+        .positions
+        .iter()
+        .map(|p| {
+            let mut s = view.project(*p)?;
+            s.x /= ss;
+            s.y /= ss;
+            for (k, plane) in planes.iter().enumerate() {
+                s.cut[k] = plane.distance(*p) as f32;
+            }
+            Some(s)
+        })
+        .collect();
+    let (w, h) = (width as usize, height as usize);
+    let empty = Tags::default();
+    let tags = geometry.tags.as_ref().unwrap_or(&empty);
+    let cut = |d: &[f32; PLANES]| d[..planes.len()].iter().any(|x| *x > 0.0);
+    let mut depth = vec![f32::INFINITY; w * h];
+    let mut face = vec![NONE; w * h];
+    for (runs, tris, both) in [
+        (&tags.triangles, &geometry.triangles, false),
+        (&tags.sheets, &geometry.sheets, true),
+    ] {
+        for (range, id) in runs {
+            for t in &tris[range.clone()] {
+                let (Some(a), Some(b), Some(c)) = (
+                    screen[t.p[0] as usize],
+                    screen[t.p[1] as usize],
+                    screen[t.p[2] as usize],
+                ) else {
+                    continue;
+                };
+                // As `Band::fill`: counterclockwise from outside has
+                // negative area on screen; a sheet is picked both ways.
+                let area = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
+                if area == 0.0 || (area > 0.0 && !both) {
+                    continue;
+                }
+                let (s, area) = if area < 0.0 {
+                    ([a, c, b], -area)
+                } else {
+                    ([a, b, c], area)
+                };
+                let lo_x = s
+                    .iter()
+                    .map(|v| v.x)
+                    .fold(f32::INFINITY, f32::min)
+                    .floor()
+                    .max(0.0) as usize;
+                let hi_x = (s
+                    .iter()
+                    .map(|v| v.x)
+                    .fold(f32::NEG_INFINITY, f32::max)
+                    .ceil()
+                    .max(0.0) as usize)
+                    .min(w);
+                let lo_y = s
+                    .iter()
+                    .map(|v| v.y)
+                    .fold(f32::INFINITY, f32::min)
+                    .floor()
+                    .max(0.0) as usize;
+                let hi_y = (s
+                    .iter()
+                    .map(|v| v.y)
+                    .fold(f32::NEG_INFINITY, f32::max)
+                    .ceil()
+                    .max(0.0) as usize)
+                    .min(h);
+                let inv = [1.0 / s[0].w, 1.0 / s[1].w, 1.0 / s[2].w];
+                for y in lo_y..hi_y {
+                    let py = y as f32 + 0.5;
+                    for x in lo_x..hi_x {
+                        let px = x as f32 + 0.5;
+                        let edge = |p: Screen, q: Screen| {
+                            (q.x - p.x) * (py - p.y) - (q.y - p.y) * (px - p.x)
+                        };
+                        let (w0, w1, w2) = (edge(s[1], s[2]), edge(s[2], s[0]), edge(s[0], s[1]));
+                        if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                            continue;
+                        }
+                        let (b0, b1, b2) = (w0 / area, w1 / area, w2 / area);
+                        let iw = b0 * inv[0] + b1 * inv[1] + b2 * inv[2];
+                        let lerp = |v: [f32; 3]| {
+                            (b0 * v[0] * inv[0] + b1 * v[1] * inv[1] + b2 * v[2] * inv[2]) / iw
+                        };
+                        let mut d = [-1.0; PLANES];
+                        for (k, dk) in d.iter_mut().enumerate().take(planes.len()) {
+                            *dk = lerp([s[0].cut[k], s[1].cut[k], s[2].cut[k]]);
+                        }
+                        if cut(&d) {
+                            continue;
+                        }
+                        let z = lerp([s[0].z, s[1].z, s[2].z]);
+                        let i = y * w + x;
+                        if z < depth[i] {
+                            depth[i] = z;
+                            face[i] = *id;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Edges and vertices: the nearest within reach whose own point isn't
+    // behind a face (the slack `Band::segment` gives lines on surfaces).
+    let near = |layer: &mut Vec<u32>, best: &mut Vec<f32>, a: Screen, b: Screen, id: u32| {
+        let r = PICK_REACH;
+        let lo_x = (a.x.min(b.x) - r).floor().max(0.0) as usize;
+        let hi_x = ((a.x.max(b.x) + r).ceil().max(0.0) as usize).min(w);
+        let lo_y = (a.y.min(b.y) - r).floor().max(0.0) as usize;
+        let hi_y = ((a.y.max(b.y) + r).ceil().max(0.0) as usize).min(h);
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len2 = dx * dx + dy * dy;
+        for y in lo_y..hi_y {
+            let py = y as f32 + 0.5;
+            for x in lo_x..hi_x {
+                let px = x as f32 + 0.5;
+                let t = if len2 > 0.0 {
+                    (((px - a.x) * dx + (py - a.y) * dy) / len2).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let (fx, fy) = (a.x + t * dx, a.y + t * dy);
+                let d = ((fx - px) * (fx - px) + (fy - py) * (fy - py)).sqrt();
+                if d > r {
+                    continue;
+                }
+                let iw = (1.0 - t) / a.w + t / b.w;
+                let z = ((1.0 - t) * a.z / a.w + t * b.z / b.w) / iw;
+                let dist =
+                    [0, 1, 2].map(|k| ((1.0 - t) * a.cut[k] / a.w + t * b.cut[k] / b.w) / iw);
+                if cut(&dist) {
+                    continue;
+                }
+                // The face at the edge's own point, not at the pixel.
+                let (ex, ey) = (fx.floor(), fy.floor());
+                if ex >= 0.0 && ey >= 0.0 && (ex as usize) < w && (ey as usize) < h {
+                    let at = depth[ey as usize * w + ex as usize];
+                    if z > at + 4e-3 * z.abs() + 1e-9 {
+                        continue;
+                    }
+                }
+                let i = y * w + x;
+                let better = d < best[i]
+                    || (d == best[i]
+                        && layer[i] != NONE
+                        && tags.names[id as usize] < tags.names[layer[i] as usize]);
+                if better {
+                    best[i] = d;
+                    layer[i] = id;
+                }
+            }
+        }
+    };
+    let (mut edge, mut edge_d) = (vec![NONE; w * h], vec![f32::INFINITY; w * h]);
+    for (li, id) in &tags.lines {
+        let pts: Vec<Option<Screen>> = geometry.lines[*li]
+            .points
+            .iter()
+            .map(|p| screen[*p as usize])
+            .collect();
+        if let [Some(p)] = pts[..] {
+            near(&mut edge, &mut edge_d, p, p, *id);
+        }
+        for pair in pts.windows(2) {
+            if let [Some(p), Some(q)] = pair {
+                near(&mut edge, &mut edge_d, *p, *q, *id);
+            }
+        }
+    }
+    let (mut vertex, mut vertex_d) = (vec![NONE; w * h], vec![f32::INFINITY; w * h]);
+    for (p, id) in &tags.points {
+        if let Some(s) = screen[*p as usize] {
+            near(&mut vertex, &mut vertex_d, s, s, *id);
+        }
+    }
+    Ok(Picked {
+        width,
+        height,
+        names: tags.names.clone(),
+        face,
+        edge,
+        vertex,
+    })
+}
+
 impl Image {
     fn put(&mut self, x: i64, y: i64, c: [u8; 3]) {
         if x < 0 || y < 0 || x >= self.width as i64 || y >= self.height as i64 {
@@ -1598,6 +1953,125 @@ pub fn chain_span(chain: &crate::geometry::Chain) -> f64 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    fn tagged_cube() -> Geometry {
+        let mut g = cube();
+        let mut t = Tags::default();
+        for f in 0..6 {
+            let id = t.name(&format!("c/b/face{f}"));
+            t.triangles.push((2 * f..2 * f + 2, id));
+        }
+        // The edge from corner 4 to 5 (y = 0, z = 1) and vertex 7 (1, 1, 1).
+        g.lines.push(Line {
+            points: vec![4, 5],
+            color: EDGE,
+            width: 1.0,
+            dash: false,
+        });
+        let e = t.name("c/b/edge45");
+        t.lines.push((0, e));
+        let v = t.name("c/b/vertex7");
+        t.points.push((7, v));
+        g.tags = Some(t);
+        g
+    }
+
+    fn ortho(eye: [f64; 3]) -> Camera {
+        Camera {
+            eye,
+            target: [0.5, 0.5, 0.5],
+            up: [0.0, 0.0, 1.0],
+            projection: Projection::Orthographic { height: 3.0 },
+        }
+    }
+
+    #[test]
+    fn the_nearest_face_is_picked_and_the_background_is_nothing() {
+        // From above: the top face (face1) fills the middle.
+        let p = pick(
+            &tagged_cube(),
+            &ortho([0.5, 0.5, 5.0]).with_up([0.0, 1.0, 0.0]),
+            300,
+            300,
+        )
+        .unwrap();
+        assert_eq!(p.face(150.0, 150.0), Some("c/b/face1"));
+        assert_eq!(p.top(150.0, 150.0), Some("c/b/face1"));
+        assert_eq!(p.face(2.0, 2.0), None);
+    }
+
+    #[test]
+    fn an_edge_and_a_vertex_within_reach_win_over_the_face() {
+        let cam = ortho([3.0, -4.0, 5.0]);
+        let g = tagged_cube();
+        let p = pick(&g, &cam, 400, 400).unwrap();
+        let v = View::new(&cam, 400, 400);
+        let (x, y) = v.pixel([1.0, 1.0, 1.0]).unwrap();
+        assert_eq!(p.top(x + 2.0, y + 2.0), Some("c/b/vertex7"));
+        let (x, y) = v.pixel([0.5, 0.0, 1.0]).unwrap();
+        assert_eq!(p.top(x, y + 3.0), Some("c/b/edge45"));
+        assert_eq!(p.edge_or_face(x, y + 3.0), Some("c/b/edge45"));
+        // Farther than the reach the face shows again.
+        assert_ne!(p.top(x, y + 30.0), Some("c/b/edge45"));
+    }
+
+    #[test]
+    fn hidden_edges_and_cut_faces_are_not_picked() {
+        // From behind and below, the front top edge (4–5) is behind the
+        // cube: neither of its faces faces the eye.
+        let cam = ortho([-3.0, 5.0, -5.0]);
+        let p = pick(&tagged_cube(), &cam, 400, 400).unwrap();
+        let (x, y) = View::new(&cam, 400, 400).pixel([0.5, 0.0, 1.0]).unwrap();
+        assert_ne!(p.top(x, y + 1.0), Some("c/b/edge45"));
+        // A plane cutting away the cube's upper half: from above, the
+        // bottom face's inside isn't drawn (faces facing away), so nothing.
+        let mut g = tagged_cube();
+        g.sections.push(crate::section::Plane {
+            origin_m: [0.0, 0.0, 0.5],
+            normal: [0.0, 0.0, 1.0],
+        });
+        let p = pick(
+            &g,
+            &ortho([0.5, 0.5, 5.0]).with_up([0.0, 1.0, 0.0]),
+            300,
+            300,
+        )
+        .unwrap();
+        assert_ne!(p.face(150.0, 150.0), Some("c/b/face1"));
+    }
+
+    #[test]
+    fn faces_inside_an_outline_and_under_a_stroke_are_counted() {
+        let cam = ortho([0.5, 0.5, 5.0]).with_up([0.0, 1.0, 0.0]);
+        let p = pick(&tagged_cube(), &cam, 300, 300).unwrap();
+        let square = [
+            (100.0, 100.0),
+            (200.0, 100.0),
+            (200.0, 200.0),
+            (100.0, 200.0),
+        ];
+        let inside = p.faces_inside(&square);
+        assert_eq!(inside.len(), 1);
+        assert_eq!(inside[0].0, "c/b/face1");
+        assert_eq!(inside[0].1, 100 * 100);
+        let under = p.under(&[(0.0, 150.0), (300.0, 150.0)]);
+        assert_eq!(under[0].0, "c/b/face1");
+    }
+
+    #[test]
+    fn a_pick_is_the_same_on_one_thread_and_eight() {
+        let run = |n| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .unwrap()
+                .install(|| {
+                    let p = pick(&tagged_cube(), &ortho([3.0, -4.0, 5.0]), 200, 200).unwrap();
+                    (p.face.clone(), p.edge.clone(), p.vertex.clone())
+                })
+        };
+        assert_eq!(run(1), run(8));
+    }
 
     #[test]
     fn tags_are_kept_only_when_asked_and_cost_no_bytes() {
