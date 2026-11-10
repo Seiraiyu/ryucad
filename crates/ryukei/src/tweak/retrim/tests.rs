@@ -139,6 +139,7 @@ fn a_raised_tops_journal_is_the_fixed_engines() {
         motion: Rigid::translation(Vector3::new(0.0, 0.0, 0.1)),
         tangent: false,
         topology: Topology::Keep,
+        blends: Default::default(),
     };
     let (_, fixed) = move_faces(OpKey(0x13a9), &b, &spec).unwrap();
     let set = |j: &crate::name::Journal| {

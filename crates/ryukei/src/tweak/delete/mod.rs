@@ -66,7 +66,7 @@ pub fn delete_faces_with(
     crate::work::run(work, |meter| delete_faces_in(key, body, spec, meter))
 }
 
-fn delete_faces_in(
+pub(crate) fn delete_faces_in(
     key: OpKey,
     body: &Body,
     spec: &DeleteSpec,

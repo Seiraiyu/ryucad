@@ -205,6 +205,10 @@ pub enum EditRole {
     Edge,
     /// A vertex: its parents are its edges' names, sorted.
     Vertex,
+    /// A stand-in for the key a blend made again cuts or adds a feature
+    /// standing in its strip with (plan 13.C): its parent is the step, 1
+    /// to 4, as [`Name::from_u128`].
+    Feature,
 }
 
 /// The entities of the sheet-metal operations (see [`crate::sheet_metal`]).
@@ -447,6 +451,7 @@ impl fmt::Display for Role {
             Self::Edit(r) => f.write_str(match r {
                 EditRole::Edge => "edit-edge",
                 EditRole::Vertex => "edit-vertex",
+                EditRole::Feature => "edit-feature",
             }),
         }
     }
@@ -694,7 +699,7 @@ mod tests {
         ] {
             roles.push(Role::Fill(r));
         }
-        for r in [EditRole::Edge, EditRole::Vertex] {
+        for r in [EditRole::Edge, EditRole::Vertex, EditRole::Feature] {
             roles.push(Role::Edit(r));
         }
         let mut codes: Vec<[u8; 2]> = roles.iter().map(|r| r.code()).collect();

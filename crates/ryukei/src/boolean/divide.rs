@@ -127,7 +127,7 @@ enum Side {
     Apart,
 }
 
-fn divide_in(
+pub(crate) fn divide_in(
     key: OpKey,
     target: &Body,
     tools: &[Tool],
