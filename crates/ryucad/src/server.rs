@@ -11438,6 +11438,14 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.details["needs"], json!(["annotate", "edit"]));
+        // A mark is an annotation write like any other.
+        let marked = json!({"pins": [], "comment": "here",
+                            "camera": {"eye": [1, -1, 1], "target": [0, 0, 0], "up": [0, 0, 1],
+                                       "projection": {"perspective": {"fov_deg": 40}}},
+                            "marks": {"part": "p", "list": [{"kind": "line", "in": "view",
+                                                             "xy_m": [[0, 0], [0.01, 0]]}]}});
+        let e = call_live(&mut s, &mut live, Some(&h), "annotation.create", marked).unwrap_err();
+        assert_eq!(e.code, Code::ParticipantMode);
         // Reading is never refused.
         call_live(&mut s, &mut live, Some(&h), "part.list", json!({})).unwrap();
         call_live(

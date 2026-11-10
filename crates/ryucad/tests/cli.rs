@@ -7489,6 +7489,188 @@ fn annotations_from_the_cli() {
 }
 
 #[test]
+fn redlines_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=40", "--param", "y=20", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "cylinder",
+        "--id",
+        "boss",
+        "--param",
+        "radius=4",
+        "--param",
+        "height=6",
+        "--origin",
+        "30,10,5",
+        "--operation",
+        "join",
+        "--target",
+        "b",
+    ]);
+    p.ok(&[
+        "view",
+        "save",
+        "p",
+        "corner",
+        "--eye",
+        "120,-100,90",
+        "--target",
+        "20,10,2.5",
+        "--up",
+        "0,0,1",
+        "--ortho",
+        "60 mm",
+    ]);
+    // By shorthand: an arrow from the boss's top towards the slab, and a note.
+    let a = p.ok(&[
+        "annotations",
+        "add",
+        "--comment",
+        "move the boss here",
+        "--model",
+        "p",
+        "--of",
+        "corner",
+        "--arrow",
+        "7,4:-14,5",
+        "--text",
+        "15,15=2 mm",
+    ]);
+    let id = a["annotation"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        a["annotation"]["marks"]["kinds"],
+        serde_json::json!(["arrow", "text"])
+    );
+    assert_eq!(a["marks"][0]["kind"], "arrow");
+    // By JSON, from a file, with a touch of its own.
+    let body = p.ok(&["inspect", "p"])["bodies"][0].clone();
+    let face = format!("p/b/{}", body["faces"][0]["name"].as_str().unwrap());
+    let marks = serde_json::json!({"part": "p", "list": [
+        {"kind": "rectangle", "in": "view", "xy_m": [[-0.01, -0.01], [0.01, 0.01]]},
+        {"kind": "line", "in": "view", "xy_m": [[0, 0], [0.005, 0]], "touches": [{"at": "end", "ref": face}]}]});
+    p.write("marks.json", &marks.to_string());
+    let b = p.ok(&[
+        "annotations",
+        "add",
+        "--comment",
+        "these",
+        "--marks",
+        "@marks.json",
+        "--of",
+        "corner",
+    ]);
+    let id2 = b["annotation"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(b["marks"][1]["touches"][0]["ref"], face.as_str());
+    // Shown in words.
+    let s = p.ok(&["annotations", "show", &id]);
+    assert_eq!(s["marks"][0]["touches"][0]["at"], "tail");
+    assert_eq!(s["marks"][1]["text"], "2 mm");
+    assert!(
+        s["marks"][0]["length"]["value"]
+            .as_str()
+            .unwrap()
+            .ends_with(" mm")
+    );
+    // Rendered: the files are the same both ways.
+    p.ok(&[
+        "render",
+        "--annotation",
+        &id,
+        "--out",
+        "a.png",
+        "--size",
+        "400x300",
+    ]);
+    assert_eq!(
+        fs::read(p.direct.join("a.png")).unwrap(),
+        fs::read(p.daemon.join("a.png")).unwrap()
+    );
+    p.fails(
+        &[
+            "render",
+            "--annotation",
+            &id,
+            "--eye",
+            "1,1,1",
+            "--out",
+            "b.png",
+        ],
+        "usage",
+        2,
+    );
+    // Edited, then taken away.
+    let e = p.ok(&[
+        "annotations",
+        "edit",
+        &id2,
+        "--model",
+        "p",
+        "--line",
+        "0,0:5,5",
+    ]);
+    assert_eq!(e["annotation"]["marks"]["count"], 1);
+    let e = p.ok(&["annotations", "edit", &id2, "--no-marks"]);
+    assert!(e["annotation"].get("marks").is_none());
+    let file: serde_json::Value = serde_json::from_slice(
+        &fs::read(p.direct.join(format!("annotations/{id2}.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(file["format"], 1, "no marks: format 1 again");
+    // Outdated once what a touch names is gone, then resolved.
+    p.ok(&["feature", "delete", "p", "boss"]);
+    let l = p.ok(&["annotations", "list"]);
+    let ours = l["annotations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(ours["outdated"], true);
+    assert_eq!(ours["outdated_marks"][0]["at"], "tail");
+    p.ok(&["annotations", "resolve", &id, "--note", "moved"]);
+    p.ok(&[
+        "render",
+        "--annotation",
+        &id,
+        "--out",
+        "c.png",
+        "--size",
+        "400x300",
+    ]);
+    assert_ne!(
+        fs::read(p.direct.join("a.png")).unwrap(),
+        fs::read(p.direct.join("c.png")).unwrap(),
+        "resolved: its marks fade"
+    );
+    // A shorthand that doesn't read.
+    p.fails(
+        &[
+            "annotations",
+            "add",
+            "--comment",
+            "x",
+            "--model",
+            "p",
+            "--of",
+            "corner",
+            "--arrow",
+            "1,2",
+        ],
+        "invalid_param",
+        1,
+    );
+}
+
+#[test]
 fn modes_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
