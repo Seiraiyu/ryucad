@@ -271,35 +271,41 @@ pub fn stack_symbol(
 pub fn port_symbol(key: &str, name: &str, flow: Flow, net: Option<usize>) -> Part {
     let w = up(font::width(name, SIZE) + 2 * GRID);
     let h = GRID / 2;
+    let t = GRID / 2; // a point's length
     let inward = !matches!(flow, Flow::Out);
-    // The flag's outline, from the pin end round its body.
-    let (pts, side, text_x): (Vec<Point>, Side, Nm) = if inward {
-        (
-            vec![
-                [0, 0],
-                [-GRID / 2, h],
-                [-w, h],
-                [-w, -h],
-                [-GRID / 2, -h],
-                [0, 0],
-            ],
-            Side::Right,
-            -w + GRID / 2,
-        )
+    // The flag's outline, shaped by its flow (plan 2.C): pointed at its
+    // pin where the signal comes in, at its far end where it goes out,
+    // both ways for both, flat for passive and power ports. `x0` is the
+    // end at the pin, `x1` the far end: the flag lies to its pin's left
+    // for an inward port and to its right else.
+    let s: Nm = if inward { -1 } else { 1 };
+    let (x0, x1) = (0, s * w);
+    let point_at_pin = matches!(flow, Flow::In | Flow::Bidirectional);
+    let point_far = matches!(flow, Flow::Out | Flow::Bidirectional);
+    let mut pts: Vec<Point> = Vec::new();
+    if point_at_pin {
+        pts.push([x0, 0]);
+        pts.push([x0 + s * t, h]);
     } else {
-        (
-            vec![
-                [0, 0],
-                [GRID / 2, h],
-                [w, h],
-                [w, -h],
-                [GRID / 2, -h],
-                [0, 0],
-            ],
-            Side::Left,
-            GRID,
-        )
-    };
+        pts.push([x0, h]);
+    }
+    if point_far {
+        pts.push([x1 - s * t, h]);
+        pts.push([x1, 0]);
+        pts.push([x1 - s * t, -h]);
+    } else {
+        pts.push([x1, h]);
+        pts.push([x1, -h]);
+    }
+    if point_at_pin {
+        pts.push([x0 + s * t, -h]);
+        pts.push([x0, 0]);
+    } else {
+        pts.push([x0, -h]);
+        pts.push([x0, h]);
+    }
+    let side = if inward { Side::Right } else { Side::Left };
+    let text_x = if inward { -w + GRID / 2 } else { GRID };
     Part {
         key: key.to_owned(),
         kind: PartKind::Port { flow },
@@ -309,7 +315,7 @@ pub fn port_symbol(key: &str, name: &str, flow: Flow, net: Option<usize>) -> Par
         graphics: vec![
             Graphic::Polyline {
                 points: pts,
-                fill: Fill::None,
+                fill: Fill::Port,
             },
             Graphic::Text {
                 text: name.to_owned(),
@@ -475,5 +481,41 @@ mod tests {
             stack_symbol("k", "Channel", &single),
             block_symbol("k", "Channel", &one)
         );
+    }
+
+    #[test]
+    fn a_port_is_a_filled_flag_shaped_by_its_flow() {
+        use crate::input::{Fill, Flow, Graphic};
+        let outline = |flow| match &port_symbol("port:p", "SDA", flow, None).graphics[0] {
+            Graphic::Polyline { points, fill } => (points.clone(), *fill),
+            g => panic!("{g:?}"),
+        };
+        for flow in [
+            Flow::In,
+            Flow::Out,
+            Flow::Bidirectional,
+            Flow::Passive,
+            Flow::Power,
+        ] {
+            let (pts, fill) = outline(flow);
+            assert_eq!(fill, Fill::Port, "{flow:?} is filled");
+            assert_eq!(pts.first(), pts.last(), "{flow:?} is closed");
+        }
+        // In: pointed at its pin. Out: flat at its pin, pointed at the far
+        // end. Both ways: pointed at both. Passive and power: flat at both.
+        // The closing point repeats the first: count the rest.
+        let pointed_at =
+            |pts: &[Point], x: Nm| pts[..pts.len() - 1].iter().filter(|p| p[0] == x).count() == 1;
+        let (i, _) = outline(Flow::In);
+        assert!(pointed_at(&i, 0));
+        let (o, _) = outline(Flow::Out);
+        assert!(!pointed_at(&o, 0));
+        let far = o.iter().map(|p| p[0]).max().unwrap();
+        assert!(pointed_at(&o, far));
+        let (bd, _) = outline(Flow::Bidirectional);
+        let lo = bd.iter().map(|p| p[0]).min().unwrap();
+        assert!(pointed_at(&bd, lo) && pointed_at(&bd, 0));
+        let (pa, _) = outline(Flow::Passive);
+        assert_eq!(pa.len(), 5, "a rectangle");
     }
 }

@@ -24,6 +24,8 @@ pub const TEXT: &str = "#202020";
 pub const POWER: &str = "#a01818";
 /// Net labels and not-connected marks.
 pub const LABEL: &str = "#1d3f8f";
+/// A block port's flag: a light blue tint, under dark text.
+pub const PORT_FILL: &str = "#dce6f5";
 /// A sheet's name, beside it on the canvas.
 pub const NAME: &str = "#606060";
 /// Every line's width.
@@ -112,6 +114,7 @@ fn graphic(items: &mut Vec<Item>, shape: &Shape, g: &Graphic) {
         Fill::None => None,
         Fill::Body => Some(BODY),
         Fill::Outline => Some(INK),
+        Fill::Port => Some(PORT_FILL),
     };
     match g {
         Graphic::Rect {

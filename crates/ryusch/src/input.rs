@@ -209,6 +209,8 @@ pub enum Fill {
     None,
     Body,
     Outline,
+    /// A block port's flag: the ports' light tint (plan 2.C).
+    Port,
 }
 
 /// A piece of a part's body, in its own frame.
