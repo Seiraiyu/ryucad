@@ -8,7 +8,10 @@
 //! sound, written at format 2 and read back as written. The bytes are
 //! also read as `approvals` and as a release tag's message: an attestation
 //! that parses writes back to its own canonical text, and a verdict is
-//! always one of four, never a panic. Any panic is a bug.
+//! always one of four, never a panic. And the bytes are read as a release
+//! package (design 436): as a zip, a manifest and a package attestation,
+//! each a typed verdict; a package that verifies, written again, reads
+//! back the same. Any panic is a bug.
 
 #![no_main]
 
@@ -31,11 +34,13 @@ const SETTINGS: &str = r#"{"format": 1, "kind": "ryupdm.config",
   }}"#;
 
 fuzz_target!(|data: &[u8]| {
+    package_bytes(data);
     let Ok(text) = std::str::from_utf8(data) else {
         return;
     };
     amounts(text);
     attestation(data);
+    package(data);
     let Ok(v) = canonical::parse(text) else {
         return;
     };
@@ -116,6 +121,48 @@ fn attestation(data: &[u8]) {
         },
     );
     // No key is trusted, so nothing verifies.
+    assert!(matches!(v, Verdict::Invalid(_)));
+}
+
+/// The bytes as a package's zip: a typed verdict, and a package that
+/// verifies, written again, reads back the same.
+fn package_bytes(data: &[u8]) {
+    use ryupdm::package::{archive, verify::files, zip};
+    let _ = zip::read(data, 1 << 20, &[]);
+    if let Ok((m, entries)) = files(data) {
+        let again = archive(&m, &entries).expect("a verified package writes");
+        assert_eq!(files(&again).expect("and reads back"), (m, entries));
+    }
+}
+
+/// The text as a manifest and as a package tag's message.
+fn package(data: &[u8]) {
+    use ryupdm::package::attest::{Expect, Verdict, verify_message};
+    use ryupdm::package::{Manifest, archive, verify::files};
+    if let Some(v) = std::str::from_utf8(data).ok().and_then(|t| canonical::parse(t).ok())
+        && let Ok(m) = Manifest::from_json(&v)
+    {
+        let again = Manifest::from_json(&m.to_json()).expect("a written manifest reads");
+        assert_eq!(again, m);
+        assert_eq!(again.hash(), m.hash());
+        // The manifest alone: its files are missing, never a panic.
+        let _ = files(&archive(&m, &[]).expect("a manifest writes"));
+    }
+    let project = ryucad::doc::id::ProjectId::parse("0123456789abcdef0123456789abcdef").unwrap();
+    let part = Id::parse("p", "part").unwrap();
+    let keys = std::collections::BTreeMap::new();
+    let v = verify_message(
+        data,
+        &Expect {
+            project: &project,
+            part: &part,
+            label: "A",
+            commit: &"0".repeat(40),
+            record: &"0".repeat(64),
+            hash: None,
+            keys: &keys,
+        },
+    );
     assert!(matches!(v, Verdict::Invalid(_)));
 }
 
