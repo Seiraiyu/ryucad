@@ -1,0 +1,61 @@
+{
+  "annotations": {
+    "d1": {
+      "at": [
+        "17.678 mm",
+        "17.678 mm"
+      ],
+      "of": "disc/a8c3c52adf258c3acf835b0912e07aa6",
+      "tolerance": {
+        "fit": "H7"
+      },
+      "type": "diameter",
+      "view": "v2"
+    }
+  },
+  "format": 1,
+  "kind": "ryucad.drawing",
+  "name": "Wheel-2",
+  "sheets": {
+    "s1": {
+      "name": "Sheet 1",
+      "scale": "1:1",
+      "size": "ansi_b"
+    }
+  },
+  "views": {
+    "v1": {
+      "at": [
+        "60.909 mm",
+        "144.583 mm"
+      ],
+      "orient": "front",
+      "sheet": "s1",
+      "type": "base"
+    },
+    "v2": {
+      "from": "v1",
+      "offset": "73.909 mm",
+      "sheet": "s1",
+      "side": "top",
+      "type": "projected"
+    },
+    "v3": {
+      "from": "v1",
+      "offset": "101.817 mm",
+      "sheet": "s1",
+      "side": "right",
+      "type": "projected"
+    },
+    "v4": {
+      "at": [
+        "370.891 mm",
+        "225.955 mm"
+      ],
+      "from": "v1",
+      "sheet": "s1",
+      "side": "iso",
+      "type": "projected"
+    }
+  }
+}

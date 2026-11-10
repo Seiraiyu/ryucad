@@ -1,5 +1,5 @@
 //! Icons (design 199, Fonts and icons): Phosphor Regular's glyphs by code
-//! point, and ryucad's own 38 CAD glyphs as stroke tables
+//! point, and ryucad's own 39 CAD glyphs as stroke tables
 //! ([`glyphs`], ported stroke for stroke from `design/app/glyphs.js`),
 //! drawn alike at any size and tinted by state. An icon never stands
 //! alone: [`button`] gives every icon button its command's title as its
@@ -227,7 +227,7 @@ pub fn button(
 }
 
 pub mod glyphs {
-    //! ryucad's 38 CAD glyphs on Phosphor's 256-unit grid with its
+    //! ryucad's 39 CAD glyphs on Phosphor's 256-unit grid with its
     //! 16-unit stroke, round caps and joins: `design/app/glyphs.js`'s
     //! table, stroke for stroke.
 
@@ -276,10 +276,11 @@ pub mod glyphs {
         Draft,
         MoveFace,
         ReplaceFace,
+        Drawing,
     }
 
     impl Glyph {
-        pub const ALL: [Glyph; 38] = [
+        pub const ALL: [Glyph; 39] = [
             Glyph::Cone,
             Glyph::Torus,
             Glyph::Extrude,
@@ -318,6 +319,7 @@ pub mod glyphs {
             Glyph::Draft,
             Glyph::MoveFace,
             Glyph::ReplaceFace,
+            Glyph::Drawing,
         ];
 
         /// The glyph's name in `glyphs.js`.
@@ -361,6 +363,7 @@ pub mod glyphs {
                 Glyph::Draft => "draft",
                 Glyph::MoveFace => "move-face",
                 Glyph::ReplaceFace => "replace-face",
+                Glyph::Drawing => "drawing",
             }
         }
     }
@@ -802,6 +805,29 @@ pub mod glyphs {
             Glyph::ReplaceFace => {
                 s.extend(cabinet(40.0, 128.0, 144.0, 88.0, 48.0, -40.0));
                 s.push(Stroke::Arc([136.0, 108.0, 96.0, 40.0], 200.0, 340.0, 10.0));
+            }
+            Glyph::Drawing => {
+                // A sheet, its title block in the corner, and a view with
+                // a hole on it.
+                s.push(line(&[
+                    [40.0, 24.0],
+                    [216.0, 24.0],
+                    [216.0, 232.0],
+                    [40.0, 232.0],
+                    [40.0, 24.0],
+                ]));
+                s.push(line(&[[128.0, 232.0], [128.0, 192.0], [216.0, 192.0]]));
+                s.push(thin(
+                    &[
+                        [72.0, 64.0],
+                        [176.0, 64.0],
+                        [176.0, 152.0],
+                        [72.0, 152.0],
+                        [72.0, 64.0],
+                    ],
+                    10.0,
+                ));
+                s.push(Stroke::Ellipse([124.0, 108.0, 20.0, 20.0], 10.0, false));
             }
         }
         s

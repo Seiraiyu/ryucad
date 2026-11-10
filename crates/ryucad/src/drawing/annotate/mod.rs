@@ -73,6 +73,9 @@ pub struct Built {
     /// A dimension's offset, and whether ryucad chose it.
     pub offset: Option<f64>,
     pub offset_placed: bool,
+    /// The sheet direction a linear dimension's offset is measured along
+    /// (unit): a drag moves its line by the drag along it.
+    pub normal: Option<P>,
     /// Its items, as indices into its sheet's.
     pub items: std::ops::Range<usize>,
     pub error: Option<Error>,
@@ -99,6 +102,7 @@ struct Out {
     at_placed: bool,
     offset: Option<f64>,
     offset_placed: bool,
+    normal: Option<P>,
     lines: Vec<[P; 2]>,
     boxes: Vec<[P; 2]>,
     measure: Option<Measure>,
@@ -272,6 +276,7 @@ pub(super) fn all(
                     at_placed: out.at_placed,
                     offset: out.offset,
                     offset_placed: out.offset_placed,
+                    normal: out.normal,
                     items: first..first,
                     error: None,
                     lines: out.lines,
@@ -320,6 +325,7 @@ pub(super) fn all(
                     at_placed: false,
                     offset: None,
                     offset_placed: false,
+                    normal: None,
                     items: first..first,
                     error: Some(e),
                     lines: Vec::new(),
@@ -1216,6 +1222,7 @@ fn linear_dim(
         at_placed: written.is_none(),
         offset: Some(offset),
         offset_placed: placed,
+        normal: Some(normal),
         lines,
         boxes: vec![tb],
         ..Out::default()

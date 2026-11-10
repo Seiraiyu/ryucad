@@ -20,10 +20,10 @@ pollster = "0.4"
 rayon = "1"
 # Native Open dialogs: the XDG portal on Linux (all Rust), AppKit, Win32.
 rfd = "0.17"
-ryucad = { path = "../ryucad" }
-# Markup's Shift-snapped angles, and the colour-blindness test's arithmetic:
-# the same on every platform (already in the build through ryucad).
+# The Drawings tile cuts arcs and ellipses, and Markup snaps its angles,
+# by the same functions everywhere.
 ryu-math = { path = "../ryu-math" }
+ryucad = { path = "../ryucad" }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
 # Only for a feature of eframe's winit: on Wayland compositors that leave

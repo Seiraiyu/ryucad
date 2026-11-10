@@ -242,6 +242,7 @@ pub fn rows(ws: &Workspace) -> (Vec<Row>, bool) {
         merge: ws.merge.as_ref().map(|m| &m.status),
         pdm: &pdm,
         whole,
+        drawings: &ws.drawing_rows,
     };
     (crate::core::tree::rows(&src), whole)
 }
@@ -565,6 +566,11 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                     view.tree_take_focus = true;
                 }
                 if did.clicked
+                    && let Some((p, d)) = &row.drawing
+                {
+                    acts.push(Act::Drawing(p.clone(), d.clone()));
+                }
+                if did.clicked
                     && let Some(k) = &row.choose
                 {
                     let chosen = view.chosen.as_ref() == Some(k);
@@ -669,6 +675,7 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             Act::Hide(r) => ws.set_visibility(vec![r], Vec::new(), Vec::new(), false),
             Act::Show(r) => ws.set_visibility(Vec::new(), vec![r], Vec::new(), false),
             Act::Menu(_) => {}
+            Act::Drawing(part, drawing) => ws.open_drawing(&part, &drawing),
         }
     }
     if let Some((id, r)) = run {

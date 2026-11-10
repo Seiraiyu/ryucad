@@ -486,8 +486,9 @@ fn drawing_atom(at: &str) -> bool {
 }
 
 /// A drawing: per member and field (a position, a list, a reference one
-/// value), but a view whose `type` changes on either side, or that both
-/// sides added differently, is one value: its fields mean other things.
+/// value), but a view whose `type` changes on either side while the other
+/// changes it too, or that both sides added differently, is one value: its
+/// fields mean other things.
 fn drawing(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) -> Value {
     let Some(base) = base else {
         return walk.whole(None, ours, theirs);
@@ -507,7 +508,11 @@ fn drawing(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
             let (bk, ok, tk) = (bv.get(k), ov.get(k), tv.get(k));
             let ty = |v: Option<&Value>| v.and_then(|v| v.get("type")).cloned();
             let retyped = match (bk, ok, tk) {
-                (Some(_), Some(_), Some(_)) => ty(bk) != ty(ok) || ty(bk) != ty(tk),
+                // Retyped on one side and left alone on the other takes
+                // the side that changed, as any value does.
+                (Some(_), Some(_), Some(_)) => {
+                    (ty(bk) != ty(ok) || ty(bk) != ty(tk)) && ok != bk && tk != bk && ok != tk
+                }
                 (None, Some(_), Some(_)) => ok != tk,
                 _ => false,
             };
@@ -3092,6 +3097,14 @@ mod tests {
             "normal_to": {"feature": "b", "name": "0123456789abcdef0123456789abcdef"}});
         let m = merge(Some(&base), &ours, &retyped);
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/views/v2"]);
+        // Retyped on one side and left alone on the other is that side's
+        // (the merge fuzz target's find).
+        let m = merge(Some(&base), &base, &retyped);
+        assert!(m.conflicts.is_empty());
+        assert_eq!(m.value, retyped);
+        let m = merge(Some(&base), &retyped, &base);
+        assert!(m.conflicts.is_empty());
+        assert_eq!(m.value, retyped);
         // A named orient against a face's is one value.
         let mut normal = base.clone();
         normal["views"]["v1"]["orient"] =

@@ -158,6 +158,9 @@ pub struct SheetBuilt {
     pub keep_out: Vec<[P; 2]>,
     /// Its annotations as drawn.
     pub annotations: Vec<annotate::Built>,
+    /// The model entity each view's curve draws, by the item's index:
+    /// what picking a curve in the app chooses.
+    pub sources: BTreeMap<usize, String>,
     /// The hole features its views show, each once: its part, its hole,
     /// a view showing it and a wall's reference there (for the lint).
     pub holes: Vec<(Id, Id, Key, String)>,
@@ -873,10 +876,15 @@ fn plans(
     Ok(out)
 }
 
+/// A path a view draws, the kind of line it is, whether its visibility
+/// is uncertain, and the model entity it draws (`<part>/<solid>/<name>`,
+/// an occurrence's with its instance path) where it draws one.
+type Line = (Path, LineKind, bool, Option<String>);
+
 /// What one view drew in its own frame: paths in model metres relative to
 /// its anchor's image, each with the kind of line it is.
 struct Drawn {
-    lines: Vec<(Path, LineKind, bool)>,
+    lines: Vec<Line>,
     /// Text it writes (a flat's bend notes): what, where on its baseline's
     /// middle, and its angle, in the same frame.
     texts: Vec<(String, P, f64)>,
@@ -932,7 +940,7 @@ fn drawn(p: &Projection, plan: &Plan, src: &Source) -> Drawn {
         return drawn_flat(flat, *notes);
     }
     let c = plan.frame.image(plan.anchor);
-    let mut lines: Vec<(Path, LineKind, bool)> = Vec::new();
+    let mut lines: Vec<Line> = Vec::new();
     let mut counts = [0; 3];
     let mut uncertain = Vec::new();
     let mut last: Option<(ryukei::project::Source, LineKind)> = None;
@@ -1035,6 +1043,9 @@ fn drawn(p: &Projection, plan: &Plan, src: &Source) -> Drawn {
                     body, face_name, ..
                 } => (body, face_name),
             };
+            let entity = src
+                .get(body as usize)
+                .map(|(_, _, r)| format!("{r}/{name}"));
             let n = named.entry((body as usize, name.to_string())).or_default();
             if kind == LineKind::Hidden {
                 n.hidden = true;
@@ -1049,7 +1060,7 @@ fn drawn(p: &Projection, plan: &Plan, src: &Source) -> Drawn {
                 _ => false,
             };
             if same(piece.source)
-                && let Some((prev, _, u)) = lines.last_mut()
+                && let Some((prev, _, u, _)) = lines.last_mut()
                 && distance(
                     prev.segments.last().map_or(prev.start, Segment::end),
                     path.start,
@@ -1058,7 +1069,7 @@ fn drawn(p: &Projection, plan: &Plan, src: &Source) -> Drawn {
                 join(prev, path);
                 *u |= unsure;
             } else {
-                lines.push((path, kind, unsure));
+                lines.push((path, kind, unsure, entity));
             }
             last = Some((piece.source, kind));
         }
@@ -1073,7 +1084,7 @@ fn drawn(p: &Projection, plan: &Plan, src: &Source) -> Drawn {
                     [i[0] - c[0], i[1] - c[1]]
                 })
                 .collect();
-            lines.push((Path::polyline(&pts, false), LineKind::Phantom, false));
+            lines.push((Path::polyline(&pts, false), LineKind::Phantom, false, None));
         }
     }
     let mut bounds = (lo[0] <= hi[0]).then_some([lo, hi]);
@@ -1104,7 +1115,13 @@ fn drawn_flat(flat: &crate::sheet_metal::flat::FlatOf, notes: bool) -> Drawn {
         for s in &l.segments {
             match curves::plane(&s.curve, s.t0, s.t1) {
                 Ok(path) => {
-                    lines.push((path.moved([-m[0], -m[1]]), LineKind::Visible, false));
+                    let entity = format!("{}/{}/{}", flat.part, flat.solid, s.edge);
+                    lines.push((
+                        path.moved([-m[0], -m[1]]),
+                        LineKind::Visible,
+                        false,
+                        Some(entity),
+                    ));
                     counts[0] += 1;
                 }
                 Err(curves::Uncut) => {
@@ -1123,7 +1140,12 @@ fn drawn_flat(flat: &crate::sheet_metal::flat::FlatOf, notes: bool) -> Drawn {
             [b.start.x - m[0], b.start.y - m[1]],
             [b.end.x - m[0], b.end.y - m[1]],
         );
-        lines.push((Path::polyline(&[a, e], false), LineKind::Phantom, false));
+        lines.push((
+            Path::polyline(&[a, e], false),
+            LineKind::Phantom,
+            false,
+            None,
+        ));
         if notes {
             // Reading left to right, at the line's middle.
             let (mut dx, mut dy) = (e[0] - a[0], e[1] - a[1]);
@@ -1457,6 +1479,7 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
         let placed = layout(&plans, &unit_boxes, &on, &views_scale, &t);
         let mut items = template_items(session, part, &file, &t, sheet, chosen, count, style);
         let mut views = Vec::new();
+        let mut sources = BTreeMap::new();
         for (j, i) in on.iter().enumerate() {
             let plan = &plans[*i].0;
             let s = views_scale[j];
@@ -1470,7 +1493,10 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
             let first = items.len();
             let (counts, error) = match &drawings[*i] {
                 Ok(d) => {
-                    for (path, kind, unsure) in &d.lines {
+                    for (path, kind, unsure, entity) in &d.lines {
+                        if let Some(e) = entity {
+                            sources.insert(items.len(), e.clone());
+                        }
                         let mut stroke = style.stroke(*kind);
                         if *unsure {
                             stroke.colour = WARNING;
@@ -1571,6 +1597,7 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
             area: t.area,
             keep_out: t.keep_out.clone(),
             annotations: Vec::new(),
+            sources,
             holes: Vec::new(),
         });
     }
@@ -2189,6 +2216,42 @@ pub(crate) mod tests {
                 _ => None,
             })
             .sum()
+    }
+
+    #[test]
+    fn every_curve_of_a_view_names_the_entity_it_draws() {
+        let views =
+            json!({"v1": {"type": "base", "sheet": "s1", "orient": "front", "scale": "1:1"}});
+        let (_d, mut s) = drawn(40.0, 20.0, 10.0, views);
+        let b = build(&mut s, &id("p"), &id("d")).unwrap();
+        let sheet = &b.sheets[0];
+        let v = &sheet.views[0];
+        // The front of a box: its four visible edges, each named, inside
+        // the view's own items.
+        let named: Vec<&String> = v
+            .items
+            .clone()
+            .filter_map(|i| sheet.sources.get(&i))
+            .collect();
+        assert_eq!(named.len(), visible_in(sheet, v).len(), "{named:?}");
+        assert_eq!(named.len(), 4);
+        for e in &named {
+            assert!(e.starts_with("p/b/") && e.len() == "p/b/".len() + 32, "{e}");
+        }
+        // Nothing outside a view (the template, its captions) names one.
+        assert!(sheet.sources.keys().all(|i| v.items.contains(i)));
+        let r = crate::drawing::request::get(&mut s, "p", "d", None, true).unwrap();
+        let j = &r["sheets"][0];
+        assert_eq!(j["views"][0]["items"], json!([v.items.start, v.items.end]));
+        let with: Vec<&Value> = j["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i.get("entity").is_some())
+            .collect();
+        assert_eq!(with.len(), 4);
+        // And the file as written, for the app's forms and drags.
+        assert_eq!(r["file"]["views"]["v1"]["orient"], "front");
     }
 
     #[test]
