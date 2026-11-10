@@ -179,6 +179,62 @@ pub(crate) fn face_beside(
     )
 }
 
+/// The plane of a planar curve along which two surfaces meet: a circle's
+/// or an ellipse's, or the plane through three of a NURBS's control
+/// points (spread as far apart as they go) when every control point lies
+/// within `tolerance` of it (so the curve does, inside their hull). For a
+/// line, the plane through it square to the surfaces' common tangent
+/// plane at its middle (neighbouring legs of a sweep tangent along a
+/// section, #260): surfaces tangent along the line lie either side of it
+/// where each leaves the line its own way. The plane only separates
+/// faces, each certified on its side by [`face_beside`], so a wrong plane
+/// only fails; the strip round the curve covers how far it lies from it.
+pub(crate) fn section_plane(
+    curve: &crate::geom::Curve,
+    interval: [f64; 2],
+    tolerance: f64,
+    a: &Surface,
+    b: &Surface,
+) -> Option<Surface> {
+    use crate::geom::{Curve, Frame, Plane};
+    let frame = match curve {
+        Curve::Line(l) => {
+            let p = curve.point((interval[0] + interval[1]) / 2.0);
+            let normal = |s: &Surface| {
+                let (u, v) = s.project(p).param;
+                s.normal(u, v)
+            };
+            let n = normal(a)?.get() + normal(b)?.get();
+            let d = l.dir().get();
+            Frame::new(p, d.cross(n), d).ok()?
+        }
+        Curve::Circle(c) => *c.frame(),
+        Curve::Ellipse(c) => *c.frame(),
+        Curve::Nurbs(n) => {
+            let pts: Vec<Point3> = n.control_points().collect();
+            // Three control points spread as far apart as they go: the
+            // first, the farthest from it, and the farthest from the line
+            // through both.
+            let a0 = pts[0];
+            let far = |f: &dyn Fn(Point3) -> f64| {
+                pts.iter()
+                    .copied()
+                    .max_by(|p, q| f(*p).total_cmp(&f(*q)))
+                    .expect("control points")
+            };
+            let b = far(&|p| p.distance(a0));
+            let c = far(&|p| (p - a0).cross(b - a0).length());
+            let frame = Frame::new(a0, (b - a0).cross(c - a0), b - a0).ok()?;
+            let off = |p: Point3| (p - a0).dot(frame.z().get()).abs();
+            if pts.iter().any(|&p| off(p) > tolerance) {
+                return None;
+            }
+            frame
+        }
+    };
+    Some(Surface::Plane(Plane::new(frame)))
+}
+
 /// Whether a face of a body is certified to keep at least `r` from `q`:
 /// every part of its parameter box that isn't certified outside the face
 /// ([`outside`]) has the sphere of radius `r` about `q`'s implicit form
