@@ -8,8 +8,14 @@
 pub(crate) mod fit;
 pub(crate) mod recognise;
 
+#[cfg(test)]
+mod tests;
+
+use crate::Error;
 use crate::blend::BlendKind;
 use crate::name::Name;
+use crate::topo::Body;
+use crate::work::Work;
 
 /// How close a face must be to a blend to be read as one.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -68,4 +74,18 @@ impl Recognition {
         }
         self.corners.iter().position(|c| c.face == face).map(Err)
     }
+}
+
+/// `body`'s fillets, chamfers and ball corners. Read only.
+pub fn recognise_blends(body: &Body, opts: &RecogniseOptions) -> Result<Recognition, Error> {
+    recognise_blends_with(body, opts, &Work::unlimited())
+}
+
+/// [`recognise_blends`] under `work`.
+pub fn recognise_blends_with(
+    body: &Body,
+    opts: &RecogniseOptions,
+    work: &Work,
+) -> Result<Recognition, Error> {
+    crate::work::run(work, |m| recognise::recognise(body, opts, m))
 }

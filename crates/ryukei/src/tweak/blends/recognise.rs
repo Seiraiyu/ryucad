@@ -27,10 +27,8 @@
 //! chain. A face that is nearly a blend but not within the tolerance is
 //! left out.
 
-// Taken out in Task 5, once every function here is used.
-#![allow(dead_code, unused_imports)]
-
 use super::{Corner, RecogniseOptions, Recognised, Recognition};
+use crate::blend::convex::tangent_along;
 use crate::blend::{BlendKind, Chamfer};
 use crate::geom::{Circle, Curve, Line, Point3, Surface, Vector3};
 use crate::name::Name;
@@ -494,4 +492,218 @@ pub(crate) fn chamfer(body: &Body, f: FaceId, tol: f64) -> Option<Candidate> {
         }
     }
     if ambiguous { None } else { found }
+}
+
+/// A blend's size: a fillet's radius, a chamfer's larger setback.
+pub(crate) fn size(kind: &BlendKind) -> f64 {
+    match *kind {
+        BlendKind::Fillet { radius } => radius,
+        BlendKind::Chamfer(Chamfer::Equal { distance }) => distance,
+        BlendKind::Chamfer(Chamfer::Distances { first, second, .. }) => first.max(second),
+        BlendKind::Chamfer(Chamfer::DistanceAngle { distance, .. }) => distance,
+    }
+}
+
+/// Whether two kinds are one within `tol`.
+fn alike(a: &BlendKind, b: &BlendKind, tol: f64) -> bool {
+    match (a, b) {
+        (BlendKind::Fillet { radius: x }, BlendKind::Fillet { radius: y }) => (x - y).abs() <= tol,
+        (
+            BlendKind::Chamfer(Chamfer::Equal { distance: x }),
+            BlendKind::Chamfer(Chamfer::Equal { distance: y }),
+        ) => (x - y).abs() <= tol,
+        (
+            BlendKind::Chamfer(Chamfer::Distances {
+                first: a1,
+                second: a2,
+                first_face: fa,
+            }),
+            BlendKind::Chamfer(Chamfer::Distances {
+                first: b1,
+                second: b2,
+                first_face: fb,
+            }),
+        ) => fa == fb && (a1 - b1).abs() <= tol && (a2 - b2).abs() <= tol,
+        _ => false,
+    }
+}
+
+/// Whether blend faces `a` and `b` of one kind run on into each other
+/// across `edge`: fillets where the edge is a section of both canals
+/// (their spines meet there), chamfers where their faces are tangent all
+/// along it.
+fn joins(body: &Body, edge: EdgeId, a: FaceId, b: FaceId, kind: &BlendKind, tol: f64) -> bool {
+    match kind {
+        BlendKind::Fillet { .. } => [a, b]
+            .into_iter()
+            .all(|f| canal(body, f, tol).is_some_and(|(c, _)| section(body, &c, edge, tol))),
+        _ => {
+            let r = size(kind).max(10.0 * LINEAR_RESOLUTION);
+            tangent_along(body, edge, slack(body, edge, r, tol)) == Some(true)
+        }
+    }
+}
+
+/// `body`'s blends and corners.
+pub(crate) fn recognise(
+    body: &Body,
+    opts: &RecogniseOptions,
+    m: &Meter,
+) -> Result<Recognition, Error> {
+    let tol = opts.tolerance;
+    if !(LINEAR_RESOLUTION..=crate::tol::TOLERANCE_CAP).contains(&tol) {
+        return Err(TweakError::BadTolerance.into());
+    }
+    let faces: Vec<FaceId> = body.faces().collect();
+    let halt = |f: FaceId| -> Error {
+        TweakError::Uncertain {
+            at: body.faces[f].name,
+        }
+        .into()
+    };
+    let read: Vec<Result<Option<Candidate>, Error>> = m.par_map(&faces, |m, &f| {
+        m.charge(1).map_err(|_| halt(f))?;
+        let found = fillet(body, f, tol, m).or_else(|| chamfer(body, f, tol));
+        if m.halted() {
+            return Err(halt(f));
+        }
+        Ok(found)
+    });
+    let mut found: Vec<Candidate> = Vec::new();
+    for r in read {
+        if let Some(c) = r? {
+            found.push(c);
+        }
+    }
+    // Chamfers standing on chamfers: the narrower first, by name.
+    found.sort_by(|a, b| {
+        let chamfer = |c: &Candidate| matches!(c.kind, BlendKind::Chamfer(_));
+        (chamfer(a), a.share, body.faces[a.face].name)
+            .partial_cmp(&(chamfer(b), b.share, body.faces[b.face].name))
+            .expect("finite")
+    });
+    let mut kept: Vec<Candidate> = Vec::new();
+    for c in found {
+        if matches!(c.kind, BlendKind::Chamfer(_)) {
+            let clash = kept
+                .iter()
+                .any(|k| k.sides.contains(&c.face) || c.sides.contains(&k.face));
+            if clash {
+                continue;
+            }
+        }
+        kept.push(c);
+    }
+    kept.sort_by_key(|c| body.faces[c.face].name);
+    // One blend: faces on one surface with the same supports and size.
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (i, c) in kept.iter().enumerate() {
+        let s = &body.surfaces[body.faces[c.face].surface];
+        let home = groups.iter_mut().find(|g| {
+            let k = &kept[g[0]];
+            k.sides == c.sides
+                && alike(&k.kind, &c.kind, tol)
+                && crate::intersect::coincident(&body.surfaces[body.faces[k.face].surface], s)
+                    == Some(true)
+        });
+        match home {
+            Some(g) => g.push(i),
+            None => groups.push(vec![i]),
+        }
+    }
+    let group_of: BTreeMap<FaceId, usize> = groups
+        .iter()
+        .enumerate()
+        .flat_map(|(g, members)| {
+            let kept = &kept;
+            members.iter().map(move |&i| (kept[i].face, g))
+        })
+        .collect();
+    // Chains: blends of one size joined across tangent edges.
+    let mut chain: Vec<usize> = (0..groups.len()).collect();
+    fn root(chain: &mut [usize], mut i: usize) -> usize {
+        while chain[i] != i {
+            chain[i] = chain[chain[i]];
+            i = chain[i];
+        }
+        i
+    }
+    for (g, members) in groups.iter().enumerate() {
+        for &i in members {
+            let c = &kept[i];
+            for e in edges_of(body, c.face) {
+                let Some(other) = across(body, e, c.face) else {
+                    continue;
+                };
+                let Some(&h) = group_of.get(&other) else {
+                    continue;
+                };
+                if h == g || !alike(&kept[groups[h][0]].kind, &c.kind, tol) {
+                    continue;
+                }
+                if joins(body, e, c.face, other, &c.kind, tol) {
+                    let (a, b) = (root(&mut chain, g), root(&mut chain, h));
+                    chain[a.max(b)] = a.min(b);
+                }
+            }
+        }
+    }
+    let mut ids: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut blends = Vec::new();
+    for (g, members) in groups.iter().enumerate() {
+        let r = root(&mut chain, g);
+        let next = ids.len();
+        let id = *ids.entry(r).or_insert(next);
+        let first = &kept[members[0]];
+        let mut fs: Vec<Name> = members
+            .iter()
+            .map(|&i| body.faces[kept[i].face].name)
+            .collect();
+        fs.sort();
+        blends.push(Recognised {
+            faces: fs,
+            kind: first.kind,
+            supports: first.sides.map(|s| body.faces[s].name),
+            chain: id,
+        });
+    }
+    // Corners: spheres every edge of which is a section of a fillet of
+    // their radius whose spine passes through their centre.
+    let mut corners = Vec::new();
+    for f in body.faces() {
+        let surface = &body.surfaces[body.faces[f].surface];
+        let Surface::Sphere(sp) = surface else {
+            continue;
+        };
+        let (r, centre) = (sp.radius(), surface.frame().expect("a sphere's").origin());
+        let mut joined = BTreeSet::new();
+        let mut all = true;
+        for e in edges_of(body, f) {
+            let fits = across(body, e, f)
+                .and_then(|g| group_of.get(&g).map(|&h| (g, h)))
+                .filter(|&(g, h)| {
+                    let BlendKind::Fillet { radius } = kept[groups[h][0]].kind else {
+                        return false;
+                    };
+                    (radius - r).abs() <= tol
+                        && canal(body, g, tol).is_some_and(|(c, _)| {
+                            c.foot(centre).distance(centre) <= tol + body.edges[e].tolerance.get()
+                        })
+                });
+            match fits {
+                Some((_, h)) => {
+                    joined.insert(h);
+                }
+                None => all = false,
+            }
+        }
+        if all && joined.len() >= 2 {
+            corners.push(Corner {
+                face: body.faces[f].name,
+                blends: joined.into_iter().collect(),
+            });
+        }
+    }
+    corners.sort_by_key(|c| c.face);
+    Ok(Recognition { blends, corners })
 }
