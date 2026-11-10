@@ -3652,6 +3652,7 @@ sections! {
     section_views => section_views_section,
     tweaks => tweaks_section,
     drafts => drafts_section,
+    retrim => retrim_section,
 }
 
 /// Self-union (design 299, plan 14.C): two 4 m blocks crossing as one
@@ -4596,4 +4597,118 @@ fn drafts_section(golden: &mut Golden) {
             s.f64(a.greatest);
         }
     }
+}
+
+/// The local re-trim (design 399, plan 13.D): tweaks with
+/// `Topology::Change` that change a body's topology: a block's wall
+/// drafted past its neighbour (a wedge), a groove's end walls offset to
+/// run it through (the top split), and a boss slid half off its plate's
+/// edge.
+fn retrim_section(golden: &mut Golden) {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::{Point3, Surface, UnitVector3, Vector3};
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::tweak::{
+        DraftFace, DraftSpec, Hinge, MoveSpec, OffsetFacesSpec, Topology, draft, move_faces,
+        offset_faces,
+    };
+    let mut s = golden.section("retrim");
+    let key = OpKey(0x7274_7200);
+    let k = OpKey(0x7274_7201);
+    let face = |r: FaceRole| Name::derive(key, Role::Face(r), &[]);
+    let (b, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let wedge = DraftSpec {
+        pull: UnitVector3::exact(Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+        angle: 1.3,
+        hinge: Hinge::Neutral {
+            origin: Point3::ORIGIN,
+        },
+        faces: vec![DraftFace {
+            face: face(FaceRole::MinusX),
+            angle: None,
+            flip: false,
+        }],
+        tangent: false,
+        topology: Topology::Change,
+        blends: Default::default(),
+    };
+    let (o, j, _) = draft(k, &b, &wedge).unwrap();
+    hash_body(&mut s, &o, &j);
+    let cut = |target: &ryukei::topo::Body,
+               tool: &ryukei::topo::Body,
+               op: BooleanOp,
+               at: Vector3,
+               key: u128| {
+        boolean(
+            OpKey(key),
+            op,
+            target,
+            &[Tool {
+                key: ToolKey(1),
+                body: tool,
+                place: Rigid::translation(at),
+            }],
+        )
+        .unwrap()
+        .0
+    };
+    let (plate, _) = primitive::block(key, 1.0, 1.0, 0.2, &Rigid::IDENTITY).unwrap();
+    let (slot, _) = primitive::block(OpKey(0x7274_7202), 0.1, 0.6, 0.2, &Rigid::IDENTITY).unwrap();
+    let grooved = cut(
+        &plate,
+        &slot,
+        BooleanOp::Subtract,
+        Vector3::new(0.45, 0.2, 0.1),
+        0x7274_7203,
+    );
+    let ends: Vec<Name> = grooved
+        .faces()
+        .filter(
+            |&f| match grooved.surface(grooved.face(f).unwrap().surface).unwrap() {
+                Surface::Plane(p) => {
+                    let y = p.frame().origin().y;
+                    p.frame().z().get().y.abs() > 0.9
+                        && ((y - 0.2).abs() < 1e-12 || (y - 0.8).abs() < 1e-12)
+                }
+                _ => false,
+            },
+        )
+        .map(|f| grooved.face(f).unwrap().name)
+        .collect();
+    let through = OffsetFacesSpec {
+        faces: ends.iter().map(|&n| (n, -0.3)).collect(),
+        tangent: false,
+        topology: Topology::Change,
+        blends: Default::default(),
+    };
+    let (o, j) = offset_faces(k, &grooved, &through).unwrap();
+    hash_body(&mut s, &o, &j);
+    let (boss, _) = primitive::cylinder(OpKey(0x7274_7204), 0.1, 0.15, &Rigid::IDENTITY).unwrap();
+    let bossed = cut(
+        &plate,
+        &boss,
+        BooleanOp::Unite,
+        Vector3::new(0.5, 0.5, 0.2),
+        0x7274_7205,
+    );
+    let boss_faces: Vec<Name> = bossed
+        .faces()
+        .filter(
+            |&f| match bossed.surface(bossed.face(f).unwrap().surface).unwrap() {
+                Surface::Cylinder(_) => true,
+                Surface::Plane(p) => (p.frame().origin().z - 0.35).abs() < 1e-12,
+                _ => false,
+            },
+        )
+        .map(|f| bossed.face(f).unwrap().name)
+        .collect();
+    let slide = MoveSpec {
+        faces: boss_faces,
+        motion: Rigid::translation(Vector3::new(-0.45, 0.0, 0.0)),
+        tangent: false,
+        topology: Topology::Change,
+        blends: Default::default(),
+    };
+    let (o, j) = move_faces(k, &bossed, &slide).unwrap();
+    hash_body(&mut s, &o, &j);
 }
