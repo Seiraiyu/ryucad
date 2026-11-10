@@ -167,8 +167,10 @@ fn imported_bodies_lose_their_small_blends() {
         "{defeatured} bodies defeatured, {refused} refused, {slow} past the deadline, {none} with no small blend"
     );
     // No count is asserted: while planning 13.D no NIST body
-    // defeatured (each refusal is filed on the stage), and the rounded
-    // box below is the case that must. What is asserted is that every
+    // defeatured, and the rounded box below is the case that must. The
+    // refusals are filed: CTC 01, 03 and 05 `Uncertain` (#650), FTC 06
+    // and 09 `HealAmbiguous` (#651), FTC 07 and 10 past the deadline
+    // (#652), FTC 08 `Uncertain` (#653), CTC 04 past the deadline (#654). What is asserted is that every
     // result checks clean and every failure is a typed refusal.
     let _ = (defeatured, refused, slow, none);
 }
