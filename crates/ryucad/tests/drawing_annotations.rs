@@ -495,6 +495,53 @@ fn balloons_show_item_numbers_and_a_bom_table_lists_them() {
     );
 }
 
+#[test]
+fn default_balloons_keep_clear_of_the_views_lines() {
+    // Five plates stacked 12 mm apart, seen from a corner: their longest
+    // edges lie side by side, so a balloon 18 mm out from its part lands
+    // on its neighbours' lines (#645).
+    let (_d, mut s) = plate();
+    must(
+        &mut s,
+        "part.create",
+        json!({"part": "asm", "kind": "assembly"}),
+    );
+    let ids = ["a", "b", "c", "e", "f"];
+    for (k, id) in ids.iter().enumerate() {
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "asm", "type": "instance", "id": id, "of": "p", "fixed": true,
+                "placement": {"origin": [0, 0, 12 * k]}}),
+        );
+    }
+    must(
+        &mut s,
+        "drawing.create",
+        json!({"part": "asm", "drawing": "d", "name": "Stack"}),
+    );
+    let mut ops = vec![
+        json!({"op": "set", "id": "s1", "fields": {"scale": "2:1"}}),
+        json!({"op": "add", "kind": "view", "value": {"type": "base", "sheet": "s1", "orient": "front_top_right"}}),
+    ];
+    for id in ids {
+        ops.push(json!({"op": "add", "kind": "annotation",
+            "value": {"type": "balloon", "view": "v1", "of": id}}));
+    }
+    let g = must(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "asm", "drawing": "d", "ops": ops}),
+    );
+    let over: Vec<&Value> = g["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "dwg_text_overlap" || f["code"] == "dwg_outside")
+        .collect();
+    assert!(over.is_empty(), "{over:?}");
+}
+
 /// The plate placed twice in assembly `asm` (instances `a` and `b`), and
 /// a drawing `d` of it at 1:1 with a front view `v1`.
 fn rig(s: &mut Session) {
