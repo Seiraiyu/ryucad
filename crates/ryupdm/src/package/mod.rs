@@ -7,6 +7,7 @@
 //! ([`Manifest::hash`]) is what a package attestation ([`attest`]) signs.
 //! [`verify`] judges a package someone was sent.
 
+pub mod attest;
 pub mod zip;
 
 use ryucad_doc::doc::canonical;

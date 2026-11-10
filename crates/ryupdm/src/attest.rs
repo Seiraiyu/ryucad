@@ -150,14 +150,14 @@ fn user_json(u: &User) -> Value {
     json!({"id": u.id, "login": u.login})
 }
 
-fn is_hex(s: &str, len: usize) -> bool {
+pub(crate) fn is_hex(s: &str, len: usize) -> bool {
     s.len() == len
         && s.bytes()
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ`, by shape.
-fn is_time(s: &str) -> bool {
+pub(crate) fn is_time(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() == 20
         && b.iter().enumerate().all(|(i, c)| match i {
@@ -443,11 +443,9 @@ fn unreadable(why: &str) -> Clause {
     Clause::Unreadable(why.to_owned())
 }
 
-/// Reads a tag message: the attestation, its signature and the canonical
-/// text signed.
-pub fn parse_message(
-    bytes: &[u8],
-) -> std::result::Result<(Attestation, Signature, String), Clause> {
+/// Reads a tag message: its canonical JSON, the signature and the text
+/// signed, for an attestation of any kind.
+pub fn split_message(bytes: &[u8]) -> std::result::Result<(Value, Signature, String), Clause> {
     if bytes.len() > MAX_MESSAGE {
         return Err(Clause::TooLarge);
     }
@@ -477,8 +475,39 @@ pub fn parse_message(
     if canonical::to_string(&v) != body {
         return Err(unreadable("the attestation isn't canonical JSON"));
     }
+    Ok((v, sig, body.to_owned()))
+}
+
+/// Whether `sig` is a trusted key's Ed25519 signature of `domain` and
+/// then `text`.
+pub fn check_signature(
+    keys: &BTreeMap<String, [u8; 32]>,
+    sig: &Signature,
+    domain: &[u8],
+    text: &str,
+) -> std::result::Result<(), Clause> {
+    let Some(public) = keys.get(&sig.key) else {
+        return Err(Clause::UnknownKey(sig.key.clone()));
+    };
+    let Ok(public) = ed25519_dalek::VerifyingKey::from_bytes(public) else {
+        return Err(Clause::UnknownKey(sig.key.clone()));
+    };
+    let mut signed = domain.to_vec();
+    signed.extend_from_slice(text.as_bytes());
+    let signature = ed25519_dalek::Signature::from_bytes(&sig.ed25519);
+    public
+        .verify_strict(&signed, &signature)
+        .map_err(|_| Clause::BadSignature)
+}
+
+/// Reads a tag message: the attestation, its signature and the canonical
+/// text signed.
+pub fn parse_message(
+    bytes: &[u8],
+) -> std::result::Result<(Attestation, Signature, String), Clause> {
+    let (v, sig, body) = split_message(bytes)?;
     let a = Attestation::from_json(&v).map_err(|e| Clause::Unreadable(e.message))?;
-    Ok((a, sig, body.to_owned()))
+    Ok((a, sig, body))
 }
 
 /// What a clone reads about one official record under rules, which its
@@ -543,17 +572,8 @@ pub fn verify_message(message: &[u8], expect: &Expect) -> Verdict {
         Ok(x) => x,
         Err(c) => return Verdict::Invalid(c),
     };
-    let Some(public) = expect.keys.get(&sig.key) else {
-        return Verdict::Invalid(Clause::UnknownKey(sig.key));
-    };
-    let Ok(public) = ed25519_dalek::VerifyingKey::from_bytes(public) else {
-        return Verdict::Invalid(Clause::UnknownKey(sig.key));
-    };
-    let mut signed = DOMAIN.to_vec();
-    signed.extend_from_slice(text.as_bytes());
-    let signature = ed25519_dalek::Signature::from_bytes(&sig.ed25519);
-    if public.verify_strict(&signed, &signature).is_err() {
-        return Verdict::Invalid(Clause::BadSignature);
+    if let Err(c) = check_signature(expect.keys, &sig, DOMAIN, &text) {
+        return Verdict::Invalid(c);
     }
     let fields = [
         ("project", a.project == *expect.project),
