@@ -268,3 +268,230 @@ pub(crate) fn fillet(body: &Body, f: FaceId, tol: f64, m: &Meter) -> Option<Cand
         share: 0.0,
     })
 }
+
+/// A surface as chamfers are read on it: a flat NURBS as its plane
+/// (`blend::spine::twin`, every control point within half the
+/// resolution of it), anything else as it is.
+fn flat(s: &Surface) -> std::borrow::Cow<'_, Surface> {
+    match crate::blend::spine::twin(s) {
+        Some(p) => std::borrow::Cow::Owned(p),
+        None => std::borrow::Cow::Borrowed(s),
+    }
+}
+
+/// Where two support surfaces meet, in closed form.
+enum Meet {
+    /// A line: a point on it and its unit direction.
+    Line(Point3, Vector3),
+    /// A circle: its centre, its axis and its radius.
+    Circle(Point3, Vector3, f64),
+}
+
+/// Where surfaces `a` and `b` meet: two planes in a line, a plane square
+/// to a cylinder's or cone's axis in a circle.
+fn meet(a: &Surface, b: &Surface) -> Option<Meet> {
+    let axial = |p: &crate::geom::Plane, s: &Surface| -> Option<Meet> {
+        let n = p.frame().z().get();
+        let (fr, radius_at): (&crate::geom::Frame, Box<dyn Fn(f64) -> f64>) = match s {
+            Surface::Cylinder(c) => {
+                let r = c.radius();
+                (s.frame()?, Box::new(move |_| r))
+            }
+            Surface::Cone(c) => {
+                let (r, t) = (c.radius(), crate::math::tan(c.half_angle()));
+                (s.frame()?, Box::new(move |v| r + v * t))
+            }
+            _ => return None,
+        };
+        let z = fr.z().get();
+        if n.cross(z).length() > ANGULAR_RESOLUTION {
+            return None;
+        }
+        let o = fr.origin();
+        let h = (p.frame().origin() - o).dot(z);
+        Some(Meet::Circle(o + z * h, z, radius_at(h)))
+    };
+    match (a, b) {
+        (Surface::Plane(p), Surface::Plane(q)) => {
+            let (na, nb) = (p.frame().z().get(), q.frame().z().get());
+            let u = na.cross(nb);
+            let len2 = u.length_squared();
+            if len2 < 1e-12 {
+                return None;
+            }
+            let (da, db) = (
+                p.frame().origin().to_vector().dot(na),
+                q.frame().origin().to_vector().dot(nb),
+            );
+            let x = (nb.cross(u) * da + u.cross(na) * db) / len2;
+            Some(Meet::Line(Point3::ORIGIN + x, u / crate::math::sqrt(len2)))
+        }
+        (Surface::Plane(p), s) | (s, Surface::Plane(p)) => axial(p, s),
+        _ => None,
+    }
+}
+
+/// How far `edge` of a chamfer is set back from where its supports meet,
+/// the same all along within `tol`: a line parallel to a line, a circle
+/// about a circle's axis.
+fn setback(body: &Body, edge: EdgeId, m: &Meet, tol: f64) -> Option<f64> {
+    let e = &body.edges[edge];
+    let reach = tol + e.tolerance.get();
+    let pts = samples(body, edge);
+    let d: Vec<f64> = match (m, &body.curves[e.curve]) {
+        (Meet::Line(o, dir), crate::geom::Curve::Line(l)) => {
+            if l.dir().get().cross(*dir).length() > ANGULAR_RESOLUTION + reach {
+                return None;
+            }
+            pts.iter()
+                .map(|&p| {
+                    let w = p - *o;
+                    (w - *dir * w.dot(*dir)).length()
+                })
+                .collect()
+        }
+        (Meet::Line(o, dir), crate::geom::Curve::Nurbs(n)) => {
+            // A spline edge is a straight setback when every control point
+            // lies within the reach of the line through its first, parallel
+            // to the meeting: the curve lies in the hull, so within the
+            // reach of that line too.
+            let w = n.weights();
+            if w.iter().any(|&x| x <= 0.0) {
+                return None;
+            }
+            let first = n.control_points().next()?;
+            let dist = |p: Point3| {
+                let q = p - first;
+                (q - *dir * q.dot(*dir)).length()
+            };
+            if n.control_points().any(|p| dist(p) > reach) {
+                return None;
+            }
+            let q = first - *o;
+            let d = (q - *dir * q.dot(*dir)).length();
+            vec![d, d]
+        }
+        (Meet::Circle(c, z, big), crate::geom::Curve::Circle(_)) => pts
+            .iter()
+            .map(|&p| {
+                let w = p - *c;
+                let h = w.dot(*z);
+                let rho = (w - *z * h).length();
+                crate::math::sqrt((rho - big) * (rho - big) + h * h)
+            })
+            .collect(),
+        _ => return None,
+    };
+    let (lo, hi) = d
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &x| {
+            (a.min(x), b.max(x))
+        });
+    (hi - lo <= reach && lo > 10.0 * LINEAR_RESOLUTION).then_some((lo + hi) / 2.0)
+}
+
+/// How wide face `g` is across where its chamfer's supports meet: its
+/// vertices' greatest distance from the meeting.
+fn width(body: &Body, g: FaceId, m: &Meet) -> f64 {
+    let mut w: f64 = 0.0;
+    for e in edges_of(body, g) {
+        let edge = &body.edges[e];
+        for v in [edge.start, edge.end] {
+            let p = body.vertices[v].point;
+            let d = match m {
+                Meet::Line(o, dir) => {
+                    let q = p - *o;
+                    (q - *dir * q.dot(*dir)).length()
+                }
+                Meet::Circle(c, z, big) => {
+                    let q = p - *c;
+                    let h = q.dot(*z);
+                    let rho = (q - *z * h).length();
+                    crate::math::sqrt((rho - big) * (rho - big) + h * h)
+                }
+            };
+            w = w.max(d);
+        }
+    }
+    w
+}
+
+/// Face `f` read as a chamfer.
+pub(crate) fn chamfer(body: &Body, f: FaceId, tol: f64) -> Option<Candidate> {
+    if !matches!(
+        flat(&body.surfaces[body.faces[f].surface]).as_ref(),
+        Surface::Plane(_) | Surface::Cone(_)
+    ) {
+        return None;
+    }
+    let mut by: BTreeMap<FaceId, Vec<EdgeId>> = BTreeMap::new();
+    for e in edges_of(body, f) {
+        if let Some(g) = across(body, e, f) {
+            by.entry(g).or_default().push(e);
+        }
+    }
+    let faces: Vec<FaceId> = by.keys().copied().collect();
+    let mut found: Option<Candidate> = None;
+    let mut ambiguous = false;
+    for (i, &a) in faces.iter().enumerate() {
+        for &b in &faces[i + 1..] {
+            let (sa, sb) = (
+                flat(&body.surfaces[body.faces[a].surface]),
+                flat(&body.surfaces[body.faces[b].surface]),
+            );
+            let Some(m) = meet(&sa, &sb) else { continue };
+            let side = |g: FaceId| -> Option<f64> {
+                let ds: Option<Vec<f64>> =
+                    by[&g].iter().map(|&e| setback(body, e, &m, tol)).collect();
+                let ds = ds?;
+                let d = ds[0];
+                ds.iter().all(|x| (x - d).abs() <= tol).then_some(d)
+            };
+            let (Some(da), Some(db)) = (side(a), side(b)) else {
+                continue;
+            };
+            let share = (da / width(body, a, &m)).max(db / width(body, b, &m));
+            if share > CHAMFER_SHARE {
+                continue;
+            }
+            // The pair setting back the least share of its supports is
+            // the chamfer's (a mitred end's neighbours read as supports
+            // too, set back farther); two pairs within the tolerance of
+            // each other: neither.
+            match &found {
+                Some(c) if c.share + tol / width(body, a, &m).max(LINEAR_RESOLUTION) < share => {
+                    continue;
+                }
+                Some(c) if (c.share - share).abs() * width(body, a, &m) <= tol => {
+                    ambiguous = true;
+                    continue;
+                }
+                _ => ambiguous = false,
+            }
+            let mut sides = [a, b];
+            let mut ds = [da, db];
+            if body.faces[b].name < body.faces[a].name {
+                sides.swap(0, 1);
+                ds.swap(0, 1);
+            }
+            let kind = if (ds[0] - ds[1]).abs() <= tol {
+                BlendKind::Chamfer(Chamfer::Equal {
+                    distance: (ds[0] + ds[1]) / 2.0,
+                })
+            } else {
+                BlendKind::Chamfer(Chamfer::Distances {
+                    first: ds[0],
+                    second: ds[1],
+                    first_face: body.faces[sides[0]].name,
+                })
+            };
+            found = Some(Candidate {
+                face: f,
+                kind,
+                sides,
+                share,
+            });
+        }
+    }
+    if ambiguous { None } else { found }
+}
