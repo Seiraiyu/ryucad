@@ -584,6 +584,97 @@ fn a_section_cuts_and_caps() {
     assert_eq!(draw(&[]), whole);
 }
 
+/// A sheet (ryucad 18) has no inside: looking down into one cut open, the
+/// inside of its bottom shows, lit and tinted towards `SHEET_BACK`, never
+/// a hatched cap; paint shows on that back as on a front.
+#[test]
+fn a_sheet_shows_its_back_tinted_and_is_never_capped() {
+    let _one = one_at_a_time();
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    use ryucad::section::Plane;
+    use ryucad_app::core::model::Model;
+    use serde_json::json;
+    let model = |kind: &str| {
+        let mut model = Model::default();
+        let want = model.apply_part(&json!({"part": "one", "revision": "r", "kind": "assembly",
+            "features": [], "solids": [], "occurrences": [
+                {"path": "c", "part": "cube", "solids": [{"solid": "s", "hash": "h", "kind": kind}],
+                 "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}}]}));
+        model.ask(want);
+        let body = ryucad::mesh::WireBody {
+            feature: "c/s".into(),
+            hash: "h".into(),
+            mesh: Ok(cube(0.01)),
+        };
+        assert!(model.take_mesh("one", body));
+        model
+    };
+    let centre = [0.005; 3];
+    let camera = view::frame(
+        [0.0; 3],
+        [0.01; 3],
+        StandardView::Top,
+        view::DEFAULT_PROJECTION,
+    );
+    let pr = Projector::new(&camera, 1.0, centre, 0.01);
+    let size = 200u32;
+    let key = ("one".to_owned(), "c/s".to_owned());
+    let paint = linear(theme::CHANGED);
+    let draw = |m: &Model, planes: &[Plane], faces: &[scene::PaintedFace]| {
+        let mut scene = Scene::new(&device, &adapter);
+        scene.sync(&device, m, centre);
+        scene.cut(scene::Cut::of(planes, &camera));
+        let list = DrawList {
+            reference: centre,
+            matrix: pr.matrix(centre),
+            perspective: pr.line_pull(),
+            light: scene::light(&camera),
+            edges: false,
+            faces,
+            background: theme::BACKGROUND,
+            overlay: &[],
+            glass: &[],
+        };
+        scene.render(&device, &queue, [size, size], &list);
+        let px = scene.read_pixels(&device, &queue).unwrap().2;
+        (90..110u32)
+            .flat_map(|y| (90..110u32).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let i = ((y * size + x) * 4) as usize;
+                [px[i], px[i + 1], px[i + 2]]
+            })
+            .collect::<Vec<_>>()
+    };
+    let (solid, sheet) = (model("solid"), model("sheet"));
+    // Uncut, from above, a sheet's front draws as a solid's.
+    let top = draw(&sheet, &[], &[]);
+    assert_eq!(top, draw(&solid, &[], &[]));
+    // Cut away above z = 5 mm: the solid shows its hatched cap, the sheet
+    // the inside of its bottom, one colour, leaning towards SHEET_BACK.
+    let half = Plane::new([0.0, 0.0, 0.005], [0.0, 0.0, 1.0]).unwrap();
+    let cap = draw(&solid, &[half], &[]);
+    assert!(
+        cap.iter().any(|p| *p != cap[0]),
+        "the solid's cap is hatched"
+    );
+    let inside = draw(&sheet, &[half], &[]);
+    assert!(inside.iter().all(|p| *p == inside[0]), "no hatching");
+    let warmth = |p: [u8; 3]| i32::from(p[0]) - i32::from(p[2]);
+    assert!(
+        warmth(inside[0]) > warmth(top[0]) + 20,
+        "{:?} {:?}",
+        inside[0],
+        top[0]
+    );
+    // Paint on that back shows as paint on the top from above: both lit
+    // by the normal facing the eye.
+    let on_top = draw(&sheet, &[], &[(key.clone(), 5, paint)]);
+    let on_back = draw(&sheet, &[half], &[(key, 4, paint)]);
+    assert_eq!(on_back, on_top);
+}
+
 /// A datum plane's square is glass: what is behind it shows through,
 /// tinted, and a square behind a face is hidden by it.
 #[test]
