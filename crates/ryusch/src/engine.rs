@@ -504,6 +504,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
     let named = |c: &Cluster| c.members.iter().find_map(|(p, _)| r.sheet.get(p).cloned());
     let mut hints = Hints {
         spread,
+        apart: idiom::bank_nets(block, &idioms, &clusters),
         ..Hints::default()
     };
     for (i, c) in clusters.iter().enumerate() {
@@ -667,7 +668,8 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
         styles.entry(n).or_insert(crate::layout::NetStyle::Wire);
     }
     pin_papers(&mut st, r);
-    let mut out = draw(st, prev, &styles, &bypass);
+    let rows = bank_rows(&st, &idioms);
+    let mut out = draw(st, prev, &styles, &bypass, &rows);
     out.layout.instructions = block.instructions.clone();
     out.idioms = idioms;
     out.flow = r.flow.iter().map(|p| block.parts[*p].key.clone()).collect();
@@ -1295,6 +1297,7 @@ fn pack_regions(
     };
     let sub_hints = Hints {
         spread: hints.spread,
+        apart: hints.apart.clone(),
         ..Hints::default()
     };
     let mut packed: Vec<Cluster> = Vec::new();
@@ -1364,6 +1367,7 @@ fn pack_regions(
     }
     let mut top_hints = Hints {
         spread: hints.spread,
+        apart: hints.apart.clone(),
         ..Hints::default()
     };
     for (i, e) in packed_edge.iter().enumerate() {
@@ -2484,12 +2488,63 @@ struct Bypass {
     cap: (usize, usize),
 }
 
+/// A bank's row on a port's net (#429): the pin, its members' pins on
+/// the net. Drawn as a wire along the row carrying a net label named as
+/// the port; the port's flag stands with the block's ports.
+#[derive(Clone, Debug)]
+struct BankRow {
+    net: usize,
+    pin: (usize, usize),
+    members: Vec<(usize, usize)>,
+}
+
+/// The bank rows on port nets, from the idioms and where parts stand.
+fn bank_rows(st: &State, idioms: &[idiom::Idiom]) -> Vec<BankRow> {
+    let block = st.block;
+    let at: BTreeMap<usize, Place> = (0..block.parts.len())
+        .filter_map(|p| st.place[p].map(|(_, pl, _)| (p, pl)))
+        .collect();
+    let mut out = Vec::new();
+    for b in idiom::banks(block, idioms, &at) {
+        for (k, list) in &b.rows {
+            let Some(net) = block.parts[b.part].pins[*k].net else {
+                continue;
+            };
+            let ported = block.parts.iter().any(|part| {
+                matches!(part.kind, PartKind::Port { .. })
+                    && part.pins.iter().any(|x| x.net == Some(net))
+            });
+            if !ported || block.nets[net].kind != NetKind::Signal {
+                continue;
+            }
+            let members = list
+                .iter()
+                .filter_map(|i| {
+                    let q = idioms[*i].parts[0];
+                    let kq = block.parts[q]
+                        .pins
+                        .iter()
+                        .position(|x| x.net == Some(net))?;
+                    Some((q, kq))
+                })
+                .collect();
+            out.push(BankRow {
+                net,
+                pin: (b.part, *k),
+                members,
+            });
+        }
+    }
+    out
+}
+
 /// Draws every sheet: labels, wires and text.
 fn draw(
     st: State,
     prev: Option<&Layout>,
     asked: &BTreeMap<usize, NetStyle>,
     bypass: &[Bypass],
+    bank_rows: &[BankRow],
 ) -> Outcome {
     let block = st.block;
     let mut layout = Layout::default();
@@ -2572,6 +2627,9 @@ fn draw(
                     _ => {}
                 }
                 if stacked.contains(n) && block.nets[*n].kind == NetKind::Signal {
+                    st = NetStyle::Label;
+                }
+                if bank_rows.iter().any(|r| r.net == *n) {
                     st = NetStyle::Label;
                 }
                 (*n, st)
@@ -2830,6 +2888,66 @@ fn draw(
                 });
                 joined.insert(b.served);
                 joined.insert(b.cap);
+            }
+            // A bank's row on a port's net: a wire from the pin to its
+            // members, a net label on it at the pin.
+            for row in bank_rows {
+                let (p, k) = row.pin;
+                if st.place[p].is_none_or(|x| x.0 != s)
+                    || row
+                        .members
+                        .iter()
+                        .any(|m| st.place[m.0].is_none_or(|x| x.0 != s))
+                {
+                    continue;
+                }
+                let pin = st.shape(p).expect("placed").pins[k];
+                let mut tried = field.clone();
+                let mut runs = Vec::new();
+                let mut tree: BTreeSet<route::Node> = BTreeSet::new();
+                let mut ok = true;
+                for (i, &(q, kq)) in row.members.iter().enumerate() {
+                    let m = st.shape(q).expect("placed").pins[kq];
+                    let run = if i == 0 && m.end[1] == pin.end[1] {
+                        Some(vec![pin.end, m.end])
+                    } else {
+                        tried
+                            .search(row.net, m.end, m.side, &tree)
+                            .map(|path| route::run_of(&path))
+                    };
+                    match run {
+                        Some(run) if tried.mark(row.net, &run).is_ok() => {
+                            tree.extend(route::expand(&run));
+                            runs.push(run);
+                        }
+                        _ => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !ok {
+                    continue;
+                }
+                let name = block.label_text(p, k);
+                let b = label::label_box(LabelKind::Net, &name, pin.end, pin.side);
+                // Clear before the row's wire, which lies under its line.
+                if !field.clear_label(b) {
+                    continue;
+                }
+                tried.block_label(b);
+                field = tried;
+                routes.entry(row.net).or_default().extend(runs);
+                labels.entry(row.net).or_default().push(Label {
+                    text: name,
+                    sheet: sid.clone(),
+                    at: pin.end,
+                    side: pin.side,
+                    kind: LabelKind::Net,
+                    on: format!("{}/{}", block.parts[p].key, block.parts[p].pins[k].number),
+                });
+                joined.insert(row.pin);
+                joined.extend(row.members.iter().copied());
             }
             // Labels, the previous ones where they still fit.
             let mut want_label: Vec<(usize, usize, usize, LabelKind)> = Vec::new();
@@ -3661,6 +3779,48 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    /// A bank's row on a port net carries a net label named as the port,
+    /// before its pull; the port's flag stands apart from the row (with the
+    /// block's ports), not on it.
+    #[test]
+    fn a_banked_port_net_is_labelled_on_its_row() {
+        let block = crate::testing::dense_block(true);
+        let out = lay(&block);
+        assert_eq!(crate::rules::check(&block, &out.layout), []);
+        let u1 = {
+            let x = &out.layout.placed["u1"];
+            Shape::of(&block.parts[0], Place::new(x.at, x.rotation, x.mirror))
+        };
+        for (port, pin) in [("port:a", "S0"), ("port:b", "S6")] {
+            let k = block.parts[0]
+                .pins
+                .iter()
+                .position(|p| p.name == pin)
+                .unwrap();
+            let row = u1.pins[k].end[1];
+            let net = block.parts[0].pins[k].net.unwrap();
+            let labels = &out.layout.labels[&block.nets[net].key];
+            assert!(
+                labels
+                    .iter()
+                    .any(|l| l.kind == LabelKind::Net && l.at[1] == row && l.text == pin),
+                "{pin}: a net label on its row: {labels:#?}"
+            );
+            let flag = &out.layout.placed[port];
+            let fp = block.part(port).unwrap();
+            let fs = Shape::of(
+                &block.parts[fp],
+                Place::new(flag.at, flag.rotation, flag.mirror),
+            );
+            assert_ne!(fs.pins[0].end[1], row, "{port}'s flag isn't on the row");
+        }
+        let (found, _) = crate::lint::lint(&block, &out);
+        assert!(
+            !found.iter().any(|f| f.code == "sch_floating"),
+            "{found:#?}"
+        );
     }
 
     /// #429: a dense part's pulls stand as a bank, each across the page on

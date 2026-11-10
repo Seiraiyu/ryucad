@@ -936,6 +936,14 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
         .iter()
         .flat_map(|b| b.rows.iter().map(|(_, l)| l[0]))
         .collect();
+    let banked_nets: BTreeSet<usize> = banks
+        .iter()
+        .flat_map(|b| {
+            b.rows
+                .iter()
+                .filter_map(|(k, _)| block.parts[b.part].pins[*k].net)
+        })
+        .collect();
     let mut banks_done = banks.is_empty();
     // What hangs off sideways pins stands in stairs before decoupling is
     // placed, which then stands past it.
@@ -1437,6 +1445,11 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
         let PartKind::Port { flow } = part.kind else {
             continue;
         };
+        // A bank's row ends in its pull, labelled with the port's name:
+        // the flag stands with the block's other ports.
+        if part.pins[0].net.is_some_and(|n| banked_nets.contains(&n)) {
+            continue;
+        }
         let Some((d, k)) = crate::place::sole_pin(block, p) else {
             continue;
         };
@@ -1483,6 +1496,23 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
         hanging_stairs(block, idioms, &mut out);
     }
     out.into_iter().flatten().collect()
+}
+
+/// The nets of the banks' rows, each bank's part placed as `clusters`
+/// place it.
+pub fn bank_nets(block: &Block, idioms: &[Idiom], clusters: &[Cluster]) -> BTreeSet<usize> {
+    let at: BTreeMap<usize, Place> = clusters
+        .iter()
+        .flat_map(|c| c.members.iter().copied())
+        .collect();
+    banks(block, idioms, &at)
+        .iter()
+        .flat_map(|b| {
+            b.rows
+                .iter()
+                .filter_map(|(k, _)| block.parts[b.part].pins[*k].net)
+        })
+        .collect()
 }
 
 /// Each bank's members placed in the cluster of its part.
