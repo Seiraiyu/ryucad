@@ -1216,6 +1216,8 @@ fn every_protocol_method_has_a_command() {
         ("redo", &["redo"]),
         ("app.open", &["open"]),
         ("request.cancel", &["cancel"]),
+        ("drawing.lint", &["drawing", "lint"]),
+        ("drawing.lint.configure", &["drawing", "lint-configure"]),
     ];
     let methods = protocol_methods();
     assert!(methods.len() >= 26, "{methods:?}");
@@ -5513,7 +5515,15 @@ fn drawings_from_the_cli() {
         "5",
     ]);
     let got = p.ok(&["drawing", "get", "plate", "main"]);
-    assert_eq!(got["findings"], json!([]), "{got}");
+    // Only the lint's findings (plan 9.C), none of the drawing's own.
+    assert!(
+        got["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["lint"] == true),
+        "{got}"
+    );
     assert_eq!(got["sheets"][0]["views"].as_array().unwrap().len(), 7);
     // What the agent reads in words.
     let d = p.ok(&["drawing", "describe", "plate", "main"]);
@@ -5592,11 +5602,121 @@ fn drawings_from_the_cli() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|f| f["source"] != "drawing"),
+            .all(|f| f["source"] != "drawing" || f["lint"] == true),
         "{checked}"
     );
     p.ok(&["drawing", "delete", "plate", "front"]);
     assert_eq!(p.ok(&["drawing", "list"])["drawings"], json!([]));
+}
+
+#[test]
+fn drawing_annotations_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "base", "--param", "x=60", "--param", "y=30",
+        "--param", "z=6",
+    ]);
+    p.ok(&["drawing", "create", "plate", "d"]);
+    p.ok(&[
+        "drawing", "view", "add", "plate", "d", "--orient", "top", "--at", "120,150",
+    ]);
+    // The end faces, seen edge on from above.
+    let body = p.ok(&["inspect", "plate"])["bodies"][0].clone();
+    let end = |x: f64| -> String {
+        body["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["frame"]["z"][0].as_f64().unwrap() * sign == x
+            })
+            .map(|f| format!("base/{}", f["name"].as_str().unwrap()))
+            .unwrap()
+    };
+    let (left, right) = (end(-1.0), end(1.0));
+    let got = p.ok(&[
+        "drawing",
+        "dim",
+        "add",
+        "plate",
+        "d",
+        "--view",
+        "v1",
+        "--type",
+        "linear",
+        "--a",
+        &left,
+        "--b",
+        &right,
+        "--along",
+        "horizontal",
+        "--tol",
+        "0.1 mm",
+    ]);
+    let d1 = &got["sheets"][0]["annotations"][0];
+    assert_eq!(d1["text"], "60.00 ±0.10", "{got}");
+    p.ok(&[
+        "drawing", "gdt", "add", "plate", "d", "--view", "v1", "--letter", "A", "--on", &left,
+    ]);
+    p.ok(&[
+        "drawing",
+        "gdt",
+        "add",
+        "plate",
+        "d",
+        "--view",
+        "v1",
+        "--characteristic",
+        "perpendicularity",
+        "--tol",
+        "0.05 mm",
+        "--datum",
+        "A",
+        "--on",
+        &right,
+    ]);
+    p.ok(&[
+        "drawing", "note", "add", "plate", "d", "--text", "DEBURR", "--at", "30,30",
+    ]);
+    let file: Value = serde_json::from_str(
+        &fs::read_to_string(p.direct.join("parts/plate/drawings/d.json")).unwrap(),
+    )
+    .unwrap();
+    let keys: Vec<&String> = file["annotations"].as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["d1", "g1", "g2", "n1"], "{file}");
+    // The dimension's offset ryucad chose is written back.
+    assert!(file["annotations"]["d1"]["offset"].is_string(), "{file}");
+    // The lint, a rule's entry, and a rule turned off.
+    let lint = p.ok(&["drawing", "lint", "plate", "d"]);
+    assert!(lint["scores"]["s1"].is_i64(), "{lint}");
+    let e = p.ok(&["drawing", "lint", "--explain", "dwg_untoleranced"]);
+    assert_eq!(e["weight"], 1);
+    p.ok(&[
+        "drawing",
+        "lint-configure",
+        "--severity",
+        "dwg_untoleranced=off",
+    ]);
+    assert!(p.direct.join("drawing_lint.json").is_file());
+    p.ok(&[
+        "drawing",
+        "lint-configure",
+        "--severity",
+        "dwg_untoleranced=default",
+    ]);
+    assert!(!p.direct.join("drawing_lint.json").exists());
+    // A dimension that can't be measured is refused, naming why.
+    p.fails(
+        &[
+            "drawing", "dim", "add", "plate", "d", "--view", "v1", "--type", "radius", "--of",
+            &left,
+        ],
+        "invalid_param",
+        1,
+    );
 }
 
 #[test]
@@ -7485,6 +7605,188 @@ fn annotations_from_the_cli() {
             .unwrap()
             .len(),
         1
+    );
+}
+
+#[test]
+fn redlines_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=40", "--param", "y=20", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "cylinder",
+        "--id",
+        "boss",
+        "--param",
+        "radius=4",
+        "--param",
+        "height=6",
+        "--origin",
+        "30,10,5",
+        "--operation",
+        "join",
+        "--target",
+        "b",
+    ]);
+    p.ok(&[
+        "view",
+        "save",
+        "p",
+        "corner",
+        "--eye",
+        "120,-100,90",
+        "--target",
+        "20,10,2.5",
+        "--up",
+        "0,0,1",
+        "--ortho",
+        "60 mm",
+    ]);
+    // By shorthand: an arrow from the boss's top towards the slab, and a note.
+    let a = p.ok(&[
+        "annotations",
+        "add",
+        "--comment",
+        "move the boss here",
+        "--model",
+        "p",
+        "--of",
+        "corner",
+        "--arrow",
+        "7,4:-14,5",
+        "--text",
+        "15,15=2 mm",
+    ]);
+    let id = a["annotation"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        a["annotation"]["marks"]["kinds"],
+        serde_json::json!(["arrow", "text"])
+    );
+    assert_eq!(a["marks"][0]["kind"], "arrow");
+    // By JSON, from a file, with a touch of its own.
+    let body = p.ok(&["inspect", "p"])["bodies"][0].clone();
+    let face = format!("p/b/{}", body["faces"][0]["name"].as_str().unwrap());
+    let marks = serde_json::json!({"part": "p", "list": [
+        {"kind": "rectangle", "in": "view", "xy_m": [[-0.01, -0.01], [0.01, 0.01]]},
+        {"kind": "line", "in": "view", "xy_m": [[0, 0], [0.005, 0]], "touches": [{"at": "end", "ref": face}]}]});
+    p.write("marks.json", &marks.to_string());
+    let b = p.ok(&[
+        "annotations",
+        "add",
+        "--comment",
+        "these",
+        "--marks",
+        "@marks.json",
+        "--of",
+        "corner",
+    ]);
+    let id2 = b["annotation"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(b["marks"][1]["touches"][0]["ref"], face.as_str());
+    // Shown in words.
+    let s = p.ok(&["annotations", "show", &id]);
+    assert_eq!(s["marks"][0]["touches"][0]["at"], "tail");
+    assert_eq!(s["marks"][1]["text"], "2 mm");
+    assert!(
+        s["marks"][0]["length"]["value"]
+            .as_str()
+            .unwrap()
+            .ends_with(" mm")
+    );
+    // Rendered: the files are the same both ways.
+    p.ok(&[
+        "render",
+        "--annotation",
+        &id,
+        "--out",
+        "a.png",
+        "--size",
+        "400x300",
+    ]);
+    assert_eq!(
+        fs::read(p.direct.join("a.png")).unwrap(),
+        fs::read(p.daemon.join("a.png")).unwrap()
+    );
+    p.fails(
+        &[
+            "render",
+            "--annotation",
+            &id,
+            "--eye",
+            "1,1,1",
+            "--out",
+            "b.png",
+        ],
+        "usage",
+        2,
+    );
+    // Edited, then taken away.
+    let e = p.ok(&[
+        "annotations",
+        "edit",
+        &id2,
+        "--model",
+        "p",
+        "--line",
+        "0,0:5,5",
+    ]);
+    assert_eq!(e["annotation"]["marks"]["count"], 1);
+    let e = p.ok(&["annotations", "edit", &id2, "--no-marks"]);
+    assert!(e["annotation"].get("marks").is_none());
+    let file: serde_json::Value = serde_json::from_slice(
+        &fs::read(p.direct.join(format!("annotations/{id2}.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(file["format"], 1, "no marks: format 1 again");
+    // Outdated once what a touch names is gone, then resolved.
+    p.ok(&["feature", "delete", "p", "boss"]);
+    let l = p.ok(&["annotations", "list"]);
+    let ours = l["annotations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(ours["outdated"], true);
+    assert_eq!(ours["outdated_marks"][0]["at"], "tail");
+    p.ok(&["annotations", "resolve", &id, "--note", "moved"]);
+    p.ok(&[
+        "render",
+        "--annotation",
+        &id,
+        "--out",
+        "c.png",
+        "--size",
+        "400x300",
+    ]);
+    assert_ne!(
+        fs::read(p.direct.join("a.png")).unwrap(),
+        fs::read(p.direct.join("c.png")).unwrap(),
+        "resolved: its marks fade"
+    );
+    // A shorthand that doesn't read.
+    p.fails(
+        &[
+            "annotations",
+            "add",
+            "--comment",
+            "x",
+            "--model",
+            "p",
+            "--of",
+            "corner",
+            "--arrow",
+            "1,2",
+        ],
+        "invalid_param",
+        1,
     );
 }
 

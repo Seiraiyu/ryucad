@@ -545,15 +545,15 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
         // Each sheet and view on one line: `views.v2 = projected from v1,
         // top, offset 70 mm, sheet s1`.
         Some(crate::doc::drawing::KIND) => {
-            for key in ["sheets", "views"] {
+            for key in ["sheets", "views", "annotations"] {
                 if let Some(Value::Object(members)) = rest.remove(key) {
                     let mut members: Vec<(&String, &Value)> = members.iter().collect();
                     members.sort_by_key(|(k, _)| member_order(k));
                     for (k, m) in members {
-                        let line = if key == "sheets" {
-                            drawing_sheet(m)
-                        } else {
-                            drawing_view(m)
+                        let line = match key {
+                            "sheets" => drawing_sheet(m),
+                            "views" => drawing_view(m),
+                            _ => drawing_annotation(m),
                         };
                         out.push(format!("{key}.{k} = {line}"));
                     }
@@ -631,6 +631,84 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                         Some(at) => format!("pin {} = {what} at {at}", i + 1),
                         None => format!("pin {} = {what}", i + 1),
                     });
+                }
+            }
+            if let Some(Value::Object(marks)) = rest.remove("marks") {
+                let mm = |x: &Value| crate::measure::number(x.as_f64().unwrap_or(0.0) * 1000.0);
+                let pt = |p: &Value| {
+                    let c: Vec<String> = p.as_array().into_iter().flatten().map(mm).collect();
+                    format!("({})", c.join(", "))
+                };
+                // A stroke's box: each coordinate's least and greatest.
+                let span = |pts: &[Value]| {
+                    let n = pts.first().and_then(Value::as_array).map_or(0, Vec::len);
+                    let (lo, hi): (Vec<f64>, Vec<f64>) = (0..n)
+                        .map(|k| {
+                            let xs = pts.iter().filter_map(|p| p[k].as_f64());
+                            let lo = xs.clone().fold(f64::INFINITY, f64::min);
+                            (lo, xs.fold(f64::NEG_INFINITY, f64::max))
+                        })
+                        .unzip();
+                    (pt(&json!(lo)), pt(&json!(hi)))
+                };
+                if let Some(p) = marks.get("part") {
+                    lines.push(format!("marks.part = {}", scalar(p)));
+                }
+                for (i, m) in marks
+                    .get("list")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                {
+                    let kind = m["kind"].as_str().unwrap_or_default();
+                    let pts: Vec<Value> = m["xy_m"]
+                        .as_array()
+                        .or(m["points_m"].as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut line = match (kind, m["in"].as_str()) {
+                        ("text", _) => format!(
+                            "text in view {} mm: {}",
+                            pts.first().map(pt).unwrap_or_default(),
+                            m["text"].as_str().unwrap_or_default()
+                        ),
+                        ("stroke", Some("face")) => {
+                            let (lo, hi) = span(&pts);
+                            format!(
+                                "stroke on {}, {} points, {lo} mm to {hi} mm",
+                                m["on"].as_str().unwrap_or_default(),
+                                pts.len()
+                            )
+                        }
+                        ("stroke", _) => {
+                            let (lo, hi) = span(&pts);
+                            format!("stroke in view, {} points, {lo} mm to {hi} mm", pts.len())
+                        }
+                        ("line" | "arrow", _) if pts.len() == 2 => {
+                            format!("{kind} in view {} mm -> {} mm", pt(&pts[0]), pt(&pts[1]))
+                        }
+                        _ if pts.len() == 2 => {
+                            format!("{kind} in view {} mm to {} mm", pt(&pts[0]), pt(&pts[1]))
+                        }
+                        _ => format!("{kind}, {} points", pts.len()),
+                    };
+                    let touches: Vec<String> = m["touches"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|t| {
+                            format!(
+                                "{} {}",
+                                t["at"].as_str().unwrap_or_default(),
+                                t["ref"].as_str().unwrap_or_default()
+                            )
+                        })
+                        .collect();
+                    if !touches.is_empty() {
+                        line.push_str(&format!("; {}", touches.join(", ")));
+                    }
+                    lines.push(format!("marks[{i}] = {line}"));
                 }
             }
             match rest.remove("change") {
@@ -759,6 +837,57 @@ fn rest_of(m: &Value, done: &[&str]) -> Vec<String> {
             format!("{k} {text}")
         })
         .collect()
+}
+
+/// A drawing's annotation on one line: its type, its view or sheet and
+/// its entities (`linear v1 b/<hex> to b/<hex>`), then the rest of its
+/// fields in key order, a tolerance as its form and values.
+fn drawing_annotation(m: &Value) -> String {
+    let ty = m.get("type").and_then(Value::as_str).unwrap_or_default();
+    let on = m
+        .get("view")
+        .or_else(|| m.get("sheet"))
+        .map(scalar)
+        .unwrap_or_default();
+    let ends: Vec<String> = ["a", "b", "datum", "of", "on", "to", "vertex", "leader"]
+        .iter()
+        .filter_map(|k| m.get(*k).map(|v| format!("{k} {}", scalar(v))))
+        .collect();
+    let mut parts = vec![format!("{ty} {on}").trim().to_owned()];
+    parts.extend(ends);
+    if let Some(t) = m.get("tolerance").and_then(Value::as_object) {
+        for (k, v) in t {
+            let v = match v.as_array() {
+                Some(a) => a.iter().map(scalar).collect::<Vec<_>>().join(" "),
+                None => scalar(v),
+            };
+            parts.push(format!("tolerance {k} {v}"));
+        }
+    }
+    if let Some(Value::Array(rows)) = m.get("rows") {
+        for (i, r) in rows.iter().enumerate() {
+            parts.push(format!("row {} {}", i + 1, r));
+        }
+    }
+    parts.extend(rest_of(
+        m,
+        &[
+            "type",
+            "view",
+            "sheet",
+            "a",
+            "b",
+            "datum",
+            "of",
+            "on",
+            "to",
+            "vertex",
+            "leader",
+            "tolerance",
+            "rows",
+        ],
+    ));
+    parts.join(", ")
 }
 
 /// A drawing's sheet on one line: `Sheet 1, ansi_b, scale 1:2`.
@@ -2531,6 +2660,65 @@ fn occurrences(a: &Built, b: &Built, all: bool) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_annotations_marks_read_a_line_each() {
+        let v = json!({"kind": "ryucad.annotation", "format": 2, "id": "aaaaaaaaaa",
+                       "by": {"participant": "dave", "kind": "human"},
+                       "at": "2026-11-05T14:02:11Z", "status": "open", "claimed_by": null,
+                       "pins": [], "comment": "move here",
+                       "view": {"eye_m": [0.3, -0.3, 0.3], "target_m": [0, 0, 0], "up": [0, 0, 1],
+                                "projection": "perspective", "fov_deg": 40},
+                       "change": null, "replies": {}, "resolution": null,
+                       "marks": {"part": "rig", "list": [
+                           {"kind": "arrow", "in": "view", "xy_m": [[-0.02, 0.011], [0.009, -0.004]],
+                            "touches": [{"at": "tail", "ref": "rig/boss/3c"},
+                                        {"at": "tip", "ref": "rig/plate/77"}]},
+                           {"kind": "ellipse", "in": "view", "xy_m": [[0.004, 0.002], [0.016, 0.009]],
+                            "touches": []},
+                           {"kind": "stroke", "in": "face", "on": "rig/plate",
+                            "points_m": [[0, 0, 0.005], [0.01, 0.002, 0.005], [0.02, 0, 0.005]],
+                            "touches": [{"at": "under", "ref": "rig/plate/5f"}]},
+                           {"kind": "text", "in": "view", "xy_m": [[0.02, 0.015]], "text": "2 mm",
+                            "touches": []}]}});
+        let text =
+            String::from_utf8(textconv(crate::doc::canonical::to_string(&v).as_bytes())).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for want in [
+            "marks.part = rig",
+            "marks[0] = arrow in view (-20, 11) mm -> (9, -4) mm; tail rig/boss/3c, tip rig/plate/77",
+            "marks[1] = ellipse in view (4, 2) mm to (16, 9) mm",
+            "marks[2] = stroke on rig/plate, 3 points, (0, 0, 5) mm to (20, 2, 5) mm; under rig/plate/5f",
+            "marks[3] = text in view (20, 15) mm: 2 mm",
+        ] {
+            assert!(lines.contains(&want), "{want:?} in\n{text}");
+        }
+        assert!(!text.contains("xy_m"), "no raw points:\n{text}");
+    }
+
+    #[test]
+    fn diff_lists_an_annotation_whose_marks_changed() {
+        let a = |x: f64| {
+            json!({"kind": "ryucad.annotation", "id": "aaaaaaaaaa", "status": "open",
+                                "marks": {"part": "p", "list": [{"kind": "line", "in": "view",
+                                    "xy_m": [[0, 0], [x, 0]], "touches": []}]}})
+        };
+        let (mut from, mut to) = (Files::new(), Files::new());
+        let put = |f: &mut Files, p: &str, v: Value| {
+            f.insert(
+                p.to_owned(),
+                crate::doc::canonical::to_string(&v).into_bytes().into(),
+            );
+        };
+        put(&mut from, "annotations/aaaaaaaaaa.json", a(0.01));
+        put(&mut to, "annotations/aaaaaaaaaa.json", a(0.02));
+        let v = structural(&from, &to, &Options::default(), &Default::default());
+        let at = v["annotations"]["changed"]["aaaaaaaaaa"][0]["at"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(at.starts_with("/marks"), "{at}");
+    }
+
     use super::*;
 
     #[test]
@@ -3991,6 +4179,28 @@ mod tests {
             "views.v6 = exploded e1 of rig, iso, sheet s1",
         ] {
             assert!(t.contains(line), "{line} in\n{t}");
+        }
+    }
+
+    #[test]
+    fn annotations_textconv_one_line_each() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let v = json!({"format": 1, "kind": "ryucad.drawing", "name": "P",
+        "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b"}},
+        "views": {"v1": {"type": "base", "sheet": "s1", "orient": "top"}},
+        "annotations": {
+            "d3": {"type": "linear", "view": "v1", "a": format!("b/{n}"), "b": format!("b/{n}"),
+                   "along": "horizontal", "offset": "12 mm", "tolerance": {"symmetric": "0.1 mm"}},
+            "g1": {"type": "datum_feature", "view": "v1", "letter": "A", "on": format!("b/{n}")}
+        }});
+        let t = text(v);
+        for line in [
+            format!(
+                "annotations.d3 = linear v1, a b/{n}, b b/{n}, tolerance symmetric 0.1 mm, along horizontal, offset 12 mm"
+            ),
+            format!("annotations.g1 = datum_feature v1, on b/{n}, letter A"),
+        ] {
+            assert!(t.contains(&line), "{line} in\n{t}");
         }
     }
 

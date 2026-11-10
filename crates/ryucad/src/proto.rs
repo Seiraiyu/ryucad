@@ -75,6 +75,28 @@ pub struct PinArg {
     pub point: Option<[Value; 3]>,
 }
 
+/// Marks as a request gives them (design 423): the part or assembly
+/// they were drawn on, marks as the file has them (`touches` optional:
+/// the daemon works them out), and shorthand marks in the view's plane in
+/// the project's default unit.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MarksArg {
+    pub part: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub list: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub short: Vec<ShortMark>,
+}
+
+/// A mark as the CLI's shorthand writes it: `kind` `line`, `arrow`,
+/// `ellipse` or `rectangle` with `at` `X1,Y1:X2,Y2`, or `text` with
+/// `X,Y=TEXT`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ShortMark {
+    pub kind: String,
+    pub at: String,
+}
+
 /// A request's `flip`: a datum's or split's turn, or a draft's flipped
 /// faces.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1762,6 +1784,32 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// The drawing lint's findings and each sheet's score; with
+    /// `explain`, a rule's entry (no drawing needed).
+    #[serde(rename = "drawing.lint")]
+    DrawingLint {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drawing: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explain: Option<String>,
+    },
+    /// Sets the drawing lint's weights and severities by rule
+    /// (`drawing_lint.json`; `default` puts one back).
+    #[serde(rename = "drawing.lint.configure")]
+    DrawingLintConfigure {
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        weights: std::collections::BTreeMap<String, Value>,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        severity: std::collections::BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Records a proposed change: `request` (`{method, params}`, one of
     /// `annotation::PROPOSABLE`) run over the caller's draft in memory,
     /// what it would have written kept in a new annotation.
@@ -1805,6 +1853,12 @@ pub enum Request {
         /// Take the caller's participant's camera.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         with_view: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        marks: Option<MarksArg>,
+        /// A named view of the marks' part (else the first pin's) as the
+        /// annotation's view.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<String>,
         #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
         author: Option<String>,
     },
@@ -1876,6 +1930,11 @@ pub enum Request {
         comment: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pins: Option<Vec<PinArg>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        marks: Option<MarksArg>,
+        /// Take the marks away.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_marks: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expect: Option<String>,
         #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
@@ -2096,9 +2155,14 @@ pub enum Request {
         /// Draw the origin's axes and planes (default false).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         origin: bool,
-        /// Draw open annotations' pins, numbered (default false).
+        /// Draw open annotations' pins, numbered, and their marks
+        /// (default false).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         annotations: bool,
+        /// Render this annotation: its view, its pins and its marks (design
+        /// 423). With `camera` or `view` it is `usage`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        annotation: Option<String>,
         /// Draw faces in their appearance (default true); false draws the
         /// fixed theme.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2215,6 +2279,7 @@ impl Request {
                 | Request::DrawingDelete { .. }
                 | Request::DrawingRename { .. }
                 | Request::DrawingLayout { dry_run: false, .. }
+                | Request::DrawingLintConfigure { .. }
                 | Request::AnnotationPropose { .. }
                 | Request::AnnotationApply { .. }
                 | Request::AnnotationCreate { .. }

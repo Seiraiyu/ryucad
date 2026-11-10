@@ -15,11 +15,15 @@
 //!  "change": null, "replies": {}, "resolution": null}
 //! ```
 //!
+//! Format 2 adds `marks`, redline marks drawn in `view` (see
+//! `doc::redline`); a file with none is written at format 1.
+//!
 //! Derived states (`outdated`, `stale`, `applied`) are never written:
 //! `ryucad::annotation` works them out from the model.
 
 use super::files::{Obj, header, invalid, number};
 use super::id::Id;
+use super::redline::Marks;
 use super::sketch::clean;
 use super::views::ViewFile;
 use crate::error::{Code, Error, Result};
@@ -29,8 +33,9 @@ use std::path::{Path, PathBuf};
 
 pub const KIND: &str = "ryucad.annotation";
 
-/// The newest format this build reads.
-pub const FORMAT: u64 = 1;
+/// The newest format this build reads: 2 holds marks (design 423); a file
+/// with none is written at 1.
+pub const FORMAT: u64 = 2;
 
 /// The folder of the project's annotations, beside the manifest.
 pub const ANNOTATIONS: &str = "annotations";
@@ -327,6 +332,9 @@ pub struct Annotation {
     pub pins: Vec<Pin>,
     pub comment: String,
     pub view: Option<ViewFile>,
+    /// Redline marks (design 423), drawn in `view`; `None` writes the file
+    /// at format 1 with no `marks` key, as stage 19 did.
+    pub marks: Option<Marks>,
     pub change: Option<Change>,
     pub replies: BTreeMap<String, Reply>,
     pub resolution: Option<Resolution>,
@@ -485,9 +493,9 @@ impl Annotation {
                 )
             })
             .collect();
-        json!({
+        let mut v = json!({
             "kind": KIND,
-            "format": FORMAT,
+            "format": 1,
             "id": self.id,
             "by": self.by.to_json(),
             "at": self.at,
@@ -501,10 +509,16 @@ impl Annotation {
             "resolution": self.resolution.as_ref().map(|r| json!({
                 "by": r.by.to_json(), "at": r.at, "note": r.note, "applied": r.applied,
             })),
-        })
+        });
+        if let Some(m) = &self.marks {
+            v["format"] = json!(FORMAT);
+            v["marks"] = m.to_json();
+        }
+        v
     }
 
     pub fn from_json(v: &Value) -> Result<Annotation> {
+        let format = v["format"].as_u64().unwrap_or(1);
         let mut o = header(v, KIND, FORMAT)?;
         let id = o
             .take("id")?
@@ -551,6 +565,16 @@ impl Annotation {
             None | Some(Value::Null) => None,
             Some(c) => Some(Change::from_json(&c, "/change")?),
         };
+        let marks = match o.take_opt("marks") {
+            None | Some(Value::Null) => None,
+            Some(_) if format < 2 => {
+                return Err(invalid("/marks", "marks need format 2 of the file"));
+            }
+            Some(m) => Some(Marks::from_json(&m, "/marks", true)?),
+        };
+        if marks.is_some() && view.is_none() {
+            return Err(invalid("/view", "marks need the view they were drawn in"));
+        }
         if comment.trim().is_empty() && change.is_none() {
             return Err(invalid("/comment", "a comment, unless it carries a change"));
         }
@@ -614,6 +638,7 @@ impl Annotation {
             pins,
             comment,
             view,
+            marks,
             change,
             replies,
             resolution,
@@ -779,10 +804,55 @@ mod tests {
         }
     }
 
+    fn with_marks() -> Value {
+        let mut v = sample();
+        v["format"] = json!(2);
+        v["marks"] = json!({"part": "bracket", "list": [
+            {"kind": "arrow", "in": "view", "xy_m": [[0, 0], [0.01, 0]],
+             "touches": [{"at": "tip", "ref": "bracket/base/9f1c00000000000000000000000000aa"}]}]});
+        v
+    }
+
+    #[test]
+    fn marks_are_format_2_and_none_are_format_1_byte_for_byte() {
+        let a = Annotation::from_json(&with_marks()).unwrap();
+        assert_eq!(a.marks.as_ref().unwrap().list.len(), 1);
+        assert_eq!(a.to_json()["format"], 2);
+        assert_eq!(a.to_json()["marks"], with_marks()["marks"]);
+        assert_eq!(Annotation::from_json(&a.to_json()).unwrap(), a);
+        // Without marks: format 1 and no `marks` key, as stage 19 wrote.
+        let plain = Annotation::from_json(&sample()).unwrap();
+        assert!(plain.marks.is_none());
+        assert_eq!(plain.to_json()["format"], 1);
+        assert!(plain.to_json().get("marks").is_none());
+    }
+
+    #[test]
+    fn marks_need_format_2_and_a_view() {
+        let mut v = with_marks();
+        v["format"] = json!(1);
+        let e = Annotation::from_json(&v).unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].clone()),
+            (Code::InvalidDocument, json!("/marks"))
+        );
+        let mut v = with_marks();
+        v["view"] = Value::Null;
+        let e = Annotation::from_json(&v).unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].clone()),
+            (Code::InvalidDocument, json!("/view"))
+        );
+        let mut v = with_marks();
+        v["marks"]["list"][0]["kind"] = json!("cloud");
+        let e = Annotation::from_json(&v).unwrap_err();
+        assert_eq!(e.details["pointer"], "/marks/list/0/kind");
+    }
+
     #[test]
     fn a_newer_format_is_refused() {
         let mut v = sample();
-        v["format"] = json!(2);
+        v["format"] = json!(3);
         assert_eq!(
             Annotation::from_json(&v).unwrap_err().code,
             Code::FormatTooNew

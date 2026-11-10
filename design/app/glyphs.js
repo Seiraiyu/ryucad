@@ -1,7 +1,9 @@
-// ryucad's 29 CAD glyphs (design 199, Fonts and icons; design 297 adds
+// ryucad's 38 CAD glyphs (design 199, Fonts and icons; design 297 adds
 // the datum and path glyphs, design 323 the sweep and loft glyphs, design
 // 327 the shell, offset, mirror and split glyphs, design 346 the base
-// flange, edge flange, unfold and refold glyphs), on Phosphor's
+// flange, edge flange, unfold and refold glyphs, design 388 the sheet,
+// planar, fill, extract, sew and thicken glyphs, design 400 the draft,
+// move-face and replace-face glyphs), on Phosphor's
 // 256-unit grid with its 16-unit stroke, round caps and joins. Each glyph
 // is a list of strokes: `l` a polyline, `e` an ellipse (cx, cy, rx, ry),
 // `a` an arc of one (cx, cy, rx, ry, from, to: degrees clockwise from +x,
@@ -196,6 +198,56 @@ const GLYPHS = {
     ...[148, 172, 196].map((y) => ({ l: [[136, y], [136, y + 12]], w: 10 })),
     { a: [136, 160, 80, 80, 270, 360] },
     { l: [[156, 64], [136, 80], [156, 96]] },
+  ],
+  sheet: [
+    { l: [[40, 96], [88, 72], [136, 88], [184, 64]] },
+    { l: [[184, 64], [216, 176]] },
+    { l: [[216, 176], [168, 200], [120, 184], [72, 208]] },
+    { l: [[72, 208], [40, 96]] },
+  ],
+  "planar-face": [
+    { e: [128, 128, 96, 64] },
+    { l: [[72, 160], [120, 96]], w: 10 },
+    { l: [[112, 176], [168, 96]], w: 10 },
+    { l: [[160, 168], [192, 120]], w: 10 },
+  ],
+  fill: [
+    { l: [[40, 64], [128, 40], [216, 48]] },
+    { l: [[216, 48], [232, 128], [200, 208]] },
+    { l: [[200, 208], [128, 224], [56, 200]] },
+    { l: [[56, 200], [24, 128], [40, 64]] },
+    { l: [[128, 40], [136, 128], [128, 224]], w: 10 },
+    { l: [[24, 128], [128, 120], [232, 128]], w: 10 },
+  ],
+  extract: [
+    ...box(40, 160, 128, 56, 48, -40),
+    { l: [[40, 96], [168, 96], [216, 56], [88, 56], [40, 96]] },
+  ],
+  sew: [
+    { l: [[24, 72], [112, 72], [112, 200], [24, 200], [24, 72]] },
+    { l: [[144, 72], [232, 72], [232, 200], [144, 200], [144, 72]] },
+    ...[96, 136, 176].map((y) => ({ l: [[96, y - 12], [160, y + 12]], w: 10 })),
+  ],
+  thicken: [
+    { l: [[24, 184], [80, 160], [176, 160], [232, 184]] },
+    { l: [[24, 136], [80, 112], [176, 112], [232, 136]] },
+    { l: [[24, 136], [24, 184]] },
+    { l: [[232, 136], [232, 184]] },
+    ...arrow(128, 96, 128, 24),
+  ],
+  draft: [
+    { l: [[48, 216], [88, 56], [168, 56], [208, 216], [48, 216]] },
+    ...dashes(88, 76, 216, 40, 20, 10),
+    { a: [88, 56, 104, 104, 90, 104] },
+  ],
+  "move-face": [
+    ...box(32, 144, 136, 72, 48, -40),
+    { l: [[32, 72], [168, 72], [216, 32], [80, 32], [32, 72]], w: 10 },
+    ...arrow(120, 136, 120, 84),
+  ],
+  "replace-face": [
+    ...box(40, 128, 144, 88, 48, -40),
+    { a: [136, 108, 96, 40, 200, 340], w: 10 },
   ],
 };
 

@@ -131,6 +131,9 @@ pub struct View {
     pub tree_menu: Option<String>,
     /// `tree_menu` was just set: its row opens the menu when next drawn.
     pub tree_menu_opening: bool,
+    /// What the last Expand all or Expand below left closed, said under
+    /// the tree's filters until the tree is next opened or closed.
+    pub tree_note: Option<String>,
 }
 
 /// How long the pointer rests on an entity before its tooltip shows,
@@ -326,6 +329,7 @@ impl View {
             tree_focus: None,
             tree_menu: None,
             tree_menu_opening: false,
+            tree_note: None,
         }
     }
 
@@ -516,12 +520,16 @@ impl View {
     }
 
     /// Starts turning the camera to `to` over [`crate::core::nav::TURN_SECONDS`]:
-    /// following stops, and the session hears of each step (see `show`).
+    /// following stops, and the session hears of each step (see `show`), or
+    /// of where it landed when motion is reduced.
     pub fn turn(&mut self, ws: &mut Workspace, to: Camera) {
         self.framed = true;
         ws.following = None;
-        // From the next step, wherever it was asked for.
-        self.nav.turn_to(to, f64::NAN);
+        // From the next step, wherever it was asked for; with motion
+        // reduced it is there now, and no step follows to share it (#603).
+        if self.nav.turn_to(to, f64::NAN) {
+            ws.share_camera(&self.nav.camera);
+        }
     }
 
     /// The navigation cube where this viewport draws it.
@@ -797,14 +805,19 @@ impl View {
             .and_then(|k| ws.model.sketches.get(k));
         let picker = self.picker(ws);
         let mut faces = Vec::new();
-        // What the chosen feature made, in the solids that show it.
+        // What the chosen feature made, in the solids that show it; of a
+        // thicken, its walls.
         if let Some(made) = ws
             .made
             .as_ref()
             .filter(|m| chosen.as_ref() == Some(&m.feature))
         {
             let c = linear(style::CHOSEN);
-            for ((part, solid), names) in &made.faces {
+            let painted = match made.walls.is_empty() {
+                true => &made.faces,
+                false => &made.walls,
+            };
+            for ((part, solid), names) in painted {
                 for n in names {
                     if let Some(Place::Face(k, i)) = picker.place(&format!("{part}/{solid}/{n}")) {
                         faces.push((k, i, c));
@@ -928,7 +941,8 @@ impl View {
     /// What a shell, offset, mirror or split chosen in the tree adds to
     /// the scene: a shell's opening (the edges between the faces it made
     /// and the rest) dashed in the chosen colour, a mirror's or split's
-    /// plane as a datum plane is drawn, its square added to `glass`.
+    /// plane as a datum plane is drawn, its square added to `glass`. A
+    /// fill's sides and a sew's sewn edges are dashed too (ryucad 18).
     fn body_overlay(
         &mut self,
         ws: &Workspace,
@@ -946,6 +960,44 @@ impl View {
         let Some((part, id)) = self.chosen.clone() else {
             return (lines, glass);
         };
+        let size = [f64::from(px[0]), f64::from(px[1])];
+        if let Some(made) = ws
+            .made
+            .as_ref()
+            .filter(|m| m.feature == (part.clone(), id.clone()) && !m.lines.is_empty())
+        {
+            let picker = self.picker(ws);
+            let seams: Vec<Vec<[f64; 3]>> = made
+                .lines
+                .iter()
+                .flat_map(|((p, s), es)| es.iter().map(move |e| format!("{p}/{s}/{e}")))
+                .filter_map(|r| match picker.place(&r) {
+                    Some(Place::Edge(ps)) => Some(ps),
+                    _ => None,
+                })
+                .collect();
+            lines.extend(bodies::rim_overlay(&seams, style::CHOSEN, pr, size, scale));
+        }
+        if let Some(t) = ws
+            .model
+            .parts
+            .get(&part)
+            .and_then(|p| p.feature(&id))
+            .and_then(|f| f.tweak.clone())
+        {
+            self.tweak_overlay(
+                ws,
+                (&part, &id),
+                &t,
+                pr,
+                size,
+                scale,
+                bounds,
+                &mut lines,
+                &mut glass,
+            );
+            return (lines, glass);
+        }
         let Some(b) = ws
             .model
             .parts
@@ -955,7 +1007,6 @@ impl View {
         else {
             return (lines, glass);
         };
-        let size = [f64::from(px[0]), f64::from(px[1])];
         if b.kind == "shell"
             && let Some(made) = ws
                 .made
@@ -980,6 +1031,82 @@ impl View {
             glass.extend(g);
         }
         (lines, glass)
+    }
+
+    /// What a draft, move face or replace face chosen in the tree adds to
+    /// the scene (design 400, The app): a draft's neutral plane as a
+    /// datum plane is drawn, or its parting-line edges in the chosen
+    /// colour twice a sketch curve's width, and its pull as an arrow in
+    /// the datums' colour from the plane's middle (or the edges'), a
+    /// fifth of the model's size long; a move's direction or axis as a
+    /// datum axis is drawn. The faces it modified are painted with the
+    /// chosen feature's ([`Workspace::made`]).
+    #[allow(clippy::too_many_arguments)]
+    fn tweak_overlay(
+        &mut self,
+        ws: &Workspace,
+        (part, id): (&str, &str),
+        t: &crate::core::tweaks::TweakInfo,
+        pr: &Projector,
+        size: [f64; 2],
+        scale: f64,
+        bounds: Option<([f64; 3], [f64; 3])>,
+        lines: &mut Vec<crate::core::sketch::Corner>,
+        glass: &mut Vec<crate::core::datums::GlassCorner>,
+    ) {
+        use crate::core::tweaks;
+        let picker = self.picker(ws);
+        let parting: Vec<Vec<[f64; 3]>> = t
+            .parting
+            .iter()
+            .filter_map(|r| match picker.place(r) {
+                Some(Place::Edge(ps)) => Some(ps),
+                _ => None,
+            })
+            .collect();
+        lines.extend(tweaks::lines_overlay(
+            &parting,
+            style::CHOSEN,
+            pr,
+            size,
+            scale,
+        ));
+        for m in [
+            t.neutral_mark(part, id, bounds),
+            t.line_mark(part, id, bounds),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let (l, g) = crate::core::bodies::plane_overlay(&m, pr, size, scale);
+            lines.extend(l);
+            glass.extend(g);
+        }
+        // The pull from the neutral plane's middle, else the parting
+        // line's.
+        let points: Vec<[f64; 3]> = parting.iter().flatten().copied().collect();
+        let from = t.neutral.map(|p| p.origin).or_else(|| {
+            (!points.is_empty()).then(|| {
+                let n = points.len() as f64;
+                [0, 1, 2].map(|k| points.iter().map(|p| p[k]).sum::<f64>() / n)
+            })
+        });
+        if let (Some(from), Some(pull)) = (from, t.pull) {
+            let length = bounds
+                .map_or(0.01, |(lo, hi)| {
+                    let d = [0, 1, 2].map(|k| hi[k] - lo[k]);
+                    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() / 5.0
+                })
+                .max(1e-3);
+            let arrow = tweaks::arrow(from, pull, length);
+            lines.extend(tweaks::lines_overlay(
+                &arrow,
+                ryucad::render::DATUM,
+                pr,
+                size,
+                scale,
+            ));
+        }
     }
 
     /// The frames of the mate chosen in the tree, as both its connectors
@@ -1290,8 +1417,7 @@ impl View {
             && self.nav.turn.as_ref().is_none_or(|t| t.to != *c)
         {
             // Eased there, as a turn to a view is.
-            self.nav.turn_to(c.clone(), self.now);
-            if !self.nav.moving() {
+            if self.nav.turn_to(c.clone(), self.now) {
                 ws.share_camera(&self.nav.camera);
             }
             ui.ctx().request_repaint();

@@ -659,6 +659,9 @@ enum Command {
         /// Use this participant's camera.
         #[arg(long = "of", value_name = "PARTICIPANT", conflicts_with = "eye")]
         of: Option<String>,
+        /// Render this annotation: its view, its pins and its marks.
+        #[arg(long, value_name = "ID", conflicts_with_all = ["view", "eye"])]
+        annotation: Option<String>,
         #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires_all = ["target", "up"])]
         eye: Option<[String; 3]>,
         #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires = "eye")]
@@ -1523,9 +1526,93 @@ enum ModeArg {
     Edit,
 }
 
+/// Redline marks (design 423): whole as JSON, or by shorthand in the
+/// view's plane in the default unit (sent arrows, lines, ellipses,
+/// rectangles, then texts, after the JSON's).
+#[derive(Args, Clone, Debug, Default)]
+struct MarkArgs {
+    /// Marks as the file has them, {"part", "list"} (touches optional), or @FILE.
+    #[arg(long, value_name = "JSON|@FILE")]
+    marks: Option<String>,
+    /// The part or assembly the shorthand marks are drawn on.
+    #[arg(long, value_name = "PART")]
+    model: Option<String>,
+    #[arg(long, value_name = "X1,Y1:X2,Y2", allow_hyphen_values = true)]
+    arrow: Vec<String>,
+    #[arg(long, value_name = "X1,Y1:X2,Y2", allow_hyphen_values = true)]
+    line: Vec<String>,
+    #[arg(long, value_name = "X1,Y1:X2,Y2", allow_hyphen_values = true)]
+    ellipse: Vec<String>,
+    #[arg(long, value_name = "X1,Y1:X2,Y2", allow_hyphen_values = true)]
+    rectangle: Vec<String>,
+    /// A text mark: its anchor and one line of text.
+    #[arg(long, value_name = "X,Y=TEXT", allow_hyphen_values = true)]
+    text: Vec<String>,
+}
+
+impl MarkArgs {
+    fn shorthands(&self) -> Vec<ryucad::proto::ShortMark> {
+        let mut out = Vec::new();
+        for (kind, list) in [
+            ("arrow", &self.arrow),
+            ("line", &self.line),
+            ("ellipse", &self.ellipse),
+            ("rectangle", &self.rectangle),
+            ("text", &self.text),
+        ] {
+            out.extend(list.iter().map(|at| ryucad::proto::ShortMark {
+                kind: kind.into(),
+                at: at.clone(),
+            }));
+        }
+        out
+    }
+
+    /// The marks these flags give, if any: `--marks` read (a file after
+    /// `@`), the shorthands after them, `--model` naming the part.
+    fn read(&self) -> Result<Option<ryucad::proto::MarksArg>> {
+        let short = self.shorthands();
+        let mut m = match &self.marks {
+            None if short.is_empty() => return Ok(None),
+            None => ryucad::proto::MarksArg::default(),
+            Some(text) => {
+                let text = match text.strip_prefix('@') {
+                    Some(path) => std::fs::read_to_string(path)
+                        .map_err(|e| Error::new(Code::Usage, format!("--marks @{path}: {e}")))?,
+                    None => text.clone(),
+                };
+                serde_json::from_str(&text).map_err(|e| {
+                    Error::new(
+                        Code::Usage,
+                        format!("--marks isn't {{\"part\", \"list\"}} JSON: {e}"),
+                    )
+                })?
+            }
+        };
+        if let Some(p) = &self.model {
+            if !m.part.is_empty() && m.part != *p {
+                return Err(Error::new(
+                    Code::Usage,
+                    "--model and --marks name different parts",
+                ));
+            }
+            m.part = p.clone();
+        }
+        if m.part.is_empty() {
+            return Err(Error::new(
+                Code::Usage,
+                "marks need --model, or a part in --marks",
+            ));
+        }
+        m.short = short;
+        Ok(Some(m))
+    }
+}
+
 #[derive(Subcommand)]
 enum AnnotationsCmd {
-    /// Pin a comment to references (or, with --part and --point, to a bare point).
+    /// Pin a comment to references (or, with --part and --point, to a bare point), with
+    /// redline marks if given.
     Add {
         refs: Vec<String>,
         #[arg(long)]
@@ -1539,6 +1626,11 @@ enum AnnotationsCmd {
         /// Keep this participant's camera with it.
         #[arg(long)]
         view: bool,
+        /// Keep this named view (of the marks' part, else the first reference's) with it.
+        #[arg(long = "of", value_name = "VIEW", conflicts_with = "view")]
+        of: Option<String>,
+        #[command(flatten)]
+        marks: MarkArgs,
     },
     /// Propose a change: a request run over your draft, kept, not written.
     Propose {
@@ -1613,6 +1705,11 @@ enum AnnotationsCmd {
         comment: Option<String>,
         #[arg(long = "pin", value_name = "REF")]
         pins: Vec<String>,
+        #[command(flatten)]
+        marks: MarkArgs,
+        /// Take its marks away.
+        #[arg(long, conflicts_with_all = ["marks", "arrow", "line", "ellipse", "rectangle", "text"])]
+        no_marks: bool,
         #[arg(long, value_name = "BLAKE3")]
         expect: Option<String>,
     },
@@ -1859,6 +1956,38 @@ enum DrawingCmd {
         #[arg(long)]
         rev: Option<String>,
     },
+    /// The drawing lint: its findings with their fixes and each sheet's
+    /// score; --explain CODE gives a rule's entry.
+    Lint {
+        part: Option<String>,
+        drawing: Option<String>,
+        #[arg(long)]
+        rev: Option<String>,
+        #[arg(long)]
+        sheet: Option<String>,
+        #[arg(long, value_name = "CODE")]
+        explain: Option<String>,
+    },
+    /// Sets the drawing lint's rules' weights and severities
+    /// (`default` puts one back), in drawing_lint.json.
+    LintConfigure {
+        #[arg(long, value_name = "CODE=N")]
+        weight: Vec<String>,
+        #[arg(long, value_name = "CODE=off|warning|error|default")]
+        severity: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Add a dimension or a hole callout: the op `edit` sends.
+    #[command(subcommand)]
+    Dim(DrawingDimCmd),
+    /// Add a note: the op `edit` sends.
+    #[command(subcommand)]
+    Note(DrawingNoteCmd),
+    /// Add a feature control frame or a datum feature: the op `edit`
+    /// sends.
+    #[command(subcommand)]
+    Gdt(DrawingGdtCmd),
     /// Lay the views out again from nothing.
     Layout {
         part: String,
@@ -1954,6 +2083,149 @@ enum DrawingViewCmd {
         #[command(flatten)]
         expect: Expect,
     },
+}
+
+#[derive(Subcommand)]
+enum DrawingDimCmd {
+    /// A dimension on a view: linear (--a, --b, --along), angular (--a,
+    /// --b), radius or diameter (--of), ordinate (--datum, --of,
+    /// --along), chamfer or hole_callout (--of). Entities are
+    /// `<solid>/<name>` (in an assembly `<instance>/…/<solid>/<name>`) or
+    /// a datum's ID.
+    Add {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        view: String,
+        #[arg(long = "type", value_parser = ["linear", "angular", "radius", "diameter", "ordinate", "chamfer", "hole_callout"])]
+        kind: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        a: Option<String>,
+        #[arg(long)]
+        b: Option<String>,
+        #[arg(long)]
+        of: Option<String>,
+        #[arg(long)]
+        datum: Option<String>,
+        #[arg(long)]
+        vertex: Option<String>,
+        #[arg(long, value_parser = ["horizontal", "vertical", "aligned"])]
+        along: Option<String>,
+        /// Its line's distance from its feature on the sheet (signed).
+        #[arg(long, allow_hyphen_values = true)]
+        offset: Option<String>,
+        /// Its text's place, relative to the view's centre.
+        #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
+        at: Option<String>,
+        /// Text with <> for the value.
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        prefix: Option<String>,
+        #[arg(long)]
+        suffix: Option<String>,
+        /// ± this.
+        #[arg(long, value_name = "Q", conflicts_with_all = ["deviation", "limits", "fit", "basic", "reference"])]
+        tol: Option<String>,
+        /// Upper and lower deviations, stacked.
+        #[arg(long, value_name = "UPPER,LOWER", allow_hyphen_values = true)]
+        deviation: Option<String>,
+        /// Upper and lower deviations, shown as the limits.
+        #[arg(long, value_name = "UPPER,LOWER", allow_hyphen_values = true)]
+        limits: Option<String>,
+        /// An ISO 286 class or fit: H7, g6, H7/g6.
+        #[arg(long)]
+        fit: Option<String>,
+        #[arg(long)]
+        basic: bool,
+        #[arg(long)]
+        reference: bool,
+        #[arg(long)]
+        precision: Option<u32>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum DrawingNoteCmd {
+    /// A note on a sheet (--sheet) or a view (--view, with an optional
+    /// --leader to an entity); fields `{name}` filled as the title
+    /// block's.
+    Add {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        text: String,
+        #[arg(long, conflicts_with = "view")]
+        sheet: Option<String>,
+        #[arg(long)]
+        view: Option<String>,
+        #[arg(long, requires = "view")]
+        leader: Option<String>,
+        #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
+        at: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum DrawingGdtCmd {
+    /// A feature control frame (--characteristic, --tol, its datums,
+    /// --on an entity or --to a dimension), or a datum feature (--letter
+    /// --on an entity).
+    Add {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        view: String,
+        #[arg(long, conflicts_with = "letter", required_unless_present = "letter")]
+        characteristic: Option<String>,
+        #[arg(long, requires = "characteristic")]
+        tol: Option<String>,
+        #[arg(long)]
+        diameter: bool,
+        /// m, l, e, p, f or t.
+        #[arg(long)]
+        condition: Option<String>,
+        /// A datum letter, repeated in order of precedence (A or A:m).
+        #[arg(long = "datum")]
+        datums: Vec<String>,
+        #[arg(long)]
+        on: Option<String>,
+        #[arg(long, conflicts_with = "on")]
+        to: Option<String>,
+        /// A datum feature's letter.
+        #[arg(long, requires = "on")]
+        letter: Option<String>,
+        #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
+        at: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+/// A pair of lengths `A,B` as two quantities.
+fn pair_of(text: &str) -> core::result::Result<Value, Error> {
+    match text
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [a, b] => Ok(json!([a, b])),
+        _ => Err(Error::new(
+            Code::Usage,
+            format!("{text:?}: expected UPPER,LOWER"),
+        )),
+    }
 }
 
 /// A geometric reference as a drawing writes it: a word (`xy`, `x`,
@@ -3923,6 +4195,8 @@ fn request(cmd: &Command) -> Option<Request> {
                     point,
                     part,
                     view,
+                    of,
+                    marks,
                 } => {
                     let mut pins = refs(r);
                     let point = point.clone().map(|p| p.map(Value::String));
@@ -3941,6 +4215,8 @@ fn request(cmd: &Command) -> Option<Request> {
                         comment: comment.clone(),
                         camera: None,
                         with_view: *view,
+                        marks: marks.read().expect("checked by annotations_usage"),
+                        view: of.clone(),
                         author,
                     }
                 }
@@ -4013,11 +4289,15 @@ fn request(cmd: &Command) -> Option<Request> {
                     id,
                     comment,
                     pins,
+                    marks,
+                    no_marks,
                     expect,
                 } => Request::AnnotationEdit {
                     id: id.clone(),
                     comment: comment.clone(),
                     pins: (!pins.is_empty()).then(|| refs(pins)),
+                    marks: marks.read().expect("checked by annotations_usage"),
+                    no_marks: *no_marks,
                     expect: expect.clone(),
                     author,
                 },
@@ -4591,6 +4871,7 @@ fn request(cmd: &Command) -> Option<Request> {
             out: _,
             view,
             of,
+            annotation,
             eye,
             target,
             up,
@@ -4641,6 +4922,7 @@ fn request(cmd: &Command) -> Option<Request> {
             },
             fraction: *fraction,
             annotations: *annotations,
+            annotation: annotation.clone(),
             flat: flat.clone(),
         },
         Command::Highlight {
@@ -4911,6 +5193,9 @@ fn annotations_usage(c: &AnnotationsCmd) -> Result<()> {
         AnnotationsCmd::Propose { request, .. } => serde_json::from_str::<Value>(request)
             .map(drop)
             .map_err(|e| Error::new(Code::Usage, format!("--request isn't JSON: {e}"))),
+        AnnotationsCmd::Add { marks, .. } | AnnotationsCmd::Edit { marks, .. } => {
+            marks.read().map(drop)
+        }
         _ => Ok(()),
     }
 }
@@ -5539,6 +5824,205 @@ fn drawing_request(d: &DrawingCmd) -> Result<Request> {
                     .into_owned(),
             ),
         },
+        DrawingCmd::Lint {
+            part,
+            drawing,
+            rev,
+            sheet,
+            explain,
+        } => Request::DrawingLint {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            rev: rev.clone(),
+            sheet: sheet.clone(),
+            explain: explain.clone(),
+        },
+        DrawingCmd::LintConfigure {
+            weight,
+            severity,
+            expect,
+        } => {
+            let split = |t: &String| -> Result<(String, String)> {
+                t.split_once('=')
+                    .map(|(a, b)| (a.to_owned(), b.to_owned()))
+                    .ok_or_else(|| Error::new(Code::Usage, format!("{t:?}: expected CODE=VALUE")))
+            };
+            let mut weights = std::collections::BTreeMap::new();
+            for w in weight {
+                let (c, v) = split(w)?;
+                weights.insert(c, v.parse::<i64>().map_or_else(|_| json!(v), |n| json!(n)));
+            }
+            let mut sev = std::collections::BTreeMap::new();
+            for x in severity {
+                let (c, v) = split(x)?;
+                sev.insert(c, v);
+            }
+            Request::DrawingLintConfigure {
+                weights,
+                severity: sev,
+                expected_revision: expect.revision.clone(),
+            }
+        }
+        DrawingCmd::Dim(DrawingDimCmd::Add {
+            part,
+            drawing,
+            view,
+            kind,
+            id,
+            a,
+            b,
+            of,
+            datum,
+            vertex,
+            along,
+            offset,
+            at,
+            text,
+            prefix,
+            suffix,
+            tol,
+            deviation,
+            limits,
+            fit,
+            basic,
+            reference,
+            precision,
+            expect,
+        }) => {
+            let mut v = json!({"type": kind, "view": view});
+            for (k, x) in [
+                ("a", a),
+                ("b", b),
+                ("of", of),
+                ("datum", datum),
+                ("vertex", vertex),
+                ("along", along),
+                ("offset", offset),
+                ("text", text),
+                ("prefix", prefix),
+                ("suffix", suffix),
+            ] {
+                if let Some(x) = x {
+                    v[k] = json!(x);
+                }
+            }
+            if let Some(a) = at {
+                v["at"] = sheet_point(a)?;
+            }
+            if let Some(p) = precision {
+                v["precision"] = json!(p);
+            }
+            let tolerance = match (tol, deviation, limits, fit) {
+                (Some(t), ..) => Some(json!({"symmetric": t})),
+                (_, Some(d), ..) => Some(json!({"deviation": pair_of(d)?})),
+                (_, _, Some(l), _) => Some(json!({"limits": pair_of(l)?})),
+                (_, _, _, Some(f)) => Some(json!({"fit": f})),
+                _ if *basic => Some(json!({"basic": true})),
+                _ if *reference => Some(json!({"reference": true})),
+                _ => None,
+            };
+            if let Some(t) = tolerance {
+                v["tolerance"] = t;
+            }
+            let mut op = json!({"op": "add", "kind": "annotation", "value": v});
+            if let Some(id) = id {
+                op["id"] = json!(id);
+            }
+            edit(part, drawing, json!([op]), expect)
+        }
+        DrawingCmd::Note(DrawingNoteCmd::Add {
+            part,
+            drawing,
+            text,
+            sheet,
+            view,
+            leader,
+            at,
+            id,
+            expect,
+        }) => {
+            let mut v = json!({"type": "note", "text": text.replace("\\n", "\n")});
+            match (sheet, view) {
+                (_, Some(w)) => v["view"] = json!(w),
+                (Some(sh), None) => v["sheet"] = json!(sh),
+                (None, None) => v["sheet"] = json!("s1"),
+            }
+            if let Some(l) = leader {
+                v["leader"] = json!(l);
+            }
+            if let Some(a) = at {
+                v["at"] = sheet_point(a)?;
+            }
+            let mut op = json!({"op": "add", "kind": "annotation", "value": v});
+            if let Some(id) = id {
+                op["id"] = json!(id);
+            }
+            edit(part, drawing, json!([op]), expect)
+        }
+        DrawingCmd::Gdt(DrawingGdtCmd::Add {
+            part,
+            drawing,
+            view,
+            characteristic,
+            tol,
+            diameter,
+            condition,
+            datums,
+            on,
+            to,
+            letter,
+            at,
+            id,
+            expect,
+        }) => {
+            let mut v = json!({"view": view});
+            match (characteristic, letter) {
+                (Some(c), _) => {
+                    v["type"] = json!("feature_control_frame");
+                    v["characteristic"] = json!(c);
+                    let mut row =
+                        json!({"tolerance": tol.clone().unwrap_or_else(|| "0 mm".into())});
+                    if *diameter {
+                        row["diameter"] = json!(true);
+                    }
+                    if let Some(c) = condition {
+                        row["condition"] = json!(c);
+                    }
+                    if !datums.is_empty() {
+                        row["datums"] = json!(
+                            datums
+                                .iter()
+                                .map(|d| match d.split_once(':') {
+                                    Some((l, c)) => json!({"datum": l, "condition": c}),
+                                    None => json!(d),
+                                })
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                    v["rows"] = json!([row]);
+                    if let Some(o) = on {
+                        v["on"] = json!(o);
+                    }
+                    if let Some(t) = to {
+                        v["to"] = json!(t);
+                    }
+                }
+                (None, Some(l)) => {
+                    v["type"] = json!("datum_feature");
+                    v["letter"] = json!(l);
+                    v["on"] = json!(on);
+                }
+                (None, None) => unreachable!("clap requires one"),
+            }
+            if let Some(a) = at {
+                v["at"] = sheet_point(a)?;
+            }
+            let mut op = json!({"op": "add", "kind": "annotation", "value": v});
+            if let Some(id) = id {
+                op["id"] = json!(id);
+            }
+            edit(part, drawing, json!([op]), expect)
+        }
         DrawingCmd::Layout {
             part,
             drawing,
@@ -5845,6 +6329,125 @@ mod tests {
             .expect("a thread")
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
+    #[test]
+    fn marks_parse_from_json_shorthands_and_a_file() {
+        on_cli_stack(|| {
+            let req = |args: &[&str]| {
+                let cli = Cli::try_parse_from(args).unwrap();
+                let Command::Annotations(c) = &cli.command else {
+                    panic!()
+                };
+                annotations_usage(c).unwrap();
+                request(&cli.command).unwrap()
+            };
+            let r = req(&[
+                "ryucad",
+                "annotations",
+                "add",
+                "--comment",
+                "here",
+                "--model",
+                "rig",
+                "--arrow",
+                "-20,11:9,-4",
+                "--text",
+                "20,15=2 mm",
+                "--view",
+            ]);
+            let Request::AnnotationCreate {
+                marks: Some(m),
+                with_view: true,
+                ..
+            } = r
+            else {
+                panic!("{r:?}")
+            };
+            assert_eq!(m.part, "rig");
+            assert_eq!(
+                m.short,
+                vec![
+                    ryucad::proto::ShortMark {
+                        kind: "arrow".into(),
+                        at: "-20,11:9,-4".into()
+                    },
+                    ryucad::proto::ShortMark {
+                        kind: "text".into(),
+                        at: "20,15=2 mm".into()
+                    },
+                ]
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("m.json");
+            std::fs::write(
+                &file,
+                r#"{"part": "rig", "list": [{"kind": "line", "in": "view", "xy_m": [[0, 0], [0.01, 0]]}]}"#,
+            )
+            .unwrap();
+            let at = format!("@{}", file.display());
+            let r = req(&[
+                "ryucad",
+                "annotations",
+                "add",
+                "--comment",
+                "here",
+                "--marks",
+                &at,
+                "--of",
+                "front_view",
+            ]);
+            let Request::AnnotationCreate {
+                marks: Some(m),
+                view: Some(v),
+                ..
+            } = r
+            else {
+                panic!()
+            };
+            assert_eq!(
+                (m.part.as_str(), m.list.len(), v.as_str()),
+                ("rig", 1, "front_view")
+            );
+            let r = req(&["ryucad", "annotations", "edit", "aaaaaaaaaa", "--no-marks"]);
+            assert!(matches!(
+                r,
+                Request::AnnotationEdit {
+                    no_marks: true,
+                    marks: None,
+                    ..
+                }
+            ));
+            // A shorthand with no model to draw on is a usage error.
+            let cli = Cli::try_parse_from([
+                "ryucad",
+                "annotations",
+                "add",
+                "--comment",
+                "x",
+                "--arrow",
+                "0,0:1,1",
+            ])
+            .unwrap();
+            let Command::Annotations(c) = &cli.command else {
+                panic!()
+            };
+            assert_eq!(annotations_usage(c).unwrap_err().code, Code::Usage);
+            // `render --annotation` with a view is refused by the parser.
+            assert!(
+                Cli::try_parse_from([
+                    "ryucad",
+                    "render",
+                    "--annotation",
+                    "aaaaaaaaaa",
+                    "--view",
+                    "iso",
+                    "--out",
+                    "a.png"
+                ])
+                .is_err()
+            );
+        });
     }
 
     #[test]

@@ -361,6 +361,54 @@ impl Path {
         }
     }
 
+    /// Points along the path, in order: its start, each line's end, and
+    /// eight points along each cubic of the rest ([`Path::cubics`]), back
+    /// to the start when it closes. What a test of what crosses what
+    /// reads, never what is drawn.
+    pub fn points(&self) -> Vec<P> {
+        let mut out = vec![self.start];
+        let mut at = self.start;
+        for piece in self.cubics() {
+            match piece {
+                Piece::Line(p) => {
+                    out.push(p);
+                    at = p;
+                }
+                Piece::Cubic(c) => {
+                    for i in 1..=8 {
+                        out.push(cubic_at(at, &c, f64::from(i) / 8.0));
+                    }
+                    at = c[2];
+                }
+            }
+        }
+        if self.closed {
+            out.push(self.start);
+        }
+        out
+    }
+
+    /// The point halfway along the path, by the length of
+    /// [`Path::points`]' polyline: where a leader meets an edge.
+    pub fn middle(&self) -> P {
+        let pts = self.points();
+        let len = |a: P, b: P| ryu_math::hypot(b[0] - a[0], b[1] - a[1]);
+        let total: f64 = pts.windows(2).map(|w| len(w[0], w[1])).sum();
+        let mut left = total / 2.0;
+        for w in pts.windows(2) {
+            let l = len(w[0], w[1]);
+            if l > 0.0 && left <= l {
+                let t = left / l;
+                return [
+                    w[0][0] + t * (w[1][0] - w[0][0]),
+                    w[0][1] + t * (w[1][1] - w[0][1]),
+                ];
+            }
+            left -= l;
+        }
+        pts[pts.len() - 1]
+    }
+
     /// The path scaled by `k > 0` about the origin, then moved by `by`.
     pub fn scaled(&self, k: f64, by: P) -> Path {
         let mut out = self.map(|p| add(mul(p, k), by), |v| mul(v, k));
@@ -441,6 +489,16 @@ mod tests {
             at = c[2];
         }
         assert!(close(at, [0.0, 10.0]));
+    }
+
+    #[test]
+    fn a_paths_middle_is_halfway_along_it() {
+        let l = Path::polyline(&[[0.0, 0.0], [4.0, 0.0], [4.0, 2.0]], false);
+        assert!(close(l.middle(), [3.0, 0.0]));
+        let c = Path::circle([0.0, 0.0], 1.0);
+        let m = c.middle();
+        assert!((m[0] + 1.0).abs() < 1e-3 && m[1].abs() < 1e-2, "{m:?}");
+        assert_eq!(*c.points().last().unwrap(), c.start);
     }
 
     #[test]

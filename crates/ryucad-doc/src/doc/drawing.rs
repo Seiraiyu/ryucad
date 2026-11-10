@@ -582,6 +582,11 @@ pub struct DrawingFile {
     pub views: BTreeMap<Key, View>,
     /// Text the title block reads that no property gives (`drawn_by`).
     pub fields: BTreeMap<String, String>,
+    /// Its annotations (plan 9.C), by key.
+    pub annotations: BTreeMap<Key, super::drawing_annotation::Annotation>,
+    /// The tolerance a dimension without its own holds (`ISO 2768-m`, or
+    /// any text), shown above the title block.
+    pub general_tolerance: Option<String>,
 }
 
 /// The most decimals a value shows.
@@ -1216,6 +1221,8 @@ impl DrawingFile {
             sheets,
             views: BTreeMap::new(),
             fields: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+            general_tolerance: None,
         }
     }
 
@@ -1242,6 +1249,19 @@ impl DrawingFile {
         }
         if !self.fields.is_empty() {
             v["fields"] = json!(self.fields);
+        }
+        // Written only when there are some: 9.A's and 9.B's files keep
+        // their bytes.
+        if !self.annotations.is_empty() {
+            v["annotations"] = members(
+                self.annotations
+                    .iter()
+                    .map(|(k, a)| (k.to_string(), a.to_json()))
+                    .collect(),
+            );
+        }
+        if let Some(g) = &self.general_tolerance {
+            v["general_tolerance"] = json!(g);
         }
         v
     }
@@ -1315,6 +1335,33 @@ impl DrawingFile {
             }
             Some(_) => return Err(invalid("/fields", "an object of text by name")),
         };
+        let mut annotations = BTreeMap::new();
+        match o.take_opt("annotations") {
+            None => {}
+            Some(Value::Object(m)) => {
+                for (k, a) in m {
+                    let at = format!("/annotations/{k}");
+                    let key = super::drawing_annotation::LETTERS
+                        .iter()
+                        .find_map(|l| Key::parse(&k, *l))
+                        .ok_or_else(|| {
+                            invalid(
+                                &at,
+                                "an annotation's key: d, c, n, b, t, g or f and a number",
+                            )
+                        })?;
+                    annotations.insert(
+                        key,
+                        super::drawing_annotation::Annotation::from_json(&a, &at, key)?,
+                    );
+                }
+            }
+            Some(_) => return Err(invalid("/annotations", "an object of members by key")),
+        };
+        let general_tolerance = match o.take_opt("general_tolerance") {
+            None => None,
+            Some(g) => Some(text_of(&g, "/general_tolerance", "a general tolerance")?),
+        };
         o.finish()?;
         let d = DrawingFile {
             name,
@@ -1325,6 +1372,8 @@ impl DrawingFile {
             sheets,
             views,
             fields,
+            annotations,
+            general_tolerance,
         };
         d.check()?;
         Ok(d)
@@ -1374,7 +1423,73 @@ impl DrawingFile {
                 }
             }
         }
+        self.check_annotations()
+    }
+
+    /// What annotations must say of the rest: their views and sheets
+    /// exist, a frame under a dimension names one, and no two datum
+    /// features take one letter.
+    fn check_annotations(&self) -> Result<()> {
+        use super::drawing_annotation::Kind;
+        let mut letters: BTreeMap<&str, Key> = BTreeMap::new();
+        for (k, a) in &self.annotations {
+            let at = format!("/annotations/{k}");
+            if let Some(v) = a.view
+                && !self.views.contains_key(&v)
+            {
+                return Err(invalid(
+                    &format!("{at}/view"),
+                    &format!("{k} annotates view {v}, which the drawing hasn't"),
+                ));
+            }
+            if let Some(s) = a.sheet
+                && !self.sheets.contains_key(&s)
+            {
+                return Err(invalid(
+                    &format!("{at}/sheet"),
+                    &format!("{k} stands on sheet {s}, which the drawing hasn't"),
+                ));
+            }
+            match &a.kind {
+                Kind::FeatureControlFrame { to: Some(d), .. } => {
+                    let ok = self.annotations.get(d).is_some_and(|x| x.is_dimension());
+                    if !ok {
+                        return Err(invalid(
+                            &format!("{at}/to"),
+                            &format!("{k} stands under {d}, which is no dimension of the drawing"),
+                        ));
+                    }
+                    if self.annotations[d].view != a.view {
+                        return Err(invalid(
+                            &format!("{at}/to"),
+                            &format!("{k} stands under {d}, which annotates another view"),
+                        ));
+                    }
+                }
+                Kind::DatumFeature { letter, .. } => {
+                    if let Some(first) = letters.insert(letter, *k) {
+                        return Err(invalid(
+                            &format!("{at}/letter"),
+                            &format!("{k} takes datum letter {letter}, which {first} has"),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
         Ok(())
+    }
+
+    /// Every entity its annotations name, with its pointer: what renumbering
+    /// rewrites and textconv lists.
+    pub fn annotation_entities(&self) -> Vec<(String, &str)> {
+        let mut out = Vec::new();
+        for (k, a) in &self.annotations {
+            for (role, e) in a.entities() {
+                out.push((format!("/annotations/{k}/{role}"), e));
+            }
+        }
+        out
     }
 
     /// The standard it follows: its own, else the project's.

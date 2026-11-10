@@ -90,6 +90,64 @@ pub struct Geometry {
     /// cut away from everything above (but labels). At most
     /// [`crate::section::MAX_PLANES`].
     pub sections: Vec<crate::section::Plane>,
+    /// Drawn last, over everything, never cut: redline marks in the view.
+    pub overlay: Vec<Overlay>,
+    /// Text on a box of the background, on the glass with the overlay.
+    pub notes: Vec<Label>,
+    /// Which entity each triangle, line and point is, for [`pick`];
+    /// `None` (renders) records nothing.
+    pub tags: Option<Tags>,
+}
+
+/// Redline marks on the glass: drawn over everything else, never hidden
+/// by the model or cut by a section plane, in screen widths.
+pub const MARK_WIDTH: f32 = 3.0;
+/// An arrowhead: this long and twice this wide, in output pixels.
+pub const HEAD_LENGTH: f32 = 12.0;
+pub const HEAD_HALF: f32 = 5.0;
+/// How opaque a note's box is over what is behind it.
+pub const NOTE_BOX: f32 = 0.8;
+
+/// Something drawn on the glass, each with its opacity.
+#[derive(Clone, Debug)]
+pub enum Overlay {
+    /// A polyline [`MARK_WIDTH`] pixels wide.
+    Line {
+        points: Vec<u32>,
+        color: Rgb,
+        alpha: f32,
+    },
+    /// A filled arrowhead with its point at `tip`, pointing away from
+    /// `from`.
+    Head {
+        from: u32,
+        tip: u32,
+        color: Rgb,
+        alpha: f32,
+    },
+}
+
+/// Entity references for a pick pass ([`pick`]): runs of
+/// [`Geometry::triangles`] and [`Geometry::sheets`] by face, the lines
+/// of [`Geometry::lines`] that are edges or sketch curves, and the
+/// positions that are vertices or sketch points. A name is the entity's
+/// reference as pins write it (`<part>/<founder>/<hex>`,
+/// `<asm>/<path>/…/<solid>/<hex>`, `<part>/<sketch>/<entity>`).
+#[derive(Clone, Debug, Default)]
+pub struct Tags {
+    pub names: Vec<String>,
+    pub triangles: Vec<(std::ops::Range<usize>, u32)>,
+    pub sheets: Vec<(std::ops::Range<usize>, u32)>,
+    pub lines: Vec<(usize, u32)>,
+    pub points: Vec<(u32, u32)>,
+}
+
+impl Tags {
+    /// `reference`'s index among the names, added.
+    pub fn name(&mut self, reference: &str) -> u32 {
+        self.names.push(reference.to_owned());
+        (self.names.len() - 1) as u32
+    }
 }
 
 /// Text drawn at a model point, on top of everything.
@@ -246,6 +304,21 @@ impl Geometry {
         self.positions.len() * size_of::<[f64; 3]>()
             + (self.triangles.len() + self.sheets.len() + self.ghosts.len()) * size_of::<Triangle>()
             + self.translucent.len() * size_of::<(Triangle, f32)>()
+            + self
+                .overlay
+                .iter()
+                .map(|o| match o {
+                    Overlay::Line { points, .. } => {
+                        size_of::<Overlay>() + points.len() * size_of::<u32>()
+                    }
+                    Overlay::Head { .. } => size_of::<Overlay>(),
+                })
+                .sum::<usize>()
+            + self
+                .notes
+                .iter()
+                .map(|l| size_of::<Label>() + l.text.len())
+                .sum::<usize>()
             + tally.bytes
     }
 }
@@ -283,6 +356,24 @@ impl Geometry {
             });
         }
     }
+}
+
+/// Participants' colours, in turn: apart from each other for colour-blind
+/// eyes too. A participant's marks and pins are drawn in theirs, in the
+/// window and in renders alike.
+pub const PARTICIPANTS: [Rgb; 6] = [
+    [0.79, 0.34, 0.73],
+    [0.97, 0.59, 0.34],
+    [0.35, 0.57, 0.07],
+    [0.54, 0.47, 0.99],
+    [0.90, 0.35, 0.40],
+    [0.28, 0.63, 0.61],
+];
+
+/// A participant's colour: the same everywhere, from their ID or name.
+pub fn participant(id: &str) -> Rgb {
+    let n: usize = id.bytes().map(usize::from).sum();
+    PARTICIPANTS[n % PARTICIPANTS.len()]
 }
 
 /// Datums' colour, and how opaque a datum plane's square is.
@@ -637,12 +728,18 @@ fn unit(a: [f64; 3]) -> [f64; 3] {
 /// The nearest depth drawn: anything closer to the eye is left out.
 const NEAR: f64 = 1e-6;
 
+/// A camera's right, up and forward directions, as renders take them.
+pub fn view_basis(camera: &Camera) -> ([f64; 3], [f64; 3], [f64; 3]) {
+    let forward = unit(sub(camera.target, camera.eye));
+    let right = unit(cross(forward, camera.up));
+    let up = cross(right, forward);
+    (right, up, forward)
+}
+
 impl View {
     /// The view of `camera` on an image `width`×`height` (output pixels).
     pub fn new(camera: &Camera, width: u32, height: u32) -> View {
-        let forward = unit(sub(camera.target, camera.eye));
-        let right = unit(cross(forward, camera.up));
-        let up = cross(right, forward);
+        let (right, up, forward) = view_basis(camera);
         let (half, perspective) = match camera.projection {
             Projection::Perspective { fov_deg } => (
                 ryukei::math::tan(fov_deg * core::f64::consts::PI / 360.0),
@@ -1107,6 +1204,120 @@ impl Band {
     }
 }
 
+impl Band {
+    /// One overlay item: every sample it covers blended once with its
+    /// colour, with no depth or section test.
+    fn overlay(&mut self, item: &Overlay, screen: &[Option<Screen>]) {
+        let mut hit: Vec<usize> = Vec::new();
+        let rows = self.y0..self.y0 + self.rows;
+        let cover = |b: &Band, x: usize, y: usize, hit: &mut Vec<usize>| {
+            if rows.contains(&y) && x < b.width {
+                hit.push((y - b.y0) * b.width + x);
+            }
+        };
+        let (color, alpha) = match item {
+            Overlay::Line {
+                points,
+                color,
+                alpha,
+            } => {
+                let half = MARK_WIDTH * SS as f32 / 2.0;
+                let pts: Vec<Screen> = points.iter().filter_map(|p| screen[*p as usize]).collect();
+                let pairs: Vec<(Screen, Screen)> = match pts.as_slice() {
+                    [p] => vec![(*p, *p)],
+                    _ => pts.windows(2).map(|w| (w[0], w[1])).collect(),
+                };
+                for (a, b) in pairs {
+                    let lo_y = (a.y.min(b.y) - half).floor().max(0.0) as usize;
+                    let hi_y = (a.y.max(b.y) + half).ceil().max(0.0) as usize;
+                    let lo_x = (a.x.min(b.x) - half).floor().max(0.0) as usize;
+                    let hi_x = (a.x.max(b.x) + half).ceil().max(0.0) as usize;
+                    let (dx, dy) = (b.x - a.x, b.y - a.y);
+                    let len2 = dx * dx + dy * dy;
+                    for y in lo_y.max(self.y0)..hi_y.min(self.y0 + self.rows) {
+                        for x in lo_x..hi_x.min(self.width) {
+                            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                            let t = if len2 > 0.0 {
+                                (((px - a.x) * dx + (py - a.y) * dy) / len2).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            let (cx, cy) = (a.x + t * dx - px, a.y + t * dy - py);
+                            if cx * cx + cy * cy <= half * half {
+                                cover(self, x, y, &mut hit);
+                            }
+                        }
+                    }
+                }
+                (*color, *alpha)
+            }
+            Overlay::Head {
+                from,
+                tip,
+                color,
+                alpha,
+            } => {
+                let (Some(f), Some(t)) = (screen[*from as usize], screen[*tip as usize]) else {
+                    return;
+                };
+                let (dx, dy) = (t.x - f.x, t.y - f.y);
+                let len = (dx * dx + dy * dy).sqrt();
+                if len == 0.0 {
+                    return;
+                }
+                let (ux, uy) = (dx / len, dy / len);
+                let ss = SS as f32;
+                let (bx, by) = (t.x - ux * HEAD_LENGTH * ss, t.y - uy * HEAD_LENGTH * ss);
+                let (nx, ny) = (-uy * HEAD_HALF * ss, ux * HEAD_HALF * ss);
+                let tri = [(t.x, t.y), (bx + nx, by + ny), (bx - nx, by - ny)];
+                let lo_y = tri
+                    .iter()
+                    .map(|p| p.1)
+                    .fold(f32::INFINITY, f32::min)
+                    .floor()
+                    .max(0.0) as usize;
+                let hi_y = tri
+                    .iter()
+                    .map(|p| p.1)
+                    .fold(f32::NEG_INFINITY, f32::max)
+                    .ceil()
+                    .max(0.0) as usize;
+                let lo_x = tri
+                    .iter()
+                    .map(|p| p.0)
+                    .fold(f32::INFINITY, f32::min)
+                    .floor()
+                    .max(0.0) as usize;
+                let hi_x = tri
+                    .iter()
+                    .map(|p| p.0)
+                    .fold(f32::NEG_INFINITY, f32::max)
+                    .ceil()
+                    .max(0.0) as usize;
+                for y in lo_y.max(self.y0)..hi_y.min(self.y0 + self.rows) {
+                    for x in lo_x..hi_x.min(self.width) {
+                        let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                        let e = |a: (f32, f32), b: (f32, f32)| {
+                            (b.0 - a.0) * (py - a.1) - (b.1 - a.1) * (px - a.0)
+                        };
+                        let w = [e(tri[1], tri[2]), e(tri[2], tri[0]), e(tri[0], tri[1])];
+                        if w.iter().all(|w| *w >= 0.0) || w.iter().all(|w| *w <= 0.0) {
+                            cover(self, x, y, &mut hit);
+                        }
+                    }
+                }
+                (*color, *alpha)
+            }
+        };
+        hit.sort_unstable();
+        hit.dedup();
+        for i in hit {
+            let c = self.color[i];
+            self.color[i] = [0, 1, 2].map(|k| c[k] + alpha * (color[k] - c[k]));
+        }
+    }
+}
+
 /// The point a fraction `t` along `a`..`b` on screen, its depth
 /// interpolated over w as [`Band::segment`] does.
 fn between(a: Screen, b: Screen, t: f32) -> Screen {
@@ -1394,6 +1605,9 @@ pub fn render(
                 }
                 b.blend_translucent();
             }
+            for item in &geometry.overlay {
+                b.overlay(item, &screen);
+            }
             for (i, px) in out.chunks_mut(4).enumerate() {
                 let (x, y) = (i % w, i / w);
                 let mut sum = [0.0f32; 3];
@@ -1419,10 +1633,370 @@ pub fn render(
             img.text(x as i64 + 4, y as i64 - 12, &l.text);
         }
     }
+    for l in &geometry.notes {
+        if let Some((x, y)) = view.pixel(l.at) {
+            img.note(x as i64 + 4, y as i64 - 12, &l.text);
+        }
+    }
     if options.triad {
         img.triad(&view);
     }
     Ok(img)
+}
+
+/// How far, in pixels, a pick pass reaches from an edge or a vertex: as
+/// far as the window's picker.
+pub const PICK_REACH: f32 = 6.0;
+
+/// No entity at a pixel.
+const NONE: u32 = u32::MAX;
+
+/// What a pick pass ([`pick`]) found at each output pixel: the nearest
+/// face, the nearest visible edge (or sketch curve) within
+/// [`PICK_REACH`], and the nearest visible vertex (or sketch point)
+/// within it, as indices into `names`.
+#[derive(Clone, Debug)]
+pub struct Picked {
+    pub width: u32,
+    pub height: u32,
+    pub names: Vec<String>,
+    pub(crate) face: Vec<u32>,
+    pub(crate) edge: Vec<u32>,
+    pub(crate) vertex: Vec<u32>,
+}
+
+impl Picked {
+    fn index(&self, x: f32, y: f32) -> Option<usize> {
+        let (x, y) = (x.floor(), y.floor());
+        (x >= 0.0 && y >= 0.0 && x < self.width as f32 && y < self.height as f32)
+            .then(|| y as usize * self.width as usize + x as usize)
+    }
+
+    fn named(&self, id: u32) -> Option<&str> {
+        (id != NONE).then(|| self.names[id as usize].as_str())
+    }
+
+    /// The face at pixel `(x, y)` (output pixels, y down).
+    pub fn face(&self, x: f32, y: f32) -> Option<&str> {
+        self.index(x, y).and_then(|i| self.named(self.face[i]))
+    }
+
+    /// The edge within reach of `(x, y)`, else the face there.
+    pub fn edge_or_face(&self, x: f32, y: f32) -> Option<&str> {
+        let i = self.index(x, y)?;
+        self.named(self.edge[i])
+            .or_else(|| self.named(self.face[i]))
+    }
+
+    /// What the window's picker would pick at `(x, y)`: a vertex within
+    /// reach, else an edge, else the face.
+    pub fn top(&self, x: f32, y: f32) -> Option<&str> {
+        let i = self.index(x, y)?;
+        self.named(self.vertex[i])
+            .or_else(|| self.named(self.edge[i]))
+            .or_else(|| self.named(self.face[i]))
+    }
+
+    /// The faces with pixels whose centres lie inside `outline` (a
+    /// polygon in output pixels, even-odd), with how many, most first,
+    /// ties by name.
+    pub fn faces_inside(&self, outline: &[(f32, f32)]) -> Vec<(String, usize)> {
+        let mut counts: std::collections::BTreeMap<u32, usize> = Default::default();
+        if outline.len() >= 3 {
+            let lo_x = outline
+                .iter()
+                .map(|p| p.0)
+                .fold(f32::INFINITY, f32::min)
+                .floor()
+                .max(0.0) as usize;
+            let hi_x = (outline
+                .iter()
+                .map(|p| p.0)
+                .fold(f32::NEG_INFINITY, f32::max)
+                .ceil() as usize)
+                .min(self.width as usize);
+            let lo_y = outline
+                .iter()
+                .map(|p| p.1)
+                .fold(f32::INFINITY, f32::min)
+                .floor()
+                .max(0.0) as usize;
+            let hi_y = (outline
+                .iter()
+                .map(|p| p.1)
+                .fold(f32::NEG_INFINITY, f32::max)
+                .ceil() as usize)
+                .min(self.height as usize);
+            for y in lo_y..hi_y {
+                let py = y as f32 + 0.5;
+                for x in lo_x..hi_x {
+                    let px = x as f32 + 0.5;
+                    let mut inside = false;
+                    for k in 0..outline.len() {
+                        let (a, b) = (outline[k], outline[(k + 1) % outline.len()]);
+                        if (a.1 > py) != (b.1 > py)
+                            && px < a.0 + (py - a.1) / (b.1 - a.1) * (b.0 - a.0)
+                        {
+                            inside = !inside;
+                        }
+                    }
+                    let f = self.face[y * self.width as usize + x];
+                    if inside && f != NONE {
+                        *counts.entry(f).or_default() += 1;
+                    }
+                }
+            }
+        }
+        self.ranked(counts)
+    }
+
+    /// The edges (else faces) a polyline in output pixels passes over,
+    /// sampled every half pixel and counted once a pixel, most first,
+    /// ties by name.
+    pub fn under(&self, polyline: &[(f32, f32)]) -> Vec<(String, usize)> {
+        let mut counts: std::collections::BTreeMap<u32, usize> = Default::default();
+        let mut last = None;
+        let mut visit = |x: f32, y: f32| {
+            if let Some(i) = self.index(x, y)
+                && last != Some(i)
+            {
+                last = Some(i);
+                let id = if self.edge[i] != NONE {
+                    self.edge[i]
+                } else {
+                    self.face[i]
+                };
+                if id != NONE {
+                    *counts.entry(id).or_default() += 1;
+                }
+            }
+        };
+        if let [p] = polyline {
+            visit(p.0, p.1);
+        }
+        for w in polyline.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let n = ((b.0 - a.0).abs().max((b.1 - a.1).abs()) * 2.0)
+                .ceil()
+                .max(1.0) as usize;
+            for k in 0..=n {
+                let t = k as f32 / n as f32;
+                visit(a.0 + t * (b.0 - a.0), a.1 + t * (b.1 - a.1));
+            }
+        }
+        self.ranked(counts)
+    }
+
+    /// Counts by name, most first, ties by name, at most
+    /// `doc::redline::MAX_TOUCHES`.
+    fn ranked(&self, counts: std::collections::BTreeMap<u32, usize>) -> Vec<(String, usize)> {
+        let mut by: std::collections::BTreeMap<&str, usize> = Default::default();
+        for (id, n) in counts {
+            *by.entry(self.names[id as usize].as_str()).or_default() += n;
+        }
+        let mut out: Vec<(String, usize)> =
+            by.into_iter().map(|(k, n)| (k.to_owned(), n)).collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        out.truncate(crate::doc::redline::MAX_TOUCHES);
+        out
+    }
+}
+
+/// What a render of `geometry` from `camera` would draw at each output
+/// pixel of a `width` × `height` image, by entity (`geometry.tags`; an
+/// untagged geometry picks nothing). The same arithmetic as [`render`]'s
+/// projection; one thread, so the same answer on any number.
+pub fn pick(geometry: &Geometry, camera: &Camera, width: u32, height: u32) -> Result<Picked> {
+    check_size(width, height)?;
+    camera.check()?;
+    let view = View::new(camera, width, height);
+    let planes = &geometry.sections[..geometry.sections.len().min(PLANES)];
+    let ss = SS as f32;
+    let screen: Vec<Option<Screen>> = geometry
+        .positions
+        .iter()
+        .map(|p| {
+            let mut s = view.project(*p)?;
+            s.x /= ss;
+            s.y /= ss;
+            for (k, plane) in planes.iter().enumerate() {
+                s.cut[k] = plane.distance(*p) as f32;
+            }
+            Some(s)
+        })
+        .collect();
+    let (w, h) = (width as usize, height as usize);
+    let empty = Tags::default();
+    let tags = geometry.tags.as_ref().unwrap_or(&empty);
+    let cut = |d: &[f32; PLANES]| d[..planes.len()].iter().any(|x| *x > 0.0);
+    let mut depth = vec![f32::INFINITY; w * h];
+    let mut face = vec![NONE; w * h];
+    for (runs, tris, both) in [
+        (&tags.triangles, &geometry.triangles, false),
+        (&tags.sheets, &geometry.sheets, true),
+    ] {
+        for (range, id) in runs {
+            for t in &tris[range.clone()] {
+                let (Some(a), Some(b), Some(c)) = (
+                    screen[t.p[0] as usize],
+                    screen[t.p[1] as usize],
+                    screen[t.p[2] as usize],
+                ) else {
+                    continue;
+                };
+                // As `Band::fill`: counterclockwise from outside has
+                // negative area on screen; a sheet is picked both ways.
+                let area = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
+                if area == 0.0 || (area > 0.0 && !both) {
+                    continue;
+                }
+                let (s, area) = if area < 0.0 {
+                    ([a, c, b], -area)
+                } else {
+                    ([a, b, c], area)
+                };
+                let lo_x = s
+                    .iter()
+                    .map(|v| v.x)
+                    .fold(f32::INFINITY, f32::min)
+                    .floor()
+                    .max(0.0) as usize;
+                let hi_x = (s
+                    .iter()
+                    .map(|v| v.x)
+                    .fold(f32::NEG_INFINITY, f32::max)
+                    .ceil()
+                    .max(0.0) as usize)
+                    .min(w);
+                let lo_y = s
+                    .iter()
+                    .map(|v| v.y)
+                    .fold(f32::INFINITY, f32::min)
+                    .floor()
+                    .max(0.0) as usize;
+                let hi_y = (s
+                    .iter()
+                    .map(|v| v.y)
+                    .fold(f32::NEG_INFINITY, f32::max)
+                    .ceil()
+                    .max(0.0) as usize)
+                    .min(h);
+                let inv = [1.0 / s[0].w, 1.0 / s[1].w, 1.0 / s[2].w];
+                for y in lo_y..hi_y {
+                    let py = y as f32 + 0.5;
+                    for x in lo_x..hi_x {
+                        let px = x as f32 + 0.5;
+                        let edge = |p: Screen, q: Screen| {
+                            (q.x - p.x) * (py - p.y) - (q.y - p.y) * (px - p.x)
+                        };
+                        let (w0, w1, w2) = (edge(s[1], s[2]), edge(s[2], s[0]), edge(s[0], s[1]));
+                        if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                            continue;
+                        }
+                        let (b0, b1, b2) = (w0 / area, w1 / area, w2 / area);
+                        let iw = b0 * inv[0] + b1 * inv[1] + b2 * inv[2];
+                        let lerp = |v: [f32; 3]| {
+                            (b0 * v[0] * inv[0] + b1 * v[1] * inv[1] + b2 * v[2] * inv[2]) / iw
+                        };
+                        let mut d = [-1.0; PLANES];
+                        for (k, dk) in d.iter_mut().enumerate().take(planes.len()) {
+                            *dk = lerp([s[0].cut[k], s[1].cut[k], s[2].cut[k]]);
+                        }
+                        if cut(&d) {
+                            continue;
+                        }
+                        let z = lerp([s[0].z, s[1].z, s[2].z]);
+                        let i = y * w + x;
+                        if z < depth[i] {
+                            depth[i] = z;
+                            face[i] = *id;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Edges and vertices: the nearest within reach whose own point isn't
+    // behind a face (the slack `Band::segment` gives lines on surfaces).
+    let near = |layer: &mut Vec<u32>, best: &mut Vec<f32>, a: Screen, b: Screen, id: u32| {
+        let r = PICK_REACH;
+        let lo_x = (a.x.min(b.x) - r).floor().max(0.0) as usize;
+        let hi_x = ((a.x.max(b.x) + r).ceil().max(0.0) as usize).min(w);
+        let lo_y = (a.y.min(b.y) - r).floor().max(0.0) as usize;
+        let hi_y = ((a.y.max(b.y) + r).ceil().max(0.0) as usize).min(h);
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len2 = dx * dx + dy * dy;
+        for y in lo_y..hi_y {
+            let py = y as f32 + 0.5;
+            for x in lo_x..hi_x {
+                let px = x as f32 + 0.5;
+                let t = if len2 > 0.0 {
+                    (((px - a.x) * dx + (py - a.y) * dy) / len2).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let (fx, fy) = (a.x + t * dx, a.y + t * dy);
+                let d = ((fx - px) * (fx - px) + (fy - py) * (fy - py)).sqrt();
+                if d > r {
+                    continue;
+                }
+                let iw = (1.0 - t) / a.w + t / b.w;
+                let z = ((1.0 - t) * a.z / a.w + t * b.z / b.w) / iw;
+                let dist =
+                    [0, 1, 2].map(|k| ((1.0 - t) * a.cut[k] / a.w + t * b.cut[k] / b.w) / iw);
+                if cut(&dist) {
+                    continue;
+                }
+                // The face at the edge's own point, not at the pixel.
+                let (ex, ey) = (fx.floor(), fy.floor());
+                if ex >= 0.0 && ey >= 0.0 && (ex as usize) < w && (ey as usize) < h {
+                    let at = depth[ey as usize * w + ex as usize];
+                    if z > at + 4e-3 * z.abs() + 1e-9 {
+                        continue;
+                    }
+                }
+                let i = y * w + x;
+                let better = d < best[i]
+                    || (d == best[i]
+                        && layer[i] != NONE
+                        && tags.names[id as usize] < tags.names[layer[i] as usize]);
+                if better {
+                    best[i] = d;
+                    layer[i] = id;
+                }
+            }
+        }
+    };
+    let (mut edge, mut edge_d) = (vec![NONE; w * h], vec![f32::INFINITY; w * h]);
+    for (li, id) in &tags.lines {
+        let pts: Vec<Option<Screen>> = geometry.lines[*li]
+            .points
+            .iter()
+            .map(|p| screen[*p as usize])
+            .collect();
+        if let [Some(p)] = pts[..] {
+            near(&mut edge, &mut edge_d, p, p, *id);
+        }
+        for pair in pts.windows(2) {
+            if let [Some(p), Some(q)] = pair {
+                near(&mut edge, &mut edge_d, *p, *q, *id);
+            }
+        }
+    }
+    let (mut vertex, mut vertex_d) = (vec![NONE; w * h], vec![f32::INFINITY; w * h]);
+    for (p, id) in &tags.points {
+        if let Some(s) = screen[*p as usize] {
+            near(&mut vertex, &mut vertex_d, s, s, *id);
+        }
+    }
+    Ok(Picked {
+        width,
+        height,
+        names: tags.names.clone(),
+        face,
+        edge,
+        vertex,
+    })
 }
 
 impl Image {
@@ -1432,6 +2006,27 @@ impl Image {
         }
         let i = ((y as u32 * self.width + x as u32) * 4) as usize;
         self.rgba[i..i + 3].copy_from_slice(&c);
+    }
+
+    /// A note: text with its top left at `(x, y)` on a box of the
+    /// background, [`NOTE_BOX`] opaque.
+    fn note(&mut self, x: i64, y: i64, s: &str) {
+        let (w, h) = (8 * s.chars().count() as i64 + 6, 14);
+        let bg = BACKGROUND.map(to_u8);
+        for dy in 0..h {
+            for dx in 0..w {
+                let (px, py) = (x - 3 + dx, y - 3 + dy);
+                if px < 0 || py < 0 || px >= self.width as i64 || py >= self.height as i64 {
+                    continue;
+                }
+                let i = ((py as u32 * self.width + px as u32) * 4) as usize;
+                for (k, b) in bg.iter().enumerate() {
+                    let c = f32::from(self.rgba[i + k]);
+                    self.rgba[i + k] = (c + NOTE_BOX * (f32::from(*b) - c)).round() as u8;
+                }
+            }
+        }
+        self.text(x, y, s);
     }
 
     /// ASCII text, dark on a white halo, its top left at `(x, y)`.
@@ -1573,6 +2168,236 @@ pub fn chain_span(chain: &crate::geometry::Chain) -> f64 {
 pub(crate) mod tests {
     use super::*;
 
+    fn tagged_cube() -> Geometry {
+        let mut g = cube();
+        let mut t = Tags::default();
+        for f in 0..6 {
+            let id = t.name(&format!("c/b/face{f}"));
+            t.triangles.push((2 * f..2 * f + 2, id));
+        }
+        // The edge from corner 4 to 5 (y = 0, z = 1) and vertex 7 (1, 1, 1).
+        g.lines.push(Line {
+            points: vec![4, 5],
+            color: EDGE,
+            width: 1.0,
+            dash: false,
+        });
+        let e = t.name("c/b/edge45");
+        t.lines.push((0, e));
+        let v = t.name("c/b/vertex7");
+        t.points.push((7, v));
+        g.tags = Some(t);
+        g
+    }
+
+    fn ortho(eye: [f64; 3]) -> Camera {
+        Camera {
+            eye,
+            target: [0.5, 0.5, 0.5],
+            up: [0.0, 0.0, 1.0],
+            projection: Projection::Orthographic { height: 3.0 },
+        }
+    }
+
+    #[test]
+    fn the_nearest_face_is_picked_and_the_background_is_nothing() {
+        // From above: the top face (face1) fills the middle.
+        let p = pick(
+            &tagged_cube(),
+            &ortho([0.5, 0.5, 5.0]).with_up([0.0, 1.0, 0.0]),
+            300,
+            300,
+        )
+        .unwrap();
+        assert_eq!(p.face(150.0, 150.0), Some("c/b/face1"));
+        assert_eq!(p.top(150.0, 150.0), Some("c/b/face1"));
+        assert_eq!(p.face(2.0, 2.0), None);
+    }
+
+    #[test]
+    fn an_edge_and_a_vertex_within_reach_win_over_the_face() {
+        let cam = ortho([3.0, -4.0, 5.0]);
+        let g = tagged_cube();
+        let p = pick(&g, &cam, 400, 400).unwrap();
+        let v = View::new(&cam, 400, 400);
+        let (x, y) = v.pixel([1.0, 1.0, 1.0]).unwrap();
+        assert_eq!(p.top(x + 2.0, y + 2.0), Some("c/b/vertex7"));
+        let (x, y) = v.pixel([0.5, 0.0, 1.0]).unwrap();
+        assert_eq!(p.top(x, y + 3.0), Some("c/b/edge45"));
+        assert_eq!(p.edge_or_face(x, y + 3.0), Some("c/b/edge45"));
+        // Farther than the reach the face shows again.
+        assert_ne!(p.top(x, y + 30.0), Some("c/b/edge45"));
+    }
+
+    #[test]
+    fn hidden_edges_and_cut_faces_are_not_picked() {
+        // From behind and below, the front top edge (4–5) is behind the
+        // cube: neither of its faces faces the eye.
+        let cam = ortho([-3.0, 5.0, -5.0]);
+        let p = pick(&tagged_cube(), &cam, 400, 400).unwrap();
+        let (x, y) = View::new(&cam, 400, 400).pixel([0.5, 0.0, 1.0]).unwrap();
+        assert_ne!(p.top(x, y + 1.0), Some("c/b/edge45"));
+        // A plane cutting away the cube's upper half: from above, the
+        // bottom face's inside isn't drawn (faces facing away), so nothing.
+        let mut g = tagged_cube();
+        g.sections.push(crate::section::Plane {
+            origin_m: [0.0, 0.0, 0.5],
+            normal: [0.0, 0.0, 1.0],
+        });
+        let p = pick(
+            &g,
+            &ortho([0.5, 0.5, 5.0]).with_up([0.0, 1.0, 0.0]),
+            300,
+            300,
+        )
+        .unwrap();
+        assert_ne!(p.face(150.0, 150.0), Some("c/b/face1"));
+    }
+
+    #[test]
+    fn faces_inside_an_outline_and_under_a_stroke_are_counted() {
+        let cam = ortho([0.5, 0.5, 5.0]).with_up([0.0, 1.0, 0.0]);
+        let p = pick(&tagged_cube(), &cam, 300, 300).unwrap();
+        let square = [
+            (100.0, 100.0),
+            (200.0, 100.0),
+            (200.0, 200.0),
+            (100.0, 200.0),
+        ];
+        let inside = p.faces_inside(&square);
+        assert_eq!(inside.len(), 1);
+        assert_eq!(inside[0].0, "c/b/face1");
+        assert_eq!(inside[0].1, 100 * 100);
+        let under = p.under(&[(0.0, 150.0), (300.0, 150.0)]);
+        assert_eq!(under[0].0, "c/b/face1");
+    }
+
+    #[test]
+    fn a_pick_is_the_same_on_one_thread_and_eight() {
+        let run = |n| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .unwrap()
+                .install(|| {
+                    let p = pick(&tagged_cube(), &ortho([3.0, -4.0, 5.0]), 200, 200).unwrap();
+                    (p.face.clone(), p.edge.clone(), p.vertex.clone())
+                })
+        };
+        assert_eq!(run(1), run(8));
+    }
+
+    #[test]
+    fn overlay_lines_and_heads_are_drawn_over_the_model_and_never_cut() {
+        let mut g = cube();
+        let n = g.positions.len() as u32;
+        // A line from behind the cube to in front of it, through it.
+        g.positions.extend([[0.5, -2.0, 0.5], [0.5, 3.0, 0.5]]);
+        g.overlay.push(Overlay::Line {
+            points: vec![n, n + 1],
+            color: [1.0, 0.0, 0.0],
+            alpha: 1.0,
+        });
+        g.sections.push(crate::section::Plane {
+            origin_m: [0.0, 0.0, 0.4],
+            normal: [0.0, 0.0, 1.0],
+        });
+        let cam = camera([3.0, 0.5, 0.5]);
+        let img = render(&g, &cam, 200, 200, bare()).unwrap();
+        let v = View::new(&cam, 200, 200);
+        let (x, y) = v.pixel([0.5, 0.5, 0.5]).unwrap();
+        assert_eq!(
+            &at(&img, x as u32, y as u32)[..3],
+            &[255, 0, 0],
+            "over the face"
+        );
+        // Half opaque: between the colour and what is behind.
+        let mut g2 = cube();
+        g2.positions.extend([[0.5, -2.0, 0.5], [0.5, 3.0, 0.5]]);
+        g2.overlay.push(Overlay::Line {
+            points: vec![n, n + 1],
+            color: [1.0, 0.0, 0.0],
+            alpha: 0.4,
+        });
+        let img = render(&g2, &cam, 200, 200, bare()).unwrap();
+        let p = at(&img, x as u32, y as u32);
+        assert!(p[0] > p[1] && p[1] > 0, "{p:?}");
+    }
+
+    #[test]
+    fn an_arrowhead_is_filled_at_its_tip() {
+        let mut g = Geometry::default();
+        g.positions.extend([[0.5, 0.0, 0.5], [0.5, 1.0, 0.5]]);
+        g.overlay.push(Overlay::Head {
+            from: 0,
+            tip: 1,
+            color: [0.0, 0.0, 1.0],
+            alpha: 1.0,
+        });
+        let cam = camera([3.0, 0.5, 0.5]);
+        let img = render(&g, &cam, 200, 200, bare()).unwrap();
+        let v = View::new(&cam, 200, 200);
+        let (tx, ty) = v.pixel([0.5, 1.0, 0.5]).unwrap();
+        let (fx, _) = v.pixel([0.5, 0.0, 0.5]).unwrap();
+        // Just back from the tip, along the arrow, is the head.
+        let back = if fx < tx { tx - 4.0 } else { tx + 4.0 };
+        assert_eq!(&at(&img, back as u32, ty as u32)[..3], &[0, 0, 255]);
+        // Past the tip is not.
+        let past = if fx < tx { tx + 3.0 } else { tx - 3.0 };
+        assert_ne!(&at(&img, past as u32, ty as u32)[..3], &[0, 0, 255]);
+    }
+
+    #[test]
+    fn a_note_is_text_on_a_box() {
+        let mut g = Geometry::default();
+        g.notes.push(Label {
+            at: [0.5, 0.5, 0.5],
+            text: "2 mm".into(),
+        });
+        let cam = camera([3.0, 0.5, 0.5]);
+        let img = render(&g, &cam, 200, 200, bare()).unwrap();
+        let (x, y) = View::new(&cam, 200, 200).pixel([0.5, 0.5, 0.5]).unwrap();
+        let dark = (0..40)
+            .flat_map(|dx| (0..12).map(move |dy| (dx, dy)))
+            .any(|(dx, dy)| at(&img, x as u32 + dx, y as u32 - 12 + dy)[0] < 100);
+        assert!(dark, "the text is drawn");
+    }
+
+    #[test]
+    fn nothing_on_the_glass_changes_no_pixel() {
+        let cam = camera([3.0, -2.0, 2.5]);
+        let a = render(&cube(), &cam, 160, 120, Options::default()).unwrap();
+        let mut g = cube();
+        g.overlay.clear();
+        g.notes.clear();
+        assert_eq!(
+            render(&g, &cam, 160, 120, Options::default()).unwrap().rgba,
+            a.rgba
+        );
+    }
+
+    #[test]
+    fn a_participants_colour_is_the_same_from_their_name() {
+        assert_eq!(
+            participant("dave (window 1)"),
+            participant("dave (window 1)")
+        );
+        assert!(PARTICIPANTS.contains(&participant("agent")));
+    }
+
+    #[test]
+    fn tags_are_kept_only_when_asked_and_cost_no_bytes() {
+        let mut g = Geometry::default();
+        assert!(g.tags.is_none());
+        g.tags = Some(Tags::default());
+        let t = g.tags.as_mut().unwrap();
+        let a = t.name("p/b/aa");
+        let b = t.name("p/b/bb");
+        assert_eq!((a, b), (0, 1));
+        assert_eq!(t.names, ["p/b/aa", "p/b/bb"]);
+        assert_eq!(g.bytes(), 0);
+    }
+
     #[test]
     fn geometry_counts_its_bytes() {
         use std::mem::size_of;
@@ -1691,6 +2516,9 @@ pub(crate) mod tests {
             translucent: Vec::new(),
             translucent_lines: Vec::new(),
             sections: Vec::new(),
+            overlay: Vec::new(),
+            notes: Vec::new(),
+            tags: None,
         }
     }
 

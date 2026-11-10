@@ -60,6 +60,8 @@ pub struct Drawn {
     pub base: Arc<WireBody>,
     pub pose: Pose,
     pub edges: bool,
+    /// A sheet's body (ryucad 18): drawn from both sides, never capped.
+    pub sheet: bool,
 }
 
 fn rank(q: Quality) -> i32 {
@@ -142,6 +144,7 @@ pub fn choose(
                 base: Arc::clone(b.mesh),
                 pose: b.pose,
                 edges: pixels >= EDGES_FROM,
+                sheet: b.sheet,
             };
             Some((d, want))
         })
@@ -474,6 +477,7 @@ mod tests {
                     level: Quality::Fine,
                     base: normal,
                     edges: true,
+                    sheet: false,
                     pose: crate::core::model::Pose::of(
                         [i as f64, 0.0, 0.0],
                         [0.0, 0.0, 1.0],

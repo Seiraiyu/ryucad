@@ -55,6 +55,7 @@ pub mod sweeps;
 pub mod thumbs;
 pub mod toast;
 pub mod tree;
+pub mod tweaks;
 pub mod views;
 pub mod where_used;
 pub mod workspace;

@@ -122,13 +122,17 @@ pub(crate) fn jet_bound(surface: &Surface, range: [[f64; 2]; 2]) -> Option<Surfa
         .then_some(b)
 }
 
-/// The surface's jets over a box, for a piece's bounds: a spline's by
-/// [`crate::geom::NurbsSurface::jet_box_small`], which encloses a box small
-/// against its patch from a point value and a remainder rather than
-/// cutting the patch's nets down to it (#305, #307, #308), else the sheet's.
+/// The surface's jets over a box, for a piece's bounds, which read only
+/// its derivatives (the point's enclosure may be entire): a spline's by
+/// [`crate::geom::NurbsSurface::derivative_box_small`], which encloses a
+/// box small against its patch from a point value and a remainder rather
+/// than cutting the patch's nets down to it (#305, #307, #308), else the
+/// sheet's.
 fn jet_box(surface: &Surface, range: [[f64; 2]; 2]) -> Option<crate::geom::jet::JVec<Interval>> {
     match surface {
-        Surface::Nurbs(n) => Some(crate::geom::sheet::from_parts(n.jet_box_small(range))),
+        Surface::Nurbs(n) => Some(crate::geom::sheet::from_parts(
+            n.derivative_box_small(range),
+        )),
         _ => Sheet::of(surface).jet_box(range),
     }
 }

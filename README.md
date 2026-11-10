@@ -73,7 +73,7 @@ This is `ryucad-app` running on a Mac while the agent works, and nobody touched 
 
 ### Exchange
 
-- **STEP import:** AP203, AP214 and AP242, with healing, assemblies placed as their files place them, and re-import that keeps the stable names of unchanged geometry.
+- **STEP import:** AP203, AP214 and AP242, as references by default (the file's own faces, shown, measured and mated to without healing), or with `--solid` healed into solids you can model on; `import convert` switches either way and keeps face names. Assemblies are placed as their files place them, or flattened into one part with `--flatten`, and re-import keeps the stable names of unchanged geometry.
 - **STEP export** of parts and assemblies, in millimetres or metres. A file exported as it was imported comes back byte for byte.
 - **STL, 3MF and USD** (usda, usdc and usdz, with exact B-rep as omniSolid BrepArrays beside the meshes). The daemon writes each file itself.
 - **Real files:** on cox-worker-2 (AMD Ryzen 7 9700X, 8 cores, shared), ryustep reads 1,598 parts in 125.8 MB of AP242 in 37 to 55 s. `step-hunt` runs the public corpora (NIST, OCCT's samples, KiCad's models) through the CLI and files what fails.

@@ -23,6 +23,13 @@
 //! render` draws it; it marks the stencil, and nothing drawn after (edges,
 //! sketches, highlights, ghosts, translucent faces) is drawn over a cap.
 //! A frame with no planes draws as before.
+//!
+//! A sheet (ryucad 18) has no inside, so its back is seen: its faces are
+//! drawn both ways round with pipelines of their own, the back lit by its
+//! normal turned over and tinted towards `ryucad::render::SHEET_BACK`, as
+//! `ryucad render` draws it, so which way a sheet faces shows. A sheet is
+//! cut by section planes but never capped: its faces clear the stencil
+//! whichever way they face.
 
 use crate::core::appearance::Look;
 use crate::core::compare::Compare;
@@ -260,6 +267,37 @@ struct VOut {
     return vec4<f32>(c, 1.0);
 }
 
+// A sheet's faces both ways round: the back lit by its normal turned over
+// and leaning `SHEET_TINT_K` of the way towards `SHEET_BACK_RGB`
+// (`ryucad::render`'s, made linear, put in by `shader`). Never a cap.
+@fragment fn fs_sheet(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if cut(i.world) {
+        discard;
+    }
+    var n = normalize(i.normal);
+    var c = i.color.rgb;
+    if !front {
+        n = -n;
+        c = mix(c, SHEET_BACK_RGB, SHEET_TINT_K);
+    }
+    let lit = 0.3 + 0.7 * max(dot(n, u.light.xyz), 0.0);
+    return vec4<f32>(c * lit, i.color.a);
+}
+
+// Paint over a sheet's face from either side: its colour as it is, lit by
+// the normal facing the eye.
+@fragment fn fs_two_sided(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if cut(i.world) {
+        discard;
+    }
+    var n = normalize(i.normal);
+    if !front {
+        n = -n;
+    }
+    let lit = 0.3 + 0.7 * max(dot(n, u.light.xyz), 0.0);
+    return vec4<f32>(i.color.rgb * lit, i.color.a);
+}
+
 @fragment fn fs_face(i: VOut) -> @location(0) vec4<f32> {
     if cut(i.world) {
         discard;
@@ -349,6 +387,18 @@ fn oit(c: vec4<f32>, z: f32) -> Oit {
 }
 "#;
 
+/// The scene's shader, a sheet's back colour (`ryucad::render::SHEET_BACK`,
+/// made linear) and how far it leans there (`SHEET_TINT`) put in.
+fn shader() -> String {
+    let b = linear(ryucad::render::SHEET_BACK);
+    SHADER
+        .replace(
+            "SHEET_BACK_RGB",
+            &format!("vec3<f32>({:?}, {:?}, {:?})", b[0], b[1], b[2]),
+        )
+        .replace("SHEET_TINT_K", &format!("{:?}", ryucad::render::SHEET_TINT))
+}
+
 /// Composites the translucent faces' targets over the scene.
 const COMPOSITE: &str = r#"
 @group(0) @binding(0) var accum_t: texture_2d<f32>;
@@ -384,6 +434,8 @@ type Placed = (Arc<BodyKey>, usize, Instance, Arc<WireBody>);
 /// occurrences drawn with them ([`Drawn::edges`]).
 struct Run {
     at: Upload,
+    /// A sheet's body: drawn both ways round, never capped.
+    sheet: bool,
     instances: Vec<Instance>,
     /// Those drawn without their edges: too small for them to show.
     plain: Vec<Instance>,
@@ -469,6 +521,11 @@ pub struct DrawList<'a> {
 struct Pipes {
     faces: wgpu::RenderPipeline,
     paint: wgpu::RenderPipeline,
+    /// A sheet's faces both ways round, its back tinted; while planes cut
+    /// they clear the stencil either way (never a cap).
+    sheets: wgpu::RenderPipeline,
+    /// Paint over a sheet's faces, from either side.
+    sheet_paint: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
     /// Flat triangles pulled towards the eye as lines are: sketches.
     marks: wgpu::RenderPipeline,
@@ -738,7 +795,7 @@ impl Scene {
         };
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(shader().into()),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scene"),
@@ -986,11 +1043,23 @@ impl Scene {
             read_mask: 0xff,
             write_mask: 0,
         };
+        // A sheet's faces, either way round, are no cap: they clear it.
+        let uncapped = wgpu::StencilState {
+            front: edge(wgpu::StencilOperation::Zero),
+            back: edge(wgpu::StencilOperation::Zero),
+            read_mask: 0xff,
+            write_mask: 0xff,
+        };
         let pipes = |cutting: bool| {
-            let (depth, faces, others) = if cutting {
-                (DEPTH_CUT, mark.clone(), off_caps.clone())
+            let (depth, faces, others, sheets) = if cutting {
+                (DEPTH_CUT, mark.clone(), off_caps.clone(), uncapped.clone())
             } else {
-                (DEPTH, Default::default(), Default::default())
+                (
+                    DEPTH,
+                    Default::default(),
+                    Default::default(),
+                    Default::default(),
+                )
             };
             Pipes {
                 glass: oit(
@@ -1021,6 +1090,22 @@ impl Scene {
                     if cutting { None } else { back },
                     None,
                     (depth, faces),
+                ),
+                sheets: pipeline(
+                    ("vs_face", "fs_sheet"),
+                    tri,
+                    wgpu::CompareFunction::Less,
+                    None,
+                    None,
+                    (depth, sheets),
+                ),
+                sheet_paint: pipeline(
+                    ("vs_face", "fs_two_sided"),
+                    tri,
+                    wgpu::CompareFunction::LessEqual,
+                    None,
+                    None,
+                    (depth, others.clone()),
                 ),
                 // The same triangles again, so the same depths: equal passes.
                 paint: pipeline(
@@ -1094,6 +1179,7 @@ impl Scene {
                 base: Arc::clone(mesh),
                 pose,
                 edges: true,
+                sheet: model.is_sheet(key),
             })
             .collect();
         self.set_looks(&model.looks);
@@ -1137,6 +1223,7 @@ impl Scene {
                     run_of.insert((Arc::as_ptr(body), id), self.runs.len());
                     self.runs.push(Run {
                         at: (body.hash.clone(), d.level, id),
+                        sheet: d.sheet,
                         instances: Vec::new(),
                         plain: Vec::new(),
                     });
@@ -1405,7 +1492,7 @@ impl Scene {
         // Each run's occurrences drawn with edges first, then those
         // without: its faces are drawn at all of them, its edges at the
         // first.
-        let mut runs: Vec<(&GpuBody, core::ops::Range<u32>)> = Vec::new();
+        let mut runs: Vec<(&GpuBody, core::ops::Range<u32>, bool)> = Vec::new();
         let mut edged: Vec<core::ops::Range<u32>> = Vec::new();
         let mut all = Vec::with_capacity(self.placed.len());
         for run in &self.runs {
@@ -1416,19 +1503,19 @@ impl Scene {
             all.extend_from_slice(&run.instances);
             edged.push(n..all.len() as u32);
             all.extend_from_slice(&run.plain);
-            runs.push((b, n..all.len() as u32));
+            runs.push((b, n..all.len() as u32, run.sheet));
         }
         if self.instances.as_ref().is_none_or(|(was, _)| *was != all) {
             let buffer = instances(device, "occurrences", &all);
             self.instances = Some((all, buffer));
         }
-        let glassy = runs.iter().any(|(b, _)| b.glass.is_some()) || !list.glass.is_empty();
+        let glassy = runs.iter().any(|(b, ..)| b.glass.is_some()) || !list.glass.is_empty();
         let placed = &self.instances.as_ref().expect("made above").1;
         // The painted faces, all in one buffer, each drawn at its
         // occurrence: the same positions and matrix as the face itself, so
         // the same depths.
         let mut painted = Vec::new();
-        let mut paint_runs: Vec<(core::ops::Range<u32>, u32)> = Vec::new();
+        let mut paint_runs: Vec<(core::ops::Range<u32>, u32, bool)> = Vec::new();
         let mut paint_at = Vec::new();
         let placed_at: std::collections::HashMap<&BodyKey, usize> = match list.faces.is_empty() {
             true => Default::default(),
@@ -1459,7 +1546,8 @@ impl Scene {
             let tris = &m.triangles[f.triangles.0 as usize..f.triangles.1 as usize];
             let start = painted.len() as u32;
             painted.extend(face_vertices(m, [0.0; 3], tris, *color));
-            paint_runs.push((start..painted.len() as u32, paint_at.len() as u32));
+            let sheet = self.runs[*r].sheet;
+            paint_runs.push((start..painted.len() as u32, paint_at.len() as u32, sheet));
             paint_at.push(*inst);
         }
         let paint = (!painted.is_empty()).then(|| {
@@ -1544,31 +1632,36 @@ impl Scene {
             // A back face nearest marks its cap with 1; the rest are drawn
             // where it is 0.
             pass.set_stencil_reference(1);
-            pass.set_pipeline(&pipes.faces);
             pass.set_vertex_buffer(1, placed.slice(..));
-            for (b, r) in &runs {
-                pass.set_vertex_buffer(0, b.faces.slice(..));
-                match &b.indices {
-                    Some((ix, n)) => {
-                        pass.set_index_buffer(ix.slice(..), wgpu::IndexFormat::Uint32);
-                        pass.draw_indexed(0..*n, 0, r.clone());
+            // Solids' faces, then sheets' both ways round.
+            for (pipe, sheets) in [(&pipes.faces, false), (&pipes.sheets, true)] {
+                pass.set_pipeline(pipe);
+                for (b, r, _) in runs.iter().filter(|(.., s)| *s == sheets) {
+                    pass.set_vertex_buffer(0, b.faces.slice(..));
+                    match &b.indices {
+                        Some((ix, n)) => {
+                            pass.set_index_buffer(ix.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.draw_indexed(0..*n, 0, r.clone());
+                        }
+                        None => pass.draw(0..b.face_count, r.clone()),
                     }
-                    None => pass.draw(0..b.face_count, r.clone()),
                 }
             }
             pass.set_stencil_reference(0);
             if let Some((p, at)) = &paint {
-                pass.set_pipeline(&pipes.paint);
                 pass.set_vertex_buffer(0, p.slice(..));
                 pass.set_vertex_buffer(1, at.slice(..));
-                for (r, i) in &paint_runs {
-                    pass.draw(r.clone(), *i..*i + 1);
+                for (pipe, sheets) in [(&pipes.paint, false), (&pipes.sheet_paint, true)] {
+                    pass.set_pipeline(pipe);
+                    for (r, i, _) in paint_runs.iter().filter(|(.., s)| *s == sheets) {
+                        pass.draw(r.clone(), *i..*i + 1);
+                    }
                 }
             }
             if list.edges {
                 pass.set_pipeline(&pipes.lines);
                 pass.set_vertex_buffer(1, placed.slice(..));
-                for ((b, _), r) in runs.iter().zip(&edged) {
+                for ((b, ..), r) in runs.iter().zip(&edged) {
                     if !r.is_empty() {
                         pass.set_vertex_buffer(0, b.edges.slice(..));
                         pass.draw(0..b.edge_count, r.clone());
@@ -1616,7 +1709,7 @@ impl Scene {
             pass.set_stencil_reference(0);
             pass.set_vertex_buffer(1, placed.slice(..));
             pass.set_pipeline(&pipes.glass);
-            for (b, r) in &runs {
+            for (b, r, _) in &runs {
                 if let Some(g) = &b.glass {
                     pass.set_vertex_buffer(0, g.faces.slice(..));
                     pass.draw(0..g.face_count, r.clone());
@@ -1631,7 +1724,7 @@ impl Scene {
             }
             if list.edges {
                 pass.set_pipeline(&pipes.glass_lines);
-                for (b, r) in &runs {
+                for (b, r, _) in &runs {
                     if let Some(g) = b.glass.as_ref().filter(|g| g.edge_count > 0) {
                         pass.set_vertex_buffer(0, g.edges.slice(..));
                         pass.draw(0..g.edge_count, r.clone());
@@ -1752,7 +1845,16 @@ pub fn headless() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
 
 #[cfg(test)]
 mod tests {
-    use super::fit_texture;
+    use super::{fit_texture, linear, shader};
+
+    #[test]
+    fn the_shader_takes_a_sheets_back_colour_and_tint() {
+        let s = shader();
+        assert!(!s.contains("SHEET_BACK_RGB") && !s.contains("SHEET_TINT_K"));
+        let b = linear(ryucad::render::SHEET_BACK);
+        assert!(s.contains(&format!("vec3<f32>({:?}, {:?}, {:?})", b[0], b[1], b[2])));
+        assert!(s.contains("mix(c, vec3<f32>("));
+    }
 
     #[test]
     fn a_texture_past_the_limit_shrinks_keeping_its_proportions() {

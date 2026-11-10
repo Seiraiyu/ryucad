@@ -4276,6 +4276,83 @@ fn context_menus_follow_what_was_right_clicked() {
     frames(&mut h, |a| shell::is_open(&a.opened().tiles, "history"));
 }
 
+#[test]
+fn the_tree_expands_and_collapses_all_and_below_a_row() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("base (box)");
+    // The space under the rows collapses the whole tree...
+    h.get_by_label("Space under the tree's rows")
+        .click_secondary();
+    context_item(&mut h, "Collapse all");
+    h.run_steps(2);
+    assert!(h.query_by_label("base (box)").is_none());
+    assert!(h.query_by_label("boss (solid)").is_none());
+    // ...and the Edit menu expands it again (the palette lists it too).
+    menu(&mut h, "Edit", "Expand all");
+    h.run_steps(2);
+    h.get_by_label("base (box)");
+    h.get_by_label("boss (cylinder)");
+    // A row closes what is under it alone, and opens it again.
+    h.get_by_label("boss (solid)").click_secondary();
+    context_item(&mut h, "Collapse below");
+    h.run_steps(2);
+    assert!(h.query_by_label("boss (cylinder)").is_none());
+    h.get_by_label("base (box)");
+    h.get_by_label("boss (solid)").click_secondary();
+    context_item(&mut h, "Expand below");
+    h.run_steps(2);
+    h.get_by_label("boss (cylinder)");
+    // A small project loads whole, so nothing was left closed.
+    assert!(h.state().opened().view.tree_note.is_none());
+}
+
+#[test]
+fn a_part_or_instance_row_shows_its_part_as_view_show_does() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    let focus = |a: &App| a.opened().ws.model.focus.clone();
+    // An instance's row shows the part it places.
+    h.get_by_label("b1 (bolt @ working, fixed)")
+        .click_secondary();
+    context_item(&mut h, "Show");
+    frames(&mut h, |a| focus(a).as_deref() == Some("bolt"));
+    // A solid's visibility is Hide and Unhide, so Show means one thing.
+    h.get_all_by_label("shank (solid)")
+        .next()
+        .unwrap()
+        .click_secondary();
+    for _ in 0..10 {
+        h.step();
+    }
+    let solid = h
+        .get_all_by_role(egui::accesskit::Role::Menu)
+        .last()
+        .unwrap();
+    assert!(solid.query_by_label("Hide").is_some());
+    assert!(solid.query_by_label("Show").is_none());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    // A part's row shows that part.
+    h.get_by(|n| {
+        n.label()
+            .is_some_and(|l| l.starts_with("frame") && l.ends_with("(assembly)"))
+    })
+    .click_secondary();
+    context_item(&mut h, "Show");
+    frames(&mut h, |a| focus(a).as_deref() == Some("frame"));
+}
+
 /// Presses or lets go of the primary button at `pos`.
 fn press(h: &Harness<'static, App>, pos: egui::Pos2, pressed: bool) {
     h.event(egui::Event::PointerButton {
@@ -5000,6 +5077,35 @@ fn framing_eases_and_reduced_motion_lands_at_once() {
 }
 
 #[test]
+fn with_reduced_motion_a_turn_to_a_view_is_shared_with_the_session() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["config", "set", "ui.motion", "reduce"]);
+    let mut h = window(&p);
+    frames(&mut h, |a| loaded(a) && !a.opened().view.nav.animate);
+    h.step();
+    // View > Front lands at once, and the session hears where (#603).
+    menu(&mut h, "View", "Front");
+    h.step();
+    let shown = h.state().opened().view.nav.camera.clone();
+    assert!(h.state().opened().view.nav.turn.is_none());
+    let t0 = Instant::now();
+    while p.ok(&["camera"])["camera"]["eye"] != serde_json::json!(shown.eye) {
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "the session never heard of the front view: {} against {:?}",
+            p.ok(&["camera"]),
+            shown.eye
+        );
+        h.step();
+    }
+    p.ok(&["config", "set", "ui.motion", "animate"]);
+}
+
+#[test]
 fn a_dependency_is_added_from_its_tab_and_its_part_placed_from_the_picker() {
     let _one = one_at_a_time();
     if !gpu() {
@@ -5534,6 +5640,81 @@ fn a_shells_thickness_and_a_splits_flip_are_edited_from_their_forms() {
 }
 
 #[test]
+fn a_thickens_front_and_a_fills_tolerance_are_edited_from_their_forms() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_surfaces();
+    let mut h = window(&p);
+    // `loaded` counts the default project's two meshes: this one has a
+    // body for each surface feature, so wait for every shown solid's.
+    frames(&mut h, |a| {
+        let ryucad_app::ui::app::Screen::Opened(o) = &a.screen else {
+            return false;
+        };
+        let Some(part) = o.ws.model.parts.get("p") else {
+            return false;
+        };
+        o.ws.idle()
+            && ["t", "f"]
+                .iter()
+                .all(|f| part.feature(f).is_some_and(|f| f.hash.is_some()))
+            && part.solids.iter().all(|s| {
+                o.ws.model
+                    .meshes
+                    .contains_key(&("p".to_owned(), s.id.clone()))
+            })
+    });
+    h.step();
+    // The sheets' rows say what they are.
+    h.get_by_label("f (sheet, 1 boundary)");
+    h.get_by_label("sw (sheet, closed)");
+    let saved = |h: &mut Harness<'static, App>| {
+        frames(h, |a| {
+            a.opened()
+                .ws
+                .form
+                .as_ref()
+                .is_some_and(|f| !f.saving && !f.dirty())
+        });
+    };
+    h.get_by_label("t (thicken)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| f.surface_form.is_some())
+    });
+    h.step();
+    let front = h.get_by_role_and_label(egui::accesskit::Role::TextInput, "front");
+    front.set_text_value_accesskit("3 mm");
+    h.step();
+    h.get_by_label("Apply").click();
+    saved(&mut h);
+    let shown = p.ok(&["feature", "show", "p", "t"]);
+    assert_eq!(shown["front"]["value"], "3 mm");
+    h.get_by_label("f (fill)").click();
+    frames(&mut h, |a| {
+        a.opened().ws.form.as_ref().is_some_and(|f| {
+            matches!(
+                f.surface_form,
+                Some(ryucad_app::core::edit::SurfaceForm::Fill(_))
+            )
+        })
+    });
+    h.step();
+    let tolerance = h.get_by_role_and_label(egui::accesskit::Role::TextInput, "tolerance");
+    tolerance.set_text_value_accesskit("0.002 mm");
+    h.step();
+    h.get_by_label("Apply").click();
+    saved(&mut h);
+    let shown = p.ok(&["feature", "show", "p", "f"]);
+    assert_eq!(shown["tolerance"]["value"], "0.002 mm");
+}
+
+#[test]
 fn a_flanges_angle_and_a_base_flanges_k_factor_are_edited_and_the_part_laid_flat() {
     let _one = one_at_a_time();
     if !gpu() {
@@ -5606,6 +5787,71 @@ fn a_flanges_angle_and_a_base_flanges_k_factor_are_edited_and_the_part_laid_flat
     menu(&mut h, "View", "Flat pattern");
     h.step();
     assert!(h.state().opened().ws.model.flat.is_none());
+}
+
+#[test]
+fn a_drafts_angle_and_a_moves_distance_are_edited_from_their_forms() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_tweaks();
+    let mut h = window(&p);
+    // One solid, so one mesh.
+    frames(&mut h, |a| {
+        let ws = &a.opened().ws;
+        ws.idle()
+            && ws.model.meshes.len() == 1
+            && ["d", "m", "r"].iter().all(|f| {
+                ws.model.parts["p"]
+                    .feature(f)
+                    .is_some_and(|f| f.hash.is_some())
+            })
+    });
+    h.step();
+    let save = |h: &mut Harness<'static, App>| {
+        h.get_by_label("Apply").click();
+        frames(h, |a| {
+            a.opened()
+                .ws
+                .form
+                .as_ref()
+                .is_some_and(|f| !f.saving && !f.dirty())
+        });
+    };
+    h.get_by_label("d (draft)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| f.tweak.is_some())
+    });
+    h.step();
+    // The hinge is shown, not edited; the angle is.
+    h.get_by_label("neutral xy");
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "angle")
+        .set_text_value_accesskit("3 deg");
+    h.step();
+    save(&mut h);
+    let shown = p.ok(&["feature", "show", "p", "d"]);
+    assert_eq!(shown["angle"]["value"], "3 deg");
+    h.get_by_label("m (move_face)").click();
+    frames(&mut h, |a| {
+        a.opened().ws.form.as_ref().is_some_and(|f| {
+            matches!(
+                f.tweak,
+                Some(ryucad_app::core::edit::TweakForm::MoveFace(_))
+            )
+        })
+    });
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "distance")
+        .set_text_value_accesskit("2 mm");
+    h.step();
+    save(&mut h);
+    let shown = p.ok(&["feature", "show", "p", "m"]);
+    assert_eq!(shown["distance"]["value"], "2 mm");
 }
 
 /// The sides split `sp`'s report gives, behind first.

@@ -97,6 +97,7 @@ pub mod pdm;
 pub mod profile;
 pub mod proto;
 pub mod rebuild;
+pub mod redline;
 pub mod reference;
 pub mod release;
 pub mod render;

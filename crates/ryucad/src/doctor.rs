@@ -518,6 +518,7 @@ fn diagnose_in(builds: &mut Builds) -> Vec<Issue> {
     diagnose_pdm(root, manifest.as_ref(), &part_ids, &mut issues);
     diagnose_deps(builds, manifest.as_ref(), &mut issues);
     diagnose_materials(root, &part_ids, &mut issues);
+    diagnose_drawing_lint(root, &mut issues);
     diagnose_releases(root, &mut issues);
     diagnose_git(root, &mut issues);
     issues
@@ -773,6 +774,22 @@ fn stale_assembly(session: &mut Session, part: &str) -> Option<Vec<(String, Vec<
             })
             .collect(),
     )
+}
+
+/// The drawing lint's preferences (plan 9.C): a file that doesn't read
+/// (a rule it doesn't know, a weight out of range) is `invalid_document`,
+/// one not written canonically `non_canonical`.
+fn diagnose_drawing_lint(root: &Path, issues: &mut Vec<Issue>) {
+    use crate::doc::drawing_lint::{DRAWING_LINT, Prefs};
+    match read(root, DRAWING_LINT) {
+        Read::Missing => {}
+        Read::Bad(i) => issues.push(i),
+        Read::Json(v, canonical) => match Prefs::from_json(&v, &crate::drawing::lint::known) {
+            Ok(_) if !canonical => issues.push(non_canonical(DRAWING_LINT)),
+            Ok(_) => {}
+            Err(e) => issues.push(document_issue(DRAWING_LINT, &e)),
+        },
+    }
 }
 
 /// The material library: a file that doesn't read, and, when it reads,
@@ -2459,6 +2476,11 @@ pub(crate) mod tests {
         )
         .unwrap();
         std::fs::write(a.join("notes.txt"), b"hi").unwrap();
+        let mut marked = good.to_json();
+        marked["id"] = json!("dddddddddd");
+        marked["format"] = json!(2);
+        marked["marks"] = json!({"part": "p", "list": [{"kind": "cloud"}]});
+        crate::doc::project::write_json(&a.join("dddddddddd.json"), &marked).unwrap();
         let issues = diagnose(root);
         let of = |code: &str| -> Vec<String> {
             issues
@@ -2468,8 +2490,30 @@ pub(crate) mod tests {
                 .collect()
         };
         assert_eq!(of("non_canonical"), ["annotations/bbbbbbbbbb.json"]);
-        assert_eq!(of("invalid_document"), ["annotations/cccccccccc.json"]);
+        assert_eq!(
+            of("invalid_document"),
+            ["annotations/cccccccccc.json", "annotations/dddddddddd.json"]
+        );
         assert_eq!(of("unknown_file"), ["annotations/notes.txt"]);
+    }
+
+    #[test]
+    fn a_drawing_lint_file_that_doesnt_read_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        crate::server::init(root, None).unwrap();
+        std::fs::write(
+            root.join("drawing_lint.json"),
+            b"{\"format\": 1, \"kind\": \"ryucad.drawing_lint\", \"weights\": {\"dwg_nope\": 1}}\n",
+        )
+        .unwrap();
+        let issues = diagnose(root);
+        let bad: Vec<&Issue> = issues
+            .iter()
+            .filter(|i| i.code == "invalid_document")
+            .collect();
+        assert_eq!(bad.len(), 1, "{issues:?}");
+        assert_eq!(bad[0].files, ["drawing_lint.json"]);
     }
 
     #[test]

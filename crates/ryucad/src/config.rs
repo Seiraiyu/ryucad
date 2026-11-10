@@ -735,6 +735,11 @@ pub fn project_revision_from(read: &dyn Fn(&str) -> Result<Option<Vec<u8>>>) -> 
         piece(crate::doc::project::PROJECT_PARAMETERS_TAG.as_bytes());
         piece(&p);
     }
+    // Only when there is one: other projects' revisions keep their bits.
+    if let Some(l) = read(crate::doc::drawing_lint::DRAWING_LINT)? {
+        piece(crate::doc::drawing_lint::DRAWING_LINT.as_bytes());
+        piece(&l);
+    }
     Ok(h.finalize().to_hex()[..32].to_owned())
 }
 

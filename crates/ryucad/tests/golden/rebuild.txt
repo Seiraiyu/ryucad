@@ -10,10 +10,11 @@ deps 009688e76b92122f
 deps_structure 5bdb14dac47749ae
 diff 6e4d4e0ad7ff6060
 display 575d87fadbd3cdc4
-draft_reports 86d7a57e0c81c9ca
+draft_reports 384e08ae47e9729a
 drafts 40c270a0531dbacb
-drawing_sections ab35ee24bffc76ba
-drawings 59fe688efbf17b58
+drawing_annotations 46f185d088e07aab
+drawing_sections 1d8ab70a1d209a8d
+drawings 2285dedcdd1f0d2d
 explodes 24f373106cb30113
 exports 1341c77f1539e1a3
 expressions 385744de1f6c36bb
@@ -34,6 +35,7 @@ patterns 3a2ccdd69e784d14
 pdm 634d72f32565f931
 placement ff1d621ede04abf2
 rebuild f95f3bea0fc4987d
+redlines be765d16aa282317
 reference_imports 053f9feeef8ddca6
 reference_interference a0e5f2c4f59cc29d
 references 29596b1cfa8e2715

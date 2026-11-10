@@ -324,6 +324,35 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
                 o.view.fit_all(&mut o.ws, &bodies);
             }
         }
+        // The part a part's row is, or an instance's row places.
+        "view.show_row" => {
+            if let Some(part) = target.and_then(|t| o.ws.model.part_of_row(t)) {
+                o.ws.set_focus(Some(part));
+            }
+        }
+        // The whole tree, or a row (by its id) and what is under it.
+        "tree.expand_all" | "tree.collapse_all" | "tree.expand_below" | "tree.collapse_below" => {
+            let of = target.filter(|_| command::below(id));
+            if command::below(id) && of.is_none() {
+                return None;
+            }
+            let (rows, whole) = crate::ui::tiles::tree::rows(&o.ws);
+            if id.starts_with("tree.expand") {
+                let left = o.view.tree.expand(&rows, of, whole);
+                o.view.tree_note = (left > 0).then(|| {
+                    format!(
+                        "{left} part{} not loaded {} left closed: open {} to load {}",
+                        if left == 1 { "" } else { "s" },
+                        if left == 1 { "was" } else { "were" },
+                        if left == 1 { "its row" } else { "their rows" },
+                        if left == 1 { "it" } else { "them" },
+                    )
+                });
+            } else {
+                o.view.tree.collapse(&rows, of);
+                o.view.tree_note = None;
+            }
+        }
         "view.close_tile" => {
             if let Some(t) = target {
                 crate::ui::shell::close(&mut o.tiles, t);
@@ -577,8 +606,21 @@ pub fn context_menu(
     target: Option<&str>,
     import: Option<bool>,
 ) -> Option<(&'static str, Option<String>)> {
+    context_menu_where(ui, shown, what, target, import, |_| true)
+}
+
+/// [`context_menu`] listing only the commands `offer` keeps: a tree row
+/// with nothing under it offers no Expand below.
+pub fn context_menu_where(
+    ui: &mut egui::Ui,
+    shown: &Shown,
+    what: Context,
+    target: Option<&str>,
+    import: Option<bool>,
+    offer: impl Fn(&str) -> bool,
+) -> Option<(&'static str, Option<String>)> {
     let mut chosen = None;
-    for c in command::context(what).filter(|c| command::offered(c.id, import)) {
+    for c in command::context(what).filter(|c| command::offered(c.id, import) && offer(c.id)) {
         let mut b = egui::Button::new(c.title);
         if let Some(k) = shown.keys.get(c.id) {
             b = b.shortcut_text(k.as_str());

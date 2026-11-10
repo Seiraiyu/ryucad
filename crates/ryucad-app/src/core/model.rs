@@ -55,9 +55,20 @@ pub struct Feature {
     /// A base flange's, flange's, unfold's or refold's report as the
     /// window reads it: its target, the bends it names, an unfold's flat.
     pub sheet: Option<crate::core::sheet::SheetInfo>,
+    /// A draft's, move face's or replace face's report as the window
+    /// reads it: a draft's neutral plane, pull, parting edges and angles,
+    /// a move's line.
+    pub tweak: Option<crate::core::tweaks::TweakInfo>,
 }
 
 impl Feature {
+    /// Whether it founds the body named by its own ID: its operation is
+    /// none, or `new`, as a sew's or a thicken's from a sheet reports it
+    /// beside the sheets it consumes (ryucad 18).
+    pub fn founds(&self) -> bool {
+        self.operation.as_deref().is_none_or(|o| o == "new") && self.solids == [self.id.clone()]
+    }
+
     /// A path or helix that built: one `path.get` draws.
     pub fn is_path(&self) -> bool {
         matches!(self.ty.as_deref(), Some("path" | "helix")) && self.error.is_none()
@@ -284,6 +295,8 @@ pub struct Occurrence {
     pub path: String,
     pub part: String,
     pub solids: Vec<(String, String)>,
+    /// Those of its solids that are sheets (ryucad 18), by founder.
+    pub sheets: Vec<String>,
     pub origin: [f64; 3],
     pub z: [f64; 3],
     pub x: [f64; 3],
@@ -309,6 +322,12 @@ pub struct Solid {
     pub hash: Option<String>,
     /// Why its last feature failed: it shows as the last that built.
     pub error: Option<Value>,
+    /// Whether its body is a sheet (ryucad 18): drawn two-sided, never
+    /// capped, its back faces picked.
+    pub sheet: bool,
+    /// A sheet's boundaries (rings of laminar edges; none: closed), when
+    /// its report says; an occurrence's sheet doesn't.
+    pub boundaries: Option<u64>,
 }
 
 impl Solid {
@@ -364,6 +383,13 @@ impl Occurrence {
                 .into_iter()
                 .flatten()
                 .map(|s| (text(&s["solid"]), text(&s["hash"])))
+                .collect(),
+            sheets: v["solids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|s| s["kind"] == "sheet")
+                .map(|s| text(&s["solid"]))
                 .collect(),
             origin: triple(&v["pose"]["origin_m"]),
             z: triple(&v["pose"]["z"]),
@@ -447,6 +473,7 @@ impl Part {
                             .and_then(ryucad::render::DatumShape::from_report),
                         body: crate::core::bodies::BodyInfo::from_report(f),
                         sheet: crate::core::sheet::SheetInfo::from_report(f),
+                        tweak: crate::core::tweaks::TweakInfo::from_report(f),
                     })
                     .collect()
             })
@@ -460,6 +487,10 @@ impl Part {
                 features: texts(&s["features"]),
                 hash: s["hash"].as_str().map(str::to_owned),
                 error: (s["ok"] == false).then(|| s["error"].clone()),
+                // A reference import's body is a sheet, but it is drawn,
+                // picked and listed as the file has it (ryucad 21.C).
+                sheet: s["kind"] == "sheet" && s["reference"] != true,
+                boundaries: s["boundaries"].as_u64(),
             })
             .collect();
         let assembly = v["kind"] == "assembly";
@@ -488,6 +519,8 @@ impl Part {
                         features: vec![top.clone()],
                         hash: Some(h.clone()),
                         error: None,
+                        sheet: o.sheets.contains(s),
+                        boundaries: None,
                     })
                 })
                 .collect(),
@@ -550,7 +583,7 @@ impl Part {
     pub fn founders(&self) -> Vec<String> {
         self.features
             .iter()
-            .filter(|f| f.operation.is_none() && f.solids == [f.id.clone()])
+            .filter(|f| f.founds())
             .map(|f| f.id.clone())
             .collect()
     }
@@ -697,6 +730,20 @@ pub struct Model {
 }
 
 impl Model {
+    /// The part a tree row's reference shows (#541): a part's own
+    /// (`bracket`, loaded or only listed), or the part an instance places
+    /// (`frame/b1`) when it is this project's.
+    pub fn part_of_row(&self, reference: &str) -> Option<String> {
+        match reference.split_once('/') {
+            None => (self.parts.contains_key(reference) || self.listed.contains_key(reference))
+                .then(|| reference.to_owned()),
+            Some((asm, inst)) => {
+                let placed = self.parts.get(asm)?.feature(inst)?.instance.as_ref()?;
+                placed.project.is_none().then(|| placed.part.clone())
+            }
+        }
+    }
+
     /// Takes a part's report. Returns the bodies whose meshes are now
     /// missing or stale: they need fetching ([`Model::sketches_wanted`]
     /// says the same of sketches).
@@ -1381,6 +1428,15 @@ impl Model {
         self.shown_meshes(false)
     }
 
+    /// Whether `key`'s body is a sheet (ryucad 18): a part's solid its
+    /// report says is, or an occurrence's its assembly's report says is.
+    pub fn is_sheet(&self, key: &BodyKey) -> bool {
+        self.parts
+            .get(&key.0)
+            .and_then(|p| p.solid(&key.1))
+            .is_some_and(|s| s.sheet)
+    }
+
     /// The meshes of the parts the window shows that it hides: what
     /// Shift+Tab may show again.
     pub fn hidden_drawn(&self) -> impl Iterator<Item = (&BodyKey, &Arc<WireBody>, Pose)> {
@@ -1773,6 +1829,30 @@ mod tests {
     }
 
     #[test]
+    fn a_rows_part_is_its_own_or_the_one_its_instance_places() {
+        let mut m = Model::default();
+        m.apply_part(&json!({
+            "part": "frame", "revision": "r1", "kind": "assembly",
+            "features": [
+                {"id": "pin", "type": "instance", "ok": true, "hash": "x",
+                 "instance": {"part": "p", "rev": "working"}},
+                {"id": "b1", "type": "instance", "ok": true, "hash": "y",
+                 "instance": {"part": "m6-bolt", "rev": {"label": "B", "project": "aa"}}}],
+        }));
+        m.listed.insert(
+            "big".into(),
+            Listed::from_json(&json!({"part": "big", "kind": "assembly"})),
+        );
+        assert_eq!(m.part_of_row("frame").as_deref(), Some("frame"));
+        assert_eq!(m.part_of_row("big").as_deref(), Some("big"));
+        assert_eq!(m.part_of_row("frame/pin").as_deref(), Some("p"));
+        // Another project's part isn't this window's to show.
+        assert_eq!(m.part_of_row("frame/b1"), None);
+        assert_eq!(m.part_of_row("nothing"), None);
+        assert_eq!(m.part_of_row("frame/nothing"), None);
+    }
+
+    #[test]
     fn a_mates_frames_show_only_with_its_assembly() {
         let mut m = Model::default();
         m.apply_part(&report(&[("a", Some("1"))]));
@@ -1918,6 +1998,42 @@ mod tests {
                     "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}},
                    {"path": "b2", "part": "bolt", "solids": [{"solid": "s", "hash": "1"}],
                     "pose": {"origin_m": [1, 0, 0], "z": [0, 0, 1], "x": [0, 1, 0]}}]})
+    }
+
+    #[test]
+    fn sheets_are_known_in_parts_and_occurrences() {
+        let mut m = Model::default();
+        m.apply_part(&json!({"part": "skin", "revision": "r", "features": [
+            {"id": "w", "type": "extrude", "ok": true, "hash": "h", "solids": ["w"]},
+            {"id": "b", "type": "box", "ok": true, "hash": "k", "solids": ["b"]}],
+            "solids": [
+                {"solid": "w", "ok": true, "features": ["w"], "hash": "h",
+                 "kind": "sheet", "boundaries": 1, "closed": false},
+                {"solid": "b", "ok": true, "features": ["b"], "hash": "k", "kind": "solid"},
+                {"solid": "r", "ok": true, "features": ["r"], "hash": "q",
+                 "kind": "sheet", "boundaries": 0, "closed": true, "reference": true}]}));
+        let skin = &m.parts["skin"];
+        assert_eq!(
+            (
+                skin.solid("w").unwrap().sheet,
+                skin.solid("w").unwrap().boundaries
+            ),
+            (true, Some(1))
+        );
+        assert!(!skin.solid("b").unwrap().sheet);
+        assert!(
+            !skin.solid("r").unwrap().sheet,
+            "a reference import isn't drawn as a sheet"
+        );
+        assert!(m.is_sheet(&("skin".into(), "w".into())));
+        assert!(!m.is_sheet(&("skin".into(), "b".into())));
+        // An assembly's occurrence of it: its sheet says so, by path.
+        let mut v = assembly();
+        v["occurrences"][0]["solids"] = json!([{"solid": "w", "hash": "h", "kind": "sheet"}]);
+        m.apply_part(&v);
+        assert!(m.is_sheet(&("frame".into(), "b1/w".into())));
+        assert!(!m.is_sheet(&("frame".into(), "b2/s".into())));
+        assert!(!m.is_sheet(&("nowhere".into(), "w".into())));
     }
 
     #[test]
