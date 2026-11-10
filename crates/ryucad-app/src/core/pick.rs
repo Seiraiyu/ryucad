@@ -449,6 +449,18 @@ impl Default for Filter {
 }
 
 impl Filter {
+    /// Faces alone: what the Markup tool's pen on faces draws on.
+    pub fn faces() -> Filter {
+        Filter {
+            faces: true,
+            edges: false,
+            vertices: false,
+            sketches: false,
+            bodies: false,
+            datums: false,
+        }
+    }
+
     /// What a mate's connector is picked on: faces, edges and vertices.
     pub fn connectors() -> Filter {
         Filter {

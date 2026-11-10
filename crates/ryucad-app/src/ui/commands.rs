@@ -252,7 +252,12 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         // leaves the Measure tool, then clears the selection and the
         // tree's choice with it.
         "edit.clear_selection" => {
-            if o.ws.mover.as_ref().is_some_and(|m| m.grip.is_some()) {
+            // The Markup bar: the mark under way goes, then the tool.
+            if let Some(m) = o.ws.markup.as_mut() {
+                if !m.escape() {
+                    o.ws.cancel_markup();
+                }
+            } else if o.ws.mover.as_ref().is_some_and(|m| m.grip.is_some()) {
                 o.ws.clear_move();
             } else if o.ws.mover.is_some() {
                 o.ws.cancel_move();
@@ -399,10 +404,33 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             o.layout_dirty = true;
         }
         "view.annotations" => toggle(o, "display.annotations", o.view.annotations),
-        "annotation.add" | "annotation.here" => o.view.compose(&o.ws, id, target),
+        "annotation.add" | "annotation.here" => o.view.compose(&mut o.ws, id, target),
         "edit.move" if o.ws.mover.is_some() && target.is_none() => o.ws.cancel_move(),
         // On the shown assembly, from what was right-clicked: an instance's
         // row, or an occurrence's entity (the first pick, too).
+        // Markup (design 423): the bar opens on the shown model, locking
+        // the camera where it is; again, it closes and its marks go.
+        "annotation.markup" if o.ws.markup.is_some() => o.ws.cancel_markup(),
+        "annotation.markup" => {
+            let camera = o.view.nav.camera.clone();
+            if let Err(why) = o.ws.open_markup(camera) {
+                o.ws.drag_note = Some(why);
+            }
+        }
+        "markup.undo" => {
+            if let Some(m) = o.ws.markup.as_mut() {
+                m.undo();
+            }
+        }
+        "markup.post" => o.ws.post_markup(),
+        id if id.starts_with("markup.") => {
+            if let (Some(m), Some(t)) = (
+                o.ws.markup.as_mut(),
+                crate::core::markup::Tool::of_command(id),
+            ) {
+                m.choose(t);
+            }
+        }
         "edit.mate" => {
             if let Some(asm) = o.ws.shown_assembly() {
                 let rest = target.and_then(|t| t.strip_prefix(&asm)?.strip_prefix('/'));

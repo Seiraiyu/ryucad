@@ -1421,6 +1421,9 @@ impl Workspace {
             return Err("Show one part or assembly to mark up (View > Show).".into());
         };
         let part = part.to_string();
+        // One tool at a time.
+        self.cancel_move();
+        self.close_mate();
         self.markup = Some(crate::core::markup::Markup::new(&part, camera));
         Ok(())
     }
@@ -1435,7 +1438,7 @@ impl Workspace {
             .ok_or_else(|| format!("No annotation {id}."))?;
         let m = crate::core::markup::Markup::editing(id, e)
             .ok_or("This annotation has no marks or no view to reopen.")?;
-        if !self.model.shown().iter().any(|s| *s == m.part.as_str()) {
+        if !self.model.shown().contains(&m.part.as_str()) {
             self.set_focus(Some(m.part.clone()));
         }
         self.markup = Some(m);
