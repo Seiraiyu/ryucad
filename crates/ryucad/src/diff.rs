@@ -754,6 +754,87 @@ fn drawing_view(m: &Value) -> String {
                 &["type", "from", "side", "normal_to"],
             )
         }
+        "section" => {
+            let from = m.get("from").map(scalar).unwrap_or_default();
+            let letter = m.get("label").map(scalar).unwrap_or_default();
+            let point = |p: &Value| match p {
+                Value::Array(a) => a.iter().map(scalar).collect::<Vec<_>>().join(", "),
+                p => reference(p).unwrap_or_else(|| scalar(p)),
+            };
+            let cut = match m.get("cut") {
+                Some(c) if c.get("plane").is_some() => {
+                    let mut t = format!("on {}", point(&c["plane"]));
+                    if let Some(o) = c.get("offset") {
+                        t.push_str(&format!(" offset {}", scalar(o)));
+                    }
+                    t
+                }
+                Some(c) if c.get("through").is_some() => format!(
+                    "through {}",
+                    c["through"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|p| format!("({})", point(p)))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+                Some(c) => format!(
+                    "at {} normal {}",
+                    point(c.get("origin").unwrap_or(&Value::Null)),
+                    point(c.get("normal").unwrap_or(&Value::Null))
+                ),
+                None => String::new(),
+            };
+            (
+                format!("section {letter} from {from}, {cut}"),
+                &["type", "from", "label", "cut"],
+            )
+        }
+        "detail" => {
+            let from = m.get("from").map(scalar).unwrap_or_default();
+            let letter = m.get("label").map(scalar).unwrap_or_default();
+            let centre = match m.get("centre") {
+                Some(Value::Array(a)) => a.iter().map(scalar).collect::<Vec<_>>().join(", "),
+                Some(p) => reference(p).unwrap_or_else(|| scalar(p)),
+                None => String::new(),
+            };
+            let r = m.get("radius").map(scalar).unwrap_or_default();
+            (
+                format!("detail {letter} from {from}, about {centre} radius {r}"),
+                &["type", "from", "label", "centre", "radius"],
+            )
+        }
+        "flat" => {
+            let of = m
+                .get("of")
+                .map(|p| format!(" of {}", scalar(p)))
+                .unwrap_or_default();
+            let solid = m
+                .get("solid")
+                .map(|p| format!(" solid {}", scalar(p)))
+                .unwrap_or_default();
+            (format!("flat{of}{solid}"), &["type", "of", "solid"])
+        }
+        "exploded" => {
+            let e = m.get("explode").map(scalar).unwrap_or_default();
+            let of = m
+                .get("of")
+                .map(|p| format!(" of {}", scalar(p)))
+                .unwrap_or_default();
+            let orient = match m.get("orient") {
+                Some(Value::Object(o)) => o
+                    .get("normal_to")
+                    .map(|r| format!("normal to {}", reference(r).unwrap_or_else(|| scalar(r))))
+                    .unwrap_or_default(),
+                Some(o) => scalar(o),
+                None => String::new(),
+            };
+            (
+                format!("exploded {e}{of}, {orient}"),
+                &["type", "explode", "of", "orient"],
+            )
+        }
         _ => (scalar(&json!(ty)), &["type"]),
     };
     let mut parts = vec![head];

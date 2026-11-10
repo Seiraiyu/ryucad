@@ -420,6 +420,7 @@ pub fn answer_live(
             sheet,
             format,
             out,
+            unit,
         } => session.at(rev.as_deref()).and_then(|(commit, s)| {
             let mut a = crate::drawing::request::export(
                 s,
@@ -428,6 +429,7 @@ pub fn answer_live(
                 sheet.as_deref(),
                 format.as_deref(),
                 out.as_deref(),
+                unit.as_deref(),
             )?;
             a.result = noted(Ok(a.result), commit)?;
             Ok(a)

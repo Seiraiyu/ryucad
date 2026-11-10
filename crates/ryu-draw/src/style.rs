@@ -61,6 +61,40 @@ pub enum LineKind {
     Centre,
     /// The sheet's border and the title block's frame: thick.
     Border,
+    /// A section's cutting-plane line on its parent (ASME Y14.2: thick,
+    /// long dash and two short; ISO 128: thin chain, thick at its ends and
+    /// bends, which the drawing adds).
+    Cutting,
+    /// A section cap's hatching: thin and continuous.
+    Hatch,
+}
+
+impl LineKind {
+    /// Every kind, in the order a DXF lists its layers.
+    pub const ALL: [LineKind; 8] = [
+        LineKind::Visible,
+        LineKind::Hidden,
+        LineKind::Thin,
+        LineKind::Phantom,
+        LineKind::Centre,
+        LineKind::Border,
+        LineKind::Cutting,
+        LineKind::Hatch,
+    ];
+
+    /// Its DXF layer's name.
+    pub fn layer(self) -> &'static str {
+        match self {
+            LineKind::Visible => "VISIBLE",
+            LineKind::Hidden => "HIDDEN",
+            LineKind::Thin => "THIN",
+            LineKind::Phantom => "PHANTOM",
+            LineKind::Centre => "CENTRE",
+            LineKind::Border => "BORDER",
+            LineKind::Cutting => "CUTTING",
+            LineKind::Hatch => "HATCH",
+        }
+    }
 }
 
 /// How a path is stroked.
@@ -72,6 +106,9 @@ pub struct Stroke {
     /// On and off lengths in the drawing's unit, from the path's start;
     /// empty for continuous.
     pub dash: Vec<f64>,
+    /// What the line shows, where a standard's table made it: a DXF's
+    /// layer. PDF and SVG draw width, dash and colour alone.
+    pub kind: Option<LineKind>,
 }
 
 impl Standard {
@@ -88,7 +125,11 @@ impl Standard {
         let (thick, thin) = self.widths();
         let (width, dash) = match (self, kind) {
             (_, LineKind::Visible | LineKind::Border) => (thick, vec![]),
-            (_, LineKind::Thin) => (thin, vec![]),
+            (_, LineKind::Thin | LineKind::Hatch) => (thin, vec![]),
+            (Standard::Asme, LineKind::Cutting) => (thick, vec![20.0, 1.5, 3.0, 1.5, 3.0, 1.5]),
+            (Standard::Iso, LineKind::Cutting) => {
+                (thin, vec![24.0 * thin, 3.0 * thin, 0.5 * thin, 3.0 * thin])
+            }
             (Standard::Asme, LineKind::Hidden) => (thin, vec![3.0, 1.5]),
             (Standard::Asme, LineKind::Centre) => (thin, vec![20.0, 1.5, 3.0, 1.5]),
             (Standard::Asme, LineKind::Phantom) => (thin, vec![20.0, 1.5, 3.0, 1.5, 3.0, 1.5]),
@@ -112,6 +153,7 @@ impl Standard {
             colour: Colour::BLACK,
             width,
             dash,
+            kind: Some(kind),
         }
     }
 }
@@ -135,5 +177,24 @@ mod tests {
         assert_eq!((v.width, v.dash.len()), (0.6, 0));
         assert_eq!(Standard::Asme.stroke(LineKind::Hidden).dash, vec![3.0, 1.5]);
         assert_eq!(Standard::Iso.stroke(LineKind::Phantom).dash.len(), 6);
+    }
+
+    #[test]
+    fn cutting_planes_and_hatches_follow_their_standard() {
+        let a = Standard::Asme.stroke(LineKind::Cutting);
+        assert_eq!(
+            (a.width, a.dash.len(), a.kind),
+            (0.6, 6, Some(LineKind::Cutting))
+        );
+        let i = Standard::Iso.stroke(LineKind::Cutting);
+        assert_eq!(
+            (i.width, i.dash.clone()),
+            (0.25, vec![6.0, 0.75, 0.125, 0.75])
+        );
+        let h = Standard::Iso.stroke(LineKind::Hatch);
+        assert_eq!((h.width, h.dash.len()), (0.25, 0));
+        let layers: Vec<&str> = LineKind::ALL.iter().map(|k| k.layer()).collect();
+        assert_eq!(layers.len(), 8);
+        assert!(layers.windows(2).all(|w| w[0] != w[1]));
     }
 }

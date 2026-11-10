@@ -204,6 +204,17 @@ impl PlaneArg {
 
 /// An origin plane, or the plane of the face `reference` names.
 fn named(session: &mut Session, reference: &str, at: &str) -> Result<Plane> {
+    named_at(session, reference, &crate::doc::assembly::Rev::Working, at)
+}
+
+/// [`named`] in the model `rev` gives (a drawing's view pinned at a label
+/// cuts on its faces and datums there); its faults name `{at}/plane`.
+pub fn named_at(
+    session: &mut Session,
+    reference: &str,
+    rev: &crate::doc::assembly::Rev,
+    at: &str,
+) -> Result<Plane> {
     let axis = |k: usize| {
         let mut n = [0.0; 3];
         n[k] = 1.0;
@@ -225,7 +236,7 @@ fn named(session: &mut Session, reference: &str, at: &str) -> Result<Plane> {
         ));
     }
     // A datum plane, of the part or an occurrence's: its own plane.
-    if let Some(d) = crate::geometry::locate(session, reference)? {
+    if let Some(d) = crate::geometry::locate_at(session, reference, rev)? {
         let crate::geometry::Geom::Plane(p) = d.geom else {
             return Err(bad(
                 format!(
@@ -240,16 +251,20 @@ fn named(session: &mut Session, reference: &str, at: &str) -> Result<Plane> {
         return Plane::new([o.x, o.y, o.z], [n.x, n.y, n.z])
             .ok_or_else(|| bad("a datum plane with no normal", format!("{at}/plane")));
     }
-    face_plane(session, reference)
+    face_plane(session, reference, rev)
 }
 
 /// The plane of a planar face: through the middle of its vertices (the
 /// surface's own origin for a face with none), along its outward normal,
 /// placed by its occurrence's pose.
-fn face_plane(session: &mut Session, reference: &str) -> Result<Plane> {
+fn face_plane(
+    session: &mut Session,
+    reference: &str,
+    rev: &crate::doc::assembly::Rev,
+) -> Result<Plane> {
     use ryukei::geom::{Point3, Surface, Vector3};
     use ryukei::measure::Entity;
-    let located = crate::measure::locate(session, reference)?;
+    let located = crate::measure::locate_at(session, reference, rev)?;
     let not_planar = || {
         Error::new(
             Code::InvalidParam,

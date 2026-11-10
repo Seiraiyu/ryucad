@@ -9,8 +9,10 @@
 //! told how many points (PDF) or how many of its own units (SVG) one is.
 //! ryueda draws in nanometres, ryucad in sheet millimetres.
 
+pub mod dxf;
 pub mod font;
 pub mod geom;
+pub mod hatch;
 pub mod item;
 pub mod pdf;
 pub mod style;

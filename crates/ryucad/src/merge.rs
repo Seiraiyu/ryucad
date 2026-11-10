@@ -452,9 +452,20 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
 
 /// A drawing view's `orient` and `rev` are one value each: a standard
 /// view's name and a face to look normal to are two shapes of one choice.
+/// So are a section's `cut` (a plane, its offset, or the points it runs
+/// through) and a detail's `centre`, and a section's `unsectioned` is one
+/// list.
 fn drawing_atom(at: &str) -> bool {
     let seg: Vec<&str> = at.split('/').collect();
-    matches!(seg.as_slice(), ["", "views", _, "orient" | "rev"])
+    matches!(
+        seg.as_slice(),
+        [
+            "",
+            "views",
+            _,
+            "orient" | "rev" | "cut" | "centre" | "unsectioned"
+        ]
+    )
 }
 
 /// A drawing: per member and field (a position, a list, a reference one
