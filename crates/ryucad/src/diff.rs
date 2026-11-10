@@ -347,6 +347,26 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
+        // A split's tool on one line: `tool = body parting`, or
+        // `tool = faces k/<hex>, k/<hex>`.
+        Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("split") => {
+            if let Some(tool) = rest.remove("tool") {
+                let line = match (tool.get("body"), tool.get("faces")) {
+                    (Some(b), _) => format!("tool = body {}", scalar(b)),
+                    (None, Some(f)) => {
+                        let refs: Vec<String> = f
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|r| reference(r).unwrap_or_else(|| scalar(r)))
+                            .collect();
+                        format!("tool = faces {}", refs.join(", "))
+                    }
+                    _ => format!("tool = {}", scalar(&tool)),
+                };
+                lines.push(line);
+            }
+        }
         // A thicken's source on one line, its groups one line each:
         // `from = sheet skin`, `faces[0] = 3 mm, 0 mm: skin/<hex>`.
         Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("thicken") => {
@@ -2567,6 +2587,22 @@ mod tests {
     }
 
     #[test]
+    fn a_splits_tool_is_one_line() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let m = "fedcba9876543210fedcba9876543210";
+        let by_body = json!({"format": 19, "kind": "ryucad.feature", "type": "split",
+                             "target": "h", "tool": {"body": "parting"}, "keep": "behind"});
+        let t = text(by_body);
+        assert!(t.contains("tool = body parting\n"), "{t}");
+        assert!(t.contains("keep = behind\n"), "{t}");
+        let by_faces = json!({"format": 19, "kind": "ryucad.feature", "type": "split",
+                              "target": "h", "tool": {"faces": [
+                                  {"feature": "k", "name": n}, {"feature": "k", "name": m}]}});
+        let t = text(by_faces);
+        assert!(t.contains(&format!("tool = faces k/{n}, k/{m}\n")), "{t}");
+    }
+
+    #[test]
     fn sheet_metal_features_textconv_one_line_a_field() {
         let n = |k: u8| format!("{k:032x}");
         let v = json!({"format": 11, "kind": "ryucad.feature", "type": "flange", "target": "plate",
@@ -4423,6 +4459,69 @@ mod tests {
             assert_eq!(
                 (&x["from"]["ok"], &x["to"]["ok"]),
                 (&json!(true), &json!(true)),
+                "{v}"
+            );
+            assert_ne!(x["from"]["hash"], x["to"]["hash"], "{side}: {v}");
+        }
+        assert_eq!(v["parts"]["p"]["features"]["s"]["status"], "same", "{v}");
+    }
+
+    #[test]
+    fn a_split_whose_tool_sheet_moved_changes_both_its_sides() {
+        use crate::git::tests::git;
+        use crate::server::tests::{call, fresh};
+        let (dir, mut s) = fresh();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        for f in [
+            json!({"type": "box", "id": "h", "params": {"x": 40, "y": 30, "z": 20}}),
+            json!({"type": "sketch", "id": "a", "plane": "xy"}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(&mut s, "feature.add", f).unwrap();
+        }
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "a", "ops": [
+                {"op": "add", "id": "p1", "type": "point", "at": [10, -5]},
+                {"op": "add", "id": "p2", "type": "point", "at": [10, 35]},
+                {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"}]}),
+        )
+        .unwrap();
+        for f in [
+            json!({"type": "extrude", "id": "parting", "sketch": "a", "surface": true,
+                   "extent": {"type": "symmetric", "length": "50 mm"}}),
+            json!({"type": "split", "id": "s", "target": "h", "tool": "parting"}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(&mut s, "feature.add", f).unwrap();
+        }
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "start"]);
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "a", "ops": [
+                {"op": "move", "id": "p1", "at": [12, -5]},
+                {"op": "move", "id": "p2", "at": [12, 35]}]}),
+        )
+        .unwrap();
+        let v = call(&mut s, "diff", json!({"model": true})).unwrap();
+        let solids = &v["parts"]["p"]["solids"];
+        for side in ["h", "s"] {
+            let x = &solids[side];
+            assert_eq!(
+                (&x["from"]["ok"], &x["to"]["ok"]),
+                (&json!(true), &json!(true)),
+                "{v}"
+            );
+            assert_eq!(
+                (&x["from"]["kind"], &x["to"]["kind"]),
+                (&json!("solid"), &json!("solid")),
                 "{v}"
             );
             assert_ne!(x["from"]["hash"], x["to"]["hash"], "{side}: {v}");

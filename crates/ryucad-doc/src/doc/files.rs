@@ -76,7 +76,8 @@ pub const MANIFEST_FORMAT: u64 = 4;
 /// flanges (ryucad 16), 12 surface sweeps and planar faces (ryucad 18),
 /// 13 reference imports (ryucad 21), 14 unfolds and refolds (ryucad
 /// 16.B), 15 fills, extracts, sews and thickens (ryucad 18), 16 face
-/// tweaks (ryucad 17). A feature is written at the lowest format that
+/// tweaks (ryucad 17), 19 splits by a body or faces (ryucad 18.C). A
+/// feature is written at the lowest format that
 /// holds it, so one with only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
     // The largest of every stage's (a later stage merging adds its own).
@@ -86,6 +87,7 @@ pub const FEATURE_FORMAT: u64 = {
         super::sheet_metal::UNFOLD_FORMAT,
         super::surface::FORMAT,
         super::tweak::FORMAT,
+        super::body::TOOL_FORMAT,
     ];
     let (mut max, mut i) = (0, 0);
     while i < all.len() {
@@ -717,6 +719,9 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if v.get("type").and_then(Value::as_str) == Some("split") && v.get("tool").is_some() {
+        return super::body::TOOL_FORMAT;
+    }
     if matches!(
         v.get("type").and_then(Value::as_str),
         Some("fill" | "extract" | "sew" | "thicken")
@@ -1033,6 +1038,9 @@ impl Feature {
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
+        if let Feature::Split(s) = self {
+            return s.format();
+        }
         if matches!(
             self,
             Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_)
@@ -1051,7 +1059,7 @@ impl Feature {
         if matches!(self, Feature::BaseFlange(_) | Feature::Flange(_)) {
             return super::sheet_metal::FORMAT;
         }
-        if matches!(self, Feature::Mirror(_) | Feature::Split(_)) {
+        if matches!(self, Feature::Mirror(_)) {
             return super::body::MIRROR_FORMAT;
         }
         if matches!(self, Feature::Sweep(_) | Feature::Loft(_)) {
@@ -1311,11 +1319,13 @@ impl Feature {
         }
     }
 
-    /// The solid a mirror copies, read as the mirror sees it; `None` for
-    /// anything else.
+    /// The body it reads whole without changing it, as it sees it: the
+    /// solid or sheet a mirror copies, the body a split cuts with; `None`
+    /// for anything else.
     pub fn source(&self) -> Option<&Id> {
         match self {
             Feature::Mirror(m) => Some(&m.solid),
+            Feature::Split(s) => s.tool_body(),
             _ => None,
         }
     }
@@ -1418,6 +1428,16 @@ impl Feature {
             Feature::Fillet(f) => f.references(),
             Feature::Chamfer(c) => c.references(),
             Feature::Shell(s) => s.references(),
+            // A plane that is a face, or the faces it cuts with.
+            Feature::Split(s) => s
+                .references()
+                .into_iter()
+                .chain(
+                    self.geometry()
+                        .into_iter()
+                        .filter_map(|(k, g)| Some((k, g.reference()?))),
+                )
+                .collect(),
             Feature::Offset(o) => o.references(),
             Feature::Flange(f) => f.references(),
             Feature::Unfold(u) => u.references(),
@@ -1467,7 +1487,11 @@ impl Feature {
                 _ => Vec::new(),
             },
             Feature::Mirror(m) => vec![("plane".to_owned(), &m.plane)],
-            Feature::Split(s) => vec![("plane".to_owned(), &s.plane)],
+            Feature::Split(s) => s
+                .plane()
+                .map(|p| ("plane".to_owned(), p))
+                .into_iter()
+                .collect(),
             Feature::Planar(p) => p.geometry(),
             Feature::Fill(x) => x.geometry(),
             Feature::MoveFace(m) => m.geometry(),
@@ -1918,6 +1942,38 @@ mod tests {
         );
         const { assert!(FEATURE_FORMAT >= super::super::sheet_metal::UNFOLD_FORMAT) };
         const { assert!(FEATURE_FORMAT >= super::super::tweak::FORMAT) };
+    }
+
+    #[test]
+    fn a_split_by_a_tool_is_format_19_and_reads_its_tool() {
+        use super::super::body::{MIRROR_FORMAT, TOOL_FORMAT};
+        let id = |s: &str| Id::parse(s, "feature").unwrap();
+        let header = |mut v: Value| {
+            v["kind"] = json!(FEATURE_KIND);
+            v["format"] = json!(TOOL_FORMAT);
+            v["type"] = json!("split");
+            v
+        };
+        let read = |v: &Value| Feature::from_json(v, Unit::Mm, &Env::empty()).unwrap();
+        let plane = read(&header(json!({"target": "h", "plane": "xy"})));
+        assert_eq!(plane.format(), MIRROR_FORMAT);
+        assert_eq!(plane.geometry().len(), 1);
+        assert!(plane.source().is_none());
+        let v = header(json!({"target": "h", "tool": {"body": "parting"}}));
+        let body = read(&v);
+        assert_eq!(
+            (body.format(), feature_format(&v)),
+            (TOOL_FORMAT, TOOL_FORMAT)
+        );
+        assert_eq!(body.to_json(), v);
+        assert!(body.geometry().is_empty());
+        assert_eq!(body.source(), Some(&id("parting")));
+        assert_eq!(body.targets(), vec![&id("h")]);
+        let faces = read(&header(json!({"target": "h", "tool": {"faces": [
+            {"feature": "base", "name": "0123456789abcdef0123456789abcdef"}]}})));
+        assert_eq!(faces.references()[0].0, "tool.faces.0");
+        assert_eq!(faces.geometry_reads(), vec![&id("base")]);
+        const { assert!(FEATURE_FORMAT >= TOOL_FORMAT) };
     }
 
     #[test]

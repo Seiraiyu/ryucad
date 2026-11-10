@@ -10,7 +10,9 @@
 //! again to the same text; the usdc read to the same layer; the usdz
 //! holding the usdc's bytes. Every BrepArray must pass the schema's
 //! checks, and a body the BrepArray can't describe must be a typed
-//! refusal. Any panic is a bug. With a first byte `0xd5`, the rest is a
+//! refusal. A last byte may put a sheet's open square in the first part:
+//! its triangles counted in STL, a `surface` object in 3MF, a mesh with no
+//! BrepArray in USD. Any panic is a bug. With a first byte `0xd5`, the rest is a
 //! seeded sheet metal part (`sheet_metal_bytes::case`) whose flat pattern
 //! is written as DXF in millimetres and inches and read back.
 
@@ -162,6 +164,7 @@ fuzz_target!(|data: &[u8]| {
             p.solids.push(Solid {
                 name: format!("s{s}"),
                 mesh: Arc::clone(mesh),
+                surface: false,
             });
             u.solids.push(stage::Solid {
                 name: format!("s{s}"),
@@ -225,6 +228,31 @@ fuzz_target!(|data: &[u8]| {
             ..stage::Product::default()
         })
         .collect();
+    // A sheet in the first part, where the last byte read says: an open
+    // 10 mm square, a 3MF `surface` object, USD's mesh with no BrepArray.
+    let sheet = b.pick(2) == 1;
+    if sheet {
+        use ryukei::geom::{Frame, Plane, Surface};
+        let plane = Surface::Plane(Plane::new(Frame::WORLD));
+        let (square, _) = ryukei::sheet::from_surface(
+            ryukei::name::OpKey::from_bytes(b"sheet"),
+            &plane,
+            [[0.0, 0.01], [0.0, 0.01]],
+        )
+        .unwrap();
+        let mesh = meshed(&square).expect("a square meshes");
+        leaves[0].0.solids.push(Solid {
+            name: "sheet".into(),
+            mesh: Arc::clone(&mesh),
+            surface: true,
+        });
+        leaves[0].1.solids.push(stage::Solid {
+            name: "sheet".into(),
+            body: Arc::new(square),
+            mesh: Some(mesh),
+            brep: false,
+        });
+    }
     for (p, u) in leaves {
         products.push(p);
         model.push(u);
@@ -258,7 +286,8 @@ fuzz_target!(|data: &[u8]| {
     let exact = common::scene_volume(&scene, unit);
     let slack = 1e-5 * scale(&triangles) + 1e-12;
     let v = common::volume(&triangles);
-    assert!((v - exact).abs() <= slack, "STL {v} against {exact}");
+    // A sheet encloses nothing: its triangles are counted, not measured.
+    assert!(sheet || (v - exact).abs() <= slack, "STL {v} against {exact}");
 
     // 3MF: watertight objects, every component placed, the same volume.
     let opts = ryuformats::threemf::ThreeMf {
@@ -269,9 +298,17 @@ fuzz_target!(|data: &[u8]| {
     ryuformats::threemf::write(&scene, &opts, &mut package).unwrap();
     let f = common::read_3mf(&package);
     assert_eq!(f.unit, unit.name());
-    assert!(f.meshes_watertight());
-    let v = f.volume();
-    assert!((v - exact).abs() <= slack, "3MF {v} against {exact}");
+    if sheet {
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(&package)).unwrap();
+        let mut model = String::new();
+        std::io::Read::read_to_string(&mut z.by_name("3D/3dmodel.model").unwrap(), &mut model)
+            .unwrap();
+        assert_eq!(model.matches("type=\"surface\"").count(), 1, "{model}");
+    } else {
+        assert!(f.meshes_watertight());
+        let v = f.volume();
+        assert!((v - exact).abs() <= slack, "3MF {v} against {exact}");
+    }
 
     // USD: B-rep and meshes, else a typed refusal.
     let opts = stage::Options {

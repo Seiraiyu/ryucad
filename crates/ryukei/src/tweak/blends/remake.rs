@@ -308,7 +308,7 @@ fn recut(
     let (walls, _) = crate::sheet::extract(k(1), body, taken)?;
     let mut steps = Vec::new();
     let mut out = round;
-    if let Ok((d, j)) = divide_in(k(2), capped, &[tool(&walls)], m) {
+    if let Ok((d, j)) = divide_in(k(2), capped, &[tool(&walls)], m, false) {
         let lumps: Vec<&Body> = d.front.iter().chain(&d.back).collect();
         if lumps.len() >= 2 {
             let plug = lumps.iter().min_by_key(|b| own(b, capped)).expect("two");
@@ -328,7 +328,7 @@ fn recut(
         .filter(|&n| capped.by_name(n).is_some())
         .collect();
     let (lid, _) = crate::sheet::extract(k(4), capped, &hosts)?;
-    let (d, j) = divide_in(k(5), body, &[tool(&lid)], m)?;
+    let (d, j) = divide_in(k(5), body, &[tool(&lid)], m, false)?;
     let lumps: Vec<&Body> = d.front.iter().chain(&d.back).collect();
     let Some(boss) = lumps.iter().min_by_key(|b| own(b, body)) else {
         return Err(TweakError::Uncertain { at: taken[0] }.into());

@@ -25,7 +25,7 @@ use ryukei::tweak::{MoveSpec, OffsetFacesSpec, Topology};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// Whether `f` may take a sheet as its target.
+/// Whether `f` is a face tweak, reported as one.
 pub fn takes_sheets(f: &Feature) -> bool {
     matches!(f, Feature::MoveFace(_) | Feature::ReplaceFace(_))
 }
@@ -179,7 +179,7 @@ fn surface(
 }
 
 /// Resolves a tweak (feature `id` of `part`): its target, through
-/// [`crate::rebuild::target_kinds`] taking sheets, its faces and its
+/// [`crate::rebuild::read`], as the table says (a sheet too), its faces and its
 /// motion or surfaces, everything in its view.
 pub(crate) fn resolve<'a>(
     part: &Part,
@@ -191,8 +191,7 @@ pub(crate) fn resolve<'a>(
     let ty = f.type_name();
     match f {
         Feature::MoveFace(m) => {
-            let built =
-                crate::rebuild::target_kinds(part, solids, id, "target", &m.target, before, true)?;
+            let built = crate::rebuild::read(part, solids, id, f, "target", &m.target, before)?;
             let mut faces: Vec<(Name, f64)> = Vec::new();
             let d = match &m.by {
                 MoveBy::Offset { distance, .. } => distance.meters(),
@@ -236,8 +235,7 @@ pub(crate) fn resolve<'a>(
             })
         }
         Feature::ReplaceFace(x) => {
-            let built =
-                crate::rebuild::target_kinds(part, solids, id, "target", &x.target, before, true)?;
+            let built = crate::rebuild::read(part, solids, id, f, "target", &x.target, before)?;
             let mut faces = Vec::new();
             for (i, g) in x.groups.iter().enumerate() {
                 let s = surface(part, id, &format!("groups.{i}.with"), &g.with, before)?;

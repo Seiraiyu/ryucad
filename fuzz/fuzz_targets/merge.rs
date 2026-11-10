@@ -10,7 +10,7 @@
 //! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft, `0xf2` a mirror or split, `0xf1` an annotation, `0xf0` a base
 //! flange or flange, `0xef` a planar face or a surface extrude, `0xee` an
 //! unfold or refold, `0xed` a face tweak, `0xec` a thicken or a fill (by the
-//! parity of the edit bytes). Merging must never panic, must give the same bytes twice,
+//! parity of the edit bytes), `0xea` a split by a tool. Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -1007,6 +1007,42 @@ fn edit_surface_feature(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// A split by a tool: its tool a body (`t`, `u`) or a face of `t`, a
+/// plane in its place, its flip or what it keeps.
+fn edit_split_tool(v: &mut Value, op: u8, arg: u8) {
+    let o = v.as_object_mut().unwrap();
+    match op % 4 {
+        0 => {
+            o.remove("plane");
+            let b = if arg % 2 == 0 { "t" } else { "u" };
+            o.insert("tool".into(), json!({"body": b}));
+        }
+        1 => {
+            o.remove("plane");
+            let face = json!({"feature": "t", "name": format!("{:032x}", arg % 4)});
+            o.insert("tool".into(), json!({"faces": [face]}));
+        }
+        2 => {
+            o.remove("tool");
+            let p = if arg % 2 == 0 { "xy" } else { "yz" };
+            o.insert("plane".into(), json!(p));
+        }
+        _ => {
+            // A file writes flip only when true and keep only when behind.
+            match arg % 4 {
+                0 => o.insert("flip".into(), json!(true)),
+                1 => o.remove("flip"),
+                2 => o.insert("keep".into(), json!("behind")),
+                _ => o.remove("keep"),
+            };
+        }
+    }
+    // A file is written at the lowest format that holds it: 19 for a tool,
+    // 15.B's 10 for a plane.
+    let format = if o.contains_key("tool") { 19 } else { 10 };
+    o.insert("format".into(), json!(format));
+}
+
 fn edit_unfold(v: &mut Value, op: u8, arg: u8) {
     let r = |a: u8| json!({"feature": "f", "name": format!("{:032x}", a % 4)});
     let o = v.as_object_mut().unwrap();
@@ -1117,9 +1153,10 @@ fuzz_target!(|data: &[u8]| {
     // (21), `0xf2` a mirror or split (22), `0xf1` an annotation (23),
     // `0xf0` a base flange or flange (24), `0xef` a planar face or a
     // surface extrude (25), `0xee` an unfold or refold (26), `0xed` a face
-    // tweak (27), `0xec` a thicken or a fill (28); every other byte picks as
-    // it did before them.
+    // tweak (27), `0xec` a thicken or a fill (28), `0xea` a split by a
+    // tool (30); every other byte picks as it did before them.
     let kind = match mode {
+        0xea => 30,
         0xec => 28,
         0xed => 27,
         0xee => 26,
@@ -1208,6 +1245,8 @@ fuzz_target!(|data: &[u8]| {
             27 => json!({"format": 16, "kind": "ryucad.feature", "type": "move_face",
                          "target": "b", "by": "translate", "direction": "z", "distance": "5 mm",
                          "faces": [{"feature": "b", "name": format!("{:032x}", 1)}]}),
+            30 => json!({"format": 19, "kind": "ryucad.feature", "type": "split",
+                         "target": "h", "tool": {"body": "t"}}),
             // A thicken when the edits leave no odd byte over, else a fill.
             28 if rest.len() % 2 == 0 => json!({"format": 15, "kind": "ryucad.feature",
                 "type": "thicken", "from": {"sheet": "s"}, "front": "1 mm", "back": "0 mm",
@@ -1296,6 +1335,7 @@ fuzz_target!(|data: &[u8]| {
             26 => edit_unfold(v, op, arg),
             27 => edit_tweak(v, op, arg),
             28 => edit_surface_feature(v, op, arg),
+            30 => edit_split_tool(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -1450,7 +1490,7 @@ fuzz_target!(|data: &[u8]| {
             }
         }
         // A thicken's source is one value: never conflicted inside.
-        if kind == 27 {
+        if kind == 28 {
             let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
             let v: Value = serde_json::from_slice(&merged).expect("JSON");
             for k in record(&v).keys() {
@@ -1458,6 +1498,26 @@ fuzz_target!(|data: &[u8]| {
                     !k.starts_with("/from/") && !k.starts_with("/sides/"),
                     "conflicted inside a thicken's from or a fill's sides at {k}: {v}"
                 );
+            }
+        }
+        // A split's plane, tool and flip are one value together, never
+        // conflicting inside the tool, and a clean merge reads.
+        if kind == 30 {
+            let (merged, outcome) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            for k in record(&v).keys() {
+                assert!(
+                    ["", "/plane", "/tool", "/flip", "/keep"].contains(&k.as_str()),
+                    "conflicted inside a split's tool at {k}: {v}"
+                );
+            }
+            if outcome == Outcome::Clean {
+                ryucad::doc::files::Feature::from_json(
+                    &v,
+                    ryucad::units::Unit::Mm,
+                    &ryucad::expr::Env::empty(),
+                )
+                .expect("a clean merge of a split reads");
             }
         }
         // A split's plane and flip are one value together; a mirror's
