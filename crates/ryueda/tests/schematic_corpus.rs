@@ -185,14 +185,9 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
                     s.score
                 );
             }
-            // No sheet at 0, but the Ethernet PHY's (issue #429: its pull-ups
-            // and bypass capacitors stand far from the 32-pin LAN8710A,
-            // satellite placement round dense ICs that plan 1.D doesn't
-            // hold; Task 13's thresholds record its score).
-            if (*name, b.id.as_str()) != ("ethernet", "eth") {
-                for s in &scores {
-                    assert!(s.score > 0, "{name}/{}: sheet {} scores 0", b.id, s.sheet);
-                }
+            // No sheet at 0 (#429 closed by plan 2.B's banks).
+            for s in &scores {
+                assert!(s.score > 0, "{name}/{}: sheet {} scores 0", b.id, s.sheet);
             }
         }
     }
@@ -282,17 +277,19 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
 /// another session, load 4 to 12) on 2026-11-07 after plan 2.A's regions
 /// and paper fit (scores are the same on every machine). Region frames
 /// spread the drawings, so most thresholds fell from 1.D's: the RP2040's
-/// first sheet from 36 to 14, the buck from 37 to 29. Ethernet's PHY
-/// sheet scores 0 (issue #429).
+/// first sheet from 36 to 14, the buck from 37 to 29. Plan 2.B's banks
+/// (#429) took Ethernet's PHY sheet from 0 to 51 and the RP2040's first
+/// sheet from 14 to 19, measured on cox-worker-1 (Intel Xeon E5-2650, 8
+/// threads, shared, load 2 to 5) on 2026-11-10.
 const THRESHOLDS: &[(&str, &str, i64)] = &[
     ("breakout", "breakout", 79),
     ("breakout", "sensor", 95),
-    ("rp2040", "mitayi", 9),
+    ("rp2040", "mitayi", 14),
     ("buck", "buck", 24),
     ("frontend", "amp", 51),
     ("frontend", "baldiff", 48),
     ("frontend", "ivconv", 73),
-    ("ethernet", "eth", 0),
+    ("ethernet", "eth", 46),
     ("ethernet", "status_led", 92),
 ];
 

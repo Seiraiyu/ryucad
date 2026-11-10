@@ -2497,7 +2497,8 @@ struct BankRow {
     net: usize,
     pin: (usize, usize),
     members: Vec<(usize, usize)>,
-    /// A port is on its net: the row carries the port's name.
+    /// A port is on its net, or a pin beyond the row: the row carries
+    /// the net's name.
     ported: bool,
     /// The side of its part the bank stands on.
     side: Side,
@@ -2515,8 +2516,15 @@ fn bank_rows(st: &State, idioms: &[idiom::Idiom]) -> Vec<BankRow> {
             let Some(net) = block.parts[b.part].pins[*k].net else {
                 continue;
             };
-            let ported = block.parts.iter().any(|part| {
-                matches!(part.kind, PartKind::Port { .. })
+            // A port on its net, or a pin beyond the row's own: the row
+            // carries the net's name.
+            let row_parts: BTreeSet<usize> = list
+                .iter()
+                .map(|i| idioms[*i].parts[0])
+                .chain([b.part])
+                .collect();
+            let ported = block.parts.iter().enumerate().any(|(q, part)| {
+                (matches!(part.kind, PartKind::Port { .. }) || !row_parts.contains(&q))
                     && part.pins.iter().any(|x| x.net == Some(net))
             });
             let ported = ported && block.nets[net].kind == NetKind::Signal;

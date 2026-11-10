@@ -171,7 +171,11 @@ pub fn banks(block: &Block, idioms: &[Idiom], at: &BTreeMap<usize, Place>) -> Ve
     }
     let mut out = Vec::new();
     for ((a, side), rows) in by {
-        if rows.values().map(Vec::len).sum::<usize>() < 2 {
+        // A row is a pull resistor's (a pin's capacitors alone, a
+        // regulator's, keep phase 1's places), and a bank two rows or more.
+        let mut rows = rows;
+        rows.retain(|_, list| list.iter().any(|i| is_resistor(block, idioms[*i].parts[0])));
+        if rows.len() < 2 {
             continue;
         }
         let shape = Shape::of(&block.parts[a], at[&a]);
@@ -929,7 +933,7 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
             // A pull with a jumper keeps phase 1's place: the jumper stands
             // on the pin's line, where a bank's member stands.
             b.rows.retain(|(_, list)| idioms[list[0]].parts.len() == 1);
-            (b.rows.iter().map(|(_, l)| l.len()).sum::<usize>() >= 2).then_some(b)
+            (b.rows.len() >= 2).then_some(b)
         })
         .collect();
     let on_rows: BTreeSet<usize> = banks
