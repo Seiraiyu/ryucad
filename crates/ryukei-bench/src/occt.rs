@@ -102,6 +102,12 @@ mod ffi {
             neutral: &[f64],
             seconds: &mut f64,
         ) -> Result<UniquePtr<Shape>>;
+        fn defeature(
+            s: &Shape,
+            faces: &[f64],
+            select: u32,
+            seconds: &mut f64,
+        ) -> Result<UniquePtr<Shape>>;
         fn offset_on_faces(s: &Shape, faces: &[f64], distances: &[f64])
         -> Result<UniquePtr<Shape>>;
         fn face_normal(s: &Shape, x: f64, y: f64, z: f64) -> Vec<f64>;
@@ -374,6 +380,17 @@ pub struct SolidProps {
     pub faces: u32,
 }
 
+/// Which faces [`Solid::defeature`] removes.
+#[derive(Clone, Debug)]
+pub enum Defeature {
+    /// The face nearest each point.
+    Nearest(Vec<Point3>),
+    /// Every cylindrical face.
+    Cylinders,
+    /// Every face that isn't a plane.
+    NotPlanes,
+}
+
 /// The STL file at `path` (binary or ASCII) read by `RWStl::ReadFile`,
 /// OCCT's STL reader under `StlAPI_Reader`, which welds coincident
 /// vertices: its triangles by position index. OCCT's failure as text.
@@ -504,6 +521,21 @@ impl Solid {
         )
         .map(|s| (Self(s), seconds))
         .map_err(|e| e.to_string())
+    }
+
+    /// The faces `which` picks removed and the gaps healed, with
+    /// `BRepAlgoAPI_Defeaturing` on one thread: the result and the
+    /// seconds OCCT took, finding the faces left out.
+    pub fn defeature(&self, which: &Defeature) -> Result<(Self, f64), String> {
+        let (pts, select): (Vec<f64>, u32) = match which {
+            Defeature::Nearest(faces) => (faces.iter().flat_map(|p| [p.x, p.y, p.z]).collect(), 0),
+            Defeature::Cylinders => (Vec::new(), 1),
+            Defeature::NotPlanes => (Vec::new(), 2),
+        };
+        let mut seconds = 0.0;
+        ffi::defeature(&self.0, &pts, select, &mut seconds)
+            .map(|s| (Self(s), seconds))
+            .map_err(|e| e.to_string())
     }
 
     /// The faces nearest each point moved along their normals by their

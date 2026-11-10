@@ -70,12 +70,15 @@ pub(crate) fn work_body(
     body: &Body,
     region: &Region,
     working: &BTreeMap<FaceId, Working>,
+    m: &crate::work::Meter,
 ) -> Result<WorkBody, Error> {
     let mut lay = Layout::default();
     let outside: BTreeSet<FaceId> = body.faces().filter(|f| !region.faces.contains(f)).collect();
     let copied = crate::sheet::copy(&mut lay, body, &outside);
     let mut sheets = Vec::new();
     for (&f, w) in working {
+        // Polled before each sheet's fitted sides, which are unmetered.
+        m.poll().map_err(|_| Error::Cancelled)?;
         let name = body.faces[f].name;
         let (s, _) = crate::sheet::from_surface(sheet_key(key, name), &w.surface, w.rect)
             .map_err(|_| Error::from(TweakError::ExtensionUnsupported { face: name }))?;
@@ -232,7 +235,8 @@ mod tests {
                 )
             })
             .collect();
-        let w = work_body(K, &b, &r, &ws).unwrap();
+        // unmetered: a unit test.
+        let w = work_body(K, &b, &r, &ws, &crate::work::Meter::free()).unwrap();
         assert_eq!(w.body.kind(), crate::topo::BodyKind::Sheet);
         assert!(crate::check::check_topology(&w.body).is_empty());
         assert_eq!(w.body.faces().count(), 6);
@@ -262,7 +266,8 @@ mod tests {
                 )
             })
             .collect();
-        let w = work_body(K, &b, &r, &ws).unwrap();
+        // unmetered: a unit test.
+        let w = work_body(K, &b, &r, &ws, &crate::work::Meter::free()).unwrap();
         let pairs = w.pairs();
         let bottom = *w
             .origin

@@ -67,6 +67,10 @@ pub(crate) fn retrim(
     // grown by a ring, twice. It stops once the region is every face.
     let mut last = None;
     for rung in 0..4 {
+        // Polled, never charged: a rung's working faces and their sheets
+        // are unmetered (13.D: NIST FTC 10's blends ran 17 minutes past a
+        // cancel here).
+        m.poll().map_err(|_| Error::Cancelled)?;
         if rung >= 2 {
             if region.whole(body) {
                 break;
@@ -157,6 +161,9 @@ fn attempt(
 ) -> Rung {
     let mut ws = BTreeMap::new();
     for &f in region.faces.iter().filter(|f| !changes.deleted.contains(f)) {
+        if m.poll().is_err() {
+            return done(Err(Error::Cancelled));
+        }
         let mo = changes.motion.get(&f);
         let sense = changes
             .senses
@@ -177,7 +184,7 @@ fn attempt(
             Err(e) => return done(Err(e)),
         }
     }
-    let w = match work_body(key, body, region, &ws) {
+    let w = match work_body(key, body, region, &ws, m) {
         Ok(w) => w,
         Err(e) => return Rung::Next(e),
     };

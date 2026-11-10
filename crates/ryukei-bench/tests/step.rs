@@ -1249,3 +1249,64 @@ fn pinned_bodies_shell_untightened() {
     );
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// Every body the pinned corpus heals, defeatured (design 399, plan
+/// 13.D): its recognised blends no larger than 2 mm deleted. Each result
+/// checks clean (`check` and `check_intersections`), or is a typed
+/// refusal (`InvalidTweak`), printed with the time it took. Run after
+/// `scripts/fetch-corpus.sh`, in the devcontainer.
+#[test]
+fn pinned_bodies_defeature() {
+    use ryukei::check::{check, check_intersections};
+    use ryukei::tweak::{DeleteBlends, RecogniseOptions, delete_blends, recognise_blends};
+    let spec = DeleteBlends {
+        max_size: Some(2e-3),
+        faces: Vec::new(),
+        options: RecogniseOptions::default(),
+    };
+    let (mut defeatured, mut refused, mut none) = (0, 0, 0);
+    let start = Instant::now();
+    for name in pinned_files() {
+        for (rep, body) in pinned_bodies(&name, true) {
+            let t = Instant::now();
+            let blends = match recognise_blends(&body, &spec.options) {
+                Ok(r) => r.blends.len(),
+                Err(ryukei::Error::InvalidTweak(e)) => {
+                    println!("{name} #{rep}: recognition refused {e:?}");
+                    refused += 1;
+                    continue;
+                }
+                Err(e) => panic!("{name} #{rep}: {e:?}"),
+            };
+            if blends == 0 {
+                none += 1;
+                continue;
+            }
+            match delete_blends(OpKey(0x13d), &body, &spec) {
+                Ok((o, _)) => {
+                    assert_eq!(check(&o), [], "{name} #{rep}");
+                    assert_eq!(check_intersections(&o), [], "{name} #{rep}");
+                    println!(
+                        "{name} #{rep}: {} faces to {} in {:.2} s",
+                        body.counts().faces,
+                        o.counts().faces,
+                        t.elapsed().as_secs_f64()
+                    );
+                    defeatured += 1;
+                }
+                Err(ryukei::Error::InvalidTweak(e)) => {
+                    println!(
+                        "{name} #{rep}: refused {e:?} in {:.2} s",
+                        t.elapsed().as_secs_f64()
+                    );
+                    refused += 1;
+                }
+                Err(e) => panic!("{name} #{rep}: not a tweak's refusal: {e:?}"),
+            }
+        }
+    }
+    println!(
+        "pinned corpus: {defeatured} defeatured, {refused} refused, {none} with no blend, in {:.1} s",
+        start.elapsed().as_secs_f64()
+    );
+}

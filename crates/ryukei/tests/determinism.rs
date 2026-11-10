@@ -3652,6 +3652,9 @@ sections! {
     section_views => section_views_section,
     tweaks => tweaks_section,
     drafts => drafts_section,
+    retrim => retrim_section,
+    delete_faces => delete_faces_section,
+    blend_recognition => blend_recognition_section,
 }
 
 /// Self-union (design 299, plan 14.C): two 4 m blocks crossing as one
@@ -4596,4 +4599,262 @@ fn drafts_section(golden: &mut Golden) {
             s.f64(a.greatest);
         }
     }
+}
+
+/// The local re-trim (design 399, plan 13.D): tweaks with
+/// `Topology::Change` that change a body's topology: a block's wall
+/// drafted past its neighbour (a wedge), a groove's end walls offset to
+/// run it through (the top split), and a boss slid half off its plate's
+/// edge.
+fn retrim_section(golden: &mut Golden) {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::{Point3, Surface, UnitVector3, Vector3};
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::tweak::{
+        DraftFace, DraftSpec, Hinge, MoveSpec, OffsetFacesSpec, Topology, draft, move_faces,
+        offset_faces,
+    };
+    let mut s = golden.section("retrim");
+    let key = OpKey(0x7274_7200);
+    let k = OpKey(0x7274_7201);
+    let face = |r: FaceRole| Name::derive(key, Role::Face(r), &[]);
+    let (b, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let wedge = DraftSpec {
+        pull: UnitVector3::exact(Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+        angle: 1.3,
+        hinge: Hinge::Neutral {
+            origin: Point3::ORIGIN,
+        },
+        faces: vec![DraftFace {
+            face: face(FaceRole::MinusX),
+            angle: None,
+            flip: false,
+        }],
+        tangent: false,
+        topology: Topology::Change,
+        blends: Default::default(),
+    };
+    let (o, j, _) = draft(k, &b, &wedge).unwrap();
+    hash_body(&mut s, &o, &j);
+    let cut = |target: &ryukei::topo::Body,
+               tool: &ryukei::topo::Body,
+               op: BooleanOp,
+               at: Vector3,
+               key: u128| {
+        boolean(
+            OpKey(key),
+            op,
+            target,
+            &[Tool {
+                key: ToolKey(1),
+                body: tool,
+                place: Rigid::translation(at),
+            }],
+        )
+        .unwrap()
+        .0
+    };
+    let (plate, _) = primitive::block(key, 1.0, 1.0, 0.2, &Rigid::IDENTITY).unwrap();
+    let (slot, _) = primitive::block(OpKey(0x7274_7202), 0.1, 0.6, 0.2, &Rigid::IDENTITY).unwrap();
+    let grooved = cut(
+        &plate,
+        &slot,
+        BooleanOp::Subtract,
+        Vector3::new(0.45, 0.2, 0.1),
+        0x7274_7203,
+    );
+    let ends: Vec<Name> = grooved
+        .faces()
+        .filter(
+            |&f| match grooved.surface(grooved.face(f).unwrap().surface).unwrap() {
+                Surface::Plane(p) => {
+                    let y = p.frame().origin().y;
+                    p.frame().z().get().y.abs() > 0.9
+                        && ((y - 0.2).abs() < 1e-12 || (y - 0.8).abs() < 1e-12)
+                }
+                _ => false,
+            },
+        )
+        .map(|f| grooved.face(f).unwrap().name)
+        .collect();
+    let through = OffsetFacesSpec {
+        faces: ends.iter().map(|&n| (n, -0.3)).collect(),
+        tangent: false,
+        topology: Topology::Change,
+        blends: Default::default(),
+    };
+    let (o, j) = offset_faces(k, &grooved, &through).unwrap();
+    hash_body(&mut s, &o, &j);
+    let (boss, _) = primitive::cylinder(OpKey(0x7274_7204), 0.1, 0.15, &Rigid::IDENTITY).unwrap();
+    let bossed = cut(
+        &plate,
+        &boss,
+        BooleanOp::Unite,
+        Vector3::new(0.5, 0.5, 0.2),
+        0x7274_7205,
+    );
+    let boss_faces: Vec<Name> = bossed
+        .faces()
+        .filter(
+            |&f| match bossed.surface(bossed.face(f).unwrap().surface).unwrap() {
+                Surface::Cylinder(_) => true,
+                Surface::Plane(p) => (p.frame().origin().z - 0.35).abs() < 1e-12,
+                _ => false,
+            },
+        )
+        .map(|f| bossed.face(f).unwrap().name)
+        .collect();
+    let slide = MoveSpec {
+        faces: boss_faces,
+        motion: Rigid::translation(Vector3::new(-0.45, 0.0, 0.0)),
+        tangent: false,
+        topology: Topology::Change,
+        blends: Default::default(),
+    };
+    let (o, j) = move_faces(k, &bossed, &slide).unwrap();
+    hash_body(&mut s, &o, &j);
+}
+
+/// Deleting faces (design 399, plan 13.D): a plate's through hole capped,
+/// a block's edge fillet grown back to the block, and every blend of a
+/// box rounded at 0.1 grown back (its corners first); `feature_faces` of
+/// the hole's wall.
+fn delete_faces_section(golden: &mut Golden) {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend};
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::Surface;
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::topo::Body;
+    use ryukei::tweak::{DeleteSpec, Heal, delete_faces, feature_faces};
+    let mut s = golden.section("delete_faces");
+    let key = OpKey(0x646c_6600);
+    let k = OpKey(0x646c_6601);
+    let face = |r: FaceRole| Name::derive(key, Role::Face(r), &[]);
+    let curved = |b: &Body| -> Vec<Name> {
+        b.faces()
+            .filter(|&f| {
+                !matches!(
+                    b.surface(b.face(f).unwrap().surface).unwrap(),
+                    Surface::Plane(_)
+                )
+            })
+            .map(|f| b.face(f).unwrap().name)
+            .collect()
+    };
+    let auto = |faces: Vec<Name>| DeleteSpec {
+        faces,
+        heal: Heal::Auto,
+    };
+    let (plate, _) = primitive::block(key, 1.0, 1.0, 0.2, &Rigid::IDENTITY).unwrap();
+    let (pin, _) = primitive::cylinder(OpKey(0x646c_6602), 0.1, 0.4, &Rigid::IDENTITY).unwrap();
+    let (drilled, _) = boolean(
+        OpKey(0x646c_6603),
+        BooleanOp::Subtract,
+        &plate,
+        &[Tool {
+            key: ToolKey(1),
+            body: &pin,
+            place: Rigid::translation(Vector3::new(0.5, 0.5, -0.1)),
+        }],
+    )
+    .unwrap();
+    let wall = curved(&drilled);
+    for n in feature_faces(&drilled, wall[0]).unwrap() {
+        s.u64(n.to_u128() as u64);
+        s.u64((n.to_u128() >> 64) as u64);
+    }
+    let (o, j) = delete_faces(k, &drilled, &auto(wall)).unwrap();
+    hash_body(&mut s, &o, &j);
+    let (b, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let edge_of = |a: FaceRole, c: FaceRole| {
+        let mut f = [face(a), face(c)];
+        f.sort();
+        Name::derive(key, Role::Edge, &f)
+    };
+    let fillet = BlendKind::Fillet { radius: 0.1 };
+    let (one, _) = blend(
+        OpKey(0x646c_6604),
+        &b,
+        &[EdgeBlend {
+            edge: edge_of(FaceRole::PlusZ, FaceRole::MinusY),
+            kind: fillet,
+        }],
+    )
+    .unwrap();
+    let (o, j) = delete_faces(k, &one, &auto(curved(&one))).unwrap();
+    hash_body(&mut s, &o, &j);
+    let all: Vec<EdgeBlend> = b
+        .edges()
+        .map(|e| EdgeBlend {
+            edge: b.edge(e).unwrap().name,
+            kind: fillet,
+        })
+        .collect();
+    let (rounded, _) = blend(OpKey(0x646c_6605), &b, &all).unwrap();
+    let (o, j) = delete_faces(k, &rounded, &auto(curved(&rounded))).unwrap();
+    hash_body(&mut s, &o, &j);
+}
+
+/// Blend recognition and edits (design 399, plan 13.D): a box rounded at
+/// 0.1 and one chamfered at 0.05 recognised (every blend's faces, kind,
+/// size, supports and chain, and the corners), the rounded box's
+/// fillets under 0.15 deleted, and one fillet of a block resized to 0.15
+/// keeping its names.
+fn blend_recognition_section(golden: &mut Golden) {
+    use ryukei::blend::{BlendKind, Chamfer, EdgeBlend, blend};
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::tweak::{
+        DeleteBlends, RecogniseOptions, delete_blends, recognise_blends, resize_blends,
+    };
+    let mut s = golden.section("blend_recognition");
+    let key = OpKey(0x6272_6300);
+    let k = OpKey(0x6272_6301);
+    let face = |r: FaceRole| Name::derive(key, Role::Face(r), &[]);
+    let (b, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let every = |kind: BlendKind, key: u128| {
+        let all: Vec<EdgeBlend> = b
+            .edges()
+            .map(|e| EdgeBlend {
+                edge: b.edge(e).unwrap().name,
+                kind,
+            })
+            .collect();
+        blend(OpKey(key), &b, &all).unwrap().0
+    };
+    let rounded = every(BlendKind::Fillet { radius: 0.1 }, 0x6272_6302);
+    let chamfered = every(
+        BlendKind::Chamfer(Chamfer::Equal { distance: 0.05 }),
+        0x6272_6303,
+    );
+    let opts = RecogniseOptions::default();
+    for body in [&rounded, &chamfered] {
+        let r = recognise_blends(body, &opts).unwrap();
+        s.str(&format!("{r:?}"));
+    }
+    let small = DeleteBlends {
+        max_size: Some(0.15),
+        faces: Vec::new(),
+        options: opts,
+    };
+    let (o, j) = delete_blends(k, &rounded, &small).unwrap();
+    hash_body(&mut s, &o, &j);
+    let mut f = [face(FaceRole::PlusZ), face(FaceRole::MinusY)];
+    f.sort();
+    let (one, _) = blend(
+        OpKey(0x6272_6304),
+        &b,
+        &[EdgeBlend {
+            edge: Name::derive(key, Role::Edge, &f),
+            kind: BlendKind::Fillet { radius: 0.1 },
+        }],
+    )
+    .unwrap();
+    let r = recognise_blends(&one, &opts).unwrap();
+    let (o, j) = resize_blends(
+        k,
+        &one,
+        &[(r.blends[0].faces[0], BlendKind::Fillet { radius: 0.15 })],
+    )
+    .unwrap();
+    hash_body(&mut s, &o, &j);
 }

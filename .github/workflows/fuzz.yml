@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [predicates, interval, euler, nurbs, mesh, feature, merge, sweep, intersect, general, boolean, blend, offset, tweak, heal, tolerant, self_union, expr, sketch, step, measure, eda, kicad, odb, shapes, export, schematic, parts, sheet, sheet_metal, projection]
+        target: [predicates, interval, euler, nurbs, mesh, feature, merge, sweep, intersect, general, boolean, blend, offset, tweak, edit, heal, tolerant, self_union, expr, sketch, step, measure, eda, kicad, odb, shapes, export, schematic, parts, sheet, sheet_metal, projection]
     steps:
       - uses: actions/checkout@v4
       # cargo-fuzz needs nightly; the pinned stable toolchain stays the
@@ -34,8 +34,8 @@ jobs:
         # (450 s), so their cases end within 600 s; blend's keep libFuzzer's default 1,200 s.
         run: >-
           cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600
-          ${{ (matrix.target == 'boolean' || matrix.target == 'blend' || matrix.target == 'sweep' || matrix.target == 'offset' || matrix.target == 'tweak' || matrix.target == 'export' || matrix.target == 'sheet' || matrix.target == 'sheet_metal' || matrix.target == 'projection') && '-rss_limit_mb=6144' || '' }}
-          ${{ (matrix.target == 'sweep' || matrix.target == 'offset' || matrix.target == 'tweak') && '-timeout=600' || '' }}
+          ${{ (matrix.target == 'boolean' || matrix.target == 'blend' || matrix.target == 'sweep' || matrix.target == 'offset' || matrix.target == 'tweak' || matrix.target == 'edit' || matrix.target == 'export' || matrix.target == 'sheet' || matrix.target == 'sheet_metal' || matrix.target == 'projection') && '-rss_limit_mb=6144' || '' }}
+          ${{ (matrix.target == 'sweep' || matrix.target == 'offset' || matrix.target == 'tweak' || matrix.target == 'edit') && '-timeout=600' || '' }}
       - name: Upload crashes
         if: failure()
         uses: actions/upload-artifact@v4

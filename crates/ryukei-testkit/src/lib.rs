@@ -156,6 +156,7 @@ pub mod along_bytes;
 pub mod blend_bytes;
 pub mod boolean_bytes;
 pub mod crossing;
+pub mod edit_bytes;
 pub mod euler_script;
 pub mod exact;
 mod golden;

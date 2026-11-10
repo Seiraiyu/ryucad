@@ -1,12 +1,14 @@
 analytic 77486439ba83b83f
 bent e6534789b55ed891
 blend_booleans eb5e1e05f57ec6de
+blend_recognition 2f058afa4db07ab0
 blends 3aa69b864ac0722e
 booleans 6a2255fa3738c182
 codec e8258d56059ad28f
 conversion ebfbd230262bc6d1
 corners f809756dfe01de9a
 curve_length e3e6d043806398a7
+delete_faces 015f47041aee7815
 derivatives f798f3a584b8a528
 drafts a2e5c5d56618af08
 ellipse d183a46baced650d
@@ -38,6 +40,7 @@ predicates 582c63309c4c6f67
 primitives d1d75bf1aae07f71
 projection 5cabf36eda0e3960
 reference b16573e05f22ed3a
+retrim f8272e7bcf701b6c
 section_views 85e6dc539783db2b
 self_union 63d790ba1aa91bdb
 sewing b7344fea95c33f8e
