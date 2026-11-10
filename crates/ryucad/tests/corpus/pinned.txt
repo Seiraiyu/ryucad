@@ -25,6 +25,3 @@ licence voron/Switchwire_Assembly_v1_STEP.zip GPL-3.0 VoronDesign/Voron-Switchwi
 builds 324 voron/Switchwire_Assembly_v1_STEP.step
 builds 381 voron/V0.2R1 Master Assembly v63.step
 builds 1291 voron/Voron_2.4r2_Assembly.step
-#
-# #618: v0-display-pcb builds but comes back through STEP as nothing.
-roundtrip v0-display-pcb #618 voron/V0.2R1 Master Assembly v63.step
