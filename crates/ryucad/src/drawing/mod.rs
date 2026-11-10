@@ -316,11 +316,14 @@ enum Place {
     /// At a centre written, or one ryucad chooses.
     At(Option<P>),
     /// Along `dir` (a unit on the sheet) from its parent, by a distance
-    /// written or one ryucad chooses.
+    /// written or one ryucad chooses; `reach` orders a family's views as
+    /// they reach from their parent (0 an orthographic neighbour, 1 the
+    /// back view, 2 an auxiliary view), so a nearer one is placed first.
     Along {
         parent: Key,
         dir: P,
         offset: Option<f64>,
+        reach: u8,
     },
 }
 
@@ -526,6 +529,7 @@ fn plans(
                             parent: p.key,
                             dir,
                             offset: mm(offset),
+                            reach: u8::from(*side == Side::Back),
                         },
                         None => Place::At(at(w)),
                     };
@@ -571,6 +575,7 @@ fn plans(
                         parent: p.key,
                         dir: [flip * img[0] / len, flip * img[1] / len],
                         offset: mm(offset),
+                        reach: 2,
                     };
                     (
                         p.of.clone(),
@@ -1114,13 +1119,33 @@ fn layout(
             root[j] = root[*pj];
         }
     }
+    // Parents before their children, and among a generation the views
+    // nearest their parents first (neighbours, then back, then auxiliary
+    // views), keys only within each: a back view never takes the place
+    // beside the front because it was added first.
+    let mut depth = vec![0usize; on.len()];
     for (j, i) in on.iter().enumerate() {
+        if let Place::Along { parent, .. } = plans[*i].0.place
+            && let Some(pj) = index.get(&parent)
+        {
+            depth[j] = depth[*pj] + 1;
+        }
+    }
+    let rank = |j: usize| match plans[on[j]].0.place {
+        Place::At(_) => 0,
+        Place::Along { reach, .. } => reach,
+    };
+    let mut order: Vec<usize> = (0..on.len()).collect();
+    order.sort_by_key(|j| (depth[*j], rank(*j), plans[on[*j]].0.key));
+    for j in order {
+        let i = &on[j];
         match plans[*i].0.place {
             Place::At(_) => rel[j] = Some([0.0, 0.0]),
             Place::Along {
                 parent,
                 dir,
                 offset,
+                ..
             } => {
                 let Some(pj) = index.get(&parent).copied() else {
                     rel[j] = Some([0.0, 0.0]);
@@ -1601,12 +1626,19 @@ pub(crate) mod tests {
 
     #[test]
     fn a_back_view_goes_past_the_right_view_and_no_two_views_overlap() {
-        let views = json!({
+        // Whichever has the lower key: placement follows reach, not keys.
+        for (right, back) in [("v3", "v5"), ("v4", "v3")] {
+            back_past_right(right, back);
+        }
+    }
+
+    fn back_past_right(right: &str, back: &str) {
+        let mut views = json!({
             "v1": {"type": "base", "sheet": "s1", "orient": "front"},
             "v2": {"type": "projected", "sheet": "s1", "from": "v1", "side": "top"},
-            "v3": {"type": "projected", "sheet": "s1", "from": "v1", "side": "right"},
-            "v5": {"type": "projected", "sheet": "s1", "from": "v1", "side": "back"}
         });
+        views[right] = json!({"type": "projected", "sheet": "s1", "from": "v1", "side": "right"});
+        views[back] = json!({"type": "projected", "sheet": "s1", "from": "v1", "side": "back"});
         let (_d, mut s) = drawn(60.0, 40.0, 20.0, views);
         let apart = |views: &[ViewBuilt]| {
             for (i, a) in views.iter().enumerate() {
@@ -1634,8 +1666,11 @@ pub(crate) mod tests {
                 .at
         };
         // Third angle: the back view on the front's row, past the right.
-        assert_eq!(at("v5")[1], at("v1")[1]);
-        assert!(at("v5")[0] > at("v3")[0]);
+        assert_eq!(at(back)[1], at("v1")[1]);
+        assert!(
+            at(back)[0] > at(right)[0],
+            "{back} beside the front, {right} past it"
+        );
         // `drawing layout` lays them out alike, at a scale that fits.
         let v = call(
             &mut s,

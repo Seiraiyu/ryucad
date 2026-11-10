@@ -403,7 +403,6 @@ fn path_part(files: &Files, asm: &str, path: &[Value]) -> Option<String> {
     Some(part)
 }
 
-/// The feature a file of the part is, if it is one.
 /// The part a drawing's node at `pt` names faces of: the source of the
 /// view it is under (its base view's `of`, else `owner`, the drawing's own
 /// part).
@@ -422,6 +421,7 @@ fn drawing_source<'a>(v: &'a Value, pt: &str, owner: &'a str) -> &'a str {
     owner
 }
 
+/// The feature a file of the part is, if it is one.
 fn feature_of<'a>(path: &'a str, part: &str) -> Option<&'a str> {
     path.strip_prefix(&format!("parts/{part}/features/"))?
         .strip_suffix(".json")

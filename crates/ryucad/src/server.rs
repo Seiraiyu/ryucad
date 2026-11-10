@@ -6067,7 +6067,7 @@ pub(crate) fn normal_to_face_at(
     use ryukei::geom::{Curve, Surface};
     use ryukei::measure::Entity;
     // A datum plane: along its normal, its x level; a datum axis: along it.
-    if let Some(d) = crate::geometry::locate(session, reference)? {
+    if let Some(d) = crate::geometry::locate_at(session, reference, rev)? {
         let a = |v: ryukei::geom::Vector3| [v.x, v.y, v.z];
         return match d.geom {
             crate::geometry::Geom::Plane(p) => Ok(crate::view::normal_to(
