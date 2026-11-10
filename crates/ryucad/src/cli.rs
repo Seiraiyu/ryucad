@@ -659,6 +659,9 @@ enum Command {
         /// Use this participant's camera.
         #[arg(long = "of", value_name = "PARTICIPANT", conflicts_with = "eye")]
         of: Option<String>,
+        /// Render this annotation: its view, its pins and its marks.
+        #[arg(long, value_name = "ID", conflicts_with_all = ["view", "eye"])]
+        annotation: Option<String>,
         #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires_all = ["target", "up"])]
         eye: Option<[String; 3]>,
         #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires = "eye")]
@@ -1523,9 +1526,93 @@ enum ModeArg {
     Edit,
 }
 
+/// Redline marks (design 423): whole as JSON, or by shorthand in the
+/// view's plane in the default unit (sent arrows, lines, ellipses,
+/// rectangles, then texts, after the JSON's).
+#[derive(Args, Clone, Debug, Default)]
+struct MarkArgs {
+    /// Marks as the file has them, {"part", "list"} (touches optional), or @FILE.
+    #[arg(long, value_name = "JSON|@FILE")]
+    marks: Option<String>,
+    /// The part or assembly the shorthand marks are drawn on.
+    #[arg(long, value_name = "PART")]
+    model: Option<String>,
+    #[arg(long, value_name = "X1,Y1:X2,Y2", allow_hyphen_values = true)]
+    arrow: Vec<String>,
+    #[arg(long, value_name = "X1,Y1:X2,Y2", allow_hyphen_values = true)]
+    line: Vec<String>,
+    #[arg(long, value_name = "X1,Y1:X2,Y2", allow_hyphen_values = true)]
+    ellipse: Vec<String>,
+    #[arg(long, value_name = "X1,Y1:X2,Y2", allow_hyphen_values = true)]
+    rectangle: Vec<String>,
+    /// A text mark: its anchor and one line of text.
+    #[arg(long, value_name = "X,Y=TEXT", allow_hyphen_values = true)]
+    text: Vec<String>,
+}
+
+impl MarkArgs {
+    fn shorthands(&self) -> Vec<ryucad::proto::ShortMark> {
+        let mut out = Vec::new();
+        for (kind, list) in [
+            ("arrow", &self.arrow),
+            ("line", &self.line),
+            ("ellipse", &self.ellipse),
+            ("rectangle", &self.rectangle),
+            ("text", &self.text),
+        ] {
+            out.extend(list.iter().map(|at| ryucad::proto::ShortMark {
+                kind: kind.into(),
+                at: at.clone(),
+            }));
+        }
+        out
+    }
+
+    /// The marks these flags give, if any: `--marks` read (a file after
+    /// `@`), the shorthands after them, `--model` naming the part.
+    fn read(&self) -> Result<Option<ryucad::proto::MarksArg>> {
+        let short = self.shorthands();
+        let mut m = match &self.marks {
+            None if short.is_empty() => return Ok(None),
+            None => ryucad::proto::MarksArg::default(),
+            Some(text) => {
+                let text = match text.strip_prefix('@') {
+                    Some(path) => std::fs::read_to_string(path)
+                        .map_err(|e| Error::new(Code::Usage, format!("--marks @{path}: {e}")))?,
+                    None => text.clone(),
+                };
+                serde_json::from_str(&text).map_err(|e| {
+                    Error::new(
+                        Code::Usage,
+                        format!("--marks isn't {{\"part\", \"list\"}} JSON: {e}"),
+                    )
+                })?
+            }
+        };
+        if let Some(p) = &self.model {
+            if !m.part.is_empty() && m.part != *p {
+                return Err(Error::new(
+                    Code::Usage,
+                    "--model and --marks name different parts",
+                ));
+            }
+            m.part = p.clone();
+        }
+        if m.part.is_empty() {
+            return Err(Error::new(
+                Code::Usage,
+                "marks need --model, or a part in --marks",
+            ));
+        }
+        m.short = short;
+        Ok(Some(m))
+    }
+}
+
 #[derive(Subcommand)]
 enum AnnotationsCmd {
-    /// Pin a comment to references (or, with --part and --point, to a bare point).
+    /// Pin a comment to references (or, with --part and --point, to a bare point), with
+    /// redline marks if given.
     Add {
         refs: Vec<String>,
         #[arg(long)]
@@ -1539,6 +1626,11 @@ enum AnnotationsCmd {
         /// Keep this participant's camera with it.
         #[arg(long)]
         view: bool,
+        /// Keep this named view (of the marks' part, else the first reference's) with it.
+        #[arg(long = "of", value_name = "VIEW", conflicts_with = "view")]
+        of: Option<String>,
+        #[command(flatten)]
+        marks: MarkArgs,
     },
     /// Propose a change: a request run over your draft, kept, not written.
     Propose {
@@ -1613,6 +1705,11 @@ enum AnnotationsCmd {
         comment: Option<String>,
         #[arg(long = "pin", value_name = "REF")]
         pins: Vec<String>,
+        #[command(flatten)]
+        marks: MarkArgs,
+        /// Take its marks away.
+        #[arg(long, conflicts_with_all = ["marks", "arrow", "line", "ellipse", "rectangle", "text"])]
+        no_marks: bool,
         #[arg(long, value_name = "BLAKE3")]
         expect: Option<String>,
     },
@@ -3923,6 +4020,8 @@ fn request(cmd: &Command) -> Option<Request> {
                     point,
                     part,
                     view,
+                    of,
+                    marks,
                 } => {
                     let mut pins = refs(r);
                     let point = point.clone().map(|p| p.map(Value::String));
@@ -3941,8 +4040,8 @@ fn request(cmd: &Command) -> Option<Request> {
                         comment: comment.clone(),
                         camera: None,
                         with_view: *view,
-                        marks: None,
-                        view: None,
+                        marks: marks.read().expect("checked by annotations_usage"),
+                        view: of.clone(),
                         author,
                     }
                 }
@@ -4015,13 +4114,15 @@ fn request(cmd: &Command) -> Option<Request> {
                     id,
                     comment,
                     pins,
+                    marks,
+                    no_marks,
                     expect,
                 } => Request::AnnotationEdit {
                     id: id.clone(),
                     comment: comment.clone(),
                     pins: (!pins.is_empty()).then(|| refs(pins)),
-                    marks: None,
-                    no_marks: false,
+                    marks: marks.read().expect("checked by annotations_usage"),
+                    no_marks: *no_marks,
                     expect: expect.clone(),
                     author,
                 },
@@ -4595,6 +4696,7 @@ fn request(cmd: &Command) -> Option<Request> {
             out: _,
             view,
             of,
+            annotation,
             eye,
             target,
             up,
@@ -4645,7 +4747,7 @@ fn request(cmd: &Command) -> Option<Request> {
             },
             fraction: *fraction,
             annotations: *annotations,
-            annotation: None,
+            annotation: annotation.clone(),
             flat: flat.clone(),
         },
         Command::Highlight {
@@ -4916,6 +5018,9 @@ fn annotations_usage(c: &AnnotationsCmd) -> Result<()> {
         AnnotationsCmd::Propose { request, .. } => serde_json::from_str::<Value>(request)
             .map(drop)
             .map_err(|e| Error::new(Code::Usage, format!("--request isn't JSON: {e}"))),
+        AnnotationsCmd::Add { marks, .. } | AnnotationsCmd::Edit { marks, .. } => {
+            marks.read().map(drop)
+        }
         _ => Ok(()),
     }
 }
@@ -5850,6 +5955,125 @@ mod tests {
             .expect("a thread")
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
+    #[test]
+    fn marks_parse_from_json_shorthands_and_a_file() {
+        on_cli_stack(|| {
+            let req = |args: &[&str]| {
+                let cli = Cli::try_parse_from(args).unwrap();
+                let Command::Annotations(c) = &cli.command else {
+                    panic!()
+                };
+                annotations_usage(c).unwrap();
+                request(&cli.command).unwrap()
+            };
+            let r = req(&[
+                "ryucad",
+                "annotations",
+                "add",
+                "--comment",
+                "here",
+                "--model",
+                "rig",
+                "--arrow",
+                "-20,11:9,-4",
+                "--text",
+                "20,15=2 mm",
+                "--view",
+            ]);
+            let Request::AnnotationCreate {
+                marks: Some(m),
+                with_view: true,
+                ..
+            } = r
+            else {
+                panic!("{r:?}")
+            };
+            assert_eq!(m.part, "rig");
+            assert_eq!(
+                m.short,
+                vec![
+                    ryucad::proto::ShortMark {
+                        kind: "arrow".into(),
+                        at: "-20,11:9,-4".into()
+                    },
+                    ryucad::proto::ShortMark {
+                        kind: "text".into(),
+                        at: "20,15=2 mm".into()
+                    },
+                ]
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("m.json");
+            std::fs::write(
+                &file,
+                r#"{"part": "rig", "list": [{"kind": "line", "in": "view", "xy_m": [[0, 0], [0.01, 0]]}]}"#,
+            )
+            .unwrap();
+            let at = format!("@{}", file.display());
+            let r = req(&[
+                "ryucad",
+                "annotations",
+                "add",
+                "--comment",
+                "here",
+                "--marks",
+                &at,
+                "--of",
+                "front_view",
+            ]);
+            let Request::AnnotationCreate {
+                marks: Some(m),
+                view: Some(v),
+                ..
+            } = r
+            else {
+                panic!()
+            };
+            assert_eq!(
+                (m.part.as_str(), m.list.len(), v.as_str()),
+                ("rig", 1, "front_view")
+            );
+            let r = req(&["ryucad", "annotations", "edit", "aaaaaaaaaa", "--no-marks"]);
+            assert!(matches!(
+                r,
+                Request::AnnotationEdit {
+                    no_marks: true,
+                    marks: None,
+                    ..
+                }
+            ));
+            // A shorthand with no model to draw on is a usage error.
+            let cli = Cli::try_parse_from([
+                "ryucad",
+                "annotations",
+                "add",
+                "--comment",
+                "x",
+                "--arrow",
+                "0,0:1,1",
+            ])
+            .unwrap();
+            let Command::Annotations(c) = &cli.command else {
+                panic!()
+            };
+            assert_eq!(annotations_usage(c).unwrap_err().code, Code::Usage);
+            // `render --annotation` with a view is refused by the parser.
+            assert!(
+                Cli::try_parse_from([
+                    "ryucad",
+                    "render",
+                    "--annotation",
+                    "aaaaaaaaaa",
+                    "--view",
+                    "iso",
+                    "--out",
+                    "a.png"
+                ])
+                .is_err()
+            );
+        });
     }
 
     #[test]
