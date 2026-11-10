@@ -443,6 +443,18 @@ impl Default for Filter {
 }
 
 impl Filter {
+    /// What a mate's connector is picked on: faces, edges and vertices.
+    pub fn connectors() -> Filter {
+        Filter {
+            faces: true,
+            edges: true,
+            vertices: true,
+            sketches: false,
+            bodies: false,
+            datums: false,
+        }
+    }
+
     /// What a pick looks for: every kind when whole bodies are picked.
     fn effective(self) -> Filter {
         if self.bodies {
