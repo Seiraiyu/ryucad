@@ -1574,6 +1574,130 @@ mod tests {
         );
     }
 
+    fn more() -> Value {
+        let mut v = bracket();
+        let views = v["views"].as_object_mut().unwrap();
+        views.insert(
+            "v5".into(),
+            json!({"type": "section", "sheet": "s1", "from": "v1",
+            "cut": {"plane": "zx", "offset": "5 mm"}, "label": "A", "offset": "90 mm"}),
+        );
+        views.insert("v6".into(), json!({"type": "section", "sheet": "s1", "from": "v1",
+            "cut": {"through": [["0 mm", 0, 0], {"feature": "base", "name": "0123456789abcdef0123456789abcdef"}, "origin"]},
+            "flip": true, "unsectioned": ["p1/left", "ring:2/pin"], "label": "B", "at": [300, 100]}));
+        views.insert(
+            "v7".into(),
+            json!({"type": "detail", "sheet": "s1", "from": "v5",
+            "centre": ["10 mm", 0, "5 mm"], "radius": "8 mm", "scale": "4:1", "label": "C"}),
+        );
+        views.insert(
+            "v8".into(),
+            json!({"type": "flat", "sheet": "s1", "of": "tray", "notes": false}),
+        );
+        views.insert(
+            "v9".into(),
+            json!({"type": "exploded", "sheet": "s1", "of": "rig",
+            "explode": "apart", "fraction": 0.5, "orient": "iso", "trails": true}),
+        );
+        v
+    }
+
+    #[test]
+    fn sections_details_flats_and_explodes_read_and_write_themselves() {
+        let d = DrawingFile::from_json(&more()).unwrap();
+        assert_eq!(DrawingFile::from_json(&d.to_json()).unwrap(), d);
+        let k = |s: &str| Key::parse(s, 'v').unwrap();
+        assert_eq!(d.views[&k("v7")].parent(), Some(k("v5")));
+        assert_eq!(d.views[&k("v6")].letter(), Some("B"));
+        assert_eq!(d.views[&k("v8")].type_name(), "flat");
+        // The base view's face, the auxiliary's, v4's and v6's through point.
+        assert_eq!(d.references().len(), 3);
+        let ViewKind::Section {
+            cut: Cut::Through(p),
+            flip: true,
+            unsectioned,
+            ..
+        } = &d.views[&k("v6")].kind
+        else {
+            panic!()
+        };
+        assert_eq!((p.len(), unsectioned.len()), (3, 2));
+        let ViewKind::Exploded { fraction, .. } = d.views[&k("v9")].kind else {
+            panic!()
+        };
+        assert_eq!(fraction, 0.5);
+        // Defaults are written as nothing.
+        let mut v = more();
+        v["views"]["v8"].as_object_mut().unwrap().remove("notes");
+        let f = DrawingFile::from_json(&v).unwrap().to_json();
+        assert!(f["views"]["v8"].get("notes").is_none());
+    }
+
+    #[test]
+    fn letters_cuts_and_details_are_refused_at_their_pointers() {
+        let at = |f: &dyn Fn(&mut Value)| {
+            let mut v = more();
+            f(&mut v);
+            let e = DrawingFile::from_json(&v).unwrap_err();
+            e.details
+                .get("pointer")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert_eq!(
+            at(&|v| v["views"]["v5"]["label"] = json!("I")),
+            "/views/v5/label"
+        );
+        assert_eq!(
+            at(&|v| {
+                v["views"]["v5"].as_object_mut().unwrap().remove("label");
+            }),
+            "/views/v5/label"
+        );
+        assert_eq!(
+            at(&|v| v["views"]["v6"]["label"] = json!("A")),
+            "/views/v6/label"
+        );
+        assert_eq!(
+            at(&|v| v["views"]["v5"]["at"] = json!([1, 2])),
+            "/views/v5/offset"
+        );
+        assert_eq!(
+            at(&|v| v["views"]["v5"]["cut"] = json!({"origin": [0, 0, 0], "normal": [0, 0, 0]})),
+            "/views/v5/cut/normal"
+        );
+        assert_eq!(
+            at(&|v| v["views"]["v6"]["cut"] = json!({"through": ["origin"]})),
+            "/views/v5/cut/through".replace("v5", "v6")
+        );
+        assert_eq!(
+            at(&|v| v["views"]["v6"]["unsectioned"] = json!(["p1", "p1"])),
+            "/views/v6/unsectioned/1"
+        );
+        assert_eq!(
+            at(&|v| v["views"]["v7"]["radius"] = json!("0 mm")),
+            "/views/v7/radius"
+        );
+        assert_eq!(
+            at(&|v| v["views"]["v9"]["fraction"] = json!(2)),
+            "/views/v9/fraction"
+        );
+        assert_eq!(
+            at(&|v| v["views"]["v7"]["from"] = json!("v7")),
+            "/views/v7/from"
+        );
+        assert!(letter_ok("AB") && !letter_ok("Ab") && !letter_ok("ABC") && !letter_ok("Q"));
+        assert_eq!(
+            next_letter([
+                "A", "B", "C", "D", "E", "F", "G", "H", "J", "K", "L", "M", "N", "P", "R", "T",
+                "U", "V", "W", "Y"
+            ]),
+            "AA"
+        );
+        assert_eq!(next_letter(["A", "C"]), "B");
+    }
+
     #[test]
     fn sizes_scales_and_templates() {
         assert_eq!(Size::AnsiB.paper(Orientation::Landscape), [431.8, 279.4]);
