@@ -100,6 +100,55 @@ fn plate(s: &mut Session) {
 }
 
 #[test]
+fn a_full_section_through_the_hole_hatches_the_plate_less_it() {
+    let (_d, mut s) = project();
+    plate(&mut s);
+    let get = drawing(
+        &mut s,
+        "p",
+        json!({
+            "v1": {"type": "base", "sheet": "s1", "orient": "top"},
+            "v2": {"type": "section", "sheet": "s1", "from": "v1", "cut": {"plane": "yz", "offset": "20 mm"}}
+        }),
+    );
+    assert_eq!(get["findings"], json!([]));
+    // The letter it was given, and its caption.
+    let texts: Vec<&str> = items(&get)
+        .iter()
+        .filter_map(|i| i["text"].as_str())
+        .collect();
+    assert!(texts.contains(&"SECTION A-A"), "{texts:?}");
+    // At x = 20 the cap is 40 × 10 less the hole's 10 × 10: 300 mm².
+    let area = hatched(&get) * 2.5;
+    assert!((area - 300.0).abs() < 300.0 * 0.05, "{area}");
+}
+
+#[test]
+fn an_offset_section_through_two_holes_hatches_both_steps() {
+    let (_d, mut s) = project();
+    plate(&mut s);
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "cylinder", "id": "h2", "params": {"radius": 5, "height": 30},
+               "placement": {"origin": [45, 30, -5]}, "operation": "cut", "targets": ["b"]}),
+    );
+    let get = drawing(
+        &mut s,
+        "p",
+        json!({
+            "v1": {"type": "base", "sheet": "s1", "orient": "top"},
+            "v2": {"type": "section", "sheet": "s1", "from": "v1", "label": "B", "flip": true,
+                   "cut": {"through": [[-1, 20, 0], [32, 20, 0], [32, 30, 0], [61, 30, 0]]}}
+        }),
+    );
+    assert_eq!(get["findings"], json!([]));
+    // Caps 33 + 29 = 60 mm long and 10 thick, less both holes' 10 × 10.
+    let area = hatched(&get) * 2.5;
+    assert!((area - 400.0).abs() < 400.0 * 0.05, "{area}");
+}
+
+#[test]
 fn a_flat_view_draws_the_pattern_flat_get_gives() {
     let (_d, mut s) = project();
     must(&mut s, "part.create", json!({"part": "p"}));
@@ -157,6 +206,7 @@ fn a_flat_view_draws_the_pattern_flat_get_gives() {
         "{texts:?}"
     );
 }
+
 #[test]
 fn an_exploded_view_draws_its_parts_apart() {
     let (_d, mut s) = project();
@@ -201,4 +251,56 @@ fn an_exploded_view_draws_its_parts_apart() {
     // Stacked, 20 mm tall; exploded, 50.
     assert!((height(view(&get, "v1")) - 20.0).abs() < 1e-9);
     assert!((height(view(&get, "v2")) - 50.0).abs() < 1e-9);
+}
+
+#[test]
+fn a_section_on_a_face_follows_it_by_name_across_an_edit() {
+    let (_d, mut s) = project();
+    plate(&mut s);
+    let face = |s: &mut Session| -> String {
+        let b = must(s, "inspect", json!({"part": "p", "feature": "b"}));
+        // The plate's front face (y = 0), facing -y.
+        b["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let z = &f["surface"]["frame"]["z"];
+                let s = if f["reversed"] == json!(true) {
+                    -1.0
+                } else {
+                    1.0
+                };
+                f["surface"]["type"] == "plane"
+                    && z[1].as_f64() == Some(-s)
+                    && z[0].as_f64() == Some(0.0)
+            })
+            .map(|f| f["name"].as_str().unwrap().to_owned())
+            .expect("a front face")
+    };
+    let name = face(&mut s);
+    drawing(
+        &mut s,
+        "p",
+        json!({
+            "v1": {"type": "base", "sheet": "s1", "orient": "top"},
+            "v2": {"type": "section", "sheet": "s1", "from": "v1", "label": "A",
+                   "cut": {"plane": {"feature": "b", "name": name}, "offset": "-20 mm"}}
+        }),
+    );
+    // The hole moved: the section on the plate's own face stays.
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "h", "placement": {"origin": [30, 20, -5]}}),
+    );
+    let get = must(
+        &mut s,
+        "drawing.get",
+        json!({"part": "p", "drawing": "d", "items": true}),
+    );
+    assert_eq!(get["findings"], json!([]));
+    // At y = 20 now through the moved hole: 60 × 10 less 10 × 10.
+    let area = hatched(&get) * 2.5;
+    assert!((area - 500.0).abs() < 500.0 * 0.05, "{area}");
 }
