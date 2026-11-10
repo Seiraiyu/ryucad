@@ -551,6 +551,8 @@ pub struct Workspace {
     mover_waiting: bool,
     /// The Mate dialog, while it is open.
     pub mating: Option<crate::core::mating::Mating>,
+    /// The Markup bar, while it is open (design 423).
+    pub markup: Option<crate::core::markup::Markup>,
     /// How many mate previews the window has asked for.
     mate_previews: u64,
     /// A tile the window should open (the app opens it next frame): the
@@ -715,6 +717,7 @@ impl Workspace {
             mover_asked: None,
             mover_waiting: false,
             mating: None,
+            markup: None,
             mate_previews: 0,
             wants_tile: None,
             views: Default::default(),
