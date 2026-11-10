@@ -316,6 +316,13 @@ pub fn entry(
     if let Some(applied) = d.applied {
         o.insert("applied".into(), json!(applied));
     }
+    if let Some(m) = &a.marks {
+        o.insert(
+            "marks".into(),
+            json!({"part": m.part, "count": m.list.len(),
+                   "kinds": m.list.iter().map(|k| k.kind.as_str()).collect::<Vec<_>>()}),
+        );
+    }
     v
 }
 
@@ -380,6 +387,132 @@ pub fn pins_from(session: &mut Session, args: &[crate::proto::PinArg]) -> Result
     Ok(out)
 }
 
+/// What a pick pass leaves out beside the view's own section planes:
+/// the author's participant's hidden set, when the request came from one.
+#[derive(Clone, Debug, Default)]
+pub struct PickFrom {
+    pub hidden: std::collections::BTreeSet<String>,
+}
+
+/// Marks as a request gives them, read in `drafted` (the author's draft)
+/// and seen through `view`: shorthand marks read in the default unit,
+/// touches given checked to resolve, the rest worked out by one pick
+/// pass of the view over the draft.
+pub fn marks_from(
+    drafted: &mut Session,
+    arg: &crate::proto::MarksArg,
+    view: Option<&crate::doc::views::ViewFile>,
+    from: &PickFrom,
+) -> Result<crate::doc::redline::Marks> {
+    use crate::doc::redline::{Anchor, Kind, Mark, Marks};
+    let unit = drafted.project().manifest.default_unit;
+    let list = json!({"part": arg.part, "list": arg.list});
+    let mut marks = Marks::from_json(&list, "/marks", false)?;
+    drafted.project().part(&marks.part)?;
+    for (i, s) in arg.short.iter().enumerate() {
+        let bad = |why: &str| {
+            Error::new(
+                Code::InvalidParam,
+                format!("--{} {:?}: {why}", s.kind, s.at),
+            )
+            .with("pointer", format!("/marks/short/{i}"))
+        };
+        let q = |t: &str| -> Result<f64> {
+            crate::units::Quantity::parse(t.trim(), unit)
+                .map(|q| q.meters())
+                .map_err(|_| bad("each coordinate is a length"))
+        };
+        let xy = |t: &str| -> Result<[f64; 2]> {
+            let (x, y) = t.split_once(',').ok_or_else(|| bad("a point is X,Y"))?;
+            Ok([q(x)?, q(y)?])
+        };
+        let kind = Kind::parse(&s.kind)
+            .filter(|k| *k != Kind::Stroke)
+            .ok_or_else(|| bad("line, arrow, ellipse, rectangle or text"))?;
+        let (points, text) = if kind == Kind::Text {
+            let (p, t) =
+                s.at.split_once('=')
+                    .ok_or_else(|| bad("text is X,Y=TEXT"))?;
+            (vec![xy(p)?], Some(t.to_owned()))
+        } else {
+            let (a, b) =
+                s.at.split_once(':')
+                    .ok_or_else(|| bad("two points: X1,Y1:X2,Y2"))?;
+            (vec![xy(a)?, xy(b)?], None)
+        };
+        let mark = Mark {
+            kind,
+            anchor: Anchor::View(points),
+            text,
+            touches: None,
+        };
+        // Read back as the file reads it, so a shorthand keeps the same
+        // limits a mark given whole keeps.
+        let at = format!("/marks/list/{}", marks.list.len());
+        marks.list.push(
+            Marks::from_json(
+                &json!({"part": marks.part, "list": [mark.to_json()]}),
+                "/marks",
+                false,
+            )
+            .map_err(|e| e.with("pointer", at))?
+            .list
+            .remove(0),
+        );
+    }
+    if marks.list.len() > crate::doc::redline::MAX_MARKS {
+        return Err(crate::doc::files::invalid(
+            "/marks/list",
+            "a list of at most 64 marks",
+        ));
+    }
+    let Some(view) = view else {
+        return Err(crate::doc::files::invalid(
+            "/view",
+            "marks need the view they were drawn in: give a camera, --view or --of",
+        ));
+    };
+    for m in &marks.list {
+        for t in m.touches.iter().flatten() {
+            crate::entity::EntityRef::parse(&t.reference)?.resolve(drafted)?;
+        }
+    }
+    if marks.list.iter().any(|m| m.touches.is_none()) {
+        let camera = crate::view::Camera::from(view);
+        let sections = view
+            .sections
+            .iter()
+            .map(|s| crate::section::Plane {
+                origin_m: s.origin_m,
+                normal: s.normal,
+            })
+            .collect();
+        let ask = crate::server::RenderAsk::pick(
+            marks.part.as_str(),
+            camera.clone(),
+            sections,
+            from.hidden.clone(),
+        );
+        let scene = crate::server::render_scene(drafted, None, Vec::new(), ask)?;
+        let plane = crate::redline::Plane::of(&camera);
+        let (w, h) = crate::redline::pick_size(&plane, &camera, &marks.list);
+        let picked = crate::render::pick(&scene.g, &camera, w, h)?;
+        let seen = crate::render::View::new(&camera, w, h);
+        for m in &mut marks.list {
+            if m.touches.is_none() {
+                m.touches = Some(crate::redline::touches(
+                    &picked,
+                    &seen,
+                    &plane,
+                    m,
+                    &scene.poses,
+                ));
+            }
+        }
+    }
+    Ok(marks)
+}
+
 /// Writes `a` into `annotations/` through the session and takes it in.
 pub fn save(session: &mut Session, a: &Annotation) -> Result<()> {
     let at = crate::doc::annotation::path(session.root(), &a.id);
@@ -426,9 +559,14 @@ fn closed(a: &Annotation) -> bool {
 
 /// Writes `a` and answers it as listings give it.
 fn written(session: &mut Session, a: &Annotation) -> Result<Value> {
+    Annotation::from_json(&a.to_json())?;
     save(session, a)?;
     let all = read_all(&session.snapshot());
-    Ok(json!({"annotation": entry(session, &all, a)}))
+    let mut v = json!({"annotation": entry(session, &all, a)});
+    if a.marks.is_some() {
+        v["marks"] = json!(crate::redline::words(session, a)?);
+    }
+    Ok(v)
 }
 
 fn nonempty(text: &str, what: &str) -> Result<String> {
@@ -447,10 +585,15 @@ pub fn create(
     pins: &[crate::proto::PinArg],
     comment: &str,
     view: Option<crate::doc::views::ViewFile>,
+    marks: Option<&crate::proto::MarksArg>,
+    from: &PickFrom,
 ) -> Result<Value> {
     let comment = nonempty(comment, "comment")?;
     let mut drafted = session.capturing(propose::draft(session, &by))?;
     let pins = pins_from(&mut drafted, pins)?;
+    let marks = marks
+        .map(|m| marks_from(&mut drafted, m, view.as_ref(), from))
+        .transpose()?;
     let taken = taken(session);
     let a = Annotation {
         id: new_id(|s| taken.contains(s))?,
@@ -461,7 +604,7 @@ pub fn create(
         pins,
         comment,
         view,
-        marks: None,
+        marks,
         change: None,
         replies: Default::default(),
         resolution: None,
@@ -769,11 +912,15 @@ fn authors(a: &Annotation, by: &By) -> Result<()> {
 }
 
 /// `annotation.edit`.
+#[allow(clippy::too_many_arguments)] // one per field a request edits
 pub fn edit(
     session: &mut Session,
     id: &str,
     comment: Option<&str>,
     pins: Option<&[crate::proto::PinArg]>,
+    marks: Option<&crate::proto::MarksArg>,
+    no_marks: bool,
+    from: &PickFrom,
     expect: Option<&str>,
     by: By,
 ) -> Result<Value> {
@@ -788,6 +935,13 @@ pub fn edit(
     if let Some(p) = pins {
         let mut drafted = session.capturing(propose::draft(session, &by))?;
         a.pins = pins_from(&mut drafted, p)?;
+    }
+    if no_marks {
+        a.marks = None;
+    }
+    if let Some(m) = marks {
+        let mut drafted = session.capturing(propose::draft(session, &by))?;
+        a.marks = Some(marks_from(&mut drafted, m, a.view.as_ref(), from)?);
     }
     written(session, &a)
 }
@@ -807,6 +961,7 @@ pub fn delete(session: &mut Session, id: &str, expect: Option<&str>, by: By) -> 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::redline::{Anchor, At, Touch};
     use crate::server::tests::{call, fresh};
     use serde_json::json;
 
@@ -956,6 +1111,375 @@ pub(crate) mod tests {
     }
 
     /// A part `plate` with a box `slab`, and one of its faces' references.
+    /// A 60 × 40 × 5 mm plate with two through holes (at x 20 and 30,
+    /// y 20) and a boss on its top (at x 45, y 20, 6 mm tall), and a
+    /// view from a corner above it.
+    pub(crate) fn drilled() -> (
+        tempfile::TempDir,
+        crate::session::Session,
+        crate::doc::views::ViewFile,
+    ) {
+        let (dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "plate"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "plate", "type": "box", "id": "slab",
+             "params": {"x": 60, "y": 40, "z": 5}}),
+        )
+        .unwrap();
+        for (id, x) in [("h1", 20), ("h2", 30)] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "plate", "type": "cylinder", "id": id,
+                 "operation": "cut", "targets": ["slab"], "params": {"radius": 3, "height": 9},
+                 "placement": {"origin": [x, 20, -2]}}),
+            )
+            .unwrap();
+        }
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "plate", "type": "cylinder", "id": "boss",
+             "operation": "join", "targets": ["slab"], "params": {"radius": 4, "height": 6},
+             "placement": {"origin": [45, 20, 5]}}),
+        )
+        .unwrap();
+        let camera = crate::view::Camera {
+            eye: [0.12, -0.10, 0.09],
+            target: [0.03, 0.02, 0.0025],
+            up: [0.0, 0.0, 1.0],
+            projection: crate::view::Projection::Orthographic { height: 0.08 },
+        };
+        (dir, s, camera.to_view_file())
+    }
+
+    /// Where model point `p` (metres) is in `view`'s plane.
+    pub(crate) fn on(view: &crate::doc::views::ViewFile, p: [f64; 3]) -> [f64; 2] {
+        crate::redline::Plane::of(&crate::view::Camera::from(view)).xy(p)
+    }
+
+    /// The feature that made entity `r` of the plate, as `inspect` says.
+    fn made_by(s: &mut crate::session::Session, r: &str) -> String {
+        let v = call(s, "inspect", json!({"part": "plate", "entity": r})).unwrap();
+        v["entity"]["origin"]["feature"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    fn create_marked(
+        s: &mut crate::session::Session,
+        view: &crate::doc::views::ViewFile,
+        list: Value,
+    ) -> Result<Value> {
+        let marks = crate::proto::MarksArg {
+            part: "plate".into(),
+            list: serde_json::from_value(list).unwrap(),
+            short: Vec::new(),
+        };
+        create(
+            s,
+            By::agent("agent"),
+            &[],
+            "look",
+            Some(view.clone()),
+            Some(&marks),
+            &Default::default(),
+        )
+    }
+
+    #[test]
+    fn each_kind_touches_what_lies_under_it() {
+        let (_dir, mut s, view) = drilled();
+        let boss_top = on(&view, [0.045, 0.02, 0.011]);
+        let plate_top = on(&view, [0.008, 0.008, 0.005]);
+        // A hole's wall seen from the corner: the far side of h1's bore,
+        // just under the top.
+        let wall = on(&view, [0.020, 0.023, 0.004]);
+        let (h1, h2) = (
+            on(&view, [0.017, 0.017, 0.005]),
+            on(&view, [0.033, 0.023, 0.005]),
+        );
+        let a = create_marked(&mut s, &view, json!([
+            {"kind": "arrow", "in": "view", "xy_m": [boss_top, plate_top]},
+            {"kind": "line", "in": "view", "xy_m": [plate_top, wall]},
+            {"kind": "ellipse", "in": "view", "xy_m": [[h1[0] - 0.002, h1[1] - 0.002], [h2[0] + 0.002, h2[1] + 0.002]]},
+            {"kind": "line", "in": "view", "xy_m": [[0.3, 0.3], [0.31, 0.3]]},
+            {"kind": "text", "in": "view", "xy_m": [[0, 0]], "text": "2 mm"}
+        ])).unwrap();
+        let list = &a["annotation"]["marks"];
+        assert_eq!(list["count"], 5);
+        let file = read_all(&s.snapshot())
+            .into_values()
+            .next()
+            .unwrap()
+            .unwrap();
+        let marks = file.marks.unwrap().list;
+        let t = |i: usize| marks[i].touches.clone().unwrap();
+        assert_eq!(t(0)[0].at, At::Tail);
+        assert_eq!(made_by(&mut s, &t(0)[0].reference), "boss");
+        assert_eq!(t(0)[1].at, At::Tip);
+        assert_eq!(made_by(&mut s, &t(0)[1].reference), "slab");
+        assert_eq!(
+            made_by(&mut s, &t(1)[1].reference),
+            "h1",
+            "the line's end on a bore's wall"
+        );
+        let inside: Vec<String> = t(2).iter().map(|x| made_by(&mut s, &x.reference)).collect();
+        assert!(
+            inside.contains(&"h1".to_owned()) && inside.contains(&"h2".to_owned()),
+            "{inside:?}"
+        );
+        assert!(
+            t(3).is_empty(),
+            "a mark over the background touches nothing"
+        );
+        assert!(t(4).is_empty(), "text touches nothing");
+    }
+
+    #[test]
+    fn a_face_stroke_lies_on_the_faces_under_its_points() {
+        let (_dir, mut s, view) = drilled();
+        let a = create_marked(
+            &mut s,
+            &view,
+            json!([
+                {"kind": "stroke", "in": "face", "on": "plate/slab",
+                 "points_m": [[0.005, 0.005, 0.005], [0.015, 0.005, 0.005], [0.025, 0.005, 0.005]]}
+            ]),
+        )
+        .unwrap();
+        let file = read_all(&s.snapshot())
+            .into_values()
+            .next()
+            .unwrap()
+            .unwrap();
+        let t = file.marks.unwrap().list[0].touches.clone().unwrap();
+        assert_eq!(t.len(), 1);
+        assert_eq!(made_by(&mut s, &t[0].reference), "slab");
+        assert!(
+            a["marks"][0]["touches"][0]["ref"].is_string(),
+            "the answer reads the marks"
+        );
+    }
+
+    #[test]
+    fn touches_given_are_kept_and_checked() {
+        let (_dir, mut s, view) = drilled();
+        let face = call(&mut s, "inspect", json!({"part": "plate"})).unwrap()["bodies"][0]["faces"]
+            [0]["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let given = format!("plate/slab/{face}");
+        create_marked(
+            &mut s,
+            &view,
+            json!([
+                {"kind": "line", "in": "view", "xy_m": [[0, 0], [0.01, 0]],
+                 "touches": [{"at": "end", "ref": given}]}
+            ]),
+        )
+        .unwrap();
+        let file = read_all(&s.snapshot())
+            .into_values()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            file.marks.unwrap().list[0].touches.clone().unwrap(),
+            vec![Touch {
+                at: At::End,
+                reference: given
+            }]
+        );
+        let e = create_marked(
+            &mut s,
+            &view,
+            json!([
+                {"kind": "line", "in": "view", "xy_m": [[0, 0], [0.01, 0]],
+                 "touches": [{"at": "end", "ref": "plate/slab/00000000000000000000000000000000"}]}
+            ]),
+        )
+        .unwrap_err();
+        // The resolver's own refusal: a name the session never built is not
+        // found, one it built and lost is unresolved.
+        assert!(
+            matches!(e.code, Code::NotFound | Code::ReferenceUnresolved),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn marks_need_a_view_and_keep_to_their_limits() {
+        let (_dir, mut s, _view) = drilled();
+        let marks = crate::proto::MarksArg {
+            part: "plate".into(),
+            list: vec![json!({"kind": "line", "in": "view", "xy_m": [[0, 0], [0.01, 0]]})],
+            short: Vec::new(),
+        };
+        let e = create(
+            &mut s,
+            By::agent("agent"),
+            &[],
+            "look",
+            None,
+            Some(&marks),
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].clone()),
+            (Code::InvalidDocument, json!("/view"))
+        );
+        let (_dir, mut s, view) = drilled();
+        let e = create_marked(
+            &mut s,
+            &view,
+            json!(vec![
+                json!({"kind": "text", "in": "view", "xy_m": [[0, 0]], "text": "x"});
+                65
+            ]),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["pointer"], "/marks/list");
+        let e = create_marked(
+            &mut s,
+            &view,
+            json!([{"kind": "line", "in": "view", "xy_m": [[0, 0], [0.01, 0]]}])
+                .as_array()
+                .unwrap()
+                .iter()
+                .cloned()
+                .map(|mut m| {
+                    m["kind"] = json!("cloud");
+                    m
+                })
+                .collect::<Value>(),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["pointer"], "/marks/list/0/kind");
+    }
+
+    #[test]
+    fn shorthand_marks_read_in_the_default_unit() {
+        let (_dir, mut s, view) = drilled();
+        let marks = crate::proto::MarksArg {
+            part: "plate".into(),
+            list: Vec::new(),
+            short: vec![
+                crate::proto::ShortMark {
+                    kind: "arrow".into(),
+                    at: "-20,11:9,-4".into(),
+                },
+                crate::proto::ShortMark {
+                    kind: "text".into(),
+                    at: "20,15=2 mm".into(),
+                },
+            ],
+        };
+        create(
+            &mut s,
+            By::agent("agent"),
+            &[],
+            "look",
+            Some(view.clone()),
+            Some(&marks),
+            &Default::default(),
+        )
+        .unwrap();
+        let file = read_all(&s.snapshot())
+            .into_values()
+            .next()
+            .unwrap()
+            .unwrap();
+        let m = file.marks.unwrap();
+        // One multiplication from millimetres, as every quantity.
+        let Anchor::View(xy) = &m.list[0].anchor else {
+            panic!()
+        };
+        for (p, w) in xy.iter().zip([[-0.02, 0.011], [0.009, -0.004]]) {
+            assert!(
+                (p[0] - w[0]).abs() < 1e-15 && (p[1] - w[1]).abs() < 1e-15,
+                "{xy:?}"
+            );
+        }
+        assert_eq!(m.list[1].text.as_deref(), Some("2 mm"));
+        let bad = crate::proto::MarksArg {
+            part: "plate".into(),
+            list: Vec::new(),
+            short: vec![crate::proto::ShortMark {
+                kind: "arrow".into(),
+                at: "1,2".into(),
+            }],
+        };
+        let e = create(
+            &mut s,
+            By::agent("agent"),
+            &[],
+            "look",
+            Some(view),
+            Some(&bad),
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].clone()),
+            (Code::InvalidParam, json!("/marks/short/0"))
+        );
+    }
+
+    #[test]
+    fn touches_are_read_from_the_authors_draft() {
+        // A person proposes a lid on the plate's top; their mark's end
+        // lands on it, which only their draft has.
+        use crate::server::tests::call_live;
+        let (_dir, mut s, view) = drilled();
+        let mut live = crate::live::Live::new();
+        let h = live
+            .hello(crate::live::Kind::Human, Some("Dana"), None)
+            .unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "annotate"}),
+        )
+        .unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "annotation.propose",
+            json!({"request": {
+            "method": "feature.add", "params": {"part": "plate", "type": "box", "id": "lid",
+            "operation": "join", "targets": ["slab"], "params": {"x": 10, "y": 10, "z": 4},
+            "placement": {"origin": [2, 2, 5]}}}}),
+        )
+        .unwrap();
+        let end = on(&view, [0.007, 0.007, 0.009]);
+        let a = call_live(&mut s, &mut live, Some(&h), "annotation.create", json!({
+            "comment": "here",
+            "camera": {"eye": ["120 mm", "-100 mm", "90 mm"], "target": ["30 mm", "20 mm", "2.5 mm"],
+                       "up": [0, 0, 1], "projection": {"orthographic": {"height": "80 mm"}}},
+            "marks": {"part": "plate", "list": [{"kind": "line", "in": "view", "xy_m": [[0.3, 0.3], end]}]}})).unwrap();
+        let r = a["marks"][0]["touches"][0]["ref"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let name = live.get(&h).unwrap().name.clone();
+        let v = call(
+            &mut s,
+            "inspect",
+            json!({"part": "plate", "entity": r, "rev": format!("draft:{name}")}),
+        )
+        .unwrap();
+        assert_eq!(v["entity"]["origin"]["feature"], "lid");
+    }
+
     pub(crate) fn plate() -> (tempfile::TempDir, crate::session::Session, String) {
         let (dir, mut s) = fresh();
         call(&mut s, "part.create", json!({"part": "plate"})).unwrap();

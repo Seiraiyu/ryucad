@@ -214,6 +214,18 @@ pub fn touches(
     }
 }
 
+/// Each of `a`'s marks in words (Task 11).
+pub fn words(
+    _session: &mut crate::session::Session,
+    a: &crate::annotation::Annotation,
+) -> crate::error::Result<Vec<serde_json::Value>> {
+    Ok(a.marks
+        .iter()
+        .flat_map(|m| &m.list)
+        .map(Mark::to_json)
+        .collect())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

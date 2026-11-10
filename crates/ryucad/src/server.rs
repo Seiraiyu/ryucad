@@ -1454,13 +1454,33 @@ pub(crate) fn dispatch(
             comment,
             camera,
             with_view,
+            marks,
+            view: named,
             author,
         } => {
             let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
             let unit = session.project().manifest.default_unit;
-            let view = match (camera, with_view) {
-                (Some(c), _) => Some(c.resolve(unit)?.to_view_file()),
-                (None, true) => {
+            let view = match (camera, with_view, named) {
+                (Some(c), false, None) => Some(c.resolve(unit)?.to_view_file()),
+                (None, false, Some(v)) => {
+                    let part = marks
+                        .as_ref()
+                        .map(|m| m.part.clone())
+                        .or_else(|| {
+                            pins.first().and_then(|p| {
+                                let r = p.reference.clone().or(p.part.clone())?;
+                                Some(r.split('/').next().unwrap_or_default().to_owned())
+                            })
+                        })
+                        .ok_or_else(|| {
+                            Error::new(
+                                Code::Usage,
+                                "a named view is of the marks' part: give marks or a pin",
+                            )
+                        })?;
+                    Some(crate::views::view_file(session, &part_id(&part)?, &v)?)
+                }
+                (None, true, None) => {
                     let l = live
                         .as_deref()
                         .ok_or_else(|| live::no_live_session("annotation.create --view"))?;
@@ -1475,9 +1495,16 @@ pub(crate) fn dispatch(
                         })?;
                     Some(camera.to_view_file())
                 }
-                (None, false) => None,
+                (None, false, None) => None,
+                _ => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "give one of camera, --view and --of",
+                    ));
+                }
             };
-            crate::annotation::create(session, by, &pins, &comment, view)
+            let from = pick_from(live.as_deref(), me);
+            crate::annotation::create(session, by, &pins, &comment, view, marks.as_ref(), &from)
         }
         Request::AnnotationList {
             status,
@@ -1524,15 +1551,27 @@ pub(crate) fn dispatch(
             id,
             comment,
             pins,
+            marks,
+            no_marks,
             expect,
             author,
         } => {
+            if no_marks && marks.is_some() {
+                return Err(Error::new(
+                    Code::Usage,
+                    "--no-marks takes them away: give no marks with it",
+                ));
+            }
             let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            let from = pick_from(live.as_deref(), me);
             crate::annotation::edit(
                 session,
                 &id,
                 comment.as_deref(),
                 pins.as_deref(),
+                marks.as_ref(),
+                no_marks,
+                &from,
                 expect.as_deref(),
                 by,
             )
@@ -6214,6 +6253,18 @@ pub(crate) fn normal_to_face_at(
     ))
 }
 
+/// What a pick pass for `me`'s marks leaves out: their participant's
+/// hidden set, when the request came from one.
+fn pick_from(live: Option<&Live>, me: Option<&str>) -> crate::annotation::PickFrom {
+    crate::annotation::PickFrom {
+        hidden: live
+            .zip(me)
+            .and_then(|(l, m)| l.get(m).ok())
+            .map(|p| p.view.hidden.clone())
+            .unwrap_or_default(),
+    }
+}
+
 /// A render request, unpacked.
 pub(crate) struct RenderAsk {
     pub(crate) part: Option<String>,
@@ -6257,7 +6308,6 @@ impl RenderAsk {
     /// working model (or the session's draft), every edge and sketch,
     /// no datums, labels, appearance, compare or explode, cut by
     /// `sections` and leaving out `hidden`.
-    #[allow(dead_code)] // read by annotations' marks (plan 20.A, Task 9)
     pub(crate) fn pick(
         part: &str,
         camera: crate::view::Camera,
@@ -6294,7 +6344,6 @@ impl RenderAsk {
 /// What a render draws and from where: its geometry, camera, each
 /// assembly's occurrences' poses by instance path, the
 /// commit read, the compare's revision and commit, and its warnings.
-#[allow(dead_code)] // `poses` is read by annotations' marks (plan 20.A, Task 9)
 pub(crate) struct Scene {
     pub(crate) g: crate::render::Geometry,
     pub(crate) camera: crate::view::Camera,

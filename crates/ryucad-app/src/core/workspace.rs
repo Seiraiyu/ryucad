@@ -2258,6 +2258,8 @@ impl Workspace {
             comment,
             camera: camera.as_ref().map(camera_arg),
             with_view: false,
+            marks: None,
+            view: None,
             author: None,
         };
         self.send(req, Pending::AnnotationWrite);
@@ -2278,6 +2280,8 @@ impl Workspace {
             id: id.to_owned(),
             comment: Some(comment),
             pins: None,
+            marks: None,
+            no_marks: false,
             expect: None,
             author: None,
         };

@@ -3941,6 +3941,8 @@ fn request(cmd: &Command) -> Option<Request> {
                         comment: comment.clone(),
                         camera: None,
                         with_view: *view,
+                        marks: None,
+                        view: None,
                         author,
                     }
                 }
@@ -4018,6 +4020,8 @@ fn request(cmd: &Command) -> Option<Request> {
                     id: id.clone(),
                     comment: comment.clone(),
                     pins: (!pins.is_empty()).then(|| refs(pins)),
+                    marks: None,
+                    no_marks: false,
                     expect: expect.clone(),
                     author,
                 },
