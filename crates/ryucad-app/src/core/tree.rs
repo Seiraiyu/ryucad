@@ -109,6 +109,9 @@ pub struct Row {
     /// reference import (design 364), for Convert to solid and Keep as
     /// reference in its context menu.
     pub import: Option<bool>,
+    /// A drawing's row: its part and ID, which choosing opens in the
+    /// Drawings tile.
+    pub drawing: Option<(String, String)>,
 }
 
 impl Row {
@@ -140,6 +143,7 @@ impl Row {
             words: Vec::new(),
             body: None,
             import: None,
+            drawing: None,
         }
     }
 
@@ -502,6 +506,7 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
             ("Sheet", "sheet", Tint::Plain),
             ("Sheet, consumed (sewn, thickened)", "sheet", Tint::Weak),
             ("Sketch", "pencil-simple-line", Tint::Plain),
+            ("Drawing", "drawing", Tint::Plain),
             (
                 "A feature\u{2019}s \u{201c}uses\u{201d} line",
                 "link-simple",
@@ -633,6 +638,9 @@ pub struct Source<'a> {
     pub pdm: &'a BTreeMap<String, String>,
     /// The project is loaded whole: parts start open.
     pub whole: bool,
+    /// Each part's drawings (`drawing.list`): ID, name, and whether its
+    /// file doesn't read.
+    pub drawings: &'a BTreeMap<String, Vec<(String, String, bool)>>,
 }
 
 /// The parts and features a merge's conflicts concern: `(part, None)`
@@ -1105,6 +1113,27 @@ impl Builder<'_> {
                 _ => {}
             }
         }
+        // Its drawings, after its features: each opens in the Drawings
+        // tile.
+        for (d, name, failed) in src.drawings.get(&part.id).into_iter().flatten() {
+            let text = if *failed {
+                format!("{d} (drawing, doesn't read)")
+            } else {
+                format!("{d} (drawing: {name})")
+            };
+            let mut r = Row::new(format!("drawing:{}/{d}", part.id), 1, "drawing", text);
+            r.drawing = Some((part.id.clone(), d.clone()));
+            if *failed {
+                r.failed = true;
+                r.tint = Tint::Danger;
+                r.badges.push(Badge::new(
+                    "x-circle",
+                    Tint::Danger,
+                    "its file doesn't read",
+                ));
+            }
+            self.push(r, Some(me));
+        }
         let removed = src.compare.and_then(|c| c.removed.get(&part.id));
         for id in removed.into_iter().flatten() {
             let mut r = Row::new(
@@ -1252,6 +1281,8 @@ pub enum Act {
     Show(String),
     /// Open the row's context menu.
     Menu(String),
+    /// Show a part's drawing in the Drawings tile.
+    Drawing(String, String),
 }
 
 /// The tile's state: what is searched for, the filters, the rows opened
@@ -1586,8 +1617,11 @@ mod tests {
             merge: None,
             pdm,
             whole: true,
+            drawings: &NO_DRAWINGS,
         }
     }
+
+    static NO_DRAWINGS: BTreeMap<String, Vec<(String, String, bool)>> = BTreeMap::new();
 
     fn texts(rows: &[Row], tree: &Tree) -> Vec<String> {
         tree.shown(rows, &|_, _| false)
