@@ -5,29 +5,18 @@
 # case <id> limit <signature> <why…>    a limit the kernel has on purpose
 
 # The committed corpus (tests/hunt.rs judges these).
-case d2e1a1720f1f8bb9 limit import/import_failed/open_shell/CIRCLE nist_ctc_04's PMI sheet: open shells are refused until sheet bodies (ryukei phase 9)
-case e4a9bc29a4c13f7d limit import/import_failed/open_shell/LINE nist_ctc_05's PMI sheet: open shells are refused until sheet bodies (ryukei phase 9)
 case dacb323a3811e2c0 file import/import_failed/invalid_geometry/OFFSET_SURFACE OCCT's offset_sheet offsets a surface curving to a 0.57 mm radius by 1 mm, so it folds (step.md)
 case dacb323a3811e2c0 file ref_import/import_failed/invalid_geometry/OFFSET_SURFACE OCCT's offset_sheet folds, so its offset surface is refused as a reference too (step.md)
 
 # nist: step-hunt's first campaign (ryucad 12.B)
 case 00cf8bc5a999fc72 #301 check/slow/faces<1000/CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
-case 00f123af4bf2dbc7 limit import/import_failed/open_shell/CIRCLE a SHELL_BASED_SURFACE_MODEL (PMI supplemental geometry), not a solid: open shells are refused until sheet bodies (ryukei phase 9)
-case 0c3e9aed9da122b6 limit import/import_failed/open_shell/LINE a SHELL_BASED_SURFACE_MODEL (PMI supplemental geometry), not a solid: open shells are refused until sheet bodies (ryukei phase 9)
 case 0f59d6dc56113a94 #302 check/slow/faces<1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+B_SPLINE_SURFACE_WITH_KNOTS+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
 case 0f59d6dc56113a94 #308 volume/slow/faces<1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+B_SPLINE_SURFACE_WITH_KNOTS+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
-case 14f2e4484844bbdb limit import/import_failed/open_shell/LINE a SHELL_BASED_SURFACE_MODEL (PMI supplemental geometry), not a solid: open shells are refused until sheet bodies (ryukei phase 9)
 case 14f2f1fc86a44e7e #301 check/slow/faces<1000/CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
 case 1d4aba6c3144d627 #306 whole_import/slow/faces<1000/B_SPLINE_SURFACE_WITH_KNOTS+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
-case 2395c4103b61bbff limit import/import_failed/open_shell/CIRCLE a SHELL_BASED_SURFACE_MODEL (PMI supplemental geometry), not a solid: open shells are refused until sheet bodies (ryukei phase 9)
 case 274bd67b8448c866 #301 check/slow/faces<1000/CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
-case 317fbcc54cc64731 limit import/import_failed/open_shell/CIRCLE a SHELL_BASED_SURFACE_MODEL (PMI supplemental geometry), not a solid: open shells are refused until sheet bodies (ryukei phase 9)
 case 3d740c5fc3aee698 #302 check/slow/faces<1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
 case 3d740c5fc3aee698 #308 volume/slow/faces<1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
-case 4981dbb80d47c15e limit import/import_failed/open_shell/LINE a SHELL_BASED_SURFACE_MODEL (PMI supplemental geometry), not a solid: open shells are refused until sheet bodies (ryukei phase 9)
-case 4ab5bfa4425fd0f9 limit import/import_failed/open_shell/CIRCLE a SHELL_BASED_SURFACE_MODEL (PMI supplemental geometry), not a solid: open shells are refused until sheet bodies (ryukei phase 9)
-case 518e2cbdf9e9a29f limit import/import_failed/non_manifold/CIRCLE a SHELL_BASED_SURFACE_MODEL of 12 shells (PMI supplemental geometry), not a solid: surface models wait for sheet bodies (ryukei phase 9)
-case 816ba168841d4091 limit import/import_failed/open_shell/CIRCLE a SHELL_BASED_SURFACE_MODEL (PMI supplemental geometry), not a solid: open shells are refused until sheet bodies (ryukei phase 9)
 case 876244aa31004697 limit whole_import/import_body_missing the -tg edition holds only a TESSELLATED_SOLID and no B-rep: tessellated geometry isn't read
 case 8a11618e34982440 #303 check/slow/faces<1000/B_SPLINE_SURFACE_WITH_KNOTS+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
 case 97b2007c032070a8 #306 import/slow/faces<1000/B_SPLINE_SURFACE_WITH_KNOTS+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
@@ -44,10 +33,7 @@ case d53de7eb35484375 #301 check/slow/faces<200/CONICAL_SURFACE+CYLINDRICAL_SURF
 case da7a3b83004060f6 #301 check/slow/faces<200/CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
 case e1649e0adb7dd82b #305 import/slow/faces<1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+B_SPLINE_SURFACE_WITH_KNOTS+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
 case e956d5ae23f98598 #301 check/slow/faces<1000/CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
-case ed1ddfebe054e965 limit import/import_failed/open_shell/CIRCLE a SHELL_BASED_SURFACE_MODEL (PMI supplemental geometry), not a solid: open shells are refused until sheet bodies (ryukei phase 9)
 case ef292e2323181794 #305 whole_import/slow/faces<1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+B_SPLINE_SURFACE_WITH_KNOTS+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
-case ef5c70ede474e98d limit import/import_failed/open_shell/LINE a SHELL_BASED_SURFACE_MODEL (PMI supplemental geometry), not a solid: open shells are refused until sheet bodies (ryukei phase 9)
-case f0b03a4c9f07fd32 limit import/import_failed/open_shell/CIRCLE+LINE a SHELL_BASED_SURFACE_MODEL (PMI supplemental geometry), not a solid: open shells are refused until sheet bodies (ryukei phase 9)
 case f4def735b5d930dc #305 whole_import/slow/faces<1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+B_SPLINE_SURFACE_WITH_KNOTS+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE
 case f97e4dbf05811a5c #305 whole_import/slow/faces<200/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
 case f97e4dbf05811a5c #305 whole_reimport/slow/faces<200/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
@@ -338,7 +324,6 @@ case 1ae3cb7390b37883 #303 check/timeout/faces<1000/B_SPLINE_SURFACE_WITH_KNOTS+
 case 1afe1ba5d131f35d #301 check/slow/faces<1000/CYLINDRICAL_SURFACE+PLANE+TOROIDAL_SURFACE
 case 1aff3be253e3af19 #301 check/slow/faces<50/CYLINDRICAL_SURFACE+PLANE+SURFACE_OF_REVOLUTION+TOROIDAL_SURFACE
 case 1aff3be253e3af19 #307 volume/timeout/faces<50/CYLINDRICAL_SURFACE+PLANE+SURFACE_OF_REVOLUTION+TOROIDAL_SURFACE
-case 1b0a442d555b5803 limit import/import_failed/open_shell/CIRCLE a SHELL_BASED_SURFACE_MODEL among the representation's items, not a solid: open shells are refused until sheet bodies (ryukei phase 9)
 case 1b17b1428cac5947 file import/import_failed/uncertain/PLANE a planar face's outer loop crosses itself at a chamfered corner (a 50 µm edge turned back across the loop, #417)
 case 1b1aa3670f6c02d4 #301 check/timeout/faces<1000/CYLINDRICAL_SURFACE+PLANE+TOROIDAL_SURFACE
 case 1b3f01b6721990be #307 volume/slow/faces<50/CYLINDRICAL_SURFACE+PLANE+TOROIDAL_SURFACE
