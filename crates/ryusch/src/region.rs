@@ -132,7 +132,7 @@ pub fn propose(block: &Block, idioms: &[Idiom], r: &instr::Resolved) -> Vec<Prop
     let singles: Vec<Cluster> = (0..n)
         .map(|p| Cluster::single(p, Place::default()))
         .collect();
-    let clusters = crate::idiom::clusters(block, idioms, singles);
+    let clusters = crate::idiom::clusters(block, idioms, singles, &crate::idiom::Asks::default());
     let leads = |out: &mut Vec<Proposed>, taken: &mut BTreeSet<usize>, p: usize, basis: Basis| {
         let mut parts: BTreeSet<usize> = BTreeSet::from([p]);
         for i in idioms {

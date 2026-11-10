@@ -302,7 +302,37 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
 
 /// One layout of `block` under `r`, its columns spread by `spread`.
 fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usize>) -> Outcome {
+    // A network's parts the walk from its pin never reaches are moved near
+    // the pin one by one, as `near` moves a part.
+    let mut r = r.clone();
+    let mut networks = Vec::new();
+    let mut unreached_notes = Vec::new();
+    for (parts, (a, k)) in std::mem::take(&mut r.networks) {
+        let (reached, rest) = idiom::network_walk(block, &parts, (a, k));
+        for q in rest {
+            r.near.insert(q, (a, Some(k)));
+            let pin = format!(
+                "{}.{}",
+                block.parts[a].refdes, block.parts[a].pins[k].number
+            );
+            unreached_notes.push(Note {
+                code: "network_unresolved".into(),
+                message: format!(
+                    "{} isn't joined to {pin} through the others: placed near it alone",
+                    crate::lint::who(&block.parts[q])
+                ),
+                details: json!({"part": block.parts[q].key, "pin": pin}),
+            });
+        }
+        let reached: Vec<usize> = reached.into_iter().map(|(q, _)| q).collect();
+        if !reached.is_empty() {
+            networks.push((reached, (a, k)));
+        }
+    }
+    r.networks = networks;
+    let r = &r;
     let mut st = State::new(block);
+    st.notes.extend(unreached_notes);
     st.notes.extend(r.notes.iter().cloned());
     let prev = match &block.relayout {
         Relayout::Block => None,
@@ -371,6 +401,13 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
         }
     }
     let mut idioms = idiom::find(block, &r.idiom);
+    // A network places its own parts: no idiom takes them.
+    let networked: BTreeSet<usize> = r
+        .networks
+        .iter()
+        .flat_map(|(p, _)| p.iter().copied())
+        .collect();
+    idioms.retain(|i| !i.parts.iter().any(|p| networked.contains(p)));
     // A part held to an edge joins no other by an idiom, and none joins
     // it: their cluster would carry it off the edge, or push it from it.
     idioms.retain(|i| match i.anchor {
@@ -392,6 +429,12 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
     for i in &idioms {
         if i.anchor.is_some_and(|(a, _)| unkeep.contains(&a)) {
             unkeep.extend(i.parts.iter().copied());
+        }
+    }
+    // A network goes where its pin's part goes.
+    for (parts, (a, _)) in &r.networks {
+        if unkeep.contains(a) {
+            unkeep.extend(parts.iter().copied());
         }
     }
     let mut reformed: BTreeSet<usize> = BTreeSet::new();
@@ -474,7 +517,11 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             None => single(block, p, turn(p)),
         })
         .collect();
-    let mut clusters = idiom::clusters(block, &idioms, singles);
+    let asks = idiom::Asks {
+        networks: r.networks.clone(),
+        ports: BTreeMap::new(),
+    };
+    let mut clusters = idiom::clusters(block, &idioms, singles, &asks);
     for g in &r.groups {
         let inside: Vec<usize> = (0..clusters.len())
             .filter(|i| clusters[*i].members.iter().any(|(p, _)| g.contains(p)))
@@ -3961,6 +4008,74 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    /// `near C5 R1 C6 U1.COMP` keeps the buck's compensation network together
+    /// off COMP: one rigid cluster joined to U1's, so a move of U1 moves it
+    /// whole, every member within reach of the pin.
+    #[test]
+    fn a_network_near_a_pin_moves_as_one() {
+        use crate::input::{Net, PinKind};
+        use crate::testing::{capacitor, ic, net, resistor};
+        let nets: Vec<Net> = vec![
+            net("rail:v", "5V", NetKind::Supply),
+            net("rail:gnd", "GND", NetKind::Ground),
+            net("comp", "COMP", NetKind::Signal),
+            net("mid", "MID", NetKind::Signal),
+        ];
+        let block = Block {
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "REG",
+                    &[
+                        ("VIN", PinKind::PowerIn, Some(0)),
+                        ("COMP", PinKind::Passive, Some(2)),
+                        ("X", PinKind::Passive, None),
+                    ],
+                    &[("GND", PinKind::PowerIn, Some(1))],
+                ),
+                capacitor("c5", "C5", "1.5n", [Some(2), Some(3)]),
+                resistor("r1", "R1", "47k", [Some(3), Some(1)]),
+                capacitor("c6", "C6", "27p", [Some(2), Some(1)]),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let mut b = block.clone();
+        b.instructions.insert(
+            "i1".into(),
+            Instruction::Near {
+                parts: vec!["c5".into(), "r1".into(), "c6".into()],
+                to: "u1/2".into(),
+            },
+        );
+        let first = lay(&b);
+        assert_eq!(crate::rules::check(&b, &first.layout), []);
+        let j = crate::instr::judge(&b, &first.layout, &b.instructions["i1"]);
+        assert!(j.is_ok(), "{j:?}");
+        // U1 moved down by a move: the network comes with it, unchanged
+        // relative to U1.
+        let mut moved = b.clone();
+        moved.previous = Some(first.layout.clone());
+        moved.moves.push(Instruction::Edge {
+            parts: vec!["u1".into()],
+            side: Side::Down,
+        });
+        let out = lay(&moved);
+        let rel = |l: &Layout, k: &str| {
+            let (a, u) = (l.placed[k].at, l.placed["u1"].at);
+            [a[0] - u[0], a[1] - u[1]]
+        };
+        for k in ["c5", "r1", "c6"] {
+            assert_eq!(
+                rel(&out.layout, k),
+                rel(&first.layout, k),
+                "{k} moved with U1"
+            );
+        }
     }
 
     /// `text X refdes left` puts the designator left of X's body and leaves

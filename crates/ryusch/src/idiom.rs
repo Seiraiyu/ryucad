@@ -881,7 +881,167 @@ fn step(p: Point, s: Side, by: Nm) -> Point {
 /// Makes the clusters: each idiom's parts joined to the cluster of the
 /// part it serves, in their canonical shapes, else a cluster of their
 /// own; every other part alone. `singles` holds every part's own cluster.
-pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<Cluster> {
+/// What the agent asks of the clusters: networks kept together off a
+/// pin, and port flags stood on a pin's row.
+#[derive(Clone, Debug, Default)]
+pub struct Asks {
+    /// Each network's parts and the pin (part, pin) it stands off.
+    pub networks: Vec<(Vec<usize>, (usize, usize))>,
+    /// A port's flag and the pin whose row it stands on.
+    pub ports: BTreeMap<usize, (usize, usize)>,
+}
+
+/// The parts of a network the walk from its pin reaches, in the order it
+/// reaches them, with the net each is met on; the rest it never reaches.
+pub fn network_walk(
+    block: &Block,
+    parts: &[usize],
+    (a, k): (usize, usize),
+) -> (Vec<(usize, usize)>, Vec<usize>) {
+    let mut order: Vec<usize> = parts.to_vec();
+    order.sort_by(|x, y| block.parts[*x].key.cmp(&block.parts[*y].key));
+    let mut reached: Vec<(usize, usize)> = Vec::new();
+    let mut nets: Vec<usize> = block.parts[a].pins[k].net.into_iter().collect();
+    let mut i = 0;
+    while i < nets.len() {
+        let n = nets[i];
+        i += 1;
+        for &q in &order {
+            if reached.iter().any(|(x, _)| *x == q) {
+                continue;
+            }
+            if block.parts[q].pins.iter().any(|x| x.net == Some(n)) {
+                reached.push((q, n));
+                for x in &block.parts[q].pins {
+                    if let Some(m) = x.net
+                        && kind_of(block, Some(m)) == Some(NetKind::Signal)
+                        && !nets.contains(&m)
+                    {
+                        nets.push(m);
+                    }
+                }
+            }
+        }
+    }
+    let rest = order
+        .into_iter()
+        .filter(|q| !reached.iter().any(|(x, _)| x == q))
+        .collect();
+    (reached, rest)
+}
+
+/// Each network's parts placed in its pin's part's cluster: from the pin
+/// out, parts to a rail standing off their node as pulls do, then parts
+/// to a signal across the page from it, each one's far end a node in
+/// turn.
+fn place_asked_networks(
+    block: &Block,
+    asks: &Asks,
+    out: &mut [Option<Cluster>],
+    of: &mut BTreeMap<usize, usize>,
+) {
+    for (parts, (a, k)) in &asks.networks {
+        let Some(&ci) = of.get(a) else { continue };
+        let Some(mut cluster) = out[ci].clone() else {
+            continue;
+        };
+        let Some(rel) = cluster
+            .members
+            .iter()
+            .find(|(p, _)| p == a)
+            .map(|(_, x)| *x)
+        else {
+            continue;
+        };
+        let pin = Shape::of(&block.parts[*a], rel).pins[*k];
+        let side = pin.side;
+        let (reached, _) = network_walk(block, parts, (*a, *k));
+        // Each net's node: where the walk meets it.
+        let mut node: BTreeMap<usize, Point> = BTreeMap::new();
+        if let Some(n) = block.parts[*a].pins[*k].net {
+            node.insert(n, pin.end);
+        }
+        // Parts already standing off each node, so the next stands past.
+        let mut used: BTreeMap<usize, Nm> = BTreeMap::new();
+        let mut done: BTreeSet<usize> = BTreeSet::new();
+        // The walk's order across nets, rails before series at each net.
+        let mut queue: Vec<usize> = Vec::new();
+        for (_, n) in &reached {
+            if !queue.contains(n) {
+                queue.push(*n);
+            }
+        }
+        for n in queue {
+            let Some(&at) = node.get(&n) else { continue };
+            let mut here: Vec<usize> = reached
+                .iter()
+                .filter(|(q, m)| *m == n && !done.contains(q))
+                .map(|(q, _)| *q)
+                .collect();
+            here.sort_by_key(|q| {
+                let series = ends(block, *q)
+                    .iter()
+                    .all(|m| kind_of(block, *m) == Some(NetKind::Signal));
+                (series, block.parts[*q].key.clone())
+            });
+            for q in here {
+                done.insert(q);
+                let qi = pin_on(block, q, Some(n));
+                let far = 1 - qi.min(1);
+                let other = block.parts[q].pins.get(far).and_then(|x| x.net);
+                let slot = used.entry(n).or_default();
+                let place = match kind_of(block, other) {
+                    Some(NetKind::Supply) | Some(NetKind::Ground) => {
+                        let up = kind_of(block, other) == Some(NetKind::Supply);
+                        *slot += 3;
+                        let want = if up { Side::Up } else { Side::Down };
+                        let x = step(at, side, (*slot - 1) * GRID);
+                        let y = if up { x[1] + 2 * GRID } else { x[1] - 2 * GRID };
+                        put(block, q, turn_for(block, q, far, want), qi, [x[0], y])
+                    }
+                    _ => {
+                        *slot += 2;
+                        let pl = put(
+                            block,
+                            q,
+                            turn_for(block, q, qi, side.opposite()),
+                            qi,
+                            step(at, side, *slot * GRID),
+                        );
+                        if let Some(m) = other {
+                            node.entry(m)
+                                .or_insert(Shape::of(&block.parts[q], pl).pins[far].end);
+                        }
+                        pl
+                    }
+                };
+                let place = clear_of(block, &cluster.members, q, place, side);
+                // Where a series part ended up is its far node.
+                if let Some(m) = other
+                    && kind_of(block, other) == Some(NetKind::Signal)
+                {
+                    node.insert(m, Shape::of(&block.parts[q], place).pins[far].end);
+                }
+                if let Some(old) = of.get(&q).copied()
+                    && old != ci
+                {
+                    out[old] = None;
+                }
+                cluster.members.retain(|(x, _)| *x != q);
+                cluster.members.push((q, place));
+                of.insert(q, ci);
+            }
+        }
+        out[ci] = Some(cluster);
+    }
+}
+
+pub fn clusters(
+    block: &Block,
+    idioms: &[Idiom],
+    singles: Vec<Cluster>,
+    asks: &Asks,
+) -> Vec<Cluster> {
     let mut of: BTreeMap<usize, usize> = BTreeMap::new();
     for (i, c) in singles.iter().enumerate() {
         of.insert(c.first(), i);
@@ -966,6 +1126,7 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
     {
         if !stairs_done && later(&idiom) {
             if !banks_done {
+                place_asked_networks(block, asks, &mut out, &mut of);
                 place_banks(block, &banks, idioms, &mut out, &mut of);
                 place_networks(block, idioms, &mut out, &mut of);
                 banks_done = true;
@@ -1447,6 +1608,7 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
         }
     }
     if !banks_done {
+        place_asked_networks(block, asks, &mut out, &mut of);
         place_banks(block, &banks, idioms, &mut out, &mut of);
         place_networks(block, idioms, &mut out, &mut of);
     }
@@ -2286,7 +2448,7 @@ mod tests {
         let singles = (0..b.parts.len())
             .map(|p| Cluster::single(p, Place::default()))
             .collect();
-        let cl = clusters(&b, &idioms, singles);
+        let cl = clusters(&b, &idioms, singles, &Asks::default());
         // U1 with its two caps and its pull-up; the LED column; nothing
         // else.
         assert_eq!(cl.len(), 2);
@@ -2355,7 +2517,7 @@ mod tests {
         let singles = (0..block.parts.len())
             .map(|p| Cluster::single(p, Place::new([0, 0], 0, false)))
             .collect();
-        let c = clusters(&block, &idioms, singles);
+        let c = clusters(&block, &idioms, singles, &Asks::default());
         let u = c
             .iter()
             .find(|c| c.members.iter().any(|(p, _)| *p == 0))
@@ -2419,7 +2581,7 @@ mod tests {
         let singles = (0..block.parts.len())
             .map(|p| Cluster::single(p, Place::new([0, 0], 0, false)))
             .collect();
-        let c = clusters(&block, &idioms, singles);
+        let c = clusters(&block, &idioms, singles, &Asks::default());
         let u = c
             .iter()
             .find(|c| c.members.iter().any(|(p, _)| *p == 0))

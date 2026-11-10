@@ -53,6 +53,8 @@ pub struct Resolved {
     pub regions: Vec<(String, BTreeSet<usize>)>,
     /// Parts a `region none` instruction leaves to the proposal.
     pub no_region: BTreeSet<usize>,
+    /// Networks `near` keeps together off a pin: their parts and the pin.
+    pub networks: Vec<(Vec<usize>, (usize, usize))>,
     /// Each part's text fields and the side each goes on.
     pub text: BTreeMap<usize, Vec<(crate::layout::TextField, Side)>>,
     /// Each `paper` instruction's paper, by sheet ID or name: pinned.
@@ -307,7 +309,11 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
                 if parts.contains(&target.0) {
                     return Err(rule(&id, "overlap", format!("{to} can't sit near itself")));
                 }
-                set(&mut r.near, &mut by, "place", &parts, target, &id, block)?;
+                match target {
+                    // Several parts near a pin: one network off it.
+                    (p, Some(k)) if parts.len() >= 2 => r.networks.push((parts.clone(), (p, k))),
+                    _ => set(&mut r.near, &mut by, "place", &parts, target, &id, block)?,
+                }
             }
             Instruction::Align {
                 axis,
@@ -541,6 +547,36 @@ pub fn judge(block: &Block, layout: &Layout, ins: &Instruction) -> Result<(), St
                 .or_else(|| parts_named(block, to).first().copied())
                 .ok_or_else(|| format!("{to} names nothing"))?;
             let (ts, tb) = placed(t)?;
+            // A network off a pin stands together: each part within reach
+            // of the pin's part or of another part of it that is.
+            if parts.len() >= 2 && pin_named(block, to).is_some() {
+                let mut near: Vec<Rect> = vec![tb.extent];
+                let mut left: Vec<usize> = parts.clone();
+                loop {
+                    let before = left.len();
+                    let mut next = Vec::new();
+                    for &p in &left {
+                        let (s, sh) = placed(p)?;
+                        if s == ts && near.iter().any(|r| gap(&sh.extent, r) <= IDIOM_REACH) {
+                            near.push(sh.extent);
+                        } else {
+                            next.push(p);
+                        }
+                    }
+                    left = next;
+                    if left.is_empty() || left.len() == before {
+                        break;
+                    }
+                }
+                return match left.first() {
+                    None => Ok(()),
+                    Some(&p) => Err(format!(
+                        "{} isn't within {reach} of {} or the rest of the network",
+                        name(p),
+                        name(t)
+                    )),
+                };
+            }
             for &p in &parts {
                 let (s, sh) = placed(p)?;
                 if s != ts {
@@ -846,6 +882,29 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
             let Some(t) = target.and_then(shape) else {
                 return false;
             };
+            if parts.len() >= 2 && pin_named(block, to).is_some() {
+                let mut near: Vec<crate::geom::Rect> = vec![t.1.extent];
+                let mut left: Vec<usize> = parts.clone();
+                loop {
+                    let before = left.len();
+                    left.retain(|p| match shape(*p) {
+                        Some((s, sh))
+                            if s == t.0
+                                && near.iter().any(|r| {
+                                    sh.extent.grow(10 * crate::geom::GRID).overlaps(r)
+                                }) =>
+                        {
+                            near.push(sh.extent);
+                            false
+                        }
+                        _ => true,
+                    });
+                    if left.is_empty() || left.len() == before {
+                        break;
+                    }
+                }
+                return left.is_empty();
+            }
             all(&|p| {
                 shape(p).is_some_and(|(s, sh)| {
                     s == t.0 && sh.extent.grow(10 * crate::geom::GRID).overlaps(&t.1.extent)
