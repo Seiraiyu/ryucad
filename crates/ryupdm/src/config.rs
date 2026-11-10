@@ -31,8 +31,9 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 pub const KIND: &str = "ryupdm.config";
-/// The newest format this build reads: 2 added `approvals`.
-pub const FORMAT: u64 = 2;
+/// The newest format this build reads: 2 added `approvals` (and
+/// `dependencies`), 3 teams in its rules and revoked keys.
+pub const FORMAT: u64 = 3;
 
 /// How a part's revisions are labelled. Labels are always derived from the
 /// scheme, never typed.
@@ -369,7 +370,13 @@ impl Config {
 
     /// The lowest format that holds these settings.
     pub fn format(&self) -> u64 {
-        if self.approvals.is_some() || self.bump != Bump::None {
+        if self
+            .approvals
+            .as_ref()
+            .is_some_and(|a| a.format_3_at("").is_some())
+        {
+            3
+        } else if self.approvals.is_some() || self.bump != Bump::None {
             2
         } else {
             1
@@ -450,7 +457,14 @@ impl Config {
                     "approvals needs format 2: write the file at format 2 (pdm configure does)",
                 ));
             }
-            c.approvals = Some(Approvals::from_json(&a, "/approvals")?);
+            let a = Approvals::from_json(&a, "/approvals")?;
+            if let Some(at) = a.format_3_at("/approvals").filter(|_| declared < 3) {
+                return Err(invalid(
+                    &at,
+                    "teams and revoked keys need format 3: write the file at format 3 (pdm configure does)",
+                ));
+            }
+            c.approvals = Some(a);
         }
         if let Some(deps) = o.take_opt("dependencies") {
             if declared < 2 {
@@ -646,7 +660,7 @@ mod tests {
                 "{v}"
             );
         }
-        let newer = json!({"format": 3, "kind": "ryupdm.config"});
+        let newer = json!({"format": 4, "kind": "ryupdm.config"});
         assert_eq!(
             Config::from_json(&newer).unwrap_err().code,
             Code::FormatTooNew
@@ -755,5 +769,22 @@ mod tests {
         old["format"] = json!(1);
         let e = Config::from_json(&old).unwrap_err();
         assert_eq!(e.details["pointer"], "/dependencies");
+    }
+
+    #[test]
+    fn teams_and_revoked_keys_need_format_3_and_write_it() {
+        let rules = json!({"rules": [{"count": 1, "from": ["@acme/qa"], "parts": ["*"]}]});
+        let v = json!({"approvals": rules, "format": 3, "kind": "ryupdm.config"});
+        let c = Config::from_json(&v).unwrap();
+        assert_eq!(c.format(), 3);
+        assert_eq!(c.to_json()["format"], 3);
+        let mut old = v.clone();
+        old["format"] = json!(2);
+        let e = Config::from_json(&old).unwrap_err();
+        assert_eq!(e.details["pointer"], "/approvals/rules/0/from/0");
+        // Logins alone stay at format 2.
+        let plain = json!({"approvals": {"rules": [{"count": 1, "from": ["alice"], "parts": ["*"]}]},
+                           "format": 3, "kind": "ryupdm.config"});
+        assert_eq!(Config::from_json(&plain).unwrap().to_json()["format"], 2);
     }
 }

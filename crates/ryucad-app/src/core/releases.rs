@@ -176,8 +176,9 @@ fn logins(a: &Value) -> String {
 }
 
 /// A record's approval as the tab shows it, under rules: `Approved by
-/// alice, bob`, `Unapproved`, `Attestation invalid`, `Not fetched`, `Tag
-/// moved`, or for a proposal `Needs 1 of alice, bob, carol`.
+/// alice, bob`, `Unapproved`, `Attestation invalid`, `Key revoked`,
+/// `Attestation too new`, `Not fetched`, `Tag moved`, or for a proposal
+/// `Needs 1 of alice, bob, carol`.
 pub fn approval_line(r: &Value) -> Option<String> {
     let a = r.get("approval")?;
     if a["required"] == true {
@@ -187,6 +188,8 @@ pub fn approval_line(r: &Value) -> Option<String> {
         "approved" => format!("Approved by {}", logins(a)),
         "unapproved" => "Unapproved".to_owned(),
         "invalid" => "Attestation invalid".to_owned(),
+        "revoked" => "Key revoked".to_owned(),
+        "unknown" => "Attestation too new".to_owned(),
         "missing" => "Not fetched".to_owned(),
         "moved" => "Tag moved".to_owned(),
         other => other.to_owned(),
@@ -232,13 +235,30 @@ pub fn approval_hover(r: &Value) -> Option<String> {
         .into_iter()
         .flatten()
         .map(|x| {
+            let via: Vec<&str> = x["via"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            let via = if via.is_empty() {
+                String::new()
+            } else {
+                format!(" via {}", via.join(", "))
+            };
             format!(
-                "{} at {}",
+                "{}{via} at {}",
                 x["login"].as_str().unwrap_or("?"),
                 x["at"].as_str().unwrap_or("?")
             )
         })
         .collect();
+    if let Some(day) = a["revoked"].as_str() {
+        lines.push(format!("revoked on {day}"));
+    }
+    if let Some(f) = a["format"].as_u64() {
+        lines.push(format!("format {f}: upgrade ryucad to judge it"));
+    }
     if let Some(p) = a["proposed_by"]["login"].as_str() {
         lines.push(format!("proposed by {p}"));
     }
@@ -362,6 +382,33 @@ mod tests {
                           "rules": [{"parts": ["q"], "count": 1, "from": ["alice", "bob"]}],
                           "rules_at": "0123456789abcdef0123"}},
         ]})
+    }
+
+    #[test]
+    fn a_team_approval_and_a_revoked_key_say_so() {
+        let team = json!({"approval": {"status": "approved", "key": "k",
+            "approvers": [{"login": "quinn", "id": 4, "at": "2026-11-12T09:00:00Z",
+                           "via": ["@acme/quality"]}],
+            "proposed_by": {"login": "dana", "id": 2}, "rules": []}});
+        assert_eq!(approval_line(&team).unwrap(), "Approved by quinn");
+        assert_eq!(
+            approval_hover(&team).unwrap(),
+            "quinn via @acme/quality at 2026-11-12T09:00:00Z\nproposed by dana\nkey k"
+        );
+        let revoked = json!({"approval": {"status": "revoked", "key": "k",
+                                          "revoked": "2026-11-10", "rules": []}});
+        assert_eq!(approval_line(&revoked).unwrap(), "Key revoked");
+        assert_eq!(
+            approval_hover(&revoked).unwrap(),
+            "revoked on 2026-11-10\nkey k"
+        );
+        let newer =
+            json!({"approval": {"status": "unknown", "key": "k", "format": 3, "rules": []}});
+        assert_eq!(approval_line(&newer).unwrap(), "Attestation too new");
+        assert_eq!(
+            approval_hover(&newer).unwrap(),
+            "format 3: upgrade ryucad to judge it\nkey k"
+        );
     }
 
     #[test]

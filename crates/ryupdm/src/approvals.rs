@@ -35,6 +35,29 @@ pub fn login_ok(s: &str) -> bool {
         })
 }
 
+/// The most a rule naming a team may ask for: a team's size isn't known
+/// offline.
+pub const MAX_COUNT: u64 = 100;
+
+/// Whether `s` is a GitHub team as rules name one, `@<org>/<team-slug>`:
+/// the organization a login, the slug 1 to 100 letters, digits, `-`, `_`
+/// and `.`.
+pub fn team_ok(s: &str) -> bool {
+    team_org(s).is_some()
+}
+
+/// The organization of the team `s` (`acme` of `@acme/quality`), when
+/// `s` is one.
+pub fn team_org(s: &str) -> Option<&str> {
+    let (org, slug) = s.strip_prefix('@')?.split_once('/')?;
+    let slug_ok = !slug.is_empty()
+        && slug.len() <= 100
+        && slug
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'));
+    (login_ok(org) && slug_ok).then_some(org)
+}
+
 /// Whether `s` is a pattern of part IDs: what an ID holds, with `*` and
 /// `?`, 1 to 63 characters.
 pub fn glob_ok(s: &str) -> bool {
@@ -69,8 +92,9 @@ pub fn glob(pattern: &str, id: &str) -> bool {
     p[i..].iter().all(|c| *c == b'*')
 }
 
-/// One rule: at least `count` of `from` (GitHub logins) approve releases
-/// of the parts `parts` match.
+/// One rule: at least `count` of `from` (GitHub logins, and teams
+/// `@<org>/<slug>` whose members count) approve releases of the parts
+/// `parts` match.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rule {
     pub parts: Vec<String>,
@@ -84,9 +108,18 @@ impl Rule {
         self.parts.iter().any(|p| glob(p, part.as_str()))
     }
 
-    /// Whether the rule names `login`, regardless of case.
+    /// Whether the rule names `login` (or the team `login`), regardless of
+    /// case.
     pub fn names(&self, login: &str) -> bool {
         self.from.iter().any(|f| f.eq_ignore_ascii_case(login))
+    }
+
+    /// The teams the rule names, as written.
+    pub fn teams(&self) -> impl Iterator<Item = &str> {
+        self.from
+            .iter()
+            .map(String::as_str)
+            .filter(|f| f.starts_with('@'))
     }
 
     pub fn to_json(&self) -> Value {
@@ -134,13 +167,13 @@ impl Rule {
         for (i, f) in from.iter().enumerate() {
             let here = format!("{at}/from/{i}");
             if f.starts_with('@') {
-                return Err(fault(
-                    &here,
-                    format!("{f} is a GitHub team: teams come in a later ryupdm, so name the people for now"),
-                )
-                .with("team", f));
-            }
-            if !login_ok(f) {
+                if !team_ok(f) {
+                    return Err(fault(
+                        &here,
+                        format!("{f:?} isn't a GitHub team: write @<organization>/<team-slug>"),
+                    ));
+                }
+            } else if !login_ok(f) {
                 return Err(fault(&here, format!("{f:?} isn't a GitHub login")));
             }
             let lower = f.to_ascii_lowercase();
@@ -149,14 +182,21 @@ impl Rule {
             }
             seen.push(lower);
         }
+        // Who is in a team isn't known offline, so its size can't bound
+        // the count.
+        let most = if from.iter().any(|f| f.starts_with('@')) {
+            MAX_COUNT
+        } else {
+            from.len() as u64
+        };
         let count = o.take("count").map_err(recode)?;
         let count = count
             .as_u64()
-            .filter(|c| (1..=from.len() as u64).contains(c))
+            .filter(|c| (1..=most).contains(c))
             .ok_or_else(|| {
                 fault(
                     &format!("{at}/count"),
-                    format!("count must be a whole number from 1 to {}", from.len()),
+                    format!("count must be a whole number from 1 to {most}"),
                 )
             })?;
         o.finish().map_err(recode)?;
@@ -164,11 +204,30 @@ impl Rule {
     }
 }
 
+/// Whether `s` is a day, `YYYY-MM-DD`, by shape and range.
+pub fn is_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    let n = |r: std::ops::Range<usize>| s[r].parse::<u32>().ok();
+    b.len() == 10
+        && b.iter().enumerate().all(|(i, c)| {
+            if i == 4 || i == 7 {
+                *c == b'-'
+            } else {
+                c.is_ascii_digit()
+            }
+        })
+        && n(5..7).is_some_and(|m| (1..=12).contains(&m))
+        && n(8..10).is_some_and(|d| (1..=31).contains(&d))
+}
+
 /// `approvals`: the rules, and keys trusted besides the hosted ones.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Approvals {
     /// Key IDs to Ed25519 public keys.
     pub keys: BTreeMap<String, [u8; 32]>,
+    /// Keys of `keys` revoked, by ID, with the day (`YYYY-MM-DD`): every
+    /// attestation they signed verifies as revoked, whatever it says.
+    pub revoked: BTreeMap<String, String>,
     pub rules: Vec<Rule>,
 }
 
@@ -182,13 +241,59 @@ impl Approvals {
             .collect()
     }
 
+    /// Where in `approvals` something first needs `ryupdm.config` format 3
+    /// (a team, or a revoked key), as a JSON pointer under `at`.
+    pub fn format_3_at(&self, at: &str) -> Option<String> {
+        self.rules
+            .iter()
+            .enumerate()
+            .find_map(|(i, r)| {
+                r.from
+                    .iter()
+                    .position(|f| f.starts_with('@'))
+                    .map(|j| format!("{at}/rules/{i}/from/{j}"))
+            })
+            .or_else(|| {
+                self.revoked
+                    .keys()
+                    .next()
+                    .map(|id| format!("{at}/keys/{id}"))
+            })
+    }
+
+    /// `approval_rule_invalid` for the first team whose organization isn't
+    /// `owner`, the repository's: the service reads only its own
+    /// organization's teams.
+    pub fn check_owner(&self, owner: &str, at: &str) -> Result<()> {
+        for (i, r) in self.rules.iter().enumerate() {
+            for (j, f) in r.from.iter().enumerate() {
+                if let Some(org) = team_org(f).filter(|o| !o.eq_ignore_ascii_case(owner)) {
+                    return Err(fault(
+                        &format!("{at}/rules/{i}/from/{j}"),
+                        format!("{f} is a team of {org}, but the repository is {owner}'s: name {owner}'s teams"),
+                    )
+                    .with("team", f)
+                    .with("owner", owner));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn to_json(&self) -> Value {
         let mut v = json!({"rules": self.rules.iter().map(Rule::to_json).collect::<Vec<_>>()});
         if !self.keys.is_empty() {
             v["keys"] = Value::Object(
                 self.keys
                     .iter()
-                    .map(|(id, k)| (id.clone(), json!(crate::attest::hex(k))))
+                    .map(|(id, k)| {
+                        let key = json!(crate::attest::hex(k));
+                        let entry = match self.revoked.get(id) {
+                            Some(day) => json!({"key": key, "revoked": day}),
+                            None => key,
+                        };
+                        (id.clone(), entry)
+                    })
                     .collect(),
             );
         }
@@ -208,7 +313,26 @@ impl Approvals {
             .enumerate()
             .map(|(i, r)| Rule::from_json(r, &format!("{at}/rules/{i}")))
             .collect::<Result<Vec<_>>>()?;
+        // Every team is the repository owner's, so all of one organization.
+        let mut first: Option<&str> = None;
+        for (i, r) in rules.iter().enumerate() {
+            for (j, f) in r.from.iter().enumerate() {
+                let Some(org) = team_org(f) else { continue };
+                match first {
+                    None => first = Some(org),
+                    Some(o) if !o.eq_ignore_ascii_case(org) => {
+                        return Err(fault(
+                            &format!("{at}/rules/{i}/from/{j}"),
+                            format!("{f} is a team of {org}, but another rule names {o}'s: teams are the repository owner's, so all of one organization"),
+                        )
+                        .with("team", f));
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
         let mut keys = BTreeMap::new();
+        let mut revoked = BTreeMap::new();
         if let Some(k) = o.take_opt("keys") {
             let map = k.as_object().ok_or_else(|| {
                 fault(
@@ -216,8 +340,29 @@ impl Approvals {
                     "keys must be an object of key IDs to public keys",
                 )
             })?;
-            for (id, key) in map {
+            for (id, entry) in map {
                 let here = format!("{at}/keys/{id}");
+                // A key, or `{"key", "revoked"}` for one revoked on a day.
+                let (key, day) = match entry {
+                    Value::Object(_) => {
+                        let mut e = Obj::new(entry, &here).map_err(recode)?;
+                        let key = e.take("key").map_err(recode)?;
+                        let day = e.take("revoked").map_err(recode)?;
+                        e.finish().map_err(recode)?;
+                        let day = day
+                            .as_str()
+                            .filter(|d| is_date(d))
+                            .ok_or_else(|| {
+                                fault(
+                                    &format!("{here}/revoked"),
+                                    "revoked must be a day, YYYY-MM-DD",
+                                )
+                            })?
+                            .to_owned();
+                        (key, Some(day))
+                    }
+                    other => (other.clone(), None),
+                };
                 let bytes = key
                     .as_str()
                     .and_then(crate::attest::unhex::<32>)
@@ -233,10 +378,17 @@ impl Approvals {
                     return Err(fault(&here, "not an Ed25519 public key"));
                 }
                 keys.insert(id.clone(), bytes);
+                if let Some(day) = day {
+                    revoked.insert(id.clone(), day);
+                }
             }
         }
         o.finish().map_err(recode)?;
-        Ok(Approvals { keys, rules })
+        Ok(Approvals {
+            keys,
+            revoked,
+            rules,
+        })
     }
 }
 
@@ -281,56 +433,141 @@ impl Unmet {
     }
 }
 
+/// Whether a login is in a team, as whoever judges knows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Membership {
+    Member,
+    NotMember,
+    /// The team can't be read (the service's installation hasn't been
+    /// granted *Organization: Members*): counted as not a member, and
+    /// said so.
+    Unreadable,
+}
+
+/// Who is in which team: the service asks GitHub; an attestation's `via`
+/// answers for itself offline.
+pub trait Teams {
+    /// `team` as a rule writes it (`@acme/quality`), `login` as the review
+    /// gives it.
+    fn membership(&self, team: &str, login: &str) -> Membership;
+}
+
+/// Knows no team: every rule's teams admit no one.
+pub struct NoTeams;
+
+impl Teams for NoTeams {
+    fn membership(&self, _: &str, _: &str) -> Membership {
+        Membership::NotMember
+    }
+}
+
+impl<F: Fn(&str, &str) -> Membership> Teams for F {
+    fn membership(&self, team: &str, login: &str) -> Membership {
+        self(team, login)
+    }
+}
+
 /// How reviews stand against rules.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Judgement {
     /// Every rule met and nothing blocking.
     pub met: bool,
-    /// The approvers that count (a rule names them), as they wrote their
-    /// logins, by login regardless of case.
+    /// The approvers that count (a rule names them, or a team it names
+    /// holds them), as they wrote their logins, by login regardless of
+    /// case.
     pub counted: Vec<String>,
+    /// For each counted login (lower case) that a team admitted where a
+    /// rule doesn't name it directly, those teams as rules write them,
+    /// sorted: the attestation's `via`.
+    pub via: BTreeMap<String, Vec<String>>,
     /// Each rule not met.
     pub missing: Vec<Unmet>,
-    /// Logins a rule names whose review requests changes.
+    /// Logins a rule admits whose review requests changes.
     pub blockers: Vec<String>,
+    /// Teams a rule names that couldn't be read, sorted: their members
+    /// counted for nothing.
+    pub unreadable: Vec<String>,
+}
+
+/// [`judge_with`] knowing no team.
+pub fn judge(rules: &[Rule], reviews: &[Review], proposer: &str) -> Judgement {
+    judge_with(rules, reviews, proposer, &NoTeams)
 }
 
 /// Judges `reviews` (in the order they were made: a login's last review
-/// stands) against `rules`, every one of which must be met. The proposer's
-/// reviews never count; one approval counts towards every rule naming it;
-/// a change request from a login a rule names blocks until it is replaced.
-pub fn judge(rules: &[Rule], reviews: &[Review], proposer: &str) -> Judgement {
+/// stands) against `rules`, every one of which must be met. A rule admits
+/// a login it names, and a member of a team it names, as `teams` says.
+/// The proposer's reviews never count; one approval counts once towards
+/// every rule admitting it, whichever entry admits it; a change request
+/// from a login a rule admits blocks until it is replaced.
+pub fn judge_with(
+    rules: &[Rule],
+    reviews: &[Review],
+    proposer: &str,
+    teams: &dyn Teams,
+) -> Judgement {
     let mut last: BTreeMap<String, &Review> = BTreeMap::new();
     for r in reviews {
         if !r.login.eq_ignore_ascii_case(proposer) {
             last.insert(r.login.to_ascii_lowercase(), r);
         }
     }
-    let named = |l: &str| rules.iter().any(|r| r.names(l));
-    let mut counted = Vec::new();
-    let mut blockers = Vec::new();
-    for r in last.values().filter(|r| named(&r.login)) {
+    let mut unreadable = std::collections::BTreeSet::new();
+    // Each login's admitting rules, by index, and the teams admitting it
+    // where a rule doesn't name it directly.
+    let mut out = Judgement::default();
+    let mut admits: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (lower, r) in &last {
+        let mut by = Vec::new();
+        let mut via = std::collections::BTreeSet::new();
+        for (i, rule) in rules.iter().enumerate() {
+            if rule.names(&r.login) {
+                by.push(i);
+                continue;
+            }
+            for t in rule.teams() {
+                match teams.membership(t, &r.login) {
+                    Membership::Member => {
+                        if !by.contains(&i) {
+                            by.push(i);
+                        }
+                        via.insert(t.to_owned());
+                    }
+                    Membership::NotMember => {}
+                    Membership::Unreadable => {
+                        unreadable.insert(t.to_owned());
+                    }
+                }
+            }
+        }
+        if by.is_empty() {
+            continue;
+        }
         match r.state {
-            ReviewState::Approve => counted.push(r.login.clone()),
-            ReviewState::RequestChanges => blockers.push(r.login.clone()),
+            ReviewState::Approve => {
+                out.counted.push(r.login.clone());
+                if !via.is_empty() {
+                    out.via.insert(lower.clone(), via.into_iter().collect());
+                }
+                admits.insert(lower.clone(), by);
+            }
+            ReviewState::RequestChanges => out.blockers.push(r.login.clone()),
         }
     }
-    let missing: Vec<Unmet> = rules
+    out.missing = rules
         .iter()
-        .filter_map(|r| {
-            let n = counted.iter().filter(|l| r.names(l)).count() as u64;
+        .enumerate()
+        .filter_map(|(i, r)| {
+            let n = admits.values().filter(|by| by.contains(&i)).count() as u64;
             (n < r.count).then(|| Unmet {
                 rule: r.clone(),
                 needed: r.count - n,
             })
         })
         .collect();
-    Judgement {
-        met: missing.is_empty() && blockers.is_empty(),
-        counted,
-        missing,
-        blockers,
-    }
+    out.unreadable = unreadable.into_iter().collect();
+    out.met = out.missing.is_empty() && out.blockers.is_empty();
+    out
 }
 
 #[cfg(test)]
@@ -448,14 +685,127 @@ mod tests {
                 "{v}"
             );
         }
-        let team = json!({"count": 1, "from": ["@acme/reviewers"], "parts": ["*"]});
-        let e = Rule::from_json(&team, at).unwrap_err();
-        assert_eq!(e.details["team"], "@acme/reviewers");
-        assert!(
-            e.message.contains("teams come in a later ryupdm"),
-            "{}",
-            e.message
+        // A team that isn't one, and a count past what a team allows.
+        let bad = json!({"count": 1, "from": ["@acme"], "parts": ["*"]});
+        let e = Rule::from_json(&bad, at).unwrap_err();
+        assert_eq!(e.details["pointer"], "/approvals/rules/1/from/0");
+        let many = json!({"count": 101, "from": ["@acme/qa"], "parts": ["*"]});
+        let e = Rule::from_json(&many, at).unwrap_err();
+        assert_eq!(e.details["pointer"], "/approvals/rules/1/count");
+    }
+
+    #[test]
+    fn rules_name_teams_beside_logins() {
+        for ok in ["@acme/quality", "@a/b", "@Acme-2/release_team.v2"] {
+            assert!(team_ok(ok), "{ok}");
+        }
+        for bad in [
+            "@acme",
+            "@acme/",
+            "@/qa",
+            "@-a/qa",
+            "acme/qa",
+            "@acme/q a",
+            "@acme/qa/x",
+        ] {
+            assert!(!team_ok(bad), "{bad}");
+        }
+        assert_eq!(team_org("@acme/quality"), Some("acme"));
+        let v = json!({"count": 3, "from": ["@acme/quality", "dave"], "parts": ["*"]});
+        let r = Rule::from_json(&v, "/approvals/rules/0").unwrap();
+        // A team's size isn't known offline: the count may pass `from`'s.
+        assert_eq!(r.count, 3);
+        assert_eq!(r.teams().collect::<Vec<_>>(), ["@acme/quality"]);
+        assert!(r.names("@ACME/Quality") && r.names("dave"));
+        assert_eq!(r.to_json(), v);
+        assert_eq!(r.text(), "3 of @acme/quality, dave for *");
+        // Named twice whatever the case.
+        let twice = json!({"count": 1, "from": ["@acme/qa", "@ACME/QA"], "parts": ["*"]});
+        let e = Rule::from_json(&twice, "/approvals/rules/0").unwrap_err();
+        assert_eq!(e.details["pointer"], "/approvals/rules/0/from/1");
+    }
+
+    #[test]
+    fn teams_are_of_one_organization_the_owners() {
+        let v = json!({"rules": [
+            {"count": 1, "from": ["@acme/qa"], "parts": ["*"]},
+            {"count": 1, "from": ["alice", "@other/qa"], "parts": ["motor-*"]}
+        ]});
+        let e = Approvals::from_json(&v, "/approvals").unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::ApprovalRuleInvalid, Some("/approvals/rules/1/from/1"))
         );
+        let v = json!({"rules": [{"count": 1, "from": ["alice", "@Acme/qa"], "parts": ["*"]}]});
+        let a = Approvals::from_json(&v, "/approvals").unwrap();
+        assert!(a.check_owner("acme", "/approvals").is_ok());
+        let e = a.check_owner("widgets", "/approvals").unwrap_err();
+        assert_eq!(e.details["pointer"], "/approvals/rules/0/from/1");
+        assert_eq!(e.details["owner"], "widgets");
+        assert_eq!(
+            a.format_3_at("/approvals").as_deref(),
+            Some("/approvals/rules/0/from/1")
+        );
+        // Logins alone need nothing new.
+        let plain = json!({"rules": [{"count": 1, "from": ["alice"], "parts": ["*"]}]});
+        assert_eq!(
+            Approvals::from_json(&plain, "/approvals")
+                .unwrap()
+                .format_3_at("/approvals"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_key_may_be_revoked_on_a_day() {
+        let public = ed25519_dalek::SigningKey::from_bytes(&[9; 32])
+            .verifying_key()
+            .to_bytes();
+        let id = crate::attest::key_id(&public);
+        let rules = json!([{"count": 1, "from": ["alice"], "parts": ["*"]}]);
+        let v = json!({"keys": {id.clone(): {"key": crate::attest::hex(&public), "revoked": "2026-11-10"}},
+                       "rules": rules});
+        let a = Approvals::from_json(&v, "/approvals").unwrap();
+        assert_eq!(
+            (a.keys[&id], a.revoked[&id].as_str()),
+            (public, "2026-11-10")
+        );
+        assert_eq!(a.to_json(), v);
+        assert_eq!(
+            a.format_3_at("/approvals"),
+            Some(format!("/approvals/keys/{id}"))
+        );
+        for (pointer, entry) in [
+            (
+                format!("/approvals/keys/{id}/revoked"),
+                json!({"key": crate::attest::hex(&public), "revoked": "yesterday"}),
+            ),
+            (
+                format!("/approvals/keys/{id}/revoked"),
+                json!({"key": crate::attest::hex(&public), "revoked": "2026-13-01"}),
+            ),
+            (
+                format!("/approvals/keys/{id}/revoked"),
+                json!({"key": crate::attest::hex(&public)}),
+            ),
+            (
+                format!("/approvals/keys/{id}/when"),
+                json!({"key": crate::attest::hex(&public), "revoked": "2026-11-10", "when": 1}),
+            ),
+            (
+                format!("/approvals/keys/{id}"),
+                json!({"key": "00", "revoked": "2026-11-10"}),
+            ),
+        ] {
+            let v = json!({"keys": {id.clone(): entry}, "rules": rules});
+            let e = Approvals::from_json(&v, "/approvals").unwrap_err();
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (Code::ApprovalRuleInvalid, Some(pointer.as_str())),
+                "{v}"
+            );
+        }
+        assert!(is_date("2026-02-28") && !is_date("2026-2-28") && !is_date("2026-00-10"));
     }
 
     fn rules() -> Vec<Rule> {
@@ -573,5 +923,63 @@ mod tests {
             state: ReviewState::RequestChanges,
         };
         assert!(judge(&r[..1], &[approve("bob"), other], "x").met);
+    }
+
+    fn teams() -> impl Fn(&str, &str) -> Membership {
+        |team: &str, login: &str| match (team, login.to_ascii_lowercase().as_str()) {
+            ("@acme/quality", "quinn" | "rae") => Membership::Member,
+            ("@acme/locked", _) => Membership::Unreadable,
+            _ => Membership::NotMember,
+        }
+    }
+
+    #[test]
+    fn a_team_admits_its_members() {
+        let rule = |count, from: &[&str]| Rule {
+            parts: vec!["*".into()],
+            count,
+            from: from.iter().map(|s| (*s).to_owned()).collect(),
+        };
+        let r = [rule(2, &["@acme/quality", "dave"])];
+        // A member and a login named directly: two distinct approvers.
+        let j = judge_with(&r, &[approve("Quinn"), approve("dave")], "x", &teams());
+        assert!(j.met, "{j:?}");
+        assert_eq!(j.counted, ["dave", "Quinn"]);
+        assert_eq!(
+            j.via,
+            BTreeMap::from([("quinn".to_owned(), vec!["@acme/quality".to_owned()])])
+        );
+        // Not a member: nothing.
+        let j = judge_with(&r, &[approve("mallory"), approve("dave")], "x", &teams());
+        assert!(!j.met && j.counted == ["dave"]);
+        // Without teams known, a team admits no one.
+        assert!(!judge(&r, &[approve("quinn"), approve("dave")], "x").met);
+        // The proposer never counts, even through a team.
+        assert!(!judge_with(&r, &[approve("quinn"), approve("dave")], "QUINN", &teams()).met);
+        // A login named directly and through a team counts once.
+        let both = [rule(2, &["@acme/quality", "quinn"])];
+        let j = judge_with(&both, &[approve("quinn")], "x", &teams());
+        assert_eq!((j.met, j.missing[0].needed), (false, 1));
+        assert!(j.via.is_empty(), "named directly: no via");
+        // Two rules, one naming her and one her team: via names the team.
+        let two = [rule(1, &["quinn"]), rule(1, &["@acme/quality"])];
+        let j = judge_with(&two, &[approve("quinn")], "x", &teams());
+        assert!(j.met);
+        assert_eq!(j.via["quinn"], ["@acme/quality"]);
+        // A member's change request blocks.
+        let no = Review {
+            login: "rae".into(),
+            state: ReviewState::RequestChanges,
+        };
+        let j = judge_with(&r, &[approve("quinn"), approve("dave"), no], "x", &teams());
+        assert_eq!(
+            (j.met, j.blockers.as_slice()),
+            (false, &["rae".to_owned()][..])
+        );
+        // A team that can't be read is never quietly met.
+        let locked = [rule(1, &["@acme/locked"])];
+        let j = judge_with(&locked, &[approve("quinn")], "x", &teams());
+        assert!(!j.met);
+        assert_eq!(j.unreadable, ["@acme/locked"]);
     }
 }

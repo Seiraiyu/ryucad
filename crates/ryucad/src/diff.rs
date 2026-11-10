@@ -584,10 +584,15 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
                 if let Some(Value::Object(keys)) = a.remove("keys") {
                     for (id, k) in &keys {
-                        lines.push(format!(
-                            "approvals.keys.{id} = {}",
-                            k.as_str().unwrap_or_default()
-                        ));
+                        // A key, or `{key, revoked}` for one revoked on a day.
+                        let line = match (k.as_str(), &k["key"], &k["revoked"]) {
+                            (Some(hex), _, _) => hex.to_owned(),
+                            (None, Value::String(hex), Value::String(day)) => {
+                                format!("{hex} (revoked {day})")
+                            }
+                            _ => k.to_string(),
+                        };
+                        lines.push(format!("approvals.keys.{id} = {line}"));
                     }
                 }
                 // Anything else a newer file holds, field by field.
@@ -3755,6 +3760,24 @@ mod tests {
                  approvals.keys.3f9a0c1d2e4b5a69 = {}\n\
                  approvals.rules.0 = 1 of alice, bob, carol for *\n\
                  approvals.rules.1 = 2 of dave, erin, frank for motor-*, gearbox\n\
+                 release_branch = main\n\
+                 revisions = letters\n",
+                "00".repeat(32)
+            )
+        );
+        let teams = json!({
+            "approvals": {
+                "keys": {"3f9a0c1d2e4b5a69": {"key": "00".repeat(32), "revoked": "2026-11-10"}},
+                "rules": [{"count": 2, "from": ["@acme/quality", "dave"], "parts": ["*"]}]
+            },
+            "format": 3, "kind": "ryupdm.config", "release_branch": "main", "revisions": "letters",
+        });
+        assert_eq!(
+            text(teams),
+            format!(
+                "ryupdm.config (format 3)\n\
+                 approvals.keys.3f9a0c1d2e4b5a69 = {} (revoked 2026-11-10)\n\
+                 approvals.rules.0 = 2 of @acme/quality, dave for *\n\
                  release_branch = main\n\
                  revisions = letters\n",
                 "00".repeat(32)
