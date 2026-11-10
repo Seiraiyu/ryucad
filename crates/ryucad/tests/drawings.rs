@@ -304,3 +304,74 @@ fn a_section_on_a_face_follows_it_by_name_across_an_edit() {
     let area = hatched(&get) * 2.5;
     assert!((area - 500.0).abs() < 500.0 * 0.05, "{area}");
 }
+
+#[path = "../../ryu-draw/tests/common/pdf.rs"]
+mod pdf_reader;
+
+/// A drawing's PDF read back by a reader of our own (plan 9.D): a page per
+/// sheet at its paper's size, each page showing every text its sheet's
+/// items hold in the order drawn, Inter embedded, and a bookmark for each
+/// sheet and view.
+#[test]
+fn a_drawings_pdf_reads_back_its_sheets_text_and_bookmarks() {
+    let (dir, mut s) = project();
+    plate(&mut s);
+    let wall = {
+        let b = must(&mut s, "inspect", json!({"part": "p"}))["bodies"][0].clone();
+        b["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["surface"]["type"] == "cylinder")
+            .map(|f| format!("b/{}", f["name"].as_str().unwrap()))
+            .unwrap()
+    };
+    must(
+        &mut s,
+        "drawing.create",
+        json!({"part": "p", "drawing": "d", "name": "Plate", "views": "standard"}),
+    );
+    must(
+        &mut s,
+        "drawing.edit",
+        json!({"part": "p", "drawing": "d", "ops": [
+            {"op": "add", "kind": "sheet", "value": {"name": "Detail", "size": "iso_a4"}},
+            {"op": "add", "kind": "view", "value": {"type": "base", "sheet": "s2", "orient": "top",
+                "scale": "2:1"}},
+            {"op": "add", "kind": "annotation", "value": {"type": "diameter", "view": "v2",
+                "of": wall, "tolerance": {"fit": "H7"}}}]}),
+    );
+    let got = must(
+        &mut s,
+        "drawing.get",
+        json!({"part": "p", "drawing": "d", "items": true}),
+    );
+    let out = dir.path().join("d.pdf");
+    must(
+        &mut s,
+        "drawing.export",
+        json!({"part": "p", "drawing": "d", "out": out.to_str().unwrap()}),
+    );
+    let r = pdf_reader::read(&std::fs::read(&out).unwrap()).unwrap();
+    let sheets = got["sheets"].as_array().unwrap();
+    assert_eq!(r.pages.len(), sheets.len());
+    for (page, sheet) in r.pages.iter().zip(sheets) {
+        let mm = |k: usize| sheet["paper_mm"][k].as_f64().unwrap() * 72.0 / 25.4;
+        assert!((page.0[0] - mm(0)).abs() < 0.01 && (page.0[1] - mm(1)).abs() < 0.01);
+        let texts: Vec<&str> = sheet["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|i| i["text"].as_str())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert_eq!(page.1, texts, "{}", sheet["sheet"]);
+    }
+    // The fit reads back as drawn: ⌀ is a stroke, its value text.
+    assert!(r.pages[0].1.iter().any(|t| t.contains("H7")), "{:?}", r.pages[0].1);
+    assert_eq!(r.fonts.len(), 1);
+    // A bookmark for each sheet and each of its views.
+    let views: usize = sheets.iter().map(|s| s["views"].as_array().unwrap().len()).sum();
+    assert_eq!(r.bookmarks.len(), sheets.len() + views, "{:?}", r.bookmarks);
+    assert_eq!(r.title.as_deref(), Some("p · Plate"));
+}
