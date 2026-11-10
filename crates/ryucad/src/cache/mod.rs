@@ -84,14 +84,24 @@ pub enum Kind {
     /// bodies' hashes, their poses' bits and the view's. Kept on this
     /// machine only: the shared cache's protocol names the other three.
     Projection,
+    /// A section view's cut body and its caps (`ryucad.section.1`), by
+    /// the body's hash, its pose's bits and the cut's. Kept on this
+    /// machine only, as projections are.
+    Section,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 4] = [Kind::Feature, Kind::Tool, Kind::Mesh, Kind::Projection];
+    pub const ALL: [Kind; 5] = [
+        Kind::Feature,
+        Kind::Tool,
+        Kind::Mesh,
+        Kind::Projection,
+        Kind::Section,
+    ];
 
     /// Whether a shared cache holds entries of this kind.
     pub fn shared(self) -> bool {
-        self != Kind::Projection
+        !matches!(self, Kind::Projection | Kind::Section)
     }
 
     /// Its folder, and its name in `cache.stats`.
@@ -101,6 +111,7 @@ impl Kind {
             Kind::Tool => "tools",
             Kind::Mesh => "meshes",
             Kind::Projection => "projections",
+            Kind::Section => "sections",
         }
     }
 

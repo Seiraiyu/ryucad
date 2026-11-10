@@ -1729,8 +1729,9 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scale: Option<f32>,
     },
-    /// Every sheet as PDF, or one as SVG, written by the daemon to `out`
-    /// (an absolute path, never a project file), else after the answer.
+    /// Every sheet as PDF, or one as SVG or DXF (`unit` `mm` or `in`),
+    /// written by the daemon to `out` (an absolute path, never a project
+    /// file), else after the answer.
     #[serde(rename = "drawing.export")]
     DrawingExport {
         part: String,
@@ -1743,6 +1744,8 @@ pub enum Request {
         format: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         out: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unit: Option<String>,
     },
     /// The views laid out again from nothing; written unless `dry_run`.
     #[serde(rename = "drawing.layout")]

@@ -776,6 +776,87 @@ fn drawing_view(m: &Value) -> String {
                 &["type", "from", "side", "normal_to"],
             )
         }
+        "section" => {
+            let from = m.get("from").map(scalar).unwrap_or_default();
+            let letter = m.get("label").map(scalar).unwrap_or_default();
+            let point = |p: &Value| match p {
+                Value::Array(a) => a.iter().map(scalar).collect::<Vec<_>>().join(", "),
+                p => reference(p).unwrap_or_else(|| scalar(p)),
+            };
+            let cut = match m.get("cut") {
+                Some(c) if c.get("plane").is_some() => {
+                    let mut t = format!("on {}", point(&c["plane"]));
+                    if let Some(o) = c.get("offset") {
+                        t.push_str(&format!(" offset {}", scalar(o)));
+                    }
+                    t
+                }
+                Some(c) if c.get("through").is_some() => format!(
+                    "through {}",
+                    c["through"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|p| format!("({})", point(p)))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+                Some(c) => format!(
+                    "at {} normal {}",
+                    point(c.get("origin").unwrap_or(&Value::Null)),
+                    point(c.get("normal").unwrap_or(&Value::Null))
+                ),
+                None => String::new(),
+            };
+            (
+                format!("section {letter} from {from}, {cut}"),
+                &["type", "from", "label", "cut"],
+            )
+        }
+        "detail" => {
+            let from = m.get("from").map(scalar).unwrap_or_default();
+            let letter = m.get("label").map(scalar).unwrap_or_default();
+            let centre = match m.get("centre") {
+                Some(Value::Array(a)) => a.iter().map(scalar).collect::<Vec<_>>().join(", "),
+                Some(p) => reference(p).unwrap_or_else(|| scalar(p)),
+                None => String::new(),
+            };
+            let r = m.get("radius").map(scalar).unwrap_or_default();
+            (
+                format!("detail {letter} from {from}, about {centre} radius {r}"),
+                &["type", "from", "label", "centre", "radius"],
+            )
+        }
+        "flat" => {
+            let of = m
+                .get("of")
+                .map(|p| format!(" of {}", scalar(p)))
+                .unwrap_or_default();
+            let solid = m
+                .get("solid")
+                .map(|p| format!(" solid {}", scalar(p)))
+                .unwrap_or_default();
+            (format!("flat{of}{solid}"), &["type", "of", "solid"])
+        }
+        "exploded" => {
+            let e = m.get("explode").map(scalar).unwrap_or_default();
+            let of = m
+                .get("of")
+                .map(|p| format!(" of {}", scalar(p)))
+                .unwrap_or_default();
+            let orient = match m.get("orient") {
+                Some(Value::Object(o)) => o
+                    .get("normal_to")
+                    .map(|r| format!("normal to {}", reference(r).unwrap_or_else(|| scalar(r))))
+                    .unwrap_or_default(),
+                Some(o) => scalar(o),
+                None => String::new(),
+            };
+            (
+                format!("exploded {e}{of}, {orient}"),
+                &["type", "explode", "of", "orient"],
+            )
+        }
         _ => (scalar(&json!(ty)), &["type"]),
     };
     let mut parts = vec![head];
@@ -3830,6 +3911,33 @@ mod tests {
         assert_eq!(d["changed"][0]["changes"][0]["at"], "/steps");
         assert_eq!(v["parts"]["a"]["status"], "changed");
         assert!(v["parts"]["a"].get("views").is_none());
+    }
+
+    #[test]
+    fn sections_details_flats_and_explodes_textconv_a_line_each() {
+        let v = json!({"format": 1, "kind": "ryucad.drawing", "name": "P",
+        "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b"}},
+        "views": {
+            "v1": {"type": "base", "sheet": "s1", "orient": "top"},
+            "v2": {"type": "section", "sheet": "s1", "from": "v1", "label": "A",
+                   "cut": {"plane": {"feature": "b", "name": "0123456789abcdef0123456789abcdef"}, "offset": "5 mm"}},
+            "v3": {"type": "section", "sheet": "s1", "from": "v1", "label": "B", "flip": true,
+                   "cut": {"through": [["0 mm", "1 mm", "0 mm"], "origin"]}},
+            "v4": {"type": "detail", "sheet": "s1", "from": "v2", "label": "C",
+                   "centre": ["1 mm", "2 mm", "3 mm"], "radius": "4 mm"},
+            "v5": {"type": "flat", "sheet": "s1", "solid": "plate"},
+            "v6": {"type": "exploded", "sheet": "s1", "of": "rig", "explode": "e1", "orient": "iso"}
+        }});
+        let t = text(v);
+        for line in [
+            "views.v2 = section A from v1, on b/0123456789abcdef0123456789abcdef offset 5 mm, sheet s1",
+            "views.v3 = section B from v1, through (0 mm, 1 mm, 0 mm) (origin), flip true, sheet s1",
+            "views.v4 = detail C from v2, about 1 mm, 2 mm, 3 mm radius 4 mm, sheet s1",
+            "views.v5 = flat solid plate, sheet s1",
+            "views.v6 = exploded e1 of rig, iso, sheet s1",
+        ] {
+            assert!(t.contains(line), "{line} in\n{t}");
+        }
     }
 
     #[test]

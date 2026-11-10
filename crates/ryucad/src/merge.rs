@@ -461,9 +461,20 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
 
 /// A drawing view's `orient` and `rev` are one value each: a standard
 /// view's name and a face to look normal to are two shapes of one choice.
+/// So are a section's `cut` (a plane, its offset, or the points it runs
+/// through) and a detail's `centre`, and a section's `unsectioned` is one
+/// list.
 fn drawing_atom(at: &str) -> bool {
     let seg: Vec<&str> = at.split('/').collect();
-    matches!(seg.as_slice(), ["", "views", _, "orient" | "rev"])
+    matches!(
+        seg.as_slice(),
+        [
+            "",
+            "views",
+            _,
+            "orient" | "rev" | "cut" | "centre" | "unsectioned"
+        ]
+    )
 }
 
 /// A drawing: per member and field (a position, a list, a reference one
@@ -2878,6 +2889,35 @@ mod tests {
             bytes(&canonical(&base), &canonical(&newer), &canonical(&ours)).1,
             Outcome::Text(_)
         ));
+    }
+
+    #[test]
+    fn a_sections_cut_and_a_details_centre_are_one_value_each() {
+        let file = |cut: Value, centre: Value| {
+            json!({"format": 1, "kind": "ryucad.drawing", "name": "P",
+            "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b"}},
+            "views": {
+                "v1": {"type": "base", "sheet": "s1", "orient": "top"},
+                "v2": {"type": "section", "sheet": "s1", "from": "v1", "label": "A", "cut": cut},
+                "v3": {"type": "detail", "sheet": "s1", "from": "v1", "label": "B",
+                       "centre": centre, "radius": "4 mm"}
+            }})
+        };
+        let base = file(json!({"plane": "zx"}), json!(["0 mm", "0 mm", "0 mm"]));
+        // A plane moved on one side, made points on the other: one conflict.
+        let ours = file(
+            json!({"plane": "zx", "offset": "5 mm"}),
+            json!(["0 mm", "0 mm", "0 mm"]),
+        );
+        let theirs = file(
+            json!({"through": [["0 mm", "0 mm", "0 mm"], ["9 mm", "0 mm", "0 mm"]]}),
+            json!(["1 mm", "0 mm", "0 mm"]),
+        );
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/views/v2/cut"]);
+        // A centre moved on one side alone is taken whole.
+        let v = &m.value["views"]["v3"]["centre"];
+        assert_eq!(v, &json!(["1 mm", "0 mm", "0 mm"]));
     }
 
     #[test]
