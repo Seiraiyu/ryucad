@@ -479,7 +479,30 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
     }
     // Grouped and oriented parts draw no idiom (its shape would place and
     // turn them), unless an instruction asks for one.
-    for p in grouped.keys().chain(r.orient.keys()) {
+    // An amplifier turned 0 or 180 degrees keeps its op-amp stage, whose
+    // template follows its inverting pin's side; at 90 or 270 the stage
+    // is drawn as separate parts.
+    let amplifier = |p: usize| {
+        let pins = &block.parts[p].pins;
+        pins.iter().any(crate::topology::out_pin) && pins.iter().any(crate::topology::inv_pin)
+    };
+    for p in grouped.keys() {
+        r.idiom.entry(*p).or_insert(IdiomChoice::None);
+    }
+    for (p, (rotation, _)) in &r.orient {
+        if amplifier(*p) && !grouped.contains_key(p) {
+            if rotation % 180 == 0 {
+                continue;
+            }
+            r.notes.push(Note {
+                code: "orient_drops_stage".into(),
+                message: format!(
+                    "{} turned {rotation}°: its op-amp stage is drawn as separate parts; turn it 0 or 180 to keep the stage",
+                    crate::lint::who(&block.parts[*p])
+                ),
+                details: json!({"part": block.parts[*p].key, "rotation": rotation}),
+            });
+        }
         r.idiom.entry(*p).or_insert(IdiomChoice::None);
     }
     Ok(r)

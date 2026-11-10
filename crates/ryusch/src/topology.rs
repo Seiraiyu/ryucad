@@ -497,7 +497,7 @@ fn opamp_stages(s: &Sheet) -> Vec<Judged> {
             if inputs.is_empty() {
                 String::new()
             } else {
-                "; the input element lies across the page left of the inverting input, wired to it"
+                "; the input element lies across the page on the inverting input's side, wired to it"
                     .to_owned()
             }
         );
@@ -532,8 +532,24 @@ fn opamp_stages(s: &Sheet) -> Vec<Judged> {
             if !s.across(q) {
                 problems.push(format!("{q_n} stands upright"));
             }
-            if s.middle(q)[0] > s.end(amp, ik)[0] {
-                problems.push(format!("{q_n} isn't left of {a_n}'s inverting input"));
+            // On the inverting input's side (left of it, unless the
+            // amplifier is turned).
+            let inv_side = s.shapes[&amp].pins[ik].side;
+            let (mx, ex) = (s.middle(q)[0], s.end(amp, ik)[0]);
+            let wrong = if inv_side == crate::geom::Side::Right {
+                mx < ex
+            } else {
+                mx > ex
+            };
+            if wrong {
+                problems.push(format!(
+                    "{q_n} isn't {} {a_n}'s inverting input",
+                    if inv_side == crate::geom::Side::Right {
+                        "right of"
+                    } else {
+                        "left of"
+                    }
+                ));
             }
             let qi = pin_on(block, q, inn).expect("on it");
             if !s.wired(inn, (q, qi), (amp, ik)) {

@@ -1547,16 +1547,17 @@ pub fn clusters(
                         let mut row = 0;
                         for &q in &idiom.parts {
                             if ends(block, q).contains(&on) {
+                                // Its inverting-side end towards the
+                                // inverting pin, whichever way the
+                                // amplifier is turned.
                                 let qi = pin_on(block, q, inn);
+                                let dx = if side == Side::Right { 3 } else { -3 };
                                 let at = [
-                                    mid - 3 * GRID,
+                                    mid + dx * GRID,
                                     snap(shape.extent.max[1]) + (4 + 4 * row) * GRID,
                                 ];
                                 row += 1;
-                                adds.push((
-                                    q,
-                                    put(block, q, turn_for(block, q, qi, Side::Left), qi, at),
-                                ));
+                                adds.push((q, put(block, q, turn_for(block, q, qi, side), qi, at)));
                             } else {
                                 let qi = pin_on(block, q, inn);
                                 adds.push((

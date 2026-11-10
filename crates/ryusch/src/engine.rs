@@ -4027,6 +4027,59 @@ mod tests {
         lay_out(b).unwrap()
     }
 
+    /// `orient UA 180` (and `0 mirror`) keeps UA's op-amp stage: the stage is
+    /// drawn in shape, feedback above the amplifier; at 90 the stage is
+    /// dropped with a note.
+    #[test]
+    fn a_turned_amplifier_keeps_its_stage() {
+        let block = crate::testing::with_stage(seeded(5, 2));
+        for (rotation, mirror) in [(180, false), (0, true), (180, true)] {
+            let mut b = block.clone();
+            b.instructions.insert(
+                "i1".into(),
+                Instruction::Orient {
+                    parts: vec!["ua".into()],
+                    rotation,
+                    mirror,
+                },
+            );
+            let out = lay(&b);
+            assert_eq!(
+                crate::rules::check(&b, &out.layout),
+                [],
+                "{rotation} {mirror}"
+            );
+            let x = &out.layout.placed["ua"];
+            assert_eq!((x.rotation, x.mirror), (rotation, mirror));
+            let (found, _) = crate::lint::lint(&b, &out);
+            assert!(
+                !found
+                    .iter()
+                    .any(|f| f.code == "sch_topology" && f.refs.iter().any(|r| r == "ua")),
+                "{rotation} {mirror}: {:#?}",
+                found
+                    .iter()
+                    .filter(|f| f.code == "sch_topology")
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                out.layout.placed["rf"].at[1] > x.at[1],
+                "{rotation} {mirror}: feedback above the amplifier"
+            );
+        }
+        let mut b = block.clone();
+        b.instructions.insert(
+            "i1".into(),
+            Instruction::Orient {
+                parts: vec!["ua".into()],
+                rotation: 90,
+                mirror: false,
+            },
+        );
+        let out = lay(&b);
+        assert!(out.notes.iter().any(|n| n.code == "orient_drops_stage"));
+    }
+
     /// `near port:EN U1.EN` stands the flag on EN's row six steps out, even
     /// where the net has other pins (phase 1 does it only for a sole pin).
     #[test]
