@@ -39,6 +39,49 @@ pub struct Layout {
     /// Each net's wires, by sheet: runs of points.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub routes: BTreeMap<String, BTreeMap<String, Vec<Vec<Point>>>>,
+    /// Each bus drawn as a bus wire, by bus key and sheet (format 4).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub buses: BTreeMap<String, BTreeMap<String, DrawnBus>>,
+}
+
+/// A bus drawn on one sheet: its trunk, and each member's entry. Each
+/// entry's stub, its 45° run and the spines through the entries follow
+/// from `at` and `side` (`bus::entry`, `bus::spine`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DrawnBus {
+    /// The trunk's runs, joining the spines (or a spine and its
+    /// connector).
+    pub trunk: Vec<Vec<Point>>,
+    pub entries: Vec<BusEntry>,
+    /// Where the members leave the sheet: the bus's off-sheet connector,
+    /// at the trunk's far end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector: Option<BusConnector>,
+}
+
+/// A member's entry into a drawn bus.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BusEntry {
+    /// The member's net key.
+    pub net: String,
+    /// The pin it serves: `<part key>/<pin number>`.
+    pub on: String,
+    /// The pin's end.
+    pub at: Point,
+    /// Which way the pin points.
+    pub side: Side,
+}
+
+/// A drawn bus's off-sheet connector.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BusConnector {
+    pub at: Point,
+    pub side: Side,
+    /// What it says: the bundle's name when it was placed.
+    pub text: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -429,7 +472,8 @@ impl Layout {
             .labels
             .values()
             .flatten()
-            .any(|l| l.kind == LabelKind::OffSheet);
+            .any(|l| l.kind == LabelKind::OffSheet)
+            || !self.buses.is_empty();
         if four {
             return 4;
         }
@@ -679,6 +723,30 @@ mod tests {
         assert_eq!(l.format(), 4);
         let json = serde_json::to_value(&l).unwrap();
         assert_eq!(json["labels"]["n1"][0]["kind"], "off_sheet");
+        assert_eq!(serde_json::from_value::<Layout>(json).unwrap(), l);
+    }
+
+    #[test]
+    fn a_drawn_bus_makes_format_4_and_reads_back() {
+        let mut l = Layout::default();
+        l.buses.insert(
+            "bus:d".into(),
+            BTreeMap::from([(
+                "s1".into(),
+                DrawnBus {
+                    trunk: vec![vec![[0, 0], [10 * 1_270_000, 0]]],
+                    entries: vec![BusEntry {
+                        net: "d0".into(),
+                        on: "u1/3".into(),
+                        at: [-2_540_000, 0],
+                        side: Side::Right,
+                    }],
+                    connector: None,
+                },
+            )]),
+        );
+        assert_eq!(l.format(), 4);
+        let json = serde_json::to_value(&l).unwrap();
         assert_eq!(serde_json::from_value::<Layout>(json).unwrap(), l);
     }
 }

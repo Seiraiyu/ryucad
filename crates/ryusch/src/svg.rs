@@ -72,12 +72,16 @@ fn text_el(
 }
 
 fn polyline(out: &mut String, f: &Frame, pts: &[Point], stroke: &str, fill: &str) {
+    polyline_wide(out, f, pts, stroke, fill, LINE);
+}
+
+fn polyline_wide(out: &mut String, f: &Frame, pts: &[Point], stroke: &str, fill: &str, width: Nm) {
     let list: Vec<String> = pts.iter().map(|p| f.p(*p)).collect();
     let _ = writeln!(
         out,
         "<polyline points=\"{}\" fill=\"{fill}\" stroke=\"{stroke}\" stroke-width=\"{}\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/>",
         list.join(" "),
-        mm(LINE)
+        mm(width)
     );
 }
 
@@ -110,6 +114,14 @@ fn item(out: &mut String, f: &Frame, it: &Item) {
             stroke,
             fill,
         } => polyline(out, f, points, stroke, fill.unwrap_or("none")),
+        Item::Bus { points } => polyline_wide(
+            out,
+            f,
+            points,
+            crate::paint::BUS,
+            "none",
+            crate::paint::BUS_LINE,
+        ),
         Item::Circle {
             center,
             radius,

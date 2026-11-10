@@ -1004,13 +1004,17 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
                             .overlaps(&w[1].1.extent)
                 })
         }
+        Instruction::Net { net, style } if block.bus(net).is_some() => match style {
+            NetStyle::Bus => layout.buses.get(net).is_some_and(|b| !b.is_empty()),
+            _ => !layout.buses.contains_key(net),
+        },
         Instruction::Net { net, style } => {
             let labelled = layout.labels.contains_key(net);
             let wired = layout.routes.contains_key(net) && !labelled;
             match style {
                 NetStyle::Wire => wired,
                 NetStyle::Label | NetStyle::Port => labelled,
-                // Drawn buses are the layout's from plan 2.C's Task 10.
+                // Only a bus is drawn as one.
                 NetStyle::Bus => false,
             }
         }
