@@ -11,6 +11,7 @@
 
 pub mod font;
 pub mod geom;
+pub mod hatch;
 pub mod item;
 pub mod pdf;
 pub mod style;
