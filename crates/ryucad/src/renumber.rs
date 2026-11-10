@@ -263,8 +263,8 @@ fn transform(
         }
         Rename::Feature { from, to, .. } => match pointer {
             // A refold's `unfold` names its unfold as `target` names a
-            // solid's founder.
-            "/sketch" | "/target" | "/solid" | "/unfold" | "/from/sheet" => {
+            // solid's founder; a split's tool body likewise.
+            "/sketch" | "/target" | "/solid" | "/unfold" | "/from/sheet" | "/tool/body" => {
                 (node.as_str() == Some(from)).then(|| json!(to))
             }
             // The solids an operation or a boolean acts on, the sheets a
@@ -1131,6 +1131,43 @@ mod tests {
         assert_eq!(
             read(&out, "parts/a/features/on.json")["targets"],
             json!(["s-1"])
+        );
+    }
+
+    #[test]
+    fn a_splits_tool_follows_its_body_and_faces() {
+        let old = "0123456789abcdef0123456789abcdef";
+        let new = "fedcba9876543210fedcba9876543210";
+        let by_body = json!({
+            "format": 19, "kind": "ryucad.feature", "type": "split", "target": "h",
+            "tool": {"body": "parting"},
+        });
+        let by_faces = json!({
+            "format": 19, "kind": "ryucad.feature", "type": "split", "target": "h",
+            "tool": {"faces": [{"feature": "parting", "name": old}]},
+        });
+        let f = files(&[
+            ("parts/a/features/s.json", by_body),
+            ("parts/a/features/t.json", by_faces),
+        ]);
+        let names = BTreeMap::from([(
+            "parting".to_owned(),
+            BTreeMap::from([(old.to_owned(), new.to_owned())]),
+        )]);
+        let out = renumbered(
+            &f,
+            &Rename::Feature {
+                part: "a".into(),
+                from: "parting".into(),
+                to: "parting-2".into(),
+            },
+            &names,
+        );
+        let read = |p: &str| serde_json::from_slice::<Value>(&out[p]).unwrap();
+        assert_eq!(read("parts/a/features/s.json")["tool"]["body"], "parting-2");
+        assert_eq!(
+            read("parts/a/features/t.json")["tool"]["faces"][0],
+            json!({"feature": "parting-2", "name": new})
         );
     }
 

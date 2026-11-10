@@ -2254,6 +2254,110 @@ pub(crate) mod tests {
         assert_eq!(c[0]["error"]["code"], "dependency_failed");
     }
 
+    /// Adds sketch `a`, a line across box `b` at x = 5 (`l1`, from `p1` to
+    /// `p2`), and `parting`, that line extruded through the box as a sheet.
+    fn parting(m: &mut Merging) {
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "a", "plane": "xy"}),
+        )
+        .unwrap();
+        m.call(
+            "sketch.edit",
+            json!({"part": "p", "sketch": "a", "ops": [
+                {"op": "add", "id": "p1", "type": "point", "at": [5, -5]},
+                {"op": "add", "id": "p2", "type": "point", "at": [5, 25]},
+                {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+            ]}),
+        )
+        .unwrap();
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "parting", "sketch": "a",
+                   "surface": true, "extent": {"type": "symmetric", "length": "20 mm"}}),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_split_by_a_sheet_merges_through_it() {
+        // Ours moves the tool sheet, theirs trims the split: clean, and
+        // nothing broken.
+        let mut m = boxed();
+        parting(&mut m);
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "split", "id": "sp", "target": "b", "tool": "parting"}),
+        )
+        .unwrap();
+        m.commit("a box split by a sheet");
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        m.call(
+            "feature.edit",
+            json!({"part": "p", "id": "sp", "keep": "behind"}),
+        )
+        .unwrap();
+        m.commit("theirs: a trim");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        m.call(
+            "sketch.edit",
+            json!({"part": "p", "sketch": "a", "ops": [
+                {"op": "move", "id": "p1", "at": [6, -5]},
+                {"op": "move", "id": "p2", "at": [6, 25]}]}),
+        )
+        .unwrap();
+        m.commit("ours: the sheet moved");
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        assert!(
+            v["conflicts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c["kind"] != "merge_broke"),
+            "{v}"
+        );
+    }
+
+    #[test]
+    fn a_split_whose_tool_the_other_side_broke_is_blamed_on_it() {
+        let mut m = boxed();
+        parting(&mut m);
+        m.commit("a box and a sheet");
+        // Theirs splits the box by the sheet.
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "split", "id": "sp", "target": "b", "tool": "parting"}),
+        )
+        .unwrap();
+        m.commit("theirs: split by the sheet");
+        // Ours takes the sheet's line away: the sheet fails.
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        m.call(
+            "sketch.edit",
+            json!({"part": "p", "sketch": "a", "ops": [{"op": "remove", "id": "l1"}]}),
+        )
+        .unwrap();
+        m.commit("ours: no line");
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        let c: Vec<&Value> = v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["kind"] == "merge_broke")
+            .collect();
+        assert_eq!(c.len(), 1, "{v}");
+        assert_eq!(c[0]["id"], "parts/p/features/sp.json#merge_broke");
+        assert_eq!(c[0]["cause"], "ours");
+        assert_eq!(c[0]["built_on"], json!(["theirs"]));
+    }
+
     #[test]
     fn what_the_merge_broke_names_the_side_that_broke_it() {
         let mut m = boxed();
