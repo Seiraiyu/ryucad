@@ -362,6 +362,35 @@ pub fn fitted(
     .ok()
 }
 
+/// [`fitted`] where the caller knows the curve's parameters on `surface`
+/// at every point (`uv`, continuous along the curve on its own
+/// parameter), so nothing is projected: a cubic spline through them and
+/// its certified bound, at least
+/// [`LINEAR_RESOLUTION`](crate::tol::LINEAR_RESOLUTION), spans halving
+/// until the bound is within `target`; `None` where no fit certifies.
+/// A curve found on a swept surface keeps its parameters through the
+/// surface's NURBS form's [`Reparam`](crate::geom::Reparam)s, where a
+/// fit by projection can't follow it across the form's period start
+/// (race bodies 482 and 819, #247).
+pub fn fitted_by(
+    surface: &Surface,
+    curve: &Curve,
+    interval: [f64; 2],
+    uv: &dyn Fn(f64) -> Point2,
+    target: f64,
+) -> Option<(NurbsCurve2, f64)> {
+    crate::intersect::fit_pcurve_by(
+        surface,
+        curve,
+        interval,
+        uv,
+        target,
+        // unmetered: pcurve::fitted_by takes no work (export)
+        &crate::work::Meter::free(),
+    )
+    .ok()
+}
+
 /// Whether the surface takes the pcurve to within `tolerance` of the edge
 /// at every sample.
 pub(crate) fn fits(
@@ -493,6 +522,37 @@ mod tests {
             Line::through(f.to_world(2.0, 0.0, 0.0), f.to_world(2.0, 1.0, 0.0)).unwrap(),
         );
         assert!(fitted(&nurbs, &off, [0.0, 1.0], TOL).is_none());
+    }
+
+    #[test]
+    fn fits_by_known_parameters_cross_a_forms_period_start() {
+        // A cylinder's NURBS form over [π, 3π], and a circle round it from
+        // 5.5 to 7.0 rad, across the cylinder's own seam at 2π: the
+        // circle's angle carried through the form's reparameterization
+        // gives the fit its parameters, so nothing is projected.
+        use crate::geom::Reparam;
+        let f = tilted();
+        let cyl = Surface::Cylinder(Cylinder::new(f, 0.5).unwrap());
+        let (n, reparam) = cyl.to_nurbs([[PI, 3.0 * PI], [0.0, 1.0]]).unwrap();
+        assert_eq!(reparam, [Reparam::Angle, Reparam::Identity]);
+        let nurbs = Surface::Nurbs(Arc::new(n));
+        let circle = Curve::Circle(
+            Circle::new(
+                Frame::new(f.to_world(0.0, 0.0, 0.3), f.z().get(), f.x().get()).unwrap(),
+                0.5,
+            )
+            .unwrap(),
+        );
+        let range = [5.5, 7.0];
+        let uv = |t: f64| Point2::new(reparam[0].to_nurbs(t), reparam[1].to_nurbs(0.3));
+        let (c2, bound) = fitted_by(&nurbs, &circle, range, &uv, TOL).unwrap();
+        assert!((TOL..=10.0 * TOL).contains(&bound), "{bound}");
+        assert_eq!(c2.domain(), range);
+        for i in 0..=100 {
+            let t = range[0] + (range[1] - range[0]) * i as f64 / 100.0;
+            let q = c2.point(t);
+            assert!(nurbs.point(q.x, q.y).distance(circle.point(t)) <= bound);
+        }
     }
 
     #[test]

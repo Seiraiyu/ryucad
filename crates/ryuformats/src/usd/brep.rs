@@ -530,13 +530,19 @@ fn converted(
     {
         return Some((n, 0.0));
     }
-    ryukei::pcurve::fitted(n, curve, e.interval, tol).or_else(|| {
-        // Where the form keeps the swept surface's parameters, the curve
-        // found on that surface lies on the form as it is: a fit by
-        // projection can't follow one across the form's period start, as
-        // a band cut at a seam elsewhere has (#469).
-        (reparam == [Reparam::Identity; 2]).then(|| (x.uv.clone(), 0.0))
-    })
+    let through = |t: f64| {
+        let q = x.uv.point(t);
+        Point2::new(reparam[0].to_nurbs(q.x), reparam[1].to_nurbs(q.y))
+    };
+    ryukei::pcurve::fitted(n, curve, e.interval, tol)
+        .or_else(|| ryukei::pcurve::fitted_by(n, curve, e.interval, &through, tol))
+        .or_else(|| {
+            // Where the form keeps the swept surface's parameters, the curve
+            // found on that surface lies on the form as it is: a fit by
+            // projection can't follow one across the form's period start, as
+            // a band cut at a seam elsewhere has (#469).
+            (reparam == [Reparam::Identity; 2]).then(|| (x.uv.clone(), 0.0))
+        })
 }
 
 /// A degree 1 curve from `a` to `b` over `[t0, t1]`.
@@ -555,15 +561,37 @@ fn on_edge(c: &Curve2, [a, b]: [f64; 2], [t0, t1]: [f64; 2]) -> Option<NurbsCurv
     }
     let (lo, hi) = if s0 <= s1 { (s0, s1) } else { (s1, s0) };
     let n = match c {
-        Curve2::Nurbs2(n) => n.part([lo, hi]).ok()?,
+        Curve2::Nurbs2(n) => n.part(snapped(n, [lo, hi])).ok()?,
         _ => {
             let (n, r) = c.to_nurbs([lo, hi]).ok()?;
-            n.part([r.to_nurbs(lo), r.to_nurbs(hi)]).ok()?
+            n.part(snapped(&n, [r.to_nurbs(lo), r.to_nurbs(hi)])).ok()?
         }
     };
     let n = if s0 > s1 { n.reversed() } else { n };
     remapped(&n, [t0, t1])
 }
+
+/// A cut `[lo, hi]` of `n` with each end that lies within [`SNAP`] ulps
+/// of one of `n`'s knots moved onto it: cut a rounding error short of a
+/// knot, `part` keeps a sliver span an ulp or two long, which reversing
+/// the curve rounds away into an end multiplicity past `degree + 1` that
+/// no clamped knot vector holds (race body 1187, #247).
+fn snapped(n: &NurbsCurve2, [lo, hi]: [f64; 2]) -> [f64; 2] {
+    let snap = |x: f64| {
+        n.knots()
+            .knots()
+            .iter()
+            .copied()
+            .find(|&k| (k - x).abs() <= SNAP * f64::EPSILON * k.abs().max(x.abs()).max(1.0))
+            .unwrap_or(x)
+    };
+    let (a, b) = (snap(lo), snap(hi));
+    if a < b { [a, b] } else { [lo, hi] }
+}
+
+/// How many ulps of a cut's size an end may lie from a knot and be
+/// moved onto it ([`snapped`]).
+const SNAP: f64 = 8.0;
 
 /// `n` (clamped) with its knots moved affinely onto `[t0, t1]`.
 fn remapped(n: &NurbsCurve2, [t0, t1]: [f64; 2]) -> Option<NurbsCurve2> {
@@ -1502,4 +1530,35 @@ fn curve(a: &mut Arrays, c: &Curve, [t0, t1]: [f64; 2], k: f64) -> [f64; 2] {
     };
     a.edge_types.push(token.into());
     range
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryukei::geom::{Circle2, Frame2, Vector2};
+
+    /// A cut two ulps short of a circle form's knot at π is moved onto
+    /// it, so the part has no sliver span and reversing it keeps a
+    /// clamped knot vector (race body 1187, #247); a cut well inside a
+    /// span stays where it is.
+    #[test]
+    fn cuts_a_rounding_error_from_a_knot_land_on_it() {
+        let c = Curve2::Circle2(
+            Circle2::new(
+                Frame2::new(Point2::new(0.0, 0.0), Vector2::new(1.0, 0.0), true).unwrap(),
+                0.5,
+            )
+            .unwrap(),
+        );
+        let (n, _) = c.to_nurbs([0.0, std::f64::consts::TAU]).unwrap();
+        let pi = std::f64::consts::PI;
+        assert!(n.knots().knots().contains(&pi));
+        let lo = f64::from_bits(pi.to_bits() + 2);
+        let [a, b] = snapped(&n, [lo, 6.0]);
+        assert_eq!((a, b), (pi, 6.0));
+        let part = n.part([a, b]).unwrap().reversed().to_clamped();
+        let p = part.degree();
+        assert!(part.knots().mults().iter().all(|&m| m <= p + 1));
+        assert_eq!(snapped(&n, [1.0, 2.0]), [1.0, 2.0]);
+    }
 }
