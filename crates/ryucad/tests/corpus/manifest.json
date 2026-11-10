@@ -6,11 +6,11 @@
           "drawing_view_uncertain": 4,
           "dwg_hole_uncalled": 3,
           "dwg_outside": 1,
-          "dwg_text_overlap": 9,
+          "dwg_text_overlap": 4,
           "instances_interfere": 2
         },
         "errors": 0,
-        "warnings": 19
+        "warnings": 14
       },
       "drawings": {
         "gearbox/main": {
@@ -27,12 +27,11 @@
           },
           "findings": {
             "drawing_view_uncertain": 1,
-            "dwg_hole_uncalled": 3,
-            "dwg_text_overlap": 5
+            "dwg_hole_uncalled": 3
           },
-          "pdf": "894ae446cbddf71a59c2f66019c87fbdc34826f4a38f89510132e0c4011bc077",
+          "pdf": "db81075398389e6ad9709b5a9ad401ec4d7505293a15a223d4c2f299c7fcb708",
           "scores": {
-            "s1": 76
+            "s1": 91
           },
           "views": {
             "v1": {
@@ -495,11 +494,10 @@
       "check": {
         "codes": {
           "dwg_hole_uncalled": 2,
-          "dwg_outside": 2,
-          "dwg_text_overlap": 2
+          "dwg_outside": 1
         },
         "errors": 0,
-        "warnings": 6
+        "warnings": 3
       },
       "drawings": {
         "corner-bracket/main": {
@@ -566,12 +564,11 @@
           },
           "findings": {
             "dwg_hole_uncalled": 2,
-            "dwg_outside": 2,
-            "dwg_text_overlap": 2
+            "dwg_outside": 1
           },
-          "pdf": "fd656d0872b1748e5b60b116a65390b6000894b0319b217f615f447c26ea496c",
+          "pdf": "226864cd7d6436519e1526171166d1b72e3cddc1328585fbb3bc5eb5a64646b3",
           "scores": {
-            "s1": 78
+            "s1": 89
           },
           "views": {
             "v1": {
