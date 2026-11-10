@@ -4536,7 +4536,8 @@ fn surfaces_from_the_cli() {
     assert_eq!(v["feature"]["surface"], true, "{v}");
     let r = p.ok(&["rebuild", "skin"]);
     assert_eq!(r["parts"][0]["solids"][0]["kind"], "sheet", "{r}");
-    // A cut of the wall is refused in the agent's terms.
+    // A join to the wall is refused in the agent's terms (a cut trims
+    // it since 18.C).
     let e = p.fails(
         &[
             "feature",
@@ -4550,7 +4551,7 @@ fn surfaces_from_the_cli() {
             "--param",
             "z=1",
             "--operation",
-            "cut",
+            "join",
             "--target",
             "wall",
         ],

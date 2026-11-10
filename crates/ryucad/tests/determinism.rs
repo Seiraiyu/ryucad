@@ -1564,7 +1564,7 @@ fn trims_section(golden: &mut Golden) {
             )
             .unwrap_or_else(|e| panic!("{m}: {e}"))
         };
-        let mut add = |call: &mut Call<'_>, f: serde_json::Value| {
+        let add = |call: &mut Call<'_>, f: serde_json::Value| {
             let mut f = f;
             f["part"] = json!(part);
             call("feature.add", f);
