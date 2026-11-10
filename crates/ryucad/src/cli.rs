@@ -1832,8 +1832,11 @@ enum DrawingCmd {
         out: std::path::PathBuf,
         #[arg(long)]
         sheet: Option<String>,
-        #[arg(long, value_parser = ["pdf", "svg"])]
+        #[arg(long, value_parser = ["pdf", "svg", "dxf"])]
         format: Option<String>,
+        /// A DXF's unit.
+        #[arg(long, value_parser = ["mm", "in"])]
+        unit: Option<String>,
         /// A Git revision, `label:<L>`, `annotation:<id>` or `draft:<name>`.
         #[arg(long)]
         rev: Option<String>,
@@ -5425,6 +5428,7 @@ fn drawing_request(d: &DrawingCmd) -> Result<Request> {
             out,
             sheet,
             format,
+            unit,
             rev,
         } => Request::DrawingExport {
             part: part.clone(),
@@ -5432,6 +5436,7 @@ fn drawing_request(d: &DrawingCmd) -> Result<Request> {
             rev: rev.clone(),
             sheet: sheet.clone(),
             format: format.clone(),
+            unit: unit.clone(),
             out: Some(
                 std::path::absolute(out)
                     .unwrap_or_else(|_| out.clone())

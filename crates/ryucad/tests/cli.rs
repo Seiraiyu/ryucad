@@ -5321,6 +5321,27 @@ fn drawings_from_the_cli() {
             .unwrap()
             .starts_with("<svg")
     );
+    // A sheet as DXF, in inches.
+    let dxf = p.ok(&[
+        "drawing", "export", "plate", "main", "--out", "s1.dxf", "--unit", "in",
+    ]);
+    assert_eq!(
+        (dxf["format"].as_str(), dxf["unit"].as_str()),
+        (Some("dxf"), Some("in")),
+        "{dxf}"
+    );
+    let bytes = fs::read_to_string(p.direct.join("s1.dxf")).unwrap();
+    assert!(
+        bytes.contains("AC1015") && bytes.contains("HATCH\n"),
+        "{bytes}"
+    );
+    p.fails(
+        &[
+            "drawing", "export", "plate", "main", "--out", "x.pdf", "--unit", "in",
+        ],
+        "invalid_param",
+        1,
+    );
     let pdf = p.ok(&["drawing", "export", "plate", "main", "--out", "main.pdf"]);
     assert_eq!(pdf["sheets"], 1, "{pdf}");
     assert!(

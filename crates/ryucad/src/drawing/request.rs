@@ -713,6 +713,7 @@ pub fn export(
     sheet: Option<&str>,
     format: Option<&str>,
     out: Option<&str>,
+    unit: Option<&str>,
 ) -> Result<Answer> {
     let pid = crate::server::part_id(part)?;
     let format = match (format, out) {
@@ -732,6 +733,11 @@ pub fn export(
     let job = session.job.clone();
     let mut result = json!({"part": pid, "drawing": did, "format": format, "findings": b.findings});
     match format.as_str() {
+        "pdf" | "svg" if unit.is_some() => Err(Error::new(
+            Code::InvalidParam,
+            "unit is a DXF's: a PDF and an SVG are in millimetres",
+        )
+        .with("param", "unit")),
         "pdf" => {
             if sheet.is_some() {
                 return Err(Error::new(Code::InvalidParam, "a PDF holds every sheet")
@@ -751,9 +757,26 @@ pub fn export(
                 w.write_all(text.as_bytes())
             })
         }
+        "dxf" => {
+            let unit = match unit {
+                None => ryu_draw::dxf::Unit::Mm,
+                Some(u) => ryu_draw::dxf::Unit::parse(u).ok_or_else(|| {
+                    Error::new(Code::InvalidParam, format!("{u:?}: a DXF is in mm or in"))
+                        .with("param", "unit")
+                })?,
+            };
+            let s = b.sheet(sheet)?;
+            result["sheet"] = json!(s.key.to_string());
+            result["unit"] = json!(unit.as_str());
+            let bytes = ryu_draw::dxf::write(s.paper, &s.items, unit)
+                .map_err(|e| Error::new(Code::Internal, format!("DXF: {e}")))?;
+            crate::export::deliver(&job, result, out.as_deref(), "application/dxf", |w| {
+                w.write_all(&bytes)
+            })
+        }
         f => Err(Error::new(
             Code::InvalidParam,
-            format!("{f:?}: a drawing exports as pdf or svg (DXF is plan 9.B's)"),
+            format!("{f:?}: a drawing exports as pdf, svg or dxf"),
         )
         .with("param", "format")),
     }
