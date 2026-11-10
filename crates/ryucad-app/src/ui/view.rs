@@ -1229,9 +1229,12 @@ impl View {
         }
         let shown: Vec<String> = ws.model.shown().iter().map(|s| s.to_string()).collect();
         let shown: Vec<&str> = shown.iter().map(String::as_str).collect();
-        let markers =
-            ws.annotations
-                .markers(&shown, |k| ws.model.pose(k), |on| ws.model.placed_on(on));
+        let markers = ws.annotations.markers(
+            &shown,
+            |k| ws.model.pose(k),
+            |on| ws.model.placed_on(on),
+            ws.markup_editing(),
+        );
         let size = [f64::from(rect.width()), f64::from(rect.height())];
         let mut chosen = None;
         for m in markers {
@@ -2829,26 +2832,7 @@ impl View {
         // their pins are drawn, and the Markup bar's, depth-tested as
         // sketch curves are, in their authors' colours.
         {
-            let shown = ws.model.shown();
-            let place = |on: &str| ws.model.placed_on(on);
-            let mut strokes = if self.annotations {
-                ws.annotations.face_strokes(&shown, place)
-            } else {
-                Vec::new()
-            };
-            if let Some(m) = &ws.markup {
-                let mut marks = m.marks.clone();
-                marks.extend(m.under_way());
-                let marks = ryucad::redline::Marks {
-                    part: ryucad::doc::id::Id::parse(&m.part, "part").expect("a part's ID"),
-                    list: marks,
-                };
-                strokes.extend(crate::core::annotations::face_strokes_of(
-                    &marks,
-                    ws.my_name(),
-                    &place,
-                ));
-            }
+            let strokes = ws.face_strokes(self.annotations);
             crate::core::sketch::bands(
                 strokes.iter().map(|s| {
                     (

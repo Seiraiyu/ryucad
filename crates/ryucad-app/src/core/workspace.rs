@@ -1507,6 +1507,40 @@ impl Workspace {
         })
     }
 
+    /// The annotation the Markup bar edits, if it edits one: the bar
+    /// draws its marks, so the listing's are left out.
+    pub fn markup_editing(&self) -> Option<&str> {
+        self.markup.as_ref().and_then(|m| m.editing.as_deref())
+    }
+
+    /// The face strokes the window draws (design 423): open annotations'
+    /// when `pins` are drawn, but the one the bar edits, then the bar's,
+    /// with the mark under way, in this window's colour.
+    pub fn face_strokes(&self, pins: bool) -> Vec<crate::core::annotations::Stroke> {
+        let shown = self.model.shown();
+        let place = |on: &str| self.model.placed_on(on);
+        let mut strokes = if pins {
+            self.annotations
+                .face_strokes(&shown, place, self.markup_editing())
+        } else {
+            Vec::new()
+        };
+        if let Some(m) = &self.markup {
+            let mut marks = m.marks.clone();
+            marks.extend(m.under_way());
+            let marks = ryucad::redline::Marks {
+                part: ryucad::doc::id::Id::parse(&m.part, "part").expect("a part's ID"),
+                list: marks,
+            };
+            strokes.extend(crate::core::annotations::face_strokes_of(
+                &marks,
+                self.my_name(),
+                &place,
+            ));
+        }
+        strokes
+    }
+
     /// Cancel (or Esc with nothing under way): the bar closes and its
     /// marks go.
     pub fn cancel_markup(&mut self) {

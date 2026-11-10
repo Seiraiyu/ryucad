@@ -371,20 +371,42 @@ fn a_markup_is_posted_with_what_its_marks_touch_and_edited_again() {
     assert_eq!(e.mark_count(), 2);
     let strokes = ws
         .annotations
-        .face_strokes(&["p"], |on| ws.model.placed_on(on));
+        .face_strokes(&["p"], |on| ws.model.placed_on(on), None);
     assert_eq!(strokes.len(), 1);
     assert_eq!(strokes[0].points.len(), 3);
-    let at = ws
-        .annotations
-        .markers(&["p"], |k| ws.model.pose(k), |on| ws.model.placed_on(on));
+    let at = ws.annotations.markers(
+        &["p"],
+        |k| ws.model.pose(k),
+        |on| ws.model.placed_on(on),
+        None,
+    );
     assert_eq!(at.len(), 1);
+    assert_eq!(ws.face_strokes(true), strokes, "the window draws it");
     // Its author edits it: the bar reopens at its view with its marks; the
     // stroke undone, Save sends the arrow alone.
     ws.edit_markup(&id).unwrap();
     let m = ws.markup.as_mut().unwrap();
     assert_eq!((m.marks.len(), m.camera.clone()), (2, from_above()));
     assert_eq!(m.editing.as_deref(), Some(id.as_str()));
+    // While the bar edits it, the window draws the bar's marks only: the
+    // listing's stroke and marker are left out, so an undo shows.
+    assert_eq!(ws.face_strokes(true), strokes, "the bar's copy, once");
+    assert!(
+        ws.annotations
+            .markers(
+                &["p"],
+                |k| ws.model.pose(k),
+                |on| ws.model.placed_on(on),
+                ws.markup_editing(),
+            )
+            .is_empty()
+    );
+    let m = ws.markup.as_mut().unwrap();
     m.undo();
+    assert!(
+        ws.face_strokes(true).is_empty(),
+        "the stroke undone is gone"
+    );
     ws.post_markup();
     assert!(ws.wait_until(WAIT, |ws| ws.markup.is_none()
         && ws.annotations.all[&id].mark_count() == 1));
@@ -436,7 +458,7 @@ fn an_agents_marks_from_the_cli_are_the_windows_to_draw() {
     assert!(e.view.is_some());
     assert_eq!(
         ws.annotations
-            .face_strokes(&["p"], |on| ws.model.placed_on(on))
+            .face_strokes(&["p"], |on| ws.model.placed_on(on), None)
             .len(),
         1
     );
@@ -445,7 +467,7 @@ fn an_agents_marks_from_the_cli_are_the_windows_to_draw() {
     assert!(ws.wait_until(WAIT, |ws| !ws.annotations.all[&id].is_open()));
     assert!(
         ws.annotations
-            .face_strokes(&["p"], |on| ws.model.placed_on(on))
+            .face_strokes(&["p"], |on| ws.model.placed_on(on), None)
             .is_empty()
     );
 }

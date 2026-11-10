@@ -414,9 +414,15 @@ impl Annotations {
         shown: &[&str],
         pose: impl Fn(&(String, String)) -> Pose,
         place: impl Fn(&str) -> Pose,
+        skip: Option<&str>,
     ) -> Vec<Marker> {
         let mut out = Vec::new();
         for (i, e) in self.open_oldest_first().into_iter().enumerate() {
+            // The annotation the Markup bar edits is drawn by the bar; the
+            // others keep their numbers.
+            if Some(e.id.as_str()) == skip {
+                continue;
+            }
             let marker = |pin: usize, at: At| Marker {
                 id: e.id.clone(),
                 pin,
@@ -456,9 +462,18 @@ impl Annotations {
     /// The open annotations' face strokes on the parts `shown`, each in
     /// its author's colour, placed by `place`: drawn whenever pins are
     /// (design 423, When).
-    pub fn face_strokes(&self, shown: &[&str], place: impl Fn(&str) -> Pose) -> Vec<Stroke> {
+    pub fn face_strokes(
+        &self,
+        shown: &[&str],
+        place: impl Fn(&str) -> Pose,
+        skip: Option<&str>,
+    ) -> Vec<Stroke> {
         let mut out = Vec::new();
         for e in self.open_oldest_first() {
+            // The annotation the Markup bar edits: the bar draws its marks.
+            if Some(e.id.as_str()) == skip {
+                continue;
+            }
             let Some(m) = e
                 .marks
                 .as_ref()
@@ -654,14 +669,14 @@ mod tests {
             origin: [1.0, 0.0, 0.0],
             ..Pose::IDENTITY
         };
-        let m = a.markers(&["p"], |_| moved, |_| Pose::IDENTITY);
+        let m = a.markers(&["p"], |_| moved, |_| Pose::IDENTITY, None);
         assert_eq!(m.len(), 1);
         assert_eq!(
             (m[0].number, m[0].at.clone()),
             (2, At::Point([1.01, 0.0, 0.0]))
         );
         // An occurrence's pin with no point stands on its entity.
-        let m = a.markers(&["a"], |_| Pose::IDENTITY, |_| Pose::IDENTITY);
+        let m = a.markers(&["a"], |_| Pose::IDENTITY, |_| Pose::IDENTITY, None);
         assert_eq!(
             m[0].at,
             At::Entity("a/i1/s/0123456789abcdef0123456789abcdef".into())
@@ -710,11 +725,11 @@ mod tests {
                 .all(|(a, b)| (a - b).abs() < 1e-12)
         );
         // No pin: its marker stands at its first mark, outdated by a touch.
-        let m = a.markers(&["p"], |_| Pose::IDENTITY, |_| Pose::IDENTITY);
+        let m = a.markers(&["p"], |_| Pose::IDENTITY, |_| Pose::IDENTITY, None);
         assert_eq!(m.len(), 1);
         assert!(m[0].outdated);
         assert!(
-            a.markers(&["q"], |_| Pose::IDENTITY, |_| Pose::IDENTITY)
+            a.markers(&["q"], |_| Pose::IDENTITY, |_| Pose::IDENTITY, None)
                 .is_empty()
         );
         // Its face stroke, placed by what it was drawn on.
@@ -722,10 +737,14 @@ mod tests {
             origin: [0.0, 0.0, 1.0],
             ..Pose::IDENTITY
         };
-        let strokes = a.face_strokes(&["p"], |on| {
-            assert_eq!(on, "p/base");
-            up
-        });
+        let strokes = a.face_strokes(
+            &["p"],
+            |on| {
+                assert_eq!(on, "p/base");
+                up
+            },
+            None,
+        );
         assert_eq!(
             strokes,
             vec![Stroke {
@@ -733,12 +752,17 @@ mod tests {
                 points: vec![[0.0, 0.0, 1.005], [0.01, 0.0, 1.005]],
             }]
         );
+        // While the Markup bar edits it, the bar draws its marks: the
+        // listing's are left out, stroke and marker.
+        let editing = Some("ffffffffff");
+        assert!(a.face_strokes(&["p"], |_| up, editing).is_empty());
+        assert!(a.markers(&["p"], |_| up, |_| up, editing).is_empty());
         // Closed, it draws no stroke and stands at no marker.
         let mut done = marked();
         done["status"] = json!("done");
         a.changed(&json!({"annotations": [done]}), "dana (window 1)");
-        assert!(a.face_strokes(&["p"], |_| up).is_empty());
-        assert!(a.markers(&["p"], |_| up, |_| up).is_empty());
+        assert!(a.face_strokes(&["p"], |_| up, None).is_empty());
+        assert!(a.markers(&["p"], |_| up, |_| up, None).is_empty());
     }
 
     #[test]
