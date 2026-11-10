@@ -59,6 +59,11 @@ pub struct Entry {
     pub outdated: Vec<String>,
     pub stale: bool,
     pub applied: bool,
+    /// Its redline marks (design 423), as the file has them, touches and
+    /// all; a listing that doesn't hold them reads as none.
+    pub marks: Option<ryucad::redline::Marks>,
+    /// Each mark's touch that no longer resolves, in words.
+    pub outdated_marks: Vec<String>,
     /// The listing's JSON, whole.
     pub raw: Value,
 }
@@ -135,6 +140,28 @@ impl Entry {
             let f = ryucad::doc::views::ViewFile::from_json(&Value::Object(o)).ok()?;
             Some(ryucad::view::Camera::from(&f))
         });
+        // A listing gives marks as `{part, count, kinds, list}`: the file's
+        // `{part, list}` and a summary.
+        let marks = v["marks"].as_object().and_then(|m| {
+            let file = serde_json::json!({"part": m.get("part")?, "list": m.get("list")?});
+            ryucad::redline::Marks::from_json(&file, "/marks", true).ok()
+        });
+        let outdated_marks = v["outdated_marks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|o| {
+                let why = match o["removed_by"].as_str() {
+                    Some(f) => format!("removed by {f}"),
+                    None => o["code"].as_str().unwrap_or("unresolved").replace('_', " "),
+                };
+                format!(
+                    "mark {}: {}: {why}",
+                    o["mark"].as_u64().map_or(0, |m| m + 1),
+                    o["ref"].as_str().unwrap_or_default()
+                )
+            })
+            .collect();
         Some(Entry {
             id: v["id"].as_str()?.to_owned(),
             by,
@@ -156,8 +183,32 @@ impl Entry {
             outdated,
             stale: v["stale"] == true,
             applied: v["applied"] == true,
+            marks,
+            outdated_marks,
             raw: v.clone(),
         })
+    }
+
+    /// How many marks it carries.
+    pub fn mark_count(&self) -> usize {
+        self.marks.as_ref().map_or(0, |m| m.list.len())
+    }
+
+    /// The plane of the view its marks were drawn in.
+    pub fn plane(&self) -> Option<ryucad::redline::Plane> {
+        self.view.as_ref().map(ryucad::redline::Plane::of)
+    }
+
+    /// Where its first mark's first point is in the shown model's frame: a
+    /// view mark's on its plane, a face stroke's placed by `place` (the
+    /// pose of the occurrence or solid it names).
+    pub fn first_point(&self, place: &impl Fn(&str) -> Pose) -> Option<[f64; 3]> {
+        use ryucad::redline::Anchor;
+        let m = self.marks.as_ref()?.list.first()?;
+        match &m.anchor {
+            Anchor::View(xy) => Some(self.plane()?.point(*xy.first()?)),
+            Anchor::Face { on, points_m } => Some(place(on).apply(*points_m.first()?)),
+        }
     }
 
     /// `open` or `in_progress`.
@@ -355,10 +406,33 @@ impl Annotations {
 
     /// The open annotations' pins on the parts `shown`, each placed by
     /// `pose` (an occurrence's body's, `(part, "<path>/<solid>")`, as
-    /// `Model::pose` gives it).
-    pub fn markers(&self, shown: &[&str], pose: impl Fn(&(String, String)) -> Pose) -> Vec<Marker> {
+    /// `Model::pose` gives it); an open annotation with marks and no pin
+    /// stands at its first mark's first point (design 423, When), a face
+    /// stroke's placed by `place` (the pose of what its `on` names).
+    pub fn markers(
+        &self,
+        shown: &[&str],
+        pose: impl Fn(&(String, String)) -> Pose,
+        place: impl Fn(&str) -> Pose,
+    ) -> Vec<Marker> {
         let mut out = Vec::new();
         for (i, e) in self.open_oldest_first().into_iter().enumerate() {
+            let marker = |pin: usize, at: At| Marker {
+                id: e.id.clone(),
+                pin,
+                number: i + 1,
+                at,
+                outdated: !e.outdated.is_empty() || !e.outdated_marks.is_empty(),
+                by: e.by.clone(),
+                comment: e.comment.clone(),
+            };
+            if e.pins.is_empty()
+                && let Some(m) = &e.marks
+                && shown.contains(&m.part.as_str())
+                && let Some(p) = e.first_point(&place)
+            {
+                out.push(marker(0, At::Point(p)));
+            }
             for (k, pin) in e.pins.iter().enumerate() {
                 if !shown.contains(&pin.part.as_str()) {
                     continue;
@@ -373,19 +447,58 @@ impl Annotations {
                     (None, Some(p)) => At::Point(p),
                     (None, None) => continue,
                 };
-                out.push(Marker {
-                    id: e.id.clone(),
-                    pin: k,
-                    number: i + 1,
-                    at,
-                    outdated: !e.outdated.is_empty(),
-                    by: e.by.clone(),
-                    comment: e.comment.clone(),
-                });
+                out.push(marker(k, at));
             }
         }
         out
     }
+
+    /// The open annotations' face strokes on the parts `shown`, each in
+    /// its author's colour, placed by `place`: drawn whenever pins are
+    /// (design 423, When).
+    pub fn face_strokes(&self, shown: &[&str], place: impl Fn(&str) -> Pose) -> Vec<Stroke> {
+        let mut out = Vec::new();
+        for e in self.open_oldest_first() {
+            let Some(m) = e
+                .marks
+                .as_ref()
+                .filter(|m| shown.contains(&m.part.as_str()))
+            else {
+                continue;
+            };
+            out.extend(face_strokes_of(m, &e.by, &place));
+        }
+        out
+    }
+}
+
+/// A face stroke as the window draws it: in the shown model's frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stroke {
+    pub by: String,
+    pub points: Vec<[f64; 3]>,
+}
+
+/// `marks`' face strokes, each placed by `place`.
+pub fn face_strokes_of(
+    marks: &ryucad::redline::Marks,
+    by: &str,
+    place: &impl Fn(&str) -> Pose,
+) -> Vec<Stroke> {
+    marks
+        .list
+        .iter()
+        .filter_map(|m| match &m.anchor {
+            ryucad::redline::Anchor::Face { on, points_m } => {
+                let at = place(on);
+                Some(Stroke {
+                    by: by.to_owned(),
+                    points: points_m.iter().map(|p| at.apply(*p)).collect(),
+                })
+            }
+            ryucad::redline::Anchor::View(_) => None,
+        })
+        .collect()
 }
 
 /// The comment box: what it pins, what is typed and the camera it keeps.
@@ -541,19 +654,91 @@ mod tests {
             origin: [1.0, 0.0, 0.0],
             ..Pose::IDENTITY
         };
-        let m = a.markers(&["p"], |_| moved);
+        let m = a.markers(&["p"], |_| moved, |_| Pose::IDENTITY);
         assert_eq!(m.len(), 1);
         assert_eq!(
             (m[0].number, m[0].at.clone()),
             (2, At::Point([1.01, 0.0, 0.0]))
         );
         // An occurrence's pin with no point stands on its entity.
-        let m = a.markers(&["a"], |_| Pose::IDENTITY);
+        let m = a.markers(&["a"], |_| Pose::IDENTITY, |_| Pose::IDENTITY);
         assert_eq!(
             m[0].at,
             At::Entity("a/i1/s/0123456789abcdef0123456789abcdef".into())
         );
         assert!(m[0].outdated);
+    }
+
+    /// An annotation with marks and no pin, as a listing gives it.
+    fn marked() -> Value {
+        let mut e = entry(
+            "ffffffffff",
+            "dana (window 1)",
+            "2026-11-05T19:00:00Z",
+            "open",
+        );
+        e["view"] = json!({"eye_m": [0, -1, 0], "target_m": [0, 0, 0], "up": [0, 0, 1],
+                           "projection": "orthographic", "height_m": 0.1});
+        e["marks"] = json!({"part": "p", "count": 2, "kinds": ["arrow", "stroke"], "list": [
+            {"kind": "arrow", "in": "view", "xy_m": [[0.01, 0.02], [0.03, 0.02]],
+             "touches": [{"at": "tip", "ref": "p/base/0123456789abcdef0123456789abcdef"}]},
+            {"kind": "stroke", "in": "face", "on": "p/base",
+             "points_m": [[0, 0, 0.005], [0.01, 0, 0.005]], "touches": []}]});
+        e["outdated"] = json!(true);
+        e["outdated_marks"] = json!([{"mark": 0, "touch": 0, "at": "tip",
+            "ref": "p/base/0123456789abcdef0123456789abcdef", "code": "reference_unresolved",
+            "removed_by": "cut1"}]);
+        e
+    }
+
+    #[test]
+    fn marks_are_read_and_stand_where_they_were_drawn() {
+        let mut a = Annotations::default();
+        a.reset(&json!({"schema": 1, "annotations": [marked()]}));
+        let e = &a.all["ffffffffff"];
+        assert_eq!(e.mark_count(), 2);
+        assert_eq!(
+            e.outdated_marks,
+            ["mark 1: p/base/0123456789abcdef0123456789abcdef: removed by cut1"]
+        );
+        // Seen from -y, the plane's x is the model's x and its y the
+        // model's z: the arrow's tail is at (0.01, 0, 0.02).
+        let at = e.first_point(&|_| Pose::IDENTITY).unwrap();
+        assert!(
+            at.iter()
+                .zip([0.01, 0.0, 0.02])
+                .all(|(a, b)| (a - b).abs() < 1e-12)
+        );
+        // No pin: its marker stands at its first mark, outdated by a touch.
+        let m = a.markers(&["p"], |_| Pose::IDENTITY, |_| Pose::IDENTITY);
+        assert_eq!(m.len(), 1);
+        assert!(m[0].outdated);
+        assert!(
+            a.markers(&["q"], |_| Pose::IDENTITY, |_| Pose::IDENTITY)
+                .is_empty()
+        );
+        // Its face stroke, placed by what it was drawn on.
+        let up = Pose {
+            origin: [0.0, 0.0, 1.0],
+            ..Pose::IDENTITY
+        };
+        let strokes = a.face_strokes(&["p"], |on| {
+            assert_eq!(on, "p/base");
+            up
+        });
+        assert_eq!(
+            strokes,
+            vec![Stroke {
+                by: "dana (window 1)".into(),
+                points: vec![[0.0, 0.0, 1.005], [0.01, 0.0, 1.005]],
+            }]
+        );
+        // Closed, it draws no stroke and stands at no marker.
+        let mut done = marked();
+        done["status"] = json!("done");
+        a.changed(&json!({"annotations": [done]}), "dana (window 1)");
+        assert!(a.face_strokes(&["p"], |_| up).is_empty());
+        assert!(a.markers(&["p"], |_| up, |_| up).is_empty());
     }
 
     #[test]
