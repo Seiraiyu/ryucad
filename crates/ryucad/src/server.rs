@@ -8479,7 +8479,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let id = asked["annotation"]["id"].as_str().unwrap().to_owned();
-        let a = crate::annotation::one(&mut s, &id, None).unwrap();
+        let a = crate::annotation::one(&s, &id, None).unwrap();
         let scene = |s: &mut Session, all: bool| {
             let mut ask = RenderAsk::pick(
                 "plate",

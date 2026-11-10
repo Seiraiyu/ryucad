@@ -1665,7 +1665,7 @@ pub(crate) mod tests {
             json!(["arrow", "rectangle", "stroke", "text"])
         );
         let id = v["annotation"]["id"].as_str().unwrap();
-        let file = one(&mut s, id, None).unwrap();
+        let file = one(&s, id, None).unwrap();
         assert_eq!(
             v["annotation"]["marks"]["list"],
             file.marks.unwrap().to_json()["list"]
