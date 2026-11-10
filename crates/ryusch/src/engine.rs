@@ -3663,6 +3663,83 @@ mod tests {
         lay_out(b).unwrap()
     }
 
+    /// #429: a dense part's pulls stand as a bank, each across the page on
+    /// its pin's row (its signal pin's end on the row), every hard rule
+    /// holding, none of them far from the part or floating, and each rail's
+    /// far ends in one column.
+    #[test]
+    fn a_dense_parts_pulls_stand_on_their_rows() {
+        let block = crate::testing::dense_block(false);
+        let out = lay(&block);
+        assert_eq!(crate::rules::check(&block, &out.layout), []);
+        let shape = |key: &str| {
+            let p = block.part(key).expect("part");
+            let x = &out.layout.placed[key];
+            Shape::of(&block.parts[p], Place::new(x.at, x.rotation, x.mirror))
+        };
+        let u1 = shape("u1");
+        let mut columns: BTreeMap<usize, BTreeSet<Nm>> = BTreeMap::new();
+        for i in 0..10 {
+            let key = format!("r{}", i + 1);
+            let r = shape(&key);
+            let row = u1.pins[block.parts[0]
+                .pins
+                .iter()
+                .position(|p| p.name == format!("S{i}"))
+                .expect("pin")]
+            .end[1];
+            let p = block.part(&key).expect("part");
+            let sig = block.parts[p]
+                .pins
+                .iter()
+                .position(|x| x.net == Some(2 + i))
+                .expect("signal pin");
+            let rail = 1 - sig;
+            assert_eq!(r.pins[sig].end[1], row, "{key} on its pin's row");
+            assert_eq!(r.pins[rail].end[1], row, "{key} across the page");
+            assert!(
+                r.pins[sig].end[0] < r.pins[rail].end[0],
+                "{key}: its signal end towards U1"
+            );
+            columns
+                .entry(block.parts[p].pins[rail].net.expect("rail"))
+                .or_default()
+                .insert(r.pins[rail].end[0]);
+        }
+        for (rail, xs) in &columns {
+            assert_eq!(xs.len(), 1, "rail {rail}'s far ends in one column: {xs:?}");
+        }
+        let (found, _) = crate::lint::lint(&block, &out);
+        // sch_idiom_missed: the far rail's members stand past the near
+        // ones and their text; the lint judges them along their rows
+        // (Task 8).
+        // The banked rows' nets (s0 to s9): J1's two rows run round U1 to
+        // its other side, as they do without banks.
+        let banked = |f: &crate::lint::Finding| {
+            f.refs
+                .iter()
+                .any(|r| (0..10).any(|i| *r == format!("s{i}") || *r == format!("r{}", i + 1)))
+        };
+        for code in ["sch_floating", "sch_jog"] {
+            assert!(
+                !found.iter().any(|f| f.code == code && banked(f)),
+                "{code}: {:#?}",
+                found
+                    .iter()
+                    .filter(|f| f.code == code && banked(f))
+                    .collect::<Vec<_>>()
+            );
+        }
+        // The far rail's bar passes the near rail's rows only: three
+        // crossings at most for this interleaving.
+        let crossings: u64 = found
+            .iter()
+            .filter(|f| f.code == "sch_crossings")
+            .map(|f| f.details["crossings"].as_u64().unwrap_or(1))
+            .sum();
+        assert!(crossings <= 3, "{crossings} crossings");
+    }
+
     /// Over a previous layout a new pull-up joins its host's region, the
     /// region grows into free space beside it, and nothing outside it
     /// moves; a region with no room beside it moves whole.

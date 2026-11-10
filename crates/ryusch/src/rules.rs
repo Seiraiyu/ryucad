@@ -37,6 +37,10 @@ struct Item {
     /// What a part draws: its body and its pins' lines, which text and
     /// labels may not touch (the rest of its box is empty).
     ink: Vec<Rect>,
+    /// A part of two pins lying across the page, its pins' row: two such
+    /// on different rows may stand closer than a step (a bank's members,
+    /// rows two steps apart), their extents still apart.
+    row: Option<i64>,
 }
 
 const PART: u8 = 0;
@@ -86,11 +90,16 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
             }
             let mut ink = vec![shape.body];
             ink.extend(shape.pins.iter().map(|p| Rect::new(p.base, p.end)));
+            let row = (shape.pins.len() == 2
+                && shape.pins.iter().all(|p| p.side.horizontal())
+                && shape.pins[0].end[1] == shape.pins[1].end[1])
+                .then(|| shape.pins[0].end[1]);
             items.push(Item {
                 what: part.key.clone(),
                 rect: shape.extent,
                 kind: PART,
                 ink,
+                row,
             });
             if let Some(fields) = layout.text.get(&part.key) {
                 for (field, value) in [("refdes", &part.refdes), ("value", &part.value)] {
@@ -115,6 +124,7 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                             rect: b,
                             kind: TEXT,
                             ink: Vec::new(),
+                            row: None,
                         });
                     }
                 }
@@ -144,6 +154,7 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                     rect: b,
                     kind: LABEL,
                     ink: Vec::new(),
+                    row: None,
                 });
             }
         }
@@ -153,7 +164,10 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
             for j in i + 1..items.len() {
                 let (a, b) = (&items[i], &items[j]);
                 let overlap = match (a.kind == PART, b.kind == PART) {
-                    (true, true) => a.rect.grow(GRID / 2).overlaps(&b.rect.grow(GRID / 2 - 1)),
+                    (true, true) => match (a.row, b.row) {
+                        (Some(ra), Some(rb)) if ra != rb => a.rect.overlaps(&b.rect),
+                        _ => a.rect.grow(GRID / 2).overlaps(&b.rect.grow(GRID / 2 - 1)),
+                    },
                     (true, false) => a.ink.iter().any(|r| touches(r, &b.rect)),
                     (false, true) => b.ink.iter().any(|r| touches(r, &a.rect)),
                     (false, false) => a.rect.overlaps(&b.rect),
@@ -430,6 +444,31 @@ mod tests {
             rules.contains(&"overlap") && rules.contains(&"orthogonal"),
             "{rules:?}"
         );
+    }
+
+    /// Two parts of two pins lying across the page on rows two steps
+    /// apart (a bank's members) may stand closer than a step; on one row,
+    /// or with extents overlapping, they break `spacing` or `overlap`.
+    #[test]
+    fn parts_across_the_page_on_different_rows_may_stand_close() {
+        use crate::layout::Placed;
+        let b = crate::testing::dense_block(false);
+        let l = crate::engine::lay_out(&b).unwrap().layout;
+        assert_eq!(check(&b, &l), [], "the bank's rows two steps apart");
+        // R2 standing up a step past R1's end: not across the page, too
+        // close.
+        let mut close = l.clone();
+        let r1: Placed = close.placed["r1"].clone();
+        let r2 = close.placed.get_mut("r2").unwrap();
+        r2.at = [r1.at[0] + 4 * GRID, r1.at[1]];
+        r2.rotation = 0;
+        let rules: Vec<&str> = check(&b, &close).iter().map(|v| v.rule).collect();
+        assert!(rules.contains(&"spacing"), "{rules:?}");
+        // R2 a step under R1: their extents overlap.
+        let mut over = l.clone();
+        over.placed.get_mut("r2").unwrap().at = [r1.at[0], r1.at[1] - GRID];
+        let rules: Vec<&str> = check(&b, &over).iter().map(|v| v.rule).collect();
+        assert!(rules.contains(&"overlap"), "{rules:?}");
     }
 
     #[test]

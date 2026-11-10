@@ -647,3 +647,60 @@ pub fn regions_block() -> Block {
         ..Block::default()
     }
 }
+
+/// A dense part (#429's shape): a 24-pin IC whose right side's rows each
+/// carry a signal, ten of them pulled, pull-ups and pull-downs
+/// interleaved as the Ethernet PHY's are (from the top: up, up, up, down,
+/// down, down, up, up, up, down), two of the pulled nets block ports
+/// (`with_ports`), and one row (the ninth) with a capacitor to ground as
+/// well. Nets: 0 the supply, 1 ground, 2.. one a row.
+pub fn dense_block(with_ports: bool) -> Block {
+    use crate::input::Flow;
+    let ups = [
+        true, true, true, false, false, false, true, true, true, false,
+    ];
+    let names: Vec<String> = (0..12).map(|i| format!("S{i}")).collect();
+    let mut nets = vec![
+        net("rail:v", "3V3", NetKind::Supply),
+        net("rail:gnd", "GND", NetKind::Ground),
+    ];
+    for n in &names {
+        nets.push(net(&n.to_lowercase(), n, NetKind::Signal));
+    }
+    let right: Vec<(&str, PinKind, Option<usize>)> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), PinKind::Bidirectional, Some(2 + i)))
+        .collect();
+    let left: Vec<(&str, PinKind, Option<usize>)> = vec![
+        ("VDD", PinKind::PowerIn, Some(0)),
+        ("GND", PinKind::PowerIn, Some(1)),
+    ]
+    .into_iter()
+    .chain((0..10).map(|_| ("NC", PinKind::Passive, None)))
+    .collect();
+    let mut parts = vec![ic("u1", "U1", "PHY", &left, &right)];
+    for (i, up) in ups.iter().enumerate() {
+        let rail = if *up { Some(0) } else { Some(1) };
+        parts.push(resistor(
+            &format!("r{}", i + 1),
+            &format!("R{}", i + 1),
+            "10k",
+            [Some(2 + i), rail],
+        ));
+    }
+    parts.push(capacitor("c1", "C1", "100n", [Some(10), Some(1)]));
+    // Two signals out of the block, each pulled: ports.
+    if with_ports {
+        parts.push(port("port:a", "S0", Flow::Bidirectional, Some(2)));
+        parts.push(port("port:b", "S6", Flow::Bidirectional, Some(8)));
+    }
+    // The two unpulled rows go somewhere: a connector.
+    parts.push(connector("j1", "J1", &[Some(12), Some(13)]));
+    Block {
+        parts,
+        nets,
+        sheet: [400_000_000, 277_000_000],
+        ..Block::default()
+    }
+}

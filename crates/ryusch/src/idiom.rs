@@ -916,17 +916,46 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
         .flat_map(|i| i.parts.iter().copied())
         .collect();
     let later = |i: &&Idiom| i.kind == IdiomKind::Decoupling;
+    // A dense part's pulls stand as banks on their pins' rows (#429): each
+    // anchor as its own cluster places it.
+    let at: BTreeMap<usize, Place> = out
+        .iter()
+        .flatten()
+        .map(|c| (c.members[0].0, c.members[0].1))
+        .collect();
+    let banks: Vec<Bank> = banks(block, idioms, &at)
+        .into_iter()
+        .filter_map(|mut b| {
+            // A pull with a jumper keeps phase 1's place: the jumper stands
+            // on the pin's line, where a bank's member stands.
+            b.rows.retain(|(_, list)| idioms[list[0]].parts.len() == 1);
+            (b.rows.iter().map(|(_, l)| l.len()).sum::<usize>() >= 2).then_some(b)
+        })
+        .collect();
+    let on_rows: BTreeSet<usize> = banks
+        .iter()
+        .flat_map(|b| b.rows.iter().map(|(_, l)| l[0]))
+        .collect();
+    let mut banks_done = banks.is_empty();
     // What hangs off sideways pins stands in stairs before decoupling is
     // placed, which then stands past it.
     let mut stairs_done = false;
-    for idiom in idioms
+    for (index, idiom) in idioms
         .iter()
-        .filter(|i| !later(i))
-        .chain(idioms.iter().filter(later))
+        .enumerate()
+        .filter(|(_, i)| !later(i))
+        .chain(idioms.iter().enumerate().filter(|(_, i)| later(i)))
     {
         if !stairs_done && later(&idiom) {
+            if !banks_done {
+                place_banks(block, &banks, idioms, &mut out, &mut of);
+                banks_done = true;
+            }
             hanging_stairs(block, idioms, &mut out);
             stairs_done = true;
+        }
+        if on_rows.contains(&index) {
+            continue;
         }
         let ground = |n: Option<usize>| kind_of(block, n) == Some(NetKind::Ground);
         match idiom.anchor {
@@ -1397,6 +1426,9 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
             }
         }
     }
+    if !banks_done {
+        place_banks(block, &banks, idioms, &mut out, &mut of);
+    }
     // A port's flag whose net meets one part's pin (an in port feeding
     // it, an out port it drives) stands on that pin's line a few steps
     // out, its own pin towards it, so the net is a short straight wire and
@@ -1451,6 +1483,239 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
         hanging_stairs(block, idioms, &mut out);
     }
     out.into_iter().flatten().collect()
+}
+
+/// Each bank's members placed in the cluster of its part.
+fn place_banks(
+    block: &Block,
+    banks: &[Bank],
+    idioms: &[Idiom],
+    out: &mut [Option<Cluster>],
+    of: &mut BTreeMap<usize, usize>,
+) {
+    for bank in banks {
+        let Some(&ci) = of.get(&bank.part) else {
+            continue;
+        };
+        let Some(mut cluster) = out[ci].clone() else {
+            continue;
+        };
+        for (p, place) in place_bank(block, bank, idioms, &cluster.members) {
+            if let Some(old) = of.get(&p).copied()
+                && old != ci
+            {
+                out[old] = None;
+            }
+            cluster.members.retain(|(q, _)| *q != p);
+            cluster.members.push((p, place));
+            of.insert(p, ci);
+        }
+        out[ci] = Some(cluster);
+    }
+}
+
+/// A bank's members (design 348's figure 2, option A): each row's first
+/// pull across the page on its pin's row, its signal end towards the part
+/// in one column past whatever the side's rows put out, and each rail's
+/// far ends in one column of their own, so the rail comb draws one bar a
+/// run. The rail whose bar would pass fewer of the other rail's rows
+/// stands nearer (the far rows' wires cross the near bar). A row's other
+/// members hang off its wire.
+fn place_bank(
+    block: &Block,
+    bank: &Bank,
+    idioms: &[Idiom],
+    members: &[(usize, Place)],
+) -> Vec<(usize, Place)> {
+    let a = bank.part;
+    let Some(rel) = members.iter().find(|(q, _)| *q == a).map(|(_, x)| *x) else {
+        return Vec::new();
+    };
+    let side = bank.side;
+    let shape = Shape::of(&block.parts[a], rel);
+    let away = |x: Nm, from: Nm| {
+        if side == Side::Left {
+            from - x
+        } else {
+            x - from
+        }
+    };
+    let up_steps = |v: Nm| (v.max(0) + GRID - 1) / GRID;
+    let banked: BTreeSet<usize> = bank
+        .rows
+        .iter()
+        .flat_map(|(_, l)| l.iter().flat_map(|i| idioms[*i].parts.iter().copied()))
+        .collect();
+    let rows_y: Vec<Nm> = bank
+        .rows
+        .iter()
+        .map(|(k, _)| shape.pins[*k].end[1])
+        .collect();
+    let (lo, hi) = (
+        rows_y.iter().copied().min().unwrap_or(0),
+        rows_y.iter().copied().max().unwrap_or(0),
+    );
+    // How far the side's rows reach out already: each row's net label,
+    // and what else stands beside the rows.
+    let mut reach: Nm = 0;
+    for (k, _) in &bank.rows {
+        let pin = shape.pins[*k];
+        let name = block.label_text(a, *k);
+        if !name.is_empty() {
+            let r = crate::label::label_box(crate::layout::LabelKind::Net, &name, pin.end, side);
+            reach = reach
+                .max(away(r.min[0], pin.end[0]))
+                .max(away(r.max[0], pin.end[0]));
+        }
+    }
+    let edge = shape.pins[bank.rows[0].0].end[0];
+    for (q, pl) in members {
+        if banked.contains(q) {
+            continue;
+        }
+        let r = Cluster::single(*q, *pl).room(block, [0, 0]);
+        if *q == a {
+            reach = reach.max(away(
+                if side == Side::Left {
+                    r.min[0]
+                } else {
+                    r.max[0]
+                },
+                edge,
+            ));
+            continue;
+        }
+        if r.max[1] < lo - GRID || r.min[1] > hi + GRID {
+            continue;
+        }
+        let far = away(r.min[0], edge).max(away(r.max[0], edge));
+        if far > 0 {
+            reach = reach.max(far);
+        }
+    }
+    let x_sig = edge + side.step()[0] / GRID * (up_steps(reach) + 2) * GRID;
+    // Each row's first member across the page, its signal end at the
+    // column.
+    let mut placed: Vec<(usize, Place, Option<usize>, Nm)> = Vec::new();
+    for (k, list) in &bank.rows {
+        let r = idioms[list[0]].parts[0];
+        let net = block.parts[a].pins[*k].net;
+        let sig = pin_on(block, r, net);
+        let rail = block.parts[r].pins[1 - sig].net;
+        let y = shape.pins[*k].end[1];
+        let pl = put(
+            block,
+            r,
+            turn_for(block, r, sig, side.opposite()),
+            sig,
+            [x_sig, y],
+        );
+        placed.push((r, pl, rail, y));
+    }
+    let rails: BTreeSet<Option<usize>> = placed.iter().map(|x| x.2).collect();
+    // A row's other members, each standing towards its rail.
+    let hangs = |list: &[usize]| -> Vec<(usize, usize, Side)> {
+        list[1..]
+            .iter()
+            .map(|i| {
+                let q = idioms[*i].parts[0];
+                let ends = ends(block, q);
+                let sig = if kind_of(block, ends[0]) == Some(NetKind::Signal) {
+                    0
+                } else {
+                    1
+                };
+                let want = if kind_of(block, ends[1 - sig]) == Some(NetKind::Ground) {
+                    Side::Down
+                } else {
+                    Side::Up
+                };
+                (q, sig, want)
+            })
+            .collect()
+    };
+    let mut far: Option<Option<usize>> = None;
+    // Where the far rows' hanging members stand: past the near members'
+    // rooms, two steps out.
+    let mut hang_x: Nm = x_sig;
+    if rails.len() == 2 {
+        // How many of the other rail's rows lie inside each rail's span:
+        // the nearer bar is crossed by those.
+        let crossed = |rail: Option<usize>| {
+            let ys: Vec<Nm> = placed.iter().filter(|x| x.2 == rail).map(|x| x.3).collect();
+            let (t, b) = (*ys.iter().max().unwrap(), *ys.iter().min().unwrap());
+            placed
+                .iter()
+                .filter(|x| x.2 != rail && x.3 < t && x.3 > b)
+                .count()
+        };
+        let mut list: Vec<Option<usize>> = rails.iter().copied().collect();
+        // Fewer crossed rows nearer; ties to ground (pull-downs) nearer.
+        list.sort_by_key(|r| (crossed(*r), kind_of(block, *r) != Some(NetKind::Ground)));
+        let f = list[1];
+        far = Some(f);
+        // The far members stand one column further out: past the near
+        // members' rooms (their text beside them), what hangs off the far
+        // rows, and two steps.
+        let near_reach = placed
+            .iter()
+            .filter(|x| x.2 != f)
+            .map(|x| {
+                let r = Cluster::single(x.0, x.1).room(block, [0, 0]);
+                away(r.min[0], x_sig).max(away(r.max[0], x_sig))
+            })
+            .max()
+            .unwrap_or(0);
+        let near_col = (up_steps(near_reach) + 2) * GRID;
+        hang_x = x_sig + side.step()[0] / GRID * near_col;
+        let mut hung: Nm = 0;
+        for ((_, list), x) in bank.rows.iter().zip(&placed) {
+            if x.2 != f {
+                continue;
+            }
+            for (q, sig, want) in hangs(list) {
+                let pl = put(block, q, turn_for(block, q, 1 - sig, want), sig, [0, 0]);
+                let r = Cluster::single(q, pl).room(block, [0, 0]);
+                hung = hung.max(up_steps(r.max[0] - r.min[0]) + 2);
+            }
+        }
+        let by = (near_col + hung * GRID) * side.step()[0] / GRID;
+        for x in placed.iter_mut().filter(|x| x.2 == f) {
+            x.1 = Place::new([x.1.at[0] + by, x.1.at[1]], x.1.rotation, x.1.mirror);
+        }
+    }
+    let mut adds: Vec<(usize, Place)> = placed.iter().map(|x| (x.0, x.1)).collect();
+    // A row's other members hang off its wire towards their rail: a far
+    // row's between the near column and its far member, where no near
+    // row's wire runs; a near row's just short of the column.
+    for ((k, list), first) in bank.rows.iter().zip(&placed) {
+        let row = shape.pins[*k].end[1];
+        for (j, (q, sig, want)) in hangs(list).into_iter().enumerate() {
+            // Two steps off the row, so its wire drops into its pin.
+            let y = row + want.step()[1] / GRID * 2 * GRID;
+            let dx = side.step()[0] / GRID * 3 * j as Nm * GRID;
+            let at = if far == Some(first.2) {
+                let r = Cluster::single(
+                    q,
+                    put(block, q, turn_for(block, q, 1 - sig, want), sig, [0, 0]),
+                )
+                .room(block, [0, 0]);
+                let back = if side == Side::Left {
+                    r.max[0]
+                } else {
+                    -r.min[0]
+                };
+                [
+                    hang_x + side.step()[0] / GRID * up_steps(back) * GRID + dx,
+                    y,
+                ]
+            } else {
+                [x_sig - side.step()[0] / GRID * 2 * GRID - dx, y]
+            };
+            adds.push((q, put(block, q, turn_for(block, q, 1 - sig, want), sig, at)));
+        }
+    }
+    adds
 }
 
 /// Satellites hanging off a part's sideways pins stand in stairs: each
