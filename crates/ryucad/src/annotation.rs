@@ -1518,9 +1518,18 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(v["entity"]["origin"]["feature"], "lid");
-        // The working files have no lid: there the touch is outdated.
+        // The working files have no lid: there the touch is outdated. The
+        // proposal and the mark are made in one second and listed by time,
+        // then by their random IDs, so find the mark by its own ID.
+        let id = a["annotation"]["id"].clone();
         let e = list(&mut s, &[], None, None, false).unwrap();
-        assert_eq!(e["annotations"][0]["outdated"], true);
+        let mine = e["annotations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == id)
+            .unwrap();
+        assert_eq!(mine["outdated"], true);
     }
 
     #[test]
