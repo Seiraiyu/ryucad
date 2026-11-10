@@ -312,8 +312,11 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
                     return Err(rule(&id, "overlap", format!("{to} can't sit near itself")));
                 }
                 match target {
-                    // Several parts near a pin: one network off it.
-                    (p, Some(k)) if parts.len() >= 2 => r.networks.push((parts.clone(), (p, k))),
+                    // Several parts near a pin of a part of three pins or
+                    // more: one network off it.
+                    (p, Some(k)) if parts.len() >= 2 && block.parts[p].pins.len() >= 3 => {
+                        r.networks.push((parts.clone(), (p, k)))
+                    }
                     // A port's flag near a pin: on its row.
                     (p, Some(k))
                         if matches!(

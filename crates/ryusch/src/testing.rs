@@ -553,6 +553,68 @@ pub fn check_bytes(data: &[u8]) {
         };
         block.instructions.insert(format!("r{}", i + 1), ins);
     }
+    // Plan 2.B, from the bytes past the 80th: an op-amp stage, `text`,
+    // networks and ports near a pin, and the stage's amplifier turned.
+    let mut more = Bytes(data.get(80..).unwrap_or(&[]), 0);
+    if more.next() & 1 == 1 {
+        block = with_stage(block);
+    }
+    let keys: Vec<String> = block.parts.iter().map(|p| p.key.clone()).collect();
+    // A pin of a part of three pins or more: what a network stands off.
+    let wide: Vec<usize> = (0..block.parts.len())
+        .filter(|p| block.parts[*p].pins.len() >= 3)
+        .collect();
+    let pin_of = |b: &mut Bytes| -> Option<String> {
+        let part = &block.parts[*wide.get(b.next() % wide.len().max(1))?];
+        let pin = part.pins.get(b.next() % part.pins.len().max(1))?;
+        Some(format!("{}/{}", part.key, pin.number))
+    };
+    for i in 0..more.next() % 4 {
+        let ins = match more.next() % 3 {
+            0 => Instruction::Text {
+                parts: vec![keys[more.next() % keys.len()].clone()],
+                field: [
+                    crate::layout::TextField::Refdes,
+                    crate::layout::TextField::Value,
+                    crate::layout::TextField::Both,
+                ][more.next() % 3],
+                side: SIDES[more.next() % 4],
+            },
+            1 => {
+                // A network: two or three parts of two pins.
+                let two: Vec<&String> = block
+                    .parts
+                    .iter()
+                    .filter(|p| p.pins.len() == 2 && matches!(p.kind, PartKind::Symbol { .. }))
+                    .map(|p| &p.key)
+                    .collect();
+                if two.is_empty() {
+                    continue;
+                }
+                let mut parts = Vec::new();
+                for _ in 0..2 + more.next() % 2 {
+                    parts.push(two[more.next() % two.len()].clone());
+                }
+                parts.sort();
+                parts.dedup();
+                let Some(to) = pin_of(&mut more) else {
+                    continue;
+                };
+                Instruction::Near { parts, to }
+            }
+            _ => {
+                if block.part("ua").is_none() {
+                    continue;
+                }
+                Instruction::Orient {
+                    parts: vec!["ua".into()],
+                    rotation: [0, 180][more.next() % 2],
+                    mirror: more.next() % 2 == 1,
+                }
+            }
+        };
+        block.instructions.insert(format!("t{}", i + 1), ins);
+    }
     let out = match crate::engine::lay_out(&block) {
         Ok(o) => o,
         Err(r) => {

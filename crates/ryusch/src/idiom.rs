@@ -898,7 +898,16 @@ pub fn network_walk(
     parts: &[usize],
     (a, k): (usize, usize),
 ) -> (Vec<(usize, usize)>, Vec<usize>) {
-    let mut order: Vec<usize> = parts.to_vec();
+    // Two-pin symbols alone: anything else (an IC, a connector, a port)
+    // is moved near the pin by itself.
+    let mut order: Vec<usize> = parts
+        .iter()
+        .copied()
+        .filter(|q| {
+            block.parts[*q].pins.len() == 2
+                && matches!(block.parts[*q].kind, PartKind::Symbol { .. })
+        })
+        .collect();
     order.sort_by(|x, y| block.parts[*x].key.cmp(&block.parts[*y].key));
     let mut reached: Vec<(usize, usize)> = Vec::new();
     let mut nets: Vec<usize> = block.parts[a].pins[k].net.into_iter().collect();
@@ -923,10 +932,12 @@ pub fn network_walk(
             }
         }
     }
-    let rest = order
-        .into_iter()
+    let mut rest: Vec<usize> = parts
+        .iter()
+        .copied()
         .filter(|q| !reached.iter().any(|(x, _)| x == q))
         .collect();
+    rest.sort_by(|x, y| block.parts[*x].key.cmp(&block.parts[*y].key));
     (reached, rest)
 }
 

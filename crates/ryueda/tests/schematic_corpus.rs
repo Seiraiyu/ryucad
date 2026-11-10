@@ -563,6 +563,8 @@ fn pins_line_up_and_parts_shift() {
         let mut l = ryueda::schem::read_layout(&std::fs::read(f).unwrap(), "layout.json").unwrap();
         assert_eq!(l.format(), 3, "regions and fitted papers are format 3");
         l.regions.clear();
+        // What a lasting instruction moved stood (plan 2.B): format 3 too.
+        l.before.clear();
         for sheet in l.sheets.values_mut() {
             sheet.size = None;
         }
@@ -1837,5 +1839,74 @@ fn round_projects() {
             serde_json::to_string_pretty(&Value::Object(baseline)).unwrap() + "\n",
         )
         .unwrap();
+    }
+}
+
+/// Plan 2.B's asks on the corpus: a bank's pull revalued and a text
+/// asked onto a side change only that part; an edge released puts the
+/// part back where it stood; a network near a pin moves with its part.
+#[test]
+fn the_asks_change_only_what_they_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = circuit(dir.path(), "ethernet");
+    ryueda(&board, 1, &["layout"]);
+    let s = |x: &str| x.to_owned();
+    // A pull of the PHY's bank revalued: only it (and its text) moves.
+    let before = layout_of(&board, "eth");
+    ryueda(
+        &board,
+        1,
+        &["component", "edit", "eth/r41", "--value", "4.7k"],
+    );
+    let after = layout_of(&board, "eth");
+    unchanged(
+        &before,
+        &after,
+        &[s("r41")],
+        &nets_of(&board, "eth", "r41"),
+        "r41 revalued",
+    );
+    // Its text asked left: only its text moves.
+    let before = after;
+    ryueda(&board, 1, &["place", "eth", "text R26 both left"]);
+    let after = layout_of(&board, "eth");
+    assert_eq!(before["placed"], after["placed"], "text moves no part");
+    unchanged(&before, &after, &[s("r26")], &[], "text R26 both left");
+    // An edge released: R41 back where it stood.
+    let before = after;
+    ryueda(&board, 1, &["place", "eth", "edge R41 left"]);
+    let moved = layout_of(&board, "eth");
+    assert_ne!(
+        moved["placed"]["r41"], before["placed"]["r41"],
+        "the edge moves R41"
+    );
+    ryueda(&board, 1, &["place", "eth", "release R41"]);
+    let after = layout_of(&board, "eth");
+    assert_eq!(
+        after["placed"], before["placed"],
+        "released, R41 stands where it stood"
+    );
+    assert!(
+        after
+            .get("before")
+            .is_none_or(|b| b.as_object().is_none_or(|o| o.is_empty()))
+    );
+    // The buck's compensation network near COMP moves with U1.
+    let board = circuit(dir.path(), "buck");
+    ryueda(&board, 1, &["layout"]);
+    ryueda(&board, 1, &["place", "buck", "near C5 R1 C6 U1.COMP"]);
+    let first = layout_of(&board, "buck");
+    ryueda(&board, 1, &["place", "buck", "--move", "shift U1 down 4"]);
+    let second = layout_of(&board, "buck");
+    let rel = |l: &Value, k: &str| {
+        let (a, u) = (&l["placed"][k]["at"], &l["placed"]["u1"]["at"]);
+        [
+            a[0].as_i64().unwrap() - u[0].as_i64().unwrap(),
+            a[1].as_i64().unwrap() - u[1].as_i64().unwrap(),
+        ]
+    };
+    assert_ne!(first["placed"]["u1"], second["placed"]["u1"], "U1 moved");
+    for k in ["c5", "r1", "c6"] {
+        assert_eq!(rel(&first, k), rel(&second, k), "{k} moved with U1");
     }
 }

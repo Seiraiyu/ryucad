@@ -12,7 +12,7 @@
 use ryusch::engine::lay_out;
 use ryusch::input::{Block, Flow, NetKind};
 use ryusch::layout::{Instruction, Layout};
-use ryusch::testing::{resistor, seeded, with_stage};
+use ryusch::testing::{dense_block, resistor, seeded, with_stage};
 use std::collections::BTreeSet;
 
 /// What an edit may change: parts and nets by key.
@@ -421,6 +421,69 @@ fn edits_change_only_what_they_name() {
 #[test]
 fn one_seed_quickly() {
     every_edit(7, 3);
+}
+
+/// A dense part's bank (#429, plan 2.B) laid out over its own layout:
+/// each pull revalued, a pull added on an unpulled row and one deleted
+/// change only that part, its row's net, and the rails (whose bars and
+/// ports the comb draws), every hard rule holding.
+fn dense_edits(ports: bool) {
+    let b = dense_block(ports);
+    let name = if ports { "dense, ports" } else { "dense" };
+    for i in 1..=10 {
+        let key = format!("r{i}");
+        let mut e = b.clone();
+        let p = e.part(&key).unwrap();
+        e.parts[p].value = "4.7k".into();
+        let a = Allowed {
+            parts: [key.clone()].into(),
+            nets: nets_of(&b, &key),
+        };
+        check(&b, &mut e, a, &format!("{name}, {key} revalued"));
+    }
+    // A pull added on S10, which only the connector reaches.
+    {
+        let mut e = b.clone();
+        let s10 = e.net("s10").unwrap();
+        let v = e.net("rail:v").unwrap();
+        e.parts
+            .push(resistor("r11", "R11", "10k", [Some(s10), Some(v)]));
+        let a = Allowed {
+            parts: ["r11".to_owned()].into(),
+            nets: nets_of(&e, "r11"),
+        };
+        check(&b, &mut e, a, &format!("{name}, a pull added"));
+    }
+    // A pull deleted: its rail's bar may part, so the members beside it
+    // on that rail may take ports of their own, but stay where they are.
+    {
+        let mut e = b.clone();
+        let nets = nets_of(&b, "r5");
+        e.parts.retain(|p| p.key != "r5");
+        let beside = ["r4", "r6"];
+        let a = Allowed {
+            parts: ["r5"]
+                .into_iter()
+                .chain(beside)
+                .map(str::to_owned)
+                .collect(),
+            nets,
+        };
+        check(&b, &mut e, a, &format!("{name}, a pull deleted"));
+        let before = lay_out(&b).unwrap().layout;
+        e.previous = Some(before.clone());
+        let after = lay_out(&e).unwrap().layout;
+        for k in beside {
+            assert_eq!(before.placed[k], after.placed[k], "{name}: {k} moved");
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
+fn a_banks_edits_change_only_what_they_name() {
+    dense_edits(false);
+    dense_edits(true);
 }
 
 /// A seeded block with an op-amp stage whose output is an out port: laid
