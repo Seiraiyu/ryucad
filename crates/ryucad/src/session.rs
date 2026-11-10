@@ -1480,6 +1480,50 @@ impl Session {
         None
     }
 
+    /// What the session knows of `name`, an entity `solid` of `part` no
+    /// longer has as the part shows it: what it was (`was`), the feature
+    /// that took it away (`removed_by`), and the names it became through
+    /// the solid's journals (`candidates`, bare): what a drawing says of
+    /// an annotation's entity that is gone (plan 9.C).
+    pub fn explain_gone(
+        &self,
+        part: &Id,
+        solid: &Id,
+        name: &str,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        let mut out = serde_json::Map::new();
+        let Some(n) = crate::doc::reference::parse_name(name) else {
+            return out;
+        };
+        if let Some(w) = self
+            .known
+            .get(&(part.clone(), solid.clone()))
+            .and_then(|k| k.get(&n))
+        {
+            out.insert("was".into(), w.to_json());
+        }
+        if let Some(by) = self.removed_from(part, solid, name) {
+            out.insert("removed_by".into(), serde_json::json!(by));
+        }
+        let Some(p) = self.project.parts.get(part) else {
+            return out;
+        };
+        let order = p.order().to_vec();
+        if let Some(tip) = crate::solid::Solids::of_order(p, &order)
+            .chain(solid)
+            .and_then(|c| c.last().cloned())
+        {
+            let c = self.candidates(part, &order, solid, n, &tip);
+            if !c.is_empty() {
+                out.insert(
+                    "candidates".into(),
+                    serde_json::json!(c.iter().map(ToString::to_string).collect::<Vec<_>>()),
+                );
+            }
+        }
+        out
+    }
+
     /// The feature of `solid`'s whole chain that left it without the
     /// entity `name` after the feature before it had it, or the feature
     /// that made it (as this session last saw the name) when its own
