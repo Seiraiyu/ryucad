@@ -604,6 +604,71 @@ pub fn check(p: &Prim) -> Summary {
                 authored == 0 || authored == n,
                 "face {f} loop {i}: some UV curves, not all"
             );
+            // SMLib rebuilds an analytic face's curves from its edges
+            // inside one period: a loop whose edges sweep a whole turn
+            // about the surface's axis (or a torus's tube) must hold its
+            // seam, an edge it uses twice (#620: race body 1318's
+            // cylinder, one loop touching itself, written with no seam).
+            let angles: Vec<Box<dyn Fn(P3) -> Option<f64>>> = match sh {
+                Shape3::Cylinder(o, z, x, _)
+                | Shape3::Cone(o, z, x, _, _)
+                | Shape3::Sphere(o, z, x, _)
+                | Shape3::Torus(o, z, x, _, _) => {
+                    let (o, z, x) = (*o, *z, *x);
+                    let y = cross(z, x);
+                    let dot = |a: P3, b: P3| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+                    let mut out: Vec<Box<dyn Fn(P3) -> Option<f64>>> =
+                        vec![Box::new(move |p: P3| {
+                            let d = [p[0] - o[0], p[1] - o[1], p[2] - o[2]];
+                            let (a, b) = (dot(d, x), dot(d, y));
+                            // On the axis (a pole, an apex) the angle is any.
+                            let r = math::sqrt(a * a + b * b);
+                            (r > 1e-9 * (1.0 + dist(p, o))).then(|| math::atan2(b, a))
+                        })];
+                    if let Shape3::Torus(_, _, _, big, _) = sh {
+                        let big = *big;
+                        out.push(Box::new(move |p: P3| {
+                            let d = [p[0] - o[0], p[1] - o[1], p[2] - o[2]];
+                            let (a, b, h) = (dot(d, x), dot(d, y), dot(d, z));
+                            Some(math::atan2(h, math::sqrt(a * a + b * b) - big))
+                        }));
+                    }
+                    out
+                }
+                _ => vec![],
+            };
+            let edges: Vec<usize> = uses.iter().map(|&u| eu_edges[u]).collect();
+            let seamed = (0..n).any(|a| (a + 1..n).any(|b| edges[a] == edges[b]));
+            for angle in &angles {
+                let mut at: Option<f64> = None;
+                let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+                let mut on_axis = false;
+                for &u in &uses {
+                    let e = eu_edges[u];
+                    let [t0, t1] = [eranges[2 * e], eranges[2 * e + 1]];
+                    for m in 0..=64 {
+                        let s = m as f64 / 64.0;
+                        let s = if eu_types[u] == "same" { s } else { 1.0 - s };
+                        let Some(a) = angle(lines[e].point(t0 + (t1 - t0) * s)) else {
+                            on_axis = true;
+                            continue;
+                        };
+                        let a = match at {
+                            Some(prev) => {
+                                let tau = 2.0 * std::f64::consts::PI;
+                                a + ((prev - a) / tau).round() * tau
+                            }
+                            None => a,
+                        };
+                        (lo, hi) = (lo.min(a), hi.max(a));
+                        at = Some(a);
+                    }
+                }
+                assert!(
+                    on_axis || seamed || hi - lo < 2.0 * std::f64::consts::PI - 1e-6,
+                    "face {f} loop {i}: a whole turn round with no seam"
+                );
+            }
             if authored == 0 {
                 uvless += 1;
             } else {
@@ -655,6 +720,21 @@ pub fn check(p: &Prim) -> Summary {
                         .windows(2)
                         .map(|w| dist(w[0], w[1]))
                         .fold(0.0, f64::max);
+                    // Inside the range all along, sampled at every
+                    // control point's worth: a hole crossing a seam may
+                    // dip past the range for a stretch 16 samples miss
+                    // (#620: race body 469).
+                    let dense = 16.max(4 * uvs[u].as_ref().unwrap().0.len());
+                    for m in 0..=dense {
+                        let q = uv(u, d0 + (d1 - d0) * m as f64 / dense as f64);
+                        for k in 0..2 {
+                            let slack = 1e-9 * (1.0 + hi[k].abs() + lo[k].abs());
+                            assert!(
+                                q[k] >= lo[k] - slack && q[k] <= hi[k] + slack,
+                                "face {f}: UV curve {u} leaves the range: {q:?} {lo:?} {hi:?}"
+                            );
+                        }
+                    }
                     let mut prev = a0;
                     for m in 1..=16 {
                         let q = uv(u, d0 + (d1 - d0) * m as f64 / 16.0);
@@ -704,6 +784,27 @@ pub fn check(p: &Prim) -> Summary {
             _ => true,
         };
         assert!(ok, "face {f}'s range {lo:?} {hi:?}");
+        // No angle's span over a turn in SMLib's degrees, each end turned
+        // on its own and snapped to a quarter turn within 1e-9: its
+        // revolved surfaces' circles refuse a span over 360 (#620).
+        let deg = |x: f64| {
+            let d = x * (180.0 / std::f64::consts::PI);
+            (-4..=4)
+                .map(|q| 90.0 * f64::from(q))
+                .find(|b| (d - b).abs() <= 1e-9)
+                .unwrap_or(d)
+        };
+        let angles: &[usize] = match stypes[f].as_str() {
+            "BrepSurfaceCylinderAPI" | "BrepSurfaceConeAPI" => &[0],
+            "BrepSurfaceSphereAPI" | "BrepSurfaceTorusAPI" => &[0, 1],
+            _ => &[],
+        };
+        for &j in angles {
+            assert!(
+                deg(hi[j]) - deg(lo[j]) <= 360.0,
+                "face {f}'s range {lo:?} {hi:?} spans over 360 degrees in SMLib's"
+            );
+        }
         // Each periodic direction's band starts in its first turn: SMLib
         // frees an array twice rebuilding a torus over a band from 2π.
         let first = |x: f64| (-1e-9..turn - 1e-6).contains(&x);

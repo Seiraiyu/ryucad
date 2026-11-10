@@ -63,7 +63,7 @@ use ryukei::geom::{
     Box3, Curve, Curve2, Direction, KnotVector, NurbsCurve2, NurbsSurface, Point2, Point3, Reparam,
     Surface,
 };
-use ryukei::heal::{Loop, Origins, Shape, Use, seamed_with_origins};
+use ryukei::heal::{Loop, Origins, Shape, Use, seamed_with_origins_unpinched};
 use ryukei::name::Name;
 use ryukei::tol::LINEAR_RESOLUTION;
 use ryukei::topo::{Body, FaceId, Sense};
@@ -180,19 +180,20 @@ pub fn brep_array(
     unit: Unit,
     pipe_tolerance: f64,
 ) -> Result<Prim, BrepError> {
-    let (shape, origins) = seamed_with_origins(body, pipe_tolerance).map_err(|e| match e {
-        Error::InvalidHeal(HealError::BadDomain { face }) => BrepError {
-            face,
-            reason: "seams",
-        },
-        _ => BrepError {
-            face: face_order(body)
-                .first()
-                .and_then(|&f| body.face(f))
-                .map_or(Name::from_u128(0), |f| f.name),
-            reason: "approximation",
-        },
-    })?;
+    let (shape, origins) =
+        seamed_with_origins_unpinched(body, pipe_tolerance).map_err(|e| match e {
+            Error::InvalidHeal(HealError::BadDomain { face }) => BrepError {
+                face,
+                reason: "seams",
+            },
+            _ => BrepError {
+                face: face_order(body)
+                    .first()
+                    .and_then(|&f| body.face(f))
+                    .map_or(Name::from_u128(0), |f| f.name),
+                reason: "approximation",
+            },
+        })?;
     let cx = Cx {
         body,
         shape: &shape,
@@ -357,7 +358,14 @@ fn face(cx: &Cx, k: usize) -> Result<FaceOut, BrepError> {
         }
         s => Geometry::Analytic(s.clone()),
     };
-    let range = range(&loops, &geometry.surface());
+    let mut range = range(&loops, &geometry.surface());
+    if let Geometry::Analytic(s) = &geometry {
+        for (j, angular) in angular(s).into_iter().enumerate() {
+            if angular {
+                range[j] = within_a_turn(range[j]);
+            }
+        }
+    }
     Ok(FaceOut {
         name: face_name(cx, k),
         geometry,
@@ -875,6 +883,44 @@ fn range(loops: &[LoopOut], surface: &Surface) -> [[f64; 2]; 2] {
         }
     }
     r
+}
+
+/// Which of an analytic surface's parameters are angles, which SMLib
+/// reads in degrees.
+fn angular(s: &Surface) -> [bool; 2] {
+    match s {
+        Surface::Cylinder(_) | Surface::Cone(_) => [true, false],
+        Surface::Sphere(_) | Surface::Torus(_) => [true, true],
+        _ => [false, false],
+    }
+}
+
+/// An angle as SMLib reads `face:range`: in degrees, by one
+/// multiplication, snapped to a quarter turn within a billionth of a
+/// degree (usd-brep's `UsdRadiansToSMLibDegrees`).
+fn smlib_degrees(radians: f64) -> f64 {
+    let d = radians * (180.0 / std::f64::consts::PI);
+    (-4..=4)
+        .map(|q| 90.0 * f64::from(q))
+        .find(|b| (d - b).abs() <= 1e-9)
+        .unwrap_or(d)
+}
+
+/// An angular range whose span in SMLib's degrees is no more than 360:
+/// SMLib converts each end on its own, so a whole turn starting away
+/// from a quarter turn can come out a rounding error over 360 degrees,
+/// and its revolved surface's circles refuse a span over a turn (#620:
+/// `AdjustSTEPUVDomain` failed on 15 race bodies). The end comes down
+/// by ulps until it isn't, never more than a few.
+fn within_a_turn([lo, hi]: [f64; 2]) -> [f64; 2] {
+    let mut hi = hi;
+    for _ in 0..64 {
+        if smlib_degrees(hi) - smlib_degrees(lo) <= 360.0 {
+            break;
+        }
+        hi = hi.next_down();
+    }
+    [lo, hi]
 }
 
 /// Whether a face's only loop is four lines along its parameters around
@@ -1560,5 +1606,23 @@ mod tests {
         let p = part.degree();
         assert!(part.knots().mults().iter().all(|&m| m <= p + 1));
         assert_eq!(snapped(&n, [1.0, 2.0]), [1.0, 2.0]);
+    }
+
+    /// A whole turn from 282.93 degrees (race body 229's sphere) comes out
+    /// 360.00000000000006 in SMLib's degrees, which its circles refuse
+    /// (#620): its end comes down an ulp; one from a quarter turn, or a
+    /// half turn short, is left as it is.
+    #[test]
+    fn a_whole_turn_spans_no_more_than_360_degrees_in_smlibs() {
+        let (lo, hi) = (4.938014316047276, 11.221199623226862);
+        assert!(smlib_degrees(hi) - smlib_degrees(lo) > 360.0);
+        let [a, b] = within_a_turn([lo, hi]);
+        assert_eq!(a, lo);
+        assert!(b < hi && hi - b <= 4.0 * f64::EPSILON * hi);
+        assert!(smlib_degrees(b) - smlib_degrees(a) <= 360.0);
+        let pi = std::f64::consts::PI;
+        assert_eq!(within_a_turn([pi, 3.0 * pi]), [pi, 3.0 * pi]);
+        assert_eq!(within_a_turn([0.5, 3.0]), [0.5, 3.0]);
+        assert_eq!(smlib_degrees(pi / 2.0 + 1e-13), 90.0);
     }
 }

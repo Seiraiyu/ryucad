@@ -281,6 +281,43 @@ fn race_bodies_469_are_sound() {
     check(&p);
 }
 
+/// Race bodies SMLib wouldn't import or measured wrongly (issue #620),
+/// each now passing the checks that would have caught it: fifteen faces
+/// a whole turn round starting away from a quarter turn, whose ranges
+/// came out a rounding error over 360 degrees in SMLib's degrees (race
+/// bodies 155, 200, 229, 272, 380, 427, 467, 481, 536, 539, 755, 1008,
+/// 1265, 1372 and 1564); race body 1318's cylinder, one loop touching
+/// itself at a vertex and covering the whole turn with no seam, now cut
+/// there and seamed; and race body 469's torus, whose seam crossed a
+/// hole that dipped past it between `heal::seamed`'s samples. Release
+/// only: blends take seconds each in a debug build.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "a minute in a debug build: CI runs it in release"
+)]
+fn race_bodies_620_are_sound() {
+    use ryukei_testkit::race::{blend_body, boolean_body};
+    let blends = [87, 259];
+    let booleans = [
+        113, 128, 151, 209, 233, 258, 267, 298, 299, 421, 562, 701, 731, 763, 881,
+    ];
+    let bodies = blends
+        .iter()
+        .map(|&k| (format!("blend {k}"), blend_body(k)))
+        .chain(
+            booleans
+                .iter()
+                .map(|&k| (format!("boolean {k}"), boolean_body(k))),
+        );
+    for (what, b) in bodies {
+        let b = b.expect("it builds");
+        let p = brep_array(&b, "brep", Unit::Millimeter, 1e-7)
+            .unwrap_or_else(|e| panic!("{what}: {e}"));
+        check(&p);
+    }
+}
+
 /// Every race body (`race::writable(1600)`) is written as a BrepArray
 /// that passes the schema's checks, or refused where `REFUSED` lists it (none).
 /// Release only (minutes even there): its own step in `full.yml`.
