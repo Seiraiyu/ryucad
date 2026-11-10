@@ -284,6 +284,8 @@ pub struct Occurrence {
     pub path: String,
     pub part: String,
     pub solids: Vec<(String, String)>,
+    /// Those of its solids that are sheets (ryucad 18), by founder.
+    pub sheets: Vec<String>,
     pub origin: [f64; 3],
     pub z: [f64; 3],
     pub x: [f64; 3],
@@ -309,6 +311,12 @@ pub struct Solid {
     pub hash: Option<String>,
     /// Why its last feature failed: it shows as the last that built.
     pub error: Option<Value>,
+    /// Whether its body is a sheet (ryucad 18): drawn two-sided, never
+    /// capped, its back faces picked.
+    pub sheet: bool,
+    /// A sheet's boundaries (rings of laminar edges; none: closed), when
+    /// its report says; an occurrence's sheet doesn't.
+    pub boundaries: Option<u64>,
 }
 
 impl Solid {
@@ -364,6 +372,13 @@ impl Occurrence {
                 .into_iter()
                 .flatten()
                 .map(|s| (text(&s["solid"]), text(&s["hash"])))
+                .collect(),
+            sheets: v["solids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|s| s["kind"] == "sheet")
+                .map(|s| text(&s["solid"]))
                 .collect(),
             origin: triple(&v["pose"]["origin_m"]),
             z: triple(&v["pose"]["z"]),
@@ -460,6 +475,8 @@ impl Part {
                 features: texts(&s["features"]),
                 hash: s["hash"].as_str().map(str::to_owned),
                 error: (s["ok"] == false).then(|| s["error"].clone()),
+                sheet: s["kind"] == "sheet",
+                boundaries: s["boundaries"].as_u64(),
             })
             .collect();
         let assembly = v["kind"] == "assembly";
@@ -488,6 +505,8 @@ impl Part {
                         features: vec![top.clone()],
                         hash: Some(h.clone()),
                         error: None,
+                        sheet: o.sheets.contains(s),
+                        boundaries: None,
                     })
                 })
                 .collect(),
@@ -1381,6 +1400,15 @@ impl Model {
         self.shown_meshes(false)
     }
 
+    /// Whether `key`'s body is a sheet (ryucad 18): a part's solid its
+    /// report says is, or an occurrence's its assembly's report says is.
+    pub fn is_sheet(&self, key: &BodyKey) -> bool {
+        self.parts
+            .get(&key.0)
+            .and_then(|p| p.solid(&key.1))
+            .is_some_and(|s| s.sheet)
+    }
+
     /// The meshes of the parts the window shows that it hides: what
     /// Shift+Tab may show again.
     pub fn hidden_drawn(&self) -> impl Iterator<Item = (&BodyKey, &Arc<WireBody>, Pose)> {
@@ -1918,6 +1946,36 @@ mod tests {
                     "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}},
                    {"path": "b2", "part": "bolt", "solids": [{"solid": "s", "hash": "1"}],
                     "pose": {"origin_m": [1, 0, 0], "z": [0, 0, 1], "x": [0, 1, 0]}}]})
+    }
+
+    #[test]
+    fn sheets_are_known_in_parts_and_occurrences() {
+        let mut m = Model::default();
+        m.apply_part(&json!({"part": "skin", "revision": "r", "features": [
+            {"id": "w", "type": "extrude", "ok": true, "hash": "h", "solids": ["w"]},
+            {"id": "b", "type": "box", "ok": true, "hash": "k", "solids": ["b"]}],
+            "solids": [
+                {"solid": "w", "ok": true, "features": ["w"], "hash": "h",
+                 "kind": "sheet", "boundaries": 1, "closed": false},
+                {"solid": "b", "ok": true, "features": ["b"], "hash": "k", "kind": "solid"}]}));
+        let skin = &m.parts["skin"];
+        assert_eq!(
+            (
+                skin.solid("w").unwrap().sheet,
+                skin.solid("w").unwrap().boundaries
+            ),
+            (true, Some(1))
+        );
+        assert!(!skin.solid("b").unwrap().sheet);
+        assert!(m.is_sheet(&("skin".into(), "w".into())));
+        assert!(!m.is_sheet(&("skin".into(), "b".into())));
+        // An assembly's occurrence of it: its sheet says so, by path.
+        let mut v = assembly();
+        v["occurrences"][0]["solids"] = json!([{"solid": "w", "hash": "h", "kind": "sheet"}]);
+        m.apply_part(&v);
+        assert!(m.is_sheet(&("frame".into(), "b1/w".into())));
+        assert!(!m.is_sheet(&("frame".into(), "b2/s".into())));
+        assert!(!m.is_sheet(&("nowhere".into(), "w".into())));
     }
 
     #[test]
