@@ -578,8 +578,11 @@ fn a_chosen_draft_looks_as_it_did() {
     let picker = Picker::new(&ws.model);
     let (lo, hi) = picker.bounds().unwrap();
     let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let d = [0, 1, 2].map(|k| hi[k] - lo[k]);
+    let diagonal = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
     let camera = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
-    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.015);
+    // The depth range round the whole box: its bounding sphere.
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, diagonal / 2.0);
     let mut scene = Scene::new(&device, &adapter);
     scene.sync(&device, &ws.model, centre);
     let c = scene::linear(style::CHOSEN);
@@ -603,9 +606,8 @@ fn a_chosen_draft_looks_as_it_did() {
     let size = [f64::from(W), f64::from(H)];
     let mark = t.neutral_mark("p", "d", Some((lo, hi))).unwrap();
     let (mut overlay, glass) = ryucad_app::core::bodies::plane_overlay(&mark, &pr, size, 1.0);
-    let d = [0, 1, 2].map(|k| hi[k] - lo[k]);
-    let length = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() / 5.0;
-    let arrow = ryucad_app::core::tweaks::arrow(t.neutral.unwrap().origin, t.pull.unwrap(), length);
+    let arrow =
+        ryucad_app::core::tweaks::arrow(t.neutral.unwrap().origin, t.pull.unwrap(), diagonal / 5.0);
     overlay.extend(ryucad_app::core::tweaks::lines_overlay(
         &arrow,
         ryucad::render::DATUM,
