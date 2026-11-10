@@ -19,12 +19,13 @@ use std::collections::BTreeMap;
 /// A block's layout file, in its folder.
 pub const LAYOUT: &str = "layout.json";
 pub const LAYOUT_KIND: &str = "ryueda.layout";
-/// The newest layout format this build reads: 3 holds regions, with each
+/// The newest layout format this build reads: 4 holds off-sheet
+/// connectors, drawn buses and notes (plan 2.C); 3 holds regions, with each
 /// region's parts placed relative to its origin, sheets' own papers and
 /// the region and paper instructions (plan 2.A); 2 a lasting pin-level
 /// `align` (plan 1.D); every other layout is written at 1. A layout of
 /// format 1 or 2 reads as one with no regions, at the project's paper.
-pub const LAYOUT_FORMAT: u64 = 3;
+pub const LAYOUT_FORMAT: u64 = 4;
 /// What the PDF's border takes on every side of the paper.
 pub const BORDER: Nm = 10_000_000;
 

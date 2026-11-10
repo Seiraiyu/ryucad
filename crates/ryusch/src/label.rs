@@ -8,6 +8,9 @@ use crate::font::{self, Anchor, SIZE};
 use crate::geom::{GRID, Nm, Point, Rect, Side};
 use crate::layout::LabelKind;
 
+/// The size of the text inside an off-sheet connector.
+pub const FLAG_TEXT: Nm = SIZE * 4 / 5;
+
 /// A label drawn: its lines, its text and the box it all takes (apart
 /// from its anchor's own node, which its pin or stub holds).
 pub struct Drawn {
@@ -146,6 +149,38 @@ pub fn drawn(kind: LabelKind, name: &str, at: Point, side: Side) -> Drawn {
                 bounds: wire.union(tb),
             }
         }
+        LabelKind::OffSheet => {
+            // Along the way it points from its anchor: a point (half a
+            // step), the name's body, a point, then a second chevron half
+            // a step on. Which end carries the second chevron is the
+            // drawing's (`drawn_flow`); the box is the same.
+            let tw = font::width(name, FLAG_TEXT);
+            let h = GRID / 2;
+            let body = tw + GRID; // half a step of room each side of the name
+            let tip = GRID / 2 + body + GRID / 2;
+            let outline = vec![
+                a([0, 0]),
+                a([h, GRID / 2]),
+                a([h, GRID / 2 + body]),
+                a([0, tip]),
+                a([-h, GRID / 2 + body]),
+                a([-h, GRID / 2]),
+                a([0, 0]),
+            ];
+            let chevron = vec![a([h, tip]), a([0, tip + GRID / 2]), a([-h, tip])];
+            let (base, anchor) = match side {
+                Side::Right => ([at[0] + GRID, at[1] - FLAG_TEXT / 3], Anchor::Start),
+                Side::Left => ([at[0] - GRID, at[1] - FLAG_TEXT / 3], Anchor::End),
+                // Never drawn up or down (`upright`); kept total.
+                Side::Up | Side::Down => ([at[0], at[1]], Anchor::Middle),
+            };
+            let bounds = Rect::of([a([-h, 0]), a([h, tip + GRID / 2])]).expect("points");
+            Drawn {
+                lines: vec![outline, chevron],
+                text: Some((base, anchor, false)),
+                bounds,
+            }
+        }
     }
 }
 
@@ -162,8 +197,8 @@ pub fn pointing(kind: LabelKind, side: Side) -> Side {
     match kind {
         LabelKind::Power => Side::Up,
         LabelKind::Ground => Side::Down,
-        LabelKind::Net if side.horizontal() => side,
-        LabelKind::Net => Side::Right,
+        LabelKind::Net | LabelKind::OffSheet if side.horizontal() => side,
+        LabelKind::Net | LabelKind::OffSheet => Side::Right,
     }
 }
 
@@ -173,7 +208,7 @@ pub fn upright(kind: LabelKind, to: Side) -> bool {
     match kind {
         LabelKind::Power => to == Side::Up,
         LabelKind::Ground => to == Side::Down,
-        LabelKind::Net => to.horizontal(),
+        LabelKind::Net | LabelKind::OffSheet => to.horizontal(),
     }
 }
 
@@ -329,5 +364,40 @@ mod tests {
         assert!(!vertical && base[1] > 0);
         let p = label_box(LabelKind::Power, "3V3", [0, 0], Side::Right);
         assert!(p.min[0] > 0);
+    }
+
+    #[test]
+    fn an_off_sheet_connector_is_an_outlined_chevron_whose_box_is_its_own() {
+        let at = [10 * GRID, 10 * GRID];
+        let name = "SDA";
+        let w = font::width(name, FLAG_TEXT);
+        for side in [Side::Right, Side::Left] {
+            let d = drawn(LabelKind::OffSheet, name, at, side);
+            // Its outline is closed and holds its text.
+            let outline = &d.lines[0];
+            assert_eq!(outline.first(), outline.last(), "{side:?}: closed");
+            let b = label_box(LabelKind::OffSheet, name, at, side);
+            assert_eq!(
+                b.width(),
+                w + 3 * GRID / 2 + GRID,
+                "{side:?}: long as its name and its points"
+            );
+            assert_eq!(b.height(), GRID, "{side:?}: half a step each way");
+            // It starts at its anchor and runs the way it points.
+            if side == Side::Right {
+                assert_eq!(b.min[0], at[0]);
+            } else {
+                assert_eq!(b.max[0], at[0]);
+            }
+        }
+        // It reads across the page from any pin, as a net label does.
+        assert_eq!(pointing(LabelKind::OffSheet, Side::Up), Side::Right);
+        assert!(upright(LabelKind::OffSheet, Side::Left));
+        assert!(!upright(LabelKind::OffSheet, Side::Up));
+        // Not the net label's box: a different outline takes a different place.
+        assert_ne!(
+            label_box(LabelKind::OffSheet, name, at, Side::Right),
+            label_box(LabelKind::Net, name, at, Side::Right)
+        );
     }
 }

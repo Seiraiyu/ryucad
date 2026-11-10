@@ -136,6 +136,18 @@ pub enum LabelKind {
     Power,
     /// Ground: the ground symbol, pointing down.
     Ground,
+    /// An off-sheet connector: an outlined double chevron holding the
+    /// net's name, for a net that continues on another sheet of the
+    /// block (format 4). Last, so the kinds before it keep their order.
+    OffSheet,
+}
+
+impl LabelKind {
+    /// Whether it names a signal net (a net label or an off-sheet
+    /// connector), not a rail.
+    pub fn signal(self) -> bool {
+        matches!(self, LabelKind::Net | LabelKind::OffSheet)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,10 +418,19 @@ impl Layout {
             .any(|i| matches!(i, Instruction::Align { parts, .. } if parts.iter().any(|p| p.contains('/'))))
     }
 
-    /// The lowest layout format that holds it: 3 for regions, a sheet's
-    /// own paper or an instruction format 3 brings; 2 for a lasting
-    /// pin-level `align`; else 1.
+    /// The lowest layout format that holds it: 4 for an off-sheet
+    /// connector, a drawn bus, a note or an instruction format 4 brings
+    /// (plan 2.C); 3 for regions, a sheet's own paper or an instruction
+    /// format 3 brings; 2 for a lasting pin-level `align`; else 1.
     pub fn format(&self) -> u64 {
+        let four = self
+            .labels
+            .values()
+            .flatten()
+            .any(|l| l.kind == LabelKind::OffSheet);
+        if four {
+            return 4;
+        }
         let three = !self.regions.is_empty()
             || !self.before.is_empty()
             || self
@@ -634,5 +655,28 @@ mod tests {
             serde_json::to_value(&l).unwrap(),
             json!({"placed": {"r1": {"sheet": "s1", "at": [0, 0]}}})
         );
+    }
+
+    #[test]
+    fn an_off_sheet_connector_makes_a_layout_format_4_and_reads_back() {
+        let mut l = Layout::default();
+        l.sheets
+            .insert("s1".into(), Sheet::new("Sheet 1".into(), [0, 0]));
+        assert_eq!(l.format(), 1);
+        l.labels.insert(
+            "n1".into(),
+            vec![Label {
+                sheet: "s1".into(),
+                at: [0, 0],
+                side: Side::Right,
+                kind: LabelKind::OffSheet,
+                on: "u1/3".into(),
+                text: "SDA".into(),
+            }],
+        );
+        assert_eq!(l.format(), 4);
+        let json = serde_json::to_value(&l).unwrap();
+        assert_eq!(json["labels"]["n1"][0]["kind"], "off_sheet");
+        assert_eq!(serde_json::from_value::<Layout>(json).unwrap(), l);
     }
 }

@@ -814,7 +814,9 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 let (code, what) = match l.kind {
                     LabelKind::Power if l.side != Side::Up => ("sch_power_sideways", "supply"),
                     LabelKind::Ground if l.side != Side::Down => ("sch_ground_sideways", "ground"),
-                    LabelKind::Net if !l.side.horizontal() => ("sch_label_vertical", "label"),
+                    LabelKind::Net | LabelKind::OffSheet if !l.side.horizontal() => {
+                        ("sch_label_vertical", "label")
+                    }
                     _ => continue,
                 };
                 found.push(f(

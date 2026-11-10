@@ -3720,14 +3720,14 @@ fn place_labels(
         // each turns off its pin clear of those placed before it.
         let y = st.shape(p).expect("placed").pins[k].end[1];
         let height = match kind {
-            LabelKind::Net => 0,
+            LabelKind::Net | LabelKind::OffSheet => 0,
             LabelKind::Ground => y,
             LabelKind::Power => -y,
         };
         // A part with more pins labels first, so a small part beside it
         // joins its label by a short wire rather than the reverse.
         let pins = std::cmp::Reverse(block.parts[p].pins.len());
-        order.push((rank, kind != LabelKind::Net, height, pins, i));
+        order.push((rank, !kind.signal(), height, pins, i));
     }
     order.sort();
     let mut order: Vec<usize> = order.into_iter().map(|(_, _, _, _, i)| i).collect();

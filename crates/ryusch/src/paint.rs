@@ -210,9 +210,14 @@ pub fn name_box(name: &str, at: &crate::shape::PinAt) -> Rect {
 /// A label's lines and text.
 fn label_items(items: &mut Vec<Item>, kind: LabelKind, name: &str, at: Point, side: Side) {
     let d = label::drawn(kind, name, at, side);
-    let colour = if kind == LabelKind::Net { LABEL } else { POWER };
-    // A net label's line is the wire it names.
-    let ink = if kind == LabelKind::Net { WIRE } else { POWER };
+    let colour = if kind.signal() { LABEL } else { POWER };
+    // A net label's line is the wire it names; a connector's outline is
+    // its own.
+    let ink = match kind {
+        LabelKind::Net => WIRE,
+        LabelKind::OffSheet => LABEL,
+        _ => POWER,
+    };
     for l in &d.lines {
         line(items, l.clone(), ink);
     }
@@ -220,7 +225,11 @@ fn label_items(items: &mut Vec<Item>, kind: LabelKind, name: &str, at: Point, si
         items.push(Item::Text {
             text: name.to_owned(),
             at: p,
-            size: SIZE,
+            size: if kind == LabelKind::OffSheet {
+                label::FLAG_TEXT
+            } else {
+                SIZE
+            },
             anchor,
             vertical,
             colour,
