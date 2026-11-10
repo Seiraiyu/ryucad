@@ -5,9 +5,6 @@
 //! and its faces, edges and vertices given back the names of those they
 //! stand in place of.
 
-// Taken out in Task 11, once every function here is used.
-#![allow(dead_code, unused_imports)]
-
 use super::recognise::{self, size};
 use super::{DeleteBlends, RecogniseOptions, Recognised, Recognition};
 use crate::blend::{BlendKind, Chamfer, EdgeBlend};
@@ -803,4 +800,93 @@ pub(crate) fn resize(
         Ok((b.clone(), Journal::new(), ()))
     })?;
     Ok((out, j))
+}
+
+/// Whether a tweak's refusal is one a blend in the way may cause.
+pub(crate) fn breaks(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::InvalidTweak(
+            TweakError::TangencyBroken { .. }
+                | TweakError::EdgeVanishes { .. }
+                | TweakError::VertexSplits { .. }
+                | TweakError::FaceCollapses { .. }
+                | TweakError::SelfIntersecting { .. }
+                | TweakError::GapNotHealed { .. }
+                | TweakError::HealAmbiguous { .. }
+                | TweakError::RegionTooSmall { .. }
+        )
+    )
+}
+
+/// The faces round the entity a tweak's refusal names.
+fn blamed(body: &Body, e: &Error) -> BTreeSet<Name> {
+    let Error::InvalidTweak(t) = e else {
+        return BTreeSet::new();
+    };
+    let name = match t {
+        TweakError::TangencyBroken { edge } | TweakError::EdgeVanishes { edge } => *edge,
+        TweakError::VertexSplits { vertex } => *vertex,
+        TweakError::FaceCollapses { face }
+        | TweakError::GapNotHealed { face }
+        | TweakError::HealAmbiguous { face }
+        | TweakError::RegionTooSmall { face } => *face,
+        TweakError::SelfIntersecting { faces } => return faces.iter().copied().collect(),
+        _ => return BTreeSet::new(),
+    };
+    match body.by_name(name) {
+        Some(EntityId::Face(_)) => BTreeSet::from([name]),
+        Some(x) => faces_at(body, x),
+        None => BTreeSet::new(),
+    }
+}
+
+/// The tweak `run` made over the blends in its way: those standing on
+/// `faces` or on a face next to one (a hole's wall moved into a fillet's
+/// strip stands on the fillet's support), and those holding or standing
+/// on the faces round what the tweak's own refusal `refused` names. `None` where no blend is in
+/// the way (the tweak's own refusal stands), or where the faces it names
+/// are themselves blends' faces.
+pub(crate) fn rebuild<X>(
+    key: OpKey,
+    body: &Body,
+    faces: &[Name],
+    refused: &Error,
+    m: &Meter,
+    run: &impl Fn(&Body, &Meter) -> Result<(Body, Journal, X), Error>,
+) -> Option<Result<(Body, Journal, X), Error>> {
+    let rec = match recognise::recognise(body, &RecogniseOptions::default(), m) {
+        Ok(r) => r,
+        Err(e) => return Some(Err(e)),
+    };
+    let named: BTreeSet<Name> = faces.iter().copied().collect();
+    let mut blame = blamed(body, refused);
+    // The faces next to the changed ones: a hole's wall moved into a
+    // fillet's strip stands on the fillet's support.
+    for &n in &named {
+        if let Some(EntityId::Face(f)) = body.by_name(n) {
+            blame.extend(neighbours(body, f));
+        }
+    }
+    let kinds: BTreeMap<usize, BlendKind> = rec
+        .blends
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| {
+            b.supports
+                .iter()
+                .chain(&b.faces)
+                .any(|s| named.contains(s) || blame.contains(s))
+        })
+        .filter(|(_, b)| !b.faces.iter().any(|f| named.contains(f)))
+        .map(|(i, b)| (i, b.kind))
+        .collect();
+    if kinds.is_empty() {
+        return None;
+    }
+    let (_, gone) = close(&rec, kinds.keys().copied().collect());
+    if gone.iter().any(|f| named.contains(f)) {
+        return None;
+    }
+    Some(remake(key, body, &rec, &kinds, m, run))
 }

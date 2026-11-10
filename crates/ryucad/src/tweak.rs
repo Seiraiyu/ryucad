@@ -220,11 +220,13 @@ pub(crate) fn resolve<'a>(
                     motion,
                     tangent: m.tangent,
                     topology: Topology::Keep,
+                    blends: Default::default(),
                 }),
                 None => Spec::Offset(OffsetFacesSpec {
                     faces,
                     tangent: m.tangent,
                     topology: Topology::Keep,
+                    blends: Default::default(),
                 }),
             };
             Ok(Resolved {
@@ -258,6 +260,7 @@ pub(crate) fn resolve<'a>(
                 spec: Spec::Replace(ryukei::tweak::ReplaceSpec {
                     faces,
                     topology: Topology::Keep,
+                    blends: Default::default(),
                 }),
             })
         }

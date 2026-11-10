@@ -16,7 +16,7 @@ use crate::Error;
 use crate::blend::BlendKind;
 use crate::name::{Journal, Name, OpKey};
 use crate::topo::Body;
-use crate::work::Work;
+use crate::work::{Meter, Work};
 
 /// How close a face must be to a blend to be read as one.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -91,6 +91,20 @@ pub fn recognise_blends_with(
     crate::work::run(work, |m| recognise::recognise(body, opts, m))
 }
 
+/// Whether a tweak keeps the blends beside the faces it changes as they
+/// are, or makes them again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Blends {
+    /// Phase 9's: a blend the tweak would break refuses it
+    /// (`TangencyBroken`).
+    #[default]
+    Keep,
+    /// Where the tweak refuses, the recognised blends standing on the
+    /// faces it changes are deleted, the tweak made on the sharp body,
+    /// and each blend made again at its size, keeping its names.
+    Rebuild,
+}
+
 /// Which blends [`delete_blends`] takes away: every one no larger than
 /// `max_size`, and those holding `faces`.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -150,4 +164,24 @@ pub fn resize_blends_with(
     work: &Work,
 ) -> Result<(Body, Journal), Error> {
     crate::work::run(work, |m| remake::resize(key, body, sizes, opts, m))
+}
+
+/// A tweak made with its `blends` option: its own result, or where it
+/// refuses with `Blends::Rebuild` and blends stand on `faces`, those
+/// blends deleted, the tweak made on the sharp body, and the blends made
+/// again.
+pub(crate) fn tweak_with<X>(
+    key: OpKey,
+    body: &Body,
+    faces: &[Name],
+    blends: Blends,
+    m: &Meter,
+    run: impl Fn(&Body, &Meter) -> Result<(Body, Journal, X), Error>,
+) -> Result<(Body, Journal, X), Error> {
+    let plain = run(body, m);
+    match (&plain, blends) {
+        (Ok(_), _) | (Err(_), Blends::Keep) => plain,
+        (Err(e), Blends::Rebuild) if !remake::breaks(e) => plain,
+        (Err(e), Blends::Rebuild) => remake::rebuild(key, body, faces, e, m, &run).unwrap_or(plain),
+    }
 }
