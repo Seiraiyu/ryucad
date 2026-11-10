@@ -345,6 +345,8 @@ pub fn answer_live(
                 explode,
                 annotations,
                 flat,
+                camera_m: None,
+                pick: false,
             };
             render_noting(session, target, shown, ask)
         }
@@ -6213,40 +6215,97 @@ pub(crate) fn normal_to_face_at(
 }
 
 /// A render request, unpacked.
-struct RenderAsk {
-    part: Option<String>,
-    camera: Option<crate::view::CameraArg>,
-    view: Option<String>,
-    width: u32,
-    height: u32,
-    highlight: Vec<String>,
-    edges: bool,
-    labels: bool,
-    sketches: bool,
+pub(crate) struct RenderAsk {
+    pub(crate) part: Option<String>,
+    pub(crate) camera: Option<crate::view::CameraArg>,
+    pub(crate) view: Option<String>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) highlight: Vec<String>,
+    pub(crate) edges: bool,
+    pub(crate) labels: bool,
+    pub(crate) sketches: bool,
     /// Draw the shown parts' datums.
-    datums: bool,
-    rev: Option<String>,
-    frame: Vec<String>,
-    compare: Option<String>,
+    pub(crate) datums: bool,
+    pub(crate) rev: Option<String>,
+    pub(crate) frame: Vec<String>,
+    pub(crate) compare: Option<String>,
     /// What to leave out: occurrences and solids, at the leaves.
-    hidden: std::collections::BTreeSet<String>,
+    pub(crate) hidden: std::collections::BTreeSet<String>,
     /// Draw the origin's axes and planes.
-    origin: bool,
+    pub(crate) origin: bool,
     /// Draw each face in its appearance, else the fixed theme.
-    appearance: bool,
+    pub(crate) appearance: bool,
     /// Cut away what lies beyond these planes.
-    sections: Vec<crate::section::Plane>,
+    pub(crate) sections: Vec<crate::section::Plane>,
     /// An explode to draw.
-    explode: Option<DrawExplode>,
+    pub(crate) explode: Option<DrawExplode>,
     /// Draw open annotations' pins, numbered.
-    annotations: bool,
+    pub(crate) annotations: bool,
     /// A sheet metal solid whose flat pattern to draw instead (`""`: the
     /// part's one).
-    flat: Option<String>,
+    pub(crate) flat: Option<String>,
+    /// A camera in metres that wins over `camera`, a participant's and
+    /// `view` (a pick pass, `render --annotation`).
+    pub(crate) camera_m: Option<crate::view::Camera>,
+    /// Tag every entity drawn, for a pick pass.
+    pub(crate) pick: bool,
+}
+
+impl RenderAsk {
+    /// What a pick pass draws of `part` seen through `camera`: the
+    /// working model (or the session's draft), every edge and sketch,
+    /// no datums, labels, appearance, compare or explode, cut by
+    /// `sections` and leaving out `hidden`.
+    #[allow(dead_code)] // read by annotations' marks (plan 20.A, Task 9)
+    pub(crate) fn pick(
+        part: &str,
+        camera: crate::view::Camera,
+        sections: Vec<crate::section::Plane>,
+        hidden: std::collections::BTreeSet<String>,
+    ) -> RenderAsk {
+        RenderAsk {
+            part: Some(part.to_owned()),
+            camera: None,
+            view: None,
+            width: 800,
+            height: 600,
+            highlight: Vec::new(),
+            edges: true,
+            labels: false,
+            sketches: true,
+            datums: false,
+            rev: None,
+            frame: Vec::new(),
+            compare: None,
+            hidden,
+            origin: false,
+            appearance: false,
+            sections,
+            explode: None,
+            annotations: false,
+            flat: None,
+            camera_m: Some(camera),
+            pick: true,
+        }
+    }
+}
+
+/// What a render draws and from where: its geometry, camera, each
+/// assembly's occurrences' poses by instance path, the
+/// commit read, the compare's revision and commit, and its warnings.
+#[allow(dead_code)] // `poses` is read by annotations' marks (plan 20.A, Task 9)
+pub(crate) struct Scene {
+    pub(crate) g: crate::render::Geometry,
+    pub(crate) camera: crate::view::Camera,
+    pub(crate) poses: BTreeMap<String, BTreeMap<String, ryukei::geom::Rigid>>,
+    pub(crate) commit: Option<String>,
+    pub(crate) compare: Option<Value>,
+    pub(crate) warnings: Vec<Value>,
 }
 
 /// An explode a render draws.
-struct DrawExplode {
+pub(crate) struct DrawExplode {
     /// The assembly of the explode a participant's window shows, which the
     /// render draws only if it draws that assembly; `None` for one the
     /// request (or a named view) names, of the one part rendered.
@@ -6482,11 +6541,41 @@ fn render(
     shown: Vec<live::Highlight>,
     ask: RenderAsk,
 ) -> Result<Answer> {
-    use crate::render::{self as r, Geometry, Options};
-    r::check_size(ask.width, ask.height)?;
+    crate::render::check_size(ask.width, ask.height)?;
     if let Some(solid) = ask.flat.clone() {
         return render_flat(session, ask, solid);
     }
+    let (width, height, edges, part) = (ask.width, ask.height, ask.edges, ask.part.clone());
+    let scene = render_scene(session, target, shown, ask)?;
+    let options = crate::render::Options {
+        silhouettes: edges,
+        triad: true,
+    };
+    let img = crate::render::render(&scene.g, &scene.camera, width, height, options)?;
+    let mut result =
+        json!({"part": part, "width": width, "height": height, "camera": scene.camera});
+    if let Some(c) = scene.commit {
+        result["commit"] = json!(c);
+    }
+    if let Some(c) = scene.compare {
+        result["compare"] = c;
+    }
+    if !scene.warnings.is_empty() {
+        result["warnings"] = json!(scene.warnings);
+    }
+    Ok(Answer::bytes(result, "image/png", img.png()))
+}
+
+/// The geometry and camera a render draws, without its image: what
+/// `render` rasterizes, and what a pick pass ([`crate::render::pick`])
+/// reads with `ask.pick`.
+pub(crate) fn render_scene(
+    session: &mut Session,
+    target: Option<(&str, Option<&Live>)>,
+    shown: Vec<live::Highlight>,
+    ask: RenderAsk,
+) -> Result<Scene> {
+    use crate::render::{self as r, Geometry};
     let parts = render_parts(session.at(ask.rev.as_deref())?.1, ask.part.as_deref())?;
     // Other revisions' models only widen the framing.
     let mut extra: Vec<[f64; 3]> = Vec::new();
@@ -6531,6 +6620,9 @@ fn render(
         marks.insert(e.to_string(), (r::NOTE, None));
     }
     let mut g = Geometry::default();
+    if ask.pick {
+        g.tags = Some(Default::default());
+    }
     // Each assembly's occurrences' poses, by instance path, for the pins
     // `annotations` draws on them.
     let mut poses: BTreeMap<String, BTreeMap<String, ryukei::geom::Rigid>> = BTreeMap::new();
@@ -6773,7 +6865,9 @@ fn render(
         }
     }
     g.sections = ask.sections.clone();
+    let fixed = ask.camera_m.clone();
     let camera = match (ask.camera, target, ask.view.as_deref()) {
+        _ if fixed.is_some() => fixed.expect("checked"),
         (Some(c), _, _) => c.resolve(session.project().manifest.default_unit)?,
         (None, Some((p, live)), _) => {
             let live =
@@ -6805,23 +6899,14 @@ fn render(
             }
         }
     };
-    let options = Options {
-        silhouettes: ask.edges,
-        triad: true,
-    };
-    let img = r::render(&g, &camera, ask.width, ask.height, options)?;
-    let mut result =
-        json!({"part": ask.part, "width": ask.width, "height": ask.height, "camera": camera});
-    if let Some(c) = commit {
-        result["commit"] = json!(c);
-    }
-    if let Some((rev, (commit, _))) = other {
-        result["compare"] = json!({"rev": rev, "commit": commit});
-    }
-    if !warnings.is_empty() {
-        result["warnings"] = json!(warnings);
-    }
-    Ok(Answer::bytes(result, "image/png", img.png()))
+    Ok(Scene {
+        g,
+        camera,
+        poses,
+        commit,
+        compare: other.map(|(rev, (commit, _))| json!({"rev": rev, "commit": commit})),
+        warnings,
+    })
 }
 
 /// `render --flat`: `solid`'s flat pattern (`""`: the part's one sheet
@@ -8065,6 +8150,29 @@ pub(crate) mod tests {
 
     pub(crate) fn call(s: &mut Session, method: &str, params: Value) -> Result<Value> {
         handle(s, Request::from_rpc(method, Some(params))?)
+    }
+
+    #[test]
+    fn a_scene_for_a_fixed_camera_holds_the_tagged_model() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 10, "y": 10, "z": 10}}),
+        )
+        .unwrap();
+        let camera = crate::view::Camera {
+            eye: [0.1, -0.1, 0.1],
+            target: [0.005, 0.005, 0.005],
+            up: [0.0, 0.0, 1.0],
+            projection: crate::view::Projection::Orthographic { height: 0.05 },
+        };
+        let ask = RenderAsk::pick("p", camera.clone(), Vec::new(), Default::default());
+        let scene = render_scene(&mut s, None, Vec::new(), ask).unwrap();
+        assert_eq!(scene.camera, camera);
+        assert_eq!(scene.g.tags.as_ref().unwrap().triangles.len(), 6);
+        assert!(scene.g.labels.is_empty());
     }
 
     #[test]
