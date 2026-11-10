@@ -3544,8 +3544,6 @@ fn blend_from(
     Ok(out)
 }
 
-/// The solids a feature put at `at` in `order` could act on: founded
-/// before it and not consumed.
 /// Whether body `x` of part `pid`, as a feature at `at` of `list` would
 /// see it, is a sheet in the current rebuild: the tip of its chain among
 /// the features before `at`. A part no feature of which may make a
@@ -3574,6 +3572,8 @@ fn source_is_sheet(session: &mut Session, pid: &Id, list: &[Id], at: usize, x: &
         .is_some_and(|b| b.body.kind() == ryukei::topo::BodyKind::Sheet)
 }
 
+/// The solids a feature put at `at` in `order` could act on: founded
+/// before it and not consumed.
 fn solids_before(p: &Part, order: &[Id], at: usize) -> Vec<Id> {
     Solids::of_order(p, &order[..at])
         .tips()

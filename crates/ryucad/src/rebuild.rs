@@ -2516,16 +2516,23 @@ fn split_by_sheet(
     } else {
         (d.back, d.front)
     };
-    let one = |b: Option<Body>, name: &str| -> Result<Built> {
-        let b = b.ok_or_else(|| crate::body::empty_side(id, t, name, "tool"))?;
+    // A side left empty is refused whatever `keep` says, as a plane's or a
+    // solid tool's split refuses it: a sheet that misses the target divides
+    // nothing.
+    let (back, front) = match (back, front) {
+        (Some(b), Some(f)) => (b, f),
+        (_, None) => return Err(crate::body::empty_side(id, t, "front", "tool")),
+        (None, _) => return Err(crate::body::empty_side(id, t, "behind", "tool")),
+    };
+    let one = |b: Body| -> Result<Built> {
         let origins = boolean_origins(id, built, &tools, &b, &journal);
         finish(id, "split", (b, journal.clone()), origins)
     };
     match s.keep {
-        Keep::Behind => Ok(Made::new(vec![(t.clone(), Arc::new(one(back, "behind")?))])),
+        Keep::Behind => Ok(Made::new(vec![(t.clone(), Arc::new(one(back)?))])),
         Keep::Both => Ok(Made::new(vec![
-            (t.clone(), Arc::new(one(back, "behind")?)),
-            (id.clone(), Arc::new(one(front, "front")?)),
+            (t.clone(), Arc::new(one(back)?)),
+            (id.clone(), Arc::new(one(front)?)),
         ])),
     }
 }

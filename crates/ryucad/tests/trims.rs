@@ -361,3 +361,28 @@ fn a_tool_that_doesnt_divide_is_refused() {
     let r = reported(&mut s, "sp");
     assert_eq!(r["error"]["code"], "operation_no_effect", "{r}");
 }
+
+#[test]
+fn a_sheet_tool_that_misses_is_refused_whatever_is_kept() {
+    for keep in ["behind", "both"] {
+        let (_dir, mut s) = project();
+        add(
+            &mut s,
+            json!({"type": "box", "id": "h", "params": {"x": 10, "y": 10, "z": 10}}),
+        );
+        // A wall at x = 50 mm, far from the box: it divides nothing.
+        sketch(&mut s, "a", json!("xy"), line([50.0, -5.0], [50.0, 15.0]));
+        add(
+            &mut s,
+            json!({"type": "extrude", "id": "wl", "sketch": "a", "surface": true,
+                   "extent": {"type": "symmetric", "length": "40 mm"}}),
+        );
+        add(
+            &mut s,
+            json!({"type": "split", "id": "sp", "target": "h", "tool": "wl", "keep": keep}),
+        );
+        let r = reported(&mut s, "sp");
+        assert_eq!(r["error"]["code"], "operation_no_effect", "{keep}: {r}");
+        assert_eq!(r["error"]["details"]["target"], "h", "{keep}: {r}");
+    }
+}

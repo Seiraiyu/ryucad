@@ -324,8 +324,6 @@ fn stage(
     ok
 }
 
-/// Whether two volumes agree within their bounds (and a part in 10⁹ for
-/// rounding).
 /// A `mass` answer's volume, or a `measure` answer's area, with its
 /// bound (0 when exact), in m³ or m².
 fn measure_of(v: &Value) -> Option<(f64, f64)> {
@@ -337,6 +335,8 @@ fn measure_of(v: &Value) -> Option<(f64, f64)> {
     None
 }
 
+/// Whether two volumes agree within their bounds (and a part in 10⁹ for
+/// rounding).
 fn volumes_agree(a: (f64, f64), b: (f64, f64)) -> bool {
     (a.0 - b.0).abs() <= a.1 + b.1 + 1e-9 * a.0.abs().max(b.0.abs())
 }
