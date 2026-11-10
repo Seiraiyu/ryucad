@@ -759,6 +759,34 @@ pub fn plan(
                 continue;
             };
             let new = rewrite(&v, "", &mut |pt, n| {
+                // An annotation's entity (plan 9.C): `<solid>/<name>` of
+                // its view's source, written as text.
+                if let (Some(text), Some(rest)) = (n.as_str(), pt.strip_prefix("/annotations/")) {
+                    let view = rest
+                        .split('/')
+                        .next()
+                        .and_then(|k| v["annotations"][k]["view"].as_str())
+                        .map(|w| format!("/views/{w}"))?;
+                    if drawing_source(&v, &view, owner) != part {
+                        return None;
+                    }
+                    let (solid, name) = text.split_once('/').filter(|(_, n)| !n.contains('/'))?;
+                    let mine = o.as_ref().and_then(|o| o.pointer(pt));
+                    if t.pointer(pt) != Some(n) || mine == Some(n) {
+                        return None;
+                    }
+                    let feature = match &r {
+                        Rename::Feature { from, to, .. } if solid == from => to.clone(),
+                        _ => solid.to_owned(),
+                    };
+                    let name = names
+                        .get(solid)
+                        .and_then(|m| m.get(name))
+                        .cloned()
+                        .unwrap_or_else(|| name.to_owned());
+                    let out = json!(format!("{feature}/{name}"));
+                    return (out != *n).then_some(out);
+                }
                 if !is_reference(n) || drawing_source(&v, pt, owner) != part {
                     return None;
                 }

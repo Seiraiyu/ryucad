@@ -545,15 +545,15 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
         // Each sheet and view on one line: `views.v2 = projected from v1,
         // top, offset 70 mm, sheet s1`.
         Some(crate::doc::drawing::KIND) => {
-            for key in ["sheets", "views"] {
+            for key in ["sheets", "views", "annotations"] {
                 if let Some(Value::Object(members)) = rest.remove(key) {
                     let mut members: Vec<(&String, &Value)> = members.iter().collect();
                     members.sort_by_key(|(k, _)| member_order(k));
                     for (k, m) in members {
-                        let line = if key == "sheets" {
-                            drawing_sheet(m)
-                        } else {
-                            drawing_view(m)
+                        let line = match key {
+                            "sheets" => drawing_sheet(m),
+                            "views" => drawing_view(m),
+                            _ => drawing_annotation(m),
                         };
                         out.push(format!("{key}.{k} = {line}"));
                     }
@@ -759,6 +759,57 @@ fn rest_of(m: &Value, done: &[&str]) -> Vec<String> {
             format!("{k} {text}")
         })
         .collect()
+}
+
+/// A drawing's annotation on one line: its type, its view or sheet and
+/// its entities (`linear v1 b/<hex> to b/<hex>`), then the rest of its
+/// fields in key order, a tolerance as its form and values.
+fn drawing_annotation(m: &Value) -> String {
+    let ty = m.get("type").and_then(Value::as_str).unwrap_or_default();
+    let on = m
+        .get("view")
+        .or_else(|| m.get("sheet"))
+        .map(scalar)
+        .unwrap_or_default();
+    let ends: Vec<String> = ["a", "b", "datum", "of", "on", "to", "vertex", "leader"]
+        .iter()
+        .filter_map(|k| m.get(*k).map(|v| format!("{k} {}", scalar(v))))
+        .collect();
+    let mut parts = vec![format!("{ty} {on}").trim().to_owned()];
+    parts.extend(ends);
+    if let Some(t) = m.get("tolerance").and_then(Value::as_object) {
+        for (k, v) in t {
+            let v = match v.as_array() {
+                Some(a) => a.iter().map(scalar).collect::<Vec<_>>().join(" "),
+                None => scalar(v),
+            };
+            parts.push(format!("tolerance {k} {v}"));
+        }
+    }
+    if let Some(Value::Array(rows)) = m.get("rows") {
+        for (i, r) in rows.iter().enumerate() {
+            parts.push(format!("row {} {}", i + 1, r));
+        }
+    }
+    parts.extend(rest_of(
+        m,
+        &[
+            "type",
+            "view",
+            "sheet",
+            "a",
+            "b",
+            "datum",
+            "of",
+            "on",
+            "to",
+            "vertex",
+            "leader",
+            "tolerance",
+            "rows",
+        ],
+    ));
+    parts.join(", ")
 }
 
 /// A drawing's sheet on one line: `Sheet 1, ansi_b, scale 1:2`.
@@ -3991,6 +4042,28 @@ mod tests {
             "views.v6 = exploded e1 of rig, iso, sheet s1",
         ] {
             assert!(t.contains(line), "{line} in\n{t}");
+        }
+    }
+
+    #[test]
+    fn annotations_textconv_one_line_each() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let v = json!({"format": 1, "kind": "ryucad.drawing", "name": "P",
+        "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b"}},
+        "views": {"v1": {"type": "base", "sheet": "s1", "orient": "top"}},
+        "annotations": {
+            "d3": {"type": "linear", "view": "v1", "a": format!("b/{n}"), "b": format!("b/{n}"),
+                   "along": "horizontal", "offset": "12 mm", "tolerance": {"symmetric": "0.1 mm"}},
+            "g1": {"type": "datum_feature", "view": "v1", "letter": "A", "on": format!("b/{n}")}
+        }});
+        let t = text(v);
+        for line in [
+            format!(
+                "annotations.d3 = linear v1, a b/{n}, b b/{n}, tolerance symmetric 0.1 mm, along horizontal, offset 12 mm"
+            ),
+            format!("annotations.g1 = datum_feature v1, on b/{n}, letter A"),
+        ] {
+            assert!(t.contains(&line), "{line} in\n{t}");
         }
     }
 
