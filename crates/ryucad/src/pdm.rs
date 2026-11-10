@@ -126,6 +126,8 @@ pub fn config(session: &Session) -> Result<Value> {
         "properties": custom,
         "approvals": c.approvals.as_ref().map(ryupdm::approvals::Approvals::to_json),
         "dependencies": {"bump": c.bump.as_str()},
+        "packages": {"formats": c.package_formats().iter().map(|f| f.as_str()).collect::<Vec<_>>(),
+                     "default": c.packages.is_none()},
         "project_revision": session.project_revision()?,
     }))
 }
@@ -205,6 +207,9 @@ pub struct Change {
     /// `none` or `pr`: what the hosted service does about newer releases
     /// of what this project places.
     pub bump: Option<String>,
+    /// What a release's package holds (`packages.formats`, design 436):
+    /// the formats by name, or an empty list for the default.
+    pub package_formats: Option<Vec<String>>,
     /// Write even if parts' properties stop fitting.
     pub force: bool,
 }
@@ -218,6 +223,7 @@ pub fn configure(session: &mut Session, change: Change, expected: Option<&str>) 
         && change.properties.is_empty()
         && change.approvals.is_none()
         && change.bump.is_none()
+        && change.package_formats.is_none()
     {
         return Err(Error::new(
             Code::Usage,
@@ -281,6 +287,15 @@ pub fn configure(session: &mut Session, change: Change, expected: Option<&str>) 
         c.approvals = match a {
             Value::Bool(false) => None,
             v => Some(ryupdm::approvals::Approvals::from_json(v, "/approvals")?),
+        };
+    }
+    if let Some(f) = &change.package_formats {
+        c.packages = match f.is_empty() {
+            true => None,
+            false => Some(ryupdm::package::formats_from(
+                &json!(f),
+                "/package_formats",
+            )?),
         };
     }
     if let Some(b) = &change.bump {

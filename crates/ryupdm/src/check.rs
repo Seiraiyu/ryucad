@@ -19,6 +19,7 @@
 //! | `release_unapproved` | error | An official record under approval rules whose service attestation says it became official without them |
 //! | `release_attestation_invalid` | error | A record under rules whose tag is lightweight, holds no attestation, doesn't verify, or doesn't match the record, its commit or the rules |
 //! | `release_attestation_missing` | warning | A record under rules with no tag here: not fetched, or not tagged yet |
+//! | `release_package_invalid` | error | An official release's package tag (`…/<label>.package`) whose attestation doesn't verify or names another release (a missing one is never a finding: a project with no service has none) |
 
 use crate::attest::Verdict;
 use crate::config::Config;
@@ -39,7 +40,7 @@ use std::collections::BTreeMap;
 pub const SCHEMA: u64 = 1;
 
 /// Every code a release check reports, with its severity.
-pub const CODES: [(&str, &str); 13] = [
+pub const CODES: [(&str, &str); 14] = [
     ("release_hash_mismatch", "error"),
     ("release_stale", "error"),
     ("release_modified", "error"),
@@ -53,6 +54,7 @@ pub const CODES: [(&str, &str); 13] = [
     ("release_unapproved", "error"),
     ("release_attestation_invalid", "error"),
     ("release_attestation_missing", "warning"),
+    ("release_package_invalid", "error"),
 ];
 
 /// One thing a check found.
@@ -315,6 +317,23 @@ pub fn run(
                     .with("path", &e.path)
                     .with("official", &o.commit)
                     .with("changes", &changes),
+                );
+            }
+            if e.kind == Kind::Release
+                && let crate::package::attest::Verdict::Invalid(c) =
+                    crate::package::attest::of_release(h.repo, releases, h.prefix, &e.path, None)
+            {
+                let tag = crate::package::attest::tag_name(&part, &e.label);
+                out.push(
+                    Finding::new(
+                        "release_package_invalid",
+                        &part,
+                        Some(&e.label),
+                        format!("{tag}'s package attestation {}", c.text()),
+                    )
+                    .with("tag", &tag)
+                    .with("clause", c.name())
+                    .with("official", &o.commit),
                 );
             }
             if let Some(a) = releases.approvals.get(&e.path) {
