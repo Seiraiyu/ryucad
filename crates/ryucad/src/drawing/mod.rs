@@ -1421,6 +1421,36 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
                             fill: None,
                         });
                     }
+                    // Caps hatched, each solid its own angle and spacing,
+                    // a detail's kept inside its circle.
+                    let base = section::spacing(sheet.size.paper(sheet.orientation));
+                    for (n, paths) in d.caps.iter().filter(|p| !p.is_empty()).enumerate() {
+                        let (angle, gap) = section::hatch_of(n, base);
+                        let paths: Vec<Path> = paths.iter().map(|p| p.scaled(k, at)).collect();
+                        let mut hatch = ryu_draw::hatch::lines(&paths, angle, gap);
+                        if let Extra::Detail { radius, .. } = &plan.extra {
+                            hatch = ryu_draw::hatch::clip_to_circle(&hatch, at, k * radius);
+                        }
+                        for [a, b] in hatch {
+                            items.push(Item::Path {
+                                path: Path::polyline(&[a, b], false),
+                                stroke: Some(style.stroke(LineKind::Hatch)),
+                                fill: None,
+                            });
+                        }
+                    }
+                    for (text, q, turn) in &d.texts {
+                        // 1.5 mm off the line, on its left as it reads.
+                        let (sin, cos) = ryu_math::sin_cos(*turn);
+                        items.push(Item::Text {
+                            text: text.clone(),
+                            at: [at[0] + k * q[0] - 1.5 * sin, at[1] + k * q[1] + 1.5 * cos],
+                            size: 2.5,
+                            angle: *turn,
+                            anchor: Anchor::Middle,
+                            colour: Colour::BLACK,
+                        });
+                    }
                     (d.counts, None)
                 }
                 Err(e) => {
@@ -1937,6 +1967,41 @@ pub(crate) mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Every hatch line of the sheet: their total length on the sheet.
+    fn hatched(sheet: &SheetBuilt) -> f64 {
+        sheet
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Item::Path {
+                    path,
+                    stroke: Some(s),
+                    ..
+                } if s.kind == Some(LineKind::Hatch) => Some(length(path)),
+                _ => None,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn an_offset_section_steps_and_hatches_its_facing_caps_only() {
+        // Seen from the top, the cut runs along y = 5 from x = 0 to 20, steps
+        // to y = 15 and runs on to x = 40: what is left of it (towards -y)
+        // goes, and the section looks along +y.
+        let views = json!({
+            "v1": {"type": "base", "sheet": "s1", "orient": "top", "scale": "1:1"},
+            "v2": {"type": "section", "sheet": "s1", "from": "v1", "label": "B", "flip": true,
+                   "cut": {"through": [["-1 mm", "5 mm", 0], ["20 mm", "5 mm", 0], ["20 mm", "15 mm", 0], ["41 mm", "15 mm", 0]]}}
+        });
+        let (_d, mut s) = drawn(40.0, 20.0, 10.0, views);
+        let b = build(&mut s, &id("p"), &id("d")).unwrap();
+        assert!(b.findings.is_empty(), "{:?}", b.findings);
+        let sheet = &b.sheets[0];
+        // Two caps facing the view, 20 × 10 each, at the scale of 1.
+        let area = hatched(sheet) * section::spacing(sheet.paper);
+        assert!((area - 400.0).abs() < 400.0 * 0.05, "{area}");
     }
 
     #[test]

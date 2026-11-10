@@ -635,3 +635,33 @@ pub(super) fn cap_paths(
         })
         .collect()
 }
+
+/// The hatch spacing on a sheet `paper` millimetres across: 2.5 mm up to
+/// ANSI B and A3, 3.5 mm up to ANSI D and A1, else 5 mm.
+pub(super) fn spacing(paper: P) -> f64 {
+    let long = paper[0].max(paper[1]);
+    if long <= 432.0 {
+        2.5
+    } else if long <= 865.0 {
+        3.5
+    } else {
+        5.0
+    }
+}
+
+/// The `i`th sectioned solid's hatch: 45° or 135° alternately, every
+/// other pair at six tenths the spacing, so neighbouring parts read apart.
+pub(super) fn hatch_of(i: usize, base: f64) -> (f64, f64) {
+    let quarter = std::f64::consts::FRAC_PI_4;
+    let angle = if i.is_multiple_of(2) {
+        quarter
+    } else {
+        3.0 * quarter
+    };
+    let spacing = if (i / 2).is_multiple_of(2) {
+        base
+    } else {
+        0.6 * base
+    };
+    (angle, spacing)
+}
