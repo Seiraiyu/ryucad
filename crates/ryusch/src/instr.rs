@@ -55,6 +55,8 @@ pub struct Resolved {
     pub no_region: BTreeSet<usize>,
     /// Networks `near` keeps together off a pin: their parts and the pin.
     pub networks: Vec<(Vec<usize>, (usize, usize))>,
+    /// Port flags `near` stands on a pin's row: the flag and the pin.
+    pub port_rows: BTreeMap<usize, (usize, usize)>,
     /// Each part's text fields and the side each goes on.
     pub text: BTreeMap<usize, Vec<(crate::layout::TextField, Side)>>,
     /// Each `paper` instruction's paper, by sheet ID or name: pinned.
@@ -312,6 +314,17 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
                 match target {
                     // Several parts near a pin: one network off it.
                     (p, Some(k)) if parts.len() >= 2 => r.networks.push((parts.clone(), (p, k))),
+                    // A port's flag near a pin: on its row.
+                    (p, Some(k))
+                        if matches!(
+                            block.parts[parts[0]].kind,
+                            crate::input::PartKind::Port { .. }
+                        ) =>
+                    {
+                        set(&mut r.near, &mut by, "place", &parts, target, &id, block)?;
+                        r.near.remove(&parts[0]);
+                        r.port_rows.insert(parts[0], (p, k));
+                    }
                     _ => set(&mut r.near, &mut by, "place", &parts, target, &id, block)?,
                 }
             }

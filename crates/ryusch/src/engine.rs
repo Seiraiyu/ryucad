@@ -519,7 +519,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
         .collect();
     let asks = idiom::Asks {
         networks: r.networks.clone(),
-        ports: BTreeMap::new(),
+        ports: r.port_rows.clone(),
     };
     let mut clusters = idiom::clusters(block, &idioms, singles, &asks);
     for g in &r.groups {
@@ -550,9 +550,26 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
     let is_new = |c: &Cluster| c.members.iter().all(|(p, _)| st.place[*p].is_none());
     // The sheet a cluster is asked onto: its first member's that names one.
     let named = |c: &Cluster| c.members.iter().find_map(|(p, _)| r.sheet.get(p).cloned());
+    let bank_nets = idiom::bank_nets(block, &idioms, &clusters);
+    // A port asked onto a banked row stays with the ports.
+    for (&f, &(a, k)) in &r.port_rows {
+        if block.parts[a].pins[k]
+            .net
+            .is_some_and(|n| bank_nets.contains(&n))
+        {
+            st.notes.push(Note {
+                code: "port_row_banked".into(),
+                message: format!(
+                    "{}'s row is a bank's, which ends in its pull: the flag stays with the ports",
+                    crate::lint::who(&block.parts[a])
+                ),
+                details: json!({"port": block.parts[f].key, "pin": format!("{}/{}", block.parts[a].key, block.parts[a].pins[k].number)}),
+            });
+        }
+    }
     let mut hints = Hints {
         spread,
-        apart: idiom::bank_nets(block, &idioms, &clusters),
+        apart: bank_nets.clone(),
         ..Hints::default()
     };
     for (i, c) in clusters.iter().enumerate() {
@@ -4008,6 +4025,72 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    /// `near port:EN U1.EN` stands the flag on EN's row six steps out, even
+    /// where the net has other pins (phase 1 does it only for a sole pin).
+    #[test]
+    fn a_port_near_a_pin_stands_on_its_row() {
+        use crate::input::{Flow, Net, PinKind};
+        use crate::testing::{ic, net, port, resistor};
+        let nets: Vec<Net> = vec![
+            net("rail:v", "5V", NetKind::Supply),
+            net("rail:gnd", "GND", NetKind::Ground),
+            net("en", "EN", NetKind::Signal),
+        ];
+        let block = Block {
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "REG",
+                    &[
+                        ("VIN", PinKind::PowerIn, Some(0)),
+                        ("EN", PinKind::Input, Some(2)),
+                        ("X", PinKind::Passive, None),
+                    ],
+                    &[("GND", PinKind::PowerIn, Some(1))],
+                ),
+                ic(
+                    "u2",
+                    "U2",
+                    "MCU",
+                    &[("A", PinKind::Passive, None)],
+                    &[
+                        ("EN_OUT", PinKind::Output, Some(2)),
+                        ("B", PinKind::Passive, None),
+                        ("C", PinKind::Passive, None),
+                    ],
+                ),
+                resistor("r1", "R1", "100k", [Some(2), Some(1)]),
+                port("port:en", "EN", Flow::In, Some(2)),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let mut b = block.clone();
+        b.instructions.insert(
+            "i1".into(),
+            Instruction::Near {
+                parts: vec!["port:en".into()],
+                to: "u1/2".into(),
+            },
+        );
+        let out = lay(&b);
+        assert_eq!(crate::rules::check(&b, &out.layout), []);
+        let shape = |k: &str| {
+            let p = b.part(k).unwrap();
+            let x = &out.layout.placed[k];
+            Shape::of(&b.parts[p], Place::new(x.at, x.rotation, x.mirror))
+        };
+        let pin = shape("u1").pins[1];
+        let flag = shape("port:en").pins[0];
+        assert_eq!(flag.end[1], pin.end[1], "on EN's row");
+        assert!(
+            (flag.end[0] - pin.end[0]).abs() <= 8 * GRID,
+            "a few steps out"
+        );
     }
 
     /// `near C5 R1 C6 U1.COMP` keeps the buck's compensation network together

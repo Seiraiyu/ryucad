@@ -1625,7 +1625,10 @@ pub fn clusters(
         if part.pins[0].net.is_some_and(|n| banked_nets.contains(&n)) {
             continue;
         }
-        let Some((d, k)) = crate::place::sole_pin(block, p) else {
+        // The agent's ask (`near port:NAME PIN`), else the one pin its net
+        // meets.
+        let asked = asks.ports.get(&p).copied();
+        let Some((d, k)) = asked.or_else(|| crate::place::sole_pin(block, p)) else {
             continue;
         };
         let (Some(&ci), Some(&pi)) = (of.get(&d), of.get(&p)) else {
@@ -1656,7 +1659,7 @@ pub fn clusters(
         // An in flag beside a pin pointing right would read right to left
         // (`sch_flow_reversed`): it keeps its edge. An out flag beside a
         // pin pointing left is mirrored.
-        if own == pin.side && flow != Flow::Out {
+        if own == pin.side && flow != Flow::Out && asked.is_none() {
             continue;
         }
         let mirror = own == pin.side;
