@@ -2331,6 +2331,82 @@ mod move_tests {
     }
 
     #[test]
+    fn a_solve_previews_a_turn_about_a_point() {
+        // The pin is free (no mates): a move is held where it is put.
+        let (dir, mut s, _, _) = super::current_tests::placed();
+        let before =
+            std::fs::read_to_string(feature_path(dir.path(), &id("frame"), &id("pin"))).unwrap();
+        let origin = |v: &serde_json::Value| {
+            let o = &v["instances"]["pin"]["pose"]["origin_m"];
+            [0, 1, 2].map(|k| o[k].as_f64().unwrap())
+        };
+        let plain = call(&mut s, "assembly.solve", json!({"part": "frame"})).unwrap();
+        let o = origin(&plain);
+        // A half turn about z through a point 5 mm along x of the pin's
+        // origin swings the origin 10 mm along x.
+        let about = [
+            format!("{} m", o[0] + 0.005),
+            format!("{} m", o[1]),
+            format!("{} m", o[2]),
+        ];
+        let v = call(
+            &mut s,
+            "assembly.solve",
+            json!({"part": "frame", "moves": [{"instance": "pin", "axis": [0, 0, 1],
+                   "angle": "180 deg", "about": about}]}),
+        )
+        .unwrap();
+        let t = origin(&v);
+        assert!((t[0] - (o[0] + 0.01)).abs() < 1e-9, "{t:?} from {o:?}");
+        assert!((t[1] - o[1]).abs() < 1e-9, "{t:?} from {o:?}");
+        let after =
+            std::fs::read_to_string(feature_path(dir.path(), &id("frame"), &id("pin"))).unwrap();
+        assert_eq!(before, after, "a solve writes nothing");
+    }
+
+    #[test]
+    fn a_solve_previews_a_mate_without_writing_it() {
+        let (dir, mut s, top, foot) = super::current_tests::placed();
+        let files = |d: &std::path::Path| {
+            crate::session::files(d)
+                .unwrap()
+                .into_iter()
+                .map(|f| (f.clone(), std::fs::read(d.join(&f)).unwrap()))
+                .collect::<Vec<_>>()
+        };
+        let before = files(dir.path());
+        let v = call(
+            &mut s,
+            "assembly.solve",
+            json!({"part": "frame", "mates": [{"form": "revolute", "a": top, "b": foot,
+                                               "b_offset": {"flip": true}}]}),
+        )
+        .unwrap();
+        assert_eq!(v["converged"], true, "{v}");
+        let z = v["instances"]["pin"]["pose"]["origin_m"][2]
+            .as_f64()
+            .unwrap();
+        assert!(
+            (z - 0.005).abs() < 1e-9,
+            "the pin stands on the plate's top: {v}"
+        );
+        assert_eq!(files(dir.path()), before, "nothing written");
+        let frame = s.project().part(&id("frame")).unwrap();
+        assert!(
+            crate::server::feature(frame, &id("m1")).is_err(),
+            "no mate in the working files"
+        );
+        // A mate the daemon can't take is feature.add's own refusal, at its place.
+        let e = call(
+            &mut s,
+            "assembly.solve",
+            json!({"part": "frame", "mates": [{"form": "fastened", "a": foot, "b": foot}]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["pointer"], "/mates/0", "{e:?}");
+    }
+
+    #[test]
     fn solving_reports_and_previews_moves_without_writing() {
         let (dir, mut s) = hinged_with_cap();
         let before =
@@ -2547,7 +2623,7 @@ mod move_tests {
 }
 
 #[cfg(test)]
-mod current_tests {
+pub(crate) mod current_tests {
     use super::tests::face;
     use crate::assembly::tests::{id, project};
     use crate::error::Code;
@@ -2556,7 +2632,7 @@ mod current_tests {
 
     /// The plate fixed and the bolt free in `frame`, and the faces a
     /// revolute stands the bolt on.
-    fn placed() -> (tempfile::TempDir, crate::session::Session, String, String) {
+    pub(crate) fn placed() -> (tempfile::TempDir, crate::session::Session, String, String) {
         let (dir, mut s) = project();
         let top = face(&mut s, "plate", "slab", [0.0, 0.0, 1.0]);
         let foot = face(&mut s, "bolt", "shank", [0.0, 0.0, -1.0]);

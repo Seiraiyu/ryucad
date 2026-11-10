@@ -75,6 +75,36 @@ pub struct PinArg {
     pub point: Option<[Value; 3]>,
 }
 
+/// A request's `flip`: a datum's or split's turn, or a draft's flipped
+/// faces.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Flip {
+    On(bool),
+    Faces(Vec<String>),
+}
+
+impl Flip {
+    /// The turn a datum or split takes: `invalid_param` at `flip` for
+    /// faces.
+    pub fn on(&self) -> crate::error::Result<bool> {
+        match self {
+            Flip::On(b) => Ok(*b),
+            Flip::Faces(_) => Err(crate::error::Error::new(
+                crate::error::Code::InvalidParam,
+                "flip is true or false here; a list of faces is a draft's",
+            )
+            .with("param", "flip")),
+        }
+    }
+}
+
+impl From<bool> for Flip {
+    fn from(b: bool) -> Flip {
+        Flip::On(b)
+    }
+}
+
 /// The fields of a feature that only some types take: a sketch's plane,
 /// what an extrude or revolve sweeps and how far. Each is left out unless
 /// given.
@@ -118,7 +148,7 @@ pub struct FeatureFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extent: Option<Value>,
     /// Extrude against the sketch's normal; a linear pattern against its
-    /// direction.
+    /// direction; a draft's pull turned round.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
     /// Sweep the profile's loops and open chains into a sheet of its own
@@ -132,7 +162,8 @@ pub struct FeatureFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axis: Option<String>,
     /// A revolve's angle, or `"full"`; a chamfer's angle to its face; a
-    /// move_face's (rotate), right-handed about its axis.
+    /// move_face's (rotate), right-handed about its axis; a draft's angle
+    /// from its pull.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub angle: Option<Value>,
     /// Revolve half the angle each side of the sketch's plane.
@@ -159,7 +190,8 @@ pub struct FeatureFields {
     /// A fillet's or chamfer's groups, each as a file has it but with its
     /// edges and face as `<part>/<feature>/<name>` (or `{feature, name}`).
     /// A move_face's `[{distance, faces}]`, a replace_face's
-    /// `[{with, faces}]` (`with` a face or a plane as text).
+    /// `[{with, faces}]` (`with` a face or a plane as text); a draft's
+    /// `[{angle, faces}]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub groups: Option<Value>,
     /// Whether a fillet or chamfer grows each edge to its tangent chain
@@ -338,9 +370,24 @@ pub struct FeatureFields {
     /// construction's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x: Option<String>,
-    /// A datum plane's normal, or a datum axis's direction, turned.
+    /// A datum plane's normal, or a datum axis's direction, turned; a
+    /// split's plane turned: `true` or `false`. A draft's faces drafted
+    /// against its pull: a list of faces, each `<part>/<solid>/<name>`,
+    /// replacing them all (`[]` for none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flip: Option<bool>,
+    pub flip: Option<Flip>,
+    /// A draft's neutral plane: any plane (an origin or datum plane, a
+    /// sketch, a planar face `<part>/<solid>/<name>`); its normal is the
+    /// pull. Given, a parting line and its pull go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neutral: Option<String>,
+    /// A draft's parting line, replacing it: edges of its target, each
+    /// `<part>/<solid>/<name>`. Given, a neutral plane goes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parting: Option<Vec<String>>,
+    /// A parting-line draft's pull: any axis, or a plane's normal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull: Option<String>,
     /// A path's segments in order, replacing them all: each a curve as
     /// text (an edge `<part>/<solid>/<name>`, a sketch's line, arc or
     /// circle `<part>/<sketch>/<entity>`, a path or helix
@@ -420,7 +467,8 @@ pub struct FeatureFields {
     /// A shell's or offset's face groups, replacing them all:
     /// `[{"thickness" | "distance": Q, "faces": ["<part>/<solid>/<name>", ...]}]`
     /// (`[]` for none). A move_face's faces, each `<part>/<solid>/<name>`,
-    /// replacing them all.
+    /// replacing them all; a draft's faces, each `<part>/<solid>/<name>`,
+    /// with `{angle, faces}` objects for groups as the CLI sends them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub faces: Option<Value>,
     /// The solid a mirror copies, by the feature that founded it.
@@ -552,6 +600,10 @@ pub struct InstanceMove {
     pub axis: Option<[f64; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub angle: Option<Value>,
+    /// The point the turn's axis runs through; the instance's origin when
+    /// left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<[Value; 3]>,
 }
 
 /// How one merge conflict is settled: by one side's value, a value given,
@@ -936,7 +988,8 @@ pub enum Request {
     },
     /// Moves an instance of an assembly: to the pose `placement` gives
     /// (what it leaves out stays), then by `translate` and a turn of
-    /// `angle` about `axis` through its origin, in the assembly's frame.
+    /// `angle` about `axis` through `about` (else its origin), in the
+    /// assembly's frame.
     #[serde(rename = "assembly.move")]
     AssemblyMove {
         part: String,
@@ -949,6 +1002,10 @@ pub enum Request {
         axis: Option<[f64; 3]>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         angle: Option<Value>,
+        /// The point the turn's axis runs through, in the assembly's
+        /// frame (three quantities); the instance's origin when left out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        about: Option<[Value; 3]>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -956,7 +1013,8 @@ pub enum Request {
     /// `moves` held where they put instances for a first solve. Each
     /// instance's pose and the solve's report. With `component`, only
     /// what the moved instances' mates reach is solved and answered, from
-    /// the poses the assembly's rebuild has (a drag's preview).
+    /// the poses the assembly's rebuild has (a drag's preview). At `rev`, and
+    /// with `mates` added in memory, it previews over a draft or a mate.
     #[serde(rename = "assembly.solve")]
     AssemblySolve {
         part: String,
@@ -964,6 +1022,15 @@ pub enum Request {
         moves: Vec<InstanceMove>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         component: bool,
+        /// The revision to solve over (the working files when left out):
+        /// any a read takes, a person's `draft:` included.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        /// Mates to solve with, as `feature.add` of a mate takes their
+        /// fields (`form`, `a`, `b`, `a_offset`, `b_offset`, `angle`,
+        /// `distance`), added to the assembly in memory and never written.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mates: Vec<Map<String, Value>>,
     },
     /// An assembly's instances as a tree: each with its part, revision and
     /// how it resolved, its pose in the assembly, and a subassembly's own.
@@ -2431,6 +2498,44 @@ mod tests {
             }
             .method(),
             "rebuild"
+        );
+    }
+
+    #[test]
+    fn flip_is_a_bool_or_faces() {
+        let f: FeatureFields = serde_json::from_value(json!({"flip": true})).unwrap();
+        assert_eq!(f.flip, Some(Flip::On(true)));
+        assert_eq!(f.flip.as_ref().unwrap().on(), Ok(true));
+        let f: FeatureFields =
+            serde_json::from_value(json!({"flip": ["p/b/0123456789abcdef0123456789abcdef"]}))
+                .unwrap();
+        let Some(Flip::Faces(faces)) = &f.flip else {
+            panic!("{:?}", f.flip)
+        };
+        assert_eq!(faces.len(), 1);
+        let e = f.flip.as_ref().unwrap().on().unwrap_err();
+        assert_eq!(
+            (e.code, e.details["param"].as_str()),
+            (crate::error::Code::InvalidParam, Some("flip"))
+        );
+        // Written back as given.
+        assert_eq!(
+            serde_json::to_value(&f).unwrap()["flip"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let f: FeatureFields =
+            serde_json::from_value(json!({"neutral": "xy", "parting": ["p/b/e"], "pull": "z"}))
+                .unwrap();
+        assert_eq!(
+            (
+                f.neutral.as_deref(),
+                f.parting.as_deref(),
+                f.pull.as_deref()
+            ),
+            (Some("xy"), Some(&["p/b/e".to_owned()][..]), Some("z"))
         );
     }
 }

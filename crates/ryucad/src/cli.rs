@@ -1076,7 +1076,7 @@ enum PartCmd {
 enum AssemblyCmd {
     /// Move an instance: to a pose (--origin, --z, --x; what is left out
     /// stays), then by --translate and a turn of --angle about --axis
-    /// through its origin, in the assembly's frame.
+    /// through --about (else its origin), in the assembly's frame.
     Move {
         part: String,
         instance: String,
@@ -1091,6 +1091,9 @@ enum AssemblyCmd {
         /// How far to turn it (with --axis): 90deg.
         #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
         angle: Option<String>,
+        /// The point the turn's axis runs through (with --axis): 10mm,0,0.
+        #[arg(long, value_name = "VECTOR", value_parser = triple, allow_hyphen_values = true)]
+        about: Option<[String; 3]>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1112,10 +1115,21 @@ enum AssemblyCmd {
         /// How far to turn it (with --axis): 90deg.
         #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
         angle: Option<String>,
+        /// The point the turn's axis runs through (with --axis): 10mm,0,0.
+        #[arg(long, value_name = "VECTOR", value_parser = triple, allow_hyphen_values = true)]
+        about: Option<[String; 3]>,
         /// Solve only what the instance's mates reach, from the poses the
         /// assembly's rebuild has, as a drag's preview does.
         #[arg(long, requires = "instance")]
         component: bool,
+        /// Solve over this revision rather than the working files: a Git
+        /// revision, worktree:<path>, annotation:<id> or draft:<name>.
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
+        /// A mate to solve with, writing nothing, as JSON of the fields
+        /// feature add takes for a mate: {"form": "revolute", "a": REF, "b": REF}.
+        #[arg(long = "mate", value_name = "JSON", value_parser = json_object)]
+        mates: Vec<Value>,
     },
     /// The instances as a tree: parts, revisions, poses, freedom,
     /// subassemblies.
@@ -1147,7 +1161,9 @@ enum FeatureCmd {
     /// face tweak: move_face (--by translate with --direction and --distance,
     /// rotate with --axis and --angle, or offset with --distance and
     /// --face-distance; --face repeated, --no-tangent) or replace_face (--with,
-    /// then the --face values it replaces) of a solid, keeping every name (offset
+    /// then the --face values it replaces) or draft (--neutral, or --parting with
+    /// --pull; --angle; --face repeated, --face-angle, --flip, --reverse, --no-tangent)
+    /// of a solid, keeping every name (offset
     /// moves every face, filling where they part; move_face --by offset moves
     /// only the faces named, keeping the topology); a
     /// mirror (--solid, --plane, --operation) of a whole solid, joined to
@@ -2253,7 +2269,7 @@ struct FieldArgs {
     /// A planar face to sketch on, the face a chamfer's first distance runs along, or a
     /// planar face whose loops a sweep carries: <part>/<feature>/<name>, as inspect
     /// gives it. Repeat for an extract's faces, a thicken's or a move_face's; a
-    /// replace_face's, after the --with they take.
+    /// replace_face's, after the --with they take; or a draft's (repeat for each).
     #[arg(long = "face", value_name = "REFERENCE")]
     face: Vec<String>,
     /// A sketch on a face: a vertex for its origin ("" for the part origin, projected).
@@ -2291,7 +2307,7 @@ struct FieldArgs {
     #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
     offset: Option<String>,
     /// Extrude against the sketch's normal, or a linear pattern against its direction
-    /// (or --reverse false).
+    /// (or --reverse false); a draft's pull, turned round.
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     reverse: Option<bool>,
     /// Sweep the profile's loops and open chains into a sheet of its own: an
@@ -2306,7 +2322,9 @@ struct FieldArgs {
     /// A revolve's angle: 90, "90 deg", or full; a chamfer's angle to its face
     /// (distance_angle). A circular pattern's span, which it needs: 360 spaces --count
     /// evenly round a whole turn, less spans the first instance to the last. A
-    /// move_face's turn about its --axis (right-handed; a minus sign turns it back).
+    /// move_face's turn about its --axis (right-handed; a minus sign turns it back). A
+    /// draft's angle from its pull (a positive one tapers a boss inward along it and
+    /// opens a hole).
     #[arg(long, allow_hyphen_values = true)]
     angle: Option<String>,
     /// Revolve half the angle each side of the sketch's plane (or --symmetric false).
@@ -2532,10 +2550,38 @@ struct FieldArgs {
     /// What a projection point is projected onto: a plane or an axis.
     #[arg(long, value_name = "REFERENCE")]
     onto: Option<String>,
-    /// Turn a datum plane's normal, or a datum axis's direction (or --flip false). A
-    /// split's plane, turned: the target keeps the side behind it.
-    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
-    flip: Option<bool>,
+    /// Turn a datum plane's normal, or a datum axis's direction (or --flip false); a
+    /// split's plane, turned: the target keeps the side behind it. A draft's: a face it
+    /// drafts against its pull, <part>/<solid>/<name>; repeat for each (given, they
+    /// replace a draft's flipped faces).
+    #[arg(long, value_name = "BOOL|FACE", num_args = 0..=1, default_missing_value = "true")]
+    flip: Vec<String>,
+    /// Flip none of a draft's faces.
+    #[arg(long, conflicts_with = "flip")]
+    no_flip: bool,
+    /// A draft's neutral plane: xy, yz, zx, a datum plane <part>/<datum>, a sketch, or a
+    /// planar face <part>/<solid>/<name>; its normal is the pull (--reverse turns it
+    /// round). The faces turn about where the plane crosses them.
+    #[arg(long, value_name = "PLANE", conflicts_with = "parting")]
+    neutral: Option<String>,
+    /// An edge of a draft's parting line, which the faces it bounds turn about:
+    /// <part>/<solid>/<name>; repeat for each. Needs --pull.
+    #[arg(long = "parting", value_name = "EDGE")]
+    parting: Vec<String>,
+    /// A parting-line draft's pull: x, y, z, a datum axis, a straight edge, or a plane's
+    /// normal (--reverse turns it round).
+    #[arg(long, value_name = "DIRECTION")]
+    pull: Option<String>,
+    /// A face a draft drafts at its own angle: REFERENCE=ANGLE, of either sign; repeat for
+    /// several. Faces of one angle are one group. Given, they replace a draft's groups.
+    #[arg(
+        long = "face-angle",
+        value_name = "REFERENCE=ANGLE",
+        value_parser = param,
+        allow_hyphen_values = true,
+        conflicts_with_all = ["face_thickness", "face_distance"]
+    )]
+    face_angle: Vec<(String, String)>,
     /// A path's segment, in order; repeat for each: an edge <part>/<solid>/<name>
     /// (--propagate right after it grows it to its tangent chain), a sketch's line, arc
     /// or circle <part>/<sketch>/<entity>, or a path or helix (<part>/<feature> or its
@@ -2637,10 +2683,11 @@ struct FieldArgs {
         conflicts_with = "face_thickness"
     )]
     face_distance: Vec<(String, String)>,
-    /// Give no face of a shell or offset a thickness or distance of its own.
-    #[arg(long, conflicts_with_all = ["face_thickness", "face_distance"])]
+    /// Give no face of a shell or offset a thickness or distance of its own, nor of a
+    /// draft an angle of its own.
+    #[arg(long, conflicts_with_all = ["face_thickness", "face_distance", "face_angle"])]
     no_faces: bool,
-    /// Move a face tweak's tangent neighbours with the faces it names (the default;
+    /// Move or draft a face tweak's tangent neighbours with the faces it names (the default;
     /// --tangent false or --no-tangent keeps the kernel's tangency_broken). In a
     /// fill, the --edge just before meets its face tangentially (the edge must have
     /// one face).
@@ -2929,6 +2976,9 @@ impl FieldArgs {
         }
         FeatureFields {
             plane: self.plane.clone(),
+            neutral: self.neutral.clone(),
+            parting: (!self.parting.is_empty()).then(|| self.parting.clone()),
+            pull: self.pull.clone(),
             // One --face is a chamfer's, a sketch's or a sweep's `face`;
             // several are a move's `faces`, beside any --face-distance
             // groups; with --with they are a replacement's groups.
@@ -3078,7 +3128,7 @@ impl FieldArgs {
             onto: self.onto.clone(),
             origin: None,
             x: None,
-            flip: self.flip,
+            flip: flip_of(&self.flip, self.no_flip),
             segments: (!self.segments.is_empty()).then(|| {
                 self.segments
                     .iter()
@@ -3135,6 +3185,8 @@ impl FieldArgs {
                     face_groups(&self.face_thickness, "thickness")
                 } else if !self.face_distance.is_empty() {
                     face_groups(&self.face_distance, "distance")
+                } else if !self.face_angle.is_empty() {
+                    face_groups(&self.face_angle, "angle")
                 } else {
                     json!([])
                 };
@@ -3385,6 +3437,21 @@ fn ends_json(setbacks: &[(String, String)], reliefs: &[(String, String)]) -> Opt
     ))
 }
 
+/// `--flip` as a request takes it: a bool where every value is `true` or
+/// `false` (the last one counting: a datum's or split's), else a draft's
+/// faces; `--no-flip` none.
+fn flip_of(values: &[String], none: bool) -> Option<ryucad::proto::Flip> {
+    use ryucad::proto::Flip;
+    if none {
+        return Some(Flip::Faces(Vec::new()));
+    }
+    let last = values.last()?;
+    if values.iter().all(|v| v == "true" || v == "false") {
+        return Some(Flip::On(last == "true"));
+    }
+    Some(Flip::Faces(values.to_vec()))
+}
+
 fn face_groups(pairs: &[(String, String)], key: &str) -> Value {
     let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
     for (face, q) in pairs {
@@ -3556,6 +3623,7 @@ fn request(cmd: &Command) -> Option<Request> {
             translate,
             axis,
             angle,
+            about,
             expect,
         }) => Request::AssemblyMove {
             part: part.clone(),
@@ -3564,6 +3632,7 @@ fn request(cmd: &Command) -> Option<Request> {
             translate: translate.clone().map(|t| t.map(Value::String)),
             axis: *axis,
             angle: angle.clone().map(Value::String),
+            about: about.clone().map(|t| t.map(Value::String)),
             expected_revision: expect.revision.clone(),
         },
         Command::Assembly(AssemblyCmd::Tree { part, path, depth }) => Request::AssemblyTree {
@@ -3578,10 +3647,18 @@ fn request(cmd: &Command) -> Option<Request> {
             translate,
             axis,
             angle,
+            about,
             component,
+            rev,
+            mates,
         }) => Request::AssemblySolve {
             part: part.clone(),
             component: *component,
+            rev: rev.clone(),
+            mates: mates
+                .iter()
+                .filter_map(|m| m.as_object().cloned())
+                .collect(),
             moves: instance
                 .iter()
                 .map(|i| ryucad::proto::InstanceMove {
@@ -3590,6 +3667,7 @@ fn request(cmd: &Command) -> Option<Request> {
                     translate: translate.clone().map(|t| t.map(Value::String)),
                     axis: *axis,
                     angle: angle.clone().map(Value::String),
+                    about: about.clone().map(|t| t.map(Value::String)),
                 })
                 .collect(),
         },
@@ -5752,6 +5830,92 @@ mod tests {
             }
             _ => panic!("not a feature write"),
         }
+    }
+
+    #[test]
+    fn drafts_from_the_command_line() {
+        on_cli_stack(|| {
+            use ryucad::proto::Flip;
+            // About a neutral plane: faces, a group at its own angle, a face
+            // flipped, the pull reversed, tangency off.
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "draft",
+                "--neutral",
+                "xy",
+                "--angle",
+                "2deg",
+                "--face",
+                "p/b/a",
+                "--face",
+                "p/b/c",
+                "--face-angle",
+                "p/b/d=-5deg",
+                "--flip",
+                "p/b/d",
+                "--reverse",
+                "--no-tangent",
+            ])
+            .unwrap();
+            assert_eq!(f.neutral.as_deref(), Some("xy"));
+            assert_eq!(
+                f.faces,
+                Some(json!(["p/b/a", "p/b/c", {"angle": "-5deg", "faces": ["p/b/d"]}]))
+            );
+            assert_eq!(f.flip, Some(Flip::Faces(vec!["p/b/d".to_owned()])));
+            assert_eq!((f.reverse, f.tangent), (Some(true), Some(false)));
+            assert_eq!(f.angle, Some(json!("2deg")));
+            // From a parting line of two edges, with a pull.
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "draft",
+                "--parting",
+                "p/b/e1",
+                "--parting",
+                "p/b/e2",
+                "--pull",
+                "z",
+                "--angle",
+                "3deg",
+                "--face",
+                "p/b/a",
+            ])
+            .unwrap();
+            assert_eq!(
+                f.parting,
+                Some(vec!["p/b/e1".to_owned(), "p/b/e2".to_owned()])
+            );
+            assert_eq!(f.pull.as_deref(), Some("z"));
+            assert_eq!(f.face.as_deref(), Some("p/b/a"));
+            // --flip alone, and --flip false, are a datum's or a split's.
+            let f = sent(&["ryucad", "feature", "edit", "p", "d1", "--flip"]).unwrap();
+            assert_eq!(f.flip, Some(Flip::On(true)));
+            let f = sent(&["ryucad", "feature", "edit", "p", "d1", "--flip", "false"]).unwrap();
+            assert_eq!(f.flip, Some(Flip::On(false)));
+            // --no-flip: no face of a draft flipped.
+            let f = sent(&["ryucad", "feature", "edit", "p", "d", "--no-flip"]).unwrap();
+            assert_eq!(f.flip, Some(Flip::Faces(Vec::new())));
+            // A neutral plane and a parting line together is a usage error.
+            let e = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "draft",
+                "--neutral",
+                "xy",
+                "--parting",
+                "p/b/e",
+            ])
+            .unwrap_err();
+            assert_eq!(e.code, Code::Usage);
+        });
     }
 
     #[test]

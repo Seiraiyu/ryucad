@@ -3408,6 +3408,107 @@ fn datums_from_the_cli() {
 }
 
 #[test]
+fn drafts_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "box"]);
+    p.ok(&[
+        "feature", "add", "box", "box", "--id", "base", "--param", "x=40", "--param", "y=30",
+        "--param", "z=20",
+    ]);
+    let base = p.ok(&["inspect", "box", "base"])["bodies"][0].clone();
+    let wall = |axis: usize, n: f64| -> String {
+        let f = base["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["z"][axis].as_f64().unwrap() * sign == n
+            })
+            .unwrap();
+        format!("box/base/{}", f["name"].as_str().unwrap())
+    };
+    let (east, west, north, south) = (wall(0, 1.0), wall(0, -1.0), wall(1, 1.0), wall(1, -1.0));
+    let north_angle = format!("{north}=5deg");
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "box",
+        "draft",
+        "--id",
+        "d",
+        "--neutral",
+        "xy",
+        "--angle",
+        "2deg",
+        "--face",
+        &east,
+        "--face",
+        &west,
+        "--face",
+        &south,
+        "--face-angle",
+        &north_angle,
+        "--flip",
+        &south,
+    ]);
+    let f = &r["feature"];
+    assert_eq!(f["target"], "base", "{r}");
+    assert_eq!(f["faces"], json!([east, west, south]), "{r}");
+    assert_eq!(f["groups"][0]["faces"], json!([north]), "{r}");
+    assert_eq!(f["flip"], json!([south]), "{r}");
+    // The rebuild reports each face's angle.
+    let built = p.ok(&["rebuild", "box"]);
+    let d = built["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == "d")
+        .unwrap()["draft"]
+        .clone();
+    assert_eq!(d["angles"].as_array().unwrap().len(), 4, "{d}");
+    // A parting line replaces the neutral plane.
+    let rim = format!("box/base/{}", base["edges"][0]["name"].as_str().unwrap());
+    p.ok(&[
+        "feature",
+        "edit",
+        "box",
+        "d",
+        "--parting",
+        &rim,
+        "--pull",
+        "z",
+        "--no-flip",
+    ]);
+    let shown = p.ok(&["feature", "show", "box", "d"]);
+    assert!(
+        shown.get("neutral").is_none() || shown["neutral"].is_null(),
+        "{shown}"
+    );
+    assert_eq!(shown["pull"], "z", "{shown}");
+    assert!(shown.get("flip").is_none(), "{shown}");
+    // An angle out of range is the agent's to fix.
+    p.fails(
+        &["feature", "edit", "box", "d", "--angle", "90deg"],
+        "invalid_param",
+        1,
+    );
+    // The daemon logged the draft: undo takes its file away, redo puts it
+    // back.
+    let file = p.daemon.join("parts/box/features/d.json");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(!file.exists());
+    let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(file.exists());
+}
+
+#[test]
 fn face_tweaks_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
@@ -5702,10 +5803,10 @@ fn interference_from_the_cli() {
     p.fails(&["clearance", "bolt"], "wrong_part_kind", 1);
 }
 
-#[test]
-fn mates_from_the_cli() {
-    let p = Pair::new();
-    p.ok(&["init", "--unit", "mm"]);
+/// A plate `base` (100 × 50 × 5 mm, fixed) and a bolt `pin` (radius 3,
+/// height 20) placed 50 mm along x in assembly `frame`; the plate's top
+/// and the bolt's foot as entity references.
+fn plate_and_bolt(p: &Pair) -> (String, String) {
     let params: [(&str, &str, &str, &[&str]); 2] = [
         ("plate", "box", "slab", &["x=100", "y=50", "z=5"]),
         ("bolt", "cylinder", "shank", &["radius=3", "height=20"]),
@@ -5739,8 +5840,48 @@ fn mates_from_the_cli() {
             .map(|f| f["name"].as_str().unwrap().to_owned())
             .unwrap()
     };
-    let top = format!("frame/base/slab/{}", face("plate", "slab", 1.0));
-    let foot = format!("frame/pin/shank/{}", face("bolt", "shank", -1.0));
+    (
+        format!("frame/base/slab/{}", face("plate", "slab", 1.0)),
+        format!("frame/pin/shank/{}", face("bolt", "shank", -1.0)),
+    )
+}
+
+#[test]
+fn controlled_edits_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let (top, foot) = plate_and_bolt(&p);
+    // A mate previewed, nothing written.
+    let mate = format!(
+        r#"{{"form": "revolute", "a": "{top}", "b": "{foot}", "b_offset": {{"flip": true}}}}"#
+    );
+    let v = p.ok(&["assembly", "solve", "frame", "--mate", &mate]);
+    assert_eq!(v["converged"], true, "{v}");
+    assert_eq!(v["solve"]["instances"]["pin"]["dof"], 1, "{v}");
+    let listed = p.ok(&["feature", "list", "frame"]);
+    assert!(!listed.to_string().contains("\"mate\""), "{listed}");
+    // A turn about a point, written.
+    let v = p.ok(&[
+        "assembly", "move", "frame", "pin", "--axis", "0,0,1", "--angle", "90deg", "--about",
+        "60mm,0,0",
+    ]);
+    let o = &v["pose"]["origin_m"];
+    assert!((o[0].as_f64().unwrap() - 0.06).abs() < 1e-12, "{v}");
+    assert!((o[1].as_f64().unwrap() + 0.01).abs() < 1e-12, "{v}");
+    // About alone is refused.
+    let e = p.fails(
+        &["assembly", "move", "frame", "pin", "--about", "0,0,0"],
+        "invalid_param",
+        1,
+    );
+    assert_eq!(e["details"]["param"], "about", "{e}");
+}
+
+#[test]
+fn mates_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let (top, foot) = plate_and_bolt(&p);
     let added = p.ok(&[
         "feature",
         "add",

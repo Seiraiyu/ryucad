@@ -217,7 +217,7 @@ pub fn bodies_read(f: &crate::doc::files::Feature) -> Vec<Read<'_>> {
             }
             out
         }
-        F::Offset(_) | F::MoveFace(_) | F::ReplaceFace(_) => f
+        F::Offset(_) | F::MoveFace(_) | F::ReplaceFace(_) | F::Draft(_) => f
             .targets()
             .into_iter()
             .map(|t| read("target", t, None, None))

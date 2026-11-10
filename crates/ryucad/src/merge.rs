@@ -408,7 +408,8 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
 
 /// A feature file: one value when its type changes (or both sides added
 /// it differently), or a datum's construction (`by`) does, a sketch per
-/// member, else per key.
+/// member, a split's plane and flip and a draft's hinge one value each,
+/// else per key.
 fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) -> Value {
     let ty = |v: &Value| (v.get("type").cloned(), v.get("by").cloned());
     let same_type = match base {
@@ -421,11 +422,19 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
             instance(walk, b, ours, theirs)
         }
         Some(b) if same_type && ty(b).0 == Some(json!("split")) => {
-            split_feature(walk, b, ours, theirs)
+            paired(walk, b, ours, theirs, &["plane", "tool", "flip"], true)
         }
         Some(b) if same_type && ty(b).0 == Some(json!("import")) => {
             import_feature(walk, b, ours, theirs)
         }
+        Some(b) if same_type && ty(b).0 == Some(json!("draft")) => paired(
+            walk,
+            b,
+            ours,
+            theirs,
+            &["neutral", "parting", "pull", "reverse"],
+            false,
+        ),
         // A planar face's profile is one value, as a sweep's is.
         Some(b)
             if same_type
@@ -726,35 +735,50 @@ fn import_feature(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -
     Value::Object(out)
 }
 
-/// A split: per key, but what it cuts with (its plane or its tool) and
-/// its flip are one value together: a flip changed alone means the other
-/// side is kept, so a side changing one while the other changes another
-/// is a conflict at each key the sides give differently, as a sweep's law
-/// and direction are, ours' standing in the file as ours' value stands at
-/// every conflict, so taking one side at each gives that side's split
-/// whole.
-fn split_feature(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Value {
-    const ONE: [&str; 3] = ["plane", "tool", "flip"];
+/// A feature merged per key but for `keys`, one value together: a side
+/// changing any of them takes them all, and both changing them
+/// differently is a conflict at each of them (with `differing`, only at
+/// those the sides give differently), ours' standing in the file as ours'
+/// value stands at every conflict, so taking one side at all of them gives
+/// that side's whole. A split's plane or tool and flip (a flip changed
+/// alone means the other side is kept), a draft's hinge (`neutral`,
+/// `parting`, `pull` and `reverse`: a parting line changed alone leaves a
+/// pull it doesn't take), as a sweep's law and direction are.
+fn paired(
+    walk: &mut Walk,
+    base: &Value,
+    ours: &Value,
+    theirs: &Value,
+    keys: &[&str],
+    differing: bool,
+) -> Value {
     let obj = |v: &Value| v.as_object().cloned().unwrap_or_default();
     let (b, o, t) = (obj(base), obj(ours), obj(theirs));
-    let mut out = walk.object("", &b, &o, &t, &ONE);
-    let triple = |m: &Map<String, Value>| ONE.map(|k| m.get(k).cloned());
-    let (pb, po, pt) = (triple(&b), triple(&o), triple(&t));
-    let side = if po == pt || pt == pb {
-        po
-    } else if po == pb {
-        pt
+    let mut out = walk.object("", &b, &o, &t, keys);
+    let set = |m: &Map<String, Value>| keys.iter().map(|k| m.get(*k).cloned()).collect::<Vec<_>>();
+    let (sb, so, st) = (set(&b), set(&o), set(&t));
+    let side = if so == st || st == sb {
+        so
+    } else if so == sb {
+        st
     } else {
-        for k in ONE {
-            if o.get(k) != t.get(k) {
-                walk.conflict(&format!("/{k}"), Kind::Value, b.get(k), o.get(k), t.get(k));
+        for k in keys {
+            if differing && o.get(*k) == t.get(*k) {
+                continue;
             }
+            walk.conflict(
+                &format!("/{k}"),
+                Kind::Value,
+                b.get(*k),
+                o.get(*k),
+                t.get(*k),
+            );
         }
-        po
+        so
     };
-    for (k, v) in ONE.into_iter().zip(side) {
+    for (k, v) in keys.iter().zip(side) {
         if let Some(v) = v {
-            out.insert(k.to_owned(), v);
+            out.insert((*k).to_owned(), v);
         }
     }
     Value::Object(out)
@@ -1658,6 +1682,59 @@ mod tests {
         let m = merge(Some(&o), &base, &o);
         assert!(m.value.get("place").is_none(), "{}", m.value);
         assert_eq!(m.value["format"], 13);
+    }
+
+    #[test]
+    fn a_drafts_hinge_is_one_value_and_its_lists_merge_whole() {
+        let n = |k: u8| json!({"feature": "b", "name": format!("{k:032x}")});
+        let dr = |extra: Value| {
+            let mut v = json!({"format": crate::doc::tweak::DRAFT_FORMAT, "kind": "ryucad.feature",
+                               "type": "draft", "target": "b", "angle": "2 deg", "neutral": "xy",
+                               "faces": [n(1)]});
+            for (k, x) in extra.as_object().unwrap() {
+                if x.is_null() {
+                    v.as_object_mut().unwrap().remove(k);
+                } else {
+                    v[k] = x.clone();
+                }
+            }
+            v
+        };
+        let base = dr(json!({}));
+        let parting = dr(json!({"neutral": null, "parting": [n(2)], "pull": "z"}));
+        // An angle on one side and a new hinge on the other: both.
+        let m = merge(Some(&base), &dr(json!({"angle": "3 deg"})), &parting);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(m.value["angle"], "3 deg");
+        assert!(m.value.get("neutral").is_none(), "{}", m.value);
+        assert_eq!(
+            (&m.value["parting"], &m.value["pull"]),
+            (&json!([n(2)]), &json!("z"))
+        );
+        // A hinge changed differently on both sides: one conflict, at its
+        // fields together, ours' hinge standing in the file.
+        let m = merge(Some(&base), &dr(json!({"neutral": "yz"})), &parting);
+        assert_eq!(
+            m.conflicts.keys().collect::<Vec<_>>(),
+            ["/neutral", "/parting", "/pull", "/reverse"]
+        );
+        assert_eq!(m.value["neutral"], "yz");
+        assert!(m.value.get("parting").is_none());
+        // reverse goes with its hinge: turned on one side, the plane moved
+        // on the other, is one conflict too.
+        let m = merge(
+            Some(&base),
+            &dr(json!({"reverse": true})),
+            &dr(json!({"neutral": "yz"})),
+        );
+        assert!(!m.is_clean());
+        // Faces and flips are one value each.
+        let m = merge(
+            Some(&base),
+            &dr(json!({"faces": [n(1), n(3)]})),
+            &dr(json!({"faces": [n(1), n(4)]})),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/faces"]);
     }
 
     #[test]
