@@ -106,3 +106,38 @@ fn a_name_is_followed_through_placings_and_one_live_piece() {
     assert_eq!(follow(top, &[j], &b), b.by_name(piece));
     assert!(matches!(b.by_name(piece), Some(EntityId::Face(_))));
 }
+
+/// A frustum's top rim chamfered: the disc capping it is bounded only by
+/// the chamfer's rail, so it has no width beyond the rail to measure a
+/// share by, and the chamfer is read all the same (plan 13.D: seeded
+/// blends recognised back found it refused).
+#[test]
+fn a_chamfer_round_a_capped_rim_is_read() {
+    let (f, _) = primitive::frustum(K, 0.5, 0.3, 0.4, &Rigid::IDENTITY).unwrap();
+    // The top rim: the circle at z = 0.4.
+    let rim = f
+        .edges()
+        .find(|&e| {
+            let v = f.edges[e].start;
+            (f.vertices[v].point.z - 0.4).abs() < 1e-12
+        })
+        .unwrap();
+    let kind = BlendKind::Chamfer(Chamfer::Equal { distance: 0.02 });
+    let (c, _) = blend(
+        OpKey(7),
+        &f,
+        &[EdgeBlend {
+            edge: f.edges[rim].name,
+            kind,
+        }],
+    )
+    .unwrap();
+    let r = recognise_blends(&c, &RecogniseOptions::default()).unwrap();
+    assert_eq!(r.blends.len(), 1, "{r:?}");
+    match r.blends[0].kind {
+        BlendKind::Chamfer(Chamfer::Equal { distance }) => {
+            assert!((distance - 0.02).abs() < 1e-9, "{distance}")
+        }
+        k => panic!("read as {k:?}"),
+    }
+}
