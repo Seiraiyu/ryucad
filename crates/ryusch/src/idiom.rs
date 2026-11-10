@@ -950,7 +950,7 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
         .flat_map(|b| b.rows.iter().flat_map(|(_, l)| l.iter()))
         .flat_map(|i| idioms[*i].parts.iter().copied())
         .collect();
-    let mut banks_done = banks.is_empty();
+    let mut banks_done = false;
     // What hangs off sideways pins stands in stairs before decoupling is
     // placed, which then stands past it.
     let mut stairs_done = false;
@@ -963,6 +963,7 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
         if !stairs_done && later(&idiom) {
             if !banks_done {
                 place_banks(block, &banks, idioms, &mut out, &mut of);
+                place_networks(block, idioms, &mut out, &mut of);
                 banks_done = true;
             }
             hanging_stairs(block, idioms, &mut out);
@@ -1443,6 +1444,7 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
     }
     if !banks_done {
         place_banks(block, &banks, idioms, &mut out, &mut of);
+        place_networks(block, idioms, &mut out, &mut of);
     }
     // A port's flag whose net meets one part's pin (an in port feeding
     // it, an out port it drives) stands on that pin's line a few steps
@@ -1520,6 +1522,186 @@ pub fn bank_nets(block: &Block, idioms: &[Idiom], clusters: &[Cluster]) -> BTree
                 .filter_map(|(k, _)| block.parts[b.part].pins[*k].net)
         })
         .collect()
+}
+
+/// One-symbol resistor networks (an array of four pins or more, its
+/// pins in level pairs either side) that are no idiom's part, each of
+/// whose signal pins is on a net whose only other pin is one sideways
+/// side of one part: each joins that part's cluster beside the side,
+/// turned so its signal pins face it, its topmost signal pin on the
+/// topmost served pin's row, past whatever stands out there.
+fn place_networks(
+    block: &Block,
+    idioms: &[Idiom],
+    out: &mut [Option<Cluster>],
+    of: &mut BTreeMap<usize, usize>,
+) {
+    let taken: BTreeSet<usize> = idioms
+        .iter()
+        .flat_map(|i| i.parts.iter().copied())
+        .collect();
+    let by_net = pins_by_net(block);
+    for q in 0..block.parts.len() {
+        let part = &block.parts[q];
+        let pre = prefix(block, q);
+        let array = pre == "R" || ["RN", "RM", "RA"].iter().any(|x| pre.starts_with(x));
+        if !array || part.pins.len() < 4 || !part.pins.len().is_multiple_of(2) || taken.contains(&q)
+        {
+            continue;
+        }
+        // Level pairs either side.
+        let level = part.pins.iter().all(|x| {
+            x.side.horizontal()
+                && part
+                    .pins
+                    .iter()
+                    .any(|y| y.side == x.side.opposite() && y.at[1] == x.at[1])
+        });
+        if !level {
+            continue;
+        }
+        // Each signal pin's net meets one other pin, all of one part.
+        let mut served: Vec<(usize, usize, usize)> = Vec::new();
+        let mut ok = true;
+        for (k, x) in part.pins.iter().enumerate() {
+            let Some(n) = x.net else { continue };
+            if kind_of(block, Some(n)) != Some(NetKind::Signal) {
+                continue;
+            }
+            let others: Vec<(usize, usize)> = by_net
+                .get(&n)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|(p, _)| *p != q)
+                .collect();
+            if others.len() != 1 {
+                ok = false;
+                break;
+            }
+            served.push((k, others[0].0, others[0].1));
+        }
+        let Some(&(_, a, _)) = served.first() else {
+            continue;
+        };
+        if !ok || served.iter().any(|(_, p, _)| *p != a) {
+            continue;
+        }
+        let (Some(&ci), Some(&qi)) = (of.get(&a), of.get(&q)) else {
+            continue;
+        };
+        if ci == qi || out[qi].as_ref().is_none_or(|c| c.members.len() != 1) {
+            continue;
+        }
+        let Some(mut cluster) = out[ci].clone() else {
+            continue;
+        };
+        let Some(rel) = cluster
+            .members
+            .iter()
+            .find(|(p, _)| *p == a)
+            .map(|(_, x)| *x)
+        else {
+            continue;
+        };
+        let shape = Shape::of(&block.parts[a], rel);
+        let side = shape.pins[served[0].2].side;
+        if !side.horizontal() || served.iter().any(|(_, _, k)| shape.pins[*k].side != side) {
+            continue;
+        }
+        // Its served pins top to bottom, and its own signal pins likewise
+        // once turned: the turn whose order matches first.
+        let mut want: Vec<(Nm, usize)> = served
+            .iter()
+            .map(|(qk, _, k)| (shape.pins[*k].end[1], *qk))
+            .collect();
+        want.sort_by_key(|(y, _)| std::cmp::Reverse(*y));
+        let facing: Vec<(u16, bool)> = [(0, false), (0, true), (180, false), (180, true)]
+            .into_iter()
+            .filter(|(r, m)| {
+                let sh = Shape::of(part, Place::new([0, 0], *r, *m));
+                served
+                    .iter()
+                    .all(|(qk, _, _)| sh.pins[*qk].side == side.opposite())
+            })
+            .collect();
+        let Some(&turn) = facing
+            .iter()
+            .find(|(r, m)| {
+                let sh = Shape::of(part, Place::new([0, 0], *r, *m));
+                let mut got: Vec<(Nm, usize)> = served
+                    .iter()
+                    .map(|(qk, _, _)| (sh.pins[*qk].end[1], *qk))
+                    .collect();
+                got.sort_by_key(|(y, _)| std::cmp::Reverse(*y));
+                got.iter().map(|x| x.1).eq(want.iter().map(|x| x.1))
+            })
+            .or(facing.first())
+        else {
+            continue;
+        };
+        // Past whatever stands out beside the served rows: their labels,
+        // the part's own room, and every other member there.
+        let edge = shape.pins[served[0].2].end[0];
+        let away = |x: Nm| {
+            if side == Side::Left {
+                edge - x
+            } else {
+                x - edge
+            }
+        };
+        let (lo, hi) = (
+            served
+                .iter()
+                .map(|(_, _, k)| shape.pins[*k].end[1])
+                .min()
+                .unwrap_or(0),
+            served
+                .iter()
+                .map(|(_, _, k)| shape.pins[*k].end[1])
+                .max()
+                .unwrap_or(0),
+        );
+        let mut reach: Nm = 0;
+        for (_, _, k) in &served {
+            let name = block.label_text(a, *k);
+            if !name.is_empty() {
+                let r = crate::label::label_box(
+                    crate::layout::LabelKind::Net,
+                    &name,
+                    shape.pins[*k].end,
+                    side,
+                );
+                reach = reach.max(away(r.min[0])).max(away(r.max[0]));
+            }
+        }
+        for (p, pl) in &cluster.members {
+            // The part's own room; others' extents beside the rows.
+            let r = if *p == a {
+                Cluster::single(*p, *pl).room(block, [0, 0])
+            } else {
+                Shape::of(&block.parts[*p], *pl).extent.grow(GRID)
+            };
+            if *p != a && (r.max[1] < lo || r.min[1] > hi) {
+                continue;
+            }
+            let far = if side == Side::Left {
+                r.min[0]
+            } else {
+                r.max[0]
+            };
+            reach = reach.max(away(far));
+        }
+        let steps = (reach.max(0) + GRID - 1) / GRID + 2;
+        let top = want[0].1;
+        let x = edge + side.step()[0] / GRID * steps * GRID;
+        let place = put(block, q, turn, top, [x, want[0].0]);
+        let place = clear_of(block, &cluster.members, q, place, side);
+        cluster.members.push((q, place));
+        out[qi] = None;
+        of.insert(q, ci);
+        out[ci] = Some(cluster);
+    }
 }
 
 /// Each bank's members placed in the cluster of its part.
@@ -1686,9 +1868,44 @@ fn place_bank(
                 .filter(|x| x.2 != rail && x.3 < t && x.3 > b)
                 .count()
         };
+        // The other rail's rows just past this rail's port (a supply's
+        // above its top row, ground's below its bottom one): its port
+        // stands in their way.
+        let blocked = |rail: Option<usize>| {
+            let ys: Vec<Nm> = placed.iter().filter(|x| x.2 == rail).map(|x| x.3).collect();
+            let ground = kind_of(block, rail) == Some(NetKind::Ground);
+            let end = if ground {
+                *ys.iter().min().unwrap()
+            } else {
+                *ys.iter().max().unwrap()
+            };
+            placed
+                .iter()
+                .filter(|x| x.2 != rail)
+                .filter(|x| {
+                    let d = if ground { end - x.3 } else { x.3 - end };
+                    d > 0 && d <= 4 * GRID
+                })
+                .count()
+        };
+        // A rail with a row whose other members hang off it stands far:
+        // they hang between the columns, where no near row's wire runs.
+        let hangs_on = |rail: Option<usize>| {
+            bank.rows
+                .iter()
+                .zip(&placed)
+                .any(|((_, l), x)| x.2 == rail && l.len() > 1)
+        };
         let mut list: Vec<Option<usize>> = rails.iter().copied().collect();
-        // Fewer crossed rows nearer; ties to ground (pull-downs) nearer.
-        list.sort_by_key(|r| (crossed(*r), kind_of(block, *r) != Some(NetKind::Ground)));
+        // Fewer crossed rows nearer (a port in a row's way costs two);
+        // ties to ground (pull-downs) nearer.
+        list.sort_by_key(|r| {
+            (
+                hangs_on(*r),
+                crossed(*r) + 2 * blocked(*r),
+                kind_of(block, *r) != Some(NetKind::Ground),
+            )
+        });
         let f = list[1];
         far = Some(f);
         // The far members stand one column further out: past the near

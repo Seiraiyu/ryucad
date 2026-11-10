@@ -3066,11 +3066,13 @@ fn draw(
                 let y = st.shape(row.pin.0).expect("placed").pins[row.pin.1].end[1];
                 let base = (y - font::SIZE / 4).div_euclid(GRID) * GRID;
                 let w = text::row_width(&texts);
-                let start = |d: Nm| match row.side {
-                    Side::Left => [(ext.min[0] - GRID - w).div_euclid(GRID) * GRID - d, base],
+                // Under the row first, then on it (a port at its rail end
+                // may take the place under it), stepping out.
+                let start = |d: Nm, y: Nm| match row.side {
+                    Side::Left => [(ext.min[0] - GRID - w).div_euclid(GRID) * GRID - d, y],
                     _ => [
                         (ext.max[0] + GRID - 1).div_euclid(GRID) * GRID + GRID + d,
-                        base,
+                        y,
                     ],
                 };
                 let fits = |at: Point| {
@@ -3079,8 +3081,15 @@ fn draw(
                         .zip(&texts)
                         .all(|(q, t)| text::boxes(&[t], *q).iter().all(|b| field.clear(*b)))
                 };
-                let kept = kept_text.get(&p).copied().filter(|at| at[1] == base);
-                let at = kept.or_else(|| (0..=24).map(|k| start(k * GRID)).find(|a| fits(*a)));
+                let kept = kept_text
+                    .get(&p)
+                    .copied()
+                    .filter(|at| at[1] == base || at[1] == base + GRID);
+                let at = kept.or_else(|| {
+                    (0..=24)
+                        .flat_map(|k| [start(k * GRID, base), start(k * GRID, base + GRID)])
+                        .find(|a| fits(*a))
+                });
                 if let Some(at) = at {
                     let pts = text::row_points(&texts, at);
                     let mut fields = BTreeMap::new();
@@ -3839,6 +3848,44 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    /// A one-symbol network pulling four of a dense part's rows stands beside
+    /// that side, its signal pins facing the part, and every hard rule holds.
+    #[test]
+    fn a_one_symbol_network_stands_beside_the_pins_it_serves() {
+        let mut block = crate::testing::dense_block(false);
+        // R1 to R4 (rows S0 to S3) replaced by one 4-element network to 3V3.
+        block
+            .parts
+            .retain(|p| !["r1", "r2", "r3", "r4"].contains(&p.key.as_str()));
+        block.parts.push(crate::testing::network(
+            "rn1",
+            "RN1",
+            "4x10k",
+            &[
+                Some(2),
+                Some(3),
+                Some(4),
+                Some(5),
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(0),
+            ],
+        ));
+        let out = lay(&block);
+        assert_eq!(crate::rules::check(&block, &out.layout), []);
+        let rn = &out.layout.placed["rn1"];
+        let u1 = &out.layout.placed["u1"];
+        assert!(rn.at[0] > u1.at[0], "on U1's right, the side it serves");
+        let (found, _) = crate::lint::lint(&block, &out);
+        assert!(
+            !found
+                .iter()
+                .any(|f| f.code == "sch_floating" && f.refs.iter().any(|r| r == "rn1")),
+            "{found:#?}"
+        );
     }
 
     /// A bypass capacitor on a dense part's banked side stands past the bank

@@ -704,3 +704,51 @@ pub fn dense_block(with_ports: bool) -> Block {
         ..Block::default()
     }
 }
+
+/// A one-symbol resistor network of `n` elements (prefix RN): element
+/// `k` between pin `k` on the left and pin `2n + 1 - k` on the right,
+/// level, two steps apart, top to bottom; `nets` gives each pin's net in
+/// pin number order.
+pub fn network(key: &str, refdes: &str, value: &str, nets: &[Option<usize>]) -> Part {
+    let n = nets.len() / 2;
+    let h = 2 * GRID * n as Nm;
+    let mut pins = Vec::new();
+    for (k, net) in nets[..n].iter().enumerate() {
+        let y = h / 2 - GRID - 2 * GRID * k as Nm;
+        pins.push(pin(
+            &(k + 1).to_string(),
+            "",
+            [-3 * GRID, y],
+            Side::Left,
+            2 * GRID,
+            PinKind::Passive,
+            *net,
+        ));
+    }
+    for k in (0..n).rev() {
+        let y = h / 2 - GRID - 2 * GRID * k as Nm;
+        let number = 2 * n - k;
+        pins.push(pin(
+            &number.to_string(),
+            "",
+            [3 * GRID, y],
+            Side::Right,
+            2 * GRID,
+            PinKind::Passive,
+            nets[number - 1],
+        ));
+    }
+    pins.sort_by_key(|p| p.number.parse::<usize>().unwrap_or(0));
+    symbol(
+        key,
+        "RN",
+        refdes,
+        value,
+        vec![Graphic::Rect {
+            start: [-GRID, h / 2],
+            end: [GRID, -h / 2],
+            fill: Fill::Body,
+        }],
+        pins,
+    )
+}
