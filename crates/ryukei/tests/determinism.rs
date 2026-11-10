@@ -3654,6 +3654,7 @@ sections! {
     drafts => drafts_section,
     retrim => retrim_section,
     delete_faces => delete_faces_section,
+    blend_recognition => blend_recognition_section,
 }
 
 /// Self-union (design 299, plan 14.C): two 4 m blocks crossing as one
@@ -4791,5 +4792,69 @@ fn delete_faces_section(golden: &mut Golden) {
         .collect();
     let (rounded, _) = blend(OpKey(0x646c_6605), &b, &all).unwrap();
     let (o, j) = delete_faces(k, &rounded, &auto(curved(&rounded))).unwrap();
+    hash_body(&mut s, &o, &j);
+}
+
+/// Blend recognition and edits (design 399, plan 13.D): a box rounded at
+/// 0.1 and one chamfered at 0.05 recognised (every blend's faces, kind,
+/// size, supports and chain, and the corners), the rounded box's
+/// fillets under 0.15 deleted, and one fillet of a block resized to 0.15
+/// keeping its names.
+fn blend_recognition_section(golden: &mut Golden) {
+    use ryukei::blend::{BlendKind, Chamfer, EdgeBlend, blend};
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::tweak::{
+        DeleteBlends, RecogniseOptions, delete_blends, recognise_blends, resize_blends,
+    };
+    let mut s = golden.section("blend_recognition");
+    let key = OpKey(0x6272_6300);
+    let k = OpKey(0x6272_6301);
+    let face = |r: FaceRole| Name::derive(key, Role::Face(r), &[]);
+    let (b, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let every = |kind: BlendKind, key: u128| {
+        let all: Vec<EdgeBlend> = b
+            .edges()
+            .map(|e| EdgeBlend {
+                edge: b.edge(e).unwrap().name,
+                kind,
+            })
+            .collect();
+        blend(OpKey(key), &b, &all).unwrap().0
+    };
+    let rounded = every(BlendKind::Fillet { radius: 0.1 }, 0x6272_6302);
+    let chamfered = every(
+        BlendKind::Chamfer(Chamfer::Equal { distance: 0.05 }),
+        0x6272_6303,
+    );
+    let opts = RecogniseOptions::default();
+    for body in [&rounded, &chamfered] {
+        let r = recognise_blends(body, &opts).unwrap();
+        s.str(&format!("{r:?}"));
+    }
+    let small = DeleteBlends {
+        max_size: Some(0.15),
+        faces: Vec::new(),
+        options: opts,
+    };
+    let (o, j) = delete_blends(k, &rounded, &small).unwrap();
+    hash_body(&mut s, &o, &j);
+    let mut f = [face(FaceRole::PlusZ), face(FaceRole::MinusY)];
+    f.sort();
+    let (one, _) = blend(
+        OpKey(0x6272_6304),
+        &b,
+        &[EdgeBlend {
+            edge: Name::derive(key, Role::Edge, &f),
+            kind: BlendKind::Fillet { radius: 0.1 },
+        }],
+    )
+    .unwrap();
+    let r = recognise_blends(&one, &opts).unwrap();
+    let (o, j) = resize_blends(
+        k,
+        &one,
+        &[(r.blends[0].faces[0], BlendKind::Fillet { radius: 0.15 })],
+    )
+    .unwrap();
     hash_body(&mut s, &o, &j);
 }
