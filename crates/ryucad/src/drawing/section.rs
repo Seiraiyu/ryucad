@@ -214,3 +214,424 @@ pub(super) fn frame_of(normal: [f64; 3], parent: &Frame) -> Result<Frame> {
     };
     Frame::new(normal, up)
 }
+
+/// A cut body and its caps, as the session keeps them.
+#[derive(Clone, Debug)]
+pub struct Cut1 {
+    pub built: Arc<crate::rebuild::Built>,
+    pub caps: Vec<FaceId>,
+}
+
+/// Cut bodies by their key, kept by the session.
+#[derive(Clone, Debug, Default)]
+pub struct Cache {
+    kept: BTreeMap<String, Arc<Cut1>>,
+}
+
+impl Cache {
+    pub const MAX: usize = 256;
+
+    fn get(&self, k: &str) -> Option<Arc<Cut1>> {
+        self.kept.get(k).cloned()
+    }
+
+    fn put(&mut self, k: String, c: Arc<Cut1>) {
+        if self.kept.len() >= Self::MAX {
+            self.kept.clear();
+        }
+        self.kept.insert(k, c);
+    }
+}
+
+/// The key of `body` at `pose` cut by `how`.
+fn key(b: &crate::rebuild::Built, pose: &Rigid, how: &How) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(b"ryucad.section.1\0");
+    h.update(b.hash.as_bytes());
+    h.update(&ryukei::codec::encode_rigid(pose));
+    let mut bits = |x: f64| {
+        h.update(&x.to_bits().to_le_bytes());
+    };
+    match how {
+        How::Plane(p) => {
+            p.origin_m.into_iter().chain(p.normal).for_each(&mut bits);
+        }
+        How::Steps { points, square } => {
+            points
+                .iter()
+                .flatten()
+                .copied()
+                .chain(*square)
+                .for_each(&mut bits);
+        }
+    }
+    h.finalize().to_hex().to_string()
+}
+
+/// `ryucad.section.1`: the caps' names, then the body.
+fn encode(c: &Cut1) -> Vec<u8> {
+    let mut out = b"ryucad.section.1\n".to_vec();
+    out.extend_from_slice(&(c.caps.len() as u32).to_le_bytes());
+    for f in &c.caps {
+        let n = c.built.body.face(*f).expect("a live face").name;
+        out.extend_from_slice(&n.to_u128().to_le_bytes());
+    }
+    out.extend_from_slice(&ryukei::codec::encode_body(&c.built.body));
+    out
+}
+
+fn decode(bytes: &[u8], hash: &str, origins: &Arc<crate::rebuild::Origins>) -> Option<Cut1> {
+    let rest = bytes.strip_prefix(b"ryucad.section.1\n")?;
+    let n = u32::from_le_bytes(rest.get(..4)?.try_into().ok()?) as usize;
+    let names = rest.get(4..4 + 16 * n)?;
+    let body = ryukei::codec::decode_body(rest.get(4 + 16 * n..)?).ok()?;
+    let caps = names
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .map(
+            |c| match body.by_name(Name::from_u128(u128::from_le_bytes(*c))) {
+                Some(EntityId::Face(f)) => Some(f),
+                _ => None,
+            },
+        )
+        .collect::<Option<Vec<_>>>()?;
+    Some(Cut1 {
+        built: Arc::new(crate::rebuild::Built {
+            body,
+            journal: ryukei::name::Journal::new(),
+            origins: origins.clone(),
+            hash: hash.to_owned(),
+            reference: false,
+        }),
+        caps,
+    })
+}
+
+/// The names `journal` made of `names`: placed, split and merged, to a
+/// fixed point (as the kernel follows a section's base).
+fn follow(
+    journal: &ryukei::name::Journal,
+    names: impl IntoIterator<Item = Name>,
+) -> BTreeSet<Name> {
+    let mut set: BTreeSet<Name> = names.into_iter().collect();
+    loop {
+        let before = set.len();
+        for e in journal.events() {
+            match e {
+                Event::Placed { from, to, .. } if set.contains(from) => {
+                    set.insert(*to);
+                }
+                Event::Split { parent, children } if set.contains(parent) => {
+                    set.extend(children.iter().copied());
+                }
+                Event::Merged { parents, child } if parents.iter().any(|p| set.contains(p)) => {
+                    set.insert(*child);
+                }
+                _ => {}
+            }
+        }
+        if set.len() == before {
+            return set;
+        }
+    }
+}
+
+/// The tool an offset section subtracts, in model space: the polygon of
+/// the points seen along `square`, run on past both ends by `reach` and
+/// closed round the side `normal` points to, extruded `reach` each way.
+fn stepped_tool(
+    points: &[[f64; 3]],
+    square: [f64; 3],
+    normal: [f64; 3],
+    reach: f64,
+) -> std::result::Result<Body, ryukei::Error> {
+    use ryukei::geom::{Curve2, Frame as F3, Line2, Point2};
+    use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile};
+    let o = Point3::new(points[0][0], points[0][1], points[0][2]);
+    let frame = F3::new(
+        o,
+        Vector3::new(square[0], square[1], square[2]),
+        Vector3::new(normal[0], normal[1], normal[2]),
+    )?;
+    let (x, y) = (frame.x().get().to_array(), frame.y().get().to_array());
+    let flat = |p: [f64; 3]| {
+        let d = [
+            p[0] - points[0][0],
+            p[1] - points[0][1],
+            p[2] - points[0][2],
+        ];
+        [dot(d, x), dot(d, y)]
+    };
+    let q: Vec<P> = points.iter().map(|p| flat(*p)).collect();
+    let unit = |a: P, b: P| {
+        let l = ryu_math::hypot(b[0] - a[0], b[1] - a[1]);
+        [(b[0] - a[0]) / l, (b[1] - a[1]) / l]
+    };
+    let (n, last) = (q.len(), q[q.len() - 1]);
+    let d0 = unit(q[0], q[1]);
+    let dl = unit(q[n - 2], last);
+    let m = [dot(normal, x), dot(normal, y)];
+    let a = [q[0][0] - d0[0] * reach, q[0][1] - d0[1] * reach];
+    let b = [last[0] + dl[0] * reach, last[1] + dl[1] * reach];
+    let mut ring = vec![a];
+    ring.extend(q.iter().copied());
+    ring.push(b);
+    ring.push([b[0] + 2.0 * reach * m[0], b[1] + 2.0 * reach * m[1]]);
+    ring.push([a[0] + 2.0 * reach * m[0], a[1] + 2.0 * reach * m[1]]);
+    let mut segments = Vec::new();
+    for (i, w) in ring.iter().zip(ring.iter().cycle().skip(1)).enumerate() {
+        let (p, r) = (Point2::new(w.0[0], w.0[1]), Point2::new(w.1[0], w.1[1]));
+        segments.push(Segment {
+            key: SegmentKey(i as u128 + 1),
+            curve: Curve2::Line2(Line2::through(p, r)?),
+            t0: 0.0,
+            t1: (r - p).length(),
+        });
+    }
+    let profile = ValidProfile::new(Profile {
+        frame,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments,
+        }],
+    })?;
+    let key = OpKey::from_bytes(b"ryucad.drawing.offset_section");
+    let (tool, _) = ryukei::sweep::extrude(
+        key,
+        &profile,
+        Vector3::new(square[0], square[1], square[2]),
+        -reach,
+        reach,
+    )?;
+    Ok(tool)
+}
+
+/// The tool's key in an offset section's boolean.
+const STEPS: ToolKey = ToolKey(0x5ec7_0ff5);
+
+/// `b` at `pose` cut by `how`: the cut body (in its own frame, placed by
+/// `pose` as before) and its caps.
+fn cut_one(
+    b: &crate::rebuild::Built,
+    pose: &Rigid,
+    how: &How,
+    normal: [f64; 3],
+    reach: f64,
+    work: &ryukei::work::Work,
+) -> std::result::Result<(Body, Vec<FaceId>), ryukei::Error> {
+    let inv = pose.inverse();
+    match how {
+        How::Plane(p) => {
+            let o = inv.apply_point(Point3::new(p.origin_m[0], p.origin_m[1], p.origin_m[2]));
+            let n = inv.apply_vector(Vector3::new(p.normal[0], p.normal[1], p.normal[2]));
+            let hint = if n.x.abs() < 0.9 {
+                Vector3::new(1.0, 0.0, 0.0)
+            } else {
+                Vector3::new(0.0, 1.0, 0.0)
+            };
+            let plane = ryukei::geom::Plane::new(ryukei::geom::Frame::new(o, n, hint)?);
+            let s = ryukei::project::section_with(
+                OpKey::from_bytes(b"ryucad.drawing.section"),
+                &b.body,
+                &plane,
+                work,
+            )?;
+            Ok((s.body, s.faces))
+        }
+        How::Steps { points, square } => {
+            let tool = stepped_tool(points, *square, normal, reach)?;
+            let names: Vec<Name> = tool
+                .faces()
+                .filter_map(|f| tool.face(f).map(|x| x.name))
+                .collect();
+            let (cut, journal) = ryukei::boolean::boolean_with(
+                OpKey::from_bytes(b"ryucad.drawing.section"),
+                ryukei::boolean::BooleanOp::Subtract,
+                &b.body,
+                &[ryukei::boolean::Tool {
+                    key: STEPS,
+                    body: &tool,
+                    place: inv,
+                }],
+                work,
+            )?;
+            let made = follow(&journal, names);
+            let caps = cut
+                .faces()
+                .filter(|&f| cut.face(f).is_some_and(|x| made.contains(&x.name)))
+                .collect();
+            Ok((cut, caps))
+        }
+    }
+}
+
+/// A cut the kernel made, or why it couldn't.
+type Made = std::result::Result<(Body, Vec<FaceId>), ryukei::Error>;
+
+/// Whether the solid named `name` (`<of>/<path…>/<founder>`) is under one
+/// of `paths`.
+fn whole(name: &str, paths: &[String]) -> bool {
+    let inner = name.split_once('/').map_or("", |(_, r)| r);
+    paths.iter().any(|p| inner.starts_with(&format!("{p}/")))
+}
+
+/// Each section plan's source cut, its caps beside it; a plan whose cut
+/// the kernel refuses has its error. A cancel stops it all.
+pub(super) fn cut_all(session: &mut Session, plans: &mut [(super::Plan, Source)]) -> Result<()> {
+    struct Job1 {
+        plan: usize,
+        solid: usize,
+        key: String,
+    }
+    let mut jobs = Vec::new();
+    for (i, (plan, src)) in plans.iter_mut().enumerate() {
+        let super::Extra::Section(c) = &plan.extra else {
+            continue;
+        };
+        plan.caps = vec![Vec::new(); src.len()];
+        for (j, (b, pose, name)) in src.iter().enumerate() {
+            if !whole(name, &c.unsectioned) {
+                jobs.push(Job1 {
+                    plan: i,
+                    solid: j,
+                    key: key(b, pose, &c.how),
+                });
+            }
+        }
+    }
+    let disk = session.disk().cloned();
+    let mut found: Vec<Option<Arc<Cut1>>> = jobs
+        .iter()
+        .map(|j| {
+            session.sections.get(&j.key).or_else(|| {
+                let d = disk.as_ref()?;
+                let bytes = d.get(crate::cache::Kind::Section, j.key.as_bytes())?;
+                let origins = plans[j.plan].1[j.solid].0.origins.clone();
+                match decode(&bytes, &j.key, &origins) {
+                    Some(c) => Some(Arc::new(c)),
+                    None => {
+                        d.discard(crate::cache::Kind::Section, j.key.as_bytes());
+                        None
+                    }
+                }
+            })
+        })
+        .collect();
+    let job = session.job.clone();
+    let stage = job.begin(ryu_session::job::Phase::Project, "sections", jobs.len());
+    use rayon::prelude::*;
+    let made: Vec<Option<Made>> = jobs
+        .par_iter()
+        .zip(found.par_iter())
+        .map(|(j, have)| {
+            if have.is_some() {
+                return None;
+            }
+            let (plan, src) = &plans[j.plan];
+            let super::Extra::Section(c) = &plan.extra else {
+                unreachable!("a section's job")
+            };
+            let (b, pose, _) = &src[j.solid];
+            let reach = super::reach(src);
+            let work = crate::work::work(&job);
+            Some(cut_one(b, pose, &c.how, c.normal, reach, &work))
+        })
+        .collect();
+    for (n, m) in made.into_iter().enumerate() {
+        let j = &jobs[n];
+        stage.step(|| format!("{}", plans[j.plan].0.key))?;
+        let cut = match m {
+            None => found[n].take().expect("found"),
+            Some(Ok((body, caps))) => {
+                let b = &plans[j.plan].1[j.solid].0;
+                let c = Arc::new(Cut1 {
+                    built: Arc::new(crate::rebuild::Built {
+                        body,
+                        journal: ryukei::name::Journal::new(),
+                        origins: b.origins.clone(),
+                        hash: j.key.clone(),
+                        reference: false,
+                    }),
+                    caps,
+                });
+                if let Some(d) = &disk {
+                    d.put(crate::cache::Kind::Section, j.key.as_bytes(), &encode(&c));
+                }
+                session.sections.put(j.key.clone(), c.clone());
+                c
+            }
+            Some(Err(e)) => {
+                if let Some(c) = crate::work::stopped(&e, &job) {
+                    return Err(c);
+                }
+                let plan = &mut plans[j.plan].0;
+                if plan.failed.is_none() {
+                    plan.failed = Some(super::view_failed(plan, &e));
+                }
+                continue;
+            }
+        };
+        let (plan, src) = &mut plans[j.plan];
+        src[j.solid].0 = cut.built.clone();
+        plan.caps[j.solid] = cut.caps.clone();
+    }
+    Ok(())
+}
+
+/// Each source solid's caps facing the view, as boundary paths in the
+/// view's frame (model metres about the anchor's image): the input of its
+/// hatching, by solid.
+pub(super) fn cap_paths(
+    src: &Source,
+    caps: &[Vec<FaceId>],
+    frame: &Frame,
+    anchor: [f64; 3],
+) -> Vec<Vec<Path>> {
+    let c = frame.image(anchor);
+    let view = frame.view();
+    src.iter()
+        .zip(caps)
+        .map(|((b, pose, _), faces)| {
+            let body = &b.body;
+            let mut out = Vec::new();
+            for f in faces {
+                let Some(face) = body.face(*f) else { continue };
+                // Facing the view: a plane whose outward normal is the
+                // view's way (an offset section's steps are edge-on).
+                let Some(ryukei::geom::Surface::Plane(p)) = body.surface(face.surface) else {
+                    continue;
+                };
+                let z = p.frame().z().get();
+                let z = match face.sense {
+                    ryukei::topo::Sense::Forward => z,
+                    ryukei::topo::Sense::Reversed => -z,
+                };
+                if dot(pose.apply_vector(z).to_array(), frame.towards) < 1.0 - 1e-9 {
+                    continue;
+                }
+                for lp in body.face_loops(*f) {
+                    for fin in body.loop_fins(lp) {
+                        let Some(e) = body.fin(fin).and_then(|x| body.edge(x.edge)) else {
+                            continue;
+                        };
+                        let Some(curve) = body.curve(e.curve) else {
+                            continue;
+                        };
+                        let curve = curve.transformed(pose);
+                        let Ok(images) = ryukei::project::project_curve(&curve, e.interval, &view)
+                        else {
+                            continue;
+                        };
+                        for im in images {
+                            if let Ok(Some(path)) = super::curves::path(&im) {
+                                out.push(path.moved([-c[0], -c[1]]));
+                            }
+                        }
+                    }
+                }
+            }
+            out
+        })
+        .collect()
+}

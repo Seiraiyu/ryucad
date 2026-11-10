@@ -861,6 +861,11 @@ fn plans(
 /// its anchor's image, each with the kind of line it is.
 struct Drawn {
     lines: Vec<(Path, LineKind, bool)>,
+    /// Text it writes (a flat's bend notes): what, where on its baseline's
+    /// middle, and its angle, in the same frame.
+    texts: Vec<(String, P, f64)>,
+    /// Each source solid's caps' boundaries, by solid, to hatch.
+    caps: Vec<Vec<Path>>,
     /// Its box, in the same frame.
     bounds: Option<[P; 2]>,
     counts: [usize; 3],
@@ -895,6 +900,9 @@ fn line_of(p: &ryukei::project::Piece, plan: &Plan) -> Option<(LineKind, bool)> 
 /// the nearest of those it runs along, and runs of one source's pieces
 /// joined end to end into one path.
 fn drawn(p: &Projection, plan: &Plan, src: &Source) -> Drawn {
+    if let Extra::Flat { flat, notes } = &plan.extra {
+        return drawn_flat(flat, *notes);
+    }
     let c = plan.frame.image(plan.anchor);
     let mut lines: Vec<(Path, LineKind, bool)> = Vec::new();
     let mut counts = [0; 3];
@@ -902,6 +910,21 @@ fn drawn(p: &Projection, plan: &Plan, src: &Source) -> Drawn {
     let mut last: Option<(ryukei::project::Source, LineKind)> = None;
     let mut lo = [f64::INFINITY; 2];
     let mut hi = [f64::NEG_INFINITY; 2];
+    // An edge between two caps (an offset section's step) isn't drawn.
+    let between_caps = |s: &ryukei::project::Source| -> bool {
+        let ryukei::project::Source::Edge { body, edge, .. } = s else {
+            return false;
+        };
+        let Some(caps) = plan.caps.get(*body as usize).filter(|c| !c.is_empty()) else {
+            return false;
+        };
+        let b = &src[*body as usize].0.body;
+        let faces: Vec<FaceId> = b
+            .edge_fins(*edge)
+            .filter_map(|f| b.fin(f).and_then(|f| b.loop_(f.loop_)).map(|l| l.face))
+            .collect();
+        faces.len() >= 2 && faces.iter().all(|f| caps.contains(f))
+    };
     for (i, piece) in p.pieces.iter().enumerate() {
         if let Some(first) = piece.overlaps.first()
             && let Some(o) = p.pieces.get(*first as usize)
@@ -913,6 +936,9 @@ fn drawn(p: &Projection, plan: &Plan, src: &Source) -> Drawn {
         let Some((kind, unsure)) = line_of(piece, plan) else {
             continue;
         };
+        if between_caps(&piece.source) {
+            continue;
+        }
         let source = || {
             let (body, what, name) = match piece.source {
                 ryukei::project::Source::Edge { body, name, .. } => (body, "edge", name),
@@ -923,51 +949,157 @@ fn drawn(p: &Projection, plan: &Plan, src: &Source) -> Drawn {
             let solid = src.get(body as usize).map_or("", |(_, _, r)| r.as_str());
             format!("{what} {solid}/{name}")
         };
-        let path = match curves::path(&piece.image) {
-            Ok(Some(path)) => path,
-            Ok(None) => continue,
-            // Not drawn, but never silently: counted uncertain and named.
-            Err(curves::Uncut) => {
-                counts[2] += 1;
-                uncertain.push(format!("{} (not drawn: its image can't be cut)", source()));
-                continue;
+        // The stretches it draws: all of it, or a detail's inside its circle.
+        let stretches: Vec<ryukei::project::ImageCurve> = match &plan.extra {
+            Extra::Detail { centre, radius, .. } => {
+                let m = plan.frame.image(*centre);
+                match ryukei::project::inside_circle(
+                    &piece.image,
+                    ryukei::geom::Point2::new(m[0], m[1]),
+                    *radius,
+                ) {
+                    Ok(r) => r
+                        .into_iter()
+                        .map(|range| ryukei::project::ImageCurve {
+                            image: piece.image.image.clone(),
+                            range,
+                        })
+                        .collect(),
+                    Err(_) => {
+                        counts[2] += 1;
+                        uncertain.push(format!(
+                            "{} (not drawn: its crossing of the detail's circle is uncertain)",
+                            source()
+                        ));
+                        continue;
+                    }
+                }
             }
+            _ => vec![piece.image.clone()],
         };
-        let path = path.moved([-c[0], -c[1]]);
-        let [a, b] = path.bounds();
-        lo = [lo[0].min(a[0]), lo[1].min(a[1])];
-        hi = [hi[0].max(b[0]), hi[1].max(b[1])];
-        counts[match (kind, unsure) {
-            (_, true) => 2,
-            (LineKind::Hidden, _) => 1,
-            _ => 0,
-        }] += 1;
-        if unsure {
-            uncertain.push(source());
+        for stretch in &stretches {
+            let path = match curves::path(stretch) {
+                Ok(Some(path)) => path,
+                Ok(None) => continue,
+                // Not drawn, but never silently: counted uncertain and named.
+                Err(curves::Uncut) => {
+                    counts[2] += 1;
+                    uncertain.push(format!("{} (not drawn: its image can't be cut)", source()));
+                    continue;
+                }
+            };
+            let path = path.moved([-c[0], -c[1]]);
+            let [a, b] = path.bounds();
+            lo = [lo[0].min(a[0]), lo[1].min(a[1])];
+            hi = [hi[0].max(b[0]), hi[1].max(b[1])];
+            counts[match (kind, unsure) {
+                (_, true) => 2,
+                (LineKind::Hidden, _) => 1,
+                _ => 0,
+            }] += 1;
+            if unsure {
+                uncertain.push(source());
+            }
+            // One source's next piece, drawn alike, from where the last
+            // ended: the same path.
+            let same = |s: ryukei::project::Source| match (last, s) {
+                (Some((a, k)), b) => a == b && k == kind,
+                _ => false,
+            };
+            if same(piece.source)
+                && let Some((prev, _, u)) = lines.last_mut()
+                && distance(
+                    prev.segments.last().map_or(prev.start, Segment::end),
+                    path.start,
+                ) < 1e-9
+            {
+                join(prev, path);
+                *u |= unsure;
+            } else {
+                lines.push((path, kind, unsure));
+            }
+            last = Some((piece.source, kind));
         }
-        // One source's next piece, drawn alike, from where the last ended:
-        // the same path.
-        let same = |s: ryukei::project::Source| match (last, s) {
-            (Some((a, k)), b) => a == b && k == kind,
-            _ => false,
-        };
-        if same(piece.source)
-            && let Some((prev, _, u)) = lines.last_mut()
-            && distance(
-                prev.segments.last().map_or(prev.start, Segment::end),
-                path.start,
-            ) < 1e-9
-        {
-            join(prev, path);
-            *u |= unsure;
-        } else {
-            lines.push((path, kind, unsure));
+    }
+    // An explode's trails, thin phantoms through where each part goes.
+    if let Extra::Exploded { trails } = &plan.extra {
+        for t in trails.iter().filter(|t| t.len() >= 2) {
+            let pts: Vec<P> = t
+                .iter()
+                .map(|q| {
+                    let i = plan.frame.image(*q);
+                    [i[0] - c[0], i[1] - c[1]]
+                })
+                .collect();
+            lines.push((Path::polyline(&pts, false), LineKind::Phantom, false));
         }
-        last = Some((piece.source, kind));
+    }
+    let mut bounds = (lo[0] <= hi[0]).then_some([lo, hi]);
+    if let Extra::Detail { radius, .. } = &plan.extra {
+        bounds = Some([[-radius, -radius], [*radius, *radius]]);
     }
     Drawn {
         lines,
-        bounds: (lo[0] <= hi[0]).then_some([lo, hi]),
+        texts: Vec::new(),
+        caps: section::cap_paths(src, &plan.caps, &plan.frame, plan.anchor),
+        bounds,
+        counts,
+        uncertain,
+    }
+}
+
+/// A flat view: its pattern's loops thick, its bend lines thin phantoms
+/// with their notes, about the middle of the pattern's box, in metres.
+fn drawn_flat(flat: &crate::sheet_metal::flat::FlatOf, notes: bool) -> Drawn {
+    let p = &flat.pattern;
+    let (lo, hi) = (p.bounds.min(), p.bounds.max());
+    let m = [(lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0];
+    let mut lines = Vec::new();
+    let mut counts = [0; 3];
+    let mut uncertain = Vec::new();
+    for l in &p.loops {
+        for s in &l.segments {
+            match curves::plane(&s.curve, s.t0, s.t1) {
+                Ok(path) => {
+                    lines.push((path.moved([-m[0], -m[1]]), LineKind::Visible, false));
+                    counts[0] += 1;
+                }
+                Err(curves::Uncut) => {
+                    counts[2] += 1;
+                    uncertain.push(format!(
+                        "edge {}/{}/{} (not drawn: its curve can't be cut)",
+                        flat.part, flat.solid, s.edge
+                    ));
+                }
+            }
+        }
+    }
+    let mut texts = Vec::new();
+    for b in &p.bend_lines {
+        let (a, e) = (
+            [b.start.x - m[0], b.start.y - m[1]],
+            [b.end.x - m[0], b.end.y - m[1]],
+        );
+        lines.push((Path::polyline(&[a, e], false), LineKind::Phantom, false));
+        if notes {
+            // Reading left to right, at the line's middle.
+            let (mut dx, mut dy) = (e[0] - a[0], e[1] - a[1]);
+            if dx < 0.0 || (dx == 0.0 && dy < 0.0) {
+                (dx, dy) = (-dx, -dy);
+            }
+            let text = ryuformats::dxf::note(b, ryuformats::dxf::DxfUnit::Mm, "°");
+            texts.push((
+                text,
+                [(a[0] + e[0]) / 2.0, (a[1] + e[1]) / 2.0],
+                ryu_math::atan2(dy, dx),
+            ));
+        }
+    }
+    Drawn {
+        lines,
+        texts,
+        caps: Vec::new(),
+        bounds: Some([[lo.x - m[0], lo.y - m[1]], [hi.x - m[0], hi.y - m[1]]]),
         counts,
         uncertain,
     }
@@ -1001,16 +1133,35 @@ fn join(path: &mut Path, next: Path) {
 }
 
 /// Projections for `plans`, from the session's cache, the disk's, or the
-/// kernel side by side; each failure in its place.
+/// kernel side by side, each distinct view projected once (a detail shares
+/// its parent's); each failure in its place. A flat view projects nothing.
 fn project(
     session: &mut Session,
     plans: &[(Plan, Source)],
 ) -> Result<Vec<std::result::Result<Arc<Projection>, Error>>> {
     let keys: Vec<String> = plans.iter().map(|(p, s)| key_of(s, &p.frame)).collect();
+    // The first plan of each key projects for every plan of it.
+    let mut first: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut lead: Vec<usize> = Vec::with_capacity(plans.len());
+    for (i, k) in keys.iter().enumerate() {
+        let skip = plans[i].0.failed.is_some() || matches!(plans[i].0.extra, Extra::Flat { .. });
+        lead.push(if skip {
+            i
+        } else {
+            *first.entry(k).or_insert(i)
+        });
+    }
     let disk = session.disk().cloned();
     let mut found: Vec<Option<Arc<Projection>>> = keys
         .iter()
-        .map(|k| {
+        .enumerate()
+        .map(|(i, k)| {
+            if lead[i] != i || plans[i].0.failed.is_some() {
+                return None;
+            }
+            if matches!(plans[i].0.extra, Extra::Flat { .. }) {
+                return Some(Arc::new(Projection::default()));
+            }
             session.projections.get(k).or_else(|| {
                 let d = disk.as_ref()?;
                 let bytes = d.get(crate::cache::Kind::Projection, k.as_bytes())?;
@@ -1030,8 +1181,9 @@ fn project(
     let made: Vec<Option<std::result::Result<Projection, ryukei::Error>>> = plans
         .par_iter()
         .zip(found.par_iter())
-        .map(|((plan, src), have)| {
-            if have.is_some() {
+        .enumerate()
+        .map(|(i, ((plan, src), have))| {
+            if have.is_some() || lead[i] != i || plan.failed.is_some() {
                 return None;
             }
             let placed: Vec<Placed> = src
@@ -1050,9 +1202,18 @@ fn project(
             ))
         })
         .collect();
-    let mut out = Vec::new();
+    let mut out: Vec<std::result::Result<Arc<Projection>, Error>> = Vec::new();
     for (i, m) in made.into_iter().enumerate() {
         stage.step(|| plans[i].0.key.to_string())?;
+        if let Some(e) = &plans[i].0.failed {
+            out.push(Err(e.clone()));
+            continue;
+        }
+        if lead[i] != i {
+            let p = out[lead[i]].clone();
+            out.push(p);
+            continue;
+        }
         match m {
             None => out.push(Ok(found[i].take().expect("found"))),
             Some(Ok(p)) => {
@@ -1124,7 +1285,26 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
     file.check()?;
     let standard = file.standard_in(session.project().manifest.standard());
     let angle = file.projection.unwrap_or_else(|| standard.projection());
-    let plans = plans(session, part, &file, angle)?;
+    let mut plans = plans(session, part, &file, angle)?;
+    section::cut_all(session, &mut plans)?;
+    // A detail draws its parent as cut: its source and caps, and its
+    // failure.
+    for i in 0..plans.len() {
+        if let Extra::Detail { parent, .. } = plans[i].0.extra
+            && let Some(j) = plans.iter().position(|(p, _)| p.key == parent)
+        {
+            let (src, caps, failed) = (
+                plans[j].1.clone(),
+                plans[j].0.caps.clone(),
+                plans[j].0.failed.clone(),
+            );
+            plans[i].1 = src;
+            plans[i].0.caps = caps;
+            if plans[i].0.failed.is_none() {
+                plans[i].0.failed = failed;
+            }
+        }
+    }
     let projected = project(session, &plans)?;
     let style = match standard {
         Standard::Asme => ryu_draw::Standard::Asme,
