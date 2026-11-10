@@ -55,6 +55,19 @@ pub fn from_surface(
     surface: &Surface,
     rect: [[f64; 2]; 2],
 ) -> Result<(Body, Journal), Error> {
+    // unmetered: the public entry point takes no work
+    from_surface_in(key, surface, rect, &crate::work::Meter::free())
+}
+
+/// [`from_surface`] under a caller's meter: a fitted side charges it, is
+/// capped by its fit scope and stops at its cancel (the local re-trim's
+/// working faces, plan 13.D).
+pub(crate) fn from_surface_in(
+    key: OpKey,
+    surface: &Surface,
+    rect: [[f64; 2]; 2],
+    m: &crate::work::Meter,
+) -> Result<(Body, Journal), Error> {
     let domain = surface.domain();
     let (pu, pv) = surface.periods();
     let periods = [pu, pv];
@@ -153,7 +166,7 @@ pub fn from_surface(
         }
         let c = rect[j][end];
         let range = rect[along];
-        let (curve, tolerance) = side_curve(surface, j, c, range)?;
+        let (curve, tolerance) = side_curve(surface, j, c, range, m)?;
         let (start, finish) = (vertex(from, &mut out), vertex(to, &mut out));
         out.curves.push(curve);
         out.curves2.push(iso2(j, c));
@@ -276,16 +289,20 @@ fn off_row(surface: &Surface, d: usize, row: f64, c: f64, range: [f64; 2]) -> f6
 /// The parameter line `j = c` over `range`, running with the other
 /// parameter, and its tolerance: exact where the surface has it, else
 /// fitted along the line.
-fn side_curve(surface: &Surface, j: usize, c: f64, range: [f64; 2]) -> Result<(Curve, f64), Error> {
+fn side_curve(
+    surface: &Surface,
+    j: usize,
+    c: f64,
+    range: [f64; 2],
+    m: &crate::work::Meter,
+) -> Result<(Curve, f64), Error> {
     if let Some(curve) = exact(surface, j, c) {
         return Ok((curve, 0.0));
     }
     if let Some(found) = iso(surface, j, c, range) {
         return Ok(found);
     }
-    // unmetered: a bounded sheet's sides, which take no work
-    let free = crate::work::Meter::free();
-    let lifted = crate::intersect::fit_along(surface, &iso2(j, c), [0.0, 1.0], range, &free)
+    let lifted = crate::intersect::fit_along(surface, &iso2(j, c), [0.0, 1.0], range, m)
         .map_err(|_| SheetError::Uncertain)?;
     Ok((Curve::Nurbs(Arc::new(lifted.curve)), lifted.tolerance))
 }

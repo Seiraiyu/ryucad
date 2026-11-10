@@ -228,3 +228,49 @@ fn a_rounded_box_through_step_is_defeatured_to_the_box() {
     let exact = 0.01 * 0.006 * 0.004;
     assert!((v - exact).abs() <= 1e-6 * area, "{v} against {exact}");
 }
+
+/// A cancel stops deleting NIST FTC 10's blends at once (plan 13.D: its
+/// re-trim fitted a carried spline's working sheet for 17 minutes past a
+/// cancel, unpolled). Cancelled 5 s in, it answers within 5 s more.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes in a debug build: CI runs it in release"
+)]
+fn a_cancel_stops_deleting_ftc_10s_blends() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/nist_ftc_10_asme1_rb.stp");
+    let m = read(
+        &std::fs::read(path).unwrap(),
+        &ReadOptions {
+            key: OpKey(7),
+            heal: Default::default(),
+        },
+    )
+    .unwrap();
+    let (body, _, _) = m.bodies[0].result.clone().unwrap();
+    let spec = DeleteBlends {
+        max_size: Some(MAX_SIZE),
+        faces: Vec::new(),
+        options: RecogniseOptions::default(),
+    };
+    let flag = AtomicBool::new(false);
+    let start = Instant::now();
+    let (r, stopped) = std::thread::scope(|s| {
+        s.spawn(|| {
+            std::thread::sleep(Duration::from_secs(5));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let r = delete_blends_with(
+            OpKey(0x13d),
+            &body,
+            &spec,
+            &Work::unlimited().with_cancel(&flag),
+        );
+        (r, start.elapsed())
+    });
+    assert!(matches!(r, Err(Error::Cancelled)), "{:?}", r.err());
+    assert!(
+        stopped < Duration::from_secs(10),
+        "stopped after {stopped:?}"
+    );
+}

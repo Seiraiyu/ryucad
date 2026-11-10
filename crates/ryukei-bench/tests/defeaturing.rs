@@ -257,12 +257,6 @@ fn deletes_against_occt() {
     }
 }
 
-/// The booleans' race plate: 40 × 25 × 0.5 with a grid of 1,000 through
-/// holes of radius 0.3, made by both kernels.
-fn plate_1000() -> (Body, occt::Solid) {
-    plate(40, 25)
-}
-
 /// A `cols` × `rows` plate 0.5 thick with a hole of radius 0.3 in each
 /// unit square, made by both kernels.
 fn plate(cols: u32, rows: u32) -> (Body, occt::Solid) {
@@ -293,15 +287,19 @@ fn plate(cols: u32, rows: u32) -> (Body, occt::Solid) {
     (body, solid.cut(&pins, false))
 }
 
-/// Design 399's bar: every hole of the race plate deleted, on one
-/// thread, faster than OCCT's `BRepAlgoAPI_Defeaturing` (its time taken
-/// in C++ around adding the faces and Build). Asserted as it stands with
+/// Design 399's bar: every hole of the race plate deleted on one thread
+/// faster than OCCT's `BRepAlgoAPI_Defeaturing` (its time taken in C++
+/// around adding the faces and Build). OCCT's defeaturing grows faster
+/// than the square of the holes (cox-worker-4: 25 holes 3.5 s, 100 holes
+/// 72 s, 200 holes 415 s, 1,000 past an hour), so OCCT is timed on a
+/// plate of 100 holes, a lower bound on its time for 1,000, and ryukei
+/// must delete all 1,000 in less. Asserted as it stands with
 /// `RYUKEI_BARS=1`, ten times looser otherwise. Where OCCT refuses, or
-/// its volume misses the plate's, the bar isn't judged and the test says
+/// its volume misses its plate's, the bar isn't judged and the test says
 /// so.
 #[test]
 fn deleting_1000_holes_beats_occt_on_one_thread() {
-    let (body, solid) = plate_1000();
+    let (body, _) = plate(40, 25);
     let walls = not_planes(&body);
     assert_eq!(walls.len(), 1000);
     let spec = DeleteSpec {
@@ -332,14 +330,16 @@ fn deleting_1000_holes_beats_occt_on_one_thread() {
         .expect("ryukei's delete");
     let parallel_s = t.elapsed().as_secs_f64();
     assert_eq!(all.0.dump(), o.dump());
-    println!("ryukei: {ryukei_s:.3} s on one thread, {parallel_s:.3} s on all; OCCT next");
+    println!("ryukei: 1,000 holes in {ryukei_s:.3} s on one thread, {parallel_s:.3} s on all");
+    let (_, solid) = plate(10, 10);
     let bars = std::env::var_os("RYUKEI_BARS").is_some();
     match solid.defeature(&occt::Defeature::Cylinders) {
         Ok((d, occt_s)) => {
             let ov = d.volume();
-            let agrees = (ov - exact).abs() <= 1e-6 * exact;
+            let small = 10.0 * 10.0 * 0.5;
+            let agrees = (ov - small).abs() <= 1e-6 * small;
             println!(
-                "1,000 holes deleted: ryukei {ryukei_s:.3} s on one thread, {parallel_s:.3} s on all; OCCT {occt_s:.3} s ({:.2} times), its volume {ov:.9} against {exact:.9} ({})",
+                "OCCT: 100 holes in {occt_s:.3} s ({:.4} of it for ryukei's 1,000), its volume {ov:.9} against {small:.9} ({})",
                 ryukei_s / occt_s,
                 if agrees {
                     "agrees"
@@ -352,9 +352,7 @@ fn deleting_1000_holes_beats_occt_on_one_thread() {
                 assert!(ryukei_s < bar, "ryukei {ryukei_s:.3} s against {bar:.3} s");
             }
         }
-        Err(e) => println!(
-            "1,000 holes deleted: ryukei {ryukei_s:.3} s on one thread, {parallel_s:.3} s on all; OCCT refused ({e}): the bar isn't judged"
-        ),
+        Err(e) => println!("OCCT refused 100 holes ({e}): the bar isn't judged"),
     }
 }
 
@@ -370,11 +368,18 @@ fn deleting_holes_scales() {
             faces: not_planes(&body),
             heal: Heal::Auto,
         };
-        let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let one = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
         let t = Instant::now();
-        one.install(|| delete_faces(OpKey(0xbe9), &body, &spec)).unwrap();
+        one.install(|| delete_faces(OpKey(0xbe9), &body, &spec))
+            .unwrap();
         let ryukei_s = t.elapsed().as_secs_f64();
-        let occt = solid.defeature(&occt::Defeature::Cylinders).map(|(_, s)| format!("{s:.3} s")).unwrap_or_else(|e| e);
+        let occt = solid
+            .defeature(&occt::Defeature::Cylinders)
+            .map(|(_, s)| format!("{s:.3} s"))
+            .unwrap_or_else(|e| e);
         println!("{} holes: ryukei {ryukei_s:.3} s, OCCT {occt}", cols * rows);
     }
 }

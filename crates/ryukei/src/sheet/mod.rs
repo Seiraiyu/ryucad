@@ -8,6 +8,7 @@
 mod bounded;
 
 pub use bounded::from_surface;
+pub(crate) use bounded::from_surface_in;
 
 use crate::TopologyError;
 use crate::error::{Error, SheetError};

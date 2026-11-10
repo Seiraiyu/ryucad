@@ -77,10 +77,11 @@ pub(crate) fn work_body(
     let copied = crate::sheet::copy(&mut lay, body, &outside);
     let mut sheets = Vec::new();
     for (&f, w) in working {
-        // Polled before each sheet's fitted sides, which are unmetered.
+        // Polled before each working sheet.
         m.poll().map_err(|_| Error::Cancelled)?;
         let name = body.faces[f].name;
-        let (s, _) = crate::sheet::from_surface(sheet_key(key, name), &w.surface, w.rect)
+        // Its fitted sides charge the meter and stop at its cancel.
+        let (s, _) = crate::sheet::from_surface_in(sheet_key(key, name), &w.surface, w.rect, m)
             .map_err(|_| Error::from(TweakError::ExtensionUnsupported { face: name }))?;
         let only: BTreeSet<FaceId> = s.faces().collect();
         let c = crate::sheet::copy(&mut lay, &s, &only);
