@@ -405,17 +405,19 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
         }
         // A tweak's groups, each on one line: a move's
         // `groups[0] = 1 mm: base/<hex>, base/<hex>`, a replacement's
-        // `groups[0] = lid/<hex>: base/<hex>` (its surface first).
+        // `groups[0] = lid/<hex>: base/<hex>` (its surface first), a
+        // draft's `groups[0] = 5 deg: base/<hex>`.
         Some("ryucad.feature")
             if matches!(
                 o.get("type").and_then(Value::as_str),
-                Some("move_face" | "replace_face")
+                Some("move_face" | "replace_face" | "draft")
             ) =>
         {
             if let Some(Value::Array(groups)) = rest.remove("groups") {
                 for (i, g) in groups.iter().enumerate() {
                     let head = g
                         .get("distance")
+                        .or_else(|| g.get("angle"))
                         .or_else(|| g.get("with"))
                         .map(|x| reference(x).unwrap_or_else(|| scalar(x)))
                         .unwrap_or_default();
@@ -2703,6 +2705,62 @@ mod tests {
             )
         );
     }
+    #[test]
+    fn a_drafts_groups_read_on_a_line_each() {
+        let (a, b) = (
+            "0123456789abcdef0123456789abcdef",
+            "fedcba9876543210fedcba9876543210",
+        );
+        let v = json!({"format": 18, "kind": "ryucad.feature", "type": "draft",
+            "target": "base", "angle": "2 deg", "neutral": "xy", "reverse": true,
+            "faces": [{"feature": "base", "name": a}],
+            "groups": [{"angle": "5 deg", "faces": [{"feature": "base", "name": b}]}],
+            "flip": [{"feature": "base", "name": b}], "tangent": false});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature draft (format 18)\n\
+                 angle = 2 deg\n\
+                 faces = [base/{a}]\n\
+                 flip = [base/{b}]\n\
+                 groups[0] = 5 deg: base/{b}\n\
+                 neutral = xy\n\
+                 reverse = true\n\
+                 tangent = false\n\
+                 target = base\n"
+            )
+        );
+        let v = json!({"format": 18, "kind": "ryucad.feature", "type": "draft",
+            "target": "base", "angle": "3 deg",
+            "parting": [{"feature": "base", "name": b}], "pull": "z",
+            "faces": [{"feature": "base", "name": a}]});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature draft (format 18)\n\
+                 angle = 3 deg\n\
+                 faces = [base/{a}]\n\
+                 parting = [base/{b}]\n\
+                 pull = z\n\
+                 target = base\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_drafts_changes_are_by_field() {
+        let n = |k: u8| json!({"feature": "b", "name": format!("{k:032x}")});
+        let before = json!({"format": 18, "kind": "ryucad.feature", "type": "draft",
+                            "target": "b", "angle": "2 deg", "neutral": "xy", "faces": [n(1)]});
+        let mut after = before.clone();
+        after["angle"] = json!("3 deg");
+        after["flip"] = json!([n(1)]);
+        let mut out = Vec::new();
+        changes("", Some(&before), Some(&after), &mut out);
+        let pointers: Vec<&str> = out.iter().map(|c| c["at"].as_str().unwrap()).collect();
+        assert_eq!(pointers, ["/angle", "/flip"]);
+    }
+
     #[test]
     fn a_tweaks_groups_read_on_a_line_each() {
         let (a, b) = (

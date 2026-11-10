@@ -12,7 +12,8 @@
 //! edges, its holes drill at `t`'s point, its patterns repeat `k`, and
 //! its shells and offsets (seeded with `b`'s faces) hollow and grow `b`,
 //! its face tweaks (seeded with `b`'s faces) move, offset and replace
-//! `b`'s faces, and
+//! `b`'s faces, its drafts (seeded with `b`'s walls) draft them about xy
+//! and from a parting line, and
 //! its mirrors and splits copy and divide `b`, its base flanges make
 //! plates of `s` and bent sections of `u` (an open L, so its radius
 //! bends a corner), and its flanges bend and flange `b`'s
@@ -225,6 +226,7 @@ fn part(f: Feature, reference: bool) -> Part {
         views: BTreeMap::new(),
         appearance: None,
         explodes: BTreeMap::new(),
+        drawings: BTreeMap::new(),
         revision: String::new(),
     }
 }

@@ -1,7 +1,7 @@
-//! Face tweaks (design 400, plan 17.A): a solid's faces moved
-//! (translated, turned about an axis, offset along their normals) or
-//! given another surface, by one kernel call under the feature's key and
-//! the request's cancel. A tweak acts on its target: it joins its chain,
+//! Face tweaks (design 400, plans 17.A and 17.B): a solid's faces moved
+//! (translated, turned about an axis, offset along their normals), given
+//! another surface, or drafted about a neutral plane or a parting line, by
+//! one kernel call under the feature's key and the request's cancel. A tweak acts on its target: it joins its chain,
 //! what it leaves is the target, and it keeps every face, edge and vertex
 //! and their names and origins. It takes a sheet where the kernel does.
 
@@ -10,24 +10,27 @@ use crate::doc::geometry::GeomRef;
 use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::doc::reference::Reference;
-use crate::doc::tweak::{MoveBy, MoveFace};
+use crate::doc::tweak::{Draft, DraftHinge, MoveBy, MoveFace};
 use crate::error::{Code, Error, Result};
 use crate::geometry::{At, Geom, Line, Want};
 use crate::proto::FeatureFields;
 use crate::rebuild::{Built, Made, Results, Run};
 use crate::solid::Solids;
-use ryukei::geom::{Rigid, Surface, UnitVector3};
+use ryukei::geom::{Rigid, Surface, UnitVector3, Vector3};
 use ryukei::name::{Event, Name};
 use ryukei::topo::EntityId;
 // 17.A's tweaks keep the body's topology (`Topology::Keep`); changing it
 // (ryukei 13's re-trim) is a later plan's.
-use ryukei::tweak::{MoveSpec, OffsetFacesSpec, Topology};
+use ryukei::tweak::{DraftFace, DraftSpec, Hinge, MoveSpec, OffsetFacesSpec, Topology};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// Whether `f` is a face tweak, reported as one.
 pub fn takes_sheets(f: &Feature) -> bool {
-    matches!(f, Feature::MoveFace(_) | Feature::ReplaceFace(_))
+    matches!(
+        f,
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_)
+    )
 }
 
 /// What a tweak asks the kernel.
@@ -35,6 +38,13 @@ pub(crate) enum Spec {
     Move(MoveSpec),
     Offset(OffsetFacesSpec),
     Replace(ryukei::tweak::ReplaceSpec),
+    /// A draft, whether its hinge is a parting line, and each listed
+    /// face's signed angle (radians) as the file asks it, for its report.
+    Draft {
+        spec: DraftSpec,
+        parting: bool,
+        asked: Vec<(Name, f64)>,
+    },
 }
 
 /// A tweak resolved in its view: its target as it sees it, and the spec.
@@ -67,6 +77,19 @@ fn at<'a>(part: &'a Part, id: &'a Id, results: &'a dyn Results) -> At<'a> {
     }
 }
 
+/// The unit direction of `v`, which `role`'s `g` gave:
+/// `reference_wrong_kind` where it has no length.
+fn unit(at: &At, role: &str, g: &GeomRef, v: Vector3) -> Result<UnitVector3> {
+    v.normalize().ok_or_else(|| {
+        at.fail(
+            Code::ReferenceWrongKind,
+            role,
+            g,
+            "gives no direction".to_owned(),
+        )
+    })
+}
+
 /// A move's rigid motion, resolved in its view; `None` for an offset.
 pub(crate) fn motion(
     part: &Part,
@@ -90,14 +113,7 @@ pub(crate) fn motion(
                 Geom::Plane(p) => p.normal,
                 _ => unreachable!("asked for an axis or a plane"),
             };
-            let u = v.normalize().ok_or_else(|| {
-                at.fail(
-                    Code::ReferenceWrongKind,
-                    "direction",
-                    direction,
-                    "gives no direction".to_owned(),
-                )
-            })?;
+            let u = unit(&at, "direction", direction, v)?;
             Ok(Some(along(u, distance.meters())))
         }
         MoveBy::Rotate { axis, angle } => {
@@ -108,10 +124,12 @@ pub(crate) fn motion(
     }
 }
 
-/// The face `r` names (in `role` of tweak `id`) in the target's view:
-/// `targets_mixed` for another solid's, `reference_wrong_kind` for an edge
-/// or vertex, and whatever the reference fails with.
-fn face(
+/// The face (or, with `edge`, the edge) `r` names (in `role` of tweak
+/// `id`) in the target's view: `targets_mixed` for another solid's,
+/// `reference_wrong_kind` for another kind, and whatever the reference
+/// fails with.
+#[allow(clippy::too_many_arguments)]
+fn named(
     part: &Part,
     id: &Id,
     target: &Id,
@@ -119,12 +137,14 @@ fn face(
     role: &str,
     r: &Reference,
     results: &dyn Results,
+    edge: bool,
 ) -> Result<Name> {
+    let what = if edge { "an edge" } else { "a face" };
     if r.feature != *target {
         return Err(Error::new(
             Code::TargetsMixed,
             format!(
-                "{ty} {id}: its {role} {} is a face of {}, not of its target {target}; a {ty} acts on one solid",
+                "{ty} {id}: its {role} {} is {what} of {}, not of its target {target}; a {ty} acts on one solid",
                 r.text(&part.id),
                 r.feature
             ),
@@ -134,17 +154,29 @@ fn face(
         .with("solids", [target.as_str(), r.feature.as_str()]));
     }
     let (_, e) = crate::reference::resolve(part, part.order(), id, role, r, results)?;
-    match e {
-        EntityId::Face(_) => Ok(r.name),
-        e => Err(crate::reference::wrong_kind(
+    match (e, edge) {
+        (EntityId::Face(_), false) | (EntityId::Edge(_), true) => Ok(r.name),
+        (e, _) => Err(crate::reference::wrong_kind(
             part,
             id,
             role,
             r,
             crate::reference::kind(e),
-            "a face",
+            what,
         )),
     }
+}
+
+fn face(
+    part: &Part,
+    id: &Id,
+    target: &Id,
+    ty: &str,
+    role: &str,
+    r: &Reference,
+    results: &dyn Results,
+) -> Result<Name> {
+    named(part, id, target, ty, role, r, results, false)
 }
 
 /// The surface `with` names (in `role` of tweak `id`): a face's, whole,
@@ -176,6 +208,50 @@ fn surface(
     }
     let p = crate::geometry::one(&at(part, id, results), role, with, Want::Plane)?.plane();
     Ok(Surface::Plane(ryukei::geom::Plane::new(p.frame)))
+}
+
+/// A draft's pull (turned round by `reverse`) and hinge, resolved in its
+/// view (feature `id` of `part`): a neutral plane's point and unit normal,
+/// or a parting line's edges (each an edge of the target) and its pull,
+/// an axis or a plane's normal.
+pub(crate) fn hinge(
+    part: &Part,
+    id: &Id,
+    d: &Draft,
+    results: &dyn Results,
+) -> Result<(UnitVector3, Hinge)> {
+    let at = at(part, id, results);
+    let (pull, hinge) = match &d.hinge {
+        DraftHinge::Neutral { plane } => {
+            let p = crate::geometry::one(&at, "neutral", plane, Want::Plane)?.plane();
+            (
+                unit(&at, "neutral", plane, p.normal)?,
+                Hinge::Neutral { origin: p.point },
+            )
+        }
+        DraftHinge::Parting { edges, pull } => {
+            let v = match crate::geometry::resolve(&at, "pull", pull, &[Want::Axis, Want::Plane])? {
+                Geom::Axis(l) => l.dir.get(),
+                Geom::Plane(p) => p.normal,
+                _ => unreachable!("asked for an axis or a plane"),
+            };
+            let mut names = Vec::with_capacity(edges.len());
+            for (i, r) in edges.iter().enumerate() {
+                names.push(named(
+                    part,
+                    id,
+                    &d.target,
+                    "draft",
+                    &format!("parting.{i}"),
+                    r,
+                    results,
+                    true,
+                )?);
+            }
+            (unit(&at, "pull", pull, v)?, Hinge::PartingLine(names))
+        }
+    };
+    Ok((if d.reverse { -pull } else { pull }, hinge))
 }
 
 /// Resolves a tweak (feature `id` of `part`): its target, through
@@ -260,6 +336,39 @@ pub(crate) fn resolve<'a>(
                     topology: Topology::Keep,
                     blends: Default::default(),
                 }),
+            })
+        }
+        Feature::Draft(d) => {
+            let built = crate::rebuild::read(part, solids, id, f, "target", &d.target, before)?;
+            let (pull, hinge) = hinge(part, id, d, before)?;
+            let mut faces = Vec::new();
+            let mut asked = Vec::new();
+            for (role, r) in d.drafted() {
+                let n = face(part, id, &d.target, ty, &role, r, before)?;
+                let a = d.angle_of(r);
+                faces.push(DraftFace {
+                    face: n,
+                    angle: role.starts_with("groups.").then_some(a),
+                    flip: d.flip.contains(r),
+                });
+                asked.push((n, a));
+            }
+            Ok(Resolved {
+                target: &d.target,
+                built,
+                spec: Spec::Draft {
+                    spec: DraftSpec {
+                        pull,
+                        angle: d.angle.radians(),
+                        hinge,
+                        faces,
+                        tangent: d.tangent,
+                        topology: Topology::Keep,
+                        blends: Default::default(),
+                    },
+                    parting: matches!(d.hinge, DraftHinge::Parting { .. }),
+                    asked,
+                },
             })
         }
         _ => unreachable!("a tweak"),
@@ -547,18 +656,62 @@ pub fn build(
     let work = crate::work::work(run.job);
     let key = crate::rebuild::op_key(&part.id, id);
     let body = &r.built.body;
-    let made = match &r.spec {
-        Spec::Move(s) => ryukei::tweak::move_faces_with(key, body, s, &work),
-        Spec::Offset(s) => ryukei::tweak::offset_faces_with(key, body, s, &work),
-        Spec::Replace(s) => ryukei::tweak::replace_faces_with(key, body, s, &work),
-    }
-    .map_err(|e| {
+    let (made, report) = match &r.spec {
+        Spec::Move(s) => (ryukei::tweak::move_faces_with(key, body, s, &work), None),
+        Spec::Offset(s) => (ryukei::tweak::offset_faces_with(key, body, s, &work), None),
+        Spec::Replace(s) => (ryukei::tweak::replace_faces_with(key, body, s, &work), None),
+        Spec::Draft {
+            spec,
+            parting,
+            asked,
+        } => match ryukei::tweak::draft_with(key, body, spec, &work) {
+            Ok((b, j, rep)) => (
+                Ok((b, j)),
+                Some(draft_report(r.target, *parting, asked, &rep)),
+            ),
+            Err(e) => (Err(e), None),
+        },
+    };
+    let made = made.map_err(|e| {
         crate::work::stopped(&e, run.job)
             .unwrap_or_else(|| kernel_error(part, id, ty, (r.target, r.built), e))
     })?;
     let origins = crate::rebuild::replaced_origins(id, r.built, &made);
     let built = crate::rebuild::finish(id, ty, made, origins)?;
-    Ok(Made::new(vec![(r.target.clone(), Arc::new(built))]))
+    Ok(Made {
+        report: report.map(Arc::new),
+        ..Made::new(vec![(r.target.clone(), Arc::new(built))])
+    })
+}
+
+/// What a draft's report keeps (`Made::report`, so the disk cache holds
+/// it): its target, whether its hinge is a parting line, and each drafted
+/// face's least and greatest angle from its pull (radians, by name),
+/// with `asked`, the signed angle the file asks, for the faces it lists
+/// (faces joined by tangency have none).
+pub(crate) fn draft_report(
+    target: &Id,
+    parting: bool,
+    asked: &[(Name, f64)],
+    r: &ryukei::tweak::DraftReport,
+) -> Value {
+    let angles: Vec<Value> = r
+        .faces
+        .iter()
+        .map(|a| {
+            let mut v =
+                json!({"face": a.face.to_string(), "least": a.least, "greatest": a.greatest});
+            if let Some((_, t)) = asked.iter().find(|(n, _)| *n == a.face) {
+                v["asked"] = json!(t);
+            }
+            v
+        })
+        .collect();
+    json!({
+        "target": target,
+        "hinge": if parting { "parting" } else { "neutral" },
+        "angles": angles,
+    })
 }
 
 /// Refuses a tweak (feature `id` of `part`, as a write would leave it)
@@ -669,6 +822,7 @@ pub fn from_given(
     let mut v = match current {
         Some(Feature::MoveFace(m)) => m.fields(),
         Some(Feature::ReplaceFace(r)) => r.fields(),
+        Some(Feature::Draft(d)) => d.fields(),
         _ => json!({}),
     };
     let o = v.as_object_mut().expect("fields are an object");
@@ -739,43 +893,47 @@ pub fn from_given(
             };
         }
     } else {
-        let by = f.by.clone().or_else(|| {
-            (current.is_none()).then(|| {
-                if f.axis.is_some() {
-                    "rotate"
-                } else if f.direction.is_some() {
-                    "translate"
-                } else {
-                    "offset"
+        if ty == "draft" {
+            draft_given(o, f, &reference, &geom)?;
+        } else {
+            let by = f.by.clone().or_else(|| {
+                (current.is_none()).then(|| {
+                    if f.axis.is_some() {
+                        "rotate"
+                    } else if f.direction.is_some() {
+                        "translate"
+                    } else {
+                        "offset"
+                    }
+                    .to_owned()
+                })
+            });
+            if let Some(by) = by {
+                let Some(takes) = MoveBy::takes(&by) else {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        format!("a move_face's by is translate, rotate or offset, not {by:?}"),
+                    )
+                    .with("param", "by"));
+                };
+                if o.get("by").and_then(Value::as_str) != Some(by.as_str()) {
+                    let motion = ["direction", "distance", "axis", "angle", "groups"];
+                    o.retain(|k, _| !motion.contains(&k.as_str()) || takes.contains(&k.as_str()));
+                    o.insert("by".into(), json!(by));
                 }
-                .to_owned()
-            })
-        });
-        if let Some(by) = by {
-            let Some(takes) = MoveBy::takes(&by) else {
-                return Err(Error::new(
-                    Code::InvalidParam,
-                    format!("a move_face's by is translate, rotate or offset, not {by:?}"),
-                )
-                .with("param", "by"));
-            };
-            if o.get("by").and_then(Value::as_str) != Some(by.as_str()) {
-                let motion = ["direction", "distance", "axis", "angle", "groups"];
-                o.retain(|k, _| !motion.contains(&k.as_str()) || takes.contains(&k.as_str()));
-                o.insert("by".into(), json!(by));
             }
-        }
-        if let Some(d) = &f.direction {
-            o.insert("direction".into(), geom(d, "direction")?);
-        }
-        if let Some(a) = &f.axis {
-            o.insert("axis".into(), geom(a, "axis")?);
-        }
-        if let Some(q) = &f.distance {
-            o.insert("distance".into(), q.clone());
-        }
-        if let Some(q) = &f.angle {
-            o.insert("angle".into(), q.clone());
+            if let Some(d) = &f.direction {
+                o.insert("direction".into(), geom(d, "direction")?);
+            }
+            if let Some(a) = &f.axis {
+                o.insert("axis".into(), geom(a, "axis")?);
+            }
+            if let Some(q) = &f.distance {
+                o.insert("distance".into(), q.clone());
+            }
+            if let Some(q) = &f.angle {
+                o.insert("angle".into(), q.clone());
+            }
         }
         if let Some(Value::Array(fs)) = &f.faces {
             let refs = fs
@@ -813,10 +971,77 @@ pub fn from_given(
         "replace_face" => Feature::ReplaceFace(Box::new(
             crate::doc::tweak::ReplaceFace::from_fields(&mut r)?,
         )),
+        "draft" => Feature::Draft(Box::new(crate::doc::tweak::Draft::from_fields(
+            &mut r, env,
+        )?)),
         _ => Feature::MoveFace(Box::new(MoveFace::from_fields(&mut r, unit, env)?)),
     };
     r.finish()?;
     Ok(out)
+}
+
+/// A draft's own fields from what was given, over `o` (its file's): an
+/// angle; a neutral plane, which takes the parting line and pull away; a
+/// parting line (edges as text), which takes the neutral plane away; a
+/// pull; `reverse`; and flipped faces (a bool is a datum's or split's
+/// flip, refused).
+fn draft_given(
+    o: &mut serde_json::Map<String, Value>,
+    f: &FeatureFields,
+    reference: &dyn Fn(&str, &str) -> Result<Value>,
+    geom: &dyn Fn(&str, &str) -> Result<Value>,
+) -> Result<()> {
+    if let Some(q) = &f.angle {
+        o.insert("angle".into(), q.clone());
+    }
+    if let Some(n) = &f.neutral {
+        o.remove("parting");
+        o.remove("pull");
+        o.insert("neutral".into(), geom(n, "neutral")?);
+    }
+    if let Some(es) = &f.parting {
+        o.remove("neutral");
+        let refs = es
+            .iter()
+            .enumerate()
+            .map(|(i, t)| reference(t, &format!("/parting/{i}")))
+            .collect::<Result<Vec<_>>>()?;
+        o.insert("parting".into(), json!(refs));
+    }
+    if let Some(p) = &f.pull {
+        o.insert("pull".into(), geom(p, "pull")?);
+    }
+    match f.reverse {
+        Some(true) => {
+            o.insert("reverse".into(), json!(true));
+        }
+        Some(false) => {
+            o.remove("reverse");
+        }
+        None => {}
+    }
+    match &f.flip {
+        None => {}
+        Some(crate::proto::Flip::On(_)) => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "a draft's flip is the faces it drafts against its pull, each <part>/<solid>/<name>",
+            )
+            .with("param", "flip"));
+        }
+        Some(crate::proto::Flip::Faces(fs)) if fs.is_empty() => {
+            o.remove("flip");
+        }
+        Some(crate::proto::Flip::Faces(fs)) => {
+            let refs = fs
+                .iter()
+                .enumerate()
+                .map(|(i, t)| reference(t, &format!("/flip/{i}")))
+                .collect::<Result<Vec<_>>>()?;
+            o.insert("flip".into(), json!(refs));
+        }
+    }
+    Ok(())
 }
 
 /// A tweak as output reports it: its file's fields, quantities as written
@@ -862,6 +1087,29 @@ pub fn report(part: &Id, f: &Feature) -> Value {
             }
             v
         }
+        Feature::Draft(d) => {
+            let mut v = d.fields();
+            v["angle"] = d.angle.report();
+            for (i, g) in d.groups.iter().enumerate() {
+                v["groups"][i]["angle"] = g.quantity.report();
+            }
+            match &d.hinge {
+                DraftHinge::Neutral { plane } => v["neutral"] = json!(plane.text(part)),
+                DraftHinge::Parting { edges, pull } => {
+                    v["parting"] = json!(edges.iter().map(|r| r.text(part)).collect::<Vec<_>>());
+                    v["pull"] = json!(pull.text(part));
+                }
+            }
+            v["reverse"] = json!(d.reverse);
+            v["tangent"] = json!(d.tangent);
+            for (role, r) in d.drafted() {
+                *v.pointer_mut(&pointer(&role)).expect("its own face") = json!(r.text(part));
+            }
+            if !d.flip.is_empty() {
+                v["flip"] = json!(d.flip.iter().map(|r| r.text(part)).collect::<Vec<_>>());
+            }
+            v
+        }
         _ => unreachable!("a tweak"),
     }
 }
@@ -888,6 +1136,15 @@ pub fn resolved(
         let t = r.translation_part();
         v["motion"] = json!({"rotation": r.rotation_matrix(), "translation_m": [t.x, t.y, t.z]});
     }
+    if let Feature::Draft(d) = f
+        && let Ok((pull, h)) = hinge(part, id, d, results)
+    {
+        let p = pull.get();
+        v["pull"] = json!([p.x, p.y, p.z]);
+        if let Hinge::Neutral { origin: o } = h {
+            v["neutral"] = json!({"origin_m": [o.x, o.y, o.z], "normal": [p.x, p.y, p.z]});
+        }
+    }
     let target = f.targets()[0];
     if let Some(Ok(out)) = results.result(id)
         && let Some(b) = out.solid(target)
@@ -909,8 +1166,90 @@ pub fn resolved(
             refs.sort();
             v["modified"]["references"] = json!(refs);
         }
+        if let crate::rebuild::Output::Solids(m) = out
+            && let Some(rep) = &m.report
+            && let Some(a) = angles(&part.id, rep)
+        {
+            v["angles"] = a;
+        }
     }
     Some(v)
+}
+
+/// A draft report's angles as output gives them: each face as
+/// `<part>/<solid>/<name>`, its least and greatest angle from its pull in
+/// degrees and radians, and `exact` where the two are the same bits (the
+/// kernel's closed form for planes and cones).
+fn angles(part: &Id, rep: &Value) -> Option<Value> {
+    let target = rep["target"].as_str()?;
+    let deg = |x: f64| json!({"value": format!("{} deg", crate::measure::number(x / crate::units::DEG)), "rad": x});
+    Some(Value::Array(
+        rep["angles"]
+            .as_array()?
+            .iter()
+            .filter_map(|a| {
+                let (lo, hi) = (a["least"].as_f64()?, a["greatest"].as_f64()?);
+                Some(json!({
+                    "face": format!("{part}/{target}/{}", a["face"].as_str()?),
+                    "least": deg(lo),
+                    "greatest": deg(hi),
+                    "exact": lo.to_bits() == hi.to_bits(),
+                }))
+            })
+            .collect(),
+    ))
+}
+
+/// How far (radians) a face's angle may lie from the angle asked, or
+/// spread, before a draft warns: a millidegree.
+pub const VARIES: f64 = 1e-3 * crate::units::DEG;
+
+/// `draft_angle_varies` for each face of a parting-line draft (feature
+/// `id` of `part`, its report `rep`) whose angle lies more than
+/// [`VARIES`] from the angle its file asks or spreads wider than it. A
+/// neutral-plane draft holds its angle by construction (design 384), so a
+/// spline's certified bounds, wider than a millidegree, aren't a varying
+/// angle; nothing is said for it, nor for a report that isn't a draft's.
+pub fn draft_warnings(part: &Id, id: &Id, rep: &Value) -> Vec<Value> {
+    if rep["hinge"] != "parting" {
+        return Vec::new();
+    }
+    let (Some(target), Some(angles)) = (rep["target"].as_str(), rep["angles"].as_array()) else {
+        return Vec::new();
+    };
+    let deg = |x: f64| x / crate::units::DEG;
+    angles
+        .iter()
+        .filter_map(|a| {
+            let (lo, hi) = (a["least"].as_f64()?, a["greatest"].as_f64()?);
+            let asked = a["asked"].as_f64();
+            let off = asked.is_some_and(|t| (lo - t).abs() > VARIES || (hi - t).abs() > VARIES);
+            if !(off || hi - lo > VARIES) {
+                return None;
+            }
+            let face = format!("{part}/{target}/{}", a["face"].as_str()?);
+            let asked_text = asked
+                .map(|t| format!(", not the {}° asked", crate::measure::number(deg(t))))
+                .unwrap_or_default();
+            let mut w = json!({
+                "code": "draft_angle_varies",
+                "part": part,
+                "feature": id,
+                "face": face,
+                "least_rad": lo,
+                "greatest_rad": hi,
+                "message": format!(
+                    "draft {id}: face {face} lies {}° to {}° from the pull{asked_text}: a parting line climbing along the pull holds the angle in the section square to it, not from the pull",
+                    crate::measure::number(deg(lo)),
+                    crate::measure::number(deg(hi)),
+                ),
+            });
+            if let Some(t) = asked {
+                w["asked_rad"] = json!(t);
+            }
+            Some(w)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1374,5 +1713,407 @@ mod tests {
             (e.code, e.details["param"].as_str()),
             (Code::InvalidParam, Some("faces"))
         );
+    }
+
+    #[test]
+    fn draft_angles_are_the_kernels() {
+        assert_eq!(
+            crate::doc::tweak::MIN_DRAFT_ANGLE,
+            ryukei::tol::ANGULAR_RESOLUTION
+        );
+        assert_eq!(crate::doc::tweak::MAX_DRAFT_ANGLE, ryukei::tweak::MAX_ANGLE);
+    }
+
+    /// The reference to the planar face of `f`'s body of `solid` whose
+    /// outward normal is `n` along `axis`.
+    fn facing(
+        s: &mut crate::session::Session,
+        f: &str,
+        solid: &str,
+        axis: usize,
+        n: f64,
+    ) -> String {
+        let v = call(s, "inspect", json!({"part": "p", "feature": f})).unwrap();
+        let face = v["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| {
+                let sign = if x["reversed"] == true { -1.0 } else { 1.0 };
+                x["surface"]["type"] == "plane"
+                    && x["surface"]["frame"]["z"][axis].as_f64().unwrap() * sign == n
+            })
+            .unwrap()["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        format!("p/{solid}/{face}")
+    }
+
+    /// `{feature, name}` of a reference `p/<solid>/<name>`.
+    fn wire(r: &str) -> Value {
+        let mut it = r.split('/').skip(1);
+        json!({"feature": it.next().unwrap(), "name": it.next().unwrap()})
+    }
+
+    fn draft_feature(v: Value) -> Feature {
+        let mut v = v;
+        v["format"] = json!(crate::doc::tweak::DRAFT_FORMAT);
+        v["kind"] = json!("ryucad.feature");
+        v["type"] = json!("draft");
+        Feature::from_json(&v, crate::units::Unit::Mm, &crate::expr::Env::empty()).unwrap()
+    }
+
+    /// A draft's spec, whether its hinge is a parting line, and each
+    /// listed face's asked angle.
+    type Drafted = (DraftSpec, bool, Vec<(Name, f64)>);
+
+    /// Part `p` of `s` with draft `d` written last, and what it resolves
+    /// to: the kernel's spec, whether its hinge is a parting line, and each
+    /// listed face's asked angle.
+    fn resolved_draft(s: &mut crate::session::Session, v: Value) -> Result<Drafted> {
+        let pid = Id::parse("p", "part").unwrap();
+        let part = s.project().part(&pid).unwrap().clone();
+        let d = Id::parse("d", "feature").unwrap();
+        let f = draft_feature(v);
+        let mut order = part.order().to_vec();
+        order.push(d.clone());
+        let p = crate::server::proposed(&part, &order, &[(&d, &f)]);
+        let results = s.rebuilt(&pid).unwrap();
+        match resolve(&p, &Solids::of(&p), &d, &f, results)?.spec {
+            Spec::Draft {
+                spec,
+                parting,
+                asked,
+            } => Ok((spec, parting, asked)),
+            _ => panic!("a draft's spec"),
+        }
+    }
+
+    #[test]
+    fn a_draft_resolves_its_hinge_pull_faces_and_flips() {
+        let (_dir, mut s) = boxes();
+        let (east, north) = (
+            facing(&mut s, "b", "b", 0, 1.0),
+            facing(&mut s, "b", "b", 1, 1.0),
+        );
+        // About xy, the pull turned round; one wall at the draft's angle,
+        // one in a group of its own, flipped.
+        let (spec, parting, asked) = resolved_draft(
+            &mut s,
+            json!({"target": "b", "angle": "2 deg", "neutral": "xy", "reverse": true,
+                   "faces": [wire(&east)],
+                   "groups": [{"angle": "5 deg", "faces": [wire(&north)]}],
+                   "flip": [wire(&north)]}),
+        )
+        .unwrap();
+        assert_eq!(spec.pull.get(), ryukei::geom::Vector3::new(0.0, 0.0, -1.0));
+        assert_eq!(
+            spec.hinge,
+            ryukei::tweak::Hinge::Neutral {
+                origin: ryukei::geom::Point3::ORIGIN
+            }
+        );
+        assert!(!parting && spec.tangent);
+        assert!((spec.angle - 2f64.to_radians()).abs() < 1e-15);
+        assert_eq!((spec.faces[0].angle, spec.faces[0].flip), (None, false));
+        assert!((spec.faces[1].angle.unwrap() - 5f64.to_radians()).abs() < 1e-15);
+        assert!(spec.faces[1].flip);
+        assert!((asked[0].1 - 2f64.to_radians()).abs() < 1e-15);
+        assert!((asked[1].1 - 5f64.to_radians()).abs() < 1e-15);
+        // From a parting line: the bottom edge of the east wall, pull z.
+        let edge = names(&mut s, "b", "edges")[0].clone();
+        let (spec, parting, _) = resolved_draft(
+            &mut s,
+            json!({"target": "b", "angle": "2 deg",
+                   "parting": [{"feature": "b", "name": edge}], "pull": "z",
+                   "faces": [wire(&east)]}),
+        )
+        .unwrap();
+        assert!(parting);
+        assert!(matches!(&spec.hinge, ryukei::tweak::Hinge::PartingLine(e) if e.len() == 1));
+        assert_eq!(spec.pull.get(), ryukei::geom::Vector3::new(0.0, 0.0, 1.0));
+        // A face where a parting edge goes; another solid's face; a whole
+        // solid as the neutral plane.
+        let other = facing(&mut s, "c", "c", 2, 1.0);
+        for (v, code) in [
+            (
+                json!({"target": "b", "angle": "2 deg", "parting": [wire(&north)], "pull": "z",
+                    "faces": [wire(&east)]}),
+                Code::ReferenceWrongKind,
+            ),
+            (
+                json!({"target": "b", "angle": "2 deg", "neutral": "xy",
+                    "faces": [wire(&other)]}),
+                Code::TargetsMixed,
+            ),
+            (
+                json!({"target": "b", "angle": "2 deg", "neutral": {"feature": "c"},
+                    "faces": [wire(&east)]}),
+                Code::ReferenceWrongKind,
+            ),
+        ] {
+            let e = resolved_draft(&mut s, v.clone())
+                .err()
+                .unwrap_or_else(|| panic!("{v}"));
+            assert_eq!(e.code, code, "{v}: {e}");
+        }
+    }
+
+    /// Part `p` of `s` with draft `d` added last, rebuilt: `d`'s result.
+    fn built_draft(s: &mut crate::session::Session, v: Value) -> Result<crate::rebuild::Output> {
+        let pid = Id::parse("p", "part").unwrap();
+        let part = s.project().part(&pid).unwrap().clone();
+        let d = Id::parse("d", "feature").unwrap();
+        let f = draft_feature(v);
+        let mut order = part.order().to_vec();
+        order.push(d.clone());
+        let p = crate::server::proposed(&part, &order, &[(&d, &f)]);
+        let out = s.rebuilt_as(p).unwrap();
+        out.features
+            .iter()
+            .find(|(i, _)| *i == d)
+            .unwrap()
+            .1
+            .clone()
+    }
+
+    #[test]
+    fn a_draft_builds_and_keeps_the_kernels_report() {
+        let (_dir, mut s) = boxes();
+        let walls: Vec<Value> = [(0, 1.0), (0, -1.0), (1, 1.0), (1, -1.0)]
+            .iter()
+            .map(|&(a, n)| wire(&facing(&mut s, "b", "b", a, n)))
+            .collect();
+        let out = built_draft(
+            &mut s,
+            json!({"target": "b", "angle": "2 deg", "neutral": "xy", "faces": walls}),
+        )
+        .unwrap();
+        let crate::rebuild::Output::Solids(m) = &out else {
+            panic!("{out:?}")
+        };
+        let rep = m.report.as_ref().expect("a draft's report");
+        assert_eq!(
+            (rep["target"].as_str(), rep["hinge"].as_str()),
+            (Some("b"), Some("neutral"))
+        );
+        let angles = rep["angles"].as_array().unwrap();
+        assert_eq!(angles.len(), 4);
+        for a in angles {
+            // Planes: the closed form, the same bits both ways.
+            assert_eq!(a["least"], a["greatest"], "{a}");
+            assert!(
+                (a["least"].as_f64().unwrap() - 2f64.to_radians()).abs() < 1e-12,
+                "{a}"
+            );
+            assert!(
+                (a["asked"].as_f64().unwrap() - 2f64.to_radians()).abs() < 1e-15,
+                "{a}"
+            );
+        }
+        assert!(rep.get("mode").is_none());
+        // The top doesn't cross xy: no_hinge, the face named.
+        let top = wire(&facing(&mut s, "b", "b", 2, 1.0));
+        let e = built_draft(
+            &mut s,
+            json!({"target": "b", "angle": "2 deg", "neutral": "xy", "faces": [top]}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (
+                e.code,
+                e.details["reason"].as_str(),
+                e.details["kernel"].as_str()
+            ),
+            (Code::TweakFailed, Some("no_hinge"), Some("tweak"))
+        );
+        assert_eq!(e.details["entities"][0]["kind"], "face", "{e}");
+    }
+
+    #[test]
+    fn the_protocol_adds_and_edits_a_draft() {
+        let (dir, mut s) = boxes();
+        let (east, north) = (
+            facing(&mut s, "b", "b", 0, 1.0),
+            facing(&mut s, "b", "b", 1, 1.0),
+        );
+        // No target and two solids: its faces name it.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "draft", "id": "d", "angle": "2 deg", "neutral": "xy",
+                   "faces": [east.clone(), {"angle": "5 deg", "faces": [north.clone()]}]}),
+        )
+        .unwrap();
+        let v = file(&dir, "d");
+        assert_eq!(v["format"], crate::doc::tweak::DRAFT_FORMAT);
+        assert_eq!(v["target"], "b", "{v}");
+        assert_eq!(v["neutral"], "xy", "{v}");
+        assert_eq!(v["groups"][0]["angle"], "5 deg", "{v}");
+        assert!(
+            v.get("tangent").is_none() && v.get("reverse").is_none(),
+            "{v}"
+        );
+        // A parting line replaces the neutral plane; a flipped face; the
+        // pull reversed; tangency off.
+        let edge = format!("p/b/{}", names(&mut s, "b", "edges")[0]);
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "d", "parting": [edge], "pull": "z", "reverse": true,
+                   "flip": [north.clone()], "tangent": false}),
+        )
+        .unwrap();
+        let v = file(&dir, "d");
+        assert!(v.get("neutral").is_none(), "{v}");
+        assert_eq!(
+            (v["pull"].as_str(), v["reverse"].as_bool()),
+            (Some("z"), Some(true))
+        );
+        assert_eq!(v["flip"][0]["name"], wire(&north)["name"], "{v}");
+        assert_eq!(v["tangent"], false);
+        // Back to a neutral plane: the parting line and its pull go.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "d", "neutral": "xy", "flip": [], "reverse": false}),
+        )
+        .unwrap();
+        let v = file(&dir, "d");
+        assert!(v.get("parting").is_none() && v.get("pull").is_none(), "{v}");
+        assert!(v.get("flip").is_none() && v.get("reverse").is_none(), "{v}");
+        // A bool is no draft's flip; a field a draft doesn't take.
+        for (extra, param) in [
+            (json!({"flip": true}), "flip"),
+            (json!({"distance": "1 mm"}), "distance"),
+        ] {
+            let mut p = json!({"part": "p", "id": "d"});
+            for (k, x) in extra.as_object().unwrap() {
+                p[k] = x.clone();
+            }
+            let e = call(&mut s, "feature.edit", p).unwrap_err();
+            assert_eq!(
+                (e.code, e.details["param"].as_str()),
+                (Code::InvalidParam, Some(param)),
+                "{e}"
+            );
+        }
+        // The angle is checked when written.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "d", "angle": "89.9 deg"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::InvalidParam, Some("/angle"))
+        );
+    }
+
+    #[test]
+    fn a_draft_reports_its_fields_pull_and_angles() {
+        let (_dir, mut s) = boxes();
+        let east = facing(&mut s, "b", "b", 0, 1.0);
+        let shown = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "draft", "id": "d", "target": "b", "angle": "2 deg",
+                   "neutral": "xy", "reverse": true, "faces": [east.clone()]}),
+        )
+        .unwrap();
+        let f = &shown["feature"];
+        assert_eq!(f["angle"]["value"], "2 deg", "{f}");
+        assert!((f["angle"]["rad"].as_f64().unwrap() - 2f64.to_radians()).abs() < 1e-15);
+        assert_eq!(f["faces"], json!([east]), "{f}");
+        assert_eq!(
+            (
+                f["neutral"].as_str(),
+                f["reverse"].as_bool(),
+                f["tangent"].as_bool()
+            ),
+            (Some("xy"), Some(true), Some(true))
+        );
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let d = r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "d")
+            .unwrap()["draft"]
+            .clone();
+        // Reversed: the pull is -z, and xy's point is the neutral plane's.
+        assert_eq!(d["pull"], json!([0.0, 0.0, -1.0]), "{d}");
+        assert_eq!(
+            d["neutral"],
+            json!({"origin_m": [0.0, 0.0, 0.0], "normal": [0.0, 0.0, -1.0]})
+        );
+        // Pulled down, the east wall drafted about its bottom leans out
+        // going up: its angle from the pull is the one asked, exactly.
+        let a = &d["angles"][0];
+        assert_eq!(a["face"], east, "{d}");
+        assert_eq!(a["exact"], true, "{d}");
+        assert_eq!(a["least"]["value"], "2 deg", "{d}");
+        assert_eq!(a["least"], a["greatest"]);
+        assert_eq!(d["modified"]["faces"], 1, "{d}");
+        assert!(
+            r["parts"][0]["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|x| x.get("import").is_none()),
+            "{r}"
+        );
+        // inspect --feature gives the same, with what it modified by name.
+        let i = call(&mut s, "inspect", json!({"part": "p", "feature": "d"})).unwrap();
+        assert_eq!(i["draft"]["angles"], d["angles"]);
+        assert!(
+            i["draft"]["modified"]["references"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(east))
+        );
+    }
+
+    #[test]
+    fn a_parting_drafts_angle_off_what_it_asks_warns() {
+        let (part, id) = (
+            Id::parse("p", "part").unwrap(),
+            Id::parse("d", "feature").unwrap(),
+        );
+        let t = 3f64.to_radians();
+        let n = "0123456789abcdef0123456789abcdef";
+        let rep = |hinge: &str, lo: f64, hi: f64| {
+            json!({"target": "b", "hinge": hinge,
+                   "angles": [{"face": n, "least": lo, "greatest": hi, "asked": t}]})
+        };
+        // At the angle asked, or within a millidegree: nothing.
+        assert!(draft_warnings(&part, &id, &rep("parting", t, t)).is_empty());
+        let close = t + 0.5e-3f64.to_radians();
+        assert!(draft_warnings(&part, &id, &rep("parting", close, close)).is_empty());
+        // A parting line climbing along the pull: the face is at 2.5°.
+        let w = draft_warnings(
+            &part,
+            &id,
+            &rep("parting", 2.5f64.to_radians(), 2.5f64.to_radians()),
+        );
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0]["code"], "draft_angle_varies");
+        assert_eq!(w[0]["face"], format!("p/b/{n}"));
+        assert_eq!(w[0]["feature"], "d");
+        assert!(
+            w[0]["message"].as_str().unwrap().contains("parting line"),
+            "{}",
+            w[0]
+        );
+        // A spread wider than a millidegree, the asked angle inside it.
+        let w = draft_warnings(&part, &id, &rep("parting", t - 0.01, t + 0.01));
+        assert_eq!(w.len(), 1);
+        // A neutral plane holds the angle by construction: a spline's
+        // certified bounds wider than that say nothing.
+        assert!(draft_warnings(&part, &id, &rep("neutral", t - 0.01, t + 0.01)).is_empty());
+        // Any other report (an import's, a fill's) says nothing here.
+        assert!(draft_warnings(&part, &id, &json!({"sides": []})).is_empty());
     }
 }

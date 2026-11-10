@@ -2399,7 +2399,9 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Boolean(b) => b.fields(),
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) => crate::tweak::report(part, f),
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
+            crate::tweak::report(part, f)
+        }
         Feature::Datum(d) => crate::datum::report(part, d),
         Feature::Path(x) => crate::path::report(part, x),
         Feature::Sweep(w) => crate::along::feature_report(part, w),
@@ -3741,7 +3743,7 @@ fn check_solids(q: &Part, written: &[&Id]) -> Result<()> {
 
 /// The part as a write would leave it: `writes` in place, listed as
 /// `order`.
-fn proposed(p: &Part, order: &[Id], writes: &[(&Id, &Feature)]) -> Part {
+pub(crate) fn proposed(p: &Part, order: &[Id], writes: &[(&Id, &Feature)]) -> Part {
     let mut q = p.clone();
     for (id, f) in writes {
         q.features.insert((*id).clone(), Ok((*f).clone()));
@@ -4276,7 +4278,7 @@ fn check_resolved(
         }
         // Faces of its target, its direction, axis or surfaces their
         // kinds; what the kernel makes of them only rebuild can tell.
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) => {
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
             crate::tweak::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
         Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
@@ -4592,7 +4594,7 @@ fn feature_add(
             given.only(ty, crate::doc::body::request_fields(ty))?;
             crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
-        "move_face" | "replace_face" => {
+        "move_face" | "replace_face" | "draft" => {
             given.only(ty, crate::doc::tweak::request_fields(ty))?;
             crate::tweak::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
@@ -4833,7 +4835,7 @@ fn feature_edit(
                 given.only(ty, crate::doc::surface::request_fields(ty))?;
                 crate::surface::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
             }
-            f @ (Feature::MoveFace(_) | Feature::ReplaceFace(_)) => {
+            f @ (Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_)) => {
                 let ty = f.type_name();
                 crate::tweak::take_given(ty, &mut given.fields)?;
                 given.only(ty, crate::doc::tweak::request_fields(ty))?;
@@ -4936,6 +4938,7 @@ fn feature_edit(
                 | Feature::Split(_)
                 | Feature::MoveFace(_)
                 | Feature::ReplaceFace(_)
+                | Feature::Draft(_)
         ) && f.targets() != old.targets())
         || ((f.base_flange().is_some()
             || f.flange().is_some()
@@ -5243,7 +5246,9 @@ pub(crate) fn part_report(
                 // A fill's rebuild report is what it measured (see
                 // `Made::report`), an extract's its faces.
                 Feature::Extract(_) => crate::surface::report(id, f),
-                Feature::MoveFace(_) | Feature::ReplaceFace(_) => crate::tweak::report(id, f),
+                Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
+                    crate::tweak::report(id, f)
+                }
                 _ => return None,
             };
             Some((fid.clone(), (f.type_name(), report)))
@@ -5275,6 +5280,7 @@ pub(crate) fn part_report(
                             | Feature::Split(_)
                             | Feature::MoveFace(_)
                             | Feature::ReplaceFace(_)
+                            | Feature::Draft(_)
                     )
             })
         })
@@ -5298,12 +5304,16 @@ pub(crate) fn part_report(
                         && let Some(i) = &m.report
                     {
                         // A fill's report under its own type, else an
-                        // import's.
+                        // import's; a draft's angles come with its own
+                        // report (`tweak::resolved`).
                         let key = match types.get(fid).and_then(Value::as_str) {
-                            Some("fill") => "fill",
-                            _ => "import",
+                            Some("fill") => Some("fill"),
+                            Some("draft") => None,
+                            _ => Some("import"),
                         };
-                        v[key] = i.as_ref().clone();
+                        if let Some(key) = key {
+                            v[key] = i.as_ref().clone();
+                        }
                     }
                     if let crate::rebuild::Output::Solids(m) = o
                         && let Some(f) = &m.flat
@@ -7542,6 +7552,7 @@ fn inspect(
                                 | Feature::Split(_)
                                 | Feature::MoveFace(_)
                                 | Feature::ReplaceFace(_)
+                                | Feature::Draft(_)
                         ))
             }) =>
         {
@@ -7709,7 +7720,8 @@ fn inspect(
             | Feature::Mirror(_)
             | Feature::Split(_)
             | Feature::MoveFace(_)
-            | Feature::ReplaceFace(_)),
+            | Feature::ReplaceFace(_)
+            | Feature::Draft(_)),
         )) = features.iter().find(|(i, _)| i == f)
     {
         let k = x.type_name();
