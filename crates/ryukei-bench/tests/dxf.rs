@@ -277,11 +277,37 @@ fn ezdxf_reads_every_drawing_dxf() {
         "feature.add",
         json!({"part": "p", "type": "box", "id": "b", "params": {"x": 60, "y": 40, "z": 12}}),
     );
+    // Its four upright edges rounded, so the top view draws arcs, and a
+    // ring joined on its top, whose silhouette the views trace as
+    // splines (#655): every segment kind ryu_draw::dxf writes.
+    let uprights: Vec<String> = call(&mut s, "inspect", json!({"part": "p"}))["bodies"][0]
+        ["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            e["curve"]["type"] == "line"
+                && e["curve"]["dir"][2].as_f64().is_some_and(|z| z.abs() == 1.0)
+        })
+        .map(|e| format!("p/b/{}", e["name"].as_str().unwrap()))
+        .collect();
+    assert_eq!(uprights.len(), 4, "{uprights:?}");
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "fillet", "id": "r", "radius": 4, "edges": uprights}),
+    );
     call(
         &mut s,
         "feature.add",
         json!({"part": "p", "type": "cylinder", "id": "h", "operation": "cut", "targets": ["b"],
                "params": {"radius": 6, "height": 12}, "placement": {"origin": [30, 20, 0]}}),
+    );
+    call(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "torus", "id": "t", "operation": "join", "targets": ["b"],
+               "params": {"major_radius": 5, "minor_radius": 2}, "placement": {"origin": [12, 12, 12]}}),
     );
     // The standard views, the bore's diameter with its fit, a full
     // section through the hole and a detail of it: every item kind,
@@ -361,6 +387,9 @@ fn ezdxf_reads_every_drawing_dxf() {
         let counts: std::collections::BTreeMap<String, u64> =
             serde_json::from_value(r["counts"].clone()).unwrap();
         assert_eq!(counts, want, "{f}");
+        for kind in ["LINE", "ARC", "CIRCLE", "ELLIPSE", "SPLINE", "SOLID", "TEXT"] {
+            assert!(counts.get(kind).is_some_and(|n| *n > 0), "{f}: no {kind}: {counts:?}");
+        }
     }
     eprintln!(
         "ezdxf read {} drawing DXF files clean: {want:?}",
