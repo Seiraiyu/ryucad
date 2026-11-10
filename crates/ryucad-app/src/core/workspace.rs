@@ -1461,6 +1461,36 @@ impl Workspace {
         self.send(req, Pending::MarkupPost);
     }
 
+    /// The view marks the viewport draws on the glass (design 423, When):
+    /// the Markup bar's, with the mark under way, in this window's colour;
+    /// else the chosen annotation's, in its author's, at
+    /// [`ryucad::redline::CLOSED_ALPHA`] once closed; else none, since flat
+    /// marks seen from another view mislead.
+    pub fn view_marks(&self) -> Option<crate::core::markup::ViewMarks> {
+        use crate::core::markup::ViewMarks;
+        if let Some(m) = &self.markup {
+            let mut marks = m.marks.clone();
+            marks.extend(m.under_way());
+            return Some(ViewMarks {
+                plane: m.plane(),
+                marks,
+                colour: ryucad::render::participant(&self.name),
+                alpha: 1.0,
+            });
+        }
+        let e = self.annotations.all.get(self.chosen_annotation.as_ref()?)?;
+        Some(ViewMarks {
+            plane: e.plane()?,
+            marks: e.marks.as_ref()?.list.clone(),
+            colour: ryucad::render::participant(&e.by),
+            alpha: if e.is_open() {
+                1.0
+            } else {
+                ryucad::redline::CLOSED_ALPHA
+            },
+        })
+    }
+
     /// Cancel (or Esc with nothing under way): the bar closes and its
     /// marks go.
     pub fn cancel_markup(&mut self) {

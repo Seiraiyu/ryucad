@@ -2245,42 +2245,16 @@ impl View {
         rect: egui::Rect,
         pr: &Projector,
     ) {
-        use ryucad::redline::{Anchor, Kind, Mark, Plane, outline};
+        use ryucad::redline::{Anchor, Kind, outline};
         let size = [f64::from(rect.width()), f64::from(rect.height())];
-        let (plane, marks, colour, alpha): (Plane, Vec<Mark>, _, f32) = match &ws.markup {
-            Some(m) => {
-                let mut all = m.marks.clone();
-                all.extend(m.under_way());
-                (
-                    m.plane(),
-                    all,
-                    ryucad::render::participant(ws.my_name()),
-                    1.0,
-                )
-            }
-            None => {
-                let Some(e) = ws
-                    .chosen_annotation
-                    .as_ref()
-                    .and_then(|id| ws.annotations.all.get(id))
-                else {
-                    return;
-                };
-                let (Some(plane), Some(marks)) = (e.plane(), &e.marks) else {
-                    return;
-                };
-                let alpha = if e.is_open() {
-                    1.0
-                } else {
-                    ryucad::redline::CLOSED_ALPHA
-                };
-                (
-                    plane,
-                    marks.list.clone(),
-                    ryucad::render::participant(&e.by),
-                    alpha,
-                )
-            }
+        let Some(crate::core::markup::ViewMarks {
+            plane,
+            marks,
+            colour,
+            alpha,
+        }) = ws.view_marks()
+        else {
+            return;
         };
         let ink = style::color32(colour).gamma_multiply(alpha);
         let width = ryucad::render::MARK_WIDTH;
