@@ -960,6 +960,29 @@ enum ReviewCmd {
 }
 
 #[derive(Subcommand)]
+enum ReviewPackageCmd {
+    /// Download a release's package and verify it against this clone, offline.
+    Get {
+        part: String,
+        label: String,
+        /// The zip to write; <part>-<label>.zip here if left out.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
+    /// Have the service build a release's package that has none, or retry one that hit a
+    /// limit (repo admin).
+    Build { part: String, label: String },
+    /// An expiring link to a release's package for someone without access (repo write).
+    Share {
+        part: String,
+        label: String,
+        /// How long it lasts, 1 to 30 days (7 if left out).
+        #[arg(long)]
+        days: Option<u64>,
+    },
+}
+
+#[derive(Subcommand)]
 enum GitCmd {
     /// Print a ryucad file as one line per value, for `git diff` (Git's
     /// textconv): plain text, not JSON.
@@ -2391,29 +2414,6 @@ struct PackageArgs {
     /// packages.formats.
     #[arg(long, value_delimiter = ',')]
     formats: Option<Vec<String>>,
-}
-
-#[derive(Subcommand)]
-enum ReviewPackageCmd {
-    /// Download a release's package and verify it against this clone, offline.
-    Get {
-        part: String,
-        label: String,
-        /// The zip to write; <part>-<label>.zip here if left out.
-        #[arg(long, value_name = "FILE")]
-        out: Option<PathBuf>,
-    },
-    /// Have the service build a release's package that has none, or retry one that hit a
-    /// limit (repo admin).
-    Build { part: String, label: String },
-    /// An expiring link to a release's package for someone without access (repo write).
-    Share {
-        part: String,
-        label: String,
-        /// How long it lasts, 1 to 30 days (7 if left out).
-        #[arg(long)]
-        days: Option<u64>,
-    },
 }
 
 #[derive(Subcommand)]

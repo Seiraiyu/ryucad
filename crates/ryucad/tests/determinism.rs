@@ -4910,6 +4910,100 @@ fn deps_projects() -> (tempfile::TempDir, tempfile::TempDir) {
     (lib, dir)
 }
 
+/// Release packages (design 436): a part with a drawing released at A and
+/// an assembly placing it there, each packaged on one thread and four.
+/// Every file's bytes but the record's, and the manifest with what names
+/// commits left out: a record names the build that made it, so commits
+/// differ between a development and a stamped build.
+fn packages_section(golden: &mut Golden) {
+    use serde_json::{Value, json};
+    let mut s = golden.section("packages");
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .env("GIT_AUTHOR_DATE", "2026-11-10T12:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-11-10T12:00:00Z")
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    };
+    let call = |s: &mut ryucad::session::Session, m: &str, p: Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    ryucad::server::init(dir.path(), None).unwrap();
+    let m = json!({"default_unit": "mm", "format": 2, "kind": "ryucad.project",
+                   "project": ryucad::doc::id::ProjectId::from_bytes([7; 16])});
+    ryucad::doc::project::write_json(&dir.path().join("ryucad.json"), &m).unwrap();
+    let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+    call(&mut session, "part.create", json!({"part": "bracket"}));
+    call(&mut session, "feature.add", json!({"part": "bracket", "type": "box", "id": "b",
+        "params": {"x": 40, "y": 20, "z": 5}}));
+    call(&mut session, "feature.add", json!({"part": "bracket", "type": "cylinder", "id": "c",
+        "params": {"radius": 4, "height": 5}, "placement": {"origin": [20, 10, 5]}}));
+    call(&mut session, "props.set", json!({"part": "bracket", "properties": {"number": "100-0042"}}));
+    call(&mut session, "drawing.create", json!({"part": "bracket", "drawing": "d", "views": "standard"}));
+    call(&mut session, "pdm.configure", json!({"package_formats": ["bom", "dxf", "pdf", "render", "step"]}));
+    call(&mut session, "release.propose", json!({"part": "bracket"}));
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-q", "-m", "bracket A"]);
+    call(&mut session, "part.create", json!({"part": "frame", "kind": "assembly"}));
+    for (id, x) in [("b1", "0 mm"), ("b2", "60 mm")] {
+        call(&mut session, "feature.add", json!({"part": "frame", "type": "instance", "id": id,
+            "of": "bracket", "rev": "A", "placement": {"origin": [x, "0 mm", "0 mm"]}}));
+    }
+    call(&mut session, "props.set", json!({"part": "frame", "properties": {"number": "200-0001"}}));
+    call(&mut session, "release.propose", json!({"part": "frame"}));
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-q", "-m", "frame A"]);
+    let built = ryupdm::package::BuiltWith { ryucad: "0.10.0".into(), commit: "0123456789ab".into() };
+    let mut runs = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        let mut fresh = ryucad::session::Session::open(dir.path()).unwrap();
+        let lines: Vec<String> = pool.install(|| {
+            let mut lines = Vec::new();
+            for part in ["bracket", "frame"] {
+                let ask = ryucad::package::Ask { part: part.into(), ..Default::default() };
+                let a = ryucad::package::package_stamped(&mut fresh, ask, &built).unwrap();
+                let (m, files) = ryupdm::package::verify::files(&a.binary.unwrap()).unwrap();
+                for (path, bytes) in &files {
+                    if path == ryupdm::package::RECORD {
+                        continue;
+                    }
+                    let bytes = match path.ends_with(".step") {
+                        true => ryukei_testkit::unversioned(std::str::from_utf8(bytes).unwrap()).into_bytes(),
+                        false => bytes.clone(),
+                    };
+                    lines.push(format!("{part} {path} {} {:x}", bytes.len(), md(&bytes)));
+                }
+                let mut v = m.to_json();
+                for k in ["commit", "content", "record"] {
+                    v[k] = json!("-");
+                }
+                for f in v["files"].as_array_mut().unwrap() {
+                    if f["path"] == ryupdm::package::RECORD || f["path"].as_str().unwrap().ends_with(".step") {
+                        f["blake3"] = json!("-");
+                        f["size"] = json!("-");
+                    }
+                }
+                lines.push(format!("{part} {}", ryucad::doc::canonical::to_string(&v)));
+            }
+            lines
+        });
+        runs.push(lines);
+    }
+    assert_eq!(runs[0], runs[1], "one thread and four");
+    for l in &runs[0] {
+        s.str(l);
+    }
+}
+
 /// An assembly placing another project's releases: a library repository
 /// (its bolt released as A, then thicker as B) and a project placing A
 /// twice and B once, fetched and locked. Each occurrence's bodies, and the
@@ -5553,6 +5647,7 @@ sections! {
     explodes => explodes_section(&mut golden),
     cache => cache_section(&mut golden),
     deps => deps_section(&mut golden),
+    packages => packages_section(&mut golden),
     deps_structure => deps_structure_section(&mut golden),
     datums => datums_section(&mut golden),
     paths => paths_section(&mut golden),

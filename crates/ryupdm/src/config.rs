@@ -677,7 +677,7 @@ mod tests {
                 "{v}"
             );
         }
-        let newer = json!({"format": 3, "kind": "ryupdm.config"});
+        let newer = json!({"format": FORMAT + 1, "kind": "ryupdm.config"});
         assert_eq!(
             Config::from_json(&newer).unwrap_err().code,
             Code::FormatTooNew

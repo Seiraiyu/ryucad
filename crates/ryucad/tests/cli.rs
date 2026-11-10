@@ -1108,6 +1108,8 @@ fn every_protocol_method_has_a_command() {
         ("bom.renumber", &["bom", "renumber"]),
         ("release.check", &["release", "check"]),
         ("release.sync", &["release", "sync"]),
+        ("release.package", &["release", "package"]),
+        ("release.package.verify", &["release", "package", "verify"]),
         ("release.propose", &["release", "propose"]),
         ("release.obsolete", &["release", "obsolete"]),
         ("sketch.edit", &["sketch", "edit"]),
@@ -2289,6 +2291,83 @@ fn blends_from_the_cli() {
 }
 
 #[test]
+fn packages_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "bracket"]);
+    p.ok(&[
+        "feature", "add", "bracket", "box", "--id", "b", "--param", "x=40", "--param", "y=20",
+        "--param", "z=5",
+    ]);
+    // One ID for both projects, so the two ways write the same packages.
+    p.write(
+        "ryucad.json",
+        "{\n  \"default_unit\": \"mm\",\n  \"format\": 2,\n  \"kind\": \"ryucad.project\",\n  \"project\": \"0123456789abcdef0123456789abcdef\"\n}\n",
+    );
+    p.ok(&["props", "set", "bracket", "number=100-0042"]);
+    p.ok(&["drawing", "create", "bracket", "d", "--views", "standard"]);
+    p.fails(
+        &["pdm", "configure", "--package-formats", "step,stl"],
+        "packages_format_unknown",
+        1,
+    );
+    p.ok(&["pdm", "configure", "--package-formats", "step,pdf,dxf,render"]);
+    p.git(&["init", "-q", "-b", "main"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start"]);
+    p.fails(&["release", "package", "bracket"], "label_not_found", 1);
+    p.ok(&["release", "propose", "bracket"]);
+    p.fails(
+        &["release", "package", "bracket", "--label", "A"],
+        "label_not_official",
+        1,
+    );
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "release A"]);
+    let v = p.ok(&["release", "package", "bracket", "--out", "a.zip"]);
+    let paths: Vec<&str> = v["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "drawings/d-s1.dxf",
+            "drawings/d.pdf",
+            "record.json",
+            "render/iso.png",
+            "step/100-0042-A.step"
+        ]
+    );
+    assert_eq!(v["file_name"], "100-0042-A.zip");
+    // The same package both ways, byte for byte, and again.
+    let zip = fs::read(p.direct.join("a.zip")).unwrap();
+    assert_eq!(zip, fs::read(p.daemon.join("a.zip")).unwrap());
+    p.ok(&["release", "package", "bracket"]);
+    assert_eq!(zip, fs::read(p.daemon.join("100-0042-A.zip")).unwrap());
+    let v = p.ok(&["release", "package", "verify", "a.zip", "--rebuild"]);
+    assert_eq!(
+        (&v["verdict"], &v["rebuilt"], &v["tag"]["status"]),
+        (&json!("unattested"), &json!(true), &json!("missing"))
+    );
+    let listed = p.ok(&["release", "list", "bracket"]);
+    assert_eq!(listed["records"][0]["package"], json!({"tag": "missing"}));
+    // A byte changed in a file is named.
+    let (m, mut files) = ryupdm::package::verify::files(&zip).unwrap();
+    files[0].1.push(b'\n');
+    let bad = ryupdm::package::archive(&m, &files).unwrap();
+    fs::write(p.direct.join("bad.zip"), &bad).unwrap();
+    fs::write(p.daemon.join("bad.zip"), &bad).unwrap();
+    let e = p.fails(&["release", "package", "verify", "bad.zip"], "package_invalid", 1);
+    assert_eq!(e["details"]["clause"], "file_changed");
+    // As a folder.
+    p.ok(&["release", "package", "bracket", "--out", "folder/"]);
+    assert!(p.daemon.join("folder/step/100-0042-A.step").is_file());
+}
+
+#[test]
 fn releases_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init"]);
@@ -2829,6 +2908,37 @@ fn review_against_a_fake_service() {
             "text/csv",
             b"at,event,part,label\n2026-11-02T09:20:11Z,attestation_signed,p,A\n".to_vec(),
         ),
+        json(
+            "GET",
+            "/api/v1/repos/acme/widget/releases/p/A/package",
+            200,
+            serde_json::json!({"state": "built", "url": "/api/v1/artifacts/pk", "size": 9}),
+        ),
+        json(
+            "GET",
+            "/api/v1/repos/acme/widget/releases/p/B/package",
+            200,
+            serde_json::json!({"state": "building"}),
+        ),
+        (
+            "GET",
+            "/api/v1/artifacts/pk".to_owned(),
+            200,
+            "application/zip",
+            b"not a zip".to_vec(),
+        ),
+        json(
+            "POST",
+            "/api/v1/repos/acme/widget/releases/p/A/package",
+            202,
+            serde_json::json!({"state": "queued"}),
+        ),
+        json(
+            "POST",
+            "/api/v1/repos/acme/widget/releases/p/A/package/share",
+            201,
+            serde_json::json!({"url": "https://review.example/s/x", "expires": "2026-11-17T00:00:00Z"}),
+        ),
     ]);
     let dir = tempfile::tempdir().unwrap();
     git(dir.path(), &["init", "-q", "-b", "main"]);
@@ -2902,6 +3012,28 @@ fn review_against_a_fake_service() {
             .unwrap()
             .contains("attestation_signed")
     );
+    // A package is downloaded and verified against the clone, which
+    // refuses what the service sent here (it isn't a package).
+    let (code, v) = run(&["init"], None);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = run(&["review", "package", "get", "p", "A"], Some("tok"));
+    assert_eq!(
+        (code, &v["error"]["code"], &v["error"]["details"]["clause"]),
+        (1, &serde_json::json!("package_invalid"), &serde_json::json!("unreadable")),
+        "{v}"
+    );
+    assert_eq!(fs::read(dir.path().join("p-A.zip")).unwrap(), b"not a zip");
+    let (code, v) = run(&["review", "package", "get", "p", "B"], Some("tok"));
+    assert_eq!((code, &v["error"]["code"]), (1, &serde_json::json!("review_not_found")), "{v}");
+    assert_eq!(
+        run(&["review", "package", "build", "p", "A"], Some("tok")).1["error"]["code"],
+        "review_pending"
+    );
+    let sh = ok(&["review", "package", "share", "p", "A", "--days", "7"]);
+    assert_eq!(sh["url"], "https://review.example/s/x");
+    let seen = fake.seen.lock().unwrap().clone();
+    let share = seen.iter().find(|r| r.path.ends_with("/package/share")).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&share.body).unwrap(), serde_json::json!({"days": 7}));
     let r = ok(&["review", "renders", "7", "--out", "shots"]);
     assert_eq!(r["files"].as_array().unwrap().len(), 2);
     assert_eq!(
