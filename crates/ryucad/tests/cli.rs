@@ -4811,6 +4811,117 @@ fn sew_and_thicken_from_the_cli() {
 }
 
 #[test]
+fn trims_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    // A wall across where box `h` stands, and a box `k` over its top half.
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--plane", "xy",
+    ]);
+    let line = serde_json::json!([
+        {"op": "add", "id": "a", "type": "point", "at": [5, -5]},
+        {"op": "add", "id": "b", "type": "point", "at": [5, 15]},
+        {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}
+    ])
+    .to_string();
+    p.ok(&["sketch", "edit", "p", "s", &line]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "extrude",
+        "--sketch",
+        "s",
+        "--surface",
+        "--length",
+        "20mm",
+        "--id",
+        "w",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "h", "--param", "x=10", "--param", "y=10", "--param",
+        "z=10",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "box",
+        "--id",
+        "k",
+        "--param",
+        "x=20",
+        "--param",
+        "y=30",
+        "--param",
+        "z=20",
+        "--origin",
+        "-5,-10,10",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "split", "--target", "h", "--tool", "w", "--id", "sp",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "split", "--target", "w", "--tool", "k", "--keep", "behind", "--id",
+        "t",
+    ]);
+    let line_of = |r: &Value, id: &str| -> Value {
+        r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id}: {r}"))
+    };
+    let r = p.ok(&["rebuild", "p"]);
+    let sp = line_of(&r, "sp");
+    let sides = sp["split"]["sides"].as_array().unwrap();
+    assert_eq!(sides.len(), 2, "{sp}");
+    assert!(sides.iter().all(|x| x["kind"] == "solid"), "{sp}");
+    assert_eq!(line_of(&r, "t")["split"]["trim"], true, "{r}");
+    p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "x.step",
+        "--time-stamp",
+        "2026-11-09T00:00:00",
+    ]);
+    let step = fs::read_to_string(p.direct.join("x.step")).unwrap();
+    assert!(step.contains("SHELL_BASED_SURFACE_MODEL"));
+    p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "x.3mf",
+        "--time-stamp",
+        "2026-11-09T00:00:00",
+    ]);
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(
+        fs::read(p.daemon.join("x.3mf")).unwrap(),
+    ))
+    .unwrap();
+    let mut model = String::new();
+    std::io::Read::read_to_string(&mut z.by_name("3D/3dmodel.model").unwrap(), &mut model).unwrap();
+    assert!(model.contains("type=\"surface\""), "{model}");
+    // Through the daemon: undo takes the trim back.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["rebuild", "p"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(
+        v["result"]["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["id"] != "t"),
+        "{v}"
+    );
+}
+
+#[test]
 fn lofts_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
