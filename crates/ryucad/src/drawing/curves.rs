@@ -26,15 +26,27 @@ pub fn path(c: &ImageCurve) -> Result<Option<Path>, Uncut> {
         Image::Point(_) => return Ok(None),
         Image::Curve { curve, map } => (curve, map),
     };
-    let start = pt(c.point(t0));
-    let segments = match (curve, map) {
-        // A line, or a conic seen edge-on (its cosine map one to one over
-        // the stretch): straight between its ends.
-        (Curve2::Line2(_), _) | (_, ImageMap::Cosine { .. }) => {
-            vec![Segment::Line(pt(c.point(t1)))]
-        }
-        (Curve2::Circle2(k), ImageMap::Affine(_)) => {
-            let [s0, s1] = [map.apply(t0), map.apply(t1)];
+    if let ImageMap::Cosine { .. } = map {
+        // A conic seen edge-on (its cosine map one to one over the
+        // stretch): straight between its ends.
+        return Ok(Some(Path {
+            start: pt(c.point(t0)),
+            segments: vec![Segment::Line(pt(c.point(t1)))],
+            closed: false,
+        }));
+    }
+    plane(curve, map.apply(t0), map.apply(t1)).map(Some)
+}
+
+/// A plane curve from parameter `s0` to `s1` (`s1 < s0` runs it
+/// backwards) as a path: a line, an arc, an elliptic arc, or a NURBS's
+/// rational Bézier pieces; `Err(Uncut)` for a NURBS the kernel can't cut
+/// to the stretch, or a kind no case here takes.
+pub fn plane(curve: &Curve2, s0: f64, s1: f64) -> Result<Path, Uncut> {
+    let start = pt(curve.point(s0));
+    let segments = match curve {
+        Curve2::Line2(_) => vec![Segment::Line(pt(curve.point(s1)))],
+        Curve2::Circle2(k) => {
             let f = k.frame();
             let x = f.x();
             let turn = ryu_math::atan2(x.y, x.x);
@@ -46,8 +58,7 @@ pub fn path(c: &ImageCurve) -> Result<Option<Path>, Uncut> {
                 sweep: sense * (s1 - s0),
             }]
         }
-        (Curve2::Ellipse2(e), ImageMap::Affine(_)) => {
-            let [s0, s1] = [map.apply(t0), map.apply(t1)];
+        Curve2::Ellipse2(e) => {
             let f = e.frame();
             let (x, y) = (f.x(), f.y());
             vec![Segment::Ellipse {
@@ -58,8 +69,7 @@ pub fn path(c: &ImageCurve) -> Result<Option<Path>, Uncut> {
                 sweep: s1 - s0,
             }]
         }
-        (Curve2::Nurbs2(n), ImageMap::Affine(_)) => {
-            let [s0, s1] = [map.apply(t0), map.apply(t1)];
+        Curve2::Nurbs2(n) => {
             let forward = s0 <= s1;
             let part = n.part([s0.min(s1), s0.max(s1)]).map_err(|_| Uncut)?;
             let part = if forward { part } else { part.reversed() };
@@ -67,11 +77,11 @@ pub fn path(c: &ImageCurve) -> Result<Option<Path>, Uncut> {
         }
         _ => return Err(Uncut),
     };
-    Ok(Some(Path {
+    Ok(Path {
         start,
         segments,
         closed: false,
-    }))
+    })
 }
 
 /// A clamped NURBS's Bézier pieces, in order: each interior knot raised
