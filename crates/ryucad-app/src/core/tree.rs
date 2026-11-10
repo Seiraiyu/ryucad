@@ -399,6 +399,9 @@ pub fn type_icon(ty: &str, op: Option<&str>, form: Option<&str>) -> &'static str
         "extract" => "extract",
         "sew" => "sew",
         "thicken" => "thicken",
+        "draft" => "draft",
+        "move_face" => "move-face",
+        "replace_face" => "replace-face",
         _ => "question",
     }
 }
@@ -544,6 +547,9 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
             ("Extract", "extract", Tint::Plain),
             ("Sew", "sew", Tint::Plain),
             ("Thicken", "thicken", Tint::Plain),
+            ("Draft", "draft", Tint::Plain),
+            ("Move face", "move-face", Tint::Plain),
+            ("Replace face", "replace-face", Tint::Plain),
             ("Linear pattern", "pattern-linear", Tint::Plain),
             ("Circular pattern", "pattern-circular", Tint::Plain),
             ("Mirror pattern", "flip-horizontal", Tint::Plain),
@@ -796,6 +802,19 @@ impl Builder<'_> {
                 _ => {}
             }
             row.tip = Some(format!("a = {}\nb = {}", m.a, m.b));
+        }
+        // A draft whose angle varies (a parting line climbing along the
+        // pull): the rebuild's `draft_angle_varies` as a badge.
+        if f.tweak
+            .as_ref()
+            .is_some_and(crate::core::tweaks::TweakInfo::varies)
+        {
+            let tip = "a drafted face's angle varies from the angle asked: \
+                       see its angles in the form"
+                .to_owned();
+            row.badges
+                .push(Badge::new("warning", Tint::Warn, tip.clone()));
+            row.tip = Some(tip);
         }
         if let Some(e) = &f.error {
             row.fail(&message(e));
@@ -1440,6 +1459,7 @@ mod tests {
             datum: None,
             body: None,
             sheet: None,
+            tweak: None,
         }
     }
 
@@ -1784,6 +1804,56 @@ mod tests {
                 "    bad (mirror, join): failed (mirror_failed)",
             ]
         );
+    }
+
+    #[test]
+    fn tweaks_take_their_glyphs_and_a_varying_draft_its_warning() {
+        let mut m = Model::default();
+        m.apply_part(&json!({"part": "p", "revision": "r1", "features": [
+            {"id": "b", "type": "box", "ok": true, "hash": "1", "solids": ["b"]},
+            {"id": "m", "type": "move_face", "ok": true, "hash": "2", "solids": ["b"],
+             "uses": ["b"], "move_face": {"target": "b", "by": "translate", "direction": "z"}},
+            {"id": "d", "type": "draft", "ok": true, "hash": "3", "solids": ["b"],
+             "uses": ["b", "m"], "draft": {"target": "b", "parting": ["p/b/k"], "pull": [0, 0, 1],
+              "angles": [{"face": "p/b/f", "least": {"value": "2.5 deg"},
+                          "greatest": {"value": "2.5 deg"}, "exact": true, "varies": true}]}},
+            {"id": "r", "type": "replace_face", "ok": false, "solids": ["b"], "uses": ["b"],
+             "replace_face": {"target": "b"},
+             "error": {"code": "tweak_failed", "message": "the edge vanishes"}}],
+            "solids": [{"solid": "b", "ok": false, "features": ["b", "m", "d", "r"],
+                        "hash": "3", "error": {"code": "tweak_failed"}}]}));
+        let (states, pdm) = (States::default(), BTreeMap::new());
+        let rows = rows(&source(&m, &states, &pdm));
+        let row = |id: &str| {
+            rows.iter()
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("{id}"))
+        };
+        assert_eq!(
+            ["m", "d", "r"].map(|f| row(&format!("feature:p/{f}")).icon),
+            ["move-face", "draft", "replace-face"]
+        );
+        let d = row("feature:p/d");
+        assert!(
+            d.badges
+                .iter()
+                .any(|b| b.icon == "warning" && b.tint == Tint::Warn),
+            "{:?}",
+            d.badges
+        );
+        assert!(
+            !row("feature:p/m")
+                .badges
+                .iter()
+                .any(|b| b.icon == "warning")
+        );
+        let bad = row("feature:p/r");
+        assert!(bad.failed && bad.tint == Tint::Danger);
+        assert!(bad.text.contains("tweak_failed"), "{}", bad.text);
+        let shown = texts(&rows, &Tree::default());
+        for line in ["    d (draft)", "      uses b, m", "    m (move_face)"] {
+            assert!(shown.iter().any(|t| t == line), "{line:?} in {shown:#?}");
+        }
     }
 
     #[test]

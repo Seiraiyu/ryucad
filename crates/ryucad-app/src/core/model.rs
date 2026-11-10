@@ -55,6 +55,10 @@ pub struct Feature {
     /// A base flange's, flange's, unfold's or refold's report as the
     /// window reads it: its target, the bends it names, an unfold's flat.
     pub sheet: Option<crate::core::sheet::SheetInfo>,
+    /// A draft's, move face's or replace face's report as the window
+    /// reads it: a draft's neutral plane, pull, parting edges and angles,
+    /// a move's line.
+    pub tweak: Option<crate::core::tweaks::TweakInfo>,
 }
 
 impl Feature {
@@ -469,6 +473,7 @@ impl Part {
                             .and_then(ryucad::render::DatumShape::from_report),
                         body: crate::core::bodies::BodyInfo::from_report(f),
                         sheet: crate::core::sheet::SheetInfo::from_report(f),
+                        tweak: crate::core::tweaks::TweakInfo::from_report(f),
                     })
                     .collect()
             })

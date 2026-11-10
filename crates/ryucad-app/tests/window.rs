@@ -5683,6 +5683,71 @@ fn a_flanges_angle_and_a_base_flanges_k_factor_are_edited_and_the_part_laid_flat
     assert!(h.state().opened().ws.model.flat.is_none());
 }
 
+#[test]
+fn a_drafts_angle_and_a_moves_distance_are_edited_from_their_forms() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_tweaks();
+    let mut h = window(&p);
+    // One solid, so one mesh.
+    frames(&mut h, |a| {
+        let ws = &a.opened().ws;
+        ws.idle()
+            && ws.model.meshes.len() == 1
+            && ["d", "m", "r"].iter().all(|f| {
+                ws.model.parts["p"]
+                    .feature(f)
+                    .is_some_and(|f| f.hash.is_some())
+            })
+    });
+    h.step();
+    let save = |h: &mut Harness<'static, App>| {
+        h.get_by_label("Apply").click();
+        frames(h, |a| {
+            a.opened()
+                .ws
+                .form
+                .as_ref()
+                .is_some_and(|f| !f.saving && !f.dirty())
+        });
+    };
+    h.get_by_label("d (draft)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| f.tweak.is_some())
+    });
+    h.step();
+    // The hinge is shown, not edited; the angle is.
+    h.get_by_label("neutral xy");
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "angle")
+        .set_text_value_accesskit("3 deg");
+    h.step();
+    save(&mut h);
+    let shown = p.ok(&["feature", "show", "p", "d"]);
+    assert_eq!(shown["angle"]["value"], "3 deg");
+    h.get_by_label("m (move_face)").click();
+    frames(&mut h, |a| {
+        a.opened().ws.form.as_ref().is_some_and(|f| {
+            matches!(
+                f.tweak,
+                Some(ryucad_app::core::edit::TweakForm::MoveFace(_))
+            )
+        })
+    });
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "distance")
+        .set_text_value_accesskit("2 mm");
+    h.step();
+    save(&mut h);
+    let shown = p.ok(&["feature", "show", "p", "m"]);
+    assert_eq!(shown["distance"]["value"], "2 mm");
+}
+
 /// The sides split `sp`'s report gives, behind first.
 fn split_sides(h: &Harness<'static, App>) -> Vec<String> {
     let ws = &h.state().opened().ws;

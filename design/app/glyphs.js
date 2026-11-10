@@ -1,8 +1,9 @@
-// ryucad's 35 CAD glyphs (design 199, Fonts and icons; design 297 adds
+// ryucad's 38 CAD glyphs (design 199, Fonts and icons; design 297 adds
 // the datum and path glyphs, design 323 the sweep and loft glyphs, design
 // 327 the shell, offset, mirror and split glyphs, design 346 the base
 // flange, edge flange, unfold and refold glyphs, design 388 the sheet,
-// planar, fill, extract, sew and thicken glyphs), on Phosphor's
+// planar, fill, extract, sew and thicken glyphs, design 400 the draft,
+// move-face and replace-face glyphs), on Phosphor's
 // 256-unit grid with its 16-unit stroke, round caps and joins. Each glyph
 // is a list of strokes: `l` a polyline, `e` an ellipse (cx, cy, rx, ry),
 // `a` an arc of one (cx, cy, rx, ry, from, to: degrees clockwise from +x,
@@ -233,6 +234,20 @@ const GLYPHS = {
     { l: [[24, 136], [24, 184]] },
     { l: [[232, 136], [232, 184]] },
     ...arrow(128, 96, 128, 24),
+  ],
+  draft: [
+    { l: [[48, 216], [88, 56], [168, 56], [208, 216], [48, 216]] },
+    ...dashes(88, 76, 216, 40, 20, 10),
+    { a: [88, 56, 104, 104, 90, 104] },
+  ],
+  "move-face": [
+    ...box(32, 144, 136, 72, 48, -40),
+    { l: [[32, 72], [168, 72], [216, 32], [80, 32], [32, 72]], w: 10 },
+    ...arrow(120, 136, 120, 84),
+  ],
+  "replace-face": [
+    ...box(40, 128, 144, 88, 48, -40),
+    { a: [136, 108, 96, 40, 200, 340], w: 10 },
   ],
 };
 

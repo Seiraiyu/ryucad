@@ -124,6 +124,44 @@ pub(crate) fn motion(
     }
 }
 
+/// The line a move goes along or turns about, resolved in its view, for
+/// the window to draw: a rotation's axis where it lies, or a
+/// translation's direction through its reference's point, turned the way
+/// the faces go (a negative distance runs it backwards); `None` for an
+/// offset.
+pub(crate) fn line(
+    part: &Part,
+    id: &Id,
+    m: &MoveFace,
+    results: &dyn Results,
+) -> Result<Option<Line>> {
+    let at = at(part, id, results);
+    match &m.by {
+        MoveBy::Translate {
+            direction,
+            distance,
+        } => {
+            let (origin, v) = match crate::geometry::resolve(
+                &at,
+                "direction",
+                direction,
+                &[Want::Axis, Want::Plane],
+            )? {
+                Geom::Axis(l) => (l.origin, l.dir.get()),
+                Geom::Plane(p) => (p.point, p.normal),
+                _ => unreachable!("asked for an axis or a plane"),
+            };
+            let u = unit(&at, "direction", direction, v)?;
+            let u = if distance.meters() < 0.0 { -u } else { u };
+            Ok(Some(Line::along(origin, u)))
+        }
+        MoveBy::Rotate { axis, .. } => Ok(Some(
+            crate::geometry::one(&at, "axis", axis, Want::Axis)?.axis(),
+        )),
+        MoveBy::Offset { .. } => Ok(None),
+    }
+}
+
 /// The face (or, with `edge`, the edge) `r` names (in `role` of tweak
 /// `id`) in the target's view: `targets_mixed` for another solid's,
 /// `reference_wrong_kind` for another kind, and whatever the reference
@@ -1136,6 +1174,12 @@ pub fn resolved(
         let t = r.translation_part();
         v["motion"] = json!({"rotation": r.rotation_matrix(), "translation_m": [t.x, t.y, t.z]});
     }
+    if let Feature::MoveFace(m) = f
+        && let Ok(Some(l)) = line(part, id, m, results)
+    {
+        let (o, d) = (l.origin, l.dir.get());
+        v["line"] = json!({"origin_m": [o.x, o.y, o.z], "direction": [d.x, d.y, d.z]});
+    }
     if let Feature::Draft(d) = f
         && let Ok((pull, h)) = hinge(part, id, d, results)
     {
@@ -1194,6 +1238,7 @@ fn angles(part: &Id, rep: &Value) -> Option<Value> {
                     "least": deg(lo),
                     "greatest": deg(hi),
                     "exact": lo.to_bits() == hi.to_bits(),
+                    "varies": varies(rep, a),
                 }))
             })
             .collect(),
@@ -1203,6 +1248,23 @@ fn angles(part: &Id, rep: &Value) -> Option<Value> {
 /// How far (radians) a face's angle may lie from the angle asked, or
 /// spread, before a draft warns: a millidegree.
 pub const VARIES: f64 = 1e-3 * crate::units::DEG;
+
+/// Whether a face's angles in a draft's report (its `least` and
+/// `greatest`, and the `asked` angle where the report gives one) vary:
+/// past [`VARIES`] from the angle asked, or spread wider than it. Only a
+/// parting-line draft's can (see [`draft_warnings`]).
+fn varies(rep: &Value, a: &Value) -> bool {
+    if rep["hinge"] != "parting" {
+        return false;
+    }
+    let (Some(lo), Some(hi)) = (a["least"].as_f64(), a["greatest"].as_f64()) else {
+        return false;
+    };
+    let off = a["asked"]
+        .as_f64()
+        .is_some_and(|t| (lo - t).abs() > VARIES || (hi - t).abs() > VARIES);
+    off || hi - lo > VARIES
+}
 
 /// `draft_angle_varies` for each face of a parting-line draft (feature
 /// `id` of `part`, its report `rep`) whose angle lies more than
@@ -1221,12 +1283,11 @@ pub fn draft_warnings(part: &Id, id: &Id, rep: &Value) -> Vec<Value> {
     angles
         .iter()
         .filter_map(|a| {
-            let (lo, hi) = (a["least"].as_f64()?, a["greatest"].as_f64()?);
-            let asked = a["asked"].as_f64();
-            let off = asked.is_some_and(|t| (lo - t).abs() > VARIES || (hi - t).abs() > VARIES);
-            if !(off || hi - lo > VARIES) {
+            if !varies(rep, a) {
                 return None;
             }
+            let (lo, hi) = (a["least"].as_f64()?, a["greatest"].as_f64()?);
+            let asked = a["asked"].as_f64();
             let face = format!("{part}/{target}/{}", a["face"].as_str()?);
             let asked_text = asked
                 .map(|t| format!(", not the {}° asked", crate::measure::number(deg(t))))
@@ -1635,6 +1696,53 @@ mod tests {
         let refs = i["move_face"]["modified"]["references"].as_array().unwrap();
         assert!(refs.contains(&json!(top)), "{i}");
         assert_eq!(refs.len(), 13);
+    }
+
+    #[test]
+    fn a_moves_line_is_its_axis_or_its_direction_the_way_faces_go() {
+        let (_dir, mut s) = boxes();
+        let top = up(&mut s, "b", "b", 0.02);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "move_face", "id": "m",
+            "by": "translate", "direction": "z", "distance": "-2 mm", "faces": [top.clone()]}),
+        )
+        .unwrap();
+        let line = |s: &mut crate::session::Session| {
+            let r = call(s, "rebuild", json!({"part": "p"})).unwrap();
+            r["parts"][0]["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["id"] == "m")
+                .unwrap()["move_face"]["line"]
+                .clone()
+        };
+        // Down 2 mm along z: the line runs down through z's origin.
+        assert_eq!(
+            line(&mut s),
+            json!({"origin_m": [0.0, 0.0, 0.0], "direction": [0.0, 0.0, -1.0]})
+        );
+        // A turn about x: the axis as it lies.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "m", "by": "rotate", "axis": "x", "angle": "1 deg"}),
+        )
+        .unwrap();
+        assert_eq!(
+            line(&mut s),
+            json!({"origin_m": [0.0, 0.0, 0.0], "direction": [1.0, 0.0, 0.0]})
+        );
+        // An offset moves each face its own way: no line.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "m", "by": "offset", "distance": "1 mm"}),
+        )
+        .unwrap();
+        assert!(line(&mut s).is_null());
     }
 
     #[test]
@@ -2056,6 +2164,8 @@ mod tests {
         assert_eq!(a["exact"], true, "{d}");
         assert_eq!(a["least"]["value"], "2 deg", "{d}");
         assert_eq!(a["least"], a["greatest"]);
+        // About a neutral plane the angle never varies.
+        assert_eq!(a["varies"], false, "{d}");
         assert_eq!(d["modified"]["faces"], 1, "{d}");
         assert!(
             r["parts"][0]["features"]
@@ -2090,6 +2200,12 @@ mod tests {
         };
         // At the angle asked, or within a millidegree: nothing.
         assert!(draft_warnings(&part, &id, &rep("parting", t, t)).is_empty());
+        // Each angle the output gives says whether it varies, as the
+        // warning does.
+        let out = |r: &Value| angles(&part, r).unwrap()[0]["varies"].clone();
+        assert_eq!(out(&rep("parting", t, t)), false);
+        assert_eq!(out(&rep("parting", 2.5f64.to_radians(), t)), true);
+        assert_eq!(out(&rep("neutral", 2.5f64.to_radians(), t)), false);
         let close = t + 0.5e-3f64.to_radians();
         assert!(draft_warnings(&part, &id, &rep("parting", close, close)).is_empty());
         // A parting line climbing along the pull: the face is at 2.5°.

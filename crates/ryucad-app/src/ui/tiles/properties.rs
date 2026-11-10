@@ -410,6 +410,97 @@ fn relief(rows: &mut Rows<'_>, r: &mut crate::core::edit::ReliefForm) {
     }
 }
 
+/// A draft or move's groups: each its quantity, then its faces.
+fn tweak_groups(ui: &mut egui::Ui, groups: &mut [crate::core::edit::TweakGroup], keys: &mut Keys) {
+    for (i, g) in groups.iter_mut().enumerate() {
+        let k = form::grid(ui, ("tweak group", i), |rows| {
+            let name = g.quantity.name.clone();
+            rows.quantity(&name, &mut g.quantity);
+        });
+        keys.apply |= k.apply;
+        keys.revert |= k.revert;
+        removable(ui, &mut g.faces, "face");
+    }
+}
+
+/// A draft's target, hinge and pull (an agent's to change); its angle,
+/// `reverse` and `tangent`; its faces, groups and flipped faces, each a
+/// checkbox to take it out; and each drafted face's certified angle from
+/// its pull, read only, as the rebuild gave it (`angles`).
+pub(crate) fn draft(
+    ui: &mut egui::Ui,
+    d: &mut crate::core::edit::DraftForm,
+    angles: &[crate::core::tweaks::Angle],
+) -> Keys {
+    let mut keys = form::grid(ui, "draft", |rows| {
+        rows.read_only("target", &d.target, true, None);
+        rows.read_only("hinge", &d.hinge, true, Some(&d.hinge.clone()));
+        if let Some(p) = &d.pull {
+            rows.read_only("pull", p, true, None);
+        }
+        rows.quantity("angle", &mut d.angle);
+        rows.flag("reverse the pull", &mut d.reverse);
+        rows.flag("tangent faces join", &mut d.tangent);
+    });
+    removable(ui, &mut d.faces, "face");
+    tweak_groups(ui, &mut d.groups, &mut keys);
+    if !d.flip.options.is_empty() {
+        removable(ui, &mut d.flip, "face");
+    }
+    if !angles.is_empty() {
+        let k = form::grid(ui, "draft angles", |rows| {
+            for a in angles {
+                let shown = if a.varies {
+                    format!("{} (varies)", a.text())
+                } else {
+                    a.text()
+                };
+                rows.read_only(&short("face", &a.face), &shown, false, None);
+            }
+        });
+        keys.apply |= k.apply;
+    }
+    keys
+}
+
+/// A move's target, motion and what it goes along or about (an agent's
+/// to change); its distance or angle and `tangent`; its faces and groups.
+pub(crate) fn move_face(ui: &mut egui::Ui, m: &mut crate::core::edit::MoveFaceForm) -> Keys {
+    let mut keys = form::grid(ui, "move face", |rows| {
+        rows.read_only("target", &m.target, true, None);
+        rows.read_only("by", &m.by, false, None);
+        if let Some(a) = &m.along {
+            rows.read_only("along", a, true, None);
+        }
+        if let Some(f) = &mut m.distance {
+            rows.quantity("distance", f);
+        }
+        if let Some(f) = &mut m.angle {
+            rows.quantity("angle", f);
+        }
+        rows.flag("tangent faces join", &mut m.tangent);
+    });
+    removable(ui, &mut m.faces, "face");
+    tweak_groups(ui, &mut m.groups, &mut keys);
+    keys
+}
+
+/// A replacement's target, and each group's surface (an agent's to
+/// change) with its faces, each a checkbox to take it out.
+pub(crate) fn replace_face(ui: &mut egui::Ui, r: &mut crate::core::edit::ReplaceFaceForm) -> Keys {
+    let mut keys = form::grid(ui, "replace face", |rows| {
+        rows.read_only("target", &r.target, true, None);
+    });
+    for (i, g) in r.groups.iter_mut().enumerate() {
+        let k = form::grid(ui, ("replace group", i), |rows| {
+            rows.read_only(&format!("with (group {})", i + 1), &g.with, true, None);
+        });
+        keys.apply |= k.apply;
+        removable(ui, &mut g.faces, "face");
+    }
+    keys
+}
+
 /// An allowance's form (a K-factor, a deduction or an allowance) and
 /// its value.
 fn allowance(rows: &mut Rows<'_>, a: &mut crate::core::edit::AllowanceForm) {
@@ -662,6 +753,20 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         .and_then(|f| f.foreign.as_ref())
         .map(|p| ws.model.marks.name(p));
     let gate = ws.control("feature.edit");
+    // A draft's faces' angles, as the rebuild certified them.
+    let angles = ws
+        .form
+        .as_ref()
+        .and_then(|f| {
+            ws.model
+                .parts
+                .get(&f.part)?
+                .feature(&f.feature)?
+                .tweak
+                .as_ref()
+        })
+        .map(|t| t.angles.clone())
+        .unwrap_or_default();
     let Some(form) = &mut ws.form else {
         crate::ui::tiles::empty(
             ui,
@@ -726,6 +831,14 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
                 S::Flange(f) => flange(ui, f),
                 S::Unfold(u) => unfold(ui, u),
                 S::Refold(r) => refold(ui, r),
+            }
+        }),
+        form.tweak.as_mut().map(|t| {
+            use crate::core::edit::TweakForm as T;
+            match t {
+                T::Draft(d) => draft(ui, d, &angles),
+                T::MoveFace(m) => move_face(ui, m),
+                T::ReplaceFace(r) => replace_face(ui, r),
             }
         }),
     ]

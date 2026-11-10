@@ -970,6 +970,26 @@ impl View {
                 .collect();
             lines.extend(bodies::rim_overlay(&seams, style::CHOSEN, pr, size, scale));
         }
+        if let Some(t) = ws
+            .model
+            .parts
+            .get(&part)
+            .and_then(|p| p.feature(&id))
+            .and_then(|f| f.tweak.clone())
+        {
+            self.tweak_overlay(
+                ws,
+                (&part, &id),
+                &t,
+                pr,
+                size,
+                scale,
+                bounds,
+                &mut lines,
+                &mut glass,
+            );
+            return (lines, glass);
+        }
         let Some(b) = ws
             .model
             .parts
@@ -1003,6 +1023,82 @@ impl View {
             glass.extend(g);
         }
         (lines, glass)
+    }
+
+    /// What a draft, move face or replace face chosen in the tree adds to
+    /// the scene (design 400, The app): a draft's neutral plane as a
+    /// datum plane is drawn, or its parting-line edges in the chosen
+    /// colour twice a sketch curve's width, and its pull as an arrow in
+    /// the datums' colour from the plane's middle (or the edges'), a
+    /// fifth of the model's size long; a move's direction or axis as a
+    /// datum axis is drawn. The faces it modified are painted with the
+    /// chosen feature's ([`Workspace::made`]).
+    #[allow(clippy::too_many_arguments)]
+    fn tweak_overlay(
+        &mut self,
+        ws: &Workspace,
+        (part, id): (&str, &str),
+        t: &crate::core::tweaks::TweakInfo,
+        pr: &Projector,
+        size: [f64; 2],
+        scale: f64,
+        bounds: Option<([f64; 3], [f64; 3])>,
+        lines: &mut Vec<crate::core::sketch::Corner>,
+        glass: &mut Vec<crate::core::datums::GlassCorner>,
+    ) {
+        use crate::core::tweaks;
+        let picker = self.picker(ws);
+        let parting: Vec<Vec<[f64; 3]>> = t
+            .parting
+            .iter()
+            .filter_map(|r| match picker.place(r) {
+                Some(Place::Edge(ps)) => Some(ps),
+                _ => None,
+            })
+            .collect();
+        lines.extend(tweaks::lines_overlay(
+            &parting,
+            style::CHOSEN,
+            pr,
+            size,
+            scale,
+        ));
+        for m in [
+            t.neutral_mark(part, id, bounds),
+            t.line_mark(part, id, bounds),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let (l, g) = crate::core::bodies::plane_overlay(&m, pr, size, scale);
+            lines.extend(l);
+            glass.extend(g);
+        }
+        // The pull from the neutral plane's middle, else the parting
+        // line's.
+        let points: Vec<[f64; 3]> = parting.iter().flatten().copied().collect();
+        let from = t.neutral.map(|p| p.origin).or_else(|| {
+            (!points.is_empty()).then(|| {
+                let n = points.len() as f64;
+                [0, 1, 2].map(|k| points.iter().map(|p| p[k]).sum::<f64>() / n)
+            })
+        });
+        if let (Some(from), Some(pull)) = (from, t.pull) {
+            let length = bounds
+                .map_or(0.01, |(lo, hi)| {
+                    let d = [0, 1, 2].map(|k| hi[k] - lo[k]);
+                    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() / 5.0
+                })
+                .max(1e-3);
+            let arrow = tweaks::arrow(from, pull, length);
+            lines.extend(tweaks::lines_overlay(
+                &arrow,
+                ryucad::render::DATUM,
+                pr,
+                size,
+                scale,
+            ));
+        }
     }
 
     /// The frames of the mate chosen in the tree, as both its connectors
