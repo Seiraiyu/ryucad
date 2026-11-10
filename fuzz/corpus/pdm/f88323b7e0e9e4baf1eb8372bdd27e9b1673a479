@@ -1,0 +1,27 @@
+{
+  "format": 1,
+  "kind": "ryupdm.config",
+  "part_number": {
+    "pattern": "\\d{3}-\\d{4}"
+  },
+  "properties": {
+    "finish": {
+      "requird": "ryupdm.config",
+  "part_number": {
+    "pattern": "\\d{3}-\\d{4}"
+  },
+  "properties": {
+    "finish": {
+      "required": true,
+      "revising": true,
+      "type": "enum",
+      "values": [
+        "anodized",
+        "bare"
+      ]
+    },
+    "mass": {
+      "dim": "length^3"  "type": "quantity"
+  ain",
+  "revisions": "letters"
+}

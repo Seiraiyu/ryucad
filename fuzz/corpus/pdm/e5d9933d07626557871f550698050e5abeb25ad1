@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "Mind": "ryupdm.config",
+  "part_number": {
+    "pattern": "\\d{3}-\\d{4}"
+  },
+  "properties": {
+    "finish": {
+      "required": true,
+      "revising": true,
+      "type": "enum",
+   3  "values": [
+       visions": "letters"
+}

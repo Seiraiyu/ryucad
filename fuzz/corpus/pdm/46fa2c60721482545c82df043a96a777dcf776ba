@@ -1,0 +1,23 @@
+{
+  "format": 1,
+  "kind": "ryupdm.config",
+  "part_iiiinumber": {
+    "paies": {
+    "finish": {
+      "required": true,
+      "revising": true,
+      "type": "enum",
+      "values": [
+        "anodized" ,
+       "bare"
+      ]
+    },
+    "mass": {
+      "dim": "length^6",
+      "type": "quantity"
+    }
+  },
+  "relealues": [
+        "aase_b.anch": "main",
+  "revisioblankns": "letters"
+}

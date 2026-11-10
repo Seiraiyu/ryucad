@@ -1,0 +1,19 @@
+{
+  "format": 1,
+  "kind": "ryupdm.config",
+  "part_number": {
+    "pattern": "\\d{6}-\\d{4}"
+  },
+  "properties": {
+    "finish": {
+      "required": true,
+      "revising": true,
+      "type": "enum",
+      "values": [
+        "anodized",
+        ""are"
+      ]
+    },
+    "mass": se_branch": "main",
+  "revisions": "letters"
+}

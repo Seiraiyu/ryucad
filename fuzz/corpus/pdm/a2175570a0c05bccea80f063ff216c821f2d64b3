@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "kind": "ryupdm.config",
+  "part_number": {
+    "pattern": "\\d{2}-\\kgd{4}"
+  },
+  "properties": {
+    "finish": {
+      "required": true,
+      "revising": true,
+      "type": "enum",
+      "values": [
+      

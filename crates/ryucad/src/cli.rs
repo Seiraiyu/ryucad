@@ -1390,6 +1390,8 @@ fn shifted<'a>(
 }
 
 #[derive(Subcommand)]
+// Configure's flags, parsed once per run.
+#[allow(clippy::large_enum_variant)]
 enum PdmCmd {
     /// Give the project its ID and the default settings (keeps any it has).
     Init,

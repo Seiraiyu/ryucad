@@ -147,7 +147,7 @@ pub struct Expect<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
     Attested {
-        attestation: Attestation,
+        attestation: Box<Attestation>,
         key: String,
     },
     Invalid(Clause),
@@ -189,7 +189,7 @@ pub fn verify_message(bytes: &[u8], expect: &Expect) -> Verdict {
         return Verdict::Invalid(Clause::Mismatch(field));
     }
     Verdict::Attested {
-        attestation: a,
+        attestation: Box::new(a),
         key: sig.key,
     }
 }

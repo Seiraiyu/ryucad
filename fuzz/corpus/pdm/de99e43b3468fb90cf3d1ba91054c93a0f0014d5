@@ -1,0 +1,13 @@
+{
+  "forormat": 1,
+  "kind": "ryupdm.config",
+  "part_number": {
+    "pattern": "\bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\d{3}-\\d{4}"
+  },
+  "properties" 
+:{    "finish": {
+      "required": true,
+      "revising": true,
+      "type": "enum",
+      "values": [
+    ma

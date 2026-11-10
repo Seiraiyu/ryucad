@@ -2311,7 +2311,12 @@ fn packages_from_the_cli() {
         "packages_format_unknown",
         1,
     );
-    p.ok(&["pdm", "configure", "--package-formats", "step,pdf,dxf,render"]);
+    p.ok(&[
+        "pdm",
+        "configure",
+        "--package-formats",
+        "step,pdf,dxf,render",
+    ]);
     p.git(&["init", "-q", "-b", "main"]);
     p.git(&["add", "."]);
     p.git(&["commit", "-q", "-m", "start"]);
@@ -2360,7 +2365,11 @@ fn packages_from_the_cli() {
     let bad = ryupdm::package::archive(&m, &files).unwrap();
     fs::write(p.direct.join("bad.zip"), &bad).unwrap();
     fs::write(p.daemon.join("bad.zip"), &bad).unwrap();
-    let e = p.fails(&["release", "package", "verify", "bad.zip"], "package_invalid", 1);
+    let e = p.fails(
+        &["release", "package", "verify", "bad.zip"],
+        "package_invalid",
+        1,
+    );
     assert_eq!(e["details"]["clause"], "file_changed");
     // As a folder.
     p.ok(&["release", "package", "bracket", "--out", "folder/"]);
@@ -3019,12 +3028,20 @@ fn review_against_a_fake_service() {
     let (code, v) = run(&["review", "package", "get", "p", "A"], Some("tok"));
     assert_eq!(
         (code, &v["error"]["code"], &v["error"]["details"]["clause"]),
-        (1, &serde_json::json!("package_invalid"), &serde_json::json!("unreadable")),
+        (
+            1,
+            &serde_json::json!("package_invalid"),
+            &serde_json::json!("unreadable")
+        ),
         "{v}"
     );
     assert_eq!(fs::read(dir.path().join("p-A.zip")).unwrap(), b"not a zip");
     let (code, v) = run(&["review", "package", "get", "p", "B"], Some("tok"));
-    assert_eq!((code, &v["error"]["code"]), (1, &serde_json::json!("review_not_found")), "{v}");
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &serde_json::json!("review_not_found")),
+        "{v}"
+    );
     assert_eq!(
         run(&["review", "package", "build", "p", "A"], Some("tok")).1["error"]["code"],
         "review_pending"
@@ -3032,8 +3049,14 @@ fn review_against_a_fake_service() {
     let sh = ok(&["review", "package", "share", "p", "A", "--days", "7"]);
     assert_eq!(sh["url"], "https://review.example/s/x");
     let seen = fake.seen.lock().unwrap().clone();
-    let share = seen.iter().find(|r| r.path.ends_with("/package/share")).unwrap();
-    assert_eq!(serde_json::from_str::<Value>(&share.body).unwrap(), serde_json::json!({"days": 7}));
+    let share = seen
+        .iter()
+        .find(|r| r.path.ends_with("/package/share"))
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&share.body).unwrap(),
+        serde_json::json!({"days": 7})
+    );
     let r = ok(&["review", "renders", "7", "--out", "shots"]);
     assert_eq!(r["files"].as_array().unwrap().len(), 2);
     assert_eq!(

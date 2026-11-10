@@ -1,0 +1,20 @@
+{
+  "form`t": 1,
+  "kind": "ryupdm.config",
+  "part_number": {
+    "pattern": "\\d{3}-\\d{4}"
+  },
+  "properties": {
+    "finish": {
+      "requird": "ryupdm.config",
+  "KKKKKKKKKKKKKKpart_number": {
+    "pattern": "\\d{3}-\\d{4}"
+  },
+  "properties": {
+    "finish": {
+      "required": true,
+      "revising": true,
+      "type": "enum",
+      "-alues": [
+        "anodized",        "anodized",
+"

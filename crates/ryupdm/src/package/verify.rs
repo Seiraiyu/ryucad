@@ -75,9 +75,12 @@ impl Clause {
     }
 }
 
+/// A package's files by path, as the zip holds them.
+pub type Files = Vec<(String, Vec<u8>)>;
+
 /// A package's manifest and files (the record among them, not the
 /// manifest), each checked against the manifest's hash and size.
-pub fn files(bytes: &[u8]) -> Result<(Manifest, Vec<(String, Vec<u8>)>), Clause> {
+pub fn files(bytes: &[u8]) -> Result<(Manifest, Files), Clause> {
     let mut entries = zip::read(bytes, MAX_FILE, &[(MANIFEST, MAX_MANIFEST)])
         .map_err(|u| Clause::Unreadable(u.text()))?;
     if entries.first().map(|(n, _)| n.as_str()) != Some(MANIFEST) {
@@ -156,7 +159,7 @@ mod tests {
     use super::super::{File, archive};
     use super::*;
 
-    fn package() -> (Manifest, Vec<(String, Vec<u8>)>, Vec<u8>) {
+    fn package() -> (Manifest, Files, Vec<u8>) {
         let m = manifest();
         let files = vec![
             (RECORD.to_owned(), br#"{"kind":"ryupdm.release"}"#.to_vec()),
