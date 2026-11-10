@@ -116,6 +116,8 @@ jobs:
       - run: cargo test -p ryukei --release --test drafts
       - name: Tweak properties (release)
         run: cargo test -p ryukei --release --test tweak_props -- --nocapture
+      - name: Edit properties (release)
+        run: cargo test -p ryukei --release --test edit_props -- --nocapture
       - run: cargo test -p ryukei --release --test work -- --nocapture
       - run: cargo test -p ryukei --release --test silhouettes
       - run: cargo test -p ryukei --release --test projection_props -- --nocapture
@@ -148,6 +150,7 @@ jobs:
       - run: cargo test -p ryustep --release --test round_trip_props
       - run: cargo test -p ryustep --release --test write
       - run: cargo test -p ryustep --release --test drill
+      - run: cargo test -p ryustep --release --test defeature -- --nocapture
       - run: cargo test -p ryustep --release --test checks
       - run: cargo test -p ryustep --release --test reference
       - run: cargo test -p ryustep --release --test mass
@@ -293,6 +296,7 @@ jobs:
             cargo test -p ryukei-bench --features occt --release --test fill -- --nocapture
             RYUCAD_REQUIRE_CORPUS=1 cargo test -p ryukei-bench --features occt --release --test projection -- --nocapture --test-threads 1
             cargo test -p ryukei-bench --features occt --release --test drafts -- --nocapture
+            cargo test -p ryukei-bench --features occt --release --test defeaturing -- --nocapture
             cargo test -p ryukei-bench --features usd --release --test usd -- --nocapture
             cargo test -p ryukei-bench --features dxf --release --test dxf -- --nocapture
             cargo test -p ryukei-bench --features occt,usd --release --test nurbs -- --skip race --nocapture

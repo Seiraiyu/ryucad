@@ -522,3 +522,51 @@ fn projection_finds_view_and_cut_cleanly() {
         ryukei_testkit::projection::check_bytes(bytes);
     }
 }
+
+/// The `edit` fuzz target's first find (plan 13.D,
+/// `timeout-1a4a7c7895f1c268a0bd659fc316719704850480`): an offset with
+/// `Topology::Change` and `Blends::Rebuild` of a face of a 16-face body.
+/// The re-trim's third rung grew its region onto a spline face, whose
+/// working sheet fitted its sides on a free meter for 26 s: cancelled at
+/// 20 s, it answered at 42 s, and under the fuzzer's instrumentation past
+/// libFuzzer's 600 s. Its sides now charge the re-trim's meter and stop
+/// at its cancel: cancelled 5 s in, it answers within 5 s more (at once
+/// on cox-worker-4, an AMD Opteron 6380; uncancelled it refuses
+/// `Uncertain` after about 200 s there, #647). Release only.
+#[cfg_attr(debug_assertions, ignore = "release only")]
+#[test]
+fn a_cancel_stops_an_edits_working_sheets() {
+    use ryukei::work::Work;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    let data = bytes(concat!(
+        "213f3f3f3f3f3f3f3f3f3f3f3f3f91919191919191919191919191919191919191919191",
+        "9191919191913f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f13131313131313131313131313",
+        "131313131313131313131313131313131313131313131313131313131313131313131313",
+        "13131313133f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f",
+    ));
+    let case = ryukei_testkit::edit_bytes::edit_case(&data).expect("an edit");
+    let flag = AtomicBool::new(false);
+    let start = Instant::now();
+    let (r, stopped) = std::thread::scope(|s| {
+        s.spawn(|| {
+            std::thread::sleep(Duration::from_secs(5));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let r = ryukei_testkit::edit_bytes::run(
+            &case,
+            OpKey(0xed1),
+            &Work::unlimited().with_cancel(&flag),
+        );
+        (r, start.elapsed())
+    });
+    assert!(
+        matches!(r, Err(ryukei::Error::Cancelled)),
+        "{:?}",
+        r.map(|_| ())
+    );
+    assert!(
+        stopped < Duration::from_secs(10),
+        "stopped after {stopped:?}"
+    );
+}

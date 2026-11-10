@@ -74,6 +74,8 @@ std::unique_ptr<Shape> draft_angle(const Shape &s, rust::Slice<const double> fac
                                    bool cylinders, rust::Slice<const double> pull,
                                    double angle, rust::Slice<const double> neutral,
                                    double &seconds);
+std::unique_ptr<Shape> defeature(const Shape &s, rust::Slice<const double> faces,
+                                 uint32_t select, double &seconds);
 std::unique_ptr<Shape> offset_on_faces(const Shape &s, rust::Slice<const double> faces,
                                        rust::Slice<const double> distances);
 rust::Vec<double> face_normal(const Shape &s, double x, double y, double z);

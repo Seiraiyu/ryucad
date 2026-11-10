@@ -448,7 +448,17 @@ pub(crate) fn chamfer(body: &Body, f: FaceId, tol: f64) -> Option<Candidate> {
             let (Some(da), Some(db)) = (side(a), side(b)) else {
                 continue;
             };
-            let share = (da / width(body, a, &m)).max(db / width(body, b, &m));
+            // A support every edge of which the chamfer bounds (a disc
+            // capping a frustum's rim) has nothing beyond its rail to
+            // measure a width by, and no mitre to mistake: its share is 0.
+            let share_of = |g: FaceId, d: f64| {
+                if edges_of(body, g).len() == by[&g].len() {
+                    0.0
+                } else {
+                    d / width(body, g, &m)
+                }
+            };
+            let share = share_of(a, da).max(share_of(b, db));
             if share > CHAMFER_SHARE {
                 continue;
             }
