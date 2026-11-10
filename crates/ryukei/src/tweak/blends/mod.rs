@@ -5,6 +5,7 @@
 //! them ([`Blends::Rebuild`]), their faces, edges and vertices keeping
 //! their names.
 
+pub(crate) mod fit;
 pub(crate) mod recognise;
 
 use crate::blend::BlendKind;
