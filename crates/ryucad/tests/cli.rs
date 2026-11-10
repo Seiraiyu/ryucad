@@ -959,7 +959,7 @@ fn every_error_code_has_its_exit_code() {
     }
     p.write(
         "ryucad.json",
-        r#"{"default_unit":"mm","format":4,"kind":"ryucad.project"}"#,
+        r#"{"default_unit":"mm","format":5,"kind":"ryucad.project"}"#,
     );
     p.fails(&["part", "list"], "format_too_new", 3);
 }
@@ -1168,6 +1168,16 @@ fn every_protocol_method_has_a_command() {
         ("view.focus", &["focus"]),
         ("visibility.set", &["hide"]),
         ("section.get", &["section"]),
+        ("drawing.list", &["drawing", "list"]),
+        ("drawing.create", &["drawing", "create"]),
+        ("drawing.edit", &["drawing", "edit"]),
+        ("drawing.delete", &["drawing", "delete"]),
+        ("drawing.rename", &["drawing", "rename"]),
+        ("drawing.get", &["drawing", "get"]),
+        ("drawing.describe", &["drawing", "describe"]),
+        ("drawing.render", &["drawing", "render"]),
+        ("drawing.export", &["drawing", "export"]),
+        ("drawing.layout", &["drawing", "layout"]),
         ("explode.list", &["explode", "list"]),
         ("explode.save", &["explode", "save"]),
         ("explode.delete", &["explode", "delete"]),
@@ -3398,6 +3408,107 @@ fn datums_from_the_cli() {
 }
 
 #[test]
+fn drafts_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "box"]);
+    p.ok(&[
+        "feature", "add", "box", "box", "--id", "base", "--param", "x=40", "--param", "y=30",
+        "--param", "z=20",
+    ]);
+    let base = p.ok(&["inspect", "box", "base"])["bodies"][0].clone();
+    let wall = |axis: usize, n: f64| -> String {
+        let f = base["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["z"][axis].as_f64().unwrap() * sign == n
+            })
+            .unwrap();
+        format!("box/base/{}", f["name"].as_str().unwrap())
+    };
+    let (east, west, north, south) = (wall(0, 1.0), wall(0, -1.0), wall(1, 1.0), wall(1, -1.0));
+    let north_angle = format!("{north}=5deg");
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "box",
+        "draft",
+        "--id",
+        "d",
+        "--neutral",
+        "xy",
+        "--angle",
+        "2deg",
+        "--face",
+        &east,
+        "--face",
+        &west,
+        "--face",
+        &south,
+        "--face-angle",
+        &north_angle,
+        "--flip",
+        &south,
+    ]);
+    let f = &r["feature"];
+    assert_eq!(f["target"], "base", "{r}");
+    assert_eq!(f["faces"], json!([east, west, south]), "{r}");
+    assert_eq!(f["groups"][0]["faces"], json!([north]), "{r}");
+    assert_eq!(f["flip"], json!([south]), "{r}");
+    // The rebuild reports each face's angle.
+    let built = p.ok(&["rebuild", "box"]);
+    let d = built["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == "d")
+        .unwrap()["draft"]
+        .clone();
+    assert_eq!(d["angles"].as_array().unwrap().len(), 4, "{d}");
+    // A parting line replaces the neutral plane.
+    let rim = format!("box/base/{}", base["edges"][0]["name"].as_str().unwrap());
+    p.ok(&[
+        "feature",
+        "edit",
+        "box",
+        "d",
+        "--parting",
+        &rim,
+        "--pull",
+        "z",
+        "--no-flip",
+    ]);
+    let shown = p.ok(&["feature", "show", "box", "d"]);
+    assert!(
+        shown.get("neutral").is_none() || shown["neutral"].is_null(),
+        "{shown}"
+    );
+    assert_eq!(shown["pull"], "z", "{shown}");
+    assert!(shown.get("flip").is_none(), "{shown}");
+    // An angle out of range is the agent's to fix.
+    p.fails(
+        &["feature", "edit", "box", "d", "--angle", "90deg"],
+        "invalid_param",
+        1,
+    );
+    // The daemon logged the draft: undo takes its file away, redo puts it
+    // back.
+    let file = p.daemon.join("parts/box/features/d.json");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(!file.exists());
+    let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(file.exists());
+}
+
+#[test]
 fn face_tweaks_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
@@ -4536,7 +4647,8 @@ fn surfaces_from_the_cli() {
     assert_eq!(v["feature"]["surface"], true, "{v}");
     let r = p.ok(&["rebuild", "skin"]);
     assert_eq!(r["parts"][0]["solids"][0]["kind"], "sheet", "{r}");
-    // A cut of the wall is refused in the agent's terms.
+    // A join to the wall is refused in the agent's terms (a cut trims
+    // it since 18.C).
     let e = p.fails(
         &[
             "feature",
@@ -4550,7 +4662,7 @@ fn surfaces_from_the_cli() {
             "--param",
             "z=1",
             "--operation",
-            "cut",
+            "join",
             "--target",
             "wall",
         ],
@@ -4808,6 +4920,117 @@ fn sew_and_thicken_from_the_cli() {
     assert_eq!(code, 0, "{v}");
     let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
     assert_eq!(code, 0, "{v}");
+}
+
+#[test]
+fn trims_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    // A wall across where box `h` stands, and a box `k` over its top half.
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--plane", "xy",
+    ]);
+    let line = serde_json::json!([
+        {"op": "add", "id": "a", "type": "point", "at": [5, -5]},
+        {"op": "add", "id": "b", "type": "point", "at": [5, 15]},
+        {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}
+    ])
+    .to_string();
+    p.ok(&["sketch", "edit", "p", "s", &line]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "extrude",
+        "--sketch",
+        "s",
+        "--surface",
+        "--length",
+        "20mm",
+        "--id",
+        "w",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "h", "--param", "x=10", "--param", "y=10", "--param",
+        "z=10",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "box",
+        "--id",
+        "k",
+        "--param",
+        "x=20",
+        "--param",
+        "y=30",
+        "--param",
+        "z=20",
+        "--origin",
+        "-5,-10,10",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "split", "--target", "h", "--tool", "w", "--id", "sp",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "split", "--target", "w", "--tool", "k", "--keep", "behind", "--id",
+        "t",
+    ]);
+    let line_of = |r: &Value, id: &str| -> Value {
+        r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id}: {r}"))
+    };
+    let r = p.ok(&["rebuild", "p"]);
+    let sp = line_of(&r, "sp");
+    let sides = sp["split"]["sides"].as_array().unwrap();
+    assert_eq!(sides.len(), 2, "{sp}");
+    assert!(sides.iter().all(|x| x["kind"] == "solid"), "{sp}");
+    assert_eq!(line_of(&r, "t")["split"]["trim"], true, "{r}");
+    p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "x.step",
+        "--time-stamp",
+        "2026-11-09T00:00:00",
+    ]);
+    let step = fs::read_to_string(p.direct.join("x.step")).unwrap();
+    assert!(step.contains("SHELL_BASED_SURFACE_MODEL"));
+    p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "x.3mf",
+        "--time-stamp",
+        "2026-11-09T00:00:00",
+    ]);
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(
+        fs::read(p.daemon.join("x.3mf")).unwrap(),
+    ))
+    .unwrap();
+    let mut model = String::new();
+    std::io::Read::read_to_string(&mut z.by_name("3D/3dmodel.model").unwrap(), &mut model).unwrap();
+    assert!(model.contains("type=\"surface\""), "{model}");
+    // Through the daemon: undo takes the trim back.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["rebuild", "p"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(
+        v["result"]["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["id"] != "t"),
+        "{v}"
+    );
 }
 
 #[test]
@@ -5213,6 +5436,170 @@ fn sections_from_the_cli() {
 }
 
 #[test]
+fn drawings_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "base", "--param", "x=60", "--param", "y=30",
+        "--param", "z=6",
+    ]);
+    let rev = p.ok(&["drawing", "list", "plate"])["revisions"]["plate"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // A drawing of standard views, laid out: their places written back.
+    let made = p.ok(&[
+        "drawing", "create", "plate", "main", "--name", "Plate", "--views", "standard", "--expect",
+        &rev,
+    ]);
+    assert_eq!(
+        made["sheets"][0]["views"].as_array().unwrap().len(),
+        4,
+        "{made}"
+    );
+    assert_eq!(made["findings"], json!([]), "{made}");
+    let text = fs::read_to_string(p.direct.join("parts/plate/drawings/main.json")).unwrap();
+    let file: Value = serde_json::from_str(&text).unwrap();
+    assert!(file["views"]["v1"]["at"].is_array(), "{file}");
+    assert!(file["views"]["v2"]["offset"].is_string(), "{file}");
+    // Its revision moved; the old one no longer writes.
+    p.fails(
+        &["drawing", "delete", "plate", "main", "--expect", &rev],
+        "conflict",
+        1,
+    );
+    // An edit: the top view dashed, a left view added.
+    let edited = p.ok(&[
+        "drawing",
+        "edit",
+        "plate",
+        "main",
+        "--ops",
+        r#"[{"op": "set", "id": "v2", "fields": {"hidden": "dashed"}}]"#,
+    ]);
+    assert_eq!(edited["replaced"], true);
+    p.ok(&[
+        "drawing", "view", "add", "plate", "main", "--from", "v1", "--side", "left",
+    ]);
+    p.ok(&["drawing", "move", "plate", "main", "v1", "--at", "150,180"]);
+    let got = p.ok(&["drawing", "get", "plate", "main"]);
+    let views = got["sheets"][0]["views"].as_array().unwrap();
+    assert_eq!(views.len(), 5);
+    assert_eq!(views[0]["at_mm"], json!([150.0, 180.0]), "{got}");
+    // A section of the top view at x = 20 mm: its letter given, placed
+    // on the top view's row and its offset written back.
+    p.ok(&[
+        "drawing",
+        "view",
+        "add",
+        "plate",
+        "main",
+        "--from",
+        "v2",
+        "--cut",
+        "yz",
+        "--cut-offset",
+        "20",
+    ]);
+    let text = fs::read_to_string(p.direct.join("parts/plate/drawings/main.json")).unwrap();
+    let file: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(file["views"]["v6"]["type"], "section", "{file}");
+    assert_eq!(file["views"]["v6"]["label"], "A", "{file}");
+    assert!(file["views"]["v6"]["offset"].is_string(), "{file}");
+    // A detail of the front view about its corner.
+    p.ok(&[
+        "drawing", "view", "add", "plate", "main", "--from", "v1", "--centre", "0,0,0", "--radius",
+        "5",
+    ]);
+    let got = p.ok(&["drawing", "get", "plate", "main"]);
+    assert_eq!(got["findings"], json!([]), "{got}");
+    assert_eq!(got["sheets"][0]["views"].as_array().unwrap().len(), 7);
+    // What the agent reads in words.
+    let d = p.ok(&["drawing", "describe", "plate", "main"]);
+    let words = d["sheets"][0]["views"][0]["text"].as_str().unwrap();
+    assert!(words.starts_with("v1 (base) of plate"), "{words}");
+    // A sheet as PNG and SVG, the whole drawing as PDF.
+    p.ok(&["drawing", "render", "plate", "main", "--out", "s1.png"]);
+    assert!(
+        fs::read(p.direct.join("s1.png"))
+            .unwrap()
+            .starts_with(b"\x89PNG")
+    );
+    p.ok(&[
+        "drawing", "render", "plate", "main", "--out", "s1.svg", "--format", "svg",
+    ]);
+    assert!(
+        fs::read_to_string(p.direct.join("s1.svg"))
+            .unwrap()
+            .starts_with("<svg")
+    );
+    // A sheet as DXF, in inches.
+    let dxf = p.ok(&[
+        "drawing", "export", "plate", "main", "--out", "s1.dxf", "--unit", "in",
+    ]);
+    assert_eq!(
+        (dxf["format"].as_str(), dxf["unit"].as_str()),
+        (Some("dxf"), Some("in")),
+        "{dxf}"
+    );
+    let bytes = fs::read_to_string(p.direct.join("s1.dxf")).unwrap();
+    assert!(
+        bytes.contains("AC1015") && bytes.contains("HATCH\n"),
+        "{bytes}"
+    );
+    p.fails(
+        &[
+            "drawing", "export", "plate", "main", "--out", "x.pdf", "--unit", "in",
+        ],
+        "invalid_param",
+        1,
+    );
+    let pdf = p.ok(&["drawing", "export", "plate", "main", "--out", "main.pdf"]);
+    assert_eq!(pdf["sheets"], 1, "{pdf}");
+    assert!(
+        fs::read(p.direct.join("main.pdf"))
+            .unwrap()
+            .starts_with(b"%PDF")
+    );
+    p.fails(
+        &[
+            "drawing",
+            "export",
+            "plate",
+            "main",
+            "--out",
+            "parts/plate/part.json",
+            "--format",
+            "pdf",
+        ],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &["drawing", "get", "plate", "nothing"],
+        "drawing_not_found",
+        1,
+    );
+    // Laid out again from nothing, then renamed and deleted.
+    let dry = p.ok(&["drawing", "layout", "plate", "main", "--dry-run"]);
+    assert_eq!(dry["dry_run"], true);
+    p.ok(&["drawing", "rename", "plate", "main", "front"]);
+    assert!(p.direct.join("parts/plate/drawings/front.json").is_file());
+    let checked = p.ok(&["check", "plate"]);
+    assert!(
+        checked["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["source"] != "drawing"),
+        "{checked}"
+    );
+    p.ok(&["drawing", "delete", "plate", "front"]);
+    assert_eq!(p.ok(&["drawing", "list"])["drawings"], json!([]));
+}
+
+#[test]
 fn explodes_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
@@ -5465,10 +5852,10 @@ fn interference_from_the_cli() {
     p.fails(&["clearance", "bolt"], "wrong_part_kind", 1);
 }
 
-#[test]
-fn mates_from_the_cli() {
-    let p = Pair::new();
-    p.ok(&["init", "--unit", "mm"]);
+/// A plate `base` (100 × 50 × 5 mm, fixed) and a bolt `pin` (radius 3,
+/// height 20) placed 50 mm along x in assembly `frame`; the plate's top
+/// and the bolt's foot as entity references.
+fn plate_and_bolt(p: &Pair) -> (String, String) {
     let params: [(&str, &str, &str, &[&str]); 2] = [
         ("plate", "box", "slab", &["x=100", "y=50", "z=5"]),
         ("bolt", "cylinder", "shank", &["radius=3", "height=20"]),
@@ -5502,8 +5889,48 @@ fn mates_from_the_cli() {
             .map(|f| f["name"].as_str().unwrap().to_owned())
             .unwrap()
     };
-    let top = format!("frame/base/slab/{}", face("plate", "slab", 1.0));
-    let foot = format!("frame/pin/shank/{}", face("bolt", "shank", -1.0));
+    (
+        format!("frame/base/slab/{}", face("plate", "slab", 1.0)),
+        format!("frame/pin/shank/{}", face("bolt", "shank", -1.0)),
+    )
+}
+
+#[test]
+fn controlled_edits_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let (top, foot) = plate_and_bolt(&p);
+    // A mate previewed, nothing written.
+    let mate = format!(
+        r#"{{"form": "revolute", "a": "{top}", "b": "{foot}", "b_offset": {{"flip": true}}}}"#
+    );
+    let v = p.ok(&["assembly", "solve", "frame", "--mate", &mate]);
+    assert_eq!(v["converged"], true, "{v}");
+    assert_eq!(v["solve"]["instances"]["pin"]["dof"], 1, "{v}");
+    let listed = p.ok(&["feature", "list", "frame"]);
+    assert!(!listed.to_string().contains("\"mate\""), "{listed}");
+    // A turn about a point, written.
+    let v = p.ok(&[
+        "assembly", "move", "frame", "pin", "--axis", "0,0,1", "--angle", "90deg", "--about",
+        "60mm,0,0",
+    ]);
+    let o = &v["pose"]["origin_m"];
+    assert!((o[0].as_f64().unwrap() - 0.06).abs() < 1e-12, "{v}");
+    assert!((o[1].as_f64().unwrap() + 0.01).abs() < 1e-12, "{v}");
+    // About alone is refused.
+    let e = p.fails(
+        &["assembly", "move", "frame", "pin", "--about", "0,0,0"],
+        "invalid_param",
+        1,
+    );
+    assert_eq!(e["details"]["param"], "about", "{e}");
+}
+
+#[test]
+fn mates_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let (top, foot) = plate_and_bolt(&p);
     let added = p.ok(&[
         "feature",
         "add",

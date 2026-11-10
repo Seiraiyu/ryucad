@@ -77,7 +77,7 @@ pub fn laid(session: &Session, by: &By) -> (Files, Vec<Annotation>) {
 /// subset of `Request::mutates`. Releases, PDM settings, dependencies,
 /// imports, doctor's repairs, merge resolutions, undo and redo need
 /// Direct edit.
-pub const PROPOSABLE: [&str; 18] = [
+pub const PROPOSABLE: [&str; 23] = [
     "feature.add",
     "feature.edit",
     "feature.delete",
@@ -96,6 +96,11 @@ pub const PROPOSABLE: [&str; 18] = [
     "view.save",
     "explode.save",
     "explode.delete",
+    "drawing.create",
+    "drawing.edit",
+    "drawing.delete",
+    "drawing.rename",
+    "drawing.layout",
 ];
 
 /// What `annotation.propose` is given.
@@ -424,6 +429,54 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_solve_reads_a_draft() {
+        // dave proposes the pin 5 mm up; the working files keep it where it
+        // is, and assembly.solve at his draft sees the proposal.
+        let (_dir, mut s, _, _) = crate::mate::current_tests::placed();
+        let dave = By {
+            participant: "dave (window 1)".into(),
+            kind: AuthorKind::Human,
+        };
+        let rel = "parts/frame/features/pin.json";
+        let now = s.snapshot()[rel].clone();
+        let mut v: Value = serde_json::from_slice(&now).unwrap();
+        let z = v["pose"]["origin_m"][2].as_f64().unwrap();
+        v["pose"]["origin_m"][2] = json!(z + 0.005);
+        put(
+            &mut s,
+            &changing(
+                "aaaaaaaaaa",
+                &dave,
+                "2026-11-05T14:00:00Z",
+                rel,
+                Some(&now),
+                v,
+                vec![],
+            ),
+        );
+        let at = |s: &mut Session, rev: Option<&str>| {
+            let mut p = json!({"part": "frame"});
+            if let Some(r) = rev {
+                p["rev"] = json!(r);
+            }
+            let v = call(s, "assembly.solve", p).unwrap();
+            (
+                v["instances"]["pin"]["pose"]["origin_m"][2]
+                    .as_f64()
+                    .unwrap(),
+                v,
+            )
+        };
+        let (working, _) = at(&mut s, None);
+        let (drafted, v) = at(&mut s, Some("draft:dave (window 1)"));
+        assert!(
+            (drafted - working - 0.005).abs() < 1e-9,
+            "{working} → {drafted}"
+        );
+        assert_eq!(v["rev"]["draft"], "dave (window 1)", "{v}");
+    }
+
+    #[test]
     fn a_draft_lays_the_proposers_open_changes_in_order() {
         let (_dir, mut s, _) = plate();
         let dave = By {
@@ -559,6 +612,18 @@ pub(crate) mod tests {
             "materials.set",
             json!({"name": "spare", "density": "1000 kg/m^3"}),
         );
+        c(
+            &mut s,
+            "drawing.create",
+            json!({"part": "plate", "drawing": "main", "views": "standard"}),
+        );
+        // Moved by hand: laying it out again moves it back.
+        c(
+            &mut s,
+            "drawing.edit",
+            json!({"part": "plate", "drawing": "main",
+                   "ops": [{"op": "move", "id": "v1", "at": ["200 mm", "200 mm"]}]}),
+        );
         (dir, s)
     }
 
@@ -624,6 +689,27 @@ pub(crate) mod tests {
                                     "steps": [{"instances": ["p1"], "translate": [0, 0, 10]}]}),
             ),
             ("explode.delete", json!({"part": "rig", "explode": "apart"})),
+            (
+                "drawing.create",
+                json!({"part": "plate", "drawing": "second", "size": "iso_a4"}),
+            ),
+            (
+                "drawing.edit",
+                json!({"part": "plate", "drawing": "main",
+                       "ops": [{"op": "set", "id": "v2", "fields": {"hidden": "dashed"}}]}),
+            ),
+            (
+                "drawing.delete",
+                json!({"part": "plate", "drawing": "main"}),
+            ),
+            (
+                "drawing.rename",
+                json!({"part": "plate", "drawing": "main", "to": "front"}),
+            ),
+            (
+                "drawing.layout",
+                json!({"part": "plate", "drawing": "main"}),
+            ),
         ]
     }
 

@@ -19,7 +19,7 @@ use super::sketch::Sketch;
 use super::solid::{Boolean, Combine};
 use super::surface::{Extract, Fill, Sew, Thicken};
 use super::sweep::{Extrude, Loft, Revolve, Sweep};
-use super::tweak::{MoveFace, ReplaceFace};
+use super::tweak::{Draft, MoveFace, ReplaceFace};
 use crate::error::{Code, Error, Result};
 use crate::expr::{self, Env, Expr};
 use crate::units::{Quantity, Unit};
@@ -61,10 +61,11 @@ pub fn parse_item_key(s: &str) -> Result<Id> {
 }
 
 /// The newest manifest format: 2 adds the project's ID, 3 its
-/// dependencies and where it was forked from. A manifest stays at the
-/// lowest that holds it, so older builds still read projects that don't
-/// use PDM, or other projects.
-pub const MANIFEST_FORMAT: u64 = 3;
+/// dependencies and where it was forked from, 4 the drafting standard its
+/// drawings follow (design 417). A manifest stays at the lowest that holds
+/// it, so older builds still read projects that don't use PDM, other
+/// projects or ISO drawings.
+pub const MANIFEST_FORMAT: u64 = 4;
 
 /// The newest feature format: 2 adds expressions, sketches and sweeps, 3
 /// operations on solids, 4 an assembly's instances, mates and instance
@@ -75,7 +76,8 @@ pub const MANIFEST_FORMAT: u64 = 3;
 /// flanges (ryucad 16), 12 surface sweeps and planar faces (ryucad 18),
 /// 13 reference imports (ryucad 21), 14 unfolds and refolds (ryucad
 /// 16.B), 15 fills, extracts, sews and thickens (ryucad 18), 16 face
-/// tweaks (ryucad 17). A feature is written at the lowest format that
+/// tweaks (ryucad 17), 18 drafts (ryucad 17.B), 19 splits by a body or
+/// faces (ryucad 18.C). A feature is written at the lowest format that
 /// holds it, so one with only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
     // The largest of every stage's (a later stage merging adds its own).
@@ -85,6 +87,8 @@ pub const FEATURE_FORMAT: u64 = {
         super::sheet_metal::UNFOLD_FORMAT,
         super::surface::FORMAT,
         super::tweak::FORMAT,
+        super::tweak::DRAFT_FORMAT,
+        super::body::TOOL_FORMAT,
     ];
     let (mut max, mut i) = (0, 0);
     while i < all.len() {
@@ -111,6 +115,9 @@ pub struct Manifest {
     pub dependencies: super::deps::Dependencies,
     /// The ID and commit `ryucad pdm new-id` gave it a new ID at.
     pub forked_from: Option<super::deps::ForkedFrom>,
+    /// The standard its drawings follow unless one says another: ASME
+    /// when none is written (question 337).
+    pub drawing_standard: Option<super::drawing::Standard>,
 }
 
 /// A part's ordered feature list, `parts/<part>/part.json`, whether it is
@@ -225,6 +232,9 @@ pub enum Feature {
     MoveFace(Box<MoveFace>),
     /// Faces of a solid given another face's surface or a plane.
     ReplaceFace(Box<ReplaceFace>),
+    /// Faces of a solid drafted about a neutral plane or a parting line
+    /// (ryucad 17.B).
+    Draft(Box<Draft>),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -333,7 +343,13 @@ impl Manifest {
             project: None,
             dependencies: super::deps::Dependencies::new(),
             forked_from: None,
+            drawing_standard: None,
         }
+    }
+
+    /// The standard the project's drawings follow by default.
+    pub fn standard(&self) -> super::drawing::Standard {
+        self.drawing_standard.unwrap_or_default()
     }
 
     pub fn to_json(&self) -> Value {
@@ -345,10 +361,14 @@ impl Manifest {
         }
         if !self.dependencies.is_empty() {
             v["dependencies"] = super::deps::to_json(&self.dependencies);
-            v["format"] = json!(MANIFEST_FORMAT);
+            v["format"] = json!(3);
         }
         if let Some(f) = &self.forked_from {
             v["forked_from"] = f.to_json();
+            v["format"] = json!(3);
+        }
+        if let Some(s) = self.drawing_standard {
+            v["drawing_standard"] = json!(s.as_str());
             v["format"] = json!(MANIFEST_FORMAT);
         }
         v
@@ -373,6 +393,14 @@ impl Manifest {
             None => None,
             Some(f) => Some(super::deps::ForkedFrom::from_json(&f)?),
         };
+        let drawing_standard = match o.take_opt("drawing_standard") {
+            None => None,
+            Some(d) => Some(
+                d.as_str()
+                    .and_then(super::drawing::Standard::parse)
+                    .ok_or_else(|| invalid("/drawing_standard", "expected one of asme, iso"))?,
+            ),
+        };
         let unit = o.take("default_unit")?;
         let default_unit = unit.as_str().and_then(Unit::parse).ok_or_else(|| {
             invalid(
@@ -386,6 +414,7 @@ impl Manifest {
             project,
             dependencies,
             forked_from,
+            drawing_standard,
         })
     }
 }
@@ -673,11 +702,13 @@ pub fn part_format(v: &Value) -> u64 {
     }
 }
 
-/// The lowest manifest format that holds `v`: 3 with dependencies or a
-/// fork's origin, 2 with a project ID, else 1.
+/// The lowest manifest format that holds `v`: 4 with a drawing standard,
+/// 3 with dependencies or a fork's origin, 2 with a project ID, else 1.
 pub fn manifest_format(v: &Value) -> u64 {
-    if v.get("dependencies").is_some() || v.get("forked_from").is_some() {
+    if v.get("drawing_standard").is_some() {
         MANIFEST_FORMAT
+    } else if v.get("dependencies").is_some() || v.get("forked_from").is_some() {
+        3
     } else if v.get("project").is_some() {
         2
     } else {
@@ -692,6 +723,12 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if v.get("type").and_then(Value::as_str) == Some("draft") {
+        return super::tweak::DRAFT_FORMAT;
+    }
+    if v.get("type").and_then(Value::as_str) == Some("split") && v.get("tool").is_some() {
+        return super::body::TOOL_FORMAT;
+    }
     if matches!(
         v.get("type").and_then(Value::as_str),
         Some("fill" | "extract" | "sew" | "thicken")
@@ -904,7 +941,7 @@ pub fn feature_acts(v: &Value) -> Acts {
         Some("base_flange") => out.founds = true,
         Some("flange" | "unfold" | "refold") => out.acts_on = ids(v.get("target")),
         Some("shell" | "offset") => out.acts_on = ids(v.get("target")),
-        Some("move_face" | "replace_face") => out.acts_on = ids(v.get("target")),
+        Some("move_face" | "replace_face" | "draft") => out.acts_on = ids(v.get("target")),
         _ => {}
     }
     out
@@ -940,7 +977,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold, fill, extract, sew, thicken, move_face, replace_face"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold, fill, extract, sew, thicken, move_face, replace_face, draft"),
     )
     .with("type", s)
 }
@@ -981,6 +1018,7 @@ impl Feature {
             Feature::Thicken(_) => "thicken",
             Feature::MoveFace(_) => "move_face",
             Feature::ReplaceFace(_) => "replace_face",
+            Feature::Draft(_) => "draft",
         }
     }
 
@@ -1008,11 +1046,17 @@ impl Feature {
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
+        if let Feature::Split(s) = self {
+            return s.format();
+        }
         if matches!(
             self,
             Feature::Fill(_) | Feature::Extract(_) | Feature::Sew(_) | Feature::Thicken(_)
         ) {
             return super::surface::FORMAT;
+        }
+        if matches!(self, Feature::Draft(_)) {
+            return super::tweak::DRAFT_FORMAT;
         }
         if matches!(self, Feature::MoveFace(_) | Feature::ReplaceFace(_)) {
             return super::tweak::FORMAT;
@@ -1026,7 +1070,7 @@ impl Feature {
         if matches!(self, Feature::BaseFlange(_) | Feature::Flange(_)) {
             return super::sheet_metal::FORMAT;
         }
-        if matches!(self, Feature::Mirror(_) | Feature::Split(_)) {
+        if matches!(self, Feature::Mirror(_)) {
             return super::body::MIRROR_FORMAT;
         }
         if matches!(self, Feature::Sweep(_) | Feature::Loft(_)) {
@@ -1069,6 +1113,7 @@ impl Feature {
                 super::surface::FORMAT
             }
             Feature::MoveFace(_) | Feature::ReplaceFace(_) => super::tweak::FORMAT,
+            Feature::Draft(_) => super::tweak::DRAFT_FORMAT,
         }
     }
 
@@ -1115,6 +1160,7 @@ impl Feature {
             Feature::Thicken(x) => x.fields(),
             Feature::MoveFace(m) => m.fields(),
             Feature::ReplaceFace(r) => r.fields(),
+            Feature::Draft(d) => d.fields(),
         }
     }
 
@@ -1146,6 +1192,7 @@ impl Feature {
                 Feature::MoveFace(Box::new(MoveFace::from_fields(&mut o, default, env)?))
             }
             "replace_face" => Feature::ReplaceFace(Box::new(ReplaceFace::from_fields(&mut o)?)),
+            "draft" => Feature::Draft(Box::new(Draft::from_fields(&mut o, env)?)),
             "mirror" => Feature::Mirror(Box::new(Mirror::from_fields(&mut o)?)),
             "split" => Feature::Split(Box::new(Split::from_fields(&mut o)?)),
             "base_flange" => {
@@ -1223,7 +1270,8 @@ impl Feature {
             | Feature::Unfold(_)
             | Feature::Refold(_)
             | Feature::MoveFace(_)
-            | Feature::ReplaceFace(_) => None,
+            | Feature::ReplaceFace(_)
+            | Feature::Draft(_) => None,
         }
     }
 
@@ -1258,6 +1306,7 @@ impl Feature {
             Feature::Thicken(t) => t.combine.targets.iter().chain(t.sheet()).collect(),
             Feature::MoveFace(m) => vec![&m.target],
             Feature::ReplaceFace(r) => vec![&r.target],
+            Feature::Draft(d) => vec![&d.target],
             f => f
                 .combine()
                 .map_or(Vec::new(), |c| c.targets.iter().collect()),
@@ -1286,11 +1335,13 @@ impl Feature {
         }
     }
 
-    /// The solid a mirror copies, read as the mirror sees it; `None` for
-    /// anything else.
+    /// The body it reads whole without changing it, as it sees it: the
+    /// solid or sheet a mirror copies, the body a split cuts with; `None`
+    /// for anything else.
     pub fn source(&self) -> Option<&Id> {
         match self {
             Feature::Mirror(m) => Some(&m.solid),
+            Feature::Split(s) => s.tool_body(),
             _ => None,
         }
     }
@@ -1393,6 +1444,16 @@ impl Feature {
             Feature::Fillet(f) => f.references(),
             Feature::Chamfer(c) => c.references(),
             Feature::Shell(s) => s.references(),
+            // A plane that is a face, or the faces it cuts with.
+            Feature::Split(s) => s
+                .references()
+                .into_iter()
+                .chain(
+                    self.geometry()
+                        .into_iter()
+                        .filter_map(|(k, g)| Some((k, g.reference()?))),
+                )
+                .collect(),
             Feature::Offset(o) => o.references(),
             Feature::Flange(f) => f.references(),
             Feature::Unfold(u) => u.references(),
@@ -1411,6 +1472,7 @@ impl Feature {
                 .collect(),
             Feature::MoveFace(m) => m.references(),
             Feature::ReplaceFace(r) => r.references(),
+            Feature::Draft(d) => d.references(),
             _ => self
                 .geometry()
                 .into_iter()
@@ -1442,11 +1504,16 @@ impl Feature {
                 _ => Vec::new(),
             },
             Feature::Mirror(m) => vec![("plane".to_owned(), &m.plane)],
-            Feature::Split(s) => vec![("plane".to_owned(), &s.plane)],
+            Feature::Split(s) => s
+                .plane()
+                .map(|p| ("plane".to_owned(), p))
+                .into_iter()
+                .collect(),
             Feature::Planar(p) => p.geometry(),
             Feature::Fill(x) => x.geometry(),
             Feature::MoveFace(m) => m.geometry(),
             Feature::ReplaceFace(r) => r.geometry(),
+            Feature::Draft(d) => d.geometry(),
             _ => Vec::new(),
         }
     }
@@ -1893,6 +1960,38 @@ mod tests {
         );
         const { assert!(FEATURE_FORMAT >= super::super::sheet_metal::UNFOLD_FORMAT) };
         const { assert!(FEATURE_FORMAT >= super::super::tweak::FORMAT) };
+    }
+
+    #[test]
+    fn a_split_by_a_tool_is_format_19_and_reads_its_tool() {
+        use super::super::body::{MIRROR_FORMAT, TOOL_FORMAT};
+        let id = |s: &str| Id::parse(s, "feature").unwrap();
+        let header = |mut v: Value| {
+            v["kind"] = json!(FEATURE_KIND);
+            v["format"] = json!(TOOL_FORMAT);
+            v["type"] = json!("split");
+            v
+        };
+        let read = |v: &Value| Feature::from_json(v, Unit::Mm, &Env::empty()).unwrap();
+        let plane = read(&header(json!({"target": "h", "plane": "xy"})));
+        assert_eq!(plane.format(), MIRROR_FORMAT);
+        assert_eq!(plane.geometry().len(), 1);
+        assert!(plane.source().is_none());
+        let v = header(json!({"target": "h", "tool": {"body": "parting"}}));
+        let body = read(&v);
+        assert_eq!(
+            (body.format(), feature_format(&v)),
+            (TOOL_FORMAT, TOOL_FORMAT)
+        );
+        assert_eq!(body.to_json(), v);
+        assert!(body.geometry().is_empty());
+        assert_eq!(body.source(), Some(&id("parting")));
+        assert_eq!(body.targets(), vec![&id("h")]);
+        let faces = read(&header(json!({"target": "h", "tool": {"faces": [
+            {"feature": "base", "name": "0123456789abcdef0123456789abcdef"}]}})));
+        assert_eq!(faces.references()[0].0, "tool.faces.0");
+        assert_eq!(faces.geometry_reads(), vec![&id("base")]);
+        const { assert!(FEATURE_FORMAT >= TOOL_FORMAT) };
     }
 
     #[test]
@@ -2426,11 +2525,11 @@ mod tests {
         // other field is read, and format 0 never existed.
         let mut v = Manifest::new(Unit::Mm).to_json();
         assert!(Manifest::from_json(&v).is_ok());
-        v["format"] = json!(4);
+        v["format"] = json!(MANIFEST_FORMAT + 1);
         v["default_unit"] = json!("parsec");
         let e = Manifest::from_json(&v).unwrap_err();
         assert_eq!(e.code, Code::FormatTooNew);
-        assert_eq!(e.details["supported"], 3);
+        assert_eq!(e.details["supported"], MANIFEST_FORMAT);
         v["format"] = json!(0);
         assert_eq!(
             Manifest::from_json(&v).unwrap_err().code,
@@ -2608,5 +2707,39 @@ mod tests {
         assert_eq!(reads, ["lid", "base"]);
         // One past the newest is too new.
         const { assert!(FEATURE_FORMAT >= super::super::tweak::FORMAT) };
+    }
+
+    #[test]
+    fn a_draft_is_a_feature_at_its_own_format() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let v = json!({"format": super::super::tweak::DRAFT_FORMAT, "kind": "ryucad.feature",
+                       "type": "draft", "target": "base", "angle": "2 deg", "neutral": "xy",
+                       "faces": [{"feature": "base", "name": n}]});
+        let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!(f.type_name(), "draft");
+        assert_eq!(f.format(), super::super::tweak::DRAFT_FORMAT);
+        assert_eq!(feature_format(&v), super::super::tweak::DRAFT_FORMAT);
+        assert_eq!(f.to_json(), v);
+        assert_eq!(f.targets(), [&Id::parse("base", "feature").unwrap()]);
+        let roles: Vec<String> = f.references().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(roles, ["faces.0"]);
+        let geo: Vec<String> = f.geometry().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(geo, ["neutral"]);
+        assert!(f.combine().is_none());
+        // What a file that doesn't load still says it acts on.
+        assert_eq!(
+            feature_acts(&v).acts_on,
+            vec![Id::parse("base", "feature").unwrap()]
+        );
+        // The format reads the constant; a newer one is refused.
+        const { assert!(FEATURE_FORMAT >= super::super::tweak::DRAFT_FORMAT) };
+        let mut newer = v.clone();
+        newer["format"] = json!(FEATURE_FORMAT + 1);
+        assert_eq!(
+            Feature::from_json(&newer, Unit::Mm, &Env::empty())
+                .unwrap_err()
+                .code,
+            Code::FormatTooNew
+        );
     }
 }

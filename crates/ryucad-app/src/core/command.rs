@@ -168,6 +168,16 @@ const ANNOTATABLE: [Context; 13] = [
     Context::Entity(Pick::Datum),
 ];
 
+/// What has an instance to move or mate: an instance's row and an
+/// occurrence's entities (offered on a part's entities too, where
+/// [`enabled`] says why not).
+const MOVABLE: [Context; 4] = [
+    Context::Row(Row::Instance),
+    Context::Entity(Pick::Face),
+    Context::Entity(Pick::Edge),
+    Context::Entity(Pick::Vertex),
+];
+
 /// Every row, every entity and a ghost: what has a reference to copy.
 const REFERENCED: [Context; 14] = [
     Context::Row(Row::Part),
@@ -544,6 +554,16 @@ pub const COMMANDS: &[Command] = &[
         .icon("chat-circle-text")
         .context(&[Context::Viewport])
         .hidden(),
+    // Controlled edits (design 374, phase 5): an instance moved or turned
+    // by its handles, and a mate from a dialog that previews its solve.
+    cmd("edit.move", "Move", Edit)
+        .icon("arrows-out-cardinal")
+        .toolbar()
+        .toggle()
+        .context(&MOVABLE),
+    cmd("edit.mate", "Mate…", Edit)
+        .icon("link-simple")
+        .context(&MOVABLE),
     cmd("tools.interference", "Check interference", Tools)
         .icon("intersect-square")
         .toolbar(),
@@ -645,6 +665,13 @@ pub struct State {
     /// chosen feature's, or the one part shown).
     pub flat: bool,
     pub flattenable: bool,
+    /// The selection's instance and whether it can move: `None` when
+    /// nothing selected is an instance's in the shown assembly.
+    pub movable: Option<Result<(String, String), String>>,
+    /// The Move tool is on.
+    pub moving: bool,
+    /// The Mate dialog is open.
+    pub mating: bool,
 }
 
 /// Whether the window's mode allows `id`, or which mode would: the part
@@ -656,6 +683,10 @@ pub fn mode_allows(id: &str, s: &State) -> Result<(), &'static str> {
         "annotation.add" | "annotation.here" => need(
             s.mode != crate::core::modes::Mode::View,
             "Annotate does this: press Annotate first.",
+        ),
+        "edit.move" | "edit.mate" => need(
+            s.mode != crate::core::modes::Mode::View,
+            "Annotate or Direct edit does this: View changes nothing.",
         ),
         "edit.undo"
         | "edit.redo"
@@ -689,7 +720,7 @@ pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
         // Esc also closes the view selector or Select other's list and
         // leaves the Measure tool.
         "edit.clear_selection" => need(
-            s.selected > 0 || s.chosen || s.selector || s.measuring,
+            s.selected > 0 || s.chosen || s.selector || s.measuring || s.moving || s.mating,
             "Nothing is selected or chosen.",
         ),
         "view.normal_to" => need(s.planar_face, "Select a planar face first."),
@@ -710,6 +741,13 @@ pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
             need(s.assembly_shown, "Show an assembly first (View > Show).")
         }
         "deps.place" => need(s.assembly_shown, "Show an assembly first (View > Show)."),
+        "edit.move" if s.moving => Ok(()),
+        "edit.move" => match &s.movable {
+            Some(Ok(_)) => Ok(()),
+            Some(Err(_)) => Err("This instance can't move: the status line says why."),
+            None => Err("Select one instance of the shown assembly."),
+        },
+        "edit.mate" => need(s.assembly_shown, "Show an assembly first (View > Show)."),
         "view.scale_up" => need(
             s.scale < ryucad::config::MAX_SCALE,
             "The window is as large as it goes.",
@@ -764,6 +802,7 @@ pub fn checked(id: &str, s: &State) -> Option<bool> {
         "mode.edit" => s.mode == crate::core::modes::Mode::Edit,
         "view.annotations" => s.annotations,
         "view.flat" => s.flat,
+        "edit.move" => s.moving,
         _ => return None,
     })
 }
@@ -787,6 +826,46 @@ pub fn toolbar() -> impl Iterator<Item = &'static Command> {
 mod tests {
     use super::*;
     use crate::core::keys::Chord;
+
+    #[test]
+    fn move_needs_one_movable_instance_and_a_mode_that_edits() {
+        use crate::core::modes::Mode;
+        let mut s = State {
+            mode: Mode::Edit,
+            ..State::default()
+        };
+        assert!(enabled("edit.move", &s).is_err(), "nothing selected");
+        s.movable = Some(Ok(("frame".into(), "b2".into())));
+        assert_eq!(enabled("edit.move", &s), Ok(()));
+        s.movable = Some(Err("b1 is fixed".into()));
+        assert!(enabled("edit.move", &s).is_err());
+        s.moving = true;
+        assert_eq!(enabled("edit.move", &s), Ok(()), "on: it turns off");
+        assert_eq!(checked("edit.move", &s), Some(true));
+        s.moving = false;
+        s.movable = Some(Ok(("frame".into(), "b2".into())));
+        s.mode = Mode::View;
+        assert!(enabled("edit.move", &s).unwrap_err().contains("Annotate"));
+        let c = get("edit.move").unwrap();
+        assert_eq!(c.icon, Some("arrows-out-cardinal"));
+        assert!(c.toolbar);
+    }
+
+    #[test]
+    fn mate_needs_an_assembly_and_a_mode_that_edits() {
+        use crate::core::modes::Mode;
+        let mut s = State {
+            mode: Mode::Annotate,
+            ..State::default()
+        };
+        assert!(enabled("edit.mate", &s).is_err());
+        s.assembly_shown = true;
+        assert_eq!(enabled("edit.mate", &s), Ok(()));
+        s.mode = Mode::View;
+        assert!(enabled("edit.mate", &s).is_err());
+        let c = get("edit.mate").unwrap();
+        assert_eq!((c.title, c.icon), ("Mate…", Some("link-simple")));
+    }
 
     #[test]
     fn modes_are_toolbar_toggles_and_annotating_needs_a_mode() {
@@ -925,6 +1004,7 @@ mod tests {
             scale: 1.0,
             mode: crate::core::modes::Mode::Edit,
             flattenable: true,
+            movable: Some(Ok(("frame".into(), "b2".into()))),
             ..State::default()
         };
         for c in COMMANDS {
@@ -992,16 +1072,16 @@ mod tests {
             ["edit.copy_reference", "view.fit_row", "annotation.add"]
         );
         for k in Pick::ALL {
-            assert_eq!(
-                ids(Context::Entity(k)),
-                [
-                    "edit.copy_reference",
-                    "edit.select",
-                    "edit.select_other",
-                    "annotation.add"
-                ],
-                "{k:?}"
-            );
+            let mut want = vec![
+                "edit.copy_reference",
+                "edit.select",
+                "edit.select_other",
+                "annotation.add",
+            ];
+            if matches!(k, Pick::Face | Pick::Edge | Pick::Vertex) {
+                want.extend(["edit.move", "edit.mate"]);
+            }
+            assert_eq!(ids(Context::Entity(k)), want, "{k:?}");
         }
         assert_eq!(ids(Context::Ghost), ["edit.copy_reference"]);
         assert_eq!(

@@ -94,8 +94,9 @@ fn rectangle(w: &str, h: &str, at: [f64; 2]) -> Value {
 /// up a line of `wl` on zx as `sw`; a circle `la` on xy lofted to a
 /// smaller one `lb` on a datum plane `dl` 10 mm above it as `lf` (circles:
 /// a loft of squares is four spline faces whose self-intersection check
-/// takes a debug build tens of seconds on every rebuild from nothing); and
-/// a reference import of OCCT's box, which edits make a solid and back.
+/// takes a debug build tens of seconds on every rebuild from nothing); a
+/// box `tb` split by a surface wall `tw` across it as `tsp`; and a
+/// reference import of OCCT's box, which edits make a solid and back.
 fn project() -> (tempfile::TempDir, Session) {
     let dir = tempfile::tempdir().unwrap();
     ryucad::server::init(dir.path(), None).unwrap();
@@ -327,6 +328,34 @@ fn project() -> (tempfile::TempDir, Session) {
         &mut s,
         json!({"type": "thicken", "id": "slab", "sheet": "pad", "front": "1 mm"}),
     );
+    // A box split by a wall square to its side (a trim's tool), which
+    // edits move along x and flip.
+    add(
+        &mut s,
+        json!({"type": "box", "id": "tb", "params": {"x": 10, "y": 10, "z": 10},
+               "placement": {"origin": [90, 0, 0]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "sts", "plane": "xy"}),
+    );
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "sts", "ops": [
+            {"op": "add", "id": "a", "type": "point", "at": [95, -5]},
+            {"op": "add", "id": "b", "type": "point", "at": [95, 15]},
+            {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "extrude", "id": "tw", "sketch": "sts", "surface": true,
+               "extent": {"type": "symmetric", "length": "30 mm"}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "split", "id": "tsp", "target": "tb", "tool": "tw"}),
+    );
     // A reference import of OCCT's box, which edits convert and back.
     let file = format!(
         "{}/../ryustep/tests/data/occt/box_ap214.stp",
@@ -345,7 +374,7 @@ fn mm(g: &mut Lcg, lo: u64, hi: u64) -> String {
 /// One random edit. Some are refused, or leave a feature failing; both
 /// must rebuild the same way however they are reached.
 fn edit(g: &mut Lcg, s: &mut Session) {
-    let (method, params) = match g.next_u64() % 26 {
+    let (method, params) = match g.next_u64() % 28 {
         0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
         1 => (
             "param.set",
@@ -467,6 +496,21 @@ fn edit(g: &mut Lcg, s: &mut Session) {
             "feature.edit",
             json!({"id": "lid",
                    "tolerance": format!("{} mm", [0.001, 0.002, 0.005][(g.next_u64() % 3) as usize])}),
+        ),
+        // The split's wall moved along x, under the box's size, or the
+        // split flipped.
+        26 => {
+            let x = 93 + g.next_u64() % 5;
+            (
+                "sketch.edit",
+                json!({"sketch": "sts", "ops": [
+                    {"op": "move", "id": "a", "at": [x, -5]},
+                    {"op": "move", "id": "b", "at": [x, 15]}]}),
+            )
+        }
+        27 => (
+            "feature.edit",
+            json!({"id": "tsp", "flip": g.next_u64().is_multiple_of(2)}),
         ),
         // The import made a healed solid, or a reference again.
         23 => (
@@ -1620,4 +1664,90 @@ fn a_cancel_inside_a_kernel_call_keeps_nothing() {
     );
     let again = ryucad::rebuild::rebuild_part_with(&part, &stopped.cache).0;
     assert_eq!(again.hash, whole.1);
+}
+
+/// Part `p`: a datum plane `lvl` up from xy (`lvl`), a box `b`
+/// (`w` × 12 × 8 mm) whose walls `d` drafts by `a` about xy. Returns the
+/// walls' references, +x first and +y third.
+fn drafted() -> (tempfile::TempDir, Session, Vec<String>) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    must(
+        &mut s,
+        "param.set",
+        json!({"part": "p", "parameters": {"w": "20 mm", "a": "2 deg", "lvl": "4 mm"}}),
+    );
+    let add = |s: &mut Session, f: Value| {
+        let mut f = f;
+        f["part"] = json!("p");
+        must(s, "feature.add", f);
+    };
+    add(
+        &mut s,
+        json!({"type": "plane", "id": "lvl", "by": "offset", "from": "xy", "distance": "lvl"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": "w", "y": "12 mm", "z": "8 mm"}}),
+    );
+    let walls: Vec<String> = [
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+    ]
+    .iter()
+    .map(|n| face(&mut s, "b", *n))
+    .collect();
+    add(
+        &mut s,
+        json!({"type": "draft", "id": "d", "angle": "a", "neutral": "xy", "faces": walls.clone()}),
+    );
+    (dir, s, walls)
+}
+
+/// One random edit of [`drafted`]'s part.
+fn draft_edit(g: &mut Lcg, s: &mut Session, walls: &[String]) {
+    let (method, params) = match g.next_u64() % 7 {
+        0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
+        1 => (
+            "param.set",
+            json!({"parameters": {"a": format!("{} deg", 1 + g.next_u64() % 4)}}),
+        ),
+        2 => ("param.set", json!({"parameters": {"lvl": mm(g, 2, 6)}})),
+        3 => ("feature.edit", json!({"id": "d", "neutral": "p/lvl"})),
+        4 => ("feature.edit", json!({"id": "d", "neutral": "xy"})),
+        5 => (
+            "feature.edit",
+            json!({"id": "d", "flip": if g.next_u64().is_multiple_of(2) { json!([walls[2]]) } else { json!([]) }}),
+        ),
+        _ => (
+            "feature.edit",
+            json!({"id": "d", "tangent": g.next_u64().is_multiple_of(2)}),
+        ),
+    };
+    let mut params = params;
+    params["part"] = json!("p");
+    let _ = call(s, method, params);
+}
+
+#[test]
+fn drafts_recompute_as_from_nothing() {
+    for seed in [10, 11] {
+        let (_dir, mut s, walls) = drafted();
+        let part = Id::parse("p", "part").unwrap();
+        let first = s.rebuilt(&part).unwrap();
+        assert_eq!(first.failed(), 0, "{:?}", summary(first));
+        let mut g = Lcg::new(seed);
+        for step in 0..10 {
+            draft_edit(&mut g, &mut s, &walls);
+            let (one, eight) = (full(&s, 1), full(&s, 8));
+            let r = s.rebuilt(&part).unwrap();
+            let incremental = (r.hash.clone(), summary(r));
+            assert_eq!(incremental, one, "seed {seed}, step {step}");
+            assert_eq!(incremental, eight, "seed {seed}, step {step}");
+        }
+    }
 }

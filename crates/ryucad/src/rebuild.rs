@@ -524,7 +524,9 @@ impl PartResult {
                 if let Output::Solids(m) = o
                     && let Some(rep) = &m.report
                 {
-                    return crate::import::reference_warnings(part, id, rep);
+                    let mut w = crate::import::reference_warnings(part, id, rep);
+                    w.extend(crate::tweak::draft_warnings(part, id, rep));
+                    return w;
                 }
                 o.instance()
                     .and_then(|p| {
@@ -612,7 +614,8 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Unfold(_)
         | Feature::Refold(_)
         | Feature::MoveFace(_)
-        | Feature::ReplaceFace(_) => Err(Error::new(
+        | Feature::ReplaceFace(_)
+        | Feature::Draft(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} makes no body of its own", f.type_name()),
         )
@@ -1019,7 +1022,9 @@ pub(crate) fn names(b: &Body) -> BTreeSet<Name> {
 
 /// The solid founded by `t` as feature `id` sees it: as its view, the
 /// last feature of its chain listed before `id`, left it.
-/// [`target_as`] in the role `targets`.
+/// [`target_as`] in the role `targets`: a solid that the feature
+/// changes. Builds ask through [`read`]; sheet metal and tests through
+/// this.
 pub fn target<'a>(
     part: &Part,
     solids: &Solids,
@@ -1030,6 +1035,39 @@ pub fn target<'a>(
     target_as(part, solids, id, "targets", t, before)
 }
 
+/// Body `t` that feature `f` (`id`) names in `role`, asked for as
+/// [`crate::kind::bodies_read`] says, the one table of what each feature
+/// wants of each body, so a write and a rebuild judge it alike. A body
+/// the table doesn't list in that role is wanted a solid that `f` changes.
+pub fn read<'a>(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    f: &Feature,
+    role: &str,
+    t: &Id,
+    before: &'a dyn Results,
+) -> Result<&'a Built> {
+    let need = match crate::kind::bodies_read(f)
+        .into_iter()
+        .find(|r| r.role == role && r.body == t)
+    {
+        Some(r) => Need {
+            role,
+            want: r.want,
+            changes: r.changes,
+            hint: r.hint,
+        },
+        None => Need {
+            role,
+            want: Some(crate::kind::Want::Solid),
+            changes: true,
+            hint: None,
+        },
+    };
+    body_as(part, solids, id, t, need, before)
+}
+
 /// How a feature asks for a body it names: in `role`, of a kind (`None`
 /// for either), and whether it changes it (acts on it or consumes it), so
 /// that a reference import's body is refused.
@@ -1038,6 +1076,8 @@ pub struct Need<'r> {
     pub role: &'r str,
     pub want: Option<crate::kind::Want>,
     pub changes: bool,
+    /// What a refusal of the wrong kind says to do instead.
+    pub hint: Option<&'static str>,
 }
 
 /// Body `t` as feature `id` sees it, as `need` asks: refused where it was
@@ -1072,7 +1112,7 @@ pub fn body_as<'a>(
         return Err(reference_body(&part.id, id, t, role));
     }
     if let Some(want) = need.want {
-        crate::kind::need(id, need.role, t, &built.body, want)?;
+        crate::kind::need(id, need.role, t, &built.body, want, need.hint)?;
     }
     Ok(built)
 }
@@ -1094,26 +1134,7 @@ pub fn target_as<'a>(
         role,
         want: Some(crate::kind::Want::Solid),
         changes: true,
-    };
-    body_as(part, solids, id, t, need, before)
-}
-
-/// [`target_as`], taking a sheet too where `sheets` is true: face tweaks
-/// act on sheets where the kernel does (design 400), every other feature
-/// on solids only.
-pub fn target_kinds<'a>(
-    part: &Part,
-    solids: &Solids,
-    id: &Id,
-    role: &str,
-    t: &Id,
-    before: &'a dyn Results,
-    sheets: bool,
-) -> Result<&'a Built> {
-    let need = Need {
-        role,
-        want: (!sheets).then_some(crate::kind::Want::Solid),
-        changes: true,
+        hint: None,
     };
     body_as(part, solids, id, t, need, before)
 }
@@ -1137,18 +1158,21 @@ pub fn reference_body(part: &Id, id: &Id, t: &Id, role: &str) -> Error {
 /// reference import's body, against the current rebuild `results`.
 pub fn check_not_reference(p: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result<()> {
     let solids = Solids::of(p);
-    for (role, t, _) in crate::kind::bodies_read(f) {
-        if let Some(view) = solids.view(t, id)
+    for r in crate::kind::bodies_read(f)
+        .into_iter()
+        .filter(|r| r.changes)
+    {
+        if let Some(view) = solids.view(r.body, id)
             && let Ok(out) = crate::graph::input(p, id, view, results)
-            && out.solid(t).is_some_and(|b| b.reference)
+            && out.solid(r.body).is_some_and(|b| b.reference)
         {
             // A boolean's target, like every one-target role, is `targets`.
-            let role = if matches!(role, "target") {
+            let role = if r.role == "target" {
                 "targets"
             } else {
-                role
+                r.role
             };
-            return Err(reference_body(&p.id, id, t, role));
+            return Err(reference_body(&p.id, id, r.body, role));
         }
     }
     Ok(())
@@ -1234,7 +1258,7 @@ fn build_body(
     // `dependency_failed`, whatever its own body would be.
     let targets: Result<Vec<(&Id, &Built)>> = targets
         .iter()
-        .map(|t| Ok((t, target(part, solids, id, t, before)?)))
+        .map(|t| Ok((t, read(part, solids, id, f, "targets", t, before)?)))
         .collect();
     let targets = match targets {
         Ok(t) => t,
@@ -1258,7 +1282,7 @@ fn build_body(
         Some((h, Some((c, b)))) if *c == h => Ok(Arc::clone(b)),
         _ => match (f, &holes) {
             (Feature::Primitive(p), _) => build_primitive(&part.id, id, p),
-            (Feature::Mirror(m), _) => crate::body::mirror_copy(part, solids, id, m, before),
+            (Feature::Mirror(m), _) => crate::body::mirror_copy(part, solids, id, f, m, before),
             (Feature::Sweep(w), _) => crate::along::build(part, id, w, before, run),
             (Feature::Loft(l), _) => crate::loft::build(part, id, l, before, run),
             (Feature::Planar(x), _) => crate::profile::planar(part, id, x, before),
@@ -1331,6 +1355,7 @@ fn build_pattern(
     part: &Part,
     solids: &Solids,
     id: &Id,
+    f: &Feature,
     p: &crate::doc::pattern::Pattern,
     before: &dyn Results,
     run: &crate::rebuild::Run,
@@ -1339,7 +1364,7 @@ fn build_pattern(
     let targets: Vec<(&Id, &Built)> = p
         .targets
         .iter()
-        .map(|t| Ok((t, target(part, solids, id, t, before)?)))
+        .map(|t| Ok((t, read(part, solids, id, f, "targets", t, before)?)))
         .collect::<Result<_>>()?;
     let (operation, seeds) = crate::pattern::seeds(part, id, p, before)?;
     let motions = crate::pattern::motions(part, id, p, before)?;
@@ -1525,7 +1550,11 @@ fn apply(
     let kept = names(&body);
     // A tool counts if any of it is left, or any of the target went: a
     // join inside the target, a cut or an intersect that misses nothing,
-    // changes nothing.
+    // changes nothing. A sheet trimmed keeps its face's name, the face
+    // `Modified`, and none of the tool is left: for a sheet a modified
+    // face counts too. (Not for a solid, where a tool that misses beside
+    // others that drill one face would be hidden by them.)
+    let sheet = target.body.kind() == ryukei::topo::BodyKind::Sheet;
     let target_faces: BTreeSet<Name> = target
         .body
         .faces()
@@ -1533,6 +1562,7 @@ fn apply(
         .collect();
     let changed = journal.events().iter().any(|e| match e {
         Event::Deleted(n) | Event::Split { parent: n, .. } => target_faces.contains(n),
+        Event::Modified(n) => sheet && target_faces.contains(n),
         _ => false,
     });
     for x in tools {
@@ -1584,11 +1614,24 @@ fn apply(
             return Err(e);
         }
     }
-    // Origins: the target's, each tool's under their placed names, a
-    // split entity's for each of its pieces, merged entities' where they
-    // all agree, and this feature's for everything else it made: the
-    // edges and vertices where faces cross, and merges of entities from
-    // different features.
+    let origins = boolean_origins(id, target, tools, &body, &journal);
+    finish(id, ty, (body, journal), origins)
+}
+
+/// Origins of what a boolean or a division of `target` by `tools` left
+/// (`body`, by its `journal`): the target's, each tool's under their
+/// placed names, a split entity's for each of its pieces, merged
+/// entities' where they all agree, and feature `id`'s for everything
+/// else it made: the edges and vertices where faces cross, and merges of
+/// entities from different features.
+fn boolean_origins(
+    id: &Id,
+    target: &Built,
+    tools: &[ToolBody],
+    body: &Body,
+    journal: &Journal,
+) -> Origins {
+    let kept = names(body);
     let mut from: BTreeMap<Name, Value> = BTreeMap::new();
     for (n, o) in target.origins.iter() {
         if let Some(n) = crate::doc::reference::parse_name(n) {
@@ -1629,11 +1672,9 @@ fn apply(
             _ => {}
         }
     }
-    let origins: Origins = kept
-        .iter()
+    kept.iter()
         .map(|n| (n.to_string(), from.get(n).unwrap_or(&own).clone()))
-        .collect();
-    finish(id, ty, (body, journal), origins)
+        .collect()
 }
 
 /// A tool's label as text: a hole's point (`p3`), or a pattern's
@@ -1741,6 +1782,11 @@ fn boolean_error(
             faces.iter().map(face).collect(),
             Some([at.x, at.y, at.z]),
         ),
+        ryukei::Error::InvalidBoolean(BooleanError::ToolDoesNotDivide { face: f }) => (
+            "a cut ends inside the target: the tool doesn't divide it".to_owned(),
+            vec![face(f)],
+            None,
+        ),
         e => (e.to_string(), Vec::new(), None),
     };
     let which = match alone.and_then(|x| x.label.as_ref()) {
@@ -1763,6 +1809,12 @@ fn boolean_error(
     if let Some(at) = at {
         err = err.with("at", at);
     }
+    if let ryukei::Error::InvalidBoolean(BooleanError::ToolDoesNotDivide { .. }) = &e {
+        err = err.with("reason", "tool_does_not_divide").with(
+            "hint",
+            "a split's tool must cut the target right through: carry the sheet past the target on every side",
+        );
+    }
     err
 }
 
@@ -1772,15 +1824,16 @@ fn build_boolean(
     part: &Part,
     solids: &Solids,
     id: &Id,
+    f: &Feature,
     b: &crate::doc::solid::Boolean,
     before: &dyn Results,
     run: &crate::rebuild::Run,
 ) -> Result<Made> {
-    let target = self::target_as(part, solids, id, "target", &b.target, before)?;
+    let target = read(part, solids, id, f, "target", &b.target, before)?;
     let tools: Vec<(&Id, &Built)> = b
         .tools
         .iter()
-        .map(|t| Ok((t, self::target_as(part, solids, id, "tools", t, before)?)))
+        .map(|t| Ok((t, read(part, solids, id, f, "tools", t, before)?)))
         .collect::<Result<_>>()?;
     let keys: Vec<ToolKey> = b.tools.iter().map(|t| solid_key(&part.id, id, t)).collect();
     let tools: Vec<ToolBody> = tools
@@ -1896,8 +1949,8 @@ fn groups<'a>(
 fn blend_edges<'g>(
     part: &Part,
     id: &Id,
-    solid: &Id,
-    built: &Built,
+    ty: &str,
+    (solid, built): (&Id, &Built),
     groups: &'g [Group],
     propagate: bool,
     before: &dyn Results,
@@ -1920,6 +1973,12 @@ fn blend_edges<'g>(
                     "an edge",
                 ));
             };
+            // The kernel rounds only edges with a face either side; a
+            // tangent chain from an inner edge never reaches a laminar one.
+            if body.is_laminar(e) {
+                let name = body.edge(e).expect("a live edge").name;
+                return Err(laminar_blend(part, id, ty, solid, name));
+            }
             let chain = if propagate {
                 ryukei::blend::tangent_chain(body, e).map_err(|k| {
                     Error::new(Code::Internal, format!("{id}: {k}")).with("feature", id)
@@ -1988,9 +2047,18 @@ fn blend_solid(id: &Id, f: &Feature) -> Result<(Id, bool)> {
 pub fn check_blend(part: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result<()> {
     let solids = Solids::of(part);
     let (solid, propagate) = blend_solid(id, f)?;
-    let built = target(part, &solids, id, &solid, results)?;
+    let built = read(part, &solids, id, f, "targets", &solid, results)?;
     let groups = groups(part, id, f, results)?;
-    blend_edges(part, id, &solid, built, &groups, propagate, results).map(drop)
+    blend_edges(
+        part,
+        id,
+        f.type_name(),
+        (&solid, built),
+        &groups,
+        propagate,
+        results,
+    )
+    .map(drop)
 }
 
 /// The kernel's refusal of a fillet or chamfer: `blend_failed`, with its
@@ -2103,7 +2171,40 @@ fn blend_error(
     if !entities.is_empty() {
         err = err.with("entities", entities);
     }
+    if let ryukei::Error::InvalidBlend(B::Unsupported { at }) = &e
+        && let Some(EntityId::Edge(x)) = built.body.by_name(*at)
+        && built.body.is_laminar(x)
+    {
+        err = err.with(
+            "hint",
+            laminar_hint(&format!("{}/{solid}/{at}", part.id), solid),
+        );
+    }
     err
+}
+
+/// What to say of boundary (laminar) edge `reference` of sheet `solid`
+/// that a fillet or chamfer names.
+fn laminar_hint(reference: &str, solid: &Id) -> String {
+    format!(
+        "{reference} is a boundary of sheet {solid} (laminar): only a sheet's inner edges are rounded"
+    )
+}
+
+/// `blend_failed` for a fillet or chamfer of a sheet's boundary: the
+/// kernel rounds only edges with a face either side.
+fn laminar_blend(part: &Part, id: &Id, ty: &str, solid: &Id, edge: Name) -> Error {
+    let reference = format!("{}/{solid}/{edge}", part.id);
+    let hint = laminar_hint(&reference, solid);
+    Error::new(Code::BlendFailed, format!("{ty} {id}: {hint}"))
+        .with("feature", id)
+        .with("solid", solid)
+        .with("reason", "unsupported")
+        .with(
+            "entities",
+            json!([{"role": "edge", "reference": reference, "kind": "edge"}]),
+        )
+        .with("hint", hint)
 }
 
 /// A fillet or chamfer: its solid as it sees it, with every edge its
@@ -2118,9 +2219,9 @@ fn build_blend(
 ) -> Result<Made> {
     let ty = f.type_name();
     let (solid, propagate) = blend_solid(id, f)?;
-    let built = target(part, solids, id, &solid, before)?;
+    let built = read(part, solids, id, f, "targets", &solid, before)?;
     let groups = groups(part, id, f, before)?;
-    let listed = blend_edges(part, id, &solid, built, &groups, propagate, before)?;
+    let listed = blend_edges(part, id, ty, (&solid, built), &groups, propagate, before)?;
     let edges: Vec<ryukei::blend::EdgeBlend> = listed.iter().map(|(e, _)| *e).collect();
     let work = crate::work::work(run.job);
     let made = ryukei::blend::blend_with(op_key(&part.id, id), &built.body, &edges, &work)
@@ -2178,7 +2279,7 @@ pub(crate) fn finish(
     // shown (design 388).
     if body.kind() == ryukei::topo::BodyKind::Mixed {
         return Err(
-            crate::kind::wrong(id, "result", id, "mixed", crate::kind::Want::Solid)
+            crate::kind::wrong(id, "result", id, "mixed", crate::kind::Want::Solid, None)
                 .with("reason", "mixed"),
         );
     }
@@ -2300,20 +2401,49 @@ fn build_split(
     part: &Part,
     solids: &Solids,
     id: &Id,
+    f: &Feature,
     s: &crate::doc::body::Split,
     before: &dyn Results,
     run: &Run,
 ) -> Result<Made> {
-    use crate::doc::body::Keep;
     let t = &s.target;
-    let built = target(part, solids, id, t, before)?;
+    let built = read(part, solids, id, f, "target", t, before)?;
     let at = crate::geometry::At {
         part,
         order: part.order(),
         owner: id,
         results: before,
     };
-    let pl = crate::geometry::one(&at, "plane", &s.plane, crate::geometry::Want::Plane)?.plane();
+    let Some(plane) = s.plane() else {
+        return match crate::body::split_tool(part, solids, id, f, s, before)? {
+            crate::body::SplitTool::Solid(tool) => {
+                // Its inside is behind, its outside in front; flip swaps them.
+                let (inside, outside) = (BooleanOp::Intersect, BooleanOp::Subtract);
+                let (behind_op, front_op) = if s.flip {
+                    (outside, inside)
+                } else {
+                    (inside, outside)
+                };
+                let side = |name: &'static str, kop: BooleanOp| -> Result<Built> {
+                    let key = crate::body::side_key(&part.id, id, name);
+                    let tools = [ToolBody::whole(key, &tool, id)];
+                    apply(part, id, "split", (kop, "split"), t, built, &tools, run)
+                        .map_err(|e| crate::body::tool_side_error(id, t, name, e))
+                };
+                sides(
+                    s,
+                    t,
+                    id,
+                    || side("behind", behind_op),
+                    || side("front", front_op),
+                )
+            }
+            crate::body::SplitTool::Sheet(sheet) => {
+                split_by_sheet(part, id, s, (t, built), &sheet, run)
+            }
+        };
+    };
+    let pl = crate::geometry::one(&at, "plane", plane, crate::geometry::Want::Plane)?.plane();
     let normal = if s.flip { -pl.normal } else { pl.normal };
     let half = crate::body::half_space(&part.id, id, t, &built.body, pl.point, normal)?;
     let side = |name: &'static str, kop: BooleanOp| -> Result<Built> {
@@ -2323,23 +2453,90 @@ fn build_split(
         apply(part, id, "split", (kop, "split"), t, built, &tools, run)
             .map_err(|e| crate::body::side_error(id, t, name, e))
     };
+    sides(
+        s,
+        t,
+        id,
+        || side("behind", BooleanOp::Subtract),
+        || side("front", BooleanOp::Intersect),
+    )
+}
+
+/// A split's sides from two closures, behind and front: the target keeps
+/// behind; with `keep: both`, the split founds what is in front. Both
+/// sides are made side by side, the first failure in order reported.
+fn sides(
+    s: &crate::doc::body::Split,
+    t: &Id,
+    id: &Id,
+    behind: impl FnOnce() -> Result<Built> + Send,
+    front: impl FnOnce() -> Result<Built> + Send,
+) -> Result<Made> {
+    use crate::doc::body::Keep;
     match s.keep {
-        Keep::Behind => {
-            let behind = side("behind", BooleanOp::Subtract)?;
-            Ok(Made::new(vec![(t.clone(), Arc::new(behind))]))
-        }
+        Keep::Behind => Ok(Made::new(vec![(t.clone(), Arc::new(behind()?))])),
         Keep::Both => {
-            let (behind, front) = rayon::join(
-                || side("behind", BooleanOp::Subtract),
-                || side("front", BooleanOp::Intersect),
-            );
+            let (b, f) = rayon::join(behind, front);
             // The first failure in order, not the first a thread found.
-            let (behind, front) = (behind?, front?);
+            let (b, f) = (b?, f?);
             Ok(Made::new(vec![
-                (t.clone(), Arc::new(behind)),
-                (id.clone(), Arc::new(front)),
+                (t.clone(), Arc::new(b)),
+                (id.clone(), Arc::new(f)),
             ]))
         }
+    }
+}
+
+/// Split `id` (`s`) of target `t` (`built`) by a sheet: one division,
+/// each side one body. The side behind the sheet (against its normal,
+/// and what it doesn't reach) is the target's; flip swaps them.
+fn split_by_sheet(
+    part: &Part,
+    id: &Id,
+    s: &crate::doc::body::Split,
+    (t, built): (&Id, &Built),
+    sheet: &Body,
+    run: &Run,
+) -> Result<Made> {
+    use crate::doc::body::Keep;
+    let key = op_key(&part.id, id);
+    let tk = crate::body::side_key(&part.id, id, "tool");
+    let tool = crate::body::side_tool(id, sheet, "tool")?;
+    let tools = [ToolBody::whole(tk, &tool, id)];
+    let placed = [Tool {
+        key: tk,
+        body: sheet,
+        place: Rigid::IDENTITY,
+    }];
+    let work = crate::work::work(run.job);
+    let (d, journal) = ryukei::boolean::divide_sides_with(key, &built.body, &placed, &work)
+        .map_err(|e| {
+            crate::work::stopped(&e, run.job)
+                .unwrap_or_else(|| boolean_error(part, id, "split", t, built, &tools, None, e))
+        })?;
+    let (back, front) = if s.flip {
+        (d.front, d.back)
+    } else {
+        (d.back, d.front)
+    };
+    // A side left empty is refused whatever `keep` says, as a plane's or a
+    // solid tool's split refuses it: a sheet that misses the target divides
+    // nothing.
+    let (back, front) = match (back, front) {
+        (Some(b), Some(f)) => (b, f),
+        (_, None) => return Err(crate::body::empty_side(id, t, "front", "tool")),
+        (None, _) => return Err(crate::body::empty_side(id, t, "behind", "tool")),
+    };
+    let one = |b: Body| -> Result<Built> {
+        let origins = boolean_origins(id, built, &tools, &b, &journal);
+        finish(id, "split", (b, journal.clone()), origins)
+    };
+    match s.keep {
+        Keep::Behind => Ok(Made::new(vec![(t.clone(), Arc::new(one(back)?))])),
+        Keep::Both => Ok(Made::new(vec![
+            (t.clone(), Arc::new(one(back)?)),
+            (id.clone(), Arc::new(one(front)?)),
+        ])),
     }
 }
 
@@ -2383,7 +2580,7 @@ fn rebuild_with(
             (r, None)
         }
         Feature::Boolean(b) => (
-            build_boolean(part, solids, id, b, before, run).map(solid),
+            build_boolean(part, solids, id, f, b, before, run).map(solid),
             None,
         ),
         Feature::Fillet(_) | Feature::Chamfer(_) => (
@@ -2394,7 +2591,7 @@ fn rebuild_with(
             crate::body::build(part, solids, id, f, before, run).map(solid),
             None,
         ),
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) => (
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => (
             crate::tweak::build(part, solids, id, f, before, run).map(solid),
             None,
         ),
@@ -2416,7 +2613,7 @@ fn rebuild_with(
             None,
         ),
         Feature::Split(x) => (
-            build_split(part, solids, id, x, before, run).map(solid),
+            build_split(part, solids, id, f, x, before, run).map(solid),
             None,
         ),
         Feature::Fill(x) => {
@@ -2439,7 +2636,7 @@ fn rebuild_with(
             None,
         ),
         Feature::Pattern(p) => (
-            build_pattern(part, solids, id, p, before, run).map(solid),
+            build_pattern(part, solids, id, f, p, before, run).map(solid),
             None,
         ),
         Feature::Import(i) => {
@@ -2504,6 +2701,11 @@ pub(crate) fn input_hash(
     if let Some(i) = f.import() {
         let mut x = blake3::Hasher::new();
         x.update(h.as_bytes());
+        // Surface models heal as sheets since ryucad 18.C: a refusal an
+        // earlier build kept (`open_shell`) isn't this build's result.
+        if i.mode() != crate::doc::import::Mode::Reference {
+            x.update(b"ryucad.import.open_sheet\0");
+        }
         let now = part.imports.get(&i.file.path);
         x.update(now.map_or("missing", |f| f.blake3.as_str()).as_bytes());
         h = x.finalize();
@@ -3171,12 +3373,14 @@ mod tests {
             role: "faces",
             want: None,
             changes: false,
+            hint: None,
         };
         assert!(body_as(&part, &solids, &id, &b, any, &r).is_ok());
         let sheet = Need {
             role: "sheets",
             want: Some(Want::Sheet),
             changes: true,
+            hint: None,
         };
         let e = body_as(&part, &solids, &id, &b, sheet, &r).unwrap_err();
         assert_eq!(
@@ -3390,6 +3594,7 @@ mod tests {
             &id("w"),
             &sheet_fixture(),
             crate::kind::Want::Solid,
+            None,
         )
         .unwrap_err();
         assert_eq!(e.code, Code::WrongBodyKind);

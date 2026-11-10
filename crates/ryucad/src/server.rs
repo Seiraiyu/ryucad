@@ -394,6 +394,46 @@ pub fn answer_live(
                 bends,
             },
         ),
+        Request::DrawingRender {
+            part,
+            drawing,
+            rev,
+            sheet,
+            format,
+            scale,
+        } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+            let mut a = crate::drawing::request::render(
+                s,
+                &part,
+                &drawing,
+                sheet.as_deref(),
+                format.as_deref(),
+                scale,
+            )?;
+            a.result = noted(Ok(a.result), commit)?;
+            Ok(a)
+        }),
+        Request::DrawingExport {
+            part,
+            drawing,
+            rev,
+            sheet,
+            format,
+            out,
+            unit,
+        } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+            let mut a = crate::drawing::request::export(
+                s,
+                &part,
+                &drawing,
+                sheet.as_deref(),
+                format.as_deref(),
+                out.as_deref(),
+                unit.as_deref(),
+            )?;
+            a.result = noted(Ok(a.result), commit)?;
+            Ok(a)
+        }),
         Request::Rebuild { part, rev } => session.at(rev.as_deref()).and_then(|(commit, s)| {
             rebuild(s, part.as_deref(), commit.as_deref())
                 .map_err(|e| noted(Err(e), commit).expect_err("an error"))
@@ -738,6 +778,7 @@ pub(crate) fn dispatch(
             translate,
             axis,
             angle,
+            about,
             expected_revision,
         } => crate::assembly::moved(
             session,
@@ -748,6 +789,7 @@ pub(crate) fn dispatch(
                 translate,
                 axis,
                 angle,
+                about,
             },
             expected_revision.as_deref(),
         ),
@@ -891,10 +933,10 @@ pub(crate) fn dispatch(
             part,
             moves,
             component,
-        } => crate::mate::solve_request(
-            session,
-            &part,
-            moves
+            rev,
+            mates,
+        } => {
+            let moves = moves
                 .into_iter()
                 .map(|m| {
                     (
@@ -904,12 +946,13 @@ pub(crate) fn dispatch(
                             translate: m.translate,
                             axis: m.axis,
                             angle: m.angle,
+                            about: m.about,
                         },
                     )
                 })
-                .collect(),
-            component,
-        ),
+                .collect();
+            solve_at(session, &part, moves, component, rev.as_deref(), mates)
+        }
         Request::FeatureShow { part, id, rev } => {
             let (_, session) = session.at(rev.as_deref())?;
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
@@ -1287,6 +1330,93 @@ pub(crate) fn dispatch(
             live.set_hidden(&id, hidden)?;
             Ok(json!({"participant": id, "hidden": live.get(&id)?.view.hidden}))
         }
+        Request::DrawingList { part } => crate::drawing::request::list(session, part.as_deref()),
+        Request::DrawingCreate {
+            part,
+            drawing,
+            name,
+            template,
+            size,
+            views,
+            expected_revision,
+        } => crate::drawing::request::create(
+            session,
+            &part,
+            &drawing,
+            &crate::drawing::request::Create {
+                name,
+                template,
+                size,
+                views,
+            },
+            expected_revision.as_deref(),
+        ),
+        Request::DrawingEdit {
+            part,
+            drawing,
+            ops,
+            expected_revision,
+        } => crate::drawing::request::edit(
+            session,
+            &part,
+            &drawing,
+            &ops,
+            expected_revision.as_deref(),
+        ),
+        Request::DrawingDelete {
+            part,
+            drawing,
+            expected_revision,
+        } => {
+            crate::drawing::request::delete(session, &part, &drawing, expected_revision.as_deref())
+        }
+        Request::DrawingRename {
+            part,
+            drawing,
+            to,
+            expected_revision,
+        } => crate::drawing::request::rename(
+            session,
+            &part,
+            &drawing,
+            &to,
+            expected_revision.as_deref(),
+        ),
+        Request::DrawingLayout {
+            part,
+            drawing,
+            dry_run,
+            expected_revision,
+        } => crate::drawing::request::layout(
+            session,
+            &part,
+            &drawing,
+            dry_run,
+            expected_revision.as_deref(),
+        ),
+        Request::DrawingGet {
+            part,
+            drawing,
+            rev,
+            sheet,
+            items,
+        } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+            noted(
+                crate::drawing::request::get(s, &part, &drawing, sheet.as_deref(), items),
+                commit,
+            )
+        }),
+        Request::DrawingDescribe {
+            part,
+            drawing,
+            rev,
+            sheet,
+        } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+            noted(
+                crate::drawing::request::describe(s, &part, &drawing, sheet.as_deref()),
+                commit,
+            )
+        }),
         Request::ExplodeList { part } => crate::explode::list(session, part.as_deref()),
         Request::ExplodeSave {
             part,
@@ -1570,6 +1700,10 @@ pub(crate) fn dispatch(
         // A render's answer is bytes: `answer_live` handles it.
         Request::Render { .. } => Err(Error::new(Code::Internal, "render answers with bytes")),
         Request::Export { .. } => Err(Error::new(Code::Internal, "export answers with bytes")),
+        Request::DrawingRender { .. } | Request::DrawingExport { .. } => Err(Error::new(
+            Code::Internal,
+            "drawings render and export with bytes",
+        )),
         // The session is current: doctor reuses its rebuilds (#125).
         Request::Doctor {} => {
             let root = session.root().to_owned();
@@ -1619,11 +1753,7 @@ pub(crate) fn dispatch(
         Request::CacheWarm { part } => cache_warm(session, part.as_deref()),
         Request::ConfigGet { key, scope } => {
             let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
-            let mut v = config::get(
-                session.project().manifest.default_unit,
-                key.as_deref(),
-                scope,
-            )?;
+            let mut v = config::get(&session.project().manifest, key.as_deref(), scope)?;
             v["project_revision"] = json!(session.project_revision()?);
             Ok(v)
         }
@@ -1637,15 +1767,11 @@ pub(crate) fn dispatch(
             let v = match config::validate(&key, &value, scope)? {
                 config::Scope::Project => {
                     session.check_project_revision(expected_revision.as_deref())?;
-                    let unit = Unit::parse(value.as_str().expect("validated")).expect("validated");
                     // The rest of the manifest (the project's ID) stays.
-                    let m = Manifest {
-                        default_unit: unit,
-                        ..session.project().manifest.clone()
-                    };
+                    let m = config::set_project(&session.project().manifest, &key, &value);
                     session.write_json(&session.root().join(MANIFEST), &m.to_json())?;
                     session.reload()?;
-                    let mut v = config::get(unit, Some(&key), None)?;
+                    let mut v = config::get(&m, Some(&key), None)?;
                     v["project_revision"] = json!(session.project_revision()?);
                     v
                 }
@@ -2275,7 +2401,9 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Boolean(b) => b.fields(),
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) => crate::tweak::report(part, f),
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
+            crate::tweak::report(part, f)
+        }
         Feature::Datum(d) => crate::datum::report(part, d),
         Feature::Path(x) => crate::path::report(part, x),
         Feature::Sweep(w) => crate::along::feature_report(part, w),
@@ -3544,6 +3672,34 @@ fn blend_from(
     Ok(out)
 }
 
+/// Whether body `x` of part `pid`, as a feature at `at` of `list` would
+/// see it, is a sheet in the current rebuild: the tip of its chain among
+/// the features before `at`. A part no feature of which may make a
+/// sheet is never rebuilt for this.
+fn source_is_sheet(session: &mut Session, pid: &Id, list: &[Id], at: usize, x: &Id) -> bool {
+    let Ok(p) = session.project().part(pid).cloned() else {
+        return false;
+    };
+    let may = p
+        .features
+        .values()
+        .any(|g| g.as_ref().is_ok_and(|g| g.may_make_sheet()));
+    if !may {
+        return false;
+    }
+    let solids = Solids::of_order(&p, &list[..at]);
+    let Some(tip) = solids.tips().find(|(s, _)| *s == x).map(|(_, t)| t.clone()) else {
+        return false;
+    };
+    let Ok(results) = session.rebuilt(pid) else {
+        return false;
+    };
+    crate::rebuild::Results::result(results, &tip)
+        .and_then(|r| r.as_ref().ok())
+        .and_then(|o| o.solid(x))
+        .is_some_and(|b| b.body.kind() == ryukei::topo::BodyKind::Sheet)
+}
+
 /// The solids a feature put at `at` in `order` could act on: founded
 /// before it and not consumed.
 fn solids_before(p: &Part, order: &[Id], at: usize) -> Vec<Id> {
@@ -3589,7 +3745,7 @@ fn check_solids(q: &Part, written: &[&Id]) -> Result<()> {
 
 /// The part as a write would leave it: `writes` in place, listed as
 /// `order`.
-fn proposed(p: &Part, order: &[Id], writes: &[(&Id, &Feature)]) -> Part {
+pub(crate) fn proposed(p: &Part, order: &[Id], writes: &[(&Id, &Feature)]) -> Part {
     let mut q = p.clone();
     for (id, f) in writes {
         q.features.insert((*id).clone(), Ok((*f).clone()));
@@ -4033,7 +4189,10 @@ fn check_references(
         .any(|g| g.as_ref().is_ok_and(|g| g.may_make_sheet()));
     let read = crate::kind::bodies_read(f);
     let reads_bodies = !read.is_empty()
-        && (may_hold_sheets || read.iter().any(|(_, _, w)| *w == crate::kind::Want::Sheet));
+        && (may_hold_sheets
+            || read
+                .iter()
+                .any(|r| r.want == Some(crate::kind::Want::Sheet)));
     let planar = matches!(f, Feature::Planar(_));
     // An unfold's allowance and a refold's unfold are judged against the
     // rebuild whatever they reference.
@@ -4044,6 +4203,7 @@ fn check_references(
         && f.geometry().is_empty()
         && !reads_bodies
         && !planar
+        && !matches!(f, Feature::Split(s) if s.plane().is_none())
     {
         return Ok(());
     }
@@ -4120,7 +4280,7 @@ fn check_resolved(
         }
         // Faces of its target, its direction, axis or surfaces their
         // kinds; what the kernel makes of them only rebuild can tell.
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) => {
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
             crate::tweak::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
         Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
@@ -4262,31 +4422,42 @@ fn feature_add(
     // A mirror whose operation is left out joins its own source (design
     // 327, question 20); one with no solid copies the part's one solid.
     // The file names both all the same.
-    if ty == "mirror" {
-        if given.fields.solid.is_none() {
-            let before = solids_before(p, &list, at);
-            match before.as_slice() {
-                [one] => given.fields.solid = Some(one.to_string()),
-                _ => {
-                    return Err(Error::new(
-                        Code::InvalidParam,
-                        format!(
-                            "a mirror names the solid it copies (solid): the part has {} before it",
-                            before.len()
-                        ),
-                    )
-                    .with("param", "solid")
-                    .with("solids", before));
-                }
+    if ty == "mirror" && given.fields.solid.is_none() {
+        let before = solids_before(p, &list, at);
+        match before.as_slice() {
+            [one] => given.fields.solid = Some(one.to_string()),
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "a mirror names the solid it copies (solid): the part has {} before it",
+                        before.len()
+                    ),
+                )
+                .with("param", "solid")
+                .with("solids", before));
             }
         }
-        if given.fields.operation.is_none() {
+    }
+    // A sheet's copy can't be joined: left out, its operation is new
+    // (design 388).
+    if ty == "mirror" && given.fields.operation.is_none() {
+        let sheet = given
+            .fields
+            .solid
+            .as_deref()
+            .and_then(|x| Id::parse(x, "feature").ok())
+            .is_some_and(|x| source_is_sheet(session, &pid, &list, at, &x));
+        if sheet {
+            given.fields.operation = Some("new".into());
+        } else {
             given.fields.operation = Some("join".into());
             if given.fields.targets.is_none() {
                 given.fields.targets = given.fields.solid.clone().map(|s| vec![s]);
             }
         }
     }
+    let p = session.project().part(&pid)?;
     // A join, cut, intersect or hole with no targets acts on the part's
     // one solid; the file names it all the same.
     let acts = ty == "hole"
@@ -4425,7 +4596,7 @@ fn feature_add(
             given.only(ty, crate::doc::body::request_fields(ty))?;
             crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
-        "move_face" | "replace_face" => {
+        "move_face" | "replace_face" | "draft" => {
             given.only(ty, crate::doc::tweak::request_fields(ty))?;
             crate::tweak::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
@@ -4666,7 +4837,7 @@ fn feature_edit(
                 given.only(ty, crate::doc::surface::request_fields(ty))?;
                 crate::surface::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
             }
-            f @ (Feature::MoveFace(_) | Feature::ReplaceFace(_)) => {
+            f @ (Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_)) => {
                 let ty = f.type_name();
                 crate::tweak::take_given(ty, &mut given.fields)?;
                 given.only(ty, crate::doc::tweak::request_fields(ty))?;
@@ -4769,6 +4940,7 @@ fn feature_edit(
                 | Feature::Split(_)
                 | Feature::MoveFace(_)
                 | Feature::ReplaceFace(_)
+                | Feature::Draft(_)
         ) && f.targets() != old.targets())
         || ((f.base_flange().is_some()
             || f.flange().is_some()
@@ -5076,7 +5248,9 @@ pub(crate) fn part_report(
                 // A fill's rebuild report is what it measured (see
                 // `Made::report`), an extract's its faces.
                 Feature::Extract(_) => crate::surface::report(id, f),
-                Feature::MoveFace(_) | Feature::ReplaceFace(_) => crate::tweak::report(id, f),
+                Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
+                    crate::tweak::report(id, f)
+                }
                 _ => return None,
             };
             Some((fid.clone(), (f.type_name(), report)))
@@ -5108,6 +5282,7 @@ pub(crate) fn part_report(
                             | Feature::Split(_)
                             | Feature::MoveFace(_)
                             | Feature::ReplaceFace(_)
+                            | Feature::Draft(_)
                     )
             })
         })
@@ -5131,12 +5306,16 @@ pub(crate) fn part_report(
                         && let Some(i) = &m.report
                     {
                         // A fill's report under its own type, else an
-                        // import's.
+                        // import's; a draft's angles come with its own
+                        // report (`tweak::resolved`).
                         let key = match types.get(fid).and_then(Value::as_str) {
-                            Some("fill") => "fill",
-                            _ => "import",
+                            Some("fill") => Some("fill"),
+                            Some("draft") => None,
+                            _ => Some("import"),
                         };
-                        v[key] = i.as_ref().clone();
+                        if let Some(key) = key {
+                            v[key] = i.as_ref().clone();
+                        }
                     }
                     if let crate::rebuild::Output::Solids(m) = o
                         && let Some(f) = &m.flat
@@ -5930,11 +6109,23 @@ fn framed(
 /// `reference` names (`<part>/<solid>/<name>`, or an occurrence's face,
 /// placed by its pose): along a planar face's outward normal or a
 /// revolved face's axis, its longest straight edge level.
-fn normal_to_face(session: &mut Session, reference: &str) -> Result<([f64; 3], [f64; 3])> {
+pub(crate) fn normal_to_face(
+    session: &mut Session,
+    reference: &str,
+) -> Result<([f64; 3], [f64; 3])> {
+    normal_to_face_at(session, reference, &crate::doc::assembly::Rev::Working)
+}
+
+/// [`normal_to_face`] with the face read in the model `rev` gives.
+pub(crate) fn normal_to_face_at(
+    session: &mut Session,
+    reference: &str,
+    rev: &crate::doc::assembly::Rev,
+) -> Result<([f64; 3], [f64; 3])> {
     use ryukei::geom::{Curve, Surface};
     use ryukei::measure::Entity;
     // A datum plane: along its normal, its x level; a datum axis: along it.
-    if let Some(d) = crate::geometry::locate(session, reference)? {
+    if let Some(d) = crate::geometry::locate_at(session, reference, rev)? {
         let a = |v: ryukei::geom::Vector3| [v.x, v.y, v.z];
         return match d.geom {
             crate::geometry::Geom::Plane(p) => Ok(crate::view::normal_to(
@@ -5949,7 +6140,7 @@ fn normal_to_face(session: &mut Session, reference: &str) -> Result<([f64; 3], [
             .with("entity", reference)),
         };
     }
-    let located = crate::measure::locate(session, reference)?;
+    let located = crate::measure::locate_at(session, reference, rev)?;
     let not_a_face = || {
         Error::new(
             Code::InvalidParam,
@@ -7363,6 +7554,7 @@ fn inspect(
                                 | Feature::Split(_)
                                 | Feature::MoveFace(_)
                                 | Feature::ReplaceFace(_)
+                                | Feature::Draft(_)
                         ))
             }) =>
         {
@@ -7530,7 +7722,8 @@ fn inspect(
             | Feature::Mirror(_)
             | Feature::Split(_)
             | Feature::MoveFace(_)
-            | Feature::ReplaceFace(_)),
+            | Feature::ReplaceFace(_)
+            | Feature::Draft(_)),
         )) = features.iter().find(|(i, _)| i == f)
     {
         let k = x.type_name();
@@ -7558,6 +7751,55 @@ fn inspect(
             features.iter().find(|(i, _)| i == f)
     {
         v[x.type_name()] = crate::surface::report(&pid, x);
+    }
+    Ok(v)
+}
+
+/// `assembly.solve` answered for `rev` (the working files when `None`):
+/// any revision a read takes, a person's draft included, named in the
+/// answer's `rev`. `mates` are each run as `feature.add` of a mate in a
+/// capture session over those files and solved with the rest, never
+/// written; a refusal is `feature.add`'s own, at `/mates/<i>`.
+fn solve_at(
+    session: &mut Session,
+    part: &str,
+    moves: Vec<(String, crate::assembly::Move)>,
+    component: bool,
+    rev: Option<&str>,
+    mates: Vec<serde_json::Map<String, Value>>,
+) -> Result<Value> {
+    let rev = rev.filter(|r| *r != "working");
+    let (named, files) = match rev {
+        None => (None, None),
+        Some(r) => {
+            let (n, f) = files_at(session, r)?;
+            (Some(n), Some(f))
+        }
+    };
+    let mut v = if mates.is_empty() {
+        let (_, s) = session.at(rev)?;
+        crate::mate::solve_request(s, part, moves, component)?
+    } else {
+        let files = files.unwrap_or_else(|| session.snapshot());
+        let mut capture = session.capturing(files)?;
+        for (i, m) in mates.into_iter().enumerate() {
+            let at = |mut e: Error| {
+                if let Some(p) = e.details.get("pointer").cloned() {
+                    e = e.with("field", p);
+                }
+                e.with("pointer", format!("/mates/{i}"))
+            };
+            let mut params = json!({"part": part, "type": "mate"});
+            for (k, v) in m {
+                params[k] = v;
+            }
+            let req = Request::from_rpc("feature.add", Some(params)).map_err(at)?;
+            dispatch(&mut capture, None, None, req).map_err(at)?;
+        }
+        crate::mate::solve_request(&mut capture, part, moves, component)?
+    };
+    if let Some(n) = named {
+        v["rev"] = n;
     }
     Ok(v)
 }
@@ -7601,6 +7843,37 @@ fn rebuilt_at(session: &mut Session, rev: &str) -> Result<BTreeMap<String, crate
     Ok(out)
 }
 
+/// Each drawing of every part at `rev`, built: by part and drawing, each
+/// view's fingerprint by key, or why it didn't build.
+fn drawn_at(session: &mut Session, rev: &str) -> Result<crate::diff::Drawn> {
+    let (_, s) = session.at(Some(rev))?;
+    let mut out = crate::diff::Drawn::new();
+    let ids: Vec<(Id, Vec<Id>)> = s
+        .project()
+        .parts
+        .iter()
+        .map(|(id, p)| (id.clone(), p.drawings.keys().cloned().collect()))
+        .collect();
+    for (pid, drawings) in ids {
+        for d in drawings {
+            let views = match crate::drawing::build(s, &pid, &d) {
+                Ok(b) => Ok(b
+                    .sheets
+                    .iter()
+                    .flat_map(|sh| {
+                        sh.views
+                            .iter()
+                            .map(move |v| (v.key.to_string(), v.fingerprint(sh)))
+                    })
+                    .collect()),
+                Err(e) => Err(e.code),
+            };
+            out.insert((pid.to_string(), d.to_string()), views);
+        }
+    }
+    Ok(out)
+}
+
 /// `diff`: what changed from one revision to another.
 pub(crate) fn diff(
     session: &mut Session,
@@ -7614,6 +7887,7 @@ pub(crate) fn diff(
     }
     let (a, fa) = files_at(session, from)?;
     let (b, fb) = files_at(session, to)?;
+    let (a_rev, b_rev) = (from.to_owned(), to.to_owned());
     let releases = crate::release::history(session)
         .map(|(_, r)| r)
         .unwrap_or_default();
@@ -7629,6 +7903,9 @@ pub(crate) fn diff(
         let to = rebuilt_at(session, to)?;
         drop(stage);
         crate::diff::model(&mut v, &from, &to, opts);
+        // Each drawing whose built views differ (design 417).
+        let (dfrom, dto) = (drawn_at(session, &a_rev)?, drawn_at(session, &b_rev)?);
+        crate::diff::drawings_model(&mut v, &dfrom, &dto, opts);
         // Each imported file that differs, by product.
         if let Some(Value::Array(files)) = v.get_mut("imports") {
             for f in files {
@@ -7996,6 +8273,132 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_split_by_a_tool_is_checked_when_written_and_reports_its_sides() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let add = |s: &mut Session, f: Value| {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(s, "feature.add", f)
+        };
+        add(
+            &mut s,
+            json!({"type": "box", "id": "h", "params": {"x": 10, "y": 10, "z": 10}}),
+        )
+        .unwrap();
+        add(
+            &mut s,
+            json!({"type": "box", "id": "t", "params": {"x": 12, "y": 12, "z": 10},
+                   "placement": {"origin": [-1, -1, 5]}}),
+        )
+        .unwrap();
+        // Its own target, and a body the part hasn't, are refused.
+        let e = add(
+            &mut s,
+            json!({"type": "split", "id": "x", "target": "h", "tool": "h"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["pointer"], "/tool/body", "{e}");
+        let e = add(
+            &mut s,
+            json!({"type": "split", "id": "x", "target": "h", "tool": "zz"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound, "{e}");
+        // Faces of two bodies.
+        let face = |s: &mut Session, f: &str| {
+            let v = call(s, "inspect", json!({"part": "p", "feature": f})).unwrap();
+            format!(
+                "p/{f}/{}",
+                v["bodies"][0]["faces"][0]["name"].as_str().unwrap()
+            )
+        };
+        let (fh, ft) = (face(&mut s, "h"), face(&mut s, "t"));
+        let e = add(
+            &mut s,
+            json!({"type": "split", "id": "x", "target": "h", "tool_faces": [fh, ft]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::TargetsMixed, "{e}");
+        add(
+            &mut s,
+            json!({"type": "split", "id": "sp", "target": "h", "tool": "t"}),
+        )
+        .unwrap();
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let line = r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "sp")
+            .unwrap()
+            .clone();
+        assert_eq!(line["ok"], true, "{line}");
+        assert_eq!(line["split"]["tool"], json!({"body": "t"}), "{line}");
+        assert_eq!(line["split"]["tool_kind"], "solid", "{line}");
+        let sides = line["split"]["sides"].as_array().unwrap();
+        assert_eq!(sides.len(), 2, "{line}");
+        assert_eq!(
+            sides[0],
+            json!({"side": "behind", "solid": "h", "lumps": 1, "kind": "solid"})
+        );
+    }
+
+    #[test]
+    fn a_mirror_of_a_sheet_is_new_and_an_offset_of_one_a_sheet() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "plane": "xy"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
+                {"op": "add", "id": "a", "type": "point", "at": [0, 0]},
+                {"op": "add", "id": "b", "type": "point", "at": [10, 0]},
+                {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}]}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "w", "sketch": "s", "surface": true,
+                   "extent": {"type": "blind", "length": "20 mm"}}),
+        )
+        .unwrap();
+        // Left out, the operation is new for a sheet.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "mirror", "id": "m", "solid": "w", "plane": "zx"}),
+        )
+        .unwrap();
+        let shown = call(&mut s, "feature.show", json!({"part": "p", "id": "m"})).unwrap();
+        assert_eq!(shown["operation"], "new", "{shown}");
+        assert!(shown.get("targets").is_none(), "{shown}");
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "offset", "id": "o", "target": "w", "distance": "2 mm"}),
+        )
+        .unwrap();
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let solids = r["parts"][0]["solids"].as_array().unwrap();
+        for id in ["m", "w"] {
+            let b = solids
+                .iter()
+                .find(|x| x["solid"] == id)
+                .unwrap_or_else(|| panic!("{r}"));
+            assert_eq!(b["kind"], "sheet", "{b}");
+            assert_eq!(b["ok"], true, "{b}");
+        }
+    }
+
+    #[test]
     fn mirrors_and_splits_through_the_protocol() {
         let (_dir, mut s) = fresh();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
@@ -8060,8 +8463,8 @@ pub(crate) mod tests {
         assert_eq!(sp["solids"], json!(["half", "sp"]));
         assert_eq!(
             sp["split"]["sides"],
-            json!([{"side": "behind", "solid": "half", "lumps": 1},
-                   {"side": "front", "solid": "sp", "lumps": 1}])
+            json!([{"side": "behind", "solid": "half", "lumps": 1, "kind": "solid"},
+                   {"side": "front", "solid": "sp", "lumps": 1, "kind": "solid"}])
         );
         // Refusals at write time: a plane that isn't one, a solid that isn't.
         let e = add(

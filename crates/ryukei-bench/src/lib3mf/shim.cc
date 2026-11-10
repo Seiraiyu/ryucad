@@ -117,6 +117,15 @@ Read3mf read_3mf(rust::Str path) {
     while (objects->MoveNext()) {
       PObject o = objects->GetCurrentObject();
       out.objects.push_back(rust::String(o->GetName() + "|" + o->GetPartNumber()));
+      const char *ty = "other";
+      switch (o->GetType()) {
+      case eObjectType::Model: ty = "model"; break;
+      case eObjectType::Support: ty = "support"; break;
+      case eObjectType::SolidSupport: ty = "solidsupport"; break;
+      case eObjectType::Surface: ty = "surface"; break;
+      default: break;
+      }
+      out.types.push_back(rust::String(ty));
     }
     PBuildItemIterator items = model->GetBuildItems();
     while (items->MoveNext()) {

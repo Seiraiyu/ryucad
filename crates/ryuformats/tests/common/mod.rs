@@ -360,6 +360,7 @@ pub fn scene() -> Scene {
     let solid = |name: &str, b| Solid {
         name: name.into(),
         mesh: meshed(b),
+        surface: false,
     };
     let turned = Rigid::translation(Vector3::new(0.06, 0.03, 0.01))
         .then_after(&Rigid::rotation(UnitVector3::X, 1.0));

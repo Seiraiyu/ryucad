@@ -497,3 +497,91 @@ fn a_window_opens_in_view_and_its_mode_is_its_participants() {
         .clone();
     assert_eq!(me["mode"], "annotate");
 }
+
+#[test]
+fn the_move_tool_previews_and_writes_a_typed_move() {
+    use ryucad_app::core::mover::Grip;
+    let p = common::two_bolts();
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |w| w.idle()
+        && w.model.middles("frame").contains_key("b2")));
+    ws.start_move("frame", "b2").expect("b2 is free");
+    ws.mover.as_mut().unwrap().grip = Some(Grip::Arrow(0));
+    ws.type_move("20");
+    ws.preview_move();
+    assert!(ws.wait_until(WAIT, |w| !w.model.preview.is_empty()));
+    ws.send_move();
+    assert!(ws.mover.is_none());
+    let moved = |p: &Project| {
+        let shown = p.ok(&["feature", "show", "frame", "b2"]);
+        shown["pose"]["origin_m"][0].as_f64().unwrap()
+    };
+    let t = Instant::now();
+    while (moved(&p) - 0.06).abs() > 1e-9 {
+        assert!(t.elapsed() < WAIT, "from 40 mm to 60 mm: {}", moved(&p));
+        ws.wait_until(Duration::from_millis(200), |_| false);
+    }
+    assert!(ws.wait_until(WAIT, |w| w.idle() && w.model.preview.is_empty()));
+    // A fixed instance has no handles, and says why.
+    assert_eq!(ws.start_move("frame", "b1"), Err("b1 is fixed".to_owned()));
+    // Cancelling draws it where it is again.
+    ws.start_move("frame", "b2").unwrap();
+    ws.mover.as_mut().unwrap().grip = Some(Grip::Ring(2));
+    ws.type_move("90");
+    ws.preview_move();
+    assert!(ws.wait_until(WAIT, |w| !w.model.preview.is_empty()));
+    ws.cancel_move();
+    assert!(ws.model.preview.is_empty() && ws.mover.is_none());
+}
+
+#[test]
+fn the_mate_dialog_previews_and_adds_a_mate() {
+    use ryucad_app::core::mating::Form;
+    let (p, top, foot) = common::plate_and_bolt();
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |w| w.idle() && w.model.middles("frame").len() == 2));
+    ws.open_mate("frame", Some("pin"));
+    ws.mate_pick(&foot).unwrap();
+    // Both picks on one instance are refused in the dialog.
+    assert!(ws.mate_pick(&foot).is_err());
+    assert!(ws.mating.as_ref().unwrap().note.is_some());
+    ws.mate_pick(&top).unwrap();
+    {
+        let d = ws.mating.as_mut().unwrap();
+        d.form = Form::Revolute;
+        d.flip = true;
+    }
+    ws.preview_mate();
+    assert!(ws.wait_until(WAIT, |w| w.mating.as_ref().is_some_and(|d| d.addable())));
+    assert!(
+        !ws.model.preview.is_empty(),
+        "the pin drawn where the mate puts it"
+    );
+    // Nothing written by the preview.
+    assert!(
+        !p.ok(&["feature", "list", "frame"])
+            .to_string()
+            .contains("\"mate\"")
+    );
+    ws.add_mate();
+    assert!(ws.mating.is_none());
+    let t = Instant::now();
+    while !p
+        .ok(&["feature", "list", "frame"])
+        .to_string()
+        .contains("\"mate\"")
+    {
+        assert!(t.elapsed() < WAIT, "no mate written");
+        ws.wait_until(Duration::from_millis(200), |_| false);
+    }
+    // A form a face pair can't take is the daemon's refusal: Add stays off.
+    ws.open_mate("frame", None);
+    ws.mate_pick(&foot).unwrap();
+    ws.mate_pick(&foot.replace("frame/pin/", "frame/base/"))
+        .ok();
+    assert!(ws.wait_until(WAIT, |w| w.mating.as_ref().is_some_and(|d| !d.waiting)));
+    let d = ws.mating.as_ref().unwrap();
+    assert!(d.refusal.is_some() && !d.addable(), "{d:?}");
+    ws.close_mate();
+    assert!(ws.mating.is_none());
+}

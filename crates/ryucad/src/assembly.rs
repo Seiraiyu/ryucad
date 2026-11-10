@@ -1337,12 +1337,14 @@ pub struct Move {
     pub translate: Option<[serde_json::Value; 3]>,
     pub axis: Option<[f64; 3]>,
     pub angle: Option<serde_json::Value>,
+    /// The point the turn's axis runs through; the origin when `None`.
+    pub about: Option<[serde_json::Value; 3]>,
 }
 
 /// Where `how` puts instance `inst` (in an assembly whose default unit is
 /// `unit` and parameters `env`): a placement first (what it leaves out
-/// stays), then a turn of `angle` about `axis` through its origin, then
-/// `translate`, in the assembly's frame.
+/// stays), then a turn of `angle` about `axis` through `about` (else its
+/// origin), then `translate`, in the assembly's frame.
 pub fn move_pose(
     inst: &Instance,
     how: Move,
@@ -1367,6 +1369,13 @@ pub fn move_pose(
             pose.x = x;
         }
     }
+    if how.about.is_some() && (how.axis.is_none() || how.angle.is_none()) {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "about is the point a turn's axis runs through: give axis and angle too",
+        )
+        .with("param", "about"));
+    }
     match (how.axis, how.angle) {
         (None, None) => {}
         (Some(axis), Some(angle)) => {
@@ -1384,6 +1393,20 @@ pub fn move_pose(
             let x = turn.apply_vector(v(pose.x));
             pose.z = [z.x, z.y, z.z];
             pose.x = [x.x, x.y, x.z];
+            if let Some(about) = &how.about {
+                let mut c = [0.0; 3];
+                for (i, q) in about.iter().enumerate() {
+                    c[i] = Quantity::from_json_as(q, Field::Length(unit), &lookup)
+                        .map_err(|e| e.with("pointer", format!("/about/{i}")))?
+                        .meters();
+                }
+                let r = turn.apply_vector(Vector3::new(
+                    pose.origin_m[0] - c[0],
+                    pose.origin_m[1] - c[1],
+                    pose.origin_m[2] - c[2],
+                ));
+                pose.origin_m = [c[0] + r.x, c[1] + r.y, c[2] + r.z];
+            }
         }
         _ => {
             return Err(
@@ -3043,6 +3066,39 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(items(&s), json!({"plate": 1, "bolt": 2}));
+    }
+
+    #[test]
+    fn a_turn_about_a_point_swings_the_origin_round_it() {
+        let (_dir, mut s) = project();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "id": "b1", "of": "bolt"}),
+        )
+        .unwrap();
+        // A quarter turn about z through (10 mm, 0, 0): the origin at 0 goes
+        // to (10 mm, -10 mm, 0), its x axis to y.
+        let v = call(
+            &mut s,
+            "assembly.move",
+            json!({"part": "frame", "instance": "b1", "axis": [0, 0, 1], "angle": "90 deg",
+                   "about": ["10 mm", 0, 0]}),
+        )
+        .unwrap();
+        let o = &v["pose"]["origin_m"];
+        assert!((o[0].as_f64().unwrap() - 0.01).abs() < 1e-12, "{o}");
+        assert!((o[1].as_f64().unwrap() + 0.01).abs() < 1e-12, "{o}");
+        assert_eq!(v["pose"]["x"], json!([0, 1, 0]));
+        // About with nothing to turn is refused, naming it.
+        let e = call(
+            &mut s,
+            "assembly.move",
+            json!({"part": "frame", "instance": "b1", "about": [0, 0, 0]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        assert_eq!(e.details["param"], "about");
     }
 
     #[test]

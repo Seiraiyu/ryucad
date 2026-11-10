@@ -80,10 +80,29 @@ pub enum Kind {
     Tool,
     /// A body's display mesh at one quality.
     Mesh,
+    /// A drawing view's projection (`ryukei.projection.1`), by its placed
+    /// bodies' hashes, their poses' bits and the view's. Kept on this
+    /// machine only: the shared cache's protocol names the other three.
+    Projection,
+    /// A section view's cut body and its caps (`ryucad.section.1`), by
+    /// the body's hash, its pose's bits and the cut's. Kept on this
+    /// machine only, as projections are.
+    Section,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 3] = [Kind::Feature, Kind::Tool, Kind::Mesh];
+    pub const ALL: [Kind; 5] = [
+        Kind::Feature,
+        Kind::Tool,
+        Kind::Mesh,
+        Kind::Projection,
+        Kind::Section,
+    ];
+
+    /// Whether a shared cache holds entries of this kind.
+    pub fn shared(self) -> bool {
+        !matches!(self, Kind::Projection | Kind::Section)
+    }
 
     /// Its folder, and its name in `cache.stats`.
     pub fn as_str(self) -> &'static str {
@@ -91,6 +110,8 @@ impl Kind {
             Kind::Feature => "features",
             Kind::Tool => "tools",
             Kind::Mesh => "meshes",
+            Kind::Projection => "projections",
+            Kind::Section => "sections",
         }
     }
 
@@ -391,7 +412,7 @@ impl Disk {
             entry.drain(..HEADER_LEN);
             return Some(entry);
         }
-        if lock(&self.absent).contains(&key) {
+        if !kind.shared() || lock(&self.absent).contains(&key) {
             return None;
         }
         let entry = self.remote()?.get(kind, &key)?;
@@ -520,7 +541,7 @@ impl Disk {
         match self.put_entry(kind, &key, &bytes) {
             Ok(true) => {
                 self.stored.fetch_add(1, Ordering::Relaxed);
-                if let Some(r) = self.remote() {
+                if let Some(r) = self.remote().filter(|_| kind.shared()) {
                     r.send_later(kind, key, bytes);
                 }
             }

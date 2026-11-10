@@ -4,8 +4,8 @@
 //!
 //! A body-making feature's entry is its [`Made`]: each solid's founder
 //! and [`Built`] (the body, the journal, the origins as JSON, the hash),
-//! the hash, what it applied, if anything, an import's report, and an
-//! unfold's flat, written only when it has one (so every other entry keeps
+//! the hash, what it applied, if anything, a feature's report (an
+//! import's, a fill's, a draft's angles), and an unfold's flat, written only when it has one (so every other entry keeps
 //! its bytes). A tool's entry is its own
 //! body's `Built`. Integers are little-endian, byte strings length-first.
 //! Anything that doesn't read back exactly is `None`: a miss.
@@ -402,6 +402,37 @@ mod tests {
         let back = decode_built(&encode_built(tool)).unwrap();
         assert_eq!(back.body.dump(), tool.body.dump());
         assert_eq!(back.hash, tool.hash);
+    }
+
+    #[test]
+    fn a_drafts_entry_keeps_its_report_and_is_no_reference() {
+        let body = ryukei::primitive::block(
+            ryukei::name::OpKey::from_bytes(b"t"),
+            0.01,
+            0.01,
+            0.01,
+            &ryukei::geom::Rigid::IDENTITY,
+        )
+        .unwrap()
+        .0;
+        let id = Id::parse("d", "feature").unwrap();
+        let b = crate::rebuild::finish(
+            &id,
+            "draft",
+            (body, Default::default()),
+            crate::rebuild::Origins::default(),
+        )
+        .unwrap();
+        let rep = json!({"target": "b", "hinge": "parting",
+            "angles": [{"face": "0123456789abcdef0123456789abcdef",
+                        "least": 0.0349, "greatest": 0.0351, "asked": 0.0349}]});
+        let made = Made {
+            report: Some(Arc::new(rep.clone())),
+            ..Made::new(vec![(Id::parse("b", "feature").unwrap(), Arc::new(b))])
+        };
+        let back = decode_made(&encode_made(&made)).unwrap();
+        assert_eq!(back.report.as_deref(), Some(&rep));
+        assert!(!back.solids[0].1.reference);
     }
 
     #[test]

@@ -263,8 +263,8 @@ fn transform(
         }
         Rename::Feature { from, to, .. } => match pointer {
             // A refold's `unfold` names its unfold as `target` names a
-            // solid's founder.
-            "/sketch" | "/target" | "/solid" | "/unfold" | "/from/sheet" => {
+            // solid's founder; a split's tool body likewise.
+            "/sketch" | "/target" | "/solid" | "/unfold" | "/from/sheet" | "/tool/body" => {
                 (node.as_str() == Some(from)).then(|| json!(to))
             }
             // The solids an operation or a boolean acts on, the sheets a
@@ -401,6 +401,24 @@ fn path_part(files: &Files, asm: &str, path: &[Value]) -> Option<String> {
         part = v["part"].as_str()?.to_owned();
     }
     Some(part)
+}
+
+/// The part a drawing's node at `pt` names faces of: the source of the
+/// view it is under (its base view's `of`, else `owner`, the drawing's own
+/// part).
+fn drawing_source<'a>(v: &'a Value, pt: &str, owner: &'a str) -> &'a str {
+    let mut k = match pt.strip_prefix("/views/").and_then(|r| r.split('/').next()) {
+        Some(k) => k,
+        None => return owner,
+    };
+    for _ in 0..=v["views"].as_object().map_or(0, |m| m.len()) {
+        let w = &v["views"][k];
+        match w["from"].as_str() {
+            Some(up) => k = up,
+            None => return w["of"].as_str().unwrap_or(owner),
+        }
+    }
+    owner
 }
 
 /// The feature a file of the part is, if it is one.
@@ -716,6 +734,45 @@ pub fn plan(
             }
         }
     }
+    // References theirs' drawings of the part make (plan 9.A): a node the
+    // merge has from theirs, not ours, mapped as a feature's references
+    // are. Only references: a drawing's other strings are its own keys
+    // (`s1`, `v2`) and part IDs, which a feature's renumbering never names.
+    // Every part's drawings: a view names faces of its source part (a
+    // base view's `of`, else the drawing's own part), so only views whose
+    // source is the renumbered part are mapped.
+    if let Rename::Feature { .. } = &r {
+        let sub = format!("/{}/", crate::doc::drawing::DRAWINGS);
+        for (p, b) in working {
+            let Some(owner) = p
+                .strip_prefix("parts/")
+                .and_then(|rest| rest.split_once(sub.as_str()))
+                .map(|(o, _)| o)
+            else {
+                continue;
+            };
+            let (Ok(v), Some(t), o) = (
+                serde_json::from_slice::<Value>(b),
+                json_of(theirs, p),
+                json_of(ours, p),
+            ) else {
+                continue;
+            };
+            let new = rewrite(&v, "", &mut |pt, n| {
+                if !is_reference(n) || drawing_source(&v, pt, owner) != part {
+                    return None;
+                }
+                let mine = o.as_ref().and_then(|o| o.pointer(pt));
+                if t.pointer(pt) != Some(n) || mine == Some(n) {
+                    return None;
+                }
+                transform(&r, &names, &v, "", pt, n)
+            });
+            if new != v {
+                files.insert(p.clone(), bytes(&new));
+            }
+        }
+    }
     // Explode steps theirs wrote (plan 10.D): the assembly's instance
     // paths through a renumbered instance or pattern. A file's steps are
     // one value, as the merge takes them.
@@ -850,6 +907,59 @@ pub fn plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drafts_follow_their_target_faces_parting_line_and_flips() {
+        let old = |k: u8| format!("{k:032x}");
+        let new = |k: u8| format!("{:032x}", k + 100);
+        let r = |k: u8| json!({"feature": "b", "name": old(k)});
+        let d = json!({"format": crate::doc::tweak::DRAFT_FORMAT, "kind": "ryucad.feature",
+            "type": "draft", "target": "b", "angle": "2 deg", "parting": [r(3)], "pull": "z",
+            "faces": [r(1)], "groups": [{"angle": "5 deg", "faces": [r(2)]}], "flip": [r(2)]});
+        let n = json!({"format": crate::doc::tweak::DRAFT_FORMAT, "kind": "ryucad.feature",
+            "type": "draft", "target": "b", "angle": "2 deg", "neutral": r(4), "faces": [r(1)]});
+        let f = files(&[
+            ("parts/a/features/d.json", d),
+            ("parts/a/features/n.json", n),
+        ]);
+        let rename = Rename::Feature {
+            part: "a".into(),
+            from: "b".into(),
+            to: "b-1".into(),
+        };
+        let names = BTreeMap::from([(
+            "b".to_owned(),
+            (1..=4)
+                .map(|k| (old(k), new(k)))
+                .collect::<BTreeMap<_, _>>(),
+        )]);
+        let out = renumbered(&f, &rename, &names);
+        let read = |p: &str| serde_json::from_slice::<Value>(&out[p]).unwrap();
+        let to = |k: u8| json!({"feature": "b-1", "name": new(k)});
+        let d = read("parts/a/features/d.json");
+        assert_eq!(
+            (&d["target"], &d["faces"][0], &d["parting"][0]),
+            (&json!("b-1"), &to(1), &to(3))
+        );
+        assert_eq!(
+            (&d["groups"][0]["faces"][0], &d["flip"][0]),
+            (&to(2), &to(2))
+        );
+        assert_eq!(read("parts/a/features/n.json")["neutral"], to(4));
+    }
+
+    #[test]
+    fn a_drawings_node_names_faces_of_its_views_source() {
+        let v = json!({"views": {
+            "v1": {"type": "base", "of": "q"},
+            "v2": {"type": "projected", "from": "v1"},
+            "v3": {"type": "base"}
+        }});
+        assert_eq!(drawing_source(&v, "/views/v2/normal_to", "p"), "q");
+        assert_eq!(drawing_source(&v, "/views/v1/orient/normal_to", "p"), "q");
+        assert_eq!(drawing_source(&v, "/views/v3/orient/normal_to", "p"), "p");
+        assert_eq!(drawing_source(&v, "/sheets/s1", "p"), "p");
+    }
 
     #[test]
     fn tweaks_follow_their_target_faces_and_axis() {
@@ -1131,6 +1241,43 @@ mod tests {
         assert_eq!(
             read(&out, "parts/a/features/on.json")["targets"],
             json!(["s-1"])
+        );
+    }
+
+    #[test]
+    fn a_splits_tool_follows_its_body_and_faces() {
+        let old = "0123456789abcdef0123456789abcdef";
+        let new = "fedcba9876543210fedcba9876543210";
+        let by_body = json!({
+            "format": 19, "kind": "ryucad.feature", "type": "split", "target": "h",
+            "tool": {"body": "parting"},
+        });
+        let by_faces = json!({
+            "format": 19, "kind": "ryucad.feature", "type": "split", "target": "h",
+            "tool": {"faces": [{"feature": "parting", "name": old}]},
+        });
+        let f = files(&[
+            ("parts/a/features/s.json", by_body),
+            ("parts/a/features/t.json", by_faces),
+        ]);
+        let names = BTreeMap::from([(
+            "parting".to_owned(),
+            BTreeMap::from([(old.to_owned(), new.to_owned())]),
+        )]);
+        let out = renumbered(
+            &f,
+            &Rename::Feature {
+                part: "a".into(),
+                from: "parting".into(),
+                to: "parting-2".into(),
+            },
+            &names,
+        );
+        let read = |p: &str| serde_json::from_slice::<Value>(&out[p]).unwrap();
+        assert_eq!(read("parts/a/features/s.json")["tool"]["body"], "parting-2");
+        assert_eq!(
+            read("parts/a/features/t.json")["tool"]["faces"][0],
+            json!({"feature": "parting-2", "name": new})
         );
     }
 

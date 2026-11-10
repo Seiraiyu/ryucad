@@ -99,6 +99,11 @@ enum Command {
     /// participant's window, part of the way through with --fraction.
     #[command(subcommand)]
     Explode(ExplodeCmd),
+    /// A part's 2D drawings: sheets on a template with a title block, and
+    /// views projected with exact hidden lines, written as PDF, SVG and
+    /// PNG. Every value a sheet shows comes from the model.
+    #[command(subcommand)]
+    Drawing(DrawingCmd),
     /// ryupdm's settings for this project: its ID, how revisions are labelled, the release
     /// branch, the part number pattern and the custom properties parts may have.
     #[command(subcommand)]
@@ -1071,7 +1076,7 @@ enum PartCmd {
 enum AssemblyCmd {
     /// Move an instance: to a pose (--origin, --z, --x; what is left out
     /// stays), then by --translate and a turn of --angle about --axis
-    /// through its origin, in the assembly's frame.
+    /// through --about (else its origin), in the assembly's frame.
     Move {
         part: String,
         instance: String,
@@ -1086,6 +1091,9 @@ enum AssemblyCmd {
         /// How far to turn it (with --axis): 90deg.
         #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
         angle: Option<String>,
+        /// The point the turn's axis runs through (with --axis): 10mm,0,0.
+        #[arg(long, value_name = "VECTOR", value_parser = triple, allow_hyphen_values = true)]
+        about: Option<[String; 3]>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1107,10 +1115,21 @@ enum AssemblyCmd {
         /// How far to turn it (with --axis): 90deg.
         #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
         angle: Option<String>,
+        /// The point the turn's axis runs through (with --axis): 10mm,0,0.
+        #[arg(long, value_name = "VECTOR", value_parser = triple, allow_hyphen_values = true)]
+        about: Option<[String; 3]>,
         /// Solve only what the instance's mates reach, from the poses the
         /// assembly's rebuild has, as a drag's preview does.
         #[arg(long, requires = "instance")]
         component: bool,
+        /// Solve over this revision rather than the working files: a Git
+        /// revision, worktree:<path>, annotation:<id> or draft:<name>.
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
+        /// A mate to solve with, writing nothing, as JSON of the fields
+        /// feature add takes for a mate: {"form": "revolute", "a": REF, "b": REF}.
+        #[arg(long = "mate", value_name = "JSON", value_parser = json_object)]
+        mates: Vec<Value>,
     },
     /// The instances as a tree: parts, revisions, poses, freedom,
     /// subassemblies.
@@ -1142,12 +1161,16 @@ enum FeatureCmd {
     /// face tweak: move_face (--by translate with --direction and --distance,
     /// rotate with --axis and --angle, or offset with --distance and
     /// --face-distance; --face repeated, --no-tangent) or replace_face (--with,
-    /// then the --face values it replaces) of a solid, keeping every name (offset
+    /// then the --face values it replaces) or draft (--neutral, or --parting with
+    /// --pull; --angle; --face repeated, --face-angle, --flip, --reverse, --no-tangent)
+    /// of a solid, keeping every name (offset
     /// moves every face, filling where they part; move_face --by offset moves
     /// only the faces named, keeping the topology); a
     /// mirror (--solid, --plane, --operation) of a whole solid, joined to
-    /// it unless told otherwise; a split (--target, --plane, --flip,
-    /// --keep) of a solid by a plane; a base flange (--sketch, --thickness,
+    /// it unless told otherwise; a split (--target, --plane, or --tool
+    /// BODY, or --tool-face FACE...; --flip, --keep): the target keeps the
+    /// side behind, `--keep behind` trims it, `--keep both` founds what is
+    /// in front; a base flange (--sketch, --thickness,
     /// --radius, --k-factor or --deduction, --relief, a bent section's
     /// --depth) founding a sheet metal solid; an edge flange (--edge,
     /// --side, --angle, --length, --measured, --position, --radius,
@@ -1698,6 +1721,292 @@ enum ExplodeCmd {
     },
 }
 
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+enum DrawingCmd {
+    /// A part's drawings, or every part's, with each listed part's revision.
+    List { part: Option<String> },
+    /// A drawing with one sheet; --views standard adds a base front view,
+    /// its top and right (first-angle's when the standard says) and an
+    /// isometric, laid out.
+    Create {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        name: Option<String>,
+        /// A built-in template (asme-a to asme-e, iso-a4 to iso-a0) or a
+        /// project template's ID; the size's built-in one by default.
+        #[arg(long)]
+        template: Option<String>,
+        /// iso_a0 to iso_a4, ansi_a to ansi_e (ansi_b for ASME, iso_a3 for
+        /// ISO by default).
+        #[arg(long)]
+        size: Option<String>,
+        #[arg(long, value_parser = ["standard"])]
+        views: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// A batch of ops on a drawing's sheets and views, all or nothing:
+    /// '[{"op": "add", "kind": "view", "value": {"type": "projected",
+    /// "sheet": "s1", "from": "v1", "side": "left"}}, {"op": "set",
+    /// "id": "v1", "fields": {"hidden": "dashed"}}, {"op": "move", "id":
+    /// "v1", "at": ["120 mm", "150 mm"]}, {"op": "remove", "id": "v4"}]'.
+    Edit {
+        part: String,
+        drawing: String,
+        #[arg(long, value_name = "JSON", value_parser = json_array)]
+        ops: Value,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Add a view: the same op `edit` sends.
+    #[command(subcommand)]
+    View(DrawingViewCmd),
+    /// Move a view to a centre on its sheet, or a projected or auxiliary
+    /// view along its row or column.
+    Move {
+        part: String,
+        drawing: String,
+        view: String,
+        #[arg(
+            long,
+            value_name = "X,Y",
+            conflicts_with = "offset",
+            required_unless_present = "offset"
+        )]
+        at: Option<String>,
+        #[arg(long, value_name = "LENGTH")]
+        offset: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Remove a sheet or a view.
+    Remove {
+        part: String,
+        drawing: String,
+        id: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Delete {
+        part: String,
+        drawing: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Give a drawing a new ID.
+    Rename {
+        part: String,
+        drawing: String,
+        to: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// The built drawing: sheets, views with their boxes and frames, and
+    /// findings; --items adds every item's exact geometry.
+    Get {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        rev: Option<String>,
+        #[arg(long)]
+        sheet: Option<String>,
+        #[arg(long)]
+        items: bool,
+    },
+    /// Each sheet in words: its views, what they show, what lies near what.
+    Describe {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        rev: Option<String>,
+        #[arg(long)]
+        sheet: Option<String>,
+    },
+    /// A sheet as PNG (4 pixels a millimetre unless --scale) or SVG.
+    Render {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        out: std::path::PathBuf,
+        #[arg(long)]
+        sheet: Option<String>,
+        #[arg(long, value_parser = ["png", "svg"])]
+        format: Option<String>,
+        /// Pixels to the millimetre, 0.5 to 40.
+        #[arg(long, value_name = "PX_PER_MM")]
+        scale: Option<f32>,
+        #[arg(long)]
+        rev: Option<String>,
+    },
+    /// Every sheet as one PDF, or one sheet as SVG or DXF, by --out's
+    /// extension unless --format; the daemon writes it (never over a
+    /// project file).
+    Export {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        out: std::path::PathBuf,
+        #[arg(long)]
+        sheet: Option<String>,
+        #[arg(long, value_parser = ["pdf", "svg", "dxf"])]
+        format: Option<String>,
+        /// A DXF's unit.
+        #[arg(long, value_parser = ["mm", "in"])]
+        unit: Option<String>,
+        /// A Git revision, `label:<L>`, `annotation:<id>` or `draft:<name>`.
+        #[arg(long)]
+        rev: Option<String>,
+    },
+    /// Lay the views out again from nothing.
+    Layout {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum DrawingViewCmd {
+    /// A base view (--orient), one projected from another (--from with
+    /// --side), or an auxiliary one (--from with --normal-to).
+    Add {
+        part: String,
+        drawing: String,
+        /// Its key (v1, v2, …); the next free one by default.
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long, default_value = "s1")]
+        sheet: String,
+        /// A standard view's name, a named view of the part, or with
+        /// --normal-to unset a face's reference to look normal to.
+        #[arg(long, conflicts_with = "from")]
+        orient: Option<String>,
+        /// The part or assembly a base, flat or exploded view draws (the
+        /// drawing's own).
+        #[arg(long = "of")]
+        of: Option<String>,
+        #[arg(long, requires = "orient")]
+        label_rev: Option<String>,
+        #[arg(long, required_unless_present_any = ["orient", "flat"])]
+        from: Option<String>,
+        /// A section (with --from) on a plane: xy, yz, zx, a planar face's
+        /// or a datum plane's reference.
+        #[arg(long, requires = "from", conflicts_with_all = ["through", "side", "normal_to", "centre"])]
+        cut: Option<String>,
+        /// Moves --cut's plane along its normal.
+        #[arg(long, requires = "cut", allow_hyphen_values = true)]
+        cut_offset: Option<String>,
+        /// An offset section (with --from) through these points in order:
+        /// X,Y,Z lengths, a vertex's or datum point's reference, or origin.
+        #[arg(long, requires = "from", conflicts_with_all = ["side", "normal_to", "centre"])]
+        through: Vec<String>,
+        /// Sees a section from the other side.
+        #[arg(long)]
+        flip: bool,
+        /// An instance path an assembly's section leaves whole.
+        #[arg(long)]
+        unsectioned: Vec<String>,
+        /// A detail (with --from) about this point, X,Y,Z or a reference.
+        #[arg(long, requires_all = ["from", "radius"], conflicts_with_all = ["side", "normal_to"])]
+        centre: Option<String>,
+        /// A detail's radius in the model.
+        #[arg(long, requires = "centre")]
+        radius: Option<String>,
+        /// A sheet metal solid's flat pattern.
+        #[arg(long, conflicts_with_all = ["orient", "from"])]
+        flat: bool,
+        /// The flat view's solid (the part's one sheet metal solid).
+        #[arg(long, requires = "flat")]
+        solid: Option<String>,
+        /// A flat view without its bend notes.
+        #[arg(long, requires = "flat")]
+        no_notes: bool,
+        /// An exploded view (with --orient) of this explode.
+        #[arg(long, requires = "orient")]
+        explode: Option<String>,
+        /// How far through the explode, 0 to 1 (all of it).
+        #[arg(long, requires = "explode")]
+        fraction: Option<f64>,
+        /// Draws the explode's trails.
+        #[arg(long, requires = "explode")]
+        trails: bool,
+        /// top, bottom, left, right, back, or iso and the cube's corners.
+        #[arg(long, requires = "from", conflicts_with = "normal_to")]
+        side: Option<String>,
+        /// A straight edge or planar face the auxiliary view looks along.
+        #[arg(long, requires = "from")]
+        normal_to: Option<String>,
+        #[arg(long, value_name = "X,Y")]
+        at: Option<String>,
+        #[arg(long, value_name = "SHEET:MODEL")]
+        scale: Option<String>,
+        #[arg(long, value_parser = ["off", "dashed"])]
+        hidden: Option<String>,
+        #[arg(long, value_parser = ["thin", "off", "phantom"])]
+        tangent: Option<String>,
+        #[arg(long)]
+        label: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+/// A geometric reference as a drawing writes it: a word (`xy`, `x`,
+/// `origin`), `<part>/<feature>` (a datum) or `<part>/<feature>/<name>`.
+fn drawing_geom(text: &str) -> core::result::Result<Value, Error> {
+    let parts: Vec<&str> = text.split('/').collect();
+    match parts.as_slice() {
+        [w] => Ok(json!(w)),
+        [_, f] => Ok(json!({"feature": f})),
+        _ => drawing_ref(text),
+    }
+}
+
+/// A model point as a drawing writes it: `X,Y,Z` lengths, else a
+/// geometric reference.
+fn drawing_point(text: &str) -> core::result::Result<Value, Error> {
+    let xyz: Vec<&str> = text.split(',').map(str::trim).collect();
+    match xyz.as_slice() {
+        [x, y, z] => Ok(json!([x, y, z])),
+        _ => drawing_geom(text),
+    }
+}
+
+/// A reference `<part>/<feature>/<name>` as a drawing writes it.
+fn drawing_ref(text: &str) -> core::result::Result<Value, Error> {
+    let parts: Vec<&str> = text.split('/').collect();
+    match parts.as_slice() {
+        [_, f, n] => Ok(json!({"feature": f, "name": n})),
+        _ => Err(Error::new(
+            Code::InvalidParam,
+            format!("{text:?} is no reference: <part>/<solid>/<name>"),
+        )),
+    }
+}
+
+/// `X,Y` as two sheet lengths (bare numbers millimetres).
+fn sheet_point(text: &str) -> core::result::Result<Value, Error> {
+    let parts: Vec<&str> = text.split(',').map(str::trim).collect();
+    match parts.as_slice() {
+        [x, y] => {
+            let q = |s: &str| -> Value {
+                s.parse::<f64>()
+                    .map_or_else(|_| json!(s), |n| json!(format!("{n} mm")))
+            };
+            Ok(json!([q(x), q(y)]))
+        }
+        _ => Err(Error::new(
+            Code::Usage,
+            format!("{text:?}: a point on the sheet is X,Y"),
+        )),
+    }
+}
+
 fn json_array(s: &str) -> core::result::Result<Value, String> {
     match serde_json::from_str::<Value>(s) {
         Ok(v @ Value::Array(_)) => Ok(v),
@@ -2022,7 +2331,7 @@ struct FieldArgs {
     /// A planar face to sketch on, the face a chamfer's first distance runs along, or a
     /// planar face whose loops a sweep carries: <part>/<feature>/<name>, as inspect
     /// gives it. Repeat for an extract's faces, a thicken's or a move_face's; a
-    /// replace_face's, after the --with they take.
+    /// replace_face's, after the --with they take; or a draft's (repeat for each).
     #[arg(long = "face", value_name = "REFERENCE")]
     face: Vec<String>,
     /// A sketch on a face: a vertex for its origin ("" for the part origin, projected).
@@ -2060,7 +2369,7 @@ struct FieldArgs {
     #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
     offset: Option<String>,
     /// Extrude against the sketch's normal, or a linear pattern against its direction
-    /// (or --reverse false).
+    /// (or --reverse false); a draft's pull, turned round.
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     reverse: Option<bool>,
     /// Sweep the profile's loops and open chains into a sheet of its own: an
@@ -2075,7 +2384,9 @@ struct FieldArgs {
     /// A revolve's angle: 90, "90 deg", or full; a chamfer's angle to its face
     /// (distance_angle). A circular pattern's span, which it needs: 360 spaces --count
     /// evenly round a whole turn, less spans the first instance to the last. A
-    /// move_face's turn about its --axis (right-handed; a minus sign turns it back).
+    /// move_face's turn about its --axis (right-handed; a minus sign turns it back). A
+    /// draft's angle from its pull (a positive one tapers a boss inward along it and
+    /// opens a hole).
     #[arg(long, allow_hyphen_values = true)]
     angle: Option<String>,
     /// Revolve half the angle each side of the sketch's plane (or --symmetric false).
@@ -2095,8 +2406,14 @@ struct FieldArgs {
     #[arg(long)]
     op: Option<String>,
     /// A solid a boolean uses as a tool, and consumes; repeat for several.
+    /// A split's tool: a sheet or solid it cuts with, never changed.
     #[arg(long = "tool", value_name = "SOLID")]
     tools: Vec<String>,
+    /// A face a split cuts with (its faces are taken off as a sheet):
+    /// <part>/<solid>/<name>; repeat for several. A split's tool body is
+    /// --tool.
+    #[arg(long = "tool-face", value_name = "FACE")]
+    tool_faces: Vec<String>,
     /// A fillet's radius, or a cylinder's, cone's or sphere's (its radius parameter).
     #[arg(long, value_name = "QUANTITY")]
     radius: Option<String>,
@@ -2295,10 +2612,38 @@ struct FieldArgs {
     /// What a projection point is projected onto: a plane or an axis.
     #[arg(long, value_name = "REFERENCE")]
     onto: Option<String>,
-    /// Turn a datum plane's normal, or a datum axis's direction (or --flip false). A
-    /// split's plane, turned: the target keeps the side behind it.
-    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
-    flip: Option<bool>,
+    /// Turn a datum plane's normal, or a datum axis's direction (or --flip false); a
+    /// split's plane, turned: the target keeps the side behind it. A draft's: a face it
+    /// drafts against its pull, <part>/<solid>/<name>; repeat for each (given, they
+    /// replace a draft's flipped faces).
+    #[arg(long, value_name = "BOOL|FACE", num_args = 0..=1, default_missing_value = "true")]
+    flip: Vec<String>,
+    /// Flip none of a draft's faces.
+    #[arg(long, conflicts_with = "flip")]
+    no_flip: bool,
+    /// A draft's neutral plane: xy, yz, zx, a datum plane <part>/<datum>, a sketch, or a
+    /// planar face <part>/<solid>/<name>; its normal is the pull (--reverse turns it
+    /// round). The faces turn about where the plane crosses them.
+    #[arg(long, value_name = "PLANE", conflicts_with = "parting")]
+    neutral: Option<String>,
+    /// An edge of a draft's parting line, which the faces it bounds turn about:
+    /// <part>/<solid>/<name>; repeat for each. Needs --pull.
+    #[arg(long = "parting", value_name = "EDGE")]
+    parting: Vec<String>,
+    /// A parting-line draft's pull: x, y, z, a datum axis, a straight edge, or a plane's
+    /// normal (--reverse turns it round).
+    #[arg(long, value_name = "DIRECTION")]
+    pull: Option<String>,
+    /// A face a draft drafts at its own angle: REFERENCE=ANGLE, of either sign; repeat for
+    /// several. Faces of one angle are one group. Given, they replace a draft's groups.
+    #[arg(
+        long = "face-angle",
+        value_name = "REFERENCE=ANGLE",
+        value_parser = param,
+        allow_hyphen_values = true,
+        conflicts_with_all = ["face_thickness", "face_distance"]
+    )]
+    face_angle: Vec<(String, String)>,
     /// A path's segment, in order; repeat for each: an edge <part>/<solid>/<name>
     /// (--propagate right after it grows it to its tangent chain), a sketch's line, arc
     /// or circle <part>/<sketch>/<entity>, or a path or helix (<part>/<feature> or its
@@ -2400,10 +2745,11 @@ struct FieldArgs {
         conflicts_with = "face_thickness"
     )]
     face_distance: Vec<(String, String)>,
-    /// Give no face of a shell or offset a thickness or distance of its own.
-    #[arg(long, conflicts_with_all = ["face_thickness", "face_distance"])]
+    /// Give no face of a shell or offset a thickness or distance of its own, nor of a
+    /// draft an angle of its own.
+    #[arg(long, conflicts_with_all = ["face_thickness", "face_distance", "face_angle"])]
     no_faces: bool,
-    /// Move a face tweak's tangent neighbours with the faces it names (the default;
+    /// Move or draft a face tweak's tangent neighbours with the faces it names (the default;
     /// --tangent false or --no-tangent keeps the kernel's tangency_broken). In a
     /// fill, the --edge just before meets its face tangentially (the edge must have
     /// one face).
@@ -2692,6 +3038,9 @@ impl FieldArgs {
         }
         FeatureFields {
             plane: self.plane.clone(),
+            neutral: self.neutral.clone(),
+            parting: (!self.parting.is_empty()).then(|| self.parting.clone()),
+            pull: self.pull.clone(),
             // One --face is a chamfer's, a sketch's or a sweep's `face`;
             // several are a move's `faces`, beside any --face-distance
             // groups; with --with they are a replacement's groups.
@@ -2754,6 +3103,8 @@ impl FieldArgs {
             op: self.op.clone(),
             target: None,
             tools: (!self.tools.is_empty()).then(|| self.tools.clone()),
+            tool: None,
+            tool_faces: (!self.tool_faces.is_empty()).then(|| self.tool_faces.clone()),
             groups: if self.with_groups.is_empty() {
                 self.groups.clone().map(|g| g.0)
             } else {
@@ -2839,7 +3190,7 @@ impl FieldArgs {
             onto: self.onto.clone(),
             origin: None,
             x: None,
-            flip: self.flip,
+            flip: flip_of(&self.flip, self.no_flip),
             segments: (!self.segments.is_empty()).then(|| {
                 self.segments
                     .iter()
@@ -2896,6 +3247,8 @@ impl FieldArgs {
                     face_groups(&self.face_thickness, "thickness")
                 } else if !self.face_distance.is_empty() {
                     face_groups(&self.face_distance, "distance")
+                } else if !self.face_angle.is_empty() {
+                    face_groups(&self.face_angle, "angle")
                 } else {
                     json!([])
                 };
@@ -3146,6 +3499,21 @@ fn ends_json(setbacks: &[(String, String)], reliefs: &[(String, String)]) -> Opt
     ))
 }
 
+/// `--flip` as a request takes it: a bool where every value is `true` or
+/// `false` (the last one counting: a datum's or split's), else a draft's
+/// faces; `--no-flip` none.
+fn flip_of(values: &[String], none: bool) -> Option<ryucad::proto::Flip> {
+    use ryucad::proto::Flip;
+    if none {
+        return Some(Flip::Faces(Vec::new()));
+    }
+    let last = values.last()?;
+    if values.iter().all(|v| v == "true" || v == "false") {
+        return Some(Flip::On(last == "true"));
+    }
+    Some(Flip::Faces(values.to_vec()))
+}
+
 fn face_groups(pairs: &[(String, String)], key: &str) -> Value {
     let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
     for (face, q) in pairs {
@@ -3317,6 +3685,7 @@ fn request(cmd: &Command) -> Option<Request> {
             translate,
             axis,
             angle,
+            about,
             expect,
         }) => Request::AssemblyMove {
             part: part.clone(),
@@ -3325,6 +3694,7 @@ fn request(cmd: &Command) -> Option<Request> {
             translate: translate.clone().map(|t| t.map(Value::String)),
             axis: *axis,
             angle: angle.clone().map(Value::String),
+            about: about.clone().map(|t| t.map(Value::String)),
             expected_revision: expect.revision.clone(),
         },
         Command::Assembly(AssemblyCmd::Tree { part, path, depth }) => Request::AssemblyTree {
@@ -3339,10 +3709,18 @@ fn request(cmd: &Command) -> Option<Request> {
             translate,
             axis,
             angle,
+            about,
             component,
+            rev,
+            mates,
         }) => Request::AssemblySolve {
             part: part.clone(),
             component: *component,
+            rev: rev.clone(),
+            mates: mates
+                .iter()
+                .filter_map(|m| m.as_object().cloned())
+                .collect(),
             moves: instance
                 .iter()
                 .map(|i| ryucad::proto::InstanceMove {
@@ -3351,6 +3729,7 @@ fn request(cmd: &Command) -> Option<Request> {
                     translate: translate.clone().map(|t| t.map(Value::String)),
                     axis: *axis,
                     angle: angle.clone().map(Value::String),
+                    about: about.clone().map(|t| t.map(Value::String)),
                 })
                 .collect(),
         },
@@ -3645,6 +4024,8 @@ fn request(cmd: &Command) -> Option<Request> {
             }
         }
         Command::View(ViewCmd::List { part }) => Request::ViewList { part: part.clone() },
+        // `main` checks it first (`drawing_request`'s refusals).
+        Command::Drawing(d) => drawing_request(d).expect("checked before the request is made"),
         Command::Explode(ExplodeCmd::List { part }) => Request::ExplodeList { part: part.clone() },
         Command::Explode(ExplodeCmd::Save {
             part,
@@ -4579,7 +4960,8 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             let disk = Disk::for_user().ok_or_else(|| {
                 Error::new(Code::Io, "there is no disk cache on this machine to push")
             })?;
-            let kinds = kind.map_or(Kind::ALL.to_vec(), |k| vec![k]);
+            let shared: Vec<Kind> = Kind::ALL.into_iter().filter(|k| k.shared()).collect();
+            let kinds = kind.map_or(shared, |k| vec![k]);
             ryucad::cache::push(&disk, &kinds)
         }
         Command::WhereUsed {
@@ -4721,6 +5103,9 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             if let Command::Annotations(c) = cmd {
                 annotations_usage(c)?;
             }
+            if let Command::Drawing(d) = cmd {
+                drawing_request(d)?;
+            }
             let req = absolute_worktrees(
                 request(cmd).expect("every other command is a request"),
                 &here,
@@ -4847,7 +5232,10 @@ fn deliver(cmd: &Command, a: Answer) -> Result<Value> {
         return written(cmd, a.result);
     };
     let out = match cmd {
-        Command::Mesh { out: Some(o), .. } | Command::Render { out: o, .. } => o,
+        Command::Mesh { out: Some(o), .. }
+        | Command::Render { out: o, .. }
+        | Command::Drawing(DrawingCmd::Render { out: o, .. })
+        | Command::Drawing(DrawingCmd::Export { out: o, .. }) => o,
         _ => {
             return Err(Error::new(
                 Code::Internal,
@@ -4859,6 +5247,303 @@ fn deliver(cmd: &Command, a: Answer) -> Result<Value> {
     let mut result = a.result;
     result["out"] = json!(out);
     Ok(result)
+}
+
+/// The request a `drawing` command sends.
+fn drawing_request(d: &DrawingCmd) -> Result<Request> {
+    let edit =
+        |part: &String, drawing: &String, ops: Value, expect: &Expect| Request::DrawingEdit {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            ops,
+            expected_revision: expect.revision.clone(),
+        };
+    Ok(match d {
+        DrawingCmd::List { part } => Request::DrawingList { part: part.clone() },
+        DrawingCmd::Create {
+            part,
+            drawing,
+            name,
+            template,
+            size,
+            views,
+            expect,
+        } => Request::DrawingCreate {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            name: name.clone(),
+            template: template.clone(),
+            size: size.clone(),
+            views: views.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        DrawingCmd::Edit {
+            part,
+            drawing,
+            ops,
+            expect,
+        } => edit(part, drawing, ops.clone(), expect),
+        DrawingCmd::View(DrawingViewCmd::Add {
+            part,
+            drawing,
+            id,
+            sheet,
+            orient,
+            of,
+            label_rev,
+            from,
+            cut,
+            cut_offset,
+            through,
+            flip,
+            unsectioned,
+            centre,
+            radius,
+            flat,
+            solid,
+            no_notes,
+            explode,
+            fraction,
+            trails,
+            side,
+            normal_to,
+            at,
+            scale,
+            hidden,
+            tangent,
+            label,
+            expect,
+        }) => {
+            let mut v = json!({"sheet": sheet});
+            match (orient, from) {
+                _ if *flat => {
+                    v["type"] = json!("flat");
+                    if let Some(of) = of {
+                        v["of"] = json!(of);
+                    }
+                    if let Some(s) = solid {
+                        v["solid"] = json!(s);
+                    }
+                    if *no_notes {
+                        v["notes"] = json!(false);
+                    }
+                }
+                (Some(o), _) if explode.is_some() => {
+                    v["type"] = json!("exploded");
+                    v["explode"] = json!(explode);
+                    v["orient"] = if o.contains('/') {
+                        json!({"normal_to": drawing_ref(o)?})
+                    } else {
+                        json!(o)
+                    };
+                    if let Some(of) = of {
+                        v["of"] = json!(of);
+                    }
+                    if let Some(f) = fraction {
+                        v["fraction"] = json!(f);
+                    }
+                    if *trails {
+                        v["trails"] = json!(true);
+                    }
+                }
+                (None, Some(f)) if cut.is_some() || !through.is_empty() => {
+                    v["type"] = json!("section");
+                    v["from"] = json!(f);
+                    v["cut"] = match cut {
+                        Some(c) => {
+                            let mut c = json!({"plane": drawing_geom(c)?});
+                            if let Some(d) = cut_offset {
+                                c["offset"] = json!(d);
+                            }
+                            c
+                        }
+                        None => {
+                            json!({"through": through.iter().map(|p| drawing_point(p)).collect::<core::result::Result<Vec<_>, _>>()?})
+                        }
+                    };
+                    if *flip {
+                        v["flip"] = json!(true);
+                    }
+                    if !unsectioned.is_empty() {
+                        v["unsectioned"] = json!(unsectioned);
+                    }
+                }
+                (None, Some(f)) if centre.is_some() => {
+                    v["type"] = json!("detail");
+                    v["from"] = json!(f);
+                    v["centre"] = drawing_point(centre.as_deref().unwrap_or_default())?;
+                    v["radius"] = json!(radius);
+                }
+                (Some(o), _) => {
+                    v["type"] = json!("base");
+                    v["orient"] = if o.contains('/') {
+                        json!({"normal_to": drawing_ref(o)?})
+                    } else {
+                        json!(o)
+                    };
+                    if let Some(of) = of {
+                        v["of"] = json!(of);
+                    }
+                    if let Some(l) = label_rev {
+                        v["rev"] = json!({"label": l});
+                    }
+                }
+                (None, Some(f)) => {
+                    v["from"] = json!(f);
+                    match (side, normal_to) {
+                        (_, Some(n)) => {
+                            v["type"] = json!("auxiliary");
+                            v["normal_to"] = drawing_ref(n)?;
+                        }
+                        (Some(sd), None) => {
+                            v["type"] = json!("projected");
+                            v["side"] = json!(sd);
+                        }
+                        (None, None) => {
+                            return Err(Error::new(
+                                Code::Usage,
+                                "a view from another takes --side or --normal-to",
+                            ));
+                        }
+                    }
+                }
+                (None, None) => unreachable!("clap requires one"),
+            }
+            if let Some(a) = at {
+                v["at"] = sheet_point(a)?;
+            }
+            for (k, x) in [
+                ("scale", scale),
+                ("hidden", hidden),
+                ("tangent", tangent),
+                ("label", label),
+            ] {
+                if let Some(x) = x {
+                    v[k] = json!(x);
+                }
+            }
+            let mut op = json!({"op": "add", "kind": "view", "value": v});
+            if let Some(id) = id {
+                op["id"] = json!(id);
+            }
+            edit(part, drawing, json!([op]), expect)
+        }
+        DrawingCmd::Move {
+            part,
+            drawing,
+            view,
+            at,
+            offset,
+            expect,
+        } => {
+            let mut op = json!({"op": "move", "id": view});
+            match (at, offset) {
+                (Some(a), _) => op["at"] = sheet_point(a)?,
+                (None, Some(o)) => op["offset"] = json!(o),
+                (None, None) => unreachable!("clap requires one"),
+            }
+            edit(part, drawing, json!([op]), expect)
+        }
+        DrawingCmd::Remove {
+            part,
+            drawing,
+            id,
+            expect,
+        } => edit(part, drawing, json!([{"op": "remove", "id": id}]), expect),
+        DrawingCmd::Delete {
+            part,
+            drawing,
+            expect,
+        } => Request::DrawingDelete {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        DrawingCmd::Rename {
+            part,
+            drawing,
+            to,
+            expect,
+        } => Request::DrawingRename {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            to: to.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        DrawingCmd::Get {
+            part,
+            drawing,
+            rev,
+            sheet,
+            items,
+        } => Request::DrawingGet {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            rev: rev.clone(),
+            sheet: sheet.clone(),
+            items: *items,
+        },
+        DrawingCmd::Describe {
+            part,
+            drawing,
+            rev,
+            sheet,
+        } => Request::DrawingDescribe {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            rev: rev.clone(),
+            sheet: sheet.clone(),
+        },
+        DrawingCmd::Render {
+            part,
+            drawing,
+            out: _,
+            sheet,
+            format,
+            scale,
+            rev,
+        } => Request::DrawingRender {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            rev: rev.clone(),
+            sheet: sheet.clone(),
+            format: format.clone(),
+            scale: *scale,
+        },
+        DrawingCmd::Export {
+            part,
+            drawing,
+            out,
+            sheet,
+            format,
+            unit,
+            rev,
+        } => Request::DrawingExport {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            rev: rev.clone(),
+            sheet: sheet.clone(),
+            format: format.clone(),
+            unit: unit.clone(),
+            out: Some(
+                std::path::absolute(out)
+                    .unwrap_or_else(|_| out.clone())
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        },
+        DrawingCmd::Layout {
+            part,
+            drawing,
+            dry_run,
+            expect,
+        } => Request::DrawingLayout {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            dry_run: *dry_run,
+            expected_revision: expect.revision.clone(),
+        },
+    })
 }
 
 /// The result to print, once text a command writes to its `--out` file
@@ -5278,6 +5963,92 @@ mod tests {
             }
             _ => panic!("not a feature write"),
         }
+    }
+
+    #[test]
+    fn drafts_from_the_command_line() {
+        on_cli_stack(|| {
+            use ryucad::proto::Flip;
+            // About a neutral plane: faces, a group at its own angle, a face
+            // flipped, the pull reversed, tangency off.
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "draft",
+                "--neutral",
+                "xy",
+                "--angle",
+                "2deg",
+                "--face",
+                "p/b/a",
+                "--face",
+                "p/b/c",
+                "--face-angle",
+                "p/b/d=-5deg",
+                "--flip",
+                "p/b/d",
+                "--reverse",
+                "--no-tangent",
+            ])
+            .unwrap();
+            assert_eq!(f.neutral.as_deref(), Some("xy"));
+            assert_eq!(
+                f.faces,
+                Some(json!(["p/b/a", "p/b/c", {"angle": "-5deg", "faces": ["p/b/d"]}]))
+            );
+            assert_eq!(f.flip, Some(Flip::Faces(vec!["p/b/d".to_owned()])));
+            assert_eq!((f.reverse, f.tangent), (Some(true), Some(false)));
+            assert_eq!(f.angle, Some(json!("2deg")));
+            // From a parting line of two edges, with a pull.
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "draft",
+                "--parting",
+                "p/b/e1",
+                "--parting",
+                "p/b/e2",
+                "--pull",
+                "z",
+                "--angle",
+                "3deg",
+                "--face",
+                "p/b/a",
+            ])
+            .unwrap();
+            assert_eq!(
+                f.parting,
+                Some(vec!["p/b/e1".to_owned(), "p/b/e2".to_owned()])
+            );
+            assert_eq!(f.pull.as_deref(), Some("z"));
+            assert_eq!(f.face.as_deref(), Some("p/b/a"));
+            // --flip alone, and --flip false, are a datum's or a split's.
+            let f = sent(&["ryucad", "feature", "edit", "p", "d1", "--flip"]).unwrap();
+            assert_eq!(f.flip, Some(Flip::On(true)));
+            let f = sent(&["ryucad", "feature", "edit", "p", "d1", "--flip", "false"]).unwrap();
+            assert_eq!(f.flip, Some(Flip::On(false)));
+            // --no-flip: no face of a draft flipped.
+            let f = sent(&["ryucad", "feature", "edit", "p", "d", "--no-flip"]).unwrap();
+            assert_eq!(f.flip, Some(Flip::Faces(Vec::new())));
+            // A neutral plane and a parting line together is a usage error.
+            let e = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "draft",
+                "--neutral",
+                "xy",
+                "--parting",
+                "p/b/e",
+            ])
+            .unwrap_err();
+            assert_eq!(e.code, Code::Usage);
+        });
     }
 
     #[test]

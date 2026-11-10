@@ -83,6 +83,10 @@ pub struct Session {
     pub flats: crate::sheet_metal::flat::Cache,
     /// What intersecting pairs of placed solids found, for `interference`.
     pub interference: crate::interference::Cache,
+    /// Drawing views' projections, by their placed bodies and the view.
+    pub projections: crate::drawing::Cache,
+    /// Section views' cut bodies and caps, by body, pose and cut.
+    pub sections: crate::drawing::section::Cache,
     /// Mass properties worked out, for `mass`.
     pub mass: crate::mass::Cache,
     /// Distances between placed solids, for `clearance`.
@@ -240,6 +244,8 @@ impl Session {
             meshes: crate::mesh::Cache::default(),
             flats: Default::default(),
             interference: crate::interference::Cache::default(),
+            projections: crate::drawing::Cache::default(),
+            sections: crate::drawing::section::Cache::default(),
             mass: crate::mass::Cache::default(),
             clearance: crate::clearance::Cache::default(),
             frozen: false,
@@ -445,6 +451,8 @@ impl Session {
             meshes: crate::mesh::Cache::with_disk(from.store.disk.clone()),
             flats: Default::default(),
             interference: from.interference.clone(),
+            projections: from.projections.clone(),
+            sections: from.sections.clone(),
             mass: from.mass.clone(),
             clearance: from.clearance.clone(),
             frozen: true,
@@ -1664,8 +1672,9 @@ pub(crate) fn names_of_all(parts: &[(&Id, &PartResult)]) -> Vec<Vec<Name>> {
 }
 
 /// Whether an event's path (relative, with `/`) can matter to a project's
-/// state: the root files, and anything under `parts/`, `releases/` and
-/// `imports/` ([`listed`] decides which files there do).
+/// state: the root files, and anything under `parts/`, `releases/`,
+/// `imports/`, `annotations/` and `templates/` ([`listed`] decides which
+/// files there do).
 pub(crate) fn tracked(rel: &str) -> bool {
     let first = rel.split('/').next().unwrap_or_default();
     crate::doc::project::ROOT_FILES.contains(&rel)
@@ -1673,6 +1682,7 @@ pub(crate) fn tracked(rel: &str) -> bool {
         || first == crate::doc::project::RELEASES
         || first == crate::doc::project::IMPORTS
         || first == crate::doc::annotation::ANNOTATIONS
+        || first == crate::doc::drawing_template::TEMPLATES
 }
 
 /// The project's folders as they are on disk, and its files' bytes as
@@ -1784,6 +1794,9 @@ fn listed(root: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
     out.extend(releases_in(&root.join(crate::doc::project::RELEASES))?);
     out.extend(files_in(&root.join(crate::doc::project::IMPORTS))?);
     out.extend(files_in(&root.join(crate::doc::annotation::ANNOTATIONS))?);
+    out.extend(files_in(
+        &root.join(crate::doc::drawing_template::TEMPLATES),
+    )?);
     Ok(out)
 }
 
@@ -1868,6 +1881,8 @@ fn listed_at(root: &Path, rel: &str) -> Result<Vec<(PathBuf, fs::Metadata)>> {
         [i, _] if *i == IMPORTS && file => one(),
         [a] if *a == crate::doc::annotation::ANNOTATIONS => files_in(&path),
         [a, _] if *a == crate::doc::annotation::ANNOTATIONS && file => one(),
+        [t] if *t == crate::doc::drawing_template::TEMPLATES => files_in(&path),
+        [t, _] if *t == crate::doc::drawing_template::TEMPLATES && file => one(),
         _ => Ok(Vec::new()),
     }
 }

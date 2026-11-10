@@ -12,7 +12,8 @@
 //! object, so instancing is kept. A product with nothing to show has no
 //! object; the build has one item, the root's object, if it has one.
 //! Vertices are placed and scaled in f64, rounded to `f32` once and
-//! written as the shortest text that reads back to them.
+//! written as the shortest text that reads back to them. A sheet's mesh
+//! is an object of type `surface`, which may be open.
 
 use crate::scene::{Scene, Solid, Unit, placed_point};
 use crate::text::{push_f32, push_f64};
@@ -99,8 +100,11 @@ impl Objects<'_> {
     }
 
     /// An object's opening tag.
-    fn open(&mut self, id: u32, name: &str, number: Option<&str>) {
-        let _ = write!(self.xml, "  <object id=\"{id}\" type=\"model\" name=\"");
+    /// An object's opening tag: a sheet's mesh is a `surface` object (3MF
+    /// Core 1.4.0, 4.1: surface objects may be open), everything else a
+    /// `model` (a components object's type is ignored).
+    fn open(&mut self, id: u32, ty: &str, name: &str, number: Option<&str>) {
+        let _ = write!(self.xml, "  <object id=\"{id}\" type=\"{ty}\" name=\"");
         escape(&mut self.xml, name);
         self.xml.push('"');
         if let Some(n) = number {
@@ -114,7 +118,8 @@ impl Objects<'_> {
     /// A mesh object for `s`, named `name`.
     fn mesh(&mut self, s: &Solid, name: &str, number: Option<&str>) -> u32 {
         let id = self.id();
-        self.open(id, name, number);
+        let ty = if s.surface { "surface" } else { "model" };
+        self.open(id, ty, name, number);
         let x = &mut self.xml;
         x.push_str("   <mesh>\n    <vertices>\n");
         for &p in &s.mesh.positions {
@@ -159,7 +164,7 @@ impl Objects<'_> {
             _ => {
                 let own: Vec<u32> = solids.iter().map(|s| self.mesh(s, &s.name, None)).collect();
                 let id = self.id();
-                self.open(id, &p.name, Some(&p.id));
+                self.open(id, "model", &p.name, Some(&p.id));
                 self.xml.push_str("   <components>\n");
                 for o in own {
                     let _ = writeln!(self.xml, "    <component objectid=\"{o}\"/>");
@@ -338,6 +343,26 @@ mod tests {
     }
 
     #[test]
+    fn a_sheet_is_a_surface_object() {
+        let one = Scene {
+            products: vec![Product {
+                id: "PN-8".into(),
+                name: "Skin".into(),
+                part: "p".into(),
+                solids: vec![Solid {
+                    name: "a".into(),
+                    mesh: block(0.01, 0.01, 0.01),
+                    surface: true,
+                }],
+                children: vec![],
+            }],
+        };
+        let xml = model(&one, &ThreeMf::default());
+        assert!(xml.contains("type=\"surface\""), "{xml}");
+        assert!(!xml.contains("type=\"model\""), "{xml}");
+    }
+
+    #[test]
     fn a_part_of_one_solid_is_its_mesh() {
         let one = Scene {
             products: vec![Product {
@@ -347,6 +372,7 @@ mod tests {
                 solids: vec![Solid {
                     name: "a".into(),
                     mesh: block(0.01, 0.01, 0.01),
+                    surface: false,
                 }],
                 children: vec![],
             }],

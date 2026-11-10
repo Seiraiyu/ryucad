@@ -129,11 +129,14 @@ pub fn open_ahead<'a>(files: impl IntoIterator<Item = &'a ImportFile>) {
 }
 
 /// How a solid-mode import heals: one place, which the dry run, `build`
-/// and `import convert` all read. ryucad 18 (design 388) makes it
-/// `Open::Sheet` here, for solid imports only; a reference reads only its
-/// tolerance cap.
+/// and `import convert` all read. Surface models heal as sheets
+/// (`Open::Sheet`, design 388), solids exactly as before; a reference
+/// reads only its tolerance cap.
 pub fn heal_options() -> ryukei::heal::HealOptions {
-    Default::default()
+    ryukei::heal::HealOptions {
+        open: ryukei::heal::Open::Sheet,
+        ..Default::default()
+    }
 }
 
 /// What a reference import reports beside its body: its file, product,
@@ -1682,6 +1685,34 @@ pub(crate) mod tests {
             "{}/../ryustep/tests/data/occt/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
+    }
+
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "a large file: tests/step.rs reads it in release"
+    )]
+    fn a_surface_model_imports_as_a_sheet() {
+        // NIST CTC 04's PMI support geometry, representation #14185: one
+        // face, two laminar edges (ryustep's corpus manifest).
+        let (_dir, mut s) = crate::server::tests::fresh();
+        let call = crate::server::tests::call;
+        let file = format!(
+            "{}/../ryustep/tests/corpus/nist_ctc_04_asme1_rd.stp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let v = call(&mut s, "import", json!({"path": file, "solid": true})).unwrap();
+        let mut kinds = Vec::new();
+        for p in v["parts"].as_array().unwrap() {
+            let r = call(&mut s, "rebuild", json!({"part": p["part"]})).unwrap();
+            for x in r["parts"][0]["solids"].as_array().unwrap() {
+                kinds.push((x["kind"].clone(), x["closed"].clone()));
+            }
+        }
+        assert!(kinds.contains(&(json!("sheet"), json!(false))), "{kinds:?}");
+        // Solids heal as before: the file's solid is still a solid.
+        assert!(kinds.iter().any(|(k, _)| k == "solid"), "{kinds:?}");
+        assert_eq!(heal_options().open, ryukei::heal::Open::Sheet);
     }
 
     #[test]

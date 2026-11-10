@@ -274,3 +274,34 @@ fn a_reconnected_window_is_in_view_again() {
     // And the daemon says so.
     assert!(ws.wait_until(WAIT, |ws| ws.myself().is_some_and(|m| m.mode == Mode::View)));
 }
+
+#[test]
+fn a_freehand_drag_in_annotate_is_a_rough_suggestion_with_a_comment_to_edit() {
+    let p = common::two_bolts();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    ws.set_mode(Mode::Annotate);
+    assert!(ws.wait_until(WAIT, |w| w.idle()
+        && w.annotations.loaded
+        && w.model.middles("frame").contains_key("b2")));
+    ws.drag_to("frame", "b2", [0.01, 0.0, 0.0]);
+    assert!(ws.wait_until(WAIT, |w| w.idle()));
+    ws.drop_drag();
+    assert!(ws.wait_until(WAIT, |w| w.annotation_ui.editing.is_some()));
+    let listed = p.ok(&["annotations", "list"]);
+    let a = &listed["annotations"][0];
+    assert_eq!(a["change"]["rough"], true, "{a}");
+    assert_eq!(a["comment"], "Move about here", "{a}");
+    assert_eq!(a["change"]["request"]["method"], "assembly.move", "{a}");
+    let (id, text) = ws.annotation_ui.editing.clone().unwrap();
+    assert_eq!(
+        (id.as_str(), text.as_str()),
+        (a["id"].as_str().unwrap(), "Move about here")
+    );
+    assert_eq!(ws.wants_tile, Some("annotations"));
+    assert_eq!(ws.chosen_annotation.as_deref(), Some(id.as_str()));
+    // Nothing moved.
+    let x = p.ok(&["feature", "show", "frame", "b2"])["pose"]["origin_m"][0]
+        .as_f64()
+        .unwrap();
+    assert!((x - 0.04).abs() < 1e-12, "{x}");
+}
