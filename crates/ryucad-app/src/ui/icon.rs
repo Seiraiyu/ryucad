@@ -1,5 +1,5 @@
 //! Icons (design 199, Fonts and icons): Phosphor Regular's glyphs by code
-//! point, and ryucad's own 29 CAD glyphs as stroke tables
+//! point, and ryucad's own 32 CAD glyphs as stroke tables
 //! ([`glyphs`], ported stroke for stroke from `design/app/glyphs.js`),
 //! drawn alike at any size and tinted by state. An icon never stands
 //! alone: [`button`] gives every icon button its command's title as its
@@ -218,7 +218,7 @@ pub fn button(
 }
 
 pub mod glyphs {
-    //! ryucad's 29 CAD glyphs on Phosphor's 256-unit grid with its
+    //! ryucad's 32 CAD glyphs on Phosphor's 256-unit grid with its
     //! 16-unit stroke, round caps and joins: `design/app/glyphs.js`'s
     //! table, stroke for stroke.
 
@@ -258,10 +258,13 @@ pub mod glyphs {
         EdgeFlange,
         Unfold,
         Refold,
+        Draft,
+        MoveFace,
+        ReplaceFace,
     }
 
     impl Glyph {
-        pub const ALL: [Glyph; 29] = [
+        pub const ALL: [Glyph; 32] = [
             Glyph::Cone,
             Glyph::Torus,
             Glyph::Extrude,
@@ -291,6 +294,9 @@ pub mod glyphs {
             Glyph::EdgeFlange,
             Glyph::Unfold,
             Glyph::Refold,
+            Glyph::Draft,
+            Glyph::MoveFace,
+            Glyph::ReplaceFace,
         ];
 
         /// The glyph's name in `glyphs.js`.
@@ -325,6 +331,9 @@ pub mod glyphs {
                 Glyph::EdgeFlange => "edge-flange",
                 Glyph::Unfold => "unfold",
                 Glyph::Refold => "refold",
+                Glyph::Draft => "draft",
+                Glyph::MoveFace => "move-face",
+                Glyph::ReplaceFace => "replace-face",
             }
         }
     }
@@ -661,6 +670,35 @@ pub mod glyphs {
                 } else {
                     &[[156.0, 64.0], [136.0, 80.0], [156.0, 96.0]]
                 }));
+            }
+            Glyph::Draft => {
+                s.push(line(&[
+                    [48.0, 216.0],
+                    [88.0, 56.0],
+                    [168.0, 56.0],
+                    [208.0, 216.0],
+                    [48.0, 216.0],
+                ]));
+                s.extend(dashes(88.0, 76.0, 216.0, 40.0, 20.0, 10.0));
+                s.push(arc([88.0, 56.0, 104.0, 104.0], 90.0, 104.0));
+            }
+            Glyph::MoveFace => {
+                s.extend(cabinet(32.0, 144.0, 136.0, 72.0, 48.0, -40.0));
+                s.push(thin(
+                    &[
+                        [32.0, 72.0],
+                        [168.0, 72.0],
+                        [216.0, 32.0],
+                        [80.0, 32.0],
+                        [32.0, 72.0],
+                    ],
+                    10.0,
+                ));
+                s.extend(arrow(120.0, 136.0, 120.0, 84.0));
+            }
+            Glyph::ReplaceFace => {
+                s.extend(cabinet(40.0, 128.0, 144.0, 88.0, 48.0, -40.0));
+                s.push(Stroke::Arc([136.0, 108.0, 96.0, 40.0], 200.0, 340.0, 10.0));
             }
         }
         s

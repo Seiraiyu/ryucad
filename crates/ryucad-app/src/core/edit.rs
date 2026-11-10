@@ -9,10 +9,12 @@
 //! reloads and lists what changed instead of overwriting it.
 
 mod sheet_metal;
+mod tweak;
 pub use sheet_metal::{
     AllowanceForm, BaseFlangeForm, EndForm, FlangeForm, OverrideForm, RefoldForm, ReliefForm,
     SheetMetalForm, UnfoldForm,
 };
+pub use tweak::{DraftForm, MoveFaceForm, ReplaceFaceForm, TweakForm, TweakGroup, WithGroup};
 
 use ryucad::error::Error;
 use ryucad::proto::{FeatureFields, PlacementArg, Request};
@@ -1334,6 +1336,8 @@ pub struct Form {
     /// A base flange's, flange's, unfold's or refold's settings, sizes
     /// and what it names.
     pub sheet: Option<SheetMetalForm>,
+    /// A draft's, move face's or replace face's sizes, flags and faces.
+    pub tweak: Option<TweakForm>,
     /// An instance's revision (`working` or a label) and whether it is
     /// fixed; its pose is the placement, its origin in [`Form::unit`].
     pub rev: Option<Choice>,
@@ -1480,6 +1484,7 @@ impl Form {
         });
         let split = (ty == "split").then(|| SplitForm::from_show(v));
         let sheet = SheetMetalForm::from_show(&ty, v);
+        let tweak = TweakForm::from_show(&ty, v);
         Form {
             part: part.to_owned(),
             feature: text(&v["id"]),
@@ -1508,6 +1513,7 @@ impl Form {
             mirror,
             split,
             sheet,
+            tweak,
             rev: instance.then(|| {
                 let read = match v["rev"]["label"].as_str() {
                     Some(l) => l.to_owned(),
@@ -1593,6 +1599,7 @@ impl Form {
             .chain(self.shell.iter().flat_map(ShellForm::fields))
             .chain(self.offset.iter().flat_map(BodyOffsetForm::fields))
             .chain(self.sheet.iter().flat_map(SheetMetalForm::fields))
+            .chain(self.tweak.iter().flat_map(TweakForm::fields))
     }
 
     /// Every field, to place errors and keep what was typed.
@@ -1648,6 +1655,9 @@ impl Form {
         if let Some(s) = &mut self.sheet {
             out.extend(s.fields_mut());
         }
+        if let Some(t) = &mut self.tweak {
+            out.extend(t.fields_mut());
+        }
         out
     }
 
@@ -1682,6 +1692,10 @@ impl Form {
     fn at_pointer(&mut self, pointer: &str) -> Option<&mut Field> {
         let steps: Vec<&str> = pointer.strip_prefix('/')?.split('/').collect();
         match steps.as_slice() {
+            // A draft's or move's group's angle or distance.
+            ["groups", ..] if self.tweak.is_some() => {
+                self.tweak.as_mut()?.at_pointer(steps.as_slice())
+            }
             ["groups", i, k] => {
                 let i: usize = i.parse().ok()?;
                 let g = self.blend.as_mut()?.groups.get_mut(i)?;
@@ -1760,6 +1774,7 @@ impl Form {
             || self.offset.as_ref().is_some_and(BodyOffsetForm::dirty)
             || self.split.as_ref().is_some_and(SplitForm::dirty)
             || self.sheet.as_ref().is_some_and(SheetMetalForm::dirty)
+            || self.tweak.as_ref().is_some_and(TweakForm::dirty)
     }
 
     /// Everything typed or chosen goes back as it was read.
@@ -1824,6 +1839,9 @@ impl Form {
         }
         if let Some(s) = &mut self.split {
             s.revert();
+        }
+        if let Some(t) = &mut self.tweak {
+            t.revert();
         }
         if let Some(s) = &mut self.sheet {
             s.revert();
@@ -1903,6 +1921,9 @@ impl Form {
         }
         if let Some(s) = &self.sheet {
             s.given(&mut out);
+        }
+        if let Some(t) = &self.tweak {
+            t.given(&mut out);
         }
         Ok(out)
     }

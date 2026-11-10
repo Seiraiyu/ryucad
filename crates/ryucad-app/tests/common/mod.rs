@@ -361,6 +361,93 @@ impl Project {
 }
 
 impl Project {
+    /// The face of `p`'s box `b` whose outward normal is `n`, as
+    /// `p/b/<name>`.
+    pub fn box_face(&self, n: [i64; 3]) -> String {
+        let body = self.ok(&["inspect", "p", "b"])["bodies"][0].clone();
+        body["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let s = if f["reversed"] == true { -1.0 } else { 1.0 };
+                (0..3).all(|k| f["surface"]["frame"]["z"][k].as_f64().unwrap() * s == n[k] as f64)
+            })
+            .map(|f| format!("p/b/{}", f["name"].as_str().unwrap()))
+            .unwrap()
+    }
+
+    /// Face tweaks on part `p`: a 40 x 30 x 20 mm box `b`, a datum plane
+    /// `lid` 25 mm over xy, a draft `d` of its east and west walls by 2°
+    /// about xy, a move `m` pushing its north wall out 1 mm, and a
+    /// replacement `r` of its top by `lid`.
+    pub fn with_tweaks(self) -> Project {
+        self.ok(&["part", "create", "p"]);
+        self.ok(&[
+            "feature", "add", "p", "box", "--id", "b", "--param", "x=40", "--param", "y=30",
+            "--param", "z=20",
+        ]);
+        let [east, west, north, top] =
+            [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1]].map(|n| self.box_face(n));
+        self.ok(&[
+            "feature",
+            "add",
+            "p",
+            "plane",
+            "--id",
+            "lid",
+            "--by",
+            "offset",
+            "--from",
+            "xy",
+            "--distance",
+            "25mm",
+        ]);
+        self.ok(&[
+            "feature",
+            "add",
+            "p",
+            "draft",
+            "--id",
+            "d",
+            "--neutral",
+            "xy",
+            "--angle",
+            "2deg",
+            "--face",
+            &east,
+            "--face",
+            &west,
+        ]);
+        self.ok(&[
+            "feature",
+            "add",
+            "p",
+            "move_face",
+            "--id",
+            "m",
+            "--by",
+            "offset",
+            "--distance",
+            "1mm",
+            "--face",
+            &north,
+        ]);
+        self.ok(&[
+            "feature",
+            "add",
+            "p",
+            "replace_face",
+            "--id",
+            "r",
+            "--with",
+            "p/lid",
+            "--face",
+            &top,
+        ]);
+        self
+    }
+
     /// A sheet metal part `p`: a 60 x 40 mm plate 1.5 mm thick (base
     /// flange `plate`, K-factor 0.44), a 20 mm flange `f` down its right
     /// top edge, and an unfold `u` of it, which the tip shows flat.
