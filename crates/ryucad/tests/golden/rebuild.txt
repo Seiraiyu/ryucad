@@ -12,8 +12,9 @@ diff 6e4d4e0ad7ff6060
 display 575d87fadbd3cdc4
 draft_reports 384e08ae47e9729a
 drafts 40c270a0531dbacb
-drawing_sections ab35ee24bffc76ba
-drawings 59fe688efbf17b58
+drawing_annotations 46f185d088e07aab
+drawing_sections 1d8ab70a1d209a8d
+drawings 2285dedcdd1f0d2d
 explodes 24f373106cb30113
 exports 1341c77f1539e1a3
 expressions 385744de1f6c36bb

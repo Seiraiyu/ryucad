@@ -12,7 +12,10 @@
 //! body's hash, every pose's bits and the view's bits in the session and
 //! on disk (`projections`, `ryukei.projection.1`).
 
+pub mod annotate;
 pub mod curves;
+pub mod fit;
+pub mod lint;
 pub mod output;
 pub mod request;
 pub mod section;
@@ -149,6 +152,15 @@ pub struct SheetBuilt {
     pub scale_chosen: bool,
     pub items: Vec<Item>,
     pub views: Vec<ViewBuilt>,
+    /// Where its views go, and the boxes in it none may cover (its
+    /// template's title block), in sheet millimetres.
+    pub area: [P; 2],
+    pub keep_out: Vec<[P; 2]>,
+    /// Its annotations as drawn.
+    pub annotations: Vec<annotate::Built>,
+    /// The hole features its views show, each once: its part, its hole,
+    /// a view showing it and a wall's reference there (for the lint).
+    pub holes: Vec<(Id, Id, Key, String)>,
 }
 
 /// A drawing built against the model.
@@ -161,8 +173,12 @@ pub struct Built {
     pub projection: Angle,
     pub sheets: Vec<SheetBuilt>,
     /// `drawing_view_failed` and `drawing_view_uncertain` findings, as
-    /// `{code, severity, view, sheet, message, details}`.
+    /// `{code, severity, view, sheet, message, details}`, then the
+    /// annotations' and the lint's.
     pub findings: Vec<Value>,
+    /// Each sheet's lint score, by sheet key: 100 less its findings'
+    /// points.
+    pub scores: BTreeMap<String, i64>,
 }
 
 impl Built {
@@ -866,10 +882,22 @@ struct Drawn {
     texts: Vec<(String, P, f64)>,
     /// Each source solid's caps' boundaries, by solid, to hatch.
     caps: Vec<Vec<Path>>,
+    /// Each entity it drew (an edge, or a face by its silhouette), by its
+    /// source solid and name: what annotations stand on.
+    named: BTreeMap<(usize, String), Named>,
     /// Its box, in the same frame.
     bounds: Option<[P; 2]>,
     counts: [usize; 3],
     uncertain: Vec<String>,
+}
+
+/// What a view drew of one entity, in the view's frame (model metres
+/// relative to its anchor's image).
+#[derive(Clone, Debug, Default)]
+struct Named {
+    visible: bool,
+    hidden: bool,
+    paths: Vec<Path>,
 }
 
 /// The kind of line a piece draws as, if it is drawn.
@@ -910,6 +938,7 @@ fn drawn(p: &Projection, plan: &Plan, src: &Source) -> Drawn {
     let mut last: Option<(ryukei::project::Source, LineKind)> = None;
     let mut lo = [f64::INFINITY; 2];
     let mut hi = [f64::NEG_INFINITY; 2];
+    let mut named: BTreeMap<(usize, String), Named> = BTreeMap::new();
     // An edge between two caps (an offset section's step) isn't drawn.
     let between_caps = |s: &ryukei::project::Source| -> bool {
         let ryukei::project::Source::Edge { body, edge, .. } = s else {
@@ -1000,6 +1029,19 @@ fn drawn(p: &Projection, plan: &Plan, src: &Source) -> Drawn {
             if unsure {
                 uncertain.push(source());
             }
+            let (body, name) = match piece.source {
+                ryukei::project::Source::Edge { body, name, .. } => (body, name),
+                ryukei::project::Source::Silhouette {
+                    body, face_name, ..
+                } => (body, face_name),
+            };
+            let n = named.entry((body as usize, name.to_string())).or_default();
+            if kind == LineKind::Hidden {
+                n.hidden = true;
+            } else {
+                n.visible = true;
+            }
+            n.paths.push(path.clone());
             // One source's next piece, drawn alike, from where the last
             // ended: the same path.
             let same = |s: ryukei::project::Source| match (last, s) {
@@ -1042,6 +1084,7 @@ fn drawn(p: &Projection, plan: &Plan, src: &Source) -> Drawn {
         lines,
         texts: Vec::new(),
         caps: section::cap_paths(src, &plan.caps, &plan.frame, plan.anchor),
+        named,
         bounds,
         counts,
         uncertain,
@@ -1099,6 +1142,7 @@ fn drawn_flat(flat: &crate::sheet_metal::flat::FlatOf, notes: bool) -> Drawn {
         lines,
         texts,
         caps: Vec::new(),
+        named: BTreeMap::new(),
         bounds: Some([[lo.x - m[0], lo.y - m[1]], [hi.x - m[0], hi.y - m[1]]]),
         counts,
         uncertain,
@@ -1524,9 +1568,28 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
             scale_chosen: fixed.is_none(),
             items,
             views,
+            area: t.area,
+            keep_out: t.keep_out.clone(),
+            annotations: Vec::new(),
+            holes: Vec::new(),
         });
     }
     marks(&plans, &mut sheets, style);
+    let drawn: Vec<Option<&Drawn>> = drawings.iter().map(|d| d.as_ref().ok()).collect();
+    annotate::all(
+        session,
+        &annotate::Context {
+            part,
+            file: &file,
+            plans: &plans,
+            drawn: &drawn,
+            standard,
+            style,
+        },
+        &mut sheets,
+        &mut findings,
+    )?;
+    let scores = lint::run(session, part, &file, &sheets, &mut findings);
     Ok(Built {
         part: part.clone(),
         drawing: id.clone(),
@@ -1535,6 +1598,7 @@ pub fn build(session: &mut Session, part: &Id, id: &Id) -> Result<Built> {
         projection: angle,
         sheets,
         findings,
+        scores,
     })
 }
 

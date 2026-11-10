@@ -17,6 +17,7 @@ pub mod item;
 pub mod pdf;
 pub mod style;
 pub mod svg;
+pub mod symbol;
 
 pub use geom::{P, Path, Segment};
 pub use item::{Anchor, Item};
