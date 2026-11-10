@@ -1121,8 +1121,11 @@ fn edit_drawing(v: &mut Value, op: u8, arg: u8) {
         0 => {
             o["views"]["v1"]["at"] = json!([mm(arg), mm(arg / 2)]);
         }
+        // Only a projected view has an offset (a retyped one is a detail).
         1 => {
-            o["views"]["v2"]["offset"] = mm(arg);
+            if o["views"]["v2"]["type"] == "projected" {
+                o["views"]["v2"]["offset"] = mm(arg);
+            }
         }
         // A view seen otherwise, or drawn with its hidden lines.
         2 => {
@@ -1151,7 +1154,13 @@ fn edit_drawing(v: &mut Value, op: u8, arg: u8) {
         }
         6 => match arg % 2 {
             0 => o["annotations"]["d1"]["offset"] = mm(arg / 4),
-            _ => o["annotations"]["n1"]["at"] = json!([mm(arg), mm(arg / 3)]),
+            // Only a note that is there is moved: indexing a removed one
+            // would write a note with no type.
+            _ => {
+                if let Some(n1) = o["annotations"].get_mut("n1") {
+                    n1["at"] = json!([mm(arg), mm(arg / 3)]);
+                }
+            }
         },
         // An annotation added or taken away, the sheet's scale set.
         _ => match arg % 3 {
