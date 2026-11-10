@@ -296,11 +296,13 @@ pub(crate) fn resolve<'a>(
                     motion,
                     tangent: m.tangent,
                     topology: Topology::Keep,
+                    blends: Default::default(),
                 }),
                 None => Spec::Offset(OffsetFacesSpec {
                     faces,
                     tangent: m.tangent,
                     topology: Topology::Keep,
+                    blends: Default::default(),
                 }),
             };
             Ok(Resolved {
@@ -334,6 +336,7 @@ pub(crate) fn resolve<'a>(
                 spec: Spec::Replace(ryukei::tweak::ReplaceSpec {
                     faces,
                     topology: Topology::Keep,
+                    blends: Default::default(),
                 }),
             })
         }
@@ -503,6 +506,30 @@ pub(crate) fn refusal(e: &ryukei::TweakError) -> Refusal {
             "no_feature",
             "this face is part of no feature (at most half the body's faces) that a cap closes",
             vec![("face", face)],
+        ),
+        T::NotABlend { face } => r(
+            "not_a_blend",
+            "this face is no recognised fillet's, chamfer's or corner's (or no support of its chamfer)",
+            vec![("face", face)],
+        ),
+        T::BlendLost { face, reason } => Refusal {
+            reason: "blend_lost",
+            case: Some(match reason {
+                ryukei::BlendLoss::NoEdge => "no_edge",
+                ryukei::BlendLoss::Overflow => "overflow",
+                ryukei::BlendLoss::RadiusTooLarge => "radius_too_large",
+                ryukei::BlendLoss::SmoothEdge => "smooth_edge",
+                ryukei::BlendLoss::Unsupported => "unsupported",
+                ryukei::BlendLoss::NonManifold => "non_manifold",
+                ryukei::BlendLoss::Uncertain => "uncertain",
+            }),
+            message: "the blend holding this face can't be made again after the edit",
+            entities: vec![("face", face)],
+        },
+        T::BadTolerance => r(
+            "bad_tolerance",
+            "a recognition tolerance that isn't finite or lies outside 10 nm to 0.1 mm",
+            vec![],
         ),
         T::SelfIntersecting { faces: [a, b] } => r(
             "self_intersecting",
@@ -1299,6 +1326,15 @@ mod tests {
             (T::CapNotOnFace { face: n }, "cap_not_on_face"),
             (T::GrowWouldCap { face: n }, "grow_would_cap"),
             (T::NoFeature { face: n }, "no_feature"),
+            (T::NotABlend { face: n }, "not_a_blend"),
+            (
+                T::BlendLost {
+                    face: n,
+                    reason: ryukei::BlendLoss::Overflow,
+                },
+                "blend_lost",
+            ),
+            (T::BadTolerance, "bad_tolerance"),
             (T::SelfIntersecting { faces: [n, n] }, "self_intersecting"),
             (T::Uncertain { at: n }, "uncertain"),
             (

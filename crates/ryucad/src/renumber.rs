@@ -403,6 +403,24 @@ fn path_part(files: &Files, asm: &str, path: &[Value]) -> Option<String> {
     Some(part)
 }
 
+/// The part a drawing's node at `pt` names faces of: the source of the
+/// view it is under (its base view's `of`, else `owner`, the drawing's own
+/// part).
+fn drawing_source<'a>(v: &'a Value, pt: &str, owner: &'a str) -> &'a str {
+    let mut k = match pt.strip_prefix("/views/").and_then(|r| r.split('/').next()) {
+        Some(k) => k,
+        None => return owner,
+    };
+    for _ in 0..=v["views"].as_object().map_or(0, |m| m.len()) {
+        let w = &v["views"][k];
+        match w["from"].as_str() {
+            Some(up) => k = up,
+            None => return w["of"].as_str().unwrap_or(owner),
+        }
+    }
+    owner
+}
+
 /// The feature a file of the part is, if it is one.
 fn feature_of<'a>(path: &'a str, part: &str) -> Option<&'a str> {
     path.strip_prefix(&format!("parts/{part}/features/"))?
@@ -716,6 +734,45 @@ pub fn plan(
             }
         }
     }
+    // References theirs' drawings of the part make (plan 9.A): a node the
+    // merge has from theirs, not ours, mapped as a feature's references
+    // are. Only references: a drawing's other strings are its own keys
+    // (`s1`, `v2`) and part IDs, which a feature's renumbering never names.
+    // Every part's drawings: a view names faces of its source part (a
+    // base view's `of`, else the drawing's own part), so only views whose
+    // source is the renumbered part are mapped.
+    if let Rename::Feature { .. } = &r {
+        let sub = format!("/{}/", crate::doc::drawing::DRAWINGS);
+        for (p, b) in working {
+            let Some(owner) = p
+                .strip_prefix("parts/")
+                .and_then(|rest| rest.split_once(sub.as_str()))
+                .map(|(o, _)| o)
+            else {
+                continue;
+            };
+            let (Ok(v), Some(t), o) = (
+                serde_json::from_slice::<Value>(b),
+                json_of(theirs, p),
+                json_of(ours, p),
+            ) else {
+                continue;
+            };
+            let new = rewrite(&v, "", &mut |pt, n| {
+                if !is_reference(n) || drawing_source(&v, pt, owner) != part {
+                    return None;
+                }
+                let mine = o.as_ref().and_then(|o| o.pointer(pt));
+                if t.pointer(pt) != Some(n) || mine == Some(n) {
+                    return None;
+                }
+                transform(&r, &names, &v, "", pt, n)
+            });
+            if new != v {
+                files.insert(p.clone(), bytes(&new));
+            }
+        }
+    }
     // Explode steps theirs wrote (plan 10.D): the assembly's instance
     // paths through a renumbered instance or pattern. A file's steps are
     // one value, as the merge takes them.
@@ -889,6 +946,19 @@ mod tests {
             (&to(2), &to(2))
         );
         assert_eq!(read("parts/a/features/n.json")["neutral"], to(4));
+    }
+
+    #[test]
+    fn a_drawings_node_names_faces_of_its_views_source() {
+        let v = json!({"views": {
+            "v1": {"type": "base", "of": "q"},
+            "v2": {"type": "projected", "from": "v1"},
+            "v3": {"type": "base"}
+        }});
+        assert_eq!(drawing_source(&v, "/views/v2/normal_to", "p"), "q");
+        assert_eq!(drawing_source(&v, "/views/v1/orient/normal_to", "p"), "q");
+        assert_eq!(drawing_source(&v, "/views/v3/orient/normal_to", "p"), "p");
+        assert_eq!(drawing_source(&v, "/sheets/s1", "p"), "p");
     }
 
     #[test]

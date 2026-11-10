@@ -400,3 +400,39 @@ fn flat_patterns_round_trip_and_damage_is_refused() {
     assert!(decode_flat_pattern(&bad).is_err());
     assert!(decode_flat_pattern(&encode_flat_map(&u.map)).is_err());
 }
+
+#[test]
+fn projections_round_trip_and_damage_is_refused() {
+    use crate::geom::Vector3;
+    use crate::project::{Placed, View, ViewOptions, view};
+    let (block, _) = primitive::block(OpKey(1), 0.02, 0.01, 0.005, &Rigid::IDENTITY).unwrap();
+    let (ball, _) = primitive::sphere(OpKey(2), 0.004, &Rigid::IDENTITY).unwrap();
+    let v = View::new(Vector3::new(1.0, -1.0, 1.0), Vector3::new(0.0, 0.0, 1.0)).unwrap();
+    let placed = [
+        Placed {
+            body: &block,
+            place: Rigid::IDENTITY,
+        },
+        Placed {
+            body: &ball,
+            place: Rigid::IDENTITY,
+        },
+    ];
+    let p = view(&placed, &v, &ViewOptions::default()).unwrap();
+    assert!(p.pieces.len() > 10 && !p.silhouettes[1].branches.is_empty());
+    let bytes = encode_projection(&p);
+    let d = decode_projection(&bytes).unwrap();
+    assert_eq!(d, p);
+    assert_eq!(encode_projection(&d), bytes);
+    for cut in [0, 10, bytes.len() / 2, bytes.len() - 1] {
+        assert!(decode_projection(&bytes[..cut]).is_err());
+    }
+    let mut longer = bytes.clone();
+    longer.push(0);
+    assert!(decode_projection(&longer).is_err());
+    // The first piece's source tag made unknown.
+    let mut bad = bytes.clone();
+    bad[PROJECTION_MAGIC.len() + 4] = 7;
+    assert!(decode_projection(&bad).is_err());
+    assert!(decode_projection(&encode_body(&block)).is_err());
+}

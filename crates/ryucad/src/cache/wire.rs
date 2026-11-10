@@ -48,7 +48,8 @@ pub fn name(kind: Kind, key: &str) -> String {
 /// The kind and key a name gives, if it is one.
 pub fn parse_name(name: &str) -> Option<(Kind, &str)> {
     let (kind, key) = name.split_once('/')?;
-    Some((Kind::parse(kind)?, key)).filter(|(_, k)| valid_key(k))
+    // Projections are this machine's alone: the protocol names no others.
+    Some((Kind::parse(kind).filter(|k| k.shared())?, key)).filter(|(_, k)| valid_key(k))
 }
 
 /// An entry's path on the server.

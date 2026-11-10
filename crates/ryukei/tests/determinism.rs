@@ -4379,6 +4379,7 @@ fn tweaks_section(golden: &mut Golden) {
         motion,
         tangent: false,
         topology: Topology::Keep,
+        blends: Default::default(),
     };
     let (b, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
     let top = face(FaceRole::PlusZ);
@@ -4393,6 +4394,7 @@ fn tweaks_section(golden: &mut Golden) {
         faces: vec![(top, 0.05), (face(FaceRole::PlusX), -0.03)],
         tangent: false,
         topology: Topology::Keep,
+        blends: Default::default(),
     };
     let (o, j) = offset_faces(k, &b, &out).unwrap();
     hash_body(&mut s, &o, &j);
@@ -4457,6 +4459,7 @@ fn tweaks_section(golden: &mut Golden) {
         faces: vec![(face(FaceRole::PlusX), 0.05)],
         tangent: true,
         topology: Topology::Keep,
+        blends: Default::default(),
     };
     let (o, j) = offset_faces(k, &rounded, &chain).unwrap();
     hash_body(&mut s, &o, &j);
@@ -4474,6 +4477,7 @@ fn tweaks_section(golden: &mut Golden) {
         &ReplaceSpec {
             faces: vec![(top, tilted)],
             topology: Topology::Keep,
+            blends: Default::default(),
         },
     )
     .unwrap();
@@ -4508,6 +4512,7 @@ fn drafts_section(golden: &mut Golden) {
             .collect(),
         tangent: false,
         topology: Topology::Keep,
+        blends: Default::default(),
     };
     let about = |z: f64| Hinge::Neutral {
         origin: Point3::new(0.0, 0.0, z),

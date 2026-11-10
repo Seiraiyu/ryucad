@@ -99,6 +99,11 @@ enum Command {
     /// participant's window, part of the way through with --fraction.
     #[command(subcommand)]
     Explode(ExplodeCmd),
+    /// A part's 2D drawings: sheets on a template with a title block, and
+    /// views projected with exact hidden lines, written as PDF, SVG and
+    /// PNG. Every value a sheet shows comes from the model.
+    #[command(subcommand)]
+    Drawing(DrawingCmd),
     /// ryupdm's settings for this project: its ID, how revisions are labelled, the release
     /// branch, the part number pattern and the custom properties parts may have.
     #[command(subcommand)]
@@ -1698,6 +1703,225 @@ enum ExplodeCmd {
         #[arg(long = "of", value_name = "PARTICIPANT")]
         of: Option<String>,
     },
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+enum DrawingCmd {
+    /// A part's drawings, or every part's, with each listed part's revision.
+    List { part: Option<String> },
+    /// A drawing with one sheet; --views standard adds a base front view,
+    /// its top and right (first-angle's when the standard says) and an
+    /// isometric, laid out.
+    Create {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        name: Option<String>,
+        /// A built-in template (asme-a to asme-e, iso-a4 to iso-a0) or a
+        /// project template's ID; the size's built-in one by default.
+        #[arg(long)]
+        template: Option<String>,
+        /// iso_a0 to iso_a4, ansi_a to ansi_e (ansi_b for ASME, iso_a3 for
+        /// ISO by default).
+        #[arg(long)]
+        size: Option<String>,
+        #[arg(long, value_parser = ["standard"])]
+        views: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// A batch of ops on a drawing's sheets and views, all or nothing:
+    /// '[{"op": "add", "kind": "view", "value": {"type": "projected",
+    /// "sheet": "s1", "from": "v1", "side": "left"}}, {"op": "set",
+    /// "id": "v1", "fields": {"hidden": "dashed"}}, {"op": "move", "id":
+    /// "v1", "at": ["120 mm", "150 mm"]}, {"op": "remove", "id": "v4"}]'.
+    Edit {
+        part: String,
+        drawing: String,
+        #[arg(long, value_name = "JSON", value_parser = json_array)]
+        ops: Value,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Add a view: the same op `edit` sends.
+    #[command(subcommand)]
+    View(DrawingViewCmd),
+    /// Move a view to a centre on its sheet, or a projected or auxiliary
+    /// view along its row or column.
+    Move {
+        part: String,
+        drawing: String,
+        view: String,
+        #[arg(
+            long,
+            value_name = "X,Y",
+            conflicts_with = "offset",
+            required_unless_present = "offset"
+        )]
+        at: Option<String>,
+        #[arg(long, value_name = "LENGTH")]
+        offset: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Remove a sheet or a view.
+    Remove {
+        part: String,
+        drawing: String,
+        id: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Delete {
+        part: String,
+        drawing: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Give a drawing a new ID.
+    Rename {
+        part: String,
+        drawing: String,
+        to: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// The built drawing: sheets, views with their boxes and frames, and
+    /// findings; --items adds every item's exact geometry.
+    Get {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        rev: Option<String>,
+        #[arg(long)]
+        sheet: Option<String>,
+        #[arg(long)]
+        items: bool,
+    },
+    /// Each sheet in words: its views, what they show, what lies near what.
+    Describe {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        rev: Option<String>,
+        #[arg(long)]
+        sheet: Option<String>,
+    },
+    /// A sheet as PNG (4 pixels a millimetre unless --scale) or SVG.
+    Render {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        out: std::path::PathBuf,
+        #[arg(long)]
+        sheet: Option<String>,
+        #[arg(long, value_parser = ["png", "svg"])]
+        format: Option<String>,
+        /// Pixels to the millimetre, 0.5 to 40.
+        #[arg(long, value_name = "PX_PER_MM")]
+        scale: Option<f32>,
+        #[arg(long)]
+        rev: Option<String>,
+    },
+    /// Every sheet as one PDF, or one sheet as SVG, by --out's extension
+    /// unless --format; the daemon writes it (never over a project file).
+    Export {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        out: std::path::PathBuf,
+        #[arg(long)]
+        sheet: Option<String>,
+        #[arg(long, value_parser = ["pdf", "svg"])]
+        format: Option<String>,
+        /// A Git revision, `label:<L>`, `annotation:<id>` or `draft:<name>`.
+        #[arg(long)]
+        rev: Option<String>,
+    },
+    /// Lay the views out again from nothing.
+    Layout {
+        part: String,
+        drawing: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum DrawingViewCmd {
+    /// A base view (--orient), one projected from another (--from with
+    /// --side), or an auxiliary one (--from with --normal-to).
+    Add {
+        part: String,
+        drawing: String,
+        /// Its key (v1, v2, …); the next free one by default.
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long, default_value = "s1")]
+        sheet: String,
+        /// A standard view's name, a named view of the part, or with
+        /// --normal-to unset a face's reference to look normal to.
+        #[arg(long, conflicts_with = "from")]
+        orient: Option<String>,
+        /// The part or assembly a base view draws (the drawing's own).
+        #[arg(long = "of", requires = "orient")]
+        of: Option<String>,
+        #[arg(long, requires = "orient")]
+        label_rev: Option<String>,
+        #[arg(long, required_unless_present = "orient")]
+        from: Option<String>,
+        /// top, bottom, left, right, back, or iso and the cube's corners.
+        #[arg(long, requires = "from", conflicts_with = "normal_to")]
+        side: Option<String>,
+        /// A straight edge or planar face the auxiliary view looks along.
+        #[arg(long, requires = "from")]
+        normal_to: Option<String>,
+        #[arg(long, value_name = "X,Y")]
+        at: Option<String>,
+        #[arg(long, value_name = "SHEET:MODEL")]
+        scale: Option<String>,
+        #[arg(long, value_parser = ["off", "dashed"])]
+        hidden: Option<String>,
+        #[arg(long, value_parser = ["thin", "off", "phantom"])]
+        tangent: Option<String>,
+        #[arg(long)]
+        label: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+/// A reference `<part>/<feature>/<name>` as a drawing writes it.
+fn drawing_ref(text: &str) -> core::result::Result<Value, Error> {
+    let parts: Vec<&str> = text.split('/').collect();
+    match parts.as_slice() {
+        [_, f, n] => Ok(json!({"feature": f, "name": n})),
+        _ => Err(Error::new(
+            Code::InvalidParam,
+            format!("{text:?} is no reference: <part>/<solid>/<name>"),
+        )),
+    }
+}
+
+/// `X,Y` as two sheet lengths (bare numbers millimetres).
+fn sheet_point(text: &str) -> core::result::Result<Value, Error> {
+    let parts: Vec<&str> = text.split(',').map(str::trim).collect();
+    match parts.as_slice() {
+        [x, y] => {
+            let q = |s: &str| -> Value {
+                s.parse::<f64>()
+                    .map_or_else(|_| json!(s), |n| json!(format!("{n} mm")))
+            };
+            Ok(json!([q(x), q(y)]))
+        }
+        _ => Err(Error::new(
+            Code::Usage,
+            format!("{text:?}: a point on the sheet is X,Y"),
+        )),
+    }
 }
 
 fn json_array(s: &str) -> core::result::Result<Value, String> {
@@ -3698,6 +3922,8 @@ fn request(cmd: &Command) -> Option<Request> {
             }
         }
         Command::View(ViewCmd::List { part }) => Request::ViewList { part: part.clone() },
+        // `main` checks it first (`drawing_request`'s refusals).
+        Command::Drawing(d) => drawing_request(d).expect("checked before the request is made"),
         Command::Explode(ExplodeCmd::List { part }) => Request::ExplodeList { part: part.clone() },
         Command::Explode(ExplodeCmd::Save {
             part,
@@ -4632,7 +4858,8 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             let disk = Disk::for_user().ok_or_else(|| {
                 Error::new(Code::Io, "there is no disk cache on this machine to push")
             })?;
-            let kinds = kind.map_or(Kind::ALL.to_vec(), |k| vec![k]);
+            let shared: Vec<Kind> = Kind::ALL.into_iter().filter(|k| k.shared()).collect();
+            let kinds = kind.map_or(shared, |k| vec![k]);
             ryucad::cache::push(&disk, &kinds)
         }
         Command::WhereUsed {
@@ -4774,6 +5001,9 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             if let Command::Annotations(c) = cmd {
                 annotations_usage(c)?;
             }
+            if let Command::Drawing(d) = cmd {
+                drawing_request(d)?;
+            }
             let req = absolute_worktrees(
                 request(cmd).expect("every other command is a request"),
                 &here,
@@ -4900,7 +5130,10 @@ fn deliver(cmd: &Command, a: Answer) -> Result<Value> {
         return written(cmd, a.result);
     };
     let out = match cmd {
-        Command::Mesh { out: Some(o), .. } | Command::Render { out: o, .. } => o,
+        Command::Mesh { out: Some(o), .. }
+        | Command::Render { out: o, .. }
+        | Command::Drawing(DrawingCmd::Render { out: o, .. })
+        | Command::Drawing(DrawingCmd::Export { out: o, .. }) => o,
         _ => {
             return Err(Error::new(
                 Code::Internal,
@@ -4912,6 +5145,230 @@ fn deliver(cmd: &Command, a: Answer) -> Result<Value> {
     let mut result = a.result;
     result["out"] = json!(out);
     Ok(result)
+}
+
+/// The request a `drawing` command sends.
+fn drawing_request(d: &DrawingCmd) -> Result<Request> {
+    let edit =
+        |part: &String, drawing: &String, ops: Value, expect: &Expect| Request::DrawingEdit {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            ops,
+            expected_revision: expect.revision.clone(),
+        };
+    Ok(match d {
+        DrawingCmd::List { part } => Request::DrawingList { part: part.clone() },
+        DrawingCmd::Create {
+            part,
+            drawing,
+            name,
+            template,
+            size,
+            views,
+            expect,
+        } => Request::DrawingCreate {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            name: name.clone(),
+            template: template.clone(),
+            size: size.clone(),
+            views: views.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        DrawingCmd::Edit {
+            part,
+            drawing,
+            ops,
+            expect,
+        } => edit(part, drawing, ops.clone(), expect),
+        DrawingCmd::View(DrawingViewCmd::Add {
+            part,
+            drawing,
+            id,
+            sheet,
+            orient,
+            of,
+            label_rev,
+            from,
+            side,
+            normal_to,
+            at,
+            scale,
+            hidden,
+            tangent,
+            label,
+            expect,
+        }) => {
+            let mut v = json!({"sheet": sheet});
+            match (orient, from) {
+                (Some(o), _) => {
+                    v["type"] = json!("base");
+                    v["orient"] = if o.contains('/') {
+                        json!({"normal_to": drawing_ref(o)?})
+                    } else {
+                        json!(o)
+                    };
+                    if let Some(of) = of {
+                        v["of"] = json!(of);
+                    }
+                    if let Some(l) = label_rev {
+                        v["rev"] = json!({"label": l});
+                    }
+                }
+                (None, Some(f)) => {
+                    v["from"] = json!(f);
+                    match (side, normal_to) {
+                        (_, Some(n)) => {
+                            v["type"] = json!("auxiliary");
+                            v["normal_to"] = drawing_ref(n)?;
+                        }
+                        (Some(sd), None) => {
+                            v["type"] = json!("projected");
+                            v["side"] = json!(sd);
+                        }
+                        (None, None) => {
+                            return Err(Error::new(
+                                Code::Usage,
+                                "a view from another takes --side or --normal-to",
+                            ));
+                        }
+                    }
+                }
+                (None, None) => unreachable!("clap requires one"),
+            }
+            if let Some(a) = at {
+                v["at"] = sheet_point(a)?;
+            }
+            for (k, x) in [
+                ("scale", scale),
+                ("hidden", hidden),
+                ("tangent", tangent),
+                ("label", label),
+            ] {
+                if let Some(x) = x {
+                    v[k] = json!(x);
+                }
+            }
+            let mut op = json!({"op": "add", "kind": "view", "value": v});
+            if let Some(id) = id {
+                op["id"] = json!(id);
+            }
+            edit(part, drawing, json!([op]), expect)
+        }
+        DrawingCmd::Move {
+            part,
+            drawing,
+            view,
+            at,
+            offset,
+            expect,
+        } => {
+            let mut op = json!({"op": "move", "id": view});
+            match (at, offset) {
+                (Some(a), _) => op["at"] = sheet_point(a)?,
+                (None, Some(o)) => op["offset"] = json!(o),
+                (None, None) => unreachable!("clap requires one"),
+            }
+            edit(part, drawing, json!([op]), expect)
+        }
+        DrawingCmd::Remove {
+            part,
+            drawing,
+            id,
+            expect,
+        } => edit(part, drawing, json!([{"op": "remove", "id": id}]), expect),
+        DrawingCmd::Delete {
+            part,
+            drawing,
+            expect,
+        } => Request::DrawingDelete {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        DrawingCmd::Rename {
+            part,
+            drawing,
+            to,
+            expect,
+        } => Request::DrawingRename {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            to: to.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        DrawingCmd::Get {
+            part,
+            drawing,
+            rev,
+            sheet,
+            items,
+        } => Request::DrawingGet {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            rev: rev.clone(),
+            sheet: sheet.clone(),
+            items: *items,
+        },
+        DrawingCmd::Describe {
+            part,
+            drawing,
+            rev,
+            sheet,
+        } => Request::DrawingDescribe {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            rev: rev.clone(),
+            sheet: sheet.clone(),
+        },
+        DrawingCmd::Render {
+            part,
+            drawing,
+            out: _,
+            sheet,
+            format,
+            scale,
+            rev,
+        } => Request::DrawingRender {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            rev: rev.clone(),
+            sheet: sheet.clone(),
+            format: format.clone(),
+            scale: *scale,
+        },
+        DrawingCmd::Export {
+            part,
+            drawing,
+            out,
+            sheet,
+            format,
+            rev,
+        } => Request::DrawingExport {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            rev: rev.clone(),
+            sheet: sheet.clone(),
+            format: format.clone(),
+            out: Some(
+                std::path::absolute(out)
+                    .unwrap_or_else(|_| out.clone())
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        },
+        DrawingCmd::Layout {
+            part,
+            drawing,
+            dry_run,
+            expect,
+        } => Request::DrawingLayout {
+            part: part.clone(),
+            drawing: drawing.clone(),
+            dry_run: *dry_run,
+            expected_revision: expect.revision.clone(),
+        },
+    })
 }
 
 /// The result to print, once text a command writes to its `--out` file
