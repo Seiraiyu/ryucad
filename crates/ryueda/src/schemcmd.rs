@@ -722,9 +722,18 @@ fn block_description(
     sheet: Option<&str>,
 ) -> Result<Value> {
     let (layers, shown) = show_layer(p, b, laid, None)?;
-    let (findings, scores) =
-        ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
+    let prefs = crate::lint::prefs(p);
+    let (_, scores) = ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &prefs);
+    // Every fix tried by a dry run first: those that don't hold aren't
+    // offered.
+    let (findings, checked) = schem::checked_findings(laid, &prefs);
     let mut d = ryusch::describe::describe(&laid.built.input, &laid.outcome, &findings, &scores);
+    let unchecked: Vec<(&str, &str, &Vec<String>)> = findings
+        .iter()
+        .zip(&checked)
+        .filter(|(_, ok)| !**ok)
+        .map(|(f, _)| (f.code, f.sheet.as_str(), &f.refs))
+        .collect();
     let names = Names {
         p,
         b,
@@ -741,8 +750,15 @@ fn block_description(
     // Findings' fixes in the agent's names, ready to send.
     if let Some(sheets) = d["sheets"].as_array_mut() {
         for s in sheets {
+            let sid = s["sheet"].as_str().unwrap_or_default().to_owned();
             if let Some(found) = s["findings"].as_array_mut() {
                 for f in found {
+                    let past = unchecked.iter().any(|(code, sheet, refs)| {
+                        f["code"] == *code && *sheet == sid && f["refs"] == json!(refs)
+                    });
+                    if past {
+                        f["fixes_checked"] = json!(false);
+                    }
                     names.fixes_in(f);
                 }
             }

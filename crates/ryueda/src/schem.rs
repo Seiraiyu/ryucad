@@ -815,6 +815,58 @@ pub fn lay_restoring(
     })
 }
 
+/// The most fixes a block's findings have checked (the findings with the
+/// most points first): each is a layout of the block.
+pub const FIX_CHECKS: usize = 24;
+
+/// `laid`'s lint with every fix tried first (`ryusch::lint::try_fix`), in
+/// parallel: a fix that doesn't hold is dropped; findings past
+/// `FIX_CHECKS` fixes say `fixes_checked: false` and keep theirs.
+pub fn checked_findings(
+    laid: &Laid,
+    prefs: &ryusch::lint::Prefs,
+) -> (Vec<ryusch::lint::Finding>, Vec<bool>) {
+    use rayon::prelude::*;
+    let (mut found, _) = ryusch::lint::lint_with(&laid.built.input, &laid.outcome, prefs);
+    let mut order: Vec<usize> = (0..found.len())
+        .filter(|i| !found[*i].fixes.is_empty())
+        .collect();
+    order.sort_by_key(|i| (std::cmp::Reverse(found[*i].points), *i));
+    let mut budget = FIX_CHECKS;
+    let mut checked = vec![true; found.len()];
+    let mut asks: Vec<(usize, usize)> = Vec::new();
+    for i in order {
+        let n = found[i].fixes.len();
+        if n > budget {
+            checked[i] = false;
+            continue;
+        }
+        budget -= n;
+        asks.extend((0..n).map(|j| (i, j)));
+    }
+    let verdicts: Vec<bool> = asks
+        .par_iter()
+        .map(|(i, j)| {
+            ryusch::lint::try_fix(
+                &laid.built.input,
+                &laid.outcome,
+                &found[*i],
+                &found[*i].fixes[*j],
+            )
+            .is_ok()
+        })
+        .collect();
+    let mut keep: std::collections::BTreeMap<usize, Vec<bool>> = Default::default();
+    for ((i, _), ok) in asks.iter().zip(verdicts) {
+        keep.entry(*i).or_default().push(ok);
+    }
+    for (i, oks) in keep {
+        let mut it = oks.into_iter();
+        found[i].fixes.retain(|_| it.next().unwrap_or(false));
+    }
+    (found, checked)
+}
+
 /// ryusch's refusal as ryueda's error.
 pub fn refusal(block: &Id, r: ryusch::instr::Refusal) -> Error {
     let code = match r.code {

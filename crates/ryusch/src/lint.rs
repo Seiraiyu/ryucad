@@ -1923,9 +1923,72 @@ fn wired_on_row(
     reached.contains(&route::node_of(end)) && reached.len() > 1
 }
 
+/// Lays `fix` out over `out` as a dry run (its instructions added as
+/// lasting ones) and judges it: `Ok` when the engine takes it, every
+/// hard rule holds, the layout changes and `finding` (by code and refs)
+/// is gone; else why not.
+pub fn try_fix(
+    block: &Block,
+    out: &crate::engine::Outcome,
+    finding: &Finding,
+    fix: &[Instruction],
+) -> Result<(), String> {
+    let mut b = block.clone();
+    b.previous = Some(out.layout.clone());
+    b.moves.clear();
+    b.relayout = crate::input::Relayout::None;
+    for ins in fix {
+        let id = crate::layout::next_id(b.instructions.keys());
+        b.instructions.insert(id, ins.clone());
+    }
+    let tried = crate::engine::lay_out(&b).map_err(|e| e.message.clone())?;
+    if let Some(v) = crate::rules::check(&b, &tried.layout).first() {
+        return Err(format!("it breaks a hard rule ({}): {}", v.rule, v.message));
+    }
+    if tried.layout.placed == out.layout.placed
+        && tried.layout.labels == out.layout.labels
+        && tried.layout.routes == out.layout.routes
+        && tried.layout.text == out.layout.text
+    {
+        return Err("it changes nothing".into());
+    }
+    let (after, _) = lint(&b, &tried);
+    if after
+        .iter()
+        .any(|f| f.code == finding.code && f.refs == finding.refs)
+    {
+        return Err(format!("{} is still there after it", finding.code));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fix that holds is kept; an `align` that moves nothing, or a fix
+    /// that leaves the finding, is dropped.
+    #[test]
+    fn fixes_are_tried_before_they_are_offered() {
+        let block = crate::testing::with_stage(crate::testing::seeded(5, 2));
+        let out = crate::engine::lay_out(&block).unwrap();
+        let (found, _) = lint(&block, &out);
+        let with_fix: Vec<&Finding> = found.iter().filter(|f| !f.fixes.is_empty()).collect();
+        assert!(!with_fix.is_empty(), "the seed has a finding with a fix");
+        for f in &with_fix {
+            for fix in &f.fixes {
+                // Whatever the verdict, it is the same twice.
+                assert_eq!(try_fix(&block, &out, f, fix), try_fix(&block, &out, f, fix));
+            }
+        }
+        // Lining a part up with itself changes nothing: dropped.
+        let p = block.parts[1].key.clone();
+        let idle = vec![Instruction::Align {
+            parts: vec![p.clone(), p],
+            axis: crate::layout::Axis::Row,
+        }];
+        assert!(try_fix(&block, &out, with_fix[0], &idle).is_err());
+    }
 
     /// A pull wired on its pin's row is the pin's however far out along it
     /// (a bank past a column of flags, #429); moved off the row it is judged

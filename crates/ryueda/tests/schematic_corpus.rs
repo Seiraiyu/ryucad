@@ -622,8 +622,9 @@ fn pins_line_up_and_parts_shift() {
 /// Findings carry fixes in the agent's names: each circuit laid out from
 /// nothing, each finding's first fix sent alone as a dry run, and the
 /// share of fixes that remove their finding printed per rule (the lint's
-/// evidence, plan 1.D's Task 18). Every flipped part's fix works. Release
-/// only (a dry run per finding).
+/// evidence, plan 1.D's Task 18). Every fix offered and checked works
+/// (plan 2.B: they are tried before they are offered). Release only (a
+/// dry run per finding).
 #[test]
 #[cfg_attr(debug_assertions, ignore = "a dry run per finding: release only")]
 fn the_corpus_from_nothing_findings_carry_fixes() {
@@ -656,7 +657,9 @@ fn the_corpus_from_nothing_findings_carry_fixes() {
             let e = tally.entry(code.clone()).or_default();
             e.0 += 1;
             e.1 += usize::from(gone);
-            if code == "sch_part_flipped" {
+            // Plan 2.B: every fix offered was tried by a dry run first,
+            // so every one checked works.
+            if f["fixes_checked"] != false {
                 assert!(gone, "{name}: {texts:?} left {f}: {v}");
             }
         }
