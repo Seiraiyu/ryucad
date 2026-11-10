@@ -367,6 +367,7 @@ pub(crate) fn resolve<'a>(
                         faces,
                         tangent: d.tangent,
                         topology: Topology::Keep,
+                        blends: Default::default(),
                     },
                     parting: matches!(d.hinge, DraftHinge::Parting { .. }),
                     asked,
