@@ -603,15 +603,39 @@ pub fn flow(
                 }
             }
         }
-        // The channel past this column: room for the nets crossing it.
-        let crossing = if i + 1 < cols.len() {
+        // The channel past this column: room for the nets crossing it,
+        // and for a bus's entries both sides and its trunk where four of
+        // its members cross (plan 2.C).
+        let (crossing, bus_room) = if i + 1 < cols.len() {
             let before: BTreeSet<usize> = nets[..=i].iter().flatten().copied().collect();
             let after: BTreeSet<usize> = nets[i + 1..].iter().flatten().copied().collect();
-            before.intersection(&after).count() as Nm
+            let both: BTreeSet<usize> = before.intersection(&after).copied().collect();
+            let bus_room = block
+                .buses
+                .iter()
+                .filter_map(|b| {
+                    let crossing: Vec<usize> = b
+                        .members
+                        .iter()
+                        .copied()
+                        .filter(|n| both.contains(n))
+                        .collect();
+                    (crossing.len() >= crate::bus::MIN_MEMBERS).then(|| {
+                        let stub = crate::bus::stub_len(
+                            crossing.iter().map(|n| block.nets[*n].name.as_str()),
+                        );
+                        // Both pins' lengths, the entries and a trunk of
+                        // a few steps between the spines.
+                        2 * (stub + crate::bus::ENTRY) + 12 * GRID
+                    })
+                })
+                .max()
+                .unwrap_or(0);
+            (both.len() as Nm, bus_room)
         } else {
-            0
+            (0, 0)
         };
-        x += width + (crossing + 6).clamp(6, 16) * GRID + hints.spread;
+        x += width + ((crossing + 6).clamp(6, 16) * GRID).max(bus_room) + hints.spread;
     }
     // A port flag alone in its column moves up or down onto the line of
     // the pin it meets, where its room is free: a straight wire, no jog.

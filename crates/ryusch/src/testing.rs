@@ -686,6 +686,36 @@ pub fn leaving_block() -> Block {
     b
 }
 
+/// A block for plan 2.C's buses: four nets QSPI_SD0 to QSPI_SD3, a bus
+/// of them, from an MCU's right side to a flash's left.
+pub fn bus_block() -> Block {
+    use crate::input::{Bus, PinKind::Bidirectional as Bd};
+    let mut b = Block {
+        sheet: [400_000_000, 277_000_000],
+        ..Default::default()
+    };
+    for i in 0..4 {
+        b.nets.push(net(
+            &format!("d{i}"),
+            &format!("QSPI_SD{i}"),
+            NetKind::Signal,
+        ));
+    }
+    b.buses.push(Bus {
+        key: "bus:q".into(),
+        name: "QSPI_SD".into(),
+        members: vec![0, 1, 2, 3],
+    });
+    let side: Vec<(&str, PinKind, Option<usize>)> = ["IO0", "IO1", "IO2", "IO3"]
+        .into_iter()
+        .enumerate()
+        .map(|(i, n)| (n, Bd, Some(i)))
+        .collect();
+    b.parts.push(ic("u1", "U1", "MCU", &[], &side));
+    b.parts.push(ic("u2", "U2", "FLASH", &side, &[]));
+    b
+}
+
 /// A block for plan 2.A's regions: a dense IC (U1, 10 pins) with a bypass
 /// capacitor and a pull-up, a buck (U2 TPS54331 with L1 and C2 on its own
 /// output rail), a connector (J1) on U1's D+, a loose RC on its own nets,

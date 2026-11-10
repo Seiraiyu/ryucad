@@ -312,7 +312,13 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                     .and_then(|r| r.get(sid))
                     .is_some_and(|runs| runs.iter().any(|run| route::expand(run).contains(&node)));
                 let on = format!("{part}/{}", pin.number);
+                // A bus member's pin joins its bus by its entry (plan 2.C).
+                let entered = layout.buses.values().any(|by| {
+                    by.get(sid)
+                        .is_some_and(|b| b.entries.iter().any(|e| e.on == on && &e.net == key))
+                });
                 let labelled = *port
+                    || entered
                     || layout
                         .labels
                         .get(key)

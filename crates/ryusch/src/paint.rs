@@ -271,8 +271,14 @@ fn bus_items(block: &Block, layout: &Layout, sid: &str, items: &mut Vec<Item>) {
         };
         let mut columns: BTreeMap<Nm, Vec<Point>> = BTreeMap::new();
         let mut members: Vec<usize> = Vec::new();
+        let stub_len = crate::bus::stub_len(
+            drawn
+                .entries
+                .iter()
+                .filter_map(|e| block.net(&e.net).map(|n| block.nets[n].name.as_str())),
+        );
         for e in &drawn.entries {
-            let (stub, on_spine) = crate::bus::entry(e.at, e.side);
+            let (stub, on_spine) = crate::bus::entry(e.at, e.side, stub_len);
             line(items, vec![e.at, stub, on_spine], WIRE);
             columns.entry(on_spine[0]).or_default().push(on_spine);
             if let Some(n) = block.net(&e.net) {
@@ -604,7 +610,8 @@ mod tests {
                 side: shape.pins[k].side,
             })
             .collect();
-        let x = crate::bus::entry(entries[0].at, entries[0].side).1[0];
+        let stub = crate::bus::stub_len(["QSPI_SD0"]);
+        let x = crate::bus::entry(entries[0].at, entries[0].side, stub).1[0];
         l.buses.insert(
             "bus:q".into(),
             BTreeMap::from([(

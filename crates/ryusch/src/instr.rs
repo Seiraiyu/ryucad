@@ -44,6 +44,8 @@ pub struct Resolved {
     pub shift: Vec<(Vec<usize>, Side, u16)>,
     pub groups: Vec<Vec<usize>>,
     pub styles: BTreeMap<usize, NetStyle>,
+    /// How each bus is asked to be drawn, by bus index (plan 2.C).
+    pub bus_styles: BTreeMap<usize, NetStyle>,
     pub idiom: BTreeMap<usize, IdiomChoice>,
     pub flow: BTreeSet<usize>,
     /// Parts a move of this batch places: held where they go.
@@ -217,7 +219,11 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
             {
                 missing.push(to.clone())
             }
-            Instruction::Net { net, .. } if block.net(net).is_none() => missing.push(net.clone()),
+            Instruction::Net { net, .. }
+                if block.net(net).is_none() && block.bus(net).is_none() =>
+            {
+                missing.push(net.clone())
+            }
             _ => {}
         }
         if !missing.is_empty() {
@@ -440,6 +446,17 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
                     grouped.insert(p, id.clone());
                 }
                 r.groups.push(parts.clone());
+            }
+            Instruction::Net { net, style } if block.net(net).is_none() => {
+                let b = block.bus(net).expect("resolved");
+                if !matches!(style, NetStyle::Bus | NetStyle::Label) {
+                    return Err(rule(
+                        &id,
+                        "bus",
+                        format!("{net} is a bus: it is drawn as one (bus) or by labels (label)"),
+                    ));
+                }
+                r.bus_styles.insert(b, *style);
             }
             Instruction::Net { net, style } => {
                 let n = block.net(net).expect("resolved");
@@ -832,7 +849,14 @@ pub fn judge(block: &Block, layout: &Layout, ins: &Instruction) -> Result<(), St
                 .net(net)
                 .map_or(net.clone(), |n| block.nets[n].name.clone());
             Err(match style {
+                _ if block.bus(net).is_some() => match style {
+                    NetStyle::Bus => {
+                        format!("{net} is drawn by labels: it can't be drawn as a bus")
+                    }
+                    _ => format!("{net} is drawn as a bus"),
+                },
                 NetStyle::Wire => format!("{n} is drawn by labels"),
+                NetStyle::Bus => format!("{n} isn't a bus: only a bus is drawn as one"),
                 _ => format!("{n} is drawn by wires"),
             })
         }

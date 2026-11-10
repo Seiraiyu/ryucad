@@ -153,14 +153,26 @@ pub fn name(block: &Block, bus: usize, members: &[usize]) -> String {
     }
 }
 
-/// From a member pin's end pointing `side`: the stub's end and the
-/// entry's end on the spine (the entry turns down the page from the
-/// stub, so a column of entries steps one way).
-pub fn entry(end: Point, side: Side) -> (Point, Point) {
+/// How long a bundle's stubs run from their pins: its longest member's
+/// name and a step, in whole steps, at least [`STUB`], so each name reads
+/// on its stub as a net label's on its wire.
+pub fn stub_len<'a>(names: impl IntoIterator<Item = &'a str>) -> Nm {
+    let w = names
+        .into_iter()
+        .map(|n| crate::font::width(n, crate::font::SIZE))
+        .max()
+        .unwrap_or(0);
+    ((w + 2 * GRID - 1) / GRID * GRID).max(STUB)
+}
+
+/// From a member pin's end pointing `side`, with stubs `stub` long: the
+/// stub's end and the entry's end on the spine (the entry turns down the
+/// page from the stub, so a column of entries steps one way).
+pub fn entry(end: Point, side: Side, stub: Nm) -> (Point, Point) {
     let d = side.step();
-    let stub = [end[0] + d[0] / GRID * STUB, end[1]];
-    let on_spine = [stub[0] + d[0] / GRID * ENTRY, stub[1] - ENTRY];
-    (stub, on_spine)
+    let s = [end[0] + d[0] / GRID * stub, end[1]];
+    let on_spine = [s[0] + d[0] / GRID * ENTRY, s[1] - ENTRY];
+    (s, on_spine)
 }
 
 /// The spine through a column of entries' ends: from the highest to the

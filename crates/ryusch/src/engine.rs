@@ -43,6 +43,8 @@ const NEAR_RAIL: Nm = 4 * GRID;
 /// said 12 steps; on the corpus from nothing 16 wires three more parts
 /// (the RP2040's switches and test pads) and longer reaches add none.
 const LOCAL_REACH: Nm = 16 * GRID;
+/// The router's net id of bus `i`'s spines and trunk: far past any net.
+const BUS_NET: usize = usize::MAX / 2;
 
 /// A warning about the result: an instruction whose subject is gone, a
 /// sheet full.
@@ -823,7 +825,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
     }
     pin_papers(&mut st, r);
     let rows = bank_rows(&st, &idioms);
-    let mut out = draw(st, prev, &styles, &bypass, &rows, &r.text);
+    let mut out = draw(st, prev, &styles, &r.bus_styles, &bypass, &rows, &r.text);
     out.layout.instructions = block.instructions.clone();
     // What each lasting instruction moved stood before it, while it lasts.
     if let Some(p) = &block.previous {
@@ -926,6 +928,7 @@ pub(crate) fn guest(block: &Block, cl: &Cluster, r: &instr::Resolved) -> bool {
             && !crate::cluster::is_connector(block, p)
             && !r.edge.contains_key(&p)
             && !r.sheet.contains_key(&p)
+            && !on_bus(block, p)
     };
     let powered = |p: usize| {
         matches!(block.parts[p].kind, PartKind::Block)
@@ -937,6 +940,19 @@ pub(crate) fn guest(block: &Block, cl: &Cluster, r: &instr::Resolved) -> bool {
     };
     let m = &cl.members;
     m.iter().all(|(p, _)| small(*p)) && (m.len() == 1 || !m.iter().any(|(p, _)| powered(*p)))
+}
+
+/// Whether part `p` has a pin on as many of one bus's members as a
+/// bundle draws (plan 2.C): it stands where flow puts it, a channel
+/// wide enough for the bus from its neighbour, never beside a host.
+fn on_bus(block: &Block, p: usize) -> bool {
+    block.buses.iter().any(|b| {
+        b.members
+            .iter()
+            .filter(|n| block.parts[p].pins.iter().any(|x| x.net == Some(**n)))
+            .count()
+            >= crate::bus::MIN_MEMBERS
+    })
 }
 
 /// The signal nets a set of parts' pins are drawn on.
@@ -2770,6 +2786,7 @@ fn draw(
     st: State,
     prev: Option<&Layout>,
     asked: &BTreeMap<usize, NetStyle>,
+    bus_styles: &BTreeMap<usize, NetStyle>,
     bypass: &[Bypass],
     bank_rows: &[BankRow],
     asks: &BTreeMap<usize, Vec<(crate::layout::TextField, Side)>>,
@@ -2800,6 +2817,8 @@ fn draw(
             );
         }
     }
+    // Buses that couldn't be drawn, and why (plan 2.C).
+    let mut bus_notes: Vec<Note> = Vec::new();
     // Which sheets each net is on.
     let mut net_sheets: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
     for (p, part) in block.parts.iter().enumerate() {
@@ -2831,6 +2850,41 @@ fn draw(
                 }
                 if pin.stacked() {
                     stacked.extend(pin.nets());
+                }
+            }
+        }
+        // Buses before anything else is drawn (plan 2.C): a bundle's
+        // members take no labels or wires of their own.
+        for (i, bus) in block.buses.iter().enumerate() {
+            if bus_styles.get(&i) == Some(&NetStyle::Label) {
+                continue;
+            }
+            let here = crate::bus::sides_on_sheet(block, &parts);
+            let leaves = |n: usize| net_sheets.get(&n).is_some_and(|s| s.len() > 1);
+            let side_of = |p: usize, k: usize| st.shape(p).expect("placed").pins[k].side;
+            let Some(bundle) = crate::bus::bundle_with(block, i, &here, &leaves, &side_of) else {
+                if bus_styles.get(&i) == Some(&NetStyle::Bus)
+                    && bus.members.iter().any(|n| pins_of.contains_key(n))
+                {
+                    bus_notes.push(bus_note(block, i, &sid, "its members don't run between one side of one part and one side of another"));
+                }
+                continue;
+            };
+            let saved = field.clone();
+            match draw_bus(block, &st, &mut field, i, &bundle) {
+                Ok(d) => {
+                    for n in &bundle.members {
+                        pins_of.remove(n);
+                    }
+                    layout
+                        .buses
+                        .entry(bus.key.clone())
+                        .or_default()
+                        .insert(sid.clone(), d);
+                }
+                Err(why) => {
+                    field = saved;
+                    bus_notes.push(bus_note(block, i, &sid, &why));
                 }
             }
         }
@@ -3484,6 +3538,7 @@ fn draw(
     crate::canvas::arrange(block, &mut layout, prev);
     let blocked = st.blocked;
     let mut notes = st.notes;
+    notes.extend(bus_notes);
     for (n, why) in not_held {
         notes.push(Note {
             code: "net_style_not_held".into(),
@@ -3780,6 +3835,128 @@ fn carriers(
         }
     }
     out
+}
+
+/// A bus noted `bus_not_drawn` on sheet `sid`, and why.
+fn bus_note(block: &Block, i: usize, sid: &str, why: &str) -> Note {
+    let bus = &block.buses[i];
+    Note {
+        code: "bus_not_drawn".into(),
+        message: format!("{} is drawn by labels: {why}", bus.name),
+        details: serde_json::json!({"bus": bus.key, "sheet": sid, "why": why}),
+    }
+}
+
+/// A bundle drawn into `field` (plan 2.C): each member's stub (its net's
+/// wire) and the name it carries, the spine through each end's entries
+/// and a trunk between the spines, all marked; the space the entries
+/// cross blocked. `Err` says why it can't be, and marks nothing worth
+/// keeping (the caller puts the field back).
+fn draw_bus(
+    block: &Block,
+    st: &State,
+    field: &mut Field,
+    i: usize,
+    bundle: &crate::bus::Bundle,
+) -> Result<crate::layout::DrawnBus, String> {
+    use crate::layout::{BusEntry, DrawnBus};
+    let id = BUS_NET + i;
+    let name_of = |n: usize| block.nets[n].name.as_str();
+    let stub = crate::bus::stub_len(bundle.members.iter().map(|n| name_of(*n)));
+    let mut entries = Vec::new();
+    let mut spines: Vec<[Point; 2]> = Vec::new();
+    let mut ends: Vec<(Point, Side)> = Vec::new();
+    for (end, pins) in &bundle.ends {
+        let who = &block.parts[end.part].refdes;
+        let shape = st.shape(end.part).expect("placed");
+        let mut on_spine = Vec::new();
+        let mut lo = [Nm::MAX, Nm::MAX];
+        let mut hi = [Nm::MIN, Nm::MIN];
+        for (m, &k) in bundle.members.iter().zip(pins) {
+            let pin = shape.pins[k];
+            let (s, e) = crate::bus::entry(pin.end, pin.side, stub);
+            let name_box = label::label_box(LabelKind::Net, name_of(*m), pin.end, pin.side);
+            if !field.clear_label(name_box) {
+                return Err(format!("its entries have no room beside {who}"));
+            }
+            field
+                .mark(*m, &[pin.end, s])
+                .map_err(|_| format!("its entries have no room beside {who}"))?;
+            field.block_label(name_box);
+            on_spine.push(e);
+            for p in [pin.end, s, e] {
+                lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+                hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+            }
+            entries.push(BusEntry {
+                net: block.nets[*m].key.clone(),
+                on: format!(
+                    "{}/{}",
+                    block.parts[end.part].key, block.parts[end.part].pins[k].number
+                ),
+                at: pin.end,
+                side: pin.side,
+            });
+        }
+        let spine = crate::bus::spine(&on_spine)
+            .ok_or_else(|| format!("its entries beside {who} don't line up"))?;
+        field
+            .mark(id, &spine)
+            .map_err(|_| format!("its entries have no room beside {who}"))?;
+        // Nothing crosses the entries: the columns between the pins' ends
+        // and the spine, over the entries' height, are blocked.
+        let side = shape.pins[pins[0]].side;
+        let (x0, x1) = (lo[0] + GRID, hi[0] - GRID);
+        if x0 <= x1 {
+            field.block_label(Rect::new([x0, lo[1]], [x1, hi[1]]));
+        }
+        let mid_y = (spine[0][1] + spine[1][1]).div_euclid(2 * GRID) * GRID;
+        ends.push(([spine[0][0], mid_y], side));
+        spines.push(spine);
+    }
+    let mut trunk = Vec::new();
+    if let [(from, side), _] = ends[..] {
+        let target: BTreeSet<route::Node> = route::expand(&spines[1]).into_iter().collect();
+        let path = field.search(id, from, side, &target).ok_or_else(|| {
+            format!(
+                "no way for its trunk between {} and {}",
+                block.parts[bundle.ends[0].0.part].refdes,
+                block.parts[bundle.ends[1].0.part].refdes
+            )
+        })?;
+        let run = route::run_of(&path);
+        field
+            .mark(id, &run)
+            .map_err(|_| "no way for its trunk".to_owned())?;
+        trunk.push(run);
+    }
+    // The bundle's name on its trunk.
+    let name = crate::bus::name(block, i, &bundle.members);
+    if let Some(run) = trunk.first() {
+        let side = label::pointing(LabelKind::Net, toward(run[0], run[1]));
+        if let Some((p, anchor, _)) = label::drawn(LabelKind::Net, &name, run[0], side).text {
+            let b = crate::font::text_box(&name, crate::font::SIZE, p, anchor);
+            if field.overlaps_box(b) {
+                return Err(format!("no room for {name} on its trunk"));
+            }
+            field.block(b);
+        }
+    }
+    Ok(DrawnBus {
+        trunk,
+        entries,
+        connector: None,
+    })
+}
+
+/// The way from `a` to `b` along a run's first segment.
+fn toward(a: Point, b: Point) -> Side {
+    match ((b[0] - a[0]).signum(), (b[1] - a[1]).signum()) {
+        (1, _) => Side::Right,
+        (-1, _) => Side::Left,
+        (_, 1) => Side::Up,
+        _ => Side::Down,
+    }
 }
 
 /// Whether a previous label of kind `was` stands for one of kind `now`:
@@ -5884,5 +6061,43 @@ mod tests {
             }
         }
         assert_eq!(connectors, 2, "a connector on each sheet again");
+    }
+
+    #[test]
+    fn four_members_between_two_sides_are_drawn_as_a_bus() {
+        let mut b = crate::testing::bus_block();
+        let out = lay(&b);
+        assert!(
+            crate::rules::check(&b, &out.layout).is_empty(),
+            "{:?}",
+            crate::rules::check(&b, &out.layout)
+        );
+        let drawn = &out.layout.buses.get("bus:q").expect("drawn");
+        let (_, bus) = drawn.iter().next().expect("on a sheet");
+        assert_eq!(bus.entries.len(), 8, "four members at two ends");
+        assert!(!bus.trunk.is_empty());
+        // Its members take no labels and no wires of their own.
+        for i in 0..4 {
+            let k = format!("d{i}");
+            assert!(
+                out.layout.labels.get(&k).is_none_or(|v| v.is_empty()),
+                "{k}"
+            );
+            assert!(
+                out.layout.routes.get(&k).is_none_or(|v| v.is_empty()),
+                "{k}"
+            );
+        }
+        // Asked for labels, it isn't drawn.
+        b.instructions.insert(
+            "i1".into(),
+            Instruction::Net {
+                net: "bus:q".into(),
+                style: NetStyle::Label,
+            },
+        );
+        let out = lay(&b);
+        assert!(out.layout.buses.is_empty());
+        assert!(crate::rules::check(&b, &out.layout).is_empty());
     }
 }
