@@ -533,6 +533,14 @@ fn projection_finds_view_and_cut_cleanly() {
 /// at its cancel: cancelled 5 s in, it answers within 5 s more (at once
 /// on cox-worker-4, an AMD Opteron 6380; uncancelled it refuses
 /// `Uncertain` after about 200 s there, #647). Release only.
+///
+/// The case is built and edited in a rayon pool of its own: on the global
+/// pool, a worker waiting on one of its joins steals another test's tasks
+/// (this file's `a_general_boolean_with_thousands_of_singular_leaves`) and
+/// runs them to the end, so the cancel waited for that boolean: 52 s on full.yml's
+/// macOS, Windows and ARM runners, and 254 s beside it on two threads on
+/// cox-worker-1 (Intel Xeon E5-2650). The edit itself stops at its cancel
+/// whenever it comes (15 to 180 s in, within 0.2 s there).
 #[cfg_attr(debug_assertions, ignore = "release only")]
 #[test]
 fn a_cancel_stops_an_edits_working_sheets() {
@@ -545,7 +553,13 @@ fn a_cancel_stops_an_edits_working_sheets() {
         "131313131313131313131313131313131313131313131313131313131313131313131313",
         "13131313133f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f",
     ));
-    let case = ryukei_testkit::edit_bytes::edit_case(&data).expect("an edit");
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .expect("a pool");
+    let case = pool
+        .install(|| ryukei_testkit::edit_bytes::edit_case(&data))
+        .expect("an edit");
     let flag = AtomicBool::new(false);
     let start = Instant::now();
     let (r, stopped) = std::thread::scope(|s| {
@@ -553,11 +567,13 @@ fn a_cancel_stops_an_edits_working_sheets() {
             std::thread::sleep(Duration::from_secs(5));
             flag.store(true, Ordering::Relaxed);
         });
-        let r = ryukei_testkit::edit_bytes::run(
-            &case,
-            OpKey(0xed1),
-            &Work::unlimited().with_cancel(&flag),
-        );
+        let r = pool.install(|| {
+            ryukei_testkit::edit_bytes::run(
+                &case,
+                OpKey(0xed1),
+                &Work::unlimited().with_cancel(&flag),
+            )
+        });
         (r, start.elapsed())
     });
     assert!(
