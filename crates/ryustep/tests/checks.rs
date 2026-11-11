@@ -355,6 +355,69 @@ fn cp_radial_d8_cans_heal_and_check() {
     }
 }
 
+/// #598: KiCad's Coilcraft SQ coils, as references (ryucad's import key),
+/// meshed at ryucad's normal quality: each wire end is two plane slivers
+/// 0.2 to 0.6 µm wide whose sides cross, which never meshed, so every
+/// round meshed the coil's 1,288-pole face again (146 s to a 300 s
+/// timeout on an Opteron 6380). Drawn as strips, each meshes whole, in
+/// under 30 s on one thread with `RYUKEI_BARS=1`.
+#[test]
+#[ignore = "needs the KiCad corpus (scripts/fetch-kicad.sh)"]
+fn coilcraft_coils_mesh_whole_as_references() {
+    let _serial = serial();
+    let Some(dir) = kicad("Inductor_SMD.3dshapes") else {
+        return;
+    };
+    let mut coils: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("L_Coilcraft_") && n.contains("SQ-"))
+        })
+        .collect();
+    coils.sort();
+    assert_eq!(coils.len(), 16, "{coils:?}");
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let opts = ReadOptions {
+        key: OpKey::from_bytes(b"ryucad.feature\0ref\0ref"),
+        heal: Default::default(),
+    };
+    for path in coils {
+        let opened = ryustep::open(&std::fs::read(&path).unwrap()).unwrap();
+        let (body, _) = pool.install(|| opened.reference(0, &opts)).result.unwrap();
+        let diagonal = body
+            .faces()
+            .map(|f| ryukei::intersect::face_box(&body, f))
+            .reduce(|a, b| a.union(&b))
+            .map(|b| (b.max() - b.min()).length())
+            .unwrap();
+        let params = ryukei::mesh::MeshParams::new(diagonal * 5e-4, core::f64::consts::PI / 12.0);
+        let t = std::time::Instant::now();
+        let mesh = pool
+            .install(|| ryukei::mesh::tessellate(&body, &params))
+            .unwrap();
+        let secs = t.elapsed().as_secs_f64();
+        eprintln!(
+            "{}: {} triangles in {secs:.1} s",
+            path.file_name().unwrap().to_string_lossy(),
+            mesh.triangles.len()
+        );
+        assert_eq!(mesh.faults, [], "{}", path.display());
+        assert_eq!(
+            ryukei::mesh::check_mesh(&body, &mesh),
+            Ok(()),
+            "{}",
+            path.display()
+        );
+        assert!(!bars() || secs < 30.0, "{}: {secs:.1} s", path.display());
+    }
+}
+
 /// #550: KiCad's L_Wurth_WE-HCFT-2012 inductor. Its four solids overlap,
 /// so ryustep heals each alone and unites them; one face pair (the coil's
 /// spline face against a lead's cylinder) traced 23.5M units in 25 s on
