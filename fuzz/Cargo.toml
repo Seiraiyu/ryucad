@@ -304,3 +304,10 @@ path = "fuzz_targets/drawing.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "style"
+path = "fuzz_targets/style.rs"
+test = false
+doc = false
+bench = false
