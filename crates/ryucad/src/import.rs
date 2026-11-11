@@ -557,6 +557,64 @@ pub fn unreadable(path: &str, e: &StepError) -> Error {
     err
 }
 
+/// `import_body_missing` for `path`: with `external` (each file the
+/// file's externally defined products name, the products naming it by
+/// id, else name, and the format the writer gave) and a message saying
+/// the parts are in those files, which this version doesn't read yet
+/// (design 448; plan 24.D reads them). Without any, as before.
+pub fn body_missing(opened: &Opened, path: &str) -> Error {
+    let mut files: BTreeMap<String, (Vec<String>, Option<String>)> = BTreeMap::new();
+    for d in opened
+        .products
+        .definitions
+        .iter()
+        .filter(|d| d.externally_defined())
+    {
+        let product = if d.product_id.is_empty() {
+            d.name.to_string()
+        } else {
+            d.product_id.to_string()
+        };
+        for x in &d.external {
+            let entry = files.entry(x.name.clone()).or_default();
+            if !entry.0.contains(&product) {
+                entry.0.push(product.clone());
+            }
+            if entry.1.is_none() {
+                entry.1 = x.format.clone();
+            }
+        }
+    }
+    let plain = Error::new(
+        Code::ImportBodyMissing,
+        format!("{path} holds no solid to import"),
+    )
+    .with("path", path);
+    if files.is_empty() {
+        return plain;
+    }
+    let external: Vec<Value> = files
+        .iter()
+        .map(|(f, (products, format))| {
+            let mut v = json!({"file": f, "products": products});
+            if let Some(x) = format {
+                v["format"] = json!(x);
+            }
+            v
+        })
+        .collect();
+    let names: Vec<&str> = files.keys().map(String::as_str).collect();
+    Error::new(
+        Code::ImportBodyMissing,
+        format!(
+            "{path} holds no solid to import: its parts are in other files ({}), which ryucad doesn't read yet",
+            names.join(", ")
+        ),
+    )
+    .with("path", path)
+    .with("external", external)
+}
+
 /// `import_failed`: why a body couldn't be read or healed, its reason in
 /// snake case and the STEP instances it names (`#n`), with the names
 /// healing gave those it made. Faces that overlap or shells that cross in
@@ -1268,11 +1326,7 @@ fn into_plan(
         groups.push(None);
     }
     if groups.is_empty() {
-        return Err(Error::new(
-            Code::ImportBodyMissing,
-            format!("{} holds no solid to import", ask.path),
-        )
-        .with("path", &ask.path));
+        return Err(body_missing(opened, &ask.path));
     }
     let pid = crate::server::part_id(into)?;
     let p = session.project().part(&pid)?;
@@ -2318,6 +2372,41 @@ pub(crate) mod tests {
         // Before the file is read there is nothing to report.
         let e = import_call(&mut s, json!({"path": "/nowhere/at/all.step"})).unwrap_err();
         assert!(e.details.get("transfer").is_none());
+    }
+
+    /// An assembly whose parts are in other files (OCCT's form, #443's
+    /// interim, design 448) is refused `import_body_missing` naming each
+    /// file and the products naming it, and the report counts the
+    /// documents retained.
+    #[test]
+    fn an_assembly_of_external_parts_names_its_files() {
+        let path = format!(
+            "{}/../ryustep/tests/data/external/occt_style.stp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let (_dir, mut s) = crate::server::tests::fresh();
+        let e = import_call(&mut s, json!({"path": path})).unwrap_err();
+        assert_eq!(e.code, Code::ImportBodyMissing);
+        assert_eq!(
+            e.details["external"],
+            json!([
+                {"file": "bracket.stp", "products": ["P1"], "format": "STEP AP214"},
+                {"file": "parts/plate.stp", "products": ["P2"], "format": "STEP AP214"},
+            ])
+        );
+        assert!(
+            e.message.contains("bracket.stp") && e.message.contains("parts/plate.stp"),
+            "{}",
+            e.message
+        );
+        let docs = e.details["transfer"]["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["category"] == "external_references")
+            .unwrap()
+            .clone();
+        assert!(docs["retained"]["count"].as_u64().unwrap() > 0, "{docs}");
     }
 
     #[test]
