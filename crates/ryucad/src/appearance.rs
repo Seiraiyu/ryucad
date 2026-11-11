@@ -1091,7 +1091,7 @@ pub fn clear(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn look(colour: Option<&str>, opacity: Option<f64>, material: bool) -> Look {
@@ -1246,7 +1246,7 @@ mod tests {
     }
 
     /// The names of `solid`'s faces in `part`, in order.
-    fn faces(s: &mut Session, part: &str, solid: &str) -> Vec<String> {
+    pub(crate) fn face_names(s: &mut Session, part: &str, solid: &str) -> Vec<String> {
         let d = drawn(s, &Id::parse(part, "part").unwrap()).unwrap();
         let b = &d.iter().find(|d| d.key == solid).unwrap().built.body;
         b.faces()
@@ -1355,7 +1355,7 @@ mod tests {
             json!({"part": "plate", "solid": "base", "opacity": 1})
         );
         let rev = before["revisions"]["plate"].clone();
-        let top = faces(&mut s, "plate", "base")[0].clone();
+        let top = face_names(&mut s, "plate", "base")[0].clone();
         let v = call(
             &mut s,
             "appearance.set",
@@ -1535,7 +1535,7 @@ mod tests {
     #[test]
     fn entries_the_model_lost_are_kept_and_reported() {
         let (_dir, mut s) = project();
-        let names = faces(&mut s, "plate", "base");
+        let names = face_names(&mut s, "plate", "base");
         let refs: Vec<String> = names.iter().map(|n| format!("plate/base/{n}")).collect();
         call(
             &mut s,

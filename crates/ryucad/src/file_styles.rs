@@ -442,4 +442,81 @@ pub(crate) mod tests {
         assert!(u["step"].as_str().unwrap().starts_with('#'));
         assert_eq!(u["usages"].as_array().unwrap().len(), 1);
     }
+
+    /// `painted.stp`'s block, its body `colour` and no face styled: the
+    /// same geometry, so an update keeps every name.
+    fn repainted(colour: [u8; 3]) -> Vec<u8> {
+        let b = ryukei::primitive::block(
+            ryukei::name::OpKey(1),
+            0.01,
+            0.02,
+            0.03,
+            &ryukei::geom::Rigid::IDENTITY,
+        )
+        .unwrap()
+        .0;
+        let model = ryustep::WriteModel {
+            products: vec![ryustep::Product {
+                id: "block".into(),
+                name: "block".into(),
+                bodies: vec![b],
+                names: vec!["body".into()],
+                ..Default::default()
+            }],
+        };
+        let paints = ryustep::Paints {
+            bodies: vec![ryustep::BodyPaint {
+                product: 0,
+                body: 0,
+                base: Some(ryustep::Paint {
+                    colour,
+                    opacity: 1.0,
+                }),
+                faces: Vec::new(),
+            }],
+            occurrences: Vec::new(),
+        };
+        let opts = ryustep::WriteOptions {
+            unit: ryustep::LengthUnit::Millimeter,
+            ..Default::default()
+        };
+        ryustep::write_styled(&model, &[], &paints, &opts).unwrap().bytes
+    }
+
+    #[test]
+    fn an_update_brings_the_new_files_colours_and_keeps_a_persons() {
+        let (_d, mut s, v) = imported("painted.stp", json!({}));
+        let part = part_of(&v, "part", 0);
+        let stored = v["file"]["path"].as_str().unwrap().to_owned();
+        let get = |s: &mut Session| {
+            call(s, "appearance.get", json!({"part": part.as_str()})).unwrap()["solids"][0].clone()
+        };
+        let before = get(&mut s);
+        let blue = before["faces"].as_object().unwrap().keys().next().unwrap().clone();
+        // A person's face entry on another face.
+        let solid = before["solid"].as_str().unwrap().to_owned();
+        let names = crate::appearance::tests::face_names(&mut s, part.as_str(), &solid);
+        let other = names.iter().find(|n| **n != blue).unwrap().clone();
+        call(
+            &mut s,
+            "appearance.set",
+            json!({"entities": [format!("{part}/{solid}/{other}")], "colour": "#ffffff"}),
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let next = dir.path().join("painted.stp");
+        std::fs::write(&next, repainted([0, 255, 0])).unwrap();
+        call(
+            &mut s,
+            "import",
+            json!({"path": next, "solid": true, "update": stored}),
+        )
+        .unwrap();
+        let after = get(&mut s);
+        assert_eq!(after["colour"], "#00ff00", "{after}");
+        assert_eq!(after["source"]["colour"], "file");
+        // The old file's blue face is gone with it; the person's stays.
+        assert!(after["faces"].get(&blue).is_none(), "{after}");
+        assert_eq!(after["faces"][&other]["colour"], "#ffffff");
+    }
 }
