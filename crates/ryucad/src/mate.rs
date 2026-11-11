@@ -1871,8 +1871,10 @@ pub(crate) mod tests {
 
     #[test]
     fn the_edit_that_breaks_a_mate_warns_of_it() {
-        // Issue #155: a slot cut across the plate's top splits the face
-        // m1 stands on.
+        // Issue #155: the slot grown into a skim over the plate's whole
+        // top takes away the face m1 stands on. (A slot across the top
+        // only splits it, both pieces on its plane, and m1 follows the
+        // first: design 447.)
         let (_dir, mut s) = hinged();
         call(
             &mut s,
@@ -1886,7 +1888,8 @@ pub(crate) mod tests {
         let v = call(
             &mut s,
             "feature.edit",
-            json!({"part": "plate", "id": "slot", "params": {"y": 60}}),
+            json!({"part": "plate", "id": "slot", "params": {"x": 200, "y": 200, "z": 2},
+                   "placement": {"origin": [-50, -50, 4], "z": [0, 0, 1], "x": [1, 0, 0]}}),
         )
         .unwrap();
         assert!(result_of(&mut s, "frame", "m1").is_err());
