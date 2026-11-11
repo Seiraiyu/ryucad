@@ -226,6 +226,23 @@ fn locked_clashes(p: &Project) -> Result<()> {
     Ok(())
 }
 
+/// The first designator `{prefix}{n}{rest}` from `*n` on that isn't
+/// taken, `*n` left past it; `None` once one isn't a designator (a
+/// library prefix like `#PWR`, or too long), since a larger `n` never
+/// makes one again.
+fn next_free(prefix: &str, rest: &str, n: &mut u64, taken: &BTreeSet<String>) -> Option<String> {
+    loop {
+        let t = format!("{prefix}{n}{rest}");
+        if !conn::refdes_ok(&t) {
+            return None;
+        }
+        *n += 1;
+        if !taken.contains(&t) {
+            return Some(t);
+        }
+    }
+}
+
 /// What annotating design `design` would change.
 pub fn plan(p: &Project, design: Option<&str>, order: Order, reset: Reset) -> Result<Plan> {
     let d = netlist::one_design(p, design)?;
@@ -284,12 +301,12 @@ pub fn plan(p: &Project, design: Option<&str>, order: Order, reset: Reset) -> Re
     let mut writes = Writes::default();
     for (bid, cid, mut c, prefix, rest) in todo {
         let n = next.entry((prefix.clone(), rest.clone())).or_insert(1);
-        let to = loop {
-            let t = format!("{prefix}{n}{rest}");
-            *n += 1;
-            if !taken.contains(&t) && conn::refdes_ok(&t) {
-                break t;
-            }
+        let Some(to) = next_free(&prefix, &rest, n, &taken) else {
+            skipped.push(json!({"component": format!("{bid}/{cid}"),
+                                "why": format!("{prefix}<n>{rest} isn't a designator \
+                                                (a letter, then letters, digits and _, \
+                                                at most 32)")}));
+            continue;
         };
         taken.insert(to.clone());
         if c.refdes.as_deref() == Some(to.as_str()) {
@@ -457,6 +474,21 @@ pub fn lock(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbers_stop_where_designators_do() {
+        let taken: BTreeSet<String> = ["R1", "R2", "R4"].map(String::from).into();
+        let mut n = 1;
+        assert_eq!(next_free("R", "", &mut n, &taken).as_deref(), Some("R3"));
+        assert_eq!(next_free("R", "", &mut n, &taken).as_deref(), Some("R5"));
+        assert_eq!(n, 6);
+        // A prefix no designator can start with, and a rest that leaves no
+        // room for a longer number: no designator, never a loop.
+        assert_eq!(next_free("#PWR", "", &mut 1, &taken), None);
+        let rest = format!("_{}", "A".repeat(29));
+        let taken: BTreeSet<String> = (1..10).map(|i| format!("C{i}{rest}")).collect();
+        assert_eq!(next_free("C", &rest, &mut 1, &taken), None);
+    }
 
     #[test]
     fn places_read_down_each_column_or_across_each_row() {
