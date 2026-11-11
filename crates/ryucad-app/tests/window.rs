@@ -1769,6 +1769,75 @@ fn a_compare_marks_the_tree_and_shows_what_changed() {
 }
 
 #[test]
+fn b_swaps_a_compare_and_writes_wait_for_the_working_files() {
+    use ryucad_app::core::command;
+    use ryucad_app::core::compare::{Blink, SWAPPED};
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part().committed();
+    p.ok(&["feature", "edit", "p", "base", "--param", "x=30"]);
+    p.ok(&["feature", "delete", "p", "boss"]);
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.meshes.len() == 1
+    });
+    menu(&mut h, "View", "Compare with HEAD");
+    frames(&mut h, compared);
+    // B over the viewport: HEAD's box and cylinder, the working box
+    // ghosted.
+    let rect = h.state().opened().view.rect;
+    h.event(egui::Event::PointerMoved(rect.center()));
+    h.step();
+    hooked(&mut h, egui::Key::B, egui::Modifiers::NONE);
+    frames(&mut h, |a| {
+        compared(a)
+            && a.opened().ws.model.meshes.len() == 2
+            && a.opened()
+                .ws
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.swapped.as_deref() == Some("HEAD"))
+    });
+    h.step();
+    h.get_by_label("Showing HEAD · working ghosted");
+    // Undo waits for the working files, and says why.
+    let state = ryucad_app::ui::commands::state(h.state_mut().opened_mut());
+    assert_eq!(command::enabled("edit.undo", &state), Err(SWAPPED));
+    // An agent's write lands; the ghost follows it.
+    let key = ("p".to_owned(), "base".to_owned());
+    let before = h.state().opened().ws.compare.as_ref().unwrap().wanted[&key].clone();
+    p.ok(&["feature", "edit", "p", "base", "--param", "x=25"]);
+    frames(&mut h, |a| {
+        compared(a)
+            && a.opened()
+                .ws
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.wanted.get(&key).is_some_and(|h| *h != before))
+    });
+    // HEAD alone; B blinks to the working files alone.
+    h.get_by_label("Only HEAD").click();
+    frames(&mut h, |a| a.opened().ws.painted().is_none());
+    h.event(egui::Event::PointerMoved(rect.center()));
+    h.step();
+    hooked(&mut h, egui::Key::B, egui::Modifiers::NONE);
+    frames(&mut h, |a| {
+        let ws = &a.opened().ws;
+        ws.idle() && ws.model_rev().is_none() && ws.model.meshes.len() == 1
+    });
+    shown(&mut h, "Showing only the working files");
+    h.get_by_label("Both").click();
+    frames(&mut h, |a| a.opened().ws.painted().is_some());
+    // Stop comparing ends the blink.
+    h.get_by_label("Stop comparing").click();
+    frames(&mut h, |a| {
+        a.opened().ws.compare.is_none() && a.opened().ws.blink == Blink::default()
+    });
+}
+
+#[test]
 fn a_merge_conflict_is_settled_from_its_panel() {
     let _one = one_at_a_time();
     if !gpu() {

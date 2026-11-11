@@ -1869,6 +1869,11 @@ impl View {
                 self.moved(ws);
             }
         }
+        // B swaps a compare's sides (design 447): `take_keys` took it
+        // over the viewport.
+        if tabs.contains(&"view.compare_swap") {
+            ws.swap_compare();
+        }
         self.hovered = response.hovered();
         if response.hovered() && !ui.ctx().text_edit_focused() {
             let all = tabs.contains(&"view.show_all");
