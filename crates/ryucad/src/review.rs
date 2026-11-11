@@ -19,6 +19,8 @@ pub const TOKEN_VAR: &str = "RYUCAD_REVIEW_TOKEN";
 
 /// The largest artifact downloaded (renders are well under it).
 const MAX_DOWNLOAD: u64 = 64 * 1024 * 1024;
+/// The largest package downloaded: a large assembly's is tens of MB.
+pub const MAX_PACKAGE: u64 = 4 << 30;
 
 pub struct Client {
     base: String,
@@ -77,6 +79,11 @@ impl Client {
     /// or a full URL (a signed one it redirected to). The token goes only
     /// to the service itself.
     pub fn download(&self, url: &str) -> Result<Vec<u8>> {
+        self.download_up_to(url, MAX_DOWNLOAD)
+    }
+
+    /// [`Client::download`] of at most `limit` bytes.
+    pub fn download_up_to(&self, url: &str, limit: u64) -> Result<Vec<u8>> {
         let full = if url.starts_with('/') {
             format!("{}{url}", self.base)
         } else {
@@ -97,7 +104,7 @@ impl Client {
         }
         resp.body_mut()
             .with_config()
-            .limit(MAX_DOWNLOAD)
+            .limit(limit)
             .read_to_vec()
             .map_err(|e| self.unreachable(&e))
     }
@@ -328,6 +335,24 @@ pub enum Action {
         csv: bool,
         out: Option<std::path::PathBuf>,
     },
+    /// A release's package (design 436): downloaded to `out`; the CLI
+    /// verifies it against the clone after.
+    PackageGet {
+        part: String,
+        label: String,
+        out: std::path::PathBuf,
+    },
+    /// Build (or retry) a release's package on the service.
+    PackageBuild {
+        part: String,
+        label: String,
+    },
+    /// An expiring link to a release's package for someone without access.
+    PackageShare {
+        part: String,
+        label: String,
+        days: Option<u64>,
+    },
 }
 
 /// Runs `action` for the clone at `here`, asking the service.
@@ -468,6 +493,58 @@ pub fn run(here: &std::path::Path, action: Action) -> Result<Value> {
             Ok(with(
                 client.get(&format!("/repos/{slug}/pulls/{n}/approvals"))?,
                 Some(n),
+            ))
+        }
+        Action::PackageGet { part, label, out } => {
+            let path = format!(
+                "/repos/{slug}/releases/{}/{}/package",
+                escape(&part),
+                escape(&label)
+            );
+            let row = client.get(&path)?;
+            let url = row["url"].as_str().ok_or_else(|| {
+                Error::new(
+                    Code::ReviewNotFound,
+                    format!(
+                        "{part} {label}'s package isn't built: it is {}",
+                        row["state"].as_str().unwrap_or("unknown")
+                    ),
+                )
+                .with("state", &row["state"])
+            })?;
+            let bytes = client.download_up_to(url, MAX_PACKAGE)?;
+            crate::doc::source::write_atomic(&out, &bytes)?;
+            Ok(
+                json!({"repo": slug, "part": part, "label": label, "out": out,
+                      "bytes": bytes.len(), "service": row}),
+            )
+        }
+        Action::PackageBuild { part, label } => Ok(with(
+            client.post(
+                &format!(
+                    "/repos/{slug}/releases/{}/{}/package",
+                    escape(&part),
+                    escape(&label)
+                ),
+                &json!({}),
+            )?,
+            None,
+        )),
+        Action::PackageShare { part, label, days } => {
+            let mut body = json!({});
+            if let Some(d) = days {
+                body["days"] = json!(d);
+            }
+            Ok(with(
+                client.post(
+                    &format!(
+                        "/repos/{slug}/releases/{}/{}/package/share",
+                        escape(&part),
+                        escape(&label)
+                    ),
+                    &body,
+                )?,
+                None,
             ))
         }
         Action::Audit {
