@@ -32,6 +32,17 @@ pub(super) fn simple(id: Id, name: &str, params: &[Param]) -> Option<Result<Enti
             let mut a = Args::new(id, params, 1)?;
             Ok(Entity::StyleAssignment { styles: a.refs()? })
         })(),
+        // PRESENTATION_STYLE_BY_CONTEXT(styles, style_context): OCCT's
+        // form of a component's colour, the context a usage's shape
+        // representation.
+        "PRESENTATION_STYLE_BY_CONTEXT" => (|| {
+            let mut a = Args::new(id, params, 2)?;
+            let styles = a.refs()?;
+            Ok(Entity::StyleByContext {
+                styles,
+                context: a.id()?,
+            })
+        })(),
         // SURFACE_STYLE_USAGE(side, style)
         "SURFACE_STYLE_USAGE" => (|| {
             let mut a = Args::new(id, params, 2)?;

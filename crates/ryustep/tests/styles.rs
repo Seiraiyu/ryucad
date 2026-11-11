@@ -197,3 +197,61 @@ fn painted_assembly_reads_back_its_occurrence_and_transparency() {
     assert_eq!(&*defs[o.products.roots[0]].children[occ[0].path[0].1].id, "2");
     assert_eq!(occ[0].style.colour, Some([0, 255, 0]));
 }
+
+fn occt(name: &str) -> ryustep::Opened {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/occt")
+        .join(name);
+    ryustep::open(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// OCCT's XDE colours: the block red with its top face blue, the pin
+/// green and half transparent (`gen.cpp`).
+#[test]
+fn occt_colours_read_as_occt_wrote_them() {
+    let o = occt("colours.stp");
+    let defs = &o.products.definitions;
+    let held = |name: &str| {
+        o.held
+            .iter()
+            .position(|h| h.definition.is_some_and(|d| &*defs[d].name == name))
+            .unwrap_or_else(|| panic!("no {name}"))
+    };
+    let block = o.body_styles(held("block"));
+    assert_eq!(block.body.unwrap().colour, Some([255, 0, 0]));
+    assert_eq!(block.faces.len(), 1, "{block:?}");
+    assert_eq!(block.faces.values().next().unwrap().colour, Some([0, 0, 255]));
+    let pin = o.body_styles(held("pin")).body.unwrap();
+    assert_eq!(pin.colour, Some([0, 255, 0]));
+    assert_eq!(pin.opacity, Some(0.5));
+    assert!(o.styles().failed.is_empty(), "{:?}", o.styles().failed);
+}
+
+/// One block placed twice, red in one place and blue in the other, by
+/// XDE's instance colours: each occurrence reads as its colour, through
+/// an occurrence style or the block's own.
+#[test]
+fn occt_occurrence_colours_read_per_occurrence() {
+    let o = occt("colour_assembly.stp");
+    let root = o.products.roots[0];
+    let children = &o.products.definitions[root].children;
+    assert_eq!(children.len(), 2);
+    let block = children[0].definition;
+    let k = o
+        .held
+        .iter()
+        .position(|h| h.definition == Some(block))
+        .unwrap();
+    let own = o.body_styles(k).body;
+    let occ = o.occurrence_styles();
+    let colour = |n: usize| {
+        occ.iter()
+            .find(|x| x.path == [(root, n)] && matches!(x.target, ryustep::styles::Target::Body(_) | ryustep::styles::Target::Product))
+            .map(|x| x.style)
+            .or(own)
+            .and_then(|s| s.colour)
+    };
+    let mut got = [colour(0), colour(1)];
+    got.sort();
+    assert_eq!(got, [Some([0, 0, 255]), Some([255, 0, 0])], "{occ:?} own {own:?}");
+}

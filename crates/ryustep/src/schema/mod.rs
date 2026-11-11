@@ -325,6 +325,12 @@ pub enum Entity {
     StyleAssignment {
         styles: Vec<Id>,
     },
+    /// `PRESENTATION_STYLE_BY_CONTEXT`: an assignment's styles that hold
+    /// in `context` (a representation or a representation item).
+    StyleByContext {
+        styles: Vec<Id>,
+        context: Id,
+    },
     /// `SURFACE_STYLE_USAGE`: a `SURFACE_SIDE_STYLE` for `side`.
     SurfaceStyleUsage {
         side: Side,
@@ -443,6 +449,7 @@ impl Entity {
             } => "OVER_RIDING_STYLED_ITEM",
             Entity::StyledItem { .. } => "STYLED_ITEM",
             Entity::StyleAssignment { .. } => "PRESENTATION_STYLE_ASSIGNMENT",
+            Entity::StyleByContext { .. } => "PRESENTATION_STYLE_BY_CONTEXT",
             Entity::SurfaceStyleUsage { .. } => "SURFACE_STYLE_USAGE",
             Entity::SurfaceSideStyle { .. } => "SURFACE_SIDE_STYLE",
             Entity::SurfaceFill { .. } => "SURFACE_STYLE_FILL_AREA",
@@ -788,7 +795,8 @@ pub(crate) mod tests {
              #12=CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM('',(#9),#30,#10,(#40,#41));\
              #13=DRAUGHTING_PRE_DEFINED_COLOUR('red');\
              #14=SPECIFIED_HIGHER_USAGE_OCCURRENCE('','','',#50,#51,$,#40,#41);\
-             #15=SURFACE_STYLE_USAGE(.SIDEWAYS.,#7);",
+             #15=SURFACE_STYLE_USAGE(.SIDEWAYS.,#7);\
+             #16=PRESENTATION_STYLE_BY_CONTEXT((#8),#31);",
         );
         assert_eq!(e.get(0, 1), Ok(&Entity::ColourRgb { rgb: [1.0, 0.5, 0.0] }));
         assert_eq!(e.get(0, 2), Ok(&Entity::FillColour { colour: 1 }));
@@ -815,6 +823,13 @@ pub(crate) mod tests {
         assert_eq!(e.get(0, 13), Ok(&Entity::PredefinedColour { name: "red".into() }));
         assert_eq!(e.get(0, 14), Ok(&Entity::HigherUsage { upper: 40, next: 41 }));
         assert!(matches!(e.get(0, 15), Err(ImportError::Malformed { instance: 15, .. })));
+        assert_eq!(
+            e.get(0, 16),
+            Ok(&Entity::StyleByContext {
+                styles: vec![8],
+                context: 31
+            })
+        );
         for (id, kind) in [
             (10, "STYLED_ITEM"),
             (11, "OVER_RIDING_STYLED_ITEM"),

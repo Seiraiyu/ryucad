@@ -44,6 +44,13 @@
 #include <TopLoc_Location.hxx>
 #include <TopoDS_Shape.hxx>
 #include <string>
+#include <XCAFDoc_ColorTool.hxx>
+#include <Quantity_Color.hxx>
+#include <Quantity_ColorRGBA.hxx>
+#include <TopExp_Explorer.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
+#include <cmath>
 
 static void write(const TopoDS_Shape& s, const char* file, int schema, const char* unit) {
   Interface_Static::SetIVal("write.step.schema", schema);
@@ -52,6 +59,16 @@ static void write(const TopoDS_Shape& s, const char* file, int schema, const cha
   STEPControl_Writer w;
   w.Transfer(s, STEPControl_AsIs);
   w.Write(file);
+}
+
+// Writes an XDE document as AP214 in millimetres, with its colours.
+static void write_doc(const Handle(TDocStd_Document)& doc, const char* file) {
+  Interface_Static::SetIVal("write.step.schema", 5);
+  Interface_Static::SetCVal("write.step.unit", "MM");
+  STEPCAFControl_Writer cw;
+  cw.SetColorMode(Standard_True);
+  cw.Transfer(doc, STEPControl_AsIs);
+  cw.Write(file);
 }
 
 int main() {
@@ -132,5 +149,49 @@ int main() {
   STEPCAFControl_Writer cw;
   cw.Transfer(doc, STEPControl_AsIs);
   cw.Write("assembly.stp");
+  // Colours (ryucad 24.B): the block red with its top face (z = 30)
+  // blue, and the pin green, half transparent.
+  {
+    Handle(TDocStd_Document) d;
+    app->NewDocument("MDTV-XCAF", d);
+    Handle(XCAFDoc_ShapeTool) t = XCAFDoc_DocumentTool::ShapeTool(d->Main());
+    Handle(XCAFDoc_ColorTool) c = XCAFDoc_DocumentTool::ColorTool(d->Main());
+    TDF_Label b = t->AddShape(box, Standard_False);
+    TDataStd_Name::Set(b, "block");
+    c->SetColor(b, Quantity_Color(1., 0., 0., Quantity_TOC_RGB), XCAFDoc_ColorSurf);
+    for (TopExp_Explorer x(box, TopAbs_FACE); x.More(); x.Next()) {
+      GProp_GProps g;
+      BRepGProp::SurfaceProperties(x.Current(), g);
+      if (std::abs(g.CentreOfMass().Z() - 30.) < 1e-6) {
+        TDF_Label f = t->AddSubShape(b, x.Current());
+        c->SetColor(f, Quantity_Color(0., 0., 1., Quantity_TOC_RGB), XCAFDoc_ColorSurf);
+      }
+    }
+    TDF_Label y = t->AddShape(cyl, Standard_False);
+    TDataStd_Name::Set(y, "pin");
+    c->SetColor(y, Quantity_ColorRGBA(Quantity_Color(0., 1., 0., Quantity_TOC_RGB), 0.5f),
+                XCAFDoc_ColorSurf);
+    write_doc(d, "colours.stp");
+  }
+  // One block placed twice, red in one place and blue in the other: XDE's
+  // colours on the two components.
+  {
+    Handle(TDocStd_Document) d;
+    app->NewDocument("MDTV-XCAF", d);
+    Handle(XCAFDoc_ShapeTool) t = XCAFDoc_DocumentTool::ShapeTool(d->Main());
+    Handle(XCAFDoc_ColorTool) c = XCAFDoc_DocumentTool::ColorTool(d->Main());
+    TDF_Label a = t->NewShape();
+    TDataStd_Name::Set(a, "pair");
+    TDF_Label b = t->AddShape(box, Standard_False);
+    TDataStd_Name::Set(b, "block");
+    gp_Trsf right;
+    right.SetTranslation(gp_Vec(100., 0., 0.));
+    TDF_Label one = t->AddComponent(a, b, TopLoc_Location(gp_Trsf()));
+    TDF_Label two = t->AddComponent(a, b, TopLoc_Location(right));
+    c->SetColor(one, Quantity_Color(1., 0., 0., Quantity_TOC_RGB), XCAFDoc_ColorSurf);
+    c->SetColor(two, Quantity_Color(0., 0., 1., Quantity_TOC_RGB), XCAFDoc_ColorSurf);
+    t->UpdateAssemblies();
+    write_doc(d, "colour_assembly.stp");
+  }
   return 0;
 }

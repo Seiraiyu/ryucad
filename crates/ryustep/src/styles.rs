@@ -140,6 +140,9 @@ pub fn read<'n>(e: &Entities, name_of: &(dyn Fn(Id) -> Option<&'n str> + Sync)) 
         Ok(_) => false,
         Err(_) => name_of(id).is_some_and(is_styled),
     });
+    // Each shape representation's shape definitions, read once and only
+    // for a file whose styles hold in a context.
+    let mut shapes: Option<BTreeMap<Id, Vec<Id>>> = None;
     for id in found {
         let x = match e.get(id, id) {
             Ok(x) => x,
@@ -165,9 +168,14 @@ pub fn read<'n>(e: &Entities, name_of: &(dyn Fn(Id) -> Option<&'n str> + Sync)) 
         else {
             continue;
         };
-        let read = assigned(e, id, styles).and_then(|style| {
+        let mut by_context = Vec::new();
+        let read = assigned(e, id, styles, &mut by_context).and_then(|style| {
             let path = match context {
                 Some(c) => usage_path(e, id, c)?,
+                None if !by_context.is_empty() => {
+                    let shapes = shapes.get_or_insert_with(|| shape_definitions(e));
+                    by_context_path(e, id, &by_context, shapes)?
+                }
                 None => Vec::new(),
             };
             Ok((style, path))
@@ -203,12 +211,23 @@ pub fn read<'n>(e: &Entities, name_of: &(dyn Fn(Id) -> Option<&'n str> + Sync)) 
 
 /// The surface style a styled item's assignments give a face, and the
 /// instances it came from; `None` for one with nothing a face takes.
-fn assigned(e: &Entities, id: Id, styles: &[Id]) -> Result<Option<(Style, Vec<Id>)>, ImportError> {
+/// A `PRESENTATION_STYLE_BY_CONTEXT`'s context is added to `contexts`.
+fn assigned(
+    e: &Entities,
+    id: Id,
+    styles: &[Id],
+    contexts: &mut Vec<Id>,
+) -> Result<Option<(Style, Vec<Id>)>, ImportError> {
     let mut used = Vec::new();
     let mut style = Style::default();
     for &psa in styles {
-        let Entity::StyleAssignment { styles } = e.get(id, psa)? else {
-            return Err(wrong(psa, "a PRESENTATION_STYLE_ASSIGNMENT"));
+        let styles = match e.get(id, psa)? {
+            Entity::StyleAssignment { styles } => styles,
+            Entity::StyleByContext { styles, context } => {
+                contexts.push(*context);
+                styles
+            }
+            _ => return Err(wrong(psa, "a PRESENTATION_STYLE_ASSIGNMENT")),
         };
         for &s in styles {
             let Entity::SurfaceStyleUsage { side, style: sss } = e.get(psa, s)? else {
@@ -316,6 +335,55 @@ fn usage_path(e: &Entities, id: Id, context: &[Id]) -> Result<Vec<Id>, ImportErr
         attribute: 4,
         what: "a style's context isn't one usage path",
     })
+}
+
+/// For each representation a `SHAPE_DEFINITION_REPRESENTATION` names,
+/// the shapes (`PRODUCT_DEFINITION_SHAPE`s) it represents.
+fn shape_definitions(e: &Entities) -> BTreeMap<Id, Vec<Id>> {
+    let mut out: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+    for id in e.select(|_, x| matches!(x, Ok(Entity::ShapeDefinition { .. }))) {
+        if let Ok(Entity::ShapeDefinition {
+            definition,
+            representation,
+        }) = e.get(id, id)
+        {
+            out.entry(*representation).or_default().push(*definition);
+        }
+    }
+    out
+}
+
+/// The usage path the contexts of a styled item's
+/// `PRESENTATION_STYLE_BY_CONTEXT`s name, as OCCT writes a component's
+/// colour: each context a usage (or what [`usage_path`] takes), or a
+/// shape representation of a usage's `PRODUCT_DEFINITION_SHAPE`. Empty
+/// where none names a usage: then the style holds wherever its item is.
+fn by_context_path(
+    e: &Entities,
+    id: Id,
+    contexts: &[Id],
+    shapes: &BTreeMap<Id, Vec<Id>>,
+) -> Result<Vec<Id>, ImportError> {
+    let mut named = Vec::new();
+    for &c in contexts {
+        let mut found = Vec::new();
+        usages(e, id, c, &mut found, 0)?;
+        if found.is_empty() {
+            for &pds in shapes.get(&c).into_iter().flatten() {
+                if let Ok(Entity::DefinitionShape { definition }) = e.get(c, pds)
+                    && let Ok(Entity::Usage { .. }) = e.get(pds, *definition)
+                {
+                    found.push(*definition);
+                }
+            }
+            found.dedup();
+        }
+        named.extend(found);
+    }
+    if named.is_empty() {
+        return Ok(named);
+    }
+    usage_path(e, id, &named)
 }
 
 fn usages(e: &Entities, from: Id, c: Id, out: &mut Vec<Id>, depth: usize) -> Result<(), ImportError> {
@@ -680,6 +748,35 @@ mod tests {
     /// context of usages outermost first, innermost first, as a higher
     /// usage, and as shape relationships all read as `[40, 41]`; usages
     /// that don't chain fail.
+    /// OCCT's component colour: a `STYLED_ITEM` on the part's body whose
+    /// assignment is a `PRESENTATION_STYLE_BY_CONTEXT` in a shape
+    /// representation of the usage's `PRODUCT_DEFINITION_SHAPE` (OCCT
+    /// 7.8's XDE writer, `tests/data/occt/colour_assembly.stp`). One whose
+    /// context is no usage's holds wherever its item is.
+    #[test]
+    fn a_style_by_context_in_a_usages_shape_reads_as_that_usage() {
+        let s = styles_of(&chain(
+            "1.,0.,0.",
+            "#40=NEXT_ASSEMBLY_USAGE_OCCURRENCE('4','','',#50,#51,$);\
+             #44=PRODUCT_DEFINITION_SHAPE('Placement','',#40);\
+             #45=SHAPE_DEFINITION_REPRESENTATION(#44,#46);\
+             #46=SHAPE_REPRESENTATION('',(#47),#48);\
+             #10=PRESENTATION_STYLE_BY_CONTEXT((#8),#46);\
+             #11=PRESENTATION_STYLE_BY_CONTEXT((#8),#60);\
+             #20=STYLED_ITEM('color',(#10),#100);\
+             #21=STYLED_ITEM('color',(#11),#101);\
+             #60=SHAPE_REPRESENTATION('',(#47),#48);",
+        ));
+        assert_eq!(s.failed, []);
+        let a = s.assigned.iter().find(|a| a.instance == 20).unwrap();
+        assert_eq!(a.path, [40]);
+        assert_eq!(a.style.colour, Some([255, 0, 0]));
+        assert!(!s.plain.contains_key(&100));
+        let b = s.assigned.iter().find(|a| a.instance == 21).unwrap();
+        assert!(b.path.is_empty());
+        assert_eq!(s.plain[&101], 1);
+    }
+
     #[test]
     fn contexts_read_as_usage_paths_outermost_first() {
         let tree = "#40=NEXT_ASSEMBLY_USAGE_OCCURRENCE('1','','',#50,#51,$);\
