@@ -154,6 +154,77 @@ fn a_compare_looks_as_it_did() {
     looks_as_it_did(&adapter, &px, "compare");
 }
 
+/// The same compare swapped: HEAD's shorter box and its cylinder drawn,
+/// the cylinder painted new and the box where it changed, the working
+/// files' longer box ghosted.
+#[test]
+fn a_swapped_compare_looks_as_it_did() {
+    let _one = one_at_a_time();
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::named("snapshot").with_part().committed();
+    p.ok(&["feature", "edit", "p", "base", "--param", "x=30"]);
+    p.ok(&["feature", "delete", "p", "boss"]);
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    p.ok(&["compare", "HEAD"]);
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| {
+        ws.idle() && ws.compare.as_ref().is_some_and(|c| c.loaded)
+    }));
+    ws.swap_compare();
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| {
+        ws.idle()
+            && ws.model.meshes.len() == 2
+            && ws
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.swapped.is_some() && c.loaded && c.ghosts.len() == 1)
+    }));
+    let c = ws.compare.as_ref().unwrap();
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = ([-0.004, -0.004, 0.0], [0.03, 0.01, 0.013]);
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.02);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    scene.sync_ghosts(&device, Some(c));
+    // Painted as the view paints a compare: bodies new as a whole, then
+    // faces.
+    let mut faces = Vec::new();
+    for key in &c.new_bodies {
+        let new = linear(style::NEW);
+        faces.extend((0..picker.faces(key)).map(|i| (key.clone(), i, new)));
+    }
+    for (key, marks) in &c.faces {
+        for (name, m) in marks {
+            let r = format!("{}/{}/{name}", key.0, key.1);
+            if let Some(ryucad_app::core::pick::Place::Face(k, i)) = picker.place(&r) {
+                let colour = match m {
+                    FaceMark::New => style::NEW,
+                    FaceMark::Changed => style::CHANGED,
+                };
+                faces.push((k, i, linear(colour)));
+            }
+        }
+    }
+    assert!(!faces.is_empty());
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: theme::BACKGROUND,
+        light: scene::light(&camera),
+        edges: true,
+        faces: &faces,
+        overlay: &[],
+        glass: &[],
+    };
+    scene.render(&device, &queue, [W, H], &list);
+    let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
+    looks_as_it_did(&adapter, &px, "compare-swapped");
+}
+
 /// A plate with its vertical edges rounded and a row of four counterbored
 /// holes, patterned from one: what phase 4's solids look like.
 #[test]
