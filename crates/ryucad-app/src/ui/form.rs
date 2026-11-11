@@ -71,6 +71,16 @@ impl Rows<'_> {
         self.ui.end_row();
     }
 
+    /// A weak mark under a field that is no fault (`unused`), with why
+    /// on hover.
+    pub fn mark(&mut self, text: &str, why: &str) {
+        self.ui.label("");
+        self.ui
+            .label(RichText::new(text).small().weak())
+            .on_hover_text(why);
+        self.ui.end_row();
+    }
+
     /// A field framed as the mockup frames it: the accent when dirty, red
     /// when wrong.
     fn framed(
