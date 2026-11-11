@@ -1,5 +1,5 @@
 //! Icons (design 199, Fonts and icons): Phosphor Regular's glyphs by code
-//! point, and ryucad's own 39 CAD glyphs as stroke tables
+//! point, and ryucad's own 42 CAD glyphs as stroke tables
 //! ([`glyphs`], ported stroke for stroke from `design/app/glyphs.js`),
 //! drawn alike at any size and tinted by state. An icon never stands
 //! alone: [`button`] gives every icon button its command's title as its
@@ -227,7 +227,7 @@ pub fn button(
 }
 
 pub mod glyphs {
-    //! ryucad's 39 CAD glyphs on Phosphor's 256-unit grid with its
+    //! ryucad's 42 CAD glyphs on Phosphor's 256-unit grid with its
     //! 16-unit stroke, round caps and joins: `design/app/glyphs.js`'s
     //! table, stroke for stroke.
 
@@ -277,10 +277,13 @@ pub mod glyphs {
         MoveFace,
         ReplaceFace,
         Drawing,
+        DeleteFace,
+        DeleteBlend,
+        ResizeBlend,
     }
 
     impl Glyph {
-        pub const ALL: [Glyph; 39] = [
+        pub const ALL: [Glyph; 42] = [
             Glyph::Cone,
             Glyph::Torus,
             Glyph::Extrude,
@@ -320,6 +323,9 @@ pub mod glyphs {
             Glyph::MoveFace,
             Glyph::ReplaceFace,
             Glyph::Drawing,
+            Glyph::DeleteFace,
+            Glyph::DeleteBlend,
+            Glyph::ResizeBlend,
         ];
 
         /// The glyph's name in `glyphs.js`.
@@ -364,6 +370,9 @@ pub mod glyphs {
                 Glyph::MoveFace => "move-face",
                 Glyph::ReplaceFace => "replace-face",
                 Glyph::Drawing => "drawing",
+                Glyph::DeleteFace => "delete-face",
+                Glyph::DeleteBlend => "delete-blend",
+                Glyph::ResizeBlend => "resize-blend",
             }
         }
     }
@@ -828,6 +837,42 @@ pub mod glyphs {
                     10.0,
                 ));
                 s.push(Stroke::Ellipse([124.0, 108.0, 20.0, 20.0], 10.0, false));
+            }
+            Glyph::DeleteFace => {
+                // A block, the hole on its top, and a cross: the hole goes.
+                s.extend(cabinet(32.0, 136.0, 144.0, 88.0, 48.0, -40.0));
+                s.push(Stroke::Ellipse([128.0, 116.0, 32.0, 10.0], 10.0, false));
+                s.push(thin(&[[176.0, 24.0], [224.0, 72.0]], 12.0));
+                s.push(thin(&[[224.0, 24.0], [176.0, 72.0]], 12.0));
+            }
+            Glyph::DeleteBlend => {
+                // The corner square again, the round that was, a cross.
+                s.push(line(&[
+                    [24.0, 208.0],
+                    [24.0, 64.0],
+                    [232.0, 64.0],
+                    [232.0, 208.0],
+                    [24.0, 208.0],
+                ]));
+                s.push(Stroke::Arc([136.0, 160.0, 96.0, 96.0], 270.0, 360.0, 10.0));
+                s.push(thin(&[[56.0, 120.0], [104.0, 168.0]], 12.0));
+                s.push(thin(&[[104.0, 120.0], [56.0, 168.0]], 12.0));
+            }
+            Glyph::ResizeBlend => {
+                // The fillet's profile, a smaller round inside its round
+                // with the sides it runs to, and the radius.
+                s.push(line(&[
+                    [136.0, 208.0],
+                    [24.0, 208.0],
+                    [24.0, 64.0],
+                    [136.0, 64.0],
+                ]));
+                s.push(arc([136.0, 160.0, 96.0, 96.0], 270.0, 360.0));
+                s.push(line(&[[232.0, 160.0], [232.0, 208.0], [136.0, 208.0]]));
+                s.push(thin(&[[136.0, 64.0], [176.0, 64.0]], 10.0));
+                s.push(thin(&[[232.0, 120.0], [232.0, 160.0]], 10.0));
+                s.push(Stroke::Arc([176.0, 120.0, 56.0, 56.0], 270.0, 360.0, 10.0));
+                s.push(thin(&[[136.0, 160.0], [204.0, 92.0]], 10.0));
             }
         }
         s

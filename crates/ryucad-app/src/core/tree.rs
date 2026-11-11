@@ -406,6 +406,9 @@ pub fn type_icon(ty: &str, op: Option<&str>, form: Option<&str>) -> &'static str
         "draft" => "draft",
         "move_face" => "move-face",
         "replace_face" => "replace-face",
+        "delete_face" => "delete-face",
+        "delete_blend" => "delete-blend",
+        "resize_blend" => "resize-blend",
         _ => "question",
     }
 }
@@ -555,6 +558,9 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
             ("Draft", "draft", Tint::Plain),
             ("Move face", "move-face", Tint::Plain),
             ("Replace face", "replace-face", Tint::Plain),
+            ("Delete face", "delete-face", Tint::Plain),
+            ("Delete blend", "delete-blend", Tint::Plain),
+            ("Resize blend", "resize-blend", Tint::Plain),
             ("Linear pattern", "pattern-linear", Tint::Plain),
             ("Circular pattern", "pattern-circular", Tint::Plain),
             ("Mirror pattern", "flip-horizontal", Tint::Plain),
@@ -810,6 +816,15 @@ impl Builder<'_> {
                 _ => {}
             }
             row.tip = Some(format!("a = {}\nb = {}", m.a, m.b));
+        }
+        // What a direct edit did, or a tweak may do (ryucad 22): its tip.
+        if let Some(lines) = f
+            .tweak
+            .as_ref()
+            .map(crate::core::tweaks::TweakInfo::summary)
+            .filter(|l| !l.is_empty())
+        {
+            row.tip = Some(lines.join("\n"));
         }
         // A draft whose angle varies (a parting line climbing along the
         // pull): the rebuild's `draft_angle_varies` as a badge.
@@ -1940,6 +1955,80 @@ mod tests {
     }
 
     #[test]
+    fn direct_edits_take_their_glyphs_and_say_what_they_did() {
+        let mut m = Model::default();
+        m.apply_part(&json!({"part": "p", "revision": "r1", "features": [
+            {"id": "b", "type": "box", "ok": true, "hash": "1", "solids": ["b"]},
+            {"id": "x", "type": "delete_face", "ok": true, "hash": "2", "solids": ["b"],
+             "uses": ["b"], "delete_face": {"target": "b", "heal": "cap",
+              "seeds": [{"seed": "p/b/s1", "faces": ["p/b/s1", "p/b/s2"]}],
+              "modified": {"faces": 2, "edges": 0, "vertices": 0},
+              "created": {"faces": 0, "edges": 0, "vertices": 0},
+              "deleted": {"faces": 2, "edges": 4, "vertices": 0}}},
+            {"id": "db", "type": "delete_blend", "ok": true, "hash": "3", "solids": ["b"],
+             "uses": ["b", "x"], "delete_blend": {"target": "b",
+              "below": {"value": "2 mm", "m": 0.002},
+              "blends": [{"kind": "fillet", "size": {"value": "1 mm", "m": 0.001},
+                          "faces": ["p/b/f1"]}],
+              "modified": {"faces": 2, "edges": 0, "vertices": 0},
+              "created": {"faces": 0, "edges": 1, "vertices": 0},
+              "deleted": {"faces": 1, "edges": 2, "vertices": 0}}},
+            {"id": "m", "type": "move_face", "ok": true, "hash": "4", "solids": ["b"],
+             "uses": ["b"], "move_face": {"target": "b", "by": "translate", "direction": "x",
+              "topology": "change", "blends": "keep",
+              "modified": {"faces": 1, "edges": 0, "vertices": 0},
+              "created": {"faces": 1, "edges": 0, "vertices": 0},
+              "deleted": {"faces": 0, "edges": 0, "vertices": 0}}},
+            {"id": "r", "type": "resize_blend", "ok": false, "solids": ["b"], "uses": ["b"],
+             "resize_blend": {"target": "b"},
+             "error": {"code": "tweak_failed", "message": "not a blend"}}],
+            "solids": [{"solid": "b", "ok": false, "features": ["b", "x", "db", "m", "r"],
+                        "hash": "4", "error": {"code": "tweak_failed"}}]}));
+        let (states, pdm) = (States::default(), BTreeMap::new());
+        let rows = rows(&source(&m, &states, &pdm));
+        let row = |id: &str| {
+            rows.iter()
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("{id}"))
+        };
+        assert_eq!(
+            ["x", "db", "r", "m"].map(|f| row(&format!("feature:p/{f}")).icon),
+            ["delete-face", "delete-blend", "resize-blend", "move-face"]
+        );
+        let tip = |id: &str| {
+            row(&format!("feature:p/{id}"))
+                .tip
+                .clone()
+                .unwrap_or_default()
+        };
+        assert!(
+            tip("x").contains("faces: 2 modified, 0 made, 2 taken away"),
+            "{}",
+            tip("x")
+        );
+        assert!(tip("x").contains("seed p/b/s1: 2 faces"), "{}", tip("x"));
+        assert!(
+            tip("db").contains("1 blend taken: fillet 1 mm"),
+            "{}",
+            tip("db")
+        );
+        assert!(tip("m").contains("topology may change"), "{}", tip("m"));
+        // A failed one is red with its code, its tip its error.
+        let bad = row("feature:p/r");
+        assert!(bad.failed && bad.tint == Tint::Danger);
+        assert!(bad.text.contains("tweak_failed"), "{}", bad.text);
+        assert!(tip("r").contains("not a blend"), "{}", tip("r"));
+        let shown = texts(&rows, &Tree::default());
+        for line in [
+            "    x (delete_face)",
+            "    db (delete_blend)",
+            "      uses b, x",
+        ] {
+            assert!(shown.iter().any(|t| t == line), "{line:?} in {shown:#?}");
+        }
+    }
+
+    #[test]
     fn sheet_metal_features_take_their_glyphs_and_list_what_they_read() {
         let mut m = Model::default();
         m.apply_part(&json!({"part": "p", "revision": "r1", "features": [
@@ -2167,6 +2256,12 @@ mod tests {
             "offset",
             "mirror",
             "split",
+            "draft",
+            "move_face",
+            "replace_face",
+            "delete_face",
+            "delete_blend",
+            "resize_blend",
             "mystery",
         ] {
             for op in [
