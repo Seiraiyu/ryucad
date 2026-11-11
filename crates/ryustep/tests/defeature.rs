@@ -8,7 +8,7 @@
 
 use ryukei::Error;
 use ryukei::blend::{BlendKind, EdgeBlend, blend};
-use ryukei::check::{check, check_intersections};
+use ryukei::check::{check, check_intersections, check_intersections_with};
 use ryukei::geom::Rigid;
 use ryukei::mesh::{MeshParams, tessellate};
 use ryukei::name::OpKey;
@@ -322,4 +322,51 @@ fn ftc_09s_split_holes_lose_their_countersinks() {
     assert_eq!(check_intersections(&o), []);
     // The two cones went and the two half cylinders became one face.
     assert_eq!(o.counts().faces, body.counts().faces - 3);
+}
+
+/// Deleting one of NIST CTC 04's fillets (517 faces) spends fewer units
+/// than checking the whole result once: the re-trim checks only the pairs
+/// with a face it made. Every rung checked every pair, 4 s of the
+/// delete's 8.2 s on cox-worker-2.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "seconds in release, minutes in a debug build: CI runs it in release"
+)]
+fn a_delete_checks_only_its_own_pairs() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/nist_ctc_04_asme1_rd.stp");
+    let m = read(
+        &std::fs::read(path).unwrap(),
+        &ReadOptions {
+            key: OpKey(7),
+            heal: Default::default(),
+        },
+    )
+    .unwrap();
+    let (body, _, _) = m.bodies[0].result.clone().unwrap();
+    let r = recognise_blends(&body, &RecogniseOptions::default()).unwrap();
+    // The least-named fillet of 0.5 to 0.6 mm.
+    let pick = r
+        .blends
+        .iter()
+        .filter(
+            |b| matches!(b.kind, BlendKind::Fillet { radius } if (5e-4..6e-4).contains(&radius)),
+        )
+        .min_by_key(|b| b.faces[0])
+        .unwrap();
+    let spec = DeleteBlends {
+        max_size: None,
+        faces: pick.faces.clone(),
+        options: RecogniseOptions::default(),
+    };
+    let w = Work::unlimited();
+    let (o, _) = delete_blends_with(OpKey(0x16c), &body, &spec, &w).unwrap();
+    let c = Work::unlimited();
+    assert_eq!(check_intersections_with(&o, &c).unwrap(), []);
+    println!(
+        "delete {} units, one whole check {} units",
+        w.spent(),
+        c.spent()
+    );
+    assert!(w.spent() < c.spent(), "{} against {}", w.spent(), c.spent());
 }

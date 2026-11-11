@@ -18,7 +18,7 @@ pub(crate) mod working;
 use crate::boolean::build::Kept;
 use crate::boolean::table::Table;
 use crate::boolean::{Fail, past_cap};
-use crate::check::{Fault, check_intersections_in};
+use crate::check::Fault;
 use crate::name::{Journal, Name, OpKey};
 use crate::split::Piece;
 use crate::topo::{Body, FaceId};
@@ -303,7 +303,16 @@ fn attempt(
     if !crate::check::check(&out).is_empty() {
         return done(Err(Error::Topology(TopologyError::Inconsistent)));
     }
-    for fault in check_intersections_in(&out, m) {
+    // Only pairs with a face the re-trim made: the faces outside the
+    // region come back as they were (it never cuts them), so their pairs
+    // are the input's (NIST CTC 04: 4 s of a fillet's 8.2 s delete).
+    let outside: std::collections::BTreeSet<Name> = body
+        .faces()
+        .filter(|f| !region.faces.contains(f))
+        .map(|f| body.faces[f].name)
+        .collect();
+    let made = |f: FaceId| !outside.contains(&out.faces[f].name);
+    for fault in crate::check::check_pairs_in(&out, m, |a, b| made(a) || made(b)) {
         match fault {
             Fault::FacesCross { a, b } | Fault::FacesOverlap { a, b } => {
                 let mut faces = [out.faces[a].name, out.faces[b].name];
