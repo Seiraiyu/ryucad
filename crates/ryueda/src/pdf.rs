@@ -126,6 +126,101 @@ pub fn title_items(paper: [Nm; 2], t: &TitleBlock) -> Vec<Item> {
     out
 }
 
+/// Row letters: ISO 5457 leaves out I and O.
+const LETTERS: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ";
+/// A zone's size, about.
+const ZONE: Nm = 50_000_000;
+
+/// How many zones a page of `paper` has across and down the drawing
+/// frame (inside the border): about 50 mm each, at least 2.
+pub fn zones(paper: [Nm; 2]) -> (usize, usize) {
+    let b = crate::schem::BORDER;
+    let n = |len: Nm| (((len + ZONE / 2) / ZONE) as usize).max(2);
+    (n(paper[0] - 2 * b), n(paper[1] - 2 * b))
+}
+
+/// The zone at `at` on the page (its frame, y up): row letter from the
+/// top, column number from the left; outside the frame, the nearest.
+pub fn zone_at(paper: [Nm; 2], at: Point) -> (usize, usize) {
+    let b = crate::schem::BORDER;
+    let (cols, rows) = zones(paper);
+    let (w, h) = (paper[0] - 2 * b, paper[1] - 2 * b);
+    let col = ((at[0] - b).clamp(0, w - 1) as i128 * cols as i128 / w as i128) as usize;
+    let row = ((paper[1] - b - at[1]).clamp(0, h - 1) as i128 * rows as i128 / h as i128) as usize;
+    (row, col)
+}
+
+pub fn zone_text((row, col): (usize, usize)) -> String {
+    format!("{}{}", LETTERS[row % LETTERS.len()] as char, col + 1)
+}
+
+pub fn zone_of(paper: [Nm; 2], at: Point) -> String {
+    zone_text(zone_at(paper, at))
+}
+
+/// The drawing frame and the zone marks between it and the page's border:
+/// a tick at each division, each zone's number (columns) or letter (rows)
+/// in both margins.
+pub fn zone_items(paper: [Nm; 2]) -> Vec<Item> {
+    use ryusch::style::{Look, Role};
+    let look = Look::default();
+    let ink = look.role(Role::Name);
+    let b = crate::schem::BORDER;
+    let (cols, rows) = zones(paper);
+    let (w, h) = (paper[0] - 2 * b, paper[1] - 2 * b);
+    let size = 2_500_000;
+    let line = |pts: Vec<Point>| Item::Polyline {
+        points: pts,
+        stroke: ink,
+        fill: None,
+        width: LINE,
+        dash: false,
+    };
+    let text = |t: String, at: Point| Item::Text {
+        text: t,
+        at,
+        size,
+        anchor: Anchor::Middle,
+        vertical: false,
+        colour: ink,
+        bold: false,
+    };
+    let mut out = vec![line(vec![
+        [b, b],
+        [b + w, b],
+        [b + w, b + h],
+        [b, b + h],
+        [b, b],
+    ])];
+    let margin_mid = (FRAME + b) / 2;
+    for i in 0..cols {
+        let x = b + (w as i128 * i as i128 / cols as i128) as Nm;
+        let next = b + (w as i128 * (i + 1) as i128 / cols as i128) as Nm;
+        if i > 0 {
+            out.push(line(vec![[x, FRAME], [x, b]]));
+            out.push(line(vec![[x, paper[1] - b], [x, paper[1] - FRAME]]));
+        }
+        let mid = (x + next) / 2;
+        for y in [margin_mid - size / 3, paper[1] - margin_mid - size / 3] {
+            out.push(text((i + 1).to_string(), [mid, y]));
+        }
+    }
+    for j in 0..rows {
+        let top = paper[1] - b - (h as i128 * j as i128 / rows as i128) as Nm;
+        let next = paper[1] - b - (h as i128 * (j + 1) as i128 / rows as i128) as Nm;
+        if j > 0 {
+            out.push(line(vec![[FRAME, top], [b, top]]));
+            out.push(line(vec![[paper[0] - b, top], [paper[0] - FRAME, top]]));
+        }
+        let mid = (top + next) / 2 - size / 3;
+        let l = (LETTERS[j % LETTERS.len()] as char).to_string();
+        for x in [margin_mid, paper[0] - margin_mid] {
+            out.push(text(l.clone(), [x, mid]));
+        }
+    }
+    out
+}
+
 /// A point of the sheet's frame on the paper, in nanometres: exact in
 /// `f64` (every coordinate is far below 2^53).
 fn on(origin: Point, q: Point) -> P {
@@ -136,7 +231,10 @@ fn on(origin: Point, q: Point) -> P {
 fn chars(pages: &[Page]) -> BTreeSet<char> {
     let mut out: BTreeSet<char> = BTreeSet::new();
     for p in pages {
-        for it in title_items(p.paper, &p.title) {
+        for it in zone_items(p.paper)
+            .into_iter()
+            .chain(title_items(p.paper, &p.title))
+        {
             if let Item::Text { text, .. } = it {
                 out.extend(text.chars());
             }
@@ -397,6 +495,9 @@ pub fn write(title: &str, pages: &[Page], marks: &[Mark]) -> Vec<u8> {
             ],
         );
         c.stroke();
+        for it in zone_items(page.paper) {
+            draw(c, [0, 0], &it);
+        }
         for it in title_items(page.paper, &page.title) {
             draw(c, [0, 0], &it);
         }
@@ -530,5 +631,29 @@ mod tests {
             ]
         );
         assert!(r.max[1] <= crate::schem::BORDER + crate::schem::TITLE_BAND);
+    }
+
+    #[test]
+    fn zones_are_about_fifty_millimetres_lettered_from_the_top() {
+        let a4 = [297_000_000, 210_000_000];
+        let a3 = [420_000_000, 297_000_000];
+        assert_eq!(zones(a4), (6, 4));
+        assert_eq!(zones(a3), (8, 6));
+        let b = crate::schem::BORDER;
+        assert_eq!(zone_of(a4, [b + 1, 210_000_000 - b - 1]), "A1");
+        assert_eq!(zone_of(a4, [297_000_000 - b - 1, b + 1]), "D6");
+        assert_eq!(zone_of(a4, [0, 0]), "D1", "outside the frame clamps");
+        let items = zone_items(a4);
+        let labels: Vec<&str> = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        // Each number and letter twice (both margins).
+        assert_eq!(labels.iter().filter(|t| **t == "6").count(), 2);
+        assert_eq!(labels.iter().filter(|t| **t == "D").count(), 2);
+        assert!(!labels.contains(&"I"));
     }
 }
