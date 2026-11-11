@@ -63,7 +63,17 @@ pub(crate) fn working(
             (rect0[1][0] + rect0[1][1]) / 2.0,
         );
         let speed = [mid.du.length(), mid.dv.length()];
-        let m = crate::tweak::extend::margins(rect0, domain, [pu, pv], speed, diagonal);
+        let mut m = crate::tweak::extend::margins(rect0, domain, [pu, pv], speed, diagonal);
+        // No farther than the domain's own length each way: a polynomial
+        // carried tens of its lengths on is no surface the region needs
+        // (NIST FTC 07: v carried from a few units to [-37, 20], its
+        // working sheet's sides fitted for 63 s and refused).
+        for k in 0..2 {
+            let len = domain[k][1] - domain[k][0];
+            for e in 0..2 {
+                m[k][e] = m[k][e].min(len);
+            }
+        }
         if m != [[0.0; 2]; 2] {
             match carried_by(&surface, m) {
                 Some(c) => surface = c,
@@ -179,5 +189,32 @@ mod tests {
         assert!(w.extendable);
         assert!(after[0][0] < before[0][0] && after[0][1] > before[0][1]);
         assert!(after[1][0] < before[1][0] && after[1][1] > before[1][1]);
+    }
+
+    #[test]
+    fn a_spline_is_carried_no_farther_than_its_length() {
+        // The spline top of `a_spline_top_is_carried_past_its_domain`,
+        // 0.4 × 0.2, in a region box a thousand times its size.
+        let b = block();
+        let top = face_of(&b, FaceRole::PlusZ);
+        let plane = &b.surfaces[b.faces[top].surface];
+        let (n, _) = plane.to_nurbs([[0.1, 0.5], [0.1, 0.3]]).unwrap();
+        let s = Surface::Nurbs(std::sync::Arc::new(n));
+        let (sheet, _) = crate::sheet::from_surface(K, &s, s.domain()).unwrap();
+        let f = sheet.faces().next().unwrap();
+        let before = sheet.surfaces[sheet.faces[f].surface].domain();
+        let huge = Box3::new(
+            Point3::new(-200.0, -200.0, -200.0),
+            Point3::new(200.0, 200.0, 200.0),
+        );
+        let w = working(&sheet, f, None, sheet.faces[f].sense, true, &huge).unwrap();
+        let after = w.surface.domain();
+        for k in 0..2 {
+            let len = before[k][1] - before[k][0];
+            assert!(
+                after[k][1] - after[k][0] <= 3.0 * len + 1e-12,
+                "{k}: {after:?}"
+            );
+        }
     }
 }

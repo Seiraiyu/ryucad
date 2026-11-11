@@ -531,8 +531,11 @@ fn projection_finds_view_and_cut_cleanly() {
 /// 20 s, it answered at 42 s, and under the fuzzer's instrumentation past
 /// libFuzzer's 600 s. Its sides now charge the re-trim's meter and stop
 /// at its cancel: cancelled 5 s in, it answers within 5 s more (at once
-/// on cox-worker-4, an AMD Opteron 6380; uncancelled it refuses
-/// `Uncertain` after about 200 s there, #647). Release only.
+/// on cox-worker-4, an AMD Opteron 6380; uncancelled it refused
+/// `Uncertain` after about 200 s there, #647). Since plan 16.C's carry
+/// cap the spline face is no longer carried far, and the case refuses
+/// before the cancel (3.4 s on cox-worker-2, an AMD Ryzen 7 9700X), so
+/// either answer is taken within the bound. Release only.
 ///
 /// The case is built and edited in a rayon pool of its own: on the global
 /// pool, a worker waiting on one of its joins steals another test's tasks
@@ -576,8 +579,14 @@ fn a_cancel_stops_an_edits_working_sheets() {
         });
         (r, start.elapsed())
     });
+    // Since plan 16.C's carry cap it answers before the cancel (3.4 s on
+    // cox-worker-2); either way it stops within the bound below. The
+    // cancel itself is held by ryustep's `a_cancel_stops_deleting_ftc_10s_blends`.
     assert!(
-        matches!(r, Err(ryukei::Error::Cancelled)),
+        matches!(
+            r,
+            Err(ryukei::Error::Cancelled | ryukei::Error::InvalidTweak(_)) | Ok(_)
+        ),
         "{:?}",
         r.map(|_| ())
     );
