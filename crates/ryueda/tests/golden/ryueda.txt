@@ -41,7 +41,7 @@ schematic.buck.pdf df3bcc39aa2ab14655e6b8bd72e0dd66
 schematic.ethernet.annotate.across 3e37c20215db0a0a99935fad9f564914
 schematic.ethernet.annotate.down bd55ae35b3213b051219e3904b4c4b01
 schematic.ethernet.eth.dark.svg c60b67ccb489f386cf377b338bd75d31
-schematic.ethernet.eth.describe a65c1e7044dae77cce0d1936cca73dc7
+schematic.ethernet.eth.describe 5310e8ce86743477adf0a43d2465a69d
 schematic.ethernet.eth.explain dc9129b090d2a52b9e39402312458e10
 schematic.ethernet.eth.layout cf798e64993376416a5781dce76bc2a5
 schematic.ethernet.eth.svg f7110b7b034fef5844ed2a902008d168
@@ -54,7 +54,7 @@ schematic.ethernet.status_led.led_act.svg e0e3266e715dc74ee72d2ca5b20da471
 schematic.ethernet.status_led.led_lnk.svg a3bcdb5c23b56db962be28515456792d
 schematic.ethernet.status_led.svg e0e3266e715dc74ee72d2ca5b20da471
 schematic.frontend.amp.dark.svg 09d0d5146283496cb55bdbd9f64b6612
-schematic.frontend.amp.describe b0650c937a46ee9bdb52600904086d89
+schematic.frontend.amp.describe 0bf5d211a49b8240cdc4f4d2b5962c37
 schematic.frontend.amp.explain 1cf2a520ca572c2ba29caed32caacb5c
 schematic.frontend.amp.layout 63263d5cf3253f6e4bf4ba0c082f334b
 schematic.frontend.amp.svg 143cf590a0773ff196d4296d3ad12d8c

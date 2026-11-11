@@ -248,7 +248,7 @@ pub const RULES: &[Rule] = &[
         code: "sch_floating",
         weight: FLOATING,
         unit: "a part",
-        what: "A part's signal pins all reach their nets by labels, though one of those nets has another pin on its sheet and none leaves it, or a pin on a net that leaves the sheet carries no label of its own and is wired to none of its region's off-sheet connectors.",
+        what: "A part's signal pins all reach their nets by labels, though one of those nets has another pin on its sheet and none leaves it, or a pin on a net that leaves the sheet carries no label of its own and is wired to none of its region's off-sheet connectors. A stack's pin on a net per layer, which only a label can draw, isn't judged.",
         why: "A part joined to nothing by a wire floats: the reader can't see what it belongs to without matching label names across the sheet.",
         fix: "Stand it beside the part it serves (near X P, with P the pin on its net), or ask for the net's wires (net N wire).",
         evidence: "Round 1's sessions and work item 4530 named floating parts as the corpus's main fault (35 laid out from nothing before plan 1.D, 16 after); a local part reads as part of its circuit only when wired to it. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the RP2040 split by function onto three sheets 3 to 0 though this rule's points rose from 32 to 80: they don't fault a label on a net that leaves its sheet, so since plan 2.A (design 348) such a label is the net's off-sheet connector and joins its pin; since plan 2.C (design 348) a pin wired to its region's off-sheet connector, not to a local label, is joined.",
@@ -939,7 +939,9 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             let mut nearest: Option<(Nm, String)> = None;
             for (k, pin) in part.pins.iter().enumerate() {
                 let Some(n) = pin.drawn_net() else { continue };
-                if block.nets[n].kind != NetKind::Signal {
+                // A stack's pin on a net per layer is labelled, never
+                // wired: one wire can't carry several nets (plan 2.G).
+                if block.nets[n].kind != NetKind::Signal || pin.stacked() {
                     continue;
                 }
                 signals += 1;
@@ -2450,6 +2452,50 @@ mod tests {
         let wires = vec![vec![a, b], vec![c, [6 * g, 0]]];
         assert!(wired_to_another(&wires, n(a), &[n(a), n(b)]));
         assert!(wired_to_another(&wires, n(c), &[n(a), n(c)]));
+    }
+
+    /// A stack's pin carrying a net per layer can only be labelled (one
+    /// wire can't carry several nets): a part whose every signal pin is
+    /// such a pin isn't judged floating (plan 2.G; the front end's IV
+    /// converter and the Ethernet circuit's status LEDs).
+    #[test]
+    fn a_stacked_pin_is_not_judged_floating() {
+        let mut b = seeded(1, 2);
+        let mut out = crate::engine::lay_out(&b).unwrap();
+        let wired: Vec<String> = out
+            .layout
+            .routes
+            .keys()
+            .filter(|k| b.net(k).is_some_and(|n| b.nets[n].kind == NetKind::Signal))
+            .cloned()
+            .collect();
+        for key in &wired {
+            out.layout.routes.remove(key);
+        }
+        let first = lint(&b, &out)
+            .0
+            .into_iter()
+            .find(|f| f.code == "sch_floating")
+            .expect("a part floats")
+            .refs[0]
+            .clone();
+        let p = b.part(&first).unwrap();
+        let signals: Vec<usize> = (0..b.nets.len())
+            .filter(|n| b.nets[*n].kind == NetKind::Signal)
+            .collect();
+        for pin in &mut b.parts[p].pins {
+            if let Some(n) = pin.net {
+                let other = *signals.iter().find(|m| **m != n).unwrap();
+                pin.layers = vec![Some(other)];
+            }
+        }
+        assert!(
+            !lint(&b, &out)
+                .0
+                .iter()
+                .any(|f| f.code == "sch_floating" && f.refs[0] == first),
+            "{first} is judged though every pin is a stack's"
+        );
     }
 
     #[test]
