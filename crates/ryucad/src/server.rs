@@ -5431,11 +5431,11 @@ pub(crate) fn part_report(
                         && let Some(i) = &m.report
                     {
                         // A fill's report under its own type, else an
-                        // import's; a draft's angles come with its own
-                        // report (`tweak::resolved`).
+                        // import's; a tweak's report comes with its own
+                        // fields (`tweak::resolved`).
                         let key = match types.get(fid).and_then(Value::as_str) {
                             Some("fill") => Some("fill"),
-                            Some("draft") => None,
+                            Some("draft" | "move_face" | "replace_face" | "delete_face") => None,
                             _ => Some("import"),
                         };
                         if let Some(key) = key {

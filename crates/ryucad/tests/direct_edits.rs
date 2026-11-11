@@ -248,4 +248,32 @@ fn a_wall_drafted_past_its_neighbour_is_a_wedge() {
     near(volume(&mut s, "d", "b"), 30.0 * 0.5 * 40.0 * h, 1e-6);
     assert!(planes(&body(&mut s, "d"), "b", 2, 1.0, 20.0).is_empty());
     report(&mut s, "d");
+    // inspect --feature counts what went: the top and its edges and
+    // vertices; the report gives the units spent.
+    let v = must(&mut s, "inspect", json!({"part": "p", "feature": "d"}));
+    let d = &v["draft"];
+    assert_eq!(d["deleted"]["faces"], 1, "{v}");
+    assert!(d["deleted"]["edges"].as_u64().unwrap() >= 4, "{v}");
+    assert!(
+        d["deleted"]["references"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r
+                .as_str()
+                .unwrap()
+                .ends_with(&plane(&body(&mut s, "b"), "b", 2, 1.0, 20.0)[4..])),
+        "{v}"
+    );
+    assert!(d["spent"].as_u64().unwrap() > 0, "{v}");
+    // The rebuild report carries no stray import report for it.
+    let r = must(&mut s, "rebuild", json!({"part": "p"}));
+    let f = r["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "d")
+        .unwrap()
+        .clone();
+    assert!(f.get("import").is_none(), "{f}");
 }

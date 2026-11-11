@@ -1377,6 +1377,36 @@ pub fn resolved(
             refs.sort();
             v["modified"]["references"] = json!(refs);
         }
+        // A direct edit's new and lost entities, against its target as it
+        // saw it (a split face's pieces are new, the face it was is gone),
+        // and what it spent of its budget.
+        if budgeted(f)
+            && let Ok(was) =
+                crate::rebuild::read(part, &Solids::of(part), id, f, "target", target, results)
+        {
+            let (had, has) = (
+                crate::rebuild::names(&was.body),
+                crate::rebuild::names(&b.body),
+            );
+            v["created"] = tally(
+                (&part.id, target),
+                &b.body,
+                has.difference(&had),
+                references,
+            );
+            v["deleted"] = tally(
+                (&part.id, target),
+                &was.body,
+                had.difference(&has),
+                references,
+            );
+        }
+        if let crate::rebuild::Output::Solids(m) = out
+            && let Some(rep) = &m.report
+            && let Some(n) = rep.get("spent")
+        {
+            v["spent"] = n.clone();
+        }
         if let crate::rebuild::Output::Solids(m) = out
             && let Some(rep) = &m.report
             && let Some(a) = angles(&part.id, rep)
@@ -1385,6 +1415,33 @@ pub fn resolved(
         }
     }
     Some(v)
+}
+
+/// Counts of `names` by kind as `body` holds them, and with `references`
+/// each as `<part>/<target>/<name>`, sorted.
+fn tally<'a>(
+    (part, target): (&Id, &Id),
+    body: &ryukei::topo::Body,
+    names: impl Iterator<Item = &'a Name>,
+    references: bool,
+) -> Value {
+    let (mut faces, mut edges, mut vertices) = (0u64, 0u64, 0u64);
+    let mut refs = Vec::new();
+    for n in names {
+        match body.by_name(*n) {
+            Some(EntityId::Face(_)) => faces += 1,
+            Some(EntityId::Edge(_)) => edges += 1,
+            Some(EntityId::Vertex(_)) => vertices += 1,
+            _ => continue,
+        }
+        refs.push(format!("{part}/{target}/{n}"));
+    }
+    let mut v = json!({"faces": faces, "edges": edges, "vertices": vertices});
+    if references {
+        refs.sort();
+        v["references"] = json!(refs);
+    }
+    v
 }
 
 /// A draft report's angles as output gives them: each face as
