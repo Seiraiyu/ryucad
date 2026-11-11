@@ -885,6 +885,20 @@ pub(crate) fn dispatch(
         Request::FeatureFacesGet { face, rev } => {
             crate::tweak::feature_faces_get(session, &face, rev.as_deref())
         }
+        Request::BlendsGet {
+            part,
+            solid,
+            tolerance,
+            below,
+            rev,
+        } => crate::blends::get(
+            session,
+            &part,
+            solid.as_deref(),
+            tolerance.as_deref(),
+            below.as_deref(),
+            rev.as_deref(),
+        ),
         Request::FlatGet {
             part,
             solid,
@@ -2553,7 +2567,9 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
         Feature::MoveFace(_)
         | Feature::ReplaceFace(_)
         | Feature::Draft(_)
-        | Feature::DeleteFace(_) => crate::tweak::report(part, f),
+        | Feature::DeleteFace(_)
+        | Feature::DeleteBlend(_)
+        | Feature::ResizeBlend(_) => crate::tweak::report(part, f),
         Feature::Datum(d) => crate::datum::report(part, d),
         Feature::Path(x) => crate::path::report(part, x),
         Feature::Sweep(w) => crate::along::feature_report(part, w),
@@ -4439,7 +4455,9 @@ fn check_resolved(
         Feature::MoveFace(_)
         | Feature::ReplaceFace(_)
         | Feature::Draft(_)
-        | Feature::DeleteFace(_) => {
+        | Feature::DeleteFace(_)
+        | Feature::DeleteBlend(_)
+        | Feature::ResizeBlend(_) => {
             crate::tweak::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
         Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
@@ -4755,7 +4773,8 @@ fn feature_add(
             given.only(ty, crate::doc::body::request_fields(ty))?;
             crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
-        "move_face" | "replace_face" | "draft" | "delete_face" => {
+        "move_face" | "replace_face" | "draft" | "delete_face" | "delete_blend"
+        | "resize_blend" => {
             given.only(ty, crate::tweak::request_fields(ty))?;
             crate::tweak::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
@@ -5006,7 +5025,9 @@ fn feature_edit(
             f @ (Feature::MoveFace(_)
             | Feature::ReplaceFace(_)
             | Feature::Draft(_)
-            | Feature::DeleteFace(_)) => {
+            | Feature::DeleteFace(_)
+            | Feature::DeleteBlend(_)
+            | Feature::ResizeBlend(_)) => {
                 let ty = f.type_name();
                 crate::tweak::take_given(ty, &mut given.fields)?;
                 given.only(ty, crate::tweak::request_fields(ty))?;
@@ -5115,6 +5136,8 @@ fn feature_edit(
                 | Feature::ReplaceFace(_)
                 | Feature::Draft(_)
                 | Feature::DeleteFace(_)
+                | Feature::DeleteBlend(_)
+                | Feature::ResizeBlend(_)
         ) && f.targets() != old.targets())
         || ((f.base_flange().is_some()
             || f.flange().is_some()
@@ -5310,6 +5333,7 @@ pub(crate) fn part_report(
     id: &Id,
     occurrences: bool,
 ) -> Result<(Value, Option<String>)> {
+    let unit = session.project().manifest.default_unit;
     let part = session.project().part(id)?;
     let revision = part.revision.clone();
     let assembly = part_kind(part) == PartKind::Assembly;
@@ -5426,7 +5450,9 @@ pub(crate) fn part_report(
                 Feature::MoveFace(_)
                 | Feature::ReplaceFace(_)
                 | Feature::Draft(_)
-                | Feature::DeleteFace(_) => crate::tweak::report(id, f),
+                | Feature::DeleteFace(_)
+                | Feature::DeleteBlend(_)
+                | Feature::ResizeBlend(_) => crate::tweak::report(id, f),
                 _ => return None,
             };
             Some((fid.clone(), (f.type_name(), report)))
@@ -5460,6 +5486,8 @@ pub(crate) fn part_report(
                             | Feature::ReplaceFace(_)
                             | Feature::Draft(_)
                             | Feature::DeleteFace(_)
+                            | Feature::DeleteBlend(_)
+                            | Feature::ResizeBlend(_)
                     )
             })
         })
@@ -5494,7 +5522,10 @@ pub(crate) fn part_report(
                         // fields (`tweak::resolved`).
                         let key = match types.get(fid).and_then(Value::as_str) {
                             Some("fill") => Some("fill"),
-                            Some("draft" | "move_face" | "replace_face" | "delete_face") => None,
+                            Some(
+                                "draft" | "move_face" | "replace_face" | "delete_face"
+                                | "delete_blend" | "resize_blend",
+                            ) => None,
                             _ => Some("import"),
                         };
                         if let Some(key) = key {
@@ -5582,7 +5613,7 @@ pub(crate) fn part_report(
                     held.as_ref().filter(|_| v["ok"] == true).and_then(|q| {
                         let f = q.features.get(fid)?.as_ref().ok()?;
                         crate::body::resolved(q, r, fid, f)
-                            .or_else(|| crate::tweak::resolved(q, r, fid, f, false))
+                            .or_else(|| crate::tweak::resolved(q, r, fid, f, false, unit))
                     })
                 {
                     for (key, x) in extra {
@@ -7952,6 +7983,7 @@ fn inspect(
         return inspect_assembly(session, &part_id(part)?, only, entity);
     }
     let pid = part_id(part)?;
+    let unit = session.project().manifest.default_unit;
     let only = only.map(feature_id).transpose()?;
     if let Some(f) = &only {
         feature(session.project().part(&pid)?, f)?;
@@ -7980,6 +8012,8 @@ fn inspect(
                                 | Feature::ReplaceFace(_)
                                 | Feature::Draft(_)
                                 | Feature::DeleteFace(_)
+                                | Feature::DeleteBlend(_)
+                                | Feature::ResizeBlend(_)
                         ))
             }) =>
         {
@@ -8149,7 +8183,9 @@ fn inspect(
             | Feature::MoveFace(_)
             | Feature::ReplaceFace(_)
             | Feature::Draft(_)
-            | Feature::DeleteFace(_)),
+            | Feature::DeleteFace(_)
+            | Feature::DeleteBlend(_)
+            | Feature::ResizeBlend(_)),
         )) = features.iter().find(|(i, _)| i == f)
     {
         let k = x.type_name();
@@ -8162,7 +8198,7 @@ fn inspect(
         let built = matches!(crate::rebuild::Results::result(result, f), Some(Ok(_)));
         if let Some(Value::Object(extra)) = held.as_ref().filter(|_| built).and_then(|q| {
             if tweak {
-                crate::tweak::resolved(q, result, f, x, true)
+                crate::tweak::resolved(q, result, f, x, true, unit)
             } else {
                 crate::body::resolved(q, result, f, x)
             }

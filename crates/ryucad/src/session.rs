@@ -89,6 +89,8 @@ pub struct Session {
     pub sections: crate::drawing::section::Cache,
     /// Mass properties worked out, for `mass`.
     pub mass: crate::mass::Cache,
+    /// Blends recognised, for `blends`, by body hash and tolerance.
+    pub blends: crate::blends::Cache,
     /// Distances between placed solids, for `clearance`.
     pub clearance: crate::clearance::Cache,
     /// A revision's session: its files never change, and it never reads
@@ -267,6 +269,7 @@ impl Session {
             projections: crate::drawing::Cache::default(),
             sections: crate::drawing::section::Cache::default(),
             mass: crate::mass::Cache::default(),
+            blends: crate::blends::Cache::default(),
             clearance: crate::clearance::Cache::default(),
             frozen: false,
             revisions: Vec::new(),
@@ -367,7 +370,8 @@ impl Session {
             self.known.len() as u64,
             self.known.values().map(|n| n.len() as u64).sum(),
             self.store.models.len() as u64,
-            (self.interference.len() + self.clearance.len() + self.mass.len()) as u64,
+            (self.interference.len() + self.clearance.len() + self.mass.len() + self.blends.len())
+                as u64,
             crate::import::opened_bytes(),
             self.store.results.len() as u64,
         ];
@@ -475,6 +479,7 @@ impl Session {
             projections: from.projections.clone(),
             sections: from.sections.clone(),
             mass: from.mass.clone(),
+            blends: from.blends.clone(),
             clearance: from.clearance.clone(),
             frozen: true,
             revisions: Vec::new(),
