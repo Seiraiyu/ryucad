@@ -1,7 +1,7 @@
 //! What a sheet draws, as items in the sheet's own frame (nanometres, y
 //! up): every line, circle, arc, curve and text of its symbols, pins,
-//! wires, junctions and labels, in drawing order, in one fixed look (the
-//! theme is stage 2's). SVG and ryueda's PDF both draw from it, so they
+//! wires, junctions and labels, in drawing order, in a look (`crate::style`,
+//! plan 2.E): each role's colour and each object's pen. SVG and ryueda's PDF both draw from it, so they
 //! draw alike; it also says where each label and block symbol is, for the
 //! PDF's cross-references and links.
 
@@ -12,76 +12,130 @@ use crate::label;
 use crate::layout::{LabelKind, Layout};
 use crate::route;
 use crate::shape::Shape;
+use crate::style::{Look, Pen, Rgb, Role};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Symbols' lines.
-pub const INK: &str = "#7a1f1f";
-/// Symbols' bodies.
-pub const BODY: &str = "#fff6dc";
-pub const WIRE: &str = "#1b6e3a";
-pub const TEXT: &str = "#202020";
-/// Power ports and ground.
-pub const POWER: &str = "#a01818";
-/// Net labels and not-connected marks.
-pub const LABEL: &str = "#1d3f8f";
-/// A bus wire: the wires' colour, three lines wide.
-pub const BUS: &str = WIRE;
+/// A bus wire: three lines wide at the normal weight.
 pub const BUS_LINE: Nm = 3 * LINE;
-/// A block port's flag: a light blue tint, under dark text.
-pub const PORT_FILL: &str = "#dce6f5";
-/// A sheet's name, beside it on the canvas.
-pub const NAME: &str = "#606060";
-/// Every line's width.
+/// Every line's width at the normal weight.
 pub const LINE: Nm = 150_000;
-/// A region's frame: the symbols' colour at 45% over the paper.
-pub const FRAME: &str = "#c39a9a";
-/// The paper, under a region's title.
-pub const PAPER: &str = "#ffffff";
-/// A region frame's dash: 2 mm on, 1 mm off.
+/// A dashed line's dash (a region's frame, a dashed pen's polylines):
+/// 2 mm on, 1 mm off.
 pub const DASH: [Nm; 2] = [2_000_000, 1_000_000];
 
-/// One thing drawn. A fill of `None` draws the outline alone.
+/// A group a PDF reader can turn off (plan 2.E): [`Item::Begin`] and
+/// [`Item::End`] mark what it holds. SVG writes it as a `<g>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Layer {
+    /// Region frames, their tabs and titles.
+    Frames,
+    Notes,
+    /// Rails' and nets' intent.
+    Intent,
+    PinNumbers,
+}
+
+impl Layer {
+    /// In the PDF's order.
+    pub const ALL: [Layer; 4] = [
+        Layer::Frames,
+        Layer::Notes,
+        Layer::Intent,
+        Layer::PinNumbers,
+    ];
+
+    /// Its name in a PDF reader's layer panel.
+    pub fn title(self) -> &'static str {
+        match self {
+            Layer::Frames => "Region frames",
+            Layer::Notes => "Notes",
+            Layer::Intent => "Intent",
+            Layer::PinNumbers => "Pin numbers",
+        }
+    }
+
+    /// Its key in SVG (`data-layer`).
+    pub fn key(self) -> &'static str {
+        match self {
+            Layer::Frames => "frames",
+            Layer::Notes => "notes",
+            Layer::Intent => "intent",
+            Layer::PinNumbers => "pin_numbers",
+        }
+    }
+
+    /// Its place in [`Layer::ALL`].
+    pub fn index(self) -> usize {
+        Layer::ALL.iter().position(|l| *l == self).expect("listed")
+    }
+}
+
+/// One thing drawn, in its colours and widths. A fill of `None` draws the
+/// outline alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Item {
     Polyline {
         points: Vec<Point>,
-        stroke: &'static str,
-        fill: Option<&'static str>,
+        stroke: Rgb,
+        fill: Option<Rgb>,
+        width: Nm,
+        /// Dashed [`DASH`].
+        dash: bool,
     },
     /// Outlined when `stroke` is given (a symbol's circle), else filled
     /// alone (a junction's dot).
     Circle {
         center: Point,
         radius: Nm,
-        stroke: Option<&'static str>,
-        fill: Option<&'static str>,
+        stroke: Option<Rgb>,
+        fill: Option<Rgb>,
+        width: Nm,
     },
     /// The arc from `start` through `mid` to `end`.
     Arc {
         start: Point,
         mid: Point,
         end: Point,
-        stroke: &'static str,
+        stroke: Rgb,
+        width: Nm,
     },
     /// A cubic Bézier.
     Bezier {
         points: [Point; 4],
-        stroke: &'static str,
+        stroke: Rgb,
+        width: Nm,
     },
-    /// A region's frame: a dashed rectangle, and its title's tab (filled
-    /// with the paper, outlined), drawn under everything on its sheet.
-    Frame { rect: Rect, title_tab: Rect },
-    /// A bus wire: a polyline drawn [`BUS_LINE`] wide in [`BUS`].
-    Bus { points: Vec<Point> },
-    /// A text on its baseline through `at`, upright or reading upwards.
+    /// A region's frame: a dashed rectangle (unless its pen hides it,
+    /// `frame: false`), and its title's tab, filled with `paper` and
+    /// outlined, drawn under everything on its sheet.
+    Frame {
+        rect: Rect,
+        title_tab: Rect,
+        stroke: Rgb,
+        paper: Rgb,
+        width: Nm,
+        frame: bool,
+    },
+    /// A bus wire.
+    Bus {
+        points: Vec<Point>,
+        stroke: Rgb,
+        width: Nm,
+    },
+    /// A text on its baseline through `at`, upright or reading upwards, in
+    /// SemiBold when `bold`.
     Text {
         text: String,
         at: Point,
         size: Nm,
         anchor: Anchor,
         vertical: bool,
-        colour: &'static str,
+        colour: Rgb,
+        bold: bool,
     },
+    /// What follows, to the matching [`Item::End`], is in a layer.
+    Begin(Layer),
+    End,
 }
 
 /// A label where it is drawn: its net, the pin it serves and its box.
@@ -114,22 +168,74 @@ pub struct Painted {
     pub nets: BTreeSet<String>,
 }
 
-fn line(items: &mut Vec<Item>, points: Vec<Point>, stroke: &'static str) {
+/// How a line is drawn.
+#[derive(Clone, Copy, Debug)]
+struct Ink {
+    colour: Rgb,
+    width: Nm,
+    dash: bool,
+}
+
+impl Ink {
+    /// An object's lines: its pen's colour (else `role`'s), weight and dash.
+    fn of(look: &Look, pen: &Pen, role: Role) -> Ink {
+        Ink {
+            colour: pen.colour.unwrap_or_else(|| look.role(role)),
+            width: pen.weight.width(),
+            dash: pen.dash,
+        }
+    }
+
+    /// A plain line in `role`'s colour.
+    fn plain(look: &Look, role: Role) -> Ink {
+        Ink {
+            colour: look.role(role),
+            width: LINE,
+            dash: false,
+        }
+    }
+}
+
+fn line(items: &mut Vec<Item>, points: Vec<Point>, ink: Ink) {
     items.push(Item::Polyline {
         points,
-        stroke,
+        stroke: ink.colour,
         fill: None,
+        width: ink.width,
+        dash: ink.dash,
     });
 }
 
-fn graphic(items: &mut Vec<Item>, shape: &Shape, g: &Graphic) {
+/// A text item, Regular unless `bold`.
+fn text_item(text: &str, at: Point, size: Nm, anchor: Anchor, vertical: bool, colour: Rgb) -> Item {
+    Item::Text {
+        text: text.to_owned(),
+        at,
+        size,
+        anchor,
+        vertical,
+        colour,
+        bold: false,
+    }
+}
+
+/// What a part's graphics are drawn in.
+struct PartInk {
+    ink: Ink,
+    body: Rgb,
+    port: Rgb,
+    text: Rgb,
+}
+
+fn graphic(items: &mut Vec<Item>, shape: &Shape, g: &Graphic, k: &PartInk) {
     let pl = |p: Point| shape.place.apply(p);
     let fill = |x: Fill| match x {
         Fill::None => None,
-        Fill::Body => Some(BODY),
-        Fill::Outline => Some(INK),
-        Fill::Port => Some(PORT_FILL),
+        Fill::Body => Some(k.body),
+        Fill::Outline => Some(k.ink.colour),
+        Fill::Port => Some(k.port),
     };
+    let (stroke, width, dash) = (k.ink.colour, k.ink.width, k.ink.dash);
     match g {
         Graphic::Rect {
             start,
@@ -143,13 +249,17 @@ fn graphic(items: &mut Vec<Item>, shape: &Shape, g: &Graphic) {
                 pl([start[0], end[1]]),
                 pl(*start),
             ],
-            stroke: INK,
+            stroke,
             fill: fill(*x),
+            width,
+            dash,
         }),
         Graphic::Polyline { points, fill: x } => items.push(Item::Polyline {
             points: points.iter().map(|p| pl(*p)).collect(),
-            stroke: INK,
+            stroke,
             fill: fill(*x),
+            width,
+            dash,
         }),
         Graphic::Circle {
             center,
@@ -158,27 +268,30 @@ fn graphic(items: &mut Vec<Item>, shape: &Shape, g: &Graphic) {
         } => items.push(Item::Circle {
             center: pl(*center),
             radius: *radius,
-            stroke: Some(INK),
+            stroke: Some(stroke),
             fill: fill(*x),
+            width,
         }),
         Graphic::Arc { start, mid, end } => items.push(Item::Arc {
             start: pl(*start),
             mid: pl(*mid),
             end: pl(*end),
-            stroke: INK,
+            stroke,
+            width,
         }),
         Graphic::Bezier { points } => items.push(Item::Bezier {
             points: points.map(pl),
-            stroke: INK,
+            stroke,
+            width,
         }),
-        Graphic::Text { text, at, size } => items.push(Item::Text {
-            text: text.clone(),
-            at: pl(*at),
-            size: (*size).max(MIN_SIZE),
-            anchor: Anchor::Start,
-            vertical: false,
-            colour: TEXT,
-        }),
+        Graphic::Text { text, at, size } => items.push(text_item(
+            text,
+            pl(*at),
+            (*size).max(MIN_SIZE),
+            Anchor::Start,
+            false,
+            k.text,
+        )),
     }
 }
 
@@ -230,7 +343,8 @@ pub fn name_box_sized(name: &str, at: &crate::shape::PinAt, size: Nm) -> Rect {
     }
 }
 
-/// A label's lines and text.
+/// A label's lines and text, in its net's pen.
+#[allow(clippy::too_many_arguments)]
 fn label_items(
     items: &mut Vec<Item>,
     kind: LabelKind,
@@ -239,46 +353,46 @@ fn label_items(
     side: Side,
     flow: crate::input::Flow,
     intent: &str,
+    look: &Look,
+    pen: &Pen,
 ) {
     let d = if kind == LabelKind::OffSheet {
         label::drawn_flow(name, at, side, flow)
     } else {
         label::drawn_with(kind, name, intent, at, side)
     };
+    let power = pen.colour.unwrap_or_else(|| look.role(Role::Power));
     if let Some((p, anchor, text)) = &d.extra {
-        items.push(Item::Text {
-            text: text.clone(),
-            at: *p,
-            size: MIN_SIZE,
-            anchor: *anchor,
-            vertical: false,
-            colour: POWER,
-        });
+        items.push(Item::Begin(Layer::Intent));
+        items.push(text_item(text, *p, MIN_SIZE, *anchor, false, power));
+        items.push(Item::End);
     }
-    let colour = if kind.signal() { LABEL } else { POWER };
+    let colour = if kind.signal() {
+        pen.colour.unwrap_or_else(|| look.role(Role::Label))
+    } else {
+        power
+    };
     // A net label's line is the wire it names; a connector's outline is
     // its own.
-    let ink = match kind {
-        LabelKind::Net => WIRE,
-        LabelKind::OffSheet => LABEL,
-        _ => POWER,
+    let role = match kind {
+        LabelKind::Net => Role::Wire,
+        LabelKind::OffSheet => Role::Label,
+        _ => Role::Power,
+    };
+    let ink = Ink {
+        dash: false,
+        ..Ink::of(look, pen, role)
     };
     for l in &d.lines {
         line(items, l.clone(), ink);
     }
     if let Some((p, anchor, vertical)) = d.text {
-        items.push(Item::Text {
-            text: name.to_owned(),
-            at: p,
-            size: if kind == LabelKind::OffSheet {
-                label::FLAG_TEXT
-            } else {
-                SIZE
-            },
-            anchor,
-            vertical,
-            colour,
-        });
+        let size = if kind == LabelKind::OffSheet {
+            label::FLAG_TEXT
+        } else {
+            SIZE
+        };
+        items.push(text_item(name, p, size, anchor, vertical, colour));
     }
 }
 
@@ -312,20 +426,32 @@ fn bus_items(
     layout: &Layout,
     sid: &str,
     items: &mut Vec<Item>,
+    look: &Look,
 ) -> Vec<BusConnector> {
     let mut connectors = Vec::new();
     for (key, by_sheet) in &layout.buses {
         let Some(drawn) = by_sheet.get(sid) else {
             continue;
         };
+        let bus_pen = look.pen(key);
+        let bus_wire = Ink::of(look, &bus_pen, Role::Wire);
+        let bus_label = bus_pen.colour.unwrap_or_else(|| look.role(Role::Label));
         let mut columns: BTreeMap<Nm, Vec<Point>> = BTreeMap::new();
         let mut members: Vec<usize> = Vec::new();
         let stub_len = drawn.stub;
         for e in &drawn.entries {
             let (stub, on_spine) = crate::bus::entry(e.at, e.side, stub_len);
-            line(items, vec![e.at, stub, on_spine], WIRE);
+            let net_pen = block.net(&e.net).map(|n| look.pen(&block.nets[n].key));
+            let ink = net_pen.as_ref().map_or_else(
+                || Ink::plain(look, Role::Wire),
+                |p| Ink::of(look, p, Role::Wire),
+            );
+            line(items, vec![e.at, stub, on_spine], ink);
             columns.entry(on_spine[0]).or_default().push(on_spine);
             if let Some(n) = block.net(&e.net) {
+                let colour = net_pen
+                    .and_then(|p| p.colour)
+                    .unwrap_or_else(|| look.role(Role::Label));
                 if !members.contains(&n) {
                     members.push(n);
                 }
@@ -333,14 +459,7 @@ fn bus_items(
                 if let Some((p, anchor, vertical)) =
                     label::drawn(LabelKind::Net, name, e.at, e.side).text
                 {
-                    items.push(Item::Text {
-                        text: name.clone(),
-                        at: p,
-                        size: SIZE,
-                        anchor,
-                        vertical,
-                        colour: LABEL,
-                    });
+                    items.push(text_item(name, p, SIZE, anchor, vertical, colour));
                 }
             }
         }
@@ -348,12 +467,18 @@ fn bus_items(
             if let Some([a, b]) = crate::bus::spine(pts)
                 && a != b
             {
-                items.push(Item::Bus { points: vec![a, b] });
+                items.push(Item::Bus {
+                    points: vec![a, b],
+                    stroke: bus_wire.colour,
+                    width: 3 * bus_wire.width,
+                });
             }
         }
         for run in &drawn.trunk {
             items.push(Item::Bus {
                 points: run.clone(),
+                stroke: bus_wire.colour,
+                width: 3 * bus_wire.width,
             });
         }
         let name = match block.bus(key) {
@@ -374,14 +499,7 @@ fn bus_items(
             if let Some((p, anchor, vertical)) =
                 label::drawn(LabelKind::Net, &name, run[0], side).text
             {
-                items.push(Item::Text {
-                    text: name.clone(),
-                    at: p,
-                    size: SIZE,
-                    anchor,
-                    vertical,
-                    colour: LABEL,
-                });
+                items.push(text_item(&name, p, SIZE, anchor, vertical, bus_label));
             }
         }
         if let Some(c) = &drawn.connector {
@@ -390,7 +508,17 @@ fn bus_items(
                 .map_or(crate::input::Flow::Bidirectional, |n| {
                     label::flow_on_sheet(block, layout, *n, sid)
                 });
-            label_items(items, LabelKind::OffSheet, &c.text, c.at, c.side, flow, "");
+            label_items(
+                items,
+                LabelKind::OffSheet,
+                &c.text,
+                c.at,
+                c.side,
+                flow,
+                "",
+                look,
+                &bus_pen,
+            );
             connectors.push(BusConnector {
                 bus: key.clone(),
                 nets: members.iter().map(|n| block.nets[*n].key.clone()).collect(),
@@ -401,18 +529,24 @@ fn bus_items(
     connectors
 }
 
-/// What sheet `sid` of `layout` draws: parts in key order (each its
-/// graphics, pins, pin names and numbers, not-connected marks and text),
-/// then wires and junctions, then labels.
+/// [`sheet_in`] in the built-in light look.
 pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
+    sheet_in(block, layout, sid, &Look::default())
+}
+
+/// What sheet `sid` of `layout` draws in `look`: parts in key order (each
+/// its graphics, pins, pin names and numbers, not-connected marks and
+/// text), then wires and junctions, then labels.
+pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Painted {
     let mut out = Painted::default();
     let items = &mut out.items;
     // Regions first, under everything: a dashed frame and a titled tab in
     // its title band's top left. An untitled region isn't drawn.
-    for r in layout.regions.values() {
+    for (rid, r) in &layout.regions {
         if r.sheet != sid || r.title.is_empty() {
             continue;
         }
+        let pen = look.pen(&format!("region:{rid}"));
         let rect = r.frame_on_sheet();
         let w = crate::font::width(&r.title, SIZE);
         let base = [rect.min[0] + GRID, rect.max[1] - 2 * GRID];
@@ -420,15 +554,24 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
             [rect.min[0] + GRID / 2, base[1] - GRID / 2],
             [base[0] + w + GRID / 2, base[1] + SIZE + GRID / 2],
         );
-        items.push(Item::Frame { rect, title_tab });
-        items.push(Item::Text {
-            text: r.title.clone(),
-            at: base,
-            size: SIZE,
-            anchor: Anchor::Start,
-            vertical: false,
-            colour: TEXT,
+        items.push(Item::Begin(Layer::Frames));
+        items.push(Item::Frame {
+            rect,
+            title_tab,
+            stroke: pen.colour.unwrap_or_else(|| look.role(Role::Frame)),
+            paper: look.role(Role::Paper),
+            width: pen.weight.width(),
+            frame: pen.frame,
         });
+        items.push(text_item(
+            &r.title,
+            base,
+            SIZE,
+            Anchor::Start,
+            false,
+            pen.colour.unwrap_or_else(|| look.role(Role::Text)),
+        ));
+        items.push(Item::End);
     }
     let mut arms: BTreeMap<(usize, route::Node), u8> = BTreeMap::new();
     for part in &block.parts {
@@ -449,71 +592,70 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
         {
             out.ports.push((block.nets[n].key.clone(), shape.body));
         }
+        let pen = look.pen(&part.key);
+        let k = PartInk {
+            ink: Ink::of(look, &pen, Role::Ink),
+            body: pen.fill.unwrap_or_else(|| look.role(Role::Body)),
+            port: pen.fill.unwrap_or_else(|| look.role(Role::PortFill)),
+            text: pen.colour.unwrap_or_else(|| look.role(Role::Text)),
+        };
         for g in &part.graphics {
-            graphic(items, &shape, g);
+            graphic(items, &shape, g, &k);
         }
         let names = draws_names(part);
-        for (k, pin) in part.pins.iter().enumerate() {
-            let at = shape.pins[k];
+        let mut numbers: Vec<Item> = Vec::new();
+        for (i, pin) in part.pins.iter().enumerate() {
+            let at = shape.pins[i];
             if at.base != at.end {
-                line(items, vec![at.base, at.end], INK);
+                line(items, vec![at.base, at.end], k.ink);
             }
             if let Some(n) = pin.net {
                 *arms.entry((n, route::node_of(at.end))).or_default() += 1;
             }
             if names && !pin.name.is_empty() {
                 let (p, anchor) = name_at(&at, SIZE);
-                items.push(Item::Text {
-                    text: pin.name.clone(),
-                    at: p,
-                    size: SIZE,
+                items.push(text_item(
+                    &pin.name,
+                    p,
+                    SIZE,
                     anchor,
-                    vertical: !at.side.horizontal(),
-                    colour: TEXT,
-                });
+                    !at.side.horizontal(),
+                    k.text,
+                ));
             }
-            if pin.show_number {
+            if pin.show_number && pen.pin_numbers {
                 let mid = [(at.base[0] + at.end[0]) / 2, (at.base[1] + at.end[1]) / 2];
                 let (p, vertical) = if at.side.horizontal() {
                     ([mid[0], mid[1] + GRID / 4], false)
                 } else {
                     ([mid[0] - GRID / 4, mid[1]], true)
                 };
-                items.push(Item::Text {
-                    text: pin.number.clone(),
-                    at: p,
-                    size: MIN_SIZE,
-                    anchor: Anchor::Middle,
+                numbers.push(text_item(
+                    &pin.number,
+                    p,
+                    MIN_SIZE,
+                    Anchor::Middle,
                     vertical,
-                    colour: INK,
-                });
+                    pen.colour.unwrap_or_else(|| look.role(Role::PinNumber)),
+                ));
             }
             if pin.nc {
                 let d = GRID / 3;
                 let e = at.end;
-                line(
-                    items,
-                    vec![[e[0] - d, e[1] - d], [e[0] + d, e[1] + d]],
-                    LABEL,
-                );
-                line(
-                    items,
-                    vec![[e[0] - d, e[1] + d], [e[0] + d, e[1] - d]],
-                    LABEL,
-                );
+                let ink = Ink::plain(look, Role::Label);
+                line(items, vec![[e[0] - d, e[1] - d], [e[0] + d, e[1] + d]], ink);
+                line(items, vec![[e[0] - d, e[1] + d], [e[0] + d, e[1] - d]], ink);
             }
+        }
+        if !numbers.is_empty() {
+            items.push(Item::Begin(Layer::PinNumbers));
+            items.append(&mut numbers);
+            items.push(Item::End);
         }
         if let Some(fields) = layout.text.get(&part.key) {
             for (field, value) in [("refdes", &part.refdes), ("value", &part.value)] {
                 if let Some(at) = fields.get(field) {
-                    items.push(Item::Text {
-                        text: value.clone(),
-                        at: *at,
-                        size: SIZE,
-                        anchor: Anchor::Start,
-                        vertical: false,
-                        colour: TEXT,
-                    });
+                    items.push(text_item(value, *at, SIZE, Anchor::Start, false, k.text));
                 }
             }
         }
@@ -524,8 +666,9 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
             continue;
         };
         let n = block.net(key).unwrap_or(usize::MAX);
+        let ink = Ink::of(look, &look.pen(key), Role::Wire);
         for run in runs {
-            line(items, run.clone(), WIRE);
+            line(items, run.clone(), ink);
             let nodes = route::expand(run);
             for (i, node) in nodes.iter().enumerate() {
                 let ends = u8::from(i > 0) + u8::from(i + 1 < nodes.len());
@@ -533,17 +676,22 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
             }
         }
     }
-    for ((_, node), count) in &arms {
+    for ((n, node), count) in &arms {
         if *count >= 3 {
+            let colour = block.nets.get(*n).map_or_else(
+                || look.role(Role::Wire),
+                |net| Ink::of(look, &look.pen(&net.key), Role::Wire).colour,
+            );
             items.push(Item::Circle {
                 center: route::point_of(*node),
                 radius: GRID / 4,
                 stroke: None,
-                fill: Some(WIRE),
+                fill: Some(colour),
+                width: LINE,
             });
         }
     }
-    out.buses = bus_items(block, layout, sid, items);
+    out.buses = bus_items(block, layout, sid, items, look);
     for (key, list) in &layout.labels {
         for l in list.iter().filter(|l| l.sheet == sid) {
             let flow = match (l.kind, block.net(key)) {
@@ -558,6 +706,8 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
                 l.side,
                 flow,
                 label::intent_of(block, key),
+                look,
+                &look.pen(key),
             );
             out.labels.push(Placed {
                 net: key.clone(),
@@ -576,6 +726,7 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
             continue;
         };
         let b = note_box(text, n.at);
+        out.items.push(Item::Begin(Layer::Notes));
         out.items.push(Item::Polyline {
             points: vec![
                 b.min,
@@ -584,17 +735,20 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
                 [b.min[0], b.max[1]],
                 b.min,
             ],
-            stroke: NAME,
+            stroke: look.role(Role::Name),
             fill: None,
+            width: LINE,
+            dash: false,
         });
-        out.items.push(Item::Text {
-            text: text.to_owned(),
-            at: [n.at[0] + GRID / 2, n.at[1] + GRID / 2],
-            size: SIZE,
-            anchor: Anchor::Start,
-            vertical: false,
-            colour: TEXT,
-        });
+        out.items.push(text_item(
+            text,
+            [n.at[0] + GRID / 2, n.at[1] + GRID / 2],
+            SIZE,
+            Anchor::Start,
+            false,
+            look.role(Role::Text),
+        ));
+        out.items.push(Item::End);
     }
     out
 }
@@ -733,7 +887,7 @@ mod tests {
         let entry_lines = p
             .items
             .iter()
-            .filter(|i| matches!(i, Item::Polyline { points, stroke, .. } if points.len() == 3 && *stroke == WIRE))
+            .filter(|i| matches!(i, Item::Polyline { points, stroke, .. } if points.len() == 3 && *stroke == crate::style::Look::default().role(crate::style::Role::Wire)))
             .count();
         assert_eq!(entry_lines, 4);
         let texts: Vec<&str> = p
@@ -748,6 +902,90 @@ mod tests {
             assert!(texts.contains(&format!("QSPI_SD{i}").as_str()), "{texts:?}");
         }
         assert!(texts.contains(&"QSPI_SD[0..3]"));
+    }
+
+    #[test]
+    fn a_look_colours_and_weighs_what_its_pens_name() {
+        use crate::style::{Look, Pen, Rgb, Role, Theme, Weight};
+        let b = seeded(2, 4);
+        let out = crate::engine::lay_out(&b).unwrap();
+        let sid = out.layout.sheets.keys().next().unwrap().clone();
+        let plain = sheet(&b, &out.layout, &sid);
+        let dark = sheet_in(&b, &out.layout, &sid, &Look::builtin(Theme::Dark));
+        assert_eq!(plain.items.len(), dark.items.len(), "a theme moves no item");
+        let wire = Look::default().role(Role::Wire);
+        assert!(
+            plain
+                .items
+                .iter()
+                .any(|i| matches!(i, Item::Polyline { stroke, .. } if *stroke == wire))
+        );
+        // One net drawn red and heavy, dashed.
+        let (key, _) = out
+            .layout
+            .routes
+            .iter()
+            .find(|(_, s)| s.contains_key(&sid))
+            .expect("a wired net on the sheet");
+        let red = Rgb(0xff, 0, 0);
+        let mut look = Look::default();
+        look.pens.insert(
+            key.clone(),
+            Pen {
+                colour: Some(red),
+                weight: Weight::Heavy,
+                dash: true,
+                ..Pen::default()
+            },
+        );
+        let p = sheet_in(&b, &out.layout, &sid, &look);
+        assert!(p.items.iter().any(|i| matches!(i,
+            Item::Polyline { stroke, width, dash: true, .. } if *stroke == red && *width == Weight::Heavy.width())));
+        // Layers come in pairs.
+        let begins = p
+            .items
+            .iter()
+            .filter(|i| matches!(i, Item::Begin(_)))
+            .count();
+        let ends = p.items.iter().filter(|i| matches!(i, Item::End)).count();
+        assert_eq!(begins, ends);
+    }
+
+    #[test]
+    fn pin_numbers_hide_by_pen_and_sit_in_their_layer() {
+        use crate::style::{Look, Pen};
+        let b = seeded(1, 2);
+        let out = crate::engine::lay_out(&b).unwrap();
+        let sid = out.layout.sheets.keys().next().unwrap().clone();
+        let numbered = b
+            .parts
+            .iter()
+            .find(|p| {
+                p.pins.iter().any(|x| x.show_number)
+                    && out
+                        .layout
+                        .placed
+                        .get(&p.key)
+                        .is_some_and(|x| x.sheet == sid)
+            })
+            .expect("a part with numbers");
+        let count = |p: &Painted| {
+            p.items
+                .windows(2)
+                .filter(|w| matches!(w, [Item::Begin(Layer::PinNumbers), Item::Text { .. }]))
+                .count()
+        };
+        let all = sheet(&b, &out.layout, &sid);
+        assert!(count(&all) > 0);
+        let mut look = Look::default();
+        look.pens.insert(
+            numbered.key.clone(),
+            Pen {
+                pin_numbers: false,
+                ..Pen::default()
+            },
+        );
+        assert!(count(&sheet_in(&b, &out.layout, &sid, &look)) < count(&all));
     }
 
     #[test]
@@ -773,7 +1011,7 @@ mod tests {
             },
         );
         let p = sheet(&b, &l, "s1");
-        assert!(p.items.iter().any(|i| matches!(i, Item::Polyline { points, stroke, fill: None } if points.len() == 5 && points[0] == points[4] && *stroke == NAME)));
-        assert!(p.items.iter().any(|i| matches!(i, Item::Text { text, size, colour, .. } if text == "Rev B" && *size == SIZE && *colour == TEXT)));
+        assert!(p.items.iter().any(|i| matches!(i, Item::Polyline { points, stroke, fill: None, width: _, dash: false } if points.len() == 5 && points[0] == points[4] && *stroke == crate::style::Look::default().role(crate::style::Role::Name))));
+        assert!(p.items.iter().any(|i| matches!(i, Item::Text { text, size, colour, .. } if text == "Rev B" && *size == SIZE && *colour == crate::style::Look::default().role(crate::style::Role::Text))));
     }
 }

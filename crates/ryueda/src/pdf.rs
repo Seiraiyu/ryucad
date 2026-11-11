@@ -9,7 +9,8 @@ use ryu_draw::pdf::{Canvas, Doc};
 use ryu_draw::{Colour, P};
 use ryusch::font::{Anchor, MIN_SIZE};
 use ryusch::geom::{Nm, Point};
-use ryusch::paint::{Item, LINE};
+use ryusch::paint::{DASH, Item, LINE};
+use ryusch::style::{Look, Rgb, Role};
 use std::collections::BTreeSet;
 
 pub use ryu_draw::pdf::Mark;
@@ -76,43 +77,60 @@ fn circle(a: Point, b: Point, c: Point) -> Option<([f64; 2], f64, bool)> {
     Some(([ux, uy], r, d > 0.0))
 }
 
+fn colour(c: Rgb) -> Colour {
+    Colour(c.0, c.1, c.2)
+}
+
 /// Draws one item at `origin` on the page.
 fn draw(c: &mut Canvas, origin: Point, it: &Item) {
     let at = |q: Point| on(origin, q);
     let atf = |q: [f64; 2]| [origin[0] as f64 + q[0], origin[1] as f64 + q[1]];
-    let stroke = |c: &mut Canvas, s: &str| c.stroke_colour(Colour::hex(s));
-    let fill = |c: &mut Canvas, s: &str| c.fill_colour(Colour::hex(s));
+    let stroke = |c: &mut Canvas, s: Rgb, w: Nm| {
+        c.line_width(w as f64);
+        c.stroke_colour(colour(s));
+    };
+    let fill = |c: &mut Canvas, f: Rgb| c.fill_colour(colour(f));
     match it {
-        Item::Bus { points } => {
+        Item::Bus {
+            points,
+            stroke: s,
+            width,
+        } => {
             let Some(first) = points.first() else { return };
-            stroke(c, ryusch::paint::BUS);
-            c.line_width(ryusch::paint::BUS_LINE as f64);
+            stroke(c, *s, *width);
             c.move_to(at(*first));
             for p in &points[1..] {
                 c.line_to(at(*p));
             }
             c.stroke();
-            c.line_width(LINE as f64);
         }
         Item::Polyline {
             points,
             stroke: s,
             fill: f,
+            width,
+            dash,
         } => {
             let Some(first) = points.first() else { return };
-            stroke(c, s);
+            stroke(c, *s, *width);
+            if *dash {
+                c.dash(&[DASH[0] as f64, DASH[1] as f64]);
+            }
             c.move_to(at(*first));
             for p in &points[1..] {
                 c.line_to(at(*p));
             }
             match f {
                 Some(f) => {
-                    fill(c, f);
+                    fill(c, *f);
                     c.fill_and_stroke();
                 }
                 None => {
                     c.stroke();
                 }
+            }
+            if *dash {
+                c.dash(&[]);
             }
         }
         Item::Circle {
@@ -120,6 +138,7 @@ fn draw(c: &mut Canvas, origin: Point, it: &Item) {
             radius,
             stroke: s,
             fill: f,
+            width,
         } => {
             let r = *radius as f64;
             let ctr = [center[0] as f64, center[1] as f64];
@@ -130,18 +149,18 @@ fn draw(c: &mut Canvas, origin: Point, it: &Item) {
             }
             c.close();
             if let Some(s) = s {
-                stroke(c, s);
+                stroke(c, *s, *width);
             }
             match (s, f) {
                 (Some(_), Some(f)) => {
-                    fill(c, f);
+                    fill(c, *f);
                     c.fill_and_stroke();
                 }
                 (Some(_), None) => {
                     c.stroke();
                 }
                 (None, Some(f)) => {
-                    fill(c, f);
+                    fill(c, *f);
                     c.fill();
                 }
                 (None, None) => {}
@@ -152,8 +171,9 @@ fn draw(c: &mut Canvas, origin: Point, it: &Item) {
             mid,
             end,
             stroke: s,
+            width,
         } => {
-            stroke(c, s);
+            stroke(c, *s, *width);
             let Some((ctr, r, ccw)) = circle(*start, *mid, *end) else {
                 c.move_to(at(*start));
                 c.line_to(at(*mid));
@@ -180,7 +200,14 @@ fn draw(c: &mut Canvas, origin: Point, it: &Item) {
             }
             c.stroke();
         }
-        Item::Frame { rect, title_tab } => {
+        Item::Frame {
+            rect,
+            title_tab,
+            stroke: s,
+            paper,
+            width,
+            frame,
+        } => {
             let rect_path = |c: &mut Canvas, r: &ryusch::geom::Rect| {
                 c.move_to(at([r.min[0], r.min[1]]));
                 c.line_to(at([r.max[0], r.min[1]]));
@@ -188,18 +215,24 @@ fn draw(c: &mut Canvas, origin: Point, it: &Item) {
                 c.line_to(at([r.min[0], r.max[1]]));
                 c.close();
             };
-            stroke(c, ryusch::paint::FRAME);
-            let [on_, off] = ryusch::paint::DASH;
-            c.dash(&[on_ as f64, off as f64]);
-            rect_path(c, rect);
-            c.stroke();
-            c.dash(&[]);
-            fill(c, ryusch::paint::PAPER);
+            stroke(c, *s, *width);
+            if *frame {
+                let [on_, off] = DASH;
+                c.dash(&[on_ as f64, off as f64]);
+                rect_path(c, rect);
+                c.stroke();
+                c.dash(&[]);
+            }
+            fill(c, *paper);
             rect_path(c, title_tab);
             c.fill_and_stroke();
         }
-        Item::Bezier { points, stroke: s } => {
-            stroke(c, s);
+        Item::Bezier {
+            points,
+            stroke: s,
+            width,
+        } => {
+            stroke(c, *s, *width);
             let [a, b, d, e] = *points;
             c.move_to(at(a));
             c.cubic_to(at(b), at(d), at(e));
@@ -211,7 +244,9 @@ fn draw(c: &mut Canvas, origin: Point, it: &Item) {
             size,
             anchor,
             vertical,
-            colour,
+            colour: col,
+            // SemiBold from Task 22 (plan 2.E); Regular until then.
+            bold: _,
         } => {
             let w = ryusch::font::width(text, *size);
             let shift = match anchor {
@@ -225,10 +260,11 @@ fn draw(c: &mut Canvas, origin: Point, it: &Item) {
             } else {
                 (point[0] - shift, point[1])
             };
-            fill(c, colour);
+            fill(c, *col);
             let dir = if *vertical { [0.0, 1.0] } else { [1.0, 0.0] };
             c.text(text, at([px, py]), *size as f64, dir);
         }
+        Item::Begin(_) | Item::End => {}
     }
 }
 
@@ -284,7 +320,8 @@ pub fn write(title: &str, pages: &[Page], marks: &[Mark]) -> Vec<u8> {
                 size: HEADING,
                 anchor: Anchor::Start,
                 vertical: false,
-                colour: "#202020",
+                colour: Look::default().role(Role::Text),
+                bold: false,
             },
         );
         for it in &page.items {
@@ -305,20 +342,24 @@ mod tests {
             items: vec![
                 Item::Polyline {
                     points: vec![[0, 0], [10_000_000, 0]],
-                    stroke: "#1b6e3a",
+                    stroke: Rgb(0x1f, 0x5f, 0xbf),
                     fill: None,
+                    width: LINE,
+                    dash: false,
                 },
                 Item::Arc {
                     start: [0, 0],
                     mid: [5_000_000, 5_000_000],
                     end: [10_000_000, 0],
-                    stroke: "#7a1f1f",
+                    stroke: Rgb(0x3a, 0x3f, 0x47),
+                    width: LINE,
                 },
                 Item::Circle {
                     center: [20_000_000, 0],
                     radius: 317_500,
                     stroke: None,
-                    fill: Some("#1b6e3a"),
+                    fill: Some(Rgb(0x1f, 0x5f, 0xbf)),
+                    width: LINE,
                 },
                 Item::Text {
                     text: "R1".into(),
@@ -326,7 +367,8 @@ mod tests {
                     size: 1_270_000,
                     anchor: Anchor::Start,
                     vertical: true,
-                    colour: "#202020",
+                    colour: Rgb(0x20, 0x23, 0x28),
+                    bold: false,
                 },
             ],
             links,

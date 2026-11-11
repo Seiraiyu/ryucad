@@ -16,7 +16,8 @@ use crate::schem::{self, BORDER, Laid};
 use ryusch::font::{Anchor, MIN_SIZE};
 use ryusch::geom::{Nm, Rect};
 use ryusch::layout::LabelKind;
-use ryusch::paint::{Item, LABEL};
+use ryusch::paint::Item;
+use ryusch::style::{Look, Role};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -518,7 +519,8 @@ fn xref_items(
         size: MIN_SIZE,
         anchor: Anchor::Start,
         vertical: false,
-        colour: LABEL,
+        colour: Look::default().role(Role::Label),
+        bold: false,
     });
 }
 
