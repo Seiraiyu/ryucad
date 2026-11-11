@@ -16,6 +16,7 @@ use crate::place::{self, Hints, MARGIN};
 use crate::route::{self, Field, NO_NET};
 use crate::shape::{Shape, grid_origin};
 use crate::text;
+use crate::text::Line;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2830,7 +2831,7 @@ fn draw(
                     st.sheets[s0].0 == x.sheet && pl == Place::new(x.at, x.rotation, x.mirror)
                 });
                 if let (true, Some(fields)) = (unmoved, l.text.get(&part.key)) {
-                    for (n, t) in text_lines(part) {
+                    for (n, t) in part.lines() {
                         if let Some(at) = fields.get(n) {
                             kept_text.extend(text::boxes(&[t], *at));
                         }
@@ -2979,7 +2980,7 @@ fn draw(
         let mut kept_fields: BTreeMap<usize, BTreeMap<String, Point>> = BTreeMap::new();
         for &p in &parts {
             let part = &block.parts[p];
-            let texts = text_lines(part);
+            let texts = part.lines();
             if texts.is_empty() {
                 continue;
             }
@@ -3007,13 +3008,13 @@ fn draw(
                     continue;
                 };
                 let clear = texts.iter().all(|(n, t)| {
-                    text::boxes(&[t], fields[*n])
+                    text::boxes(&[*t], fields[*n])
                         .iter()
                         .all(|b| field.clear(*b))
                 });
                 if clear {
                     for (n, t) in &texts {
-                        for b in text::boxes(&[t], fields[*n]) {
+                        for b in text::boxes(&[*t], fields[*n]) {
                             field.block(b);
                         }
                     }
@@ -3033,13 +3034,13 @@ fn draw(
             });
             if let Some(fields) = fields
                 && texts.iter().all(|(n, t)| {
-                    text::boxes(&[t], fields[*n])
+                    text::boxes(&[*t], fields[*n])
                         .iter()
                         .all(|b| field.clear(*b))
                 })
             {
                 for (n, t) in &texts {
-                    for b in text::boxes(&[t], fields[*n]) {
+                    for b in text::boxes(&[*t], fields[*n]) {
                         field.block(b);
                     }
                 }
@@ -3253,7 +3254,13 @@ fn draw(
                     continue;
                 }
                 let name = block.label_text(p, k);
-                let b = label::label_box(LabelKind::Net, &name, pin.end, pin.side);
+                let b = label::label_box_with(
+                    LabelKind::Net,
+                    &name,
+                    label::intent_on(&block.nets[row.net], LabelKind::Net),
+                    pin.end,
+                    pin.side,
+                );
                 // Clear before the row's wire, which lies under its line.
                 if !field.clear_label(b) {
                     continue;
@@ -3367,12 +3374,15 @@ fn draw(
             if matches!(part.kind, PartKind::Port { .. }) {
                 continue;
             }
-            let lines = text_lines(part);
+            let lines = part.lines();
             if lines.is_empty() {
                 continue;
             }
-            let texts: Vec<&str> = lines.iter().map(|(_, t)| *t).collect();
+            let texts: Vec<Line> = lines.iter().map(|(_, t)| *t).collect();
             let body = st.shape(p).expect("placed").body;
+            // #712: never in the room in front of one of its own pin ends.
+            let fronts = pin_fronts(&st.shape(p).expect("placed"));
+            let clear_of = |bs: &[Rect]| bs.iter().all(|b| fronts.iter().all(|f| !f.overlaps(b)));
             // Text kept field by field (asked parts' too, below).
             if !asks.contains_key(&p)
                 && let Some(f) = kept_fields.get(&p)
@@ -3390,12 +3400,12 @@ fn draw(
                         fn place(
                             field: &mut Field,
                             fields: &mut BTreeMap<String, Point>,
-                            group: Vec<(&str, &str)>,
+                            group: Vec<(&str, Line)>,
                             at: Option<Point>,
                             fallback: Point,
                         ) {
                             let at = at.unwrap_or(fallback);
-                            let ts: Vec<&str> = group.iter().map(|(_, t)| *t).collect();
+                            let ts: Vec<Line> = group.iter().map(|(_, t)| *t).collect();
                             for b in text::boxes(&ts, at) {
                                 field.block(b);
                             }
@@ -3406,7 +3416,7 @@ fn draw(
                         }
                         let mut done: BTreeSet<&str> = BTreeSet::new();
                         for (f, side) in list {
-                            let group: Vec<(&str, &str)> = lines
+                            let group: Vec<(&str, Line)> = lines
                                 .iter()
                                 .copied()
                                 .filter(|(n, _)| f.covers(n) && !done.contains(n))
@@ -3415,30 +3425,30 @@ fn draw(
                                 continue;
                             }
                             done.extend(group.iter().map(|(n, _)| *n));
-                            let ts: Vec<&str> = group.iter().map(|(_, t)| *t).collect();
+                            let ts: Vec<Line> = group.iter().map(|(_, t)| *t).collect();
                             let cands = text::candidates_on(body, &ts, *side);
-                            let at = cands
-                                .iter()
-                                .copied()
-                                .find(|c| text::boxes(&ts, *c).iter().all(|b| field.clear(*b)));
+                            let at = cands.iter().copied().find(|c| {
+                                let bs = text::boxes(&ts, *c);
+                                bs.iter().all(|b| field.clear(*b)) && clear_of(&bs)
+                            });
                             let fallback = cands
                                 .first()
                                 .copied()
                                 .unwrap_or_else(|| text::candidates(body, &ts)[0]);
                             place(&mut field, &mut fields, group, at, fallback);
                         }
-                        let rest: Vec<(&str, &str)> = lines
+                        let rest: Vec<(&str, Line)> = lines
                             .iter()
                             .copied()
                             .filter(|(n, _)| !done.contains(n))
                             .collect();
                         if !rest.is_empty() {
-                            let ts: Vec<&str> = rest.iter().map(|(_, t)| *t).collect();
+                            let ts: Vec<Line> = rest.iter().map(|(_, t)| *t).collect();
                             let cands = text::candidates(body, &ts);
-                            let at = cands
-                                .iter()
-                                .copied()
-                                .find(|c| text::boxes(&ts, *c).iter().all(|b| field.clear(*b)));
+                            let at = cands.iter().copied().find(|c| {
+                                let bs = text::boxes(&ts, *c);
+                                bs.iter().all(|b| field.clear(*b)) && clear_of(&bs)
+                            });
                             place(&mut field, &mut fields, rest, at, cands[0]);
                         }
                         fields
@@ -3467,7 +3477,7 @@ fn draw(
                     text::row_points(&texts, at)
                         .iter()
                         .zip(&texts)
-                        .all(|(q, t)| text::boxes(&[t], *q).iter().all(|b| field.clear(*b)))
+                        .all(|(q, t)| text::boxes(&[*t], *q).iter().all(|b| field.clear(*b)))
                 };
                 let at = (0..=24)
                     .flat_map(|k| [start(k * GRID, base), start(k * GRID, base + GRID)])
@@ -3476,7 +3486,7 @@ fn draw(
                     let pts = text::row_points(&texts, at);
                     let mut fields = BTreeMap::new();
                     for ((name, t), q) in lines.iter().zip(&pts) {
-                        for b in text::boxes(&[t], *q) {
+                        for b in text::boxes(&[*t], *q) {
                             field.block(b);
                         }
                         fields.insert((*name).to_owned(), *q);
@@ -3486,7 +3496,10 @@ fn draw(
                 }
             }
             let at = {
-                let fits = |at: Point| text::boxes(&texts, at).iter().all(|b| field.clear(*b));
+                let fits = |at: Point| {
+                    let bs = text::boxes(&texts, at);
+                    bs.iter().all(|b| field.clear(*b)) && clear_of(&bs)
+                };
                 let at = text::candidates(body, &texts)
                     .into_iter()
                     .find(|c| fits(*c))
@@ -3604,19 +3617,24 @@ fn port_on_run(
     order.into_iter().find(|p| ok(*p))
 }
 
-/// A part's lines of text beside it: its designator and value, those it
-/// has; a port has none (its name is in its flag).
-fn text_lines(part: &crate::input::Part) -> Vec<(&'static str, &str)> {
-    if matches!(part.kind, PartKind::Port { .. }) {
-        return Vec::new();
-    }
-    [
-        ("refdes", part.refdes.as_str()),
-        ("value", part.value.as_str()),
-    ]
-    .into_iter()
-    .filter(|(_, t)| !t.is_empty())
-    .collect()
+/// The room in front of each of a part's pin ends (#712): three steps out
+/// along the pin and a step either side of its row, where its wire or
+/// label goes. A connected pin's wire holds it already when text is
+/// placed; an unconnected pin's must be kept clear too.
+fn pin_fronts(shape: &Shape) -> Vec<Rect> {
+    shape
+        .pins
+        .iter()
+        .map(|p| {
+            let e = p.end;
+            match p.side {
+                Side::Right => Rect::new([e[0], e[1] - GRID], [e[0] + 3 * GRID, e[1] + GRID]),
+                Side::Left => Rect::new([e[0] - 3 * GRID, e[1] - GRID], [e[0], e[1] + GRID]),
+                Side::Up => Rect::new([e[0] - GRID, e[1]], [e[0] + GRID, e[1] + 3 * GRID]),
+                Side::Down => Rect::new([e[0] - GRID, e[1] - 3 * GRID], [e[0] + GRID, e[1]]),
+            }
+        })
+        .collect()
 }
 
 /// The previous layout's runs on sheet `sid`, by net index.
@@ -4592,7 +4610,13 @@ fn place_labels_in(
                     let near = carrier.is_some()
                         || (e[0] - pin.end[0]).abs() + (e[1] - pin.end[1]).abs() <= LOCAL_REACH;
                     near.then(|| {
-                        let b = label::label_box(kind2, &block.label_text(q, l), e, at.side);
+                        let b = label::label_box_with(
+                            kind2,
+                            &block.label_text(q, l),
+                            label::intent_on(&block.nets[m], kind2),
+                            e,
+                            at.side,
+                        );
                         boxes.insert(route::node_of(e), b);
                         route::node_of(e)
                     })
@@ -4650,8 +4674,8 @@ fn place_labels_in(
         );
         let kept = prev_runs.get(&n).map(|r| (r, &net_pins));
         let name = &block.label_text(p, k);
-        let intent = block.nets[n].intent.as_str();
         let fits_as = |field: &Field, kind: LabelKind, stub: &[Point], at: Point, side: Side| {
+            let intent = label::intent_on(&block.nets[n], kind);
             if !field.clear_label(label::label_box_with(kind, name, intent, at, side)) {
                 return false;
             }
@@ -4783,6 +4807,7 @@ fn place_labels_in(
         if !stub.is_empty() && field.mark(n, &stub).is_ok() {
             routes.entry(n).or_default().push(stub);
         }
+        let intent = label::intent_on(&block.nets[n], kind);
         field.block_label(label::label_box_with(kind, name, intent, at, side));
         labels.entry(n).or_default().push(Label {
             text: name.clone(),
@@ -6558,5 +6583,83 @@ mod tests {
         let out = lay(&b);
         assert!(crate::rules::check(&b, &out.layout).is_empty());
         assert!(out.layout.notes.contains_key("i9"));
+    }
+
+    #[test]
+    fn a_larger_text_moves_only_the_text_that_no_longer_fits() {
+        let block = seeded(3, 2);
+        let first = lay(&block);
+        let key = block
+            .parts
+            .iter()
+            .find(|p| !p.value.is_empty() && first.layout.text.contains_key(&p.key))
+            .expect("a part with text")
+            .key
+            .clone();
+        let mut b = block.clone();
+        b.previous = Some(first.layout.clone());
+        let i = b.part(&key).unwrap();
+        b.parts[i].text.size = 1_778_000;
+        let out = lay(&b);
+        assert_eq!(crate::rules::check(&b, &out.layout), []);
+        assert_eq!(out.layout.placed, first.layout.placed, "no part moves");
+        for (k, t) in &first.layout.text {
+            if *k != key {
+                assert_eq!(out.layout.text.get(k), Some(t), "{k}'s text moved");
+            }
+        }
+    }
+
+    #[test]
+    fn nets_with_intent_keep_every_rule() {
+        for seed in 0..6 {
+            let mut b = seeded(seed, 2);
+            for (i, n) in b.nets.iter_mut().enumerate() {
+                if n.kind == crate::input::NetKind::Signal && i % 2 == 0 {
+                    n.intent = "3.3 V · 20 mA".into();
+                }
+            }
+            let out = lay(&b);
+            assert_eq!(crate::rules::check(&b, &out.layout), [], "seed {seed}");
+            let mut again = b.clone();
+            again.previous = Some(out.layout.clone());
+            assert_eq!(lay(&again).layout, out.layout, "seed {seed}: kept");
+        }
+    }
+
+    /// #712: a part's text never stands in front of one of its own pin
+    /// ends, where the pin's wire or label will go.
+    #[test]
+    fn text_stays_out_of_the_room_in_front_of_its_own_pins() {
+        use crate::layout::TextField;
+        let mut b = Block {
+            name: "reg".into(),
+            sheet: [277_000_000, 170_000_000],
+            ..Block::default()
+        };
+        b.parts.push(crate::testing::regulator("u1", "U1", "reg"));
+        let first = lay(&b);
+        b.previous = Some(first.layout.clone());
+        b.instructions.insert(
+            "i1".into(),
+            Instruction::Text {
+                parts: vec!["u1".into()],
+                field: TextField::Both,
+                side: Side::Right,
+            },
+        );
+        let out = lay(&b);
+        assert_eq!(crate::rules::check(&b, &out.layout), []);
+        let x = &out.layout.placed["u1"];
+        let shape = Shape::of(&b.parts[0], Place::new(x.at, x.rotation, x.mirror));
+        let fronts = pin_fronts(&shape);
+        for (field, line) in b.parts[0].fields() {
+            let at = out.layout.text["u1"][field];
+            let bx = line.boxed(at);
+            assert!(
+                fronts.iter().all(|f| !f.overlaps(&bx)),
+                "{field} at {at:?} stands in front of a pin: {bx:?}"
+            );
+        }
     }
 }

@@ -16,7 +16,10 @@ pub use sheet_metal::{
 };
 mod surface;
 pub use surface::{ExtractForm, FillForm, FillSide, SewForm, SideGroup, SurfaceForm, ThickenForm};
-pub use tweak::{DraftForm, MoveFaceForm, ReplaceFaceForm, TweakForm, TweakGroup, WithGroup};
+pub use tweak::{
+    DeleteBlendForm, DeleteFaceForm, DraftForm, MoveFaceForm, ReplaceFaceForm, ResizeBlendForm,
+    ResizeGroup, RetrimForm, TweakForm, TweakGroup, WithGroup,
+};
 
 use ryucad::error::Error;
 use ryucad::proto::{FeatureFields, PlacementArg, Request};
@@ -1354,7 +1357,7 @@ pub struct Form {
     /// A base flange's, flange's, unfold's or refold's settings, sizes
     /// and what it names.
     pub sheet: Option<SheetMetalForm>,
-    /// A draft's, move face's or replace face's sizes, flags and faces.
+    /// A draft's, move face's or replace face's sizes, flags and faces; a delete's, blend delete's or resize's (ryucad 22).
     pub tweak: Option<TweakForm>,
     /// An instance's revision (`working` or a label) and whether it is
     /// fixed; its pose is the placement, its origin in [`Form::unit`].

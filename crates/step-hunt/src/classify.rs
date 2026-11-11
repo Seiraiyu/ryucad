@@ -237,6 +237,7 @@ mod tests {
                 ),
             ],
             key: None,
+            transfer: Default::default(),
         };
         assert_eq!(
             findings(&case(10), &ran, 30.0),
@@ -267,6 +268,7 @@ mod tests {
         let mut ran = Ran {
             stages: vec![failed.clone()],
             key: Some(stage("import", 1.0, Outcome::Ok)),
+            transfer: Default::default(),
         };
         assert!(key_dependent(&case(1), &ran));
         ran.key = Some(failed);
@@ -288,6 +290,7 @@ mod tests {
             // nothing either.
             stages: vec![stage("import", 0.1, Outcome::Ok), s],
             key: None,
+            transfer: Default::default(),
         };
         assert!(findings(&case(6), &ran, 0.5).is_empty());
     }

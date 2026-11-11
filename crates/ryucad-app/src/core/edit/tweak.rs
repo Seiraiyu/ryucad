@@ -3,11 +3,14 @@
 //! flipped faces each a checkbox to take it out, its hinge and pull shown;
 //! a move's distance or angle, its groups' distances and `tangent` edited,
 //! its `by` and what it goes along or about shown; a replacement's faces
-//! checkboxes, each group's surface shown. Adding a face, or changing
-//! what a tweak turns about, is an agent's work. Each save is one
-//! `feature.edit` against the revision read.
+//! checkboxes, each group's surface shown. And of the direct edits
+//! (design 445, The app): a delete's faces and seeds checkboxes and its
+//! heal a choice; a blend delete's size and tolerance edited and its
+//! faces checkboxes; a resize's sizes and tolerance edited. Adding a
+//! face, or changing what a tweak turns about, is an agent's work. Each
+//! save is one `feature.edit` against the revision read.
 
-use super::{Field, Flag, Picks, text, texts};
+use super::{Choice, Field, Flag, Picks, text, texts};
 use ryucad::proto::{FeatureFields, Flip};
 use serde_json::{Value, json};
 
@@ -43,6 +46,8 @@ pub struct DraftForm {
     pub flip: Picks,
     pub reverse: Flag,
     pub tangent: Flag,
+    /// Its topology and blends (ryucad 22).
+    pub retrim: RetrimForm,
 }
 
 /// A move face's form.
@@ -61,6 +66,8 @@ pub struct MoveFaceForm {
     /// An offset's faces at distances of their own.
     pub groups: Vec<TweakGroup>,
     pub tangent: Flag,
+    /// Its topology and blends (ryucad 22).
+    pub retrim: RetrimForm,
 }
 
 /// A replace face's form.
@@ -68,14 +75,93 @@ pub struct MoveFaceForm {
 pub struct ReplaceFaceForm {
     pub target: String,
     pub groups: Vec<WithGroup>,
+    /// Its topology and blends (ryucad 22).
+    pub retrim: RetrimForm,
 }
 
-/// A draft's, move face's or replace face's form.
+/// A delete face's form: its faces and seeds, each a checkbox to take it
+/// out, and how it heals.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeleteFaceForm {
+    pub target: String,
+    pub faces: Picks,
+    pub seeds: Picks,
+    /// `auto`, `cap` or `grow`.
+    pub heal: Choice,
+}
+
+/// A blend delete's form: the size it takes blends below and its
+/// recognition tolerance (each empty when not written), and its faces,
+/// each a checkbox to take it out.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeleteBlendForm {
+    pub target: String,
+    pub below: Field,
+    pub tolerance: Field,
+    pub faces: Picks,
+}
+
+/// One group of a resize: its sizes by their keys (`radius`, or a
+/// chamfer's `d`, `d1`, `d2`, `angle`), edited; its chamfer form and the
+/// face its first distance runs along, and the faces naming its blends,
+/// shown.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResizeGroup {
+    pub sizes: Vec<(String, Field)>,
+    pub form: Option<String>,
+    pub face: Option<String>,
+    pub faces: Vec<String>,
+}
+
+/// A resize blend's form.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResizeBlendForm {
+    pub target: String,
+    pub groups: Vec<ResizeGroup>,
+    pub tolerance: Field,
+}
+
+impl ResizeBlendForm {
+    fn sizes(&self) -> impl Iterator<Item = &Field> {
+        self.groups
+            .iter()
+            .flat_map(|g| g.sizes.iter().map(|(_, f)| f))
+    }
+
+    /// The groups as `feature.edit` takes them: every one, whole, as
+    /// typed.
+    fn groups_json(&self) -> Value {
+        let gs: Vec<Value> = self
+            .groups
+            .iter()
+            .map(|g| {
+                let mut v = json!({"faces": g.faces});
+                for (k, f) in &g.sizes {
+                    v[k] = json!(f.text.trim());
+                }
+                if let Some(form) = &g.form {
+                    v["form"] = json!(form);
+                }
+                if let Some(face) = &g.face {
+                    v["face"] = json!(face);
+                }
+                v
+            })
+            .collect();
+        json!(gs)
+    }
+}
+
+/// A draft's, move face's or replace face's form, or a delete face's,
+/// delete blend's or resize blend's.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TweakForm {
     Draft(Box<DraftForm>),
     MoveFace(Box<MoveFaceForm>),
     ReplaceFace(Box<ReplaceFaceForm>),
+    DeleteFace(Box<DeleteFaceForm>),
+    DeleteBlend(Box<DeleteBlendForm>),
+    ResizeBlend(Box<ResizeBlendForm>),
 }
 
 fn flag(name: &str, read: bool) -> Flag {
@@ -83,6 +169,53 @@ fn flag(name: &str, read: bool) -> Flag {
         name: name.to_owned(),
         read,
         chosen: read,
+    }
+}
+
+/// A face tweak's `topology: change` and `blends: rebuild` (ryucad 22),
+/// each a checkbox: off is `keep`, ryucad 17's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RetrimForm {
+    pub topology: Flag,
+    pub blends: Flag,
+}
+
+impl RetrimForm {
+    fn from_show(v: &Value) -> RetrimForm {
+        RetrimForm {
+            topology: flag("topology", v["topology"] == "change"),
+            blends: flag("blends", v["blends"] == "rebuild"),
+        }
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.topology.dirty() || self.blends.dirty()
+    }
+
+    fn revert(&mut self) {
+        self.topology.chosen = self.topology.read;
+        self.blends.chosen = self.blends.read;
+    }
+
+    /// Each flag changed: `change` or `rebuild` when on, `keep` (which
+    /// takes the field out of the file) when off.
+    fn given(&self, out: &mut FeatureFields) {
+        if self.topology.dirty() {
+            let t = if self.topology.chosen {
+                "change"
+            } else {
+                "keep"
+            };
+            out.topology = Some(t.to_owned());
+        }
+        if self.blends.dirty() {
+            let b = if self.blends.chosen {
+                "rebuild"
+            } else {
+                "keep"
+            };
+            out.blends = Some(b.to_owned());
+        }
     }
 }
 
@@ -148,6 +281,7 @@ impl TweakForm {
                     flip: Picks::new("flipped faces", texts(&v["flip"])),
                     reverse: flag("reverse", v["reverse"] == true),
                     tangent,
+                    retrim: RetrimForm::from_show(v),
                 }))
             }
             "move_face" => {
@@ -165,6 +299,7 @@ impl TweakForm {
                     groups: groups(v, "distance"),
                     tangent,
                     by,
+                    retrim: RetrimForm::from_show(v),
                 }))
             }
             "replace_face" => TweakForm::ReplaceFace(Box::new(ReplaceFaceForm {
@@ -179,7 +314,56 @@ impl TweakForm {
                         faces: Picks::new(&format!("faces (group {})", i + 1), texts(&g["faces"])),
                     })
                     .collect(),
+                retrim: RetrimForm::from_show(v),
             })),
+            "delete_face" => TweakForm::DeleteFace(Box::new(DeleteFaceForm {
+                target,
+                faces: Picks::new("faces", texts(&v["faces"])),
+                seeds: Picks::new("seeds", texts(&v["seeds"])),
+                heal: Choice::new(
+                    "heal",
+                    &["auto", "cap", "grow"],
+                    v["heal"].as_str().unwrap_or("auto").to_owned(),
+                ),
+            })),
+            "delete_blend" => TweakForm::DeleteBlend(Box::new(DeleteBlendForm {
+                target,
+                below: Field::new("below", text(&v["below"])),
+                tolerance: Field::new("tolerance", text(&v["tolerance"])),
+                faces: Picks::new("faces", texts(&v["faces"])),
+            })),
+            "resize_blend" => {
+                let gs: Vec<&Value> = v["groups"].as_array().into_iter().flatten().collect();
+                let many = gs.len() > 1;
+                let groups = gs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, g)| {
+                        let named = |k: &str| {
+                            if many {
+                                format!("{k} (group {})", i + 1)
+                            } else {
+                                k.to_owned()
+                            }
+                        };
+                        ResizeGroup {
+                            sizes: ["radius", "d", "d1", "d2", "angle"]
+                                .into_iter()
+                                .filter(|k| !g[*k].is_null())
+                                .map(|k| (k.to_owned(), Field::new(&named(k), text(&g[k]))))
+                                .collect(),
+                            form: g["form"].as_str().map(str::to_owned),
+                            face: g["face"].as_str().map(str::to_owned),
+                            faces: texts(&g["faces"]),
+                        }
+                    })
+                    .collect();
+                TweakForm::ResizeBlend(Box::new(ResizeBlendForm {
+                    target,
+                    groups,
+                    tolerance: Field::new("tolerance", text(&v["tolerance"])),
+                }))
+            }
             _ => return None,
         })
     }
@@ -197,6 +381,9 @@ impl TweakForm {
                 .chain(m.groups.iter().map(|g| &g.quantity))
                 .collect(),
             TweakForm::ReplaceFace(_) => Vec::new(),
+            TweakForm::DeleteFace(_) => Vec::new(),
+            TweakForm::DeleteBlend(d) => vec![&d.below, &d.tolerance],
+            TweakForm::ResizeBlend(r) => r.sizes().chain([&r.tolerance]).collect(),
         }
     }
 
@@ -212,24 +399,65 @@ impl TweakForm {
                 .chain(m.groups.iter_mut().map(|g| &mut g.quantity))
                 .collect(),
             TweakForm::ReplaceFace(_) => Vec::new(),
+            TweakForm::DeleteFace(_) => Vec::new(),
+            TweakForm::DeleteBlend(d) => vec![&mut d.below, &mut d.tolerance],
+            TweakForm::ResizeBlend(r) => r
+                .groups
+                .iter_mut()
+                .flat_map(|g| g.sizes.iter_mut().map(|(_, f)| f))
+                .chain([&mut r.tolerance])
+                .collect(),
         }
     }
 
     /// A group's quantity by its pointer's steps (`groups`, `0`,
-    /// `angle`).
+    /// `angle`): a draft's or move's one quantity, a resize's size by its
+    /// key.
     pub fn at_pointer(&mut self, steps: &[&str]) -> Option<&mut Field> {
-        let ["groups", i, _] = steps else {
+        let ["groups", i, k] = steps else {
             return None;
         };
         let i: usize = i.parse().ok()?;
         match self {
             TweakForm::Draft(d) => Some(&mut d.groups.get_mut(i)?.quantity),
             TweakForm::MoveFace(m) => Some(&mut m.groups.get_mut(i)?.quantity),
-            TweakForm::ReplaceFace(_) => None,
+            TweakForm::ResizeBlend(r) => r
+                .groups
+                .get_mut(i)?
+                .sizes
+                .iter_mut()
+                .find(|(key, _)| key == k)
+                .map(|(_, f)| f),
+            TweakForm::ReplaceFace(_) | TweakForm::DeleteFace(_) | TweakForm::DeleteBlend(_) => {
+                None
+            }
+        }
+    }
+
+    /// A face tweak's topology and blends; `None` for a direct edit.
+    pub fn retrim(&self) -> Option<&RetrimForm> {
+        match self {
+            TweakForm::Draft(d) => Some(&d.retrim),
+            TweakForm::MoveFace(m) => Some(&m.retrim),
+            TweakForm::ReplaceFace(r) => Some(&r.retrim),
+            _ => None,
+        }
+    }
+
+    pub fn retrim_mut(&mut self) -> Option<&mut RetrimForm> {
+        match self {
+            TweakForm::Draft(d) => Some(&mut d.retrim),
+            TweakForm::MoveFace(m) => Some(&mut m.retrim),
+            TweakForm::ReplaceFace(r) => Some(&mut r.retrim),
+            _ => None,
         }
     }
 
     pub fn dirty(&self) -> bool {
+        self.own_dirty() || self.retrim().is_some_and(RetrimForm::dirty)
+    }
+
+    fn own_dirty(&self) -> bool {
         match self {
             TweakForm::Draft(d) => {
                 d.angle.dirty()
@@ -246,6 +474,9 @@ impl TweakForm {
                     || m.tangent.dirty()
             }
             TweakForm::ReplaceFace(r) => r.groups.iter().any(|g| g.faces.dirty()),
+            TweakForm::DeleteFace(x) => x.faces.dirty() || x.seeds.dirty() || x.heal.dirty(),
+            TweakForm::DeleteBlend(d) => d.below.dirty() || d.tolerance.dirty() || d.faces.dirty(),
+            TweakForm::ResizeBlend(_) => self.fields().iter().any(|f| f.dirty()),
         }
     }
 
@@ -271,6 +502,19 @@ impl TweakForm {
                     g.faces.chosen.clone_from(&g.faces.read);
                 }
             }
+            TweakForm::DeleteFace(x) => {
+                x.faces.chosen.clone_from(&x.faces.read);
+                x.seeds.chosen.clone_from(&x.seeds.read);
+                x.heal.chosen.clone_from(&x.heal.read);
+            }
+            TweakForm::DeleteBlend(d) => {
+                d.faces.chosen.clone_from(&d.faces.read);
+            }
+            // Its sizes and tolerance went back with every field.
+            TweakForm::ResizeBlend(_) => {}
+        }
+        if let Some(r) = self.retrim_mut() {
+            r.revert();
         }
     }
 
@@ -343,6 +587,40 @@ impl TweakForm {
                     out.groups = Some(json!(gs));
                 }
             }
+            TweakForm::DeleteFace(x) => {
+                if x.faces.dirty() {
+                    out.faces = Some(json!(x.faces.chosen));
+                }
+                if x.seeds.dirty() {
+                    out.seeds = Some(x.seeds.chosen.clone());
+                }
+                if x.heal.dirty() {
+                    out.heal = Some(x.heal.chosen.clone());
+                }
+            }
+            TweakForm::DeleteBlend(d) => {
+                // Cleared, `""` takes the field out of the file.
+                if d.below.dirty() {
+                    out.below = Some(typed(&d.below));
+                }
+                if d.tolerance.dirty() {
+                    out.tolerance = Some(typed(&d.tolerance));
+                }
+                if d.faces.dirty() {
+                    out.faces = Some(json!(d.faces.chosen));
+                }
+            }
+            TweakForm::ResizeBlend(r) => {
+                if r.sizes().any(Field::dirty) {
+                    out.groups = Some(r.groups_json());
+                }
+                if r.tolerance.dirty() {
+                    out.tolerance = Some(typed(&r.tolerance));
+                }
+            }
+        }
+        if let Some(r) = self.retrim() {
+            r.given(out);
         }
     }
 }
@@ -478,5 +756,184 @@ mod tests {
             Some(json!([{"with": "box/lid", "faces": ["box/base/t"]}]))
         );
         assert!(TweakForm::from_show("shell", &v).is_none());
+    }
+
+    #[test]
+    fn a_deletes_faces_and_seeds_are_taken_out_and_its_heal_chosen() {
+        let v = json!({"faces":["box/base/a","box/base/b"],"heal":"cap",
+            "id":"x","revision":"r1","seeds":["box/hole/s"],"target":"base",
+            "type":"delete_face"});
+        let mut t = TweakForm::from_show("delete_face", &v).unwrap();
+        assert!(t.fields().is_empty() && !t.dirty());
+        let TweakForm::DeleteFace(x) = &mut t else {
+            panic!()
+        };
+        assert_eq!((x.target.as_str(), x.heal.read.as_str()), ("base", "cap"));
+        assert_eq!(x.heal.options, ["auto", "cap", "grow"]);
+        x.faces.toggle("box/base/b");
+        x.heal.chosen = "grow".into();
+        let out = given(&t);
+        assert_eq!(out.faces, Some(json!(["box/base/a"])));
+        assert_eq!(out.heal.as_deref(), Some("grow"));
+        assert!(out.seeds.is_none());
+        // Every seed taken out goes as an empty list.
+        let TweakForm::DeleteFace(x) = &mut t else {
+            panic!()
+        };
+        x.seeds.toggle("box/hole/s");
+        assert_eq!(given(&t).seeds, Some(Vec::new()));
+        t.revert();
+        assert!(!t.dirty());
+        // A delete by seeds alone, healing as it likes: no faces, auto.
+        let v = json!({"heal":"auto","id":"x","revision":"r1",
+            "seeds":["box/hole/s"],"target":"base","type":"delete_face"});
+        let TweakForm::DeleteFace(x) = TweakForm::from_show("delete_face", &v).unwrap() else {
+            panic!()
+        };
+        assert!(x.faces.options.is_empty());
+        assert_eq!(x.heal.read, "auto");
+    }
+
+    #[test]
+    fn a_blend_deletes_size_and_tolerance_are_edited_and_cleared() {
+        let v = json!({"below":{"m":0.002,"value":"2 mm"},"faces":["box/round/f"],
+            "id":"db","revision":"r1","target":"base","type":"delete_blend"});
+        let mut t = TweakForm::from_show("delete_blend", &v).unwrap();
+        let TweakForm::DeleteBlend(d) = &mut t else {
+            panic!()
+        };
+        assert_eq!(
+            (d.below.read.as_str(), d.tolerance.read.as_str()),
+            ("2 mm", "")
+        );
+        assert_eq!(
+            t.fields()
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            ["below", "tolerance"]
+        );
+        let TweakForm::DeleteBlend(d) = &mut t else {
+            panic!()
+        };
+        d.below.text = "1.5 mm".into();
+        d.tolerance.text = "0.02 mm".into();
+        let out = given(&t);
+        assert_eq!(
+            (out.below, out.tolerance),
+            (Some(json!("1.5 mm")), Some(json!("0.02 mm")))
+        );
+        assert!(out.faces.is_none());
+        // Below cleared, the face taken out: below goes, faces are none.
+        let TweakForm::DeleteBlend(d) = &mut t else {
+            panic!()
+        };
+        d.below.text = String::new();
+        d.tolerance.text.clone_from(&d.tolerance.read);
+        d.faces.toggle("box/round/f");
+        let out = given(&t);
+        assert_eq!(out.below, Some(json!("")));
+        assert_eq!(out.faces, Some(json!([])));
+        assert!(out.tolerance.is_none());
+    }
+
+    #[test]
+    fn a_resizes_sizes_are_edited_and_its_groups_sent_whole() {
+        let v = json!({"groups":[
+                {"faces":["box/round/f"],"radius":{"m":0.003,"value":"3 mm"}},
+                {"d1":{"m":0.001,"value":"1 mm"},"d2":{"m":0.002,"value":"2 mm"},
+                 "face":"box/base/t","faces":["box/bevel/c"],"form":"distances"}],
+            "id":"r","revision":"r1","target":"base","type":"resize_blend"});
+        let mut t = TweakForm::from_show("resize_blend", &v).unwrap();
+        assert_eq!(
+            t.fields()
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "radius (group 1)",
+                "d1 (group 2)",
+                "d2 (group 2)",
+                "tolerance"
+            ]
+        );
+        let TweakForm::ResizeBlend(r) = &mut t else {
+            panic!()
+        };
+        assert_eq!(r.groups[1].form.as_deref(), Some("distances"));
+        assert_eq!(r.groups[1].face.as_deref(), Some("box/base/t"));
+        assert_eq!(r.groups[0].faces, ["box/round/f"]);
+        r.groups[0].sizes[0].1.text = "2 mm".into();
+        let out = given(&t);
+        assert_eq!(
+            out.groups,
+            Some(json!([
+                {"faces": ["box/round/f"], "radius": "2 mm"},
+                {"faces": ["box/bevel/c"], "form": "distances", "face": "box/base/t",
+                 "d1": "1 mm", "d2": "2 mm"}]))
+        );
+        assert!(out.tolerance.is_none() && out.faces.is_none() && out.radius.is_none());
+        // A refusal at a group's size lands on it.
+        assert_eq!(
+            t.at_pointer(&["groups", "1", "d2"]).unwrap().name,
+            "d2 (group 2)"
+        );
+        assert!(t.at_pointer(&["groups", "1", "radius"]).is_none());
+        t.revert();
+        assert!(!t.dirty());
+        // One group: its sizes are named plainly.
+        let v = json!({"groups":[{"faces":["box/round/f"],
+            "radius":{"m":0.003,"value":"3 mm"}}],
+            "id":"r","revision":"r1","target":"base","type":"resize_blend"});
+        let t = TweakForm::from_show("resize_blend", &v).unwrap();
+        assert_eq!(t.fields()[0].name, "radius");
+    }
+
+    #[test]
+    fn a_tweaks_topology_and_blends_are_two_checkboxes() {
+        // Kept, as feature.show gives a tweak that sets neither.
+        let mut v = draft();
+        v["topology"] = json!("keep");
+        v["blends"] = json!("keep");
+        let mut t = TweakForm::from_show("draft", &v).unwrap();
+        let r = t.retrim_mut().unwrap();
+        assert!(!r.topology.read && !r.blends.read);
+        r.topology.chosen = true;
+        assert!(t.dirty());
+        let out = given(&t);
+        assert_eq!(
+            (out.topology.as_deref(), out.blends.as_deref()),
+            (Some("change"), None)
+        );
+        t.revert();
+        assert!(!t.dirty());
+        // A move that changes both, turned back: keep, keep.
+        let v = json!({"by":"offset","distance":{"m":0.001,"value":"1 mm"},
+            "faces":["box/base/t"],"id":"m","revision":"r1","tangent":true,
+            "target":"base","type":"move_face","topology":"change","blends":"rebuild"});
+        let mut t = TweakForm::from_show("move_face", &v).unwrap();
+        let r = t.retrim_mut().unwrap();
+        assert!(r.topology.read && r.blends.read);
+        r.topology.chosen = false;
+        r.blends.chosen = false;
+        let out = given(&t);
+        assert_eq!(
+            (out.topology.as_deref(), out.blends.as_deref()),
+            (Some("keep"), Some("keep"))
+        );
+        // A replacement has both too; the direct edits have neither.
+        let v = json!({"groups":[{"faces":["box/base/t"],"with":"box/lid"}],
+            "id":"r","revision":"r1","target":"base","type":"replace_face",
+            "topology":"keep","blends":"rebuild"});
+        let mut t = TweakForm::from_show("replace_face", &v).unwrap();
+        assert!(t.retrim_mut().unwrap().blends.read);
+        let v = json!({"heal":"auto","id":"x","revision":"r1","seeds":["box/hole/s"],
+            "target":"base","type":"delete_face"});
+        assert!(
+            TweakForm::from_show("delete_face", &v)
+                .unwrap()
+                .retrim_mut()
+                .is_none()
+        );
     }
 }

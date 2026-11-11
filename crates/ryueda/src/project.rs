@@ -29,6 +29,8 @@ pub const SELF: &str = "self";
 pub const ERC: &str = "erc.json";
 /// The schematic lint's preferences, beside the manifest.
 pub const LINT: &str = "lint.json";
+/// The project's style, beside the manifest (plan 2.E).
+pub const STYLE: &str = crate::style::FILE;
 /// The project's sourcing (design 347), beside the manifest.
 pub const PARTS: &str = "parts.json";
 
@@ -74,6 +76,10 @@ pub struct Manifest {
 pub struct Schematic {
     #[serde(default)]
     pub sheet: Sheet,
+    /// The library project (an alias in `libraries`) whose `style.json`
+    /// is the organisation's style (plan 2.E).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style_from: Option<Id>,
 }
 
 impl Schematic {
@@ -393,6 +399,33 @@ pub struct Project {
     pub lint: Loaded<ryusch::lint::Prefs>,
     /// `parts.json`, read (the defaults when there is none) with its faults.
     pub parts: Loaded<crate::sourcing::Config>,
+    /// `style.json`, read (the empty style when there is none) with its
+    /// faults.
+    pub style: Loaded<crate::style::Style>,
+    /// The organisation's style, when the manifest names one.
+    pub org_style: Option<OrgStyle>,
+}
+
+/// The organisation's style: the library project `schematic.style_from`
+/// names, and its `style.json` as read.
+#[derive(Clone, Debug)]
+pub struct OrgStyle {
+    pub alias: String,
+    /// The file, relative to this project (`../org/style.json`).
+    pub path: String,
+    pub style: Loaded<crate::style::Style>,
+}
+
+fn read_style(bytes: &[u8], path: &str) -> Result<crate::style::Style> {
+    doc::read::<crate::style::Style>(bytes, path, crate::style::KIND, crate::style::FORMAT).map_err(
+        |e| {
+            if e.code == Code::FormatTooNew {
+                e
+            } else {
+                Error::new(Code::StyleInvalid, e.message.clone()).with("path", path)
+            }
+        },
+    )
 }
 
 /// The nearest folder at or above `start` holding a `ryueda.json`.
@@ -438,6 +471,7 @@ impl Project {
         let erc = src.read(ERC)?;
         let lint = src.read(LINT)?;
         let parts = src.read(PARTS)?;
+        let style = src.read(STYLE)?;
         let mut conn = design::load(src)?;
         let mut h = blake3::Hasher::new();
         h.update(b"ryueda.project.1");
@@ -458,6 +492,11 @@ impl Project {
         // Likewise its sourcing.
         if let Some(b) = &parts {
             h.update(b"ryueda.parts");
+            design::piece(&mut h, b);
+        }
+        // And its style (plan 2.E).
+        if let Some(b) = &style {
+            h.update(b"ryueda.style");
             design::piece(&mut h, b);
         }
         let revision = h.finalize().to_hex()[..32].to_owned();
@@ -546,6 +585,47 @@ impl Project {
             };
             libraries.insert(alias.to_string(), lib);
         }
+        let org_style = manifest.schematic.style_from.as_ref().map(|alias| {
+            let base = libraries
+                .get(alias.as_str())
+                .and_then(|l| l.as_ref().ok())
+                .map(|l| l.base.clone());
+            let path = join(&base.clone().unwrap_or_default(), STYLE);
+            let item = match base {
+                None => Err(Error::new(
+                    Code::StyleInvalid,
+                    format!(
+                        "schematic.style_from names {alias}, which isn't a usable library alias"
+                    ),
+                )
+                .with("path", MANIFEST)
+                .with("pointer", "/schematic/style_from")),
+                Some(_) => match src.read(&path) {
+                    Ok(Some(b)) => read_style(&b, &path),
+                    Ok(None) => Err(Error::new(
+                        Code::StyleInvalid,
+                        format!("{alias}'s project has no {STYLE}"),
+                    )
+                    .with("path", &path)),
+                    Err(e) => Err(e),
+                },
+            };
+            OrgStyle {
+                alias: alias.to_string(),
+                path,
+                style: Loaded {
+                    item,
+                    faults: Vec::new(),
+                },
+            }
+        });
+        let style = Loaded {
+            item: match &style {
+                None => Ok(crate::style::Style::default()),
+                Some(b) => read_style(b, STYLE),
+            },
+            faults: Vec::new(),
+        };
         let mut p = Project {
             root: root.to_path_buf(),
             manifest,
@@ -555,7 +635,43 @@ impl Project {
             erc,
             lint,
             parts,
+            style,
+            org_style,
         };
+        let builtin = crate::style::builtin();
+        let org_palette: Vec<String> = p
+            .org_style
+            .as_ref()
+            .and_then(|o| o.style.item.as_ref().ok())
+            .map(|s| s.palette.keys().cloned().collect())
+            .unwrap_or_default();
+        let own_palette: Vec<String> = p
+            .style
+            .item
+            .as_ref()
+            .map(|s| s.palette.keys().cloned().collect())
+            .unwrap_or_default();
+        let known = |n: &str| {
+            builtin.palette.contains_key(n)
+                || org_palette.iter().any(|x| x == n)
+                || own_palette.iter().any(|x| x == n)
+        };
+        if let Some(o) = &mut p.org_style
+            && let Ok(s) = &o.style.item
+        {
+            o.style.faults = s
+                .check(crate::style::Layer::Organisation, &known)
+                .into_iter()
+                .map(|f| f.with("path", &o.path))
+                .collect();
+        }
+        if let Ok(s) = &p.style.item {
+            p.style.faults = s
+                .check(crate::style::Layer::Project, &known)
+                .into_iter()
+                .map(|f| f.with("path", STYLE))
+                .collect();
+        }
         p.judge_components();
         conn.judge(&|r| p.libcomp(SELF, r).map(drop));
         if p.manifest.project_kind == ProjectKind::Library {
@@ -591,7 +707,8 @@ impl Project {
     /// The library `alias` names, or why it can't be used.
     /// The standards that judge library `alias`'s symbols, and where they
     /// come from (the alias whose file they are, or `built_in`): the
-    /// library's own `standards.json`, else this project's own, else the
+    /// library's own `standards.json`, else the organisation's when its
+    /// style pins them (plan 2.E), else this project's own, else the
     /// built-in standards, whose resistor shape follows `lint.json`'s
     /// `prefer.resistor`. A file that doesn't read, or fails its checks,
     /// judges nothing: its fault is the answer (`standards_invalid`).
@@ -619,6 +736,14 @@ impl Project {
         };
         if let Some(s) = own(alias)? {
             return Ok((s, alias.to_owned()));
+        }
+        // The organisation's pinned standards take the project's own place
+        // (plan 2.E; plan 2.D's question 444).
+        if let Some(o) = &self.org_style
+            && o.style.item.as_ref().is_ok_and(|s| s.standards)
+            && let Some(s) = own(&o.alias)?
+        {
+            return Ok((s, o.alias.clone()));
         }
         if alias != SELF
             && let Some(s) = own(SELF)?
@@ -801,6 +926,40 @@ impl Project {
             });
         }
         out.extend(self.parts.faults.iter().cloned());
+        if let Err(e) = &self.style.item {
+            out.push(Fault {
+                severity: Severity::Error,
+                error: e.clone().with("path", STYLE),
+            });
+        }
+        out.extend(self.style.faults.iter().cloned());
+        if let Some(o) = &self.org_style {
+            if let Err(e) = &o.style.item {
+                let e = if e.details.get("path").is_some() {
+                    e.clone()
+                } else {
+                    e.clone().with("path", &o.path)
+                };
+                out.push(Fault {
+                    severity: Severity::Error,
+                    error: e,
+                });
+            }
+            out.extend(o.style.faults.iter().cloned());
+        }
+        let layers = crate::cascade::Layers::of(self);
+        for (lock, ptr) in layers.broken_locks() {
+            out.push(
+                Fault::error(
+                    Code::StyleLocked,
+                    format!("the organisation's style locks {lock}; this project's style sets it"),
+                )
+                .with("path", STYLE)
+                .with("pointer", ptr)
+                .with("lock", &lock)
+                .with("organisation", layers.org_path().unwrap_or_default()),
+            );
+        }
         out.extend(self.conn.faults());
         out
     }
@@ -814,7 +973,7 @@ impl Project {
             return out;
         };
         out.push((MANIFEST.to_owned(), meta));
-        for file in [ERC, LINT, PARTS] {
+        for file in [ERC, LINT, PARTS, STYLE] {
             if let Ok(meta) = std::fs::metadata(root.join(file))
                 && meta.is_file()
             {
@@ -862,6 +1021,14 @@ impl Project {
             if !base.is_empty() {
                 let at = join(&base, MANIFEST);
                 if let Ok(meta) = std::fs::metadata(root.join(&at)) {
+                    out.push((at, meta));
+                }
+                // An organisation's style beside it (plan 2.E), so its
+                // edits reload a session.
+                let at = join(&base, STYLE);
+                if let Ok(meta) = std::fs::metadata(crate::session::path_of(root, &at))
+                    && meta.is_file()
+                {
                     out.push((at, meta));
                 }
             }
@@ -1294,6 +1461,58 @@ pub(crate) mod tests {
         assert_eq!(
             find_root(dir.path()).unwrap_err().code,
             Code::ProjectNotFound
+        );
+    }
+
+    #[test]
+    fn a_project_reads_its_style_and_its_organisations() {
+        let d = tempfile::tempdir().unwrap();
+        let org = d.path().join("org");
+        std::fs::create_dir_all(&org).unwrap();
+        tests::manifest(&org, ProjectKind::Library, &[]);
+        std::fs::write(
+            org.join(crate::style::FILE),
+            r##"{"kind": "ryueda.style", "format": 1, "palette": {"brand": {"light": "#0055aa", "dark": "#66aaff"}}, "locks": ["colour"]}"##,
+        )
+        .unwrap();
+        let me = d.path().join("me");
+        std::fs::create_dir_all(&me).unwrap();
+        tests::manifest(&me, ProjectKind::Design, &[("org", "../org")]);
+        let mut m = Manifest::read(&std::fs::read(me.join(MANIFEST)).unwrap()).unwrap();
+        m.schematic.style_from = Some(Id::parse("org", "alias").unwrap());
+        std::fs::write(me.join(MANIFEST), m.to_text()).unwrap();
+        std::fs::write(
+            me.join(crate::style::FILE),
+            r##"{"kind": "ryueda.style", "format": 1, "rules": [{"select": {"tag": "hv"}, "set": {"fill": "brand"}}]}"##,
+        )
+        .unwrap();
+        let p = Project::load(&me).unwrap();
+        let o = p.org_style.as_ref().expect("an organisation style");
+        assert_eq!(o.alias, "org");
+        assert_eq!(o.path, "../org/style.json");
+        assert!(
+            o.style
+                .item
+                .as_ref()
+                .unwrap()
+                .locks
+                .contains(&"colour".to_owned())
+        );
+        assert_eq!(p.style.item.as_ref().unwrap().rules.len(), 1);
+        assert!(p.faults().iter().all(|f| !f.is_error()), "{:?}", p.faults());
+        // The project's style is in its revision.
+        let before = p.revision.clone();
+        std::fs::remove_file(me.join(crate::style::FILE)).unwrap();
+        assert_ne!(Project::load(&me).unwrap().revision, before);
+        // A style_from naming no alias is a fault.
+        m.schematic.style_from = Some(Id::parse("nope", "alias").unwrap());
+        std::fs::write(me.join(MANIFEST), m.to_text()).unwrap();
+        assert!(
+            Project::load(&me)
+                .unwrap()
+                .faults()
+                .iter()
+                .any(|f| f.error.code == Code::StyleInvalid)
         );
     }
 }

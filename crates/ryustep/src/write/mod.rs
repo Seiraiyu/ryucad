@@ -208,6 +208,28 @@ pub struct Passed {
     pub instances: Vec<Instance>,
 }
 
+/// What [`write_report`] wrote: the bytes [`write_with`] gives, every
+/// instance counted by category and entity name
+/// ([`crate::census::count`]), and each body some of whose faces are
+/// approximations (pipes and sweeps as NURBS within the pipe tolerance).
+#[derive(Clone, Debug)]
+pub struct Written {
+    pub bytes: Vec<u8>,
+    pub counts: Vec<(crate::census::Category, String, u64)>,
+    pub approximated: Vec<Approximated>,
+}
+
+/// Body `body` of product `product` (indices into the model), `faces` of
+/// whose faces were written as approximations, the largest bound used in
+/// meters.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Approximated {
+    pub product: usize,
+    pub body: usize,
+    pub faces: usize,
+    pub bound: f64,
+}
+
 /// Writes `model` as a STEP file. Fails with
 /// [`WriteError::NotRepresentable`], naming the face, for a face that
 /// can't be cut open into a region of its surface or a pipe that can't
@@ -223,6 +245,17 @@ pub fn write_with(
     passed: &[Passed],
     opts: &WriteOptions,
 ) -> Result<Vec<u8>, WriteError> {
+    write_report(model, passed, opts).map(|w| w.bytes)
+}
+
+/// [`write_with`], with what it wrote counted (design 448): every
+/// instance by category and entity name, and each body written as an
+/// approximation.
+pub fn write_report(
+    model: &WriteModel,
+    passed: &[Passed],
+    opts: &WriteOptions,
+) -> Result<Written, WriteError> {
     // Each body as a file must describe it, in parallel; the first body
     // that can't be fails, whatever the number of threads.
     let all: Vec<&Body> = model.products.iter().flat_map(|p| &p.bodies).collect();
@@ -241,6 +274,21 @@ pub fn write_with(
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<_, _>>()?;
+    let approximated: Vec<Approximated> = shapes
+        .iter()
+        .enumerate()
+        .flat_map(|(product, bodies)| {
+            bodies.iter().enumerate().filter_map(move |(body, sh)| {
+                let faces = sh.faces.iter().filter(|f| f.tolerance > 0.0).count();
+                (faces > 0).then(|| Approximated {
+                    product,
+                    body,
+                    faces,
+                    bound: sh.faces.iter().map(|f| f.tolerance).fold(0.0, f64::max),
+                })
+            })
+        })
+        .collect();
     let mut out = Out::default();
     let uncertainty = model
         .products
@@ -401,7 +449,12 @@ pub fn write_with(
         header: header(opts),
         instances: out.instances,
     };
-    Ok(part21::write(&file)?)
+    let counts = crate::census::count(&file.instances);
+    Ok(Written {
+        bytes: part21::write(&file)?,
+        counts,
+        approximated,
+    })
 }
 
 /// The representation a body's items go in: a sheet's surface model in a

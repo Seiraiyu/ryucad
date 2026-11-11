@@ -15,7 +15,6 @@ use crate::label;
 use crate::layout::Layout;
 use crate::route;
 use crate::shape::{Shape, pins_on_grid};
-use crate::text;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -106,7 +105,7 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                 on_wire: None,
             });
             if let Some(fields) = layout.text.get(&part.key) {
-                for (field, value) in [("refdes", &part.refdes), ("value", &part.value)] {
+                for (field, line) in part.fields() {
                     if let Some(at) = fields.get(field) {
                         if !on_grid(*at) {
                             out.push(v(
@@ -115,7 +114,7 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                                 vec![part.key.clone()],
                             ));
                         }
-                        let b = text::boxes(&[value.as_str()], *at)[0];
+                        let b = line.boxed(*at);
                         if !area.contains(&b) {
                             out.push(v(
                                 "inside",

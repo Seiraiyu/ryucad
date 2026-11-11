@@ -9,7 +9,7 @@
 //! preview of an update rebuild them in a session over the files as they
 //! would be, and a real import writes them.
 
-use super::{free, id_from};
+use super::{body_missing, free, id_from};
 use crate::doc::assembly::{ImportUsage, Instance, Pose, Rev};
 use crate::doc::files::{Feature, PartFile, PartKind};
 use crate::doc::id::Id;
@@ -228,11 +228,7 @@ impl Fresh<'_> {
             roots.push(None);
         }
         if roots.is_empty() {
-            return Err(Error::new(
-                Code::ImportBodyMissing,
-                format!("{} holds no solid to import", self.file.path),
-            )
-            .with("path", &self.file.path));
+            return Err(body_missing(opened, &self.file.path));
         }
         if self.part.is_some() && roots.len() != 1 {
             return Err(Error::new(
@@ -543,11 +539,7 @@ impl Flat<'_> {
             .collect();
         let walked = walk(opened, &self.file.path)?;
         if walked.is_empty() {
-            return Err(Error::new(
-                Code::ImportBodyMissing,
-                format!("{} holds no solid to import", self.file.path),
-            )
-            .with("path", &self.file.path));
+            return Err(body_missing(opened, &self.file.path));
         }
         let part = match &self.part {
             Some(p) => p.clone(),

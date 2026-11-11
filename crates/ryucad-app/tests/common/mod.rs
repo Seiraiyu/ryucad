@@ -486,6 +486,111 @@ impl Project {
         self
     }
 
+    /// Direct edits on part `p` (design 445, The app): a 40 x 30 x 20 mm
+    /// box `b`; its top east edge filleted 4 mm (`f`) and resized to 3 mm
+    /// (`r`); a blend delete `db` below 1 mm, which takes nothing; a 6 mm
+    /// hole `h` through it at (10, 15), from a sketch `s` on its top; and
+    /// a delete `x` of that hole by a seed on its bore, capped.
+    pub fn with_direct_edits(self) -> Project {
+        self.ok(&["part", "create", "p"]);
+        self.ok(&[
+            "feature", "add", "p", "box", "--id", "b", "--param", "x=40", "--param", "y=30",
+            "--param", "z=20",
+        ]);
+        let [east, top] = [[1, 0, 0], [0, 0, 1]].map(|n| self.box_face(n));
+        let hex = |r: &str| r.rsplit('/').next().unwrap().to_owned();
+        let (east, top) = (hex(&east), hex(&top));
+        let body = self.ok(&["inspect", "p", "b"])["bodies"][0].clone();
+        let rim = body["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| {
+                let fs = e["faces"].as_array().unwrap();
+                fs.contains(&Value::from(east.as_str())) && fs.contains(&Value::from(top.as_str()))
+            })
+            .map(|e| format!("p/b/{}", e["name"].as_str().unwrap()))
+            .unwrap();
+        self.ok(&[
+            "feature", "add", "p", "fillet", "--id", "f", "--radius", "4", "--edge", &rim,
+        ]);
+        let round = self.faces_of("f", "cylinder")[0].clone();
+        self.ok(&[
+            "feature",
+            "add",
+            "p",
+            "resize_blend",
+            "--id",
+            "r",
+            "--radius",
+            "3mm",
+            "--face",
+            &round,
+        ]);
+        self.ok(&[
+            "feature",
+            "add",
+            "p",
+            "delete_blend",
+            "--id",
+            "db",
+            "--below",
+            "1mm",
+        ]);
+        self.ok(&[
+            "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,20",
+        ]);
+        let ops = r#"[
+            {"op": "add", "type": "point", "at": [10, 15]},
+            {"op": "add", "type": "fix", "a": "p1"}
+        ]"#;
+        self.ok(&["sketch", "edit", "p", "s", ops]);
+        self.ok(&[
+            "feature",
+            "add",
+            "p",
+            "hole",
+            "--id",
+            "h",
+            "--sketch",
+            "s",
+            "--diameter",
+            "6",
+            "--depth",
+            "through_all",
+        ]);
+        let bore = self
+            .faces_of("h", "cylinder")
+            .into_iter()
+            .find(|f| *f != round)
+            .unwrap();
+        self.ok(&[
+            "feature",
+            "add",
+            "p",
+            "delete_face",
+            "--id",
+            "x",
+            "--seed",
+            &bore,
+            "--heal",
+            "cap",
+        ]);
+        self
+    }
+
+    /// The faces of solid `b` after feature `f` whose surface is a
+    /// `kind`, as references.
+    pub fn faces_of(&self, f: &str, kind: &str) -> Vec<String> {
+        self.ok(&["inspect", "p", f])["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|x| x["surface"]["type"] == kind)
+            .map(|x| format!("p/b/{}", x["name"].as_str().unwrap()))
+            .collect()
+    }
+
     /// A sheet metal part `p`: a 60 x 40 mm plate 1.5 mm thick (base
     /// flange `plate`, K-factor 0.44), a 20 mm flange `f` down its right
     /// top edge, and an unfold `u` of it, which the tip shows flat.

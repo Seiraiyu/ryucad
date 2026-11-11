@@ -12,11 +12,12 @@ use crate::id::Id;
 use crate::netlist;
 use crate::pdf::{self, Link, Mark, Page};
 use crate::project::Project;
-use crate::schem::{self, BORDER, Laid};
+use crate::schem::{self, BORDER, Laid, TITLE_BAND};
 use ryusch::font::{Anchor, MIN_SIZE};
 use ryusch::geom::{Nm, Rect};
 use ryusch::layout::LabelKind;
-use ryusch::paint::{Item, LABEL};
+use ryusch::paint::Item;
+use ryusch::style::{Look, Role};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -181,10 +182,22 @@ fn join(a: &str, b: &str) -> String {
     }
 }
 
-/// The text of a cross-reference to `pages` (numbered from 1).
-fn xref(pages: &[usize]) -> String {
-    let list: Vec<String> = pages.iter().map(|p| (p + 1).to_string()).collect();
+/// The text of a cross-reference to `pages` (numbered from 1), each with
+/// its zone where it has one (`→ 2 B4, 3`; plan 2.E).
+fn xref(pages: &[(usize, Option<String>)]) -> String {
+    let list: Vec<String> = pages.iter().map(|(p, z)| page_zone(*p, z)).collect();
     format!("→ {}", list.join(", "))
+}
+
+/// A page (from 0) and the zone its net is drawn in there, if any.
+type PageZone = (usize, Option<String>);
+
+/// `n` (from 1) and its zone.
+fn page_zone(p: usize, zone: &Option<String>) -> String {
+    match zone {
+        Some(z) => format!("{} {z}", p + 1),
+        None => (p + 1).to_string(),
+    }
 }
 
 /// `output`: design `design`'s PDF and what it holds.
@@ -249,7 +262,6 @@ fn output_pages(
         node: usize,
         sheet: String,
         name: String,
-        index: usize,
         count: usize,
     }
     let mut sheets: Vec<Sheet> = Vec::new();
@@ -260,19 +272,22 @@ fn output_pages(
             continue;
         };
         let order = ryusch::canvas::order(&l.outcome.layout);
-        for (k, s) in order.iter().enumerate() {
+        for s in &order {
             sheets.push(Sheet {
                 node: i,
                 sheet: s.clone(),
                 name: l.outcome.layout.sheets[s].name.clone(),
-                index: k + 1,
                 count: order.len(),
             });
         }
     }
     // Where each flattened net is drawn by labels.
     let mut painted: Vec<ryusch::paint::Painted> = Vec::new();
+    let mut looks_of: BTreeMap<Id, BTreeMap<String, ryusch::style::Look>> = BTreeMap::new();
     let mut net_pages: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    // The least zone (row, column) of each flattened net's connectors,
+    // flags and labels on each page (plan 2.E).
+    let mut net_zones: BTreeMap<(usize, usize), (usize, usize)> = BTreeMap::new();
     // Each node's designators, its block's layers read once.
     let mut layers_of: BTreeMap<Id, Vec<schem::Layer>> = BTreeMap::new();
     let mut refdes: Vec<BTreeMap<Id, String>> = Vec::new();
@@ -292,7 +307,27 @@ fn output_pages(
         let l = &laid[&node.block];
         let mut built = l.built.clone();
         built.designators(&refdes[s.node]);
-        let paint = ryusch::paint::sheet(&built.input, &l.outcome.layout, &s.sheet);
+        // In the project's look, light (plan 2.E): the PDF is always so.
+        let look = looks_of
+            .entry(node.block.clone())
+            .or_insert_with(|| {
+                p.conn.block(&node.block).map_or_else(
+                    |_| BTreeMap::new(),
+                    |b| {
+                        crate::schemcmd::looks(
+                            p,
+                            b,
+                            &l.built,
+                            &l.outcome.layout,
+                            ryusch::style::Theme::Light,
+                        )
+                    },
+                )
+            })
+            .get(&s.sheet)
+            .cloned()
+            .unwrap_or_default();
+        let paint = ryusch::paint::sheet_in(&built.input, &l.outcome.layout, &s.sheet, &look);
         // Every flattened net a pin on the page is on (plan 2.C): a
         // connector's or a port's cross-reference names the pages its net
         // is drawn on.
@@ -301,10 +336,33 @@ fn output_pages(
                 net_pages.entry(*f).or_default().insert(pg);
             }
         }
+        // Where on the page each is: its paper and the sheet's origin as
+        // the page draws them.
+        let area = l.built.input.area_in(&l.outcome.layout, &s.sheet);
+        let paper = [area[0] + 2 * BORDER, area[1] + 2 * BORDER + TITLE_BAND];
+        let origin = [BORDER, BORDER + TITLE_BAND];
+        let mut drawn: Vec<(Vec<String>, Rect)> = paint
+            .labels
+            .iter()
+            .map(|l| (vec![l.net.clone()], l.rect))
+            .collect();
+        drawn.extend(paint.ports.iter().map(|(n, r)| (vec![n.clone()], *r)));
+        drawn.extend(paint.buses.iter().map(|c| (c.nets.clone(), c.rect)));
+        for (nets, r) in drawn {
+            let c = [(r.min[0] + r.max[0]) / 2, (r.min[1] + r.max[1]) / 2];
+            let z = crate::pdf::zone_at(paper, [origin[0] + c[0], origin[1] + c[1]]);
+            for n in &nets {
+                if let Some(f) = flat_of[s.node].get(n) {
+                    let e = net_zones.entry((*f, pg)).or_insert(z);
+                    *e = (*e).min(z);
+                }
+            }
+        }
         painted.push(paint);
     }
     let mut pages: Vec<Page> = Vec::new();
     let mut listing = Vec::new();
+    let style_layers = crate::cascade::Layers::of(p);
     for (pg, s) in sheets.iter().enumerate() {
         let node = &nodes[s.node];
         let b = p.conn.block(&node.block)?;
@@ -313,13 +371,34 @@ fn output_pages(
             .item
             .as_ref()
             .map_or(node.block.to_string(), |x| x.name.clone());
-        let mut heading = format!(
-            "{design_name} · {block_name} · sheet {}/{} {}",
-            s.index, s.count, s.name
+        let lv = schem::levels(
+            p,
+            b,
+            BTreeMap::from([
+                ("design", design_name.clone()),
+                ("block", block_name.clone()),
+                ("sheet", s.name.clone()),
+                ("sheets", s.count.to_string()),
+            ]),
         );
+        let fill = |f: crate::style::TitleField| {
+            crate::props::Template::parse(&style_layers.title_field(f))
+                .and_then(|t| t.render(&|n| Some(lv.get(n).unwrap_or_default())))
+                .unwrap_or_default()
+        };
+        let mut design_block = format!("{design_name} · {block_name}");
         if !node.layer.is_empty() {
-            heading.push_str(&format!(" · layer {}", node.layer));
+            design_block.push_str(&format!(" · layer {}", node.layer));
         }
+        let title = crate::pdf::TitleBlock {
+            title: fill(crate::style::TitleField::Title),
+            number: fill(crate::style::TitleField::Number),
+            organisation: fill(crate::style::TitleField::Organisation),
+            design_block,
+            revision: fill(crate::style::TitleField::Revision),
+            date: fill(crate::style::TitleField::Date),
+            sheet: format!("{}/{}", pg + 1, sheets.len()),
+        };
         let paint = &painted[pg];
         let mut items = paint.items.clone();
         let mut links = Vec::new();
@@ -341,7 +420,8 @@ fn output_pages(
                 });
             }
         }
-        for (rect, others) in cross_references(paint, &flat_of[s.node], &net_pages, pg) {
+        for (rect, others) in cross_references(paint, &flat_of[s.node], &net_pages, &net_zones, pg)
+        {
             xref_items(
                 [rect.min[0], rect.min[1] - MIN_SIZE],
                 &others,
@@ -357,13 +437,14 @@ fn output_pages(
             "sheet": s.sheet,
             "name": s.name,
         }));
-        // Its sheet's own paper (plan 2.A): the drawing area and the border.
+        // Its sheet's own paper (plan 2.A): the drawing area, the border
+        // and the title band at its foot (plan 2.E).
         let l = &laid[&node.block];
         let area = l.built.input.area_in(&l.outcome.layout, &s.sheet);
         pages.push(Page {
-            paper: [area[0] + 2 * BORDER, area[1] + 2 * BORDER],
-            heading,
-            origin: [BORDER, BORDER],
+            paper: [area[0] + 2 * BORDER, area[1] + 2 * BORDER + TITLE_BAND],
+            title,
+            origin: [BORDER, BORDER + TITLE_BAND],
             items,
             links,
         });
@@ -457,15 +538,17 @@ fn net_key(n: &crate::conn::Node) -> Option<String> {
 /// Each off-sheet connector, a bus's included, and each block port's flag
 /// on page `pg`: its box and its nets' other pages (by `flat`, the page's
 /// net keys' flattened nets, and `net_pages`, each flattened net's pages),
-/// for the cross-reference under it (plan 2.C; zones are 2.E's). A local
+/// for the cross-reference under it (plan 2.C), each page with the least
+/// zone its nets are drawn in there (`net_zones`, plan 2.E). A local
 /// net label continues nowhere, so it carries none; neither does a
 /// connector whose nets are on no other page.
 fn cross_references(
     paint: &ryusch::paint::Painted,
     flat: &BTreeMap<String, usize>,
     net_pages: &BTreeMap<usize, BTreeSet<usize>>,
+    net_zones: &BTreeMap<(usize, usize), (usize, usize)>,
     pg: usize,
-) -> Vec<(Rect, Vec<usize>)> {
+) -> Vec<(Rect, Vec<PageZone>)> {
     let mut under: Vec<(Vec<String>, Rect)> = paint
         .labels
         .iter()
@@ -477,31 +560,42 @@ fn cross_references(
     under
         .into_iter()
         .filter_map(|(nets, rect)| {
-            let others: BTreeSet<usize> = nets
+            let fs: Vec<usize> = nets.iter().filter_map(|n| flat.get(n)).copied().collect();
+            let others: BTreeSet<usize> = fs
                 .iter()
-                .filter_map(|n| flat.get(n))
                 .filter_map(|f| net_pages.get(f))
                 .flatten()
                 .copied()
                 .filter(|x| *x != pg)
                 .collect();
-            (!others.is_empty()).then(|| (rect, others.into_iter().collect()))
+            let zoned = others
+                .into_iter()
+                .map(|o| {
+                    let z = fs
+                        .iter()
+                        .filter_map(|f| net_zones.get(&(*f, o)))
+                        .min()
+                        .map(|z| crate::pdf::zone_text(*z));
+                    (o, z)
+                })
+                .collect::<Vec<_>>();
+            (!zoned.is_empty()).then_some((rect, zoned))
         })
         .collect()
 }
 
-/// A cross-reference's text at `at` (`→ 2, 3`) and a link on each page
-/// number.
+/// A cross-reference's text at `at` (`→ 2 B4, 3`) and a link on each
+/// page number and its zone.
 fn xref_items(
     at: ryusch::geom::Point,
-    others: &[usize],
+    others: &[(usize, Option<String>)],
     items: &mut Vec<Item>,
     links: &mut Vec<Link>,
 ) {
     let text = xref(others);
     let mut x = at[0] + ryusch::font::width("→ ", MIN_SIZE);
-    for (k, o) in others.iter().enumerate() {
-        let num = (o + 1).to_string();
+    for (k, (o, zone)) in others.iter().enumerate() {
+        let num = page_zone(*o, zone);
         let wn = ryusch::font::width(&num, MIN_SIZE);
         links.push(Link {
             rect: Rect::new([x, at[1] - MIN_SIZE / 4], [x + wn, at[1] + MIN_SIZE]),
@@ -518,13 +612,26 @@ fn xref_items(
         size: MIN_SIZE,
         anchor: Anchor::Start,
         vertical: false,
-        colour: LABEL,
+        colour: Look::default().role(Role::Label),
+        bold: false,
     });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_title_block_reads_the_style_and_the_properties() {
+        let (_dir, p) =
+            crate::netlist::tests::project_with_properties(&[("doc_number", "SB-1"), ("rev", "C")]);
+        let (_, _, pages, _) = output_pages(&p, None, Layers::All).unwrap();
+        let t = &pages[0].title;
+        assert_eq!((t.number.as_str(), t.revision.as_str()), ("SB-1", "C"));
+        assert_eq!(t.date, "", "no date property: empty, never a time stamp");
+        assert!(t.sheet.starts_with("1/"));
+        assert!(!t.title.is_empty(), "the design's name by default");
+    }
 
     #[test]
     fn a_design_pages_its_stack_once_per_layer() {
@@ -619,12 +726,23 @@ mod tests {
         let mut net_pages: BTreeMap<usize, BTreeSet<usize>> =
             (0..4).map(|i| (i, BTreeSet::from([0, 1]))).collect();
         net_pages.get_mut(&2).unwrap().insert(2);
-        let refs = cross_references(&paint, &flat, &net_pages, 0);
-        assert_eq!(refs, [(bus.rect, vec![1, 2])]);
+        let none = BTreeMap::new();
+        let refs = cross_references(&paint, &flat, &net_pages, &none, 0);
+        assert_eq!(refs, [(bus.rect, vec![(1, None), (2, None)])]);
+        // With zones, each page its nets' least.
+        let zones = BTreeMap::from([((0, 1), (1, 3)), ((3, 1), (0, 5)), ((2, 2), (2, 0))]);
+        let refs = cross_references(&paint, &flat, &net_pages, &zones, 0);
+        assert_eq!(
+            refs,
+            [(
+                bus.rect,
+                vec![(1, Some("A6".to_owned())), (2, Some("C1".to_owned()))]
+            )]
+        );
         // On no other page: none.
         let alone: BTreeMap<usize, BTreeSet<usize>> =
             (0..4).map(|i| (i, BTreeSet::from([0]))).collect();
-        assert!(cross_references(&paint, &flat, &alone, 0).is_empty());
+        assert!(cross_references(&paint, &flat, &alone, &none, 0).is_empty());
     }
 
     #[test]
@@ -687,5 +805,20 @@ mod tests {
         // but its port's.
         let arrows = |pg: usize| t[pg].iter().filter(|x| x.starts_with("→")).count();
         assert_eq!(arrows(2), 1);
+        // Each page a number, then its zone (plan 2.E): `→ 2 B4, 3 A1`.
+        for x in t.iter().flatten().filter(|x| x.starts_with("→ ")) {
+            for part in x["→ ".len()..].split(", ") {
+                let (n, zone) = part.split_once(' ').expect("a page and its zone");
+                assert!(n.parse::<usize>().is_ok(), "{x}");
+                let mut c = zone.chars();
+                assert!(c.next().is_some_and(|l| l.is_ascii_uppercase()), "{x}");
+                assert!(c.as_str().parse::<usize>().is_ok(), "{x}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_cross_reference_names_the_page_and_zone() {
+        assert_eq!(xref(&[(1, Some("B4".into())), (2, None)]), "→ 2 B4, 3");
     }
 }

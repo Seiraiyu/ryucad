@@ -778,6 +778,23 @@ pub(crate) mod tests {
         (dir, p)
     }
 
+    /// [`project`] with manifest properties `props` (plan 2.E's title
+    /// block).
+    pub fn project_with_properties(props: &[(&str, &str)]) -> (tempfile::TempDir, Project) {
+        let (dir, _) = project(&[]);
+        let board = dir.path().join("board");
+        let mut m = crate::project::Manifest::read(
+            &std::fs::read(board.join(crate::project::MANIFEST)).unwrap(),
+        )
+        .unwrap();
+        for (k, v) in props {
+            m.properties.insert((*k).to_owned(), (*v).to_owned());
+        }
+        write_atomic(&board.join(crate::project::MANIFEST), m.to_text()).unwrap();
+        let p = Project::load(&board).unwrap();
+        (dir, p)
+    }
+
     fn id(s: &str) -> Id {
         Id::parse(s, "test").unwrap()
     }

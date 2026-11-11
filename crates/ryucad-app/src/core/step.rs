@@ -26,6 +26,9 @@ pub struct Plan {
     pub vanished: Vec<String>,
     /// The answer's warnings, as written.
     pub warnings: Vec<String>,
+    /// What the file holds and what the import made of it, a line per
+    /// category (design 448): the answer's `transfer` summaries.
+    pub transfer: Vec<String>,
 }
 
 fn text(v: &Value) -> &str {
@@ -171,6 +174,12 @@ impl Plan {
                 })
                 .collect(),
             warnings: strings(&v["warnings"]),
+            transfer: v["transfer"]["categories"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c["summary"].as_str().map(str::to_owned))
+                .collect(),
         }
     }
 }
@@ -251,6 +260,9 @@ mod tests {
                          "error": {"code": "reference_unresolved"}}],
             "vanished": [{"product": {"id": "OLD-1"}, "parts": ["old"]}],
             "warnings": ["import_failed: plate/body-2 doesn't build: an open shell"],
+            "transfer": {"categories": [
+                {"category": "geometry", "summary": "geometry: 120 interpreted (CARTESIAN_POINT 60)"},
+                {"category": "appearance", "summary": "appearance: 14 retained (STYLED_ITEM 6)"}]},
         });
         let p = Plan::from_answer(&v);
         assert_eq!(p.stored, "imports/frame.step");
@@ -275,6 +287,13 @@ mod tests {
         assert_eq!(p.failing, ["plate/f1: reference_unresolved"]);
         assert_eq!(p.vanished, ["OLD-1 (in old)"]);
         assert_eq!(p.warnings.len(), 1);
+        assert_eq!(
+            p.transfer,
+            [
+                "geometry: 120 interpreted (CARTESIAN_POINT 60)",
+                "appearance: 14 retained (STYLED_ITEM 6)"
+            ]
+        );
     }
 
     #[test]

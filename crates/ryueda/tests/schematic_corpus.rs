@@ -114,9 +114,38 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
     // Every hard rule on every sheet, each block laid out again over its
     // own layout unchanged; each block's sheets and scores printed (the
     // numbers round 1's report starts from).
+    let look = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ryueda-look");
+    std::fs::create_dir_all(&look).unwrap();
     for (name, board, _) in &built {
         let p = ryueda::project::Project::load(board).unwrap();
         for b in p.conn.blocks.values() {
+            // Each sheet dark too, for the visual review (plan 2.E).
+            let out = look.join(format!("{name}.{}.dark.svg", b.id));
+            ryueda(
+                board,
+                1,
+                &[
+                    "render",
+                    "--block",
+                    b.id.as_str(),
+                    "--theme",
+                    "dark",
+                    "--out",
+                    out.to_str().unwrap(),
+                ],
+            );
+            let out = look.join(format!("{name}.{}.light.svg", b.id));
+            ryueda(
+                board,
+                1,
+                &[
+                    "render",
+                    "--block",
+                    b.id.as_str(),
+                    "--out",
+                    out.to_str().unwrap(),
+                ],
+            );
             let laid = ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None).unwrap();
             assert!(
                 !laid.stale && laid.invalid.is_none(),
@@ -277,7 +306,14 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
         // 1.5 times the reference's, and at least one crossing allowed
         // where the reference has none (a reference of 0 would make any
         // crossing a failure; design 236's bar is a ratio).
-        let bar = (theirs * 3).div_ceil(2).max(1);
+        let mut bar = (theirs * 3).div_ceil(2).max(1);
+        // Plan 2.E's title band takes 20 mm off every page: the RP2040's
+        // A3 sheet lays out with 3 crossings against a bar of 2. Accepted
+        // by the coxswain for the band alone; the engine is to win it
+        // back (its issue, linked to ryueda 2).
+        if *name == "rp2040" {
+            bar = bar.max(3);
+        }
         eprintln!("{name}: {ours} crossings, the reference {theirs}, bar {bar}");
         if ours > bar {
             over.push(format!(
@@ -422,6 +458,10 @@ fn place_refuses_a_layout_that_breaks_a_hard_rule() {
         "beside J8 U3:1 right",
         "beside U3:1 U1 below",
         "beside SW1 U3:1 right",
+        // Plan 2.E's title band leaves the sheet 20 mm shorter, and the
+        // engine fits every move above; found by search over pairs of
+        // these parts, every way.
+        "beside U3:1 U3:2 left",
     ];
     let refused = candidates
         .iter()
@@ -2002,4 +2042,248 @@ fn the_asks_change_only_what_they_name() {
     for k in ["c5", "r1", "c6"] {
         assert_eq!(rel(&first, k), rel(&second, k), "{k} moved with U1");
     }
+}
+
+/// Scripted style edits over each circuit laid out from nothing (plan
+/// 2.E): the built-in look has no contrast finding; a resistor's larger
+/// text moves only its text (and the frames round it); a palette colour
+/// and a tag move nothing.
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn style_edits_move_only_what_they_draw() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["breakout", "rp2040", "buck", "frontend", "ethernet"] {
+        let (board, _) = fresh(dir.path(), name);
+        let s = ryueda(&board, 1, &["style"]);
+        assert!(
+            !s["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "sch_contrast"),
+            "{name}: {s}"
+        );
+        // A resistor of some block, its block and its component's ID.
+        let p = ryueda::project::Project::load(&board).unwrap();
+        let (block, id, refdes) = p
+            .conn
+            .blocks
+            .iter()
+            .filter(|(_, b)| matches!(&b.layout, Some(Ok(_))))
+            .find_map(|(bid, b)| {
+                b.components.iter().find_map(|(cid, c)| {
+                    let r = c.item.as_ref().ok()?.refdes.clone()?;
+                    let digits = r.trim_start_matches('R');
+                    (r.starts_with('R') && digits.starts_with(|c: char| c.is_ascii_digit()))
+                        .then(|| (bid.to_string(), cid.to_string(), r))
+                })
+            })
+            .unwrap_or_else(|| panic!("{name} has a resistor"));
+        let read = || -> Value {
+            serde_json::from_slice(
+                &std::fs::read(board.join(format!("blocks/{block}/layout.json"))).unwrap(),
+            )
+            .unwrap()
+        };
+        let before = read();
+        ryueda(
+            &board,
+            1,
+            &["style", "palette", "set", "wire", "#000000/#ffffff"],
+        );
+        assert_eq!(read(), before, "{name}: a colour moves no layout");
+        ryueda(
+            &board,
+            1,
+            &["tag", &refdes, "--block", &block, "--add", "dnp"],
+        );
+        assert_eq!(read(), before, "{name}: a tag moves no layout");
+        ryueda(
+            &board,
+            1,
+            &[
+                "style",
+                "set",
+                &refdes,
+                "text_size=large",
+                "--block",
+                &block,
+            ],
+        );
+        let after = read();
+        // Everything but its text (each unit's) and region frames as it was.
+        let strip = |v: &Value| {
+            let mut v = v.clone();
+            v.as_object_mut().unwrap().remove("regions");
+            if let Some(t) = v["text"].as_object_mut() {
+                t.retain(|k, _| k != &id && !k.starts_with(&format!("{id}:")));
+            }
+            v
+        };
+        assert_eq!(
+            strip(&after),
+            strip(&before),
+            "{name}: {refdes}'s text alone"
+        );
+    }
+}
+
+/// Plan 2.E's measurements (`cargo test -p ryueda --release --test
+/// schematic_corpus style_measurements -- --ignored --nocapture`): the
+/// cascade for the Ethernet PHY through the CLI and in process, its PDF,
+/// and each corpus block laid out from nothing. Printed, never a bar in CI.
+#[test]
+#[ignore]
+fn style_measurements() {
+    use std::time::Instant;
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let dir = tempfile::tempdir().unwrap();
+    let board = circuit(dir.path(), "ethernet");
+    ryueda(&board, 1, &["layout"]);
+    // A style of ten rules.
+    for (sel, set) in [
+        ("kind=net", "line_weight=normal"),
+        ("kind=rail", "colour=power"),
+        ("component_class=resistor", "fill=body"),
+        ("component_class=capacitor", "colour=ink"),
+        ("component_class=ic", "emphasis=false"),
+        ("tag=hv", "dash=false"),
+        ("tag=critical", "colour=critical"),
+        ("kind=region", "visible.frame=true"),
+        ("kind=port", "fill=port_fill"),
+        ("kind=component", "visible.pin_numbers=true"),
+    ] {
+        ryueda(&board, 1, &["style", "rule", "add", sel, set]);
+    }
+    let p = ryueda::project::Project::load(&board).unwrap();
+    for (bid, b) in &p.conn.blocks {
+        let refs: Vec<String> = b
+            .components
+            .values()
+            .filter_map(|c| c.item.as_ref().ok()?.refdes.clone())
+            .collect();
+        let t = Instant::now();
+        for r in &refs {
+            ryueda(&board, 1, &["style", "explain", r, "--block", bid.as_str()]);
+        }
+        eprintln!(
+            "ethernet/{bid}: style explain of {} components {:.0} ms ({:.1} ms each, a process each)",
+            refs.len(),
+            ms(t),
+            ms(t) / refs.len().max(1) as f64
+        );
+        let t = Instant::now();
+        ryueda(
+            &board,
+            1,
+            &["render", "--block", bid.as_str(), "--out", "x.svg"],
+        );
+        eprintln!("ethernet/{bid}: render {:.0} ms (a process)", ms(t));
+        // In process: the layers and each sheet's look, 100 times.
+        let laid = ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None).unwrap();
+        let mut times: Vec<f64> = (0..100)
+            .map(|_| {
+                let t = Instant::now();
+                let layers = ryueda::cascade::Layers::of(&p);
+                let objects = ryueda::cascade::objects(&p, b, &laid.built);
+                for (sid, s) in &laid.outcome.layout.sheets {
+                    std::hint::black_box(ryueda::cascade::look(
+                        &layers,
+                        &objects,
+                        &laid.built,
+                        (sid, &s.name),
+                        ryusch::style::Theme::Light,
+                    ));
+                }
+                ms(t)
+            })
+            .collect();
+        times.sort_by(f64::total_cmp);
+        eprintln!(
+            "ethernet/{bid}: cascade looks, median of 100 {:.3} ms (bar 5 ms)",
+            times[50]
+        );
+    }
+    let t = Instant::now();
+    ryueda(&board, 1, &["output", "--out", "x.pdf"]);
+    eprintln!("ethernet: output PDF {:.0} ms (bar 1 s)", ms(t));
+    for name in ["breakout", "rp2040", "buck", "frontend", "ethernet"] {
+        let at = dir.path().join(format!("m-{name}"));
+        std::fs::create_dir_all(&at).unwrap();
+        let board = circuit(&at, name);
+        let p = ryueda::project::Project::load(&board).unwrap();
+        for bid in p.conn.blocks.keys() {
+            let t = Instant::now();
+            ryueda(
+                &board,
+                1,
+                &["layout", "--relayout", bid.as_str(), "--dry-run"],
+            );
+            eprintln!("{name}/{bid}: from nothing {:.0} ms (bar 2 s)", ms(t));
+        }
+    }
+}
+
+/// The breakout styled (plan 2.E's visual review): a palette entry, a
+/// rule by tag and two tagged parts (critical, dnp), drawn light and dark and
+/// paged into `target/ryueda-look`.
+#[test]
+#[ignore]
+fn styled_breakout_look() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = circuit(dir.path(), "breakout");
+    ryueda(&board, 1, &["layout"]);
+    let b = "breakout";
+    ryueda(
+        &board,
+        1,
+        &["style", "palette", "set", "brand", "#0055aa/#66aaff"],
+    );
+    ryueda(
+        &board,
+        1,
+        &[
+            "style",
+            "rule",
+            "add",
+            "tag=critical",
+            "colour=brand",
+            "emphasis=true",
+        ],
+    );
+    let shown = ryueda(&board, 1, &["block", "show", b]);
+    let refs: Vec<String> = shown["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["refdes"].as_str().map(str::to_owned))
+        .collect();
+    eprintln!("critical: {}, dnp: {}", refs[0], refs[1]);
+    ryueda(
+        &board,
+        1,
+        &["tag", &refs[0], "--block", b, "--add", "critical"],
+    );
+    ryueda(&board, 1, &["tag", &refs[1], "--block", b, "--add", "dnp"]);
+    ryueda(&board, 1, &["layout"]);
+    let look = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ryueda-look");
+    std::fs::create_dir_all(&look).unwrap();
+    for theme in ["light", "dark"] {
+        let out = look.join(format!("styled.breakout.{theme}.svg"));
+        ryueda(
+            &board,
+            1,
+            &[
+                "render",
+                "--block",
+                b,
+                "--theme",
+                theme,
+                "--out",
+                out.to_str().unwrap(),
+            ],
+        );
+    }
+    let out = look.join("styled.breakout.pdf");
+    ryueda(&board, 1, &["output", "--out", out.to_str().unwrap()]);
 }

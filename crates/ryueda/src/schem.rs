@@ -28,6 +28,9 @@ pub const LAYOUT_KIND: &str = "ryueda.layout";
 pub const LAYOUT_FORMAT: u64 = 4;
 /// What the PDF's border takes on every side of the paper.
 pub const BORDER: Nm = 10_000_000;
+/// The band at the foot of every page that holds the title block (plan
+/// 2.E): the drawing area stops above it.
+pub const TITLE_BAND: Nm = 20_000_000;
 
 /// The path of a block's layout file.
 pub fn layout_path(block: &Id) -> String {
@@ -402,7 +405,12 @@ fn widest(layers: &[Layer]) -> BTreeMap<Id, String> {
     let mut out: BTreeMap<Id, String> = BTreeMap::new();
     for l in layers {
         for (c, r) in &l.refdes {
-            let w = |t: &str| (ryusch::font::width(t, ryusch::font::SIZE), t.to_owned());
+            let w = |t: &str| {
+                (
+                    ryusch::font::width_in(t, ryusch::font::Font::DESIGNATOR),
+                    t.to_owned(),
+                )
+            };
             if out.get(c).is_none_or(|old| w(r) > w(old)) {
                 out.insert(c.clone(), r.clone());
             }
@@ -447,8 +455,8 @@ fn placeholder(
 }
 
 /// The paper series a project's sheets take, smallest first, each paper's
-/// drawing area the paper less the PDF's border (plan 2.A): none with fit
-/// off.
+/// drawing area the paper less the PDF's border and the title band (plans
+/// 2.A and 2.E): none with fit off.
 pub fn papers(sheet: &crate::project::Sheet) -> Vec<input::Paper> {
     sheet
         .series()
@@ -467,7 +475,7 @@ pub fn papers(sheet: &crate::project::Sheet) -> Vec<input::Paper> {
                     }
                     crate::project::Orientation::Portrait => ryusch::layout::Orientation::Portrait,
                 },
-                area: [w - 2 * BORDER, h - 2 * BORDER],
+                area: [w - 2 * BORDER, h - 2 * BORDER - TITLE_BAND],
             }
         })
         .collect()
@@ -519,6 +527,7 @@ pub(crate) fn unit_part(sym: &crate::symbol::Symbol, unit: u32, key: String, pre
         refdes: String::new(),
         value: String::new(),
         function: String::new(),
+        text: ryusch::input::PartText::default(),
         graphics,
         pins,
     }
@@ -705,6 +714,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
                     kind: PartKind::Symbol { prefix },
                     refdes,
                     function: function_of(c),
+                    text: ryusch::input::PartText::default(),
                     value,
                     graphics,
                     pins,
@@ -800,10 +810,10 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
         ));
         of.push(Of::Port(pid.clone()));
     }
-    Ok(Built {
+    let mut built = Built {
         input: input::Block {
             name: block.name.clone(),
-            sheet: [w - 2 * BORDER, h - 2 * BORDER],
+            sheet: [w - 2 * BORDER, h - 2 * BORDER - TITLE_BAND],
             papers: papers(&p.manifest.schematic.sheet),
             parts,
             nets,
@@ -812,7 +822,66 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
         },
         of,
         stacks,
-    })
+    };
+    style_inputs(p, b, &mut built);
+    Ok(built)
+}
+
+/// The geometry the style moves (plan 2.E), as engine input: each
+/// component's text size and emphasis, and each net's and rail's intent
+/// where the style shows it (a rail's voltage, a net's class, voltage,
+/// current and impedance). Resolved with no sheet: rules naming a sheet
+/// or a region can't set these.
+fn style_inputs(p: &Project, b: &BlockFiles, built: &mut Built) {
+    use crate::style::Kind;
+    let layers = crate::cascade::Layers::of(p);
+    for o in crate::cascade::objects(p, b, built) {
+        let r = layers.resolve(&o, None).props;
+        match o.kind {
+            Kind::Component => {
+                let text = ryusch::input::PartText {
+                    size: r.text_size.unwrap_or_default().nm(),
+                    emphasis: r.emphasis.unwrap_or(false),
+                };
+                for part in &mut built.input.parts {
+                    if part.key == o.key || part.key.split(':').next() == Some(o.key.as_str()) {
+                        part.text = text;
+                    }
+                }
+            }
+            Kind::Rail if r.visible.intent == Some(false) => {
+                if let Some(n) = built.input.nets.iter_mut().find(|n| n.key == o.key) {
+                    n.intent.clear();
+                }
+            }
+            Kind::Net if r.visible.intent == Some(true) => {
+                let Some(Ok(net)) = Id::parse(&o.key, "net")
+                    .ok()
+                    .and_then(|id| b.nets.get(&id))
+                    .map(|n| n.item.as_ref())
+                else {
+                    continue;
+                };
+                let class = net.class.as_ref().map(|c| {
+                    p.conn
+                        .classes
+                        .get(c)
+                        .and_then(|x| x.item.as_ref().ok())
+                        .map_or_else(|| c.to_string(), |x| x.name.clone())
+                });
+                let text: Vec<String> = class
+                    .into_iter()
+                    .chain(net.voltage.clone())
+                    .chain(net.current.clone())
+                    .chain(net.impedance.clone())
+                    .collect();
+                if let Some(n) = built.input.nets.iter_mut().find(|n| n.key == o.key) {
+                    n.intent = text.join(" · ");
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// A block laid out as its files stand: over its layout file where that
@@ -901,17 +970,13 @@ pub fn lay_restoring(
     })
 }
 
-/// Fills each note instruction's properties (plan 2.C): `{name}` from the
-/// levels a designator format reads for the block's first layer (each
-/// instance from the innermost, the block, the project) and the built-in
-/// `block` (the block's name). A note naming a property no level sets, or
-/// that doesn't read as a template, keeps its text as written, with the
-/// note `note_property_unknown`.
-pub fn fill_notes(
-    p: &Project,
-    b: &BlockFiles,
-    input: &mut input::Block,
-) -> Vec<ryusch::engine::Note> {
+/// The property levels text in block `b` reads (its first layer's
+/// instances, the block, the project), with `built_in` read first.
+pub fn levels<'a>(
+    p: &'a Project,
+    b: &'a BlockFiles,
+    built_in: BTreeMap<&'static str, String>,
+) -> crate::props::Levels<'a> {
     let mut outer: Vec<&crate::props::Properties> = Vec::new();
     if let Some(first) = layers(p, &b.id).first() {
         for iid in first.path.iter().rev() {
@@ -926,15 +991,28 @@ pub fn fill_notes(
             }
         }
     }
-    let own = b.block.item.as_ref().ok();
-    if let Some(own) = own {
+    if let Ok(own) = b.block.item.as_ref() {
         outer.push(&own.properties);
     }
     outer.push(&p.manifest.properties);
-    let levels = crate::props::Levels {
+    crate::props::Levels {
         levels: outer,
-        built_in: BTreeMap::from([("block", input.name.clone())]),
-    };
+        built_in,
+    }
+}
+
+/// Fills each note instruction's properties (plan 2.C): `{name}` from the
+/// levels a designator format reads for the block's first layer (each
+/// instance from the innermost, the block, the project) and the built-in
+/// `block` (the block's name). A note naming a property no level sets, or
+/// that doesn't read as a template, keeps its text as written, with the
+/// note `note_property_unknown`.
+pub fn fill_notes(
+    p: &Project,
+    b: &BlockFiles,
+    input: &mut input::Block,
+) -> Vec<ryusch::engine::Note> {
+    let levels = levels(p, b, BTreeMap::from([("block", input.name.clone())]));
     let mut notes = Vec::new();
     input.notes.clear();
     for (id, ins) in &input.instructions {
@@ -1224,5 +1302,99 @@ mod tests {
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].code, "note_property_unknown");
         assert_eq!(notes[0].details["property"], "nothing");
+    }
+
+    /// The test project with SDA at 3.3 V and `style` as its style.json.
+    fn styled_project(style: &str) -> (tempfile::TempDir, Project) {
+        let (dir, _) = project(&[]);
+        let board = dir.path().join("board");
+        crate::source::write_atomic(
+            &board.join("blocks/top/nets/sda.json"),
+            r#"{"format": 1, "kind": "ryueda.net", "name": "SDA", "voltage": "3.3 V"}"#,
+        )
+        .unwrap();
+        crate::source::write_atomic(&board.join(crate::style::FILE), style).unwrap();
+        let p = Project::load(&board).unwrap();
+        (dir, p)
+    }
+
+    #[test]
+    fn the_style_sets_text_sizes_emphasis_and_intent() {
+        let (dir, p) = styled_project(
+            r#"{"kind": "ryueda.style", "format": 1,
+                "rules": [{"select": {"kind": "net"}, "set": {"visible": {"intent": true}}},
+                          {"select": {"component_class": "resistor"}, "set": {"text_size": "large", "emphasis": true}}]}"#,
+        );
+        let b = &p.conn.blocks[&Id::parse("top", "block").unwrap()];
+        let built = build(&p, b).unwrap();
+        let r = built.input.parts.iter().find(|x| x.refdes == "R1").unwrap();
+        assert_eq!(r.text.size, 1_778_000);
+        assert!(r.text.emphasis);
+        let sda = built.input.nets.iter().find(|n| n.name == "SDA").unwrap();
+        assert_eq!(sda.intent, "3.3 V");
+        drop(dir);
+    }
+
+    #[test]
+    fn a_papers_drawing_area_leaves_the_title_band() {
+        let sheet = crate::project::Sheet::default();
+        let a4 = &papers(&sheet)[0];
+        assert_eq!(a4.size, "a4");
+        assert_eq!(
+            a4.area,
+            [277_000_000, 170_000_000],
+            "297 × 210 less 10 mm a side and the 20 mm band"
+        );
+        let a3 = &papers(&sheet)[1];
+        assert_eq!(a3.area, [400_000_000, 257_000_000]);
+    }
+
+    /// A layout made before the title band whose drawing reaches into it
+    /// breaks `inside`: read as layout_invalid, laid out again (plan 2.E).
+    #[test]
+    fn a_layout_reaching_into_the_title_band_is_laid_out_again() {
+        let (dir, p) = project(&[]);
+        let board = dir.path().join("board");
+        let top = Id::parse("top", "block").unwrap();
+        let laid = lay(
+            &p,
+            &p.conn.blocks[&top],
+            None,
+            &[],
+            ryusch::input::Relayout::None,
+        )
+        .unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_str(&layout_text(&laid.outcome.layout)).unwrap();
+        let key = v["placed"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        // The old A4 area's top (190 mm) less two steps: inside before the
+        // band, past the 170 mm the band leaves.
+        v["placed"][&key]["at"][1] = serde_json::json!(190_000_000 - 2 * GRID);
+        crate::source::write_atomic(
+            &board.join(layout_path(&top)),
+            crate::canonical::to_string(&v),
+        )
+        .unwrap();
+        let p = Project::load(&board).unwrap();
+        let again = lay(
+            &p,
+            &p.conn.blocks[&top],
+            None,
+            &[],
+            ryusch::input::Relayout::None,
+        )
+        .unwrap();
+        let e = again.invalid.expect("the file breaks a rule");
+        assert_eq!(e.code, Code::LayoutInvalid, "{e:?}");
+        assert_eq!(
+            ryusch::rules::check(&again.built.input, &again.outcome.layout),
+            []
+        );
     }
 }
