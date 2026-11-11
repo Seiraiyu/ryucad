@@ -46,15 +46,10 @@ const MIN_BUILT: usize = 32;
 const KNOWN_SLOW: &[u64] = &[76];
 
 /// Seeds of `seeded_blends_are_recognised_back` whose blend isn't read
-/// back, each with why:
-///
-/// - 32 and 92: chamfers on a cone setting back more than
-///   `CHAMFER_SHARE` (0.4) of a support's width, which recognition leaves
-///   out by design (plan 13.C);
-/// - 39, 100 and 102: a chamfer along a line of three edges a cylinder's
-///   hole splits, a chamfer ending on a torus, and a chamfer between a
-///   disc and a cone coaxial with another (#660).
-const KNOWN_UNRECOGNISED: &[u64] = &[32, 39, 92, 100, 102];
+/// back, each with why: 32 and 92, chamfers on a cone setting back more
+/// than `CHAMFER_SHARE` (0.4) of a support's width, which recognition
+/// leaves out by design (plan 13.C).
+const KNOWN_UNRECOGNISED: &[u64] = &[32, 92];
 
 /// Seeds whose result the mesher refuses at a thousandth of its size,
 /// each with its issue: their volume isn't judged, the rest is.

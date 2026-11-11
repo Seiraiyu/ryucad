@@ -398,14 +398,18 @@ fn setback(body: &Body, edge: EdgeId, m: &Meet, tol: f64) -> Option<f64> {
     (hi - lo <= reach && lo > 10.0 * LINEAR_RESOLUTION).then_some((lo + hi) / 2.0)
 }
 
-/// How wide face `g` is across where its chamfer's supports meet: its
-/// vertices' greatest distance from the meeting.
+/// How wide face `g` is across where its chamfer's supports meet: the
+/// greatest distance from the meeting of points along its edges.
 fn width(body: &Body, g: FaceId, m: &Meet) -> f64 {
     let mut w: f64 = 0.0;
     for e in edges_of(body, g) {
-        let edge = &body.edges[e];
-        for v in [edge.start, edge.end] {
-            let p = body.vertices[v].point;
+        // Points along each edge, its ends included: a support whose far
+        // side is a curve with no vertex off the rail (a hole's ellipse
+        // across it, a circle round a disc) is as wide as that curve
+        // reaches (#660: seeds 39, 100 and 102 read 1.0, 0.906 and 1.0
+        // against `CHAMFER_SHARE`). Along a straight edge the distance
+        // from a line is convex, so a polygon's width is its vertices'.
+        for p in samples(body, e) {
             let d = match m {
                 Meet::Line(o, dir) => {
                     let q = p - *o;
