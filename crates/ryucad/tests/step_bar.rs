@@ -367,12 +367,12 @@ fn painted_race() -> Vec<u8> {
         for (j, b) in p.bodies.iter().enumerate() {
             let paint = |x: usize| ryustep::Paint {
                 colour: [(x * 37 % 256) as u8, (x * 91 % 256) as u8, 64],
-                opacity: if x % 10 == 0 { 0.5 } else { 1.0 },
+                opacity: if x.is_multiple_of(10) { 0.5 } else { 1.0 },
             };
             let faces = b
                 .faces()
                 .enumerate()
-                .filter(|(i, _)| i % 10 == 0)
+                .filter(|(i, _)| i.is_multiple_of(10))
                 .map(|(i, f)| (b.face(f).unwrap().name, paint(k + i)))
                 .collect();
             paints.bodies.push(ryustep::BodyPaint {

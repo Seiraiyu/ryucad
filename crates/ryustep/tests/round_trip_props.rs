@@ -261,7 +261,7 @@ fn styles_round_trip() {
             .faces()
             .map(|f| body.face(f).unwrap().name)
             .enumerate()
-            .filter(|(i, _)| i % 3 == 0)
+            .filter(|(i, _)| i.is_multiple_of(3))
             .map(|(i, n)| (n, paint(seed * 100 + i as u64)))
             .collect();
         let model = ryustep::WriteModel {

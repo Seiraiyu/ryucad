@@ -1831,7 +1831,9 @@ fn occurrence_paints(
         return;
     };
     let plain = crate::appearance::SolidLook::default();
-    let mut stack: Vec<(usize, Vec<(usize, usize)>, Vec<Id>)> = vec![(0, Vec::new(), Vec::new())];
+    // Each product to walk, the usages that reach it, and its path's steps.
+    type Walking = (usize, Vec<(usize, usize)>, Vec<Id>);
+    let mut stack: Vec<Walking> = vec![(0, Vec::new(), Vec::new())];
     while let Some((k, path, steps)) = stack.pop() {
         for (n, c) in scene.products[k].children.iter().enumerate() {
             let mut path = path.clone();
@@ -3910,7 +3912,9 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(o.body_styles(bolt).body.unwrap().colour, Some([0x10; 3]));
         // Each occurrence by its usages' ids, outermost first.
-        let mut got: Vec<(Vec<String>, Option<[u8; 3]>, Option<f64>)> = o
+        // Each occurrence style's usage ids, colour and opacity.
+        type Got = (Vec<String>, Option<[u8; 3]>, Option<f64>);
+        let mut got: Vec<Got> = o
             .occurrence_styles()
             .iter()
             .map(|x| {
