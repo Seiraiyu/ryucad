@@ -1931,9 +1931,13 @@ fn place_networks(
         for (_, _, k) in &served {
             let name = block.label_text(a, *k);
             if !name.is_empty() {
-                let r = crate::label::label_box(
+                let intent = block.parts[a].pins[*k].drawn_net().map_or("", |n| {
+                    crate::label::intent_on(&block.nets[n], crate::layout::LabelKind::Net)
+                });
+                let r = crate::label::label_box_with(
                     crate::layout::LabelKind::Net,
                     &name,
+                    intent,
                     shape.pins[*k].end,
                     side,
                 );
@@ -2046,7 +2050,16 @@ fn place_bank(
         let pin = shape.pins[*k];
         let name = block.label_text(a, *k);
         if !name.is_empty() {
-            let r = crate::label::label_box(crate::layout::LabelKind::Net, &name, pin.end, side);
+            let intent = block.parts[a].pins[*k].drawn_net().map_or("", |n| {
+                crate::label::intent_on(&block.nets[n], crate::layout::LabelKind::Net)
+            });
+            let r = crate::label::label_box_with(
+                crate::layout::LabelKind::Net,
+                &name,
+                intent,
+                pin.end,
+                side,
+            );
             reach = reach
                 .max(away(r.min[0], pin.end[0]))
                 .max(away(r.max[0], pin.end[0]));

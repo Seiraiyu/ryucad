@@ -357,21 +357,21 @@ fn label_items(
     pen: &Pen,
 ) {
     let d = if kind == LabelKind::OffSheet {
-        label::drawn_flow(name, at, side, flow)
+        label::drawn_flow_with(name, intent, at, side, flow)
     } else {
         label::drawn_with(kind, name, intent, at, side)
     };
     let power = pen.colour.unwrap_or_else(|| look.role(Role::Power));
-    if let Some((p, anchor, text)) = &d.extra {
-        items.push(Item::Begin(Layer::Intent));
-        items.push(text_item(text, *p, MIN_SIZE, *anchor, false, power));
-        items.push(Item::End);
-    }
     let colour = if kind.signal() {
         pen.colour.unwrap_or_else(|| look.role(Role::Label))
     } else {
         power
     };
+    if let Some((p, anchor, text)) = &d.extra {
+        items.push(Item::Begin(Layer::Intent));
+        items.push(text_item(text, *p, MIN_SIZE, *anchor, false, colour));
+        items.push(Item::End);
+    }
     // A net label's line is the wire it names; a connector's outline is
     // its own.
     let role = match kind {
@@ -714,7 +714,7 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
                 l.at,
                 l.side,
                 flow,
-                label::intent_of(block, key),
+                label::intent_for(block, key, l.kind),
                 look,
                 &look.pen(key),
             );

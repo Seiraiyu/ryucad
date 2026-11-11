@@ -103,9 +103,10 @@ impl Cluster {
                         anchor,
                         side,
                     ))
-                    .union(crate::label::label_box(
+                    .union(crate::label::label_box_with(
                         LabelKind::Net,
                         name,
+                        crate::label::intent_on(&block.nets[n], LabelKind::Net),
                         at.end,
                         at.side,
                     ));
@@ -157,9 +158,10 @@ impl Cluster {
                     && (labelled(n) || pin.stacked())
                 {
                     let at = shape.pins[k];
-                    r = r.union(crate::label::label_box(
+                    r = r.union(crate::label::label_box_with(
                         LabelKind::Net,
                         &block.label_text(p, k),
+                        crate::label::intent_on(&block.nets[n], LabelKind::Net),
                         at.end,
                         at.side,
                     ));
@@ -179,9 +181,10 @@ impl Cluster {
                         });
                     if leaves {
                         let at = shape.pins[k];
-                        r = r.union(crate::label::label_box(
+                        r = r.union(crate::label::label_box_with(
                             LabelKind::Net,
                             &block.label_text(p, k),
+                            crate::label::intent_on(&block.nets[n], LabelKind::Net),
                             at.end,
                             at.side,
                         ));

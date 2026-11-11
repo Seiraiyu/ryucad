@@ -3254,7 +3254,13 @@ fn draw(
                     continue;
                 }
                 let name = block.label_text(p, k);
-                let b = label::label_box(LabelKind::Net, &name, pin.end, pin.side);
+                let b = label::label_box_with(
+                    LabelKind::Net,
+                    &name,
+                    label::intent_on(&block.nets[row.net], LabelKind::Net),
+                    pin.end,
+                    pin.side,
+                );
                 // Clear before the row's wire, which lies under its line.
                 if !field.clear_label(b) {
                     continue;
@@ -4578,7 +4584,13 @@ fn place_labels_in(
                     let near = carrier.is_some()
                         || (e[0] - pin.end[0]).abs() + (e[1] - pin.end[1]).abs() <= LOCAL_REACH;
                     near.then(|| {
-                        let b = label::label_box(kind2, &block.label_text(q, l), e, at.side);
+                        let b = label::label_box_with(
+                            kind2,
+                            &block.label_text(q, l),
+                            label::intent_on(&block.nets[m], kind2),
+                            e,
+                            at.side,
+                        );
                         boxes.insert(route::node_of(e), b);
                         route::node_of(e)
                     })
@@ -4636,8 +4648,8 @@ fn place_labels_in(
         );
         let kept = prev_runs.get(&n).map(|r| (r, &net_pins));
         let name = &block.label_text(p, k);
-        let intent = block.nets[n].intent.as_str();
         let fits_as = |field: &Field, kind: LabelKind, stub: &[Point], at: Point, side: Side| {
+            let intent = label::intent_on(&block.nets[n], kind);
             if !field.clear_label(label::label_box_with(kind, name, intent, at, side)) {
                 return false;
             }
@@ -4769,6 +4781,7 @@ fn place_labels_in(
         if !stub.is_empty() && field.mark(n, &stub).is_ok() {
             routes.entry(n).or_default().push(stub);
         }
+        let intent = label::intent_on(&block.nets[n], kind);
         field.block_label(label::label_box_with(kind, name, intent, at, side));
         labels.entry(n).or_default().push(Label {
             text: name.clone(),
@@ -6568,6 +6581,23 @@ mod tests {
             if *k != key {
                 assert_eq!(out.layout.text.get(k), Some(t), "{k}'s text moved");
             }
+        }
+    }
+
+    #[test]
+    fn nets_with_intent_keep_every_rule() {
+        for seed in 0..6 {
+            let mut b = seeded(seed, 2);
+            for (i, n) in b.nets.iter_mut().enumerate() {
+                if n.kind == crate::input::NetKind::Signal && i % 2 == 0 {
+                    n.intent = "3.3 V · 20 mA".into();
+                }
+            }
+            let out = lay(&b);
+            assert_eq!(crate::rules::check(&b, &out.layout), [], "seed {seed}");
+            let mut again = b.clone();
+            again.previous = Some(out.layout.clone());
+            assert_eq!(lay(&again).layout, out.layout, "seed {seed}: kept");
         }
     }
 }
