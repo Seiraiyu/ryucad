@@ -276,13 +276,11 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
             coded(found, "sch_bank_not_in_row")
         );
     }
-    // Placement across clusters (work item 4530): at most 25 floating
-    // parts over the corpus from nothing (16 after plan 1.D, 35 before
-    // it, 41 before 1.C wired local circuits). Plan 2.A departs from its
-    // bar of 20: a local group's wire arriving through the label its
-    // target pin is to carry is dropped (that label would have nowhere
-    // to go), and inside regions more such wires arrive so (the RP2040
-    // +4, the buck +1, the Ethernet PHY +4). Plan 2.G lowers it to 10.
+    // Placement across clusters (work item 4530): at most 10 floating
+    // parts over the corpus from nothing, design 348's bar (16 after plan
+    // 1.D, 25 allowed from 2.A to 2.F, 13 on main before plan 2.G: stacks
+    // judged though only labels can draw them, clamps beside a stack's
+    // outputs).
     for (name, found) in &all {
         eprintln!("{name}: {} floating", coded(found, "sch_floating").len());
         for f in coded(found, "sch_floating") {
@@ -293,7 +291,7 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
         .iter()
         .map(|(_, f)| coded(f, "sch_floating").len())
         .sum();
-    assert!(floating <= 25, "{floating} parts float");
+    assert!(floating <= 10, "{floating} parts float");
     // Design 236's quality bar: each circuit's crossings at most 1.5 times
     // its reference's within the cut (the manifest's `crossings`).
     let mut over = Vec::new();
@@ -306,14 +304,7 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
         // 1.5 times the reference's, and at least one crossing allowed
         // where the reference has none (a reference of 0 would make any
         // crossing a failure; design 236's bar is a ratio).
-        let mut bar = (theirs * 3).div_ceil(2).max(1);
-        // Plan 2.E's title band takes 20 mm off every page: the RP2040's
-        // A3 sheet lays out with 3 crossings against a bar of 2. Accepted
-        // by the coxswain for the band alone; the engine is to win it
-        // back (its issue, linked to ryueda 2).
-        if *name == "rp2040" {
-            bar = bar.max(3);
-        }
+        let bar = (theirs * 3).div_ceil(2).max(1);
         eprintln!("{name}: {ours} crossings, the reference {theirs}, bar {bar}");
         if ours > bar {
             over.push(format!(
@@ -333,16 +324,19 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
 /// first sheet from 36 to 14, the buck from 37 to 29. Plan 2.B's banks
 /// (#429) took Ethernet's PHY sheet from 0 to 51 and the RP2040's first
 /// sheet from 14 to 19, measured on cox-worker-1 (Intel Xeon E5-2650, 8
-/// threads, shared, load 2 to 5) on 2026-11-10.
+/// threads, shared, load 2 to 5) on 2026-11-10. Measured again after plan
+/// 2.G's engine work on cox-worker-2 (AMD Ryzen 7 9700X, 8 cores, shared,
+/// load 3.8 to 4.3) on 2026-11-11: the RP2040's first sheet 43, the front
+/// end's amp 100 (its clamps no longer float), Ethernet's PHY sheet 63.
 const THRESHOLDS: &[(&str, &str, i64)] = &[
     ("breakout", "breakout", 79),
     ("breakout", "sensor", 95),
-    ("rp2040", "mitayi", 14),
+    ("rp2040", "mitayi", 38),
     ("buck", "buck", 24),
-    ("frontend", "amp", 51),
+    ("frontend", "amp", 95),
     ("frontend", "baldiff", 42),
     ("frontend", "ivconv", 73),
-    ("ethernet", "eth", 46),
+    ("ethernet", "eth", 58),
     ("ethernet", "status_led", 92),
 ];
 
