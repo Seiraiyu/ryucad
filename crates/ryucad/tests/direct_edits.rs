@@ -1,6 +1,7 @@
-//! Direct edits through the session (design 445, plan 22.A): face tweaks
-//! that change the solid's topology or remake its blends, and deleted
-//! faces healed by a cap or by growth, against exact volumes; names,
+//! Direct edits through the session (design 445, plans 22.A and 22.B):
+//! face tweaks that change the solid's topology or remake its blends,
+//! deleted faces healed by a cap or by growth, and blends listed, deleted
+//! and resized, against exact volumes; names,
 //! origins, references to what went, reference imports, the edit budget,
 //! refusals and their hints.
 
@@ -1275,4 +1276,64 @@ fn the_blends_query_lists_what_delete_blend_takes() {
         (Code::TweakFailed, Some("bad_tolerance")),
         "{e}"
     );
+}
+
+/// A boss on a plate with its foot filleted and a filleted pocket beside
+/// it, round its whole rim: deleting every blend at most 1.5 mm leaves
+/// the sharp boss and
+/// pocket: the plate 40 × 30 × 10, the boss π × 4² × 6, the pocket
+/// 10 × 6 × 4 mm out of it.
+#[test]
+fn a_bosss_foot_and_a_pockets_rim_are_defeatured() {
+    let (_dir, mut s) = boxed();
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "b", "params": {"x": 40, "y": 30, "z": 10}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "boss", "operation": "join", "targets": ["b"],
+               "params": {"radius": 4, "height": 6}, "placement": {"origin": [12, 15, 10]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "k", "operation": "cut", "targets": ["b"],
+               "params": {"x": 10, "y": 6, "z": 4}, "placement": {"origin": [25, 12, 6]}}),
+    );
+    let j = body(&mut s, "k");
+    let foot = j["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| {
+            e["curve"]["type"] == "circle"
+                && (e["curve"]["frame"]["origin"][2].as_f64().unwrap() - 0.010).abs() < 1e-12
+        })
+        .map(|e| format!("p/b/{}", e["name"].as_str().unwrap()))
+        .expect("the boss's foot");
+    // The pocket's whole rim: one of its edges alone runs off the top at
+    // its ends (the kernel's overflow).
+    let rim = [
+        edge(&j, "b", [25.0, 12.0, 10.0], [35.0, 12.0, 10.0]),
+        edge(&j, "b", [35.0, 12.0, 10.0], [35.0, 18.0, 10.0]),
+        edge(&j, "b", [35.0, 18.0, 10.0], [25.0, 18.0, 10.0]),
+        edge(&j, "b", [25.0, 18.0, 10.0], [25.0, 12.0, 10.0]),
+    ];
+    let mut edges = vec![foot];
+    edges.extend(rim);
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "f", "radius": 1, "edges": edges}),
+    );
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "below": "1.5 mm"}),
+    );
+    near(
+        volume(&mut s, "d", "b"),
+        40.0 * 30.0 * 10.0 + PI * 16.0 * 6.0 - 10.0 * 6.0 * 4.0,
+        1e-6,
+    );
+    report(&mut s, "d");
 }
