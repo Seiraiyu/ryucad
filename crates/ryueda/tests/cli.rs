@@ -3696,3 +3696,127 @@ fn the_look_is_linted() {
             .any(|r| r["code"] == "sch_override_unused")
     );
 }
+
+#[test]
+fn annotate_from_the_cli() {
+    let p = Pair::breakout();
+    // Every designator is numbered: nothing to do by default.
+    let a = p.ok(&["annotate", "--dry-run"]);
+    assert_eq!(a["changes"], json!([]), "{a}");
+    let rev = a["revision"].as_str().unwrap().to_owned();
+    // A placeholder is numbered, and ERC says why it has none till then.
+    p.ok(&["component", "edit", "sensor/c1", "--refdes", "C?"]);
+    let e = p.ok(&["erc"]);
+    assert_eq!(
+        e["designs"][0]["findings"][0]["code"], "refdes_missing",
+        "{e}"
+    );
+    // The edit moved the revision annotate is guarded by.
+    let stale = p.fails(&["annotate", "--expect", &rev], "conflict", 1);
+    assert_eq!(stale["details"]["expected"], json!(rev));
+    let a = p.ok(&["annotate"]);
+    assert_eq!(
+        a["changes"],
+        json!([{"component": "sensor/c1", "from": "C?", "to": "C1"}])
+    );
+    assert_eq!(a["erc"], json!([]));
+    let to = |v: &Value| -> Vec<(String, String)> {
+        v["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["component"].as_str().unwrap().to_owned(),
+                    c["to"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let pairs = |l: &[(&str, &str)]| -> Vec<(String, String)> {
+        l.iter()
+            .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
+            .collect()
+    };
+    // Never laid out, each block's components go in ID order (the root's
+    // block first, then the sensor's).
+    let all = p.ok(&["annotate", "--reset", "all", "--dry-run"]);
+    assert_eq!(
+        to(&all),
+        pairs(&[
+            ("breakout/c2", "C1"),
+            ("breakout/c3", "C2"),
+            ("breakout/u2", "U1"),
+            ("sensor/c1", "C3"),
+            ("sensor/u1", "U2"),
+        ])
+    );
+    // Laid out, in canvas order: the root's sheet down each column, then
+    // the sensor's block.
+    p.ok(&["layout"]);
+    let all = p.ok(&["annotate", "--reset", "all", "--dry-run"]);
+    assert_eq!(
+        to(&all),
+        pairs(&[
+            ("breakout/c2", "C1"),
+            ("breakout/u2", "U1"),
+            ("breakout/c3", "C2"),
+            ("breakout/r2", "R1"),
+            ("breakout/r1", "R2"),
+            ("sensor/u1", "U2"),
+            ("sensor/c1", "C3"),
+        ])
+    );
+    // A locked one keeps its designator; the numbers count past it.
+    let l = p.ok(&["annotate", "lock", "R2"]);
+    assert_eq!(
+        l["locked"],
+        json!([{"component": "breakout/r2", "refdes": "R2"}])
+    );
+    let c = fs::read_to_string(p.direct.join("board/blocks/breakout/components/r2.json")).unwrap();
+    assert!(
+        c.contains("\"refdes_locked\": true") && c.contains("\"format\": 2"),
+        "{c}"
+    );
+    let all = p.ok(&["annotate", "--reset", "all", "--dry-run"]);
+    assert!(
+        all["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["component"] != "breakout/r2" && c["to"] != "R2"),
+        "{all}"
+    );
+    // Two locked as one designator: refused, naming both.
+    p.ok(&["component", "edit", "breakout/r1", "--refdes", "R2"]);
+    let c = p.fails(&["annotate", "lock", "breakout/r1"], "annotate_conflict", 1);
+    assert_eq!(
+        c["details"]["components"],
+        json!(["breakout/r1", "breakout/r2"])
+    );
+    // A designator two components show names neither.
+    p.fails(&["annotate", "lock", "R2"], "refdes_duplicate", 1);
+    p.fails(&["annotate", "lock", "R9"], "not_found", 1);
+    let u = p.ok(&["annotate", "unlock", "breakout/r2"]);
+    assert_eq!(u["unlocked"][0]["component"], "breakout/r2");
+    p.fails(&["annotate", "--order", "sideways"], "usage", 2);
+    p.fails(&["annotate", "--reset", "some"], "usage", 2);
+    // One logged change, undone whole through the daemon.
+    let run = |args: &[&str]| p.run_in(&p.daemon, "board", args);
+    let (code, a) = run(&["annotate", "--reset", "all"]);
+    assert_eq!(code, 0, "{a}");
+    assert!(a["result"]["changes"].as_array().unwrap().len() > 1, "{a}");
+    let (code, h) = run(&["history"]);
+    assert_eq!(code, 0, "{h}");
+    let last = h["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last["method"], "annotate", "{h}");
+    let (code, u) = run(&["undo"]);
+    assert_eq!(code, 0, "{u}");
+    let (_, d) = run(&["annotate", "--reset", "all", "--dry-run"]);
+    assert_eq!(d["result"]["changes"], a["result"]["changes"]);
+}
