@@ -632,6 +632,8 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
                 }
             }
             // "full" is a word, not a parameter.
+            // A delete_blend's size.
+            ("below", Value::String(s)) => out.push(s),
             ("tolerance" | "front" | "back", Value::String(s)) => out.push(s),
             ("angle", Value::String(s)) if s != "full" => out.push(s),
             _ => {}
@@ -2712,6 +2714,18 @@ mod tests {
                        "target": "a", "tools": ["t"]});
         let f = Feature::from_json(&b, Unit::Mm, &Env::empty()).unwrap();
         assert_eq!(ids(f.consumes()), ["t"]);
+    }
+
+    #[test]
+    fn a_blend_deletes_size_is_an_expression() {
+        let mut v = json!({"type": "delete_blend", "target": "b", "below": "r * 2",
+                           "tolerance": "tol"});
+        let mut found: Vec<String> = expression_strings(&mut v)
+            .into_iter()
+            .map(|s| s.clone())
+            .collect();
+        found.sort();
+        assert_eq!(found, ["r * 2", "tol"]);
     }
 
     #[test]
