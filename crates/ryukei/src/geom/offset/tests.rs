@@ -509,3 +509,34 @@ fn offset_through_passes_the_focal_surface() {
     assert!(o.turned());
     assert_eq!(t.offset_through(0.2), t.offset(0.2));
 }
+
+/// #599: an offset's point lies within its base's grown by `|d|`, so
+/// every enclosure is cut there and the offset's box lies within its
+/// base's box grown by `|d|`; enclosures still hold sampled points.
+#[test]
+fn enclosures_lie_within_reach_of_the_base() {
+    for (base, cell, [a, b]) in cases() {
+        for d in [a, b] {
+            let o = Offset::new(base.clone(), d, cell).unwrap();
+            let reach = base.bounds().grow(d.abs() * (1.0 + 1e-12));
+            let within = |b: Box3| {
+                b.min().x >= reach.min().x
+                    && b.min().y >= reach.min().y
+                    && b.min().z >= reach.min().z
+                    && b.max().x <= reach.max().x
+                    && b.max().y <= reach.max().y
+                    && b.max().z <= reach.max().z
+            };
+            assert!(within(o.bounds()), "{:?} against {reach:?}", o.bounds());
+            let sheet = Sheet::of(&base);
+            for c in o.cells() {
+                let q = o.jet_box(*c).unwrap();
+                let p = sheet.jet_box(*c).unwrap();
+                for k in 0..3 {
+                    assert!(q[k].v.lo() >= p[k].v.lo() - d.abs() * (1.0 + 1e-12));
+                    assert!(q[k].v.hi() <= p[k].v.hi() + d.abs() * (1.0 + 1e-12));
+                }
+            }
+        }
+    }
+}

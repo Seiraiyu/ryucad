@@ -314,7 +314,14 @@ impl Offset {
             return Err(Error::Degenerate);
         }
         s.turn = turn;
-        s.bounds = bounds;
+        // The cells' enclosures, each cut to its base's grown by `|d|`
+        // ([`Offset::jet_box`]); the certificate's where one can't be had.
+        let b = match s.cells_box() {
+            Some(b) => b.grow(1e-12 * (1.0 + b.max().to_vector().length())),
+            None => bounds,
+        };
+        // Within its base's box grown by `|d|`, by definition (#599).
+        s.bounds = clip(&b, &s.base.bounds().grow(distance.abs() * (1.0 + 1e-12)));
         Ok(s)
     }
 
@@ -450,6 +457,16 @@ impl Offset {
         Sheet::of(&moved).jet3_box(cell)
     }
 
+    /// The hull of the point's enclosures over every cell.
+    fn cells_box(&self) -> Option<Box3> {
+        let mut out: Option<Box3> = None;
+        for &c in &self.cells {
+            let b = point_box(&self.jet_box(c)?);
+            out = Some(out.map_or(b, |o| o.union(&b)));
+        }
+        out
+    }
+
     /// The point's jets at `(u, v)`.
     pub(crate) fn jets_at(&self, u: f64, v: f64) -> JVec<f64> {
         let d = Sheet::of(&self.base)
@@ -458,19 +475,46 @@ impl Offset {
         offset_jets(d, self.distance).expect("a certified offset has a normal")
     }
 
-    /// Enclosures of the point's jets over a box of parameters: over the
-    /// box at once, else the hull of those over its parts in the offset's
-    /// cells, each halved up to [`ENCLOSE_DEPTH`] times where the base's
+    /// Enclosures of the point's jets over a box of parameters: the hull
+    /// of those over its parts in the offset's cells ([`Offset::parts`]),
+    /// each point's cut to its base's grown by `|d|`, where `O = S + d N`
+    /// with `|N| = 1` lies however loosely the unit normal's interval came
+    /// out (design 484, #599). Where the box meets no cell, over it at
+    /// once. `None` where a part has no certified normal.
+    pub(crate) fn jet_box(&self, rect: Cell) -> Option<JVec<Interval>> {
+        let parts = self.parts(rect)?;
+        if parts.is_empty() {
+            return self.jets_over(rect);
+        }
+        let mut out: Option<JVec<Interval>> = None;
+        for (_, q) in parts {
+            out = Some(match out {
+                None => q,
+                Some(o) => core::array::from_fn(|k| Jet {
+                    v: o[k].v.hull(q[k].v),
+                    d: core::array::from_fn(|i| o[k].d[i].hull(q[k].d[i])),
+                    h: core::array::from_fn(|i| o[k].h[i].hull(q[k].h[i])),
+                }),
+            });
+        }
+        out
+    }
+
+    /// The point's jets over a box, from the base's third-order
+    /// enclosures there, the point cut to the base's grown by `|d|`.
+    fn jets_over(&self, c: Cell) -> Option<JVec<Interval>> {
+        let d = Sheet::of(&self.base).jet3_box(c)?;
+        let q = offset_jets(d, self.distance)?;
+        Some(within_reach(q, d[0], self.distance))
+    }
+
+    /// The point's jets over the parts of a box in the offset's cells,
+    /// each part halved up to [`ENCLOSE_DEPTH`] times where the base's
     /// normal can't be certified over it whole. `None` where a part still
     /// has no certified normal.
-    pub(crate) fn jet_box(&self, [ru, rv]: Cell) -> Option<JVec<Interval>> {
-        let sheet = Sheet::of(&self.base);
-        let at = |c: Cell| offset_jets(sheet.jet3_box(c)?, self.distance);
-        if let Some(q) = at([ru, rv]) {
-            return Some(q);
-        }
+    fn parts(&self, [ru, rv]: Cell) -> Option<Vec<(Cell, JVec<Interval>)>> {
         let (pu, pv) = self.base.periods();
-        let mut out: Option<JVec<Interval>> = None;
+        let mut out = Vec::new();
         let mut stack: Vec<(Cell, u32)> = Vec::new();
         for c in &self.cells {
             for u in cut(c[0], ru, pu) {
@@ -480,7 +524,7 @@ impl Offset {
             }
         }
         while let Some((c, depth)) = stack.pop() {
-            let Some(q) = at(c) else {
+            let Some(q) = self.jets_over(c) else {
                 if depth == ENCLOSE_DEPTH {
                     return None;
                 }
@@ -493,16 +537,9 @@ impl Offset {
                 stack.push((b, depth + 1));
                 continue;
             };
-            out = Some(match out {
-                None => q,
-                Some(o) => core::array::from_fn(|k| Jet {
-                    v: o[k].v.hull(q[k].v),
-                    d: core::array::from_fn(|i| o[k].d[i].hull(q[k].d[i])),
-                    h: core::array::from_fn(|i| o[k].h[i].hull(q[k].h[i])),
-                }),
-            });
+            out.push((c, q));
         }
-        out
+        Some(out)
     }
 
     pub(crate) fn point(&self, u: f64, v: f64) -> Point3 {
@@ -642,6 +679,31 @@ impl Offset {
                 None => super::bound2::INFINITE_BOUND,
             }
         }
+    }
+}
+
+/// The point's enclosure `q` cut to its base point's `p` grown by `|d|`
+/// each way: `O = S + d N` with `|N| = 1` lies there, however loosely the
+/// unit normal's interval came out (design 484, #599).
+fn within_reach(mut q: JVec<Interval>, p: IVec3, d: f64) -> JVec<Interval> {
+    let reach = Interval::new(-d.abs(), d.abs()).expect("ordered");
+    for k in 0..3 {
+        let r = p[k] + reach;
+        let (lo, hi) = (q[k].v.lo().max(r.lo()), q[k].v.hi().min(r.hi()));
+        if let Some(v) = Interval::new(lo, hi) {
+            q[k].v = v;
+        }
+    }
+    q
+}
+
+/// `b` cut to `by`, or `b` where they don't meet.
+pub(crate) fn clip(b: &Box3, by: &Box3) -> Box3 {
+    let (lo, hi) = (b.min().max(by.min()), b.max().min(by.max()));
+    if lo.x <= hi.x && lo.y <= hi.y && lo.z <= hi.z {
+        Box3::new(lo, hi)
+    } else {
+        *b
     }
 }
 
