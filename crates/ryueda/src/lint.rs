@@ -312,7 +312,34 @@ fn tried(p: &Project, prefs: &Prefs) -> Value {
         }
         blocks.push(json!({"block": b.id, "sheets": sheets}));
     }
-    json!({"dry_run": true, "prefs": prefs, "blocks": blocks, "revision": p.revision})
+    let key = |f: &Fault| {
+        (
+            f.error.code,
+            f.error.details.get("symbol").cloned(),
+            f.error.details.get("pointer").cloned(),
+        )
+    };
+    let (s0, s1) = (
+        crate::symlint::faults(p, &now),
+        crate::symlint::faults(p, prefs),
+    );
+    let came: Vec<Fault> = s1
+        .iter()
+        .filter(|f| !s0.iter().any(|g| key(g) == key(f)))
+        .cloned()
+        .collect();
+    let went: Vec<Fault> = s0
+        .iter()
+        .filter(|f| !s1.iter().any(|g| key(g) == key(f)))
+        .cloned()
+        .collect();
+    json!({
+        "dry_run": true,
+        "prefs": prefs,
+        "blocks": blocks,
+        "symbols": {"came": crate::fault::list(&came), "went": crate::fault::list(&went)},
+        "revision": p.revision,
+    })
 }
 
 #[cfg(test)]

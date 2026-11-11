@@ -696,7 +696,6 @@ fn the_corpus_from_nothing_findings_carry_fixes() {
 /// scores before and after, and the findings that come and go, each
 /// saying which preference drove it.
 #[test]
-#[ignore = "plan 2.D Task 18"]
 fn a_preference_is_tried_without_writing() {
     let dir = tempfile::tempdir().unwrap();
     let (board, _) = fresh(dir.path(), "buck");

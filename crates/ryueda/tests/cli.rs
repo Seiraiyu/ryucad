@@ -1559,13 +1559,14 @@ fn netlists_from_the_cli() {
     p.ok(&["erc", "configure", "--severity", "pin_unconnected=default"]);
     // With nothing left in it, erc.json goes.
     assert!(!p.direct.join("board/erc.json").exists());
-    // `check` reads every file and runs ERC on every design. The one
-    // warning: its parts have LCSC offers and this machine has no
-    // catalogue to judge their supply by.
+    // `check` reads every file and runs ERC on every design. The two
+    // warnings: its parts have LCSC offers and this machine has no
+    // catalogue to judge their supply by, and its resistor `r` is a box
+    // under the built-in ANSI standards (sym_shape).
     let report = p.ok(&["check"]);
     assert_eq!(
         (&report["errors"], &report["warnings"]),
-        (&json!(0), &json!(1)),
+        (&json!(0), &json!(2)),
         "{report}"
     );
     assert_eq!(report["supply"][0]["details"]["reason"], "missing");
@@ -2290,8 +2291,32 @@ fn a_library_is_checked_from_the_cli() {
     p.fails(&["lib", "check", "--symbol", "nope"], "not_found", 1);
 }
 
+/// check judges the project's own symbols and those its designs place
+/// from a library project, and fails on a rule raised to an error.
 #[test]
-#[ignore = "plan 2.D Task 18"]
+fn check_judges_the_symbols_a_project_draws() {
+    let p = Pair::with_resistor();
+    let report = p.ok(&["check"]);
+    let sym: Vec<&Value> = report["symbols"].as_array().unwrap().iter().collect();
+    assert!(
+        sym.iter()
+            .any(|f| f["code"] == "sym_shape" && f["details"]["symbol"] == "lib/self/symbol/r"),
+        "{report}"
+    );
+    assert!(sym.iter().all(|f| f["severity"] == "warning"));
+    assert!(report["warnings"].as_u64().unwrap() >= sym.len() as u64);
+    p.ok(&["lint", "configure", "--severity", "sym_shape=error"]);
+    let e = p.fails(&["check"], "check_failed", 1);
+    assert!(
+        e["details"]["report"]["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "sym_shape" && f["severity"] == "error")
+    );
+}
+
+#[test]
 fn lint_preferences_from_the_cli() {
     let p = Pair::breakout();
     p.ok(&["layout"]);

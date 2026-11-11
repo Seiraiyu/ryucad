@@ -6,6 +6,7 @@
 //! and severity are `lint.json`'s, as the sheet lint's are.
 
 use crate::error::{Code, Error, Result};
+use crate::fault::Fault;
 use crate::library::{Library, ObjKind};
 use crate::project::{Project, SELF, ref_text};
 use crate::standards::{Class, Standards};
@@ -14,6 +15,7 @@ use ryusch::geom::Rect;
 use ryusch::lint::{Prefs, Rule, Severity};
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 /// The old sheet rule whose judgement `sym_shape` took (plan 2.D):
@@ -547,6 +549,8 @@ fn shape(s: &Symbol, class: Option<Class>, cx: &Context, out: &mut Vec<Raw>) {
         json!({"drawn": drawn.as_str(), "standard": want.as_str(), "from": cx.from}),
     );
     if cx.from == "built_in" && cx.prefs.prefer.resistor == ResistorStyle::Iec {
+        // The built-in standards draw the box because lint.json asks.
+        r.message.push_str(" (prefer.resistor = iec)");
         r.prefs.push("prefer.resistor = iec".to_owned());
     }
     let pins: Vec<&Pin> = s.pins.values().collect();
@@ -874,6 +878,83 @@ pub fn library_check(p: &Project, library: Option<&str>, symbol: Option<&str>) -
         .with("report", report));
     }
     Ok(report)
+}
+
+/// The symbols `check` judges, by library: every symbol of this project's
+/// own library, and every symbol a design's component places, wherever
+/// its library component finds it.
+fn judged(p: &Project) -> BTreeMap<String, BTreeSet<crate::id::Id>> {
+    let mut out: BTreeMap<String, BTreeSet<crate::id::Id>> = BTreeMap::new();
+    if let Ok(lib) = p.library(SELF) {
+        out.entry(SELF.to_owned())
+            .or_default()
+            .extend(lib.symbols.keys().cloned());
+    }
+    for b in p.conn.blocks.values() {
+        for c in b.components.values() {
+            let Ok(c) = &c.item else { continue };
+            let lc_alias = c.of.library.as_ref().map_or(SELF, |l| l.as_str());
+            let Ok((lc, _)) = crate::partcmd::placed(p, &c.of) else {
+                continue;
+            };
+            let alias = lc.symbol.library.as_ref().map_or(lc_alias, |l| l.as_str());
+            out.entry(alias.to_owned())
+                .or_default()
+                .insert(lc.symbol.id.clone());
+        }
+    }
+    out
+}
+
+/// Every symbol finding `check` reports under lint preferences `prefs`,
+/// as faults: the symbol's file and reference, a pointer to its first pin
+/// (or its units), and its checked fixes. A library whose standards don't
+/// read is skipped: its fault is already the project's.
+pub fn faults(p: &Project, prefs: &Prefs) -> Vec<Fault> {
+    let mut out = Vec::new();
+    for (alias, ids) in judged(p) {
+        let Ok(lib) = p.library(&alias) else { continue };
+        let Ok((st, from)) = p.standards_with(&alias, prefs) else {
+            continue;
+        };
+        let cx = Context {
+            standards: &st,
+            prefs,
+            from: &from,
+        };
+        for id in ids {
+            let Some(Ok(s)) = lib.symbols.get(&id).map(|l| l.item.as_ref()) else {
+                continue;
+            };
+            let (class, _) = class_of(lib, &id, s);
+            for f in lint(s, class, &cx) {
+                let code: Code =
+                    serde_json::from_value(json!(f.code)).expect("symbol lint codes are codes");
+                let fault = match f.severity {
+                    Severity::Error => Fault::error(code, f.message.clone()),
+                    _ => Fault::warning(code, f.message.clone()),
+                };
+                // A pin's finding points at its first pin; the shape at the
+                // drawing, a unit's size at the units.
+                let pointer = match (f.code, f.pins.first()) {
+                    (_, Some(n)) => format!("/pins/{}", crate::symbol::pointer_escape(n)),
+                    ("sym_shape", None) => "/graphics".to_owned(),
+                    (_, None) => "/units".to_owned(),
+                };
+                let mut fault = fault
+                    .with("path", lib.path(ObjKind::Symbol, &id))
+                    .with("symbol", ref_text(&alias, ObjKind::Symbol, &id))
+                    .with("pointer", pointer)
+                    .with("pins", &f.pins);
+                let shown = shown(&f, &id, lib);
+                if let Some(fixes) = shown.get("fixes") {
+                    fault = fault.with("fixes", fixes);
+                }
+                out.push(fault);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
