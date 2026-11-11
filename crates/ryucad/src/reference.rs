@@ -478,6 +478,102 @@ fn lookup<'a>(
     }
 }
 
+/// Every reference of `part`'s features that built which follows a face
+/// or edge a later feature split or merged (design 447), as
+/// `reference_followed` warnings, in feature order: its own features'
+/// references and, in an assembly, its mates' and instance patterns'
+/// connectors. From the files and `result` alone.
+pub fn followed(part: &Part, result: &crate::rebuild::PartResult) -> Vec<serde_json::Value> {
+    let order = part.order();
+    let solids = Solids::of_order(part, order);
+    let mut out = Vec::new();
+    for (id, r) in &result.features {
+        if r.is_err() {
+            continue;
+        }
+        let Some(Ok(f)) = part.features.get(id) else {
+            continue;
+        };
+        out.extend(followed_by(part, &solids, id, f, result));
+        out.extend(crate::mate::followed(&part.id, id, f, result));
+    }
+    out
+}
+
+/// [`followed`] for feature `id` alone, `f` as it is or as a write would
+/// leave it, in `results` as `solids` lists its chains.
+pub fn followed_by(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    f: &Feature,
+    results: &dyn Results,
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for (role, r) in f.references() {
+        // Every role a feature names has a class: every write in every
+        // test passes here, so a new role without one fails them.
+        debug_assert!(
+            Follow::classify(f, &role).is_some(),
+            "{} {id}: its role {role} has no follow class (reference::Follow::classify)",
+            f.type_name()
+        );
+        let follow = Follow::of(f, &role);
+        if follow == Follow::One {
+            continue;
+        }
+        let Some(read) = solids.view(&r.feature, id) else {
+            continue;
+        };
+        let Some(Ok(o)) = results.result(read) else {
+            continue;
+        };
+        let Some(b) = o.solid(&r.feature) else {
+            continue;
+        };
+        if b.body.by_name(r.name).is_some() {
+            continue;
+        }
+        let lineage = Lineage::of(solids, &r.feature, read, results);
+        if let Followed::To(_, t) = lineage.follow(r.name, follow, &b.body) {
+            let text = r.text(&part.id);
+            let prefix = text.rsplit_once('/').map_or("", |(p, _)| p).to_owned();
+            out.push(followed_warning(&part.id, id, &role, &text, &prefix, &t));
+        }
+    }
+    out
+}
+
+/// A `reference_followed` warning: `reference`, held by `feature` of
+/// `part` in its `role`, follows `t`'s pieces, written under `prefix` as
+/// the reference is.
+pub fn followed_warning(
+    part: &Id,
+    feature: &Id,
+    role: &str,
+    reference: &str,
+    prefix: &str,
+    t: &Trail,
+) -> serde_json::Value {
+    let pieces: Vec<String> = t.pieces.iter().map(|n| format!("{prefix}/{n}")).collect();
+    let by =
+        t.by.as_ref()
+            .map_or(String::new(), |b| format!(" (split or merged by {b})"));
+    serde_json::json!({
+        "code": "reference_followed",
+        "part": part,
+        "feature": feature,
+        "role": role,
+        "reference": reference,
+        "pieces": pieces,
+        "by": t.by,
+        "message": format!(
+            "{feature}: its {role} {reference} is gone{by}; it follows what it became: {}",
+            pieces.join(", ")
+        ),
+    })
+}
+
 /// What a resolved reference was, for messages: `face`, `edge`, `vertex`.
 pub fn kind(e: EntityId) -> &'static str {
     match e {
