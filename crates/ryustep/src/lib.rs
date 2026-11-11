@@ -11,6 +11,7 @@
 //! It knows nothing of documents or projects: ryucad decides where a file
 //! comes from and what its bodies become.
 
+pub mod census;
 mod error;
 pub use ryu_part21 as part21;
 pub mod products;
@@ -20,7 +21,10 @@ pub mod write;
 
 pub use error::{ImportError, StepError, WriteError};
 pub use read::{Held, Imported, Model, Opened, ReadOptions, Referenced, open, read};
-pub use write::{Child, LengthUnit, Passed, Product, WriteModel, WriteOptions, write, write_with};
+pub use write::{
+    Approximated, Child, LengthUnit, Passed, Product, WriteModel, WriteOptions, Written, write,
+    write_report, write_with,
+};
 
 /// This crate's version, which a released ryucad's cache identity names.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

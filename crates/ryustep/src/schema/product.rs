@@ -82,9 +82,17 @@ fn definition(id: Id, params: &[Param], count: usize) -> Result<Entity, ImportEr
     let mut a = Args::new(id, params, count)?;
     let definition_id = a.string()?;
     a.skip();
+    let formation = a.id()?;
+    let documents = if count == 5 {
+        a.skip();
+        a.ids()?
+    } else {
+        Vec::new()
+    };
     Ok(Entity::Definition {
         id: definition_id,
-        formation: a.id()?,
+        formation,
+        documents,
     })
 }
 
@@ -118,7 +126,8 @@ mod tests {
             get(5),
             Entity::Definition {
                 id: "design".into(),
-                formation: 6
+                formation: 6,
+                documents: vec![]
             }
         );
         assert_eq!(
@@ -160,5 +169,91 @@ mod tests {
             }
         );
         assert_eq!(get(14).kind(), "PRODUCT_DEFINITION");
+        assert!(matches!(get(14), Entity::Definition { documents, .. } if documents == [20]));
+    }
+
+    #[test]
+    fn document_entities() {
+        let e = entities(
+            "#1=DOCUMENT_FILE('a.stp','',$,#2,'',$);#2=DOCUMENT_TYPE('');\
+             #3=DOCUMENT_REPRESENTATION_TYPE('digital',#1);\
+             #4=APPLIED_DOCUMENT_REFERENCE(#1,'',(#9));\
+             #5=DOCUMENT_PRODUCT_EQUIVALENCE('equivalence',$,#1,#8);\
+             #6=APPLIED_EXTERNAL_IDENTIFICATION_ASSIGNMENT('a.stp',#7,#7,(#1));\
+             #10=PROPERTY_DEFINITION('document property','',#1);\
+             #11=PROPERTY_DEFINITION_REPRESENTATION(#10,#12);\
+             #13=DESCRIPTIVE_REPRESENTATION_ITEM('data format','STEP AP214');\
+             #14=DOCUMENT('','b.stp','',#2);",
+        );
+        let get = |id| e.get(0, id).unwrap().clone();
+        assert_eq!(
+            get(1),
+            Entity::Document {
+                id: "a.stp".into(),
+                name: "".into(),
+                kind: Some(2),
+                file: true
+            }
+        );
+        assert_eq!(get(2), Entity::DocumentType { name: "".into() });
+        assert_eq!(
+            get(3),
+            Entity::DocumentRepresentationType {
+                name: "digital".into(),
+                document: 1
+            }
+        );
+        assert_eq!(
+            get(4),
+            Entity::DocumentReference {
+                document: 1,
+                items: vec![9]
+            }
+        );
+        assert_eq!(
+            get(5),
+            Entity::DocumentEquivalence {
+                document: 1,
+                product: 8
+            }
+        );
+        assert_eq!(
+            get(6),
+            Entity::ExternalIdentification {
+                id: "a.stp".into(),
+                items: vec![1]
+            }
+        );
+        assert_eq!(
+            get(10),
+            Entity::PropertyDefinition {
+                name: "document property".into(),
+                definition: 1
+            }
+        );
+        assert_eq!(
+            get(11),
+            Entity::PropertyRepresentation {
+                definition: 10,
+                representation: 12
+            }
+        );
+        assert_eq!(
+            get(13),
+            Entity::Descriptive {
+                name: "data format".into(),
+                description: "STEP AP214".into()
+            }
+        );
+        assert_eq!(
+            get(14),
+            Entity::Document {
+                id: "".into(),
+                name: "b.stp".into(),
+                kind: Some(2),
+                file: false
+            }
+        );
+        assert_eq!(get(1).kind(), "DOCUMENT_FILE");
     }
 }

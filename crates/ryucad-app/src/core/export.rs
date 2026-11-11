@@ -159,6 +159,8 @@ pub struct Written {
     pub triangles: Option<u64>,
     /// The failing features left out, as `<part>/<feature> (<code>)`.
     pub skipped: Vec<String>,
+    /// What a STEP export left out, a line each (design 448).
+    pub omitted: Vec<String>,
 }
 
 /// A face the export couldn't write, as a refusal names it: its
@@ -333,6 +335,12 @@ impl Export {
                     blake3: v["blake3"].as_str().unwrap_or_default().to_owned(),
                     triangles,
                     skipped: failing(&v["skipped"]),
+                    omitted: v["transfer"]["omitted"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|o| o["summary"].as_str().map(str::to_owned))
+                        .collect(),
                 });
             }
             Err(e) => {
@@ -595,6 +603,7 @@ mod tests {
                 blake3: "ab".into(),
                 triangles: Some(14),
                 skipped: vec![],
+                omitted: Vec::new(),
             })
         );
         // STEP writes no meshes, so no triangles.
@@ -693,5 +702,23 @@ mod tests {
         m.focus = Some("pin".into());
         assert_eq!(shown_refs(&m, "pin/shank/f1"), ["pin/shank/f1"]);
         assert!(shown_refs(&m, "nothing").is_empty());
+    }
+
+    #[test]
+    fn a_step_answer_says_what_it_left_out() {
+        let mut e = Export::new("p", Choices::default());
+        e.answered(Ok(serde_json::json!({
+            "out": "/tmp/p.step", "bytes": 10, "blake3": "ab", "products": [],
+            "transfer": {"omitted": [
+                {"what": "history", "count": 3, "summary": "feature history and parameters: 3 feature(s) in 1 part(s), written as their shapes"},
+                {"what": "appearance", "count": 1, "summary": "1 solid(s) with a colour or opacity, not written to STEP yet"}]}
+        })));
+        assert_eq!(
+            e.done.unwrap().omitted,
+            [
+                "feature history and parameters: 3 feature(s) in 1 part(s), written as their shapes",
+                "1 solid(s) with a colour or opacity, not written to STEP yet"
+            ]
+        );
     }
 }

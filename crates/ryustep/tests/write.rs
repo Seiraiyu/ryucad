@@ -531,6 +531,7 @@ fn swept_and_lofted_bodies_come_back() {
         &LoftOptions::default(),
     )
     .unwrap();
+    let swept = bar.clone();
     // The tube comes back as one face with no loops on a NURBS periodic
     // both ways.
     for b in [tube, bar, frustum] {
@@ -542,6 +543,26 @@ fn swept_and_lofted_bodies_come_back() {
         )));
         let (v, w) = (volume(&b), volume(&read));
         assert!((v - w).abs() <= 1e-3 * v, "{v} against {w}");
+    }
+    // Its sweep faces are written as NURBS within the pipe tolerance:
+    // the report says which and the bound used.
+    let w = ryustep::write_report(
+        &WriteModel {
+            products: vec![Product {
+                id: "swept".into(),
+                bodies: vec![swept.clone()],
+                ..Default::default()
+            }],
+        },
+        &[],
+        &opts(LengthUnit::Meter),
+    )
+    .unwrap();
+    assert!(!w.approximated.is_empty(), "a sweep's faces are NURBS");
+    for a in &w.approximated {
+        assert_eq!(a.product, 0);
+        assert!(a.faces > 0 && a.bound > 0.0, "{a:?}");
+        assert!(a.bound <= WriteOptions::default().pipe_tolerance, "{a:?}");
     }
 }
 
@@ -1059,4 +1080,40 @@ fn a_passed_representation_reads_back_as_its_products_body() {
         .unwrap();
     let out2 = ryustep::write_with(&model, &[passed(cut2)], &o).unwrap();
     assert_eq!(out, out2);
+}
+
+/// `write_report` writes `write`'s bytes, and counts every instance it
+/// wrote by category and entity name (design 448).
+#[test]
+fn a_report_counts_what_was_written() {
+    use ryustep::census::Category;
+    let o = opts(LengthUnit::Millimeter);
+    let model = WriteModel {
+        products: vec![Product {
+            id: "part".into(),
+            name: "part".into(),
+            bodies: primitives()[..2].to_vec(),
+            ..Default::default()
+        }],
+    };
+    let w = ryustep::write_report(&model, &[], &o).unwrap();
+    assert_eq!(w.bytes, write(&model, &o).unwrap());
+    let count = |c: Category, n: &str| {
+        w.counts
+            .iter()
+            .find(|(k, name, _)| *k == c && name == n)
+            .map_or(0, |x| x.2)
+    };
+    assert_eq!(count(Category::ProductStructure, "PRODUCT"), 1);
+    assert_eq!(count(Category::Topology, "MANIFOLD_SOLID_BREP"), 2);
+    assert_eq!(count(Category::Units, "LENGTH_UNIT NAMED_UNIT SI_UNIT"), 1);
+    assert!(
+        w.counts.iter().all(|(c, _, _)| *c != Category::Unknown),
+        "{:?}",
+        w.counts
+    );
+    let total: u64 = w.counts.iter().map(|x| x.2).sum();
+    let file = ryustep::part21::parse(&w.bytes).unwrap();
+    assert_eq!(total, file.instances.len() as u64);
+    assert!(w.approximated.is_empty(), "primitives are exact");
 }
