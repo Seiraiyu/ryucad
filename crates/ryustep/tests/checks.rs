@@ -317,6 +317,44 @@ fn cp_radial_rims_and_rounds_check() {
     );
 }
 
+/// #322: KiCad's two CP_Radial_D8.0mm cans. Their top is a ring of
+/// torus sectors (`SURFACE_OF_REVOLUTION`s of one circle) whose healed
+/// corners leave gaps of a few nanometres between pcurves; a ray from a
+/// neighbour's rim slipped through one, so healing read sectors that only
+/// abut as overlapping and its self-union failed (`FacesOverlap`). Now
+/// each heals as one solid, without a repair, and checks clean in under
+/// 30 s on one thread with `RYUKEI_BARS=1`.
+#[test]
+#[ignore = "needs the KiCad corpus (scripts/fetch-kicad.sh)"]
+fn cp_radial_d8_cans_heal_and_check() {
+    let _serial = serial();
+    let key = OpKey::from_bytes(b"ryucad.feature\0body\0body");
+    for name in [
+        "Capacitor_THT.3dshapes/CP_Radial_D8.0mm_P2.50mm.step",
+        "Capacitor_THT.3dshapes/CP_Radial_D8.0mm_P5.00mm.step",
+    ] {
+        let Some(path) = kicad(name) else {
+            return;
+        };
+        let bodies = bodies_keyed(&path, key);
+        assert_eq!(bodies.len(), 1, "{name}");
+        let body = &bodies[0].1;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let t = std::time::Instant::now();
+        let faults = pool.install(|| check_intersections(body));
+        eprintln!("{name}: {:?}", t.elapsed());
+        assert_eq!(named(body, &faults), [], "{name}");
+        assert!(
+            !bars() || t.elapsed().as_secs_f64() < 30.0,
+            "{name}: {:?}",
+            t.elapsed()
+        );
+    }
+}
+
 /// #264: ftc_07's AP242 edition. Four planes, each tangent to a fillet
 /// torus at a saddle of its tube (a critical value of 2.6e-13 m), at the
 /// one vertex they share: the trace fails on the cells there. Traced
