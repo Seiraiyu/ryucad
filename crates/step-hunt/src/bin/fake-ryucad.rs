@@ -124,7 +124,13 @@ fn main() {
                     {"code": "internal", "message": "fake", "details": {}}}),
                 _ => json!({"id": "defeature", "ok": true}),
             };
-            answer(json!({"parts": [{"part": "body", "features": [f]}]}))
+            // As ryucad does: a feature that fails makes the rebuild refuse.
+            let report = json!({"parts": [{"part": "body", "features": [f.clone()]}]});
+            if f["ok"] == true {
+                answer(report)
+            } else {
+                refuse("rebuild_failed", report)
+            }
         }
         "check" if how == "checkfail" => refuse(
             "check_failed",

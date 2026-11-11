@@ -794,7 +794,15 @@ fn defeature(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
             ],
         )
         .map_err(refused)?;
-        let rebuilt = r.cmd(&p1, &["rebuild", "body"])?;
+        // A feature that fails makes `rebuild` refuse, `rebuild_failed`,
+        // with the part's report in its details.
+        let rebuilt = match r.cmd(&p1, &["rebuild", "body"]) {
+            Ok(v) => v,
+            Err(Outcome::Failed { error, .. }) if error["code"] == "rebuild_failed" => {
+                error["details"].clone()
+            }
+            Err(o) => return Err(o),
+        };
         let f = rebuilt["parts"][0]["features"]
             .as_array()
             .into_iter()
