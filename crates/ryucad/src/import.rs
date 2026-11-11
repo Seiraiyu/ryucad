@@ -887,7 +887,8 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
     if ask.dry_run {
         let mut s = session.proposed(&writes)?;
         let parts = parts_report(&mut s, &opened, &plan)?;
-        return Ok(answer(head, &opened, parts, warnings, true));
+        let transfer = transfer_of(&opened, &stored, &plan, &parts);
+        return Ok(answer(head, &opened, parts, warnings, true, transfer));
     }
     // PDM names need the project's ID; Git's attributes keep the file's
     // bytes once it is there.
@@ -901,7 +902,8 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
     crate::drivers::write_attributes(&root)?;
     session.reload()?;
     let parts = parts_report(session, &opened, &plan)?;
-    Ok(answer(head, &opened, parts, warnings, false))
+    let transfer = transfer_of(&opened, &stored, &plan, &parts);
+    Ok(answer(head, &opened, parts, warnings, false, transfer))
 }
 
 /// `import --update <stored> <file>`: `file`'s bytes replace the stored
@@ -1024,7 +1026,11 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
     };
     if ask.dry_run {
         let parts = parts_report(&mut proposed, &opened, &u.planned)?;
-        return Ok(extra(answer(head, &opened, parts, warnings, true), None));
+        let transfer = transfer_of(&opened, &target, &u.planned, &parts);
+        return Ok(extra(
+            answer(head, &opened, parts, warnings, true, transfer),
+            None,
+        ));
     }
     // Assemblies kept current until now stay so: the moves this writes
     // are solved again in the same change.
@@ -1046,8 +1052,9 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
     session.reload()?;
     let assemblies = crate::mate::keep_current(session, &current)?;
     let parts = parts_report(session, &opened, &u.planned)?;
+    let transfer = transfer_of(&opened, &target, &u.planned, &parts);
     Ok(extra(
-        answer(head, &opened, parts, warnings, false),
+        answer(head, &opened, parts, warnings, false, transfer),
         Some(assemblies),
     ))
 }
@@ -1405,15 +1412,53 @@ fn parts_report(
     Ok(out)
 }
 
+/// The transfer report of `plan` over `opened` (design 448): each import
+/// feature that built read its body's representation; the product tree
+/// was read when anything was made; each failing feature's error names
+/// its instances (`step`) with its code. `parts` is `parts_report`'s, in
+/// `plan`'s order.
+fn transfer_of(opened: &Opened, path: &str, plan: &[Planned], parts: &[Value]) -> Value {
+    use crate::doc::files::Feature;
+    let mut read = ryustep::census::Read {
+        roots: Vec::new(),
+        product_tree: !plan.is_empty(),
+    };
+    let mut failed = Vec::new();
+    for (pl, p) in plan.iter().zip(parts) {
+        for (fid, f) in &pl.features {
+            let Feature::Import(i) = f else {
+                continue;
+            };
+            let Some(row) = p["features"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|r| r["id"] == fid.as_str())
+            else {
+                continue;
+            };
+            if row["ok"] == true {
+                if let Ok(k) = select(fid, i, opened) {
+                    read.roots.extend(opened.roots(k));
+                }
+            } else {
+                failed.extend(crate::transfer::failed_instances(&row["error"]));
+            }
+        }
+    }
+    crate::transfer::json(&opened.census.transfer(&read, &failed), path, false)
+}
+
 /// The answer: the stored file (`head`), the parts, the file's product
-/// tree faults, and warnings: those given, then each import feature that
-/// doesn't build (`import_failed`).
+/// tree faults, warnings (those given, then each import feature that
+/// doesn't build: `import_failed`) and the transfer report.
 fn answer(
     head: Value,
     opened: &Opened,
     parts: Vec<Value>,
     warnings: Vec<String>,
     dry_run: bool,
+    transfer: Value,
 ) -> Value {
     let failed: Vec<String> = parts
         .iter()
@@ -1453,6 +1498,7 @@ fn answer(
     if !warnings.is_empty() {
         v["warnings"] = json!(warnings);
     }
+    v["transfer"] = transfer;
     v
 }
 
@@ -2142,6 +2188,74 @@ pub(crate) mod tests {
             params["solid"] = json!(true);
         }
         crate::server::tests::call(s, "import", params)
+    }
+
+    /// Every import answer says what it made of the file (design 448):
+    /// a dry run and an import alike, the box's geometry, topology, units
+    /// and product tree interpreted and nothing failed.
+    #[test]
+    fn an_import_reports_its_transfer() {
+        let (_src, path) = outside("box_ap214.stp");
+        let (_dir, mut s) = crate::server::tests::fresh();
+        for dry in [true, false] {
+            let v = import_call(&mut s, json!({"path": path, "dry_run": dry})).unwrap();
+            let t = &v["transfer"];
+            assert_eq!(t["file"], "imports/box_ap214.step", "{t}");
+            let cats: Vec<&str> = t["categories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["category"].as_str().unwrap())
+                .collect();
+            for c in ["geometry", "topology", "product_structure", "units"] {
+                assert!(cats.contains(&c), "{c}: {cats:?}");
+                let line = t["categories"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|x| x["category"] == c)
+                    .unwrap();
+                assert!(line["interpreted"]["count"].as_u64().unwrap() > 0, "{line}");
+                assert_eq!(line["failed"]["count"], 0);
+                assert!(line["interpreted"]["names"].as_array().unwrap().len() <= 8);
+            }
+            let total: u64 = t["categories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| {
+                    ["interpreted", "retained", "unreferenced", "failed"]
+                        .iter()
+                        .map(|b| c[*b]["count"].as_u64().unwrap())
+                        .sum::<u64>()
+                })
+                .sum();
+            assert_eq!(t["instances"], total);
+            assert_eq!(t["summary"].as_array().unwrap().len(), cats.len());
+        }
+    }
+
+    /// A body that fails names its instances under `failed`, with its
+    /// code; what else its representation reaches is retained.
+    #[test]
+    fn a_failing_body_counts_its_instances_as_failed() {
+        let failing = crate::transfer::failed_instances(&json!({
+            "code": "import_failed",
+            "details": {"step": ["#12", "#40", "x"]}
+        }));
+        assert_eq!(
+            failing,
+            [
+                ryustep::census::Failed {
+                    instance: 12,
+                    code: "import_failed".into()
+                },
+                ryustep::census::Failed {
+                    instance: 40,
+                    code: "import_failed".into()
+                },
+            ]
+        );
     }
 
     #[test]
