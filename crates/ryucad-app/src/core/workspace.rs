@@ -107,6 +107,10 @@ enum Pending {
     Branches,
     /// A merge preview with the worktree at this path, made from this key.
     Preview(String, String),
+    /// The Branches tab's branches (`branch.list`).
+    BranchList,
+    /// The Check out dialog's `branch.switch`.
+    Switch,
     /// `deps.list` and `deps.outdated`, for the tab and the marks.
     DepsList,
     DepsOutdated,
@@ -1714,11 +1718,13 @@ impl Workspace {
             .max(Duration::from_millis(100))
     }
 
-    /// Reads the Branches tab's worktrees again (`worktree.list`); their
-    /// previews follow, one at a time.
+    /// Reads the Branches tab's branches (`branch.list`) and worktrees
+    /// (`worktree.list`) again; the worktrees' previews follow, one at a
+    /// time.
     pub fn load_branches(&mut self) {
         self.branches_at = Some(Instant::now());
         self.branches_waiting = true;
+        self.send(Request::BranchList {}, Pending::BranchList);
         self.send(Request::WorktreeList {}, Pending::Branches);
     }
 
@@ -1764,6 +1770,30 @@ impl Workspace {
         if let Err(e) = ryucad::client::open_app(dir, Some(dir), app.as_deref()) {
             self.fail(e);
         }
+    }
+
+    /// Opens the Check out dialog for `branch`, naming every other
+    /// participant attached to this daemon (question 436).
+    pub fn ask_checkout(&mut self, branch: &str) {
+        let me = self.link.participant.clone();
+        let attached = self.people.others(&me).map(|p| p.name.clone()).collect();
+        self.branches.checkout = self.branches.checkout_of(branch, attached);
+    }
+
+    /// Checks out the dialog's branch in this folder (`branch.switch`),
+    /// guarded by the project revision the list was read at; the dialog
+    /// closes when it is done, or says why it was refused.
+    pub fn confirm_checkout(&mut self) {
+        let Some(c) = self.branches.checkout.as_mut().filter(|c| !c.busy) else {
+            return;
+        };
+        c.busy = true;
+        c.refused = None;
+        let req = Request::BranchSwitch {
+            branch: c.branch.clone(),
+            expected_revision: c.expected.clone(),
+        };
+        self.send(req, Pending::Switch);
     }
 
     /// Reads the dependencies and what is outdated again, once at a time:
@@ -4198,6 +4228,30 @@ impl Workspace {
                     // Said in the tab: outside a repository, there are none.
                     Err(e) => self.branches.error = Some(e),
                 }
+            }
+            (Pending::BranchList, a) => match a {
+                Ok(a) => {
+                    self.branches.branch_list = Some(a.result);
+                    self.branches.branch_error = None;
+                }
+                // Said in the tab: outside a repository, there are none.
+                Err(e) => self.branches.branch_error = Some(e),
+            },
+            (Pending::Switch, a) => {
+                match a {
+                    Ok(_) => self.branches.checkout = None,
+                    Err(e) => {
+                        if let Some(c) = self.branches.checkout.as_mut() {
+                            c.busy = false;
+                            c.refused = Some(e);
+                        }
+                    }
+                }
+                // The head moved, or the list was stale: read both again.
+                // The files' changes come as model.changed and
+                // project.changed, as an outside change's do.
+                self.load_branches();
+                self.reload_history();
             }
             (Pending::DepsList, a) => {
                 match a {

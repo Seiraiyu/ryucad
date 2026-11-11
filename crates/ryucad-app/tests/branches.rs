@@ -105,3 +105,62 @@ fn the_tab_lists_the_other_worktree_and_previews_merging_it() {
             .is_some_and(|c| c.wanted.get(&key).is_some_and(|h| *h != before))
     }));
 }
+
+#[test]
+fn a_branch_is_checked_out_from_the_window_and_refused_while_dirty() {
+    use ryucad::error::Code;
+    use serde_json::json;
+    let p = Project::new().with_part().committed();
+    p.git(&["switch", "-q", "-c", "arm"]);
+    p.ok(&["feature", "edit", "p", "base", "--param", "x=15"]);
+    p.git(&["commit", "-q", "-am", "longer"]);
+    p.git(&["switch", "-q", "main"]);
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()));
+    p.ok(&["--as", "claude-1", "status", "reviewing"]);
+    ws.load_branches();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.branches.branch_list.is_some() && ws.people.others(ws.me()).any(|p| p.name == "claude-1")
+    }));
+    assert_eq!(ws.branches.current_branch(), Some("main"));
+    // The dialog names who else is attached.
+    ws.ask_checkout("arm");
+    let c = ws.branches.checkout.clone().unwrap();
+    assert_eq!(c.standing, "1 ahead");
+    assert!(
+        c.attached.contains(&"claude-1".to_owned()),
+        "{:?}",
+        c.attached
+    );
+    // An uncommitted change: refused, the file named, nothing switched.
+    p.ok(&["feature", "edit", "p", "boss", "--param", "radius=4"]);
+    ws.confirm_checkout();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.branches
+            .checkout
+            .as_ref()
+            .is_some_and(|c| c.refused.is_some() && !c.busy)
+    }));
+    let e = ws
+        .branches
+        .checkout
+        .as_ref()
+        .unwrap()
+        .refused
+        .clone()
+        .unwrap();
+    assert_eq!(e.code, Code::CheckoutDirty);
+    assert_eq!(e.details["files"], json!(["parts/p/features/boss.json"]));
+    // Committed in Git, the switch goes through and the window follows.
+    p.git(&["commit", "-q", "-am", "radius"]);
+    ws.confirm_checkout();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle() && ws.branches.checkout.is_none() && ws.branches.current_branch() == Some("arm")
+    }));
+    let shown = p.ok(&["feature", "show", "p", "base"]);
+    assert_eq!(shown["params"]["x"]["value"], "15 mm");
+    let log = p.ok(&["activity"]);
+    let last = log["entries"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["kind"], "switch");
+    assert_eq!(last["participant"]["kind"], "human");
+}
