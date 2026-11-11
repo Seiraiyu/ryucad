@@ -265,30 +265,33 @@ fn the_race_imports_rebuilds_and_exports_within_its_bars() {
 }
 
 /// The census (design 448) adds at most 5% to ryustep's parse and decode
-/// of the race's 125.8 MB file, the best of three each way. With
+/// of the race's file, the best of five each way. With
 /// `RYUCAD_BARS=1` the bar is asserted as it is; elsewhere ten times
 /// looser. Also prints the census's size beside the source's.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
 fn the_census_adds_at_most_five_percent_to_reading() {
     let bytes = race();
-    let best = |f: &dyn Fn()| {
-        (0..3)
-            .map(|_| {
-                let t = Instant::now();
-                f();
-                t.elapsed().as_secs_f64()
-            })
-            .fold(f64::INFINITY, f64::min)
+    // Best of five each way, the two interleaved so that a busy moment
+    // weighs on both: the base is a fraction of a second.
+    let time = |f: &dyn Fn()| {
+        let t = Instant::now();
+        f();
+        t.elapsed().as_secs_f64()
     };
-    let plain = best(&|| {
+    let plain_run = || {
         let file = ryustep::part21::parse(&bytes).unwrap();
         std::hint::black_box(ryustep::schema::Entities::decode(&file));
-    });
-    let counted = best(&|| {
+    };
+    let counted_run = || {
         let file = ryustep::part21::parse(&bytes).unwrap();
         std::hint::black_box(ryustep::schema::Entities::decode_counted(&file));
-    });
+    };
+    let (mut plain, mut counted) = (f64::INFINITY, f64::INFINITY);
+    for _ in 0..5 {
+        plain = plain.min(time(&plain_run));
+        counted = counted.min(time(&counted_run));
+    }
     let file = ryustep::part21::parse(&bytes).unwrap();
     let (_, census) = ryustep::schema::Entities::decode_counted(&file);
     eprintln!(

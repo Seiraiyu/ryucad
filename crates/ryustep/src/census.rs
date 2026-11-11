@@ -103,9 +103,7 @@ impl Category {
 /// The category of the entity named `name` (upper case): `Unknown` for a
 /// name the table doesn't hold.
 pub fn category_of(name: &str) -> Category {
-    TABLE
-        .binary_search_by(|(n, _)| (*n).cmp(name))
-        .map_or(Category::Unknown, |k| TABLE[k].1)
+    table_index(name).map_or(Category::Unknown, |k| TABLE[k].1)
 }
 
 /// The category of a property named `name`, compared without case:
@@ -146,64 +144,174 @@ pub fn joined(parts: &[Part]) -> String {
 }
 
 use crate::part21::{File, Instance};
-use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 /// Every instance of a file: its entity name, its category, and the
 /// instances it refers to, kept as a graph by index (dangling references
 /// left out), with whether its weakly connected component holds an
 /// anchor (product structure, a style, or a representation): an
 /// instance outside every such component is unreferenced.
-#[derive(Clone, Debug, Default, PartialEq)]
+///
+/// Built in parallel, a chunk of instances at a time (Task 6 of plan
+/// 24.A: the census must add at most 5% to a file's parse and decode).
+/// Entity names in [`TABLE`] are kept as their place in it, so only
+/// unknown and complex names are interned; components are found the
+/// first time a report asks ([`Census::transfer`], [`Census::anchored_at`]),
+/// never while a file is read.
+#[derive(Clone, Debug, Default)]
 pub struct Census {
     ids: Vec<u64>,
+    /// [`TABLE`]'s names, then the unknown and complex names, as met.
     names: Vec<Box<str>>,
     name: Vec<u32>,
     category: Vec<Category>,
     offsets: Vec<u32>,
     targets: Vec<u32>,
-    anchored: Vec<bool>,
+    anchored: OnceLock<Vec<bool>>,
 }
 
-/// One instance as the parallel decode sees it.
-pub(crate) struct Seen<'f> {
-    name: Cow<'f, str>,
-    category: Category,
-    refs: Vec<u32>,
+/// Equal when they count the same instances alike; whether components
+/// were found yet doesn't matter.
+impl PartialEq for Census {
+    fn eq(&self, other: &Census) -> bool {
+        self.ids == other.ids
+            && self.names == other.names
+            && self.name == other.name
+            && self.category == other.category
+            && self.offsets == other.offsets
+            && self.targets == other.targets
+    }
 }
 
-fn refs(p: &Param, out: &mut Vec<u64>) {
+/// How many instances one parallel task takes.
+const CHUNK: usize = 4096;
+
+/// A name not in [`TABLE`], interned once the chunks are in.
+const OVERFLOW: u32 = u32::MAX;
+
+/// FNV-1a over a name's bytes: [`table_index`]'s slot.
+fn hash(name: &str) -> u64 {
+    name.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// How many slots [`table_index`]'s open-addressed table has: a power
+/// of two, more than twice [`TABLE`]'s length.
+const SLOTS: usize = 2048;
+
+/// `name`'s place in [`TABLE`]: hashed rather than searched, since the
+/// census looks up every instance's name.
+fn table_index(name: &str) -> Option<usize> {
+    static SLOTTED: OnceLock<Vec<u16>> = OnceLock::new();
+    let slots = SLOTTED.get_or_init(|| {
+        let mut v = vec![u16::MAX; SLOTS];
+        for (k, (n, _)) in TABLE.iter().enumerate() {
+            let mut i = hash(n) as usize & (SLOTS - 1);
+            while v[i] != u16::MAX {
+                i = (i + 1) & (SLOTS - 1);
+            }
+            v[i] = k as u16;
+        }
+        v
+    });
+    let mut i = hash(name) as usize & (SLOTS - 1);
+    loop {
+        match slots[i] {
+            u16::MAX => return None,
+            k if TABLE[k as usize].0 == name => return Some(k as usize),
+            _ => i = (i + 1) & (SLOTS - 1),
+        }
+    }
+}
+
+/// The instances `p` refers to, as indices (`index`), onto `out`.
+fn refs(p: &Param, index: &impl Fn(u64) -> Option<u32>, out: &mut Vec<u32>) {
     match p {
-        Param::Ref(r) => out.push(*r),
-        Param::List(l) => l.iter().for_each(|x| refs(x, out)),
-        Param::Typed(_, v) => refs(v, out),
+        Param::Ref(r) => out.extend(index(*r)),
+        Param::List(l) => l.iter().for_each(|x| refs(x, index, out)),
+        Param::Typed(_, v) => refs(v, index, out),
         _ => {}
     }
 }
 
-/// What the census keeps of `inst`, whose file's instance numbers are
-/// `ids` (ascending).
-pub(crate) fn seen<'f>(inst: &'f Instance, ids: &[u64]) -> Seen<'f> {
-    let parts = inst.record.parts();
-    let name = match parts {
-        [one] => Cow::Borrowed(&*one.name),
-        _ => Cow::Owned(joined(parts)),
+/// What one chunk of instances gives the census, indices local to it.
+struct Chunk {
+    name: Vec<u32>,
+    category: Vec<Category>,
+    /// Each instance's end in `targets`.
+    ends: Vec<u32>,
+    targets: Vec<u32>,
+    /// Instances whose names aren't in the table, with those names.
+    overflow: Vec<(u32, String)>,
+    /// Its `PROPERTY_DEFINITION_REPRESENTATION`s.
+    representations: Vec<u32>,
+}
+
+/// The census of `instances`, a chunk of a file whose instance numbers
+/// are `ids` (ascending).
+fn chunk(instances: &[Instance], ids: &[u64], pdr: u32) -> Chunk {
+    let first = ids.first().copied().unwrap_or(0);
+    // Instance numbers are nearly always dense: look there first.
+    let index = |r: u64| -> Option<u32> {
+        let k = r.wrapping_sub(first) as usize;
+        if ids.get(k) == Some(&r) {
+            return Some(k as u32);
+        }
+        ids.binary_search(&r).ok().map(|k| k as u32)
     };
-    let mut raw = Vec::new();
-    for p in parts {
-        p.params.iter().for_each(|x| refs(x, &mut raw));
+    let n = instances.len();
+    let mut c = Chunk {
+        name: Vec::with_capacity(n),
+        category: Vec::with_capacity(n),
+        ends: Vec::with_capacity(n),
+        targets: Vec::with_capacity(n * 3),
+        overflow: Vec::new(),
+        representations: Vec::new(),
+    };
+    for (j, inst) in instances.iter().enumerate() {
+        let parts = inst.record.parts();
+        let (key, category) = match parts {
+            [one] => match table_index(&one.name) {
+                Some(k) if &*one.name == "PROPERTY_DEFINITION" => {
+                    (k as u32, category_of_record(&inst.record))
+                }
+                Some(k) => (k as u32, TABLE[k].1),
+                None => {
+                    c.overflow.push((j as u32, one.name.to_string()));
+                    (OVERFLOW, Category::Unknown)
+                }
+            },
+            _ => {
+                c.overflow.push((j as u32, joined(parts)));
+                (OVERFLOW, category_of_record(&inst.record))
+            }
+        };
+        if key == pdr {
+            c.representations.push(j as u32);
+        }
+        c.name.push(key);
+        c.category.push(category);
+        let start = c.targets.len();
+        for p in parts {
+            p.params
+                .iter()
+                .for_each(|x| refs(x, &index, &mut c.targets));
+        }
+        let mine = &mut c.targets[start..];
+        mine.sort_unstable();
+        let mut kept = 0;
+        for i in 0..mine.len() {
+            if kept == 0 || mine[i] != mine[kept - 1] {
+                mine[kept] = mine[i];
+                kept += 1;
+            }
+        }
+        c.targets.truncate(start + kept);
+        c.ends.push(c.targets.len() as u32);
     }
-    let mut out: Vec<u32> = raw
-        .into_iter()
-        .filter_map(|r| ids.binary_search(&r).ok().map(|k| k as u32))
-        .collect();
-    out.sort_unstable();
-    out.dedup();
-    Seen {
-        name,
-        category: category_of_record(&inst.record),
-        refs: out,
-    }
+    c
 }
 
 /// Whether an instance anchors its component: product structure, a
@@ -224,103 +332,94 @@ fn find(parent: &mut [u32], mut x: u32) -> u32 {
 }
 
 impl Census {
-    /// The census of `file`, decoded one instance at a time (in
-    /// parallel, as [`crate::schema::Entities::decode_counted`] does).
+    /// The census of `file`, in parallel: the same on any number of
+    /// threads.
     pub fn of(file: &File) -> Census {
         use rayon::prelude::*;
-        let ids: Vec<u64> = file.instances.iter().map(|i| i.id).collect();
-        let seen: Vec<Seen<'_>> = file
+        let ids: Vec<u64> = file.instances.par_iter().map(|i| i.id).collect();
+        let pdr = table_index("PROPERTY_DEFINITION_REPRESENTATION").expect("in the table") as u32;
+        let pd = table_index("PROPERTY_DEFINITION").expect("in the table") as u32;
+        let chunks: Vec<Chunk> = file
             .instances
-            .par_iter()
-            .with_min_len(256)
-            .map(|i| seen(i, &ids))
+            .par_chunks(CHUNK)
+            .map(|c| chunk(c, &ids, pdr))
             .collect();
-        Census::from_seen(ids, seen)
-    }
-
-    /// The census of instances `ids` as `seen`, in order: names
-    /// interned, the graph laid out, properties' representations given
-    /// their category, and components found. Sequential, so the same on
-    /// any number of threads.
-    pub(crate) fn from_seen(ids: Vec<u64>, seen: Vec<Seen<'_>>) -> Census {
         let n = ids.len();
-        let mut lookup: HashMap<String, u32> = HashMap::new();
-        let mut names: Vec<Box<str>> = Vec::new();
-        let mut name = Vec::with_capacity(n);
-        let mut category = Vec::with_capacity(n);
-        let mut offsets = Vec::with_capacity(n + 1);
-        let mut targets = Vec::new();
-        offsets.push(0u32);
-        for s in &seen {
-            let k = match lookup.get(s.name.as_ref()) {
-                Some(&k) => k,
-                None => {
-                    let k = names.len() as u32;
-                    names.push(s.name.as_ref().into());
-                    lookup.insert(s.name.to_string(), k);
-                    k
-                }
-            };
-            name.push(k);
-            category.push(s.category);
-            targets.extend_from_slice(&s.refs);
-            offsets.push(targets.len() as u32);
+        // Laid out side by side, each chunk where it goes, in parallel.
+        let mut bases = Vec::with_capacity(chunks.len());
+        let mut total = 0usize;
+        for c in &chunks {
+            bases.push(total as u32);
+            total += c.targets.len();
         }
-        drop(seen);
-        let out = |k: usize| offsets[k] as usize..offsets[k + 1] as usize;
+        let mut name = vec![0u32; n];
+        let mut category = vec![Category::Unknown; n];
+        let mut offsets = vec![0u32; n + 1];
+        let mut targets = vec![0u32; total];
+        let mut pieces: Vec<&mut [u32]> = Vec::with_capacity(chunks.len());
+        let mut rest = &mut targets[..];
+        for c in &chunks {
+            let (a, b) = rest.split_at_mut(c.targets.len());
+            pieces.push(a);
+            rest = b;
+        }
+        name.par_chunks_mut(CHUNK)
+            .zip(category.par_chunks_mut(CHUNK))
+            .zip(offsets[1..].par_chunks_mut(CHUNK))
+            .zip(pieces.into_par_iter())
+            .zip(chunks.par_iter().zip(bases.par_iter()))
+            .for_each(|((((nm, ca), of), ts), (c, &base))| {
+                nm.copy_from_slice(&c.name);
+                ca.copy_from_slice(&c.category);
+                for (o, e) in of.iter_mut().zip(&c.ends) {
+                    *o = base + e;
+                }
+                ts.copy_from_slice(&c.targets);
+            });
+        // Names the table doesn't hold, interned in instance order.
+        let mut names: Vec<Box<str>> = TABLE.iter().map(|(n, _)| Box::from(*n)).collect();
+        let mut lookup: HashMap<String, u32> = HashMap::new();
+        for (ci, c) in chunks.iter().enumerate() {
+            for (j, s) in &c.overflow {
+                let k = match lookup.get(s.as_str()) {
+                    Some(&k) => k,
+                    None => {
+                        let k = names.len() as u32;
+                        names.push(s.as_str().into());
+                        lookup.insert(s.clone(), k);
+                        k
+                    }
+                };
+                name[ci * CHUNK + *j as usize] = k;
+            }
+        }
         // A property's representation, and that representation's
         // property and geometry items, are what the property is about.
-        if let (Some(&pdr), Some(&pd)) = (
-            lookup.get("PROPERTY_DEFINITION_REPRESENTATION"),
-            lookup.get("PROPERTY_DEFINITION"),
-        ) {
-            for k in 0..n {
-                if name[k] != pdr {
-                    continue;
-                }
+        let out = |k: usize| offsets[k] as usize..offsets[k + 1] as usize;
+        for (ci, c) in chunks.iter().enumerate() {
+            for &j in &c.representations {
+                let k = ci * CHUNK + j as usize;
                 let refs = &targets[out(k)];
                 let Some(&def) = refs.iter().find(|&&t| name[t as usize] == pd) else {
                     continue;
                 };
-                let c = category[def as usize];
-                if c == Category::Properties {
+                let cat = category[def as usize];
+                if cat == Category::Properties {
                     continue;
                 }
-                category[k] = c;
+                category[k] = cat;
                 for &rep in refs.iter().filter(|&&t| t != def) {
-                    category[rep as usize] = c;
+                    category[rep as usize] = cat;
                     for &item in &targets[out(rep as usize)] {
                         if matches!(
                             category[item as usize],
                             Category::Properties | Category::Geometry
                         ) {
-                            category[item as usize] = c;
+                            category[item as usize] = cat;
                         }
                     }
                 }
             }
-        }
-        // Weakly connected components, by union and find.
-        let mut parent: Vec<u32> = (0..n as u32).collect();
-        for k in 0..n {
-            for &t in &targets[out(k)] {
-                let (a, b) = (find(&mut parent, k as u32), find(&mut parent, t));
-                if a != b {
-                    parent[a.max(b) as usize] = a.min(b);
-                }
-            }
-        }
-        let mut root_anchored = vec![false; n];
-        for k in 0..n {
-            if is_anchor(category[k], &names[name[k] as usize]) {
-                let r = find(&mut parent, k as u32);
-                root_anchored[r as usize] = true;
-            }
-        }
-        let mut anchored = Vec::with_capacity(n);
-        for k in 0..n {
-            let r = find(&mut parent, k as u32);
-            anchored.push(root_anchored[r as usize]);
         }
         Census {
             ids,
@@ -329,8 +428,35 @@ impl Census {
             category,
             offsets,
             targets,
-            anchored,
+            anchored: OnceLock::new(),
         }
+    }
+
+    /// Whether each instance's weakly connected component holds an
+    /// anchor: found by union and find the first time it is asked.
+    fn anchored(&self) -> &[bool] {
+        self.anchored.get_or_init(|| {
+            let n = self.len();
+            let mut parent: Vec<u32> = (0..n as u32).collect();
+            for k in 0..n {
+                for &t in self.out(k) {
+                    let (a, b) = (find(&mut parent, k as u32), find(&mut parent, t));
+                    if a != b {
+                        parent[a.max(b) as usize] = a.min(b);
+                    }
+                }
+            }
+            let mut root_anchored = vec![false; n];
+            for k in 0..n {
+                if is_anchor(self.category[k], &self.names[self.name[k] as usize]) {
+                    let r = find(&mut parent, k as u32);
+                    root_anchored[r as usize] = true;
+                }
+            }
+            (0..n)
+                .map(|k| root_anchored[find(&mut parent, k as u32) as usize])
+                .collect()
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -351,7 +477,10 @@ impl Census {
             + self.category.capacity() * size_of::<Category>()
             + self.offsets.capacity() * size_of::<u32>()
             + self.targets.capacity() * size_of::<u32>()
-            + self.anchored.capacity() * size_of::<bool>()
+            + self
+                .anchored
+                .get()
+                .map_or(0, |a| a.capacity() * size_of::<bool>())
     }
 
     fn index(&self, id: u64) -> Option<usize> {
@@ -375,7 +504,7 @@ impl Census {
 
     /// Whether instance `id`'s component holds an anchor.
     pub fn anchored_at(&self, id: u64) -> Option<bool> {
-        self.index(id).map(|k| self.anchored[k])
+        self.index(id).map(|k| self.anchored()[k])
     }
 
     /// Every instance counted by category and entity name, in category
@@ -493,6 +622,7 @@ impl Census {
     #[allow(clippy::needless_range_loop)] // `k` indexes several arrays
     pub fn transfer(&self, read: &Read, failed: &[Failed]) -> Transfer {
         let n = self.len();
+        let anchored = self.anchored();
         let mut reached = vec![false; n];
         let mut stack: Vec<u32> = read
             .roots
@@ -526,10 +656,10 @@ impl Census {
                 Bucket::Failed
             } else if INTERPRETED.contains(&c)
                 && (reached[k]
-                    || (read.product_tree && c == Category::ProductStructure && self.anchored[k]))
+                    || (read.product_tree && c == Category::ProductStructure && anchored[k]))
             {
                 Bucket::Interpreted
-            } else if !self.anchored[k] {
+            } else if !anchored[k] {
                 Bucket::Unreferenced
             } else {
                 Bucket::Retained
