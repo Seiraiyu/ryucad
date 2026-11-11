@@ -568,6 +568,17 @@ impl Census {
     }
 }
 
+/// Every one of `instances` counted by category and entity name, in
+/// category order then by name: what a writer wrote.
+pub fn count(instances: &[Instance]) -> Vec<(Category, String, u64)> {
+    let mut m: BTreeMap<(Category, String), u64> = BTreeMap::new();
+    for i in instances {
+        *m.entry((category_of_record(&i.record), joined(i.record.parts())))
+            .or_default() += 1;
+    }
+    m.into_iter().map(|((c, n), k)| (c, n, k)).collect()
+}
+
 /// Entity names and their categories, sorted by name. ISO 10303-42, -43,
 /// -41, -46, -47 and -242's names, and CAx-IF's recommended practices'.
 const TABLE: &[(&str, Category)] = &[
