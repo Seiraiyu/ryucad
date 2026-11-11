@@ -1587,7 +1587,7 @@ fn solids(p: &Part, rev: &Rev, result: &PartResult) -> Vec<Solid> {
 /// The product an imported part or assembly came from: the one product
 /// every import feature of a part names, or every imported instance of
 /// an assembly is used in.
-fn imported(p: &Part) -> Option<ProductRef> {
+pub(crate) fn imported(p: &Part) -> Option<ProductRef> {
     let mut named: BTreeSet<Option<ProductRef>> = BTreeSet::new();
     for fid in p.order() {
         match p.features.get(fid) {

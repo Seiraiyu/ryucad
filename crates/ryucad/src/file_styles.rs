@@ -16,7 +16,6 @@ use crate::doc::project::{ImportFile, Part};
 use crate::rebuild::{Output, PartResult};
 use ryustep::Opened;
 use ryustep::styles::{Style, Target};
-use serde_json::Value;
 
 /// A file's style as an entry: `#rrggbb` and the opacity; `None` for
 /// one that sets neither.
@@ -115,12 +114,134 @@ pub fn of_part(part: &Part, result: &PartResult) -> AppearanceFile {
     out
 }
 
+/// An imported assembly's file layer: each occurrence style its files
+/// give in a usage path that starts at the assembly's own product, under
+/// the instance path its imported instances make of those usages —
+/// `<path>` for a style on the product at its end, `<path>/<founder>` for
+/// one on a body, the founder of the import that reads that body. A style
+/// whose path no instance stands for, or on a face (an assembly colours
+/// occurrences, not faces), is left out: the import's transfer report
+/// counts it `retained`. `parts` finds a placed part's files; `files` an
+/// import file by path.
+pub fn of_assembly<'a>(
+    part: &'a Part,
+    parts: &dyn Fn(&Id) -> Option<&'a Part>,
+    files: &dyn Fn(&str) -> Option<&'a ImportFile>,
+) -> AppearanceFile {
+    let mut out = AppearanceFile::default();
+    let mut sources = std::collections::BTreeSet::new();
+    for fid in part.order() {
+        if let Some(Ok(Feature::Instance(i))) = part.features.get(fid)
+            && let Some(u) = &i.import
+        {
+            sources.insert((u.file.clone(), u.product.clone()));
+        }
+    }
+    for (path, product) in sources {
+        let Some(file) = files(&path) else {
+            continue;
+        };
+        let Ok(opened) = crate::import::opened(file) else {
+            continue;
+        };
+        let Some(root) = definition_of(&opened, &product) else {
+            continue;
+        };
+        for o in opened.occurrence_styles() {
+            if o.path.first().map(|x| x.0) != Some(root) {
+                continue;
+            }
+            let (Some(key), Some(l)) = (key_of(&opened, &path, part, &o, parts), look(&o.style))
+            else {
+                continue;
+            };
+            out.occurrences.entry(key).or_insert(l);
+        }
+    }
+    out
+}
+
+/// The definition a product reference names: its id and name, the
+/// `ordinal`th of those.
+pub fn definition_of(opened: &Opened, p: &crate::doc::import::ProductRef) -> Option<usize> {
+    opened
+        .products
+        .definitions
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| *d.product_id == p.id && *d.name == p.name)
+        .nth(p.ordinal as usize)
+        .map(|(k, _)| k)
+}
+
+/// The index among definition `k`'s usages of the one an imported
+/// instance stands for: its id, and its ordinal among the usages with
+/// that id and child.
+pub fn usage_index(opened: &Opened, k: usize, u: &crate::doc::assembly::ImportUsage) -> Option<usize> {
+    let usage = u.usage.as_deref()?;
+    let children = &opened.products.definitions.get(k)?.children;
+    (0..children.len()).find(|&n| {
+        &*children[n].id == usage && crate::import::usage_ordinal(opened, k, n) == u.ordinal
+    })
+}
+
+/// The key occurrence style `o` of file `file` takes in assembly `asm`'s
+/// layer, walking its usages down the instances imported from them.
+fn key_of<'a>(
+    opened: &Opened,
+    file: &str,
+    asm: &'a Part,
+    o: &ryustep::styles::OccurrenceStyle,
+    parts: &dyn Fn(&Id) -> Option<&'a Part>,
+) -> Option<String> {
+    let mut at = asm;
+    let mut steps: Vec<Id> = Vec::new();
+    let mut leaf = None;
+    for (step, &(k, n)) in o.path.iter().enumerate() {
+        // Usages are told apart by id and ordinal per child, so the
+        // instance's part must be the usage's child's product too.
+        let child = crate::import::product_of(opened, opened.products.definitions[k].children[n].definition);
+        let fid = at.order().iter().find(|fid| {
+            matches!(at.features.get(*fid), Some(Ok(Feature::Instance(i)))
+                if i.import.as_ref().is_some_and(|u| u.file == file
+                    && usage_index(opened, k, u) == Some(n))
+                    && parts(&i.part)
+                        .and_then(crate::export::imported)
+                        .is_none_or(|p| p == child))
+        })?;
+        let Some(Ok(Feature::Instance(i))) = at.features.get(fid) else {
+            return None;
+        };
+        steps.push(fid.clone());
+        let placed = parts(&i.part)?;
+        if step + 1 < o.path.len() {
+            at = placed;
+        } else {
+            leaf = Some(placed);
+        }
+    }
+    let path = crate::assembly::path_text(&steps);
+    match o.target {
+        Target::Product => Some(path),
+        Target::Body(h) => {
+            let leaf = leaf?;
+            let founder = leaf.order().iter().find(|fid| {
+                matches!(leaf.features.get(*fid), Some(Ok(Feature::Import(i)))
+                    if i.file.path == file
+                        && crate::import::select(fid, i, opened).ok() == Some(h))
+            })?;
+            Some(format!("{path}/{founder}"))
+        }
+        Target::Face { .. } | Target::Unplaced => None,
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::server::tests::{call, fresh};
     use crate::session::Session;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     /// A file of ryustep's styled fixtures (`painted.stp`,
     /// `painted_assembly.stp`), by path.
@@ -208,5 +329,29 @@ pub(crate) mod tests {
         .unwrap();
         let p = Id::parse("p", "part").unwrap();
         assert!(layer(&mut s, &p).is_empty());
+    }
+
+    #[test]
+    fn an_assemblys_layer_names_the_instance_its_usage_made() {
+        let (_d, s, v) = imported("painted_assembly.stp", json!({}));
+        let rack = part_of(&v, "assembly", 0);
+        let project = s.project();
+        let p = project.part(&rack).unwrap();
+        let l = of_assembly(p, &|id| project.parts.get(id), &|path| project.imports.get(path));
+        assert_eq!(l.occurrences.len(), 1, "{l:?}");
+        let (key, look) = l.occurrences.iter().next().unwrap();
+        assert_eq!(look.colour.as_deref(), Some("#00ff00"));
+        // `<instance>/<founder>`: the instance the file's usage `2` made.
+        let (instance, founder) = key.split_once('/').unwrap();
+        let Some(Ok(Feature::Instance(i))) = p.features.get(&Id::parse(instance, "feature").unwrap())
+        else {
+            panic!("{key}")
+        };
+        assert_eq!(i.import.as_ref().unwrap().usage.as_deref(), Some("2"));
+        let block = project.part(&i.part).unwrap();
+        assert!(matches!(
+            block.features.get(&Id::parse(founder, "feature").unwrap()),
+            Some(Ok(Feature::Import(_)))
+        ));
     }
 }
