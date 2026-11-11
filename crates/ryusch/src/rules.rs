@@ -146,7 +146,7 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                         vec![key.clone()],
                     ));
                 }
-                let b = label::label_box(l.kind, name, l.at, l.side);
+                let b = label::boxed(block, key, l);
                 if !area.contains(&b) {
                     out.push(v(
                         "inside",

@@ -340,11 +340,11 @@ fn frames_once(block: &Block, layout: &mut Layout) {
                 }
             }
         }
-        for list in layout.labels.values() {
+        for (key, list) in &layout.labels {
             for l in list.iter().filter(|l| l.sheet == r.sheet) {
                 let part = l.on.rsplit_once('/').map_or(l.on.as_str(), |(p, _)| p);
                 if r.parts.iter().any(|k| k == part) {
-                    add(crate::label::label_box(l.kind, &l.text, l.at, l.side));
+                    add(crate::label::boxed(block, key, l));
                 }
             }
         }

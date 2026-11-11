@@ -99,7 +99,13 @@ impl Cluster {
                 let name = &block.label_text(p, k);
                 // A rail may be drawn by labels instead: room for either.
                 r = r
-                    .union(crate::label::label_box(kind, name, anchor, side))
+                    .union(crate::label::label_box_with(
+                        kind,
+                        name,
+                        &block.nets[n].intent,
+                        anchor,
+                        side,
+                    ))
                     .union(crate::label::label_box(
                         LabelKind::Net,
                         name,

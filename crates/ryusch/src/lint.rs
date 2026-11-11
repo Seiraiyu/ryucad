@@ -510,9 +510,9 @@ fn ink_boxes(block: &Block, layout: &crate::layout::Layout, sid: &str) -> Vec<Re
             }
         }
     }
-    for list in layout.labels.values() {
+    for (key, list) in &layout.labels {
         for l in list.iter().filter(|l| l.sheet == sid) {
-            out.push(label::label_box(l.kind, &l.text, l.at, l.side));
+            out.push(label::boxed(block, key, l));
         }
     }
     for by_sheet in layout.routes.values() {
@@ -1337,9 +1337,9 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 }
             }
         }
-        for list in layout.labels.values() {
+        for (key, list) in &layout.labels {
             for l in list.iter().filter(|l| &l.sheet == sid) {
-                ink += label::label_box(l.kind, &l.text, l.at, l.side).area();
+                ink += label::boxed(block, key, l).area();
             }
         }
         let density = (ink * 1000 / Rect::new([0, 0], size).area().max(1)) as i64;

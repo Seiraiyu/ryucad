@@ -291,6 +291,7 @@ pub fn net(key: &str, name: &str, kind: NetKind) -> Net {
         key: key.into(),
         name: name.into(),
         kind,
+        intent: String::new(),
     }
 }
 

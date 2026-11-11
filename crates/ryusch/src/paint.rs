@@ -228,12 +228,23 @@ fn label_items(
     at: Point,
     side: Side,
     flow: crate::input::Flow,
+    intent: &str,
 ) {
     let d = if kind == LabelKind::OffSheet {
         label::drawn_flow(name, at, side, flow)
     } else {
-        label::drawn(kind, name, at, side)
+        label::drawn_with(kind, name, intent, at, side)
     };
+    if let Some((p, anchor, text)) = &d.extra {
+        items.push(Item::Text {
+            text: text.clone(),
+            at: *p,
+            size: MIN_SIZE,
+            anchor: *anchor,
+            vertical: false,
+            colour: POWER,
+        });
+    }
     let colour = if kind.signal() { LABEL } else { POWER };
     // A net label's line is the wire it names; a connector's outline is
     // its own.
@@ -346,7 +357,7 @@ fn bus_items(block: &Block, layout: &Layout, sid: &str, items: &mut Vec<Item>) {
                 .map_or(crate::input::Flow::Bidirectional, |n| {
                     label::flow_on_sheet(block, layout, *n, sid)
                 });
-            label_items(items, LabelKind::OffSheet, &c.text, c.at, c.side, flow);
+            label_items(items, LabelKind::OffSheet, &c.text, c.at, c.side, flow, "");
         }
     }
 }
@@ -500,7 +511,15 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
                 (LabelKind::OffSheet, Some(n)) => label::flow_on_sheet(block, layout, n, sid),
                 _ => crate::input::Flow::Bidirectional,
             };
-            label_items(items, l.kind, &l.text, l.at, l.side, flow);
+            label_items(
+                items,
+                l.kind,
+                &l.text,
+                l.at,
+                l.side,
+                flow,
+                label::intent_of(block, key),
+            );
             out.labels.push(Placed {
                 net: key.clone(),
                 on: l.on.clone(),
@@ -508,7 +527,7 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
                 text: l.text.clone(),
                 at: l.at,
                 side: l.side,
-                rect: label::label_box(l.kind, &l.text, l.at, l.side),
+                rect: label::boxed(block, key, l),
             });
         }
     }

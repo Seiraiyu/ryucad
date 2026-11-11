@@ -159,6 +159,54 @@ fn node_key(n: &Node) -> Option<String> {
 }
 
 /// Whether a rail is ground: its voltage 0 V, or its name a ground's.
+/// Whether a rail's name already says its voltage (plan 2.C): a ground's
+/// name for 0 V (`is_ground`'s names), else a number in it written `3V3`,
+/// `3.3V` or `5V` (after a `+`, `_`, anything not a letter or digit, or the
+/// start) equal to it.
+fn name_says_voltage(name: &str, voltage: &str) -> bool {
+    let q = |t: &str| ryueda_parts::param::quantity(t, crate::units::Dim::VOLTAGE);
+    let Some(want) = q(voltage) else {
+        return false;
+    };
+    let upper = name.to_ascii_uppercase();
+    if q("0 V") == Some(want.clone())
+        && ["GND", "VSS", "AGND", "DGND", "PGND", "0V"]
+            .iter()
+            .any(|g| upper == *g || upper.starts_with(&format!("{g}_")))
+    {
+        return true;
+    }
+    let b = upper.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if !b[i].is_ascii_digit() || (i > 0 && b[i - 1].is_ascii_alphanumeric()) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'.') {
+            i += 1;
+        }
+        if i < b.len() && b[i] == b'V' {
+            let whole = &upper[start..i];
+            i += 1;
+            let frac = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            let text = if whole.contains('.') || frac == i {
+                format!("{whole} V")
+            } else {
+                format!("{whole}.{} V", &upper[frac..i])
+            };
+            if q(&text) == Some(want.clone()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn is_ground(r: &crate::conn::Rail) -> bool {
     let name = r.name.to_ascii_uppercase();
     let zero = r
@@ -448,6 +496,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
             key: id.to_string(),
             name,
             kind: NetKind::Signal,
+            intent: String::new(),
         });
     }
     let mut rails: Vec<Id> = Vec::new();
@@ -471,8 +520,17 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
         };
         let key = format!("rail:{r}");
         index.insert(key.clone(), nets.len());
+        // A rail's voltage under its power port, where its name doesn't
+        // say it already (plan 2.C).
+        let intent = rail
+            .voltage
+            .as_deref()
+            .filter(|v| !name_says_voltage(&rail.name, v))
+            .map(String::from)
+            .unwrap_or_default();
         nets.push(input::Net {
             key,
+            intent,
             name: rail.name.clone(),
             kind: if is_ground(rail) {
                 NetKind::Ground
@@ -488,6 +546,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
             key,
             name: port.name.clone(),
             kind: NetKind::Signal,
+            intent: String::new(),
         });
     }
     // The block's buses (plan 2.C), their members by index in the file's
@@ -1041,5 +1100,27 @@ mod tests {
             .map(|n| input.nets[*n].key.as_str())
             .collect();
         assert_eq!(keys, ["sda", "scl"], "in the file's order");
+    }
+
+    #[test]
+    fn a_rails_name_that_says_its_voltage_draws_none() {
+        for (name, v) in [
+            ("3V3", "3.3 V"),
+            ("+3V3", "3.3 V"),
+            ("+3.3V", "3.3 V"),
+            ("VCC_5V", "5 V"),
+            ("+12V", "12 V"),
+            ("GND", "0 V"),
+        ] {
+            assert!(name_says_voltage(name, v), "{name} says {v}");
+        }
+        for (name, v) in [
+            ("VDD", "3.3 V"),
+            ("3V3", "5 V"),
+            ("VBAT", "3.7 V"),
+            ("AGND", "0.5 V"),
+        ] {
+            assert!(!name_says_voltage(name, v), "{name} doesn't say {v}");
+        }
     }
 }

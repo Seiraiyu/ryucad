@@ -271,9 +271,9 @@ pub fn drawn(block: &Block, layout: &Layout, which: &[&str]) -> Option<Rect> {
             }
         }
     }
-    for list in layout.labels.values() {
+    for (key, list) in &layout.labels {
         for l in list.iter().filter(|l| on(&l.sheet)) {
-            boxes.push(label::label_box(l.kind, &l.text, l.at, l.side).shift(at(&l.sheet)));
+            boxes.push(label::boxed(block, key, l).shift(at(&l.sheet)));
         }
     }
     for by_sheet in layout.routes.values() {

@@ -3097,7 +3097,7 @@ fn draw(
                     for (key, list) in &prev.labels {
                         for l in list.iter().filter(|l| l.sheet == sid) {
                             if block.net(key).is_some() {
-                                g.block_label(label::label_box(l.kind, &l.text, l.at, l.side));
+                                g.block_label(label::boxed(block, key, l));
                             }
                         }
                     }
@@ -3199,13 +3199,20 @@ fn draw(
                     .map(|l| l.at);
                 // With nowhere on the wire for the port, the pins take
                 // ports of their own as any others.
-                let Some(at) = port_on_run(&tried, &run, &name, had) else {
+                let intent = block.nets[b.net].intent.clone();
+                let Some(at) = port_on_run(&tried, &run, &name, &intent, had) else {
                     continue;
                 };
                 field = tried;
                 groups.insert(b.served, route::expand(&run).into_iter().collect());
                 routes.entry(b.net).or_default().push(run);
-                field.block_label(label::label_box(LabelKind::Power, &name, at, Side::Up));
+                field.block_label(label::label_box_with(
+                    LabelKind::Power,
+                    &name,
+                    &intent,
+                    at,
+                    Side::Up,
+                ));
                 labels.entry(b.net).or_default().push(Label {
                     text: name,
                     sheet: sid.clone(),
@@ -3566,7 +3573,13 @@ fn draw(
 /// bend, else the node nearest the run's middle; never on a pin's end nor
 /// where the run goes on up. `None` when nowhere is clear (the wire alone
 /// joins the pins, and the rail's other ports name it).
-fn port_on_run(field: &Field, run: &[Point], name: &str, had: Option<Point>) -> Option<Point> {
+fn port_on_run(
+    field: &Field,
+    run: &[Point],
+    name: &str,
+    intent: &str,
+    had: Option<Point>,
+) -> Option<Point> {
     let nodes: Vec<Point> = route::expand(run)
         .into_iter()
         .map(route::point_of)
@@ -3577,7 +3590,13 @@ fn port_on_run(field: &Field, run: &[Point], name: &str, had: Option<Point>) -> 
         p != first
             && p != last
             && !up(p)
-            && field.clear_label(label::label_box(LabelKind::Power, name, p, Side::Up))
+            && field.clear_label(label::label_box_with(
+                LabelKind::Power,
+                name,
+                intent,
+                p,
+                Side::Up,
+            ))
     };
     let mut order: Vec<Point> = had.into_iter().filter(|p| nodes.contains(p)).collect();
     order.extend(run[1..run.len() - 1].iter().copied());
@@ -4386,8 +4405,9 @@ fn place_labels_in(
         );
         let kept = prev_runs.get(&n).map(|r| (r, &net_pins));
         let name = &block.label_text(p, k);
+        let intent = block.nets[n].intent.as_str();
         let fits_as = |field: &Field, kind: LabelKind, stub: &[Point], at: Point, side: Side| {
-            if !field.clear_label(label::label_box(kind, name, at, side)) {
+            if !field.clear_label(label::label_box_with(kind, name, intent, at, side)) {
                 return false;
             }
             stub.is_empty() || field.can_mark(n, stub)
@@ -4518,7 +4538,7 @@ fn place_labels_in(
         if !stub.is_empty() && field.mark(n, &stub).is_ok() {
             routes.entry(n).or_default().push(stub);
         }
-        field.block_label(label::label_box(kind, name, at, side));
+        field.block_label(label::label_box_with(kind, name, intent, at, side));
         labels.entry(n).or_default().push(Label {
             text: name.clone(),
             sheet: sid.to_owned(),

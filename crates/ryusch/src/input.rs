@@ -204,6 +204,10 @@ pub struct Net {
     /// What its labels say.
     pub name: String,
     pub kind: NetKind,
+    /// What the sheet writes beside its power ports or ground, in the
+    /// small size: a rail's voltage where its name doesn't say it; ""
+    /// for none (plan 2.C; 2.E's style decides what else is shown).
+    pub intent: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

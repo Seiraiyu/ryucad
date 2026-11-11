@@ -19,6 +19,9 @@ pub struct Drawn {
     /// the page.
     pub text: Option<(Point, Anchor, bool)>,
     pub bounds: Rect,
+    /// A power port's or ground's intent: its text, anchor point and
+    /// anchoring, in the small size (plan 2.C).
+    pub extra: Option<(Point, Anchor, String)>,
 }
 
 /// `p` given with y along `side` (x to its right), from `at`.
@@ -71,6 +74,7 @@ pub fn drawn(kind: LabelKind, name: &str, at: Point, side: Side) -> Drawn {
                 lines,
                 text: Some((base, anchor, v)),
                 bounds: shape.union(tb),
+                extra: None,
             }
         }
         LabelKind::Ground => {
@@ -90,12 +94,14 @@ pub fn drawn(kind: LabelKind, name: &str, at: Point, side: Side) -> Drawn {
                     lines,
                     text: Some((base, anchor, v)),
                     bounds: shape.union(tb),
+                    extra: None,
                 }
             } else {
                 Drawn {
                     lines,
                     text: None,
                     bounds: shape,
+                    extra: None,
                 }
             }
         }
@@ -147,6 +153,7 @@ pub fn drawn(kind: LabelKind, name: &str, at: Point, side: Side) -> Drawn {
                 lines: vec![line],
                 text: Some((base, anchor, vertical)),
                 bounds: wire.union(tb),
+                extra: None,
             }
         }
         LabelKind::OffSheet => {
@@ -179,6 +186,7 @@ pub fn drawn(kind: LabelKind, name: &str, at: Point, side: Side) -> Drawn {
                 lines: vec![outline, chevron],
                 text: Some((base, anchor, false)),
                 bounds,
+                extra: None,
             }
         }
     }
@@ -242,6 +250,40 @@ pub fn drawn_flow(name: &str, at: Point, side: Side, flow: crate::input::Flow) -
         }
     }
     d
+}
+
+/// [`drawn`], with a power port's or ground's intent written past its
+/// name in the small size (a supply's above it, a ground's below it).
+pub fn drawn_with(kind: LabelKind, name: &str, intent: &str, at: Point, side: Side) -> Drawn {
+    let mut d = drawn(kind, name, at, side);
+    if intent.is_empty() || !matches!(kind, LabelKind::Power | LabelKind::Ground) {
+        return d;
+    }
+    let base = if kind == LabelKind::Power {
+        [at[0], d.bounds.max[1] + GRID / 4]
+    } else {
+        [at[0], d.bounds.min[1] - GRID / 4 - font::MIN_SIZE]
+    };
+    let tb = font::text_box(intent, font::MIN_SIZE, base, Anchor::Middle);
+    d.bounds = d.bounds.union(tb);
+    d.extra = Some((base, Anchor::Middle, intent.to_owned()));
+    d
+}
+
+/// The box [`drawn_with`] takes.
+pub fn label_box_with(kind: LabelKind, name: &str, intent: &str, at: Point, side: Side) -> Rect {
+    drawn_with(kind, name, intent, at, side).bounds
+}
+
+/// The box label `l` of the net keyed `key` takes, its net's intent
+/// written past a power port or ground.
+pub fn boxed(block: &crate::input::Block, key: &str, l: &crate::layout::Label) -> Rect {
+    label_box_with(l.kind, &l.text, intent_of(block, key), l.at, l.side)
+}
+
+/// The intent of the net keyed `key`, "" for none.
+pub fn intent_of<'a>(block: &'a crate::input::Block, key: &str) -> &'a str {
+    block.net(key).map_or("", |n| block.nets[n].intent.as_str())
 }
 
 /// The box a label takes.
@@ -522,6 +564,26 @@ mod tests {
                 .lines
                 .len(),
             3
+        );
+    }
+
+    #[test]
+    fn a_power_port_writes_its_rails_voltage_under_its_name() {
+        let at = [10 * GRID, 10 * GRID];
+        let plain = label_box(LabelKind::Power, "VDD", at, Side::Up);
+        let with = label_box_with(LabelKind::Power, "VDD", "3.3 V", at, Side::Up);
+        assert!(with.max[1] > plain.max[1], "a line more, above the name");
+        let d = drawn_with(LabelKind::Ground, "AGND", "0 V", at, Side::Down);
+        assert_eq!(d.extra.as_ref().map(|(_, _, t)| t.as_str()), Some("0 V"));
+        // No intent, no change.
+        assert_eq!(
+            label_box_with(LabelKind::Power, "VDD", "", at, Side::Up),
+            plain
+        );
+        // Net labels and connectors carry none in 2.C.
+        assert_eq!(
+            label_box_with(LabelKind::Net, "SDA", "fast", at, Side::Right),
+            label_box(LabelKind::Net, "SDA", at, Side::Right)
         );
     }
 }

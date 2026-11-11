@@ -266,10 +266,7 @@ fn boxes(block: &Block, l: &Layout, k: &Key) -> Vec<(String, Rect)> {
                 .flatten()
                 .filter(|x| x.on == on)
             {
-                out.push((
-                    lab.sheet.clone(),
-                    label::label_box(lab.kind, &lab.text, lab.at, lab.side),
-                ));
+                out.push((lab.sheet.clone(), label::boxed(block, net, lab)));
             }
         }
         "buses" => {
