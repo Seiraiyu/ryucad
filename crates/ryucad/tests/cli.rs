@@ -1125,6 +1125,7 @@ fn every_protocol_method_has_a_command() {
         ("mass", &["mass"]),
         ("sheet.get", &["sheet"]),
         ("feature_faces.get", &["feature-faces"]),
+        ("blends.get", &["blends"]),
         ("flat.get", &["flat"]),
         ("clearance", &["clearance"]),
         ("deps.add", &["deps", "add"]),

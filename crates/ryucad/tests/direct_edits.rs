@@ -1190,3 +1190,89 @@ fn chamfers_resize_and_a_fillet_becomes_one() {
     let rep = report(&mut t, "r");
     assert_eq!(rep["resized"][0]["now"]["kind"], "chamfer", "{rep}");
 }
+
+/// `blends.get` lists the rounded box's twelve fillets and eight corners,
+/// with sizes and references, and with `below` exactly what a
+/// `delete_blend --below` takes (its report's blends); a second ask comes
+/// from the cache; a bad tolerance and a reference import are refused.
+#[test]
+fn the_blends_query_lists_what_delete_blend_takes() {
+    let (_dir, mut s) = boxed();
+    rounded(&mut s, 3.0);
+    // A 5 mm fillet on a second box: kept by below 3.5 mm.
+    add(
+        &mut s,
+        json!({"type": "box", "id": "c", "params": {"x": 40, "y": 30, "z": 20},
+               "placement": {"origin": [60, 0, 0]}}),
+    );
+    let rim = edge(
+        &body(&mut s, "c"),
+        "c",
+        [100.0, 0.0, 20.0],
+        [100.0, 30.0, 20.0],
+    );
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "g", "radius": 5, "edges": [rim]}),
+    );
+    let all = must(&mut s, "blends.get", json!({"part": "p", "solid": "b"}));
+    assert_eq!(all["blends"].as_array().unwrap().len(), 12, "{all}");
+    assert_eq!(all["corners"].as_array().unwrap().len(), 8, "{all}");
+    let b0 = &all["blends"][0];
+    assert_eq!(b0["kind"], "fillet");
+    assert_eq!(b0["size"]["value"], "3 mm");
+    assert!(b0["faces"][0].as_str().unwrap().starts_with("p/b/"));
+    assert_eq!(b0["supports"].as_array().unwrap().len(), 2);
+    assert_eq!(all["tolerance"]["m"], 1e-5);
+    // Two solids: one must be named.
+    let e = call(&mut s, "blends.get", json!({"part": "p"})).unwrap_err();
+    assert_eq!(e.details["param"], "solid", "{e}");
+    let c = must(
+        &mut s,
+        "blends.get",
+        json!({"part": "p", "solid": "c", "below": "3.5 mm"}),
+    );
+    assert_eq!(c["blends"], json!([]), "{c}");
+    // Below, as the delete takes it.
+    let listed = must(
+        &mut s,
+        "blends.get",
+        json!({"part": "p", "solid": "b", "below": "3.5 mm"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "target": "b", "below": "3.5 mm"}),
+    );
+    let rep = must(&mut s, "inspect", json!({"part": "p", "feature": "d"}))["delete_blend"].clone();
+    let faces = |v: &Value| {
+        let mut f: Vec<String> = v["blends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|b| b["faces"].as_array().unwrap().clone())
+            .map(|f| f.as_str().unwrap().to_owned())
+            .collect();
+        f.sort();
+        f
+    };
+    assert_eq!(faces(&listed), faces(&rep));
+    // Cached by body and tolerance: the delete shows b anew (one more
+    // body recognised), and asking again recognises nothing.
+    let n = s.blends.len();
+    must(&mut s, "blends.get", json!({"part": "p", "solid": "b"}));
+    assert_eq!(s.blends.len(), n + 1);
+    must(&mut s, "blends.get", json!({"part": "p", "solid": "b"}));
+    assert_eq!(s.blends.len(), n + 1);
+    // A tolerance outside the kernel's range is its refusal.
+    let e = call(
+        &mut s,
+        "blends.get",
+        json!({"part": "p", "solid": "b", "tolerance": "1 mm"}),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.details["reason"].as_str()),
+        (Code::TweakFailed, Some("bad_tolerance")),
+        "{e}"
+    );
+}

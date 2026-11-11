@@ -331,6 +331,23 @@ enum Command {
         #[command(flatten)]
         rev: RevArg,
     },
+    /// A solid's fillets, chamfers and ball corners as delete_blend and resize_blend
+    /// read them (the part's one solid unless named): each blend's faces, kind and size,
+    /// the faces it rolls on and its chain. --below LEN lists only what `feature add
+    /// <part> delete_blend --below LEN` deletes.
+    Blends {
+        part: String,
+        solid: Option<String>,
+        /// Recognition's tolerance: how far a face may be from a fillet's or chamfer's
+        /// form and be read as one (0.01 mm by default; up to 0.1 mm).
+        #[arg(long, value_name = "LENGTH")]
+        tolerance: Option<String>,
+        /// Only the blends delete_blend --below takes at this size.
+        #[arg(long, value_name = "LENGTH")]
+        below: Option<String>,
+        #[command(flatten)]
+        rev: RevArg,
+    },
     /// A solid's flat pattern (the part's one sheet metal solid unless
     /// named): its outline, holes and bend lines with their notes, in
     /// millimetres. A folded solid is unfolded in memory, about --fixed
@@ -4941,6 +4958,19 @@ fn request(cmd: &Command) -> Option<Request> {
         },
         Command::FeatureFaces { face, rev } => Request::FeatureFacesGet {
             face: face.clone(),
+            rev: rev.rev.clone(),
+        },
+        Command::Blends {
+            part,
+            solid,
+            tolerance,
+            below,
+            rev,
+        } => Request::BlendsGet {
+            part: part.clone(),
+            solid: solid.clone(),
+            tolerance: tolerance.clone(),
+            below: below.clone(),
             rev: rev.rev.clone(),
         },
         Command::Flat {

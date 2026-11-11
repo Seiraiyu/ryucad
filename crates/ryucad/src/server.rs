@@ -885,6 +885,20 @@ pub(crate) fn dispatch(
         Request::FeatureFacesGet { face, rev } => {
             crate::tweak::feature_faces_get(session, &face, rev.as_deref())
         }
+        Request::BlendsGet {
+            part,
+            solid,
+            tolerance,
+            below,
+            rev,
+        } => crate::blends::get(
+            session,
+            &part,
+            solid.as_deref(),
+            tolerance.as_deref(),
+            below.as_deref(),
+            rev.as_deref(),
+        ),
         Request::FlatGet {
             part,
             solid,

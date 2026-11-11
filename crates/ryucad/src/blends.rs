@@ -258,6 +258,154 @@ impl Cache {
     }
 }
 
+/// The solid `solid` names in part `p`'s rebuild `r`, or the part's one
+/// solid: its ID and its body as shown.
+fn pick(
+    p: &crate::doc::project::Part,
+    r: &crate::rebuild::PartResult,
+    solids: &crate::solid::Solids,
+    solid: Option<&str>,
+) -> Result<(Id, Arc<crate::rebuild::Built>)> {
+    let pid = &p.id;
+    let shown = r.shown(solids);
+    let names = || shown.iter().map(|y| y.solid.as_str()).collect::<Vec<_>>();
+    let one = match solid {
+        Some(x) => shown
+            .iter()
+            .find(|y| y.solid.as_str() == x)
+            .ok_or_else(|| {
+                Error::new(Code::NotFound, format!("part {pid} has no solid {x}"))
+                    .with("solid", x)
+                    .with("solids", names())
+            })?,
+        None => match shown.as_slice() {
+            [one] => one,
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("part {pid} has {} solids: name one", shown.len()),
+                )
+                .with("param", "solid")
+                .with("solids", names()));
+            }
+        },
+    };
+    let Some((_, built)) = one.state else {
+        return Err(one.error.cloned().unwrap_or_else(|| {
+            Error::new(
+                Code::DependencyFailed,
+                format!("solid {} didn't build", one.solid),
+            )
+            .with("solid", one.solid)
+        }));
+    };
+    Ok((one.solid.clone(), built.clone()))
+}
+
+/// `blends.get`: solid `solid` of part `part` (its one solid unless named)
+/// as it shows at `rev`: each fillet and chamfer with its faces, kind,
+/// size, supports and chain, by least face name, and each ball corner; with
+/// `below` (a length) only the blends a `delete_blend` of that size takes,
+/// closed over chains and corners, and the corners they reach.
+/// Recognition at `tolerance` (10 µm by default) runs under the request's
+/// cancel and is kept per body hash and tolerance.
+pub fn get(
+    session: &mut crate::session::Session,
+    part: &str,
+    solid: Option<&str>,
+    tolerance: Option<&str>,
+    below: Option<&str>,
+    rev: Option<&str>,
+) -> Result<Value> {
+    let (commit, s) = session.at(rev)?;
+    let unit = s.project().manifest.default_unit;
+    let pid = crate::server::part_id(part)?;
+    let p = s.project().part(&pid)?.clone();
+    if crate::server::part_kind(&p) == crate::doc::files::PartKind::Assembly {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("{pid} is an assembly: blends reads a part's solid"),
+        )
+        .with("param", "part"));
+    }
+    let solids = crate::solid::Solids::of(&p);
+    let r = s.rebuilt(&pid)?.clone();
+    let (solid, built) = pick(&p, &r, &solids, solid)?;
+    if built.reference {
+        return Err(Error::new(
+            Code::ReferenceBody,
+            format!("{pid}/{solid} is a reference import, which nothing edits: convert it to a solid first"),
+        )
+        .with("solid", format!("{pid}/{solid}"))
+        .with("hint", format!("ryucad import convert {pid}/{solid}")));
+    }
+    let length = |t: &str, param: &str| -> Result<f64> {
+        let q = crate::units::Quantity::parse(t, unit).map_err(|e| e.with("param", param))?;
+        if q.meters() < 0.0 {
+            return Err(
+                Error::new(Code::InvalidParam, format!("{param} {t:?} is negative"))
+                    .with("param", param),
+            );
+        }
+        Ok(q.meters())
+    };
+    let tol = tolerance
+        .map(|t| length(t, "tolerance"))
+        .transpose()?
+        .unwrap_or(ryukei::tweak::DEFAULT_TOLERANCE);
+    let below = below.map(|t| length(t, "below")).transpose()?;
+    let job = s.job.clone();
+    let at = format!("{pid}/{solid}");
+    let rec = s
+        .blends
+        .get_or(&built.hash, tol, || {
+            ryukei::tweak::recognise_blends_with(
+                &built.body,
+                &ryukei::tweak::RecogniseOptions { tolerance: tol },
+                &crate::work::work(&job),
+            )
+        })
+        .map_err(|e| {
+            crate::work::stopped(&e, &job)
+                .unwrap_or_else(|| crate::tweak::query_error("solid", &at, e))
+        })?;
+    let keep: BTreeSet<usize> = match below {
+        Some(_) => taken(&rec, below, &[]),
+        None => (0..rec.blends.len()).collect(),
+    };
+    let blends: Vec<Value> = keep
+        .iter()
+        .map(|&i| render(&pid, &solid, unit, &blend_raw(&rec, i)))
+        .collect();
+    let reached = corners_of(&rec, &keep);
+    let corners: Vec<Value> = reached
+        .iter()
+        .map(|&j| {
+            let c = &rec.corners[j];
+            json!({"face": format!("{pid}/{solid}/{}", c.face), "blends": c.blends})
+        })
+        .collect();
+    let mut v = json!({
+        "schema": 1,
+        "part": pid,
+        "solid": solid,
+        "tolerance": length_json(tol, unit),
+        "blends": blends,
+        "corners": corners,
+    });
+    if let Some(b) = below {
+        v["below"] = length_json(b, unit);
+    }
+    if let Some(c) = commit {
+        v["commit"] = json!(c);
+    }
+    Ok(v)
+}
+
+fn length_json(m: f64, unit: Unit) -> Value {
+    length(m, unit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

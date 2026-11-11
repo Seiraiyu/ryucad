@@ -1179,6 +1179,24 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// A solid's fillets, chamfers and ball corners as `delete_blend` and
+    /// `resize_blend` read them: each blend's faces, kind and size,
+    /// supports and chain, by least face name, in the part as it shows at
+    /// `rev`. With `below` (a length), only those a `delete_blend` of that
+    /// size takes, closed over chains and corners. `solid` is the part's
+    /// one solid unless named; `tolerance` is recognition's (10 µm).
+    #[serde(rename = "blends.get")]
+    BlendsGet {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        solid: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tolerance: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        below: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     /// A solid's flat pattern, as the part shows it: unfolded whole in
     /// memory when folded (about `fixed`, a side face, each bend at its
     /// override in `bends` else the solid's allowance), else redrawn

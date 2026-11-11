@@ -2285,6 +2285,30 @@ pub fn draft_warnings(part: &Id, id: &Id, rep: &Value) -> Vec<Value> {
         .collect()
 }
 
+/// A read-only query's kernel refusal (`feature_faces.get`'s, `blends.get`'s):
+/// `tweak_failed` with its reason, `kernel: tweak`, the kernel's text and
+/// a hint, `key` naming what was asked about.
+pub(crate) fn query_error(key: &str, at: &str, e: ryukei::Error) -> Error {
+    let r = match &e {
+        ryukei::Error::InvalidTweak(t) => refusal(t),
+        _ => Refusal {
+            reason: "kernel",
+            case: None,
+            message: "the kernel refused it",
+            entities: vec![],
+        },
+    };
+    let mut err = Error::new(Code::TweakFailed, format!("{at}: {} ({e})", r.message))
+        .with(key, at)
+        .with("reason", r.reason)
+        .with("kernel", "tweak")
+        .with("refusal", format!("{e:?}"));
+    if let Some(h) = hint(&r) {
+        err = err.with("hint", h);
+    }
+    err
+}
+
 /// `feature_faces.get`: the faces of the hole, boss or pocket `face` (one
 /// face of a part's solid, `<part>/<solid>/<name>`) belongs to, in the
 /// part as it shows at `rev`. A face of no such feature is `tweak_failed`
@@ -2334,26 +2358,8 @@ pub fn feature_faces_get(
         .with("hint", format!("ryucad import convert {}/{}", l.part, l.solid)));
     }
     let seed = l.built.body.face(f).expect("a live face").name;
-    let names = ryukei::tweak::feature_faces(&l.built.body, seed).map_err(|e| {
-        let r = match &e {
-            ryukei::Error::InvalidTweak(t) => refusal(t),
-            _ => Refusal {
-                reason: "kernel",
-                case: None,
-                message: "the kernel refused it",
-                entities: vec![],
-            },
-        };
-        let mut err = Error::new(Code::TweakFailed, format!("{face}: {} ({e})", r.message))
-            .with("face", face)
-            .with("reason", r.reason)
-            .with("kernel", "tweak")
-            .with("refusal", format!("{e:?}"));
-        if let Some(h) = hint(&r) {
-            err = err.with("hint", h);
-        }
-        err
-    })?;
+    let names = ryukei::tweak::feature_faces(&l.built.body, seed)
+        .map_err(|e| query_error("face", face, e))?;
     let mut v = json!({
         "face": face,
         "solid": format!("{}/{}", l.part, l.solid),
