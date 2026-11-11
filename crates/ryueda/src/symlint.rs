@@ -386,11 +386,127 @@ fn sides(s: &Symbol, class: Option<Class>, cx: &Context, out: &mut Vec<Raw>) {
     }
 }
 
+/// How far along its side a pin stands, in reading order: down the left
+/// and right, across the top and bottom.
+fn along(p: &Pin) -> i64 {
+    match p.side {
+        Side::Left | Side::Right => -p.at[1],
+        Side::Up | Side::Down => p.at[0],
+    }
+}
+
+fn groups(s: &Symbol, class: Option<Class>, cx: &Context, out: &mut Vec<Raw>) {
+    let Some(class) = class else { return };
+    let st = cx.standards;
+    let rule = st.rule(class);
+    if !rule.groups {
+        return;
+    }
+    for unit in units(s) {
+        let pins = unit_pins(s, unit);
+        // Each group's pins whose role has no side of its own.
+        let mut by_group: std::collections::BTreeMap<&str, Vec<(&String, &Pin, Option<u64>)>> =
+            Default::default();
+        for (n, p) in &pins {
+            if st
+                .role(&p.name, p.ty)
+                .is_some_and(|r| rule.sides.contains_key(&r))
+            {
+                continue;
+            }
+            if let Some((g, num)) = st.group_of(&p.name) {
+                by_group.entry(g).or_default().push((n, p, num));
+            }
+        }
+        for (g, members) in by_group {
+            if members.len() < 2 {
+                continue;
+            }
+            let numbers: Vec<String> = members.iter().map(|m| m.0.clone()).collect();
+            let number_of = |n: &String| members.iter().find(|m| m.0 == n).and_then(|m| m.2);
+            let is_member = |n: &String| members.iter().any(|m| m.0 == n);
+            let side0 = members[0].1.side;
+            if members.iter().any(|m| m.1.side != side0) {
+                out.push(raw(
+                    "sym_pin_group",
+                    numbers.clone(),
+                    format!(
+                        "{g}'s pins {} stand on more than one side",
+                        numbers.join(", ")
+                    ),
+                    json!({"group": g, "split": true}),
+                ));
+                continue;
+            }
+            let mut on_side: Vec<(&String, &Pin)> = pins
+                .iter()
+                .filter(|(_, p)| p.side == side0)
+                .copied()
+                .collect();
+            on_side.sort_by_key(|(n, p)| (along(p), (*n).clone()));
+            let idx: Vec<usize> = on_side
+                .iter()
+                .enumerate()
+                .filter(|(_, (n, _))| is_member(n))
+                .map(|(i, _)| i)
+                .collect();
+            let (first, last) = (idx[0], idx[idx.len() - 1]);
+            let contiguous = last - first + 1 == idx.len();
+            let in_order: Vec<Option<u64>> = idx.iter().map(|&i| number_of(on_side[i].0)).collect();
+            let ordered = in_order.windows(2).all(|w| w[0] <= w[1]);
+            if contiguous && ordered {
+                continue;
+            }
+            // The fix: the run from the group's first pin to its last, the
+            // group first (in number order), then the others as they stand,
+            // each pin keeping its distance from the body.
+            let run = &on_side[first..=last];
+            let slots: Vec<Point> = run.iter().map(|(_, p)| p.at).collect();
+            let mut order: Vec<(&String, &Pin)> =
+                run.iter().filter(|(n, _)| is_member(n)).copied().collect();
+            order.sort_by_key(|(n, _)| number_of(n));
+            order.extend(run.iter().filter(|(n, _)| !is_member(n)).copied());
+            let ops: Vec<Value> = order
+                .iter()
+                .zip(&slots)
+                .filter_map(|((n, p), slot)| {
+                    let at = match side0 {
+                        Side::Left | Side::Right => [p.at[0], slot[1]],
+                        Side::Up | Side::Down => [slot[0], p.at[1]],
+                    };
+                    (at != p.at).then(|| json!({"op": "move", "pin": n, "at": at}))
+                })
+                .collect();
+            let mut r = raw(
+                "sym_pin_group",
+                numbers.clone(),
+                if contiguous {
+                    format!(
+                        "{g}'s pins aren't in number order along the {} side",
+                        side_word(side0)
+                    )
+                } else {
+                    format!(
+                        "{g}'s pins have other pins between them on the {} side",
+                        side_word(side0)
+                    )
+                },
+                json!({"group": g, "contiguous": contiguous, "ordered": ordered}),
+            );
+            if !ops.is_empty() {
+                r.fixes.push(ops);
+            }
+            out.push(r);
+        }
+    }
+}
+
 /// Every rule's raw findings, in the catalogue's order.
 fn found(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Raw> {
     let mut out = Vec::new();
     off_grid(s, cx, &mut out);
     sides(s, class, cx, &mut out);
+    groups(s, class, cx, &mut out);
     length(s, class, cx, &mut out);
     unit_size(s, class, cx, &mut out);
     out
@@ -590,5 +706,57 @@ mod tests {
             &cx,
         );
         assert!(codes(&found).contains(&("sym_pin_side", vec!["1".to_owned()])));
+    }
+
+    #[test]
+    fn a_groups_pins_stand_together_in_order() {
+        let st = Standards::default();
+        let prefs = Prefs::default();
+        let cx = Context {
+            standards: &st,
+            prefs: &prefs,
+            from: "built_in",
+        };
+        let gpio = |n: &str, i: u32| PinSpec {
+            number: n.into(),
+            name: format!("GPIO{i}"),
+            ty: PinType::Bidirectional,
+        };
+        let pins = vec![gpio("1", 0), gpio("2", 1), gpio("3", 2), gpio("4", 3)];
+        let clean = template("U", Class::Ic, &pins, &st).unwrap();
+        assert!(lint(&clean, Some(Class::Ic), &cx).is_empty());
+        // GPIO2 and GPIO1 swapped: out of order.
+        let mut s = clean.clone();
+        let (a, b) = (s.pins["2"].at, s.pins["3"].at);
+        s.pins.get_mut("2").unwrap().at = b;
+        s.pins.get_mut("3").unwrap().at = a;
+        let found = lint(&s, Some(Class::Ic), &cx);
+        assert_eq!(
+            codes(&found),
+            [(
+                "sym_pin_group",
+                vec!["1".into(), "2".into(), "3".into(), "4".into()]
+            )]
+        );
+        assert_eq!(found[0].details["ordered"], false);
+        let mut fixed = s.clone();
+        crate::edit::apply(&mut fixed, &found[0].fixes[0], crate::units::Unit::Mm).unwrap();
+        assert_eq!(fixed, clean);
+        // An ungrouped pin between them: not together.
+        let mut s = clean.clone();
+        s.pins.get_mut("2").unwrap().name = "XTAL".into();
+        let found = lint(&s, Some(Class::Ic), &cx);
+        let group = found.iter().find(|f| f.code == "sym_pin_group").unwrap();
+        assert_eq!(group.pins, ["1", "3", "4"]);
+        assert_eq!(group.details["contiguous"], false);
+        // Split across sides: found, no fix.
+        let mut s = clean.clone();
+        let p = s.pins.get_mut("4").unwrap();
+        p.side = Side::Right;
+        p.at[0] = -p.at[0];
+        let found = lint(&s, Some(Class::Ic), &cx);
+        let group = found.iter().find(|f| f.code == "sym_pin_group").unwrap();
+        assert_eq!(group.details["split"], true);
+        assert!(group.fixes.is_empty());
     }
 }
