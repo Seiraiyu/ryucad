@@ -22,6 +22,20 @@ for f in rp2040/Mitayi-Pico-D1 buck/usb-power-port ethernet/ESP32-PoE_Rev_M2 fro
   kicad-cli sch export svg --exclude-drawing-sheet -o "$out/$c" "$refs/$f.kicad_sch"
 done
 rm -f "$out/frontend/amp-SeDiffAmp.svg"
+# A sheet symbol's "File: x.kicad_sch" names the tool: its hidden text and
+# its stroked glyphs go, so no judge reads it.
+for f in "$out"/*/*.svg; do
+  python3 -I - "$f" <<'PY'
+import re, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    s = f.read()
+s = re.sub(r'<text [^>]*>File: [^<]*</text>\n', "", s)
+s = re.sub(r'<g class="stroked-text"><desc>File: [^<]*</desc>.*?</g>\n?', "", s, flags=re.S)
+with open(path, "w", encoding="utf-8") as f:
+    f.write(s)
+PY
+done
 crop() { # file x y w h: the root <svg>'s viewBox, width and height
   sed -i "0,/viewBox=\"[^\"]*\"/s//viewBox=\"$2 $3 $4 $5\"/; 0,/width=\"[^\"]*\"/s//width=\"$4mm\"/; 0,/height=\"[^\"]*\"/s//height=\"$5mm\"/" "$1"
 }
