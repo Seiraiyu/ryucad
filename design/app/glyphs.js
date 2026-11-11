@@ -1,9 +1,10 @@
-// ryucad's 39 CAD glyphs (design 199, Fonts and icons; design 297 adds
+// ryucad's 42 CAD glyphs (design 199, Fonts and icons; design 297 adds
 // the datum and path glyphs, design 323 the sweep and loft glyphs, design
 // 327 the shell, offset, mirror and split glyphs, design 346 the base
 // flange, edge flange, unfold and refold glyphs, design 388 the sheet,
 // planar, fill, extract, sew and thicken glyphs, design 400 the draft,
-// move-face and replace-face glyphs, design 417 the drawing glyph), on Phosphor's
+// move-face and replace-face glyphs, design 417 the drawing glyph, design
+// 445 the delete-face, delete-blend and resize-blend glyphs), on Phosphor's
 // 256-unit grid with its 16-unit stroke, round caps and joins. Each glyph
 // is a list of strokes: `l` a polyline, `e` an ellipse (cx, cy, rx, ry),
 // `a` an arc of one (cx, cy, rx, ry, from, to: degrees clockwise from +x,
@@ -254,6 +255,27 @@ const GLYPHS = {
     { l: [[128, 232], [128, 192], [216, 192]] },
     { l: [[72, 64], [176, 64], [176, 152], [72, 152], [72, 64]], w: 10 },
     { e: [124, 108, 20, 20], w: 10 },
+  ],
+  "delete-face": [
+    ...box(32, 136, 144, 88, 48, -40),
+    { e: [128, 116, 32, 10], w: 10 },
+    { l: [[176, 24], [224, 72]], w: 12 },
+    { l: [[224, 24], [176, 72]], w: 12 },
+  ],
+  "delete-blend": [
+    { l: [[24, 208], [24, 64], [232, 64], [232, 208], [24, 208]] },
+    { a: [136, 160, 96, 96, 270, 360], w: 10 },
+    { l: [[56, 120], [104, 168]], w: 12 },
+    { l: [[104, 120], [56, 168]], w: 12 },
+  ],
+  "resize-blend": [
+    { l: [[136, 208], [24, 208], [24, 64], [136, 64]] },
+    { a: [136, 160, 96, 96, 270, 360] },
+    { l: [[232, 160], [232, 208], [136, 208]] },
+    { l: [[136, 64], [176, 64]], w: 10 },
+    { l: [[232, 120], [232, 160]], w: 10 },
+    { a: [176, 120, 56, 56, 270, 360], w: 10 },
+    { l: [[136, 160], [204, 92]], w: 10 },
   ],
 };
 
