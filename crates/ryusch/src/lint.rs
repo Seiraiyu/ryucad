@@ -273,15 +273,6 @@ pub const RULES: &[Rule] = &[
         evidence: "Design 348's grammar (figure 3) and the owner's comment #11 on 1.B's renders: a net that leaves its sheet is drawn with a connector distinct from a local label. IEEE 315 and IEC 60617 both draw off-sheet connectors apart from net names. A drafting convention; no round has judged it yet.",
     },
     Rule {
-        code: "sch_resistor_style",
-        weight: 1,
-        unit: "a resistor",
-        what: "A resistor is drawn in the style the project doesn't prefer (the US zigzag or the IEC box).",
-        why: "Two styles of one symbol on a sheet make the reader wonder whether they are different parts.",
-        fix: "Draw the resistor's symbol in the preferred style in its library, or prefer the other style (lint configure --prefer resistor=us|iec).",
-        evidence: "IEEE 315 draws the zigzag, IEC 60617 the box; a sheet keeps to one. A preference, not a fault of the drawing. In round 2's blind review (plan 1.D, three judges a pair) no rubric criterion covers this rule alone.",
-    },
-    Rule {
         code: "sch_out_of_line",
         weight: 2,
         unit: "a part",
@@ -1589,38 +1580,6 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
         }
         // Styles the project prefers.
         let mut notes = Vec::new();
-        let resistor = match prefs.prefer.resistor {
-            ResistorStyle::Us => "prefer.resistor = us",
-            ResistorStyle::Iec => "prefer.resistor = iec",
-        };
-        for p in shapes.keys() {
-            let part = &block.parts[*p];
-            let Some(drawn) = resistor_style(part) else {
-                continue;
-            };
-            if drawn != prefs.prefer.resistor {
-                let (is, wants) = match drawn {
-                    ResistorStyle::Iec => ("a box (IEC)", "the US zigzag"),
-                    ResistorStyle::Us => ("a zigzag (US)", "the IEC box"),
-                };
-                let mut x = f(
-                    "sch_resistor_style",
-                    format!(
-                        "{} is drawn as {is}; this project prefers {wants} ({resistor}{})",
-                        who(part),
-                        if prefs.prefer == Prefer::default() {
-                            ", the default"
-                        } else {
-                            ""
-                        }
-                    ),
-                    vec![part.key.clone()],
-                    Value::Null,
-                );
-                x.prefs.push(resistor.to_owned());
-                found.push(x);
-            }
-        }
         // Paper fit (plan 2.A): a smaller paper would hold the drawing, or
         // it is too empty for paper larger than the series' smallest.
         let sheet = &layout.sheets[sid];
@@ -2532,36 +2491,24 @@ mod tests {
     }
 
     #[test]
-    fn a_sheet_scored_under_two_preferences_differs() {
-        let b = seeded(1, 2);
-        let out = crate::engine::lay_out(&b).unwrap();
-        let (plain, plain_scores) = lint(&b, &out);
-        // Seeded resistors are zigzags: under `iec` each is a finding.
-        assert!(!plain.iter().any(|f| f.code == "sch_resistor_style"));
+    fn resistors_are_judged_in_their_library_not_on_the_sheet() {
+        let block = seeded(1, 2);
+        let out = crate::engine::lay_out(&block).unwrap();
+        assert!(!RULES.iter().any(|r| r.code == "sch_resistor_style"));
+        // Whatever the preference, a sheet finds nothing of a resistor's
+        // drawing: ryueda's symbol lint judges it once (sym_shape).
         let mut prefs = Prefs::default();
         prefs.prefer.resistor = ResistorStyle::Iec;
         prefs.weights.insert("sch_resistor_style".into(), 4);
-        let (tuned, tuned_scores) = lint_with(&b, &out, &prefs);
-        let style: Vec<&Finding> = tuned
-            .iter()
-            .filter(|f| f.code == "sch_resistor_style")
-            .collect();
-        assert!(!style.is_empty());
-        for f in &style {
-            assert!(f.message.contains("prefer.resistor = iec"), "{}", f.message);
-            assert!(
-                f.message.contains("weights.sch_resistor_style = 4"),
-                "{}",
-                f.message
-            );
-            assert_eq!(f.points, 4);
-            assert_eq!(
-                f.prefs,
-                ["prefer.resistor = iec", "weights.sch_resistor_style = 4"]
-            );
-        }
-        let total = |s: &[Score]| s.iter().map(|x| x.score).sum::<u32>();
-        assert!(total(&tuned_scores) < total(&plain_scores));
+        let (found, _) = lint_with(&block, &out, &prefs);
+        assert!(found.iter().all(|f| f.code != "sch_resistor_style"));
+    }
+
+    #[test]
+    fn a_sheet_scored_under_two_preferences_differs() {
+        let b = seeded(1, 2);
+        let out = crate::engine::lay_out(&b).unwrap();
+        let (plain, _) = lint(&b, &out);
         // A rule turned off drops its findings and says so.
         let mut off = Prefs::default();
         off.severity.insert("sch_crossings".into(), Severity::Off);

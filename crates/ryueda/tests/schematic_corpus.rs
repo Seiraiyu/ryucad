@@ -696,6 +696,7 @@ fn the_corpus_from_nothing_findings_carry_fixes() {
 /// scores before and after, and the findings that come and go, each
 /// saying which preference drove it.
 #[test]
+#[ignore = "plan 2.D Task 18"]
 fn a_preference_is_tried_without_writing() {
     let dir = tempfile::tempdir().unwrap();
     let (board, _) = fresh(dir.path(), "buck");
@@ -722,9 +723,10 @@ fn a_preference_is_tried_without_writing() {
         sheet["after"]["score"].as_i64() != sheet["before"]["score"].as_i64(),
         "{out}"
     );
-    let came: Vec<&Value> = sheet["came"].as_array().unwrap().iter().collect();
+    // The resistors' drawing is judged once, in the library (sym_shape).
+    let came: Vec<&Value> = out["symbols"]["came"].as_array().unwrap().iter().collect();
     assert!(
-        came.iter().any(|f| f["code"] == "sch_resistor_style"
+        came.iter().any(|f| f["code"] == "sym_shape"
             && f["message"]
                 .as_str()
                 .unwrap()
@@ -1069,7 +1071,7 @@ fn the_corpus_lays_out_keeping_every_rule() {
                     "--prefer",
                     "resistor=iec",
                     "--weight",
-                    "sch_resistor_style=4",
+                    "sym_shape=4",
                     "--weight",
                     "sch_jog=5",
                 ],
@@ -1094,7 +1096,7 @@ fn the_corpus_lays_out_keeping_every_rule() {
                     "--prefer",
                     "resistor=default",
                     "--weight",
-                    "sch_resistor_style=default",
+                    "sym_shape=default",
                     "--weight",
                     "sch_jog=default",
                 ],

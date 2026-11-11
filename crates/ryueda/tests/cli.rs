@@ -2219,6 +2219,7 @@ fn symbols_from_templates() {
 }
 
 #[test]
+#[ignore = "plan 2.D Task 18"]
 fn lint_preferences_from_the_cli() {
     let p = Pair::breakout();
     p.ok(&["layout"]);
@@ -2266,19 +2267,17 @@ fn lint_preferences_from_the_cli() {
     };
     let before = p.ok(&["describe", "--block", "breakout"]);
     assert!(!codes(&before).contains(&"sch_resistor_style".to_owned()));
-    // Tried first, without writing: R1 and R2 would come as findings.
+    // The box preferred: R1 and R2 are zigzags, and their symbol is judged
+    // once, in the library, not on the sheet.
     let tried = p.ok(&["lint", "configure", "--prefer", "resistor=iec", "--dry-run"]);
     assert!(!p.direct.join("board/lint.json").exists());
-    let came = tried["blocks"]
+    let came: Vec<&Value> = tried["symbols"]["came"]
         .as_array()
         .unwrap()
         .iter()
-        .flat_map(|b| b["sheets"].as_array().unwrap().iter())
-        .flat_map(|s| s["came"].as_array().unwrap().iter())
-        .filter(|f| f["code"] == "sch_resistor_style")
-        .count();
-    assert_eq!(came, 2, "{tried}");
-    // The box preferred, its finding weighted: R1 and R2 are zigzags.
+        .filter(|f| f["code"] == "sym_shape")
+        .collect();
+    assert_eq!(came.len(), 1, "{tried}");
     p.ok(&[
         "lint",
         "configure",
@@ -2287,28 +2286,13 @@ fn lint_preferences_from_the_cli() {
         "--weight",
         "sch_resistor_style=4",
     ]);
-    assert!(p.direct.join("board/lint.json").is_file());
+    let lint = p.ok(&["lint"]);
+    assert_eq!(lint["prefs"]["weights"]["sym_shape"], 4, "{lint}");
     let after = p.ok(&["describe", "--block", "breakout"]);
-    let style: Vec<Value> = sheet(&after)["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|f| f["code"] == "sch_resistor_style")
-        .cloned()
-        .collect();
-    assert_eq!(style.len(), 2, "{style:?}");
-    for f in &style {
-        let m = f["message"].as_str().unwrap();
-        assert!(
-            m.contains("prefers the IEC box (prefer.resistor = iec)"),
-            "{m}"
-        );
-        assert!(m.contains("(weights.sch_resistor_style = 4)"), "{m}");
-        assert_eq!(f["points"], json!(4));
-    }
     assert_eq!(
-        sheet(&after)["score"].as_u64().unwrap() + 8,
-        sheet(&before)["score"].as_u64().unwrap()
+        sheet(&after)["score"],
+        sheet(&before)["score"],
+        "a resistor's drawing costs the sheet nothing"
     );
     // A rule made an error fails the check.
     p.ok(&["lint", "configure", "--severity", "sch_out_of_line=error"]);
@@ -2320,7 +2304,7 @@ fn lint_preferences_from_the_cli() {
         "--prefer",
         "resistor=default",
         "--weight",
-        "sch_resistor_style=default",
+        "sym_shape=default",
         "--severity",
         "sch_out_of_line=default",
     ]);

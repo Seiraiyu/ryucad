@@ -44,6 +44,7 @@ pub mod sourcing;
 pub mod standards;
 pub mod supply;
 pub mod symbol;
+pub mod symlint;
 pub mod template;
 pub mod topcmd;
 pub mod vocab;

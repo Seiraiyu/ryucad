@@ -472,13 +472,16 @@ impl Project {
                 crate::lint::KIND,
                 crate::lint::FORMAT,
             ) {
-                Ok(c) => Loaded {
-                    faults: crate::lint::check(&c)
-                        .into_iter()
-                        .map(|f| f.with("path", LINT))
-                        .collect(),
-                    item: Ok(c),
-                },
+                Ok(mut c) => {
+                    crate::lint::upgrade(&mut c);
+                    Loaded {
+                        faults: crate::lint::check(&c)
+                            .into_iter()
+                            .map(|f| f.with("path", LINT))
+                            .collect(),
+                        item: Ok(c),
+                    }
+                }
                 Err(e) => Loaded {
                     item: Err(e),
                     faults: Vec::new(),
