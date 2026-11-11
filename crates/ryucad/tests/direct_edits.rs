@@ -277,3 +277,228 @@ fn a_wall_drafted_past_its_neighbour_is_a_wedge() {
         .clone();
     assert!(f.get("import").is_none(), "{f}");
 }
+
+/// A plate 40 × 40 × 10 mm with a boss (r 4, 6 high) at its middle, slid
+/// 18 mm along −x: 2 mm of it overhangs. Kept topology refuses; changed,
+/// the boss stays whole.
+#[test]
+fn a_boss_slid_over_its_plates_edge() {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": 40, "y": 40, "z": 10}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "j", "operation": "join",
+        "params": {"radius": 4, "height": 6}, "placement": {"origin": [20, 20, 10]}}),
+    );
+    let j = body(&mut s, "j");
+    let mut boss = cylinders(&j, "b");
+    boss.push(plane(&j, "b", 2, 1.0, 16.0));
+    add(
+        &mut s,
+        json!({"type": "move_face", "id": "m", "by": "translate", "direction": "x",
+        "distance": -18, "faces": boss, "tangent": false}),
+    );
+    let e = failure(&mut s, "m");
+    assert_eq!(e.code, Code::TweakFailed, "{e}");
+    assert!(
+        e.details["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("topology"),
+        "{e}"
+    );
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "m", "topology": "change"}),
+    );
+    near(
+        volume(&mut s, "m", "b"),
+        40.0 * 40.0 * 10.0 + PI * 16.0 * 6.0,
+        1e-4,
+    );
+    // The plate's −x side is still there, and the boss's faces keep
+    // their names.
+    plane(&body(&mut s, "m"), "b", 0, -1.0, 0.0);
+    let after = names(&mut s, "m");
+    for f in &boss {
+        assert!(after.contains(&f[4..].to_owned()), "{f}");
+    }
+    report(&mut s, "m");
+}
+
+/// A plate 40 × 40 × 8 mm with a groove 4 wide and 4 deep along y from 8
+/// to 32 mm; both its end walls offset 12 mm into the plate run it
+/// through, splitting the top in two. Both pieces keep the top's origin.
+#[test]
+fn a_groove_run_through_splits_the_top_keeping_its_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": 40, "y": 40, "z": 8}}),
+    );
+    let top = plane(&body(&mut s, "b"), "b", 2, 1.0, 8.0);
+    let was = built(&mut s, "b", "b")
+        .origins
+        .get(&top[4..])
+        .cloned()
+        .unwrap();
+    add(
+        &mut s,
+        json!({"type": "box", "id": "g", "operation": "cut", "targets": ["b"],
+        "params": {"x": 4, "y": 24, "z": 10}, "placement": {"origin": [18, 8, 4]}}),
+    );
+    let g = body(&mut s, "g");
+    let ends = vec![plane(&g, "b", 1, 1.0, 8.0), plane(&g, "b", 1, -1.0, 32.0)];
+    add(
+        &mut s,
+        json!({"type": "move_face", "id": "m", "by": "offset", "distance": -12,
+        "faces": ends, "topology": "change"}),
+    );
+    near(
+        volume(&mut s, "m", "b"),
+        40.0 * 40.0 * 8.0 - 4.0 * 40.0 * 4.0,
+        1e-6,
+    );
+    let tops = planes(&body(&mut s, "m"), "b", 2, 1.0, 8.0);
+    assert_eq!(tops.len(), 2, "{tops:?}");
+    let after = built(&mut s, "m", "b");
+    for t in &tops {
+        assert_eq!(after.origins.get(&t[4..]), Some(&was), "{t}");
+    }
+    let v = must(&mut s, "inspect", json!({"part": "p", "feature": "m"}));
+    // The top's two pieces are new. ryukei's re-trim also splits the
+    // faces it only re-trims (the four sides) and merges the pieces again,
+    // so those come back under new names too (in metres as here, the
+    // kernel's naming gap); each new face still has an origin from before
+    // the edit, none the move's own.
+    let created: Vec<String> = v["move_face"]["created"]["references"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap().to_owned())
+        .collect();
+    for t in &tops {
+        assert!(created.contains(t), "{t} in {v}");
+    }
+    let faces: Vec<String> = body(&mut s, "m")["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap().to_owned())
+        .collect();
+    for r in created
+        .iter()
+        .filter(|r| faces.contains(&r[4..].to_owned()))
+    {
+        let o = after.origins.get(&r[4..]).unwrap();
+        assert_ne!(o["feature"], "m", "{r}: {o}");
+    }
+    report(&mut s, "m");
+}
+
+/// A box's top raised 2 mm past its fillet (r 4 along the top's +x edge),
+/// the fillet not moving with it: refused, unless blends: rebuild makes
+/// it again; every name kept.
+#[test]
+fn a_top_raised_past_its_fillet_makes_it_again() {
+    let (_dir, mut s) = boxed();
+    let b = body(&mut s, "b");
+    let rim = edge(&b, "b", [40.0, 0.0, 20.0], [40.0, 30.0, 20.0]);
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "f", "radius": 4, "edges": [rim]}),
+    );
+    let top = plane(&body(&mut s, "f"), "b", 2, 1.0, 20.0);
+    add(
+        &mut s,
+        json!({"type": "move_face", "id": "m", "by": "translate", "direction": "z",
+        "distance": 2, "faces": [top], "tangent": false}),
+    );
+    let e = failure(&mut s, "m");
+    assert_eq!(e.details["reason"], "tangency_broken", "{e}");
+    assert!(
+        e.details["hint"]
+            .as_str()
+            .unwrap()
+            .contains("blends: rebuild"),
+        "{e}"
+    );
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "m", "blends": "rebuild"}),
+    );
+    near(
+        volume(&mut s, "m", "b"),
+        40.0 * 30.0 * 22.0 - (1.0 - PI / 4.0) * 16.0 * 30.0,
+        1e-5,
+    );
+    assert_eq!(names(&mut s, "m"), names(&mut s, "f"));
+    report(&mut s, "m");
+}
+
+/// Every ryucad 17 tweak that builds builds the same bits with topology:
+/// change: the fixed engine runs first and its result stands.
+#[test]
+fn a_tweak_that_builds_kept_builds_the_same_bits_changed() {
+    let (_dir, mut s) = boxed();
+    let top = plane(&body(&mut s, "b"), "b", 2, 1.0, 20.0);
+    add(
+        &mut s,
+        json!({"type": "move_face", "id": "m", "by": "translate", "direction": "z",
+        "distance": 5, "faces": [top]}),
+    );
+    let kept = built(&mut s, "m", "b").body.dump();
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "m", "topology": "change"}),
+    );
+    assert_eq!(built(&mut s, "m", "b").body.dump(), kept);
+}
+
+/// A budget of one unit refuses the edit with its own code; the default
+/// builds it again, the same bits as before (the budget keys the result,
+/// so the refusal is never taken for the default's).
+#[test]
+fn the_edit_budget_refuses_and_keys_its_result() {
+    let (_dir, mut s) = boxed();
+    let wall = plane(&body(&mut s, "b"), "b", 0, -1.0, 0.0);
+    add(
+        &mut s,
+        json!({"type": "draft", "id": "d", "angle": "1.3 rad", "neutral": "xy",
+        "faces": [wall], "topology": "change"}),
+    );
+    let built_first = built(&mut s, "d", "b").body.dump();
+    s.set_edit_budget(1);
+    let e = failure(&mut s, "d");
+    assert_eq!(e.code, Code::EditBudgetExceeded, "{e}");
+    assert_eq!(e.details["budget"], 1);
+    assert!(e.details["spent"].as_u64().unwrap() > 1, "{e}");
+    s.set_edit_budget(ryucad::tweak::DEFAULT_EDIT_BUDGET);
+    assert_eq!(built(&mut s, "d", "b").body.dump(), built_first);
+    // A kept tweak isn't budgeted: a box of its own, its top moved.
+    s.set_edit_budget(1);
+    add(
+        &mut s,
+        json!({"type": "box", "id": "c", "params": {"x": 10, "y": 10, "z": 10},
+        "placement": {"origin": [60, 0, 0]}}),
+    );
+    let top = plane(&body(&mut s, "c"), "c", 2, 1.0, 10.0);
+    add(
+        &mut s,
+        json!({"type": "move_face", "id": "m", "target": "c", "by": "translate",
+        "direction": "z", "distance": 1, "faces": [top]}),
+    );
+    built(&mut s, "m", "c");
+}

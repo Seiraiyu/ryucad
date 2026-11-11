@@ -784,32 +784,40 @@ pub(crate) fn budget_error(id: &Id, ty: &str, e: &ryukei::Error) -> Option<Error
 /// [`crate::rebuild::replaced_origins`] gives them (a grown edge in
 /// place of a fillet is `{feature, replaces}`), but where that gives an
 /// entity the feature's own origin, a split's child takes its parent's,
-/// and a merge's child its parents' when they share one. A tweak that
+/// and a merge's child its parents' when they share one (a parent being
+/// a split's child too). A tweak that
 /// keeps its topology journals neither, so its origins are ryucad 17's.
 pub(crate) fn edit_origins(
     id: &Id,
     built: &Built,
     made: &(ryukei::topo::Body, ryukei::name::Journal),
 ) -> crate::rebuild::Origins {
+    // Splits first, then merges, whatever order the journal gives them:
+    // the re-trim splits a face it only re-trims and merges the pieces
+    // again (ryukei 13), journalling the merge first, and the merged face
+    // is still the one it was.
     let mut from: BTreeMap<String, Value> = BTreeMap::new();
     for e in made.1.events() {
-        match e {
-            Event::Split { parent, children } => {
-                if let Some(o) = built.origins.get(&parent.to_string()) {
-                    for c in children {
-                        from.entry(c.to_string()).or_insert_with(|| o.clone());
-                    }
-                }
+        if let Event::Split { parent, children } = e
+            && let Some(o) = built.origins.get(&parent.to_string())
+        {
+            for c in children {
+                from.entry(c.to_string()).or_insert_with(|| o.clone());
             }
-            Event::Merged { parents, child } => {
-                let mut theirs = parents.iter().map(|p| built.origins.get(&p.to_string()));
-                if let Some(Some(o)) = theirs.next()
-                    && theirs.all(|x| x == Some(o))
-                {
-                    from.insert(child.to_string(), o.clone());
-                }
+        }
+    }
+    for e in made.1.events() {
+        if let Event::Merged { parents, child } = e {
+            let of = |p: &Name| {
+                let k = p.to_string();
+                built.origins.get(&k).or_else(|| from.get(&k)).cloned()
+            };
+            let mut theirs = parents.iter().map(of);
+            if let Some(Some(o)) = theirs.next()
+                && theirs.all(|x| x.as_ref() == Some(&o))
+            {
+                from.insert(child.to_string(), o);
             }
-            _ => {}
         }
     }
     let own = json!({"feature": id});
