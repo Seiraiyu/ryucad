@@ -68,6 +68,14 @@ fn a_parameter_saves_through_param_set_and_moves_the_sketch() {
         (depth.field.name.as_str(), depth.value.as_str()),
         ("depth", "15 mm")
     );
+    // Nothing reads the new `depth`; the sketch reads `width`.
+    let panel = ws.params.as_ref().unwrap();
+    let unused: Vec<(&str, bool)> = panel
+        .params
+        .iter()
+        .map(|r| (r.field.name.as_str(), r.unused))
+        .collect();
+    assert_eq!(unused, [("depth", true), ("width", false)]);
     // The sketch it drives was written back solved, in the same change,
     // which is this window's.
     let log = p.ok(&["activity"]);
