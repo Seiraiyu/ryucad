@@ -135,11 +135,21 @@ pub(crate) enum Scope {
     Fit,
     /// One `beside`, `faces_apart` or `apart_within`.
     Beside,
+    /// One face pair met in a file's union of its solids
+    /// ([`crate::boolean::unite_solids_with`]): `face_face`, its traces
+    /// and searches included (#550).
+    Union,
 }
 
 impl Scope {
     #[cfg_attr(not(feature = "work-stats"), allow(dead_code))]
-    pub(crate) const ALL: [Scope; 4] = [Scope::Trace, Scope::Search, Scope::Fit, Scope::Beside];
+    pub(crate) const ALL: [Scope; 5] = [
+        Scope::Trace,
+        Scope::Search,
+        Scope::Fit,
+        Scope::Beside,
+        Scope::Union,
+    ];
 
     pub(crate) fn limit(self) -> u64 {
         match self {
@@ -147,6 +157,7 @@ impl Scope {
             Scope::Search => SEARCH,
             Scope::Fit => FIT,
             Scope::Beside => BESIDE,
+            Scope::Union => UNION,
         }
     }
 
@@ -157,6 +168,7 @@ impl Scope {
             Scope::Search => "search",
             Scope::Fit => "fit",
             Scope::Beside => "beside",
+            Scope::Union => "union",
         }
     }
 }
@@ -175,6 +187,11 @@ const TRACE: u64 = 1 << 26;
 const SEARCH: u64 = 1 << 23;
 const FIT: u64 = 1 << 25;
 const BESIDE: u64 = 1 << 24;
+/// A face pair of a file's union: 16 times the largest pair of a union
+/// that builds across the release suites and the pinned STEP corpus,
+/// rounded up to a power of two (plan 16.B's Task 8). Unions only: every
+/// other boolean's pairs keep the trace's own cap.
+const UNION: u64 = 1 << 22;
 
 static FREE: Work<'static> = Work::unlimited();
 

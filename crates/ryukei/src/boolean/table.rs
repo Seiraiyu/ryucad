@@ -293,6 +293,17 @@ pub(crate) fn build(ops: &[Body], m: &Meter) -> Result<Table, Fail> {
 
 /// Builds the table for `ops` within `scope`.
 pub(crate) fn build_in(ops: &[Body], scope: Scope, m: &Meter) -> Result<Table, Fail> {
+    build_capped(ops, scope, None, m)
+}
+
+/// [`build_in`], each face pair met under `pair`'s cap when given (a
+/// file's union, #550).
+pub(crate) fn build_capped(
+    ops: &[Body],
+    scope: Scope,
+    pair: Option<crate::work::Scope>,
+    m: &Meter,
+) -> Result<Table, Fail> {
     let faces: Vec<FaceRef> = ops
         .iter()
         .enumerate()
@@ -316,8 +327,12 @@ pub(crate) fn build_in(ops: &[Body], scope: Scope, m: &Meter) -> Result<Table, F
     let pairs: Vec<Pair> = m
         .par_map(&face_pairs, |m, &(i, j)| {
             let (a, b) = (faces[i], faces[j]);
-            let meet = face_face_in((&ops[a.op], a.face), (&ops[b.op], b.face), m)
-                .map_err(|e| fail(e, a, b))?;
+            let meet = |m: &Meter| face_face_in((&ops[a.op], a.face), (&ops[b.op], b.face), m);
+            let meet = match pair {
+                Some(s) => m.capped(s, || meet(m)),
+                None => meet(m),
+            }
+            .map_err(|e| fail(e, a, b))?;
             Ok(Pair { a, b, meet })
         })
         // The first failure in order, not the first a thread found.
