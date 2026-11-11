@@ -1546,3 +1546,75 @@ fn blend_edits_build_alike_on_one_thread_and_eight() {
     };
     assert_eq!(on(1).hash, on(8).hash);
 }
+
+/// The rounded box (3 mm fillets on every edge) written to STEP in
+/// millimetres, in `dir`.
+fn rounded_step(dir: &std::path::Path) -> std::path::PathBuf {
+    let (_d, mut s) = boxed();
+    rounded(&mut s, 3.0);
+    let out = dir.join("rounded.step");
+    must(
+        &mut s,
+        "export",
+        json!({"part": "p", "out": out.to_str().unwrap(), "unit": "mm",
+               "time_stamp": "2000-01-01T00:00:00"}),
+    );
+    out
+}
+
+/// Imported as a solid it defeatures to the box. Imported as a
+/// reference, nothing may edit it: converted, it does.
+#[test]
+fn a_rounded_box_through_step_is_defeatured() {
+    let files = tempfile::tempdir().unwrap();
+    let step = rounded_step(files.path());
+    for solid in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        ryucad::server::init(dir.path(), None).unwrap();
+        let mut s = Session::open(dir.path()).unwrap();
+        let v = must(
+            &mut s,
+            "import",
+            json!({"path": step.to_str().unwrap(), "part": "p", "solid": solid}),
+        );
+        let imp = v["parts"][0]["features"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        if solid {
+            let listed = must(&mut s, "blends.get", json!({"part": "p"}));
+            assert_eq!(listed["blends"].as_array().unwrap().len(), 12, "{listed}");
+        } else {
+            assert_eq!(
+                call(&mut s, "blends.get", json!({"part": "p"}))
+                    .unwrap_err()
+                    .code,
+                Code::ReferenceBody
+            );
+            let e = call(
+                &mut s,
+                "feature.add",
+                json!({"part": "p", "type": "delete_blend", "id": "d", "below": "3.5 mm"}),
+            )
+            .unwrap_err();
+            assert_eq!(e.code, Code::ReferenceBody, "{e}");
+            assert!(
+                e.details["hint"]
+                    .as_str()
+                    .unwrap()
+                    .contains("import convert"),
+                "{e}"
+            );
+            must(
+                &mut s,
+                "import.convert",
+                json!({"part": "p", "feature": imp}),
+            );
+        }
+        add(
+            &mut s,
+            json!({"type": "delete_blend", "id": "d", "below": "3.5 mm"}),
+        );
+        near(volume(&mut s, "d", &imp), 40.0 * 30.0 * 20.0, 1e-6);
+    }
+}
