@@ -901,6 +901,19 @@ pub enum Code {
     /// ryueda symbol lint: a unit with more pins than its class draws in
     /// one unit.
     SymUnits,
+    /// ryueda: a style file (`style.json`, a project's or an
+    /// organisation's) whose values its checks refuse; its `path` and a
+    /// JSON `pointer` are in the details (plan 2.E).
+    StyleInvalid,
+    /// ryueda: a write, or a project's style or lint file, setting what
+    /// the organisation's style locks; the `lock` and the organisation's
+    /// `path` are in the details.
+    StyleLocked,
+    /// ryueda style lint: a colour under 3:1 against the paper, a body or
+    /// a port's flag it is drawn on, in either theme.
+    SchContrast,
+    /// ryueda style lint: an override naming an object that is gone.
+    SchOverrideUnused,
 }
 
 impl Code {
@@ -1209,6 +1222,13 @@ mod tests {
         assert_eq!(json!(Code::SymShape), json!("sym_shape"));
         assert_eq!(json!(Code::SymBodyMargin), json!("sym_body_margin"));
         assert_eq!(json!(Code::SymUnits), json!("sym_units"));
+        assert_eq!(json!(Code::StyleInvalid), json!("style_invalid"));
+        assert_eq!(json!(Code::StyleLocked), json!("style_locked"));
+        assert_eq!(json!(Code::SchContrast), json!("sch_contrast"));
+        assert_eq!(json!(Code::SchOverrideUnused), json!("sch_override_unused"));
+        for c in [Code::StyleInvalid, Code::StyleLocked, Code::SchContrast] {
+            assert_eq!(c.exit_code(), 1);
+        }
         for c in [Code::StandardsInvalid, Code::SymShape, Code::SymUnits] {
             assert_eq!(c.exit_code(), 1);
         }
