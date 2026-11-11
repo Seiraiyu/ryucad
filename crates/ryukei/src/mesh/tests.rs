@@ -538,3 +538,20 @@ fn a_tolerant_lines_pcurve_inside_its_arcs_ends_meshes() {
         assert_eq!(check_mesh(&b, &m), Ok(()));
     }
 }
+
+#[test]
+fn a_face_with_inner_points_still_reports_inverted_triangles() {
+    let b = crate::primitive::sphere(OpKey(1), 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut m = tessellate(&b, &MeshParams::new(1e-2, 0.5)).unwrap();
+    let t = m.faces[0].triangles.start as usize;
+    m.triangles[t].swap(1, 2);
+    let faults = check_mesh(&b, &m).unwrap_err();
+    assert!(
+        faults
+            .iter()
+            .any(|f| matches!(f, MeshCheckFault::Inverted { .. })),
+        "{faults:?}"
+    );
+}

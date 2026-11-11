@@ -29,7 +29,8 @@ pub enum MeshCheckFault {
 }
 
 /// Checks a mesh against the body it was made from: indices in range,
-/// every face's triangles on its own corners, wound with its parameters,
+/// every face's triangles on its own corners, wound with its parameters (but for a face whose every corner lies on an
+/// edge, a strip narrower than its segments' sagitta),
 /// without degenerate triangles, every welded edge used by exactly two
 /// triangles in opposite directions (once, on a laminar edge of a sheet),
 /// and edge polylines from vertex to
@@ -40,6 +41,19 @@ pub fn check_mesh(body: &Body, mesh: &BodyMesh) -> Result<(), Vec<MeshCheckFault
     if mesh.corners.iter().any(|c| c.position >= np) {
         out.push(MeshCheckFault::IndexOutOfRange);
         return Err(out);
+    }
+    // Positions on edges: a face with no other (a strip) may have
+    // triangles inverted in its parameters where its sides come closer
+    // than their segments' sagitta, or cross (#598). A triangle kept
+    // there wrongly still shows as an open, non-manifold or inconsistent
+    // edge below.
+    let mut on_edges = vec![false; np as usize];
+    for p in &mesh.edges {
+        for &i in &p.positions {
+            if let Some(x) = on_edges.get_mut(i as usize) {
+                *x = true;
+            }
+        }
     }
     let (mut next_corner, mut next_triangle) = (0, 0);
     for fm in &mesh.faces {
@@ -53,6 +67,9 @@ pub fn check_mesh(body: &Body, mesh: &BodyMesh) -> Result<(), Vec<MeshCheckFault
         }
         (next_corner, next_triangle) = (fm.corners.end, fm.triangles.end);
         let reversed = body.face(fm.face).map(|f| f.sense) == Some(Sense::Reversed);
+        let strip = mesh.corners[fm.corners.start as usize..fm.corners.end as usize]
+            .iter()
+            .all(|c| on_edges[c.position as usize]);
         for t in fm.triangles.clone() {
             let tri = mesh.triangles[t as usize];
             if tri.iter().any(|c| !fm.corners.contains(c)) {
@@ -71,7 +88,7 @@ pub fn check_mesh(body: &Body, mesh: &BodyMesh) -> Result<(), Vec<MeshCheckFault
             } else {
                 Sign::Positive
             };
-            if orient2d(a.uv, b.uv, c.uv) != want {
+            if orient2d(a.uv, b.uv, c.uv) != want && !strip {
                 out.push(MeshCheckFault::Inverted {
                     face: fm.face,
                     triangle: t,
