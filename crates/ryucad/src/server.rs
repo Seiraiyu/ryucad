@@ -5438,6 +5438,13 @@ pub(crate) fn part_report(
     } else {
         Vec::new()
     };
+    // References that follow a face or edge a later feature split or
+    // merged (design 447): under their features and the part's warnings.
+    session.rebuilt(id)?;
+    let followed = match (session.project().parts.get(id), session.cached(id)) {
+        (Some(p), Some(r)) => crate::reference::followed(p, r),
+        _ => Vec::new(),
+    };
     let r = session.rebuilt(id)?;
     let features: Vec<Value> = r
         .features
@@ -5577,6 +5584,13 @@ pub(crate) fn part_report(
                     v["consumes"] = json!(tools);
                 }
             }
+            let own: Vec<&Value> = followed
+                .iter()
+                .filter(|w| w["feature"] == fid.as_str())
+                .collect();
+            if !own.is_empty() {
+                v["warnings"] = json!(own);
+            }
             v
         })
         .collect();
@@ -5606,6 +5620,7 @@ pub(crate) fn part_report(
                        "failed": r.failed(), "features": features, "solids": shown});
     let mut all = None;
     let mut warnings = r.warnings(id);
+    warnings.extend(followed);
     // An assembly's model is what its instances place.
     warnings.extend(kept);
     if assembly {

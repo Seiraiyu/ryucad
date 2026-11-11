@@ -1281,6 +1281,12 @@ impl Session {
             .retain(|(project, _, _), _| project.is_none());
     }
 
+    /// The rebuild of `part` this session holds, if it holds one: what
+    /// [`Session::rebuilt`] left, read beside the project's files.
+    pub(crate) fn cached(&self, part: &Id) -> Option<&PartResult> {
+        self.store.results.get(part).map(|(_, r)| r)
+    }
+
     /// The cached rebuild of `part`, to make it wrong in tests.
     #[cfg(test)]
     pub(crate) fn cached_mut(&mut self, part: &Id) -> Option<&mut PartResult> {
