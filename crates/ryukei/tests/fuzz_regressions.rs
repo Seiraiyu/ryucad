@@ -595,3 +595,45 @@ fn a_cancel_stops_an_edits_working_sheets() {
         "stopped after {stopped:?}"
     );
 }
+
+/// The `edit` fuzz target's first find (#647): an offset with
+/// `Topology::Change` and `Blends::Rebuild` on a 16-face body, uncancelled,
+/// answers on one thread: a typed refusal, under 60 s on the bar machine
+/// with `RYUKEI_BARS=1` (3.4 s on cox-worker-2 with plan 16.C's carry
+/// cap, 26.7 s before it; about 200 s on cox-worker-4, an AMD Opteron
+/// 6380). Release only.
+#[cfg_attr(debug_assertions, ignore = "release only")]
+#[test]
+fn the_edit_targets_first_find_answers() {
+    let _t = timed();
+    let data = bytes(concat!(
+        "213f3f3f3f3f3f3f3f3f3f3f3f3f91919191919191919191919191919191919191919191",
+        "9191919191913f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f13131313131313131313131313",
+        "131313131313131313131313131313131313131313131313131313131313131313131313",
+        "13131313133f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f",
+    ));
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let case = one
+        .install(|| ryukei_testkit::edit_bytes::edit_case(&data))
+        .expect("an edit");
+    let w = ryukei::work::Work::unlimited();
+    let start = std::time::Instant::now();
+    let r = one.install(|| ryukei_testkit::edit_bytes::run(&case, OpKey(0xed1), &w));
+    let s = start.elapsed().as_secs_f64();
+    println!(
+        "#647: {:?} in {s:.1} s, {} units",
+        r.as_ref().map(|_| ()),
+        w.spent()
+    );
+    assert!(
+        matches!(r, Ok(_) | Err(ryukei::Error::InvalidTweak(_))),
+        "{:?}",
+        r.map(|_| ())
+    );
+    if bars() {
+        assert!(s < 60.0, "{s} s");
+    }
+}
