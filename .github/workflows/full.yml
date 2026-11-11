@@ -304,7 +304,11 @@ jobs:
       # builds the image from Docker's layer cache after the first, and
       # target/ is the workspace's, so builds carry over. Builds take two
       # jobs and the heaviest tests two threads: the runner has 4 cores
-      # and 16 GB, and a slow step beats a dead one.
+      # and 16 GB, and a slow step beats a dead one. The workflow's env
+      # doesn't reach the container, so each step sets what the other
+      # jobs have: debug builds with line tables only and no incremental
+      # caches (with full debug info the workspace's test binaries filled
+      # 116 GB in 15 minutes, the dry run of 2026-11-11, job 130297078919).
       - name: the workspace in the devcontainer
         uses: devcontainers/ci@v0.3
         with:
@@ -313,6 +317,7 @@ jobs:
             set -e
             export PROPTEST_RNG_SEED=${{ env.PROPTEST_RNG_SEED }}
             export CARGO_BUILD_JOBS=2
+            export CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0
             df -h / && free -m
             RYUCAD_REQUIRE_GPU=1 cargo test --workspace
             df -h / && free -m
@@ -326,6 +331,7 @@ jobs:
             set -e
             export PROPTEST_RNG_SEED=${{ env.PROPTEST_RNG_SEED }}
             export CARGO_BUILD_JOBS=2
+            export CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0
             df -h / && free -m
             sh scripts/fetch-dfm-corpus.sh
             cargo test -p ryudfm --release --test pinned -- --ignored
@@ -340,6 +346,7 @@ jobs:
             set -e
             export PROPTEST_RNG_SEED=${{ env.PROPTEST_RNG_SEED }}
             export CARGO_BUILD_JOBS=2
+            export CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0
             df -h / && free -m
             sh scripts/fetch-corpus.sh
             RAYON_NUM_THREADS=2 RYUCAD_REQUIRE_CORPUS=1 cargo test -p ryucad --release --test corpus pinned -- --nocapture
@@ -354,6 +361,7 @@ jobs:
             set -e
             export PROPTEST_RNG_SEED=${{ env.PROPTEST_RNG_SEED }}
             export CARGO_BUILD_JOBS=2
+            export CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0
             df -h / && free -m
             cargo clippy -p ryukei-bench --features occt,smlib,formats,usd --all-targets -- -D warnings
             cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture
