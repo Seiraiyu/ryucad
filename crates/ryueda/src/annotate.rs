@@ -315,6 +315,144 @@ pub fn plan(p: &Project, design: Option<&str>, order: Order, reset: Reset) -> Re
     })
 }
 
+/// ERC's designator findings for design `d` of `p`.
+fn refdes_findings(p: &Project, d: &Id) -> Vec<Value> {
+    let Ok(n) = netlist::flatten(p, d) else {
+        return Vec::new();
+    };
+    crate::erc::check_netlist(p, &n)
+        .into_iter()
+        .filter(|f| matches!(f.code, Code::RefdesDuplicate | Code::RefdesMissing))
+        .map(|f| json!(f))
+        .collect()
+}
+
+/// `annotate`: one logged, undoable change guarded by [`revision`], or
+/// with `dry_run` what it would be.
+pub fn annotate(
+    session: &mut Session,
+    design: Option<&str>,
+    order: Order,
+    reset: Reset,
+    dry_run: bool,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    check_revision("the project's designators", &revision(p), expected)?;
+    let plan = plan(p, design, order, reset)?;
+    let d = plan.design.clone();
+    let erc = if dry_run {
+        refdes_findings(&write::proposed(session, &plan.writes)?, &d)
+    } else {
+        if !plan.changes.is_empty() {
+            commit(session, &format!("annotate {d}"), plan.writes)?;
+        }
+        refdes_findings(session.project(), &d)
+    };
+    Ok(json!({
+        "design": d,
+        "order": order,
+        "reset": reset,
+        "dry_run": dry_run,
+        "changes": plan.changes,
+        "skipped": plan.skipped,
+        "erc": erc,
+        "revision": revision(session.project()),
+    }))
+}
+
+/// The components `refs` name in design `design`: `<block>/<component>`,
+/// or a designator one occurrence of the design shows.
+fn named(p: &Project, design: &Id, refs: &[String]) -> Result<Vec<(Id, Id)>> {
+    let flat = netlist::flatten(p, design)?;
+    let mut out = Vec::new();
+    for r in refs {
+        if r.contains('/') {
+            let (b, c) = write::in_block(p, r, "component")?;
+            out.push((b.id.clone(), c));
+            continue;
+        }
+        let found: BTreeSet<(Id, Id)> = flat
+            .occurrences
+            .iter()
+            .filter(|o| o.refdes.as_deref() == Some(r.as_str()))
+            .map(|o| (o.block.clone(), o.component.clone()))
+            .collect();
+        match found.len() {
+            0 => {
+                return Err(
+                    Error::new(Code::NotFound, format!("design {design} shows no {r}"))
+                        .with("reference", r.as_str()),
+                );
+            }
+            1 => out.extend(found),
+            _ => {
+                let list: Vec<String> = found.iter().map(|(b, c)| format!("{b}/{c}")).collect();
+                return Err(Error::new(
+                    Code::RefdesDuplicate,
+                    format!(
+                        "{r} is {}: name one as <block>/<component>",
+                        list.join(" and ")
+                    ),
+                )
+                .with("reference", r.as_str())
+                .with("components", json!(list)));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `annotate.lock` and `annotate.unlock`: one logged, undoable change
+/// guarded by [`revision`].
+pub fn lock(
+    session: &mut Session,
+    design: Option<&str>,
+    refs: &[String],
+    lock: bool,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    check_revision("the project's designators", &revision(p), expected)?;
+    let d = netlist::one_design(p, design)?;
+    let mut writes = Writes::default();
+    let mut list = Vec::new();
+    for (bid, cid) in named(p, &d, refs)? {
+        let b = p.conn.block(&bid)?;
+        let mut c = b.components[&cid].item.clone()?;
+        if lock && c.refdes.as_deref().and_then(numbered).is_none() {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "{bid}/{cid} has no numbered designator to lock ({})",
+                    c.refdes.as_deref().unwrap_or("none")
+                ),
+            )
+            .with("reference", format!("{bid}/{cid}")));
+        }
+        list.push(json!({"component": format!("{bid}/{cid}"), "refdes": c.refdes}));
+        if c.refdes_locked != lock {
+            c.refdes_locked = lock;
+            writes.put(
+                part_path(&bid, Part::Component, &cid),
+                &c,
+                conn::COMPONENT_KIND,
+            );
+        }
+    }
+    if !writes.0.is_empty() {
+        locked_clashes(&write::proposed(session, &writes)?)?;
+        let what = if lock {
+            "annotate lock"
+        } else {
+            "annotate unlock"
+        };
+        commit(session, what, writes)?;
+    }
+    let mut out = json!({"design": d, "revision": revision(session.project())});
+    out[if lock { "locked" } else { "unlocked" }] = json!(list);
+    Ok(out)
+}
 
 #[cfg(test)]
 mod tests {
