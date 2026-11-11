@@ -431,9 +431,12 @@ pub fn lines_overlay(
     out
 }
 
-/// The faces a tweak modified, by solid, from `inspect` of the feature
-/// (`v`): the references its `kind` object's `modified` lists that name a
-/// face of the solid as the tweak left it.
+/// The faces a tweak or direct edit paints when chosen, by solid, from
+/// `inspect` of the feature (`v`): the references its `kind` object's
+/// `modified` and `created` list, and a resize's remade blends' faces
+/// (which keep their names, so the journal needn't call them either),
+/// that name a face of the solid as the edit left it. What it took away
+/// isn't there to paint.
 pub fn modified(v: &Value, kind: &str) -> BTreeMap<(String, String), BTreeSet<String>> {
     let faces: BTreeSet<(String, String)> = v["bodies"]
         .as_array()
@@ -448,13 +451,28 @@ pub fn modified(v: &Value, kind: &str) -> BTreeMap<(String, String), BTreeSet<St
                 .filter_map(move |f| Some((solid.clone(), f["name"].as_str()?.to_owned())))
         })
         .collect();
+    let o = &v[kind];
+    let mut refs: Vec<&str> = Vec::new();
+    for k in ["modified", "created"] {
+        refs.extend(
+            o[k]["references"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str),
+        );
+    }
+    for b in o["resized"].as_array().into_iter().flatten() {
+        refs.extend(
+            b["faces"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str),
+        );
+    }
     let mut out: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
-    for r in v[kind]["modified"]["references"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-    {
+    for r in refs {
         let mut it = r.splitn(3, '/');
         let (Some(part), Some(solid), Some(name)) = (it.next(), it.next(), it.next()) else {
             continue;
@@ -729,5 +747,31 @@ mod tests {
         let t = TweakInfo::from_report(&f).unwrap();
         assert!(!t.change && !t.rebuild && t.summary().is_empty());
         assert!(t.blends.is_empty());
+    }
+
+    #[test]
+    fn a_direct_edit_paints_what_it_modified_and_made_never_what_went() {
+        let v = json!({"part": "p", "bodies": [{"feature": "x", "solid": "b",
+            "faces": [{"name": "top"}, {"name": "cap"}, {"name": "side"}, {"name": "f1"}]}],
+            "delete_face": {
+                "modified": {"faces": 1, "edges": 0, "vertices": 0, "references": ["p/b/top"]},
+                "created": {"faces": 1, "edges": 0, "vertices": 0, "references": ["p/b/cap"]},
+                "deleted": {"faces": 1, "edges": 0, "vertices": 0, "references": ["p/b/bore"]}}});
+        let key = ("p".to_owned(), "b".to_owned());
+        assert_eq!(
+            modified(&v, "delete_face")[&key],
+            BTreeSet::from(["cap".to_owned(), "top".to_owned()])
+        );
+        // A resize keeps its blends' names: they paint by the report.
+        let v = json!({"part": "p", "bodies": [{"feature": "r", "solid": "b",
+            "faces": [{"name": "top"}, {"name": "f1"}]}],
+            "resize_blend": {
+                "modified": {"faces": 0, "edges": 0, "vertices": 0, "references": []},
+                "created": {"faces": 0, "edges": 0, "vertices": 0, "references": []},
+                "resized": [{"faces": ["p/b/f1"], "was": {}, "now": {}}]}});
+        assert_eq!(
+            modified(&v, "resize_blend")[&key],
+            BTreeSet::from(["f1".to_owned()])
+        );
     }
 }
