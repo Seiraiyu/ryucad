@@ -12,7 +12,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const KIND: &str = "ryueda.symbol";
-pub const FORMAT: u64 = 1;
+/// The newest format read; a symbol is written in [`format_of`]'s.
+pub const FORMAT: u64 = 2;
+
+/// The format a symbol is written in: 2 when it has a class, else 1, so
+/// an older ryueda reads every symbol written without one.
+pub fn format_of(s: &Symbol) -> u64 {
+    if s.class.is_some() { 2 } else { 1 }
+}
 
 /// A point `[x, y]` in nanometres.
 pub type Point = [i64; 2];
@@ -24,6 +31,11 @@ pub struct Symbol {
     /// How many units the symbol has: 1 for most parts, one per gate or
     /// section for the rest.
     pub units: u32,
+    /// What kind of part it draws (format 2), which the standards' rules
+    /// and templates are per; `None` lets the lint infer one from the
+    /// prefix of a library component that places it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<crate::standards::Class>,
     /// By pin number (`1`, `A1`, `EP`).
     #[serde(default)]
     pub pins: BTreeMap<String, Pin>,
@@ -391,6 +403,26 @@ pub(crate) mod tests {
     use super::*;
     use crate::doc;
     use serde_json::json;
+
+    #[test]
+    fn a_class_makes_a_symbol_format_2() {
+        let mut s = resistor();
+        assert_eq!(format_of(&s), 1);
+        let text = doc::to_string(&s, KIND, format_of(&s));
+        assert!(!text.contains("class"));
+        s.class = Some(crate::standards::Class::Resistor);
+        assert_eq!(format_of(&s), 2);
+        let text = doc::to_string(&s, KIND, format_of(&s));
+        assert!(text.contains("\"class\": \"resistor\""));
+        assert!(text.contains("\"format\": 2"));
+        let back: Symbol = doc::read(text.as_bytes(), "r.json", KIND, FORMAT).unwrap();
+        assert_eq!(back, s);
+        // A format 1 symbol reads with none; an unknown class is refused.
+        assert_eq!(resistor().class, None);
+        let bad = text.replace("\"resistor\"", "\"gizmo\"");
+        let e = doc::read::<Symbol>(bad.as_bytes(), "r.json", KIND, FORMAT).unwrap_err();
+        assert_eq!(e.code, Code::InvalidDocument);
+    }
 
     /// A two-pin resistor, drawn as a box.
     pub fn resistor() -> Symbol {

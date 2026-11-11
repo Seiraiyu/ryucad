@@ -674,7 +674,7 @@ pub fn import(session: &mut Session, opts: &Options, expected: Option<&str>) -> 
         symbol_ok.insert(id.clone());
         planned.push(Planned {
             kind: ObjKind::Symbol,
-            text: doc::to_string::<Symbol>(s, symbol::KIND, symbol::FORMAT),
+            text: doc::to_string::<Symbol>(s, symbol::KIND, symbol::format_of(s)),
             id,
         });
     }

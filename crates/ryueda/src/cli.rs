@@ -396,6 +396,11 @@ enum SymbolCmd {
         /// "rect", "start": [...], "end": [...]}, ...
         #[arg(long, value_parser = ops, default_value = "[]")]
         ops: Ops,
+        /// The class of part it draws: resistor, capacitor, inductor,
+        /// diode, led, transistor, opamp, connector, regulator, ic (none
+        /// takes it off an edit).
+        #[arg(long)]
+        class: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -409,6 +414,11 @@ enum SymbolCmd {
         units: Option<u32>,
         #[arg(long, value_parser = ops, default_value = "[]")]
         ops: Ops,
+        /// The class of part it draws: resistor, capacitor, inductor,
+        /// diode, led, transistor, opamp, connector, regulator, ic (none
+        /// takes it off an edit).
+        #[arg(long)]
+        class: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1392,12 +1402,14 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             id,
             units,
             ops,
+            class,
             expect,
         }) => Request::SymbolCreate {
             name: name.clone(),
             id: id.clone(),
             units: *units,
             ops: ops.0.clone(),
+            class: class.clone(),
             expected_revision: expect.expect.clone(),
         },
         Command::Symbol(SymbolCmd::Edit {
@@ -1405,12 +1417,14 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             name,
             units,
             ops,
+            class,
             expect,
         }) => Request::SymbolEdit {
             symbol: symbol.clone(),
             name: name.clone(),
             units: *units,
             ops: ops.0.clone(),
+            class: class.clone(),
             expected_revision: expect.expect.clone(),
         },
         Command::Symbol(SymbolCmd::Show { symbol }) => Request::SymbolShow {

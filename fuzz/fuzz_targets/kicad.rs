@@ -87,7 +87,7 @@ fn check(text: &str) {
                 && let Some(s) = &item.symbol
             {
                 let _ = s.check();
-                round_trips(s, ryueda::symbol::KIND, ryueda::symbol::FORMAT);
+                round_trips(s, ryueda::symbol::KIND, ryueda::symbol::format_of(s));
             }
         }
     }

@@ -2125,6 +2125,34 @@ fn standards_from_the_cli() {
     assert!(!p.direct.join("board/library/standards.json").exists());
 }
 
+/// A symbol's class: given, changed, taken off; a symbol with none stays
+/// format 1.
+#[test]
+fn a_symbols_class_from_the_cli() {
+    let p = Pair::projects();
+    let made = p.ok(&[
+        "symbol", "create", "R", "--ops", RESISTOR, "--class", "resistor",
+    ]);
+    assert_eq!(made["symbol"]["class"], "resistor", "{made}");
+    let file = fs::read_to_string(p.direct.join("board/library/symbols/r.json")).unwrap();
+    assert!(file.contains("\"format\": 2"), "{file}");
+    let edited = p.ok(&["symbol", "edit", "r", "--class", "none"]);
+    assert!(edited["symbol"].get("class").is_none(), "{edited}");
+    let file = fs::read_to_string(p.direct.join("board/library/symbols/r.json")).unwrap();
+    assert!(file.contains("\"format\": 1"), "{file}");
+    let e = p.fails(
+        &["symbol", "edit", "r", "--class", "gizmo"],
+        "invalid_param",
+        1,
+    );
+    assert!(
+        e["details"]["classes"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("ic"))
+    );
+}
+
 #[test]
 fn lint_preferences_from_the_cli() {
     let p = Pair::breakout();

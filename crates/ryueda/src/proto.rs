@@ -90,6 +90,10 @@ pub enum Request {
         units: Option<u32>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         ops: Vec<Value>,
+        /// The symbol's class (`resistor`, `ic`, …); on an edit `none`
+        /// takes it off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        class: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -104,6 +108,10 @@ pub enum Request {
         units: Option<u32>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         ops: Vec<Value>,
+        /// The symbol's class (`resistor`, `ic`, …); on an edit `none`
+        /// takes it off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        class: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
