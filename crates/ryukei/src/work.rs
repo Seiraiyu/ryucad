@@ -204,9 +204,14 @@ const BESIDE: u64 = 1 << 24;
 const UNION: u64 = 1 << 24;
 /// One rung of the re-trim: 16 times the largest rung that builds across
 /// the release suites and the pinned STEP corpus, rounded up to a power
-/// of two (plan 16.C's Task 11). Set provisionally to the trace's cap
-/// until then.
-const RUNG: u64 = 1 << 26;
+/// of two (plan 16.C's Task 11, on cox-worker-2, AMD Ryzen 7 9700X,
+/// 2026-11-11: largest 1,009,883 units, NIST FTC 08's pocket floor, a
+/// 33-face region at rung 0, in a pinned edition; `retrim`,
+/// `delete_faces`, `blend_edits`, `tweaks`, `drafts`, `edit_props`,
+/// `work`, `fuzz_regressions`, `tweak_props` and ryustep's `defeature`
+/// with its pinned bodies). Every rung past it refused: FTC 07's spent
+/// 95,573,843.
+const RUNG: u64 = 1 << 24;
 
 static FREE: Work<'static> = Work::unlimited();
 
