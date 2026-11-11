@@ -345,7 +345,9 @@ impl TitleField {
     pub fn default_template(self) -> &'static str {
         match self {
             TitleField::Title => "{design}",
-            TitleField::Number => "{number}",
+            // `number` is built in (a designator's number), so a
+            // project's document number is `doc_number`.
+            TitleField::Number => "{doc_number}",
             TitleField::Revision => "{rev}",
             TitleField::Date => "{date}",
             TitleField::Organisation => "{organisation}",
@@ -1045,7 +1047,7 @@ mod tests {
             "palette": {"brand": {"light": "#0055AA", "dark": "#66aaff"}},
             "rules": [{"select": {"tag": "hv", "kind": "net"}, "set": {"colour": "brand", "line_weight": "heavy"}}],
             "overrides": {"component/b1/r1": {"colour": {"light": "#ff0000", "dark": "#ff8080"}, "visible": {"pin_numbers": false}}},
-            "title_block": {"title": "{design}", "number": "{number}"}
+            "title_block": {"title": "{design}", "number": "{doc_number}"}
         }));
         assert_eq!(s.rules[0].select.keys(), 2);
         let text = crate::doc::to_string(&s, KIND, FORMAT);

@@ -1,5 +1,5 @@
 //! A PDF of sheets: one page per sheet at its paper's size, each with a
-//! plain border and a heading, its drawing what `ryusch::paint` says the
+//! plain border and a title block (plan 2.E), its drawing what `ryusch::paint` says the
 //! sheet draws, written through `ryu_draw::pdf` (Inter subset and
 //! embedded, links between pages and bookmarks; design 417 moved the
 //! writer there, every byte as it was). No time stamp, no random ID: the
@@ -7,10 +7,10 @@
 
 use ryu_draw::pdf::{Canvas, Doc};
 use ryu_draw::{Colour, P};
-use ryusch::font::{Anchor, MIN_SIZE};
+use ryusch::font::Anchor;
 use ryusch::geom::{Nm, Point};
 use ryusch::paint::{DASH, Item, LINE};
-use ryusch::style::{Look, Rgb, Role};
+use ryusch::style::Rgb;
 use std::collections::BTreeSet;
 
 pub use ryu_draw::pdf::Mark;
@@ -19,8 +19,6 @@ pub use ryu_draw::pdf::Mark;
 const PT: f64 = 72.0 / 25_400_000.0;
 /// Between the paper's edge and the border.
 pub const FRAME: Nm = 5_000_000;
-/// The heading's text, in the band between the border and the sheet.
-const HEADING: Nm = 2_500_000;
 
 /// A link: a box on the page (in the sheet's frame) going to a page.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,16 +27,103 @@ pub struct Link {
     pub to: usize,
 }
 
-/// One page: its paper, heading, where the sheet's frame sits on it, what
-/// it draws (in the sheet's frame) and its links.
+/// One page: its paper, title block, where the sheet's frame sits on it,
+/// what it draws (in the sheet's frame) and its links.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Page {
     pub paper: [Nm; 2],
-    pub heading: String,
+    pub title: TitleBlock,
     /// The sheet's lower left corner on the paper.
     pub origin: Point,
     pub items: Vec<Item>,
     pub links: Vec<Link>,
+}
+
+/// What a page's title block says (plan 2.E): the style's fields filled
+/// from properties, and the page's own design, block and sheet.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TitleBlock {
+    pub title: String,
+    pub number: String,
+    pub organisation: String,
+    /// `<design> · <block>` and the layer, when a stack's.
+    pub design_block: String,
+    pub revision: String,
+    pub date: String,
+    /// `n/m` through the document.
+    pub sheet: String,
+}
+
+/// The title block's width and height.
+pub const TITLE_W: Nm = 140_000_000;
+pub const TITLE_H: Nm = 16_000_000;
+const ROW: Nm = 7_000_000;
+const LABEL: Nm = 1_500_000;
+const VALUE: Nm = 2_500_000;
+const TITLE_VALUE: Nm = 3_500_000;
+
+/// The title block on a page of `paper`, in the drawing frame's lower
+/// right: a top row (Title, Number) and a bottom row (Organisation,
+/// Design · block, Rev, Date, Sheet), each cell's label at its top left
+/// and its value under it.
+pub fn title_items(paper: [Nm; 2], t: &TitleBlock) -> Vec<Item> {
+    use ryusch::style::{Look, Role};
+    let look = Look::default();
+    let ink = look.role(Role::Text);
+    let x1 = paper[0] - crate::schem::BORDER;
+    let x0 = x1 - TITLE_W;
+    let y0 = crate::schem::BORDER;
+    let y1 = y0 + TITLE_H;
+    let mid = y0 + ROW;
+    let mm = |v: Nm| v * 1_000_000;
+    let line = |pts: Vec<Point>| Item::Polyline {
+        points: pts,
+        stroke: ink,
+        fill: None,
+        width: LINE,
+        dash: false,
+    };
+    let mut out = vec![
+        line(vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]),
+        line(vec![[x0, mid], [x1, mid]]),
+    ];
+    let mut cell = |x: Nm, bottom: Nm, top: Nm, label: &str, value: &str, size: Nm, bold: bool| {
+        if x > x0 {
+            out.push(line(vec![[x, bottom], [x, top]]));
+        }
+        out.push(Item::Text {
+            text: label.to_owned(),
+            at: [x + mm(1), top - mm(1) - LABEL],
+            size: LABEL,
+            anchor: Anchor::Start,
+            vertical: false,
+            colour: look.role(Role::Name),
+            bold: false,
+        });
+        out.push(Item::Text {
+            text: value.to_owned(),
+            at: [x + mm(1), bottom + mm(1) + VALUE / 4],
+            size,
+            anchor: Anchor::Start,
+            vertical: false,
+            colour: ink,
+            bold,
+        });
+    };
+    cell(x0, mid, y1, "Title", &t.title, TITLE_VALUE, true);
+    cell(x0 + mm(90), mid, y1, "Number", &t.number, VALUE, false);
+    let mut x = x0;
+    for (w, label, value) in [
+        (40, "Organisation", &t.organisation),
+        (50, "Design · block", &t.design_block),
+        (15, "Rev", &t.revision),
+        (20, "Date", &t.date),
+        (15, "Sheet", &t.sheet),
+    ] {
+        cell(x, y0, mid, label, value, VALUE, false);
+        x += mm(w);
+    }
+    out
 }
 
 /// A point of the sheet's frame on the paper, in nanometres: exact in
@@ -51,7 +136,11 @@ fn on(origin: Point, q: Point) -> P {
 fn chars(pages: &[Page]) -> BTreeSet<char> {
     let mut out: BTreeSet<char> = BTreeSet::new();
     for p in pages {
-        out.extend(p.heading.chars());
+        for it in title_items(p.paper, &p.title) {
+            if let Item::Text { text, .. } = it {
+                out.extend(text.chars());
+            }
+        }
         for it in &p.items {
             if let Item::Text { text, .. } = it {
                 out.extend(text.chars());
@@ -298,7 +387,7 @@ pub fn write(title: &str, pages: &[Page], marks: &[Mark]) -> Vec<u8> {
             .set_line_cap(pdf_writer::types::LineCapStyle::RoundCap);
         c.content()
             .set_line_join(pdf_writer::types::LineJoinStyle::RoundJoin);
-        // The border, then the heading in the band above the sheet.
+        // The border, then the title block in the band at its foot.
         c.stroke_colour(Colour::BLACK);
         c.rect(
             [FRAME as f64, FRAME as f64],
@@ -308,22 +397,9 @@ pub fn write(title: &str, pages: &[Page], marks: &[Mark]) -> Vec<u8> {
             ],
         );
         c.stroke();
-        draw(
-            c,
-            [0, 0],
-            &Item::Text {
-                text: page.heading.clone(),
-                at: [
-                    FRAME + MIN_SIZE,
-                    page.paper[1] - FRAME - HEADING - MIN_SIZE / 2,
-                ],
-                size: HEADING,
-                anchor: Anchor::Start,
-                vertical: false,
-                colour: Look::default().role(Role::Text),
-                bold: false,
-            },
-        );
+        for it in title_items(page.paper, &page.title) {
+            draw(c, [0, 0], &it);
+        }
         for it in &page.items {
             draw(c, page.origin, it);
         }
@@ -337,7 +413,15 @@ mod tests {
     fn page(text: &str, links: Vec<Link>) -> Page {
         Page {
             paper: [420_000_000, 297_000_000],
-            heading: format!("design · top · sheet 1/2 · {text}"),
+            title: TitleBlock {
+                title: "Sensor board".into(),
+                number: "SB-1".into(),
+                organisation: "Seiraiyu".into(),
+                design_block: format!("design · top · {text}"),
+                revision: "B".into(),
+                date: "2026-11-11".into(),
+                sheet: "1/2".into(),
+            },
             origin: [10_000_000, 10_000_000],
             items: vec![
                 Item::Polyline {
@@ -407,5 +491,44 @@ mod tests {
         assert!(text.contains("/ToUnicode"));
         assert!(text.contains("/Title (Sheet 2)"));
         assert!(!text.contains("/CreationDate") && !text.contains("/ID"));
+        let items = title_items([420_000_000, 297_000_000], &pages[0].title);
+        let texts: Vec<&str> = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        for t in [
+            "Title",
+            "Sensor board",
+            "Number",
+            "SB-1",
+            "Rev",
+            "B",
+            "Date",
+            "2026-11-11",
+            "Sheet",
+            "1/2",
+        ] {
+            assert!(texts.contains(&t), "{t} in {texts:?}");
+        }
+        // Inside the drawing frame's lower right, in the band.
+        let r = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Polyline { points, .. } => ryusch::geom::Rect::of(points.iter().copied()),
+                _ => None,
+            })
+            .reduce(ryusch::geom::Rect::union)
+            .unwrap();
+        assert_eq!(
+            r.max,
+            [
+                420_000_000 - crate::schem::BORDER,
+                crate::schem::BORDER + TITLE_H
+            ]
+        );
+        assert!(r.max[1] <= crate::schem::BORDER + crate::schem::TITLE_BAND);
     }
 }

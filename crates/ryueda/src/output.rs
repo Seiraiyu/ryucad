@@ -250,7 +250,6 @@ fn output_pages(
         node: usize,
         sheet: String,
         name: String,
-        index: usize,
         count: usize,
     }
     let mut sheets: Vec<Sheet> = Vec::new();
@@ -261,12 +260,11 @@ fn output_pages(
             continue;
         };
         let order = ryusch::canvas::order(&l.outcome.layout);
-        for (k, s) in order.iter().enumerate() {
+        for s in &order {
             sheets.push(Sheet {
                 node: i,
                 sheet: s.clone(),
                 name: l.outcome.layout.sheets[s].name.clone(),
-                index: k + 1,
                 count: order.len(),
             });
         }
@@ -306,6 +304,7 @@ fn output_pages(
     }
     let mut pages: Vec<Page> = Vec::new();
     let mut listing = Vec::new();
+    let style_layers = crate::cascade::Layers::of(p);
     for (pg, s) in sheets.iter().enumerate() {
         let node = &nodes[s.node];
         let b = p.conn.block(&node.block)?;
@@ -314,13 +313,34 @@ fn output_pages(
             .item
             .as_ref()
             .map_or(node.block.to_string(), |x| x.name.clone());
-        let mut heading = format!(
-            "{design_name} · {block_name} · sheet {}/{} {}",
-            s.index, s.count, s.name
+        let lv = schem::levels(
+            p,
+            b,
+            BTreeMap::from([
+                ("design", design_name.clone()),
+                ("block", block_name.clone()),
+                ("sheet", s.name.clone()),
+                ("sheets", s.count.to_string()),
+            ]),
         );
+        let fill = |f: crate::style::TitleField| {
+            crate::props::Template::parse(&style_layers.title_field(f))
+                .and_then(|t| t.render(&|n| Some(lv.get(n).unwrap_or_default())))
+                .unwrap_or_default()
+        };
+        let mut design_block = format!("{design_name} · {block_name}");
         if !node.layer.is_empty() {
-            heading.push_str(&format!(" · layer {}", node.layer));
+            design_block.push_str(&format!(" · layer {}", node.layer));
         }
+        let title = crate::pdf::TitleBlock {
+            title: fill(crate::style::TitleField::Title),
+            number: fill(crate::style::TitleField::Number),
+            organisation: fill(crate::style::TitleField::Organisation),
+            design_block,
+            revision: fill(crate::style::TitleField::Revision),
+            date: fill(crate::style::TitleField::Date),
+            sheet: format!("{}/{}", pg + 1, sheets.len()),
+        };
         let paint = &painted[pg];
         let mut items = paint.items.clone();
         let mut links = Vec::new();
@@ -364,7 +384,7 @@ fn output_pages(
         let area = l.built.input.area_in(&l.outcome.layout, &s.sheet);
         pages.push(Page {
             paper: [area[0] + 2 * BORDER, area[1] + 2 * BORDER + TITLE_BAND],
-            heading,
+            title,
             origin: [BORDER, BORDER + TITLE_BAND],
             items,
             links,
@@ -528,6 +548,18 @@ fn xref_items(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_title_block_reads_the_style_and_the_properties() {
+        let (_dir, p) =
+            crate::netlist::tests::project_with_properties(&[("doc_number", "SB-1"), ("rev", "C")]);
+        let (_, _, pages, _) = output_pages(&p, None, Layers::All).unwrap();
+        let t = &pages[0].title;
+        assert_eq!((t.number.as_str(), t.revision.as_str()), ("SB-1", "C"));
+        assert_eq!(t.date, "", "no date property: empty, never a time stamp");
+        assert!(t.sheet.starts_with("1/"));
+        assert!(!t.title.is_empty(), "the design's name by default");
+    }
 
     #[test]
     fn a_design_pages_its_stack_once_per_layer() {

@@ -970,17 +970,13 @@ pub fn lay_restoring(
     })
 }
 
-/// Fills each note instruction's properties (plan 2.C): `{name}` from the
-/// levels a designator format reads for the block's first layer (each
-/// instance from the innermost, the block, the project) and the built-in
-/// `block` (the block's name). A note naming a property no level sets, or
-/// that doesn't read as a template, keeps its text as written, with the
-/// note `note_property_unknown`.
-pub fn fill_notes(
-    p: &Project,
-    b: &BlockFiles,
-    input: &mut input::Block,
-) -> Vec<ryusch::engine::Note> {
+/// The property levels text in block `b` reads (its first layer's
+/// instances, the block, the project), with `built_in` read first.
+pub fn levels<'a>(
+    p: &'a Project,
+    b: &'a BlockFiles,
+    built_in: BTreeMap<&'static str, String>,
+) -> crate::props::Levels<'a> {
     let mut outer: Vec<&crate::props::Properties> = Vec::new();
     if let Some(first) = layers(p, &b.id).first() {
         for iid in first.path.iter().rev() {
@@ -995,15 +991,28 @@ pub fn fill_notes(
             }
         }
     }
-    let own = b.block.item.as_ref().ok();
-    if let Some(own) = own {
+    if let Ok(own) = b.block.item.as_ref() {
         outer.push(&own.properties);
     }
     outer.push(&p.manifest.properties);
-    let levels = crate::props::Levels {
+    crate::props::Levels {
         levels: outer,
-        built_in: BTreeMap::from([("block", input.name.clone())]),
-    };
+        built_in,
+    }
+}
+
+/// Fills each note instruction's properties (plan 2.C): `{name}` from the
+/// levels a designator format reads for the block's first layer (each
+/// instance from the innermost, the block, the project) and the built-in
+/// `block` (the block's name). A note naming a property no level sets, or
+/// that doesn't read as a template, keeps its text as written, with the
+/// note `note_property_unknown`.
+pub fn fill_notes(
+    p: &Project,
+    b: &BlockFiles,
+    input: &mut input::Block,
+) -> Vec<ryusch::engine::Note> {
+    let levels = levels(p, b, BTreeMap::from([("block", input.name.clone())]));
     let mut notes = Vec::new();
     input.notes.clear();
     for (id, ins) in &input.instructions {
