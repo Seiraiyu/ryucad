@@ -12,6 +12,7 @@ mod args;
 mod bspline;
 mod curve;
 mod derived;
+mod document;
 mod geometry;
 mod product;
 mod representation;
@@ -226,10 +227,11 @@ pub enum Entity {
         product: Id,
     },
     /// `PRODUCT_DEFINITION` (a view of a version), with or without
-    /// associated documents.
+    /// associated documents (`documents`, empty without).
     Definition {
         id: Box<str>,
         formation: Id,
+        documents: Vec<Id>,
     },
     /// `PRODUCT_DEFINITION_SHAPE`: the shape of a product definition, or
     /// of an assembly usage.
@@ -255,6 +257,56 @@ pub enum Entity {
     ContextDependentShape {
         relationship: Id,
         product_shape: Id,
+    },
+    /// `DOCUMENT`, or `DOCUMENT_FILE` (`file`): its identifier, name and
+    /// kind (a `DOCUMENT_TYPE`).
+    Document {
+        id: Box<str>,
+        name: Box<str>,
+        kind: Option<Id>,
+        file: bool,
+    },
+    /// `DOCUMENT_TYPE`: its product data type (`cad_filename`, or empty).
+    DocumentType {
+        name: Box<str>,
+    },
+    /// `DOCUMENT_REPRESENTATION_TYPE`: `digital` or `physical`, of a
+    /// document.
+    DocumentRepresentationType {
+        name: Box<str>,
+        document: Id,
+    },
+    /// `APPLIED_DOCUMENT_REFERENCE`: a document assigned to items.
+    DocumentReference {
+        document: Id,
+        items: Vec<Id>,
+    },
+    /// `DOCUMENT_PRODUCT_EQUIVALENCE`: a document that is a product, a
+    /// formation or a definition.
+    DocumentEquivalence {
+        document: Id,
+        product: Id,
+    },
+    /// `APPLIED_EXTERNAL_IDENTIFICATION_ASSIGNMENT`: an identifier (a
+    /// file's name, for documents) assigned to items.
+    ExternalIdentification {
+        id: Box<str>,
+        items: Vec<Id>,
+    },
+    /// `PROPERTY_DEFINITION`: its name and what it is of.
+    PropertyDefinition {
+        name: Box<str>,
+        definition: Id,
+    },
+    /// `PROPERTY_DEFINITION_REPRESENTATION`.
+    PropertyRepresentation {
+        definition: Id,
+        representation: Id,
+    },
+    /// `DESCRIPTIVE_REPRESENTATION_ITEM`: a name and a text.
+    Descriptive {
+        name: Box<str>,
+        description: Box<str>,
     },
     /// An entity this crate doesn't read: its name, or a complex
     /// instance's names joined by spaces.
@@ -311,6 +363,16 @@ impl Entity {
             Entity::ShapeDefinition { .. } => "SHAPE_DEFINITION_REPRESENTATION",
             Entity::Usage { .. } => "NEXT_ASSEMBLY_USAGE_OCCURRENCE",
             Entity::ContextDependentShape { .. } => "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION",
+            Entity::Document { file: true, .. } => "DOCUMENT_FILE",
+            Entity::Document { .. } => "DOCUMENT",
+            Entity::DocumentType { .. } => "DOCUMENT_TYPE",
+            Entity::DocumentRepresentationType { .. } => "DOCUMENT_REPRESENTATION_TYPE",
+            Entity::DocumentReference { .. } => "APPLIED_DOCUMENT_REFERENCE",
+            Entity::DocumentEquivalence { .. } => "DOCUMENT_PRODUCT_EQUIVALENCE",
+            Entity::ExternalIdentification { .. } => "APPLIED_EXTERNAL_IDENTIFICATION_ASSIGNMENT",
+            Entity::PropertyDefinition { .. } => "PROPERTY_DEFINITION",
+            Entity::PropertyRepresentation { .. } => "PROPERTY_DEFINITION_REPRESENTATION",
+            Entity::Descriptive { .. } => "DESCRIPTIVE_REPRESENTATION_ITEM",
             Entity::Other(name) => name,
         }
     }
@@ -449,6 +511,9 @@ fn simple(id: Id, name: &str, params: &[Param]) -> Result<Entity, ImportError> {
     }
     if let Some(u) = units::simple(id, name, params) {
         return u;
+    }
+    if let Some(d) = document::simple(id, name, params) {
+        return d;
     }
     if let Some(p) = product::simple(id, name, params) {
         return p;

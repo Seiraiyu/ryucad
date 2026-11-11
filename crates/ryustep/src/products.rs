@@ -50,6 +50,31 @@ pub struct Definition {
     pub shapes: Vec<Shape>,
     /// Where it uses other definitions.
     pub children: Vec<Occurrence>,
+    /// The documents it names as where its shape is (design 448), in
+    /// instance order; empty for nearly every file.
+    pub external: Vec<External>,
+}
+
+impl Definition {
+    /// Whether its shape is in another file: it names a document and
+    /// holds no shape or usage of its own.
+    pub fn externally_defined(&self) -> bool {
+        !self.external.is_empty() && self.shapes.is_empty() && self.children.is_empty()
+    }
+}
+
+/// A document a definition names (CAx-IF's external references, and
+/// OCCT's writer): a file whose shape the definition is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct External {
+    /// The file's name as written: relative to the referencing file.
+    pub name: String,
+    /// Where it is, where an `external definition` property says more.
+    pub location: Option<String>,
+    /// The file type the writer names (`STEP AP214`), if any.
+    pub format: Option<String>,
+    /// The document's instance number.
+    pub instance: Id,
 }
 
 /// A representation holding B-rep items, and representations mapped into
@@ -201,6 +226,7 @@ impl Products {
                 revision,
                 shapes,
                 children: Vec::new(),
+                external: Vec::new(),
             });
         }
         let placed_by: BTreeMap<Id, Id> = s
@@ -215,6 +241,7 @@ impl Products {
                 Err(f) => p.faults.push(f),
             }
         }
+        documents(e, &mut p);
         p.break_cycles();
         let mut placed = vec![false; p.definitions.len()];
         for d in &p.definitions {
@@ -729,5 +756,181 @@ mod tests {
         assert_eq!(p.roots, [0]);
         assert_eq!(p.definitions[0].children.len(), 1);
         assert_eq!(p.definitions[1].children, []);
+    }
+}
+
+/// Each definition's external documents: those it lists itself (a
+/// definition with associated documents), those an applied document
+/// reference assigns to it, and those a document product equivalence
+/// relates to its formation or product. A document equivalent to a
+/// product whose own definitions list documents (OCCT's `<file>-Doc`)
+/// stands for those documents, and those definitions are never given
+/// any. A document counts when it is a `DOCUMENT_FILE`, has a `digital`
+/// representation type, or is of type `cad_filename` (OCCT's AP203).
+fn documents(e: &Entities, p: &mut Products) {
+    let mut lists: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+    let mut by_formation: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+    let mut formations_of: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+    let mut refs: Vec<(Id, Vec<Id>)> = Vec::new();
+    let mut equiv: Vec<(Id, Id)> = Vec::new();
+    let mut digital: BTreeSet<Id> = BTreeSet::new();
+    let mut idents: BTreeMap<Id, Box<str>> = BTreeMap::new();
+    let mut props: Vec<(Id, Box<str>, Id)> = Vec::new();
+    let mut prop_reps: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+    for &id in e.ids() {
+        match e.get(id, id) {
+            Ok(Entity::Definition {
+                formation,
+                documents,
+                ..
+            }) => {
+                by_formation.entry(*formation).or_default().push(id);
+                if !documents.is_empty() {
+                    lists.insert(id, documents.clone());
+                }
+            }
+            Ok(Entity::Formation { product, .. }) => {
+                formations_of.entry(*product).or_default().push(id);
+            }
+            Ok(Entity::DocumentReference { document, items }) => {
+                refs.push((*document, items.clone()))
+            }
+            Ok(Entity::DocumentEquivalence { document, product }) => {
+                equiv.push((*document, *product))
+            }
+            Ok(Entity::DocumentRepresentationType { name, document })
+                if name.eq_ignore_ascii_case("digital") =>
+            {
+                digital.insert(*document);
+            }
+            Ok(Entity::ExternalIdentification {
+                id: assigned,
+                items,
+            }) => {
+                if !assigned.is_empty() && !assigned.starts_with('#') {
+                    for &i in items {
+                        idents.entry(i).or_insert_with(|| assigned.clone());
+                    }
+                }
+            }
+            Ok(Entity::PropertyDefinition { name, definition }) => {
+                props.push((id, name.clone(), *definition));
+            }
+            Ok(Entity::PropertyRepresentation {
+                definition,
+                representation,
+            }) => prop_reps
+                .entry(*definition)
+                .or_default()
+                .push(*representation),
+            _ => {}
+        }
+    }
+    if refs.is_empty() && equiv.is_empty() && lists.is_empty() {
+        return;
+    }
+    let mut proxies: BTreeSet<Id> = BTreeSet::new();
+    let mut through: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+    let mut named: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
+    for &(doc, product) in &equiv {
+        let formations = match e.get(product, product) {
+            Ok(Entity::Product { .. }) => formations_of.get(&product).cloned().unwrap_or_default(),
+            _ => vec![product],
+        };
+        let defs: Vec<Id> = formations
+            .iter()
+            .flat_map(|f| match e.get(*f, *f) {
+                Ok(Entity::Definition { .. }) => vec![*f],
+                _ => by_formation.get(f).cloned().unwrap_or_default(),
+            })
+            .collect();
+        let listed: Vec<Id> = defs
+            .iter()
+            .flat_map(|d| lists.get(d).cloned().unwrap_or_default())
+            .collect();
+        if listed.is_empty() {
+            for d in defs {
+                named.entry(d).or_default().push(doc);
+            }
+        } else {
+            proxies.extend(defs);
+            through.entry(doc).or_default().extend(listed);
+        }
+    }
+    for (d, docs) in &lists {
+        if !proxies.contains(d) {
+            named.entry(*d).or_default().extend(docs);
+        }
+    }
+    for (doc, items) in &refs {
+        let docs = through.get(doc).cloned().unwrap_or_else(|| vec![*doc]);
+        for &i in items {
+            if let Ok(Entity::Definition { .. }) = e.get(i, i) {
+                named.entry(i).or_default().extend(&docs);
+            }
+        }
+    }
+    let external = |doc: Id| -> Option<External> {
+        let Ok(Entity::Document {
+            id,
+            name,
+            kind,
+            file,
+        }) = e.get(doc, doc)
+        else {
+            return None;
+        };
+        let cad = kind.is_some_and(|k| {
+            matches!(e.get(k, k), Ok(Entity::DocumentType { name }) if name.eq_ignore_ascii_case("cad_filename"))
+        });
+        if !*file && !digital.contains(&doc) && !cad {
+            return None;
+        }
+        let (mut location, mut format) = (None, None);
+        for (pid, pname, def) in &props {
+            if *def != doc {
+                continue;
+            }
+            for &rep in prop_reps.get(pid).into_iter().flatten() {
+                let Ok(Entity::Representation { items, .. }) = e.get(rep, rep) else {
+                    continue;
+                };
+                for &it in items {
+                    if let Ok(Entity::Descriptive {
+                        name: n,
+                        description,
+                    }) = e.get(it, it)
+                    {
+                        if n.eq_ignore_ascii_case("data format") {
+                            format.get_or_insert_with(|| description.to_string());
+                        } else if pname.eq_ignore_ascii_case("external definition")
+                            && !description.is_empty()
+                        {
+                            location.get_or_insert_with(|| description.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        let file_name = idents
+            .get(&doc)
+            .map(|s| s.to_string())
+            .or_else(|| (!id.is_empty()).then(|| id.to_string()))
+            .or_else(|| (!name.is_empty()).then(|| name.to_string()))?;
+        Some(External {
+            name: file_name,
+            location,
+            format,
+            instance: doc,
+        })
+    };
+    for d in &mut p.definitions {
+        let Some(docs) = named.get(&d.instance) else {
+            continue;
+        };
+        let mut docs = docs.clone();
+        docs.sort_unstable();
+        docs.dedup();
+        d.external = docs.into_iter().filter_map(external).collect();
     }
 }
