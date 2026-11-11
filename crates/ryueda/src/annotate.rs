@@ -48,6 +48,22 @@ pub enum Reset {
     All,
 }
 
+/// What `annotate` reads and writes, as one revision: the project's and
+/// every block's (designators are numbered across blocks, and those of
+/// blocks a design doesn't reach are taken). `--expect` takes it.
+pub fn revision(p: &Project) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(b"ryueda.annotate.1");
+    h.update(p.revision.as_bytes());
+    for (id, b) in &p.conn.blocks {
+        h.update(id.as_str().as_bytes());
+        h.update(b"=");
+        h.update(b.revision.as_bytes());
+        h.update(b";");
+    }
+    h.finalize().to_hex()[..32].to_owned()
+}
+
 /// Where `at` reads in `order`: smaller first.
 fn reading(at: Point, order: Order) -> (Nm, Nm, Nm) {
     let (x, down) = (at[0], -at[1]);
@@ -114,6 +130,23 @@ fn by_place(ids: &mut [Id], at: &BTreeMap<String, Key>) {
     });
 }
 
+/// One designator `annotate` sets.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Change {
+    /// `<block>/<component>`.
+    pub component: String,
+    pub from: Option<String>,
+    pub to: String,
+}
+
+/// What `annotate` would do: its changes, the files they write, and the
+/// components it leaves as they are and why.
+pub struct Plan {
+    pub design: Id,
+    pub changes: Vec<Change>,
+    pub writes: Writes,
+    pub skipped: Vec<Value>,
+}
 
 /// The components of design `design`'s blocks in annotate's order, each
 /// block once: `(block, component)`. Blocks depth first from the root as
@@ -150,6 +183,136 @@ fn in_order(p: &Project, design: &Id, order: Order) -> Result<Vec<(Id, Id)>> {
         }
     }
     Ok(out)
+}
+
+/// The prefix a component is numbered under: its designator's letters,
+/// else its library component's prefix.
+fn prefix_of(p: &Project, c: &Component) -> Option<String> {
+    if let Some(r) = &c.refdes {
+        let letters = r
+            .find(|ch: char| !ch.is_ascii_alphabetic())
+            .unwrap_or(r.len());
+        if letters > 0 {
+            return Some(r[..letters].to_owned());
+        }
+    }
+    crate::partcmd::placed(p, &c.of)
+        .ok()
+        .map(|(lc, _)| lc.prefix.clone())
+        .filter(|s| !s.is_empty())
+}
+
+/// Two locked components with one designator, which nothing may number
+/// round: `annotate_conflict`, naming both.
+fn locked_clashes(p: &Project) -> Result<()> {
+    let mut seen: BTreeMap<&str, String> = BTreeMap::new();
+    for (bid, b) in &p.conn.blocks {
+        for (cid, c) in &b.components {
+            let Ok(c) = &c.item else { continue };
+            let (true, Some(r)) = (c.refdes_locked, c.refdes.as_deref()) else {
+                continue;
+            };
+            let here = format!("{bid}/{cid}");
+            if let Some(other) = seen.insert(r, here.clone()) {
+                return Err(Error::new(
+                    Code::AnnotateConflict,
+                    format!("{other} and {here} are both locked as {r}: unlock one"),
+                )
+                .with("refdes", r)
+                .with("components", json!([other, here])));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What annotating design `design` would change.
+pub fn plan(p: &Project, design: Option<&str>, order: Order, reset: Reset) -> Result<Plan> {
+    let d = netlist::one_design(p, design)?;
+    locked_clashes(p)?;
+    let list = in_order(p, &d, order)?;
+    let mine: BTreeSet<(&Id, &Id)> = list.iter().map(|(b, c)| (b, c)).collect();
+    // Every designator nothing here renumbers is taken.
+    let mut taken: BTreeSet<String> = BTreeSet::new();
+    let mut todo: Vec<(&Id, &Id, Component, String, String)> = Vec::new();
+    let mut skipped = Vec::new();
+    for (bid, b) in &p.conn.blocks {
+        for (cid, c) in &b.components {
+            if mine.contains(&(bid, cid)) {
+                continue;
+            }
+            if let Some(r) = c.item.as_ref().ok().and_then(|c| c.refdes.clone()) {
+                taken.insert(r);
+            }
+        }
+    }
+    for (bid, cid) in &list {
+        let b = p.conn.block(bid)?;
+        let Ok(c) = &b.components[cid].item else {
+            skipped
+                .push(json!({"component": format!("{bid}/{cid}"), "why": "its file doesn't read"}));
+            continue;
+        };
+        let r = c.refdes.as_deref();
+        let renumber = !c.refdes_locked
+            && match (r, reset) {
+                (None, _) => true,
+                (Some(r), _) if refdes_placeholder(r) => true,
+                (Some(r), Reset::All) => numbered(r).is_some(),
+                (Some(_), Reset::Unannotated) => false,
+            };
+        if !renumber {
+            if let Some(r) = r {
+                taken.insert(r.to_owned());
+            }
+            continue;
+        }
+        let Some(prefix) = prefix_of(p, c) else {
+            skipped.push(json!({"component": format!("{bid}/{cid}"),
+                                "why": "it has no designator and its library component no prefix"}));
+            continue;
+        };
+        let rest = r
+            .and_then(numbered)
+            .map_or("", |(_, _, rest)| rest)
+            .to_owned();
+        todo.push((bid, cid, c.clone(), prefix, rest));
+    }
+    // Each prefix and rest counts from 1, past what is taken.
+    let mut next: BTreeMap<(String, String), u64> = BTreeMap::new();
+    let mut changes = Vec::new();
+    let mut writes = Writes::default();
+    for (bid, cid, mut c, prefix, rest) in todo {
+        let n = next.entry((prefix.clone(), rest.clone())).or_insert(1);
+        let to = loop {
+            let t = format!("{prefix}{n}{rest}");
+            *n += 1;
+            if !taken.contains(&t) && conn::refdes_ok(&t) {
+                break t;
+            }
+        };
+        taken.insert(to.clone());
+        if c.refdes.as_deref() == Some(to.as_str()) {
+            continue;
+        }
+        changes.push(Change {
+            component: format!("{bid}/{cid}"),
+            from: c.refdes.clone(),
+            to: to.clone(),
+        });
+        c.refdes = Some(to);
+        writes.put(
+            part_path(bid, Part::Component, cid),
+            &c,
+            conn::COMPONENT_KIND,
+        );
+    }
+    Ok(Plan {
+        design: d,
+        changes,
+        writes,
+        skipped,
+    })
 }
 
 
