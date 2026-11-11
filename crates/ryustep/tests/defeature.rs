@@ -1,10 +1,11 @@
-//! Imported bodies defeatured (design 399, plan 13.D): every body the
-//! committed corpus and the OCCT files heal has its blends recognised,
-//! and every blend no larger than 2 mm deleted. Each result is a body
-//! that checks clean (`check` and `check_intersections`) and has no
-//! recognised blend under 2 mm left, or a typed refusal
-//! (`InvalidTweak`), printed. Release only (minutes in a debug build):
-//! its own step in full.yml.
+//! Imported bodies defeatured (design 399, plans 13.D and 16.C): every
+//! body the committed corpus and the OCCT files heal has its blends
+//! recognised, and every blend no larger than 2 mm deleted on one
+//! thread. Question 425's bar: each result is a body that checks clean
+//! (`check` and `check_intersections`) with no recognised blend under
+//! 2 mm left, within the deadline; the bodies `KNOWN_REFUSED` lists,
+//! each with its issue, refuse typed (`InvalidTweak`). Release only
+//! (minutes in a debug build): its own step in full.yml.
 
 use ryukei::Error;
 use ryukei::blend::{BlendKind, EdgeBlend, blend};
@@ -47,6 +48,11 @@ fn within_deadline<T>(f: impl FnOnce(&Work) -> Result<T, Error>) -> Result<T, Er
 
 /// The largest blend deleted: 2 mm, in meters.
 const MAX_SIZE: f64 = 2e-3;
+
+/// Committed bodies whose small blends are still refused, each with its
+/// issue: NIST FTC 07 and FTC 10, kept faces tangent along a seam whose
+/// carried working faces meet uncertain (plan 16.C, question 517).
+const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
 
 /// The STEP files of the committed corpus and the OCCT files, sorted.
 fn files() -> Vec<PathBuf> {
@@ -134,7 +140,13 @@ fn imported_bodies_lose_their_small_blends() {
                 println!("{file} #{i}: no blend under 2 mm");
                 continue;
             }
-            match within_deadline(|w| delete_blends_with(OpKey(0x13d), body, &spec, w)) {
+            let one = rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .unwrap();
+            match one
+                .install(|| within_deadline(|w| delete_blends_with(OpKey(0x13d), body, &spec, w)))
+            {
                 Ok((o, _)) => {
                     assert_eq!(check(&o), [], "{file} #{i}");
                     assert_eq!(check_intersections(&o), [], "{file} #{i}");
@@ -153,6 +165,10 @@ fn imported_bodies_lose_their_small_blends() {
                         "{file} #{i}: {small} blends, refused {e:?} in {:.2} s",
                         t.elapsed().as_secs_f64()
                     );
+                    assert!(
+                        KNOWN_REFUSED.iter().any(|(f, _)| file.contains(f)),
+                        "{file} #{i}: refused {e:?}"
+                    );
                     refused += 1;
                 }
                 Err(Error::Cancelled) => {
@@ -166,13 +182,12 @@ fn imported_bodies_lose_their_small_blends() {
     println!(
         "{defeatured} bodies defeatured, {refused} refused, {slow} past the deadline, {none} with no small blend"
     );
-    // No count is asserted: while planning 13.D no NIST body
-    // defeatured, and the rounded box below is the case that must. The
-    // refusals are filed: CTC 01, 03 and 05 `Uncertain` (#650), FTC 06
-    // and 09 `HealAmbiguous` (#651), FTC 07 and 10 past the deadline
-    // (#652), FTC 08 `Uncertain` (#653), CTC 04 past the deadline (#654). What is asserted is that every
-    // result checks clean and every failure is a typed refusal.
-    let _ = (defeatured, refused, slow, none);
+    // Question 425's bar: every committed body with blends under 2 mm
+    // defeatured, checked clean, within the deadline on one thread (the
+    // time is asserted with `RYUKEI_BARS=1` on the bar machine, else
+    // printed); those `KNOWN_REFUSED` names, with their issues, excepted.
+    assert_eq!(refused, KNOWN_REFUSED.len(), "{refused} refused");
+    assert_eq!(slow, 0, "{slow} past the deadline");
 }
 
 /// A box 10 × 6 × 4 mm with every edge rounded at 1 mm, written to STEP
