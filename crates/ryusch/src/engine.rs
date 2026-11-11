@@ -473,8 +473,9 @@ fn names_part(refs: &[String], key: &str) -> bool {
 /// Parts a released instruction moved, back where they stood before it:
 /// not placed yet, named by no lasting instruction, their sheet still
 /// there and their room there clear of every part placed.
-fn restore(st: &mut State, idioms: &[idiom::Idiom]) {
+fn restore(st: &mut State, idioms: &[idiom::Idiom], prev: Option<&Layout>) {
     let block = st.block;
+
     let named: BTreeSet<usize> = block
         .instructions
         .values()
@@ -512,7 +513,26 @@ fn restore(st: &mut State, idioms: &[idiom::Idiom]) {
             }
             _ => true,
         });
-        if clear && Rect::new([0, 0], st.size(s)).contains(&e) {
+        // Nor on what the previous layout drew of other nets (wires,
+        // labels, buses, notes): its own nets' are drawn again, and text
+        // finds its place round the parts (#666).
+        let kept = drawn(
+            prev.map(|l| {
+                let mut l = l.clone();
+                l.text.clear();
+                for n in block.parts[p].pins.iter().flat_map(|x| x.nets()) {
+                    let key = &block.nets[n].key;
+                    l.routes.remove(key);
+                    l.labels.remove(key);
+                }
+                l
+            })
+            .as_ref(),
+        );
+        let free = kept
+            .get(&at.sheet)
+            .is_none_or(|rs| rs.iter().all(|r| !e.overlaps(r)));
+        if clear && free && Rect::new([0, 0], st.size(s)).contains(&e) {
             st.place[p] = Some((s, place, false));
             // Back in the region of the part its idiom serves, where that
             // is on its sheet.
@@ -569,7 +589,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             unreached_notes.push(Note {
                 code: "network_unresolved".into(),
                 message: format!(
-                    "{} {why}: left where it is (near {} alone, or a region instruction holding it, would move it)",
+                    "{} {why}: left where it is (near {} alone would move it where every hard rule holds there, else it says why; or a region instruction holding it)",
                     crate::lint::who(&block.parts[q]),
                     pin
                 ),
@@ -748,7 +768,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
         }
     }
     keep(&mut st, prev, fresh_sheet, &unkeep);
-    restore(&mut st, &idioms);
+    restore(&mut st, &idioms, prev);
     named_regions(&mut st, r);
     pin_papers(&mut st, r);
     // What `relate` may not move: kept parts no relative instruction moves.
@@ -5245,6 +5265,59 @@ mod tests {
         assert_eq!(crate::rules::check(&back, &out.layout), []);
     }
 
+    /// #666: a released part goes back only where nothing the previous
+    /// layout drew stands: a wire of another net laid since across its old
+    /// place keeps it from there, and every hard rule holds.
+    #[test]
+    fn a_released_part_stays_off_a_wire_drawn_where_it_stood() {
+        let block = seeded(11, 2);
+        let first = lay(&block);
+        let key = block
+            .parts
+            .iter()
+            .find(|p| p.key.starts_with('r'))
+            .expect("a resistor")
+            .key
+            .clone();
+        let mut b = block.clone();
+        b.previous = Some(first.layout.clone());
+        b.instructions.insert(
+            "i1".into(),
+            Instruction::Edge {
+                parts: vec![key.clone()],
+                side: Side::Left,
+            },
+        );
+        let mut moved = lay(&b).layout;
+        // A wire of another net across where the part stood.
+        let was = &first.layout.placed[&key];
+        let p = block.part(&key).expect("part");
+        let e = Shape::of(
+            &block.parts[p],
+            Place::new(was.at, was.rotation, was.mirror),
+        )
+        .extent;
+        let mine: BTreeSet<usize> = block.parts[p].pins.iter().filter_map(|x| x.net).collect();
+        let other = (0..block.nets.len())
+            .find(|n| !mine.contains(n) && block.nets[*n].kind == NetKind::Signal)
+            .expect("another net");
+        let y = (e.min[1] + e.max[1]) / 2 / GRID * GRID;
+        moved
+            .routes
+            .entry(block.nets[other].key.clone())
+            .or_default()
+            .entry(was.sheet.clone())
+            .or_default()
+            .push(vec![[e.min[0] - 2 * GRID, y], [e.max[0] + 2 * GRID, y]]);
+        let mut back = block.clone();
+        back.previous = Some(moved);
+        back.relayout = Relayout::Parts(vec![key.clone()]);
+        back.restore = [(key.clone(), was.clone())].into();
+        let out = lay(&back);
+        assert_ne!(&out.layout.placed[&key], was, "put back on the wire");
+        assert_eq!(crate::rules::check(&back, &out.layout), []);
+    }
+
     /// `orient UA 180` (and `0 mirror`) keeps UA's op-amp stage: the stage is
     /// drawn in shape, feedback above the amplifier; at 90 the stage is
     /// dropped with a note.
@@ -5733,6 +5806,55 @@ mod tests {
             .map(|f| f.details["crossings"].as_u64().unwrap_or(1))
             .sum();
         assert!(crossings <= 3, "{crossings} crossings");
+    }
+
+    /// #666: a bank pulled to three rails gives each rail its own column
+    /// of far ends, every hard rule holding and every row straight.
+    #[test]
+    fn a_bank_of_three_rails_gives_each_rail_its_column() {
+        let mut block = crate::testing::dense_block(false);
+        block
+            .nets
+            .push(crate::testing::net("rail:v5", "5V", NetKind::Supply));
+        let v5 = block.nets.len() - 1;
+        for key in ["r1", "r2", "r7"] {
+            let p = block.part(key).expect("part");
+            let rail = block.parts[p]
+                .pins
+                .iter()
+                .position(|x| x.net == Some(0))
+                .expect("its supply pin");
+            block.parts[p].pins[rail].net = Some(v5);
+        }
+        let out = lay(&block);
+        assert_eq!(crate::rules::check(&block, &out.layout), []);
+        let (found, _) = crate::lint::lint(&block, &out);
+        assert!(
+            !found.iter().any(|f| f.code == "sch_bank_not_in_row"),
+            "{found:#?}"
+        );
+        let mut columns: BTreeMap<usize, BTreeSet<Nm>> = BTreeMap::new();
+        for i in 0..10 {
+            let key = format!("r{}", i + 1);
+            let p = block.part(&key).expect("part");
+            let x = &out.layout.placed[&key];
+            let r = Shape::of(&block.parts[p], Place::new(x.at, x.rotation, x.mirror));
+            let rail = block.parts[p]
+                .pins
+                .iter()
+                .position(|x| x.net.is_some_and(|n| block.nets[n].kind != NetKind::Signal))
+                .expect("a rail pin");
+            columns
+                .entry(block.parts[p].pins[rail].net.expect("rail"))
+                .or_default()
+                .insert(r.pins[rail].end[0]);
+        }
+        assert_eq!(columns.len(), 3, "{columns:?}");
+        for (rail, xs) in &columns {
+            assert_eq!(xs.len(), 1, "rail {rail}: far ends in one column, {xs:?}");
+        }
+        let all: BTreeSet<Nm> = columns.values().flatten().copied().collect();
+        assert_eq!(all.len(), 3, "each rail its own column: {columns:?}");
     }
 
     /// #718 (plan 2.G): a net drawn with labels on a sheet is wired

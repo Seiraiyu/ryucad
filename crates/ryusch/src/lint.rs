@@ -2149,12 +2149,14 @@ fn wired_on_row(
 /// Lays `fix` out over `out` as a dry run (its instructions added as
 /// lasting ones) and judges it: `Ok` when the engine takes it, every
 /// hard rule holds, the layout changes and `finding` (by code and refs)
-/// is gone; else why not.
+/// is gone under `prefs`, the preferences it was found under; else why
+/// not.
 pub fn try_fix(
     block: &Block,
     out: &crate::engine::Outcome,
     finding: &Finding,
     fix: &[Instruction],
+    prefs: &Prefs,
 ) -> Result<(), String> {
     let mut b = block.clone();
     b.previous = Some(out.layout.clone());
@@ -2175,7 +2177,7 @@ pub fn try_fix(
     {
         return Err("it changes nothing".into());
     }
-    let (after, _) = lint(&b, &tried);
+    let (after, _) = lint_with(&b, &tried, prefs);
     if after
         .iter()
         .any(|f| f.code == finding.code && f.refs == finding.refs)
@@ -2201,7 +2203,10 @@ mod tests {
         for f in &with_fix {
             for fix in &f.fixes {
                 // Whatever the verdict, it is the same twice.
-                assert_eq!(try_fix(&block, &out, f, fix), try_fix(&block, &out, f, fix));
+                assert_eq!(
+                    try_fix(&block, &out, f, fix, &Prefs::default()),
+                    try_fix(&block, &out, f, fix, &Prefs::default())
+                );
             }
         }
         // Lining a part up with itself changes nothing: dropped.
@@ -2210,7 +2215,47 @@ mod tests {
             parts: vec![p.clone(), p],
             axis: crate::layout::Axis::Row,
         }];
-        assert!(try_fix(&block, &out, with_fix[0], &idle).is_err());
+        assert!(try_fix(&block, &out, with_fix[0], &idle, &Prefs::default()).is_err());
+    }
+
+    /// #666: a fix is judged under the preferences its finding was found
+    /// under. With local nets preferred as labels, `sch_floating` isn't
+    /// judged, so a fix offered for another rule can't be refused for a
+    /// floating finding the project doesn't count.
+    #[test]
+    fn fixes_are_judged_under_the_projects_preferences() {
+        let block = crate::testing::with_stage(crate::testing::seeded(5, 2));
+        let out = crate::engine::lay_out(&block).unwrap();
+        let mut prefs = Prefs::default();
+        prefs.prefer.local_nets = LocalNets::Labels;
+        let (found, _) = lint_with(&block, &out, &prefs);
+        for f in found.iter().filter(|f| !f.fixes.is_empty()) {
+            for fix in &f.fixes {
+                // The same verdict as judging by hand under `prefs`.
+                let by_hand = {
+                    let mut b = block.clone();
+                    b.previous = Some(out.layout.clone());
+                    b.moves.clear();
+                    b.relayout = crate::input::Relayout::None;
+                    for ins in fix {
+                        let id = crate::layout::next_id(b.instructions.keys());
+                        b.instructions.insert(id, ins.clone());
+                    }
+                    crate::engine::lay_out(&b).ok().is_some_and(|t| {
+                        crate::rules::check(&b, &t.layout).is_empty()
+                            && !lint_with(&b, &t, &prefs)
+                                .0
+                                .iter()
+                                .any(|g| g.code == f.code && g.refs == f.refs)
+                    })
+                };
+                if by_hand {
+                    // A fix that changes nothing is refused either way.
+                    let r = try_fix(&block, &out, f, fix, &prefs);
+                    assert!(r.is_ok() || r == Err("it changes nothing".into()), "{r:?}");
+                }
+            }
+        }
     }
 
     /// A pull wired on its pin's row is the pin's however far out along it
