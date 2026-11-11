@@ -25,6 +25,13 @@ const CHANNEL: u8 = 24;
 /// At most this share of pixels may differ.
 const SHARE: f64 = 0.01;
 
+/// lavapipe crashes (SIGSEGV) when several tests draw at once (#230), so
+/// each test here draws alone, as `scene.rs` and `window.rs` do.
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ONE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn write_png(path: &Path, px: &[u8]) {
     let file = std::fs::File::create(path).unwrap();
     let mut e = png::Encoder::new(std::io::BufWriter::new(file), W, H);
@@ -44,6 +51,7 @@ fn read_png(path: &Path) -> Vec<u8> {
 
 #[test]
 fn the_viewport_looks_as_it_did() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
@@ -89,6 +97,7 @@ fn the_viewport_looks_as_it_did() {
 /// changed and grew, and the cylinder taken off it stands as a ghost.
 #[test]
 fn a_compare_looks_as_it_did() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
@@ -149,6 +158,7 @@ fn a_compare_looks_as_it_did() {
 /// holes, patterned from one: what phase 4's solids look like.
 #[test]
 fn a_drilled_part_looks_as_it_did() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
@@ -250,6 +260,7 @@ fn a_drilled_part_looks_as_it_did() {
 /// one mesh per body, each occurrence at its level of detail.
 #[test]
 fn an_assembly_with_a_pattern_looks_as_it_did() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
@@ -381,6 +392,7 @@ fn an_assembly_with_a_pattern_looks_as_it_did() {
 /// the axis dashed, the point a cross, the helix a polyline.
 #[test]
 fn datums_paths_and_helices_look_as_they_did() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
@@ -462,6 +474,7 @@ fn datums_paths_and_helices_look_as_they_did() {
 /// beside it.
 #[test]
 fn a_chosen_loft_looks_as_it_did() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
@@ -506,6 +519,7 @@ fn a_chosen_loft_looks_as_it_did() {
 /// a datum plane is drawn.
 #[test]
 fn a_chosen_split_looks_as_it_did() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
@@ -559,6 +573,7 @@ fn a_chosen_split_looks_as_it_did() {
 /// pull as an arrow from the plane's middle.
 #[test]
 fn a_chosen_draft_looks_as_it_did() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
@@ -636,6 +651,7 @@ fn a_chosen_draft_looks_as_it_did() {
 /// its bend line dashed in the colour of its direction, seen from above.
 #[test]
 fn a_flat_pattern_looks_as_it_did() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
@@ -680,6 +696,7 @@ fn a_flat_pattern_looks_as_it_did() {
 /// `SHEET_BACK` and never capped.
 #[test]
 fn sheets_look_as_they_did() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
@@ -725,6 +742,7 @@ fn sheets_look_as_they_did() {
 /// base shows through it.
 #[test]
 fn a_coloured_translucent_part_looks_as_it_did() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
@@ -780,6 +798,7 @@ fn a_coloured_translucent_part_looks_as_it_did() {
 /// hatched.
 #[test]
 fn a_cut_part_looks_as_it_did() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
@@ -818,6 +837,7 @@ fn a_cut_part_looks_as_it_did() {
 /// turning it.
 #[test]
 fn an_exploded_assembly_looks_as_it_did() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
