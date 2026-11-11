@@ -358,7 +358,9 @@ pub(crate) fn sole_pin(block: &Block, port: usize) -> Option<(usize, usize)> {
             part.pins
                 .iter()
                 .enumerate()
-                .filter(move |(_, pin)| pin.net == Some(n))
+                // A stack's pin on a net per layer is labelled, never
+                // wired: it meets no flag (plan 2.G).
+                .filter(move |(_, pin)| pin.net == Some(n) && !pin.stacked())
                 .map(move |(k, pin)| (i, k, pin.kind))
         })
         .collect();
