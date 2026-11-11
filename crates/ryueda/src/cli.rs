@@ -1188,6 +1188,10 @@ enum ProjectCmd {
         /// --sheet-size (a4,a3 by default).
         #[arg(long, value_name = "SIZES")]
         sizes: Option<String>,
+        /// The library project (an alias) whose style.json is the
+        /// organisation's style; "" for none.
+        #[arg(long)]
+        style_from: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1395,8 +1399,10 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             orientation,
             fit,
             sizes,
+            style_from,
             expect,
         }) => Request::ProjectEdit {
+            style_from: style_from.clone(),
             fit: *fit,
             sizes: sizes
                 .as_deref()

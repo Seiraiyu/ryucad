@@ -65,6 +65,10 @@ pub enum Request {
         /// The papers paper fit takes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sizes: Option<Vec<crate::project::PaperSize>>,
+        /// The library alias whose style.json is the organisation's
+        /// style; "" for none (plan 2.E).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style_from: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },

@@ -3447,3 +3447,31 @@ fn objects_take_tags() {
         "{rails:?}"
     );
 }
+
+/// The style revision moves when a style file does, and project edit names
+/// an organisation's style.
+#[test]
+fn the_style_revision_follows_style_files() {
+    let p = Pair::with_resistor();
+    // A library project named for a style must hold one.
+    p.fails(
+        &["project", "edit", "--style-from", "passives"],
+        "style_invalid",
+        1,
+    );
+    p.write(
+        "passives/style.json",
+        "{\"kind\": \"ryueda.style\", \"format\": 1}\n",
+    );
+    let before = p.ok(&["info"])["revision"].clone();
+    let e = p.ok(&["project", "edit", "--style-from", "passives"]);
+    assert_eq!(e["schematic"]["style_from"], "passives", "{e}");
+    p.fails(
+        &["project", "edit", "--style-from", "nowhere"],
+        "invalid_param",
+        1,
+    );
+    assert_ne!(e["revision"], before);
+    let e = p.ok(&["project", "edit", "--style-from", ""]);
+    assert!(e["schematic"].get("style_from").is_none(), "{e}");
+}

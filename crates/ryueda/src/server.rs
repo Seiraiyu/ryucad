@@ -261,6 +261,7 @@ fn dispatch(
             orientation,
             fit,
             sizes,
+            style_from,
             expected_revision,
         } => topcmd::project_edit(
             session,
@@ -269,6 +270,7 @@ fn dispatch(
             orientation,
             fit,
             sizes,
+            style_from.as_deref(),
             expected_revision.as_deref(),
         ),
         Request::SymbolCreate {
@@ -880,6 +882,29 @@ pub fn revisions(p: &Project) -> BTreeMap<String, Value> {
         )
     });
     out.insert("standards".into(), standards);
+    // The organisation's and the project's style files (plan 2.E): a
+    // viewer redraws when the look changes.
+    let text = |s: &crate::style::Style| {
+        crate::doc::to_string(s, crate::style::KIND, crate::style::FORMAT)
+    };
+    let org = p
+        .org_style
+        .as_ref()
+        .map(|o| o.style.item.as_ref().map(text));
+    let style = match (org, p.style.item.as_ref().map(text)) {
+        (Some(Err(_)), _) | (_, Err(_)) => Value::Null,
+        (o, Ok(own)) => {
+            let mut h = blake3::Hasher::new();
+            h.update(b"ryueda.style.1");
+            if let Some(Ok(o)) = o {
+                h.update(o.as_bytes());
+            }
+            h.update(b"\0");
+            h.update(own.as_bytes());
+            json!(h.finalize().to_hex()[..32])
+        }
+    };
+    out.insert("style".into(), style);
     out
 }
 

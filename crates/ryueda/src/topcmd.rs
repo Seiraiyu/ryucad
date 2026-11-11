@@ -697,6 +697,7 @@ pub fn block_edit(
 
 /// `project.edit`: the manifest's properties and schematic settings, one
 /// logged change guarded by the project's revision.
+#[allow(clippy::too_many_arguments)]
 pub fn project_edit(
     session: &mut Session,
     properties: &serde_json::Map<String, Value>,
@@ -704,11 +705,26 @@ pub fn project_edit(
     orientation: Option<crate::project::Orientation>,
     fit: Option<bool>,
     sizes: Option<Vec<crate::project::PaperSize>>,
+    style_from: Option<&str>,
     expected: Option<&str>,
 ) -> Result<Value> {
     let p = session.project();
     check_revision("the project", &p.revision, expected)?;
     let mut m = p.manifest.clone();
+    match style_from {
+        None => {}
+        Some("") => m.schematic.style_from = None,
+        Some(a) => {
+            if !m.libraries.keys().any(|k| k.as_str() == a) {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("{a} isn't one of this project's library aliases"),
+                )
+                .with("param", "style_from"));
+            }
+            m.schematic.style_from = Some(Id::parse(a, "alias")?);
+        }
+    }
     crate::props::apply(&mut m.properties, properties)?;
     if let Some(s) = size {
         m.schematic.sheet.size = s;
