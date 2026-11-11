@@ -1755,7 +1755,7 @@ fn step_transfer(
         .filter(|o| matches!(o["what"].as_str(), Some("appearance" | "properties")))
         .map(|o| {
             json!({"code": "export_metadata_omitted", "what": o["what"], "count": o["count"],
-                   "message": o["summary"]})
+                   "message": format!("export_metadata_omitted: {}", o["summary"].as_str().unwrap_or_default())})
         })
         .collect();
     Ok((
