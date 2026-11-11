@@ -44,6 +44,7 @@ pub mod session;
 pub mod sourcing;
 pub mod standards;
 pub mod style;
+pub mod stylelint;
 pub mod supply;
 pub mod symbol;
 pub mod symlint;

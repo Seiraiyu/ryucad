@@ -115,6 +115,16 @@ impl<'a> Layers<'a> {
         Layers::new(org, own)
     }
 
+    /// The organisation's and the project's files: their paths and styles.
+    pub fn files(&self) -> Vec<(String, &Style)> {
+        let mut out: Vec<(String, &Style)> = Vec::new();
+        if let Some((p, s)) = &self.org {
+            out.push((p.clone(), *s));
+        }
+        out.push((crate::style::FILE.to_owned(), self.own));
+        out
+    }
+
     fn locks(&self) -> &[String] {
         self.org.as_ref().map_or(&[], |(_, s)| s.locks.as_slice())
     }

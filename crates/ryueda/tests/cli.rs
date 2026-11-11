@@ -3661,3 +3661,35 @@ fn renders_take_a_theme_and_the_style() {
         2,
     );
 }
+
+/// The look's lint: a pale wire and an override of nothing are found by
+/// check (warnings) and style; raised to an error, check fails.
+#[test]
+fn the_look_is_linted() {
+    let p = Pair::with_placed_resistor();
+    p.ok(&["style", "palette", "set", "wire", "#f0f0f0/#202326"]);
+    p.ok(&["style", "set", "R1", "dash=true", "--block", "top"]);
+    p.ok(&["component", "delete", "top/r1"]);
+    let s = p.ok(&["style"]);
+    let codes: Vec<&str> = s["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert!(
+        codes.contains(&"sch_contrast") && codes.contains(&"sch_override_unused"),
+        "{s}"
+    );
+    let c = p.ok(&["check"]);
+    assert!(!c["style"].as_array().unwrap().is_empty(), "{c}");
+    p.ok(&["lint", "configure", "--severity", "sch_contrast=error"]);
+    p.fails(&["check"], "check_failed", 1);
+    assert!(
+        p.ok(&["lint"])["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["code"] == "sch_override_unused")
+    );
+}

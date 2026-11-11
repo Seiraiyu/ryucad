@@ -688,6 +688,7 @@ pub fn get(p: &crate::project::Project) -> crate::error::Result<serde_json::Valu
         "organisation": org,
         "builtin": builtin(),
         "locks": locks,
+        "findings": crate::stylelint::findings(p, &crate::lint::prefs(p)),
         "revision": p.revision,
     }))
 }

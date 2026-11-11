@@ -28,14 +28,17 @@ fn canonical(name: &str) -> &str {
 /// lint's, or the old code `sym_shape` replaced.
 fn rule(name: &str) -> bool {
     let name = canonical(name);
-    ryusch::lint::RULES.iter().any(|r| r.code == name) || crate::symlint::rule(name).is_some()
+    ryusch::lint::RULES.iter().any(|r| r.code == name)
+        || crate::symlint::rule(name).is_some()
+        || crate::stylelint::rule(name).is_some()
 }
 
-/// Every rule: the sheet lint's, then the symbol lint's.
+/// Every rule: the sheet lint's, the symbol lint's, then the look's.
 fn all_rules() -> impl Iterator<Item = &'static ryusch::lint::Rule> {
     ryusch::lint::RULES
         .iter()
         .chain(crate::symlint::RULES.iter())
+        .chain(crate::stylelint::RULES.iter())
 }
 
 /// `lint.json` as plan 2.D reads it: the old resistor code's weight and
@@ -167,6 +170,8 @@ pub fn get(p: &Project, explain: Option<&str>) -> Result<Value> {
         let prefs = prefs(p);
         let weight = if crate::symlint::rule(rule.code).is_some() {
             crate::symlint::weight(&prefs, rule.code).0
+        } else if crate::stylelint::rule(rule.code).is_some() {
+            prefs.weights.get(rule.code).copied().unwrap_or(rule.weight)
         } else {
             prefs.weight(rule.code).0
         };
