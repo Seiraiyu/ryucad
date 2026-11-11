@@ -51,3 +51,5 @@ schematic.rp2040.mitayi.describe 2003ef62ed2b8c6795de146c1ac51669
 schematic.rp2040.mitayi.layout 3a0c2b242dc6d4e72a5ccefc88629c5d
 schematic.rp2040.mitayi.svg dc62ef0f24c1b7cfe62183aa2d08d339
 schematic.rp2040.pdf f452d2d32ac0691c627134fd68e0d7e0
+symbols.lint 674b164854a974b7bb718d051e7a1109
+symbols.templates 8f6cbe0cb46df1053cc0a54407f7deeb

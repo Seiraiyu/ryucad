@@ -54,6 +54,30 @@ fn kicad_data() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/kicad")
 }
 
+/// The symbol lint of a 64-pin IC drawn from its template, with its fixes
+/// tried: what lib check spends a symbol.
+#[divan::bench]
+fn symbol_lint_64(b: divan::Bencher) {
+    use ryueda::standards::{Class, Standards};
+    use ryueda::template::{PinSpec, template};
+    let st = Standards::default();
+    let pins: Vec<PinSpec> = (0..64)
+        .map(|i| PinSpec {
+            number: (i + 1).to_string(),
+            name: format!("GPIO{i}"),
+            ty: ryueda::symbol::PinType::Bidirectional,
+        })
+        .collect();
+    let mut s = template("U", Class::Ic, &pins, &st).unwrap();
+    // Two pins swapped, so a group finding and its fix are tried.
+    let (a, c) = (s.pins["3"].at, s.pins["9"].at);
+    s.pins.get_mut("3").unwrap().at = c;
+    s.pins.get_mut("9").unwrap().at = a;
+    let prefs = ryusch::lint::Prefs::default();
+    let cx = ryueda::symlint::Context { standards: &st, prefs: &prefs, from: "self" };
+    b.bench(|| ryueda::symlint::lint(divan::black_box(&s), Some(Class::Ic), &cx));
+}
+
 #[divan::bench]
 fn kicad_read(b: divan::Bencher) {
     let d = kicad_data();

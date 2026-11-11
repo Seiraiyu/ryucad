@@ -324,6 +324,36 @@ fn netlists_and_erc_are_bit_exact() {
     let one = kicad_library(1);
     assert_eq!(kicad_library(8), one);
     golden.json("kicad.library", &one);
+    // Every template's file under the built-in standards, both shapes (plan
+    // 2.D): the standards' own drawings, byte for byte.
+    let mut templates = serde_json::Map::new();
+    for shapes in ["ansi", "iec"] {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t");
+        std::fs::create_dir_all(&p).unwrap();
+        ryueda(&p, 1, &["init"]);
+        ryueda(&p, 1, &["standards", "set", &format!("{{\"shapes\": \"{shapes}\"}}")]);
+        for class in ["resistor", "capacitor", "inductor", "diode", "led"] {
+            ryueda(&p, 1, &["symbol", "create", class, "--template", class]);
+        }
+        ryueda(&p, 1, &["symbol", "create", "mcu", "--template", "ic", "--pins", MCU_PINS]);
+        let mut files: Vec<_> = std::fs::read_dir(p.join("library/symbols"))
+            .unwrap()
+            .map(|f| f.unwrap().path())
+            .collect();
+        files.sort();
+        for f in files {
+            templates.insert(
+                format!("{shapes}/{}", f.file_name().unwrap().to_string_lossy()),
+                std::fs::read_to_string(&f).unwrap().into(),
+            );
+        }
+    }
+    golden.json("symbols.templates", &Value::Object(templates));
+    // The committed KiCad test library, imported and judged.
+    let one = kicad_lint(1);
+    assert_eq!(kicad_lint(8), one);
+    golden.json("symbols.lint", &one);
     golden.finish();
 }
 
@@ -383,9 +413,9 @@ fn schematic(golden: &mut Golden, dir: &Path, name: &str) {
     );
 }
 
-/// Every file our KiCad-format test files import to, by path, each its
-/// BLAKE3, imported on `threads` threads.
-fn kicad_library(threads: usize) -> Value {
+/// A project our KiCad-format test files are imported into, on `threads`
+/// threads: the temporary folder that holds it, and its root.
+fn kicad_imported(threads: usize) -> (tempfile::TempDir, std::path::PathBuf) {
     let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/kicad");
     let paths = vec![
         data.join("symbols/Ryu_Test.kicad_sym"),
@@ -397,23 +427,32 @@ fn kicad_library(threads: usize) -> Value {
         ..Default::default()
     };
     let dir = tempfile::tempdir().unwrap();
-    ryueda::server::init(dir.path(), None, false).unwrap();
-    let mut s = ryueda::session::Session::open(dir.path()).unwrap();
+    let root = dir.path().join("k");
+    std::fs::create_dir_all(&root).unwrap();
+    ryueda::server::init(&root, None, false).unwrap();
+    let mut s = ryueda::session::Session::open(&root).unwrap();
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build()
         .unwrap()
         .install(|| ryueda::kicad::import::import(&mut s, &opts, None))
         .unwrap();
+    (dir, root)
+}
+
+/// Every file our KiCad-format test files import to, by path, each its
+/// BLAKE3, imported on `threads` threads.
+fn kicad_library(threads: usize) -> Value {
+    let (_dir, root) = kicad_imported(threads);
     let mut files = BTreeMap::new();
-    let mut stack = vec![dir.path().join("library")];
+    let mut stack = vec![root.join("library")];
     while let Some(d) = stack.pop() {
         for e in std::fs::read_dir(&d).unwrap() {
             let path = e.unwrap().path();
             if path.is_dir() {
                 stack.push(path);
             } else {
-                let rel = ryueda::source::relative(dir.path(), &path);
+                let rel = ryueda::source::relative(&root, &path);
                 let hash = blake3::hash(&std::fs::read(&path).unwrap())
                     .to_hex()
                     .to_string();
@@ -423,3 +462,28 @@ fn kicad_library(threads: usize) -> Value {
     }
     serde_json::to_value(files).unwrap()
 }
+
+/// The KiCad test library imported, then judged by `lib check` on
+/// `threads` threads (plan 2.D).
+fn kicad_lint(threads: usize) -> Value {
+    let (_dir, root) = kicad_imported(threads);
+    ryueda(&root, threads, &["lib", "check"])
+}
+
+/// Task 20's MCU's fourteen named pins, for the `ic` template's golden.
+const MCU_PINS: &str = r#"[
+    {"number": "1", "name": "VDD", "type": "power_in"},
+    {"number": "2", "name": "IOVDD", "type": "power_in"},
+    {"number": "3", "name": "GND", "type": "power_in"},
+    {"number": "4", "name": "AGND", "type": "power_in"},
+    {"number": "5", "name": "RUN", "type": "input"},
+    {"number": "6", "name": "TX", "type": "output"},
+    {"number": "7", "name": "SDA", "type": "bidirectional"},
+    {"number": "8", "name": "SCL", "type": "bidirectional"},
+    {"number": "9", "name": "MOSI", "type": "bidirectional"},
+    {"number": "10", "name": "MISO", "type": "bidirectional"},
+    {"number": "11", "name": "SCK", "type": "bidirectional"},
+    {"number": "12", "name": "CS", "type": "bidirectional"},
+    {"number": "13", "name": "USB_D+", "type": "bidirectional"},
+    {"number": "14", "name": "USB_D-", "type": "bidirectional"}
+]"#;
