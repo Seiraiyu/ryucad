@@ -565,14 +565,58 @@ fn escape(k: &str) -> String {
 }
 
 /// What `part`'s appearance names that its model no longer has, as
-/// `appearance_unresolved` warnings: solids not shown, faces gone (with
-/// `removed_by`, the feature that took one away, where the session's
-/// rebuild says), occurrences and their solids the assembly doesn't
-/// place. Empty for a part whose rebuild fails as a whole.
+/// `appearance_unresolved` warnings: entries naming solids not shown,
+/// faces gone (with `removed_by`, the feature that took one away, where
+/// the session's rebuild says), occurrences and their solids the assembly
+/// doesn't place; and its file layer's face styles on faces gone
+/// (`source: file`), never an error: a file's styles follow the file
+/// (design 448). Empty for a part whose rebuild fails as a whole.
 pub fn unresolved_entries(session: &mut Session, part: &Id) -> Vec<Value> {
-    let Some(f) = file(session, part).cloned() else {
-        return Vec::new();
+    let mut out = match file(session, part).cloned() {
+        Some(f) => entries_unresolved(session, part, &f),
+        None => Vec::new(),
     };
+    if let Some(layer) = Layers::default().part(session, part)
+        && let Ok(shown) = shown_solids(session, part)
+    {
+        out.extend(file_unresolved(part, &layer, &shown));
+    }
+    out
+}
+
+/// `appearance_unresolved` for each face style of `part`'s file layer on
+/// a shown solid's face the model no longer has (a solid not shown takes
+/// its styles with it).
+fn file_unresolved(part: &Id, layer: &AppearanceFile, shown: &BTreeMap<Id, Shown>) -> Vec<Value> {
+    let mut out = Vec::new();
+    for k in layer.faces.keys() {
+        let Some((solid, name)) = k.split_once('/') else {
+            continue;
+        };
+        let Some(b) = Id::parse(solid, "solid").ok().and_then(|s| shown.get(&s)) else {
+            continue;
+        };
+        let alive = crate::doc::reference::parse_name(name)
+            .is_some_and(|n| b.built.body.by_name(n).is_some() || b.has_face(n));
+        if alive {
+            continue;
+        }
+        out.push(json!({
+            "code": Code::AppearanceUnresolved,
+            "message": format!(
+                "{part}'s imported file colours the face {k}, which the model no longer has: it colours nothing"
+            ),
+            "part": part,
+            "key": k,
+            "source": "file",
+        }));
+    }
+    out
+}
+
+/// The entries of `part`'s appearance file `f` that its model no
+/// longer has, as `appearance_unresolved` warnings.
+fn entries_unresolved(session: &mut Session, part: &Id, f: &AppearanceFile) -> Vec<Value> {
     let mut out = Vec::new();
     if !f.occurrences.is_empty() {
         let Ok(keys) = occurrence_keys(session, part) else {
@@ -1656,5 +1700,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(colours(&mut s)[&green], "#123456");
+    }
+
+    #[test]
+    fn values_a_file_gave_say_so_and_its_lost_faces_warn() {
+        use crate::file_styles::tests::{imported, part_of};
+        let (_dir, mut s, v) = imported("painted.stp", json!({}));
+        let part = part_of(&v, "part", 0);
+        let v = call(&mut s, "appearance.get", json!({"part": part.as_str()})).unwrap();
+        let x = &v["solids"][0];
+        assert_eq!(x["source"], json!({"colour": "file"}), "{x}");
+        let (_, face) = x["faces"].as_object().unwrap().iter().next().unwrap();
+        assert_eq!(face["source"], json!({"colour": "file"}));
+        assert_eq!(v["warnings"], json!([]));
+        // A person's colour is unmarked.
+        let solid = x["solid"].as_str().unwrap().to_owned();
+        call(
+            &mut s,
+            "appearance.set",
+            json!({"entities": [format!("{part}/{solid}")], "colour": "#00ff00"}),
+        )
+        .unwrap();
+        let v = call(&mut s, "appearance.get", json!({"part": part.as_str()})).unwrap();
+        assert!(v["solids"][0].get("source").is_none(), "{v}");
+        // A file style on a face the model no longer has warns, naming
+        // the file as its source.
+        let mut layer = (*Layers::default().part(&mut s, &part).unwrap()).clone();
+        let gone = format!("{solid}/{}", "0".repeat(32));
+        layer.faces.insert(gone.clone(), Look {
+            colour: Some("#000000".into()),
+            ..Default::default()
+        });
+        let shown = shown_solids(&mut s, &part).unwrap();
+        let w = file_unresolved(&part, &layer, &shown);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(w[0]["code"], "appearance_unresolved");
+        assert_eq!((&w[0]["key"], &w[0]["source"]), (&json!(gone), &json!("file")));
     }
 }
