@@ -1368,3 +1368,63 @@ fn pinned_bodies_defeature() {
         start.elapsed().as_secs_f64()
     );
 }
+
+/// OCCT 7.8's XDE, colour mode on, reads the colours ryucad exports
+/// (design 448): a part's colour on its solid, a face's own, a part's
+/// translucency, and an occurrence's override, in AP242 and AP214.
+#[test]
+fn occt_reads_ryucads_colours() {
+    use serde_json::json;
+    let (dir, mut s) = exported_project();
+    let mut call = |m: &str, p: serde_json::Value| {
+        let req = ryucad::proto::Request::from_rpc(m, Some(p)).unwrap();
+        ryucad::server::handle(&mut s, req).unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    call("appearance.set", json!({"entities": ["plate"], "colour": "#ff0000"}));
+    let faces = call("inspect", json!({"part": "plate", "feature": "slab"}));
+    let face = faces["bodies"][0]["faces"][0]["name"].as_str().unwrap().to_owned();
+    call(
+        "appearance.set",
+        json!({"entities": [format!("plate/slab/{face}")], "colour": "#0000ff"}),
+    );
+    call("appearance.set", json!({"entities": ["pin"], "colour": "#00ff00", "opacity": 0.5}));
+    call("appearance.set", json!({"entities": ["frame/p2"], "colour": "#0000ff"}));
+    let mut wrong = Vec::new();
+    for (schema, unit) in [("ap242", "mm"), ("ap214", "m")] {
+        let params = json!({"part": "frame", "schema": schema, "unit": unit,
+                            "time_stamp": "2026-11-11T00:00:00"});
+        let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
+        let a = ryucad::server::answer_live(&mut s, None, None, req).unwrap();
+        let path = dir.path().join(format!("colours-{schema}.stp"));
+        std::fs::write(&path, a.binary.unwrap()).unwrap();
+        let got = occt::xde_colours(&path).unwrap();
+        let solid = |pick: &dyn Fn([f64; 3]) -> bool| {
+            got.iter()
+                .find(|x| !x.face && pick(x.centre))
+                .and_then(|x| x.rgba)
+        };
+        let near = |a: f64, b: f64| (a - b).abs() < 1.0;
+        let plate = solid(&|c| near(c[0], 30.0) && c[1] < 45.0);
+        let p1 = solid(&|c| near(c[0], 20.0) && near(c[1], 20.0));
+        let p2 = solid(&|c| near(c[0], 45.0));
+        let round = |c: Option<[f64; 4]>| c.map(|c| c.map(|x| (x * 1000.0).round() / 1000.0));
+        // sRGB from XDE's linear colours: 1 comes back within an ulp.
+        let blue_faces = got
+            .iter()
+            .filter(|x| x.face && round(x.rgba) == Some([0.0, 0.0, 1.0, 1.0]))
+            .count();
+        let want = (
+            Some([1.0, 0.0, 0.0, 1.0]),
+            Some([0.0, 1.0, 0.0, 0.5]),
+            Some([0.0, 0.0, 1.0, 0.5]),
+            1,
+        );
+        let have = (round(plate), round(p1), round(p2), blue_faces);
+        if have != want {
+            wrong.push(format!("{schema} {unit}: {have:?}, want {want:?}"));
+        } else {
+            println!("{schema} {unit}: OCCT reads the plate, the pins and the face as ryucad draws them");
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}

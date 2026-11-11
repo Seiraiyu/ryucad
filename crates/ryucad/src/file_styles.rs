@@ -355,7 +355,9 @@ pub(crate) mod tests {
             looks,
             [
                 (Some("#0000ff"), Some(0.5)),
-                (Some("#00ff00"), None),
+                // An occurrence's colour is taken whole, as OCCT writes
+                // it: opaque, over the block's own.
+                (Some("#00ff00"), Some(1.0)),
                 (Some("#ff0000"), None)
             ]
         );

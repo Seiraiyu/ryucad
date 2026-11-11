@@ -78,6 +78,15 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shell.hxx>
 #include <TopoDS_Iterator.hxx>
+#include <STEPCAFControl_Reader.hxx>
+#include <XCAFApp_Application.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
+#include <XCAFDoc_ColorTool.hxx>
+#include <TDocStd_Document.hxx>
+#include <TDF_LabelSequence.hxx>
+#include <TopLoc_Location.hxx>
+#include <Quantity_ColorRGBA.hxx>
 #include <gp.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
@@ -1101,6 +1110,86 @@ rust::Vec<double> hlr(const Shape &s, rust::Slice<const double> view) {
     throw std::runtime_error(std::string("HLRBRep_Algo: ") +
                              e.GetMessageString());
   }
+}
+
+// One solid (kind 0) or face (kind 1): its centroid, and its surface
+// colour as XDE gives it (sRGB and alpha; none: -1).
+static void record(rust::Vec<double>& out, double kind, const TopoDS_Shape& s,
+                   const Quantity_ColorRGBA* col) {
+  GProp_GProps g;
+  if (kind == 0.) BRepGProp::VolumeProperties(s, g);
+  else BRepGProp::SurfaceProperties(s, g);
+  gp_Pnt c = g.CentreOfMass();
+  Standard_Real r = -1., gr = -1., b = -1.;
+  if (col) col->GetRGB().Values(r, gr, b, Quantity_TOC_sRGB);
+  for (double x : {kind, c.X(), c.Y(), c.Z(), r, gr, b, col ? double(col->Alpha()) : -1.})
+    out.push_back(x);
+}
+
+// A label's own surface colour (else its generic one).
+static bool colour_of(const Handle(XCAFDoc_ColorTool)& ct, const TDF_Label& l,
+                      Quantity_ColorRGBA& col) {
+  return ct->GetColor(l, XCAFDoc_ColorSurf, col) || ct->GetColor(l, XCAFDoc_ColorGen, col);
+}
+
+// Walks XDE's labels as a reader shows them: a component placed at
+// `loc` takes its own colour (an instance colour) over what it places; a
+// simple shape's solids take that, else the shape's own colour; a face
+// takes its sub-shape label's colour, matched by its TShape. Asking
+// GetColor of a located face from the free shapes misses colours XDE
+// holds on sub-shape labels.
+static void walk(rust::Vec<double>& out, const Handle(XCAFDoc_ShapeTool)& st,
+                 const Handle(XCAFDoc_ColorTool)& ct, const TDF_Label& l,
+                 const TopLoc_Location& loc, const Quantity_ColorRGBA* inherited) {
+  if (st->IsReference(l)) {
+    TDF_Label ref;
+    st->GetReferredShape(l, ref);
+    Quantity_ColorRGBA own;
+    const Quantity_ColorRGBA* c = colour_of(ct, l, own) ? &own : inherited;
+    walk(out, st, ct, ref, loc * st->GetLocation(l), c);
+    return;
+  }
+  if (st->IsAssembly(l)) {
+    TDF_LabelSequence cs;
+    st->GetComponents(l, cs);
+    for (int i = 1; i <= cs.Length(); i++) walk(out, st, ct, cs(i), loc, inherited);
+    return;
+  }
+  Quantity_ColorRGBA own;
+  const Quantity_ColorRGBA* body = inherited ? inherited : (colour_of(ct, l, own) ? &own : nullptr);
+  TopoDS_Shape s = st->GetShape(l);
+  TDF_LabelSequence subs;
+  st->GetSubShapes(l, subs);
+  for (TopExp_Explorer x(s, TopAbs_SOLID); x.More(); x.Next()) {
+    record(out, 0., x.Current().Moved(loc), body);
+    for (TopExp_Explorer f(x.Current(), TopAbs_FACE); f.More(); f.Next()) {
+      Quantity_ColorRGBA fc;
+      bool has = false;
+      for (int i = 1; i <= subs.Length() && !has; i++)
+        has = st->GetShape(subs(i)).IsPartner(f.Current()) && colour_of(ct, subs(i), fc);
+      record(out, 1., f.Current().Moved(loc), has ? &fc : nullptr);
+    }
+  }
+}
+
+rust::Vec<double> xde_colours(rust::Str path) {
+  Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
+  Handle(TDocStd_Document) doc;
+  app->NewDocument("MDTV-XCAF", doc);
+  STEPCAFControl_Reader r;
+  r.SetColorMode(Standard_True);
+  r.SetNameMode(Standard_True);
+  std::string p(path);
+  if (r.ReadFile(p.c_str()) != IFSelect_RetDone) throw std::runtime_error("STEP read failed");
+  if (!r.Transfer(doc)) throw std::runtime_error("XDE transfer failed");
+  Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+  Handle(XCAFDoc_ColorTool) ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
+  TDF_LabelSequence roots;
+  st->GetFreeShapes(roots);
+  rust::Vec<double> out;
+  for (int i = 1; i <= roots.Length(); i++) walk(out, st, ct, roots(i), TopLoc_Location(), nullptr);
+  app->Close(doc);
+  return out;
 }
 
 } // namespace ryukei_occt

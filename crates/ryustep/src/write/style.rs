@@ -6,7 +6,9 @@
 //! `SURFACE_STYLE_TRANSPARENT` only where its opacity differs from the
 //! one it would take otherwise), collected in one
 //! `MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION` per product;
-//! an occurrence that differs from its part as a
+//! an occurrence that differs from its part, one usage deep, as OCCT's
+//! XDE writes and reads it (a `PRESENTATION_STYLE_BY_CONTEXT` in a shape
+//! representation of the usage), deeper as a
 //! `CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM` on its body in the context
 //! of its usages (outermost first), over the body's own style or, where
 //! it has none, a `STYLED_ITEM` of `NULL_STYLE`. Identical styles share
@@ -22,7 +24,7 @@
 //! occurrence), explicitly even when it is 1: what reads back composes
 //! to what was painted.
 
-use super::{Contexts, Out, WriteModel, WrittenBody, e, f, r, refs, s};
+use super::{Contexts, Out, WriteModel, WrittenBody, WrittenUsage, e, f, r, refs, s};
 use crate::part21::Param;
 use ryukei::name::Name;
 use std::collections::BTreeMap;
@@ -84,6 +86,10 @@ impl Paints {
 #[derive(Default)]
 struct Shared {
     colours: BTreeMap<[u8; 3], u64>,
+    /// Each style's `SURFACE_STYLE_USAGE`, and its
+    /// `PRESENTATION_STYLE_ASSIGNMENT` where a styled item assigns it
+    /// (a style by context holds the usage itself).
+    usages: BTreeMap<([u8; 3], Option<u64>), u64>,
     assignments: BTreeMap<([u8; 3], Option<u64>), u64>,
     null: Option<u64>,
 }
@@ -106,6 +112,19 @@ impl Shared {
         if let Some(&id) = self.assignments.get(&key) {
             return id;
         }
+        let usage = self.surface_usage(out, p, under);
+        let psa = out.add("PRESENTATION_STYLE_ASSIGNMENT", vec![refs([usage])]);
+        self.assignments.insert(key, psa);
+        psa
+    }
+
+    /// `p`'s `SURFACE_STYLE_USAGE` as written over an item that would
+    /// otherwise take opacity `under`.
+    fn surface_usage(&mut self, out: &mut Out, p: Paint, under: f64) -> u64 {
+        let key = p.key(under);
+        if let Some(&id) = self.usages.get(&key) {
+            return id;
+        }
         let colour = self.colour(out, p.colour);
         let fasc = out.add("FILL_AREA_STYLE_COLOUR", vec![s(""), r(colour)]);
         let fas = out.add("FILL_AREA_STYLE", vec![s(""), refs([fasc])]);
@@ -123,9 +142,8 @@ impl Shared {
         }
         let side = out.add("SURFACE_SIDE_STYLE", vec![s(""), refs(elements)]);
         let usage = out.add("SURFACE_STYLE_USAGE", vec![e("BOTH"), r(side)]);
-        let psa = out.add("PRESENTATION_STYLE_ASSIGNMENT", vec![refs([usage])]);
-        self.assignments.insert(key, psa);
-        psa
+        self.usages.insert(key, usage);
+        usage
     }
 
     /// An assignment of `NULL_STYLE`: a style that styles nothing.
@@ -146,13 +164,13 @@ impl Shared {
 }
 
 /// Writes `paints` over what was written: `bodies[k][j]` is product
-/// `k`'s body `j`, `usages[k][n]` product `k`'s `n`th usage's instance.
+/// `k`'s body `j`, `usages[k][n]` product `k`'s `n`th usage.
 pub(crate) fn write(
     out: &mut Out,
     cx: &Contexts,
     model: &WriteModel,
     bodies: &[Vec<WrittenBody>],
-    usages: &[Vec<u64>],
+    usages: &[Vec<WrittenUsage>],
     paints: &Paints,
 ) {
     if paints.is_empty() {
@@ -203,22 +221,29 @@ pub(crate) fn write(
     occurrences(out, cx, model, bodies, usages, paints, &mut shared, &mut own);
 }
 
-/// Each occurrence paint as a `CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM`
-/// on each B-rep item of the body, in the context of its usages
-/// (outermost first), over the item's own styled item or a `NULL_STYLE`
-/// one written for it; all in one presentation representation.
+/// Each occurrence paint on each B-rep item of the body, all in one
+/// presentation representation. One usage deep, as OCCT's XDE writes and
+/// reads a component's colour: a `STYLED_ITEM` whose
+/// `PRESENTATION_STYLE_BY_CONTEXT` holds in a `SHAPE_REPRESENTATION` of
+/// the usage's `PRODUCT_DEFINITION_SHAPE` (OCCT 7.8 doesn't read the
+/// other form for one usage). Deeper, a
+/// `CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM` in the context of its
+/// usages (outermost first), over the item's own styled item or a
+/// `NULL_STYLE` one written for it.
 #[allow(clippy::too_many_arguments)]
 fn occurrences(
     out: &mut Out,
     cx: &Contexts,
     model: &WriteModel,
     bodies: &[Vec<WrittenBody>],
-    usages: &[Vec<u64>],
+    usages: &[Vec<WrittenUsage>],
     paints: &Paints,
     shared: &mut Shared,
     own: &mut BTreeMap<u64, u64>,
 ) {
     let mut styled = Vec::new();
+    // Each usage's shape representation a style holds in, written once.
+    let mut in_usage: BTreeMap<u64, u64> = BTreeMap::new();
     // Each body's own opacity: what an override over it inherits.
     let under: BTreeMap<(usize, usize), f64> = paints
         .bodies
@@ -237,7 +262,7 @@ fn occurrences(
         else {
             continue;
         };
-        let context: Vec<u64> = o
+        let context: Vec<WrittenUsage> = o
             .path
             .iter()
             .filter_map(|&(p, c)| usages.get(p)?.get(c).copied())
@@ -249,6 +274,27 @@ fn occurrences(
             continue;
         };
         let inherited = under.get(&(leaf, o.body)).copied().unwrap_or(1.0);
+        if let [u] = context.as_slice() {
+            let rep = *in_usage.entry(u.usage).or_insert_with(|| {
+                let rep = out.add(
+                    "SHAPE_REPRESENTATION",
+                    vec![s(""), refs([u.axis]), r(cx.geometric)],
+                );
+                out.add("SHAPE_DEFINITION_REPRESENTATION", vec![r(u.shape), r(rep)]);
+                rep
+            });
+            // XDE takes a component's colour whole, opaque where it gives
+            // no transparency: written as a body's is.
+            let ssu = shared.surface_usage(out, o.paint, 1.0);
+            let by = out.add(
+                "PRESENTATION_STYLE_BY_CONTEXT",
+                vec![refs([ssu]), r(rep)],
+            );
+            for &item in &w.items {
+                styled.push(out.add("STYLED_ITEM", vec![s(""), refs([by]), r(item)]));
+            }
+            continue;
+        }
         let psa = shared.assignment(out, o.paint, inherited);
         for &item in &w.items {
             let over = match own.get(&item) {
@@ -268,7 +314,7 @@ fn occurrences(
                     refs([psa]),
                     r(item),
                     r(over),
-                    refs(context.iter().copied()),
+                    refs(context.iter().map(|u| u.usage)),
                 ],
             ));
         }

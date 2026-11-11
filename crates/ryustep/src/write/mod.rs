@@ -260,6 +260,17 @@ pub(crate) struct WrittenBody {
     pub(crate) faces: BTreeMap<Name, u64>,
 }
 
+/// What the writer wrote of one usage: its
+/// `NEXT_ASSEMBLY_USAGE_OCCURRENCE`, the `PRODUCT_DEFINITION_SHAPE` of it,
+/// and the axis placement in its parent's representation the child is
+/// placed at.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WrittenUsage {
+    pub(crate) usage: u64,
+    pub(crate) shape: u64,
+    pub(crate) axis: u64,
+}
+
 /// Each body's faces' names, by the shape's face index.
 fn face_names(b: &Body, o: &Origins) -> Vec<Name> {
     o.faces
@@ -290,14 +301,14 @@ pub fn write_styled(
     write_inner_styled(model, passed, paints, opts).map(|(w, _, _)| w)
 }
 
-/// [`write_report`], with what it wrote of each product's bodies and
-/// each product's usages' `NEXT_ASSEMBLY_USAGE_OCCURRENCE` instances.
+/// [`write_report`], with what it wrote of each product's bodies and of
+/// each product's usages.
 #[allow(clippy::type_complexity)]
 pub(crate) fn write_inner(
     model: &WriteModel,
     passed: &[Passed],
     opts: &WriteOptions,
-) -> Result<(Written, Vec<Vec<WrittenBody>>, Vec<Vec<u64>>), WriteError> {
+) -> Result<(Written, Vec<Vec<WrittenBody>>, Vec<Vec<WrittenUsage>>), WriteError> {
     write_inner_styled(model, passed, &Paints::default(), opts)
 }
 
@@ -308,7 +319,7 @@ pub(crate) fn write_inner_styled(
     passed: &[Passed],
     paints: &Paints,
     opts: &WriteOptions,
-) -> Result<(Written, Vec<Vec<WrittenBody>>, Vec<Vec<u64>>), WriteError> {
+) -> Result<(Written, Vec<Vec<WrittenBody>>, Vec<Vec<WrittenUsage>>), WriteError> {
     // Each body as a file must describe it, in parallel; the first body
     // that can't be fails, whatever the number of threads.
     let all: Vec<&Body> = model.products.iter().flat_map(|p| &p.bodies).collect();
@@ -360,7 +371,7 @@ pub(crate) fn write_inner_styled(
     // bodies; the usages after, once every product has its number.
     let mut defs = Vec::with_capacity(model.products.len());
     let mut bodies: Vec<Vec<WrittenBody>> = Vec::with_capacity(model.products.len());
-    let mut usages: Vec<Vec<u64>> = vec![Vec::new(); model.products.len()];
+    let mut usages: Vec<Vec<WrittenUsage>> = vec![Vec::new(); model.products.len()];
     for (k, p) in model.products.iter().enumerate() {
         let names: Vec<Vec<Name>> = p
             .bodies
@@ -495,11 +506,15 @@ pub(crate) fn write_inner_styled(
                     Param::Unset,
                 ],
             );
-            usages[k].push(usage);
             let shape = out.add(
                 "PRODUCT_DEFINITION_SHAPE",
                 vec![s("Placement"), s("Placement of an item"), r(usage)],
             );
+            usages[k].push(WrittenUsage {
+                usage,
+                shape,
+                axis: axes[n],
+            });
             let transform = out.add(
                 "ITEM_DEFINED_TRANSFORMATION",
                 vec![s(""), s(""), r(child_origin), r(axes[n])],
@@ -832,8 +847,8 @@ mod written_tests {
     }
 
     /// A block placed twice in a root, the second painted green in that
-    /// occurrence only; the block itself unpainted, so its override is
-    /// over a `NULL_STYLE` styled item.
+    /// occurrence only, one usage deep: written as OCCT's XDE writes a
+    /// component's colour, a style by context, with nothing to override.
     #[test]
     fn an_occurrence_override_reads_back_in_its_usage() {
         let place = |x: f64| Rigid::translation(ryukei::geom::Vector3::new(x, 0.0, 0.0));
@@ -894,8 +909,63 @@ mod written_tests {
         assert_eq!(occ[0].path, [(root, second)]);
         assert_eq!(occ[0].target, crate::styles::Target::Body(k));
         assert_eq!(occ[0].style.colour, Some([0, 255, 0]));
+        assert!(o.styles().retained.is_empty());
+        let text = String::from_utf8_lossy(&w.bytes);
+        assert!(text.contains("PRESENTATION_STYLE_BY_CONTEXT"));
+        assert!(!text.contains("CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM"));
+    }
+
+    /// Two usages deep (a root placing a sub-assembly placing the block),
+    /// the override is a context dependent over-riding styled item in its
+    /// usages, over a `NULL_STYLE` one where the block has no style.
+    #[test]
+    fn a_deeper_override_is_context_dependent() {
+        let at = |x: f64| Rigid::translation(ryukei::geom::Vector3::new(x, 0.0, 0.0));
+        let child = |product, x, id: &str| Child {
+            product,
+            place: at(x),
+            id: id.into(),
+        };
+        let model = WriteModel {
+            products: vec![
+                Product {
+                    id: "root".into(),
+                    children: vec![child(1, 0.0, "s")],
+                    ..Default::default()
+                },
+                Product {
+                    id: "sub".into(),
+                    children: vec![child(2, 0.0, "a"), child(2, 0.1, "b")],
+                    ..Default::default()
+                },
+                Product {
+                    id: "block".into(),
+                    bodies: vec![block()],
+                    ..Default::default()
+                },
+            ],
+        };
+        let paints = Paints {
+            bodies: Vec::new(),
+            occurrences: vec![OccurrencePaint {
+                path: vec![(0, 0), (1, 1)],
+                body: 0,
+                paint: Paint {
+                    colour: [0, 255, 0],
+                    opacity: 1.0,
+                },
+            }],
+        };
+        let w = write_styled(&model, &[], &paints, &WriteOptions::default()).unwrap();
+        let o = crate::open(&w.bytes).unwrap();
+        let occ = o.occurrence_styles();
+        assert_eq!(occ.len(), 1, "{occ:?}");
+        assert_eq!(occ[0].path.len(), 2);
+        assert_eq!(occ[0].style.colour, Some([0, 255, 0]));
         // The NULL_STYLE item is retained: it styles nothing.
         assert_eq!(o.styles().retained.len(), 1);
+        let text = String::from_utf8_lossy(&w.bytes);
+        assert!(text.contains("CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM"));
     }
 
     /// A transparency is written where an opacity differs from the one

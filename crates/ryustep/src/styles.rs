@@ -180,6 +180,18 @@ pub fn read<'n>(e: &Entities, name_of: &(dyn Fn(Id) -> Option<&'n str> + Sync)) 
             };
             Ok((style, path))
         });
+        // A style by context replaces its item's style whole, as OCCT's
+        // XDE means it: opaque where it gives no transparency.
+        let read = read.map(|(style, path)| {
+            let whole = context.is_none() && !path.is_empty();
+            let style = style.map(|(mut s, used)| {
+                if whole {
+                    s.opacity = s.opacity.or(Some(1.0));
+                }
+                (s, used)
+            });
+            (style, path)
+        });
         match read {
             Ok((Some((style, mut instances)), path)) => {
                 instances.sort_unstable();
@@ -751,8 +763,8 @@ mod tests {
     /// OCCT's component colour: a `STYLED_ITEM` on the part's body whose
     /// assignment is a `PRESENTATION_STYLE_BY_CONTEXT` in a shape
     /// representation of the usage's `PRODUCT_DEFINITION_SHAPE` (OCCT
-    /// 7.8's XDE writer, `tests/data/occt/colour_assembly.stp`). One whose
-    /// context is no usage's holds wherever its item is.
+    /// 7.8's XDE writer, `tests/data/occt/colour_assembly.stp`), taken
+    /// whole. One whose context is no usage's holds wherever its item is.
     #[test]
     fn a_style_by_context_in_a_usages_shape_reads_as_that_usage() {
         let s = styles_of(&chain(
@@ -771,6 +783,8 @@ mod tests {
         let a = s.assigned.iter().find(|a| a.instance == 20).unwrap();
         assert_eq!(a.path, [40]);
         assert_eq!(a.style.colour, Some([255, 0, 0]));
+        // Taken whole, as OCCT means it: opaque, giving no transparency.
+        assert_eq!(a.style.opacity, Some(1.0));
         assert!(!s.plain.contains_key(&100));
         let b = s.assigned.iter().find(|a| a.instance == 21).unwrap();
         assert!(b.path.is_empty());

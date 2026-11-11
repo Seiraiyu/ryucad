@@ -8423,7 +8423,8 @@ fn colours_in_and_out_from_the_cli() {
     };
     export("../out.step", &[]);
     let written = fs::read_to_string(beside.join("out.step")).unwrap();
-    assert!(written.contains("CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM"));
+    // The rack's green block, one usage deep: a style by context.
+    assert!(written.contains("PRESENTATION_STYLE_BY_CONTEXT"));
     assert!(written.contains("SURFACE_STYLE_TRANSPARENT"));
     let v = export("../plain.step", &["--no-appearance"]);
     assert!(!fs::read_to_string(beside.join("plain.step")).unwrap().contains("STYLED_ITEM"));
