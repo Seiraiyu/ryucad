@@ -76,6 +76,9 @@ pub struct Product {
 pub struct Solid {
     pub part: Id,
     pub founder: Id,
+    /// Its key in its product's part's looks ([`crate::appearance::looks`]):
+    /// its founder, or for an assembly's own bodies `<instance>/<founder>`.
+    pub key: String,
     pub built: Arc<Built>,
 }
 
@@ -90,6 +93,9 @@ pub struct Child {
     pub place: Rigid,
     pub usage: String,
     pub instance: String,
+    /// The steps it adds to an occurrence's path: the instance's ID, or a
+    /// pattern copy's `<pattern>:<i>` and its seed's.
+    pub steps: Vec<Id>,
 }
 
 /// What `export` asks for: the part, the revision (`working`, a Git
@@ -576,6 +582,12 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
         ..Walk::default()
     };
     walk.product(s, &part, &rev)?;
+    // The commit whose files give an export's appearance: a label's
+    // official commit (design 448); else the files `s` already reads.
+    let looks_at = match &rev {
+        Rev::Label(_) => walk.pin.as_ref().and_then(|p| p.commit.clone()),
+        _ => None,
+    };
     let failing: Vec<Value> = walk.failing.values().cloned().collect();
     if !failing.is_empty() && !ask.skip_failing {
         return Err(Error::new(
@@ -673,9 +685,16 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                 ..WriteOptions::default()
             };
             let (model, passed) = step_parts(&walk)?;
-            let report =
-                ryustep::write_report(&model, &passed, &opts).map_err(|e| walk.unwritable(e))?;
-            let (transfer, omitted) = step_transfer(s, &walk, &report, &model)?;
+            let (paints, unpainted) = {
+                let sess = match &looks_at {
+                    Some(c) => s.at(Some(c))?.1,
+                    None => &mut *s,
+                };
+                step_paints(sess, &walk)
+            };
+            let report = ryustep::write_styled(&model, &passed, &paints, &opts)
+                .map_err(|e| walk.unwritable(e))?;
+            let (transfer, omitted) = step_transfer(s, &walk, &report, &model, Some(&unpainted))?;
             result["transfer"] = transfer;
             if !omitted.is_empty() {
                 warn(&mut result, omitted);
@@ -1467,7 +1486,10 @@ impl Walk {
                         if own {
                             let (cp, cr) = self.node(s, &placed.part, &placed.rev)?;
                             if !cp.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly) {
-                                mine.extend(solids(&cp, &placed.rev, &cr));
+                                mine.extend(solids(&cp, &placed.rev, &cr).into_iter().map(|mut x| {
+                                    x.key = format!("{fid}/{}", x.founder);
+                                    x
+                                }));
                                 continue;
                             }
                         }
@@ -1480,6 +1502,7 @@ impl Walk {
                             place: placed.pose,
                             usage,
                             instance: fid.to_string(),
+                            steps: vec![fid.clone()],
                         });
                     }
                     Ok(Output::Copies(c)) => {
@@ -1491,6 +1514,7 @@ impl Walk {
                                 place: copy.placed.pose,
                                 usage: id.clone(),
                                 instance: id,
+                                steps: vec![Id::copy(fid, copy.index), copy.seed.clone()],
                             });
                         }
                     }
@@ -1578,6 +1602,7 @@ fn solids(p: &Part, rev: &Rev, result: &PartResult) -> Vec<Solid> {
         .flat_map(|o| o.solids)
         .map(|s| Solid {
             part: p.id.clone(),
+            key: s.founder.to_string(),
             founder: s.founder,
             built: s.built,
         })
@@ -1634,6 +1659,157 @@ fn identity(fallback: &str, p: &Part, props: &Properties) -> (String, String, St
 /// The properties STEP export writes as the product itself.
 const WRITTEN_PROPERTIES: [&str; 3] = ["number", "name", "description"];
 
+/// What an export's styles leave out (design 448), counted for its
+/// transfer report.
+#[derive(Debug, Default, PartialEq)]
+struct Unpainted {
+    /// Faces drawn otherwise only in an assembly: STEP's occurrence
+    /// styles are per body.
+    occurrence_faces: usize,
+    /// Looks with an opacity and no colour: STEP's fill needs a colour.
+    uncoloured: usize,
+    /// Reference solids with a look: passed through as their file has
+    /// them.
+    references: usize,
+    /// Products of another project's parts: their appearance is theirs.
+    foreign: usize,
+}
+
+impl Unpainted {
+    fn count(&self) -> usize {
+        self.occurrence_faces + self.uncoloured + self.references + self.foreign
+    }
+
+    fn summary(&self) -> String {
+        [
+            (
+                self.occurrence_faces,
+                "occurrence face(s) coloured otherwise only in an assembly (STEP styles an occurrence's body)",
+            ),
+            (
+                self.uncoloured,
+                "look(s) with an opacity and no colour (STEP's fill needs a colour)",
+            ),
+            (
+                self.references,
+                "reference solid(s) with a look (written as their file has them)",
+            ),
+            (
+                self.foreign,
+                "product(s) of another project, whose appearance isn't read",
+            ),
+        ]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, w)| format!("{n} {w}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+    }
+}
+
+/// A look's colour and opacity as STEP's paint; `None` with no colour.
+fn paint(e: &crate::appearance::Effective) -> Option<ryustep::Paint> {
+    let c = e.colour.as_deref()?.strip_prefix('#')?;
+    let byte = |k: usize| u8::from_str_radix(c.get(k..k + 2)?, 16).ok();
+    Some(ryustep::Paint {
+        colour: [byte(0)?, byte(2)?, byte(4)?],
+        opacity: e.opacity,
+    })
+}
+
+/// Whether two looks draw alike, wherever their values came from.
+fn alike(a: &crate::appearance::Effective, b: &crate::appearance::Effective) -> bool {
+    a.colour == b.colour && a.opacity == b.opacity
+}
+
+/// The paints of `walk`'s scene (design 448): each product's healed
+/// bodies' looks as its part draws them (`looks` of that part in `sess`,
+/// the session of the commit the export reads), and each occurrence of
+/// the root whose look differs from its product's as an override; with
+/// what STEP can't carry.
+fn step_paints(sess: &mut Session, walk: &Walk) -> (ryustep::Paints, Unpainted) {
+    use crate::appearance::SolidLook;
+    let scene = &walk.scene;
+    let mut looks: BTreeMap<Id, BTreeMap<String, SolidLook>> = BTreeMap::new();
+    let mut un = Unpainted::default();
+    for p in &scene.products {
+        if matches!(p.rev, Rev::Foreign { .. }) {
+            un.foreign += 1;
+            continue;
+        }
+        if !looks.contains_key(&p.part) {
+            // A part the commit doesn't build has no look to write.
+            let l = crate::appearance::looks(sess, &p.part).unwrap_or_default();
+            looks.insert(p.part.clone(), l);
+        }
+    }
+    let plain = SolidLook::default();
+    let mut out = ryustep::Paints::default();
+    for (k, p) in scene.products.iter().enumerate() {
+        let foreign = matches!(p.rev, Rev::Foreign { .. });
+        let mut body = 0;
+        for sol in &p.solids {
+            let l = look_in(&looks, &plain, scene, k, sol);
+            if sol.built.reference {
+                if !l.is_plain() {
+                    un.references += 1;
+                }
+                continue;
+            }
+            let j = body;
+            body += 1;
+            if foreign {
+                continue;
+            }
+            let base = paint(&l.base);
+            if base.is_none() && l.base.opacity < 1.0 {
+                un.uncoloured += 1;
+            }
+            let mut faces = Vec::new();
+            for (name, e) in &l.faces {
+                match (crate::doc::reference::parse_name(name), paint(e)) {
+                    (Some(n), Some(pt)) => faces.push((n, pt)),
+                    _ => un.uncoloured += 1,
+                }
+            }
+            if base.is_some() || !faces.is_empty() {
+                out.bodies.push(ryustep::BodyPaint {
+                    product: k,
+                    body: j,
+                    base,
+                    faces,
+                });
+            }
+        }
+    }
+    occurrence_paints(scene, &looks, &mut out, &mut un);
+    (out, un)
+}
+
+/// Solid `sol` of product `k`'s look as its part draws it; `plain` for
+/// none.
+fn look_in<'a>(
+    looks: &'a BTreeMap<Id, BTreeMap<String, crate::appearance::SolidLook>>,
+    plain: &'a crate::appearance::SolidLook,
+    scene: &Scene,
+    k: usize,
+    sol: &Solid,
+) -> &'a crate::appearance::SolidLook {
+    looks
+        .get(&scene.products[k].part)
+        .and_then(|m| m.get(&sol.key))
+        .unwrap_or(plain)
+}
+
+/// Task 20 adds each occurrence's override; until then, none.
+fn occurrence_paints(
+    _scene: &Scene,
+    _looks: &BTreeMap<Id, BTreeMap<String, crate::appearance::SolidLook>>,
+    _out: &mut ryustep::Paints,
+    _un: &mut Unpainted,
+) {
+}
+
 /// What a STEP export wrote and left out (design 448): `written`, the
 /// writer's instances by category (at most eight names each, the
 /// largest first); `omitted`, what the written parts hold that STEP
@@ -1644,6 +1820,7 @@ fn step_transfer(
     walk: &Walk,
     w: &ryustep::Written,
     model: &WriteModel,
+    unpainted: Option<&Unpainted>,
 ) -> Result<(Value, Vec<Value>)> {
     use crate::doc::files::Feature;
     use crate::transfer::SUMMARY_NAMES;
@@ -1684,7 +1861,7 @@ fn step_transfer(
         })
         .collect();
     let mut seen: BTreeSet<(Id, Rev)> = BTreeSet::new();
-    let (mut features, mut sketches, mut datums, mut appearance) = (0usize, 0usize, 0usize, 0usize);
+    let (mut features, mut sketches, mut datums) = (0usize, 0usize, 0usize);
     let mut properties: BTreeSet<(Id, String)> = BTreeSet::new();
     for p in &walk.scene.products {
         if !seen.insert((p.part.clone(), p.rev.clone())) {
@@ -1699,12 +1876,6 @@ fn step_transfer(
                     _ => {}
                 }
             }
-        }
-        if p.rev == Rev::Working {
-            appearance += crate::appearance::looks(s, &p.part)?
-                .values()
-                .filter(|l| !l.is_plain())
-                .count();
         }
         let props = properties_of(s, &p.part, &p.rev, walk.pin.as_ref());
         for (k, v) in &props.values {
@@ -1736,11 +1907,6 @@ fn step_transfer(
             "open annotation(s) on the parts, not written",
         ),
         (
-            "appearance",
-            appearance,
-            "solid(s) with a colour or opacity, not written to STEP yet",
-        ),
-        (
             "properties",
             properties.len(),
             "part propert(ies) beyond number, name and description, not written to STEP yet",
@@ -1749,6 +1915,9 @@ fn step_transfer(
         if n > 0 {
             omitted.push(json!({"what": what, "count": n, "summary": format!("{n} {words}")}));
         }
+    }
+    if let Some(u) = unpainted.filter(|u| u.count() > 0) {
+        omitted.push(json!({"what": "appearance", "count": u.count(), "summary": u.summary()}));
     }
     let warnings: Vec<Value> = omitted
         .iter()
@@ -2070,6 +2239,7 @@ pub(crate) mod tests {
         // A solid's faults stay `export_mesh_faults`.
         let solid = Solid {
             part: p.clone(),
+            key: "i".into(),
             founder: Id::parse("i", "feature").unwrap(),
             built: Arc::new(crate::rebuild::Built {
                 reference: false,
@@ -3436,5 +3606,48 @@ pub(crate) mod tests {
         let e = walk.unwritable(WriteError::NotRepresentable { face });
         assert_eq!(e.code, Code::ExportUnrepresentable);
         assert_eq!(e.details["entity"], format!("bolt/shank/{face}"));
+    }
+
+    /// A part's looks are written as styles: the part's colour on each
+    /// body, a face's own, a solid's opacity (design 448).
+    #[test]
+    fn a_parts_looks_are_written_as_styles() {
+        let (_dir, mut s) = crate::appearance::tests::project();
+        let set = |s: &mut Session, e: &str, v: Value| {
+            let mut v = v;
+            v["entities"] = json!([e]);
+            call(s, "appearance.set", v).unwrap();
+        };
+        set(&mut s, "plate", json!({"colour": "#d03030"}));
+        set(&mut s, "plate/boss", json!({"opacity": 0.5}));
+        let top = crate::appearance::tests::face_names(&mut s, "plate", "base")[0].clone();
+        set(&mut s, &format!("plate/base/{top}"), json!({"colour": "#2050c0"}));
+        let (v, bytes) = exported(
+            &mut s,
+            json!({"part": "plate", "time_stamp": "2026-11-11T00:00:00"}),
+        )
+        .unwrap();
+        let o = ryustep::open(&bytes).unwrap();
+        let held = |n: &str| o.held.iter().position(|h| h.name == n).unwrap();
+        let base = o.body_styles(held("base"));
+        assert_eq!(base.body.unwrap().colour, Some([0xd0, 0x30, 0x30]));
+        assert_eq!(base.faces.len(), 1);
+        assert_eq!(
+            base.faces.values().next().unwrap().colour,
+            Some([0x20, 0x50, 0xc0])
+        );
+        let boss = o.body_styles(held("boss")).body.unwrap();
+        assert_eq!(
+            (boss.colour, boss.opacity),
+            (Some([0xd0, 0x30, 0x30]), Some(0.5))
+        );
+        let written: Vec<&str> = v["transfer"]["written"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["category"].as_str().unwrap())
+            .collect();
+        assert!(written.contains(&"appearance"), "{written:?}");
+        assert!(v.get("warnings").is_none(), "{v}");
     }
 }

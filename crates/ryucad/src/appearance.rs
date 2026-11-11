@@ -1199,7 +1199,7 @@ pub(crate) mod tests {
 
     /// A plate (a box `base` and a cylinder `boss`), a bolt (`shank`), a
     /// pair of bolts, and a frame placing the plate and two pairs.
-    fn project() -> (tempfile::TempDir, Session) {
+    pub(crate) fn project() -> (tempfile::TempDir, Session) {
         let (dir, mut s) = fresh();
         let mut ok = |m: &str, v: Value| {
             call(&mut s, m, v).unwrap_or_else(|e| panic!("{m}: {e}"));
