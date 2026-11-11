@@ -2911,6 +2911,7 @@ pub fn failure_kept(e: &Error) -> bool {
             | Code::OffsetFailed
             | Code::MirrorFailed
             | Code::TweakFailed
+            | Code::EditBudgetExceeded
             | Code::SheetMetalFailed
             | Code::FillFailed
             | Code::ExtractFailed
