@@ -355,6 +355,43 @@ fn cp_radial_d8_cans_heal_and_check() {
     }
 }
 
+/// #550: KiCad's L_Wurth_WE-HCFT-2012 inductor. Its four solids overlap,
+/// so ryustep heals each alone and unites them; one face pair (the coil's
+/// spline face against a lead's cylinder) traced 23.5M units in 25 s on
+/// main before the union refused. Under the union scope's cap the import
+/// answers in under 10 s on one thread (asserted with `RYUKEI_BARS=1`):
+/// the file's own `FacesOverlap`, or a solid that checks clean.
+#[test]
+#[ignore = "needs the KiCad corpus (scripts/fetch-kicad.sh)"]
+fn the_wurth_inductors_union_refuses_in_bounded_time() {
+    let _serial = serial();
+    let Some(path) =
+        kicad("Inductor_THT_Wurth.3dshapes/L_Wurth_WE-HCFT-2012_LeadDiameter1.5mm.step")
+    else {
+        return;
+    };
+    let opts = ReadOptions {
+        key: OpKey::from_bytes(b"ryucad.feature\0body\0body"),
+        heal: Default::default(),
+    };
+    let bytes = std::fs::read(&path).unwrap();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let t = std::time::Instant::now();
+    let model = pool.install(|| read(&bytes, &opts)).unwrap();
+    let secs = t.elapsed().as_secs_f64();
+    eprintln!("L_Wurth_WE-HCFT-2012: {secs:.1} s");
+    assert_eq!(model.bodies.len(), 1);
+    match &model.bodies[0].result {
+        Ok((body, _, _)) => assert_eq!(named(body, &check_intersections(body)), []),
+        Err(ryustep::ImportError::Heal(ryukei::HealError::FacesOverlap { .. })) => {}
+        Err(e) => panic!("{e:?}"),
+    }
+    assert!(!bars() || secs < 10.0, "{secs:.1} s");
+}
+
 /// #264: ftc_07's AP242 edition. Four planes, each tangent to a fillet
 /// torus at a saddle of its tube (a critical value of 2.6e-13 m), at the
 /// one vertex they share: the trace fails on the cells there. Traced
