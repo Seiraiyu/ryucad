@@ -167,7 +167,18 @@ pub fn layout(
             )
             .with("param", "render")
         })?;
-        let (mime, bytes, px) = picture(&laid, &[], &ask)?;
+        let b = pictured
+            .as_ref()
+            .and_then(|id| p.conn.blocks.get(id))
+            .expect("the block pictured is the project's");
+        let looks = looks(
+            p,
+            b,
+            &laid.built,
+            &laid.outcome.layout,
+            ryusch::style::Theme::Light,
+        );
+        let (mime, bytes, px) = picture(&laid, &[], &ask, &looks)?;
         let mut v = json!({"blocks": out, "dry_run": dry_run, "format": ask.format});
         if let Some(px) = px {
             v["scale"] = json!(px);
@@ -614,7 +625,14 @@ pub fn place(
     if dry_run {
         v["description"] = json!({"blocks": [description]});
         if let Some(ask) = render {
-            let (mime, bytes, px) = picture(&laid, &[], &ask)?;
+            let looks = looks(
+                p,
+                b,
+                &laid.built,
+                &laid.outcome.layout,
+                ryusch::style::Theme::Light,
+            );
+            let (mime, bytes, px) = picture(&laid, &[], &ask, &looks)?;
             v["format"] = json!(ask.format);
             if let Some(px) = px {
                 v["scale"] = json!(px);
@@ -835,12 +853,36 @@ pub struct RenderAsk {
     pub sheet: Option<String>,
 }
 
-/// A layout drawn as `render` draws it: the bytes, their type, and the
-/// scale used (PNG).
+/// Each sheet's look in `theme` for block `b` built as `built` and laid
+/// out as `layout` (plan 2.E).
+pub fn looks(
+    p: &Project,
+    b: &BlockFiles,
+    built: &schem::Built,
+    layout: &ryusch::layout::Layout,
+    theme: ryusch::style::Theme,
+) -> BTreeMap<String, ryusch::style::Look> {
+    let layers = crate::cascade::Layers::of(p);
+    let objects = crate::cascade::objects(p, b, built);
+    layout
+        .sheets
+        .iter()
+        .map(|(sid, s)| {
+            (
+                sid.clone(),
+                crate::cascade::look(&layers, &objects, built, (sid, &s.name), theme),
+            )
+        })
+        .collect()
+}
+
+/// A layout drawn as `render` draws it, in `looks`: the bytes, their
+/// type, and the scale used (PNG).
 fn picture(
     laid: &Laid,
     refs: &[&str],
     ask: &RenderAsk,
+    looks: &BTreeMap<String, ryusch::style::Look>,
 ) -> Result<(&'static str, Vec<u8>, Option<f32>)> {
     let layout = &laid.outcome.layout;
     let one: Vec<String> = match &ask.sheet {
@@ -862,11 +904,9 @@ fn picture(
     } else {
         one.iter().map(String::as_str).collect()
     };
-    let svg = if ask.fit {
-        ryusch::svg::draw_fit(&laid.built.input, layout, &refs)
-    } else {
-        ryusch::svg::draw(&laid.built.input, layout, &refs)
-    };
+    let svg = ryusch::svg::draw_looks(&laid.built.input, layout, &refs, ask.fit, &|sid| {
+        looks.get(sid).cloned().unwrap_or_default()
+    });
     Ok(match ask.format {
         Format::Svg => ("image/svg+xml", svg.into_bytes(), None),
         Format::Png => {
@@ -883,14 +923,17 @@ fn picture(
     })
 }
 
-/// SVG to PNG at `px_per_mm`, with Inter alone for text.
+/// SVG to PNG at `px_per_mm`, with Inter alone for text (Regular, and
+/// SemiBold for `font-weight="600"`).
 pub fn png(svg: &str, px_per_mm: f32) -> Result<Vec<u8>> {
     use resvg::{tiny_skia, usvg};
     let mut opt = usvg::Options {
         font_family: "Inter".into(),
         ..usvg::Options::default()
     };
-    std::sync::Arc::make_mut(&mut opt.fontdb).load_font_data(INTER.to_vec());
+    let db = std::sync::Arc::make_mut(&mut opt.fontdb);
+    db.load_font_data(INTER.to_vec());
+    db.load_font_data(ryu_draw::font::INTER_SEMIBOLD.to_vec());
     let tree = usvg::Tree::from_str(svg, &opt)
         .map_err(|e| Error::new(Code::Internal, format!("the SVG doesn't read: {e}")))?;
     // usvg reads millimetres at 96 per inch.
@@ -962,6 +1005,7 @@ pub fn render(
     format: Format,
     scale: Option<f32>,
     fit: bool,
+    theme: ryusch::style::Theme,
 ) -> Result<Answer> {
     let b = blocks(p, design, block)?[0];
     let mut laid = schem::lay(p, b, None, &[], Relayout::None)?;
@@ -986,6 +1030,7 @@ pub fn render(
         "block": b.id,
         "sheets": if which.is_empty() { layout.sheets.keys().cloned().collect() } else { which.clone() },
         "format": format,
+        "theme": theme,
         "revision": b.revision,
         "layers": layers.iter().map(schem::Layer::to_json).collect::<Vec<_>>(),
     });
@@ -995,6 +1040,7 @@ pub fn render(
     if laid.stale {
         v["stale"] = json!(true);
     }
+    let looks = looks(p, b, &laid.built, &laid.outcome.layout, theme);
     let (mime, bytes, px) = picture(
         &laid,
         &refs,
@@ -1004,6 +1050,7 @@ pub fn render(
             fit,
             sheet: None,
         },
+        &looks,
     )?;
     if let Some(px) = px {
         v["scale"] = json!(px);
@@ -1101,7 +1148,18 @@ mod tests {
     fn a_stacked_blocks_layers_draw_their_own_designators() {
         let (_dir, p) = crate::netlist::tests::project(&[]);
         let svg = |layer: Option<&str>| {
-            let a = render(&p, None, Some("s"), None, layer, Format::Svg, None, false).unwrap();
+            let a = render(
+                &p,
+                None,
+                Some("s"),
+                None,
+                layer,
+                Format::Svg,
+                None,
+                false,
+                Default::default(),
+            )
+            .unwrap();
             (String::from_utf8(a.binary.unwrap()).unwrap(), a.result)
         };
         let (first, v) = svg(None);
@@ -1134,13 +1192,25 @@ mod tests {
             Format::Svg,
             None,
             false,
+            Default::default(),
         )
         .unwrap_err();
         assert_eq!(e.code, Code::NotFound);
         assert_eq!(e.details["layers"].as_array().unwrap().len(), 2);
         // The parent draws the two as one stack.
         let (top, _) = {
-            let a = render(&p, None, Some("top"), None, None, Format::Svg, None, false).unwrap();
+            let a = render(
+                &p,
+                None,
+                Some("top"),
+                None,
+                None,
+                Format::Svg,
+                None,
+                false,
+                Default::default(),
+            )
+            .unwrap();
             (String::from_utf8(a.binary.unwrap()).unwrap(), a.result)
         };
         assert!(

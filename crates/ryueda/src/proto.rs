@@ -731,6 +731,9 @@ pub enum Request {
         /// Crop the view to what is drawn.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         fit: bool,
+        /// light (the default) or dark (plan 2.E).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        theme: Option<ryusch::style::Theme>,
     },
     /// A design's canvases paged into a PDF, its bytes after the answer:
     /// a page per sheet, a stack's sheets per layer (`all`) or once

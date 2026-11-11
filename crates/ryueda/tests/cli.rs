@@ -3617,3 +3617,44 @@ fn an_organisations_locks_refuse_a_projects_writes() {
         "{s}"
     );
 }
+
+/// A render in either theme, through the project's style.
+#[test]
+fn renders_take_a_theme_and_the_style() {
+    let p = Pair::with_placed_resistor();
+    let block = "top";
+    p.ok(&["layout"]);
+    p.ok(&["tag", "R1", "--block", block, "--add", "hv"]);
+    let svg = |theme: &str| {
+        let out = format!("{theme}.svg");
+        let a = p.ok(&["render", "--block", block, "--theme", theme, "--out", &out]);
+        assert_eq!(a["theme"], theme);
+        fs::read_to_string(p.direct.join("board").join(&out)).unwrap()
+    };
+    let light = svg("light");
+    let dark = svg("dark");
+    assert!(
+        light.contains("fill=\"#ffffff\"") && light.contains("#c0261c"),
+        "paper, and R1 in hv red"
+    );
+    assert!(dark.contains("fill=\"#1d2025\"") && dark.contains("#ff6a5c"));
+    assert!(
+        light.contains("font-weight=\"600\""),
+        "the designator in SemiBold"
+    );
+    p.ok(&[
+        "render", "--block", block, "--theme", "dark", "--format", "png", "--out", "dark.png",
+    ]);
+    assert!(
+        fs::read(p.direct.join("board/dark.png"))
+            .unwrap()
+            .starts_with(b"\x89PNG")
+    );
+    p.fails(
+        &[
+            "render", "--block", block, "--theme", "sepia", "--out", "x.svg",
+        ],
+        "usage",
+        2,
+    );
+}

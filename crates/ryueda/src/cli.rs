@@ -296,6 +296,9 @@ enum Command {
         /// Crop to what is drawn, rather than the whole paper.
         #[arg(long)]
         fit: bool,
+        /// light (the default) or dark.
+        #[arg(long, value_parser = ["light", "dark"])]
+        theme: Option<String>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
     },
@@ -2190,6 +2193,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             format,
             scale,
             fit,
+            theme,
             out,
         } => {
             let format = picture_format(format.as_deref(), out)?;
@@ -2201,6 +2205,10 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 format: Some(format),
                 scale: *scale,
                 fit: *fit,
+                theme: theme
+                    .as_deref()
+                    .map(|t| named("theme", t, "light, dark"))
+                    .transpose()?,
             }
         }
         Command::Output {

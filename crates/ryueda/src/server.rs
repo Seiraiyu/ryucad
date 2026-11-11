@@ -163,6 +163,7 @@ pub fn answer(
             format,
             scale,
             fit,
+            theme,
         } => crate::schemcmd::render(
             session.project(),
             design.as_deref(),
@@ -172,6 +173,7 @@ pub fn answer(
             format.unwrap_or(crate::schemcmd::Format::Svg),
             scale,
             fit,
+            theme.unwrap_or_default(),
         ),
         Request::LayoutPlace {
             block,
