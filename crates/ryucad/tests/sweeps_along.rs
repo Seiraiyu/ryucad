@@ -7,9 +7,11 @@
 //! clean, the block less the tube), a face of a solid swept and joined
 //! to it; names unchanged across edits of the path, the twist, the scale
 //! and the profile's size; and the refusals in the agent's terms. A
-//! flat-sided thread sweeps up a helix (#376), but neither it nor a round
-//! one can be cut from a shank (`boolean_failed`): that kernel limit is
-//! pinned so a fix shows. The spring, the twisted
+//! round and a flat-sided thread sweep up a helix and are cut from a
+//! shank, each taking away its section inside the shank by Pappus about
+//! the axis (#376); one pair of the flat-sided cut's faces is still one
+//! the self-intersection check can't settle (#698), pinned so a fix
+//! shows. The spring, the twisted
 //! square and the threads take minutes in a debug build: they run in
 //! release (`full.yml`).
 
@@ -383,17 +385,38 @@ fn shank_and_helix(ops: Value) -> (tempfile::TempDir, Session) {
     (dir, s)
 }
 
-/// A limit of ryukei's booleans, pinned so a fix shows: a round thread
-/// sweeps up the helix, but cutting it from the shank is refused, the
-/// boolean unable to certify where the swept tube meets the shank's
-/// cylinder (`boolean_failed`, `uncertain`; #376). Fewer turns, a coarser
-/// pitch, a deeper groove and a minimal law were all refused alike on
-/// cox-worker-1.
-/// When it builds, check it clean and that it takes away the segment of
-/// the circle inside the shank by Pappus about the axis.
+/// The volume a thread cuts from the shank (`shank_and_helix`), by Pappus
+/// about the axis: `area` of its section inside the shank, in mm², about
+/// its centroid's distance `x` from the axis, in mm, round three turns
+/// (the climb lies in the section's plane and adds nothing). The shank
+/// left behind has no faces crossing or overlapping and `unchecked`
+/// pairs the self-intersection check can't settle, and its volume is the
+/// shank's less that.
+fn cut_by_pappus(s: &mut Session, area: f64, x: f64, unchecked: usize) {
+    let b = body(s, "shank");
+    let faults = ryukei::check::check_intersections(&b);
+    assert!(
+        faults.len() == unchecked
+            && faults
+                .iter()
+                .all(|f| matches!(f, ryukei::check::Fault::CannotCheck { .. })),
+        "{faults:?}"
+    );
+    let m = ryukei::measure::mass(&b, 1.0, &ryukei::measure::MassOptions::default()).unwrap();
+    let shank = PI * 25.0 * 20.0 * 1e-9;
+    let want = area * TAU * x * 3.0 * 1e-9;
+    close(shank - m.volume.value(), want, 2e-3);
+    assert!(call(s, "check", json!({"part": "p"})).is_ok());
+}
+
+/// A round thread swept up the helix and cut from the shank. Pinned as a
+/// limit of ryukei's booleans until v0.9.0 (#376: refused `uncertain`
+/// where the swept tube meets the shank's cylinder), it builds since
+/// ryukei 15.D (#587, 5115916a); it takes away the segment of its circle inside the shank, by
+/// Pappus about the axis.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
-fn a_thread_cut_from_a_shank_is_refused_as_uncertain() {
+fn a_thread_cut_from_a_shank_takes_away_its_segment() {
     // The thread's section where the helix starts: a circle of radius
     // 0.4 mm about (z, x) = (4, 5.1) mm, reaching 0.3 mm into the shank.
     let (_dir, mut s) = shank_and_helix(json!([
@@ -407,16 +430,15 @@ fn a_thread_cut_from_a_shank_is_refused_as_uncertain() {
     );
     assert_eq!(v["feature"]["law"], "binormal", "{v}");
     let r = reported(&mut s, "thread");
-    let e = &r["error"];
-    assert_eq!(e["code"], "boolean_failed", "{r}");
-    assert!(
-        e["details"]["kernel"]
-            .as_str()
-            .unwrap()
-            .starts_with("InvalidBoolean(Uncertain"),
-        "{r}"
-    );
-    // The sweep alone builds: the same thread as a solid of its own.
+    assert_eq!(r["ok"], true, "{r}");
+    // The segment of the circle (radius 0.4 mm, centre 5.1 mm out) inside
+    // x = 5 mm: its chord 0.1 mm from the centre.
+    let (rr, h) = (0.4f64, 0.1f64);
+    let half = ryukei::math::sqrt(rr * rr - h * h);
+    let area = rr * rr * ryukei::math::acos(h / rr) - h * half;
+    let x = 5.1 - 2.0 * half * half * half / (3.0 * area);
+    cut_by_pappus(&mut s, area, x, 0);
+    // The sweep alone builds too: the same thread as a solid of its own.
     must(
         &mut s,
         "feature.edit",
@@ -429,7 +451,11 @@ fn a_thread_cut_from_a_shank_is_refused_as_uncertain() {
 /// A triangular thread swept up a helix builds (#376): ryukei certifies
 /// the sweep one to one, so the self-intersection check, which can't part
 /// two flat sides meeting along their lateral, isn't asked. Its cut from
-/// the shank is the round thread's limit (above).
+/// the shank, pinned as uncertain until v0.9.0, builds since ryukei 15.D (#587, 5115916a),
+/// taking away the tip of its triangle inside the shank, by Pappus; one
+/// pair of its faces, a swept flat side against the shank's cylinder, is
+/// still one the self-intersection check can't settle (#698), pinned so
+/// a fix shows.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
 fn a_flat_sided_thread_up_a_helix_sweeps() {
@@ -453,18 +479,13 @@ fn a_flat_sided_thread_up_a_helix_sweeps() {
         "feature.edit",
         json!({"part": "p", "id": "thread", "operation": "cut", "targets": ["shank"]}),
     );
-    // Pinned as the round thread's is: a swept side against the shank's
-    // cylinder stays uncertain (#376's second limit).
     let r = reported(&mut s, "thread");
-    let e = &r["error"];
-    assert_eq!(e["code"], "boolean_failed", "{r}");
-    assert!(
-        e["details"]["kernel"]
-            .as_str()
-            .unwrap()
-            .starts_with("InvalidBoolean(Uncertain"),
-        "{r}"
-    );
+    assert_eq!(r["ok"], true, "{r}");
+    // The triangle's tip inside x = 5 mm: apex at 4.6 mm, 0.8 mm wide at
+    // 5.5 mm, so 0.4 mm tall and 0.8 × 0.4 / 0.9 mm wide at the shank,
+    // its centroid two thirds of the way from the apex.
+    let (tall, wide) = (0.4, 0.8 * 0.4 / 0.9);
+    cut_by_pappus(&mut s, 0.5 * tall * wide, 4.6 + 2.0 * tall / 3.0, 1);
 }
 
 #[test]
