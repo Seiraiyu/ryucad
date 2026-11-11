@@ -7,6 +7,7 @@
 
 use crate::standards::{Class, Standards};
 use crate::symbol::{Pin, PinType, Point, Side, Symbol};
+use ryusch::geom::Rect;
 use ryusch::lint::{Prefs, Rule, Severity};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -282,10 +283,114 @@ fn unit_size(s: &Symbol, class: Option<Class>, cx: &Context, out: &mut Vec<Raw>)
     }
 }
 
+/// A unit's body as ryusch draws it: its graphics' boxes and its pins'
+/// bases.
+fn body(s: &Symbol, unit: u32) -> Rect {
+    ryusch::shape::local(&crate::schem::unit_part(s, unit, String::new(), "U")).0
+}
+
+/// Down to a multiple of `p`, and up to one.
+fn floor(v: i64, p: i64) -> i64 {
+    v.div_euclid(p) * p
+}
+fn ceil(v: i64, p: i64) -> i64 {
+    (v + p - 1).div_euclid(p) * p
+}
+
+/// The next free place on `side` of `unit`'s body for a pin `len` long:
+/// a row (two grid steps) below the lowest pin there on the left and
+/// right, a column (four) past the rightmost along the top and bottom, or
+/// the body's first row or column when the side has none; `None` past the
+/// body's end.
+fn slot(s: &Symbol, unit: u32, side: Side, len: i64, g: i64) -> Option<Point> {
+    let b = body(s, unit);
+    let p = 2 * g;
+    let on: Vec<Point> = unit_pins(s, unit)
+        .iter()
+        .filter(|(_, x)| x.side == side)
+        .map(|(_, x)| x.at)
+        .collect();
+    match side {
+        Side::Left | Side::Right => {
+            let x = if side == Side::Left {
+                b.min[0] - len
+            } else {
+                b.max[0] + len
+            };
+            let y = on
+                .iter()
+                .map(|a| a[1])
+                .min()
+                .map_or_else(|| floor(b.max[1], p) - p, |y| y - p);
+            (y > b.min[1]).then_some([x, y])
+        }
+        Side::Up | Side::Down => {
+            let y = if side == Side::Up {
+                b.max[1] + len
+            } else {
+                b.min[1] - len
+            };
+            let x = on
+                .iter()
+                .map(|a| a[0])
+                .max()
+                .map_or_else(|| ceil(b.min[0], p) + p, |x| x + 2 * p);
+            (x < b.max[0]).then_some([x, y])
+        }
+    }
+}
+
+fn side_word(s: Side) -> &'static str {
+    match s {
+        Side::Left => "left",
+        Side::Right => "right",
+        Side::Up => "top",
+        Side::Down => "bottom",
+    }
+}
+
+fn sides(s: &Symbol, class: Option<Class>, cx: &Context, out: &mut Vec<Raw>) {
+    let Some(class) = class else { return };
+    let rule = cx.standards.rule(class);
+    for (n, p) in &s.pins {
+        let Some(role) = cx.standards.role(&p.name, p.ty) else {
+            continue;
+        };
+        let Some(&want) = rule.sides.get(&role) else {
+            continue;
+        };
+        if p.side == want {
+            continue;
+        }
+        let mut r = raw(
+            "sym_pin_side",
+            vec![n.clone()],
+            format!(
+                "pin {n} ({}) is a {} pin on the {} side; a {} puts it on the {}",
+                p.name,
+                role.as_str(),
+                side_word(p.side),
+                class.as_str(),
+                side_word(want)
+            ),
+            json!({"role": role, "side": p.side, "wanted": want}),
+        );
+        let unit = p.unit.unwrap_or_else(|| home(s));
+        if let Some(at) = slot(s, unit, want, p.length_nm, cx.standards.grid_nm) {
+            r.fixes.push(vec![
+                json!({"op": "move", "pin": n, "at": at}),
+                json!({"op": "set", "pin": n, "side": want}),
+            ]);
+        }
+        out.push(r);
+    }
+}
+
 /// Every rule's raw findings, in the catalogue's order.
 fn found(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Raw> {
     let mut out = Vec::new();
     off_grid(s, cx, &mut out);
+    sides(s, class, cx, &mut out);
     length(s, class, cx, &mut out);
     unit_size(s, class, cx, &mut out);
     out
@@ -431,5 +536,59 @@ mod tests {
             "{}",
             f.message
         );
+    }
+
+    #[test]
+    fn a_pin_on_the_wrong_side_moves_to_its_sides_next_free_place() {
+        let st = Standards::default();
+        let prefs = Prefs::default();
+        let cx = Context {
+            standards: &st,
+            prefs: &prefs,
+            from: "built_in",
+        };
+        let pins = vec![
+            PinSpec {
+                number: "1".into(),
+                name: "VDD".into(),
+                ty: PinType::PowerIn,
+            },
+            PinSpec {
+                number: "2".into(),
+                name: "GND".into(),
+                ty: PinType::PowerIn,
+            },
+            PinSpec {
+                number: "3".into(),
+                name: "EN".into(),
+                ty: PinType::Input,
+            },
+            PinSpec {
+                number: "4".into(),
+                name: "OUT".into(),
+                ty: PinType::Output,
+            },
+        ];
+        let mut s = template("U", Class::Ic, &pins, &st).unwrap();
+        // The output drawn on the left, under the input.
+        let en = s.pins["3"].clone();
+        let out = s.pins.get_mut("4").unwrap();
+        out.side = Side::Left;
+        out.at = [en.at[0], en.at[1] - 2 * st.grid_nm];
+        let found = lint(&s, Some(Class::Ic), &cx);
+        assert_eq!(codes(&found), [("sym_pin_side", vec!["4".to_owned()])]);
+        assert_eq!(found[0].details["wanted"], "right");
+        let ops = &found[0].fixes[0];
+        assert_eq!(
+            ops[1],
+            serde_json::json!({"op": "set", "pin": "4", "side": "right"})
+        );
+        // The class decides: a regulator wants its supply on the left.
+        let found = lint(
+            &template("U", Class::Ic, &pins, &st).unwrap(),
+            Some(Class::Regulator),
+            &cx,
+        );
+        assert!(codes(&found).contains(&("sym_pin_side", vec!["1".to_owned()])));
     }
 }
