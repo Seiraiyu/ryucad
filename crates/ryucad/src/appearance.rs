@@ -779,6 +779,12 @@ fn not_colourable(reference: &str, why: &str) -> Error {
 /// text and the part's kind alone (so an entry the model has lost can be
 /// cleared).
 pub fn entry_of(session: &Session, reference: &str) -> Result<(Id, Entry)> {
+    entry_of_with(session, reference, false)
+}
+
+/// [`entry_of`]; `whole` lets an assembly be named alone (its `part`
+/// entry, which holds only `file_styles`).
+fn entry_of_with(session: &Session, reference: &str, whole: bool) -> Result<(Id, Entry)> {
     let (part, rest) = match reference.split_once('/') {
         Some((p, r)) => (part_id(p)?, Some(r)),
         None => (part_id(reference)?, None),
@@ -786,7 +792,7 @@ pub fn entry_of(session: &Session, reference: &str) -> Result<(Id, Entry)> {
     let p = session.project().part(&part)?;
     let assembly = part_kind(p) == PartKind::Assembly;
     let Some(rest) = rest else {
-        if assembly {
+        if assembly && !whole {
             return Err(not_colourable(
                 reference,
                 "an assembly colours its occurrences (<assembly>/<instance>…) and their solids",
@@ -880,6 +886,21 @@ pub struct Change {
     pub opacity: Option<f64>,
     /// Fields taken out: `colour` (and `material`) or `opacity`.
     pub unset: Vec<String>,
+    /// The part entry's `file_styles`: `false` turns the file layer off,
+    /// `true` on again (design 448).
+    pub file_styles: Option<bool>,
+}
+
+impl Change {
+    /// Whether it changes `file_styles` and nothing else: what an
+    /// assembly's own entry takes.
+    fn file_styles_only(&self) -> bool {
+        self.file_styles.is_some()
+            && self.colour.is_none()
+            && !self.material
+            && self.opacity.is_none()
+            && self.unset.is_empty()
+    }
 }
 
 impl Change {
@@ -915,6 +936,7 @@ impl Change {
             && !self.material
             && self.opacity.is_none()
             && self.unset.is_empty()
+            && self.file_styles.is_none()
         {
             return Err(Error::new(
                 Code::InvalidParam,
@@ -946,13 +968,20 @@ impl Change {
         if let Some(o) = self.opacity {
             l.opacity = Some(o);
         }
+        if let Some(on) = self.file_styles {
+            l.no_file_styles = !on;
+        }
         (!l.is_empty()).then_some(l)
     }
 }
 
 /// The part every reference is in, and the entries they name; one part
 /// only.
-fn entries(session: &Session, references: &[String]) -> Result<(Id, Vec<(String, Entry)>)> {
+fn entries(
+    session: &Session,
+    references: &[String],
+    whole: bool,
+) -> Result<(Id, Vec<(String, Entry)>)> {
     if references.is_empty() {
         return Err(Error::new(
             Code::InvalidParam,
@@ -962,7 +991,7 @@ fn entries(session: &Session, references: &[String]) -> Result<(Id, Vec<(String,
     let mut part: Option<Id> = None;
     let mut out = Vec::new();
     for r in references {
-        let (p, e) = entry_of(session, r)?;
+        let (p, e) = entry_of_with(session, r, whole)?;
         if let Some(first) = &part
             && *first != p
         {
@@ -1026,7 +1055,13 @@ pub fn set(
     expected: Option<&str>,
 ) -> Result<Value> {
     change.check()?;
-    let (part, touched) = entries(session, references)?;
+    let (part, touched) = entries(session, references, change.file_styles_only())?;
+    if change.file_styles.is_some() && touched.iter().any(|(_, e)| *e != Entry::Part) {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "file_styles is the part's: name the part alone",
+        ));
+    }
     check_revision(session.project().part(&part)?, expected)?;
     for (r, e) in &touched {
         check_resolves(session, &part, e, r)?;
@@ -1046,7 +1081,7 @@ pub fn clear(
     references: &[String],
     expected: Option<&str>,
 ) -> Result<Value> {
-    let (part, touched) = entries(session, references)?;
+    let (part, touched) = entries(session, references, false)?;
     check_revision(session.project().part(&part)?, expected)?;
     let mut file = current(session, &part)?;
     for (_, e) in &touched {
@@ -1126,6 +1161,7 @@ mod tests {
                 material,
                 opacity,
                 unset: unset.iter().map(|s| s.to_string()).collect(),
+                file_styles: None,
             };
         let red = c(Some("#FF0000"), false, None, &[]);
         red.check().unwrap();
@@ -1736,5 +1772,73 @@ mod tests {
         assert_eq!(w.len(), 1, "{w:?}");
         assert_eq!(w[0]["code"], "appearance_unresolved");
         assert_eq!((&w[0]["key"], &w[0]["source"]), (&json!(gone), &json!("file")));
+    }
+
+    #[test]
+    fn file_styles_turn_off_and_on_for_a_part_and_an_assembly() {
+        use crate::file_styles::tests::{imported, part_of};
+        let (_dir, mut s, v) = imported("painted_assembly.stp", json!({}));
+        let rack = part_of(&v, "assembly", 0);
+        let block = {
+            let p = s.project().part(&rack).unwrap();
+            p.features
+                .values()
+                .find_map(|f| match f {
+                    Ok(Feature::Instance(i)) if i.import.as_ref().and_then(|u| u.usage.as_deref()) == Some("1") => {
+                        Some(i.part.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let colours = |s: &mut Session| -> Vec<Value> {
+            let v = call(s, "appearance.get", json!({"part": rack.as_str()})).unwrap();
+            let mut c: Vec<Value> = v["solids"].as_array().unwrap().iter().map(|x| x["colour"].clone()).collect();
+            c.sort_by_key(|x| x.to_string());
+            c
+        };
+        assert_eq!(colours(&mut s), [json!("#0000ff"), json!("#00ff00"), json!("#ff0000")]);
+        // The assembly's layer off: its green occurrence is the block's red.
+        call(
+            &mut s,
+            "appearance.set",
+            json!({"entities": [rack.as_str()], "file_styles": false}),
+        )
+        .unwrap();
+        let file = s.root().join(format!("parts/{rack}/appearance.json"));
+        assert_eq!(
+            crate::doc::canonical::parse(&std::fs::read_to_string(&file).unwrap()).unwrap(),
+            json!({"format": 2, "kind": "ryucad.appearance", "part": {"file_styles": false}})
+        );
+        assert_eq!(colours(&mut s), [json!("#0000ff"), json!("#ff0000"), json!("#ff0000")]);
+        // The block's off too: plain.
+        call(
+            &mut s,
+            "appearance.set",
+            json!({"entities": [block.as_str()], "file_styles": false}),
+        )
+        .unwrap();
+        assert_eq!(colours(&mut s), [json!("#0000ff"), Value::Null, Value::Null]);
+        // On again: the file goes with its last entry.
+        for p in [&rack, &block] {
+            call(
+                &mut s,
+                "appearance.set",
+                json!({"entities": [p.as_str()], "file_styles": true}),
+            )
+            .unwrap();
+        }
+        assert!(!file.exists());
+        assert_eq!(colours(&mut s), [json!("#0000ff"), json!("#00ff00"), json!("#ff0000")]);
+        // It is the part's alone; an assembly takes nothing else whole.
+        for (entities, params) in [
+            (json!([format!("{block}/x")]), json!({"file_styles": false})),
+            (json!([rack.as_str()]), json!({"file_styles": false, "colour": "#000000"})),
+        ] {
+            let mut p = params;
+            p["entities"] = entities;
+            let e = call(&mut s, "appearance.set", p).unwrap_err();
+            assert_eq!(e.code, Code::InvalidParam);
+        }
     }
 }

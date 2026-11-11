@@ -388,6 +388,7 @@ enum Command {
     /// Colour a part (<part>), its solids (<part>/<solid>) and faces
     /// (<part>/<solid>/<name>), or an assembly's occurrences
     /// (<assembly>/<instance>/…) and their solids: in Git, all in one part.
+    /// An assembly alone takes only --no-file-styles and --file-styles.
     Colour {
         #[arg(value_name = "REF", required = true)]
         refs: Vec<String>,
@@ -406,6 +407,13 @@ enum Command {
         /// Take the opacity out likewise.
         #[arg(long, conflicts_with_all = ["opacity", "clear"])]
         no_opacity: bool,
+        /// Draw the part without the colours its imported STEP files give
+        /// it (appearance.json's file_styles: false).
+        #[arg(long, conflicts_with_all = ["file_styles", "clear"])]
+        no_file_styles: bool,
+        /// Draw them again.
+        #[arg(long, conflicts_with = "clear")]
+        file_styles: bool,
         /// Take every entry named out, whether or not the model still has
         /// what it names.
         #[arg(long)]
@@ -4949,6 +4957,8 @@ fn request(cmd: &Command) -> Option<Request> {
             opacity,
             no_colour,
             no_opacity,
+            no_file_styles,
+            file_styles,
             clear: false,
             expect,
         } => Request::AppearanceSet {
@@ -4961,6 +4971,13 @@ fn request(cmd: &Command) -> Option<Request> {
                 .filter(|(on, _)| *on)
                 .map(|(_, f)| f.to_owned())
                 .collect(),
+            file_styles: if *no_file_styles {
+                Some(false)
+            } else if *file_styles {
+                Some(true)
+            } else {
+                None
+            },
             expected_revision: expect.revision.clone(),
         },
         Command::Equations { part, all, rev } => Request::EquationsList {

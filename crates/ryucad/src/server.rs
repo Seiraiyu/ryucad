@@ -1004,6 +1004,7 @@ pub(crate) fn dispatch(
             material,
             opacity,
             unset,
+            file_styles,
             expected_revision,
         } => {
             let change = crate::appearance::Change {
@@ -1011,6 +1012,7 @@ pub(crate) fn dispatch(
                 material,
                 opacity,
                 unset,
+                file_styles,
             };
             crate::appearance::set(session, &entities, &change, expected_revision.as_deref())
         }
