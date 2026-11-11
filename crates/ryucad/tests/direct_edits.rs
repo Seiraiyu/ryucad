@@ -950,3 +950,98 @@ fn an_inside_out_result_is_refused() {
     assert!(e.details["volume_mm3"].as_f64().unwrap() < 0.0, "{e}");
     assert!(e.details["hint"].as_str().unwrap().contains("heal"), "{e}");
 }
+
+/// Every edge of the box `b` filleted at `r` mm, in one fillet `f`: a
+/// rounded box, its twelve fillets meeting in eight ball corners.
+fn rounded(s: &mut Session, r: f64) {
+    let edges: Vec<String> = body(s, "b")["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| format!("p/b/{}", e["name"].as_str().unwrap()))
+        .collect();
+    assert_eq!(edges.len(), 12);
+    add(
+        s,
+        json!({"type": "fillet", "id": "f", "radius": r, "edges": edges}),
+    );
+}
+
+/// A rounded box defeatured by size: every fillet at most 3.5 mm goes,
+/// the corners with them, and the box is a box again, its faces' names
+/// the box's. Below 2 mm nothing goes: the same bits.
+#[test]
+fn a_rounded_box_is_defeatured_by_size() {
+    let (_dir, mut s) = boxed();
+    rounded(&mut s, 3.0);
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "below": "3.5 mm"}),
+    );
+    near(volume(&mut s, "d", "b"), 40.0 * 30.0 * 20.0, 1e-9);
+    let rep = report(&mut s, "d");
+    assert_eq!(rep["blends"].as_array().unwrap().len(), 12, "{rep}");
+    assert_eq!(rep["corners"].as_array().unwrap().len(), 8, "{rep}");
+    assert_eq!(rep["blends"][0]["kind"], "fillet", "{rep}");
+    // The box's six faces are back under their own names.
+    let faces: Vec<String> = body(&mut s, "d")["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap().to_owned())
+        .collect();
+    let mut was: Vec<String> = body(&mut s, "b")["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap().to_owned())
+        .collect();
+    let mut faces = faces;
+    faces.sort();
+    was.sort();
+    assert_eq!(faces, was);
+    // Nothing at most 2 mm: nothing goes.
+    let kept = built(&mut s, "f", "b").body.dump();
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "d", "below": "2 mm"}),
+    );
+    assert_eq!(built(&mut s, "d", "b").body.dump(), kept);
+    assert_eq!(report(&mut s, "d")["blends"], json!([]));
+}
+
+/// A fillet named by its face goes, its chamfer neighbour stays: the
+/// box less the chamfer's 2 × 2 / 2 × 30 mm³.
+#[test]
+fn a_named_fillet_is_deleted_leaving_the_chamfer() {
+    let (_dir, mut s) = boxed();
+    let b = body(&mut s, "b");
+    let rim = edge(&b, "b", [40.0, 0.0, 20.0], [40.0, 30.0, 20.0]);
+    let lip = edge(&b, "b", [0.0, 0.0, 20.0], [0.0, 30.0, 20.0]);
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "f", "radius": 4, "edges": [rim]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "chamfer", "id": "c", "d": 2, "edges": [lip]}),
+    );
+    let round = cylinders(&body(&mut s, "c"), "b");
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "faces": [round[0]]}),
+    );
+    near(volume(&mut s, "d", "b"), 24000.0 - 60.0, 1e-9);
+    let rep = report(&mut s, "d");
+    assert_eq!(rep["blends"].as_array().unwrap().len(), 1, "{rep}");
+    // A grown edge in the fillet's place is the delete's, replacing it.
+    let b = built(&mut s, "d", "b");
+    assert!(
+        b.origins
+            .values()
+            .any(|o| o["feature"] == "d" && o.get("replaces").is_some()),
+        "{:?}",
+        b.origins.iter().collect::<Vec<_>>()
+    );
+}

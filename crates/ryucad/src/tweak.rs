@@ -28,12 +28,24 @@ use std::sync::Arc;
 pub fn takes_sheets(f: &Feature) -> bool {
     matches!(
         f,
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) | Feature::DeleteFace(_)
+        Feature::MoveFace(_)
+            | Feature::ReplaceFace(_)
+            | Feature::Draft(_)
+            | Feature::DeleteFace(_)
+            | Feature::DeleteBlend(_)
+            | Feature::ResizeBlend(_)
     )
 }
 
 /// The face tweaks and direct edits this module builds (ryucad 17 and 22).
-pub const TYPES: [&str; 4] = ["move_face", "replace_face", "draft", "delete_face"];
+pub const TYPES: [&str; 6] = [
+    "move_face",
+    "replace_face",
+    "draft",
+    "delete_face",
+    "delete_blend",
+    "resize_blend",
+];
 
 /// The work units a direct edit may spend before it fails with
 /// `edit_budget_exceeded` (`edit.budget`'s default): the smallest power of
@@ -58,18 +70,22 @@ const _: () = {
 
 /// The fields a request may give feature type `ty` of this module.
 pub fn request_fields(ty: &str) -> &'static [&'static str] {
-    if ty == "delete_face" {
-        crate::doc::edit::DELETE_REQUEST
-    } else {
-        crate::doc::tweak::request_fields(ty)
+    match ty {
+        "delete_face" => crate::doc::edit::DELETE_REQUEST,
+        "delete_blend" => crate::doc::edit::DELETE_BLEND_REQUEST,
+        "resize_blend" => crate::doc::edit::RESIZE_REQUEST,
+        _ => crate::doc::tweak::request_fields(ty),
     }
 }
 
 /// Whether `f`'s kernel call runs under the edit budget: a `delete_face`,
-/// or a tweak that may change topology or remake its blends. A tweak that
+/// a `delete_blend` or a `resize_blend`, or a tweak that may change topology or remake its blends. A tweak that
 /// keeps both runs as ryucad 17's, unbudgeted.
 pub fn budgeted(f: &Feature) -> bool {
-    matches!(f, Feature::DeleteFace(_)) || f.retrim().is_some_and(|r| !r.is_keep())
+    matches!(
+        f,
+        Feature::DeleteFace(_) | Feature::DeleteBlend(_) | Feature::ResizeBlend(_)
+    ) || f.retrim().is_some_and(|r| !r.is_keep())
 }
 
 /// What a file's `topology` asks the kernel.
@@ -97,6 +113,12 @@ fn heal(h: crate::doc::edit::Heal) -> ryukei::tweak::Heal {
         crate::doc::edit::Heal::Cap => ryukei::tweak::Heal::Cap,
         crate::doc::edit::Heal::Grow => ryukei::tweak::Heal::Grow,
     }
+}
+
+/// Recognition's tolerance for a blend edit's: its own, else the
+/// kernel's 10 µm.
+fn recognition(t: Option<&crate::units::Quantity>) -> f64 {
+    t.map_or(ryukei::tweak::DEFAULT_TOLERANCE, |q| q.meters())
 }
 
 /// Each seed of a delete with the faces it found, by name.
@@ -148,6 +170,24 @@ pub(crate) fn delete_report(target: &Id, found: &[(Name, Vec<Name>)]) -> Value {
     })
 }
 
+/// What a blend delete's report keeps: its target, each blend it took
+/// (as [`crate::blends::blend_raw`]) and the faces of the corners they
+/// reached, by name.
+pub(crate) fn blend_delete_report(
+    target: &Id,
+    rec: &ryukei::tweak::Recognition,
+    taken: &std::collections::BTreeSet<usize>,
+) -> Value {
+    json!({
+        "target": target,
+        "blends": taken.iter().map(|&i| crate::blends::blend_raw(rec, i)).collect::<Vec<_>>(),
+        "corners": crate::blends::corners_of(rec, taken)
+            .into_iter()
+            .map(|j| rec.corners[j].face.to_string())
+            .collect::<Vec<_>>(),
+    })
+}
+
 /// What a tweak asks the kernel.
 pub(crate) enum Spec {
     Move(MoveSpec),
@@ -166,6 +206,19 @@ pub(crate) enum Spec {
         faces: Vec<Name>,
         seeds: Vec<Name>,
         heal: ryukei::tweak::Heal,
+    },
+    /// A blend delete: every blend at most `below` meters and those
+    /// holding `faces`, recognised at `tolerance`.
+    DeleteBlend {
+        below: Option<f64>,
+        faces: Vec<Name>,
+        tolerance: f64,
+    },
+    /// A resize: each group's faces and the kind it gives their blends,
+    /// recognised at `tolerance`.
+    ResizeBlend {
+        groups: Vec<(Vec<Name>, ryukei::blend::BlendKind)>,
+        tolerance: f64,
     },
 }
 
@@ -564,6 +617,30 @@ pub(crate) fn resolve<'a>(
                     faces,
                     seeds,
                     heal: heal(x.heal),
+                },
+            })
+        }
+        Feature::DeleteBlend(x) => {
+            let built = crate::rebuild::read(part, solids, id, f, "target", &x.target, before)?;
+            let mut faces = Vec::with_capacity(x.faces.len());
+            for (i, r) in x.faces.iter().enumerate() {
+                faces.push(face(
+                    part,
+                    id,
+                    &x.target,
+                    ty,
+                    &format!("faces.{i}"),
+                    r,
+                    before,
+                )?);
+            }
+            Ok(Resolved {
+                target: &x.target,
+                built,
+                spec: Spec::DeleteBlend {
+                    below: x.below.as_ref().map(|q| q.meters()),
+                    faces,
+                    tolerance: recognition(x.tolerance.as_ref()),
                 },
             })
         }
@@ -1005,7 +1082,11 @@ pub fn build(
     let ty = f.type_name();
     let r = resolve(part, solids, id, f, before)?;
     let budgeted = budgeted(f);
-    let changes = f.retrim().is_some_and(|r| r.topology) || matches!(f, Feature::DeleteFace(_));
+    let changes = f.retrim().is_some_and(|r| r.topology)
+        || matches!(
+            f,
+            Feature::DeleteFace(_) | Feature::DeleteBlend(_) | Feature::ResizeBlend(_)
+        );
     let work = if budgeted {
         crate::work::work(run.job).with_budget(run.edit_budget)
     } else {
@@ -1035,6 +1116,31 @@ pub fn build(
             ),
             Err(e) => (Err(e), None),
         },
+        Spec::DeleteBlend {
+            below,
+            faces,
+            tolerance,
+        } => {
+            let options = ryukei::tweak::RecogniseOptions {
+                tolerance: *tolerance,
+            };
+            match ryukei::tweak::recognise_blends_with(body, &options, &work) {
+                Err(e) => (Err(e), None),
+                Ok(rec) => {
+                    let taken = crate::blends::taken(&rec, *below, faces);
+                    let spec = ryukei::tweak::DeleteBlends {
+                        max_size: *below,
+                        faces: faces.clone(),
+                        options,
+                    };
+                    (
+                        ryukei::tweak::delete_blends_with(key, body, &spec, &work),
+                        Some(blend_delete_report(r.target, &rec, &taken)),
+                    )
+                }
+            }
+        }
+        Spec::ResizeBlend { .. } => unreachable!("Task 6"),
     };
     let made = made.map_err(|e| {
         crate::work::stopped(&e, run.job)
