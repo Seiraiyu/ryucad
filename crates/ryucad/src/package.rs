@@ -488,6 +488,7 @@ pub fn package_stamped(session: &mut Session, ask: Ask, built: &BuiltWith) -> Re
     match target {
         Some(o) if folder => {
             let dir = crate::export::out_path(o.trim_end_matches(['/', '\\']), &root)?;
+            refuse_inside(&dir, &root)?;
             job.check()?;
             job.writing();
             let mut all = vec![(
@@ -500,6 +501,7 @@ pub fn package_stamped(session: &mut Session, ask: Ask, built: &BuiltWith) -> Re
                 if let Some(parent) = at.parent() {
                     std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, &e))?;
                 }
+                // no session: a package's --out folder, never in the project (refused above)
                 crate::doc::source::write_atomic(&at, d)?;
             }
             result["out"] = json!(dir);
@@ -517,6 +519,31 @@ pub fn package_stamped(session: &mut Session, ask: Ask, built: &BuiltWith) -> Re
             Ok(Answer::bytes(result, "application/zip", zip))
         }
     }
+}
+
+/// Refuses a package folder in the project: its files (`package.json`,
+/// `step/` and the rest) would be left there untracked, beside the
+/// project's own, by a write that is neither logged nor undoable. `dir`
+/// is absolute and its parent exists (`export::out_path`).
+fn refuse_inside(dir: &std::path::Path, root: &std::path::Path) -> Result<()> {
+    let name = dir.file_name().expect("out_path gives a file name");
+    let parent = dir.parent().expect("an absolute path has a parent");
+    let inside = match (parent.canonicalize(), root.canonicalize()) {
+        (Ok(p), Ok(r)) => p.join(name).starts_with(&r),
+        _ => dir.starts_with(root),
+    };
+    if inside {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "out {} is inside the project: a package folder is written outside it (or ask for a zip)",
+                dir.display()
+            ),
+        )
+        .with("param", "out")
+        .with("path", dir));
+    }
+    Ok(())
 }
 
 /// How a verify ends: `verified` or `unattested`; `invalid` is
@@ -822,6 +849,40 @@ pub(crate) mod tests {
         let e = verify(&mut s, &bad.to_string_lossy(), false).unwrap_err();
         assert_eq!(e.details["clause"], json!("file_changed"));
         let _ = root;
+    }
+
+    #[test]
+    fn a_package_folder_inside_the_project_is_refused() {
+        let (dir, mut s, _, _) = two_releases();
+        let root = dir.path().to_owned();
+        let ask = |out: String| Ask {
+            part: "p".into(),
+            label: Some("A".into()),
+            out: Some(out),
+            ..Default::default()
+        };
+        for out in [
+            format!("{}/", root.display()),
+            format!("{}/pkg/", root.display()),
+            format!("{}/parts/", root.display()),
+        ] {
+            let e = package_stamped(&mut s, ask(out.clone()), &this_build()).unwrap_err();
+            assert_eq!(
+                (e.code, &e.details["param"]),
+                (Code::InvalidParam, &json!("out")),
+                "{out}"
+            );
+        }
+        assert!(!root.join("pkg").exists());
+        assert!(!root.join("package.json").exists());
+        // Outside the project, the folder is written.
+        let out = tempfile::tempdir().unwrap();
+        let folder = out.path().join("p-A");
+        let v = package_stamped(&mut s, ask(format!("{}/", folder.display())), &this_build())
+            .unwrap()
+            .result;
+        assert_eq!(v["out"], json!(folder));
+        assert!(folder.join(package::MANIFEST).is_file());
     }
 
     #[test]
