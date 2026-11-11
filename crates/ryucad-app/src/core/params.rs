@@ -18,6 +18,9 @@ pub struct Param {
     pub value: String,
     /// The features and parameters that read it.
     pub used_by: Vec<String>,
+    /// Nothing reads it, directly or through other parameters
+    /// (`param.list`'s `unused`): changing it moves no result.
+    pub unused: bool,
     /// Why it doesn't evaluate.
     pub error: Option<String>,
 }
@@ -78,6 +81,7 @@ impl Params {
                     field: Field::new(&text(&p["name"]), text(&p["value"])),
                     value: value(p, unit),
                     used_by,
+                    unused: p["unused"] == true,
                     error: p.get("error").map(|e| text(&e["message"])),
                 }
             })
@@ -160,7 +164,7 @@ mod tests {
             {"name": "hole", "value": "width / 4", "m": 0.005, "expr": true,
              "used_by": {"features": ["s"], "parameters": []}},
             {"name": "tilt", "value": "15 deg", "rad": 0.2617993877991494,
-             "used_by": {"features": [], "parameters": []}},
+             "used_by": {"features": [], "parameters": []}, "unused": true},
             {"name": "width", "value": width, "m": 0.02,
              "used_by": {"features": ["s"], "parameters": ["hole"]}}
         ]})
@@ -195,6 +199,9 @@ mod tests {
             "0.5 cm"
         );
         assert!(!p.dirty());
+        // `param.list`'s mark: nothing reads `tilt`.
+        let unused: Vec<bool> = p.params.iter().map(|r| r.unused).collect();
+        assert_eq!(unused, [false, true, false]);
     }
 
     #[test]

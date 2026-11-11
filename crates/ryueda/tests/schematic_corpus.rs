@@ -722,9 +722,10 @@ fn a_preference_is_tried_without_writing() {
         sheet["after"]["score"].as_i64() != sheet["before"]["score"].as_i64(),
         "{out}"
     );
-    let came: Vec<&Value> = sheet["came"].as_array().unwrap().iter().collect();
+    // The resistors' drawing is judged once, in the library (sym_shape).
+    let came: Vec<&Value> = out["symbols"]["came"].as_array().unwrap().iter().collect();
     assert!(
-        came.iter().any(|f| f["code"] == "sch_resistor_style"
+        came.iter().any(|f| f["code"] == "sym_shape"
             && f["message"]
                 .as_str()
                 .unwrap()
@@ -985,6 +986,26 @@ fn the_corpus_lays_out_keeping_every_rule() {
         let one = ryueda(&board, 1, &["layout", "--dry-run"]);
         assert_eq!(ryueda(&board, 8, &["layout", "--dry-run"]), one, "{name}");
         ryueda(&board, 1, &["layout"]);
+        // The corpus's own symbols, judged by the built-in standards: drawn
+        // on the grid and to ANSI by construction (tests/support/draw.rs).
+        let checked = ryueda(&board, 1, &["lib", "check"]);
+        let mut by_code: std::collections::BTreeMap<String, u64> = Default::default();
+        for s in checked["symbols"].as_array().unwrap() {
+            for f in s["findings"].as_array().unwrap() {
+                *by_code
+                    .entry(f["code"].as_str().unwrap().to_owned())
+                    .or_default() += 1;
+            }
+        }
+        eprintln!("{name}: symbol findings {by_code:?}");
+        for code in ["sym_shape", "sym_pin_off_grid"] {
+            assert!(!by_code.contains_key(code), "{name}: {by_code:?}");
+        }
+        std::fs::write(
+            look.join(format!("{name}.symbols.json")),
+            serde_json::to_string_pretty(&checked).unwrap(),
+        )
+        .unwrap();
         let p = ryueda::project::Project::load(&board).unwrap();
         for b in p.conn.blocks.values() {
             let laid = ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None).unwrap();
@@ -1069,7 +1090,7 @@ fn the_corpus_lays_out_keeping_every_rule() {
                     "--prefer",
                     "resistor=iec",
                     "--weight",
-                    "sch_resistor_style=4",
+                    "sym_shape=4",
                     "--weight",
                     "sch_jog=5",
                 ],
@@ -1094,7 +1115,7 @@ fn the_corpus_lays_out_keeping_every_rule() {
                     "--prefer",
                     "resistor=default",
                     "--weight",
-                    "sch_resistor_style=default",
+                    "sym_shape=default",
                     "--weight",
                     "sch_jog=default",
                 ],

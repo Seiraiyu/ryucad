@@ -5,7 +5,9 @@ use crate::ui::view::View;
 use eframe::egui::{self, RichText};
 
 /// In a compare, what changed in the feature chosen in the tree since the
-/// revision compared with.
+/// revision compared with, after its part's PDM and the parameters of its
+/// part and of the project: a change nothing reads, weak, with
+/// `(read by nothing)`.
 pub fn changes(ui: &mut egui::Ui, ws: &Workspace, view: &View) {
     let (Some(c), Some(key)) = (&ws.compare, &view.chosen) else {
         return;
@@ -16,6 +18,23 @@ pub fn changes(ui: &mut egui::Ui, ws: &Workspace, view: &View) {
         ui.label(RichText::new(format!("Part {}", key.0)).strong());
         for l in m.marks.iter().chain(&m.lines) {
             ui.label(l);
+        }
+    }
+    let lists = [
+        (format!("Parameters of {}", key.0), c.params.get(&key.0)),
+        ("Project parameters".to_owned(), Some(&c.project_params)),
+    ];
+    for (title, list) in lists {
+        let Some(list) = list.filter(|l| !l.is_empty()) else {
+            continue;
+        };
+        ui.label(RichText::new(title).strong());
+        for p in list {
+            if p.unused {
+                ui.weak(format!("{} (read by nothing)", p.line));
+            } else {
+                ui.label(&p.line);
+            }
         }
     }
     match c.features.get(key) {

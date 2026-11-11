@@ -566,13 +566,15 @@ fn failed(err: ryukei::Error, representation: Id) -> ImportError {
 }
 
 /// The B-rep items each healed alone, under a key derived from the
-/// caller's and the item's instance number, and united into one body:
+/// caller's and the item's instance number, and united into one body,
+/// each pair of faces under the union scope's cap
+/// ([`ryukei::boolean::unite_solids_with`], #550):
 /// the journal is each heal's then the union's, the report every heal's,
 /// and an import name the union renamed (a tool's entities, kept whole)
 /// still finds its instance. `None` where any step fails: the caller keeps
 /// its refusal.
 fn united(g: &geometry::Geo<'_>, items: &[Id], opts: &ReadOptions, work: &Work) -> Option<Read> {
-    use ryukei::boolean::{BooleanOp, Tool, boolean_with};
+    use ryukei::boolean::{Tool, unite_solids_with};
     use ryukei::name::{Event, ToolKey};
     let key = |what: &[u8], id: Id| {
         OpKey::from_bytes(&[what, &opts.key.0.to_le_bytes(), &id.to_le_bytes()].concat())
@@ -614,14 +616,8 @@ fn united(g: &geometry::Geo<'_>, items: &[Id], opts: &ReadOptions, work: &Work) 
             place: Rigid::IDENTITY,
         })
         .collect();
-    let (body, j) = boolean_with(
-        key(b"ryustep.unite\0", items[0]),
-        BooleanOp::Unite,
-        first,
-        &tools,
-        work,
-    )
-    .ok()?;
+    let (body, j) =
+        unite_solids_with(key(b"ryustep.unite\0", items[0]), first, &tools, work).ok()?;
     for e in j.events() {
         if let Event::Placed { from, to, .. } = e {
             if let Some(&i) = instances.get(from) {

@@ -317,6 +317,84 @@ fn cp_radial_rims_and_rounds_check() {
     );
 }
 
+/// #322: KiCad's two CP_Radial_D8.0mm cans. Their top is a ring of
+/// torus sectors (`SURFACE_OF_REVOLUTION`s of one circle) whose healed
+/// corners leave gaps of a few nanometres between pcurves; a ray from a
+/// neighbour's rim slipped through one, so healing read sectors that only
+/// abut as overlapping and its self-union failed (`FacesOverlap`). Now
+/// each heals as one solid, without a repair, and checks clean in under
+/// 30 s on one thread with `RYUKEI_BARS=1`.
+#[test]
+#[ignore = "needs the KiCad corpus (scripts/fetch-kicad.sh)"]
+fn cp_radial_d8_cans_heal_and_check() {
+    let _serial = serial();
+    let key = OpKey::from_bytes(b"ryucad.feature\0body\0body");
+    for name in [
+        "Capacitor_THT.3dshapes/CP_Radial_D8.0mm_P2.50mm.step",
+        "Capacitor_THT.3dshapes/CP_Radial_D8.0mm_P5.00mm.step",
+    ] {
+        let Some(path) = kicad(name) else {
+            return;
+        };
+        let bodies = bodies_keyed(&path, key);
+        assert_eq!(bodies.len(), 1, "{name}");
+        let body = &bodies[0].1;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let t = std::time::Instant::now();
+        let faults = pool.install(|| check_intersections(body));
+        eprintln!("{name}: {:?}", t.elapsed());
+        assert_eq!(named(body, &faults), [], "{name}");
+        assert!(
+            !bars() || t.elapsed().as_secs_f64() < 30.0,
+            "{name}: {:?}",
+            t.elapsed()
+        );
+    }
+}
+
+/// #550: KiCad's L_Wurth_WE-HCFT-2012 inductor. Its four solids overlap,
+/// so ryustep heals each alone and unites them; one face pair (the coil's
+/// spline face against a lead's cylinder) traced 23.5M units in 25 s on
+/// main before the union refused (26 to 31 s in all). Under the union
+/// scope's cap (`1 << 24` units a pair) the import answers in 19.9 s on
+/// one thread on cox-worker-2 (AMD Ryzen 7 9700X, load 2): the file's own
+/// `FacesOverlap`, or a solid that checks clean. With `RYUKEI_BARS=1` it
+/// is asserted under 25 s; design 444's 10 s bar is left to 16.D's
+/// record, the cap keeping the caps' rule (plan 16.B, question 495).
+#[test]
+#[ignore = "needs the KiCad corpus (scripts/fetch-kicad.sh)"]
+fn the_wurth_inductors_union_refuses_in_bounded_time() {
+    let _serial = serial();
+    let Some(path) =
+        kicad("Inductor_THT_Wurth.3dshapes/L_Wurth_WE-HCFT-2012_LeadDiameter1.5mm.step")
+    else {
+        return;
+    };
+    let opts = ReadOptions {
+        key: OpKey::from_bytes(b"ryucad.feature\0body\0body"),
+        heal: Default::default(),
+    };
+    let bytes = std::fs::read(&path).unwrap();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let t = std::time::Instant::now();
+    let model = pool.install(|| read(&bytes, &opts)).unwrap();
+    let secs = t.elapsed().as_secs_f64();
+    eprintln!("L_Wurth_WE-HCFT-2012: {secs:.1} s");
+    assert_eq!(model.bodies.len(), 1);
+    match &model.bodies[0].result {
+        Ok((body, _, _)) => assert_eq!(named(body, &check_intersections(body)), []),
+        Err(ryustep::ImportError::Heal(ryukei::HealError::FacesOverlap { .. })) => {}
+        Err(e) => panic!("{e:?}"),
+    }
+    assert!(!bars() || secs < 25.0, "{secs:.1} s");
+}
+
 /// #264: ftc_07's AP242 edition. Four planes, each tangent to a fillet
 /// torus at a saddle of its tube (a critical value of 2.6e-13 m), at the
 /// one vertex they share: the trace fails on the cells there. Traced

@@ -14,15 +14,45 @@ use serde_json::{Map, Value, json};
 pub const KIND: &str = "ryueda.lint";
 pub const FORMAT: u64 = 1;
 
-/// Whether `name` is a lint rule's code.
+/// A rule's code as files and requests may name it: the old
+/// `sch_resistor_style` is `sym_shape`.
+fn canonical(name: &str) -> &str {
+    if name == crate::symlint::ALIAS.0 {
+        crate::symlint::ALIAS.1
+    } else {
+        name
+    }
+}
+
+/// Whether `name` is a lint rule's code: the sheet lint's or the symbol
+/// lint's, or the old code `sym_shape` replaced.
 fn rule(name: &str) -> bool {
-    ryusch::lint::RULES.iter().any(|r| r.code == name)
+    let name = canonical(name);
+    ryusch::lint::RULES.iter().any(|r| r.code == name) || crate::symlint::rule(name).is_some()
+}
+
+/// Every rule: the sheet lint's, then the symbol lint's.
+fn all_rules() -> impl Iterator<Item = &'static ryusch::lint::Rule> {
+    ryusch::lint::RULES
+        .iter()
+        .chain(crate::symlint::RULES.iter())
+}
+
+/// `lint.json` as plan 2.D reads it: the old resistor code's weight and
+/// severity are `sym_shape`'s (unless it has its own).
+pub fn upgrade(prefs: &mut Prefs) {
+    let (old, new) = crate::symlint::ALIAS;
+    if let Some(w) = prefs.weights.remove(old) {
+        prefs.weights.entry(new.to_owned()).or_insert(w);
+    }
+    if let Some(s) = prefs.severity.remove(old) {
+        prefs.severity.entry(new.to_owned()).or_insert(s);
+    }
 }
 
 /// The rules, each with its default weight and its unit.
 fn rules() -> Vec<Value> {
-    ryusch::lint::RULES
-        .iter()
+    all_rules()
         .map(|r| {
             json!({
                 "code": r.code,
@@ -95,28 +125,30 @@ fn save(session: &mut crate::session::Session, prefs: &Prefs) -> Result<()> {
 pub fn get(p: &Project, explain: Option<&str>) -> Result<Value> {
     p.lint.item.as_ref().map_err(|e| e.clone())?;
     if let Some(code) = explain {
-        let Some(rule) = ryusch::lint::RULES.iter().find(|r| r.code == code) else {
+        let Some(rule) = all_rules().find(|r| r.code == canonical(code)) else {
             return Err(
                 Error::new(Code::NotFound, format!("{code} isn't a lint rule"))
                     .with("param", "explain")
-                    .with(
-                        "codes",
-                        ryusch::lint::RULES
-                            .iter()
-                            .map(|r| r.code)
-                            .collect::<Vec<_>>(),
-                    ),
+                    .with("codes", all_rules().map(|r| r.code).collect::<Vec<_>>()),
             );
         };
         let prefs = prefs(p);
-        let (weight, _) = prefs.weight(code);
-        let (severity, _) = prefs.severity(code);
-        return Ok(json!({
+        let weight = if crate::symlint::rule(rule.code).is_some() {
+            crate::symlint::weight(&prefs, rule.code).0
+        } else {
+            prefs.weight(rule.code).0
+        };
+        let (severity, _) = prefs.severity(rule.code);
+        let mut v = json!({
             "rule": rule,
             "weight_now": weight,
             "severity_now": severity.word(),
             "revision": p.revision,
-        }));
+        });
+        if rule.code != code {
+            v["alias_of"] = json!(rule.code);
+        }
+        return Ok(v);
     }
     Ok(json!({
         "prefs": prefs(p),
@@ -144,15 +176,10 @@ pub fn configure(
     let unknown = |name: &str, what: &str| {
         Error::new(Code::InvalidParam, format!("{name} isn't a lint rule"))
             .with("param", format!("{what}/{name}"))
-            .with(
-                "rules",
-                ryusch::lint::RULES
-                    .iter()
-                    .map(|r| r.code)
-                    .collect::<Vec<_>>(),
-            )
+            .with("rules", all_rules().map(|r| r.code).collect::<Vec<_>>())
     };
     for (name, v) in weights {
+        let name = &canonical(name).to_owned();
         if !rule(name) {
             return Err(unknown(name, "weights"));
         }
@@ -173,6 +200,7 @@ pub fn configure(
         }
     }
     for (name, v) in severity {
+        let name = &canonical(name).to_owned();
         if !rule(name) {
             return Err(unknown(name, "severity"));
         }
@@ -284,12 +312,55 @@ fn tried(p: &Project, prefs: &Prefs) -> Value {
         }
         blocks.push(json!({"block": b.id, "sheets": sheets}));
     }
-    json!({"dry_run": true, "prefs": prefs, "blocks": blocks, "revision": p.revision})
+    let key = |f: &Fault| {
+        (
+            f.error.code,
+            f.error.details.get("symbol").cloned(),
+            f.error.details.get("pointer").cloned(),
+        )
+    };
+    let (s0, s1) = (
+        crate::symlint::faults(p, &now),
+        crate::symlint::faults(p, prefs),
+    );
+    let came: Vec<Fault> = s1
+        .iter()
+        .filter(|f| !s0.iter().any(|g| key(g) == key(f)))
+        .cloned()
+        .collect();
+    let went: Vec<Fault> = s0
+        .iter()
+        .filter(|f| !s1.iter().any(|g| key(g) == key(f)))
+        .cloned()
+        .collect();
+    json!({
+        "dry_run": true,
+        "prefs": prefs,
+        "blocks": blocks,
+        "symbols": {"came": crate::fault::list(&came), "went": crate::fault::list(&went)},
+        "revision": p.revision,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_old_resistor_code_reads_as_sym_shape() {
+        let mut p = Prefs::default();
+        p.weights.insert("sch_resistor_style".into(), 4);
+        p.severity
+            .insert("sch_resistor_style".into(), Severity::Error);
+        upgrade(&mut p);
+        assert_eq!(p.weights.get("sym_shape"), Some(&4));
+        assert_eq!(p.severity.get("sym_shape"), Some(&Severity::Error));
+        assert!(!p.weights.contains_key("sch_resistor_style"));
+        assert!(check(&p).is_empty());
+        // Symbol rules are rules.
+        p.weights.insert("sym_pin_side".into(), 7);
+        assert!(check(&p).is_empty());
+    }
 
     #[test]
     fn a_weight_or_severity_names_a_rule() {

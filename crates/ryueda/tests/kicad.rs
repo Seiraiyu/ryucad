@@ -121,6 +121,16 @@ fn kicads_files_import_exactly() {
         ("VDD", PinType::PowerIn, Some(3), Side::Up, [0, 12_700_000])
     );
     assert_eq!(nand.pins["1"].shape, ryueda::symbol::PinShape::Line);
+    // Each imported symbol carries its class, from its prefix and words.
+    let class = |id: &str| -> Value {
+        let s: Value = serde_json::from_slice(
+            &std::fs::read(root.join(format!("library/symbols/{id}.json"))).unwrap(),
+        )
+        .unwrap();
+        s["class"].clone()
+    };
+    assert_eq!(class("ryu_test_r"), json!("resistor"));
+    assert_eq!(class("ryu_test_nand2"), json!("ic"));
     let sensor: Symbol = read(root, "library/symbols/ryu_test_sensor.json");
     let alts: Vec<&str> = sensor.pins["1"]
         .alternates

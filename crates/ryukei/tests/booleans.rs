@@ -993,3 +993,25 @@ fn blocks_sunk_into_each_other_by_less_than_a_touch_meet_in_nothing() {
         assert!((v - 2e-10).abs() <= 1e-3 * 2e-10, "turn {turn}: {v}");
     }
 }
+
+/// #550: a file's solids united under the union scope, each face pair
+/// met under its cap. A union no pair of which comes near the cap is the
+/// plain union, bit for bit, and spends the same units.
+#[test]
+fn a_files_solids_unite_as_the_plain_union_does() {
+    use ryukei::boolean::{boolean_with, unite_solids_with};
+    use ryukei::work::Work;
+    let (b, _) = primitive::block(OpKey(1), 1.0, 1.0, 1.0, &Rigid::IDENTITY).unwrap();
+    let (c, _) = primitive::cylinder(OpKey(2), 0.3, 2.0, &Rigid::IDENTITY).unwrap();
+    let tools = [Tool {
+        key: ToolKey(1),
+        body: &c,
+        place: Rigid::translation(Vector3::new(0.5, 0.5, -0.5)),
+    }];
+    let (w1, w2) = (Work::unlimited(), Work::unlimited());
+    let (plain, pj) = boolean_with(OpKey(3), BooleanOp::Unite, &b, &tools, &w1).unwrap();
+    let (capped, cj) = unite_solids_with(OpKey(3), &b, &tools, &w2).unwrap();
+    assert_eq!(capped.dump(), plain.dump());
+    assert_eq!(cj, pj);
+    assert_eq!(w2.spent(), w1.spent());
+}

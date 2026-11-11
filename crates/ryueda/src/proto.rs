@@ -79,6 +79,15 @@ pub enum Request {
     /// Every library with its revision, what it holds and its faults.
     #[serde(rename = "lib.list")]
     LibList {},
+    /// A library's symbols judged by the standards that apply to it (this
+    /// project's own library by default, or one symbol).
+    #[serde(rename = "lib.check")]
+    LibCheck {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        symbol: Option<String>,
+    },
     /// A symbol called `name`, its ID from the name unless given, with
     /// `units` (1 by default) and a batch of ops applied.
     #[serde(rename = "symbol.create")]
@@ -90,6 +99,16 @@ pub enum Request {
         units: Option<u32>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         ops: Vec<Value>,
+        /// The symbol's class (`resistor`, `ic`, …); on an edit `none`
+        /// takes it off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        class: Option<String>,
+        /// Draw it from the standards' template for this class first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        template: Option<String>,
+        /// The pins a box template places (`number`, `name`, `type`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pins: Vec<crate::template::PinSpec>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -104,6 +123,10 @@ pub enum Request {
         units: Option<u32>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         ops: Vec<Value>,
+        /// The symbol's class (`resistor`, `ic`, …); on an edit `none`
+        /// takes it off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        class: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -548,6 +571,21 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         dry_run: bool,
     },
+    /// The standards that judge a library's symbols (this project's own by
+    /// default), whole, and where they come from.
+    #[serde(rename = "standards.get")]
+    StandardsGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library: Option<String>,
+    },
+    /// A JSON merge patch on this project's own standards
+    /// (`library/standards.json`): `null` puts a field back.
+    #[serde(rename = "standards.set")]
+    StandardsSet {
+        patch: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Lays out a design's blocks (or one block) over their layout files,
     /// writing those that change; `relayout` (`<block>` or
     /// `<block>/<sheet>`) lays out from nothing what it names.
@@ -760,6 +798,7 @@ impl Request {
                 | Request::ErcWaive { .. }
                 | Request::ErcConfigure { .. }
                 | Request::LintConfigure { .. }
+                | Request::StandardsSet { .. }
                 | Request::PartsConfigure { .. }
                 | Request::Layout { .. }
                 | Request::LayoutPlace { .. }
