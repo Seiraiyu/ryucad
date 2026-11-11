@@ -1,5 +1,6 @@
-//! A draft, move face or replace face chosen in the tree, as the window
-//! draws it (design 400, phase 6), from its rebuild report: the faces it
+//! A draft, move face or replace face (design 400, phase 6), or a delete,
+//! blend delete or resize (design 445, phase 6), chosen in the tree, as
+//! the window draws it, from its rebuild report: the faces it
 //! modified painted in the chosen colour (read from `inspect` of the
 //! feature, the tweak making nothing a face's origin could name); a
 //! draft's neutral plane drawn as a datum plane is, or its parting-line
@@ -17,8 +18,15 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The report keys, which are the feature types, that say a feature is a
-/// tweak.
-pub const KINDS: [&str; 3] = ["draft", "move_face", "replace_face"];
+/// tweak or a direct edit (ryucad 17 and 22).
+pub const KINDS: [&str; 6] = [
+    "draft",
+    "move_face",
+    "replace_face",
+    "delete_face",
+    "delete_blend",
+    "resize_blend",
+];
 
 /// Whether a feature of type `ty` is drawn here.
 pub fn drawn(ty: Option<&str>) -> bool {
@@ -58,10 +66,95 @@ pub struct Line {
     pub direction: [f64; 3],
 }
 
+/// Faces, edges and vertices, as a direct edit's report counts them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub faces: u64,
+    pub edges: u64,
+    pub vertices: u64,
+}
+
+impl Counts {
+    fn read(v: &Value) -> Option<Counts> {
+        v.is_object().then(|| Counts {
+            faces: v["faces"].as_u64().unwrap_or(0),
+            edges: v["edges"].as_u64().unwrap_or(0),
+            vertices: v["vertices"].as_u64().unwrap_or(0),
+        })
+    }
+}
+
+/// A delete's seed and the faces it found when the delete built, each
+/// `<part>/<solid>/<name>`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Seed {
+    pub seed: String,
+    pub faces: Vec<String>,
+}
+
+/// A blend a blend delete took, or a resize remade: its faces, its kind
+/// and size (as it is now, for a resize), and a resize's kind and size
+/// before.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Blend {
+    pub faces: Vec<String>,
+    pub kind: String,
+    pub size: String,
+    pub was: Option<(String, String)>,
+}
+
+impl Blend {
+    /// `fillet 3 mm`; a resize's `fillet 4 mm → 3 mm`, or `chamfer 1 mm
+    /// → fillet 2 mm` when its kind changed.
+    pub fn text(&self) -> String {
+        match &self.was {
+            None => format!("{} {}", self.kind, self.size),
+            Some((k, s)) if *k == self.kind => format!("{k} {s} → {}", self.size),
+            Some((k, s)) => format!("{k} {s} → {} {}", self.kind, self.size),
+        }
+    }
+
+    fn read(b: &Value, resized: bool) -> Option<Blend> {
+        let now = if resized { &b["now"] } else { b };
+        Some(Blend {
+            faces: strings(&b["faces"]),
+            kind: now["kind"].as_str()?.to_owned(),
+            size: now["size"]["value"].as_str()?.to_owned(),
+            was: if resized {
+                let w = &b["was"];
+                Some((
+                    w["kind"].as_str()?.to_owned(),
+                    w["size"]["value"].as_str()?.to_owned(),
+                ))
+            } else {
+                None
+            },
+        })
+    }
+}
+
+/// The strings of a list.
+fn strings(v: &Value) -> Vec<String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.as_str().map(str::to_owned))
+        .collect()
+}
+
+/// `1 face`, `3 faces`.
+fn faces(n: usize) -> String {
+    if n == 1 {
+        "1 face".to_owned()
+    } else {
+        format!("{n} faces")
+    }
+}
+
 /// What a tweak's report says the window draws.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TweakInfo {
-    /// `draft`, `move_face` or `replace_face`.
+    /// Its type: one of [`KINDS`].
     pub kind: String,
     /// A move's `translate`, `rotate` or `offset`.
     pub by: Option<String>,
@@ -75,6 +168,19 @@ pub struct TweakInfo {
     pub line: Option<Line>,
     /// A draft's faces' angles, once it built.
     pub angles: Vec<Angle>,
+    /// A tweak's `topology: change` and `blends: rebuild` (ryucad 22).
+    pub change: bool,
+    pub rebuild: bool,
+    /// Once built: what it modified; and for a direct edit (a delete, a
+    /// blend edit, a tweak that may change topology or remake blends),
+    /// what it made and took away.
+    pub modified: Option<Counts>,
+    pub created: Option<Counts>,
+    pub deleted: Option<Counts>,
+    /// A built delete's seeds, each with the faces it found.
+    pub seeds: Vec<Seed>,
+    /// A built blend delete's blends taken, or a resize's blends remade.
+    pub blends: Vec<Blend>,
 }
 
 fn point(v: &Value) -> Option<[f64; 3]> {
@@ -82,8 +188,8 @@ fn point(v: &Value) -> Option<[f64; 3]> {
 }
 
 impl TweakInfo {
-    /// From a feature's rebuild report: its `draft`, `move_face` or
-    /// `replace_face` object; `None` for any other feature.
+    /// From a feature's rebuild report: its object under one of
+    /// [`KINDS`]; `None` for any other feature.
     pub fn from_report(f: &Value) -> Option<TweakInfo> {
         let (kind, v) = KINDS
             .iter()
@@ -116,25 +222,101 @@ impl TweakInfo {
                 })
             })
             .collect();
+        // A failed delete's seeds are its file's text: only a built one's
+        // are objects.
+        let seeds = v["seeds"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| {
+                Some(Seed {
+                    seed: s["seed"].as_str()?.to_owned(),
+                    faces: strings(&s["faces"]),
+                })
+            })
+            .collect();
+        // A blend delete's `blends` is a list; a tweak's is `keep` or
+        // `rebuild`.
+        let blends = match kind {
+            "delete_blend" => v["blends"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|b| Blend::read(b, false))
+                .collect(),
+            "resize_blend" => v["resized"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|b| Blend::read(b, true))
+                .collect(),
+            _ => Vec::new(),
+        };
         Some(TweakInfo {
             kind: kind.to_owned(),
             by: v["by"].as_str().map(str::to_owned),
             neutral: neutral.flatten(),
             pull: point(&v["pull"]),
-            parting: v["parting"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|e| e.as_str().map(str::to_owned))
-                .collect(),
+            parting: strings(&v["parting"]),
             line: line.flatten(),
             angles,
+            change: v["topology"] == "change",
+            rebuild: v["blends"] == "rebuild",
+            modified: Counts::read(&v["modified"]),
+            created: Counts::read(&v["created"]),
+            deleted: Counts::read(&v["deleted"]),
+            seeds,
+            blends,
         })
     }
 
     /// Whether any drafted face's angle varies: the tree's warning badge.
     pub fn varies(&self) -> bool {
         self.angles.iter().any(|a| a.varies)
+    }
+
+    /// What the tree's row says of it (its tip, a line each): a tweak's
+    /// `topology: change` and `blends: rebuild`; once a direct edit built,
+    /// the faces it modified, made and took away, each seed with the
+    /// faces it found, the blends a delete took or a resize remade. Empty
+    /// for a tweak as ryucad 17 builds it.
+    pub fn summary(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.change {
+            out.push("topology may change".to_owned());
+        }
+        if self.rebuild {
+            out.push("broken blends are made again".to_owned());
+        }
+        if self.created.is_some() || self.deleted.is_some() {
+            let [m, c, d] =
+                [self.modified, self.created, self.deleted].map(|x| x.unwrap_or_default().faces);
+            out.push(format!("faces: {m} modified, {c} made, {d} taken away"));
+            match self.kind.as_str() {
+                "delete_blend" if self.blends.is_empty() => out.push("no blend taken".to_owned()),
+                "delete_blend" => out.push(format!(
+                    "{} taken: {}",
+                    if self.blends.len() == 1 {
+                        "1 blend".to_owned()
+                    } else {
+                        format!("{} blends", self.blends.len())
+                    },
+                    self.blends
+                        .iter()
+                        .map(Blend::text)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+                "resize_blend" => {
+                    out.extend(self.blends.iter().map(|b| format!("resized {}", b.text())));
+                }
+                _ => {}
+            }
+        }
+        for s in &self.seeds {
+            out.push(format!("seed {}: {}", s.seed, faces(s.faces.len())));
+        }
+        out
     }
 
     /// A draft's neutral plane as a datum plane is drawn, sized to
@@ -406,5 +588,146 @@ mod tests {
             )])
         );
         assert!(modified(&v, "draft").is_empty());
+    }
+
+    #[test]
+    fn a_deletes_report_gives_its_counts_and_seeds() {
+        let f = json!({"id": "x", "type": "delete_face", "ok": true,
+            "delete_face": {"target": "b", "heal": "cap",
+                "seeds": [{"seed": "p/b/s1", "faces": ["p/b/s1", "p/b/s2"]}],
+                "modified": {"faces": 2, "edges": 0, "vertices": 0},
+                "created": {"faces": 0, "edges": 0, "vertices": 0},
+                "deleted": {"faces": 2, "edges": 4, "vertices": 2},
+                "spent": 9}});
+        let t = TweakInfo::from_report(&f).unwrap();
+        assert_eq!(t.kind, "delete_face");
+        assert_eq!(
+            (t.modified, t.created, t.deleted),
+            (
+                Some(Counts {
+                    faces: 2,
+                    edges: 0,
+                    vertices: 0
+                }),
+                Some(Counts::default()),
+                Some(Counts {
+                    faces: 2,
+                    edges: 4,
+                    vertices: 2
+                })
+            )
+        );
+        assert_eq!(
+            t.seeds,
+            [Seed {
+                seed: "p/b/s1".to_owned(),
+                faces: vec!["p/b/s1".to_owned(), "p/b/s2".to_owned()]
+            }]
+        );
+        assert_eq!(
+            t.summary(),
+            [
+                "faces: 2 modified, 0 made, 2 taken away",
+                "seed p/b/s1: 2 faces"
+            ]
+        );
+        // Not built, a delete's seeds are the file's text: nothing found.
+        let f = json!({"id": "x", "type": "delete_face", "ok": false,
+            "delete_face": {"target": "b", "heal": "auto", "seeds": ["p/b/s1"]}});
+        let t = TweakInfo::from_report(&f).unwrap();
+        assert!(t.seeds.is_empty() && t.created.is_none() && t.summary().is_empty());
+        assert!(drawn(Some("delete_face")) && drawn(Some("resize_blend")));
+    }
+
+    #[test]
+    fn blend_edits_reports_give_what_they_took_and_remade() {
+        let f = json!({"id": "db", "type": "delete_blend", "ok": true,
+            "delete_blend": {"target": "b", "below": {"value": "2 mm", "m": 0.002},
+                "blends": [
+                    {"index": 0, "kind": "fillet", "size": {"value": "1 mm", "m": 0.001},
+                     "radius": {"value": "1 mm", "m": 0.001}, "faces": ["p/b/f1"],
+                     "supports": ["p/b/a", "p/b/c"], "chain": 0},
+                    {"index": 1, "kind": "chamfer", "size": {"value": "1.5 mm", "m": 0.0015},
+                     "form": "equal", "d": {"value": "1.5 mm", "m": 0.0015},
+                     "faces": ["p/b/c1"], "supports": ["p/b/a", "p/b/d"], "chain": 1}],
+                "corners": [],
+                "modified": {"faces": 3, "edges": 0, "vertices": 0},
+                "created": {"faces": 0, "edges": 2, "vertices": 0},
+                "deleted": {"faces": 2, "edges": 6, "vertices": 4}}});
+        let t = TweakInfo::from_report(&f).unwrap();
+        assert_eq!(
+            t.blends.iter().map(Blend::text).collect::<Vec<_>>(),
+            ["fillet 1 mm", "chamfer 1.5 mm"]
+        );
+        assert_eq!(t.blends[0].faces, ["p/b/f1"]);
+        assert_eq!(
+            t.summary(),
+            [
+                "faces: 3 modified, 0 made, 2 taken away",
+                "2 blends taken: fillet 1 mm, chamfer 1.5 mm"
+            ]
+        );
+        // Taking nothing says so.
+        let f = json!({"id": "db", "type": "delete_blend", "ok": true,
+            "delete_blend": {"target": "b", "below": {"value": "1 mm", "m": 0.001},
+                "blends": [], "corners": [],
+                "modified": {"faces": 0, "edges": 0, "vertices": 0},
+                "created": {"faces": 0, "edges": 0, "vertices": 0},
+                "deleted": {"faces": 0, "edges": 0, "vertices": 0}}});
+        let t = TweakInfo::from_report(&f).unwrap();
+        assert_eq!(t.summary()[1], "no blend taken");
+        // A resize: each blend as it was and is now.
+        let f = json!({"id": "r", "type": "resize_blend", "ok": true,
+            "resize_blend": {"target": "b",
+                "groups": [{"radius": {"value": "3 mm", "m": 0.003}, "faces": ["p/b/f1"]}],
+                "resized": [
+                    {"index": 0, "faces": ["p/b/f1"], "chain": 0,
+                     "was": {"kind": "fillet", "size": {"value": "4 mm", "m": 0.004}},
+                     "now": {"kind": "fillet", "size": {"value": "3 mm", "m": 0.003}}},
+                    {"index": 1, "faces": ["p/b/c1"], "chain": 1,
+                     "was": {"kind": "chamfer", "size": {"value": "1 mm", "m": 0.001}},
+                     "now": {"kind": "fillet", "size": {"value": "2 mm", "m": 0.002}}}],
+                "modified": {"faces": 0, "edges": 0, "vertices": 0},
+                "created": {"faces": 0, "edges": 0, "vertices": 0},
+                "deleted": {"faces": 0, "edges": 0, "vertices": 0}}});
+        let t = TweakInfo::from_report(&f).unwrap();
+        assert_eq!(
+            t.blends.iter().map(Blend::text).collect::<Vec<_>>(),
+            ["fillet 4 mm → 3 mm", "chamfer 1 mm → fillet 2 mm"]
+        );
+        assert_eq!(
+            &t.summary()[1..],
+            [
+                "resized fillet 4 mm → 3 mm",
+                "resized chamfer 1 mm → fillet 2 mm"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tweaks_topology_and_blends_are_read() {
+        let f = json!({"id": "m", "type": "move_face", "ok": true,
+            "move_face": {"target": "b", "by": "translate", "direction": "x",
+                          "topology": "change", "blends": "rebuild",
+                          "modified": {"faces": 1, "edges": 2, "vertices": 0},
+                          "created": {"faces": 1, "edges": 0, "vertices": 0},
+                          "deleted": {"faces": 0, "edges": 0, "vertices": 0}}});
+        let t = TweakInfo::from_report(&f).unwrap();
+        assert!(t.change && t.rebuild);
+        assert_eq!(
+            t.summary(),
+            [
+                "topology may change",
+                "broken blends are made again",
+                "faces: 1 modified, 1 made, 0 taken away"
+            ]
+        );
+        // Kept, as ryucad 17 wrote it: nothing to say.
+        let f = json!({"id": "m", "type": "move_face", "ok": true,
+            "move_face": {"target": "b", "by": "translate", "topology": "keep", "blends": "keep",
+                          "modified": {"faces": 1, "edges": 4, "vertices": 4}}});
+        let t = TweakInfo::from_report(&f).unwrap();
+        assert!(!t.change && !t.rebuild && t.summary().is_empty());
+        assert!(t.blends.is_empty());
     }
 }
