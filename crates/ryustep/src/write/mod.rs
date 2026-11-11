@@ -897,4 +897,41 @@ mod written_tests {
         // The NULL_STYLE item is retained: it styles nothing.
         assert_eq!(o.styles().retained.len(), 1);
     }
+
+    /// A transparency is written where an opacity differs from the one
+    /// its item inherits, and only there: an opaque face on a translucent
+    /// body says 1, a face as translucent as its body says nothing.
+    #[test]
+    fn transparency_is_written_against_what_is_inherited() {
+        let b = block();
+        let mut names: Vec<Name> = b.faces().map(|f| b.face(f).unwrap().name).collect();
+        names.sort();
+        let model = WriteModel {
+            products: vec![Product {
+                id: "b".into(),
+                bodies: vec![b],
+                ..Default::default()
+            }],
+        };
+        let p = |c: [u8; 3], opacity| Paint { colour: c, opacity };
+        let paints = Paints {
+            bodies: vec![BodyPaint {
+                product: 0,
+                body: 0,
+                base: Some(p([255, 0, 0], 0.5)),
+                faces: vec![(names[0], p([0, 0, 255], 1.0)), (names[1], p([0, 255, 0], 0.5))],
+            }],
+            occurrences: Vec::new(),
+        };
+        let w = write_styled(&model, &[], &paints, &WriteOptions::default()).unwrap();
+        let o = crate::open(&w.bytes).unwrap();
+        let s = o.body_styles(0);
+        assert_eq!(s.body.unwrap().opacity, Some(0.5));
+        let mut faces: Vec<_> = s.faces.values().map(|f| (f.colour, f.opacity)).collect();
+        faces.sort_by_key(|f| f.0);
+        assert_eq!(
+            faces,
+            [(Some([0, 0, 255]), Some(1.0)), (Some([0, 255, 0]), None)]
+        );
+    }
 }

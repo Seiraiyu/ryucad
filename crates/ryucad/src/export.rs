@@ -3633,6 +3633,101 @@ pub(crate) mod tests {
         out
     }
 
+    /// [`frame`], painted as ryucad paints: the plate red with one face
+    /// blue, the pin translucent, the sub-assembly's second pin green in
+    /// that occurrence.
+    fn painted_frame() -> Vec<u8> {
+        use ryukei::geom::{Rigid, Vector3};
+        use ryukei::name::OpKey;
+        use ryukei::primitive;
+        let at = |x: f64, y: f64, z: f64| Rigid::translation(Vector3::new(x, y, z));
+        let k = OpKey(1);
+        let plate = primitive::block(k, 0.1, 0.1, 0.01, &Rigid::IDENTITY).unwrap().0;
+        let pin = primitive::cylinder(k, 0.002, 0.02, &Rigid::IDENTITY).unwrap().0;
+        let face = plate.faces().map(|f| plate.face(f).unwrap().name).min().unwrap();
+        let product = |id: &str, name: &str, bodies, children| ryustep::Product {
+            id: id.into(),
+            name: name.into(),
+            bodies,
+            names: vec!["body".into()],
+            children,
+            ..Default::default()
+        };
+        let child = |product, place| ryustep::Child {
+            product,
+            place,
+            id: "1".into(),
+        };
+        let model = ryustep::WriteModel {
+            products: vec![
+                product(
+                    "F-1",
+                    "Frame",
+                    vec![plate],
+                    vec![child(1, at(0.0, 0.0, 0.01)), child(2, at(0.05, 0.05, 0.01))],
+                ),
+                product(
+                    "S-1",
+                    "Sub",
+                    vec![],
+                    vec![child(2, at(0.01, 0.0, 0.0)), child(2, at(0.02, 0.0, 0.0))],
+                ),
+                product("P-1", "Pin", vec![pin], vec![]),
+            ],
+        };
+        let p = |c: [u8; 3], o: f64| ryustep::Paint { colour: c, opacity: o };
+        let paints = ryustep::Paints {
+            bodies: vec![
+                ryustep::BodyPaint {
+                    product: 0,
+                    body: 0,
+                    base: Some(p([255, 0, 0], 1.0)),
+                    faces: vec![(face, p([0, 0, 255], 1.0))],
+                },
+                ryustep::BodyPaint {
+                    product: 2,
+                    body: 0,
+                    base: Some(p([0, 0, 255], 0.5)),
+                    faces: Vec::new(),
+                },
+            ],
+            occurrences: vec![ryustep::OccurrencePaint {
+                path: vec![(0, 0), (1, 1)],
+                body: 0,
+                paint: p([0, 255, 0], 1.0),
+            }],
+        };
+        let opts = ryustep::WriteOptions {
+            unit: ryustep::LengthUnit::Meter,
+            file_name: "frame.step".into(),
+            time_stamp: "2026-10-27T00:00:00".into(),
+            ..Default::default()
+        };
+        ryustep::write_styled(&model, &[], &paints, &opts).unwrap().bytes
+    }
+
+    /// A painted file imported and exported with its header is the file,
+    /// byte for byte: its styles came in as the file layer and went out
+    /// as the same styles (design 448's fixpoint).
+    #[test]
+    fn a_painted_file_exports_as_it_came() {
+        let original = painted_frame();
+        let (_src, path) = outside(&original, "frame.step");
+        let (_dir, mut s) = fresh();
+        call(&mut s, "import", json!({"solid": true, "path": path})).unwrap();
+        let params = json!({"part": "f-1", "unit": "m", "time_stamp": "2026-10-27T00:00:00",
+                            "file_name": "frame.step"});
+        let (_, bytes) = exported(&mut s, params).unwrap();
+        if bytes != original {
+            let (a, b) = (
+                String::from_utf8_lossy(&original).into_owned(),
+                String::from_utf8_lossy(&bytes).into_owned(),
+            );
+            let first = a.lines().zip(b.lines()).position(|(x, y)| x != y);
+            panic!("differs from line {first:?}:\n{}\n---\n{}", a.lines().nth(first.unwrap_or(0)).unwrap_or(""), b.lines().nth(first.unwrap_or(0)).unwrap_or(""));
+        }
+    }
+
     #[test]
     fn an_imported_file_exports_as_it_came() {
         let original = frame();

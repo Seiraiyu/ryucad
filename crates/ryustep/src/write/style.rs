@@ -3,7 +3,8 @@
 //! with one `PRESENTATION_STYLE_ASSIGNMENT` (a surface style on both
 //! sides with its fill colour, and a
 //! `SURFACE_STYLE_RENDERING_WITH_PROPERTIES` with a
-//! `SURFACE_STYLE_TRANSPARENT` only below opacity 1), collected in one
+//! `SURFACE_STYLE_TRANSPARENT` only where its opacity differs from the
+//! one it would take otherwise), collected in one
 //! `MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION` per product;
 //! an occurrence that differs from its part as a
 //! `CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM` on its body in the context
@@ -12,6 +13,14 @@
 //! their entities, so a thousand red faces write one colour, and every
 //! style is written after the geometry, the products and the usages: no
 //! geometry instance is renumbered by a colour.
+//!
+//! A reader composes a file's styles field by field ([`crate::styles`]):
+//! a face's style or an occurrence's override without a transparency
+//! takes its body's, and a body's without one is opaque. So each
+//! transparency is written where, and only where, the opacity differs
+//! from the one inherited (1 for a body, its body's for a face or an
+//! occurrence), explicitly even when it is 1: what reads back composes
+//! to what was painted.
 
 use super::{Contexts, Out, WriteModel, WrittenBody, e, f, r, refs, s};
 use crate::part21::Param;
@@ -26,8 +35,14 @@ pub struct Paint {
 }
 
 impl Paint {
-    fn key(&self) -> ([u8; 3], u64) {
-        (self.colour, self.opacity.to_bits())
+    /// Its key as written over an item that would otherwise take opacity
+    /// `under`: its transparency left out where its opacity is that.
+    fn key(&self, under: f64) -> ([u8; 3], Option<u64>) {
+        (self.colour, self.written_opacity(under).map(f64::to_bits))
+    }
+
+    fn written_opacity(&self, under: f64) -> Option<f64> {
+        (self.opacity != under).then_some(self.opacity)
     }
 }
 
@@ -69,7 +84,7 @@ impl Paints {
 #[derive(Default)]
 struct Shared {
     colours: BTreeMap<[u8; 3], u64>,
-    assignments: BTreeMap<([u8; 3], u64), u64>,
+    assignments: BTreeMap<([u8; 3], Option<u64>), u64>,
     null: Option<u64>,
 }
 
@@ -84,8 +99,11 @@ impl Shared {
         id
     }
 
-    fn assignment(&mut self, out: &mut Out, p: Paint) -> u64 {
-        if let Some(&id) = self.assignments.get(&p.key()) {
+    /// `p` as written over an item that would otherwise take opacity
+    /// `under`.
+    fn assignment(&mut self, out: &mut Out, p: Paint, under: f64) -> u64 {
+        let key = p.key(under);
+        if let Some(&id) = self.assignments.get(&key) {
             return id;
         }
         let colour = self.colour(out, p.colour);
@@ -93,10 +111,10 @@ impl Shared {
         let fas = out.add("FILL_AREA_STYLE", vec![s(""), refs([fasc])]);
         let fill = out.add("SURFACE_STYLE_FILL_AREA", vec![r(fas)]);
         let mut elements = vec![fill];
-        if p.opacity < 1.0 {
+        if let Some(o) = p.written_opacity(under) {
             let t = out.add(
                 "SURFACE_STYLE_TRANSPARENT",
-                vec![f(crate::styles::transparency_of(p.opacity))],
+                vec![f(crate::styles::transparency_of(o))],
             );
             elements.push(out.add(
                 "SURFACE_STYLE_RENDERING_WITH_PROPERTIES",
@@ -106,7 +124,7 @@ impl Shared {
         let side = out.add("SURFACE_SIDE_STYLE", vec![s(""), refs(elements)]);
         let usage = out.add("SURFACE_STYLE_USAGE", vec![e("BOTH"), r(side)]);
         let psa = out.add("PRESENTATION_STYLE_ASSIGNMENT", vec![refs([usage])]);
-        self.assignments.insert(p.key(), psa);
+        self.assignments.insert(key, psa);
         psa
     }
 
@@ -155,8 +173,9 @@ pub(crate) fn write(
             let Some(w) = bodies.get(b.product).and_then(|p| p.get(b.body)) else {
                 continue;
             };
+            let under = b.base.map_or(1.0, |p| p.opacity);
             if let Some(p) = b.base {
-                let psa = shared.assignment(out, p);
+                let psa = shared.assignment(out, p, 1.0);
                 for &item in &w.items {
                     let id = out.add("STYLED_ITEM", vec![s(""), refs([psa]), r(item)]);
                     own.insert(item, id);
@@ -170,7 +189,7 @@ pub(crate) fn write(
                 .collect();
             faces.sort_by_key(|x| x.0);
             for (face, p) in faces {
-                let psa = shared.assignment(out, p);
+                let psa = shared.assignment(out, p, under);
                 styled.push(out.add("STYLED_ITEM", vec![s(""), refs([psa]), r(face)]));
             }
         }
@@ -200,6 +219,12 @@ fn occurrences(
     own: &mut BTreeMap<u64, u64>,
 ) {
     let mut styled = Vec::new();
+    // Each body's own opacity: what an override over it inherits.
+    let under: BTreeMap<(usize, usize), f64> = paints
+        .bodies
+        .iter()
+        .filter_map(|b| Some(((b.product, b.body), b.base?.opacity)))
+        .collect();
     for o in &paints.occurrences {
         let Some(&(parent, n)) = o.path.last() else {
             continue;
@@ -223,7 +248,8 @@ fn occurrences(
         let Some(w) = bodies.get(leaf).and_then(|p| p.get(o.body)) else {
             continue;
         };
-        let psa = shared.assignment(out, o.paint);
+        let inherited = under.get(&(leaf, o.body)).copied().unwrap_or(1.0);
+        let psa = shared.assignment(out, o.paint, inherited);
         for &item in &w.items {
             let over = match own.get(&item) {
                 Some(&id) => id,

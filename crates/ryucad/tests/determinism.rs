@@ -6169,6 +6169,47 @@ fn transfer_section(golden: &mut Golden) {
     }
 }
 
+/// Every export fixture of the `exports` section, its parts coloured: the
+/// STEP file with its appearance holds every instance the file without it
+/// has, numbered as it numbers them (design 448: geometry never moves).
+#[test]
+fn styles_move_no_geometry_instance() {
+    type Fixture = fn() -> (tempfile::TempDir, ryucad::session::Session);
+    let fixtures: [(Fixture, &str); 3] = [(assembled, "frame"), (blended, "bl"), (swept, "sw")];
+    for (make, part) in fixtures {
+        let (_dir, mut session) = make();
+        let parts: Vec<String> = session
+            .project()
+            .parts
+            .iter()
+            .filter(|(_, p)| !p.file.as_ref().is_ok_and(|f| f.kind == ryucad::doc::files::PartKind::Assembly))
+            .map(|(id, _)| id.to_string())
+            .collect();
+        for p in &parts {
+            let req = ryucad::proto::Request::from_rpc(
+                "appearance.set",
+                Some(serde_json::json!({"entities": [p], "colour": "#808080", "opacity": 0.75})),
+            )
+            .unwrap();
+            ryucad::server::handle(&mut session, req).unwrap();
+        }
+        let export = |session: &mut ryucad::session::Session, appearance: bool| {
+            let params = serde_json::json!({"part": part, "time_stamp": "2026-10-27T00:00:00",
+                                            "file_name": "x.step", "appearance": appearance});
+            let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
+            ryucad::server::answer_live(session, None, None, req).unwrap().binary.unwrap()
+        };
+        let plain = ryustep::part21::parse(&export(&mut session, false)).unwrap();
+        let styled = ryustep::part21::parse(&export(&mut session, true)).unwrap();
+        assert!(styled.instances.len() > plain.instances.len(), "{part}");
+        assert_eq!(
+            format!("{:?}", &styled.instances[..plain.instances.len()]),
+            format!("{:?}", plain.instances),
+            "{part}"
+        );
+    }
+}
+
 sections! {
     golden;
     units => units_section(&mut golden),

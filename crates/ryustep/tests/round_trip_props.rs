@@ -220,7 +220,8 @@ fn blends_round_trip() {
 
 /// Seeded sweeps with seeded paints (a colour each, an opacity on a
 /// thousandth grid, every third face its own): written and read back,
-/// the same styles; the geometry instances the same as unpainted.
+/// the same styles as a reader composes them (a face's opacity its own or
+/// its body's); the geometry instances the same as unpainted.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -295,11 +296,15 @@ fn styles_round_trip() {
             }),
             "seed {seed}"
         );
-        let want: Vec<_> = faces
-            .iter()
-            .map(|(_, p)| (p.colour, Some(p.opacity).filter(|o| *o < 1.0)))
+        // A face's style composes over its body's, field by field: its
+        // opacity is its own or the body's.
+        let want: Vec<_> = faces.iter().map(|(_, p)| (p.colour, p.opacity)).collect();
+        let body_opacity = s.body.and_then(|b| b.opacity);
+        let mut got: Vec<_> = s
+            .faces
+            .values()
+            .map(|f| (f.colour.unwrap(), f.opacity.or(body_opacity).unwrap_or(1.0)))
             .collect();
-        let mut got: Vec<_> = s.faces.values().map(|f| (f.colour.unwrap(), f.opacity)).collect();
         let mut want = want;
         got.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
         want.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
