@@ -101,6 +101,15 @@ pub enum Code {
     /// A reference to a face, edge or vertex whose name the referenced
     /// feature's body no longer has.
     ReferenceUnresolved,
+    /// A reference whose face or edge a later feature split or merged, in
+    /// a role that can't take what it became (design 447): `reason`
+    /// (`one_needed`, or `carriers_differ` where the pieces don't all lie
+    /// on the old surface or curve), `candidates`, `was`, `removed_by`.
+    ReferenceSplit,
+    /// A warning: a reference whose face or edge a later feature split or
+    /// merged, followed to what it became: `role`, `reference`, `pieces`
+    /// and `by`, the feature that split or merged it.
+    ReferenceFollowed,
     /// An edge a sketch can't project: neither a line nor a circle parallel
     /// to the sketch, or one that projects to nothing.
     ProjectionUnsupported,
@@ -1015,6 +1024,8 @@ mod tests {
     #[test]
     fn reference_codes() {
         for (c, name) in [
+            (Code::ReferenceSplit, "reference_split"),
+            (Code::ReferenceFollowed, "reference_followed"),
             (Code::ReferenceBody, "reference_body"),
             (Code::ReferenceNotSolid, "reference_not_solid"),
             (Code::ReferenceFacesUnmeshed, "reference_faces_unmeshed"),

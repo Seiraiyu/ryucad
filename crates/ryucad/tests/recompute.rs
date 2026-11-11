@@ -1802,6 +1802,64 @@ fn drafts_recompute_as_from_nothing() {
     }
 }
 
+/// A slot lengthened across a box's top and shortened again, with a
+/// sketch on the top and a chamfer of its front edge (design 447): the
+/// sketch follows the first piece of the split top and the chamfer both
+/// pieces of the split edge, and every incremental rebuild is the
+/// rebuild from nothing on one thread and on eight.
+#[test]
+fn followed_references_recompute_as_from_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    let part = Id::parse("p", "part").unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "box", "id": "b", "params": {"x": 20, "y": 10, "z": 5}}),
+    );
+    let top = face(&mut s, "b", [0.0, 0.0, 1.0]);
+    let front = edge(&mut s, "b", [0.0, 0.0, 0.005], [0.02, 0.0, 0.005]);
+    let slot = |s: &mut Session, y: i32| {
+        let placement = json!({"origin": [9.5, y, -5], "z": [0, 0, 1], "x": [1, 0, 0]});
+        if call(s, "feature.show", json!({"part": "p", "id": "c"})).is_ok() {
+            must(
+                s,
+                "feature.edit",
+                json!({"part": "p", "id": "c", "placement": placement}),
+            );
+        } else {
+            must(
+                s,
+                "feature.add",
+                json!({"part": "p", "type": "box", "id": "c", "operation": "cut",
+                       "params": {"x": 1, "y": 20, "z": 20}, "placement": placement}),
+            );
+        }
+    };
+    slot(&mut s, 7);
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "sketch", "id": "t", "face": top}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "chamfer", "id": "f", "d": 0.5, "edges": [front]}),
+    );
+    for y in [-5, 7, -5] {
+        slot(&mut s, y);
+        let (one, eight) = (full(&s, 1), full(&s, 8));
+        let r = s.rebuilt(&part).unwrap();
+        assert_eq!(r.failed(), 0, "y = {y}: {:?}", summary(r));
+        let incremental = (r.hash.clone(), summary(r));
+        assert_eq!(incremental, one, "y = {y}");
+        assert_eq!(incremental, eight, "y = {y}");
+    }
+}
+
 /// Part `p`: a plate `b` (`w` × 30 × 10 mm) with a hole `h` (`dia`) at
 /// (15, 15), deleted by its seed (`d`), and a box `c` beside it whose −x
 /// wall a draft `t` (`ang`) leans past its +x wall with topology: change.

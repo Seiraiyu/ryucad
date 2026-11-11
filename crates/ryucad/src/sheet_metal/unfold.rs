@@ -99,7 +99,15 @@ pub(crate) fn resolve<'a>(
     }
     let built = crate::rebuild::target(part, solids, id, target, before)?;
     for (role, r) in u.references() {
-        let (_, e) = crate::reference::resolve(part, part.order(), id, &role, r, before)?;
+        let (_, e) = crate::reference::resolve(
+            part,
+            part.order(),
+            id,
+            &role,
+            crate::reference::Follow::One,
+            r,
+            before,
+        )?;
         if !matches!(e, EntityId::Face(_)) {
             return Err(crate::reference::wrong_kind(
                 part,

@@ -285,9 +285,10 @@ pub(crate) fn line(
 }
 
 /// The face (or, with `edge`, the edge) `r` names (in `role` of tweak
-/// `id`) in the target's view: `targets_mixed` for another solid's,
-/// `reference_wrong_kind` for another kind, and whatever the reference
-/// fails with.
+/// `id`) in the target's view, as the names it is now (every piece of one
+/// a later feature split, design 447): `targets_mixed` for another
+/// solid's, `reference_wrong_kind` for another kind, and whatever the
+/// reference fails with.
 #[allow(clippy::too_many_arguments)]
 fn named(
     part: &Part,
@@ -298,7 +299,7 @@ fn named(
     r: &Reference,
     results: &dyn Results,
     edge: bool,
-) -> Result<Name> {
+) -> Result<Vec<Name>> {
     let what = if edge { "an edge" } else { "a face" };
     if r.feature != *target {
         return Err(Error::new(
@@ -313,18 +314,22 @@ fn named(
         .with("role", role)
         .with("solids", [target.as_str(), r.feature.as_str()]));
     }
-    let (_, e) = crate::reference::resolve(part, part.order(), id, role, r, results)?;
-    match (e, edge) {
-        (EntityId::Face(_), false) | (EntityId::Edge(_), true) => Ok(r.name),
-        (e, _) => Err(crate::reference::wrong_kind(
-            part,
-            id,
-            role,
-            r,
-            crate::reference::kind(e),
-            what,
-        )),
-    }
+    let (b, found) = crate::reference::resolve_all(part, part.order(), id, role, r, results)?;
+    found
+        .into_iter()
+        .map(|e| match (e, edge) {
+            (EntityId::Face(f), false) => Ok(b.body.face(f).expect("a live face").name),
+            (EntityId::Edge(x), true) => Ok(b.body.edge(x).expect("a live edge").name),
+            (e, _) => Err(crate::reference::wrong_kind(
+                part,
+                id,
+                role,
+                r,
+                crate::reference::kind(e),
+                what,
+            )),
+        })
+        .collect()
 }
 
 fn face(
@@ -335,7 +340,7 @@ fn face(
     role: &str,
     r: &Reference,
     results: &dyn Results,
-) -> Result<Name> {
+) -> Result<Vec<Name>> {
     named(part, id, target, ty, role, r, results, false)
 }
 
@@ -350,7 +355,15 @@ fn surface(
     results: &dyn Results,
 ) -> Result<Surface> {
     if let Some(r) = with.reference() {
-        let (b, e) = crate::reference::resolve(part, part.order(), id, role, r, results)?;
+        let (b, e) = crate::reference::resolve(
+            part,
+            part.order(),
+            id,
+            role,
+            crate::reference::Follow::Carrier,
+            r,
+            results,
+        )?;
         return match e {
             EntityId::Face(f) => {
                 let face = b.body.face(f).expect("a live face");
@@ -397,7 +410,7 @@ pub(crate) fn hinge(
             };
             let mut names = Vec::with_capacity(edges.len());
             for (i, r) in edges.iter().enumerate() {
-                names.push(named(
+                names.extend(named(
                     part,
                     id,
                     &d.target,
@@ -434,7 +447,7 @@ pub(crate) fn resolve<'a>(
                 _ => 0.0,
             };
             for (role, r) in m.faces() {
-                let n = face(part, id, &m.target, ty, &role, r, before)?;
+                let pieces = face(part, id, &m.target, ty, &role, r, before)?;
                 // A grouped face's distance is its group's.
                 let q = match (&m.by, role.strip_prefix("groups.")) {
                     (MoveBy::Offset { groups, .. }, Some(rest)) => {
@@ -447,7 +460,7 @@ pub(crate) fn resolve<'a>(
                     }
                     _ => d,
                 };
-                faces.push((n, q));
+                faces.extend(pieces.into_iter().map(|n| (n, q)));
             }
             let spec = match motion(part, id, m, before)? {
                 Some(motion) => Spec::Move(MoveSpec {
@@ -476,7 +489,7 @@ pub(crate) fn resolve<'a>(
             for (i, g) in x.groups.iter().enumerate() {
                 let s = surface(part, id, &format!("groups.{i}.with"), &g.with, before)?;
                 for (j, r) in g.faces.iter().enumerate() {
-                    let n = face(
+                    for n in face(
                         part,
                         id,
                         &x.target,
@@ -484,8 +497,9 @@ pub(crate) fn resolve<'a>(
                         &format!("groups.{i}.faces.{j}"),
                         r,
                         before,
-                    )?;
-                    faces.push((n, s.clone()));
+                    )? {
+                        faces.push((n, s.clone()));
+                    }
                 }
             }
             Ok(Resolved {
@@ -504,14 +518,15 @@ pub(crate) fn resolve<'a>(
             let mut faces = Vec::new();
             let mut asked = Vec::new();
             for (role, r) in d.drafted() {
-                let n = face(part, id, &d.target, ty, &role, r, before)?;
                 let a = d.angle_of(r);
-                faces.push(DraftFace {
-                    face: n,
-                    angle: role.starts_with("groups.").then_some(a),
-                    flip: d.flip.contains(r),
-                });
-                asked.push((n, a));
+                for n in face(part, id, &d.target, ty, &role, r, before)? {
+                    faces.push(DraftFace {
+                        face: n,
+                        angle: role.starts_with("groups.").then_some(a),
+                        flip: d.flip.contains(r),
+                    });
+                    asked.push((n, a));
+                }
             }
             Ok(Resolved {
                 target: &d.target,
@@ -535,7 +550,7 @@ pub(crate) fn resolve<'a>(
             let built = crate::rebuild::read(part, solids, id, f, "target", &x.target, before)?;
             let mut faces = Vec::with_capacity(x.faces.len());
             for (i, r) in x.faces.iter().enumerate() {
-                faces.push(face(
+                faces.extend(face(
                     part,
                     id,
                     &x.target,
@@ -547,7 +562,7 @@ pub(crate) fn resolve<'a>(
             }
             let mut seeds = Vec::with_capacity(x.seeds.len());
             for (i, r) in x.seeds.iter().enumerate() {
-                seeds.push(face(
+                seeds.extend(face(
                     part,
                     id,
                     &x.target,

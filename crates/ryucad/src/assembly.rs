@@ -44,13 +44,17 @@ pub struct Occurrence {
 }
 
 /// A solid of an occurrence's part as the part shows it: its founder, the
-/// feature whose result shows (which sizes its display mesh), and its
-/// body.
+/// feature whose result shows (which sizes its display mesh), its body,
+/// and what its chain did to the names it retired, so a connector on a
+/// face a later feature split follows it (design 447). The body's names
+/// hash their parents, so the model's hash, over the bodies, already
+/// covers the lineage a connector reads.
 #[derive(Clone, Debug)]
 pub struct Solid {
     pub founder: Id,
     pub feature: Arc<Feature>,
     pub built: Arc<Built>,
+    pub lineage: Arc<crate::reference::Lineage>,
 }
 
 /// What an instance of a part places: its occurrences in order, a hash
@@ -139,6 +143,7 @@ impl Model {
                     founder: s.solid.clone(),
                     feature: Arc::new(part.features.get(f)?.as_ref().ok()?.clone()),
                     built: Arc::clone(b),
+                    lineage: Arc::new(crate::reference::Lineage::of(&solids, s.solid, f, result)),
                 })
             })
             .collect();
@@ -2274,6 +2279,99 @@ pub(crate) mod tests {
                 .hash(),
             old.solids[0].built.hash
         );
+    }
+
+    /// A connector on a face of a part placed at a release label follows
+    /// a split the release made (design 447): the occurrence carries the
+    /// label's own lineage, from the label's rebuild, not the working
+    /// files', where the face is whole again.
+    #[test]
+    fn a_connector_follows_a_split_in_the_release_a_label_places() {
+        use crate::git::tests::git;
+        let (dir, mut s) = project();
+        let r = dir.path();
+        git(r, &["init", "-q", "-b", "main"]);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "plate", "type": "cylinder", "id": "bore", "operation": "cut",
+                   "params": {"radius": 5, "height": 40},
+                   "placement": {"origin": [20, 20, -10]}}),
+        )
+        .unwrap();
+        let cylinder = |s: &mut Session, part: &str, feature: &str| -> Vec<String> {
+            let v = call(s, "inspect", json!({"part": part, "feature": feature})).unwrap();
+            let mut out: Vec<String> = v["bodies"][0]["faces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|f| f["surface"]["type"] == "cylinder")
+                .map(|f| f["name"].as_str().unwrap().to_owned())
+                .collect();
+            out.sort();
+            out
+        };
+        let bore = cylinder(&mut s, "plate", "bore").remove(0);
+        // The slot across the bore, in the release only.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "plate", "type": "box", "id": "slot", "operation": "cut",
+                   "params": {"x": 4, "y": 24, "z": 40},
+                   "placement": {"origin": [18, 10, -10]}}),
+        )
+        .unwrap();
+        let pieces = cylinder(&mut s, "plate", "slot");
+        assert_eq!(pieces.len(), 2);
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "plate", "properties": {"number": "200"}}),
+        )
+        .unwrap();
+        call(&mut s, "release.propose", json!({"part": "plate"})).unwrap();
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "plate A"]);
+        call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "plate", "id": "slot"}),
+        )
+        .unwrap();
+        let side = cylinder(&mut s, "bolt", "shank").remove(0);
+        for (i, of, rev, fixed) in [
+            ("base", "plate", "A", true),
+            ("pin", "bolt", "working", false),
+        ] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "frame", "type": "instance", "id": i, "of": of, "rev": rev,
+                       "fixed": fixed}),
+            )
+            .unwrap();
+        }
+        let m = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "mate", "id": "j", "form": "revolute",
+                   "a": format!("frame/base/slab/{bore}"),
+                   "b": format!("frame/pin/shank/{side}")}),
+        )
+        .unwrap();
+        let want: Vec<String> = pieces
+            .iter()
+            .map(|n| format!("frame/base/slab/{n}"))
+            .collect();
+        assert_eq!(m["warnings"][0]["code"], "reference_followed", "{m}");
+        assert_eq!(m["warnings"][0]["pieces"], json!(want), "{m}");
+        assert_eq!(m["warnings"][0]["by"], "slot", "{m}");
+        let result = s.rebuilt(&id("frame")).unwrap().clone();
+        assert!(result.output(&id("j")).is_some(), "{:?}", result.features);
+        let frame = s.project().part(&id("frame")).unwrap();
+        let w = crate::reference::followed(frame, &result);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(w[0]["role"], "a");
     }
 
     /// A part reading a project parameter is released with its value: a

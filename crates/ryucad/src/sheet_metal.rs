@@ -428,7 +428,15 @@ pub(crate) fn resolve<'a>(
     }
     let built = crate::rebuild::target(part, solids, id, target, before)?;
     let kind = |role: &str, r: &Reference, want: &str| -> crate::error::Result<EntityId> {
-        let (_, e) = crate::reference::resolve(part, part.order(), id, role, r, before)?;
+        let (_, e) = crate::reference::resolve(
+            part,
+            part.order(),
+            id,
+            role,
+            crate::reference::Follow::One,
+            r,
+            before,
+        )?;
         let ok = matches!(
             (want, e),
             ("an edge", EntityId::Edge(_))
