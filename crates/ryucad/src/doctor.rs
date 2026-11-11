@@ -21,7 +21,7 @@ use crate::rebuild::PartResult;
 use crate::session::Session;
 use crate::units::Unit;
 use ryu_session::job::{Job, Phase};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -36,17 +36,30 @@ pub struct Issue {
     /// The files involved, relative to the root.
     pub files: Vec<String>,
     pub message: String,
+    /// Fields its report has besides these (`parameter_unused`'s `part`
+    /// or `scope` and `parameters`); most issues have none.
+    pub details: Map<String, Value>,
 }
 
 impl Issue {
     pub fn to_json(&self) -> Value {
-        json!({"code": self.code, "severity": self.severity, "files": self.files,
-               "message": self.message})
+        let mut v = json!({"code": self.code, "severity": self.severity, "files": self.files,
+                           "message": self.message});
+        for (k, x) in &self.details {
+            v[k] = x.clone();
+        }
+        v
+    }
+
+    /// The issue with `key` among its details.
+    pub fn with(mut self, key: &str, value: Value) -> Issue {
+        self.details.insert(key.to_owned(), value);
+        self
     }
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 44] = [
+pub const CODES: [(&str, &str); 45] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -86,6 +99,7 @@ pub const CODES: [(&str, &str); 44] = [
     ("explode_unresolved", "warning"),
     ("reference_followed", "warning"),
     ("parameter_shadows", "error"),
+    ("parameter_unused", "warning"),
     ("dependency_invalid", "error"),
     ("project_id_duplicate", "error"),
     ("lock_invalid", "error"),
@@ -118,6 +132,7 @@ fn issue(code: &'static str, files: Vec<String>, message: String) -> Issue {
         severity,
         files,
         message,
+        details: Map::new(),
     }
 }
 
@@ -3919,6 +3934,21 @@ pub(crate) mod tests {
         assert_eq!(
             p(json!({"unit": "parsec"})).unwrap_err().code,
             Code::InvalidParam
+        );
+    }
+
+    #[test]
+    fn an_issues_details_join_its_report() {
+        let i = issue(
+            "parameter_unused",
+            vec!["parameters.json".to_owned()],
+            "m".to_owned(),
+        )
+        .with("scope", json!("project"));
+        assert_eq!(
+            i.to_json(),
+            json!({"code": "parameter_unused", "severity": "warning",
+                   "files": ["parameters.json"], "message": "m", "scope": "project"})
         );
     }
 }
