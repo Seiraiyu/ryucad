@@ -2479,6 +2479,40 @@ mod tests {
     }
 
     #[test]
+    fn a_revocation_merges_with_new_rules_and_takes_format_3() {
+        let key = "ab".repeat(32);
+        let cfg = |format: u64, rules: Value, entry: Value| {
+            json!({"approvals": {"keys": {"aaaaaaaaaaaaaaaa": entry}, "rules": rules},
+                   "format": format, "kind": "ryupdm.config"})
+        };
+        let one = json!([{"count": 1, "from": ["alice"], "parts": ["*"]}]);
+        let team = json!([{"count": 1, "from": ["@acme/qa"], "parts": ["*"]}]);
+        let base = cfg(2, one.clone(), json!(key));
+        // Ours revokes the key; theirs names a team instead of alice.
+        let ours = cfg(3, one, json!({"key": key, "revoked": "2026-11-10"}));
+        let theirs = cfg(3, team.clone(), json!(key));
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(m.value["format"], 3);
+        assert_eq!(m.value["approvals"]["rules"], team);
+        assert_eq!(
+            m.value["approvals"]["keys"]["aaaaaaaaaaaaaaaa"]["revoked"],
+            "2026-11-10"
+        );
+        // Both revoking on different days: one conflict, at the key.
+        let later = cfg(
+            3,
+            json!([{"count": 1, "from": ["alice"], "parts": ["*"]}]),
+            json!({"key": key, "revoked": "2026-11-11"}),
+        );
+        let m = merge(Some(&base), &ours, &later);
+        assert_eq!(
+            m.conflicts.keys().collect::<Vec<_>>(),
+            ["/approvals/keys/aaaaaaaaaaaaaaaa"]
+        );
+    }
+
+    #[test]
     fn other_kinds_merge_per_key() {
         let params = |p: Value| json!({"format": 1, "kind": "ryucad.parameters", "parameters": p});
         let base = params(json!({"wall": "3 mm", "hole": "wall * 2"}));

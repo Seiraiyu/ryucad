@@ -21,16 +21,19 @@ RUN apt-get update \
 
 # KiCad 9.0.8 (trixie-backports), only to export ryudfm's ODB++ corpus
 # (scripts/fetch-dfm-corpus.sh; crates/ryudfm/tests/corpus/pinned.txt names
-# the version). Backports are read from a fixed snapshot.debian.org date so
-# the version can't move or vanish; without -t, only kicad comes from
-# backports and its dependencies from trixie (with -t, backports' newer
-# libcurl blocks later installs). Lato is the font two pinned boards' text
-# is set in: without it KiCad substitutes another and their silkscreen
-# changes.
-RUN echo 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261028T000000Z trixie-backports main' \
-        > /etc/apt/sources.list.d/kicad-backports.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends kicad=9.0.8+dfsg-1~bpo13+1 fonts-lato=2.015-1 \
+# the version). Its one package from backports is pinned by SHA-256 in
+# .devcontainer/debs.txt, from a fixed snapshot.debian.org date so it can't
+# move or vanish, and installed as a file: its dependencies come from
+# trixie, and apt never reads the snapshot service, whose 503s failed the
+# release gate (#557). The package is taken from .devcontainer/debs/ when
+# it is there (full.yml restores it from an Actions cache), else fetched
+# with retries. Lato is the font two pinned boards' text is set in: without
+# it KiCad substitutes another and their silkscreen changes.
+RUN --mount=type=bind,source=.devcontainer,target=/tmp/dc,rw \
+    sh /tmp/dc/fetch-debs.sh /tmp/dc/debs \
+    && apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+        /tmp/dc/debs/kicad_9.0.8+dfsg-1~bpo13+1_$(dpkg --print-architecture).deb fonts-lato=2.015-1 \
     && rm -rf /var/lib/apt/lists/* \
     && kicad-cli version
 

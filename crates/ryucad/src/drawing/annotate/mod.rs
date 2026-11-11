@@ -837,7 +837,7 @@ fn build_one(
             out.at_placed = written.is_none();
             Ok(out)
         }
-        Kind::Balloon { of } => balloon(session, ctx, plan, src, vb, of, written, &m),
+        Kind::Balloon { of } => balloon(session, ctx, plan, src, vb, sheet, of, written, &m),
         Kind::BomTable { .. } => {
             // Written relative to the view's centre, as notes are.
             let corner = written.map(|w| addp(vb.at, w));
@@ -1876,6 +1876,7 @@ fn balloon(
     plan: &Plan,
     src: &Source,
     vb: &ViewBuilt,
+    sheet: &SheetBuilt,
     of: &str,
     written: Option<P>,
     m: &Map,
@@ -1927,7 +1928,10 @@ fn balloon(
     let item = item_of(session, plan, of)?;
     let r = 1.6 * sz;
     let away = unit(sub(tip, vb.at));
-    let c = written.map_or(addp(tip, scale(away, 18.0)), |w| addp(vb.at, w));
+    let c = written.map_or_else(
+        || balloon_place(sheet, vb, tip, away, r),
+        |w| addp(vb.at, w),
+    );
     let (label, colour) = match item {
         Some(n) => (n.to_string(), Colour::BLACK),
         None => ("?".to_owned(), WARNING),
@@ -1971,6 +1975,88 @@ fn balloon(
         out.report["missing"] = json!(true);
     }
     Ok(out)
+}
+
+/// Where a balloon of radius `r` on a leader to `tip` goes when its file
+/// says nothing (#645): the nearest place, out from the view's centre
+/// through the tip and turned from that by up to 80° either way, whose
+/// circle lies over none of the sheet's drawn curves and none of the
+/// annotations placed before it, whose leader crosses none of their
+/// text, and which stays in the drawing area clear of the title block, as
+/// the lint judges them. Where none does, 18 mm out from the tip.
+fn balloon_place(sheet: &SheetBuilt, vb: &ViewBuilt, tip: P, away: P, r: f64) -> P {
+    use super::lint::{grow, hits, inside, overlap};
+    let first = addp(tip, scale(away, 18.0));
+    // Every view's stroked curves on the sheet, as segments with their
+    // boxes: the lint's "view's lines".
+    let curves: Vec<([P; 2], [P; 2])> = sheet
+        .views
+        .iter()
+        .flat_map(|v| sheet.items[v.items.clone()].iter())
+        .filter_map(|it| match it {
+            Item::Path {
+                path,
+                stroke: Some(_),
+                ..
+            } => Some(path.points()),
+            _ => None,
+        })
+        .flat_map(|pts| {
+            pts.windows(2)
+                .map(|w| {
+                    let lo = [w[0][0].min(w[1][0]), w[0][1].min(w[1][1])];
+                    let hi = [w[0][0].max(w[1][0]), w[0][1].max(w[1][1])];
+                    ([w[0], w[1]], [lo, hi])
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let placed: Vec<&Built> = sheet
+        .annotations
+        .iter()
+        .filter(|a| a.error.is_none())
+        .collect();
+    let clear = |c: P| {
+        let b = [[c[0] - r, c[1] - r], [c[0] + r, c[1] + r]];
+        if !inside(b, sheet.area) || sheet.keep_out.iter().any(|k| overlap(b, *k)) {
+            return false;
+        }
+        let tb = grow(b, -0.2);
+        let leader = [addp(c, scale(unit(sub(tip, c)), r)), tip];
+        curves
+            .iter()
+            // A segment's box first: most are nowhere near.
+            .all(|(l, lb)| !overlap(*lb, tb) || !hits(*l, tb))
+            && placed.iter().all(|a| {
+                a.boxes
+                    .iter()
+                    .all(|x| !overlap(tb, *x) && !hits(leader, *x))
+                    && a.lines.iter().all(|l| !hits(*l, tb))
+            })
+    };
+    // Far enough to leave the view's box by two radii, from the tip.
+    let [lo, hi] = vb.bounds;
+    let reach = [lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]]
+        .iter()
+        .map(|q| ryu_math::hypot(q[0] - tip[0], q[1] - tip[1]))
+        .fold(0.0, f64::max)
+        + 2.0 * r;
+    let mut t = 18.0;
+    while t <= reach.max(18.0) {
+        for k in 0..=16 {
+            // 0, +5°, -5°, +10°, … ±80°.
+            let turn =
+                f64::from((k + 1) / 2) * 5.0f64.to_radians() * if k % 2 == 1 { 1.0 } else { -1.0 };
+            let (s, co) = ryu_math::sin_cos(turn);
+            let d = [co * away[0] - s * away[1], s * away[0] + co * away[1]];
+            let c = addp(tip, scale(d, t));
+            if clear(c) {
+                return c;
+            }
+        }
+        t += r / 2.0;
+    }
+    first
 }
 
 /// The item number `of`'s part has in the assembly that places it (the
