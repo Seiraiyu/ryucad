@@ -274,6 +274,8 @@ fn dispatch(
             units,
             ops,
             class,
+            template,
+            pins,
             expected_revision,
         } => libcmd::symbol_create(
             session,
@@ -281,6 +283,8 @@ fn dispatch(
             id.as_deref(),
             units,
             class.as_deref(),
+            template.as_deref(),
+            &pins,
             &ops,
             expected_revision.as_deref(),
         ),

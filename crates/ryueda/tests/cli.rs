@@ -2153,6 +2153,71 @@ fn a_symbols_class_from_the_cli() {
     );
 }
 
+/// Symbols drawn from the standards' templates: a resistor to the
+/// project's shapes, an IC from its pins, ops applied after.
+#[test]
+fn symbols_from_templates() {
+    let p = Pair::projects();
+    let r = p.ok(&["symbol", "create", "R", "--template", "resistor"]);
+    assert_eq!(r["symbol"]["class"], "resistor", "{r}");
+    assert_eq!(r["symbol"]["graphics"]["g1"]["type"], "polyline");
+    p.ok(&["standards", "set", r#"{"shapes": "iec"}"#]);
+    let box_r = p.ok(&["symbol", "create", "R box", "--template", "resistor"]);
+    assert_eq!(box_r["symbol"]["graphics"]["g1"]["type"], "rect");
+    let u = p.ok(&[
+        "symbol",
+        "create",
+        "Sensor",
+        "--template",
+        "ic",
+        "--pins",
+        r#"[{"number": "1", "name": "VDD", "type": "power_in"},
+            {"number": "2", "name": "GND", "type": "power_in"},
+            {"number": "3", "name": "SDA", "type": "bidirectional"},
+            {"number": "4", "name": "SCL", "type": "bidirectional"}]"#,
+        "--ops",
+        r#"[{"op": "add", "graphic": "text", "text": "BME", "at": [0, 0], "size": "1.27 mm"}]"#,
+    ]);
+    let pins = &u["symbol"]["pins"];
+    assert_eq!(
+        (&pins["1"]["side"], &pins["2"]["side"]),
+        (&json!("up"), &json!("down"))
+    );
+    assert_eq!(u["added"], json!(["g2"]));
+    // Refusals.
+    p.fails(
+        &["symbol", "create", "Q", "--template", "transistor"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &[
+            "symbol",
+            "create",
+            "X",
+            "--pins",
+            r#"[{"number": "1", "type": "input"}]"#,
+        ],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &[
+            "symbol",
+            "create",
+            "X",
+            "--template",
+            "ic",
+            "--class",
+            "led",
+            "--pins",
+            r#"[{"number": "1", "type": "input"}]"#,
+        ],
+        "invalid_param",
+        1,
+    );
+}
+
 #[test]
 fn lint_preferences_from_the_cli() {
     let p = Pair::breakout();

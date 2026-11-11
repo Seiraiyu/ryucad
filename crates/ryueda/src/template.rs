@@ -9,7 +9,7 @@ use crate::error::{Code, Error, Result};
 use crate::id::Id;
 use crate::standards::{Class, Shapes, Standards};
 use crate::symbol::{Fill, Graphic, Pin, PinShape, PinType, Point, Side, Symbol};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The classes that have a template.
@@ -25,7 +25,7 @@ pub const TEMPLATES: [Class; 8] = [
 ];
 
 /// A pin a box template places: its number, name and type.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinSpec {
     pub number: String,

@@ -94,6 +94,12 @@ pub enum Request {
         /// takes it off.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         class: Option<String>,
+        /// Draw it from the standards' template for this class first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        template: Option<String>,
+        /// The pins a box template places (`number`, `name`, `type`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pins: Vec<crate::template::PinSpec>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },

@@ -401,6 +401,15 @@ enum SymbolCmd {
         /// takes it off an edit).
         #[arg(long)]
         class: Option<String>,
+        /// Draw it from the standards' template for a class: resistor,
+        /// capacitor, inductor, diode, led (whole), ic, regulator,
+        /// connector (a box round --pins); --ops apply after.
+        #[arg(long)]
+        template: Option<String>,
+        /// A box template's pins, as JSON: [{"number": "1", "name":
+        /// "VDD", "type": "power_in"}, ...].
+        #[arg(long, value_parser = pin_specs, default_value = "[]")]
+        pins: PinSpecs,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1296,6 +1305,15 @@ fn json_value(s: &str) -> std::result::Result<Value, String> {
     serde_json::from_str(s).map_err(|e| format!("not JSON: {e}"))
 }
 
+#[derive(Clone)]
+struct PinSpecs(Vec<ryueda::template::PinSpec>);
+
+fn pin_specs(s: &str) -> std::result::Result<PinSpecs, String> {
+    serde_json::from_str(s)
+        .map(PinSpecs)
+        .map_err(|e| format!("not a list of pins: {e}"))
+}
+
 /// A batch of ops, as JSON.
 #[derive(Clone)]
 struct Ops(Vec<Value>);
@@ -1403,6 +1421,8 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             units,
             ops,
             class,
+            template,
+            pins,
             expect,
         }) => Request::SymbolCreate {
             name: name.clone(),
@@ -1410,6 +1430,8 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             units: *units,
             ops: ops.0.clone(),
             class: class.clone(),
+            template: template.clone(),
+            pins: pins.0.clone(),
             expected_revision: expect.expect.clone(),
         },
         Command::Symbol(SymbolCmd::Edit {

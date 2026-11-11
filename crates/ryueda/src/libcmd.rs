@@ -214,6 +214,8 @@ pub fn symbol_create(
     id: Option<&str>,
     units: Option<u32>,
     class: Option<&str>,
+    template: Option<&str>,
+    pins: &[crate::template::PinSpec],
     ops: &[Value],
     expected: Option<&str>,
 ) -> Result<Value> {
@@ -234,14 +236,37 @@ pub fn symbol_create(
         }
         None => name::free(name, |s| lib.has(ObjKind::Symbol, s)),
     };
-    let mut s = Symbol {
-        name: name.to_owned(),
-        units: units.unwrap_or(1),
-        class: None,
-        pins: Default::default(),
-        graphics: Default::default(),
+    if template.is_none() && !pins.is_empty() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "pins are placed by a template: give --template",
+        )
+        .with("param", "pins"));
+    }
+    let class = class.map(|c| class_param(c, false)).transpose()?.flatten();
+    let mut s = match template {
+        Some(t) => {
+            let Some(tc) = class_param(t, false)? else {
+                unreachable!("none is refused")
+            };
+            if class.is_some_and(|c| c != tc) || units.is_some_and(|u| u != 1) {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("a {t} template draws one unit of class {t}"),
+                )
+                .with("param", "template"));
+            }
+            let (st, _) = p.standards_for(SELF)?;
+            crate::template::template(name, tc, pins, &st)?
+        }
+        None => Symbol {
+            name: name.to_owned(),
+            units: units.unwrap_or(1),
+            class,
+            pins: Default::default(),
+            graphics: Default::default(),
+        },
     };
-    s.class = class.map(|c| class_param(c, false)).transpose()?.flatten();
     let applied = edit::apply(&mut s, ops, p.manifest.default_unit)?;
     let errors = added_errors(&[], &s.check());
     if !errors.is_empty() {
