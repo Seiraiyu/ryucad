@@ -548,6 +548,21 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         dry_run: bool,
     },
+    /// The standards that judge a library's symbols (this project's own by
+    /// default), whole, and where they come from.
+    #[serde(rename = "standards.get")]
+    StandardsGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library: Option<String>,
+    },
+    /// A JSON merge patch on this project's own standards
+    /// (`library/standards.json`): `null` puts a field back.
+    #[serde(rename = "standards.set")]
+    StandardsSet {
+        patch: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Lays out a design's blocks (or one block) over their layout files,
     /// writing those that change; `relayout` (`<block>` or
     /// `<block>/<sheet>`) lays out from nothing what it names.
@@ -760,6 +775,7 @@ impl Request {
                 | Request::ErcWaive { .. }
                 | Request::ErcConfigure { .. }
                 | Request::LintConfigure { .. }
+                | Request::StandardsSet { .. }
                 | Request::PartsConfigure { .. }
                 | Request::Layout { .. }
                 | Request::LayoutPlace { .. }

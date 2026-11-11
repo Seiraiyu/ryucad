@@ -724,6 +724,13 @@ fn dispatch(
             expected_revision.as_deref(),
             dry_run,
         ),
+        Request::StandardsGet { library } => {
+            crate::standards::get(session.project(), library.as_deref())
+        }
+        Request::StandardsSet {
+            patch,
+            expected_revision,
+        } => crate::standards::set(session, &patch, expected_revision.as_deref()),
         Request::LayoutInstructions { block } => {
             crate::schemcmd::instructions(session.project(), &block)
         }
@@ -836,6 +843,18 @@ pub fn revisions(p: &Project) -> BTreeMap<String, Value> {
             out.insert(format!("layout/{id}"), rev);
         }
     }
+    // The standards that judge this project's own symbols: a viewer
+    // redraws the lint when they change.
+    let standards = p.standards_for(SELF).map_or(Value::Null, |(s, _)| {
+        json!(
+            blake3::hash(
+                crate::doc::to_string(&s, crate::standards::KIND, crate::standards::FORMAT)
+                    .as_bytes()
+            )
+            .to_hex()[..32]
+        )
+    });
+    out.insert("standards".into(), standards);
     out
 }
 

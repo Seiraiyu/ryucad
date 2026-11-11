@@ -478,6 +478,8 @@ fn every_protocol_method_has_a_command() {
         ("erc.configure", &["erc", "configure"]),
         ("lint.get", &["lint"]),
         ("lint.configure", &["lint", "configure"]),
+        ("standards.get", &["standards"]),
+        ("standards.set", &["standards", "set"]),
         ("check", &["check"]),
         ("layout", &["layout"]),
         ("layout.place", &["place"]),
@@ -2074,6 +2076,53 @@ fn keep_for_looking(from: &Path, name: &str) {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ryueda-look");
     fs::create_dir_all(&dir).unwrap();
     fs::copy(from, dir.join(name)).unwrap();
+}
+
+/// The project's own standards: read whole, changed by a merge patch,
+/// written only where they differ from the built-in ones, undone.
+#[test]
+fn standards_from_the_cli() {
+    let p = Pair::projects();
+    let got = p.ok(&["standards"]);
+    assert_eq!(got["from"], "built_in", "{got}");
+    assert_eq!(got["standards"]["shapes"], "ansi");
+    assert_eq!(got["standards"]["grid_nm"], 1_270_000);
+    assert!(got["standards"]["classes"]["ic"]["sides"]["power_in"] == "up");
+    let set = p.ok(&[
+        "standards",
+        "set",
+        r#"{"shapes": "iec", "classes": {"ic": {"max_pins_per_unit": 100}}}"#,
+    ]);
+    assert_eq!(set["from"], "self", "{set}");
+    assert_eq!(set["standards"]["shapes"], "iec");
+    // A class patched keeps the rest of its rule.
+    assert_eq!(set["standards"]["classes"]["ic"]["max_pins_per_unit"], 100);
+    assert_eq!(set["standards"]["classes"]["ic"]["sides"]["power_in"], "up");
+    let file: Value =
+        serde_json::from_slice(&fs::read(p.direct.join("board/library/standards.json")).unwrap())
+            .unwrap();
+    assert_eq!(file["shapes"], "iec");
+    assert!(file.get("grid_nm").is_none(), "{file}");
+    // The library project has none of its own: the project's judge it.
+    assert_eq!(
+        p.ok(&["standards", "--library", "passives"])["from"],
+        "self"
+    );
+    // Refusals: a bad value, a field no standards have.
+    let e = p.fails(
+        &["standards", "set", r#"{"grid_nm": 0}"#],
+        "standards_invalid",
+        1,
+    );
+    assert_eq!(e["details"]["faults"][0]["details"]["pointer"], "/grid_nm");
+    p.fails(
+        &["standards", "set", r#"{"colour": "red"}"#],
+        "invalid_param",
+        1,
+    );
+    // Back to the built-in shapes and class: the file goes.
+    p.ok(&["standards", "set", r#"{"shapes": null, "classes": null}"#]);
+    assert!(!p.direct.join("board/library/standards.json").exists());
 }
 
 #[test]

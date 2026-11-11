@@ -148,6 +148,18 @@ enum Command {
         #[command(subcommand)]
         action: Option<LintCmd>,
     },
+    /// The symbol standards that judge a library (this project's own by
+    /// default): resistor shapes, grid, pin lengths, name margins, ground
+    /// and group name patterns, and each class's side rules; `standards
+    /// set` changes this project's own.
+    #[command(args_conflicts_with_subcommands = true)]
+    Standards {
+        /// A library project's alias, to read the standards that judge it.
+        #[arg(long)]
+        library: Option<String>,
+        #[command(subcommand)]
+        action: Option<StandardsCmd>,
+    },
     /// Load the project from nothing and report every file's faults and
     /// every design's ERC, and supply findings from the catalogues this
     /// machine holds; fails (check_failed) on any error.
@@ -1058,6 +1070,19 @@ enum ErcCmd {
 }
 
 #[derive(Subcommand)]
+enum StandardsCmd {
+    /// Change this project's own standards by a JSON merge patch:
+    /// '{"shapes": "iec"}', '{"classes": {"ic": {"max_pins_per_unit": 100}}}';
+    /// null puts a field back.
+    Set {
+        #[arg(value_parser = json_value)]
+        patch: Value,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
 enum LintCmd {
     /// Set rules' weights (CODE=N) and severities (CODE=error|warning|off),
     /// and preferred styles (resistor=us|iec, local_nets=wires|labels);
@@ -1255,6 +1280,10 @@ enum DaemonCmd {
         #[arg(long)]
         all: bool,
     },
+}
+
+fn json_value(s: &str) -> std::result::Result<Value, String> {
+    serde_json::from_str(s).map_err(|e| format!("not JSON: {e}"))
 }
 
 /// A batch of ops, as JSON.
@@ -1805,6 +1834,19 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 dry_run: *dry_run,
             }
         }
+        Command::Standards {
+            library,
+            action: None,
+        } => Request::StandardsGet {
+            library: library.clone(),
+        },
+        Command::Standards {
+            library: _,
+            action: Some(StandardsCmd::Set { patch, expect }),
+        } => Request::StandardsSet {
+            patch: patch.clone(),
+            expected_revision: expect.expect.clone(),
+        },
         Command::Erc {
             design,
             action: None,

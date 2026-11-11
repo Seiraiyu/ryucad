@@ -426,6 +426,76 @@ pub fn merge(base: &mut Value, patch: &Value) {
     }
 }
 
+/// `standards.get`: the standards that judge `library`'s symbols (this
+/// project's own by default), whole, with where they come from.
+pub fn get(p: &crate::project::Project, library: Option<&str>) -> crate::error::Result<Value> {
+    let alias = library.unwrap_or(crate::project::SELF);
+    let lib = p.library(alias)?;
+    let (s, from) = p.standards_for(alias)?;
+    let path = (from != "built_in").then(|| {
+        crate::source::join(
+            &crate::source::join(
+                &p.library(&from).map(|l| l.base.clone()).unwrap_or_default(),
+                crate::library::DIR,
+            ),
+            FILE,
+        )
+    });
+    Ok(serde_json::json!({
+        "library": alias,
+        "from": from,
+        "path": path,
+        "standards": s,
+        "revision": lib.revision,
+    }))
+}
+
+/// `standards.set`: a merge patch on this project's own standards (the
+/// built-in ones where it has none), written as only what differs from
+/// the built-in standards, the file deleted when nothing does. Guarded by
+/// this project's library's revision.
+pub fn set(
+    session: &mut crate::session::Session,
+    patch: &Value,
+    expected: Option<&str>,
+) -> crate::error::Result<Value> {
+    use crate::error::Error;
+    use crate::project::SELF;
+    let p = session.project();
+    let lib = p.library(SELF)?;
+    crate::server::check_revision("library self", &lib.revision, expected)?;
+    if !patch.is_object() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a patch is a JSON object of the fields to change (null puts one back)",
+        )
+        .with("param", "patch"));
+    }
+    let base = match &lib.standards {
+        Some(st) => st.item.clone()?,
+        None => p.standards_for(SELF).map(|(s, _)| s).unwrap_or_default(),
+    };
+    let mut v = serde_json::to_value(&base).expect("standards serialize");
+    merge(&mut v, patch);
+    let s: Standards = serde_json::from_value(v).map_err(|e| {
+        Error::new(Code::InvalidParam, format!("not standards: {e}")).with("param", "patch")
+    })?;
+    let faults = s.check();
+    if !faults.is_empty() {
+        return Err(crate::write::refused("library/standards.json", &faults));
+    }
+    let path = crate::source::join(crate::library::DIR, FILE);
+    let mut w = crate::write::Writes::default();
+    match reduced(&s) {
+        Value::Object(o) if o.is_empty() => w.delete(path),
+        v => {
+            w.0.push((path, Some(crate::doc::to_string(&v, KIND, FORMAT))))
+        }
+    }
+    crate::write::commit(session, "library/standards.json", w)?;
+    get(session.project(), None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
