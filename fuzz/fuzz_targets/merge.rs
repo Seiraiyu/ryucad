@@ -1331,6 +1331,67 @@ fn edit_annotation(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// Edits a delete_face: its faces, its seeds, its heal; or makes it a
+/// move_face with topology and blends set and cleared.
+fn edit_direct(v: &mut Value, op: u8, arg: u8) {
+    let face = |a: u8| json!({"feature": "b", "name": format!("{:032x}", a % 5)});
+    let o = v.as_object_mut().unwrap();
+    let toggle = |o: &mut serde_json::Map<String, Value>, key: &str, a: u8| {
+        let mut list: Vec<Value> = o.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
+        let f = face(a);
+        match list.iter().position(|x| *x == f) {
+            Some(i) => {
+                list.remove(i);
+            }
+            None => list.push(f),
+        }
+        if list.is_empty() {
+            o.remove(key);
+        } else {
+            o.insert(key.into(), json!(list));
+        }
+    };
+    match op % 5 {
+        0 => toggle(o, "faces", arg),
+        1 => toggle(o, "seeds", arg),
+        2 => match arg % 3 {
+            0 => {
+                o.remove("heal");
+            }
+            1 => {
+                o.insert("heal".into(), json!("cap"));
+            }
+            _ => {
+                o.insert("heal".into(), json!("grow"));
+            }
+        },
+        3 => {
+            let key = if arg % 2 == 0 { "topology" } else { "blends" };
+            let set = if key == "topology" { "change" } else { "rebuild" };
+            if o.get("type").and_then(Value::as_str) != Some("move_face") {
+                for k in ["faces", "seeds", "heal"] {
+                    o.remove(k);
+                }
+                o.insert("type".into(), json!("move_face"));
+                o.insert("by".into(), json!("translate"));
+                o.insert("direction".into(), json!("z"));
+                o.insert("distance".into(), json!("2 mm"));
+                o.insert("faces".into(), json!([face(arg)]));
+            }
+            if o.contains_key(key) {
+                o.remove(key);
+            } else {
+                o.insert(key.into(), json!(set));
+            }
+        }
+        _ => {
+            if o.get("type").and_then(Value::as_str) == Some("move_face") {
+                o.insert("distance".into(), json!(format!("{} mm", 1 + arg % 6)));
+            }
+        }
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else {
         return;
@@ -1344,9 +1405,11 @@ fuzz_target!(|data: &[u8]| {
     // `0xf0` a base flange or flange (24), `0xef` a planar face or a
     // surface extrude (25), `0xee` an unfold or refold (26), `0xed` a face
     // tweak (27), `0xec` a thicken or a fill (28), `0xeb` a draft (29),
-    // `0xea` a split by a tool (30), `0xe9` a drawing (31); every other
-    // byte picks as it did before them.
+    // `0xea` a split by a tool (30), `0xe9` a drawing (31), `0xe8` a
+    // delete_face or a tweak's topology and blends (32); every other byte
+    // picks as it did before them.
     let kind = match mode {
+        0xe8 => 32,
         0xe9 => 31,
         0xea => 30,
         0xeb => 29,
@@ -1446,6 +1509,8 @@ fuzz_target!(|data: &[u8]| {
                          "faces": [{"feature": "b", "name": format!("{:032x}", 1)}]}),
             30 => json!({"format": 19, "kind": "ryucad.feature", "type": "split",
                          "target": "h", "tool": {"body": "t"}}),
+            32 => json!({"format": 20, "kind": "ryucad.feature", "type": "delete_face",
+                         "target": "b", "faces": [{"feature": "b", "name": format!("{:032x}", 1)}]}),
             31 => json!({"format": 1, "kind": "ryucad.drawing", "name": "D",
                 "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b"}},
                 "views": {"v1": {"type": "base", "sheet": "s1", "orient": "front",
@@ -1548,6 +1613,7 @@ fuzz_target!(|data: &[u8]| {
             29 => edit_draft(v, op, arg),
             30 => edit_split_tool(v, op, arg),
             31 => edit_drawing(v, op, arg),
+            32 => edit_direct(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
