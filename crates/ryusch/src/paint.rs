@@ -12,7 +12,7 @@ use crate::label;
 use crate::layout::{LabelKind, Layout};
 use crate::route;
 use crate::shape::Shape;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Symbols' lines.
 pub const INK: &str = "#7a1f1f";
@@ -24,6 +24,11 @@ pub const TEXT: &str = "#202020";
 pub const POWER: &str = "#a01818";
 /// Net labels and not-connected marks.
 pub const LABEL: &str = "#1d3f8f";
+/// A bus wire: the wires' colour, three lines wide.
+pub const BUS: &str = WIRE;
+pub const BUS_LINE: Nm = 3 * LINE;
+/// A block port's flag: a light blue tint, under dark text.
+pub const PORT_FILL: &str = "#dce6f5";
 /// A sheet's name, beside it on the canvas.
 pub const NAME: &str = "#606060";
 /// Every line's width.
@@ -66,6 +71,8 @@ pub enum Item {
     /// A region's frame: a dashed rectangle, and its title's tab (filled
     /// with the paper, outlined), drawn under everything on its sheet.
     Frame { rect: Rect, title_tab: Rect },
+    /// A bus wire: a polyline drawn [`BUS_LINE`] wide in [`BUS`].
+    Bus { points: Vec<Point> },
     /// A text on its baseline through `at`, upright or reading upwards.
     Text {
         text: String,
@@ -96,6 +103,15 @@ pub struct Painted {
     pub labels: Vec<Placed>,
     /// Each child block's symbol (`instance:<id>`) and its body's box.
     pub blocks: Vec<(String, Rect)>,
+    /// Each block port's flag: its net's key and its body's box (plan 2.C:
+    /// cross-references go under it).
+    pub ports: Vec<(String, Rect)>,
+    /// Each drawn bus's off-sheet connector: its bus's key, its members'
+    /// net keys on the sheet and its box (plan 2.C: cross-references go
+    /// under it as under a net's).
+    pub buses: Vec<BusConnector>,
+    /// The keys of every net a pin on the sheet is on.
+    pub nets: BTreeSet<String>,
 }
 
 fn line(items: &mut Vec<Item>, points: Vec<Point>, stroke: &'static str) {
@@ -112,6 +128,7 @@ fn graphic(items: &mut Vec<Item>, shape: &Shape, g: &Graphic) {
         Fill::None => None,
         Fill::Body => Some(BODY),
         Fill::Outline => Some(INK),
+        Fill::Port => Some(PORT_FILL),
     };
     match g {
         Graphic::Rect {
@@ -208,11 +225,38 @@ pub fn name_box(name: &str, at: &crate::shape::PinAt) -> Rect {
 }
 
 /// A label's lines and text.
-fn label_items(items: &mut Vec<Item>, kind: LabelKind, name: &str, at: Point, side: Side) {
-    let d = label::drawn(kind, name, at, side);
-    let colour = if kind == LabelKind::Net { LABEL } else { POWER };
-    // A net label's line is the wire it names.
-    let ink = if kind == LabelKind::Net { WIRE } else { POWER };
+fn label_items(
+    items: &mut Vec<Item>,
+    kind: LabelKind,
+    name: &str,
+    at: Point,
+    side: Side,
+    flow: crate::input::Flow,
+    intent: &str,
+) {
+    let d = if kind == LabelKind::OffSheet {
+        label::drawn_flow(name, at, side, flow)
+    } else {
+        label::drawn_with(kind, name, intent, at, side)
+    };
+    if let Some((p, anchor, text)) = &d.extra {
+        items.push(Item::Text {
+            text: text.clone(),
+            at: *p,
+            size: MIN_SIZE,
+            anchor: *anchor,
+            vertical: false,
+            colour: POWER,
+        });
+    }
+    let colour = if kind.signal() { LABEL } else { POWER };
+    // A net label's line is the wire it names; a connector's outline is
+    // its own.
+    let ink = match kind {
+        LabelKind::Net => WIRE,
+        LabelKind::OffSheet => LABEL,
+        _ => POWER,
+    };
     for l in &d.lines {
         line(items, l.clone(), ink);
     }
@@ -220,12 +264,135 @@ fn label_items(items: &mut Vec<Item>, kind: LabelKind, name: &str, at: Point, si
         items.push(Item::Text {
             text: name.to_owned(),
             at: p,
-            size: SIZE,
+            size: if kind == LabelKind::OffSheet {
+                label::FLAG_TEXT
+            } else {
+                SIZE
+            },
             anchor,
             vertical,
             colour,
         });
     }
+}
+
+/// The box a note's text takes from its lower left `at`: the text at the
+/// normal size half a step in, grown by half a step, its far corner on
+/// the grid (plan 2.C).
+pub fn note_box(text: &str, at: Point) -> Rect {
+    let far = [
+        at[0] + crate::font::width(text, SIZE) + GRID,
+        at[1] + SIZE + GRID,
+    ];
+    let up = |v: Nm| (v + GRID - 1).div_euclid(GRID) * GRID;
+    Rect::new(at, [up(far[0]), up(far[1])])
+}
+
+/// A drawn bus's off-sheet connector, as [`Painted::buses`] lists it:
+/// its bus's key, its members' net keys on the sheet and its box.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BusConnector {
+    pub bus: String,
+    pub nets: Vec<String>,
+    pub rect: Rect,
+}
+
+/// The buses drawn on sheet `sid` (plan 2.C): each member's stub and 45°
+/// entry, its name on its stub, the spine through a column of entries,
+/// the trunk, the bundle's name on the trunk and its off-sheet connector.
+/// Gives the connectors, for the cross-references under them.
+fn bus_items(
+    block: &Block,
+    layout: &Layout,
+    sid: &str,
+    items: &mut Vec<Item>,
+) -> Vec<BusConnector> {
+    let mut connectors = Vec::new();
+    for (key, by_sheet) in &layout.buses {
+        let Some(drawn) = by_sheet.get(sid) else {
+            continue;
+        };
+        let mut columns: BTreeMap<Nm, Vec<Point>> = BTreeMap::new();
+        let mut members: Vec<usize> = Vec::new();
+        let stub_len = drawn.stub;
+        for e in &drawn.entries {
+            let (stub, on_spine) = crate::bus::entry(e.at, e.side, stub_len);
+            line(items, vec![e.at, stub, on_spine], WIRE);
+            columns.entry(on_spine[0]).or_default().push(on_spine);
+            if let Some(n) = block.net(&e.net) {
+                if !members.contains(&n) {
+                    members.push(n);
+                }
+                let name = &block.nets[n].name;
+                if let Some((p, anchor, vertical)) =
+                    label::drawn(LabelKind::Net, name, e.at, e.side).text
+                {
+                    items.push(Item::Text {
+                        text: name.clone(),
+                        at: p,
+                        size: SIZE,
+                        anchor,
+                        vertical,
+                        colour: LABEL,
+                    });
+                }
+            }
+        }
+        for pts in columns.values() {
+            if let Some([a, b]) = crate::bus::spine(pts)
+                && a != b
+            {
+                items.push(Item::Bus { points: vec![a, b] });
+            }
+        }
+        for run in &drawn.trunk {
+            items.push(Item::Bus {
+                points: run.clone(),
+            });
+        }
+        let name = match block.bus(key) {
+            Some(b) => crate::bus::name(block, b, &members),
+            None => key.clone(),
+        };
+        if let Some(run) = drawn.trunk.first().filter(|_| drawn.connector.is_none())
+            && run.len() >= 2
+        {
+            let d = [run[1][0] - run[0][0], run[1][1] - run[0][1]];
+            let side = match (d[0].signum(), d[1].signum()) {
+                (1, _) => Side::Right,
+                (-1, _) => Side::Left,
+                (_, 1) => Side::Up,
+                _ => Side::Down,
+            };
+            let side = label::pointing(LabelKind::Net, side);
+            if let Some((p, anchor, vertical)) =
+                label::drawn(LabelKind::Net, &name, run[0], side).text
+            {
+                items.push(Item::Text {
+                    text: name.clone(),
+                    at: p,
+                    size: SIZE,
+                    anchor,
+                    vertical,
+                    colour: LABEL,
+                });
+            }
+        }
+        if let Some(c) = &drawn.connector {
+            let flow = members
+                .first()
+                .map_or(crate::input::Flow::Bidirectional, |n| {
+                    label::flow_on_sheet(block, layout, *n, sid)
+                });
+            label_items(items, LabelKind::OffSheet, &c.text, c.at, c.side, flow, "");
+            connectors.push(BusConnector {
+                bus: key.clone(),
+                nets: members.iter().map(|n| block.nets[*n].key.clone()).collect(),
+                rect: label::drawn_flow(&c.text, c.at, c.side, flow).bounds,
+            });
+        }
+    }
+    connectors
 }
 
 /// What sheet `sid` of `layout` draws: parts in key order (each its
@@ -265,6 +432,16 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
         let shape = Shape::of(part, Place::new(x.at, x.rotation, x.mirror));
         if part.kind == PartKind::Block {
             out.blocks.push((part.key.clone(), shape.body));
+        }
+        for pin in &part.pins {
+            for n in pin.nets() {
+                out.nets.insert(block.nets[n].key.clone());
+            }
+        }
+        if matches!(part.kind, PartKind::Port { .. })
+            && let Some(n) = part.pins.first().and_then(|p| p.drawn_net())
+        {
+            out.ports.push((block.nets[n].key.clone(), shape.body));
         }
         for g in &part.graphics {
             graphic(items, &shape, g);
@@ -360,9 +537,22 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
             });
         }
     }
+    out.buses = bus_items(block, layout, sid, items);
     for (key, list) in &layout.labels {
         for l in list.iter().filter(|l| l.sheet == sid) {
-            label_items(items, l.kind, &l.text, l.at, l.side);
+            let flow = match (l.kind, block.net(key)) {
+                (LabelKind::OffSheet, Some(n)) => label::flow_on_sheet(block, layout, n, sid),
+                _ => crate::input::Flow::Bidirectional,
+            };
+            label_items(
+                items,
+                l.kind,
+                &l.text,
+                l.at,
+                l.side,
+                flow,
+                label::intent_of(block, key),
+            );
             out.labels.push(Placed {
                 net: key.clone(),
                 on: l.on.clone(),
@@ -370,9 +560,35 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
                 text: l.text.clone(),
                 at: l.at,
                 side: l.side,
-                rect: label::label_box(l.kind, &l.text, l.at, l.side),
+                rect: label::boxed(block, key, l),
             });
         }
+    }
+    // Notes (plan 2.C): the text in a thin box.
+    for (id, n) in layout.notes.iter().filter(|(_, n)| n.sheet == sid) {
+        let Some(text) = block.note_text(id) else {
+            continue;
+        };
+        let b = note_box(text, n.at);
+        out.items.push(Item::Polyline {
+            points: vec![
+                b.min,
+                [b.max[0], b.min[1]],
+                b.max,
+                [b.min[0], b.max[1]],
+                b.min,
+            ],
+            stroke: NAME,
+            fill: None,
+        });
+        out.items.push(Item::Text {
+            text: text.to_owned(),
+            at: [n.at[0] + GRID / 2, n.at[1] + GRID / 2],
+            size: SIZE,
+            anchor: Anchor::Start,
+            vertical: false,
+            colour: TEXT,
+        });
     }
     out
 }
@@ -424,5 +640,119 @@ mod tests {
                 Item::Text { text, at, .. } if *text == l.text && l.rect.holds(*at))));
         }
         assert!(p.blocks.is_empty());
+    }
+
+    #[test]
+    fn a_drawn_bus_paints_its_entries_spines_and_trunk() {
+        use crate::input::{Bus, NetKind, PinKind};
+        use crate::layout::{BusEntry, DrawnBus, Placed, Sheet};
+        use crate::testing;
+        let mut b = Block::default();
+        for i in 0..4 {
+            b.nets.push(testing::net(
+                &format!("d{i}"),
+                &format!("QSPI_SD{i}"),
+                NetKind::Signal,
+            ));
+        }
+        b.buses.push(Bus {
+            key: "bus:q".into(),
+            name: "QSPI_SD".into(),
+            members: vec![0, 1, 2, 3],
+        });
+        let side: Vec<(&str, PinKind, Option<usize>)> = ["IO0", "IO1", "IO2", "IO3"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, n)| (n, PinKind::Bidirectional, Some(i)))
+            .collect();
+        b.parts.push(testing::ic("u1", "U1", "MCU", &[], &side));
+        let mut l = Layout::default();
+        l.sheets
+            .insert("s1".into(), Sheet::new("s1".into(), [0, 0]));
+        l.placed.insert(
+            "u1".into(),
+            Placed {
+                sheet: "s1".into(),
+                at: [20 * GRID, 20 * GRID],
+                rotation: 0,
+                mirror: false,
+                held: false,
+            },
+        );
+        let shape = Shape::of(&b.parts[0], Place::new([20 * GRID, 20 * GRID], 0, false));
+        let entries: Vec<BusEntry> = (0..4)
+            .map(|k| BusEntry {
+                net: format!("d{k}"),
+                on: format!("u1/{}", b.parts[0].pins[k].number),
+                at: shape.pins[k].end,
+                side: shape.pins[k].side,
+            })
+            .collect();
+        let stub = crate::bus::stub_len(["QSPI_SD0"]);
+        let x = crate::bus::entry(entries[0].at, entries[0].side, stub).1[0];
+        l.buses.insert(
+            "bus:q".into(),
+            BTreeMap::from([(
+                "s1".into(),
+                DrawnBus {
+                    stub,
+                    trunk: vec![vec![[x, 20 * GRID], [x + 10 * GRID, 20 * GRID]]],
+                    entries,
+                    connector: None,
+                },
+            )]),
+        );
+        let p = sheet(&b, &l, "s1");
+        let buses = p
+            .items
+            .iter()
+            .filter(|i| matches!(i, Item::Bus { .. }))
+            .count();
+        assert_eq!(buses, 2, "one spine and the trunk");
+        let entry_lines = p
+            .items
+            .iter()
+            .filter(|i| matches!(i, Item::Polyline { points, stroke, .. } if points.len() == 3 && *stroke == WIRE))
+            .count();
+        assert_eq!(entry_lines, 4);
+        let texts: Vec<&str> = p
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        for i in 0..4 {
+            assert!(texts.contains(&format!("QSPI_SD{i}").as_str()), "{texts:?}");
+        }
+        assert!(texts.contains(&"QSPI_SD[0..3]"));
+    }
+
+    #[test]
+    fn a_note_is_its_text_in_a_thin_box() {
+        use crate::layout::{Instruction, PlacedNote, Sheet};
+        let mut b = Block::default();
+        b.instructions.insert(
+            "i9".into(),
+            Instruction::Note {
+                on: "s1".into(),
+                text: "Rev {rev}".into(),
+            },
+        );
+        b.notes.insert("i9".into(), "Rev B".into());
+        let mut l = Layout::default();
+        l.sheets
+            .insert("s1".into(), Sheet::new("s1".into(), [0, 0]));
+        l.notes.insert(
+            "i9".into(),
+            PlacedNote {
+                sheet: "s1".into(),
+                at: [10 * GRID, 10 * GRID],
+            },
+        );
+        let p = sheet(&b, &l, "s1");
+        assert!(p.items.iter().any(|i| matches!(i, Item::Polyline { points, stroke, fill: None } if points.len() == 5 && points[0] == points[4] && *stroke == NAME)));
+        assert!(p.items.iter().any(|i| matches!(i, Item::Text { text, size, colour, .. } if text == "Rev B" && *size == SIZE && *colour == TEXT)));
     }
 }

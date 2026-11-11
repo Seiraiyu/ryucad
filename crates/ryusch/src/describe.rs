@@ -11,7 +11,7 @@ use crate::instr;
 use crate::lint::{Finding, Score};
 use crate::shape::Shape;
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// How far a neighbour may be and still be named.
 const NEAR: i64 = 40 * GRID;
@@ -166,8 +166,55 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
                 v
             })
             .collect();
+        // Buses drawn here (plan 2.C): each with its name, members, ends
+        // and connector; its members' nets say so.
+        let mut buses: Vec<Value> = Vec::new();
+        let mut bus_of: BTreeMap<&str, String> = BTreeMap::new();
+        for (key, by) in &layout.buses {
+            let Some(d) = by.get(sid) else { continue };
+            let mut members: Vec<usize> = Vec::new();
+            let mut ends: Vec<String> = Vec::new();
+            for e in &d.entries {
+                if let Some(n) = block.net(&e.net)
+                    && !members.contains(&n)
+                {
+                    members.push(n);
+                }
+                let part = e.on.rsplit_once('/').map_or(e.on.as_str(), |(p, _)| p);
+                let who = block
+                    .part(part)
+                    .map_or(part.to_owned(), |p| block.parts[p].refdes.clone());
+                let end = format!("{who} {}", e.side.as_str());
+                if !ends.contains(&end) {
+                    ends.push(end);
+                }
+            }
+            let name = block
+                .bus(key)
+                .map_or_else(|| key.clone(), |b| crate::bus::name(block, b, &members));
+            for n in &members {
+                bus_of.insert(block.nets[*n].key.as_str(), name.clone());
+            }
+            buses.push(json!({
+                "bus": key,
+                "name": name,
+                "members": members.iter().map(|n| block.nets[*n].key.clone()).collect::<Vec<_>>(),
+                "ends": ends,
+                "connector": d.connector.as_ref().map(|c| c.text.clone()),
+            }));
+        }
         let mut nets = Vec::new();
         for net in &block.nets {
+            if let Some(name) = bus_of.get(net.key.as_str()) {
+                nets.push(json!({
+                    "net": net.key,
+                    "name": net.name,
+                    "drawn": "bus",
+                    "style": "bus",
+                    "why": format!("a member of {name}"),
+                }));
+                continue;
+            }
             let wired = layout
                 .routes
                 .get(&net.key)
@@ -190,6 +237,29 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
             }
             if fell_back {
                 v["why"] = json!("its wires would run too long or cross too many");
+            }
+            // An off-sheet connector's net: the other sheets it continues
+            // on (plan 2.C).
+            let connector = layout.labels.get(&net.key).is_some_and(|l| {
+                l.iter()
+                    .any(|x| &x.sheet == sid && x.kind == crate::layout::LabelKind::OffSheet)
+            });
+            if connector && let Some(n) = block.net(&net.key) {
+                let on: BTreeSet<&String> = block
+                    .parts
+                    .iter()
+                    .filter(|p| p.pins.iter().any(|x| x.nets().contains(&n)))
+                    .filter_map(|p| layout.placed.get(&p.key))
+                    .map(|x| &x.sheet)
+                    .filter(|s| *s != sid)
+                    .collect();
+                v["continues_on"] = json!(on);
+                v["connectors"] = json!(
+                    layout.labels[&net.key]
+                        .iter()
+                        .filter(|x| &x.sheet == sid && x.kind == crate::layout::LabelKind::OffSheet)
+                        .count()
+                );
             }
             nets.push(v);
         }
@@ -223,6 +293,25 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
             "extent": crate::lint::extent(block, layout, sid),
             "fill": crate::lint::fill(block, layout, sid),
         });
+        let notes: Vec<Value> = layout
+            .notes
+            .iter()
+            .filter(|(_, n)| &n.sheet == sid)
+            .map(|(id, n)| {
+                let text = block.note_text(id).unwrap_or("");
+                let b = crate::paint::note_box(text, n.at);
+                let on = match block.instructions.get(id) {
+                    Some(crate::layout::Instruction::Note { on, .. }) => on.clone(),
+                    _ => String::new(),
+                };
+                json!({
+                    "instruction": id,
+                    "text": text,
+                    "on": on,
+                    "box_mm": [mm(b.min[0]), mm(b.min[1]), mm(b.max[0]), mm(b.max[1])],
+                })
+            })
+            .collect();
         sheets.push(json!({
             "paper": paper,
             "regions": regions,
@@ -235,6 +324,16 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
             "nets": nets,
             "findings": findings.iter().filter(|f| &f.sheet == sid).collect::<Vec<_>>(),
         }));
+        if !notes.is_empty()
+            && let Some(Value::Object(last)) = sheets.last_mut()
+        {
+            last.insert("notes".into(), json!(notes));
+        }
+        if !buses.is_empty()
+            && let Some(Value::Object(last)) = sheets.last_mut()
+        {
+            last.insert("buses".into(), json!(buses));
+        }
     }
     let instructions: Vec<Value> = block
         .instructions
@@ -317,5 +416,85 @@ mod tests {
             d,
             describe(&b, &crate::engine::lay_out(&b).unwrap(), &f, &s)
         );
+    }
+
+    #[test]
+    fn a_connector_says_where_its_net_continues() {
+        let b = crate::testing::leaving_block();
+        let out = crate::engine::lay_out(&b).unwrap();
+        let (found, scores) = crate::lint::lint(&b, &out);
+        let v = describe(&b, &out, &found, &scores);
+        let away = &out.layout.placed["u2"].sheet;
+        let home = &out.layout.placed["u1"].sheet;
+        let sheets = v["sheets"].as_array().unwrap();
+        let mut seen = 0;
+        for sh in sheets {
+            let id = sh["sheet"].as_str().unwrap();
+            for n in sh["nets"].as_array().unwrap() {
+                if n["net"] == "sig" {
+                    let other = if id == home { away } else { home };
+                    assert_eq!(n["continues_on"], json!([other]), "{n}");
+                    seen += 1;
+                }
+            }
+        }
+        assert_eq!(seen, 2);
+    }
+
+    #[test]
+    fn a_sheet_lists_its_notes() {
+        use crate::layout::Instruction;
+        let mut b = crate::testing::leaving_block();
+        let first = crate::engine::lay_out(&b).unwrap();
+        let sid = first.layout.placed["u1"].sheet.clone();
+        b.instructions.insert(
+            "i9".into(),
+            Instruction::Note {
+                on: sid.clone(),
+                text: "Fused at 2 A".into(),
+            },
+        );
+        let out = crate::engine::lay_out(&b).unwrap();
+        let (found, scores) = crate::lint::lint(&b, &out);
+        let v = describe(&b, &out, &found, &scores);
+        let sheet = v["sheets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["sheet"] == sid.as_str())
+            .unwrap();
+        let notes = sheet["notes"].as_array().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0]["instruction"], "i9");
+        assert_eq!(notes[0]["text"], "Fused at 2 A");
+        assert_eq!(notes[0]["on"], sid.as_str());
+        assert_eq!(notes[0]["box_mm"].as_array().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn a_sheet_lists_its_buses_and_their_members_say_so() {
+        let b = crate::testing::bus_block();
+        let out = crate::engine::lay_out(&b).unwrap();
+        let (found, scores) = crate::lint::lint(&b, &out);
+        let v = describe(&b, &out, &found, &scores);
+        let sheet = &v["sheets"][0];
+        assert_eq!(
+            sheet["buses"],
+            json!([{
+                "bus": "bus:q",
+                "name": "QSPI_SD[0..3]",
+                "members": ["d0", "d1", "d2", "d3"],
+                "ends": ["U1 right", "U2 left"],
+                "connector": null,
+            }])
+        );
+        let d0 = sheet["nets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["net"] == "d0")
+            .unwrap();
+        assert_eq!(d0["style"], "bus");
+        assert_eq!(d0["why"], "a member of QSPI_SD[0..3]");
     }
 }

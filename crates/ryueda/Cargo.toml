@@ -40,6 +40,8 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 assert_cmd = "2"
 # Catalogue fixtures in their sources' shapes, written by us.
 ryueda-parts = { path = "../ryueda-parts", features = ["testing"] }
+# Seeded blocks (a bus leaving its sheet) for the output's tests.
+ryusch = { path = "../ryusch", features = ["testing"] }
 # The schematic corpus's references, checked by SHA-256.
 sha2 = "0.11"
 divan = "0.1"

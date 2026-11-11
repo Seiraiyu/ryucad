@@ -1749,9 +1749,21 @@ fn trims_section(golden: &mut Golden) {
             .collect();
         s.str(&format!(
             "{format} {:x} warnings {}",
-            md(&a.binary.unwrap()),
+            md(&stamp_free(format, a.binary.unwrap())),
             codes.join(",")
         ));
+    }
+}
+
+/// An export's bytes as a release builds them: a STEP file's header names
+/// ryustep's version, which a release stamps (`scripts/stamp-version.sh`),
+/// so it is put back to `0.0.0` before hashing, as `exports` does. Every
+/// other format names the version `export_stamped` was given.
+fn stamp_free(format: &str, bytes: Vec<u8>) -> Vec<u8> {
+    if format == "step" {
+        ryukei_testkit::unversioned(std::str::from_utf8(&bytes).unwrap()).into_bytes()
+    } else {
+        bytes
     }
 }
 
@@ -4466,7 +4478,7 @@ fn reference_imports_section(golden: &mut Golden) {
                 let a = pool
                     .install(|| ryucad::export::export_stamped(&mut session, ask, "0.0.0"))
                     .unwrap_or_else(|e| panic!("{part} {format}: {e}"));
-                out.push(format!("{:x}", md(&a.binary.unwrap())));
+                out.push(format!("{:x}", md(&stamp_free(format, a.binary.unwrap()))));
             }
         }
         runs.push(out);
@@ -4592,7 +4604,7 @@ fn flatten_section(golden: &mut Golden) {
             let a = pool
                 .install(|| ryucad::export::export_stamped(&mut session, ask, "0.0.0"))
                 .unwrap_or_else(|e| panic!("{format}: {e}"));
-            out.push(format!("{:x}", md(&a.binary.unwrap())));
+            out.push(format!("{:x}", md(&stamp_free(format, a.binary.unwrap()))));
         }
         runs.push(out);
     }

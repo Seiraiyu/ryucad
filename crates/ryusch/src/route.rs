@@ -149,6 +149,11 @@ impl Field {
         }
     }
 
+    /// Whether a box overlaps any box blocked (a body, a text or a label).
+    pub fn overlaps_box(&self, r: Rect) -> bool {
+        self.boxes.iter().any(|x| x.overlaps(&r))
+    }
+
     /// Whether a box touches no wire, pin or blocked node within half a
     /// step and overlaps no box blocked: where text may go.
     pub fn clear(&self, r: Rect) -> bool {

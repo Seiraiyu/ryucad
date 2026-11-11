@@ -19,12 +19,13 @@ use std::collections::BTreeMap;
 /// A block's layout file, in its folder.
 pub const LAYOUT: &str = "layout.json";
 pub const LAYOUT_KIND: &str = "ryueda.layout";
-/// The newest layout format this build reads: 3 holds regions, with each
+/// The newest layout format this build reads: 4 holds off-sheet
+/// connectors, drawn buses and notes (plan 2.C); 3 holds regions, with each
 /// region's parts placed relative to its origin, sheets' own papers and
 /// the region and paper instructions (plan 2.A); 2 a lasting pin-level
 /// `align` (plan 1.D); every other layout is written at 1. A layout of
 /// format 1 or 2 reads as one with no regions, at the project's paper.
-pub const LAYOUT_FORMAT: u64 = 3;
+pub const LAYOUT_FORMAT: u64 = 4;
 /// What the PDF's border takes on every side of the paper.
 pub const BORDER: Nm = 10_000_000;
 
@@ -158,6 +159,54 @@ fn node_key(n: &Node) -> Option<String> {
 }
 
 /// Whether a rail is ground: its voltage 0 V, or its name a ground's.
+/// Whether a rail's name already says its voltage (plan 2.C): a ground's
+/// name for 0 V (`is_ground`'s names), else a number in it written `3V3`,
+/// `3.3V` or `5V` (after a `+`, `_`, anything not a letter or digit, or the
+/// start) equal to it.
+fn name_says_voltage(name: &str, voltage: &str) -> bool {
+    let q = |t: &str| ryueda_parts::param::quantity(t, crate::units::Dim::VOLTAGE);
+    let Some(want) = q(voltage) else {
+        return false;
+    };
+    let upper = name.to_ascii_uppercase();
+    if q("0 V") == Some(want)
+        && ["GND", "VSS", "AGND", "DGND", "PGND", "0V"]
+            .iter()
+            .any(|g| upper == *g || upper.starts_with(&format!("{g}_")))
+    {
+        return true;
+    }
+    let b = upper.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if !b[i].is_ascii_digit() || (i > 0 && b[i - 1].is_ascii_alphanumeric()) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'.') {
+            i += 1;
+        }
+        if i < b.len() && b[i] == b'V' {
+            let whole = &upper[start..i];
+            i += 1;
+            let frac = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            let text = if whole.contains('.') || frac == i {
+                format!("{whole} V")
+            } else {
+                format!("{whole}.{} V", &upper[frac..i])
+            };
+            if q(&text) == Some(want) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn is_ground(r: &crate::conn::Rail) -> bool {
     let name = r.name.to_ascii_uppercase();
     let zero = r
@@ -447,6 +496,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
             key: id.to_string(),
             name,
             kind: NetKind::Signal,
+            intent: String::new(),
         });
     }
     let mut rails: Vec<Id> = Vec::new();
@@ -470,8 +520,17 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
         };
         let key = format!("rail:{r}");
         index.insert(key.clone(), nets.len());
+        // A rail's voltage under its power port, where its name doesn't
+        // say it already (plan 2.C).
+        let intent = rail
+            .voltage
+            .as_deref()
+            .filter(|v| !name_says_voltage(&rail.name, v))
+            .map(String::from)
+            .unwrap_or_default();
         nets.push(input::Net {
             key,
+            intent,
             name: rail.name.clone(),
             kind: if is_ground(rail) {
                 NetKind::Ground
@@ -487,8 +546,24 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
             key,
             name: port.name.clone(),
             kind: NetKind::Signal,
+            intent: String::new(),
         });
     }
+    // The block's buses (plan 2.C), their members by index in the file's
+    // order; a member that isn't one of the block's nets is left out.
+    let buses: Vec<input::Bus> = block
+        .buses
+        .iter()
+        .map(|(id, bus)| input::Bus {
+            key: format!("bus:{id}"),
+            name: bus.name.clone(),
+            members: bus
+                .nets
+                .iter()
+                .filter_map(|n| index.get(n.as_str()).copied())
+                .collect(),
+        })
+        .collect();
     let net_of = |n: Option<&Node>| n.and_then(node_key).and_then(|k| index.get(&k).copied());
     let all_layers = layers(p, &b.id);
     let room_for = widest(&all_layers);
@@ -724,6 +799,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
             papers: papers(&p.manifest.schematic.sheet),
             parts,
             nets,
+            buses,
             ..input::Block::default()
         },
         of,
@@ -802,7 +878,9 @@ pub fn lay_restoring(
     }
     built.input.moves = moves.to_vec();
     built.input.relayout = relayout;
-    let outcome = ryusch::engine::lay_out(&built.input).map_err(|r| refusal(&b.id, r))?;
+    let unknown = fill_notes(p, b, &mut built.input);
+    let mut outcome = ryusch::engine::lay_out(&built.input).map_err(|r| refusal(&b.id, r))?;
+    outcome.notes.extend(unknown);
     let stale = invalid.is_none()
         && instructions.is_none()
         && moves.is_empty()
@@ -813,6 +891,64 @@ pub fn lay_restoring(
         stale,
         invalid,
     })
+}
+
+/// Fills each note instruction's properties (plan 2.C): `{name}` from the
+/// levels a designator format reads for the block's first layer (each
+/// instance from the innermost, the block, the project) and the built-in
+/// `block` (the block's name). A note naming a property no level sets, or
+/// that doesn't read as a template, keeps its text as written, with the
+/// note `note_property_unknown`.
+pub fn fill_notes(
+    p: &Project,
+    b: &BlockFiles,
+    input: &mut input::Block,
+) -> Vec<ryusch::engine::Note> {
+    let mut outer: Vec<&crate::props::Properties> = Vec::new();
+    if let Some(first) = layers(p, &b.id).first() {
+        for iid in first.path.iter().rev() {
+            if let Some(inst) = p
+                .conn
+                .blocks
+                .values()
+                .find_map(|bf| bf.instances.get(iid))
+                .and_then(|i| i.item.as_ref().ok())
+            {
+                outer.push(&inst.properties);
+            }
+        }
+    }
+    let own = b.block.item.as_ref().ok();
+    if let Some(own) = own {
+        outer.push(&own.properties);
+    }
+    outer.push(&p.manifest.properties);
+    let levels = crate::props::Levels {
+        levels: outer,
+        built_in: BTreeMap::from([("block", input.name.clone())]),
+    };
+    let mut notes = Vec::new();
+    input.notes.clear();
+    for (id, ins) in &input.instructions {
+        let ryusch::layout::Instruction::Note { text, .. } = ins else {
+            continue;
+        };
+        let filled = crate::props::Template::parse(text).and_then(|t| t.render(&|n| levels.get(n)));
+        match filled {
+            Ok(t) => {
+                input.notes.insert(id.clone(), t);
+            }
+            Err(e) => {
+                let property = e.details.get("property").cloned().unwrap_or_default();
+                notes.push(ryusch::engine::Note {
+                    code: "note_property_unknown".into(),
+                    message: format!("note {id} keeps its text as written: {}", e.message),
+                    details: serde_json::json!({"instruction": id, "property": property}),
+                });
+            }
+        }
+    }
+    notes
 }
 
 /// The most fixes a block's findings have checked (the findings with the
@@ -995,5 +1131,90 @@ mod tests {
             read_layout(b"{}", "x").unwrap_err().code,
             Code::LayoutInvalid
         );
+    }
+
+    #[test]
+    fn a_blocks_buses_reach_the_engine() {
+        use serde_json::json;
+        let (_dir, p) = project(&[
+            (
+                "blocks/top/block.json",
+                json!({"format": 1, "kind": crate::conn::BLOCK_KIND, "name": "Top",
+                    "buses": {"b1": {"name": "D", "nets": ["sda", "scl"]}}}),
+            ),
+            (
+                "blocks/top/nets/scl.json",
+                json!({"format": 1, "kind": crate::conn::NET_KIND, "name": "SCL"}),
+            ),
+        ]);
+        let top = p.conn.block(&Id::parse("top", "b").unwrap()).unwrap();
+        let built = build(&p, top).unwrap();
+        let input = &built.input;
+        assert_eq!(input.buses.len(), 1);
+        let bus = &input.buses[0];
+        assert_eq!(bus.key, "bus:b1");
+        assert_eq!(bus.name, "D");
+        let keys: Vec<&str> = bus
+            .members
+            .iter()
+            .map(|n| input.nets[*n].key.as_str())
+            .collect();
+        assert_eq!(keys, ["sda", "scl"], "in the file's order");
+    }
+
+    #[test]
+    fn a_rails_name_that_says_its_voltage_draws_none() {
+        for (name, v) in [
+            ("3V3", "3.3 V"),
+            ("+3V3", "3.3 V"),
+            ("+3.3V", "3.3 V"),
+            ("VCC_5V", "5 V"),
+            ("+12V", "12 V"),
+            ("GND", "0 V"),
+        ] {
+            assert!(name_says_voltage(name, v), "{name} says {v}");
+        }
+        for (name, v) in [
+            ("VDD", "3.3 V"),
+            ("3V3", "5 V"),
+            ("VBAT", "3.7 V"),
+            ("AGND", "0.5 V"),
+        ] {
+            assert!(!name_says_voltage(name, v), "{name} doesn't say {v}");
+        }
+    }
+
+    #[test]
+    fn notes_take_their_blocks_properties() {
+        use ryusch::layout::Instruction;
+        use serde_json::json;
+        let (_dir, p) = project(&[(
+            "blocks/top/block.json",
+            json!({"format": 2, "kind": crate::conn::BLOCK_KIND, "name": "Top",
+                "properties": {"rev": "B"}}),
+        )]);
+        let top = p.conn.block(&Id::parse("top", "b").unwrap()).unwrap();
+        let mut input = build(&p, top).unwrap().input;
+        input.instructions.insert(
+            "i1".into(),
+            Instruction::Note {
+                on: "s1".into(),
+                text: "Rev {rev} of {block}".into(),
+            },
+        );
+        input.instructions.insert(
+            "i2".into(),
+            Instruction::Note {
+                on: "s1".into(),
+                text: "{nothing}".into(),
+            },
+        );
+        let notes = fill_notes(&p, top, &mut input);
+        assert_eq!(input.notes["i1"], "Rev B of Top");
+        assert!(!input.notes.contains_key("i2"));
+        assert_eq!(input.note_text("i2"), Some("{nothing}"));
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].code, "note_property_unknown");
+        assert_eq!(notes[0].details["property"], "nothing");
     }
 }

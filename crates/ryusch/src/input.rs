@@ -5,6 +5,17 @@ use crate::geom::{Nm, Point, Side};
 use crate::layout::{Instruction, Layout};
 use std::collections::BTreeMap;
 
+/// A block's bus: nets the grammar may draw as one bundle (plan 2.C).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bus {
+    /// `bus:<id>`: what a layout keys it by.
+    pub key: String,
+    pub name: String,
+    /// Its member nets, by index into the block's nets, in its file's
+    /// order.
+    pub members: Vec<usize>,
+}
+
 /// One block to lay out.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Block {
@@ -19,8 +30,14 @@ pub struct Block {
     pub papers: Vec<Paper>,
     pub parts: Vec<Part>,
     pub nets: Vec<Net>,
+    /// The block's buses (plan 2.C).
+    pub buses: Vec<Bus>,
     /// The lasting instructions, by ID.
     pub instructions: BTreeMap<String, Instruction>,
+    /// Each note instruction's text as drawn, by its ID (plan 2.C:
+    /// properties filled by ryueda); a note with no entry draws its
+    /// instruction's text.
+    pub notes: BTreeMap<String, String>,
     /// One-off moves: applied once, their results held as placements.
     pub moves: Vec<Instruction>,
     /// The layout the files hold, kept where it can be.
@@ -191,6 +208,10 @@ pub struct Net {
     /// What its labels say.
     pub name: String,
     pub kind: NetKind,
+    /// What the sheet writes beside its power ports or ground, in the
+    /// small size: a rail's voltage where its name doesn't say it; ""
+    /// for none (plan 2.C; 2.E's style decides what else is shown).
+    pub intent: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,6 +230,8 @@ pub enum Fill {
     None,
     Body,
     Outline,
+    /// A block port's flag: the ports' light tint (plan 2.C).
+    Port,
 }
 
 /// A piece of a part's body, in its own frame.
@@ -288,6 +311,23 @@ impl Block {
         self.nets.iter().position(|n| n.key == key)
     }
 
+    /// What note `id` says as drawn: its entry in `notes`, else its
+    /// instruction's text.
+    pub fn note_text(&self, id: &str) -> Option<&str> {
+        self.notes
+            .get(id)
+            .map(String::as_str)
+            .or_else(|| match self.instructions.get(id) {
+                Some(Instruction::Note { text, .. }) => Some(text.as_str()),
+                _ => None,
+            })
+    }
+
+    /// The bus keyed `key`.
+    pub fn bus(&self, key: &str) -> Option<usize> {
+        self.buses.iter().position(|b| b.key == key)
+    }
+
     /// What a label on pin `k` of part `p` says: its net's name, or on a
     /// stacked pin each layer's net's name in layer order, each once.
     pub fn label_text(&self, p: usize, k: usize) -> String {
@@ -345,5 +385,20 @@ mod tests {
             None,
             "the largest grows no further"
         );
+    }
+
+    #[test]
+    fn a_bus_is_found_by_its_key_and_lists_its_members() {
+        let block = Block {
+            buses: vec![Bus {
+                key: "bus:b1".into(),
+                name: "D".into(),
+                members: vec![0, 1],
+            }],
+            ..Block::default()
+        };
+        assert_eq!(block.bus("bus:b1"), Some(0));
+        assert_eq!(block.bus("b1"), None);
+        assert_eq!(block.buses[0].members, vec![0, 1]);
     }
 }

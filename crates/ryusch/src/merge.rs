@@ -1,9 +1,10 @@
 //! The three-way merge of a block's layout: what Git's merge driver (stage
 //! 4's) will call, after the block's connectivity is merged. Each key of
-//! the layout (a sheet, a part's place, its text, a net's labels or wires)
-//! changed on one side takes that side; changed alike, either. Both sides
-//! changing one key differently, or the boxes of what each side changed
-//! overlapping on a sheet, is a conflict over that area. Instructions merge
+//! the layout (a sheet, a part's place, its text, a net's labels or
+//! wires, a drawn bus, a note's place) changed on one side takes that
+//! side; changed alike, either. Both sides changing one key differently,
+//! or the boxes of what each side changed overlapping on a sheet, is a
+//! conflict over that area. Instructions merge
 //! by what they say: those either side added, less those either removed.
 //!
 //! A conflict is repaired by taking ours, taking theirs, or laying its area
@@ -28,7 +29,9 @@ use std::collections::{BTreeMap, BTreeSet};
 /// net's wires on one sheet.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct Key {
-    /// `sheets`, `regions`, `placed`, `text`, `labels` or `routes`.
+    /// `sheets`, `regions`, `placed`, `text`, `labels`, `routes`,
+    /// `buses` (`<bus>|<sheet>`, plan 2.C) or `notes` (a note's place, by
+    /// its instruction's merged ID).
     pub section: &'static str,
     pub key: String,
 }
@@ -44,6 +47,12 @@ impl Key {
                 let part = on.rsplit_once('/').map_or(on, |(p, _)| p);
                 format!("part {part}")
             }
+            "buses" => format!(
+                "bus {}",
+                self.key
+                    .split_once('|')
+                    .map_or(self.key.as_str(), |(b, _)| b)
+            ),
             s => format!("{s} {}", self.key),
         }
     }
@@ -103,6 +112,7 @@ fn values(l: &Layout) -> BTreeMap<Key, serde_json::Value> {
     put(&mut out, "regions", json(&l.regions));
     put(&mut out, "placed", json(&l.placed));
     put(&mut out, "text", json(&l.text));
+    put(&mut out, "notes", json(&l.notes));
     for (net, list) in &l.labels {
         for lab in list {
             out.insert(
@@ -122,6 +132,17 @@ fn values(l: &Layout) -> BTreeMap<Key, serde_json::Value> {
                     key: format!("{net}|{sheet}"),
                 },
                 json(runs),
+            );
+        }
+    }
+    for (bus, by_sheet) in &l.buses {
+        for (sheet, drawn) in by_sheet {
+            out.insert(
+                Key {
+                    section: "buses",
+                    key: format!("{bus}|{sheet}"),
+                },
+                json(drawn),
             );
         }
     }
@@ -156,6 +177,7 @@ fn set(l: &mut Layout, k: &Key, v: Option<&serde_json::Value>) {
         "regions" => put(&mut l.regions, &k.key, v),
         "placed" => put(&mut l.placed, &k.key, v),
         "text" => put(&mut l.text, &k.key, v),
+        "notes" => put(&mut l.notes, &k.key, v),
         "labels" => {
             let (net, on) = k.key.split_once('|').expect("a label's key");
             let list = l.labels.entry(net.to_owned()).or_default();
@@ -166,6 +188,24 @@ fn set(l: &mut Layout, k: &Key, v: Option<&serde_json::Value>) {
             }
             if list.is_empty() {
                 l.labels.remove(net);
+            }
+        }
+        "buses" => {
+            let (bus, sheet) = k.key.split_once('|').expect("a bus's key");
+            let by_sheet = l.buses.entry(bus.to_owned()).or_default();
+            match v {
+                Some(v) => {
+                    by_sheet.insert(
+                        sheet.to_owned(),
+                        serde_json::from_value(v.clone()).expect("a drawn bus"),
+                    );
+                }
+                None => {
+                    by_sheet.remove(sheet);
+                }
+            }
+            if by_sheet.is_empty() {
+                l.buses.remove(bus);
             }
         }
         _ => {
@@ -230,10 +270,30 @@ fn boxes(block: &Block, l: &Layout, k: &Key) -> Vec<(String, Rect)> {
                 .flatten()
                 .filter(|x| x.on == on)
             {
-                out.push((
-                    lab.sheet.clone(),
-                    label::label_box(lab.kind, &lab.text, lab.at, lab.side),
-                ));
+                out.push((lab.sheet.clone(), label::boxed(block, net, lab)));
+            }
+        }
+        "notes" => {
+            let text = match l.instructions.get(&k.key) {
+                Some(Instruction::Note { text, .. }) => Some(text.as_str()),
+                _ => block.note_text(&k.key),
+            };
+            if let (Some(n), Some(text)) = (l.notes.get(&k.key), text) {
+                out.push((n.sheet.clone(), crate::paint::note_box(text, n.at)));
+            }
+        }
+        "buses" => {
+            let (bus, sheet) = k.key.split_once('|').expect("a bus's key");
+            if let Some(d) = l.buses.get(bus).and_then(|b| b.get(sheet)) {
+                let pts = d
+                    .entries
+                    .iter()
+                    .map(|e| e.at)
+                    .chain(d.trunk.iter().flatten().copied())
+                    .chain(d.connector.iter().map(|c| c.at));
+                if let Some(r) = Rect::of(pts) {
+                    out.push((sheet.to_owned(), r.grow(crate::geom::GRID)));
+                }
             }
         }
         _ => {
@@ -290,8 +350,9 @@ fn instructions(base: &Layout, ours: &Layout, theirs: &Layout) -> BTreeMap<Strin
 }
 
 /// Each part's place relative to the origin of the region it had in
-/// `base` (as `l` has that region, else as `base` had it): the form both
-/// sides compare in, stable when a side joins regions or moves one whole.
+/// `base` (as `l` has that region, else as `base` had it), and each note
+/// on a region of `base` relative to it likewise: the form both sides
+/// compare in, stable when a side joins regions or moves one whole.
 /// `sign` 1 takes it back to the sheet.
 fn shifted_by_base(l: &Layout, base: &Layout, sign: crate::geom::Nm) -> Layout {
     let mut out = l.clone();
@@ -303,6 +364,44 @@ fn shifted_by_base(l: &Layout, base: &Layout, sign: crate::geom::Nm) -> Layout {
             }
         }
     }
+    for (id, n) in &mut out.notes {
+        let Some(Instruction::Note { on, .. }) = l.instructions.get(id) else {
+            continue;
+        };
+        let Some(r) = on.strip_prefix("region:") else {
+            continue;
+        };
+        let Some(at) = base
+            .regions
+            .get(r)
+            .map(|b| l.regions.get(r).map_or(b.at, |x| x.at))
+        else {
+            continue;
+        };
+        n.at = [n.at[0] - sign * at[0], n.at[1] - sign * at[1]];
+    }
+    out
+}
+
+/// `l` with its instructions as `merged` numbers them (those `merged`
+/// holds) and its notes' places under those IDs: theirs' added notes are
+/// renumbered when merged, and a note whose instruction went goes too.
+fn renumbered(l: &Layout, merged: &BTreeMap<String, Instruction>) -> Layout {
+    let mut out = l.clone();
+    out.instructions = merged
+        .iter()
+        .filter(|(_, i)| l.instructions.values().any(|x| x == *i))
+        .map(|(id, i)| (id.clone(), i.clone()))
+        .collect();
+    out.notes = l
+        .notes
+        .iter()
+        .filter_map(|(id, n)| {
+            let i = l.instructions.get(id)?;
+            let (to, _) = merged.iter().find(|(_, x)| *x == i)?;
+            Some((to.clone(), n.clone()))
+        })
+        .collect();
     out
 }
 
@@ -311,12 +410,6 @@ fn shifted_by_base(l: &Layout, base: &Layout, sign: crate::geom::Nm) -> Layout {
 /// parts had in the base (plan 2.A), so a region moved on one side and a part
 /// edited inside it on the other merge cleanly; boxes are on the sheet.
 pub fn merge(block: &Block, base: &Layout, ours: &Layout, theirs: &Layout) -> Merged {
-    let (b, o, t) = (
-        values(&shifted_by_base(base, base, 1)),
-        values(&shifted_by_base(ours, base, 1)),
-        values(&shifted_by_base(theirs, base, 1)),
-    );
-    let all: BTreeSet<&Key> = b.keys().chain(o.keys()).chain(t.keys()).collect();
     let merged = instructions(base, ours, theirs);
     // What each merged instruction moved stood before it: as the side its
     // instruction came from remembered it.
@@ -329,6 +422,18 @@ pub fn merge(block: &Block, base: &Layout, ours: &Layout, theirs: &Layout) -> Me
             })
         })
         .collect();
+    // Each side's notes under the merged IDs, from here on.
+    let (base, ours, theirs) = (
+        &renumbered(base, &merged),
+        &renumbered(ours, &merged),
+        &renumbered(theirs, &merged),
+    );
+    let (b, o, t) = (
+        values(&shifted_by_base(base, base, 1)),
+        values(&shifted_by_base(ours, base, 1)),
+        values(&shifted_by_base(theirs, base, 1)),
+    );
+    let all: BTreeSet<&Key> = b.keys().chain(o.keys()).chain(t.keys()).collect();
     let mut layout = Layout {
         instructions: merged,
         before,
@@ -453,6 +558,12 @@ pub fn resolve(
     merged: &Merged,
     repairs: &[Repair],
 ) -> Result<Outcome, Refusal> {
+    let ins = &merged.layout.instructions;
+    let (base, ours, theirs) = (
+        &renumbered(base, ins),
+        &renumbered(ours, ins),
+        &renumbered(theirs, ins),
+    );
     let (b, o, t) = (
         values(&shifted_by_base(base, base, 1)),
         values(&shifted_by_base(ours, base, 1)),
@@ -539,6 +650,97 @@ mod tests {
                 .ours
                 .iter()
                 .any(|k| k == &format!("regions/{id}"))
+        );
+    }
+
+    /// `regions_block` laid out with a note on its first region (`i9`).
+    fn noted() -> (Block, Layout, String) {
+        let mut block = crate::testing::regions_block();
+        let first = engine::lay_out(&block).unwrap().layout;
+        let rid = first.regions.keys().next().expect("a region").clone();
+        block.instructions.insert(
+            "i9".into(),
+            Instruction::Note {
+                on: format!("region:{rid}"),
+                text: "Fused at 2 A".into(),
+            },
+        );
+        block.previous = Some(first);
+        let base = engine::lay_out(&block).unwrap().layout;
+        assert!(base.notes.contains_key("i9"));
+        (block, base, rid)
+    }
+
+    /// Notes merge by their instruction's ID: kept by a merge that changes
+    /// nothing, moved where one side moved it, relative to their region
+    /// where the other side moved that, and renumbered with their
+    /// instruction when theirs adds one under an ID ours took.
+    #[test]
+    fn notes_merge_by_instruction_and_move_with_their_region() {
+        use crate::geom::GRID;
+        let (block, base, rid) = noted();
+        let m = merge(&block, &base, &base, &base);
+        assert!(m.conflicts.is_empty());
+        assert_eq!(m.layout.notes, base.notes);
+        // Ours moves the note within the region; theirs moves the region.
+        let mut ours = base.clone();
+        ours.notes.get_mut("i9").unwrap().at[0] += GRID;
+        let mut theirs = base.clone();
+        let r = theirs.regions.get_mut(&rid).unwrap();
+        r.at[1] -= 40 * GRID;
+        for k in r.parts.clone() {
+            theirs.placed.get_mut(&k).unwrap().at[1] -= 40 * GRID;
+        }
+        theirs.notes.get_mut("i9").unwrap().at[1] -= 40 * GRID;
+        let m = merge(&block, &base, &ours, &theirs);
+        assert!(m.conflicts.is_empty(), "{:#?}", m.conflicts);
+        let was = base.notes["i9"].at;
+        assert_eq!(m.layout.notes["i9"].at, [was[0] + GRID, was[1] - 40 * GRID]);
+        // Both sides add a note as i10: theirs' is renumbered, its place
+        // with it.
+        let sheet = base.regions[&rid].sheet.clone();
+        let add = |l: &Layout, text: &str, at: crate::geom::Point| {
+            let mut l = l.clone();
+            l.instructions.insert(
+                "i10".into(),
+                Instruction::Note {
+                    on: sheet.clone(),
+                    text: text.into(),
+                },
+            );
+            l.notes.insert(
+                "i10".into(),
+                crate::layout::PlacedNote {
+                    sheet: sheet.clone(),
+                    at,
+                },
+            );
+            l
+        };
+        let ours = add(&base, "Rev A", [GRID, GRID]);
+        let theirs = add(&base, "Rev B", [GRID, 4 * GRID]);
+        let m = merge(&block, &base, &ours, &theirs);
+        let (id, _) = m
+            .layout
+            .instructions
+            .iter()
+            .find(|(_, i)| matches!(i, Instruction::Note { text, .. } if text == "Rev B"))
+            .expect("theirs' note");
+        assert_ne!(id, "i10");
+        assert_eq!(m.layout.notes["i10"].at, [GRID, GRID]);
+        assert_eq!(m.layout.notes[id].at, [GRID, 4 * GRID]);
+        // Both sides moving the note differently: a conflict over it.
+        let mut ours = base.clone();
+        ours.notes.get_mut("i9").unwrap().at[0] += GRID;
+        let mut theirs = base.clone();
+        theirs.notes.get_mut("i9").unwrap().at[0] += 2 * GRID;
+        let m = merge(&block, &base, &ours, &theirs);
+        assert!(
+            m.conflicts
+                .iter()
+                .any(|c| c.ours.contains(&"notes/i9".to_owned()) && !c.areas.is_empty()),
+            "{:#?}",
+            m.conflicts
         );
     }
 
@@ -641,5 +843,64 @@ mod tests {
         assert_eq!(m.conflicts[0].ours, [format!("sheets/{first}")]);
         let out = resolve(&b, &base, &l1, &l2, &m, &[Repair::Theirs]).unwrap();
         assert_eq!(out.layout.sheets[&first].name, "B");
+    }
+
+    #[test]
+    fn a_label_made_a_connector_on_one_side_merges_cleanly() {
+        use crate::layout::LabelKind;
+        let block = crate::testing::leaving_block();
+        let base = crate::engine::lay_out(&block).unwrap().layout;
+        let mut ours = base.clone();
+        let l = ours
+            .labels
+            .get_mut("o3")
+            .and_then(|v| v.first_mut())
+            .expect("O3's label");
+        l.kind = LabelKind::OffSheet;
+        let mut theirs = base.clone();
+        theirs.placed.get_mut("r1").unwrap().rotation = 270;
+        let m = merge(&block, &base, &ours, &theirs);
+        assert!(m.conflicts.is_empty(), "{:#?}", m.conflicts);
+        assert_eq!(m.layout.labels["o3"][0].kind, LabelKind::OffSheet);
+        assert_eq!(m.layout.placed["r1"].rotation, 270);
+    }
+
+    #[test]
+    fn a_bus_merges_as_one_key_a_sheet() {
+        let block = crate::testing::bus_block();
+        let base = crate::engine::lay_out(&block).unwrap().layout;
+        let sid = base.placed["u1"].sheet.clone();
+        let key = format!("buses/bus:q|{sid}");
+        // Ours moves the trunk; theirs changes nothing near it.
+        let mut ours = base.clone();
+        let bus = ours.buses.get_mut("bus:q").unwrap().get_mut(&sid).unwrap();
+        for p in bus.trunk.iter_mut().flatten() {
+            p[1] += crate::geom::GRID;
+        }
+        let mut theirs = base.clone();
+        theirs.instructions.insert(
+            "i1".into(),
+            Instruction::Flow {
+                parts: vec!["u2".into()],
+            },
+        );
+        let m = merge(&block, &base, &ours, &theirs);
+        assert!(m.conflicts.is_empty(), "{:#?}", m.conflicts);
+        assert_eq!(m.layout.buses, ours.buses);
+        assert!(m.layout.instructions.contains_key("i1"));
+        // Both change it differently: one conflict naming it.
+        let mut theirs2 = base.clone();
+        let bus = theirs2
+            .buses
+            .get_mut("bus:q")
+            .unwrap()
+            .get_mut(&sid)
+            .unwrap();
+        for p in bus.trunk.iter_mut().flatten() {
+            p[1] -= crate::geom::GRID;
+        }
+        let m = merge(&block, &base, &ours, &theirs2);
+        assert_eq!(m.conflicts.len(), 1);
+        assert!(m.conflicts[0].ours.contains(&key), "{:?}", m.conflicts[0]);
     }
 }

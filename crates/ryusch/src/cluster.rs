@@ -99,7 +99,13 @@ impl Cluster {
                 let name = &block.label_text(p, k);
                 // A rail may be drawn by labels instead: room for either.
                 r = r
-                    .union(crate::label::label_box(kind, name, anchor, side))
+                    .union(crate::label::label_box_with(
+                        kind,
+                        name,
+                        &block.nets[n].intent,
+                        anchor,
+                        side,
+                    ))
                     .union(crate::label::label_box(
                         LabelKind::Net,
                         name,
@@ -115,6 +121,25 @@ impl Cluster {
     /// placed among others reserves, since its nets may take labels.
     pub fn room_with_labels(&self, block: &Block, origin: Point) -> Rect {
         self.room_labelled(block, origin, |_| true)
+    }
+
+    /// [`Cluster::room_labelled`], with the room a bus's members need
+    /// where they leave the sheet (`away`: its stubs, entries, a short
+    /// trunk and its connector; plan 2.C).
+    pub fn room_away(&self, block: &Block, origin: Point, away: impl Fn(usize) -> bool) -> Rect {
+        let mut r = self.room_labelled(block, origin, &away);
+        for (p, place) in self.places(origin) {
+            let shape = Shape::of(&block.parts[p], place);
+            for (k, pin) in block.parts[p].pins.iter().enumerate() {
+                if pin.drawn_net().is_some_and(&away) {
+                    let at = shape.pins[k];
+                    if let Some(b) = crate::bus::leaving_room(block, p, k, at.end, at.side) {
+                        r = r.union(b);
+                    }
+                }
+            }
+        }
+        r
     }
 
     /// Its room with a label on each signal pin whose net `labelled` says

@@ -8,6 +8,9 @@ use crate::font::{self, Anchor, SIZE};
 use crate::geom::{GRID, Nm, Point, Rect, Side};
 use crate::layout::LabelKind;
 
+/// The size of the text inside an off-sheet connector.
+pub const FLAG_TEXT: Nm = SIZE * 4 / 5;
+
 /// A label drawn: its lines, its text and the box it all takes (apart
 /// from its anchor's own node, which its pin or stub holds).
 pub struct Drawn {
@@ -16,6 +19,9 @@ pub struct Drawn {
     /// the page.
     pub text: Option<(Point, Anchor, bool)>,
     pub bounds: Rect,
+    /// A power port's or ground's intent: its text, anchor point and
+    /// anchoring, in the small size (plan 2.C).
+    pub extra: Option<(Point, Anchor, String)>,
 }
 
 /// `p` given with y along `side` (x to its right), from `at`.
@@ -68,6 +74,7 @@ pub fn drawn(kind: LabelKind, name: &str, at: Point, side: Side) -> Drawn {
                 lines,
                 text: Some((base, anchor, v)),
                 bounds: shape.union(tb),
+                extra: None,
             }
         }
         LabelKind::Ground => {
@@ -87,12 +94,14 @@ pub fn drawn(kind: LabelKind, name: &str, at: Point, side: Side) -> Drawn {
                     lines,
                     text: Some((base, anchor, v)),
                     bounds: shape.union(tb),
+                    extra: None,
                 }
             } else {
                 Drawn {
                     lines,
                     text: None,
                     bounds: shape,
+                    extra: None,
                 }
             }
         }
@@ -144,9 +153,137 @@ pub fn drawn(kind: LabelKind, name: &str, at: Point, side: Side) -> Drawn {
                 lines: vec![line],
                 text: Some((base, anchor, vertical)),
                 bounds: wire.union(tb),
+                extra: None,
+            }
+        }
+        LabelKind::OffSheet => {
+            // Along the way it points from its anchor: a point (half a
+            // step), the name's body, a point, then a second chevron half
+            // a step on. Which end carries the second chevron is the
+            // drawing's (`drawn_flow`); the box is the same.
+            let tw = font::width(name, FLAG_TEXT);
+            let h = GRID / 2;
+            let body = tw + GRID; // half a step of room each side of the name
+            let tip = GRID / 2 + body + GRID / 2;
+            let outline = vec![
+                a([0, 0]),
+                a([h, GRID / 2]),
+                a([h, GRID / 2 + body]),
+                a([0, tip]),
+                a([-h, GRID / 2 + body]),
+                a([-h, GRID / 2]),
+                a([0, 0]),
+            ];
+            let chevron = vec![a([h, tip]), a([0, tip + GRID / 2]), a([-h, tip])];
+            let (base, anchor) = match side {
+                Side::Right => ([at[0] + GRID, at[1] - FLAG_TEXT / 3], Anchor::Start),
+                Side::Left => ([at[0] - GRID, at[1] - FLAG_TEXT / 3], Anchor::End),
+                // Never drawn up or down (`upright`); kept total.
+                Side::Up | Side::Down => ([at[0], at[1]], Anchor::Middle),
+            };
+            let bounds = Rect::of([a([-h, 0]), a([h, tip + GRID / 2])]).expect("points");
+            Drawn {
+                lines: vec![outline, chevron],
+                text: Some((base, anchor, false)),
+                bounds,
+                extra: None,
             }
         }
     }
+}
+
+/// Which way net `net`'s signal crosses sheet `sid`'s edge, from its pins
+/// in the whole block: out where pins on the sheet drive it, none on
+/// another sheet does and some pin there is on it; in where one elsewhere
+/// drives it and none here does; both ways otherwise. A block port's pin
+/// counts by its kind, as any pin does.
+pub fn flow_on_sheet(
+    block: &crate::input::Block,
+    layout: &crate::layout::Layout,
+    net: usize,
+    sid: &str,
+) -> crate::input::Flow {
+    use crate::input::{Flow, PinKind};
+    let (mut drive_here, mut drive_there, mut rest_there) = (false, false, false);
+    for part in &block.parts {
+        let Some(x) = layout.placed.get(&part.key) else {
+            continue;
+        };
+        let here = x.sheet == sid;
+        for pin in part.pins.iter().filter(|p| p.nets().contains(&net)) {
+            let drives = pin.kind.drives() || pin.kind == PinKind::PowerOut;
+            match (here, drives) {
+                (true, true) => drive_here = true,
+                (false, true) => drive_there = true,
+                (false, false) => rest_there = true,
+                (true, false) => {}
+            }
+        }
+    }
+    if drive_here && !drive_there && rest_there {
+        Flow::Out
+    } else if drive_there && !drive_here {
+        Flow::In
+    } else {
+        Flow::Bidirectional
+    }
+}
+
+/// An off-sheet connector drawn for its signal's way: the outline of
+/// [`drawn`], and its second chevron at the far end (out), turned back at
+/// the anchor end inside the first point (in), or both (both ways). The
+/// box is [`drawn`]'s whatever the flow.
+pub fn drawn_flow(name: &str, at: Point, side: Side, flow: crate::input::Flow) -> Drawn {
+    use crate::input::Flow;
+    let mut d = drawn(LabelKind::OffSheet, name, at, side);
+    let a = |p: Point| along(at, side, p);
+    let h = GRID / 2;
+    // The inner chevron: pointing back at the wire, inside the first point.
+    let inward = vec![a([h, GRID]), a([0, GRID / 2]), a([-h, GRID])];
+    let outward = d.lines.pop().expect("a second chevron");
+    match flow {
+        Flow::Out => d.lines.push(outward),
+        Flow::In => d.lines.push(inward),
+        _ => {
+            d.lines.push(outward);
+            d.lines.push(inward);
+        }
+    }
+    d
+}
+
+/// [`drawn`], with a power port's or ground's intent written past its
+/// name in the small size (a supply's above it, a ground's below it).
+pub fn drawn_with(kind: LabelKind, name: &str, intent: &str, at: Point, side: Side) -> Drawn {
+    let mut d = drawn(kind, name, at, side);
+    if intent.is_empty() || !matches!(kind, LabelKind::Power | LabelKind::Ground) {
+        return d;
+    }
+    let base = if kind == LabelKind::Power {
+        [at[0], d.bounds.max[1] + GRID / 4]
+    } else {
+        [at[0], d.bounds.min[1] - GRID / 4 - font::MIN_SIZE]
+    };
+    let tb = font::text_box(intent, font::MIN_SIZE, base, Anchor::Middle);
+    d.bounds = d.bounds.union(tb);
+    d.extra = Some((base, Anchor::Middle, intent.to_owned()));
+    d
+}
+
+/// The box [`drawn_with`] takes.
+pub fn label_box_with(kind: LabelKind, name: &str, intent: &str, at: Point, side: Side) -> Rect {
+    drawn_with(kind, name, intent, at, side).bounds
+}
+
+/// The box label `l` of the net keyed `key` takes, its net's intent
+/// written past a power port or ground.
+pub fn boxed(block: &crate::input::Block, key: &str, l: &crate::layout::Label) -> Rect {
+    label_box_with(l.kind, &l.text, intent_of(block, key), l.at, l.side)
+}
+
+/// The intent of the net keyed `key`, "" for none.
+pub fn intent_of<'a>(block: &'a crate::input::Block, key: &str) -> &'a str {
+    block.net(key).map_or("", |n| block.nets[n].intent.as_str())
 }
 
 /// The box a label takes.
@@ -162,8 +299,8 @@ pub fn pointing(kind: LabelKind, side: Side) -> Side {
     match kind {
         LabelKind::Power => Side::Up,
         LabelKind::Ground => Side::Down,
-        LabelKind::Net if side.horizontal() => side,
-        LabelKind::Net => Side::Right,
+        LabelKind::Net | LabelKind::OffSheet if side.horizontal() => side,
+        LabelKind::Net | LabelKind::OffSheet => Side::Right,
     }
 }
 
@@ -173,7 +310,7 @@ pub fn upright(kind: LabelKind, to: Side) -> bool {
     match kind {
         LabelKind::Power => to == Side::Up,
         LabelKind::Ground => to == Side::Down,
-        LabelKind::Net => to.horizontal(),
+        LabelKind::Net | LabelKind::OffSheet => to.horizontal(),
     }
 }
 
@@ -329,5 +466,124 @@ mod tests {
         assert!(!vertical && base[1] > 0);
         let p = label_box(LabelKind::Power, "3V3", [0, 0], Side::Right);
         assert!(p.min[0] > 0);
+    }
+
+    #[test]
+    fn an_off_sheet_connector_is_an_outlined_chevron_whose_box_is_its_own() {
+        let at = [10 * GRID, 10 * GRID];
+        let name = "SDA";
+        let w = font::width(name, FLAG_TEXT);
+        for side in [Side::Right, Side::Left] {
+            let d = drawn(LabelKind::OffSheet, name, at, side);
+            // Its outline is closed and holds its text.
+            let outline = &d.lines[0];
+            assert_eq!(outline.first(), outline.last(), "{side:?}: closed");
+            let b = label_box(LabelKind::OffSheet, name, at, side);
+            assert_eq!(
+                b.width(),
+                w + 3 * GRID / 2 + GRID,
+                "{side:?}: long as its name and its points"
+            );
+            assert_eq!(b.height(), GRID, "{side:?}: half a step each way");
+            // It starts at its anchor and runs the way it points.
+            if side == Side::Right {
+                assert_eq!(b.min[0], at[0]);
+            } else {
+                assert_eq!(b.max[0], at[0]);
+            }
+        }
+        // It reads across the page from any pin, as a net label does.
+        assert_eq!(pointing(LabelKind::OffSheet, Side::Up), Side::Right);
+        assert!(upright(LabelKind::OffSheet, Side::Left));
+        assert!(!upright(LabelKind::OffSheet, Side::Up));
+        // Not the net label's box: a different outline takes a different place.
+        assert_ne!(
+            label_box(LabelKind::OffSheet, name, at, Side::Right),
+            label_box(LabelKind::Net, name, at, Side::Right)
+        );
+    }
+
+    #[test]
+    fn a_connector_points_the_way_its_signal_goes() {
+        use crate::input::{Flow, NetKind, PinKind};
+        use crate::layout::{Layout, Placed, Sheet};
+        use crate::testing;
+        // u1 drives n on s1; u2 takes it on s2.
+        let mut b = crate::input::Block::default();
+        b.nets.push(testing::net("n", "SIG", NetKind::Signal));
+        let mut u1 = testing::resistor("u1", "R1", "1k", [Some(0), None]);
+        u1.pins[0].kind = PinKind::Output;
+        let mut u2 = testing::resistor("u2", "R2", "1k", [Some(0), None]);
+        u2.pins[0].kind = PinKind::Input;
+        b.parts = vec![u1, u2];
+        let mut l = Layout::default();
+        for (s, k) in [("s1", "u1"), ("s2", "u2")] {
+            l.sheets.insert(s.into(), Sheet::new(s.into(), [0, 0]));
+            l.placed.insert(
+                k.into(),
+                Placed {
+                    sheet: s.into(),
+                    at: [0, 0],
+                    rotation: 0,
+                    mirror: false,
+                    held: false,
+                },
+            );
+        }
+        assert_eq!(flow_on_sheet(&b, &l, 0, "s1"), Flow::Out);
+        assert_eq!(flow_on_sheet(&b, &l, 0, "s2"), Flow::In);
+        b.parts[1].pins[0].kind = PinKind::Bidirectional;
+        assert_eq!(
+            flow_on_sheet(&b, &l, 0, "s1"),
+            Flow::Out,
+            "a driver here, the rest elsewhere"
+        );
+        b.parts[0].pins[0].kind = PinKind::Passive;
+        assert_eq!(flow_on_sheet(&b, &l, 0, "s1"), Flow::Bidirectional);
+        // The second chevron sits at the end the signal leaves by; the box
+        // never moves.
+        let at = [10 * GRID, 10 * GRID];
+        let out = drawn_flow("SIG", at, Side::Right, Flow::Out);
+        let inn = drawn_flow("SIG", at, Side::Right, Flow::In);
+        assert_eq!(out.bounds, inn.bounds);
+        let far = out.bounds.max[0];
+        assert!(
+            out.lines
+                .iter()
+                .skip(1)
+                .all(|l| l.iter().any(|p| p[0] == far))
+        );
+        assert!(
+            inn.lines
+                .iter()
+                .skip(1)
+                .all(|l| l.iter().all(|p| p[0] < at[0] + 2 * GRID))
+        );
+        assert_eq!(
+            drawn_flow("SIG", at, Side::Right, Flow::Bidirectional)
+                .lines
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn a_power_port_writes_its_rails_voltage_under_its_name() {
+        let at = [10 * GRID, 10 * GRID];
+        let plain = label_box(LabelKind::Power, "VDD", at, Side::Up);
+        let with = label_box_with(LabelKind::Power, "VDD", "3.3 V", at, Side::Up);
+        assert!(with.max[1] > plain.max[1], "a line more, above the name");
+        let d = drawn_with(LabelKind::Ground, "AGND", "0 V", at, Side::Down);
+        assert_eq!(d.extra.as_ref().map(|(_, _, t)| t.as_str()), Some("0 V"));
+        // No intent, no change.
+        assert_eq!(
+            label_box_with(LabelKind::Power, "VDD", "", at, Side::Up),
+            plain
+        );
+        // Net labels and connectors carry none in 2.C.
+        assert_eq!(
+            label_box_with(LabelKind::Net, "SDA", "fast", at, Side::Right),
+            label_box(LabelKind::Net, "SDA", at, Side::Right)
+        );
     }
 }

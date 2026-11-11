@@ -83,6 +83,17 @@ fn draw(c: &mut Canvas, origin: Point, it: &Item) {
     let stroke = |c: &mut Canvas, s: &str| c.stroke_colour(Colour::hex(s));
     let fill = |c: &mut Canvas, s: &str| c.fill_colour(Colour::hex(s));
     match it {
+        Item::Bus { points } => {
+            let Some(first) = points.first() else { return };
+            stroke(c, ryusch::paint::BUS);
+            c.line_width(ryusch::paint::BUS_LINE as f64);
+            c.move_to(at(*first));
+            for p in &points[1..] {
+                c.line_to(at(*p));
+            }
+            c.stroke();
+            c.line_width(LINE as f64);
+        }
         Item::Polyline {
             points,
             stroke: s,

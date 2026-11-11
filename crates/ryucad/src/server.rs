@@ -5696,16 +5696,35 @@ pub fn publish(live: &mut Live, session: &mut Session) {
     }
     live.seen.project = project;
     // A merge: when it starts, ends, or what it leaves to settle changes.
+    // A status that failed is said again once what it read moves, though
+    // its key reads the same: else one read while Git was still writing
+    // would stand until the merge's state next changed.
     let merge = crate::validate::key(session);
-    if watched && live.seen.merge != merge {
+    let retry = live
+        .seen
+        .merge_failed
+        .is_some()
+        .then(|| crate::validate::retry_stamp(session));
+    let failed_moved = retry.is_some() && retry != live.seen.merge_failed;
+    if watched && (live.seen.merge != merge || failed_moved) {
+        let stamp = merge
+            .is_some()
+            .then(|| retry.unwrap_or_else(|| crate::validate::retry_stamp(session)));
+        let mut failed = None;
         let params = match merge {
             None => json!({"merging": false}),
             Some(_) => match crate::validate::status(session) {
                 Ok(s) => json!({"merging": true, "status": s}),
-                Err(e) => json!({"merging": true, "error": e}),
+                Err(e) => {
+                    failed = stamp;
+                    json!({"merging": true, "error": e})
+                }
             },
         };
         live.hub.send(Topic::Merge, "merge.changed", &params);
+        live.seen.merge_failed = failed;
+    } else if !watched {
+        live.seen.merge_failed = None;
     }
     live.seen.merge = merge;
     compared(live, session, watched);

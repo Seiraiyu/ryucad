@@ -850,6 +850,12 @@ pub enum Code {
     PackageInvalid,
     /// A package of an obsolete release: obsolete releases have none.
     ReleaseObsolete,
+    /// ryueda lint: an off-sheet connector on a net that stays on its
+    /// sheet, or a region of a net that leaves with none (plan 2.C).
+    SchOffSheetLocal,
+    /// ryueda lint: four or more members of a bus between the same parts'
+    /// sides drawn apart (plan 2.C).
+    SchBusUnbundled,
 }
 
 impl Code {
@@ -1137,6 +1143,8 @@ mod tests {
         assert_eq!(json!(Code::RegionUnresolved), json!("region_unresolved"));
         assert_eq!(json!(Code::SheetResized), json!("sheet_resized"));
         assert_eq!(json!(Code::SchPaperFit), json!("sch_paper_fit"));
+        assert_eq!(json!(Code::SchOffSheetLocal), json!("sch_off_sheet_local"));
+        assert_eq!(json!(Code::SchBusUnbundled), json!("sch_bus_unbundled"));
         assert_eq!(json!(Code::SchFunctionSplit), json!("sch_function_split"));
         assert_eq!(json!(Code::SchRegionUntitled), json!("sch_region_untitled"));
         assert_eq!(json!(Code::LayoutConflict), json!("layout_conflict"));

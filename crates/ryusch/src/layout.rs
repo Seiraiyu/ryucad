@@ -39,6 +39,64 @@ pub struct Layout {
     /// Each net's wires, by sheet: runs of points.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub routes: BTreeMap<String, BTreeMap<String, Vec<Vec<Point>>>>,
+    /// Each bus drawn as a bus wire, by bus key and sheet (format 4).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub buses: BTreeMap<String, BTreeMap<String, DrawnBus>>,
+    /// Each note's place, by its instruction's ID (format 4).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub notes: BTreeMap<String, PlacedNote>,
+}
+
+/// Where a note stands.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlacedNote {
+    pub sheet: String,
+    /// Its box's lower left, on the sheet.
+    pub at: Point,
+}
+
+/// A bus drawn on one sheet: its trunk, and each member's entry. Each
+/// entry's stub, its 45° run and the spines through the entries follow
+/// from `at` and `side` (`bus::entry`, `bus::spine`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DrawnBus {
+    /// How long its stubs run from their pins (`bus::stub_len` when it
+    /// was drawn).
+    pub stub: Nm,
+    /// The trunk's runs, joining the spines (or a spine and its
+    /// connector).
+    pub trunk: Vec<Vec<Point>>,
+    pub entries: Vec<BusEntry>,
+    /// Where the members leave the sheet: the bus's off-sheet connector,
+    /// at the trunk's far end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector: Option<BusConnector>,
+}
+
+/// A member's entry into a drawn bus.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BusEntry {
+    /// The member's net key.
+    pub net: String,
+    /// The pin it serves: `<part key>/<pin number>`.
+    pub on: String,
+    /// The pin's end.
+    pub at: Point,
+    /// Which way the pin points.
+    pub side: Side,
+}
+
+/// A drawn bus's off-sheet connector.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BusConnector {
+    pub at: Point,
+    pub side: Side,
+    /// What it says: the bundle's name when it was placed.
+    pub text: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +194,18 @@ pub enum LabelKind {
     Power,
     /// Ground: the ground symbol, pointing down.
     Ground,
+    /// An off-sheet connector: an outlined double chevron holding the
+    /// net's name, for a net that continues on another sheet of the
+    /// block (format 4). Last, so the kinds before it keep their order.
+    OffSheet,
+}
+
+impl LabelKind {
+    /// Whether it names a signal net (a net label or an off-sheet
+    /// connector), not a rail.
+    pub fn signal(self) -> bool {
+        matches!(self, LabelKind::Net | LabelKind::OffSheet)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,6 +240,8 @@ pub enum NetStyle {
     Label,
     /// Power ports (a rail's).
     Port,
+    /// A bus wire with entries (a bus's style, by its key; plan 2.C).
+    Bus,
 }
 
 /// The connectivity patterns drawn in canonical shapes.
@@ -314,7 +386,13 @@ pub enum Instruction {
         field: TextField,
         side: Side,
     },
+    /// A note: one line of text in a region (`region:<id>`) or on a sheet
+    /// (its ID), placed by the engine (format 4).
+    Note { on: String, text: String },
 }
+
+/// The longest a note may be, in characters.
+pub const NOTE_MAX: usize = 120;
 
 /// Which of a part's text fields an instruction places.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -358,7 +436,7 @@ impl Instruction {
             | Instruction::Region { parts, .. }
             | Instruction::RegionNone { parts }
             | Instruction::Text { parts, .. } => parts,
-            Instruction::Net { .. } | Instruction::Paper { .. } => &[],
+            Instruction::Net { .. } | Instruction::Paper { .. } | Instruction::Note { .. } => &[],
         }
     }
 
@@ -371,6 +449,7 @@ impl Instruction {
             Instruction::Near { to, .. } => out.push(to),
             Instruction::Net { net, .. } => out.push(net),
             Instruction::Paper { sheet, .. } => out.push(sheet),
+            Instruction::Note { on, .. } => out.push(on),
             _ => {}
         }
         out
@@ -393,6 +472,7 @@ impl Instruction {
             Instruction::Region { .. } | Instruction::RegionNone { .. } => "region",
             Instruction::Paper { .. } => "paper",
             Instruction::Text { .. } => "text",
+            Instruction::Note { .. } => "note",
         }
     }
 }
@@ -406,10 +486,31 @@ impl Layout {
             .any(|i| matches!(i, Instruction::Align { parts, .. } if parts.iter().any(|p| p.contains('/'))))
     }
 
-    /// The lowest layout format that holds it: 3 for regions, a sheet's
-    /// own paper or an instruction format 3 brings; 2 for a lasting
-    /// pin-level `align`; else 1.
+    /// The lowest layout format that holds it: 4 for an off-sheet
+    /// connector, a drawn bus, a note or an instruction format 4 brings
+    /// (plan 2.C); 3 for regions, a sheet's own paper or an instruction
+    /// format 3 brings; 2 for a lasting pin-level `align`; else 1.
     pub fn format(&self) -> u64 {
+        let four = self
+            .labels
+            .values()
+            .flatten()
+            .any(|l| l.kind == LabelKind::OffSheet)
+            || !self.buses.is_empty()
+            || !self.notes.is_empty()
+            || self.instructions.values().any(|i| {
+                matches!(
+                    i,
+                    Instruction::Note { .. }
+                        | Instruction::Net {
+                            style: NetStyle::Bus,
+                            ..
+                        }
+                )
+            });
+        if four {
+            return 4;
+        }
         let three = !self.regions.is_empty()
             || !self.before.is_empty()
             || self
@@ -467,6 +568,16 @@ impl Layout {
                     }
                 }
             }
+        }
+        // A note on a region stands in it as its parts do (plan 2.C).
+        for (id, n) in &mut out.notes {
+            let Some(Instruction::Note { on, .. }) = self.instructions.get(id) else {
+                continue;
+            };
+            let Some(r) = on.strip_prefix("region:").and_then(|r| self.regions.get(r)) else {
+                continue;
+            };
+            n.at = [n.at[0] + sign * r.at[0], n.at[1] + sign * r.at[1]];
         }
         out
     }
@@ -634,5 +745,117 @@ mod tests {
             serde_json::to_value(&l).unwrap(),
             json!({"placed": {"r1": {"sheet": "s1", "at": [0, 0]}}})
         );
+    }
+
+    #[test]
+    fn an_off_sheet_connector_makes_a_layout_format_4_and_reads_back() {
+        let mut l = Layout::default();
+        l.sheets
+            .insert("s1".into(), Sheet::new("Sheet 1".into(), [0, 0]));
+        assert_eq!(l.format(), 1);
+        l.labels.insert(
+            "n1".into(),
+            vec![Label {
+                sheet: "s1".into(),
+                at: [0, 0],
+                side: Side::Right,
+                kind: LabelKind::OffSheet,
+                on: "u1/3".into(),
+                text: "SDA".into(),
+            }],
+        );
+        assert_eq!(l.format(), 4);
+        let json = serde_json::to_value(&l).unwrap();
+        assert_eq!(json["labels"]["n1"][0]["kind"], "off_sheet");
+        assert_eq!(serde_json::from_value::<Layout>(json).unwrap(), l);
+    }
+
+    #[test]
+    fn a_drawn_bus_makes_format_4_and_reads_back() {
+        let mut l = Layout::default();
+        l.buses.insert(
+            "bus:d".into(),
+            BTreeMap::from([(
+                "s1".into(),
+                DrawnBus {
+                    stub: 2_540_000,
+                    trunk: vec![vec![[0, 0], [10 * 1_270_000, 0]]],
+                    entries: vec![BusEntry {
+                        net: "d0".into(),
+                        on: "u1/3".into(),
+                        at: [-2_540_000, 0],
+                        side: Side::Right,
+                    }],
+                    connector: None,
+                },
+            )]),
+        );
+        assert_eq!(l.format(), 4);
+        let json = serde_json::to_value(&l).unwrap();
+        assert_eq!(serde_json::from_value::<Layout>(json).unwrap(), l);
+    }
+
+    #[test]
+    fn a_note_round_trips_and_makes_format_4() {
+        let note: Instruction = serde_json::from_value(serde_json::json!({
+            "op": "note", "on": "region:r2", "text": "Keep C4 within 2 mm of U1"
+        }))
+        .unwrap();
+        assert_eq!(note.verb(), "note");
+        assert_eq!(note.subjects(), vec!["region:r2"]);
+        let mut l = Layout::default();
+        l.instructions.insert("i1".into(), note);
+        assert_eq!(l.format(), 4);
+        l.notes.insert(
+            "i1".into(),
+            PlacedNote {
+                sheet: "s1".into(),
+                at: [0, 0],
+            },
+        );
+        let back: Layout = serde_json::from_value(serde_json::to_value(&l).unwrap()).unwrap();
+        assert_eq!(back, l);
+    }
+    /// A note on a region is kept relative to the region's origin in the
+    /// file, as its parts are, so the region's move is one key; a note on
+    /// a sheet stays where it is.
+    #[test]
+    fn a_regions_note_is_relative_to_it_in_the_file() {
+        let mut l = Layout::default();
+        l.regions.insert(
+            "r2".into(),
+            Region {
+                sheet: "s1".into(),
+                at: [100, 200],
+                frame: Rect::new([0, 0], [500, 500]),
+                title: "F".into(),
+                named: false,
+                parts: Vec::new(),
+            },
+        );
+        for (id, on) in [("i1", "region:r2"), ("i2", "s1")] {
+            l.instructions.insert(
+                id.into(),
+                Instruction::Note {
+                    on: on.into(),
+                    text: "x".into(),
+                },
+            );
+            l.notes.insert(
+                id.into(),
+                PlacedNote {
+                    sheet: "s1".into(),
+                    at: [150, 260],
+                },
+            );
+        }
+        let rel = l.relative();
+        assert_eq!(rel.notes["i1"].at, [50, 60]);
+        assert_eq!(rel.notes["i2"].at, [150, 260]);
+        assert_eq!(rel.absolute(), l);
+        // The region moved in the file: its note with it.
+        let mut moved = rel.clone();
+        moved.regions.get_mut("r2").unwrap().at = [300, 0];
+        assert_eq!(moved.absolute().notes["i1"].at, [350, 60]);
     }
 }

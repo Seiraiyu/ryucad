@@ -147,6 +147,87 @@ pub struct Bank {
     pub rows: Vec<(usize, Vec<usize>)>,
 }
 
+/// A bank's row on a port's net (#429): the pin, its members' pins on
+/// the net. Drawn as a wire along the row carrying a net label named as
+/// the port; the port's flag stands with the block's ports.
+#[derive(Clone, Debug)]
+pub struct BankRow {
+    pub net: usize,
+    pub pin: (usize, usize),
+    pub members: Vec<(usize, usize)>,
+    /// A port is on its net, or a pin beyond the row: the row carries
+    /// the net's name.
+    pub ported: bool,
+    /// The side of its part the bank stands on.
+    pub side: Side,
+}
+
+impl BankRow {
+    /// Whether the row carries net `n`'s name: a ported row on it. Such a
+    /// net keeps its net labels (they stand in the row), so it takes no
+    /// off-sheet connector, which the engine and the lint both hold to.
+    pub fn names(&self, n: usize) -> bool {
+        self.ported && self.net == n
+    }
+}
+
+/// The banks' rows, from the idioms and where parts stand (`at`, in any
+/// frame a part's sheet shares): what the engine draws and the lint
+/// judges alike.
+pub fn bank_rows(block: &Block, idioms: &[Idiom], at: &BTreeMap<usize, Place>) -> Vec<BankRow> {
+    let shape = |p: usize| at.get(&p).map(|pl| Shape::of(&block.parts[p], *pl));
+    let mut out = Vec::new();
+    for b in banks(block, idioms, at) {
+        for (k, list) in &b.rows {
+            let Some(net) = block.parts[b.part].pins[*k].net else {
+                continue;
+            };
+            // A port on its net, or a pin beyond the row's own: the row
+            // carries the net's name.
+            let row_parts: BTreeSet<usize> = list
+                .iter()
+                .map(|i| idioms[*i].parts[0])
+                .chain([b.part])
+                .collect();
+            let ported = block.parts.iter().enumerate().any(|(q, part)| {
+                (matches!(part.kind, PartKind::Port { .. }) || !row_parts.contains(&q))
+                    && part.pins.iter().any(|x| x.net == Some(net))
+            });
+            let ported = ported && block.nets[net].kind == NetKind::Signal;
+            let members = list
+                .iter()
+                .filter_map(|i| {
+                    let q = idioms[*i].parts[0];
+                    let kq = block.parts[q]
+                        .pins
+                        .iter()
+                        .position(|x| x.net == Some(net))?;
+                    Some((q, kq))
+                })
+                .collect::<Vec<(usize, usize)>>();
+            // Only a row whose first member stands on it (one kept
+            // elsewhere is drawn as any part is).
+            let on_row = members
+                .first()
+                .is_some_and(|&(q, kq)| match (shape(b.part), shape(q)) {
+                    (Some(a), Some(m)) => a.pins[*k].end[1] == m.pins[kq].end[1],
+                    _ => false,
+                });
+            if !on_row {
+                continue;
+            }
+            out.push(BankRow {
+                net,
+                pin: (b.part, *k),
+                members,
+                ported,
+                side: b.side,
+            });
+        }
+    }
+    out
+}
+
 /// The banks of `idioms`, each anchor placed as `at` says (in the frame
 /// its cluster places it in).
 pub fn banks(block: &Block, idioms: &[Idiom], at: &BTreeMap<usize, Place>) -> Vec<Bank> {

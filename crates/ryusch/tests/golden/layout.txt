@@ -1,12 +1,12 @@
 # ryusch's golden hashes: UPDATE_GOLDEN=1 cargo test -p ryusch --test determinism
-edited.describe c6275b060aadfc11e9b405dfae066990
-edited.layout 375a15c59be99752ff41eb969c2c1ca6
-edited.lint ec199a81c43b5e033db8140526c2ec75
-edited.svg e885ffd89081f5e4b935f9675f1678a4
-instructed.describe af915d47d382894fdc216a3311ce914a
-instructed.layout 375a15c59be99752ff41eb969c2c1ca6
-instructed.lint 04b2d0fdd0870041a8cd2260293e2728
-instructed.svg 1136d7bee0719d3152f3afb12cff6c6d
+edited.describe 632aa00f07cd6601d29a9d6bc1d9510c
+edited.layout 891dc221564b979cb425c980aa9fd172
+edited.lint 06d06a034af678910d542db54d059eaa
+edited.svg c87d7ce8463d83219a22b26b52fd6980
+instructed.describe 9a0ec0f3f0c8f0d88af30fd2800dd088
+instructed.layout 891dc221564b979cb425c980aa9fd172
+instructed.lint 06d06a034af678910d542db54d059eaa
+instructed.svg 5ed9b92ab6cf8279226625445d81cceb
 seeded1.describe 9348772a5eecb3d1d0f9d1cf13ada45b
 seeded1.layout f0c75d532621a38897f1359227a95d35
 seeded1.lint 35a4aed181bdef77d21a59755dbb3b17
@@ -19,7 +19,7 @@ seeded3.describe 77c7fb10de19c1b43ed115fc667acbba
 seeded3.layout d11e186ca27f5631800a13fdf641434c
 seeded3.lint 2fb79b852fe5396213ba01857f958ded
 seeded3.svg f227a8ae34c487ac5f5a49f162e98335
-seeded4.describe 85926b415f162ed01509e7545ac1255c
-seeded4.layout e02d26217287db21dd592e729e72fc24
-seeded4.lint a81130caad2267ffab92cb5d0f1aefff
-seeded4.svg 58208ff229a6b4a1c5761fd179a75d0e
+seeded4.describe db72a29aa66905187f8263948daf86b8
+seeded4.layout 2f81069e65940a86e31622d8abf396fe
+seeded4.lint fc360753b7b38b1e5dce2ebbf79e6038
+seeded4.svg b8afc10a8761bc0bb101986be9bb340c

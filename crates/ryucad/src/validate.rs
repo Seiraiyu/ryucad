@@ -1343,6 +1343,20 @@ pub fn key(session: &Session) -> Option<String> {
     ))
 }
 
+/// What a merge status that failed is asked again on: the files Git keeps
+/// while it waits and the index, by size and time, and the session's
+/// epoch (its files' changes). Taken before the status is read, so a
+/// change made while it was read counts. A failure read while Git was
+/// still writing is read again once Git has written; one that persists
+/// costs nothing while nothing moves.
+pub fn retry_stamp(session: &Session) -> String {
+    let git = match Repo::open(session.root()) {
+        Ok(Some(repo)) => repo.merge_stamp(),
+        _ => String::new(),
+    };
+    format!("{git}|{}", session.epoch())
+}
+
 /// `merge.status`: what the merge in progress leaves to settle. Kept by
 /// [`key`], so asking again about the same state costs nothing.
 pub fn status(session: &mut Session) -> Result<Value> {
@@ -3958,6 +3972,62 @@ pub(crate) mod tests {
         assert_eq!(told(&mut live, &mut m).len(), 1);
         m.git(&["merge", "--abort"]);
         assert_eq!(told(&mut live, &mut m), [json!({"merging": false})]);
+    }
+
+    #[test]
+    fn a_failed_status_is_said_again_once_its_inputs_move() {
+        use crate::notify::Topic;
+        let mut m = boxed();
+        both_edit(&mut m, json!({"x": 15, "y": 1}), json!({"x": 12, "y": 2}));
+        let mut live = crate::live::Live::new();
+        crate::server::publish(&mut live, &mut m.session);
+        let sub = live.hub.subscribe("p-x", &[Topic::Merge]);
+        let told = |live: &mut crate::live::Live, m: &mut Merging| -> Vec<Value> {
+            m.session.reload().unwrap();
+            crate::server::publish(live, &mut m.session);
+            sub.drain()
+                .iter()
+                .map(|l| serde_json::from_str::<Value>(l).unwrap()["params"].clone())
+                .collect()
+        };
+        m.merge("theirs");
+        assert_eq!(told(&mut live, &mut m).len(), 1);
+        // A status that fails: MERGE_HEAD naming two heads.
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "--absolute-git-dir"])
+            .current_dir(m.root())
+            .output()
+            .unwrap();
+        let dir = std::path::PathBuf::from(String::from_utf8(out.stdout).unwrap().trim());
+        let head = dir.join("MERGE_HEAD");
+        let one = std::fs::read_to_string(&head).unwrap();
+        let two = format!("{one}{one}");
+        std::fs::write(&head, &two).unwrap();
+        let v = told(&mut live, &mut m);
+        assert_eq!(v.len(), 1);
+        assert!(v[0]["error"].is_object(), "{v:?}");
+        // Nothing moved: nothing said, however often it is asked.
+        assert!(told(&mut live, &mut m).is_empty());
+        assert!(told(&mut live, &mut m).is_empty());
+        // MERGE_HEAD written again as it was: the key reads the same, but
+        // what the status read moved, so it is read and said again.
+        std::fs::write(&head, &two).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&head)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        let v = told(&mut live, &mut m);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0]["error"].is_object(), "{v:?}");
+        assert!(told(&mut live, &mut m).is_empty());
+        // Put right, the status is said, and a failure no longer waits.
+        std::fs::write(&head, &one).unwrap();
+        let v = told(&mut live, &mut m);
+        assert_eq!(v[0]["status"]["conflicts"].as_array().unwrap().len(), 2);
+        assert!(live.seen.merge_failed.is_none());
     }
 
     /// Numbers `part` through the protocol.

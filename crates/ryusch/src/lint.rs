@@ -59,6 +59,9 @@ pub const BYPASS_APART: i64 = 3;
 /// What a part joined to nothing by a wire costs, where a wire could have
 /// joined it: schematics are read along their wires.
 pub const FLOATING: i64 = 8;
+/// `sch_off_sheet_local`'s weight: a net's connector where it stays, or a
+/// region of a net that leaves with none.
+pub const OFF_SHEET_LOCAL: i64 = 4;
 /// What a port's flag whose wire turns costs (besides its jogs).
 pub const PORT_BENT: i64 = 3;
 /// What a pin's name past its body, or into another's, costs.
@@ -246,10 +249,28 @@ pub const RULES: &[Rule] = &[
         code: "sch_floating",
         weight: FLOATING,
         unit: "a part",
-        what: "A part's signal pins all reach their nets by labels, though one of those nets has another pin on its sheet and none leaves it, or a pin on a net that leaves the sheet is wired to neither its own label nor the net's.",
+        what: "A part's signal pins all reach their nets by labels, though one of those nets has another pin on its sheet and none leaves it, or a pin on a net that leaves the sheet carries no label of its own and is wired to none of its region's off-sheet connectors.",
         why: "A part joined to nothing by a wire floats: the reader can't see what it belongs to without matching label names across the sheet.",
         fix: "Stand it beside the part it serves (near X P, with P the pin on its net), or ask for the net's wires (net N wire).",
-        evidence: "Round 1's sessions and work item 4530 named floating parts as the corpus's main fault (35 laid out from nothing before plan 1.D, 16 after); a local part reads as part of its circuit only when wired to it. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the RP2040 split by function onto three sheets 3 to 0 though this rule's points rose from 32 to 80: they don't fault a label on a net that leaves its sheet, so since plan 2.A (design 348) such a label is the net's off-sheet connector and joins its pin.",
+        evidence: "Round 1's sessions and work item 4530 named floating parts as the corpus's main fault (35 laid out from nothing before plan 1.D, 16 after); a local part reads as part of its circuit only when wired to it. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the RP2040 split by function onto three sheets 3 to 0 though this rule's points rose from 32 to 80: they don't fault a label on a net that leaves its sheet, so since plan 2.A (design 348) such a label is the net's off-sheet connector and joins its pin; since plan 2.C (design 348) a pin wired to its region's off-sheet connector, not to a local label, is joined.",
+    },
+    Rule {
+        code: "sch_bus_unbundled",
+        weight: 2,
+        unit: "a member",
+        what: "Four or more members of a bus run between the same two parts' sides on a sheet but are drawn as separate labels or wires.",
+        why: "A bus drawn as one bundle reads as one interface; drawn member by member it reads as unrelated signals and costs a label or a wire each.",
+        fix: "Ask for the bus (net BUS bus); if it can't be drawn, the note bus_not_drawn says why.",
+        evidence: "Design 348's grammar (figure 5): a bus of four members or more between two regions or parts is drawn as a bus wire with entries, as KiCad's buses and the hand-drawn references' data buses are. A drafting convention; no round has judged it yet.",
+    },
+    Rule {
+        code: "sch_off_sheet_local",
+        weight: OFF_SHEET_LOCAL,
+        unit: "a net",
+        what: "An off-sheet connector on a net with no pin on another sheet, or a net that continues on another sheet drawn in some region of this one by local labels alone.",
+        why: "The connector's outline is the reader's sign that a net leaves the sheet: on a net that stays it sends them looking for a page that isn't there, and where it is missing they take a net that continues for one that doesn't.",
+        fix: "Lay the sheet out again (layout --relayout B/S), or ask for the net's wires where it stays (net N wire).",
+        evidence: "Design 348's grammar (figure 3) and the owner's comment #11 on 1.B's renders: a net that leaves its sheet is drawn with a connector distinct from a local label. IEEE 315 and IEC 60617 both draw off-sheet connectors apart from net names. A drafting convention; no round has judged it yet.",
     },
     Rule {
         code: "sch_resistor_style",
@@ -464,6 +485,7 @@ fn units(f: &Finding) -> i64 {
         "sch_crossings" => f.details["crossings"].as_i64().unwrap_or(1),
         "sch_bends" => f.details["extra"].as_i64().unwrap_or(1),
         "sch_jog" => f.details["jogs"].as_i64().unwrap_or(1),
+        "sch_bus_unbundled" => f.details["members"].as_i64().unwrap_or(1),
         "sch_density" => (f.details["per_mille"].as_i64().unwrap_or(DENSITY) - DENSITY).max(0) / 10,
         _ => 1,
     }
@@ -495,7 +517,7 @@ pub struct Score {
 
 /// Everything sheet `sid` draws that takes room: parts' extents, text,
 /// labels and wire segments.
-fn ink_boxes(block: &Block, layout: &crate::layout::Layout, sid: &str) -> Vec<Rect> {
+pub(crate) fn ink_boxes(block: &Block, layout: &crate::layout::Layout, sid: &str) -> Vec<Rect> {
     let mut out = Vec::new();
     for part in &block.parts {
         let Some(x) = layout.placed.get(&part.key).filter(|x| x.sheet == sid) else {
@@ -510,9 +532,9 @@ fn ink_boxes(block: &Block, layout: &crate::layout::Layout, sid: &str) -> Vec<Re
             }
         }
     }
-    for list in layout.labels.values() {
+    for (key, list) in &layout.labels {
         for l in list.iter().filter(|l| l.sheet == sid) {
-            out.push(label::label_box(l.kind, &l.text, l.at, l.side));
+            out.push(label::boxed(block, key, l));
         }
     }
     for by_sheet in layout.routes.values() {
@@ -520,6 +542,50 @@ fn ink_boxes(block: &Block, layout: &crate::layout::Layout, sid: &str) -> Vec<Re
             for w in run.windows(2) {
                 out.push(Rect::new(w[0], w[1]));
             }
+        }
+    }
+    // Buses' entries, spines, trunks and connectors, and notes (plan 2.C).
+    for by in layout.buses.values() {
+        if let Some(bus) = by.get(sid) {
+            let stub = bus.stub;
+            let mut ends: Vec<crate::geom::Point> = Vec::new();
+            for e in &bus.entries {
+                let (_, on_spine) = crate::bus::entry(e.at, e.side, stub);
+                out.push(Rect::new(e.at, on_spine));
+                ends.push(on_spine);
+                if let Some(n) = block.net(&e.net) {
+                    out.push(label::label_box(
+                        LabelKind::Net,
+                        &block.nets[n].name,
+                        e.at,
+                        e.side,
+                    ));
+                }
+            }
+            let mut columns: BTreeMap<Nm, Vec<crate::geom::Point>> = BTreeMap::new();
+            for p in ends {
+                columns.entry(p[0]).or_default().push(p);
+            }
+            for pts in columns.values() {
+                if let Some([a, b]) = crate::bus::spine(pts) {
+                    out.push(Rect::new(a, b));
+                }
+            }
+            for run in &bus.trunk {
+                for w in run.windows(2) {
+                    out.push(Rect::new(w[0], w[1]));
+                }
+            }
+            if let Some(c) = &bus.connector {
+                out.push(label::label_box(LabelKind::OffSheet, &c.text, c.at, c.side));
+            }
+        }
+    }
+    for (id, n) in &layout.notes {
+        if n.sheet == sid
+            && let Some(text) = block.note_text(id)
+        {
+            out.push(crate::paint::note_box(text, n.at));
         }
     }
     out
@@ -814,7 +880,9 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 let (code, what) = match l.kind {
                     LabelKind::Power if l.side != Side::Up => ("sch_power_sideways", "supply"),
                     LabelKind::Ground if l.side != Side::Down => ("sch_ground_sideways", "ground"),
-                    LabelKind::Net if !l.side.horizontal() => ("sch_label_vertical", "label"),
+                    LabelKind::Net | LabelKind::OffSheet if !l.side.horizontal() => {
+                        ("sch_label_vertical", "label")
+                    }
                     _ => continue,
                 };
                 found.push(f(
@@ -912,19 +980,27 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                     .unwrap_or_default();
                 wired |= wired_to_another(runs, route::node_of(sh.pins[k].end), ends);
                 if leaving.contains(&n) {
-                    // Its own label, or wired to one of the net's labels here.
+                    // Its own label, or its bus's entry, or wired to one of
+                    // the net's off-sheet connectors here (plan 2.C).
                     let on = format!("{}/{}", part.key, pin.number);
+                    let key = &block.nets[n].key;
+                    if layout.buses.values().any(|by| {
+                        by.get(sid)
+                            .is_some_and(|b| b.entries.iter().any(|e| e.on == on && &e.net == key))
+                    }) {
+                        wired = true;
+                    }
                     let labels: Vec<route::Node> = layout
                         .labels
-                        .get(&block.nets[n].key)
+                        .get(key)
                         .into_iter()
                         .flatten()
                         .filter(|l| &l.sheet == sid)
-                        .map(|l| {
+                        .filter_map(|l| {
                             if l.on == on {
                                 wired = true;
                             }
-                            route::node_of(l.at)
+                            (l.kind == LabelKind::OffSheet).then(|| route::node_of(l.at))
                         })
                         .collect();
                     wired |= wired_to_another(runs, route::node_of(sh.pins[k].end), &labels);
@@ -953,6 +1029,11 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 );
             }
         }
+        // Off-sheet connectors where their nets stay, and regions of a net
+        // that leaves with none (plan 2.C).
+        off_sheet_local(block, &out.idioms, layout, sid, &shapes, &mut found, &f);
+        // Buses whose members could be one bundle here, drawn apart.
+        bus_unbundled(block, layout, sid, &shapes, &mut found, &f);
         // A two-pin part standing upside down against its rail: ground up,
         // or a supply down.
         for (p, sh) in &shapes {
@@ -1335,9 +1416,9 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 }
             }
         }
-        for list in layout.labels.values() {
+        for (key, list) in &layout.labels {
             for l in list.iter().filter(|l| &l.sheet == sid) {
-                ink += label::label_box(l.kind, &l.text, l.at, l.side).area();
+                ink += label::boxed(block, key, l).area();
             }
         }
         let density = (ink * 1000 / Rect::new([0, 0], size).area().max(1)) as i64;
@@ -1713,6 +1794,191 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
         findings.extend(found);
     }
     (findings, scores)
+}
+
+/// `sch_bus_unbundled` on sheet `sid` (plan 2.C): each bus not drawn here
+/// whose members make a bundle here as the engine finds one (placed
+/// sides, nets that leave), its points two a member, its fix the bus
+/// asked for.
+fn bus_unbundled(
+    block: &Block,
+    layout: &crate::layout::Layout,
+    sid: &str,
+    shapes: &BTreeMap<usize, Shape>,
+    found: &mut Vec<Finding>,
+    f: &dyn Fn(&'static str, String, Vec<String>, Value) -> Finding,
+) {
+    let parts: Vec<usize> = shapes.keys().copied().collect();
+    let here = crate::bus::sides_on_sheet(block, &parts);
+    let leaves = |n: usize| {
+        block.parts.iter().any(|q| {
+            layout.placed.get(&q.key).is_some_and(|x| x.sheet != sid)
+                && q.pins.iter().any(|x| x.nets().contains(&n))
+        })
+    };
+    let side_of = |p: usize, k: usize| shapes[&p].pins[k].side;
+    for (i, bus) in block.buses.iter().enumerate() {
+        if layout
+            .buses
+            .get(&bus.key)
+            .is_some_and(|b| b.contains_key(sid))
+        {
+            continue;
+        }
+        let Some(bundle) = crate::bus::bundle_with(block, i, &here, &leaves, &side_of) else {
+            continue;
+        };
+        let name = crate::bus::name(block, i, &bundle.members);
+        let mut refs = vec![bus.key.clone()];
+        refs.extend(bundle.members.iter().map(|n| block.nets[*n].key.clone()));
+        found.push(
+            f(
+                "sch_bus_unbundled",
+                format!(
+                    "{name}'s {} members run between the same parts' sides but are drawn apart (where it can't be drawn, the note bus_not_drawn says why)",
+                    bundle.members.len()
+                ),
+                refs,
+                json!({"members": bundle.members.len()}),
+            )
+            .fixed(vec![vec![Instruction::Net {
+                net: bus.key.clone(),
+                style: NetStyle::Bus,
+            }]]),
+        );
+    }
+}
+
+/// `sch_off_sheet_local` on sheet `sid` (plan 2.C): each off-sheet
+/// connector whose net has no pin on another sheet (its fix the net's
+/// wires); and each net with a pin on another sheet, a stacked pin's net,
+/// a ported bank row's ([`crate::idiom::BankRow::names`]) and a bus drawn
+/// here aside, whose pins in some region of this sheet (a
+/// part in no region a group of its own) carry no connector and are wired
+/// to none.
+fn off_sheet_local(
+    block: &Block,
+    idioms: &[crate::idiom::Idiom],
+    layout: &crate::layout::Layout,
+    sid: &str,
+    shapes: &BTreeMap<usize, Shape>,
+    found: &mut Vec<Finding>,
+    f: &dyn Fn(&'static str, String, Vec<String>, Value) -> Finding,
+) {
+    let elsewhere = |n: usize| {
+        block.parts.iter().any(|q| {
+            layout.placed.get(&q.key).is_some_and(|x| x.sheet != sid)
+                && q.pins.iter().any(|x| x.nets().contains(&n))
+        })
+    };
+    for (key, list) in &layout.labels {
+        let Some(n) = block.net(key) else { continue };
+        for l in list
+            .iter()
+            .filter(|l| l.sheet == sid && l.kind == LabelKind::OffSheet)
+        {
+            if !elsewhere(n) {
+                found.push(
+                    f(
+                        "sch_off_sheet_local",
+                        format!(
+                            "{} has an off-sheet connector at {} but no pin on another sheet",
+                            block.nets[n].name, l.on
+                        ),
+                        vec![key.clone(), l.on.clone()],
+                        json!({"why": "stays"}),
+                    )
+                    .fixed(vec![vec![Instruction::Net {
+                        net: key.clone(),
+                        style: NetStyle::Wire,
+                    }]]),
+                );
+            }
+        }
+    }
+    let region_of = layout.region_of();
+    // A ported bank row's net keeps its labels in the row, as the engine
+    // draws it: no connector is asked of it.
+    let at: BTreeMap<usize, Place> = block
+        .parts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            let x = layout.placed.get(&p.key)?;
+            Some((i, Place::new(x.at, x.rotation, x.mirror)))
+        })
+        .collect();
+    let rows = crate::idiom::bank_rows(block, idioms, &at);
+    let bused: BTreeSet<&String> = layout
+        .buses
+        .values()
+        .filter_map(|by| by.get(sid))
+        .flat_map(|b| b.entries.iter().map(|e| &e.net))
+        .collect();
+    // Each leaving net's groups here: its pins' ends by region.
+    let mut groups: BTreeMap<(usize, String), Vec<(String, route::Node)>> = BTreeMap::new();
+    let mut stacked: BTreeSet<usize> = BTreeSet::new();
+    for (p, sh) in shapes {
+        let part = &block.parts[*p];
+        if matches!(part.kind, PartKind::Port { .. }) {
+            continue;
+        }
+        for (k, pin) in part.pins.iter().enumerate() {
+            let Some(n) = pin.drawn_net() else { continue };
+            if pin.stacked() {
+                stacked.extend(pin.nets());
+            }
+            if block.nets[n].kind != NetKind::Signal || bused.contains(&block.nets[n].key) {
+                continue;
+            }
+            let group = region_of
+                .get(part.key.as_str())
+                .map_or_else(|| part.key.clone(), |r| (*r).to_owned());
+            groups.entry((n, group)).or_default().push((
+                format!("{}/{}", part.key, pin.number),
+                route::node_of(sh.pins[k].end),
+            ));
+        }
+    }
+    let mut leaves: BTreeMap<usize, bool> = BTreeMap::new();
+    for ((n, group), pins) in &groups {
+        if stacked.contains(n)
+            || rows.iter().any(|r| r.names(*n))
+            || !*leaves.entry(*n).or_insert_with(|| elsewhere(*n))
+        {
+            continue;
+        }
+        let key = &block.nets[*n].key;
+        let connectors: Vec<&crate::layout::Label> = layout
+            .labels
+            .get(key)
+            .into_iter()
+            .flatten()
+            .filter(|l| l.sheet == sid && l.kind == LabelKind::OffSheet)
+            .collect();
+        let carried = pins
+            .iter()
+            .any(|(on, _)| connectors.iter().any(|l| &l.on == on));
+        let runs = layout
+            .routes
+            .get(key)
+            .and_then(|r| r.get(sid))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let to: Vec<route::Node> = connectors.iter().map(|l| route::node_of(l.at)).collect();
+        let wired = pins.iter().any(|(_, at)| wired_to_another(runs, *at, &to));
+        if !carried && !wired {
+            found.push(f(
+                "sch_off_sheet_local",
+                format!(
+                    "{} continues on another sheet, but its pins in {group} carry no off-sheet connector",
+                    block.nets[*n].name
+                ),
+                vec![key.clone(), group.clone()],
+                json!({"why": "unmarked"}),
+            ));
+        }
+    }
 }
 
 /// Whether the wires of a net touching the pin end `at` reach another of
@@ -2545,6 +2811,97 @@ mod tests {
         assert!(
             found.iter().any(|f| f.code == "sch_wire_wraps"),
             "{found:#?}"
+        );
+    }
+
+    #[test]
+    fn off_sheet_connectors_where_nets_stay_or_leave_unmarked_are_found() {
+        let b = crate::testing::leaving_block();
+        let out = crate::engine::lay_out(&b).unwrap();
+        let (found, _) = lint(&b, &out);
+        assert!(
+            !found.iter().any(|f| f.code == "sch_off_sheet_local"),
+            "{found:?}"
+        );
+        // A connector on a net that stays: found, its fix the net's wires.
+        let mut bad = out.clone();
+        let (k, i) = bad
+            .layout
+            .labels
+            .iter()
+            .find_map(|(k, v)| {
+                (k != "sig")
+                    .then(|| {
+                        v.iter()
+                            .position(|l| l.kind == LabelKind::Net)
+                            .map(|i| (k.clone(), i))
+                    })
+                    .flatten()
+            })
+            .expect("a local label");
+        bad.layout.labels.get_mut(&k).unwrap()[i].kind = LabelKind::OffSheet;
+        let (found, _) = lint(&b, &bad);
+        let stays = found
+            .iter()
+            .find(|f| f.code == "sch_off_sheet_local" && f.refs.contains(&k))
+            .expect("found");
+        assert!(
+            stays
+                .fixes
+                .iter()
+                .flatten()
+                .any(|i| matches!(i, Instruction::Net { net, style: NetStyle::Wire } if *net == k))
+        );
+        // A leaving net's region with no connector: found.
+        let mut bad = out.clone();
+        for l in bad.layout.labels.get_mut("sig").unwrap() {
+            l.kind = LabelKind::Net;
+        }
+        let (found, _) = lint(&b, &bad);
+        assert!(
+            found
+                .iter()
+                .any(|f| f.code == "sch_off_sheet_local" && f.refs.iter().any(|r| r == "sig"))
+        );
+        // A pin wired to its region's connector doesn't float.
+        let (found, _) = lint(&b, &out);
+        assert!(
+            !found
+                .iter()
+                .any(|f| f.code == "sch_floating" && f.refs.iter().any(|r| r == "r1" || r == "r2"))
+        );
+    }
+
+    #[test]
+    fn a_bus_drawn_as_labels_is_found() {
+        let mut b = crate::testing::bus_block();
+        b.instructions.insert(
+            "i1".into(),
+            Instruction::Net {
+                net: "bus:q".into(),
+                style: NetStyle::Label,
+            },
+        );
+        let out = crate::engine::lay_out(&b).unwrap();
+        let (found, _) = lint(&b, &out);
+        let f = found
+            .iter()
+            .find(|f| f.code == "sch_bus_unbundled")
+            .expect("found");
+        assert!(f.refs.iter().any(|r| r == "bus:q"));
+        assert_eq!(f.points, 8, "two a member");
+        // Its fix asks for the bus.
+        assert!(f.fixes.iter().flatten().any(
+            |i| matches!(i, Instruction::Net { net, style: NetStyle::Bus } if net == "bus:q")
+        ));
+        // Drawn as a bus, not found.
+        b.instructions.clear();
+        let out = crate::engine::lay_out(&b).unwrap();
+        assert!(
+            !lint(&b, &out)
+                .0
+                .iter()
+                .any(|f| f.code == "sch_bus_unbundled")
         );
     }
 }
