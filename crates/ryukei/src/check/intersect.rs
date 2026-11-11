@@ -343,9 +343,12 @@ fn edges_on(body: &Body, f: FaceId, other: &Surface, reach: f64) -> Vec<EdgeId> 
 /// Whether face `f` keeps more than `strip` from every point of `edges`'
 /// curves outside balls of radius `ball` round `points`: each edge's
 /// range halved until its piece's box ([`crate::geom::Curve::piece_bounds`])
-/// lies in a ball, or the ball round the box grown by `strip` is
-/// certified clear of the face ([`face_off_ball`]), 20 halvings at most.
-/// Certified, since each box holds its piece.
+/// lies in a ball, or the ball round the box grown by `strip` and the
+/// edge's tolerance is certified clear of the face ([`face_off_ball`]), 20
+/// halvings at most. Certified, since each box holds its piece of the 3D
+/// curve and the faces' pcurves lie within the edge's tolerance of it.
+/// Each piece is charged a unit; a halt, a cap, or a face with a fin that
+/// has no pcurve (which [`face_off_ball`] can't search) answers `false`.
 fn face_off_edges(
     body: &Body,
     f: FaceId,
@@ -355,20 +358,32 @@ fn face_off_edges(
     ball: f64,
     m: &Meter,
 ) -> bool {
+    let unbounded = body
+        .face_loops(f)
+        .any(|l| body.loop_fins(l).any(|fin| body.fins[fin].pcurve.is_none()));
+    if unbounded {
+        return false;
+    }
     let middle = |bx: &crate::geom::Box3| bx.min() + (bx.max() - bx.min()) * 0.5;
     let half = |bx: &crate::geom::Box3| (bx.max() - bx.min()).length() / 2.0;
     for &e in edges {
         let x = &body.edges[e];
         let curve = &body.curves[x.curve];
+        let grow = strip + x.tolerance.get();
         let mut stack = vec![(x.interval, 0u32)];
         while let Some((iv, depth)) = stack.pop() {
+            if m.charge(1).is_err() {
+                return false;
+            }
             let bx = curve.piece_bounds(iv);
             let (c, r) = (middle(&bx), half(&bx));
             if points.iter().any(|p| c.distance(*p) + r <= ball) {
                 continue;
             }
-            if matches!(face_off_ball(body, f, c, r + strip, m), Ok(true)) {
-                continue;
+            match face_off_ball(body, f, c, r + grow, m) {
+                Ok(true) => continue,
+                Err(_) if m.halted() => return false,
+                _ => {}
             }
             if depth >= 20 {
                 return false;
@@ -1051,6 +1066,52 @@ mod tests {
             BESIDE_CELLS,
             &m
         ));
+    }
+
+    /// The bottom's edges kept off the top face: certified under no limit,
+    /// and stopped at once by a cancel or a spent budget, with no piece
+    /// searched past the halt.
+    #[test]
+    fn a_halt_stops_the_search_along_edges() {
+        use crate::work::Work;
+        use std::sync::atomic::AtomicBool;
+        let body = unit_cube();
+        let on = |f: FaceId, z: f64| {
+            body.face_loops(f).all(|l| {
+                body.loop_fins(l).all(|fin| {
+                    let e = &body.edges[body.fins[fin].edge];
+                    (body.vertices[e.start].point.z - z).abs() < 1e-12
+                })
+            })
+        };
+        let top = body.faces().find(|&f| on(f, 1.0)).unwrap();
+        let bottom = body.faces().find(|&f| on(f, 0.0)).unwrap();
+        let edges: Vec<EdgeId> = body
+            .face_loops(bottom)
+            .flat_map(|l| {
+                body.loop_fins(l)
+                    .map(|fin| body.fins[fin].edge)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let w = Work::unlimited();
+        let m = Meter::new(&w);
+        assert!(face_off_edges(&body, top, &edges, &[], 0.1, 0.2, &m));
+        let full = m.spent();
+        assert!(full >= edges.len() as u64, "{full}");
+        // Cancelled before it starts.
+        let flag = AtomicBool::new(true);
+        let w = Work::unlimited().with_cancel(&flag);
+        let m = Meter::new(&w);
+        assert!(!face_off_edges(&body, top, &edges, &[], 0.1, 0.2, &m));
+        assert!(m.halted());
+        assert_eq!(m.spent(), 1);
+        // A budget of one piece.
+        let w = Work::unlimited().with_budget(1);
+        let m = Meter::new(&w);
+        assert!(!face_off_edges(&body, top, &edges, &[], 0.1, 0.2, &m));
+        assert!(m.halted());
+        assert!(m.spent() < full, "{} of {full}", m.spent());
     }
 
     /// Several shared straight edges in one plane give its section plane
