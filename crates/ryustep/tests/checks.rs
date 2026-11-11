@@ -317,6 +317,22 @@ fn cp_radial_rims_and_rounds_check() {
     );
 }
 
+/// #264: ftc_07's AP242 edition. Four planes, each tangent to a fillet
+/// torus at a saddle of its tube (a critical value of 2.6e-13 m), at the
+/// one vertex they share: the trace fails on the cells there. Traced
+/// outside a cube round the vertex within the touch reach, they settle.
+#[test]
+#[ignore = "needs the pinned corpus (scripts/fetch-corpus.sh)"]
+fn saddle_tangencies_at_shared_vertices_check() {
+    let _serial = serial();
+    let Some(path) = pinned("NIST-PMI-STEP-Files/nist_ftc_07_asme1_ap242-e2.stp") else {
+        return;
+    };
+    let (rep, body) = bodies(&path).remove(0);
+    assert_eq!(rep, 13541);
+    assert_eq!(named(&body, &check_intersections(&body)), []);
+}
+
 /// ftc_07's planes against its spline faces enclosed the same patches
 /// again and again (61% of `jet_box` calls repeated): through the
 /// operation's table its check takes under 8 s on one thread.

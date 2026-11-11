@@ -296,6 +296,12 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
         // Faces sharing vertices whose every trace failed, one running
         // along the other's surface on edges of its own (#302).
         Err(_) if shared.is_empty() && apart_by_own_edges(body, a, b, BESIDE_CELLS, m) => None,
+        // Else traced outside cubes round the vertices they share, within
+        // the touch reach, where a near-tangency stops the trace (#264).
+        Err(_) if shared.is_empty() => match outside_vertices(body, a, b, m) {
+            Some(meet) => fault(a, b, &prune(body, a, b, meet)),
+            None => Some(Fault::CannotCheck { a, b }),
+        },
         Err(_) => Some(Fault::CannotCheck { a, b }),
     }
 }
@@ -395,6 +401,48 @@ fn apart_by_own_edges(body: &Body, a: FaceId, b: FaceId, cells: usize, m: &Meter
         !ex.is_empty()
             && face_beside(body, x, surface(y), &ex, &vertices, strip, cells, m).is_ok()
             && face_off_edges(body, y, &ex, &points, strip, 2.0 * strip, m)
+    })
+}
+
+/// How faces sharing vertices but no edge meet outside cubes round those
+/// vertices, half the touch reach wide, so a cube's corner is within
+/// `0.87` of the reach and whatever the faces share inside is a touch by
+/// [`TOUCH`] (the rule [`prune`] applies): the region less the cubes,
+/// traced box by box, each under [`WITHIN_LAST`] units, so no cell lies
+/// on a near-tangency at a vertex (#264: planes tangent to fillet tori at
+/// saddles of their tubes, at the vertex each pair shares). `None` where
+/// any box's trace fails or meets coincident faces.
+fn outside_vertices(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<FaceMeet> {
+    let shared = shared_vertices(body, a, b);
+    if shared.is_empty() {
+        return None;
+    }
+    let tol = slack(body, a).max(slack(body, b));
+    let half = 0.5 * TOUCH * tol;
+    let (x, y) = (face_box(body, a).grow(tol), face_box(body, b).grow(tol));
+    if !x.intersects(&y) {
+        return Some(FaceMeet::apart());
+    }
+    let region = crate::geom::Box3::new(x.min().max(y.min()), x.max().min(y.max()));
+    let points: Vec<_> = shared.iter().map(|&v| body.vertices[v].point).collect();
+    let (mut stretches, mut contacts) = (Vec::new(), Vec::new());
+    for bx in crate::intersect::region_outside(&region, &points, half) {
+        let traced = m.capped_by(WITHIN_LAST, || {
+            crate::intersect::face_face_over((body, a), (body, b), &bx, m)
+        });
+        let Ok(FaceMeet::Meet {
+            stretches: s,
+            contacts: c,
+        }) = traced
+        else {
+            return None;
+        };
+        stretches.extend(s);
+        contacts.extend(c);
+    }
+    Some(FaceMeet::Meet {
+        stretches,
+        contacts,
     })
 }
 
