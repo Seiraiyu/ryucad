@@ -158,52 +158,52 @@ The boundary between the two crates is deliberate. ryukei works on single bodies
 
 ## Decisions by area
 
-What each phase decided is recorded per area under `docs/claude/`, imported here:
+What each phase decided is recorded per area under `docs/claude/`. Read the guide for the area you're changing before you change it; they aren't loaded automatically (only the numerics guide is imported, since its determinism rules apply to every change).
 
 - @docs/claude/kernel-numerics.md — units, tolerances, precision policy, determinism
-- @docs/claude/kernel-topology.md — flat-array B-rep bodies, Euler operators, stable names, validity
-- @docs/claude/kernel-geometry.md — curves, surfaces, NURBS, derivatives, projection
-- @docs/claude/kernel-tessellation.md — certified, watertight, parallel meshing
-- @docs/claude/kernel-sweeps.md — profiles, extrude and revolve
-- @docs/claude/kernel-intersections.md — pcurves, cavities, analytic intersections, the self-intersection check
-- @docs/claude/kernel-booleans.md — analytic booleans
-- @docs/claude/kernel-blends.md — pipes, fillets, chamfers, corners, booleans on blends
-- @docs/claude/step.md — ryustep, bodies both ways, healing, real-world files
-- @docs/claude/kernel-general-intersections.md — intersections of every surface
-- @docs/claude/kernel-paths-lofts.md — sweeps along paths and lofts
-- @docs/claude/kernel-offsets.md — offset bodies and shells, sweeps' offsets, offsets' NURBS forms
-- @docs/claude/kernel-measure.md — measurement: properties, distances, angles, mass, with bounds
-- @docs/claude/kernel-tolerant.md — tolerant modeling: the tube model in booleans and blends, self-union, global offsets
-- @docs/claude/kernel-work.md — bounded work: cancels, deterministic budgets, the kernel's caps
-- @docs/claude/kernel-sheets.md — sheet bodies: kinds, laminar edges, the sheet operators, extraction
-- @docs/claude/kernel-sheet-metal.md — sheet metal: recognition, unfolding, flat patterns
-- @docs/claude/kernel-projection.md — projection: views, projected curves, silhouettes
-- @docs/claude/kernel-tweaks.md — face tweaks: moving, offsetting and replacing faces, and drafts
-- @docs/claude/kernel-direct-editing.md — direct editing: the local re-trim, topology-changing tweaks
-- @docs/claude/ryucad-core.md — projects, units, rebuild, the agent CLI, the daemon, releases
-- @docs/claude/ryucad-session.md — participants, notifications, activity and undo, settings, meshes, renders, doctor
-- @docs/claude/ryucad-app.md — the desktop app
-- @docs/claude/ryucad-parameters.md — parameters and expressions
-- @docs/claude/ryusketch.md — the sketch solver
-- @docs/claude/ryucad-sketches.md — sketch features, sweeps, references, recompute, sketches in the app
-- @docs/claude/ryucad-git.md — diff, check, merge, the compare view and conflict panel
-- @docs/claude/ryucad-solids.md — solids, fillets, chamfers, holes, patterns
-- @docs/claude/ryucad-sheet-metal.md — sheet metal: base and edge flanges, the bend table
-- @docs/claude/ryucad-assemblies.md — assemblies, mates, scale, interference
-- @docs/claude/ryucad-step.md — STEP import, re-import and export
-- @docs/claude/ryucad-scale.md — the benchmark project, file events, the memory budget, the window at scale
-- @docs/claude/ryucad-formats.md — export formats: the scene, STL, 3MF, USD, and their references
-- @docs/claude/ryucad-reference.md — geometric references, the resolver, datum planes, axes and points and their uses
-- @docs/claude/ryucad-surfaces.md — sheets in the model, surface sweeps, planar faces
-- @docs/claude/ryucad-annotations.md — annotations: files, proposed changes and their capture, annotation revisions, apply, the lifecycle, participant modes
-- @docs/claude/ryucad-drawings.md — drawings: ryu-draw, drawing and template files, views through ryukei's projection, layout, PDF, SVG and PNG
-- @docs/claude/ryupdm.md — the PDM data model and local PDM
-- @docs/claude/ryupdm-review.md — hosted review
-- @docs/claude/shared-crates.md — ryu-math, ryu-doc, ryu-session
-- @docs/claude/ryudfm.md — ryudfm: the board model and shapes (`ryu-board`), the ODB++ reader and corpus, projects, the CLI, renders and releases
-- @docs/claude/ryueda.md — ryueda projects, library projects, symbols, footprints, models, library components
-- @docs/claude/ryueda-schematic.md — ryueda schematics: properties and designator formats, the ryusch engine, layout files and their commands
-- @docs/claude/ryueda-parts.md — ryueda part data: the vocabulary, categories, alternates, library search, the parts cache and identification findings
+- `docs/claude/kernel-topology.md` — flat-array B-rep bodies, Euler operators, stable names, validity
+- `docs/claude/kernel-geometry.md` — curves, surfaces, NURBS, derivatives, projection
+- `docs/claude/kernel-tessellation.md` — certified, watertight, parallel meshing
+- `docs/claude/kernel-sweeps.md` — profiles, extrude and revolve
+- `docs/claude/kernel-intersections.md` — pcurves, cavities, analytic intersections, the self-intersection check
+- `docs/claude/kernel-booleans.md` — analytic booleans
+- `docs/claude/kernel-blends.md` — pipes, fillets, chamfers, corners, booleans on blends
+- `docs/claude/step.md` — ryustep, bodies both ways, healing, real-world files
+- `docs/claude/kernel-general-intersections.md` — intersections of every surface
+- `docs/claude/kernel-paths-lofts.md` — sweeps along paths and lofts
+- `docs/claude/kernel-offsets.md` — offset bodies and shells, sweeps' offsets, offsets' NURBS forms
+- `docs/claude/kernel-measure.md` — measurement: properties, distances, angles, mass, with bounds
+- `docs/claude/kernel-tolerant.md` — tolerant modeling: the tube model in booleans and blends, self-union, global offsets
+- `docs/claude/kernel-work.md` — bounded work: cancels, deterministic budgets, the kernel's caps
+- `docs/claude/kernel-sheets.md` — sheet bodies: kinds, laminar edges, the sheet operators, extraction
+- `docs/claude/kernel-sheet-metal.md` — sheet metal: recognition, unfolding, flat patterns
+- `docs/claude/kernel-projection.md` — projection: views, projected curves, silhouettes
+- `docs/claude/kernel-tweaks.md` — face tweaks: moving, offsetting and replacing faces, and drafts
+- `docs/claude/kernel-direct-editing.md` — direct editing: the local re-trim, topology-changing tweaks
+- `docs/claude/ryucad-core.md` — projects, units, rebuild, the agent CLI, the daemon, releases
+- `docs/claude/ryucad-session.md` — participants, notifications, activity and undo, settings, meshes, renders, doctor
+- `docs/claude/ryucad-app.md` — the desktop app
+- `docs/claude/ryucad-parameters.md` — parameters and expressions
+- `docs/claude/ryusketch.md` — the sketch solver
+- `docs/claude/ryucad-sketches.md` — sketch features, sweeps, references, recompute, sketches in the app
+- `docs/claude/ryucad-git.md` — diff, check, merge, the compare view and conflict panel
+- `docs/claude/ryucad-solids.md` — solids, fillets, chamfers, holes, patterns
+- `docs/claude/ryucad-sheet-metal.md` — sheet metal: base and edge flanges, the bend table
+- `docs/claude/ryucad-assemblies.md` — assemblies, mates, scale, interference
+- `docs/claude/ryucad-step.md` — STEP import, re-import and export
+- `docs/claude/ryucad-scale.md` — the benchmark project, file events, the memory budget, the window at scale
+- `docs/claude/ryucad-formats.md` — export formats: the scene, STL, 3MF, USD, and their references
+- `docs/claude/ryucad-reference.md` — geometric references, the resolver, datum planes, axes and points and their uses
+- `docs/claude/ryucad-surfaces.md` — sheets in the model, surface sweeps, planar faces
+- `docs/claude/ryucad-annotations.md` — annotations: files, proposed changes and their capture, annotation revisions, apply, the lifecycle, participant modes
+- `docs/claude/ryucad-drawings.md` — drawings: ryu-draw, drawing and template files, views through ryukei's projection, layout, PDF, SVG and PNG
+- `docs/claude/ryupdm.md` — the PDM data model and local PDM
+- `docs/claude/ryupdm-review.md` — hosted review
+- `docs/claude/shared-crates.md` — ryu-math, ryu-doc, ryu-session
+- `docs/claude/ryudfm.md` — ryudfm: the board model and shapes (`ryu-board`), the ODB++ reader and corpus, projects, the CLI, renders and releases
+- `docs/claude/ryueda.md` — ryueda projects, library projects, symbols, footprints, models, library components
+- `docs/claude/ryueda-schematic.md` — ryueda schematics: properties and designator formats, the ryusch engine, layout files and their commands
+- `docs/claude/ryueda-parts.md` — ryueda part data: the vocabulary, categories, alternates, library search, the parts cache and identification findings
 
 When a plan records what it decided, it edits or adds only its area's file under `docs/claude/`. It doesn't touch CLAUDE.md, except to add one import line here for a new area, and it never writes project status anywhere in the repo.
 
