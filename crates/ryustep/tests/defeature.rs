@@ -4,8 +4,10 @@
 //! thread. Question 425's bar: each result is a body that checks clean
 //! (`check` and `check_intersections`) with no recognised blend under
 //! 2 mm left, within the deadline; the bodies `KNOWN_REFUSED` lists,
-//! each with its issue, refuse typed (`InvalidTweak`). Release only
-//! (minutes in a debug build): its own step in full.yml.
+//! each with its issue, refuse typed (`InvalidTweak`) or run past the
+//! deadline. The deadline is asserted only with `RYUKEI_BARS` (where a
+//! known body past it fails too), else printed. Release only (minutes in
+//! a debug build): its own step in full.yml.
 
 use ryukei::Error;
 use ryukei::blend::{BlendKind, EdgeBlend, blend};
@@ -53,6 +55,61 @@ const MAX_SIZE: f64 = 2e-3;
 /// issue: NIST FTC 07 and FTC 10, kept faces tangent along a seam whose
 /// carried working faces meet uncertain (plan 16.C, question 517).
 const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
+
+/// How a body's delete ended, for [`Tally::count`].
+#[derive(Clone, Copy, Debug)]
+enum End {
+    /// Refused typed (`InvalidTweak`).
+    Refused,
+    /// Cancelled at [`DEADLINE`].
+    Cancelled,
+}
+
+/// The bodies refused and those past the deadline.
+#[derive(Default, Debug, PartialEq)]
+struct Tally {
+    refused: usize,
+    slow: usize,
+}
+
+impl Tally {
+    /// Counts a body's refusal or cancel. A refusal must be `known`
+    /// (in [`KNOWN_REFUSED`]). A known body's cancel is its known
+    /// outcome, counted as refused, except with `bars`, where the
+    /// deadline holds for every body: there, and for any other body, a
+    /// cancel is past the deadline.
+    fn count(&mut self, known: bool, end: End, bars: bool) {
+        match end {
+            End::Refused => {
+                assert!(known, "refused, and not in KNOWN_REFUSED");
+                self.refused += 1;
+            }
+            End::Cancelled if known && !bars => self.refused += 1,
+            End::Cancelled => self.slow += 1,
+        }
+    }
+
+    /// Question 425's bar: exactly the `KNOWN_REFUSED` bodies refused
+    /// (or, without `bars`, past the deadline), and with `bars` none past
+    /// it. Without `bars` a slow body is printed, not asserted: full.yml
+    /// runs this on hosted runners about twice as slow as the bar machine.
+    fn assert_bar(&self, bars: bool) {
+        assert_eq!(
+            self.refused,
+            KNOWN_REFUSED.len(),
+            "{} refused",
+            self.refused
+        );
+        if bars {
+            assert_eq!(self.slow, 0, "{} past the deadline", self.slow);
+        }
+    }
+}
+
+/// Whether `RYUKEI_BARS` is set: the deadline asserted for every body.
+fn bars() -> bool {
+    std::env::var_os("RYUKEI_BARS").is_some()
+}
 
 /// The STEP files of the committed corpus and the OCCT files, sorted.
 fn files() -> Vec<PathBuf> {
@@ -109,7 +166,9 @@ fn imported_bodies_lose_their_small_blends() {
         faces: Vec::new(),
         options: RecogniseOptions::default(),
     };
-    let (mut defeatured, mut refused, mut none, mut slow) = (0, 0, 0, 0);
+    let bars = bars();
+    let (mut defeatured, mut none) = (0, 0);
+    let mut tally = Tally::default();
     for path in files() {
         let file = path.file_name().unwrap().to_string_lossy().into_owned();
         let bytes = std::fs::read(&path).unwrap();
@@ -121,6 +180,7 @@ fn imported_bodies_lose_their_small_blends() {
             },
         )
         .unwrap();
+        let known = KNOWN_REFUSED.iter().any(|(f, _)| file.contains(f));
         for (i, imported) in m.bodies.iter().enumerate() {
             let Ok((body, _, _)) = &imported.result else {
                 continue;
@@ -130,7 +190,7 @@ fn imported_bodies_lose_their_small_blends() {
                 Ok(n) => n,
                 Err(Error::InvalidTweak(e)) => {
                     println!("{file} #{i}: recognition refused {e:?}");
-                    refused += 1;
+                    tally.count(known, End::Refused, bars);
                     continue;
                 }
                 Err(e) => panic!("{file} #{i}: {e:?}"),
@@ -165,29 +225,82 @@ fn imported_bodies_lose_their_small_blends() {
                         "{file} #{i}: {small} blends, refused {e:?} in {:.2} s",
                         t.elapsed().as_secs_f64()
                     );
-                    assert!(
-                        KNOWN_REFUSED.iter().any(|(f, _)| file.contains(f)),
-                        "{file} #{i}: refused {e:?}"
-                    );
-                    refused += 1;
+                    assert!(known, "{file} #{i}: refused {e:?}");
+                    tally.count(known, End::Refused, bars);
                 }
                 Err(Error::Cancelled) => {
                     println!("{file} #{i}: {small} blends, past the deadline");
-                    slow += 1;
+                    tally.count(known, End::Cancelled, bars);
                 }
                 Err(e) => panic!("{file} #{i}: not a tweak's refusal: {e:?}"),
             }
         }
     }
     println!(
-        "{defeatured} bodies defeatured, {refused} refused, {slow} past the deadline, {none} with no small blend"
+        "{defeatured} bodies defeatured, {} refused, {} past the deadline, {none} with no small blend",
+        tally.refused, tally.slow
     );
     // Question 425's bar: every committed body with blends under 2 mm
-    // defeatured, checked clean, within the deadline on one thread (the
-    // time is asserted with `RYUKEI_BARS=1` on the bar machine, else
-    // printed); those `KNOWN_REFUSED` names, with their issues, excepted.
-    assert_eq!(refused, KNOWN_REFUSED.len(), "{refused} refused");
-    assert_eq!(slow, 0, "{slow} past the deadline");
+    // defeatured, checked clean; those `KNOWN_REFUSED` names, with their
+    // issues, refused or past the deadline. Within the deadline on one
+    // thread is asserted only with `RYUKEI_BARS` on the bar machine, else
+    // printed.
+    tally.assert_bar(bars);
+}
+
+/// The tally's rules: a known body cancelled is its known outcome
+/// without `RYUKEI_BARS` and past the deadline with it; any other body
+/// cancelled is past the deadline, asserted only with it.
+#[test]
+fn a_known_bodys_cancel_counts_as_refused_except_under_the_bars() {
+    let ends = |bars: bool, ends: &[(bool, End)]| {
+        let mut t = Tally::default();
+        for &(known, end) in ends {
+            t.count(known, end, bars);
+        }
+        t
+    };
+    let known = [(true, End::Refused), (true, End::Cancelled)];
+    let t = ends(false, &known);
+    assert_eq!(
+        t,
+        Tally {
+            refused: 2,
+            slow: 0
+        }
+    );
+    t.assert_bar(false);
+    t.assert_bar(true);
+    let t = ends(true, &known);
+    assert_eq!(
+        t,
+        Tally {
+            refused: 1,
+            slow: 1
+        }
+    );
+    // An unknown body past the deadline: printed, asserted only with bars.
+    let other = [
+        (true, End::Refused),
+        (true, End::Refused),
+        (false, End::Cancelled),
+    ];
+    let t = ends(false, &other);
+    assert_eq!(
+        t,
+        Tally {
+            refused: 2,
+            slow: 1
+        }
+    );
+    t.assert_bar(false);
+    let bar = std::panic::catch_unwind(|| t.assert_bar(true));
+    assert!(bar.is_err(), "a slow body passed the bars");
+    // A refusal not in KNOWN_REFUSED fails either way.
+    for bars in [false, true] {
+        let r = std::panic::catch_unwind(|| Tally::default().count(false, End::Refused, bars));
+        assert!(r.is_err(), "an unknown refusal passed");
+    }
 }
 
 /// A box 10 × 6 × 4 mm with every edge rounded at 1 mm, written to STEP
