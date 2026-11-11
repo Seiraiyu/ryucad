@@ -16,6 +16,7 @@ use crate::place::{self, Hints, MARGIN};
 use crate::route::{self, Field, NO_NET};
 use crate::shape::{Shape, grid_origin};
 use crate::text;
+use crate::text::Line;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2830,7 +2831,7 @@ fn draw(
                     st.sheets[s0].0 == x.sheet && pl == Place::new(x.at, x.rotation, x.mirror)
                 });
                 if let (true, Some(fields)) = (unmoved, l.text.get(&part.key)) {
-                    for (n, t) in text_lines(part) {
+                    for (n, t) in part.lines() {
                         if let Some(at) = fields.get(n) {
                             kept_text.extend(text::boxes(&[t], *at));
                         }
@@ -2979,7 +2980,7 @@ fn draw(
         let mut kept_fields: BTreeMap<usize, BTreeMap<String, Point>> = BTreeMap::new();
         for &p in &parts {
             let part = &block.parts[p];
-            let texts = text_lines(part);
+            let texts = part.lines();
             if texts.is_empty() {
                 continue;
             }
@@ -3007,13 +3008,13 @@ fn draw(
                     continue;
                 };
                 let clear = texts.iter().all(|(n, t)| {
-                    text::boxes(&[t], fields[*n])
+                    text::boxes(&[*t], fields[*n])
                         .iter()
                         .all(|b| field.clear(*b))
                 });
                 if clear {
                     for (n, t) in &texts {
-                        for b in text::boxes(&[t], fields[*n]) {
+                        for b in text::boxes(&[*t], fields[*n]) {
                             field.block(b);
                         }
                     }
@@ -3033,13 +3034,13 @@ fn draw(
             });
             if let Some(fields) = fields
                 && texts.iter().all(|(n, t)| {
-                    text::boxes(&[t], fields[*n])
+                    text::boxes(&[*t], fields[*n])
                         .iter()
                         .all(|b| field.clear(*b))
                 })
             {
                 for (n, t) in &texts {
-                    for b in text::boxes(&[t], fields[*n]) {
+                    for b in text::boxes(&[*t], fields[*n]) {
                         field.block(b);
                     }
                 }
@@ -3367,11 +3368,11 @@ fn draw(
             if matches!(part.kind, PartKind::Port { .. }) {
                 continue;
             }
-            let lines = text_lines(part);
+            let lines = part.lines();
             if lines.is_empty() {
                 continue;
             }
-            let texts: Vec<&str> = lines.iter().map(|(_, t)| *t).collect();
+            let texts: Vec<Line> = lines.iter().map(|(_, t)| *t).collect();
             let body = st.shape(p).expect("placed").body;
             // Text kept field by field (asked parts' too, below).
             if !asks.contains_key(&p)
@@ -3390,12 +3391,12 @@ fn draw(
                         fn place(
                             field: &mut Field,
                             fields: &mut BTreeMap<String, Point>,
-                            group: Vec<(&str, &str)>,
+                            group: Vec<(&str, Line)>,
                             at: Option<Point>,
                             fallback: Point,
                         ) {
                             let at = at.unwrap_or(fallback);
-                            let ts: Vec<&str> = group.iter().map(|(_, t)| *t).collect();
+                            let ts: Vec<Line> = group.iter().map(|(_, t)| *t).collect();
                             for b in text::boxes(&ts, at) {
                                 field.block(b);
                             }
@@ -3406,7 +3407,7 @@ fn draw(
                         }
                         let mut done: BTreeSet<&str> = BTreeSet::new();
                         for (f, side) in list {
-                            let group: Vec<(&str, &str)> = lines
+                            let group: Vec<(&str, Line)> = lines
                                 .iter()
                                 .copied()
                                 .filter(|(n, _)| f.covers(n) && !done.contains(n))
@@ -3415,7 +3416,7 @@ fn draw(
                                 continue;
                             }
                             done.extend(group.iter().map(|(n, _)| *n));
-                            let ts: Vec<&str> = group.iter().map(|(_, t)| *t).collect();
+                            let ts: Vec<Line> = group.iter().map(|(_, t)| *t).collect();
                             let cands = text::candidates_on(body, &ts, *side);
                             let at = cands
                                 .iter()
@@ -3427,13 +3428,13 @@ fn draw(
                                 .unwrap_or_else(|| text::candidates(body, &ts)[0]);
                             place(&mut field, &mut fields, group, at, fallback);
                         }
-                        let rest: Vec<(&str, &str)> = lines
+                        let rest: Vec<(&str, Line)> = lines
                             .iter()
                             .copied()
                             .filter(|(n, _)| !done.contains(n))
                             .collect();
                         if !rest.is_empty() {
-                            let ts: Vec<&str> = rest.iter().map(|(_, t)| *t).collect();
+                            let ts: Vec<Line> = rest.iter().map(|(_, t)| *t).collect();
                             let cands = text::candidates(body, &ts);
                             let at = cands
                                 .iter()
@@ -3467,7 +3468,7 @@ fn draw(
                     text::row_points(&texts, at)
                         .iter()
                         .zip(&texts)
-                        .all(|(q, t)| text::boxes(&[t], *q).iter().all(|b| field.clear(*b)))
+                        .all(|(q, t)| text::boxes(&[*t], *q).iter().all(|b| field.clear(*b)))
                 };
                 let at = (0..=24)
                     .flat_map(|k| [start(k * GRID, base), start(k * GRID, base + GRID)])
@@ -3476,7 +3477,7 @@ fn draw(
                     let pts = text::row_points(&texts, at);
                     let mut fields = BTreeMap::new();
                     for ((name, t), q) in lines.iter().zip(&pts) {
-                        for b in text::boxes(&[t], *q) {
+                        for b in text::boxes(&[*t], *q) {
                             field.block(b);
                         }
                         fields.insert((*name).to_owned(), *q);
@@ -3602,21 +3603,6 @@ fn port_on_run(
     rest.sort();
     order.extend(rest.into_iter().map(|(_, p)| p));
     order.into_iter().find(|p| ok(*p))
-}
-
-/// A part's lines of text beside it: its designator and value, those it
-/// has; a port has none (its name is in its flag).
-fn text_lines(part: &crate::input::Part) -> Vec<(&'static str, &str)> {
-    if matches!(part.kind, PartKind::Port { .. }) {
-        return Vec::new();
-    }
-    [
-        ("refdes", part.refdes.as_str()),
-        ("value", part.value.as_str()),
-    ]
-    .into_iter()
-    .filter(|(_, t)| !t.is_empty())
-    .collect()
 }
 
 /// The previous layout's runs on sheet `sid`, by net index.
@@ -6558,5 +6544,30 @@ mod tests {
         let out = lay(&b);
         assert!(crate::rules::check(&b, &out.layout).is_empty());
         assert!(out.layout.notes.contains_key("i9"));
+    }
+
+    #[test]
+    fn a_larger_text_moves_only_the_text_that_no_longer_fits() {
+        let block = seeded(3, 2);
+        let first = lay(&block);
+        let key = block
+            .parts
+            .iter()
+            .find(|p| !p.value.is_empty() && first.layout.text.contains_key(&p.key))
+            .expect("a part with text")
+            .key
+            .clone();
+        let mut b = block.clone();
+        b.previous = Some(first.layout.clone());
+        let i = b.part(&key).unwrap();
+        b.parts[i].text.size = 1_778_000;
+        let out = lay(&b);
+        assert_eq!(crate::rules::check(&b, &out.layout), []);
+        assert_eq!(out.layout.placed, first.layout.placed, "no part moves");
+        for (k, t) in &first.layout.text {
+            if *k != key {
+                assert_eq!(out.layout.text.get(k), Some(t), "{k}'s text moved");
+            }
+        }
     }
 }

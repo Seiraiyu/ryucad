@@ -12,7 +12,6 @@ use crate::label;
 use crate::layout::{Axis, IdiomChoice, IdiomKind, Instruction, LabelKind, NetStyle};
 use crate::route;
 use crate::shape::{Shape, pins_on_grid};
-use crate::text;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -516,9 +515,9 @@ pub(crate) fn ink_boxes(block: &Block, layout: &crate::layout::Layout, sid: &str
         };
         out.push(Shape::of(part, Place::new(x.at, x.rotation, x.mirror)).extent);
         if let Some(fields) = layout.text.get(&part.key) {
-            for (field, value) in [("refdes", &part.refdes), ("value", &part.value)] {
+            for (field, line) in part.fields() {
                 if let Some(at) = fields.get(field) {
-                    out.push(text::boxes(&[value.as_str()], *at)[0]);
+                    out.push(line.boxed(*at));
                 }
             }
         }
@@ -1397,12 +1396,9 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
         for (p, s) in &shapes {
             ink += s.extent.area();
             if let Some(fields) = layout.text.get(&block.parts[*p].key) {
-                for (field, v) in [
-                    ("refdes", &block.parts[*p].refdes),
-                    ("value", &block.parts[*p].value),
-                ] {
+                for (field, line) in block.parts[*p].fields() {
                     if let Some(at) = fields.get(field) {
-                        ink += text::boxes(&[v.as_str()], *at)[0].area();
+                        ink += line.boxed(*at).area();
                     }
                 }
             }

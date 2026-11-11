@@ -5,7 +5,7 @@
 //! draw alike; it also says where each label and block symbol is, for the
 //! PDF's cross-references and links.
 
-use crate::font::{Anchor, MIN_SIZE, SIZE};
+use crate::font::{Anchor, Font, MIN_SIZE, SIZE, Weight};
 use crate::geom::{GRID, Nm, Place, Point, Rect, Side};
 use crate::input::{Block, Fill, Graphic, PartKind};
 use crate::label;
@@ -548,7 +548,7 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
         }
         let pen = look.pen(&format!("region:{rid}"));
         let rect = r.frame_on_sheet();
-        let w = crate::font::width(&r.title, SIZE);
+        let w = crate::font::width_in(&r.title, Font::DESIGNATOR);
         let base = [rect.min[0] + GRID, rect.max[1] - 2 * GRID];
         let title_tab = Rect::new(
             [rect.min[0] + GRID / 2, base[1] - GRID / 2],
@@ -563,14 +563,15 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
             width: pen.weight.width(),
             frame: pen.frame,
         });
-        items.push(text_item(
-            &r.title,
-            base,
-            SIZE,
-            Anchor::Start,
-            false,
-            pen.colour.unwrap_or_else(|| look.role(Role::Text)),
-        ));
+        items.push(Item::Text {
+            text: r.title.clone(),
+            at: base,
+            size: SIZE,
+            anchor: Anchor::Start,
+            vertical: false,
+            colour: pen.colour.unwrap_or_else(|| look.role(Role::Text)),
+            bold: true,
+        });
         items.push(Item::End);
     }
     let mut arms: BTreeMap<(usize, route::Node), u8> = BTreeMap::new();
@@ -653,9 +654,17 @@ pub fn sheet_in(block: &Block, layout: &Layout, sid: &str, look: &Look) -> Paint
             items.push(Item::End);
         }
         if let Some(fields) = layout.text.get(&part.key) {
-            for (field, value) in [("refdes", &part.refdes), ("value", &part.value)] {
+            for (field, line) in part.fields() {
                 if let Some(at) = fields.get(field) {
-                    items.push(text_item(value, *at, SIZE, Anchor::Start, false, k.text));
+                    items.push(Item::Text {
+                        text: line.text.to_owned(),
+                        at: *at,
+                        size: line.font.size,
+                        anchor: Anchor::Start,
+                        vertical: false,
+                        colour: k.text,
+                        bold: line.font.weight == Weight::SemiBold,
+                    });
                 }
             }
         }

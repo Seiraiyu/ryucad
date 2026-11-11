@@ -88,9 +88,77 @@ pub struct Part {
     /// What its component does, from its `function` property ("" for
     /// none): the title of the region it leads.
     pub function: String,
+    /// How its designator and value are set (plan 2.E).
+    pub text: PartText,
     /// The body, in the part's own frame.
     pub graphics: Vec<Graphic>,
     pub pins: Vec<Pin>,
+}
+
+/// How a part's designator and value are set (plan 2.E: the style's
+/// `text_size` and `emphasis`, read as input).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PartText {
+    pub size: Nm,
+    /// Its value in SemiBold too.
+    pub emphasis: bool,
+}
+
+impl Default for PartText {
+    fn default() -> PartText {
+        PartText {
+            size: crate::font::SIZE,
+            emphasis: false,
+        }
+    }
+}
+
+impl Part {
+    /// The font of its text field `field`: its designator SemiBold, its
+    /// value SemiBold when emphasised, both at its text size.
+    pub fn font(&self, field: &str) -> crate::font::Font {
+        use crate::font::Weight;
+        crate::font::Font {
+            size: self.text.size,
+            weight: if field == "refdes" || self.text.emphasis {
+                Weight::SemiBold
+            } else {
+                Weight::Regular
+            },
+        }
+    }
+
+    /// Its designator and value as lines, empty or not.
+    pub fn fields(&self) -> [(&'static str, crate::text::Line<'_>); 2] {
+        [
+            (
+                "refdes",
+                crate::text::Line {
+                    text: &self.refdes,
+                    font: self.font("refdes"),
+                },
+            ),
+            (
+                "value",
+                crate::text::Line {
+                    text: &self.value,
+                    font: self.font("value"),
+                },
+            ),
+        ]
+    }
+
+    /// The lines of text beside it: its designator and value, those it
+    /// has; a port has none (its name is in its flag).
+    pub fn lines(&self) -> Vec<(&'static str, crate::text::Line<'_>)> {
+        if matches!(self.kind, PartKind::Port { .. }) {
+            return Vec::new();
+        }
+        self.fields()
+            .into_iter()
+            .filter(|(_, l)| !l.text.is_empty())
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -349,6 +417,23 @@ impl Block {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_part_sets_its_designator_in_semibold_and_its_value_when_emphasised() {
+        use super::PartText;
+        use crate::font::{Font, Weight};
+        let mut p = crate::testing::resistor("r1", "R1", "10k", [Some(0), Some(1)]);
+        assert_eq!(p.font("refdes"), Font::DESIGNATOR);
+        assert_eq!(p.font("value"), Font::REGULAR);
+        p.text = PartText {
+            size: 1_778_000,
+            emphasis: true,
+        };
+        assert_eq!(p.font("value").weight, Weight::SemiBold);
+        assert_eq!(p.font("refdes").size, 1_778_000);
+        let names: Vec<&str> = p.lines().iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, ["refdes", "value"]);
+    }
+
     use super::*;
     use crate::layout::{Orientation, Sheet};
 

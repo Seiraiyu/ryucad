@@ -2184,10 +2184,8 @@ fn place_bank(
                 // and a grid's rounding past its rail end.
                 let part = &block.parts[x.0];
                 let e = Shape::of(part, x.1).extent;
-                let lines: Vec<&str> = [part.refdes.as_str(), part.value.as_str()]
-                    .into_iter()
-                    .filter(|t| !t.is_empty())
-                    .collect();
+                let lines: Vec<crate::text::Line> =
+                    part.lines().into_iter().map(|(_, l)| l).collect();
                 let rail = away(e.min[0], x_sig).max(away(e.max[0], x_sig));
                 rail + 2 * GRID + crate::text::row_width(&lines)
             })

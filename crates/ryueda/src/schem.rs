@@ -402,7 +402,12 @@ fn widest(layers: &[Layer]) -> BTreeMap<Id, String> {
     let mut out: BTreeMap<Id, String> = BTreeMap::new();
     for l in layers {
         for (c, r) in &l.refdes {
-            let w = |t: &str| (ryusch::font::width(t, ryusch::font::SIZE), t.to_owned());
+            let w = |t: &str| {
+                (
+                    ryusch::font::width_in(t, ryusch::font::Font::DESIGNATOR),
+                    t.to_owned(),
+                )
+            };
             if out.get(c).is_none_or(|old| w(r) > w(old)) {
                 out.insert(c.clone(), r.clone());
             }
@@ -519,6 +524,7 @@ pub(crate) fn unit_part(sym: &crate::symbol::Symbol, unit: u32, key: String, pre
         refdes: String::new(),
         value: String::new(),
         function: String::new(),
+        text: ryusch::input::PartText::default(),
         graphics,
         pins,
     }
@@ -705,6 +711,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
                     kind: PartKind::Symbol { prefix },
                     refdes,
                     function: function_of(c),
+                    text: ryusch::input::PartText::default(),
                     value,
                     graphics,
                     pins,

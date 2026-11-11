@@ -330,9 +330,9 @@ pub fn drawn(block: &Block, layout: &Layout, which: &[&str]) -> Option<Rect> {
                 .shift(o),
         );
         if let Some(fields) = layout.text.get(&part.key) {
-            for (field, v) in [("refdes", &part.refdes), ("value", &part.value)] {
+            for (field, line) in part.fields() {
                 if let Some(p) = fields.get(field) {
-                    boxes.push(font::text_box(v, SIZE, *p, font::Anchor::Start).shift(o));
+                    boxes.push(line.boxed(*p).shift(o));
                 }
             }
         }

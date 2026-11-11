@@ -62,10 +62,7 @@ impl Cluster {
         for (p, place) in self.places(origin) {
             let part = &block.parts[p];
             let shape = Shape::of(part, place);
-            let lines: Vec<&str> = [part.refdes.as_str(), part.value.as_str()]
-                .into_iter()
-                .filter(|t| !t.is_empty())
-                .collect();
+            let lines: Vec<crate::text::Line> = part.lines().into_iter().map(|(_, l)| l).collect();
             if !lines.is_empty() && !matches!(part.kind, PartKind::Port { .. }) {
                 let at = crate::text::candidates(shape.body, &lines)
                     .into_iter()

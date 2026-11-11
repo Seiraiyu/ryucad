@@ -46,6 +46,7 @@ fn symbol(
         refdes: refdes.into(),
         value: value.into(),
         function: String::new(),
+        text: crate::input::PartText::default(),
         graphics,
         pins,
     }
