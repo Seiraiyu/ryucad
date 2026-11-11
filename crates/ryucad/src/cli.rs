@@ -1170,7 +1170,9 @@ enum FeatureCmd {
     /// moves every face, filling where they part; move_face --by offset moves
     /// only the faces named, keeping the topology); each face tweak takes
     /// --topology change, letting it change the solid's topology, and --blends
-    /// rebuild, making again the blends it breaks; a
+    /// rebuild, making again the blends it breaks; a delete_face (--face repeated,
+    /// --seed repeated, --heal auto, cap or grow) taking faces out of a solid and
+    /// healing each gap (`ryucad feature-faces` shows what a seed takes); a
     /// mirror (--solid, --plane, --operation) of a whole solid, joined to
     /// it unless told otherwise; a split (--target, --plane, or --tool
     /// BODY, or --tool-face FACE...; --flip, --keep): the target keeps the
@@ -2758,7 +2760,8 @@ struct FieldArgs {
     /// A hole's bottom: flat (the default), or a drill point's included angle: 118.
     #[arg(long, value_name = "BOTTOM")]
     bottom: Option<String>,
-    /// A join, cut or hole a pattern repeats; repeat for several.
+    /// A join, cut or hole a pattern repeats, or a delete_face's seed: one face of a
+    /// hole, boss or pocket, deleted whole. Repeat for several.
     #[arg(long = "seed", value_name = "FEATURE")]
     seeds: Vec<String>,
     /// A linear pattern's direction: x, y, z, or a straight edge or planar face

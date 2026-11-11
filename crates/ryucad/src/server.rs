@@ -4615,7 +4615,7 @@ fn feature_add(
     }
     // A tweak sorts what it was given; with no target it acts on the part's
     // one solid, else the one its faces name. The file names it all the same.
-    if crate::doc::tweak::TYPES.contains(&ty) {
+    if crate::tweak::TYPES.contains(&ty) {
         crate::tweak::take_given(ty, &mut given.fields)?;
         if given.fields.target.is_none() && given.fields.targets.is_none() {
             let before = solids_before(p, &list, at);
@@ -4721,8 +4721,8 @@ fn feature_add(
             given.only(ty, crate::doc::body::request_fields(ty))?;
             crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
-        "move_face" | "replace_face" | "draft" => {
-            given.only(ty, crate::doc::tweak::request_fields(ty))?;
+        "move_face" | "replace_face" | "draft" | "delete_face" => {
+            given.only(ty, crate::tweak::request_fields(ty))?;
             crate::tweak::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
         "base_flange" | "flange" | "unfold" | "refold" => {
@@ -4968,7 +4968,7 @@ fn feature_edit(
             | Feature::DeleteFace(_)) => {
                 let ty = f.type_name();
                 crate::tweak::take_given(ty, &mut given.fields)?;
-                given.only(ty, crate::doc::tweak::request_fields(ty))?;
+                given.only(ty, crate::tweak::request_fields(ty))?;
                 crate::tweak::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
             }
             Feature::Datum(d) => {

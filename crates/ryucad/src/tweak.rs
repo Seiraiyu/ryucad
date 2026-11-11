@@ -49,6 +49,15 @@ const _: () = {
     assert!(DEFAULT_EDIT_BUDGET >= 4 * LARGEST_EDIT);
 };
 
+/// The fields a request may give feature type `ty` of this module.
+pub fn request_fields(ty: &str) -> &'static [&'static str] {
+    if ty == "delete_face" {
+        crate::doc::edit::DELETE_REQUEST
+    } else {
+        crate::doc::tweak::request_fields(ty)
+    }
+}
+
 /// Whether `f`'s kernel call runs under the edit budget: a `delete_face`,
 /// or a tweak that may change topology or remake its blends. A tweak that
 /// keeps both runs as ryucad 17's, unbudgeted.
@@ -1030,7 +1039,7 @@ pub fn check(part: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result
 /// in `faces`. After it, `faces` holds the listed faces and `groups` the
 /// groups; `face` is taken. Any other type is left alone.
 pub fn take_given(ty: &str, f: &mut FeatureFields) -> Result<()> {
-    if !crate::doc::tweak::TYPES.contains(&ty) {
+    if !TYPES.contains(&ty) {
         return Ok(());
     }
     let mut faces: Vec<Value> = f.face.take().map(|x| vec![json!(x)]).unwrap_or_default();
@@ -1051,6 +1060,19 @@ pub fn take_given(ty: &str, f: &mut FeatureFields) -> Result<()> {
             return Err(Error::new(
                 Code::InvalidParam,
                 format!("a {ty}'s faces are a list of faces, each <part>/<solid>/<name>"),
+            )
+            .with("param", "faces"));
+        }
+    }
+    if ty == "delete_face" {
+        // The CLI's --seed goes as a pattern's features.
+        if f.seeds.is_none() {
+            f.seeds = f.features.take();
+        }
+        if !groups.is_empty() {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "a delete_face's faces are a list of faces, each <part>/<solid>/<name>: it has no groups",
             )
             .with("param", "faces"));
         }
@@ -1092,7 +1114,8 @@ pub fn default_target(ty: &str, f: &FeatureFields, before: &[Id], part: &Id) -> 
         .or_else(|| {
             let g = f.groups.as_ref()?.as_array()?.first()?;
             g.get("faces")?.as_array()?.first().cloned()
-        });
+        })
+        .or_else(|| f.seeds.as_ref()?.first().map(|t| json!(t)));
     if let Some(t) = first.as_ref().and_then(Value::as_str)
         && let Ok(r) = Reference::parse(t, part)
     {
@@ -1126,6 +1149,7 @@ pub fn from_given(
         Some(Feature::MoveFace(m)) => m.fields(),
         Some(Feature::ReplaceFace(r)) => r.fields(),
         Some(Feature::Draft(d)) => d.fields(),
+        Some(Feature::DeleteFace(x)) => x.fields(),
         _ => json!({}),
     };
     let o = v.as_object_mut().expect("fields are an object");
@@ -1196,6 +1220,8 @@ pub fn from_given(
             };
         }
         retrim_given(o, f)?;
+    } else if ty == "delete_face" {
+        delete_given(o, f, &reference)?;
     } else {
         if ty == "draft" {
             draft_given(o, f, &reference, &geom)?;
@@ -1279,10 +1305,70 @@ pub fn from_given(
         "draft" => Feature::Draft(Box::new(crate::doc::tweak::Draft::from_fields(
             &mut r, env,
         )?)),
+        "delete_face" => {
+            Feature::DeleteFace(Box::new(crate::doc::edit::DeleteFace::from_fields(&mut r)?))
+        }
         _ => Feature::MoveFace(Box::new(MoveFace::from_fields(&mut r, unit, env)?)),
     };
     r.finish()?;
     Ok(out)
+}
+
+/// A delete's own fields from what was given, over `o` (its file's):
+/// faces and seeds as text, each list replacing the file's (`[]` for
+/// none), and its healing (`auto` taking it away). A heal it doesn't
+/// know, or neither faces nor seeds left, is refused at its param.
+fn delete_given(
+    o: &mut serde_json::Map<String, Value>,
+    f: &FeatureFields,
+    reference: &dyn Fn(&str, &str) -> Result<Value>,
+) -> Result<()> {
+    let texts: Option<Vec<String>> = match &f.faces {
+        None => None,
+        Some(Value::Array(a)) => Some(
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect(),
+        ),
+        Some(_) => None,
+    };
+    for (key, list) in [("faces", texts.as_ref()), ("seeds", f.seeds.as_ref())] {
+        let Some(list) = list else { continue };
+        let refs = list
+            .iter()
+            .enumerate()
+            .map(|(i, t)| reference(t, &format!("/{key}/{i}")))
+            .collect::<Result<Vec<_>>>()?;
+        if refs.is_empty() {
+            o.remove(key);
+        } else {
+            o.insert(key.into(), json!(refs));
+        }
+    }
+    match f.heal.as_deref() {
+        None => {}
+        Some("auto") => {
+            o.remove("heal");
+        }
+        Some(h @ ("cap" | "grow")) => {
+            o.insert("heal".into(), json!(h));
+        }
+        Some(h) => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("a delete_face's heal is auto, cap or grow, not {h:?}"),
+            )
+            .with("param", "heal"));
+        }
+    }
+    if !o.contains_key("faces") && !o.contains_key("seeds") {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a delete_face names the faces it deletes (faces), or a face of each hole, boss or pocket it deletes whole (seeds)",
+        )
+        .with("param", "faces"));
+    }
+    Ok(())
 }
 
 /// A draft's own fields from what was given, over `o` (its file's): an
@@ -2035,6 +2121,75 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::InvalidParam);
+    }
+
+    #[test]
+    fn the_protocol_adds_and_edits_a_delete() {
+        let (dir, mut s) = boxes();
+        let b = names(&mut s, "b", "faces");
+        // Seeds as the CLI sends --seed (features); no target, two solids:
+        // the seed names it.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "delete_face", "id": "d",
+            "features": [format!("p/b/{}", b[0])], "heal": "grow"}),
+        )
+        .unwrap();
+        let v = file(&dir, "d");
+        assert_eq!(
+            (v["target"].as_str(), v["heal"].as_str()),
+            (Some("b"), Some("grow")),
+            "{v}"
+        );
+        assert_eq!(v["seeds"][0]["name"], json!(b[0]), "{v}");
+        assert_eq!(v["format"], crate::doc::edit::FORMAT);
+        // A face as `face`; heal auto isn't written; seeds cleared.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "d",
+            "face": format!("p/b/{}", b[1]), "heal": "auto", "seeds": []}),
+        )
+        .unwrap();
+        let v = file(&dir, "d");
+        assert!(v.get("heal").is_none() && v.get("seeds").is_none(), "{v}");
+        assert_eq!(v["faces"][0]["name"], json!(b[1]), "{v}");
+        // Neither faces nor seeds; a field it doesn't take; a bad heal.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "d", "faces": []}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam, "{e}");
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "d", "tangent": false}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["param"].as_str()),
+            (Code::InvalidParam, Some("tangent"))
+        );
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "d", "heal": "patch"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam, "{e}");
+        // A face of another solid.
+        let c = names(&mut s, "c", "faces");
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "d",
+            "faces": [format!("p/c/{}", c[0])]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::TargetsMixed, "{e}");
     }
 
     #[test]
