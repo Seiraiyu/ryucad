@@ -16,6 +16,7 @@ use crate::doc::project::{ImportFile, Part};
 use crate::rebuild::{Output, PartResult};
 use ryustep::Opened;
 use ryustep::styles::{Style, Target};
+use serde_json::Value;
 
 /// A file's style as an entry: `#rrggbb` and the opacity; `None` for
 /// one that sets neither.
@@ -236,12 +237,55 @@ fn key_of<'a>(
     }
 }
 
+/// What an import interprets of a file's styles (design 448): every
+/// instance of the styles of each body it read (`bodies`, indices into
+/// `held`), and of each occurrence style whose usages an instance stands
+/// for (`made`: (definition, usage index)) or a flattened import's
+/// `place.via` names (`vias`); the rest are `unplaced`, each with its
+/// styled item and the usages it names (`#n`).
+pub fn interpreted(
+    opened: &Opened,
+    bodies: &std::collections::BTreeSet<usize>,
+    made: &std::collections::BTreeSet<(usize, usize)>,
+    vias: &std::collections::BTreeSet<Vec<Via>>,
+) -> (Vec<u64>, Vec<Value>) {
+    let mut instances = Vec::new();
+    for &k in bodies {
+        instances.extend(opened.body_styles(k).instances);
+    }
+    let mut unplaced = Vec::new();
+    for o in opened.occurrence_styles() {
+        let placed = !o.path.is_empty()
+            && match o.target {
+                Target::Body(h) | Target::Face { held: h, .. }
+                    if vias.contains(&via_of(opened, &o.path)) =>
+                {
+                    bodies.contains(&h)
+                }
+                Target::Body(h) => bodies.contains(&h) && o.path.iter().all(|u| made.contains(u)),
+                Target::Product => o.path.iter().all(|u| made.contains(u)),
+                Target::Face { .. } | Target::Unplaced => false,
+            };
+        if placed {
+            instances.extend(&o.instances);
+        } else {
+            unplaced.push(serde_json::json!({
+                "step": format!("#{}", o.instance),
+                "usages": o.usages.iter().map(|u| format!("#{u}")).collect::<Vec<_>>(),
+            }));
+        }
+    }
+    instances.sort_unstable();
+    instances.dedup();
+    (instances, unplaced)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::server::tests::{call, fresh};
     use crate::session::Session;
-    use serde_json::{Value, json};
+    use serde_json::json;
 
     /// A file of ryustep's styled fixtures (`painted.stp`,
     /// `painted_assembly.stp`), by path.
@@ -353,5 +397,49 @@ pub(crate) mod tests {
             block.features.get(&Id::parse(founder, "feature").unwrap()),
             Some(Ok(Feature::Import(_)))
         ));
+    }
+
+    fn appearance(v: &Value) -> Value {
+        v["transfer"]["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["category"] == "appearance")
+            .cloned()
+            .unwrap_or_else(|| panic!("no appearance in {v}"))
+    }
+
+    #[test]
+    fn an_imports_styles_are_interpreted_and_its_containers_retained() {
+        // Two styled items of eight instances each; the presentation
+        // representation holding them is retained.
+        let (_d, mut s, v) = imported("painted.stp", json!({}));
+        let a = appearance(&v);
+        assert_eq!(a["interpreted"]["count"], 16, "{a}");
+        assert_eq!(a["retained"]["count"], 1, "{a}");
+        assert!(a.get("unplaced").is_none());
+        // import.report says the same of the committed file.
+        let path = v["file"]["path"].as_str().unwrap().to_owned();
+        let r = call(&mut s, "import.report", json!({"file": path})).unwrap();
+        assert_eq!(appearance(&r)["interpreted"], a["interpreted"]);
+        // The assembly: the block's, the pin's (transparent: ten) and the
+        // override's; three presentation representations.
+        let (_d, _s, v) = imported("painted_assembly.stp", json!({}));
+        let a = appearance(&v);
+        assert_eq!(a["interpreted"]["count"], 26, "{a}");
+        assert_eq!(a["retained"]["count"], 3, "{a}");
+    }
+
+    #[test]
+    fn an_occurrence_style_no_instance_stands_for_is_unplaced() {
+        let bytes = std::fs::read(fixture("painted_assembly.stp")).unwrap();
+        let opened = ryustep::open(&bytes).unwrap();
+        let none = std::collections::BTreeSet::new();
+        let (instances, unplaced) = interpreted(&opened, &none, &Default::default(), &Default::default());
+        assert!(instances.is_empty());
+        assert_eq!(unplaced.len(), 1);
+        let u = &unplaced[0];
+        assert!(u["step"].as_str().unwrap().starts_with('#'));
+        assert_eq!(u["usages"].as_array().unwrap().len(), 1);
     }
 }
