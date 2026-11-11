@@ -14,6 +14,15 @@ Standard library only; never run by CI.
       through key.json, and writes OUT/tally.json and OUT/tally.md: per
       pair the votes and majority (first, second or same), the mean scores
       per side and criterion, and where the judges disagreed.
+
+  A pair's side may be a list of images (several sheets): copied as
+  <letter>-1.png, <letter>-2.png … and named so in the prompt (plan 2.G).
+
+  python3 -I blind.py target OUT
+      After tally: over the pairs whose id starts with ref- (ours first,
+      the reference second), whether design 348's target holds: ours the
+      same or better by majority on at least two, and the reference's mean
+      lead on grouping and paper at most one point. Writes OUT/target.json.
 """
 
 import json
@@ -41,6 +50,19 @@ RUBRIC = (
 )
 
 
+def place(src, d, letter):
+    """Copies one side's image(s): one as <letter>.png, a list as
+    <letter>-1.png, <letter>-2.png …; returns the names."""
+    if isinstance(src, str):
+        shutil.copyfile(src, os.path.join(d, f"{letter}.png"))
+        return [f"{letter}.png"]
+    names = []
+    for i, s in enumerate(src, 1):
+        names.append(f"{letter}-{i}.png")
+        shutil.copyfile(s, os.path.join(d, names[-1]))
+    return names
+
+
 def prepare(out, seed, pairs_path):
     with open(pairs_path, encoding="utf-8") as f:
         pairs = json.load(f)
@@ -52,10 +74,16 @@ def prepare(out, seed, pairs_path):
         a, b = ("second", "first") if swap else ("first", "second")
         d = os.path.join(out, p["id"])
         os.makedirs(d, exist_ok=True)
-        shutil.copyfile(p[a], os.path.join(d, "A.png"))
-        shutil.copyfile(p[b], os.path.join(d, "B.png"))
+        a_names = place(p[a], d, "A")
+        b_names = place(p[b], d, "B")
+        rubric = RUBRIC
+        if len(a_names) > 1 or len(b_names) > 1:
+            rubric = RUBRIC.replace(
+                "are the images A.png and B.png",
+                f"are the images {' '.join(a_names)} (A) and {' '.join(b_names)} (B), a sheet an image",
+            )
         with open(os.path.join(d, "prompt.txt"), "w", encoding="utf-8") as f:
-            f.write(RUBRIC)
+            f.write(rubric)
         key[p["id"]] = {"A": a, "B": b, "first": p["first"], "second": p["second"]}
     with open(os.path.join(out, "key.json"), "w", encoding="utf-8") as f:
         json.dump(key, f, indent=1, sort_keys=True)
@@ -123,12 +151,41 @@ def tally(out):
     return result
 
 
+def target(out):
+    """Design 348's target over the pairs named ref-* (ours first, the
+    reference second): ours the same or better by majority on at least two,
+    and the reference's mean lead on grouping and paper at most a point."""
+    with open(os.path.join(out, "tally.json"), encoding="utf-8") as f:
+        result = json.load(f)
+    refs = {pid: r for pid, r in result.items() if pid.startswith("ref-")}
+    same_or_better = sum(1 for r in refs.values() if r["majority"] in ("first", "same", "tie"))
+
+    def gap(c):
+        d = [r["means"]["second"][c] - r["means"]["first"][c] for r in refs.values()
+             if r["means"]["first"][c] is not None and r["means"]["second"][c] is not None]
+        return round(sum(d) / len(d), 2) if d else None
+
+    g, p = gap("grouping"), gap("paper")
+    t = {
+        "pairs": len(refs),
+        "same_or_better": same_or_better,
+        "gap": {"grouping": g, "paper": p},
+        "held": same_or_better >= 2 and g is not None and g <= 1 and p is not None and p <= 1,
+    }
+    with open(os.path.join(out, "target.json"), "w", encoding="utf-8") as f:
+        json.dump(t, f, indent=1, sort_keys=True)
+        f.write("\n")
+    return t
+
+
 def main():
     if len(sys.argv) >= 2 and sys.argv[1] == "prepare" and len(sys.argv) == 5:
         prepare(sys.argv[2], sys.argv[3], sys.argv[4])
     elif len(sys.argv) == 3 and sys.argv[1] == "tally":
         for pid, r in tally(sys.argv[2]).items():
             print(pid, r["votes"], r["majority"])
+    elif len(sys.argv) == 3 and sys.argv[1] == "target":
+        print(json.dumps(target(sys.argv[2]), sort_keys=True))
     else:
         print(__doc__, file=sys.stderr)
         sys.exit(2)
