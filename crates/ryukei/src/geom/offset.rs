@@ -103,6 +103,23 @@ pub(super) fn cut([c0, c1]: [f64; 2], [a, b]: [f64; 2], period: Option<f64>) -> 
         .collect()
 }
 
+/// Whether [`cut`] gives anything for `[c0, c1]` against `[a, b]`: the
+/// same shifts and the same test, without building the parts.
+fn meets([c0, c1]: [f64; 2], [a, b]: [f64; 2], period: Option<f64>) -> bool {
+    let hit = |k: f64| {
+        let (lo, hi) = ((c0 + k).max(a), (c1 + k).min(b));
+        lo < hi || (a == b && lo == hi)
+    };
+    match period {
+        Some(p) => {
+            let lo = ((a - c1) / p).floor() as i64;
+            let hi = ((b - c0) / p).ceil() as i64;
+            (lo..=hi).any(|k| hit(k as f64 * p))
+        }
+        None => hit(0.0),
+    }
+}
+
 /// The offset's point as jets from its base's derivatives up to third
 /// order (by [`super::nurbs::third::ORDERS`]): `S_u` and `S_v` are jets
 /// of their own, whose derivatives are the base's second and third, so
@@ -523,7 +540,13 @@ impl Offset {
         let (pu, pv) = self.base.periods();
         let mut out = Vec::new();
         let mut stack: Vec<(Cell, u32)> = Vec::new();
+        // A trace asks for many small boxes, each against every cell:
+        // [`meets`] skips a cell [`cut`] would give nothing for, before it
+        // allocates (plan 17.A's bars: `global_offset_props`' seed 3).
         for c in &self.cells {
+            if !meets(c[0], ru, pu) || !meets(c[1], rv, pv) {
+                continue;
+            }
             for u in cut(c[0], ru, pu) {
                 for v in cut(c[1], rv, pv) {
                     stack.push(([u, v], 0));

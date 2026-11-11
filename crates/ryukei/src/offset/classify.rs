@@ -412,10 +412,11 @@ fn offset_surface_in(body: &Body, f: FaceId, d: f64, through: bool) -> Result<Su
 
 /// The face's offset, as [`offset_surface`] finds it; in an envelope, a
 /// cylinder, sphere, torus or pipe whose offset passes its centre is kept
-/// inverted ([`inverted`]), and any other face whose offset collapses is
-/// tried again past its focal surface (design 484): kept where it passes
-/// it whole, on its base's parameters and with its sense, its natural
-/// normal along `O_u × O_v` as the turned cylinder's and torus's are.
+/// inverted ([`inverted`]), and any other face's offset is certified
+/// either way (design 484): regular as [`offset_surface`] makes it, or
+/// kept where it passes its focal surface whole, on its base's parameters
+/// and with its sense, its natural normal along `O_u × O_v` as the turned
+/// cylinder's and torus's are.
 fn envelope_surface(
     body: &Body,
     f: FaceId,
@@ -431,19 +432,21 @@ fn envelope_surface(
             Some(None) => return Err(OffsetError::FaceCollapses { face: face.name }.into()),
             None => {}
         }
-        return match offset_surface(body, f, d) {
-            Err(Error::InvalidOffset(OffsetError::FaceCollapses { .. })) if inverts(s) => {
-                let o = offset_surface_in(body, f, d, true)?;
-                Ok((
-                    o,
-                    Some(Inversion {
-                        map: None,
-                        flip: false,
-                    }),
-                ))
-            }
-            r => r.map(|s| (s, None)),
-        };
+        // Certified once, either way: a regular offset comes out as
+        // [`offset_surface`] makes it, bit for bit, and one past its focal
+        // surface whole is kept inverted. Certifying it regular first and
+        // then again either way repeated the same cells (the way is read
+        // cell by cell alike), doubling the cost of every face that
+        // collapses (plan 17.A's bars: `global_offset_props`' seed 36).
+        if inverts(s) {
+            let o = offset_surface_in(body, f, d, true)?;
+            let passes = matches!(&o, Surface::Offset(x) if x.passes_focal());
+            let inversion = passes.then_some(Inversion {
+                map: None,
+                flip: false,
+            });
+            return Ok((o, inversion));
+        }
     }
     offset_surface(body, f, d).map(|s| (s, None))
 }
