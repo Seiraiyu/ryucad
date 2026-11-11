@@ -28,8 +28,8 @@ pub use bspline::{BSplineCurve, BSplineSurface, Knots};
 pub use curve::Curve;
 pub use derived::{OnSurface, Trim};
 pub use geometry::{Placement, Point};
-pub use surface::Surface;
 pub use style::Side;
+pub use surface::Surface;
 pub use topology::{Brep, Edge, Face, Loop};
 pub use units::{Quantity, Unit, Units};
 
@@ -519,7 +519,10 @@ impl Entities {
     /// decoded to, ascending: the instances scanned in parallel, a chunk
     /// at a time, so a pass over a large file for a few of them costs a
     /// fraction of decoding it. The same on any number of threads.
-    pub fn select(&self, keep: impl Fn(Id, &Result<Entity, ImportError>) -> bool + Sync) -> Vec<Id> {
+    pub fn select(
+        &self,
+        keep: impl Fn(Id, &Result<Entity, ImportError>) -> bool + Sync,
+    ) -> Vec<Id> {
         self.ids
             .par_chunks(crate::census::CHUNK)
             .zip(self.items.par_iter())
@@ -798,19 +801,38 @@ pub(crate) mod tests {
              #15=SURFACE_STYLE_USAGE(.SIDEWAYS.,#7);\
              #16=PRESENTATION_STYLE_BY_CONTEXT((#8),#31);",
         );
-        assert_eq!(e.get(0, 1), Ok(&Entity::ColourRgb { rgb: [1.0, 0.5, 0.0] }));
+        assert_eq!(
+            e.get(0, 1),
+            Ok(&Entity::ColourRgb {
+                rgb: [1.0, 0.5, 0.0]
+            })
+        );
         assert_eq!(e.get(0, 2), Ok(&Entity::FillColour { colour: 1 }));
         assert_eq!(e.get(0, 3), Ok(&Entity::FillAreaStyle { styles: vec![2] }));
         assert_eq!(e.get(0, 4), Ok(&Entity::SurfaceFill { fill: 3 }));
         assert_eq!(e.get(0, 5), Ok(&Entity::Transparent { transparency: 0.25 }));
-        assert_eq!(e.get(0, 6), Ok(&Entity::Rendering { properties: vec![5] }));
-        assert_eq!(e.get(0, 7), Ok(&Entity::SurfaceSideStyle { styles: vec![4, 6] }));
+        assert_eq!(
+            e.get(0, 6),
+            Ok(&Entity::Rendering {
+                properties: vec![5]
+            })
+        );
+        assert_eq!(
+            e.get(0, 7),
+            Ok(&Entity::SurfaceSideStyle { styles: vec![4, 6] })
+        );
         assert_eq!(
             e.get(0, 8),
-            Ok(&Entity::SurfaceStyleUsage { side: Side::Both, style: 7 })
+            Ok(&Entity::SurfaceStyleUsage {
+                side: Side::Both,
+                style: 7
+            })
         );
         // NULL_STYLE is a typed value, not an instance: it styles nothing.
-        assert_eq!(e.get(0, 9), Ok(&Entity::StyleAssignment { styles: vec![8] }));
+        assert_eq!(
+            e.get(0, 9),
+            Ok(&Entity::StyleAssignment { styles: vec![8] })
+        );
         let styled = |over_riding, context| Entity::StyledItem {
             styles: vec![9],
             item: 30,
@@ -820,9 +842,21 @@ pub(crate) mod tests {
         assert_eq!(e.get(0, 10), Ok(&styled(false, None)));
         assert_eq!(e.get(0, 11), Ok(&styled(true, None)));
         assert_eq!(e.get(0, 12), Ok(&styled(true, Some(vec![40, 41]))));
-        assert_eq!(e.get(0, 13), Ok(&Entity::PredefinedColour { name: "red".into() }));
-        assert_eq!(e.get(0, 14), Ok(&Entity::HigherUsage { upper: 40, next: 41 }));
-        assert!(matches!(e.get(0, 15), Err(ImportError::Malformed { instance: 15, .. })));
+        assert_eq!(
+            e.get(0, 13),
+            Ok(&Entity::PredefinedColour { name: "red".into() })
+        );
+        assert_eq!(
+            e.get(0, 14),
+            Ok(&Entity::HigherUsage {
+                upper: 40,
+                next: 41
+            })
+        );
+        assert!(matches!(
+            e.get(0, 15),
+            Err(ImportError::Malformed { instance: 15, .. })
+        ));
         assert_eq!(
             e.get(0, 16),
             Ok(&Entity::StyleByContext {

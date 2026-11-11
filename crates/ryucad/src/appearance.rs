@@ -282,11 +282,9 @@ impl Layers {
             .get(part)
             .filter(|_| !layer_off(session, part))
             .map(|p| {
-                crate::file_styles::of_assembly(
-                    p,
-                    &|id| project.parts.get(id),
-                    &|path| project.imports.get(path),
-                )
+                crate::file_styles::of_assembly(p, &|id| project.parts.get(id), &|path| {
+                    project.imports.get(path)
+                })
             })
             .filter(|f| !f.is_empty())
             .map(Arc::new);
@@ -438,9 +436,19 @@ pub fn look_of(
     let above: Vec<(&Look, Source)> = d.above.iter().map(|(l, s)| (l, *s)).collect();
     let key = d.founder.as_str();
     let mut tail: Vec<(&Look, Source)> = Vec::new();
-    tail.extend(own.and_then(|f| f.solids.get(key)).map(|l| (l, Source::Entry)));
-    tail.extend(layer.and_then(|f| f.solids.get(key)).map(|l| (l, Source::File)));
-    tail.extend(own.and_then(|f| f.part.as_ref()).map(|l| (l, Source::Entry)));
+    tail.extend(
+        own.and_then(|f| f.solids.get(key))
+            .map(|l| (l, Source::Entry)),
+    );
+    tail.extend(
+        layer
+            .and_then(|f| f.solids.get(key))
+            .map(|l| (l, Source::File)),
+    );
+    tail.extend(
+        own.and_then(|f| f.part.as_ref())
+            .map(|l| (l, Source::Entry)),
+    );
     let base = effective(&[above.as_slice(), tail.as_slice()].concat(), material);
     let own_faces = faces_named(d, own);
     let file_faces = faces_named(d, layer);
@@ -1763,15 +1771,21 @@ pub(crate) mod tests {
         // the file as its source.
         let mut layer = (*Layers::default().part(&mut s, &part).unwrap()).clone();
         let gone = format!("{solid}/{}", "0".repeat(32));
-        layer.faces.insert(gone.clone(), Look {
-            colour: Some("#000000".into()),
-            ..Default::default()
-        });
+        layer.faces.insert(
+            gone.clone(),
+            Look {
+                colour: Some("#000000".into()),
+                ..Default::default()
+            },
+        );
         let shown = shown_solids(&mut s, &part).unwrap();
         let w = file_unresolved(&part, &layer, &shown);
         assert_eq!(w.len(), 1, "{w:?}");
         assert_eq!(w[0]["code"], "appearance_unresolved");
-        assert_eq!((&w[0]["key"], &w[0]["source"]), (&json!(gone), &json!("file")));
+        assert_eq!(
+            (&w[0]["key"], &w[0]["source"]),
+            (&json!(gone), &json!("file"))
+        );
     }
 
     #[test]
@@ -1784,7 +1798,9 @@ pub(crate) mod tests {
             p.features
                 .values()
                 .find_map(|f| match f {
-                    Ok(Feature::Instance(i)) if i.import.as_ref().and_then(|u| u.usage.as_deref()) == Some("1") => {
+                    Ok(Feature::Instance(i))
+                        if i.import.as_ref().and_then(|u| u.usage.as_deref()) == Some("1") =>
+                    {
                         Some(i.part.clone())
                     }
                     _ => None,
@@ -1793,11 +1809,19 @@ pub(crate) mod tests {
         };
         let colours = |s: &mut Session| -> Vec<Value> {
             let v = call(s, "appearance.get", json!({"part": rack.as_str()})).unwrap();
-            let mut c: Vec<Value> = v["solids"].as_array().unwrap().iter().map(|x| x["colour"].clone()).collect();
+            let mut c: Vec<Value> = v["solids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x["colour"].clone())
+                .collect();
             c.sort_by_key(|x| x.to_string());
             c
         };
-        assert_eq!(colours(&mut s), [json!("#0000ff"), json!("#00ff00"), json!("#ff0000")]);
+        assert_eq!(
+            colours(&mut s),
+            [json!("#0000ff"), json!("#00ff00"), json!("#ff0000")]
+        );
         // The assembly's layer off: its green occurrence is the block's red.
         call(
             &mut s,
@@ -1810,7 +1834,10 @@ pub(crate) mod tests {
             crate::doc::canonical::parse(&std::fs::read_to_string(&file).unwrap()).unwrap(),
             json!({"format": 2, "kind": "ryucad.appearance", "part": {"file_styles": false}})
         );
-        assert_eq!(colours(&mut s), [json!("#0000ff"), json!("#ff0000"), json!("#ff0000")]);
+        assert_eq!(
+            colours(&mut s),
+            [json!("#0000ff"), json!("#ff0000"), json!("#ff0000")]
+        );
         // The block's off too: plain.
         call(
             &mut s,
@@ -1818,7 +1845,10 @@ pub(crate) mod tests {
             json!({"entities": [block.as_str()], "file_styles": false}),
         )
         .unwrap();
-        assert_eq!(colours(&mut s), [json!("#0000ff"), Value::Null, Value::Null]);
+        assert_eq!(
+            colours(&mut s),
+            [json!("#0000ff"), Value::Null, Value::Null]
+        );
         // On again: the file goes with its last entry.
         for p in [&rack, &block] {
             call(
@@ -1829,11 +1859,17 @@ pub(crate) mod tests {
             .unwrap();
         }
         assert!(!file.exists());
-        assert_eq!(colours(&mut s), [json!("#0000ff"), json!("#00ff00"), json!("#ff0000")]);
+        assert_eq!(
+            colours(&mut s),
+            [json!("#0000ff"), json!("#00ff00"), json!("#ff0000")]
+        );
         // It is the part's alone; an assembly takes nothing else whole.
         for (entities, params) in [
             (json!([format!("{block}/x")]), json!({"file_styles": false})),
-            (json!([rack.as_str()]), json!({"file_styles": false, "colour": "#000000"})),
+            (
+                json!([rack.as_str()]),
+                json!({"file_styles": false, "colour": "#000000"}),
+            ),
         ] {
             let mut p = params;
             p["entities"] = entities;

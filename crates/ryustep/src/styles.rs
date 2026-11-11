@@ -289,7 +289,12 @@ fn side_style(e: &Entities, from: Id, sss: Id, used: &mut Vec<Id>) -> Result<Sty
     Ok(out)
 }
 
-fn fill_colour(e: &Entities, from: Id, fas: Id, used: &mut Vec<Id>) -> Result<Option<[u8; 3]>, ImportError> {
+fn fill_colour(
+    e: &Entities,
+    from: Id,
+    fas: Id,
+    used: &mut Vec<Id>,
+) -> Result<Option<[u8; 3]>, ImportError> {
     let Entity::FillAreaStyle { styles } = e.get(from, fas)? else {
         return Err(wrong(fas, "a FILL_AREA_STYLE"));
     };
@@ -398,7 +403,13 @@ fn by_context_path(
     usage_path(e, id, &named)
 }
 
-fn usages(e: &Entities, from: Id, c: Id, out: &mut Vec<Id>, depth: usize) -> Result<(), ImportError> {
+fn usages(
+    e: &Entities,
+    from: Id,
+    c: Id,
+    out: &mut Vec<Id>,
+    depth: usize,
+) -> Result<(), ImportError> {
     if depth > 64 {
         return Err(ImportError::Malformed {
             instance: from,
@@ -668,7 +679,9 @@ mod tests {
             .iter()
             .map(|i| (i.id, crate::census::joined(i.record.parts())))
             .collect();
-        read(&Entities::decode(&file), &|id| names.get(&id).map(String::as_str))
+        read(&Entities::decode(&file), &|id| {
+            names.get(&id).map(String::as_str)
+        })
     }
 
     /// One fill colour `#1` and its chain to assignment `#9`; `extra`

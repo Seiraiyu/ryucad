@@ -325,7 +325,9 @@ pub(crate) fn write_inner_styled(
     let all: Vec<&Body> = model.products.iter().flat_map(|p| &p.bodies).collect();
     let mut seamed_all = all
         .par_iter()
-        .map(|b| seamed_with_origins(b, opts.pipe_tolerance).map_err(|err| not_representable(b, err)))
+        .map(|b| {
+            seamed_with_origins(b, opts.pipe_tolerance).map_err(|err| not_representable(b, err))
+        })
         .collect::<Vec<_>>()
         .into_iter();
     let shapes: Vec<Vec<(ryukei::heal::Shape, Origins)>> = model
@@ -342,15 +344,18 @@ pub(crate) fn write_inner_styled(
         .iter()
         .enumerate()
         .flat_map(|(product, bodies)| {
-            bodies.iter().enumerate().filter_map(move |(body, (sh, _))| {
-                let faces = sh.faces.iter().filter(|f| f.tolerance > 0.0).count();
-                (faces > 0).then(|| Approximated {
-                    product,
-                    body,
-                    faces,
-                    bound: sh.faces.iter().map(|f| f.tolerance).fold(0.0, f64::max),
+            bodies
+                .iter()
+                .enumerate()
+                .filter_map(move |(body, (sh, _))| {
+                    let faces = sh.faces.iter().filter(|f| f.tolerance > 0.0).count();
+                    (faces > 0).then(|| Approximated {
+                        product,
+                        body,
+                        faces,
+                        bound: sh.faces.iter().map(|f| f.tolerance).fold(0.0, f64::max),
+                    })
                 })
-            })
         })
         .collect();
     let mut out = Out::default();
@@ -380,10 +385,7 @@ pub(crate) fn write_inner_styled(
             .map(|(b, (_, o))| face_names(b, o))
             .collect();
         let named = |n: usize, faces: BTreeMap<usize, u64>| -> BTreeMap<Name, u64> {
-            faces
-                .into_iter()
-                .map(|(i, id)| (names[n][i], id))
-                .collect()
+            faces.into_iter().map(|(i, id)| (names[n][i], id)).collect()
         };
         let mut written = Vec::with_capacity(p.bodies.len());
         let product = out.add(
@@ -765,7 +767,13 @@ mod written_tests {
             b.faces().map(|f| b.face(f).unwrap().name).collect();
         assert_eq!(bodies[0].len(), 2);
         for wb in &bodies[0] {
-            assert_eq!(wb.faces.keys().copied().collect::<std::collections::BTreeSet<_>>(), names);
+            assert_eq!(
+                wb.faces
+                    .keys()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                names
+            );
             assert_eq!(wb.items.len(), 1);
         }
         let file = crate::part21::parse(&w.bytes).unwrap();
@@ -831,17 +839,26 @@ mod written_tests {
         assert_eq!(count("PRESENTATION_STYLE_ASSIGNMENT"), 2);
         assert_eq!(count("COLOUR_RGB"), 2);
         assert_eq!(count("SURFACE_STYLE_TRANSPARENT"), 1);
-        assert_eq!(count("MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION"), 1);
+        assert_eq!(
+            count("MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION"),
+            1
+        );
         // And they read back.
         let o = crate::open(&w.bytes).unwrap();
         let s = o.body_styles(0);
         assert_eq!(s.body.unwrap().colour, Some([255, 0, 0]));
         let faces: Vec<_> = s.faces.values().collect();
         assert_eq!(faces.len(), 2);
-        assert!(faces.iter().all(|f| f.colour == Some([0, 0, 255]) && f.opacity == Some(0.25)));
+        assert!(
+            faces
+                .iter()
+                .all(|f| f.colour == Some([0, 0, 255]) && f.opacity == Some(0.25))
+        );
         // No paint, the bytes `write_with` writes.
         assert_eq!(
-            write_styled(&model, &[], &Paints::default(), &opts).unwrap().bytes,
+            write_styled(&model, &[], &Paints::default(), &opts)
+                .unwrap()
+                .bytes,
             write(&model, &opts).unwrap()
         );
     }
@@ -895,7 +912,10 @@ mod written_tests {
         let k = o
             .held
             .iter()
-            .position(|h| h.definition.is_some_and(|d| &*o.products.definitions[d].product_id == "block"))
+            .position(|h| {
+                h.definition
+                    .is_some_and(|d| &*o.products.definitions[d].product_id == "block")
+            })
             .unwrap();
         assert_eq!(o.body_styles(k).body, None);
         let occ = o.occurrence_styles();
@@ -989,7 +1009,10 @@ mod written_tests {
                 product: 0,
                 body: 0,
                 base: Some(p([255, 0, 0], 0.5)),
-                faces: vec![(names[0], p([0, 0, 255], 1.0)), (names[1], p([0, 255, 0], 0.5))],
+                faces: vec![
+                    (names[0], p([0, 0, 255], 1.0)),
+                    (names[1], p([0, 255, 0], 0.5)),
+                ],
             }],
             occurrences: Vec::new(),
         };

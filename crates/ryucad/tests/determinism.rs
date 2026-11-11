@@ -6177,14 +6177,16 @@ fn transfer_section(golden: &mut Golden) {
 fn styles_section(golden: &mut Golden) {
     use serde_json::json;
     let mut s = golden.section("styles");
-    let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/styles");
+    let data =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/styles");
     let mut runs = Vec::new();
     for threads in [1, 4] {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
             .unwrap();
-        let req = |m: &str, p: serde_json::Value| ryucad::proto::Request::from_rpc(m, Some(p)).unwrap();
+        let req =
+            |m: &str, p: serde_json::Value| ryucad::proto::Request::from_rpc(m, Some(p)).unwrap();
         let mut out = Vec::new();
         for (file, flatten) in [
             ("painted.stp", false),
@@ -6198,7 +6200,10 @@ fn styles_section(golden: &mut Golden) {
                 .install(|| {
                     ryucad::server::handle(
                         &mut session,
-                        req("import", json!({"path": data.join(file), "solid": true, "flatten": flatten})),
+                        req(
+                            "import",
+                            json!({"path": data.join(file), "solid": true, "flatten": flatten}),
+                        ),
                     )
                 })
                 .unwrap();
@@ -6206,7 +6211,10 @@ fn styles_section(golden: &mut Golden) {
             for p in v["parts"].as_array().unwrap() {
                 let a = pool
                     .install(|| {
-                        ryucad::server::handle(&mut session, req("appearance.get", json!({"part": p["part"]})))
+                        ryucad::server::handle(
+                            &mut session,
+                            req("appearance.get", json!({"part": p["part"]})),
+                        )
                     })
                     .unwrap();
                 out.push(ryucad::doc::canonical::to_string(&a["solids"]));
@@ -6224,11 +6232,16 @@ fn styles_section(golden: &mut Golden) {
         let params = json!({"part": "show", "time_stamp": "2026-11-11T00:00:00",
                             "file_name": "show.step"});
         let a = pool
-            .install(|| ryucad::server::answer_live(&mut session, None, None, req("export", params)))
+            .install(|| {
+                ryucad::server::answer_live(&mut session, None, None, req("export", params))
+            })
             .unwrap();
         out.push(format!(
             "{:x}",
-            md(ryukei_testkit::unversioned(std::str::from_utf8(&a.binary.unwrap()).unwrap()).as_bytes())
+            md(
+                ryukei_testkit::unversioned(std::str::from_utf8(&a.binary.unwrap()).unwrap())
+                    .as_bytes()
+            )
         ));
         runs.push(out);
     }
@@ -6251,7 +6264,11 @@ fn styles_move_no_geometry_instance() {
             .project()
             .parts
             .iter()
-            .filter(|(_, p)| !p.file.as_ref().is_ok_and(|f| f.kind == ryucad::doc::files::PartKind::Assembly))
+            .filter(|(_, p)| {
+                !p.file
+                    .as_ref()
+                    .is_ok_and(|f| f.kind == ryucad::doc::files::PartKind::Assembly)
+            })
             .map(|(id, _)| id.to_string())
             .collect();
         for p in &parts {
@@ -6266,7 +6283,10 @@ fn styles_move_no_geometry_instance() {
             let params = serde_json::json!({"part": part, "time_stamp": "2026-10-27T00:00:00",
                                             "file_name": "x.step", "appearance": appearance});
             let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
-            ryucad::server::answer_live(session, None, None, req).unwrap().binary.unwrap()
+            ryucad::server::answer_live(session, None, None, req)
+                .unwrap()
+                .binary
+                .unwrap()
         };
         let plain = ryustep::part21::parse(&export(&mut session, false)).unwrap();
         let styled = ryustep::part21::parse(&export(&mut session, true)).unwrap();

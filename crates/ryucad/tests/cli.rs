@@ -8388,7 +8388,10 @@ fn colours_in_and_out_from_the_cli() {
         .find(|c| c["category"] == "appearance")
         .cloned()
         .unwrap();
-    assert!(appearance["interpreted"]["count"].as_u64().unwrap() > 0, "{appearance}");
+    assert!(
+        appearance["interpreted"]["count"].as_u64().unwrap() > 0,
+        "{appearance}"
+    );
     let colours = |p: &Pair| -> Vec<String> {
         let v = p.ok(&["appearance", &rack]);
         let mut c: Vec<String> = v["solids"]
@@ -8427,7 +8430,11 @@ fn colours_in_and_out_from_the_cli() {
     assert!(written.contains("PRESENTATION_STYLE_BY_CONTEXT"));
     assert!(written.contains("SURFACE_STYLE_TRANSPARENT"));
     let v = export("../plain.step", &["--no-appearance"]);
-    assert!(!fs::read_to_string(beside.join("plain.step")).unwrap().contains("STYLED_ITEM"));
+    assert!(
+        !fs::read_to_string(beside.join("plain.step"))
+            .unwrap()
+            .contains("STYLED_ITEM")
+    );
     assert!(
         v["warnings"]
             .as_array()

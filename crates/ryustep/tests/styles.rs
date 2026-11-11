@@ -159,9 +159,12 @@ fn kept(name: &str, bytes: &[u8]) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, bytes).unwrap();
     }
-    let on_disk = std::fs::read(&path)
-        .unwrap_or_else(|e| panic!("{name}: {e} (UPDATE_GOLDEN=1 writes it)"));
-    assert!(on_disk == bytes, "{name} isn't what ryustep writes now: UPDATE_GOLDEN=1");
+    let on_disk =
+        std::fs::read(&path).unwrap_or_else(|e| panic!("{name}: {e} (UPDATE_GOLDEN=1 writes it)"));
+    assert!(
+        on_disk == bytes,
+        "{name} isn't what ryustep writes now: UPDATE_GOLDEN=1"
+    );
 }
 
 #[test]
@@ -189,12 +192,18 @@ fn painted_assembly_reads_back_its_occurrence_and_transparency() {
             .position(|h| h.definition.is_some_and(|d| &*defs[d].product_id == id))
             .unwrap()
     };
-    assert_eq!(o.body_styles(held("block")).body.unwrap().colour, Some([255, 0, 0]));
+    assert_eq!(
+        o.body_styles(held("block")).body.unwrap().colour,
+        Some([255, 0, 0])
+    );
     let pin = o.body_styles(held("pin")).body.unwrap();
     assert_eq!((pin.colour, pin.opacity), (Some([0, 0, 255]), Some(0.5)));
     let occ = o.occurrence_styles();
     assert_eq!(occ.len(), 1);
-    assert_eq!(&*defs[o.products.roots[0]].children[occ[0].path[0].1].id, "2");
+    assert_eq!(
+        &*defs[o.products.roots[0]].children[occ[0].path[0].1].id,
+        "2"
+    );
     assert_eq!(occ[0].style.colour, Some([0, 255, 0]));
 }
 
@@ -220,7 +229,10 @@ fn occt_colours_read_as_occt_wrote_them() {
     let block = o.body_styles(held("block"));
     assert_eq!(block.body.unwrap().colour, Some([255, 0, 0]));
     assert_eq!(block.faces.len(), 1, "{block:?}");
-    assert_eq!(block.faces.values().next().unwrap().colour, Some([0, 0, 255]));
+    assert_eq!(
+        block.faces.values().next().unwrap().colour,
+        Some([0, 0, 255])
+    );
     let pin = o.body_styles(held("pin")).body.unwrap();
     assert_eq!(pin.colour, Some([0, 255, 0]));
     assert_eq!(pin.opacity, Some(0.5));
@@ -246,12 +258,22 @@ fn occt_occurrence_colours_read_per_occurrence() {
     let occ = o.occurrence_styles();
     let colour = |n: usize| {
         occ.iter()
-            .find(|x| x.path == [(root, n)] && matches!(x.target, ryustep::styles::Target::Body(_) | ryustep::styles::Target::Product))
+            .find(|x| {
+                x.path == [(root, n)]
+                    && matches!(
+                        x.target,
+                        ryustep::styles::Target::Body(_) | ryustep::styles::Target::Product
+                    )
+            })
             .map(|x| x.style)
             .or(own)
             .and_then(|s| s.colour)
     };
     let mut got = [colour(0), colour(1)];
     got.sort();
-    assert_eq!(got, [Some([0, 0, 255]), Some([255, 0, 0])], "{occ:?} own {own:?}");
+    assert_eq!(
+        got,
+        [Some([0, 0, 255]), Some([255, 0, 0])],
+        "{occ:?} own {own:?}"
+    );
 }

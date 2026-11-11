@@ -250,7 +250,11 @@ fn styles_round_trip() {
             continue;
         }
         let paint = |k: u64| ryustep::Paint {
-            colour: [(k * 37 % 256) as u8, (k * 91 % 256) as u8, (k * 13 % 256) as u8],
+            colour: [
+                (k * 37 % 256) as u8,
+                (k * 91 % 256) as u8,
+                (k * 13 % 256) as u8,
+            ],
             opacity: ((k % 1000) + 1) as f64 / 1000.0,
         };
         let faces: Vec<_> = body

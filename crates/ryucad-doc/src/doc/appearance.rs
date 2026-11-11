@@ -277,7 +277,10 @@ impl AppearanceFile {
     pub fn check_kind(&self, assembly: bool) -> Result<()> {
         if assembly {
             for (key, has) in [
-                ("part", self.part.as_ref().is_some_and(|p| !p.is_file_styles_only())),
+                (
+                    "part",
+                    self.part.as_ref().is_some_and(|p| !p.is_file_styles_only()),
+                ),
                 ("solids", !self.solids.is_empty()),
                 ("faces", !self.faces.is_empty()),
             ] {
@@ -301,10 +304,7 @@ impl AppearanceFile {
 impl Look {
     /// Whether it says nothing but `file_styles: false`.
     pub fn is_file_styles_only(&self) -> bool {
-        self.no_file_styles
-            && self.colour.is_none()
-            && self.opacity.is_none()
-            && !self.material
+        self.no_file_styles && self.colour.is_none() && self.opacity.is_none() && !self.material
     }
 }
 

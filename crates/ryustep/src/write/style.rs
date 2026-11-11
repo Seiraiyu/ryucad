@@ -218,7 +218,16 @@ pub(crate) fn write(
             );
         }
     }
-    occurrences(out, cx, model, bodies, usages, paints, &mut shared, &mut own);
+    occurrences(
+        out,
+        cx,
+        model,
+        bodies,
+        usages,
+        paints,
+        &mut shared,
+        &mut own,
+    );
 }
 
 /// Each occurrence paint on each B-rep item of the body, all in one
@@ -286,10 +295,7 @@ fn occurrences(
             // XDE takes a component's colour whole, opaque where it gives
             // no transparency: written as a body's is.
             let ssu = shared.surface_usage(out, o.paint, 1.0);
-            let by = out.add(
-                "PRESENTATION_STYLE_BY_CONTEXT",
-                vec![refs([ssu]), r(rep)],
-            );
+            let by = out.add("PRESENTATION_STYLE_BY_CONTEXT", vec![refs([ssu]), r(rep)]);
             for &item in &w.items {
                 styled.push(out.add("STYLED_ITEM", vec![s(""), refs([by]), r(item)]));
             }

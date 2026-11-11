@@ -1499,10 +1499,12 @@ impl Walk {
                         if own {
                             let (cp, cr) = self.node(s, &placed.part, &placed.rev)?;
                             if !cp.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly) {
-                                mine.extend(solids(&cp, &placed.rev, &cr).into_iter().map(|mut x| {
-                                    x.key = format!("{fid}/{}", x.founder);
-                                    x
-                                }));
+                                mine.extend(solids(&cp, &placed.rev, &cr).into_iter().map(
+                                    |mut x| {
+                                        x.key = format!("{fid}/{}", x.founder);
+                                        x
+                                    },
+                                ));
                                 continue;
                             }
                         }
@@ -3642,9 +3644,17 @@ pub(crate) mod tests {
         use ryukei::primitive;
         let at = |x: f64, y: f64, z: f64| Rigid::translation(Vector3::new(x, y, z));
         let k = OpKey(1);
-        let plate = primitive::block(k, 0.1, 0.1, 0.01, &Rigid::IDENTITY).unwrap().0;
-        let pin = primitive::cylinder(k, 0.002, 0.02, &Rigid::IDENTITY).unwrap().0;
-        let face = plate.faces().map(|f| plate.face(f).unwrap().name).min().unwrap();
+        let plate = primitive::block(k, 0.1, 0.1, 0.01, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let pin = primitive::cylinder(k, 0.002, 0.02, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let face = plate
+            .faces()
+            .map(|f| plate.face(f).unwrap().name)
+            .min()
+            .unwrap();
         let product = |id: &str, name: &str, bodies, children| ryustep::Product {
             id: id.into(),
             name: name.into(),
@@ -3675,7 +3685,10 @@ pub(crate) mod tests {
                 product("P-1", "Pin", vec![pin], vec![]),
             ],
         };
-        let p = |c: [u8; 3], o: f64| ryustep::Paint { colour: c, opacity: o };
+        let p = |c: [u8; 3], o: f64| ryustep::Paint {
+            colour: c,
+            opacity: o,
+        };
         let paints = ryustep::Paints {
             bodies: vec![
                 ryustep::BodyPaint {
@@ -3703,7 +3716,9 @@ pub(crate) mod tests {
             time_stamp: "2026-10-27T00:00:00".into(),
             ..Default::default()
         };
-        ryustep::write_styled(&model, &[], &paints, &opts).unwrap().bytes
+        ryustep::write_styled(&model, &[], &paints, &opts)
+            .unwrap()
+            .bytes
     }
 
     /// A painted file imported and exported with its header is the file,
@@ -3724,7 +3739,11 @@ pub(crate) mod tests {
                 String::from_utf8_lossy(&bytes).into_owned(),
             );
             let first = a.lines().zip(b.lines()).position(|(x, y)| x != y);
-            panic!("differs from line {first:?}:\n{}\n---\n{}", a.lines().nth(first.unwrap_or(0)).unwrap_or(""), b.lines().nth(first.unwrap_or(0)).unwrap_or(""));
+            panic!(
+                "differs from line {first:?}:\n{}\n---\n{}",
+                a.lines().nth(first.unwrap_or(0)).unwrap_or(""),
+                b.lines().nth(first.unwrap_or(0)).unwrap_or("")
+            );
         }
     }
 
@@ -3825,7 +3844,11 @@ pub(crate) mod tests {
         set(&mut s, "plate", json!({"colour": "#d03030"}));
         set(&mut s, "plate/boss", json!({"opacity": 0.5}));
         let top = crate::appearance::tests::face_names(&mut s, "plate", "base")[0].clone();
-        set(&mut s, &format!("plate/base/{top}"), json!({"colour": "#2050c0"}));
+        set(
+            &mut s,
+            &format!("plate/base/{top}"),
+            json!({"colour": "#2050c0"}),
+        );
         let (v, bytes) = exported(
             &mut s,
             json!({"part": "plate", "time_stamp": "2026-11-11T00:00:00"}),
@@ -3866,7 +3889,11 @@ pub(crate) mod tests {
             call(s, "appearance.set", v).unwrap();
         };
         set(&mut s, "bolt", json!({"colour": "#101010"}));
-        set(&mut s, "pair/left", json!({"colour": "#202020", "opacity": 0.5}));
+        set(
+            &mut s,
+            "pair/left",
+            json!({"colour": "#202020", "opacity": 0.5}),
+        );
         set(&mut s, "frame/p1", json!({"colour": "#303030"}));
         set(&mut s, "frame/p2/right/shank", json!({"opacity": 0.25}));
         let (v, bytes) = exported(
@@ -3902,14 +3929,22 @@ pub(crate) mod tests {
                 (vec!["p1".into(), "left".into()], Some([0x30; 3]), Some(0.5)),
                 (vec!["p1".into(), "right".into()], Some([0x30; 3]), None),
                 (vec!["p2".into(), "left".into()], Some([0x20; 3]), Some(0.5)),
-                (vec!["p2".into(), "right".into()], Some([0x10; 3]), Some(0.25)),
+                (
+                    vec!["p2".into(), "right".into()],
+                    Some([0x10; 3]),
+                    Some(0.25)
+                ),
             ]
         );
         assert!(v.get("warnings").is_none(), "{v}");
         // A face of the bolt coloured in the bolt: in an occurrence drawn
         // otherwise, that face can't be said per occurrence.
         let face = crate::appearance::tests::face_names(&mut s, "bolt", "shank")[0].clone();
-        set(&mut s, &format!("bolt/shank/{face}"), json!({"colour": "#0000ff"}));
+        set(
+            &mut s,
+            &format!("bolt/shank/{face}"),
+            json!({"colour": "#0000ff"}),
+        );
         let (v, _) = exported(&mut s, json!({"part": "frame"})).unwrap();
         let omitted = v["transfer"]["omitted"]
             .as_array()
@@ -3920,7 +3955,10 @@ pub(crate) mod tests {
             .unwrap_or_else(|| panic!("{v}"));
         assert_eq!(omitted["count"], 4, "{omitted}");
         let w = v["warnings"].as_array().unwrap();
-        assert!(w.iter().any(|w| w["code"] == "export_metadata_omitted" && w["what"] == "appearance"));
+        assert!(
+            w.iter()
+                .any(|w| w["code"] == "export_metadata_omitted" && w["what"] == "appearance")
+        );
     }
 
     /// A label's export is its official commit's: its appearance too,

@@ -1380,15 +1380,27 @@ fn occt_reads_ryucads_colours() {
         let req = ryucad::proto::Request::from_rpc(m, Some(p)).unwrap();
         ryucad::server::handle(&mut s, req).unwrap_or_else(|e| panic!("{m}: {e}"))
     };
-    call("appearance.set", json!({"entities": ["plate"], "colour": "#ff0000"}));
+    call(
+        "appearance.set",
+        json!({"entities": ["plate"], "colour": "#ff0000"}),
+    );
     let faces = call("inspect", json!({"part": "plate", "feature": "slab"}));
-    let face = faces["bodies"][0]["faces"][0]["name"].as_str().unwrap().to_owned();
+    let face = faces["bodies"][0]["faces"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     call(
         "appearance.set",
         json!({"entities": [format!("plate/slab/{face}")], "colour": "#0000ff"}),
     );
-    call("appearance.set", json!({"entities": ["pin"], "colour": "#00ff00", "opacity": 0.5}));
-    call("appearance.set", json!({"entities": ["frame/p2"], "colour": "#0000ff"}));
+    call(
+        "appearance.set",
+        json!({"entities": ["pin"], "colour": "#00ff00", "opacity": 0.5}),
+    );
+    call(
+        "appearance.set",
+        json!({"entities": ["frame/p2"], "colour": "#0000ff"}),
+    );
     let mut wrong = Vec::new();
     for (schema, unit) in [("ap242", "mm"), ("ap214", "m")] {
         let params = json!({"part": "frame", "schema": schema, "unit": unit,
@@ -1423,7 +1435,9 @@ fn occt_reads_ryucads_colours() {
         if have != want {
             wrong.push(format!("{schema} {unit}: {have:?}, want {want:?}"));
         } else {
-            println!("{schema} {unit}: OCCT reads the plate, the pins and the face as ryucad draws them");
+            println!(
+                "{schema} {unit}: OCCT reads the plate, the pins and the face as ryucad draws them"
+            );
         }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");

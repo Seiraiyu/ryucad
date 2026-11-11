@@ -22,9 +22,7 @@ use serde_json::Value;
 /// one that sets neither.
 pub fn look(s: &Style) -> Option<Look> {
     let l = Look {
-        colour: s
-            .colour
-            .map(|[r, g, b]| format!("#{r:02x}{g:02x}{b:02x}")),
+        colour: s.colour.map(|[r, g, b]| format!("#{r:02x}{g:02x}{b:02x}")),
         opacity: s.opacity,
         ..Default::default()
     };
@@ -178,7 +176,11 @@ pub fn definition_of(opened: &Opened, p: &crate::doc::import::ProductRef) -> Opt
 /// The index among definition `k`'s usages of the one an imported
 /// instance stands for: its id, and its ordinal among the usages with
 /// that id and child.
-pub fn usage_index(opened: &Opened, k: usize, u: &crate::doc::assembly::ImportUsage) -> Option<usize> {
+pub fn usage_index(
+    opened: &Opened,
+    k: usize,
+    u: &crate::doc::assembly::ImportUsage,
+) -> Option<usize> {
     let usage = u.usage.as_deref()?;
     let children = &opened.products.definitions.get(k)?.children;
     (0..children.len()).find(|&n| {
@@ -201,7 +203,10 @@ fn key_of<'a>(
     for (step, &(k, n)) in o.path.iter().enumerate() {
         // Usages are told apart by id and ordinal per child, so the
         // instance's part must be the usage's child's product too.
-        let child = crate::import::product_of(opened, opened.products.definitions[k].children[n].definition);
+        let child = crate::import::product_of(
+            opened,
+            opened.products.definitions[k].children[n].definition,
+        );
         let fid = at.order().iter().find(|fid| {
             matches!(at.features.get(*fid), Some(Ok(Feature::Instance(i)))
                 if i.import.as_ref().is_some_and(|u| u.file == file
@@ -383,13 +388,16 @@ pub(crate) mod tests {
         let rack = part_of(&v, "assembly", 0);
         let project = s.project();
         let p = project.part(&rack).unwrap();
-        let l = of_assembly(p, &|id| project.parts.get(id), &|path| project.imports.get(path));
+        let l = of_assembly(p, &|id| project.parts.get(id), &|path| {
+            project.imports.get(path)
+        });
         assert_eq!(l.occurrences.len(), 1, "{l:?}");
         let (key, look) = l.occurrences.iter().next().unwrap();
         assert_eq!(look.colour.as_deref(), Some("#00ff00"));
         // `<instance>/<founder>`: the instance the file's usage `2` made.
         let (instance, founder) = key.split_once('/').unwrap();
-        let Some(Ok(Feature::Instance(i))) = p.features.get(&Id::parse(instance, "feature").unwrap())
+        let Some(Ok(Feature::Instance(i))) =
+            p.features.get(&Id::parse(instance, "feature").unwrap())
         else {
             panic!("{key}")
         };
@@ -437,7 +445,8 @@ pub(crate) mod tests {
         let bytes = std::fs::read(fixture("painted_assembly.stp")).unwrap();
         let opened = ryustep::open(&bytes).unwrap();
         let none = std::collections::BTreeSet::new();
-        let (instances, unplaced) = interpreted(&opened, &none, &Default::default(), &Default::default());
+        let (instances, unplaced) =
+            interpreted(&opened, &none, &Default::default(), &Default::default());
         assert!(instances.is_empty());
         assert_eq!(unplaced.len(), 1);
         let u = &unplaced[0];
@@ -482,7 +491,9 @@ pub(crate) mod tests {
             unit: ryustep::LengthUnit::Millimeter,
             ..Default::default()
         };
-        ryustep::write_styled(&model, &[], &paints, &opts).unwrap().bytes
+        ryustep::write_styled(&model, &[], &paints, &opts)
+            .unwrap()
+            .bytes
     }
 
     #[test]
@@ -494,7 +505,13 @@ pub(crate) mod tests {
             call(s, "appearance.get", json!({"part": part.as_str()})).unwrap()["solids"][0].clone()
         };
         let before = get(&mut s);
-        let blue = before["faces"].as_object().unwrap().keys().next().unwrap().clone();
+        let blue = before["faces"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
         // A person's face entry on another face.
         let solid = before["solid"].as_str().unwrap().to_owned();
         let names = crate::appearance::tests::face_names(&mut s, part.as_str(), &solid);
