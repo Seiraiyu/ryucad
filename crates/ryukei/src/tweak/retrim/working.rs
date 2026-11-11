@@ -69,10 +69,10 @@ pub(crate) fn working(
         // carried tens of its lengths on is no surface the region needs
         // (NIST FTC 07: v carried from a few units to [-37, 20], its
         // working sheet's sides fitted for 63 s and refused).
-        for k in 0..2 {
-            let len = domain[k][1] - domain[k][0];
-            for e in 0..2 {
-                m[k][e] = m[k][e].min(len);
+        for (mk, dk) in m.iter_mut().zip(domain) {
+            let len = dk[1] - dk[0];
+            for e in mk.iter_mut() {
+                *e = e.min(len);
             }
         }
         if m != [[0.0; 2]; 2] {
@@ -327,11 +327,13 @@ mod tests {
             .faces()
             .find(|&f| is(f, |s| matches!(s, Surface::Cylinder(_))))
             .unwrap();
-        let mut changes = Changes::default();
-        changes.deleted = r
-            .faces()
-            .filter(|&f| is(f, |s| matches!(s, Surface::Sphere(_))))
-            .collect();
+        let mut changes = Changes {
+            deleted: r
+                .faces()
+                .filter(|&f| is(f, |s| matches!(s, Surface::Sphere(_))))
+                .collect(),
+            ..Default::default()
+        };
         let surface = &r.surfaces[r.faces[cyl].surface];
         let [a, z] = delete_turn(&r, &changes, cyl, surface)[0].unwrap();
         let quarter = core::f64::consts::FRAC_PI_2;
