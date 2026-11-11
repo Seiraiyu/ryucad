@@ -20,7 +20,6 @@ use crate::instr::Refusal;
 use crate::label;
 use crate::layout::{Instruction, Layout, next_id};
 use crate::shape::Shape;
-use crate::text;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -254,9 +253,9 @@ fn boxes(block: &Block, l: &Layout, k: &Key) -> Vec<(String, Rect)> {
                 (l.text.get(&k.key), block.part(&k.key), l.placed.get(&k.key))
             {
                 let part = &block.parts[p];
-                for (field, v) in [("refdes", &part.refdes), ("value", &part.value)] {
+                for (field, line) in part.fields() {
                     if let Some(at) = fields.get(field) {
-                        out.push((x.sheet.clone(), text::boxes(&[v.as_str()], *at)[0]));
+                        out.push((x.sheet.clone(), line.boxed(*at)));
                     }
                 }
             }

@@ -62,10 +62,7 @@ impl Cluster {
         for (p, place) in self.places(origin) {
             let part = &block.parts[p];
             let shape = Shape::of(part, place);
-            let lines: Vec<&str> = [part.refdes.as_str(), part.value.as_str()]
-                .into_iter()
-                .filter(|t| !t.is_empty())
-                .collect();
+            let lines: Vec<crate::text::Line> = part.lines().into_iter().map(|(_, l)| l).collect();
             if !lines.is_empty() && !matches!(part.kind, PartKind::Port { .. }) {
                 let at = crate::text::candidates(shape.body, &lines)
                     .into_iter()
@@ -106,9 +103,10 @@ impl Cluster {
                         anchor,
                         side,
                     ))
-                    .union(crate::label::label_box(
+                    .union(crate::label::label_box_with(
                         LabelKind::Net,
                         name,
+                        crate::label::intent_on(&block.nets[n], LabelKind::Net),
                         at.end,
                         at.side,
                     ));
@@ -160,9 +158,10 @@ impl Cluster {
                     && (labelled(n) || pin.stacked())
                 {
                     let at = shape.pins[k];
-                    r = r.union(crate::label::label_box(
+                    r = r.union(crate::label::label_box_with(
                         LabelKind::Net,
                         &block.label_text(p, k),
+                        crate::label::intent_on(&block.nets[n], LabelKind::Net),
                         at.end,
                         at.side,
                     ));
@@ -182,9 +181,10 @@ impl Cluster {
                         });
                     if leaves {
                         let at = shape.pins[k];
-                        r = r.union(crate::label::label_box(
+                        r = r.union(crate::label::label_box_with(
                             LabelKind::Net,
                             &block.label_text(p, k),
+                            crate::label::intent_on(&block.nets[n], LabelKind::Net),
                             at.end,
                             at.side,
                         ));

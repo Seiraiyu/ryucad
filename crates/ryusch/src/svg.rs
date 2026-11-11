@@ -1,20 +1,18 @@
 //! SVG of a block's sheets: what [`crate::paint`] says each draws, in
-//! Inter at each text's measured width, on the block's canvas. One fixed
-//! look (the theme is stage 2's). Coordinates are written as exact
+//! Inter at each text's measured width, on the block's canvas, in each
+//! sheet's look (plan 2.E). Coordinates are written as exact
 //! decimal millimetres, so the same layout gives the same bytes
 //! everywhere.
 
-use crate::font::{self, SIZE};
+use crate::font::{self, Font, SIZE, Weight};
 use crate::geom::{GRID, Nm, Point, Rect, mm};
 use crate::input::Block;
 use crate::label;
 use crate::layout::Layout;
-use crate::paint::{Item, LINE, NAME};
+use crate::paint::{DASH, Item};
 use crate::shape::Shape;
+use crate::style::{Look, Rgb, Role};
 use std::fmt::Write;
-
-const CANVAS: &str = "#e6e8eb";
-const PAPER: &str = "#ffffff";
 
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -53,9 +51,17 @@ fn text_el(
     size: Nm,
     anchor: &str,
     vertical: bool,
-    colour: &str,
+    colour: Rgb,
+    bold: bool,
 ) {
-    let w = font::width(s, size).max(1);
+    let weight = if bold {
+        Weight::SemiBold
+    } else {
+        Weight::Regular
+    };
+    let w = font::width_in(s, Font { size, weight }).max(1);
+    let colour = colour.hex();
+    let heavy = if bold { " font-weight=\"600\"" } else { "" };
     let (x, y) = (f.x(at[0]), f.y(at[1]));
     let turn = if vertical {
         format!(" transform=\"rotate(-90 {x} {y})\"")
@@ -64,23 +70,35 @@ fn text_el(
     };
     let _ = writeln!(
         out,
-        "<text x=\"{x}\" y=\"{y}\" font-size=\"{}\" text-anchor=\"{anchor}\" textLength=\"{}\" lengthAdjust=\"spacingAndGlyphs\" fill=\"{colour}\"{turn}>{}</text>",
+        "<text x=\"{x}\" y=\"{y}\" font-size=\"{}\"{heavy} text-anchor=\"{anchor}\" textLength=\"{}\" lengthAdjust=\"spacingAndGlyphs\" fill=\"{colour}\"{turn}>{}</text>",
         mm(size),
         mm(w),
         esc(s)
     );
 }
 
-fn polyline(out: &mut String, f: &Frame, pts: &[Point], stroke: &str, fill: &str) {
-    polyline_wide(out, f, pts, stroke, fill, LINE);
-}
-
-fn polyline_wide(out: &mut String, f: &Frame, pts: &[Point], stroke: &str, fill: &str, width: Nm) {
+#[allow(clippy::too_many_arguments)]
+fn polyline_wide(
+    out: &mut String,
+    f: &Frame,
+    pts: &[Point],
+    stroke: Rgb,
+    fill: Option<Rgb>,
+    width: Nm,
+    dash: bool,
+) {
     let list: Vec<String> = pts.iter().map(|p| f.p(*p)).collect();
+    let fill = fill.map_or_else(|| "none".to_owned(), Rgb::hex);
+    let dashed = if dash {
+        format!(" stroke-dasharray=\"{} {}\"", mm(DASH[0]), mm(DASH[1]))
+    } else {
+        String::new()
+    };
     let _ = writeln!(
         out,
-        "<polyline points=\"{}\" fill=\"{fill}\" stroke=\"{stroke}\" stroke-width=\"{}\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/>",
+        "<polyline points=\"{}\" fill=\"{fill}\" stroke=\"{}\" stroke-width=\"{}\"{dashed} stroke-linejoin=\"round\" stroke-linecap=\"round\"/>",
         list.join(" "),
+        stroke.hex(),
         mm(width)
     );
 }
@@ -106,6 +124,10 @@ fn circle(a: Point, b: Point, c: Point) -> Option<([f64; 2], f64)> {
     Some(([ux, uy], r))
 }
 
+fn hex_or_none(c: &Option<Rgb>) -> String {
+    c.map_or_else(|| "none".to_owned(), Rgb::hex)
+}
+
 /// One item, in the SVG's frame.
 fn item(out: &mut String, f: &Frame, it: &Item) {
     match it {
@@ -113,29 +135,30 @@ fn item(out: &mut String, f: &Frame, it: &Item) {
             points,
             stroke,
             fill,
-        } => polyline(out, f, points, stroke, fill.unwrap_or("none")),
-        Item::Bus { points } => polyline_wide(
-            out,
-            f,
+            width,
+            dash,
+        } => polyline_wide(out, f, points, *stroke, *fill, *width, *dash),
+        Item::Bus {
             points,
-            crate::paint::BUS,
-            "none",
-            crate::paint::BUS_LINE,
-        ),
+            stroke,
+            width,
+        } => polyline_wide(out, f, points, *stroke, None, *width, false),
         Item::Circle {
             center,
             radius,
             stroke: Some(stroke),
             fill,
+            width,
         } => {
             let _ = writeln!(
                 out,
-                "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{}\" stroke=\"{stroke}\" stroke-width=\"{}\"/>",
+                "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"{}\"/>",
                 f.x(center[0]),
                 f.y(center[1]),
                 mm(*radius),
-                fill.unwrap_or("none"),
-                mm(LINE)
+                hex_or_none(fill),
+                stroke.hex(),
+                mm(*width)
             );
         }
         Item::Circle {
@@ -143,6 +166,7 @@ fn item(out: &mut String, f: &Frame, it: &Item) {
             radius,
             stroke: None,
             fill,
+            ..
         } => {
             let _ = writeln!(
                 out,
@@ -150,7 +174,7 @@ fn item(out: &mut String, f: &Frame, it: &Item) {
                 f.x(center[0]),
                 f.y(center[1]),
                 mm(*radius),
-                fill.unwrap_or("none"),
+                hex_or_none(fill),
             );
         }
         Item::Arc {
@@ -158,10 +182,11 @@ fn item(out: &mut String, f: &Frame, it: &Item) {
             mid: b,
             end: c,
             stroke,
+            width,
         } => {
             let (a, b, c) = (*a, *b, *c);
             let Some((center, r)) = circle(a, b, c) else {
-                polyline(out, f, &[a, b, c], stroke, "none");
+                polyline_wide(out, f, &[a, b, c], *stroke, None, *width, false);
                 return;
             };
             // Counterclockwise here (y up) is clockwise on screen.
@@ -177,25 +202,38 @@ fn item(out: &mut String, f: &Frame, it: &Item) {
             let rr = mm(r.round() as Nm);
             let _ = writeln!(
                 out,
-                "<path d=\"M{} A{rr},{rr} 0 {large} {sweep} {}\" fill=\"none\" stroke=\"{stroke}\" stroke-width=\"{}\"/>",
+                "<path d=\"M{} A{rr},{rr} 0 {large} {sweep} {}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\"/>",
                 f.p(a),
                 f.p(c),
-                mm(LINE)
+                stroke.hex(),
+                mm(*width)
             );
         }
-        Item::Bezier { points, stroke } => {
+        Item::Bezier {
+            points,
+            stroke,
+            width,
+        } => {
             let p: Vec<String> = points.iter().map(|q| f.p(*q)).collect();
             let _ = writeln!(
                 out,
-                "<path d=\"M{} C{} {} {}\" fill=\"none\" stroke=\"{stroke}\" stroke-width=\"{}\"/>",
+                "<path d=\"M{} C{} {} {}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\"/>",
                 p[0],
                 p[1],
                 p[2],
                 p[3],
-                mm(LINE)
+                stroke.hex(),
+                mm(*width)
             );
         }
-        Item::Frame { rect, title_tab } => {
+        Item::Frame {
+            rect,
+            title_tab,
+            stroke,
+            paper,
+            width,
+            frame,
+        } => {
             let corners = |r: &Rect| {
                 vec![
                     r.min,
@@ -205,22 +243,26 @@ fn item(out: &mut String, f: &Frame, it: &Item) {
                     r.min,
                 ]
             };
-            let list: Vec<String> = corners(rect).iter().map(|p| f.p(*p)).collect();
-            let _ = writeln!(
-                out,
-                "<polyline points=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\" stroke-dasharray=\"{} {}\"/>",
-                list.join(" "),
-                crate::paint::FRAME,
-                mm(LINE),
-                mm(crate::paint::DASH[0]),
-                mm(crate::paint::DASH[1]),
-            );
-            polyline(
+            if *frame {
+                let list: Vec<String> = corners(rect).iter().map(|p| f.p(*p)).collect();
+                let _ = writeln!(
+                    out,
+                    "<polyline points=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\" stroke-dasharray=\"{} {}\"/>",
+                    list.join(" "),
+                    stroke.hex(),
+                    mm(*width),
+                    mm(DASH[0]),
+                    mm(DASH[1]),
+                );
+            }
+            polyline_wide(
                 out,
                 f,
                 &corners(title_tab),
-                crate::paint::FRAME,
-                crate::paint::PAPER,
+                *stroke,
+                Some(*paper),
+                *width,
+                false,
             );
         }
         Item::Text {
@@ -230,13 +272,20 @@ fn item(out: &mut String, f: &Frame, it: &Item) {
             anchor,
             vertical,
             colour,
+            bold,
         } => {
             let anchor = match anchor {
                 font::Anchor::Start => "start",
                 font::Anchor::Middle => "middle",
                 font::Anchor::End => "end",
             };
-            text_el(out, f, text, *at, *size, anchor, *vertical, colour);
+            text_el(out, f, text, *at, *size, anchor, *vertical, *colour, *bold);
+        }
+        Item::Begin(layer) => {
+            let _ = writeln!(out, "<g data-layer=\"{}\">", layer.key());
+        }
+        Item::End => {
+            let _ = writeln!(out, "</g>");
         }
     }
 }
@@ -244,7 +293,24 @@ fn item(out: &mut String, f: &Frame, it: &Item) {
 /// Draws the sheets `which` (all when empty) of a block's layout, side by
 /// side as the canvas places them.
 pub fn draw(block: &Block, layout: &Layout, which: &[&str]) -> String {
-    draw_in(block, layout, which, None)
+    draw_looks(block, layout, which, false, &|_| Look::default())
+}
+
+/// [`draw`] in each sheet's look (`look_of(sheet id)`), its view cropped
+/// to what it draws when `fit`.
+pub fn draw_looks(
+    block: &Block,
+    layout: &Layout,
+    which: &[&str],
+    fit: bool,
+    look_of: &dyn Fn(&str) -> Look,
+) -> String {
+    let view = if fit {
+        drawn(block, layout, which)
+    } else {
+        None
+    };
+    draw_in(block, layout, which, view, look_of)
 }
 
 /// Where the sheets `which` (all when empty) draw anything, on the
@@ -264,9 +330,9 @@ pub fn drawn(block: &Block, layout: &Layout, which: &[&str]) -> Option<Rect> {
                 .shift(o),
         );
         if let Some(fields) = layout.text.get(&part.key) {
-            for (field, v) in [("refdes", &part.refdes), ("value", &part.value)] {
+            for (field, line) in part.fields() {
                 if let Some(p) = fields.get(field) {
-                    boxes.push(font::text_box(v, SIZE, *p, font::Anchor::Start).shift(o));
+                    boxes.push(line.boxed(*p).shift(o));
                 }
             }
         }
@@ -291,10 +357,16 @@ pub fn drawn(block: &Block, layout: &Layout, which: &[&str]) -> Option<Rect> {
 
 /// [`draw`], its view cropped to what it draws ([`drawn`]).
 pub fn draw_fit(block: &Block, layout: &Layout, which: &[&str]) -> String {
-    draw_in(block, layout, which, drawn(block, layout, which))
+    draw_looks(block, layout, which, true, &|_| Look::default())
 }
 
-fn draw_in(block: &Block, layout: &Layout, which: &[&str], view: Option<Rect>) -> String {
+fn draw_in(
+    block: &Block,
+    layout: &Layout,
+    which: &[&str],
+    view: Option<Rect>,
+    look_of: &dyn Fn(&str) -> Look,
+) -> String {
     let sheets: Vec<(&String, &crate::layout::Sheet)> = layout
         .sheets
         .iter()
@@ -331,26 +403,33 @@ fn draw_in(block: &Block, layout: &Layout, which: &[&str], view: Option<Rect>) -
         mm(vw),
         mm(vh)
     );
+    let canvas = sheets
+        .first()
+        .map_or_else(Look::default, |(sid, _)| look_of(sid))
+        .role(Role::Canvas);
     let _ = writeln!(
         out,
-        "<rect x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" fill=\"{CANVAS}\"/>",
+        "<rect x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" fill=\"{}\"/>",
         mm(bounds.width()),
-        mm(bounds.height())
+        mm(bounds.height()),
+        canvas.hex()
     );
     for (sid, sheet) in sheets {
         let f = Frame {
             origin: [sheet.at[0] - bounds.min[0], sheet.at[1] - bounds.min[1]],
             top: bounds.height(),
         };
+        let look = look_of(sid);
         let size = block.area_of(sheet);
         let _ = writeln!(out, "<g id=\"sheet-{}\">", esc(sid));
         let _ = writeln!(
             out,
-            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{PAPER}\"/>",
+            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{}\"/>",
             f.x(0),
             f.y(size[1]),
             mm(size[0]),
-            mm(size[1])
+            mm(size[1]),
+            look.role(Role::Paper).hex()
         );
         text_el(
             &mut out,
@@ -360,9 +439,10 @@ fn draw_in(block: &Block, layout: &Layout, which: &[&str], view: Option<Rect>) -
             SIZE,
             "start",
             false,
-            NAME,
+            look.role(Role::Name),
+            false,
         );
-        for it in &crate::paint::sheet(block, layout, sid).items {
+        for it in &crate::paint::sheet_in(block, layout, sid, &look).items {
             item(&mut out, &f, it);
         }
         let _ = writeln!(out, "</g>");

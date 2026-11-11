@@ -333,9 +333,9 @@ fn frames_once(block: &Block, layout: &mut Layout) {
             let shape = crate::shape::Shape::of(part, Place::new(x.at, x.rotation, x.mirror));
             add(shape.extent);
             if let Some(fields) = layout.text.get(k) {
-                for (field, value) in [("refdes", &part.refdes), ("value", &part.value)] {
+                for (field, line) in part.fields() {
                     if let Some(at) = fields.get(field) {
-                        add(crate::text::boxes(&[value.as_str()], *at)[0]);
+                        add(line.boxed(*at));
                     }
                 }
             }

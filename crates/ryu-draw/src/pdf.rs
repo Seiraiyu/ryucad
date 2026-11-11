@@ -9,7 +9,7 @@
 //! order, and every coordinate is `(v · pt) as f32` for a value `v` in the
 //! drawing's unit and `pt` points to the unit, as it was for nanometres.
 
-use crate::font::{INTER, Subset};
+use crate::font::{Face, Subset};
 use crate::geom::{P, Piece};
 use crate::item::{Anchor, Item};
 use crate::style::Colour;
@@ -30,6 +30,19 @@ pub struct Doc<'a> {
     pub pt: f64,
     /// Every character any page's text holds: the font's subset.
     pub chars: BTreeSet<char>,
+}
+
+/// What a PDF may hold beyond one face (ryueda's schematics, plan 2.E):
+/// a second face, and optional content groups. The default adds nothing:
+/// [`write`] is [`write_with`] with it, its bytes as they were.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Extras {
+    /// Every character text set in Inter SemiBold holds: its subset,
+    /// embedded as `F2` (none: no second face is written).
+    pub bold_chars: BTreeSet<char>,
+    /// Optional content groups' names, in order, every one on: a
+    /// canvas's `begin_layer(i)` marks content as the `i`-th.
+    pub layers: Vec<String>,
 }
 
 /// A link: a box on its page going to a page.
@@ -58,6 +71,7 @@ pub struct Mark {
 pub struct Canvas<'a> {
     content: Content,
     font: &'a Subset,
+    bold: Option<&'a Subset>,
     pt: f64,
 }
 
@@ -142,6 +156,36 @@ impl Canvas<'_> {
         let bytes = self.font.encode(text);
         self.content.show(Str(&bytes));
         self.content.end_text();
+    }
+
+    /// `text` in Inter SemiBold (the PDF's second face; [`Extras`] must
+    /// list its characters), as [`Canvas::text`] sets Regular.
+    pub fn text_bold(&mut self, text: &str, at: P, size: f64, dir: [f32; 2]) {
+        let Some(font) = self.bold else {
+            return self.text(text, at, size, dir);
+        };
+        let (x, y, s) = (self.p(at[0]), self.p(at[1]), self.p(size));
+        self.content.begin_text();
+        self.content.set_font(Name(b"F2"), s);
+        self.content
+            .set_text_matrix([dir[0], dir[1], 0.0 - dir[1], dir[0], x, y]);
+        let bytes = font.encode(text);
+        self.content.show(Str(&bytes));
+        self.content.end_text();
+    }
+
+    /// Marks what follows, to [`Canvas::end_layer`], as the `i`-th of
+    /// [`Extras::layers`] (from 0): an optional content group a reader
+    /// can turn off.
+    pub fn begin_layer(&mut self, i: usize) {
+        let name = format!("oc{}", i + 1);
+        self.content
+            .begin_marked_content_with_properties(Name(b"OC"))
+            .properties_named(Name(name.as_bytes()));
+    }
+
+    pub fn end_layer(&mut self) {
+        self.content.end_marked_content();
     }
 
     /// The path of `pieces` from `start`.
@@ -231,7 +275,20 @@ pub fn write(
     marks: &[Mark],
     draw: &mut dyn FnMut(usize, &mut Canvas),
 ) -> Vec<u8> {
+    write_with(doc, &Extras::default(), pages, marks, draw)
+}
+
+/// [`write`] with `extras`: a second face and optional content groups.
+pub fn write_with(
+    doc: &Doc,
+    extras: &Extras,
+    pages: &[Page],
+    marks: &[Mark],
+    draw: &mut dyn FnMut(usize, &mut Canvas),
+) -> Vec<u8> {
     let font = Subset::new(&doc.chars);
+    let bold =
+        (!extras.bold_chars.is_empty()).then(|| Subset::new_in(Face::SemiBold, &extras.bold_chars));
     let p = |v: f64| (v * doc.pt) as f32;
     let mut pdf = Pdf::new();
     let mut next = 1;
@@ -251,10 +308,25 @@ pub fn write(
     let info = id();
     let page_ids: Vec<Ref> = pages.iter().map(|_| id()).collect();
     let content_ids: Vec<Ref> = pages.iter().map(|_| id()).collect();
+    // Type 0, CID font, descriptor, file, ToUnicode.
+    let bold_refs: Option<[Ref; 5]> = bold.as_ref().map(|_| [id(), id(), id(), id(), id()]);
+    let ocgs: Vec<Ref> = extras.layers.iter().map(|_| id()).collect();
     let mut cat = pdf.catalog(catalog);
     cat.pages(tree);
     if !marks.is_empty() {
         cat.outlines(outline);
+    }
+    if !ocgs.is_empty() {
+        let mut props = cat.insert(Name(b"OCProperties")).dict();
+        props
+            .insert(Name(b"OCGs"))
+            .array()
+            .items(ocgs.iter().copied());
+        let mut d = props.insert(Name(b"D")).dict();
+        d.insert(Name(b"Order")).array().items(ocgs.iter().copied());
+        d.insert(Name(b"ON")).array().items(ocgs.iter().copied());
+        d.finish();
+        props.finish();
     }
     cat.finish();
     pdf.pages(tree)
@@ -272,7 +344,21 @@ pub fn write(
         if !annots.is_empty() {
             w.annotations(annots.iter().copied());
         }
-        w.resources().fonts().pair(Name(b"F1"), type0);
+        let mut res = w.resources();
+        let mut fonts = res.fonts();
+        fonts.pair(Name(b"F1"), type0);
+        if let Some(r) = &bold_refs {
+            fonts.pair(Name(b"F2"), r[0]);
+        }
+        fonts.finish();
+        if !ocgs.is_empty() {
+            let mut props = res.insert(Name(b"Properties")).dict();
+            for (i, r) in ocgs.iter().enumerate() {
+                props.pair(Name(format!("oc{}", i + 1).as_bytes()), *r);
+            }
+            props.finish();
+        }
+        res.finish();
         w.finish();
         for (link, aid) in page.links.iter().zip(&annots) {
             let [lo, hi] = link.rect;
@@ -290,6 +376,7 @@ pub fn write(
         let mut canvas = Canvas {
             content: Content::new(),
             font: &font,
+            bold: bold.as_ref(),
             pt: doc.pt,
         };
         draw(i, &mut canvas);
@@ -352,12 +439,30 @@ pub fn write(
             .count(count(marks));
         o.finish();
     }
+    for (r, name) in ocgs.iter().zip(&extras.layers) {
+        let mut g = pdf.indirect(*r).dict();
+        g.pair(Name(b"Type"), Name(b"OCG"));
+        g.pair(Name(b"Name"), TextStr(name));
+        g.finish();
+    }
+    embed(&mut pdf, &font, [type0, cid, descriptor, file, unicode]);
+    if let (Some(b), Some(r)) = (&bold, bold_refs) {
+        embed(&mut pdf, b, r);
+    }
+    pdf.finish()
+}
+
+/// A subset's font: Type 0 over a CID font of it, Identity-H, with a
+/// ToUnicode map so text reads back; `refs` are the type 0 font, the CID
+/// font, the descriptor, the file and the ToUnicode map.
+fn embed(pdf: &mut Pdf, subset: &Subset, refs: [Ref; 5]) {
+    let [type0, cid, descriptor, file, unicode] = refs;
     // The font: Type 0 over a CID font of the subset, Identity-H, with a
     // ToUnicode map so text reads back.
-    let face = ttf_parser::Face::parse(INTER, 0).expect("the bundled font reads");
-    let units = font.units;
+    let face = ttf_parser::Face::parse(subset.face.bytes(), 0).expect("the bundled font reads");
+    let units = subset.units;
     let scale = |v: f64| (v * 1000.0 / units) as f32;
-    let name = format!("{}+Inter-Regular", font.tag());
+    let name = format!("{}+{}", subset.tag(), subset.face.name());
     let system = SystemInfo {
         registry: Str(b"Adobe"),
         ordering: Str(b"Identity"),
@@ -369,8 +474,8 @@ pub fn write(
         .descendant_font(cid)
         .to_unicode(unicode);
     let mut widths: Vec<(u16, f32)> = Vec::new();
-    for g in font.remap.remapped_gids() {
-        let new = font.remap.get(g).expect("remapped");
+    for g in subset.remap.remapped_gids() {
+        let new = subset.remap.get(g).expect("remapped");
         let adv = face
             .glyph_hor_advance(ttf_parser::GlyphId(g))
             .map_or(0.0, |a| scale(f64::from(a)));
@@ -404,15 +509,15 @@ pub fn write(
         )))
         .stem_v(80.0)
         .font_file2(file);
-    let data = subsetter::subset(INTER, 0, &font.remap).expect("the bundled font subsets");
+    let data =
+        subsetter::subset(subset.face.bytes(), 0, &subset.remap).expect("the bundled font subsets");
     let packed = miniz_oxide::deflate::compress_to_vec_zlib(&data, 10);
     pdf.stream(file, &packed).filter(Filter::FlateDecode);
     let mut cmap = pdf_writer::types::UnicodeCmap::new(Name(b"Custom"), system);
-    for (c, g) in &font.gids {
+    for (c, g) in &subset.gids {
         cmap.pair(*g, *c);
     }
     pdf.cmap(unicode, &cmap.finish());
-    pdf.finish()
 }
 
 #[cfg(test)]
@@ -466,5 +571,52 @@ mod tests {
         assert!(text.contains("+Inter-Regular"));
         assert!(text.contains("/Creator (ryucad)"));
         assert!(!text.contains("/CreationDate") && !text.contains("/ID"));
+    }
+
+    #[test]
+    fn extras_add_a_bold_face_and_layers_and_nothing_else_moves() {
+        let items = sheet();
+        let doc = Doc {
+            title: "bracket",
+            creator: "ryucad",
+            pt: PT_PER_MM,
+            chars: chars(&items),
+        };
+        let pages = [Page {
+            size: [279.4, 215.9],
+            links: vec![],
+        }];
+        let plain = write(&doc, &pages, &[], &mut |_, c| c.items(&items));
+        let none = write_with(&doc, &Extras::default(), &pages, &[], &mut |_, c| {
+            c.items(&items)
+        });
+        assert_eq!(plain, none, "no extras, the same bytes");
+        let extras = Extras {
+            bold_chars: "U1".chars().collect(),
+            layers: vec!["Region frames".into(), "Notes".into()],
+        };
+        let a = write_with(&doc, &extras, &pages, &[], &mut |_, c| {
+            c.begin_layer(1);
+            c.text_bold("U1", [10.0, 10.0], 2.5, [1.0, 0.0]);
+            c.end_layer();
+            c.items(&items);
+        });
+        assert_eq!(
+            a,
+            write_with(&doc, &extras, &pages, &[], &mut |_, c| {
+                c.begin_layer(1);
+                c.text_bold("U1", [10.0, 10.0], 2.5, [1.0, 0.0]);
+                c.end_layer();
+                c.items(&items);
+            })
+        );
+        let text = String::from_utf8_lossy(&a);
+        assert!(text.contains("+Inter-SemiBold"), "{text}");
+        assert!(text.contains("/F2"));
+        assert!(text.contains("/OCProperties"));
+        assert!(text.contains("/Type /OCG"));
+        assert!(text.contains("(Notes)"));
+        assert!(text.contains("/OC /oc2 BDC"), "{text}");
+        assert!(text.contains("EMC"));
     }
 }

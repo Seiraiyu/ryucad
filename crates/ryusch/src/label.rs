@@ -252,10 +252,46 @@ pub fn drawn_flow(name: &str, at: Point, side: Side, flow: crate::input::Flow) -
     d
 }
 
+/// `d` with `intent` written under its box in the small size, centred
+/// (a net label's or off-sheet connector's, plan 2.E), but never reaching
+/// back past the label's start: the label's own wire comes in there.
+fn under(mut d: Drawn, intent: &str, side: Side) -> Drawn {
+    if intent.is_empty() {
+        return d;
+    }
+    let half = (font::width(intent, font::MIN_SIZE) + 1) / 2;
+    let centre = (d.bounds.min[0] + d.bounds.max[0]) / 2;
+    let mid = match side {
+        Side::Right => centre.max(d.bounds.min[0] + half),
+        Side::Left => centre.min(d.bounds.max[0] - half),
+        Side::Up | Side::Down => centre,
+    };
+    let base = [mid, d.bounds.min[1] - GRID / 4 - font::MIN_SIZE];
+    let tb = font::text_box(intent, font::MIN_SIZE, base, Anchor::Middle);
+    d.bounds = d.bounds.union(tb);
+    d.extra = Some((base, Anchor::Middle, intent.to_owned()));
+    d
+}
+
+/// [`drawn_flow`] with the net's intent under it.
+pub fn drawn_flow_with(
+    name: &str,
+    intent: &str,
+    at: Point,
+    side: Side,
+    flow: crate::input::Flow,
+) -> Drawn {
+    under(drawn_flow(name, at, side, flow), intent, side)
+}
+
 /// [`drawn`], with a power port's or ground's intent written past its
-/// name in the small size (a supply's above it, a ground's below it).
+/// name in the small size (a supply's above it, a ground's below it), a
+/// net label's or connector's under it.
 pub fn drawn_with(kind: LabelKind, name: &str, intent: &str, at: Point, side: Side) -> Drawn {
     let mut d = drawn(kind, name, at, side);
+    if matches!(kind, LabelKind::Net | LabelKind::OffSheet) {
+        return under(d, intent, side);
+    }
     if intent.is_empty() || !matches!(kind, LabelKind::Power | LabelKind::Ground) {
         return d;
     }
@@ -276,9 +312,33 @@ pub fn label_box_with(kind: LabelKind, name: &str, intent: &str, at: Point, side
 }
 
 /// The box label `l` of the net keyed `key` takes, its net's intent
-/// written past a power port or ground.
+/// written past a power port or ground, or under a net label or
+/// connector (plan 2.E).
 pub fn boxed(block: &crate::input::Block, key: &str, l: &crate::layout::Label) -> Rect {
-    label_box_with(l.kind, &l.text, intent_of(block, key), l.at, l.side)
+    label_box_with(
+        l.kind,
+        &l.text,
+        intent_for(block, key, l.kind),
+        l.at,
+        l.side,
+    )
+}
+
+/// What a label of `kind` of net `net` writes as its intent: a rail's
+/// beside its power ports and ground only (plan 2.C), a net's under its
+/// labels and connectors (plan 2.E).
+pub fn intent_on(net: &crate::input::Net, kind: LabelKind) -> &str {
+    match kind {
+        LabelKind::Net | LabelKind::OffSheet if net.key.starts_with("rail:") => "",
+        _ => net.intent.as_str(),
+    }
+}
+
+/// [`intent_on`] of the net keyed `key`, "" for none.
+pub fn intent_for<'a>(block: &'a crate::input::Block, key: &str, kind: LabelKind) -> &'a str {
+    block
+        .net(key)
+        .map_or("", |n| intent_on(&block.nets[n], kind))
 }
 
 /// The intent of the net keyed `key`, "" for none.
@@ -580,10 +640,17 @@ mod tests {
             label_box_with(LabelKind::Power, "VDD", "", at, Side::Up),
             plain
         );
-        // Net labels and connectors carry none in 2.C.
+        // A net label and a connector carry intent under them.
+        let plain = label_box(LabelKind::Net, "SDA", at, Side::Right);
+        let with = label_box_with(LabelKind::Net, "SDA", "400 kHz", at, Side::Right);
+        assert!(with.min[1] < plain.min[1] && with.contains(&plain));
+        let d = drawn_with(LabelKind::OffSheet, "SDA", "I2C", at, Side::Left);
+        let (p, anchor, text) = d.extra.clone().expect("intent");
+        assert_eq!((anchor, text.as_str()), (Anchor::Middle, "I2C"));
+        assert!(p[1] < label_box(LabelKind::OffSheet, "SDA", at, Side::Left).min[1]);
         assert_eq!(
-            label_box_with(LabelKind::Net, "SDA", "fast", at, Side::Right),
-            label_box(LabelKind::Net, "SDA", at, Side::Right)
+            drawn_flow_with("SDA", "I2C", at, Side::Left, crate::input::Flow::Out).bounds,
+            d.bounds
         );
     }
 }
