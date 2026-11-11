@@ -82,7 +82,11 @@ pub(crate) fn retrim(
         if rung == 1 {
             bx = doubled(&bx);
         }
-        match attempt(key, body, changes, &region, &bx, m) {
+        // Each rung under its own cap: one that can't settle refuses
+        // `Uncertain` in bounded units, as the caps do.
+        match m.capped(crate::work::Scope::Rung, || {
+            attempt(key, body, changes, &region, &bx, m)
+        }) {
             Rung::Done(r) => return *r,
             Rung::Next(e) => last = Some(e),
         }

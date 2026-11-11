@@ -139,16 +139,20 @@ pub(crate) enum Scope {
     /// ([`crate::boolean::unite_solids_with`]): `face_face`, its traces
     /// and searches included (#550).
     Union,
+    /// One rung of the local re-trim's ladder: its working body, table,
+    /// walk and checks (#647, #659).
+    Rung,
 }
 
 impl Scope {
     #[cfg_attr(not(feature = "work-stats"), allow(dead_code))]
-    pub(crate) const ALL: [Scope; 5] = [
+    pub(crate) const ALL: [Scope; 6] = [
         Scope::Trace,
         Scope::Search,
         Scope::Fit,
         Scope::Beside,
         Scope::Union,
+        Scope::Rung,
     ];
 
     pub(crate) fn limit(self) -> u64 {
@@ -158,6 +162,7 @@ impl Scope {
             Scope::Fit => FIT,
             Scope::Beside => BESIDE,
             Scope::Union => UNION,
+            Scope::Rung => RUNG,
         }
     }
 
@@ -169,6 +174,7 @@ impl Scope {
             Scope::Fit => "fit",
             Scope::Beside => "beside",
             Scope::Union => "union",
+            Scope::Rung => "rung",
         }
     }
 }
@@ -196,6 +202,11 @@ const BESIDE: u64 = 1 << 24;
 /// refused pair spent 23,520,833). Unions only: every other boolean's
 /// pairs keep the trace's own cap.
 const UNION: u64 = 1 << 24;
+/// One rung of the re-trim: 16 times the largest rung that builds across
+/// the release suites and the pinned STEP corpus, rounded up to a power
+/// of two (plan 16.C's Task 11). Set provisionally to the trace's cap
+/// until then.
+const RUNG: u64 = 1 << 26;
 
 static FREE: Work<'static> = Work::unlimited();
 
@@ -628,5 +639,21 @@ mod tests {
             .find(|(n, _)| *n == "fit")
             .unwrap();
         assert!(fit.1 >= 7);
+    }
+
+    #[test]
+    fn a_rung_is_a_scope_of_its_own() {
+        assert!(Scope::ALL.contains(&Scope::Rung));
+        assert_eq!(Scope::Rung.name(), "rung");
+        assert_eq!(Scope::Rung.limit(), RUNG);
+        // A rung's cap binds before the trace's inside it.
+        let w = Work::unlimited();
+        let m = Meter::new(&w);
+        let r = m.capped_by(10, || {
+            m.capped(Scope::Trace, || {
+                (0..20).map(|_| m.charge(1)).collect::<Vec<_>>()
+            })
+        });
+        assert_eq!(r.iter().filter(|x| x.is_ok()).count(), 10);
     }
 }
