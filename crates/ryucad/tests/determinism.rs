@@ -2986,6 +2986,238 @@ fn sheet_metal_report_section(golden: &mut Golden) {
     }
 }
 
+/// Part `de`: a plate with a hole deleted by its seed (capped), and a box
+/// whose edge fillet is deleted and grown back. Part `tt`: a plate whose
+/// boss slides over its edge (topology: change), a box whose wall is
+/// drafted past its neighbour, and a box whose top rises past its fillet
+/// (blends: rebuild).
+fn edited() -> (tempfile::TempDir, ryucad::session::Session) {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    let add = |s: &mut ryucad::session::Session, part: &str, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!(part);
+        call(s, "feature.add", f);
+    };
+    let body = |s: &mut ryucad::session::Session, part: &str, f: &str| {
+        call(s, "inspect", json!({"part": part, "feature": f}))["bodies"][0].clone()
+    };
+    // Faces of `b` as `<part>/<solid>/<name>`: planes facing `n` along
+    // `axis` at `at` metres, or cylinders.
+    let plane = |b: &serde_json::Value, part: &str, solid: &str, axis: usize, n: f64, at: f64| {
+        b["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["z"][axis].as_f64().unwrap() * sign == n
+                    && (f["surface"]["frame"]["origin"][axis].as_f64().unwrap() - at).abs() < 1e-12
+            })
+            .map(|f| format!("{part}/{solid}/{}", f["name"].as_str().unwrap()))
+            .expect("the face")
+    };
+    let cylinders = |b: &serde_json::Value, part: &str, solid: &str| -> Vec<String> {
+        b["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["surface"]["type"] == "cylinder")
+            .map(|f| format!("{part}/{solid}/{}", f["name"].as_str().unwrap()))
+            .collect()
+    };
+    let rim = |b: &serde_json::Value, part: &str, solid: &str, x: f64, z: f64| {
+        let at = |p: [f64; 3]| {
+            b["vertices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| (0..3).all(|k| (v["point"][k].as_f64().unwrap() - p[k]).abs() < 1e-12))
+                .map(|v| v["name"].clone())
+                .unwrap()
+        };
+        let (a, c) = (at([x, 0.0, z]), at([x, 0.03, z]));
+        b["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| (e["start"] == a && e["end"] == c) || (e["start"] == c && e["end"] == a))
+            .map(|e| format!("{part}/{solid}/{}", e["name"].as_str().unwrap()))
+            .unwrap()
+    };
+
+    // de: a hole deleted by its seed; a fillet grown back.
+    call(&mut s, "part.create", json!({"part": "de"}));
+    add(
+        &mut s,
+        "de",
+        json!({"type": "box", "id": "plate",
+        "params": {"x": "40 mm", "y": "30 mm", "z": "10 mm"}}),
+    );
+    let top = plane(&body(&mut s, "de", "plate"), "de", "plate", 2, 1.0, 0.010);
+    add(
+        &mut s,
+        "de",
+        json!({"type": "sketch", "id": "s", "face": top}),
+    );
+    call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "de", "sketch": "s", "ops": [
+        {"op": "add", "type": "point", "at": [20, 15]}, {"op": "add", "type": "fix", "a": "p1"}]}),
+    );
+    add(
+        &mut s,
+        "de",
+        json!({"type": "hole", "id": "h", "sketch": "s", "points": ["p1"],
+        "diameter": "6 mm", "depth": "through_all", "targets": ["plate"]}),
+    );
+    let bore = cylinders(&body(&mut s, "de", "h"), "de", "plate");
+    add(
+        &mut s,
+        "de",
+        json!({"type": "delete_face", "id": "unhole", "seeds": [bore[0]]}),
+    );
+    add(
+        &mut s,
+        "de",
+        json!({"type": "box", "id": "cube", "params": {"x": "40 mm", "y": "30 mm",
+        "z": "20 mm"}, "placement": {"origin": ["60 mm", "0 mm", "0 mm"]}}),
+    );
+    let e = rim(&body(&mut s, "de", "cube"), "de", "cube", 0.100, 0.020);
+    add(
+        &mut s,
+        "de",
+        json!({"type": "fillet", "id": "round", "radius": "4 mm", "edges": [e]}),
+    );
+    let round = cylinders(&body(&mut s, "de", "round"), "de", "cube");
+    add(
+        &mut s,
+        "de",
+        json!({"type": "delete_face", "id": "unround", "target": "cube",
+        "faces": round, "heal": "grow"}),
+    );
+
+    // tt: a boss slid over its plate's edge, a wall drafted past its
+    // neighbour, a top raised past its fillet.
+    call(&mut s, "part.create", json!({"part": "tt"}));
+    add(
+        &mut s,
+        "tt",
+        json!({"type": "box", "id": "plate",
+        "params": {"x": "40 mm", "y": "40 mm", "z": "10 mm"}}),
+    );
+    add(
+        &mut s,
+        "tt",
+        json!({"type": "cylinder", "id": "boss", "operation": "join",
+        "targets": ["plate"], "params": {"radius": "4 mm", "height": "6 mm"},
+        "placement": {"origin": ["20 mm", "20 mm", "10 mm"]}}),
+    );
+    let j = body(&mut s, "tt", "boss");
+    let mut boss = cylinders(&j, "tt", "plate");
+    boss.push(plane(&j, "tt", "plate", 2, 1.0, 0.016));
+    add(
+        &mut s,
+        "tt",
+        json!({"type": "move_face", "id": "slide", "by": "translate",
+        "direction": "x", "distance": "-18 mm", "faces": boss, "tangent": false,
+        "topology": "change"}),
+    );
+    add(
+        &mut s,
+        "tt",
+        json!({"type": "box", "id": "wedge", "params": {"x": "40 mm",
+        "y": "30 mm", "z": "20 mm"}, "placement": {"origin": ["60 mm", "0 mm", "0 mm"]}}),
+    );
+    let wall = plane(&body(&mut s, "tt", "wedge"), "tt", "wedge", 0, -1.0, 0.060);
+    add(
+        &mut s,
+        "tt",
+        json!({"type": "draft", "id": "lean", "target": "wedge",
+        "angle": "1.3 rad", "neutral": "xy", "faces": [wall], "topology": "change"}),
+    );
+    add(
+        &mut s,
+        "tt",
+        json!({"type": "box", "id": "lid", "params": {"x": "40 mm",
+        "y": "30 mm", "z": "20 mm"}, "placement": {"origin": ["120 mm", "0 mm", "0 mm"]}}),
+    );
+    let e = rim(&body(&mut s, "tt", "lid"), "tt", "lid", 0.160, 0.020);
+    add(
+        &mut s,
+        "tt",
+        json!({"type": "fillet", "id": "lip", "radius": "4 mm", "edges": [e]}),
+    );
+    let lid_top = plane(&body(&mut s, "tt", "lip"), "tt", "lid", 2, 1.0, 0.020);
+    add(
+        &mut s,
+        "tt",
+        json!({"type": "move_face", "id": "raise", "target": "lid",
+        "by": "translate", "direction": "z", "distance": "2 mm", "faces": [lid_top],
+        "tangent": false, "blends": "rebuild"}),
+    );
+    (dir, s)
+}
+
+/// Every state of every solid of `part` of [`edited`], bit for bit, with
+/// its origins and kept report, on one thread and four alike, each
+/// passing the self-intersection check, and the part's hash.
+fn edited_section(golden: &mut Golden, name: &'static str, part: &str) {
+    let mut s = golden.section(name);
+    let (_dir, session) = edited();
+    let p = session
+        .project()
+        .part(&Id::parse(part, "part").unwrap())
+        .unwrap()
+        .clone();
+    let on = |n: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+            .install(|| ryucad::rebuild::rebuild_part(&p))
+    };
+    let (one, four) = (on(1), on(4));
+    assert_eq!(one.failed(), 0, "{:?}", one.features);
+    assert_eq!(one.hash, four.hash);
+    for (id, o) in &one.features {
+        let o = o.as_ref().unwrap();
+        s.str(id.as_str());
+        for (solid, b) in o.solids() {
+            s.str(solid.as_str());
+            s.str(&b.body.dump());
+            let origins: Vec<String> = b.origins.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            s.str(&origins.join(","));
+            assert_eq!(ryukei::check::check_intersections(&b.body), [], "{id}");
+        }
+        if let ryucad::rebuild::Output::Solids(m) = o
+            && let Some(r) = &m.report
+        {
+            s.str(&ryucad::doc::canonical::to_string(r));
+        }
+        if o.solids().is_empty() {
+            s.str(o.hash());
+        }
+    }
+    s.str(&one.hash);
+}
+
+fn deletes_section(golden: &mut Golden) {
+    edited_section(golden, "deletes", "de");
+}
+
+fn topology_tweaks_section(golden: &mut Golden) {
+    edited_section(golden, "topology_tweaks", "tt");
+}
+
 /// Part `sf`: a tray of four flanges set back 5 mm on a 60 × 40 mm plate,
 /// unfolded (`u`), a slot `c` cut across its right bend line in the flat
 /// and refolded (`rf`); and a Z bent section `z`, unfolded (`uz`) and
@@ -5644,6 +5876,8 @@ sections! {
     offsets => offsets_section(&mut golden),
     tweaks => tweaks_section(&mut golden),
     drafts => drafts_section(&mut golden),
+    deletes => deletes_section(&mut golden),
+    topology_tweaks => topology_tweaks_section(&mut golden),
     draft_reports => draft_reports_section(&mut golden),
     mirrors => mirrors_section(&mut golden),
     splits => splits_section(&mut golden),
