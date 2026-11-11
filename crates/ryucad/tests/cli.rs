@@ -6345,8 +6345,10 @@ fn mates_from_the_cli() {
 
 #[test]
 fn a_failing_mate_warns_from_the_cli() {
-    // Issues #155 and #158: a slot cut across the plate splits the face
-    // m1 stands on, in frame, which top places.
+    // Issues #155 and #158: the slot grown into a skim over the plate's
+    // whole top takes away the face m1 stands on, in frame, which top
+    // places. (A slot across the top only splits it, both pieces on its
+    // plane, and m1 follows the first: design 447.)
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
     let params: [(&str, &str, &str, &[&str]); 2] = [
@@ -6436,7 +6438,23 @@ fn a_failing_mate_warns_from_the_cli() {
             .filter(|w| w.as_str().unwrap().contains("m1"))
             .count()
     };
-    let (code, v) = p.both_from("", &["feature", "edit", "plate", "slot", "--param", "y=60"]);
+    let (code, v) = p.both_from(
+        "",
+        &[
+            "feature",
+            "edit",
+            "plate",
+            "slot",
+            "--param",
+            "x=200",
+            "--param",
+            "y=200",
+            "--param",
+            "z=2",
+            "--origin",
+            "-50,-50,4",
+        ],
+    );
     assert_eq!((code, naming(&v)), (0, 1), "{v}");
     for args in [
         &["assembly", "tree", "frame"][..],
