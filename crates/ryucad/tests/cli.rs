@@ -3628,10 +3628,7 @@ fn direct_edits_from_the_cli() {
     ]);
     let shown = p.ok(&["feature", "show", "plate", "lean"]);
     assert_eq!(
-        (
-            shown["topology"].as_str(),
-            shown["blends"].as_str()
-        ),
+        (shown["topology"].as_str(), shown["blends"].as_str()),
         (Some("keep"), Some("rebuild")),
         "{shown}"
     );

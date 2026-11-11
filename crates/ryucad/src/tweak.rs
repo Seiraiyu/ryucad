@@ -99,6 +99,9 @@ fn heal(h: crate::doc::edit::Heal) -> ryukei::tweak::Heal {
     }
 }
 
+/// Each seed of a delete with the faces it found, by name.
+type Found = Vec<(Name, Vec<Name>)>;
+
 /// A delete's spec on `body`: its faces, then each seed's feature's
 /// (`feature_faces`), each face once in the order first named; and what
 /// each seed found.
@@ -107,7 +110,7 @@ fn expand(
     faces: &[Name],
     seeds: &[Name],
     how: ryukei::tweak::Heal,
-) -> core::result::Result<(ryukei::tweak::DeleteSpec, Vec<(Name, Vec<Name>)>), ryukei::Error> {
+) -> core::result::Result<(ryukei::tweak::DeleteSpec, Found), ryukei::Error> {
     let mut all: Vec<Name> = Vec::new();
     for n in faces {
         if !all.contains(n) {
