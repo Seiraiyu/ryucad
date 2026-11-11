@@ -528,7 +528,7 @@ impl View {
             self.picker = Some(
                 Picker::of(&ws.model, self.sketches)
                     .with_datums(&ws.model, self.datums)
-                    .with_compare(ws.compare.as_ref())
+                    .with_compare(ws.painted())
                     .with_sections(&ws.sections.planes),
             );
             self.picked_at = wanted;
@@ -900,7 +900,7 @@ impl View {
         }
         // A compare's new and changed faces, over the chosen feature so
         // choosing one still shows what changed in it.
-        if let Some(c) = &ws.compare {
+        if let Some(c) = ws.painted() {
             for key in &c.new_bodies {
                 let new = linear(style::NEW);
                 faces.extend((0..picker.faces(key)).map(|i| (key.clone(), i, new)));
@@ -2791,7 +2791,7 @@ impl View {
             .get_or_insert_with(|| Scene::new(&rs.device, &rs.adapter));
         scene.set_looks(&ws.model.looks);
         scene.sync_drawn(&rs.device, drawn, reference);
-        scene.sync_ghosts(&rs.device, ws.compare.as_ref());
+        scene.sync_ghosts(&rs.device, ws.painted());
         let size = [f64::from(px[0]), f64::from(px[1])];
         let mut overlay = if self.sketches {
             crate::core::sketch::overlay(

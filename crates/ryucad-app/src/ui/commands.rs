@@ -377,6 +377,9 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         "view.compare_head" => o.ws.set_compare(Some("HEAD".to_owned())),
         "view.compare_with" => o.compare_with = Some(String::new()),
         "view.compare_stop" => o.ws.set_compare(None),
+        "view.compare_swap" => o.ws.swap_compare(),
+        "view.compare_only_rev" => o.ws.compare_only(crate::core::compare::Front::Rev),
+        "view.compare_only_working" => o.ws.compare_only(crate::core::compare::Front::Working),
         "measure.tool" => {
             let on = !o.ws.measure.on;
             o.ws.measure.set(on);

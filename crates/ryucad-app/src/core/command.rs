@@ -529,6 +529,24 @@ pub const COMMANDS: &[Command] = &[
         .toolbar(),
     cmd("view.compare_with", "Compare with…", View),
     cmd("view.compare_stop", "Stop comparing", View),
+    // A compare's blink (design 447): the window's own view.
+    cmd("view.compare_swap", "Swap compared sides", View)
+        .icon("arrows-left-right")
+        .keys(&["B"])
+        .viewport()
+        .toggle(),
+    cmd(
+        "view.compare_only_rev",
+        "Show only the compared revision",
+        View,
+    )
+    .toggle(),
+    cmd(
+        "view.compare_only_working",
+        "Show only the working files",
+        View,
+    )
+    .toggle(),
     cmd("section.edit", "Section view", View).icon("knife"),
     cmd("section.clear", "Remove section planes", View),
     cmd("explode.edit", "Exploded view", View).icon("arrows-out-cardinal"),
@@ -908,6 +926,9 @@ pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
             s.comparing.as_deref() != Some("HEAD"),
             "Already comparing with HEAD.",
         ),
+        "view.compare_swap" | "view.compare_only_rev" | "view.compare_only_working" => {
+            need(s.blink.of.is_some(), "Not comparing with a revision.")
+        }
         "view.compare_stop" => need(s.comparing.is_some(), "Not comparing."),
         "section.clear" => need(s.sectioned, "The view isn't cut."),
         "explode.edit" => need(s.assembly_shown, "Show an assembly first (View > Show)."),
@@ -1000,6 +1021,13 @@ pub fn checked(id: &str, s: &State) -> Option<bool> {
             let t = crate::core::markup::Tool::of_command(id)?;
             s.marking == Some(t)
         }
+        "view.compare_swap" => s.blink.front == crate::core::compare::Front::Rev,
+        "view.compare_only_rev" => {
+            s.blink.alone && s.blink.front == crate::core::compare::Front::Rev
+        }
+        "view.compare_only_working" => {
+            s.blink.alone && s.blink.front == crate::core::compare::Front::Working
+        }
         _ => return None,
     })
 }
@@ -1023,6 +1051,39 @@ pub fn toolbar() -> impl Iterator<Item = &'static Command> {
 mod tests {
     use super::*;
     use crate::core::keys::Chord;
+
+    #[test]
+    fn swap_and_one_side_need_a_revision_and_say_whether_they_are_on() {
+        use crate::core::compare::{Blink, Front};
+        let mut s = State::default();
+        for id in [
+            "view.compare_swap",
+            "view.compare_only_rev",
+            "view.compare_only_working",
+        ] {
+            assert_eq!(
+                enabled(id, &s),
+                Err("Not comparing with a revision."),
+                "{id}"
+            );
+            assert_eq!(get(id).unwrap().category, Category::View, "{id}");
+        }
+        let swap = get("view.compare_swap").unwrap();
+        assert_eq!(swap.keys, ["B"]);
+        assert_eq!(swap.scope, Scope::Viewport);
+        s.blink = Blink {
+            of: Some("HEAD".into()),
+            ..Blink::default()
+        };
+        assert!(enabled("view.compare_swap", &s).is_ok());
+        assert_eq!(checked("view.compare_swap", &s), Some(false));
+        s.blink.front = Front::Rev;
+        assert_eq!(checked("view.compare_swap", &s), Some(true));
+        assert_eq!(checked("view.compare_only_rev", &s), Some(false));
+        s.blink.alone = true;
+        assert_eq!(checked("view.compare_only_rev", &s), Some(true));
+        assert_eq!(checked("view.compare_only_working", &s), Some(false));
+    }
 
     #[test]
     fn writes_wait_while_the_compared_revision_is_drawn() {
@@ -1243,6 +1304,10 @@ mod tests {
             planar_face: true,
             weighable: true,
             comparing: Some("main".into()),
+            blink: crate::core::compare::Blink {
+                of: Some("main".into()),
+                ..Default::default()
+            },
             sectioned: true,
             exploded: true,
             scale: 1.0,
