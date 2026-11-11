@@ -1,6 +1,6 @@
 //! Offsets that pass through their surface's centre (design 299's
 //! inverted faces): a cylinder or a sphere offset inwards past its
-//! radius, a torus past its minor radius. `S + d N` is then a surface of
+//! radius, a torus past its minor radius, a pipe past its spine. `S + d N` is then a surface of
 //! the same kind on the other side of the axis, centre or core circle,
 //! of radius `|r + d|`, whose natural normal is `(1 - d κ₁)(1 - d κ₂) N`
 //! by the parametrization: reversed against the original's for a
@@ -14,6 +14,7 @@ use crate::geom::{Cylinder, Frame, Sphere, Surface, Torus};
 use crate::sheet_metal::curve2::Affine2;
 use crate::tol::LINEAR_RESOLUTION;
 use core::f64::consts::PI;
+use std::sync::Arc;
 
 /// How an inverted offset's parameters relate to its surface's: a face's
 /// pcurve `p` on the surface is `map(p)` on the offset, and the face's
@@ -35,6 +36,7 @@ pub(crate) fn inverted(s: &Surface, d: f64) -> Option<Option<(Surface, Inversion
         Surface::Cylinder(c) => c.radius(),
         Surface::Sphere(c) => c.radius(),
         Surface::Torus(t) => t.minor(),
+        Surface::Pipe(p) => p.radius(),
         _ => return None,
     };
     let r2 = r + d;
@@ -45,6 +47,20 @@ pub(crate) fn inverted(s: &Surface, d: f64) -> Option<Option<(Surface, Inversion
         return Some(None);
     }
     let r2 = -r2;
+    // The other side of the spine: the same frame, its angle `θ + π`, as
+    // the torus's `v + π`. Refused where the new radius folds the pipe
+    // (`Pipe::new`'s own check against the spine's curvature).
+    if let Surface::Pipe(p) = s {
+        return Some(p.with_radius(r2).ok().map(|c| {
+            (
+                Surface::Pipe(Arc::new(c)),
+                Inversion {
+                    map: Some(Affine2::diagonal([0.0, 1.0], [PI, 1.0])),
+                    flip: false,
+                },
+            )
+        }));
+    }
     let frame = *s.frame().expect("an analytic surface");
     Some(match s {
         // Turned half a turn about its axis, so `u` stays.
@@ -143,6 +159,19 @@ mod tests {
     fn a_torus_past_its_core_circle_turns_v_half_a_turn() {
         let s = Surface::Torus(Torus::new(frame(), 5.0, 1.0).unwrap());
         holds(&s, -2.0, -1.0);
+    }
+
+    #[test]
+    fn a_pipe_past_its_spine_turns_its_angle_half_a_turn() {
+        use crate::geom::pipe::tests::{R, on_plane, on_spline_plane};
+        for p in [on_plane(), on_spline_plane()] {
+            let s = Surface::Pipe(Arc::new(p));
+            holds(&s, -(R + 0.05), -1.0);
+            // At the spine, and past the spine's least radius of
+            // curvature, it is refused.
+            assert_eq!(inverted(&s, -R), Some(None));
+            assert_eq!(inverted(&s, -(R + 5.0)), Some(None));
+        }
     }
 
     #[test]

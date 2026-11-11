@@ -691,11 +691,17 @@ impl Pipe {
     /// The pipe about the same spine with its radius grown by `d`: the
     /// offset by `d` along the natural normal, with the same parameters.
     pub(super) fn offset(&self, d: f64) -> Result<Self, Error> {
+        self.with_radius(self.radius + d)
+    }
+
+    /// The pipe about the same spine, anchored alike (so with the same
+    /// frame), of another radius, certified again.
+    pub(crate) fn with_radius(&self, radius: f64) -> Result<Self, Error> {
         match &self.rail {
-            None => Self::new(self.spine.clone(), self.radius + d, self.anchor.clone()),
+            None => Self::new(self.spine.clone(), radius, self.anchor.clone()),
             Some(r) => Self::on_rail(
                 self.spine.clone(),
-                self.radius + d,
+                radius,
                 self.anchor.clone(),
                 r.pcurve.clone(),
                 r.map,
