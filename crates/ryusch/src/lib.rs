@@ -35,3 +35,4 @@ pub mod testing;
 pub mod text;
 pub mod topology;
 mod widths;
+mod widths_semibold;
