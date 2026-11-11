@@ -8363,3 +8363,76 @@ fn blend_edits_from_the_cli() {
     assert_eq!(code, 0, "{v}");
     assert!(bigger.exists());
 }
+
+#[test]
+fn colours_in_and_out_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/styles");
+    let beside = p.direct.parent().unwrap();
+    fs::copy(data.join("painted_assembly.stp"), beside.join("rack.stp")).unwrap();
+    let made = p.ok(&["import", "--solid", "../rack.stp"]);
+    let rack = made["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["kind"] == "assembly")
+        .and_then(|x| x["part"].as_str())
+        .unwrap()
+        .to_owned();
+    // In: the file's styles are interpreted, and drawn.
+    let appearance = made["transfer"]["categories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["category"] == "appearance")
+        .cloned()
+        .unwrap();
+    assert!(appearance["interpreted"]["count"].as_u64().unwrap() > 0, "{appearance}");
+    let colours = |p: &Pair| -> Vec<String> {
+        let v = p.ok(&["appearance", &rack]);
+        let mut c: Vec<String> = v["solids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["colour"].as_str().unwrap_or("").to_owned())
+            .collect();
+        c.sort();
+        c
+    };
+    assert_eq!(colours(&p), ["#0000ff", "#00ff00", "#ff0000"]);
+    // The assembly's file colours off, and on again.
+    p.ok(&["colour", &rack, "--no-file-styles"]);
+    assert_eq!(colours(&p), ["#0000ff", "#ff0000", "#ff0000"]);
+    p.ok(&["colour", &rack, "--file-styles"]);
+    assert_eq!(colours(&p), ["#0000ff", "#00ff00", "#ff0000"]);
+    // Out: the export carries them; --no-appearance leaves them out.
+    let export = |out: &str, extra: &[&str]| {
+        let mut args = vec![
+            "export",
+            rack.as_str(),
+            "--out",
+            out,
+            "--time-stamp",
+            "2026-11-11T00:00:00",
+        ];
+        args.extend(extra);
+        let (code, v) = p.both_from("", &args);
+        assert_eq!((code, &v["ok"]), (0, &Value::Bool(true)), "{v}");
+        v
+    };
+    export("../out.step", &[]);
+    let written = fs::read_to_string(beside.join("out.step")).unwrap();
+    assert!(written.contains("CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM"));
+    assert!(written.contains("SURFACE_STYLE_TRANSPARENT"));
+    let v = export("../plain.step", &["--no-appearance"]);
+    assert!(!fs::read_to_string(beside.join("plain.step")).unwrap().contains("STYLED_ITEM"));
+    assert!(
+        v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|w| w.as_str())
+            .any(|w| w.starts_with("export_metadata_omitted"))
+    );
+}
