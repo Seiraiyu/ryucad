@@ -189,9 +189,13 @@ const FIT: u64 = 1 << 25;
 const BESIDE: u64 = 1 << 24;
 /// A face pair of a file's union: 16 times the largest pair of a union
 /// that builds across the release suites and the pinned STEP corpus,
-/// rounded up to a power of two (plan 16.B's Task 8). Unions only: every
-/// other boolean's pairs keep the trace's own cap.
-const UNION: u64 = 1 << 22;
+/// rounded up to a power of two (plan 16.B's Task 8, on cox-worker-2,
+/// AMD Ryzen 7 9700X, 2026-11-11: largest 968,826 units, a 119-face
+/// union of a pinned Voron assembly in ryucad's `corpus` test; every
+/// union past 1M units in those runs failed, and #550's inductor's
+/// refused pair spent 23,520,833). Unions only: every other boolean's
+/// pairs keep the trace's own cap.
+const UNION: u64 = 1 << 24;
 
 static FREE: Work<'static> = Work::unlimited();
 
@@ -399,7 +403,7 @@ pub mod stats {
         use std::io::Write;
         use std::sync::atomic::{AtomicU64, Ordering};
 
-        static MAX: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+        static MAX: [AtomicU64; Scope::ALL.len()] = [const { AtomicU64::new(0) }; Scope::ALL.len()];
 
         fn index(s: Scope) -> usize {
             Scope::ALL.iter().position(|&x| x == s).expect("a scope")
