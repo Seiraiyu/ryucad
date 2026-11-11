@@ -83,6 +83,39 @@ fn shells_crossing_in_one_solid_are_united() {
     }
 }
 
+/// A ball crossing a block's top, written as one solid's two shells,
+/// heals to their union wherever it crosses. A sphere's shell has no
+/// vertex, so which shells enclose which was judged by one point of its
+/// mesh, which could lie on either side of the block: on the coarse mesh
+/// healing signs a sphere's shell on since its winding number (#239), it
+/// lay inside, and the ball was cut out of the block as a cavity
+/// (`self_union_props`' seed 14 in v0.9.0-pre.1's gate).
+#[test]
+fn a_ball_crossing_a_block_heals_to_their_union_wherever_it_crosses() {
+    let r = 0.5;
+    let b = block(1, 2.0, 2.0, 2.0, [0.0; 3]);
+    for (k, &(x, y)) in [(0.5, 0.5), (1.0, 1.0), (1.5, 0.7)].iter().enumerate() {
+        for (j, d) in [-0.2, 0.0, 0.2].into_iter().enumerate() {
+            let place = Rigid::translation(Vector3::new(x, y, 2.0 + d));
+            let ball = primitive::sphere(OpKey(10 + 3 * k as u128 + j as u128), r, &place)
+                .unwrap()
+                .0;
+            let s = one_solid(joined(&shape(&b), &shape(&ball)));
+            let (h, _, _) = heal(OpKey(7), &s, &HealOptions::default())
+                .unwrap_or_else(|e| panic!("({x}, {y}, {d}): {e:?}"));
+            sound(&h);
+            // The block and the cap of the ball above its top.
+            let cap = r + d;
+            let want = 8.0 + core::f64::consts::PI * cap * cap * (3.0 * r - cap) / 3.0;
+            let got = volume(&h);
+            assert!(
+                (got - want).abs() < 1e-3,
+                "({x}, {y}, {d}): {got} against {want}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_cavity_crossing_its_solid_is_cut_out() {
     let (a, b) = two_blocks();
