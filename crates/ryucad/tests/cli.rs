@@ -2371,9 +2371,18 @@ fn packages_from_the_cli() {
         1,
     );
     assert_eq!(e["details"]["clause"], "file_changed");
-    // As a folder.
-    p.ok(&["release", "package", "bracket", "--out", "folder/"]);
-    assert!(p.daemon.join("folder/step/100-0042-A.step").is_file());
+    // As a folder, outside the project; never inside it.
+    let e = p.fails(
+        &["release", "package", "bracket", "--out", "folder/"],
+        "invalid_param",
+        1,
+    );
+    assert_eq!(e["details"]["param"], "out");
+    assert!(!p.daemon.join("folder").exists());
+    let out = tempfile::tempdir().unwrap();
+    let folder = format!("{}/", out.path().join("folder").display());
+    p.ok(&["release", "package", "bracket", "--out", &folder]);
+    assert!(out.path().join("folder/step/100-0042-A.step").is_file());
 }
 
 #[test]

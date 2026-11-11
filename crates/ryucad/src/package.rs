@@ -528,9 +528,16 @@ pub fn package_stamped(session: &mut Session, ask: Ask, built: &BuiltWith) -> Re
 fn refuse_inside(dir: &std::path::Path, root: &std::path::Path) -> Result<()> {
     let name = dir.file_name().expect("out_path gives a file name");
     let parent = dir.parent().expect("an absolute path has a parent");
+    // Folded to ASCII lower case, as `export::out_path` folds: Windows and
+    // macOS find `<project>` and `<PROJECT>` the same folder.
+    let fold = |p: &std::path::Path| {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
+            .collect::<Vec<_>>()
+    };
     let inside = match (parent.canonicalize(), root.canonicalize()) {
-        (Ok(p), Ok(r)) => p.join(name).starts_with(&r),
-        _ => dir.starts_with(root),
+        (Ok(p), Ok(r)) => fold(&p.join(name)).starts_with(&fold(&r)),
+        _ => fold(dir).starts_with(&fold(root)),
     };
     if inside {
         return Err(Error::new(
@@ -865,6 +872,16 @@ pub(crate) mod tests {
             format!("{}/", root.display()),
             format!("{}/pkg/", root.display()),
             format!("{}/parts/", root.display()),
+            // The project's own folder in another case: the same folder on
+            // Windows and macOS, so refused on every platform.
+            format!(
+                "{}/{}/",
+                root.parent().unwrap().display(),
+                root.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_ascii_uppercase()
+            ),
         ] {
             let e = package_stamped(&mut s, ask(out.clone()), &this_build()).unwrap_err();
             assert_eq!(
