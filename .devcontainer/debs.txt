@@ -1,0 +1,7 @@
+# Debian packages the devcontainer installs from a fixed snapshot.debian.org
+# date, by architecture, with their SHA-256 (from that snapshot's signed
+# Packages index). .devcontainer/fetch-debs.sh fetches them into
+# .devcontainer/debs/ with retries; the image installs them from there, and
+# full.yml keeps them in an Actions cache keyed by this file (#557).
+amd64 6f748064151a902257c499317b69764367212383959653320a650fa00b3b3aa1 https://snapshot.debian.org/archive/debian/20261028T000000Z/pool/main/k/kicad/kicad_9.0.8%2Bdfsg-1~bpo13%2B1_amd64.deb
+arm64 f89ab79e3b522d2229920529b8a42c2dc65b81fe0cff7ecca3229f33a69798af https://snapshot.debian.org/archive/debian/20261028T000000Z/pool/main/k/kicad/kicad_9.0.8%2Bdfsg-1~bpo13%2B1_arm64.deb

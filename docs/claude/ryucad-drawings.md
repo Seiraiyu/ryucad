@@ -96,3 +96,23 @@ The design is document 417 in the Coxswain planning project `ryucad-ryukei`; thi
 - **What the corpus found.** ryukei can't certify a silhouette of the radial engine's assembly view, from any side tried: the engine's view fails (`drawing_view_failed`), the sheet keeps its crossed frame and BOM, and the manifest records it, so the engine's balloons wait for the kernel.
 - **Reading PDFs back.** `crates/ryu-draw/tests/common/pdf.rs`, a reader of our own (the cross-reference table against every object, each page's size and its text through the font's ToUnicode map, the font file inflated, the bookmarks depth first), used by `ryu-draw`'s `tests/pdf.rs` and ryucad's `tests/drawings.rs` (a page per sheet showing every text its items hold, in order, a bookmark per sheet and view).
 - **Testing.** `tests/drawing_props.rs`: 256 seeded boxes drilled through, on seeded sheets with the standard views, a dimension of each size and of the hole with a seeded tolerance: every value is `measure`'s, every item on its sheet, and two fresh sessions build the same `drawing.get` and PDF bytes; 9 s in a debug build, so it runs with every test. The `drawing` fuzz target (drawing files and `drawing.edit` batches over a seeded project: a typed refusal, or a canonical file that builds the same twice and exports as PDF, SVG, DXF and PNG; in fuzz.yml) and the `merge` target's `0xe9` mode (31: a drawing edited per member on both sides, never conflicting inside a place, a tolerance or an orient, a clean merge reading). `ryukei-bench`'s `ezdxf_reads_every_drawing_dxf` (`--features dxf`): a drawing with every item kind, hatching and dimensions, as DXF in millimetres and inches, read by ezdxf: R2000, audited clean, its layers, and as many entities of each type as its items make.
+
+## The bars, views apart and balloons clear (decided in release 9.A)
+
+The design is document 435 in the Coxswain planning project `ryucad-ryukei`; this is its plan 9.A (issues #644, #645 and #655).
+
+- **Design 417's bars** (`tests/drawing_bar.rs`, `RYUCAD_BARS=1`, release, one thread: the 1,000-hole plate's standard drawing, 31,892 pieces, its PDF 887,453 bytes). Every run met every bar.
+
+  | Machine | Run | Load before | Cold drawing | ryukei's own views | Ratio (bar 1.25) | Warm `drawing.get` (bar 1 s) | PDF (bar 0.5 s) |
+  |---|---|---|---|---|---|---|---|
+  | bc2 (Intel Core Ultra 5 250K Plus, 18 threads), plan 9.D | 1 | 4.5 | 49.28 s | 48.60 s | 1.01 | 0.032 s | 0.084 s |
+  | | 2 | 1.7 | 49.11 s | 48.63 s | 1.01 | 0.037 s | 0.082 s |
+  | | 3 | 1.1 | 49.32 s | 48.92 s | 1.01 | 0.031 s | 0.083 s |
+  | cox-worker-2 (AMD Ryzen 7 9700X, 8 cores, shared with another project), 2026-11-10 | 1 | 6.3 | 62.01 s | 61.01 s | 1.02 | 0.022 s | 0.030 s |
+  | | 2 | 1.9 | 60.31 s | 60.11 s | 1.00 | 0.021 s | 0.028 s |
+  | | 3 | 1.3 | 61.18 s | 60.50 s | 1.01 | 0.021 s | 0.026 s |
+
+- **Views apart as layout judges them** (#644). Layout stands each view just clear of its neighbour, their rooms meeting, and writes places to a thousandth of a millimetre; the lint judged rooms meeting by that rounding (0.1 to 0.5 µm) as overlapping, on 33 of `drawing_props`' 256 seeds and on five corpus drawings. `dwg_view_overlap` now judges by layout's own `overlap` (`FIT_SLACK`, 1e-3 mm). Only lint findings moved: the `drawing_sections` golden's `drawing.get` (its PDF, SVG, DXF and PNG bytes held), and the corpus manifest's counts and scores.
+- **Balloons clear of the view's lines** (#645). A balloon with no `at` takes the nearest place, out from the view's centre through its leader's tip and turned from that by 5° steps up to 80° either way, at 18 mm and on by half its radius until it leaves the view's box by two radii, whose circle lies over none of the sheet's drawn curves and none of the annotations placed before it, whose leader crosses none of their text, and which stays in the drawing area clear of the title block, all as the lint judges them (`annotate::balloon_place`); where none does, 18 mm out as before. Balloons are placed before BOM tables, so a table placed later may still meet one. The corpus's gearbox lost its five `dwg_text_overlap` (score 76 → 91) and the printer frame its balloon past the area (78 → 89).
+- **ezdxf.** The drawing fixture's plate has its upright edges filleted and a ring joined on its top, so its DXF holds `ARC` and `SPLINE` entities too (#655): 4 and 103 of them, read clean in millimetres and inches.
+- **Left.** Each gear drawing's bore diameter text over the view's lines and the housing's hole callout past the area (`dwg_text_overlap`, `dwg_outside`): dimension placement, not standard views or balloons.

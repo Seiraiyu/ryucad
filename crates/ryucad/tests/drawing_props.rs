@@ -4,7 +4,7 @@
 //! hole, each with a seeded tolerance. Every build is the same twice
 //! (`drawing.get` with every item, and the PDF's bytes, from two fresh
 //! sessions); every dimension's value is what `measure` gives for the
-//! same entities; every item lies on its sheet.
+//! same entities; every item lies on its sheet, and no two views overlap.
 //!
 //! 256 seeds in 9 s in a debug build (cox-worker-3: Intel Core Ultra 5
 //! 250K Plus, 18 threads, load 5), so it runs with every test.
@@ -252,6 +252,17 @@ fn judge(seed: u64) -> Result<(), String> {
                 i + 1
             ));
         }
+    }
+    // Standard views stand apart, their rooms included (#644): placed
+    // just clear of each other and written to a thousandth, they are
+    // apart as layout judges it.
+    if let Some(f) = got["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "dwg_view_overlap")
+    {
+        return Err(format!("seed {seed}: {}", f["message"]));
     }
     // Every item on its sheet.
     let paper = [
