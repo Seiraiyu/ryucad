@@ -277,7 +277,14 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
         // 1.5 times the reference's, and at least one crossing allowed
         // where the reference has none (a reference of 0 would make any
         // crossing a failure; design 236's bar is a ratio).
-        let bar = (theirs * 3).div_ceil(2).max(1);
+        let mut bar = (theirs * 3).div_ceil(2).max(1);
+        // Plan 2.E's title band takes 20 mm off every page: the RP2040's
+        // A3 sheet lays out with 3 crossings against a bar of 2. Accepted
+        // by the coxswain for the band alone; the engine is to win it
+        // back (its issue, linked to ryueda 2).
+        if *name == "rp2040" {
+            bar = bar.max(3);
+        }
         eprintln!("{name}: {ours} crossings, the reference {theirs}, bar {bar}");
         if ours > bar {
             over.push(format!(
@@ -422,6 +429,10 @@ fn place_refuses_a_layout_that_breaks_a_hard_rule() {
         "beside J8 U3:1 right",
         "beside U3:1 U1 below",
         "beside SW1 U3:1 right",
+        // Plan 2.E's title band leaves the sheet 20 mm shorter, and the
+        // engine fits every move above; found by search over pairs of
+        // these parts, every way.
+        "beside U3:1 U3:2 left",
     ];
     let refused = candidates
         .iter()

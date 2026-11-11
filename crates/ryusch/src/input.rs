@@ -21,8 +21,8 @@ pub struct Bus {
 pub struct Block {
     /// What sheets' text calls it.
     pub name: String,
-    /// The project's paper's area (the paper less the margin the PDF's
-    /// border takes): the largest a sheet takes, and every sheet's when
+    /// The project's paper's area (the paper less what the PDF's border
+    /// and title band take): the largest a sheet takes, and every sheet's when
     /// `papers` is empty.
     pub sheet: [Nm; 2],
     /// The papers a sheet may take, smallest first, the project's last;
@@ -50,7 +50,7 @@ pub struct Block {
 }
 
 /// A paper a sheet may take: its size's name, its orientation and its
-/// drawing area (the paper less the PDF's border).
+/// drawing area (the paper less the PDF's border and title band).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Paper {
     pub size: String,

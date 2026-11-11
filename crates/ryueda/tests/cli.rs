@@ -2782,8 +2782,9 @@ fn each_sheet_is_drawn_and_paged_at_its_own_paper() {
     assert_eq!(d["blocks"][0]["sheets"][0]["paper"]["size"], "a4", "{d}");
     p.ok(&["render", "--block", "sensor", "--out", "s.svg"]);
     let svg = fs::read_to_string(p.daemon.join("board/s.svg")).unwrap();
-    // The A4 sheet's drawing area: 277 by 190 mm.
-    assert!(svg.contains("width=\"277\" height=\"190\""), "{svg}");
+    // The A4 sheet's drawing area: 277 by 170 mm (the title band takes
+    // 20 mm at its foot, plan 2.E).
+    assert!(svg.contains("width=\"277\" height=\"170\""), "{svg}");
     p.ok(&["output", "--out", "s.pdf"]);
     let pdf = fs::read(p.daemon.join("board/s.pdf")).unwrap();
     let text = String::from_utf8_lossy(&pdf);

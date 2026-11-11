@@ -28,6 +28,9 @@ pub const LAYOUT_KIND: &str = "ryueda.layout";
 pub const LAYOUT_FORMAT: u64 = 4;
 /// What the PDF's border takes on every side of the paper.
 pub const BORDER: Nm = 10_000_000;
+/// The band at the foot of every page that holds the title block (plan
+/// 2.E): the drawing area stops above it.
+pub const TITLE_BAND: Nm = 20_000_000;
 
 /// The path of a block's layout file.
 pub fn layout_path(block: &Id) -> String {
@@ -452,8 +455,8 @@ fn placeholder(
 }
 
 /// The paper series a project's sheets take, smallest first, each paper's
-/// drawing area the paper less the PDF's border (plan 2.A): none with fit
-/// off.
+/// drawing area the paper less the PDF's border and the title band (plans
+/// 2.A and 2.E): none with fit off.
 pub fn papers(sheet: &crate::project::Sheet) -> Vec<input::Paper> {
     sheet
         .series()
@@ -472,7 +475,7 @@ pub fn papers(sheet: &crate::project::Sheet) -> Vec<input::Paper> {
                     }
                     crate::project::Orientation::Portrait => ryusch::layout::Orientation::Portrait,
                 },
-                area: [w - 2 * BORDER, h - 2 * BORDER],
+                area: [w - 2 * BORDER, h - 2 * BORDER - TITLE_BAND],
             }
         })
         .collect()
@@ -810,7 +813,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
     let mut built = Built {
         input: input::Block {
             name: block.name.clone(),
-            sheet: [w - 2 * BORDER, h - 2 * BORDER],
+            sheet: [w - 2 * BORDER, h - 2 * BORDER - TITLE_BAND],
             papers: papers(&p.manifest.schematic.sheet),
             parts,
             nets,
@@ -1321,5 +1324,68 @@ mod tests {
         let sda = built.input.nets.iter().find(|n| n.name == "SDA").unwrap();
         assert_eq!(sda.intent, "3.3 V");
         drop(dir);
+    }
+
+    #[test]
+    fn a_papers_drawing_area_leaves_the_title_band() {
+        let sheet = crate::project::Sheet::default();
+        let a4 = &papers(&sheet)[0];
+        assert_eq!(a4.size, "a4");
+        assert_eq!(
+            a4.area,
+            [277_000_000, 170_000_000],
+            "297 × 210 less 10 mm a side and the 20 mm band"
+        );
+        let a3 = &papers(&sheet)[1];
+        assert_eq!(a3.area, [400_000_000, 257_000_000]);
+    }
+
+    /// A layout made before the title band whose drawing reaches into it
+    /// breaks `inside`: read as layout_invalid, laid out again (plan 2.E).
+    #[test]
+    fn a_layout_reaching_into_the_title_band_is_laid_out_again() {
+        let (dir, p) = project(&[]);
+        let board = dir.path().join("board");
+        let top = Id::parse("top", "block").unwrap();
+        let laid = lay(
+            &p,
+            &p.conn.blocks[&top],
+            None,
+            &[],
+            ryusch::input::Relayout::None,
+        )
+        .unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_str(&layout_text(&laid.outcome.layout)).unwrap();
+        let key = v["placed"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        // The old A4 area's top (190 mm) less two steps: inside before the
+        // band, past the 170 mm the band leaves.
+        v["placed"][&key]["at"][1] = serde_json::json!(190_000_000 - 2 * GRID);
+        crate::source::write_atomic(
+            &board.join(layout_path(&top)),
+            crate::canonical::to_string(&v),
+        )
+        .unwrap();
+        let p = Project::load(&board).unwrap();
+        let again = lay(
+            &p,
+            &p.conn.blocks[&top],
+            None,
+            &[],
+            ryusch::input::Relayout::None,
+        )
+        .unwrap();
+        let e = again.invalid.expect("the file breaks a rule");
+        assert_eq!(e.code, Code::LayoutInvalid, "{e:?}");
+        assert_eq!(
+            ryusch::rules::check(&again.built.input, &again.outcome.layout),
+            []
+        );
     }
 }

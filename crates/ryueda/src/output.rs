@@ -12,7 +12,7 @@ use crate::id::Id;
 use crate::netlist;
 use crate::pdf::{self, Link, Mark, Page};
 use crate::project::Project;
-use crate::schem::{self, BORDER, Laid};
+use crate::schem::{self, BORDER, Laid, TITLE_BAND};
 use ryusch::font::{Anchor, MIN_SIZE};
 use ryusch::geom::{Nm, Rect};
 use ryusch::layout::LabelKind;
@@ -358,13 +358,14 @@ fn output_pages(
             "sheet": s.sheet,
             "name": s.name,
         }));
-        // Its sheet's own paper (plan 2.A): the drawing area and the border.
+        // Its sheet's own paper (plan 2.A): the drawing area, the border
+        // and the title band at its foot (plan 2.E).
         let l = &laid[&node.block];
         let area = l.built.input.area_in(&l.outcome.layout, &s.sheet);
         pages.push(Page {
-            paper: [area[0] + 2 * BORDER, area[1] + 2 * BORDER],
+            paper: [area[0] + 2 * BORDER, area[1] + 2 * BORDER + TITLE_BAND],
             heading,
-            origin: [BORDER, BORDER],
+            origin: [BORDER, BORDER + TITLE_BAND],
             items,
             links,
         });
