@@ -294,12 +294,7 @@ fn bus_items(block: &Block, layout: &Layout, sid: &str, items: &mut Vec<Item>) {
         };
         let mut columns: BTreeMap<Nm, Vec<Point>> = BTreeMap::new();
         let mut members: Vec<usize> = Vec::new();
-        let stub_len = crate::bus::stub_len(
-            drawn
-                .entries
-                .iter()
-                .filter_map(|e| block.net(&e.net).map(|n| block.nets[n].name.as_str())),
-        );
+        let stub_len = drawn.stub;
         for e in &drawn.entries {
             let (stub, on_spine) = crate::bus::entry(e.at, e.side, stub_len);
             line(items, vec![e.at, stub, on_spine], WIRE);
@@ -674,6 +669,7 @@ mod tests {
             BTreeMap::from([(
                 "s1".into(),
                 DrawnBus {
+                    stub,
                     trunk: vec![vec![[x, 20 * GRID], [x + 10 * GRID, 20 * GRID]]],
                     entries,
                     connector: None,

@@ -354,12 +354,7 @@ fn frames_once(block: &Block, layout: &mut Layout) {
             let Some(bus) = by.get(&r.sheet) else {
                 continue;
             };
-            let names: Vec<&str> = bus
-                .entries
-                .iter()
-                .filter_map(|e| block.net(&e.net).map(|n| block.nets[n].name.as_str()))
-                .collect();
-            let stub = crate::bus::stub_len(names.iter().copied());
+            let stub = bus.stub;
             let mut mine = false;
             for e in &bus.entries {
                 let part = e.on.rsplit_once('/').map_or(e.on.as_str(), |(p, _)| p);

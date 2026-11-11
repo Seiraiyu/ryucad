@@ -62,6 +62,9 @@ pub struct PlacedNote {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DrawnBus {
+    /// How long its stubs run from their pins (`bus::stub_len` when it
+    /// was drawn).
+    pub stub: Nm,
     /// The trunk's runs, joining the spines (or a spine and its
     /// connector).
     pub trunk: Vec<Vec<Point>>,
@@ -765,6 +768,7 @@ mod tests {
             BTreeMap::from([(
                 "s1".into(),
                 DrawnBus {
+                    stub: 2_540_000,
                     trunk: vec![vec![[0, 0], [10 * 1_270_000, 0]]],
                     entries: vec![BusEntry {
                         net: "d0".into(),

@@ -325,7 +325,7 @@ fn order(block: &Block, clusters: &[Cluster], g: &Graph, columns: &mut [Vec<usiz
 /// The room a cluster takes with its origin at `[0, 0]`, a label
 /// reserved on each pin of a net in `away`.
 fn extent0(block: &Block, away: &BTreeSet<usize>, c: &Cluster) -> crate::geom::Rect {
-    c.room_labelled(block, [0, 0], |n| away.contains(&n))
+    c.room_away(block, [0, 0], |n| away.contains(&n))
 }
 
 /// The origin putting a cluster's extent's top left corner at `corner`,
@@ -486,7 +486,7 @@ pub fn flow(
             continue;
         }
         let o = origin_for(block, away, &clusters[*c], [x, band_top]);
-        let placed = clusters[*c].room_labelled(block, o, away_of);
+        let placed = clusters[*c].room_away(block, o, away_of);
         band_bottom = band_bottom.min(placed.min[1]);
         x = placed.max[0] + BAND_GAP;
         origins.insert(*c, o);
@@ -578,11 +578,11 @@ pub fn flow(
             }
             if let Some(dy) = best {
                 let moved = [o[0], o[1] + dy];
-                if cl.room_labelled(block, moved, away_of).min[1] >= floor {
+                if cl.room_away(block, moved, away_of).min[1] >= floor {
                     o = moved;
                 }
             }
-            let e = cl.room_labelled(block, o, away_of);
+            let e = cl.room_away(block, o, away_of);
             // What runs past the sheet's foot or side goes to the next.
             if e.min[1] < floor || e.max[0] > size[0] - MARGIN {
                 overflow.push(*c);
@@ -704,7 +704,7 @@ pub fn flow(
                 if towards == 0 && k > 0 {
                     break;
                 }
-                let room = cl.room_labelled(block, moved, away_of);
+                let room = cl.room_away(block, moved, away_of);
                 // Up to the sheet's margin: the power band, if any, is
                 // guarded by the overlap test.
                 if room.min[1] < floor
@@ -716,7 +716,7 @@ pub fn flow(
                 }
                 let clear = origins.iter().filter(|(d, _)| **d != c).all(|(d, od)| {
                     !clusters[*d]
-                        .room_labelled(block, *od, away_of)
+                        .room_away(block, *od, away_of)
                         .grow(GRID)
                         .overlaps(&room)
                 });

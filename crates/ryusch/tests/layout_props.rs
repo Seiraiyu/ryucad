@@ -139,6 +139,18 @@ fn unchanged(b: &Block, before: &Layout, after: &Layout, a: &Allowed, what: &str
 /// their nets may then move, but each keeps its place in the region, and
 /// every other region its origin.
 fn check(base: &Block, edited: &mut Block, mut a: Allowed, what: &str) {
+    // A bus member's change may draw its whole bus another way (plan 2.C):
+    // its siblings may change with it.
+    for bus in &base.buses {
+        if bus
+            .members
+            .iter()
+            .any(|n| a.nets.contains(&base.nets[*n].key))
+        {
+            a.nets
+                .extend(bus.members.iter().map(|n| base.nets[*n].key.clone()));
+        }
+    }
     let before = lay_out(base).unwrap().layout;
     edited.previous = Some(before.clone());
     let after = lay_out(edited).unwrap().layout;
@@ -224,9 +236,51 @@ fn papers(b: &mut Block) {
     b.papers = vec![a4, a3];
 }
 
+/// How many seeded blocks drew a bus (plan 2.C): every fifth seed has one.
+static DRAWN_BUSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn every_edit_on(b: Block, name: &str) {
     let what = |e: &str| format!("{name}, {e}");
     let gnd = b.net("rail:gnd").unwrap();
+    // A bus member renamed (plan 2.C): only the bus and its members' nets
+    // may change.
+    if let Some(bus) = b.buses.first() {
+        let first = lay_out(&b).unwrap().layout;
+        if first.buses.contains_key(&bus.key) {
+            DRAWN_BUSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let mut e = b.clone();
+        let m = bus.members[bus.members.len() - 1];
+        e.nets[m].name = format!("{}_RENAMED", b.nets[m].name);
+        let a = Allowed {
+            parts: BTreeSet::new(),
+            nets: bus.members.iter().map(|n| b.nets[*n].key.clone()).collect(),
+        };
+        check(&b, &mut e, a, &what("a bus member renamed"));
+    }
+    // A note on the first region (plan 2.C): nothing else may move.
+    {
+        let first = lay_out(&b).unwrap().layout;
+        if let Some(r) = first.regions.keys().next() {
+            let mut e = b.clone();
+            e.instructions.insert(
+                "n1".into(),
+                Instruction::Note {
+                    on: format!("region:{r}"),
+                    text: "A note".into(),
+                },
+            );
+            check(
+                &b,
+                &mut e,
+                Allowed {
+                    parts: BTreeSet::new(),
+                    nets: BTreeSet::new(),
+                },
+                &what("a note added"),
+            );
+        }
+    }
     // A part added: a resistor from a signal to ground.
     if let Some((n, _)) = signal(&b, 2) {
         let mut e = b.clone();
@@ -351,10 +405,19 @@ fn every_edit_on(b: Block, name: &str) {
         e.parts[at] = three;
         let mut nets = nets_of(&e, "instance:ch_a");
         nets.extend(nets_of(&base, "instance:ch_a"));
-        let a = Allowed {
-            parts: ["instance:ch_a".to_owned()].into(),
-            nets,
-        };
+        // The idioms serving the stack (a bypass capacitor on its supply)
+        // go where it goes.
+        let mut parts: BTreeSet<String> = ["instance:ch_a".to_owned()].into();
+        let at = base.part("instance:ch_a").unwrap();
+        for i in lay_out(&base).unwrap().idioms {
+            if i.anchor.is_some_and(|(p, _)| p == at) {
+                for p in i.parts {
+                    parts.insert(base.parts[p].key.clone());
+                    nets.extend(nets_of(&base, &base.parts[p].key));
+                }
+            }
+        }
+        let a = Allowed { parts, nets };
         check(&base, &mut e, a, &what("a layer added to a stack"));
     }
     // A region moved whole by a move: only it and the nets entering it may
@@ -374,8 +437,25 @@ fn every_edit_on(b: Block, name: &str) {
                 of: other,
                 side: ryusch::geom::Side::Right,
             }];
-            let parts: BTreeSet<String> = r.parts.iter().cloned().collect();
-            let nets = parts.iter().flat_map(|k| nets_of(&b, k)).collect();
+            let mut parts: BTreeSet<String> = r.parts.iter().cloned().collect();
+            let mut nets: BTreeSet<String> = parts.iter().flat_map(|k| nets_of(&b, k)).collect();
+            // A bus with an end in the region is drawn again (plan 2.C):
+            // the parts at its other end may stand elsewhere for it.
+            for bus in &b.buses {
+                if bus.members.iter().any(|n| nets.contains(&b.nets[*n].key)) {
+                    for part in &b.parts {
+                        if part
+                            .pins
+                            .iter()
+                            .any(|x| x.net.is_some_and(|n| bus.members.contains(&n)))
+                        {
+                            parts.insert(part.key.clone());
+                        }
+                    }
+                }
+            }
+            let ends: Vec<String> = parts.iter().cloned().collect();
+            nets.extend(ends.iter().flat_map(|k| nets_of(&b, k)));
             e.previous = Some(first.clone());
             if let Ok(out) = lay_out(&e) {
                 let after = out.layout;
@@ -416,6 +496,9 @@ fn edits_change_only_what_they_name() {
     for seed in 1..=64 {
         every_edit(seed, 2 + (seed as usize % 9));
     }
+    // At least one block in ten draws its bus (plan 2.C).
+    let drawn = DRAWN_BUSES.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(drawn >= 64 / 10, "{drawn} seeded blocks drew a bus");
 }
 
 #[test]

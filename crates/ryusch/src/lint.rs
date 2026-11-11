@@ -547,12 +547,7 @@ pub(crate) fn ink_boxes(block: &Block, layout: &crate::layout::Layout, sid: &str
     // Buses' entries, spines, trunks and connectors, and notes (plan 2.C).
     for by in layout.buses.values() {
         if let Some(bus) = by.get(sid) {
-            let names: Vec<&str> = bus
-                .entries
-                .iter()
-                .filter_map(|e| block.net(&e.net).map(|n| block.nets[n].name.as_str()))
-                .collect();
-            let stub = crate::bus::stub_len(names.iter().copied());
+            let stub = bus.stub;
             let mut ends: Vec<crate::geom::Point> = Vec::new();
             for e in &bus.entries {
                 let (_, on_spine) = crate::bus::entry(e.at, e.side, stub);

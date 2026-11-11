@@ -217,12 +217,7 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
         let mut bus_runs: Vec<(String, Vec<Point>)> = Vec::new();
         for (key, by) in &layout.buses {
             let Some(bus) = by.get(sid) else { continue };
-            let names: Vec<&str> = bus
-                .entries
-                .iter()
-                .filter_map(|e| block.net(&e.net).map(|n| block.nets[n].name.as_str()))
-                .collect();
-            let stub = crate::bus::stub_len(names.iter().copied());
+            let stub = bus.stub;
             let mut columns: BTreeMap<crate::geom::Nm, Vec<Point>> = BTreeMap::new();
             for e in &bus.entries {
                 let (s, on_spine) = crate::bus::entry(e.at, e.side, stub);

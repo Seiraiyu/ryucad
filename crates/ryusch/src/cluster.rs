@@ -125,6 +125,25 @@ impl Cluster {
 
     /// Its room with a label on each signal pin whose net `labelled` says
     /// will take one.
+    /// [`Cluster::room_labelled`], with the room a bus's members need
+    /// where they leave the sheet (`away`: its stubs, entries, a short
+    /// trunk and its connector; plan 2.C).
+    pub fn room_away(&self, block: &Block, origin: Point, away: impl Fn(usize) -> bool) -> Rect {
+        let mut r = self.room_labelled(block, origin, &away);
+        for (p, place) in self.places(origin) {
+            let shape = Shape::of(&block.parts[p], place);
+            for (k, pin) in block.parts[p].pins.iter().enumerate() {
+                if pin.drawn_net().is_some_and(&away) {
+                    let at = shape.pins[k];
+                    if let Some(b) = crate::bus::leaving_room(block, p, k, at.end, at.side) {
+                        r = r.union(b);
+                    }
+                }
+            }
+        }
+        r
+    }
+
     pub fn room_labelled(
         &self,
         block: &Block,
@@ -147,9 +166,6 @@ impl Cluster {
                         at.end,
                         at.side,
                     ));
-                    if let Some(b) = crate::bus::leaving_room(block, p, k, at.end, at.side) {
-                        r = r.union(b);
-                    }
                 }
             }
         }

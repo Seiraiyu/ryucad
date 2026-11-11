@@ -2076,6 +2076,38 @@ fn drawn(prev: Option<&Layout>) -> BTreeMap<String, Vec<Rect>> {
                 .push(Rect::new(l.at, l.at).grow(3 * GRID));
         }
     }
+    // A bus's entries, spines and trunk, and its connector (plan 2.C);
+    // a note's box.
+    for by in prev.buses.values() {
+        for (s, d) in by {
+            let mut pts: Vec<Point> = Vec::new();
+            for e in &d.entries {
+                let (_, on_spine) = crate::bus::entry(e.at, e.side, d.stub);
+                pts.extend([e.at, on_spine]);
+                out.entry(s.clone())
+                    .or_default()
+                    .push(Rect::new(e.at, on_spine).grow(GRID));
+            }
+            for run in &d.trunk {
+                for w in run.windows(2) {
+                    out.entry(s.clone())
+                        .or_default()
+                        .push(Rect::new(w[0], w[1]).grow(GRID / 2));
+                }
+            }
+            if let Some(r) = Rect::of(pts) {
+                out.entry(s.clone()).or_default().push(r);
+            }
+            if let Some(c) = &d.connector {
+                out.entry(s.clone()).or_default().push(label::label_box(
+                    LabelKind::OffSheet,
+                    &c.text,
+                    c.at,
+                    c.side,
+                ));
+            }
+        }
+    }
     for (key, fields) in &prev.text {
         let Some(x) = prev.placed.get(key) else {
             continue;
@@ -2853,6 +2885,25 @@ fn draw(
                 }
             }
         }
+        // The text of parts unmoved since the previous layout, which a new
+        // bus goes round (text is kept before anything is drawn).
+        let mut kept_text: Vec<Rect> = Vec::new();
+        if let Some(l) = prev {
+            for &p in &parts {
+                let part = &block.parts[p];
+                let unmoved = l.placed.get(&part.key).is_some_and(|x| {
+                    let (s0, pl, _) = st.place[p].expect("placed");
+                    st.sheets[s0].0 == x.sheet && pl == Place::new(x.at, x.rotation, x.mirror)
+                });
+                if let (true, Some(fields)) = (unmoved, l.text.get(&part.key)) {
+                    for (n, t) in text_lines(part) {
+                        if let Some(at) = fields.get(n) {
+                            kept_text.extend(text::boxes(&[t], *at));
+                        }
+                    }
+                }
+            }
+        }
         // Buses before anything else is drawn (plan 2.C): a bundle's
         // members take no labels or wires of their own.
         for (i, bus) in block.buses.iter().enumerate() {
@@ -2871,7 +2922,10 @@ fn draw(
                 continue;
             };
             let saved = field.clone();
-            match draw_bus(block, &st, &mut field, i, &bundle) {
+            let before = prev
+                .and_then(|l| l.buses.get(&bus.key))
+                .and_then(|b| b.get(&sid));
+            match draw_bus(block, &st, &mut field, i, &bundle, before, &kept_text) {
                 Ok(d) => {
                     for n in &bundle.members {
                         pins_of.remove(n);
@@ -3996,6 +4050,141 @@ fn draw_bus(
     field: &mut Field,
     i: usize,
     bundle: &crate::bus::Bundle,
+    prev: Option<&crate::layout::DrawnBus>,
+    avoid: &[Rect],
+) -> Result<crate::layout::DrawnBus, String> {
+    // Over a previous layout, the bus as it was drawn where its entries
+    // are the same pins at the same places, its names still fit its stubs
+    // and it all marks again.
+    if let Some(p) = prev {
+        let stub =
+            crate::bus::stub_len(bundle.members.iter().map(|n| block.nets[*n].name.as_str()));
+        let same = {
+            let mut a: Vec<(&str, Point, Side)> = p
+                .entries
+                .iter()
+                .map(|e| (e.on.as_str(), e.at, e.side))
+                .collect();
+            let mut b: Vec<(String, Point, Side)> = Vec::new();
+            for (end, pins) in &bundle.ends {
+                let shape = st.shape(end.part).expect("placed");
+                for &k in pins {
+                    let part = &block.parts[end.part];
+                    b.push((
+                        format!("{}/{}", part.key, part.pins[k].number),
+                        shape.pins[k].end,
+                        shape.pins[k].side,
+                    ));
+                }
+            }
+            let mut b: Vec<(&str, Point, Side)> =
+                b.iter().map(|(o, at, s)| (o.as_str(), *at, *s)).collect();
+            a.sort();
+            b.sort();
+            a == b
+        };
+        if same && stub <= p.stub {
+            let mut g = field.clone();
+            if mark_bus(block, &mut g, i, p) {
+                *field = g;
+                return Ok(p.clone());
+            }
+        }
+    }
+    let mut g = field.clone();
+    for r in avoid {
+        g.block(*r);
+    }
+    let d = find_bus(block, st, &mut g, i, bundle)?;
+    if !mark_bus(block, field, i, &d) {
+        return Err(format!(
+            "its entries have no room beside {}",
+            block.parts[bundle.ends[0].0.part].refdes
+        ));
+    }
+    Ok(d)
+}
+
+/// Marks a drawn bus into `field` as [`find_bus`] marks one: each stub
+/// (its member's net) and the name on it, each spine and trunk run (the
+/// bus's id), the columns its entries cross blocked, its connector's box
+/// and the bundle's name. Whether it all marked (else `field` is part
+/// marked: the caller works on a clone).
+fn mark_bus(block: &Block, field: &mut Field, i: usize, d: &crate::layout::DrawnBus) -> bool {
+    let id = BUS_NET + i;
+    let mut columns: BTreeMap<Nm, Vec<(Point, Point)>> = BTreeMap::new();
+    let mut members: Vec<usize> = Vec::new();
+    for e in &d.entries {
+        let Some(n) = block.net(&e.net) else {
+            return false;
+        };
+        if !members.contains(&n) {
+            members.push(n);
+        }
+        let (s, on_spine) = crate::bus::entry(e.at, e.side, d.stub);
+        let name_box = label::label_box(LabelKind::Net, &block.nets[n].name, e.at, e.side);
+        if !field.clear_label(name_box) || field.mark(n, &[e.at, s]).is_err() {
+            return false;
+        }
+        field.block_label(name_box);
+        columns
+            .entry(on_spine[0])
+            .or_default()
+            .push((e.at, on_spine));
+    }
+    for list in columns.values() {
+        let ends: Vec<Point> = list.iter().map(|(_, e)| *e).collect();
+        let Some(spine) = crate::bus::spine(&ends) else {
+            return false;
+        };
+        if field.mark(id, &spine).is_err() {
+            return false;
+        }
+        let pts = list.iter().flat_map(|(a, e)| [*a, *e]);
+        if let Some(r) = Rect::of(pts) {
+            let (x0, x1) = (r.min[0] + GRID, r.max[0] - GRID);
+            if x0 <= x1 {
+                field.block_label(Rect::new([x0, r.min[1]], [x1, r.max[1]]));
+            }
+        }
+    }
+    // The connector's box before the trunk that ends at its anchor.
+    let flag = d
+        .connector
+        .as_ref()
+        .map(|c| label::label_box(LabelKind::OffSheet, &c.text, c.at, c.side));
+    if flag.is_some_and(|b| !field.clear_label(b)) {
+        return false;
+    }
+    for run in &d.trunk {
+        if field.mark(id, run).is_err() {
+            return false;
+        }
+    }
+    if let Some(b) = flag {
+        field.block_label(b);
+    } else if let Some(run) = d.trunk.first() {
+        let name = crate::bus::name(block, i, &members);
+        let side = label::pointing(LabelKind::Net, toward(run[0], run[1]));
+        if let Some((p, anchor, _)) = label::drawn(LabelKind::Net, &name, run[0], side).text {
+            let b = crate::font::text_box(&name, crate::font::SIZE, p, anchor);
+            if field.overlaps_box(b) {
+                return false;
+            }
+            field.block(b);
+        }
+    }
+    true
+}
+
+/// Finds where a bundle's bus goes in `field` (a scratch field): see
+/// [`draw_bus`].
+fn find_bus(
+    block: &Block,
+    st: &State,
+    field: &mut Field,
+    i: usize,
+    bundle: &crate::bus::Bundle,
 ) -> Result<crate::layout::DrawnBus, String> {
     use crate::layout::{BusEntry, DrawnBus};
     let id = BUS_NET + i;
@@ -4124,6 +4313,7 @@ fn draw_bus(
         }
     }
     Ok(DrawnBus {
+        stub,
         trunk,
         entries,
         connector,
