@@ -463,6 +463,104 @@ impl crate::Opened {
     }
 }
 
+/// What an occurrence style styles, in the product its usage path ends
+/// at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// A body of `held` (by index) whose definition is that product's.
+    Body(usize),
+    /// A face of such a body.
+    Face { held: usize, face: Id },
+    /// The product's shape representation: everything it shows.
+    Product,
+    /// Nothing that product has, or a path the file's tree doesn't hold.
+    Unplaced,
+}
+
+/// A context dependent style.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OccurrenceStyle {
+    /// Its usages as (parent definition, index into its `children`),
+    /// from the outermost; empty when the tree doesn't hold them.
+    pub path: Vec<(usize, usize)>,
+    /// Its usages' instances, as the file names them.
+    pub usages: Vec<Id>,
+    pub target: Target,
+    pub style: Style,
+    /// The styled item, and every instance its style was read from.
+    pub instance: Id,
+    pub instances: Vec<Id>,
+}
+
+impl crate::Opened {
+    /// Every context dependent style of the file, by instance.
+    pub fn occurrence_styles(&self) -> Vec<OccurrenceStyle> {
+        let st = self.styles();
+        let mut at: BTreeMap<Id, (usize, usize)> = BTreeMap::new();
+        for (k, d) in self.products.definitions.iter().enumerate() {
+            for (n, c) in d.children.iter().enumerate() {
+                at.insert(c.instance, (k, n));
+            }
+        }
+        st.assigned
+            .iter()
+            .filter(|a| !a.path.is_empty())
+            .map(|a| {
+                let path: Option<Vec<(usize, usize)>> =
+                    a.path.iter().map(|u| at.get(u).copied()).collect();
+                let target = match &path {
+                    Some(p) => {
+                        let (k, n) = *p.last().expect("not empty");
+                        self.target_in(self.products.definitions[k].children[n].definition, a.item)
+                    }
+                    None => Target::Unplaced,
+                };
+                OccurrenceStyle {
+                    path: path.unwrap_or_default(),
+                    usages: a.path.clone(),
+                    target,
+                    style: a.style,
+                    instance: a.instance,
+                    instances: a.instances.clone(),
+                }
+            })
+            .collect()
+    }
+
+    /// What `item` is in definition `leaf`.
+    fn target_in(&self, leaf: usize, item: Id) -> Target {
+        for (k, h) in self
+            .held
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| h.definition == Some(leaf))
+        {
+            if h.representation == item {
+                return Target::Body(k);
+            }
+            for &i in &h.items {
+                if i == item || self.shells_of(i).contains(&item) {
+                    return Target::Body(k);
+                }
+                if self.faces_of(i).binary_search(&item).is_ok() {
+                    return Target::Face {
+                        held: k,
+                        face: item,
+                    };
+                }
+            }
+        }
+        if self.products.definitions[leaf]
+            .shapes
+            .iter()
+            .any(|s| s.representation == item)
+        {
+            return Target::Product;
+        }
+        Target::Unplaced
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,4 +771,60 @@ mod tests {
         assert!(plain.styles().assigned.is_empty());
     }
 
+    #[test]
+    fn an_occurrence_style_names_its_usages_and_its_body() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/occt/assembly.stp");
+        let bytes = std::fs::read(path).unwrap();
+        let plain = crate::open(&bytes).unwrap();
+        let defs = &plain.products.definitions;
+        let root = plain.products.roots[0];
+        // The second usage of the block, and the block's body.
+        let (n, usage) = defs[root]
+            .children
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| &*defs[c.definition].name == "block")
+            .nth(1)
+            .map(|(n, c)| (n, c.instance))
+            .unwrap();
+        let block = defs[root].children[n].definition;
+        let k = plain
+            .held
+            .iter()
+            .position(|h| h.definition == Some(block))
+            .unwrap();
+        let item = plain.held[k].items[0];
+        // The pin's usage: the block's body isn't in what it places.
+        let pin = defs[root]
+            .children
+            .iter()
+            .find(|c| &*defs[c.definition].name == "pin")
+            .unwrap()
+            .instance;
+        let text = String::from_utf8(bytes).unwrap();
+        let end = text.rfind("ENDSEC;").unwrap();
+        let extra = format!(
+            "{}#9100=STYLED_ITEM('',(#9009),#{item});\
+             #9101=CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM('',(#9019),#{item},#9100,(#{usage}));\
+             #9102=CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM('',(#9019),#{item},#9100,(#{pin}));\
+             #9103=CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM('',(#9019),#{item},#9100,(#999999));",
+            two_styles()
+        );
+        let o = crate::open(format!("{}{extra}{}", &text[..end], &text[end..]).as_bytes()).unwrap();
+        let occ = o.occurrence_styles();
+        assert_eq!(occ.len(), 2, "{occ:?}");
+        assert_eq!(occ[0].path, [(root, n)]);
+        assert_eq!(occ[0].usages, [usage]);
+        assert_eq!(occ[0].target, Target::Body(k));
+        assert_eq!(occ[0].style.colour, Some([0, 0, 255]));
+        assert_eq!(occ[0].instance, 9101);
+        // In a usage whose product doesn't hold the item: unplaced, its
+        // usages kept.
+        assert_eq!(occ[1].target, Target::Unplaced);
+        assert_eq!(occ[1].usages, [pin]);
+        // A context naming an instance the file doesn't have fails.
+        assert!(o.styles().failed.iter().any(|f| f.0 == 9103));
+        // The plain style is the block's everywhere else.
+        assert_eq!(o.body_styles(k).body.unwrap().colour, Some([255, 0, 0]));
+    }
 }
