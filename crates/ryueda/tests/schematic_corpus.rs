@@ -189,6 +189,23 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
             for s in &scores {
                 assert!(s.score > 0, "{name}/{}: sheet {} scores 0", b.id, s.sheet);
             }
+            // The RP2040 board's QSPI data lines: one bus between the
+            // RP2040 and its flash (plan 2.C), its entries at both.
+            if *name == "rp2040" && b.id.as_str() == "mitayi" {
+                let drawn: Vec<_> = l.buses.values().flat_map(|by| by.values()).collect();
+                let entries: usize = drawn.iter().map(|d| d.entries.len()).sum();
+                assert_eq!(
+                    entries, 8,
+                    "QSPI_SD drawn as a bus, four members at two ends: {:?}",
+                    laid.outcome.notes
+                );
+                assert!(
+                    drawn
+                        .iter()
+                        .flat_map(|d| &d.entries)
+                        .any(|e| e.on.starts_with("u1/"))
+                );
+            }
         }
     }
     let all: Vec<(&str, Vec<Value>)> = built.into_iter().map(|(n, _, f)| (n, f)).collect();
@@ -395,6 +412,8 @@ fn place_refuses_a_layout_that_breaks_a_hard_rule() {
     // A move the engine still can't fit: it overlaps a label. (Plan 1.D's
     // engine fits the moves this test first used, plan 2.A's regions the
     // next; the first of these a dry run refuses is the one.)
+    // (Plan 2.C's engine fits those six too: of every pair of a few
+    // parts beside each other, every way, this one it can't.)
     let candidates = [
         "beside U3:1 U3:3 above",
         "beside U3:1 U3:3 left",
@@ -402,6 +421,7 @@ fn place_refuses_a_layout_that_breaks_a_hard_rule() {
         "beside U1 U3:1 right",
         "beside J8 U3:1 right",
         "beside U3:1 U1 below",
+        "beside SW1 U3:1 right",
     ];
     let refused = candidates
         .iter()
@@ -1371,6 +1391,58 @@ fn edits_to_the_corpus_change_only_what_they_name() {
             );
         }
     }
+}
+
+#[test]
+fn the_qspi_bus_and_a_note_change_only_what_they_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = circuit(dir.path(), "rp2040");
+    ryueda(&board, 1, &["layout"]);
+    let before = layout_of(&board, "mitayi");
+    assert!(
+        before["buses"].as_object().is_some_and(|b| !b.is_empty()),
+        "QSPI_SD drawn as a bus"
+    );
+    let members: Vec<String> = ["qspi_sd0", "qspi_sd1", "qspi_sd2", "qspi_sd3"]
+        .map(str::to_owned)
+        .into();
+    // A member renamed: only the bus's drawing and the members' nets move,
+    // and the bus's name loses its range.
+    ryueda(&board, 1, &["net", "rename", "mitayi/QSPI_SD3", "QSPI_IO3"]);
+    let after = layout_of(&board, "mitayi");
+    unchanged(&before, &after, &[], &members, "a bus member renamed");
+    let described = ryueda(&board, 1, &["describe", "--block", "mitayi"]);
+    let names: Vec<String> = described["blocks"][0]["sheets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|s| s["buses"].as_array().cloned().unwrap_or_default())
+        .map(|b| b["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(!names.is_empty(), "still a bus");
+    assert!(names.iter().all(|n| n == "QSPI_SD"), "{names:?}");
+    // A note on the flash's region: placed, and nothing else moves.
+    let before = after;
+    let region = before["regions"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, r)| r["parts"].as_array().unwrap().iter().any(|p| p == "u1"))
+        .map(|(id, _)| id.clone())
+        .expect("the flash's region");
+    ryueda(
+        &board,
+        1,
+        &[
+            "place",
+            "mitayi",
+            &format!("note region:{region} \"Keep the flash within 10 mm\""),
+        ],
+    );
+    let after = layout_of(&board, "mitayi");
+    assert_eq!(after["notes"].as_object().map(|n| n.len()), Some(1));
+    unchanged(&before, &after, &[], &[], "a note added");
+    assert_eq!(before["placed"], after["placed"]);
 }
 
 /// Copies a project folder.

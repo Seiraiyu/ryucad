@@ -109,8 +109,12 @@ fn w25q() -> String {
             ("6", "CLK", "input"),
             ("5", "DI(IO0)", "bidirectional"),
             ("2", "DO(IO1)", "bidirectional"),
+            // Every QSPI pin on one side, in the RP2040's order, so its
+            // data lines make one bus (plan 2.C).
+            ("3", "IO2", "bidirectional"),
+            ("7", "IO3", "bidirectional"),
         ],
-        &[("3", "IO2", "bidirectional"), ("7", "IO3", "bidirectional")],
+        &[],
         &[("8", "VCC", "power_in")],
         &[("4", "GND", "power_in")],
         15.24,
@@ -685,6 +689,14 @@ pub fn design() -> Vec<Vec<String>> {
     for (id, name) in NETS {
         out.push(args(&["net", "add", "mitayi", name, "--id", id]));
     }
+    // The QSPI data lines, a bus (plan 2.C).
+    out.push(args(&[
+        "block",
+        "edit",
+        "mitayi",
+        "--add-bus",
+        "QSPI_SD=qspi_sd0,qspi_sd1,qspi_sd2,qspi_sd3",
+    ]));
     for (refdes, of) in PARTS {
         let id = refdes.to_lowercase();
         out.push(args(&[
