@@ -5780,6 +5780,89 @@ macro_rules! sections {
     };
 }
 
+/// The transfer report (design 448): OCCT's assembly and NIST CTC 01
+/// imported (references, as an agent imports them), each answer's and
+/// `import.report --detail`'s `transfer`; the OCCT-style external
+/// assembly's refusal; the assembly exported, its `transfer`. Canonical
+/// JSON, on one thread and on four.
+fn transfer_section(golden: &mut Golden) {
+    let mut s = golden.section("transfer");
+    let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests");
+    let files = [
+        data.join("data/occt/assembly.stp"),
+        data.join("corpus/nist_ctc_01_asme1_rd.stp"),
+    ];
+    let mut runs = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        ryucad::server::init(dir.path(), None).unwrap();
+        let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+        let mut out = Vec::new();
+        let mut root = None;
+        for f in &files {
+            let req = |m: &str, p: serde_json::Value| {
+                ryucad::proto::Request::from_rpc(m, Some(p)).unwrap()
+            };
+            let v = pool
+                .install(|| {
+                    ryucad::server::handle(
+                        &mut session,
+                        req("import", serde_json::json!({"path": f})),
+                    )
+                })
+                .unwrap();
+            out.push(ryucad::doc::canonical::to_string(&v["transfer"]));
+            if root.is_none() {
+                root = v["parts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|p| p["kind"] == "assembly")
+                    .map(|p| p["part"].as_str().unwrap().to_owned());
+            }
+            let stored = v["file"]["path"].as_str().unwrap().to_owned();
+            let r = pool
+                .install(|| {
+                    ryucad::server::handle(
+                        &mut session,
+                        req(
+                            "import.report",
+                            serde_json::json!({"file": stored, "detail": true}),
+                        ),
+                    )
+                })
+                .unwrap();
+            out.push(ryucad::doc::canonical::to_string(&r["transfer"]));
+        }
+        let ext = serde_json::json!({"path": data.join("data/external/occt_style.stp")});
+        let req = ryucad::proto::Request::from_rpc("import", Some(ext)).unwrap();
+        let e = pool
+            .install(|| ryucad::server::handle(&mut session, req))
+            .unwrap_err();
+        // Where the fixture is differs from machine to machine.
+        let mut details = e.details.clone();
+        details["path"] = serde_json::json!("occt_style.stp");
+        details["transfer"]["file"] = serde_json::json!("occt_style.stp");
+        out.push(ryucad::doc::canonical::to_string(&details));
+        let params = serde_json::json!({"part": root.expect("an assembly"),
+                                        "time_stamp": "2026-10-27T00:00:00", "file_name": "a.step"});
+        let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
+        let a = pool
+            .install(|| ryucad::server::answer_live(&mut session, None, None, req))
+            .unwrap();
+        out.push(ryucad::doc::canonical::to_string(&a.result["transfer"]));
+        runs.push(out);
+    }
+    assert_eq!(runs[0], runs[1], "one thread and four");
+    for x in &runs[0] {
+        s.str(x);
+    }
+}
+
 sections! {
     golden;
     units => units_section(&mut golden),
@@ -5820,6 +5903,7 @@ sections! {
     reference_interference => reference_interference_section(&mut golden),
     flatten => flatten_section(&mut golden),
     exports => exports_section(&mut golden),
+    transfer => transfer_section(&mut golden),
     formats => formats_section(&mut golden),
     views => views_section(&mut golden),
     appearance => appearance_section(&mut golden),
