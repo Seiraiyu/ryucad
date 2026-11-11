@@ -255,6 +255,15 @@ pub const RULES: &[Rule] = &[
         evidence: "Round 1's sessions and work item 4530 named floating parts as the corpus's main fault (35 laid out from nothing before plan 1.D, 16 after); a local part reads as part of its circuit only when wired to it. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the RP2040 split by function onto three sheets 3 to 0 though this rule's points rose from 32 to 80: they don't fault a label on a net that leaves its sheet, so since plan 2.A (design 348) such a label is the net's off-sheet connector and joins its pin; since plan 2.C (design 348) a pin wired to its region's off-sheet connector, not to a local label, is joined.",
     },
     Rule {
+        code: "sch_bus_unbundled",
+        weight: 2,
+        unit: "a member",
+        what: "Four or more members of a bus run between the same two parts' sides on a sheet but are drawn as separate labels or wires.",
+        why: "A bus drawn as one bundle reads as one interface; drawn member by member it reads as unrelated signals and costs a label or a wire each.",
+        fix: "Ask for the bus (net BUS bus); if it can't be drawn, the note bus_not_drawn says why.",
+        evidence: "Design 348's grammar (figure 5): a bus of four members or more between two regions or parts is drawn as a bus wire with entries, as KiCad's buses and the hand-drawn references' data buses are. A drafting convention; no round has judged it yet.",
+    },
+    Rule {
         code: "sch_off_sheet_local",
         weight: OFF_SHEET_LOCAL,
         unit: "a net",
@@ -476,6 +485,7 @@ fn units(f: &Finding) -> i64 {
         "sch_crossings" => f.details["crossings"].as_i64().unwrap_or(1),
         "sch_bends" => f.details["extra"].as_i64().unwrap_or(1),
         "sch_jog" => f.details["jogs"].as_i64().unwrap_or(1),
+        "sch_bus_unbundled" => f.details["members"].as_i64().unwrap_or(1),
         "sch_density" => (f.details["per_mille"].as_i64().unwrap_or(DENSITY) - DENSITY).max(0) / 10,
         _ => 1,
     }
@@ -1027,6 +1037,8 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
         // Off-sheet connectors where their nets stay, and regions of a net
         // that leaves with none (plan 2.C).
         off_sheet_local(block, layout, sid, &shapes, &mut found, &f);
+        // Buses whose members could be one bundle here, drawn apart.
+        bus_unbundled(block, layout, sid, &shapes, &mut found, &f);
         // A two-pin part standing upside down against its rail: ground up,
         // or a supply down.
         for (p, sh) in &shapes {
@@ -1791,6 +1803,59 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
 
 /// Whether the wires of a net touching the pin end `at` reach another of
 /// the net's pin ends (`ends`), not only its own label's stub.
+/// `sch_bus_unbundled` on sheet `sid` (plan 2.C): each bus not drawn here
+/// whose members make a bundle here as the engine finds one (placed
+/// sides, nets that leave), its points two a member, its fix the bus
+/// asked for.
+fn bus_unbundled(
+    block: &Block,
+    layout: &crate::layout::Layout,
+    sid: &str,
+    shapes: &BTreeMap<usize, Shape>,
+    found: &mut Vec<Finding>,
+    f: &dyn Fn(&'static str, String, Vec<String>, Value) -> Finding,
+) {
+    let parts: Vec<usize> = shapes.keys().copied().collect();
+    let here = crate::bus::sides_on_sheet(block, &parts);
+    let leaves = |n: usize| {
+        block.parts.iter().any(|q| {
+            layout.placed.get(&q.key).is_some_and(|x| x.sheet != sid)
+                && q.pins.iter().any(|x| x.nets().contains(&n))
+        })
+    };
+    let side_of = |p: usize, k: usize| shapes[&p].pins[k].side;
+    for (i, bus) in block.buses.iter().enumerate() {
+        if layout
+            .buses
+            .get(&bus.key)
+            .is_some_and(|b| b.contains_key(sid))
+        {
+            continue;
+        }
+        let Some(bundle) = crate::bus::bundle_with(block, i, &here, &leaves, &side_of) else {
+            continue;
+        };
+        let name = crate::bus::name(block, i, &bundle.members);
+        let mut refs = vec![bus.key.clone()];
+        refs.extend(bundle.members.iter().map(|n| block.nets[*n].key.clone()));
+        found.push(
+            f(
+                "sch_bus_unbundled",
+                format!(
+                    "{name}'s {} members run between the same parts' sides but are drawn apart (where it can't be drawn, the note bus_not_drawn says why)",
+                    bundle.members.len()
+                ),
+                refs,
+                json!({"members": bundle.members.len()}),
+            )
+            .fixed(vec![vec![Instruction::Net {
+                net: bus.key.clone(),
+                style: NetStyle::Bus,
+            }]]),
+        );
+    }
+}
+
 /// `sch_off_sheet_local` on sheet `sid` (plan 2.C): each off-sheet
 /// connector whose net has no pin on another sheet (its fix the net's
 /// wires); and each net with a pin on another sheet, a stacked pin's net
@@ -2792,6 +2857,39 @@ mod tests {
             !found
                 .iter()
                 .any(|f| f.code == "sch_floating" && f.refs.iter().any(|r| r == "r1" || r == "r2"))
+        );
+    }
+
+    #[test]
+    fn a_bus_drawn_as_labels_is_found() {
+        let mut b = crate::testing::bus_block();
+        b.instructions.insert(
+            "i1".into(),
+            Instruction::Net {
+                net: "bus:q".into(),
+                style: NetStyle::Label,
+            },
+        );
+        let out = crate::engine::lay_out(&b).unwrap();
+        let (found, _) = lint(&b, &out);
+        let f = found
+            .iter()
+            .find(|f| f.code == "sch_bus_unbundled")
+            .expect("found");
+        assert!(f.refs.iter().any(|r| r == "bus:q"));
+        assert_eq!(f.points, 8, "two a member");
+        // Its fix asks for the bus.
+        assert!(f.fixes.iter().flatten().any(
+            |i| matches!(i, Instruction::Net { net, style: NetStyle::Bus } if net == "bus:q")
+        ));
+        // Drawn as a bus, not found.
+        b.instructions.clear();
+        let out = crate::engine::lay_out(&b).unwrap();
+        assert!(
+            !lint(&b, &out)
+                .0
+                .iter()
+                .any(|f| f.code == "sch_bus_unbundled")
         );
     }
 }
