@@ -543,6 +543,32 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
             });
         }
     }
+    // Notes (plan 2.C): the text in a thin box.
+    for (id, n) in layout.notes.iter().filter(|(_, n)| n.sheet == sid) {
+        let Some(text) = block.note_text(id) else {
+            continue;
+        };
+        let b = note_box(text, n.at);
+        out.items.push(Item::Polyline {
+            points: vec![
+                b.min,
+                [b.max[0], b.min[1]],
+                b.max,
+                [b.min[0], b.max[1]],
+                b.min,
+            ],
+            stroke: NAME,
+            fill: None,
+        });
+        out.items.push(Item::Text {
+            text: text.to_owned(),
+            at: [n.at[0] + GRID / 2, n.at[1] + GRID / 2],
+            size: SIZE,
+            anchor: Anchor::Start,
+            vertical: false,
+            colour: TEXT,
+        });
+    }
     out
 }
 
@@ -679,5 +705,32 @@ mod tests {
             assert!(texts.contains(&format!("QSPI_SD{i}").as_str()), "{texts:?}");
         }
         assert!(texts.contains(&"QSPI_SD[0..3]"));
+    }
+
+    #[test]
+    fn a_note_is_its_text_in_a_thin_box() {
+        use crate::layout::{Instruction, PlacedNote, Sheet};
+        let mut b = Block::default();
+        b.instructions.insert(
+            "i9".into(),
+            Instruction::Note {
+                on: "s1".into(),
+                text: "Rev {rev}".into(),
+            },
+        );
+        b.notes.insert("i9".into(), "Rev B".into());
+        let mut l = Layout::default();
+        l.sheets
+            .insert("s1".into(), Sheet::new("s1".into(), [0, 0]));
+        l.notes.insert(
+            "i9".into(),
+            PlacedNote {
+                sheet: "s1".into(),
+                at: [10 * GRID, 10 * GRID],
+            },
+        );
+        let p = sheet(&b, &l, "s1");
+        assert!(p.items.iter().any(|i| matches!(i, Item::Polyline { points, stroke, fill: None } if points.len() == 5 && points[0] == points[4] && *stroke == NAME)));
+        assert!(p.items.iter().any(|i| matches!(i, Item::Text { text, size, colour, .. } if text == "Rev B" && *size == SIZE && *colour == TEXT)));
     }
 }

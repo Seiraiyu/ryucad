@@ -246,6 +246,25 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
             "extent": crate::lint::extent(block, layout, sid),
             "fill": crate::lint::fill(block, layout, sid),
         });
+        let notes: Vec<Value> = layout
+            .notes
+            .iter()
+            .filter(|(_, n)| &n.sheet == sid)
+            .map(|(id, n)| {
+                let text = block.note_text(id).unwrap_or("");
+                let b = crate::paint::note_box(text, n.at);
+                let on = match block.instructions.get(id) {
+                    Some(crate::layout::Instruction::Note { on, .. }) => on.clone(),
+                    _ => String::new(),
+                };
+                json!({
+                    "instruction": id,
+                    "text": text,
+                    "on": on,
+                    "box_mm": [mm(b.min[0]), mm(b.min[1]), mm(b.max[0]), mm(b.max[1])],
+                })
+            })
+            .collect();
         sheets.push(json!({
             "paper": paper,
             "regions": regions,
@@ -258,6 +277,11 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
             "nets": nets,
             "findings": findings.iter().filter(|f| &f.sheet == sid).collect::<Vec<_>>(),
         }));
+        if !notes.is_empty()
+            && let Some(Value::Object(last)) = sheets.last_mut()
+        {
+            last.insert("notes".into(), json!(notes));
+        }
     }
     let instructions: Vec<Value> = block
         .instructions
@@ -363,5 +387,35 @@ mod tests {
             }
         }
         assert_eq!(seen, 2);
+    }
+
+    #[test]
+    fn a_sheet_lists_its_notes() {
+        use crate::layout::Instruction;
+        let mut b = crate::testing::leaving_block();
+        let first = crate::engine::lay_out(&b).unwrap();
+        let sid = first.layout.placed["u1"].sheet.clone();
+        b.instructions.insert(
+            "i9".into(),
+            Instruction::Note {
+                on: sid.clone(),
+                text: "Fused at 2 A".into(),
+            },
+        );
+        let out = crate::engine::lay_out(&b).unwrap();
+        let (found, scores) = crate::lint::lint(&b, &out);
+        let v = describe(&b, &out, &found, &scores);
+        let sheet = v["sheets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["sheet"] == sid.as_str())
+            .unwrap();
+        let notes = sheet["notes"].as_array().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0]["instruction"], "i9");
+        assert_eq!(notes[0]["text"], "Fused at 2 A");
+        assert_eq!(notes[0]["on"], sid.as_str());
+        assert_eq!(notes[0]["box_mm"].as_array().unwrap().len(), 4);
     }
 }

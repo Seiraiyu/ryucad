@@ -878,7 +878,9 @@ pub fn lay_restoring(
     }
     built.input.moves = moves.to_vec();
     built.input.relayout = relayout;
-    let outcome = ryusch::engine::lay_out(&built.input).map_err(|r| refusal(&b.id, r))?;
+    let unknown = fill_notes(p, b, &mut built.input);
+    let mut outcome = ryusch::engine::lay_out(&built.input).map_err(|r| refusal(&b.id, r))?;
+    outcome.notes.extend(unknown);
     let stale = invalid.is_none()
         && instructions.is_none()
         && moves.is_empty()
@@ -889,6 +891,64 @@ pub fn lay_restoring(
         stale,
         invalid,
     })
+}
+
+/// Fills each note instruction's properties (plan 2.C): `{name}` from the
+/// levels a designator format reads for the block's first layer (each
+/// instance from the innermost, the block, the project) and the built-in
+/// `block` (the block's name). A note naming a property no level sets, or
+/// that doesn't read as a template, keeps its text as written, with the
+/// note `note_property_unknown`.
+pub fn fill_notes(
+    p: &Project,
+    b: &BlockFiles,
+    input: &mut input::Block,
+) -> Vec<ryusch::engine::Note> {
+    let mut outer: Vec<&crate::props::Properties> = Vec::new();
+    if let Some(first) = layers(p, &b.id).first() {
+        for iid in first.path.iter().rev() {
+            if let Some(inst) = p
+                .conn
+                .blocks
+                .values()
+                .find_map(|bf| bf.instances.get(iid))
+                .and_then(|i| i.item.as_ref().ok())
+            {
+                outer.push(&inst.properties);
+            }
+        }
+    }
+    let own = b.block.item.as_ref().ok();
+    if let Some(own) = own {
+        outer.push(&own.properties);
+    }
+    outer.push(&p.manifest.properties);
+    let levels = crate::props::Levels {
+        levels: outer,
+        built_in: BTreeMap::from([("block", input.name.clone())]),
+    };
+    let mut notes = Vec::new();
+    input.notes.clear();
+    for (id, ins) in &input.instructions {
+        let ryusch::layout::Instruction::Note { text, .. } = ins else {
+            continue;
+        };
+        let filled = crate::props::Template::parse(text).and_then(|t| t.render(&|n| levels.get(n)));
+        match filled {
+            Ok(t) => {
+                input.notes.insert(id.clone(), t);
+            }
+            Err(e) => {
+                let property = e.details.get("property").cloned().unwrap_or_default();
+                notes.push(ryusch::engine::Note {
+                    code: "note_property_unknown".into(),
+                    message: format!("note {id} keeps its text as written: {}", e.message),
+                    details: serde_json::json!({"instruction": id, "property": property}),
+                });
+            }
+        }
+    }
+    notes
 }
 
 /// The most fixes a block's findings have checked (the findings with the
@@ -1122,5 +1182,39 @@ mod tests {
         ] {
             assert!(!name_says_voltage(name, v), "{name} doesn't say {v}");
         }
+    }
+
+    #[test]
+    fn notes_take_their_blocks_properties() {
+        use ryusch::layout::Instruction;
+        use serde_json::json;
+        let (_dir, p) = project(&[(
+            "blocks/top/block.json",
+            json!({"format": 2, "kind": crate::conn::BLOCK_KIND, "name": "Top",
+                "properties": {"rev": "B"}}),
+        )]);
+        let top = p.conn.block(&Id::parse("top", "b").unwrap()).unwrap();
+        let mut input = build(&p, top).unwrap().input;
+        input.instructions.insert(
+            "i1".into(),
+            Instruction::Note {
+                on: "s1".into(),
+                text: "Rev {rev} of {block}".into(),
+            },
+        );
+        input.instructions.insert(
+            "i2".into(),
+            Instruction::Note {
+                on: "s1".into(),
+                text: "{nothing}".into(),
+            },
+        );
+        let notes = fill_notes(&p, top, &mut input);
+        assert_eq!(input.notes["i1"], "Rev B of Top");
+        assert!(!input.notes.contains_key("i2"));
+        assert_eq!(input.note_text("i2"), Some("{nothing}"));
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].code, "note_property_unknown");
+        assert_eq!(notes[0].details["property"], "nothing");
     }
 }
