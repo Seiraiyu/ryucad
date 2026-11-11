@@ -84,7 +84,7 @@ pub fn next_refdes(p: &Project, prefix: &str) -> String {
 }
 
 fn check_refdes(r: &str) -> Result<()> {
-    if refdes_ok(r) {
+    if refdes_ok(r) || conn::refdes_placeholder(r) {
         Ok(())
     } else {
         Err(Error::new(
@@ -233,6 +233,7 @@ pub fn component_add(
         parameters: BTreeMap::new(),
         pins: BTreeMap::new(),
         tags: Default::default(),
+        refdes_locked: false,
     };
     fill(
         p,

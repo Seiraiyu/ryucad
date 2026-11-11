@@ -11,6 +11,7 @@ use crate::library::{Library, ObjKind};
 use crate::project::{Project, SELF, ref_text};
 use crate::standards::{Class, Standards};
 use crate::symbol::{Pin, PinType, Point, Side, Symbol};
+use ryu_session::rpc::{Answer, Raw as Text};
 use ryusch::geom::Rect;
 use ryusch::lint::{Prefs, Rule, Severity};
 use serde::Serialize;
@@ -960,11 +961,41 @@ fn shown(f: &Finding, id: &crate::id::Id, lib: &Library) -> Value {
     v
 }
 
+/// What `lib.check` lists besides its counts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Listing {
+    /// Each symbol's counts by code, not its findings, and the library's
+    /// counts by code (`by_code`).
+    pub summary: bool,
+    /// Only findings of these codes, and only symbols holding one (every
+    /// finding still counts in `errors` and `warnings`).
+    pub codes: Vec<String>,
+}
+
+/// Symbols judged at once: their entries are written as text before the
+/// next are judged, so no more than these are ever held as `Value`s.
+const CHUNK: usize = 256;
+
 /// `lib.check`: a library's symbols (this project's own by default, or
 /// one symbol) judged by the standards that apply to it, each with its
 /// class (given or inferred), score and findings; `check_failed` (the
-/// report in its details) when a finding is an error.
-pub fn library_check(p: &Project, library: Option<&str>, symbol: Option<&str>) -> Result<Value> {
+/// report in its details) when a finding is an error. The report is
+/// written as text as it is made, never held as one `Value` tree (#711:
+/// KiCad's 10,217 symbols made a 161 MB report that peaked at 6.1 GB).
+pub fn library_check(
+    p: &Project,
+    library: Option<&str>,
+    symbol: Option<&str>,
+    listing: &Listing,
+) -> Result<Answer> {
+    for c in &listing.codes {
+        if rule(c).is_none() {
+            return Err(
+                Error::new(Code::InvalidParam, format!("{c} isn't a symbol lint code"))
+                    .with("param", "code"),
+            );
+        }
+    }
     let (alias, only) = match symbol {
         Some(t) => {
             let (a, id) = crate::libcmd::target(t, ObjKind::Symbol)?;
@@ -995,61 +1026,110 @@ pub fn library_check(p: &Project, library: Option<&str>, symbol: Option<&str>) -
         prefs: &prefs,
         from: &from,
     };
-    // Each symbol judged on its own, in parallel; the list in ID order.
     use rayon::prelude::*;
     let picked: Vec<_> = lib
         .symbols
         .iter()
         .filter(|(id, _)| only.as_ref().is_none_or(|o| o == *id))
         .collect();
-    let judged: Vec<(Value, u64, u64)> = picked
-        .par_iter()
-        .map(|(id, l)| {
-            let reference = ref_text(&alias, ObjKind::Symbol, id);
-            let s = match &l.item {
-                Ok(s) => s,
-                Err(e) => return (json!({"reference": reference, "error": e}), 0, 0),
-            };
-            let (class, inferred) = class_of(lib, id, s);
-            let found = lint(s, class, &cx);
-            let errors = found
-                .iter()
-                .filter(|f| f.severity == Severity::Error)
-                .count() as u64;
-            let v = json!({
-                "reference": reference,
-                "path": lib.path(ObjKind::Symbol, id),
-                "class": class,
-                "class_inferred": inferred,
-                "score": score(&found),
-                "findings": found.iter().map(|f| shown(f, id, lib)).collect::<Vec<_>>(),
-            });
-            (v, errors, found.len() as u64 - errors)
-        })
-        .collect();
     let (mut errors, mut warnings) = (0u64, 0u64);
-    let mut list = Vec::with_capacity(judged.len());
-    for (v, e, w) in judged {
-        errors += e;
-        warnings += w;
-        list.push(v);
+    let mut by_code: BTreeMap<&'static str, u64> = BTreeMap::new();
+    // The symbols first, written straight into the answer as they are
+    // judged; the counts after them (a reader takes keys in any order).
+    let mut text = String::from(r#"{"symbols":["#);
+    let mut first = true;
+    for chunk in picked.chunks(CHUNK) {
+        // Each symbol judged on its own, in parallel, and written as text.
+        let judged: Vec<(Option<String>, u64, u64, Vec<&'static str>)> = chunk
+            .par_iter()
+            .map(|(id, l)| {
+                let reference = ref_text(&alias, ObjKind::Symbol, id);
+                let s = match &l.item {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let v = json!({"reference": reference, "error": e});
+                        return (Some(v.to_string()), 0, 0, Vec::new());
+                    }
+                };
+                let (class, inferred) = class_of(lib, id, s);
+                let found = lint(s, class, &cx);
+                let errors = found
+                    .iter()
+                    .filter(|f| f.severity == Severity::Error)
+                    .count() as u64;
+                let codes: Vec<&'static str> = found.iter().map(|f| f.code).collect();
+                let wanted: Vec<&Finding> = found
+                    .iter()
+                    .filter(|f| {
+                        listing.codes.is_empty() || listing.codes.iter().any(|c| c == f.code)
+                    })
+                    .collect();
+                if !listing.codes.is_empty() && wanted.is_empty() {
+                    return (None, errors, found.len() as u64 - errors, codes);
+                }
+                let mut v = json!({
+                    "reference": reference,
+                    "path": lib.path(ObjKind::Symbol, id),
+                    "class": class,
+                    "class_inferred": inferred,
+                    "score": score(&found),
+                });
+                if listing.summary {
+                    let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
+                    for f in &wanted {
+                        *counts.entry(f.code).or_default() += 1;
+                    }
+                    v["counts"] = json!(counts);
+                } else {
+                    v["findings"] =
+                        json!(wanted.iter().map(|f| shown(f, id, lib)).collect::<Vec<_>>());
+                }
+                (
+                    Some(v.to_string()),
+                    errors,
+                    found.len() as u64 - errors,
+                    codes,
+                )
+            })
+            .collect();
+        for (entry, e, w, codes) in judged {
+            errors += e;
+            warnings += w;
+            for c in codes {
+                *by_code.entry(c).or_default() += 1;
+            }
+            if let Some(entry) = entry {
+                if !first {
+                    text.push(',');
+                }
+                first = false;
+                text.push_str(&entry);
+            }
+        }
     }
-    let report = json!({
-        "library": alias,
-        "revision": lib.revision,
-        "standards": {"from": from},
-        "symbols": list,
-        "errors": errors,
-        "warnings": warnings,
-    });
+    text.push(']');
+    if listing.summary {
+        text.push_str(&format!(r#","by_code":{}"#, json!(by_code)));
+    }
+    text.push_str(&format!(
+        r#","errors":{errors},"library":{},"revision":{},"standards":{},"warnings":{warnings}}}"#,
+        json!(alias),
+        json!(lib.revision),
+        json!({"from": from}),
+    ));
     if errors > 0 {
-        return Err(Error::new(
-            Code::CheckFailed,
-            format!("the symbol lint found {errors} error(s) and {warnings} warning(s)"),
-        )
-        .with("report", report));
+        return Ok(Answer::raw(Text::Error {
+            code: Code::CheckFailed,
+            message: format!("the symbol lint found {errors} error(s) and {warnings} warning(s)"),
+            details: {
+                // In place: no second copy of the report.
+                text.insert_str(0, r#"{"report":"#);
+                text.push('}');
+                text
+            },
+        }));
     }
-    Ok(report)
+    Ok(Answer::raw(Text::Result(text)))
 }
 
 /// The symbols `check` judges, by library: every symbol of this project's

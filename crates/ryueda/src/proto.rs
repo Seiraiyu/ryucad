@@ -91,6 +91,12 @@ pub enum Request {
         library: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         symbol: Option<String>,
+        /// Counts by code, no findings (#711).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        summary: bool,
+        /// Only these codes' findings, and the symbols holding them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        codes: Vec<String>,
     },
     /// A symbol called `name`, its ID from the name unless given, with
     /// `units` (1 by default) and a batch of ops applied.
@@ -745,6 +751,41 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layers: Option<crate::output::Layers>,
     },
+    /// A design's designators numbered in canvas order (plan 2.F): the
+    /// unannotated ones (`unannotated`, by default) or every unlocked one
+    /// (`all`), down each column (`down`, by default) or across each row.
+    #[serde(rename = "annotate")]
+    Annotate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        order: Option<crate::annotate::Order>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reset: Option<crate::annotate::Reset>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Components `annotate` never renumbers, by designator or
+    /// `<block>/<component>`.
+    #[serde(rename = "annotate.lock")]
+    AnnotateLock {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        refs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Components `annotate` may renumber again.
+    #[serde(rename = "annotate.unlock")]
+    AnnotateUnlock {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        refs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// The project loaded from nothing: every file's faults and every
     /// design's ERC; `check_failed` on any error.
     #[serde(rename = "check")]
@@ -848,6 +889,9 @@ impl Request {
                 | Request::RailAdd { .. }
                 | Request::RailEdit { .. }
                 | Request::Tag { .. }
+                | Request::Annotate { .. }
+                | Request::AnnotateLock { .. }
+                | Request::AnnotateUnlock { .. }
                 | Request::StyleSet { .. }
                 | Request::StyleUnset { .. }
                 | Request::StyleRule { .. }
