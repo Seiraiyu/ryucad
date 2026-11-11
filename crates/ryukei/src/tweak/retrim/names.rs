@@ -61,6 +61,7 @@ pub(crate) fn finish(
     journal: Journal,
     moved: &BTreeSet<Name>,
 ) -> Journal {
+    let journal = whole_again(out, journal);
     let created: BTreeSet<Name> = journal
         .events()
         .iter()
@@ -169,6 +170,48 @@ pub(crate) fn finish(
         let n = input.vertices[v].name;
         if out.by_name(n).is_none() && !j.events().iter().any(|x| names(x).contains(&n)) {
             j.push(Event::Deleted(n));
+        }
+    }
+    j
+}
+
+/// A face the table split whose pieces all merged back into one face
+/// takes its name again (#691: a groove run through split each side of
+/// its plate and merged it back under a new name): its `Split` becomes
+/// `Modified`, and the `Merged` goes.
+fn whole_again(out: &mut Body, journal: Journal) -> Journal {
+    let mut back: BTreeMap<Name, Name> = BTreeMap::new();
+    for e in journal.events() {
+        let Event::Merged { parents, child } = e else {
+            continue;
+        };
+        let mut ps = parents.clone();
+        ps.sort();
+        let whole = journal.events().iter().find_map(|x| match x {
+            Event::Split { parent, children } => {
+                let mut cs = children.clone();
+                cs.sort();
+                (cs == ps && out.by_name(*parent).is_none()).then_some(*parent)
+            }
+            _ => None,
+        });
+        if let (Some(p), Some(EntityId::Face(f))) = (whole, out.by_name(*child)) {
+            out.rename(EntityId::Face(f), p);
+            back.insert(p, *child);
+        }
+    }
+    if back.is_empty() {
+        return journal;
+    }
+    let gone: BTreeSet<Name> = back.values().copied().collect();
+    let mut j = Journal::new();
+    for e in journal.events() {
+        match e {
+            Event::Split { parent, .. } if back.contains_key(parent) => {
+                j.push(Event::Modified(*parent));
+            }
+            Event::Merged { child, .. } if gone.contains(child) => {}
+            other => j.push(other.clone()),
         }
     }
     j

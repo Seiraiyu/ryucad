@@ -122,8 +122,15 @@ pub(crate) fn walk(
         0 => Err(first.unwrap_or(WalkError::Open {
             piece: seeds.first().copied().unwrap_or(0),
         })),
+        // The first piece two closures disagree on, where the choice lies;
+        // the seed past `CHOICES`, whose markers are empty.
         _ => Err(WalkError::Ambiguous {
-            piece: seeds.first().copied().unwrap_or(0),
+            piece: (0..arr.pieces.len())
+                .find(|&i| match (found[0].get(i), found[1].get(i)) {
+                    (Some(a), Some(b)) => a != b,
+                    _ => false,
+                })
+                .unwrap_or_else(|| seeds.first().copied().unwrap_or(0)),
         }),
     }
 }
@@ -448,6 +455,19 @@ mod tests {
         assert_eq!(
             walk(&a, &[0], &free()).unwrap(),
             vec![Some(false), Some(false), None]
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_walk_names_where_its_closures_differ() {
+        // The cube with a second top (piece 6) using the top's edges the
+        // same way: two closures, which differ first at piece 1.
+        let mut arr = cube();
+        let top = arr.pieces[1].1.clone();
+        arr.pieces.push((1, top));
+        assert_eq!(
+            walk(&arr, &[0], &free()),
+            Err(WalkError::Ambiguous { piece: 1 })
         );
     }
 }
