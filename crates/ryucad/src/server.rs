@@ -4298,14 +4298,15 @@ fn sketch_plane(
 
 /// Refuses a feature whose references don't resolve to what they must
 /// now, in the part's current rebuild; `order` is the list as the write
-/// leaves it.
+/// leaves it. Gives the `reference_followed` warnings of those that
+/// follow a face or edge a later feature split or merged (design 447).
 fn check_references(
     session: &mut Session,
     part: &Id,
     order: &[Id],
     id: &Id,
     f: &Feature,
-) -> Result<()> {
+) -> Result<Vec<Value>> {
     // Nothing may change a reference import's body, whether or not the
     // feature references anything (a cut, a boolean). Only an import in
     // reference mode makes one, so a part without one isn't rebuilt here.
@@ -4350,14 +4351,19 @@ fn check_references(
         && !planar
         && !matches!(f, Feature::Split(s) if s.plane().is_none())
     {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let p = session.project().part(part)?.clone();
     let results = session.rebuilt(part)?;
     let q = proposed(&p, order, &[(id, f)]);
     let checked = crate::kind::check(&q, order, id, f, results)
         .and_then(|()| check_resolved(&p, order, id, f, results));
-    checked.map_err(|e| session.explain_in(part, order, e))
+    let followed = match &checked {
+        Ok(()) => crate::reference::followed_by(&q, &Solids::of_order(&q, order), id, f, results),
+        Err(_) => Vec::new(),
+    };
+    checked.map_err(|e| session.explain_in(part, order, e))?;
+    Ok(followed)
 }
 
 /// [`check_references`] against `results`.
@@ -4802,8 +4808,12 @@ fn feature_add(
     if f.instance().is_some() {
         check_instance(session, &pid, &list, &fid, &f)?;
     }
+    // What its references follow: a split face or edge (design 447).
+    let mut followed = Vec::new();
     if !f.connectors().is_empty() || f.instance_pattern().is_some() {
         crate::mate::check(session, &pid, &list, &fid, &f)?;
+        let r = session.rebuilt(&pid)?;
+        followed.extend(crate::mate::followed(&pid, &fid, &f, r));
     }
     let p = session.project().part(&pid)?;
     if !f.profiles().is_empty() {
@@ -4813,7 +4823,7 @@ fn feature_add(
     if let Feature::Pattern(x) = &f {
         crate::pattern::check_seeds(&proposed(p, &list, &[(&fid, &f)]), &fid, x)?;
     }
-    check_references(session, &pid, &list, &fid, &f)?;
+    followed.extend(check_references(session, &pid, &list, &fid, &f)?);
     if crate::assembly::assembles(&f) {
         let p = session.project().part(&pid)?;
         let q = proposed(p, &list, &[(&fid, &f)]);
@@ -4827,6 +4837,9 @@ fn feature_add(
     let mut v = json!({"feature": feature_report(saved, &fid, &f), "revision": revision});
     if !assemblies.is_empty() {
         v["assemblies"] = json!(assemblies);
+    }
+    if !followed.is_empty() {
+        v["warnings"] = json!(followed);
     }
     Ok(v)
 }
@@ -5054,8 +5067,12 @@ fn feature_edit(
     if f.instance().is_some() && f != old {
         check_instance(session, &pid, &list, &fid, &f)?;
     }
+    // What its references follow: a split face or edge (design 447).
+    let mut followed = Vec::new();
     if (!f.connectors().is_empty() || f.instance_pattern().is_some()) && f != old {
         crate::mate::check(session, &pid, &list, &fid, &f)?;
+        let r = session.rebuilt(&pid)?;
+        followed.extend(crate::mate::followed(&pid, &fid, &f, r));
     }
     let p = session.project().part(&pid)?;
     check_solids(&proposed(p, &list, &[(&fid, &f)]), &[&fid])?;
@@ -5098,7 +5115,7 @@ fn feature_edit(
         ) && f != old)
         || f.source() != old.source()
     {
-        check_references(session, &pid, &list, &fid, &f)?;
+        followed.extend(check_references(session, &pid, &list, &fid, &f)?);
     }
     if crate::assembly::assembles(&f) {
         let p = session.project().part(&pid)?;
@@ -5114,7 +5131,8 @@ fn feature_edit(
     // edit broke them or drives an assembly they already left half
     // solved (issue #155).
     let reached = crate::mate::reached(session.project(), &pid);
-    let warnings = crate::mate::failing_warnings(session, &reached, "");
+    let mut warnings = crate::mate::failing_warnings(session, &reached, "");
+    warnings.extend(followed);
     let saved = session.project().part(&pid)?;
     let revision = &saved.revision;
     let mut v = json!({"feature": feature_report(saved, &fid, &f), "revision": revision});
