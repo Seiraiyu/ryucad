@@ -3380,6 +3380,9 @@ fn draw(
             }
             let texts: Vec<Line> = lines.iter().map(|(_, t)| *t).collect();
             let body = st.shape(p).expect("placed").body;
+            // #712: never in the room in front of one of its own pin ends.
+            let fronts = pin_fronts(&st.shape(p).expect("placed"));
+            let clear_of = |bs: &[Rect]| bs.iter().all(|b| fronts.iter().all(|f| !f.overlaps(b)));
             // Text kept field by field (asked parts' too, below).
             if !asks.contains_key(&p)
                 && let Some(f) = kept_fields.get(&p)
@@ -3424,10 +3427,10 @@ fn draw(
                             done.extend(group.iter().map(|(n, _)| *n));
                             let ts: Vec<Line> = group.iter().map(|(_, t)| *t).collect();
                             let cands = text::candidates_on(body, &ts, *side);
-                            let at = cands
-                                .iter()
-                                .copied()
-                                .find(|c| text::boxes(&ts, *c).iter().all(|b| field.clear(*b)));
+                            let at = cands.iter().copied().find(|c| {
+                                let bs = text::boxes(&ts, *c);
+                                bs.iter().all(|b| field.clear(*b)) && clear_of(&bs)
+                            });
                             let fallback = cands
                                 .first()
                                 .copied()
@@ -3442,10 +3445,10 @@ fn draw(
                         if !rest.is_empty() {
                             let ts: Vec<Line> = rest.iter().map(|(_, t)| *t).collect();
                             let cands = text::candidates(body, &ts);
-                            let at = cands
-                                .iter()
-                                .copied()
-                                .find(|c| text::boxes(&ts, *c).iter().all(|b| field.clear(*b)));
+                            let at = cands.iter().copied().find(|c| {
+                                let bs = text::boxes(&ts, *c);
+                                bs.iter().all(|b| field.clear(*b)) && clear_of(&bs)
+                            });
                             place(&mut field, &mut fields, rest, at, cands[0]);
                         }
                         fields
@@ -3493,7 +3496,10 @@ fn draw(
                 }
             }
             let at = {
-                let fits = |at: Point| text::boxes(&texts, at).iter().all(|b| field.clear(*b));
+                let fits = |at: Point| {
+                    let bs = text::boxes(&texts, at);
+                    bs.iter().all(|b| field.clear(*b)) && clear_of(&bs)
+                };
                 let at = text::candidates(body, &texts)
                     .into_iter()
                     .find(|c| fits(*c))
@@ -3609,6 +3615,26 @@ fn port_on_run(
     rest.sort();
     order.extend(rest.into_iter().map(|(_, p)| p));
     order.into_iter().find(|p| ok(*p))
+}
+
+/// The room in front of each of a part's pin ends (#712): three steps out
+/// along the pin and a step either side of its row, where its wire or
+/// label goes. A connected pin's wire holds it already when text is
+/// placed; an unconnected pin's must be kept clear too.
+fn pin_fronts(shape: &Shape) -> Vec<Rect> {
+    shape
+        .pins
+        .iter()
+        .map(|p| {
+            let e = p.end;
+            match p.side {
+                Side::Right => Rect::new([e[0], e[1] - GRID], [e[0] + 3 * GRID, e[1] + GRID]),
+                Side::Left => Rect::new([e[0] - 3 * GRID, e[1] - GRID], [e[0], e[1] + GRID]),
+                Side::Up => Rect::new([e[0] - GRID, e[1]], [e[0] + GRID, e[1] + 3 * GRID]),
+                Side::Down => Rect::new([e[0] - GRID, e[1] - 3 * GRID], [e[0] + GRID, e[1]]),
+            }
+        })
+        .collect()
 }
 
 /// The previous layout's runs on sheet `sid`, by net index.
@@ -6598,6 +6624,42 @@ mod tests {
             let mut again = b.clone();
             again.previous = Some(out.layout.clone());
             assert_eq!(lay(&again).layout, out.layout, "seed {seed}: kept");
+        }
+    }
+
+    /// #712: a part's text never stands in front of one of its own pin
+    /// ends, where the pin's wire or label will go.
+    #[test]
+    fn text_stays_out_of_the_room_in_front_of_its_own_pins() {
+        use crate::layout::TextField;
+        let mut b = Block {
+            name: "reg".into(),
+            sheet: [277_000_000, 170_000_000],
+            ..Block::default()
+        };
+        b.parts.push(crate::testing::regulator("u1", "U1", "reg"));
+        let first = lay(&b);
+        b.previous = Some(first.layout.clone());
+        b.instructions.insert(
+            "i1".into(),
+            Instruction::Text {
+                parts: vec!["u1".into()],
+                field: TextField::Both,
+                side: Side::Right,
+            },
+        );
+        let out = lay(&b);
+        assert_eq!(crate::rules::check(&b, &out.layout), []);
+        let x = &out.layout.placed["u1"];
+        let shape = Shape::of(&b.parts[0], Place::new(x.at, x.rotation, x.mirror));
+        let fronts = pin_fronts(&shape);
+        for (field, line) in b.parts[0].fields() {
+            let at = out.layout.text["u1"][field];
+            let bx = line.boxed(at);
+            assert!(
+                fronts.iter().all(|f| !f.overlaps(&bx)),
+                "{field} at {at:?} stands in front of a pin: {bx:?}"
+            );
         }
     }
 }
