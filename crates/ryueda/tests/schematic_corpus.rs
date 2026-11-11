@@ -2127,3 +2127,99 @@ fn style_edits_move_only_what_they_draw() {
         );
     }
 }
+
+/// Plan 2.E's measurements (`cargo test -p ryueda --release --test
+/// schematic_corpus style_measurements -- --ignored --nocapture`): the
+/// cascade for the Ethernet PHY through the CLI and in process, its PDF,
+/// and each corpus block laid out from nothing. Printed, never a bar in CI.
+#[test]
+#[ignore]
+fn style_measurements() {
+    use std::time::Instant;
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let dir = tempfile::tempdir().unwrap();
+    let board = circuit(dir.path(), "ethernet");
+    ryueda(&board, 1, &["layout"]);
+    // A style of ten rules.
+    for (sel, set) in [
+        ("kind=net", "line_weight=normal"),
+        ("kind=rail", "colour=power"),
+        ("component_class=resistor", "fill=body"),
+        ("component_class=capacitor", "colour=ink"),
+        ("component_class=ic", "emphasis=false"),
+        ("tag=hv", "dash=false"),
+        ("tag=critical", "colour=critical"),
+        ("kind=region", "visible.frame=true"),
+        ("kind=port", "fill=port_fill"),
+        ("kind=component", "visible.pin_numbers=true"),
+    ] {
+        ryueda(&board, 1, &["style", "rule", "add", sel, set]);
+    }
+    let p = ryueda::project::Project::load(&board).unwrap();
+    for (bid, b) in &p.conn.blocks {
+        let refs: Vec<String> = b
+            .components
+            .values()
+            .filter_map(|c| c.item.as_ref().ok()?.refdes.clone())
+            .collect();
+        let t = Instant::now();
+        for r in &refs {
+            ryueda(&board, 1, &["style", "explain", r, "--block", bid.as_str()]);
+        }
+        eprintln!(
+            "ethernet/{bid}: style explain of {} components {:.0} ms ({:.1} ms each, a process each)",
+            refs.len(),
+            ms(t),
+            ms(t) / refs.len().max(1) as f64
+        );
+        let t = Instant::now();
+        ryueda(
+            &board,
+            1,
+            &["render", "--block", bid.as_str(), "--out", "x.svg"],
+        );
+        eprintln!("ethernet/{bid}: render {:.0} ms (a process)", ms(t));
+        // In process: the layers and each sheet's look, 100 times.
+        let laid = ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None).unwrap();
+        let mut times: Vec<f64> = (0..100)
+            .map(|_| {
+                let t = Instant::now();
+                let layers = ryueda::cascade::Layers::of(&p);
+                let objects = ryueda::cascade::objects(&p, b, &laid.built);
+                for (sid, s) in &laid.outcome.layout.sheets {
+                    std::hint::black_box(ryueda::cascade::look(
+                        &layers,
+                        &objects,
+                        &laid.built,
+                        (sid, &s.name),
+                        ryusch::style::Theme::Light,
+                    ));
+                }
+                ms(t)
+            })
+            .collect();
+        times.sort_by(f64::total_cmp);
+        eprintln!(
+            "ethernet/{bid}: cascade looks, median of 100 {:.3} ms (bar 5 ms)",
+            times[50]
+        );
+    }
+    let t = Instant::now();
+    ryueda(&board, 1, &["output", "--out", "x.pdf"]);
+    eprintln!("ethernet: output PDF {:.0} ms (bar 1 s)", ms(t));
+    for name in ["breakout", "rp2040", "buck", "frontend", "ethernet"] {
+        let at = dir.path().join(format!("m-{name}"));
+        std::fs::create_dir_all(&at).unwrap();
+        let board = circuit(&at, name);
+        let p = ryueda::project::Project::load(&board).unwrap();
+        for bid in p.conn.blocks.keys() {
+            let t = Instant::now();
+            ryueda(
+                &board,
+                1,
+                &["layout", "--relayout", bid.as_str(), "--dry-run"],
+            );
+            eprintln!("{name}/{bid}: from nothing {:.0} ms (bar 2 s)", ms(t));
+        }
+    }
+}
