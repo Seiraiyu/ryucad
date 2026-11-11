@@ -709,6 +709,7 @@ fn found(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Raw> {
 
 /// What the rule behind `code` finds on `s`: on `pins` alone where the
 /// rule judges each pin by itself (a fix's trial needs no more).
+#[cfg(test)]
 fn found_by(
     s: &Symbol,
     class: Option<Class>,
@@ -741,12 +742,16 @@ fn error_keys(s: &Symbol) -> Vec<ErrorKey> {
         .collect()
 }
 
-/// Whether `ops` remove the finding `code` on `pins` from `s` and add no
-/// `library_*` error: a fix is offered only so (round 2's ask).
-/// `before` is `s`'s own errors (`error_keys`), worked out once a symbol.
+/// Whether `ops` remove the finding `code` on `pins` from `s`, add no
+/// `library_*` error (round 2's ask) and add no finding of any rule
+/// (#712's review): a fix is offered only so. `before` is `s`'s own
+/// errors (`error_keys`) and `before_found` its findings, each worked out
+/// once a symbol.
+#[allow(clippy::too_many_arguments)]
 fn fixes_it(
     s: &Symbol,
     before: &[ErrorKey],
+    before_found: &[(&'static str, Vec<String>)],
     class: Option<Class>,
     cx: &Context,
     code: &str,
@@ -763,9 +768,20 @@ fn fixes_it(
     if error_keys(&t).iter().any(|k| !before.contains(k)) {
         return false;
     }
-    !found_by(&t, class, cx, code, pins)
+    let after = found(&t, class, cx);
+    if after.iter().any(|r| r.code == code && r.pins == pins) {
+        return false;
+    }
+    // Nothing it adds under any rule (#712's review): every finding after
+    // it was there before, the rules turned off aside.
+    after
         .iter()
-        .any(|r| r.code == code && r.pins == pins)
+        .filter(|r| cx.prefs.severity(r.code).0 != Severity::Off)
+        .all(|r| {
+            before_found
+                .iter()
+                .any(|(c, p)| *c == r.code && *p == r.pins)
+        })
 }
 
 /// `s`'s findings as `cx` judges a symbol of `class` (`None`: only the
@@ -779,6 +795,8 @@ pub fn lint(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Finding> {
     } else {
         Vec::new()
     };
+    let keys: Vec<(&'static str, Vec<String>)> =
+        raw.iter().map(|r| (r.code, r.pins.clone())).collect();
     // Every fix tried on its own copy, in parallel; kept in order.
     let kept: Vec<Vec<bool>> = raw
         .par_iter()
@@ -788,7 +806,7 @@ pub fn lint(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Finding> {
             }
             r.fixes
                 .iter()
-                .map(|ops| fixes_it(s, &before, class, cx, r.code, &r.pins, ops))
+                .map(|ops| fixes_it(s, &before, &keys, class, cx, r.code, &r.pins, ops))
                 .collect()
         })
         .collect();
@@ -1554,6 +1572,49 @@ mod tests {
                 let s = template("T", class, pins, &st).unwrap();
                 let found = lint(&s, Some(class), &cx);
                 assert!(found.is_empty(), "{class:?} {shapes:?}: {found:?}");
+            }
+        }
+    }
+
+    /// A fix that would add a finding of another rule isn't offered
+    /// (#712's review): a pin shorter than the standards' with its end on
+    /// the grid; setting its length keeping its base would put its end
+    /// off the grid.
+    #[test]
+    fn a_fix_that_adds_a_finding_is_not_offered() {
+        let st = Standards::default();
+        let prefs = Prefs::default();
+        let cx = Context {
+            standards: &st,
+            prefs: &prefs,
+            from: "built_in",
+        };
+        let mut s = template("U", Class::Ic, &inputs(4), &st).unwrap();
+        s.pins.get_mut("2").unwrap().length_nm -= 540_000;
+        let found = lint(&s, Some(Class::Ic), &cx);
+        let length = found
+            .iter()
+            .find(|f| f.code == "sym_pin_length")
+            .expect("pin 2 is short");
+        assert!(
+            !found.iter().any(|f| f.code == "sym_pin_off_grid"),
+            "its end is on the grid"
+        );
+        assert_eq!(length.fixes, Vec::<Vec<Value>>::new(), "{:?}", length.fixes);
+        // Every fix still offered anywhere adds nothing.
+        for f in &found {
+            for ops in &f.fixes {
+                let mut t = s.clone();
+                crate::edit::apply(&mut t, ops, crate::units::Unit::Mm).unwrap();
+                let before = codes(&found);
+                for g in lint(&t, Some(Class::Ic), &cx) {
+                    assert!(
+                        before.contains(&(g.code, g.pins.clone())),
+                        "{} adds {}",
+                        f.code,
+                        g.code
+                    );
+                }
             }
         }
     }
