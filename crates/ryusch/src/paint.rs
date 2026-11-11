@@ -288,10 +288,8 @@ pub fn note_box(text: &str, at: Point) -> Rect {
     Rect::new(at, [up(far[0]), up(far[1])])
 }
 
-/// The buses drawn on sheet `sid` (plan 2.C): each member's stub and 45°
-/// entry, its name on its stub, the spine through a column of entries,
-/// the trunk, the bundle's name on the trunk and its off-sheet connector.
-/// A drawn bus's off-sheet connector, as [`Painted::buses`] lists it.
+/// A drawn bus's off-sheet connector, as [`Painted::buses`] lists it:
+/// its bus's key, its members' net keys on the sheet and its box.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BusConnector {
     pub bus: String,
@@ -299,7 +297,10 @@ pub struct BusConnector {
     pub rect: Rect,
 }
 
-/// Draws sheet `sid`'s buses; their off-sheet connectors.
+/// The buses drawn on sheet `sid` (plan 2.C): each member's stub and 45°
+/// entry, its name on its stub, the spine through a column of entries,
+/// the trunk, the bundle's name on the trunk and its off-sheet connector.
+/// Gives the connectors, for the cross-references under them.
 fn bus_items(
     block: &Block,
     layout: &Layout,

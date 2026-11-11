@@ -1,9 +1,10 @@
 //! The three-way merge of a block's layout: what Git's merge driver (stage
 //! 4's) will call, after the block's connectivity is merged. Each key of
 //! the layout (a sheet, a part's place, its text, a net's labels or
-//! wires, a drawn bus, a note's place) changed on one side takes that side; changed alike, either. Both sides
-//! changing one key differently, or the boxes of what each side changed
-//! overlapping on a sheet, is a conflict over that area. Instructions merge
+//! wires, a drawn bus, a note's place) changed on one side takes that
+//! side; changed alike, either. Both sides changing one key differently,
+//! or the boxes of what each side changed overlapping on a sheet, is a
+//! conflict over that area. Instructions merge
 //! by what they say: those either side added, less those either removed.
 //!
 //! A conflict is repaired by taking ours, taking theirs, or laying its area

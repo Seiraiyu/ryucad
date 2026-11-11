@@ -454,8 +454,6 @@ fn net_key(n: &crate::conn::Node) -> Option<String> {
     }
 }
 
-/// A cross-reference's text at `at` (`→ 2, 3`) and a link on each page
-/// number.
 /// Each off-sheet connector, a bus's included, and each block port's flag
 /// on page `pg`: its box and its nets' other pages (by `flat`, the page's
 /// net keys' flattened nets, and `net_pages`, each flattened net's pages),
@@ -492,6 +490,8 @@ fn cross_references(
         .collect()
 }
 
+/// A cross-reference's text at `at` (`→ 2, 3`) and a link on each page
+/// number.
 fn xref_items(
     at: ryusch::geom::Point,
     others: &[usize],
