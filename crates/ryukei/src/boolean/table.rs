@@ -293,6 +293,17 @@ pub(crate) fn build(ops: &[Body], m: &Meter) -> Result<Table, Fail> {
 
 /// Builds the table for `ops` within `scope`.
 pub(crate) fn build_in(ops: &[Body], scope: Scope, m: &Meter) -> Result<Table, Fail> {
+    build_capped(ops, scope, None, m)
+}
+
+/// [`build_in`], each face pair met under `pair`'s cap when given (a
+/// file's union, #550).
+pub(crate) fn build_capped(
+    ops: &[Body],
+    scope: Scope,
+    pair: Option<crate::work::Scope>,
+    m: &Meter,
+) -> Result<Table, Fail> {
     let faces: Vec<FaceRef> = ops
         .iter()
         .enumerate()
@@ -316,8 +327,12 @@ pub(crate) fn build_in(ops: &[Body], scope: Scope, m: &Meter) -> Result<Table, F
     let pairs: Vec<Pair> = m
         .par_map(&face_pairs, |m, &(i, j)| {
             let (a, b) = (faces[i], faces[j]);
-            let meet = face_face_in((&ops[a.op], a.face), (&ops[b.op], b.face), m)
-                .map_err(|e| fail(e, a, b))?;
+            let meet = |m: &Meter| face_face_in((&ops[a.op], a.face), (&ops[b.op], b.face), m);
+            let meet = match pair {
+                Some(s) => m.capped(s, || meet(m)),
+                None => meet(m),
+            }
+            .map_err(|e| fail(e, a, b))?;
             Ok(Pair { a, b, meet })
         })
         // The first failure in order, not the first a thread found.
@@ -1120,8 +1135,14 @@ fn triple_points(
             let fb = &ops[f.op];
             let surface = &fb.surfaces[fb.faces[f.face].surface];
             let tol = s.tolerance.max(face_tolerance(fb, f.face));
-            let hits = curve_surface_in(&s.curve, s.range, surface, tol, m)
-                .map_err(|e| fail(e, p.a, f))?;
+            let hits = match curve_surface_in(&s.curve, s.range, surface, tol, m) {
+                Ok(h) => h,
+                // A stretch from a corner of the third face, touching its
+                // surface there (#585): trimmed within the touch reach.
+                Err(e) => corner_trimmed(fb, f.face, &s.curve, s.range, surface, tol, m)
+                    .ok_or(e)
+                    .map_err(|e| fail(e, p.a, f))?,
+            };
             let mut out = Vec::new();
             for h in hits {
                 let points = match h {
@@ -1148,6 +1169,94 @@ fn triple_points(
         .into_iter()
         .collect::<Result<_, _>>()?;
     Ok(found.into_iter().flatten().collect())
+}
+
+/// A stretch's hits on a third face's surface, where the search over its
+/// whole range was uncertain and an end of it lies at a vertex of that
+/// face (#585: a plane–plane stretch leaving a spline's corner in the
+/// spline's tangent plane, a tangential double root the search can't
+/// settle). The stretch within the touch reach of the vertex is a touch
+/// by the touch rule, and the vertex a hit; the rest is searched, and a
+/// hit it finds within that reach is the same touch. `None` when no end
+/// lies at a vertex of the face, or the rest stays uncertain: the caller
+/// keeps its refusal.
+fn corner_trimmed(
+    fb: &Body,
+    face: FaceId,
+    curve: &Curve,
+    range: [f64; 2],
+    surface: &crate::geom::Surface,
+    tol: f64,
+    m: &Meter,
+) -> Option<Vec<CurveHit>> {
+    use crate::intersect::Side;
+    let mut corners = Vec::new();
+    for l in fb.face_loops(face) {
+        for fin in fb.loop_fins(l) {
+            let e = &fb.edges[fb.fins[fin].edge];
+            for v in [e.start, e.end] {
+                if !corners.contains(&v) {
+                    corners.push(v);
+                }
+            }
+        }
+    }
+    let mut rest = range;
+    let mut hits = Vec::new();
+    // Each trimmed corner and its reach.
+    let mut touched: Vec<(Point3, f64)> = Vec::new();
+    for end in 0..2 {
+        let t = range[end];
+        let p = curve.point(t);
+        let Some(&v) = corners.iter().find(|&&v| {
+            let x = &fb.vertices[v];
+            p.distance(x.point) <= x.tolerance.get().max(tol)
+        }) else {
+            continue;
+        };
+        let x = &fb.vertices[v];
+        let reach = crate::tol::touch_reach(x.tolerance.get().max(tol));
+        // The longest piece from the end, halving, whose box lies within
+        // the reach of the vertex.
+        let mut k = 0.5;
+        let mut cut = None;
+        for _ in 0..60 {
+            let other = t + (range[1 - end] - t) * k;
+            let piece = if end == 0 { [t, other] } else { [other, t] };
+            let b = curve.piece_bounds(piece);
+            let (lo, hi) = (b.min(), b.max());
+            let far = |a: f64, l: f64, h: f64| (a - l).abs().max((h - a).abs());
+            let (dx, dy, dz) = (
+                far(x.point.x, lo.x, hi.x),
+                far(x.point.y, lo.y, hi.y),
+                far(x.point.z, lo.z, hi.z),
+            );
+            if crate::math::sqrt(dx * dx + dy * dy + dz * dz) <= reach {
+                cut = Some(other);
+                break;
+            }
+            k *= 0.5;
+        }
+        rest[end] = cut?;
+        touched.push((x.point, reach));
+        hits.push(CurveHit::Point {
+            t,
+            point: x.point,
+            before: Side::Beyond,
+            after: Side::Beyond,
+        });
+    }
+    if hits.is_empty() {
+        return None;
+    }
+    if rest[1] > rest[0] {
+        let found = curve_surface_in(curve, rest, surface, tol, m).ok()?;
+        hits.extend(found.into_iter().filter(|h| match h {
+            CurveHit::Point { point, .. } => !touched.iter().any(|(c, r)| point.distance(*c) <= *r),
+            CurveHit::On { .. } => true,
+        }));
+    }
+    Some(hits)
 }
 
 /// Where stretches of one pair cross each other, found in the first
@@ -2361,5 +2470,78 @@ mod coincident_points_tests {
         let mut points = vec![(1.0, 2), (1.0 + 1e-12, 1)];
         drop_coincident(&mut points, &curve, &gvs);
         assert_eq!(points, [(1.0, 2)]);
+    }
+}
+
+#[cfg(test)]
+mod corner_tests {
+    use super::*;
+    use crate::blend::{BlendKind, EdgeBlend, blend};
+    use crate::geom::{Line, Rigid, Surface};
+    use crate::name::OpKey;
+    use crate::primitive;
+
+    /// A unit block with its top `+x` edge filleted at 0.2: the fillet's
+    /// face, with its corner at `(0.8, 0, 1)`, where the cylinder is
+    /// tangent to the top's plane.
+    fn filleted() -> (Body, FaceId) {
+        let (b, _) = primitive::block(OpKey(1), 1.0, 1.0, 1.0, &Rigid::IDENTITY).unwrap();
+        let mid = |e: crate::topo::EdgeId| {
+            let x = &b.edges[e];
+            b.curves[x.curve].point(0.5 * (x.interval[0] + x.interval[1]))
+        };
+        let e = b
+            .edges()
+            .min_by(|&x, &y| {
+                let p = Point3::new(1.0, 0.5, 1.0);
+                mid(x).distance(p).total_cmp(&mid(y).distance(p))
+            })
+            .unwrap();
+        let edge = EdgeBlend {
+            edge: b.edges[e].name,
+            kind: BlendKind::Fillet { radius: 0.2 },
+        };
+        let (f, _) = blend(OpKey(2), &b, &[edge]).unwrap();
+        let face = f
+            .faces()
+            .find(|&x| matches!(f.surfaces[f.faces[x].surface], Surface::Cylinder(_)))
+            .unwrap();
+        (f, face)
+    }
+
+    /// #585 in small: a line in the plane a fillet is tangent to, leaving
+    /// the fillet's corner away from it, touches the fillet's surface only
+    /// at the corner. The end within the touch reach of the corner is a
+    /// touch: the corner is a hit, and the rest is searched (no hit).
+    #[test]
+    fn a_stretch_from_a_faces_corner_is_trimmed_there() {
+        let (b, face) = filleted();
+        let surface = &b.surfaces[b.faces[face].surface];
+        let corner = Point3::new(0.8, 0.0, 1.0);
+        let to = Point3::new(0.5, -0.3, 1.0);
+        let line = Curve::Line(Line::through(corner, to).unwrap());
+        let range = [0.0, corner.distance(to)];
+        // unmetered: a unit test of the rule alone.
+        let m = Meter::free();
+        let hits = corner_trimmed(&b, face, &line, range, surface, LINEAR_RESOLUTION, &m)
+            .expect("an end at a corner");
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        match hits[0] {
+            CurveHit::Point { t, point, .. } => {
+                assert_eq!(t, 0.0);
+                assert!(point.distance(corner) <= 1e-12);
+            }
+            ref h => panic!("{h:?}"),
+        }
+        // Reversed, the corner is its far end.
+        let back = Curve::Line(Line::through(to, corner).unwrap());
+        let hits = corner_trimmed(&b, face, &back, range, surface, LINEAR_RESOLUTION, &m).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        // A line from the middle of the fillet's edge has no end at a
+        // corner: not this rule's.
+        let from = Point3::new(0.8, 0.5, 1.0);
+        let line = Curve::Line(Line::through(from, Point3::new(0.5, 0.2, 1.0)).unwrap());
+        let range = [0.0, 0.3 * 2f64.sqrt()];
+        assert!(corner_trimmed(&b, face, &line, range, surface, LINEAR_RESOLUTION, &m).is_none());
     }
 }

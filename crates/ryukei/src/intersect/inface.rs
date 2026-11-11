@@ -60,6 +60,7 @@ pub(crate) fn point_in_face_near(
     let (pu, pv) = surface.periods();
     let mut chains = Vec::new();
     let mut gaps = Vec::new();
+    let mut joints = Vec::new();
     for l in body.face_loops(face) {
         let first = chains.len();
         let mut tolerant = false;
@@ -77,6 +78,10 @@ pub(crate) fn point_in_face_near(
         }
         if tolerant {
             gaps.extend(closing(&chains[first..], [pu, pv]));
+        } else {
+            // Not boundary (an exact loop is read from its pcurves alone,
+            // #345), but a ray through one settles nothing.
+            joints.extend(closing(&chains[first..], [pu, pv]));
         }
     }
     if chains.is_empty() {
@@ -89,6 +94,7 @@ pub(crate) fn point_in_face_near(
     let left_is_inside = f.sense == Sense::Forward;
     let ray = Rays {
         chains: &chains,
+        joints: &joints,
         periods: [pu, pv],
     };
     for target in targets(&chains) {
@@ -164,9 +170,10 @@ pub(crate) fn edge_distance(c: &Curve, [t0, t1]: [f64; 2], p: Point3) -> f64 {
 /// and the next one's start (past rounding, whole periods aside) closed
 /// by a straight segment in the parameter plane, so a ray can't slip
 /// through it uncounted (design 299). Only for a loop holding an edge
-/// past [`crate::tol::TOUCH_TOLERANCE`]: a loop of edges within it (every
+/// past [`crate::tol::TOUCH_TOLERANCE`]; a loop of edges within it (every
 /// exact body's) is read from its pcurves alone, as it always was (issue
-/// #345).
+/// #345), and its gaps are only places a ray can't settle (`Rays::joints`,
+/// #322).
 fn closing(loop_: &[Chain2], periods: [Option<f64>; 2]) -> Vec<Chain2> {
     let n = loop_.len();
     let mut out = Vec::new();
@@ -223,6 +230,12 @@ fn transversal(piece: &crate::geom::chain2::Piece2, s: f64, d: Vector2) -> bool 
 
 struct Rays<'a> {
     chains: &'a [Chain2],
+    /// Where consecutive pcurves of a loop within `TOUCH_TOLERANCE` end
+    /// apart, the segments joining them ([`closing`]'s): a ray passing
+    /// through one may slip between the pcurves uncounted, so it settles
+    /// nothing (#322: a healed torus sector's corner 2.4e-9 m open, where
+    /// a ray along its bottom edge read a point outside as inside).
+    joints: &'a [Chain2],
     periods: [Option<f64>; 2],
 }
 
@@ -332,6 +345,31 @@ impl Rays<'_> {
                         }
                     }
                 }
+            }
+        }
+        for c in self.joints {
+            for (du, dv) in self.shifts(c, lo, hi) {
+                let off = Vector2::new(du, dv);
+                let piece = &c.pieces[0];
+                let a = piece.pts[0].p + off - p.to_vector();
+                let b = piece.pts[piece.pts.len() - 1].p + off - p.to_vector();
+                // Its ends' sides of the ray's line, and where along the
+                // ray it crosses that line.
+                let (sa, sb) = (a.dot(n), b.dot(n));
+                if (sa > near && sb > near) || (sa < -near && sb < -near) {
+                    continue;
+                }
+                let (ta, tb) = (a.dot(d), b.dot(d));
+                let at = if sa != sb {
+                    ta + (tb - ta) * (sa / (sa - sb)).clamp(0.0, 1.0)
+                } else {
+                    ta.min(tb)
+                };
+                if at < -near || at > reach {
+                    continue;
+                }
+                let wide = (ta - tb).abs() + near;
+                unsettled.push(Interval::new(at - wide, at + wide)?);
             }
         }
         hits.sort_by(|x, y| x.0.lo().total_cmp(&y.0.lo()));
@@ -571,6 +609,7 @@ mod tests {
         ];
         let rays = Rays {
             chains: &chains,
+            joints: &[],
             periods: [Some(2.0 * PI), None],
         };
         let from = Point2::new(PI, -2e-4);
@@ -579,6 +618,48 @@ mod tests {
         // the point is on its right.
         assert_eq!(
             rays.first_crossing(from, Point2::new(PI - 0.5, 0.0)),
+            Some(false)
+        );
+    }
+    /// #322: a healed loop whose pcurves meet a few millionths apart in
+    /// the parameter plane (within its edges' tolerances), and a ray from
+    /// outside along the line of one of them, which slips between their
+    /// ends and meets the near pcurve from the face's side: a gap the ray
+    /// passes through settles nothing.
+    #[test]
+    fn a_ray_through_a_gap_between_pcurves_settles_nothing() {
+        let line = |a: Point2, b: Point2| {
+            let l = Line2::through(a, b).unwrap();
+            Chain2::new(&Curve2::Line2(l), 0.0, a.distance(b))
+        };
+        // Counterclockwise, the bottom ending 5e-6 below the right side's
+        // start.
+        let chains = [
+            line(Point2::new(1.0, 0.0), Point2::new(2.0, 0.0)),
+            line(Point2::new(2.0, 5e-6), Point2::new(2.0, 1.0)),
+            line(Point2::new(2.0, 1.0), Point2::new(1.0, 1.0)),
+            line(Point2::new(1.0, 1.0), Point2::new(1.0, 0.0)),
+        ];
+        let from = Point2::new(5.0, 2.5e-6);
+        let target = Point2::new(1.5, 0.0);
+        let open = Rays {
+            chains: &chains,
+            joints: &[],
+            periods: [None, None],
+        };
+        // Through the gap, it meets the bottom from above: read inside.
+        assert_eq!(open.first_crossing(from, target), Some(true));
+        let joints = closing(&chains, [None, None]);
+        assert_eq!(joints.len(), 1);
+        let rays = Rays {
+            chains: &chains,
+            joints: &joints,
+            periods: [None, None],
+        };
+        assert_eq!(rays.first_crossing(from, target), None);
+        // Aimed at the right side's middle, it crosses it from outside.
+        assert_eq!(
+            rays.first_crossing(from, Point2::new(2.0, 0.5)),
             Some(false)
         );
     }

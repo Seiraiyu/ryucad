@@ -105,9 +105,19 @@ pub(crate) fn split(ops: &[Body], table: &Table, f: FaceRef) -> Result<Vec<Piece
         sigma,
         darts: &darts,
         size: (corners.max() - corners.min()).length(),
+        far: false,
     };
-    let cycles = arr.walk().ok_or_else(uncertain)?;
-    arr.group(f, &cycles, &lone).ok_or_else(uncertain)
+    if let Some(pieces) = arr.walk().and_then(|c| arr.group(f, &c, &lone)) {
+        return Ok(pieces);
+    }
+    // A stretch tangent to a boundary arc at their vertex, starting a
+    // rounding off it, may be put on the wrong side of the arc by the
+    // nearest chords (#626: a plug's wall, its top circle and a remade
+    // fillet's stretch along it). Ordered again where they lie apart;
+    // every face the near order walks keeps its pieces.
+    let far = Arrangement { far: true, ..arr };
+    let cycles = far.walk().ok_or_else(uncertain)?;
+    far.group(f, &cycles, &lone).ok_or_else(uncertain)
 }
 
 /// One way along an arc: a global edge, the sense it is run, its end
@@ -197,6 +207,11 @@ struct Arrangement<'a> {
     /// The face's box diagonal, for the angle tangents may be off by at
     /// a tolerant vertex.
     size: f64,
+    /// Tied darts ordered at common distances from their vertex, the
+    /// farthest first ([`Arrangement::far_cmp`]), not at fractions of
+    /// each, the nearest first: the retry when the near order leaves the
+    /// face unwalkable (#626).
+    far: bool,
 }
 
 /// How a vertex is reached in the parameter plane: at a point, or (at a
@@ -452,6 +467,44 @@ impl Arrangement<'_> {
         )
     }
 
+    /// The order of two tied darts at vertex `g`, each `(dart, end)`,
+    /// where they lie apart: their directions from the vertex to their
+    /// points at one distance from it, from the nearer of their middles'
+    /// distances inwards. Arcs of one face meet only at vertices, so
+    /// where the two are certified apart their order holds all the way
+    /// in; near the vertex a stretch's start may lie a rounding off it,
+    /// on the wrong side of a boundary arc it leaves tangent to (#626).
+    /// `None` when no distance parts them.
+    fn far_cmp(
+        &self,
+        g: GvId,
+        (da, ea): (usize, usize),
+        (db, eb): (usize, usize),
+        n: Vector3,
+    ) -> Option<Ordering> {
+        let p = self.table.vertices[g].point;
+        let middle = |d: usize| {
+            let q = self.darts[d].at(0.5);
+            self.surface.point(q.x, q.y).distance(p)
+        };
+        let reach = middle(da).min(middle(db));
+        for f in [1.0, 0.3, 0.1, 0.03, 0.01] {
+            let r = reach * f;
+            let (a, b) = (&self.darts[da], &self.darts[db]);
+            let ca = self.toward(a, ea, g, self.out_to(a, ea, g, r), n);
+            let cb = self.toward(b, eb, g, self.out_to(b, eb, g, r), n);
+            let c = ca.cross(cb);
+            if c.abs() > SAME_DIRECTION * ca.length() * cb.length() {
+                return Some(if c > 0.0 {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                });
+            }
+        }
+        None
+    }
+
     /// The slots at every vertex, sorted counterclockwise about the
     /// normal, with each dart's slot at its end.
     fn slots(&self) -> Option<Slots> {
@@ -540,6 +593,20 @@ impl Arrangement<'_> {
             let mut failed = false;
             for group in &mut groups {
                 group.sort_by(|&a, &b| {
+                    if self.far && tube.is_none() {
+                        return match self.far_cmp(
+                            g,
+                            (list[a].1, list[a].2),
+                            (list[b].1, list[b].2),
+                            n,
+                        ) {
+                            Some(o) => o,
+                            None => {
+                                failed |= a != b;
+                                a.cmp(&b)
+                            }
+                        };
+                    }
                     for k in [1e-4, 1e-3, 1e-2, 1e-1, 0.3] {
                         let (da, ea) = (list[a].1, list[a].2);
                         let (db, eb) = (list[b].1, list[b].2);

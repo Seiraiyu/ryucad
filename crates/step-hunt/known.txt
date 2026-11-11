@@ -11,6 +11,8 @@ case dacb323a3811e2c0 file ref_import/import_failed/invalid_geometry/OFFSET_SURF
 # nist: step-hunt's first campaign (ryucad 12.B)
 case 876244aa31004697 limit whole_import/import_body_missing the -tg edition holds only a TESSELLATED_SOLID and no B-rep: tessellated geometry isn't read
 case 876244aa31004697 limit whole_ref_import/import_body_missing the -tg edition holds only a TESSELLATED_SOLID and no B-rep: tessellated geometry isn't read, as a reference either
+case 4ab5bfa4425fd0f9 file import/import_failed/faces_overlap/PLANE ctc_02 AP242's #1333 is two construction sheets ('Fill.1' and 'Split.1', the same face with and without a hole) on planes with one placement: they overlap as the file has them (#695)
+case 518e2cbdf9e9a29f file import/import_failed/non_manifold/CIRCLE ftc_10 AP242's #17968 is twelve CATIA construction surfaces (Extract, Join, Split, Extrude) written as one surface model; copies share circles such as edge #15568, so together they are non-manifold (#696)
 
 # occt-pinned: step-hunt's first campaign (ryucad 12.B)
 case 5a5734c80c82572a #302 check/timeout/faces<50/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE+TOROIDAL_SURFACE
@@ -2329,9 +2331,7 @@ case fff56f1d76f03062 #303 check/timeout/faces<1000/B_SPLINE_SURFACE_WITH_KNOTS+
 # battery holders were #398 (past heal.budget's old default, 1 << 23); under 1 << 24 they import
 # again and fail check as #318.
 case 03fddb88fc6672b3 #353 check/timeout/faces<1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE
-case 075c46e291f21cf5 #322 import/import_failed/faces_overlap/SURFACE_OF_REVOLUTION
 case 27785accdaed5462 #353 check/timeout/faces>=1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE
-case 3c1d3a41b79f1831 #322 import/import_failed/faces_overlap/SURFACE_OF_REVOLUTION
 case 946224eda043a375 #353 check/slow/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE
 case b25e97a09e51edd2 #353 check/timeout/faces>=1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE
 case b7b66e3a205da2c4 file check/check_failed/faces_intersect two r 5.25 mm cylinders, axes 10.5 mm apart, touch along a line, so self_union's union of the crossing items is non-manifold there (NonManifold) (#318, plan 14.C)
