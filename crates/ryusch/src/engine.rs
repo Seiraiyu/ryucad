@@ -4472,6 +4472,7 @@ fn wire_own(
     side: Side,
     reach: Nm,
     kept: Option<(&Vec<Vec<Point>>, &BTreeSet<Point>)>,
+    held: &dyn Fn(&[Point]) -> bool,
 ) -> bool {
     let tree = own_tree(routes, labels, n, sid);
     let again = kept_run(field, &tree, n, end, reach, kept);
@@ -4493,7 +4494,7 @@ fn wire_own(
             route::run_of(&path)
         }
     };
-    if route::length(&run) > reach || field.mark(n, &run).is_err() {
+    if route::length(&run) > reach || !held(&run) || field.mark(n, &run).is_err() {
         return false;
     }
     routes.entry(n).or_default().push(run);
@@ -4550,6 +4551,42 @@ fn own_tree(routes: &Routes, labels: &Labels, n: usize, sid: &str) -> BTreeSet<r
 type Routes = BTreeMap<usize, Vec<Vec<Point>>>;
 type Labels = BTreeMap<usize, Vec<Label>>;
 
+/// Whether a labelled net's wire `run` on sheet `sid` may be drawn: short
+/// (within `LOCAL_REACH`), or inside one region (its parts' extents grown
+/// by a frame's margin, which the region's frame holds once drawn), or on
+/// a sheet with no regions. Design 348: a wire between regions only where
+/// it is short, else labels; the RP2040's `qspi_ss` ran 155 mm from one
+/// region to another, crossing two wires (#718, plan 2.G).
+fn wire_held(st: &State, sid: &str, run: &[Point]) -> bool {
+    if route::length(run) <= LOCAL_REACH {
+        return true;
+    }
+    let Some(span) = run
+        .windows(2)
+        .map(|w| Rect::new(w[0], w[1]))
+        .reduce(|a, b| a.union(b))
+    else {
+        return true;
+    };
+    let mut any = false;
+    for (_, r) in st.regions.iter().filter(|(_, r)| r.sheet == sid) {
+        let held = r
+            .parts
+            .iter()
+            .filter_map(|k| st.block.part(k))
+            .filter(|p| st.place[*p].is_some_and(|x| st.sheets[x.0].0 == sid))
+            .filter_map(|p| st.shape(p))
+            .map(|sh| sh.extent)
+            .reduce(|a, b| a.union(b));
+        let Some(held) = held else { continue };
+        any = true;
+        if held.grow(crate::region::FRAME).contains(&span) {
+            return true;
+        }
+    }
+    !any
+}
+
 /// [`place_labels`] in one order; the labels left with no place.
 #[allow(clippy::too_many_arguments)]
 fn place_labels_in(
@@ -4567,6 +4604,7 @@ fn place_labels_in(
 ) -> (Vec<usize>, Vec<usize>) {
     let mut stuck = Vec::new();
     let mut demoted = Vec::new();
+    let held = |run: &[Point]| wire_held(st, sid, run);
     // A labelled net's pin the previous layout wired to another of its
     // pins (with no label of its own) keeps that wire while it holds,
     // before any label is placed, so no new label takes its way.
@@ -4603,7 +4641,8 @@ fn place_labels_in(
             end,
             Nm::MAX,
             prev_runs.get(&n).map(|r| (r, &pin_ends)),
-        ) && field.mark(n, &run).is_ok()
+        ) && wire_held(st, sid, &run)
+            && field.mark(n, &run).is_ok()
         {
             routes.entry(n).or_default().push(run);
             done.insert(i);
@@ -4764,7 +4803,7 @@ fn place_labels_in(
         let mut wired = chosen.is_none()
             && !kind.signal()
             && wire_own(
-                field, routes, labels, n, sid, pin.end, pin.side, NEAR_RAIL, kept,
+                field, routes, labels, n, sid, pin.end, pin.side, NEAR_RAIL, kept, &held,
             );
         // A pin on a labelled signal net beside the net's own (another
         // pin's wire or label) joins it by a short wire: the net is
@@ -4784,6 +4823,7 @@ fn place_labels_in(
                 pin.side,
                 LOCAL_REACH,
                 kept,
+                &held,
             );
         }
         let (stub, at, side) = chosen
@@ -4803,7 +4843,7 @@ fn place_labels_in(
                 if !wired {
                     let reach = if kind.signal() { Nm::MAX } else { RAIL_REACH };
                     wired = wire_own(
-                        field, routes, labels, n, sid, pin.end, pin.side, reach, kept,
+                        field, routes, labels, n, sid, pin.end, pin.side, reach, kept, &held,
                     );
                 }
                 None
@@ -5429,6 +5469,52 @@ mod tests {
             .map(|f| f.details["crossings"].as_u64().unwrap_or(1))
             .sum();
         assert!(crossings <= 3, "{crossings} crossings");
+    }
+
+    /// #718 (plan 2.G): a net drawn with labels on a sheet is wired
+    /// between regions only where the wire is short; every longer run of
+    /// it lies inside one region's frame. The loose RC's R9 joined in turn
+    /// to each of U1's signal nets (regions far apart), first from nothing
+    /// and then over its own layout.
+    #[test]
+    fn a_labelled_nets_long_wire_stays_inside_a_region() {
+        for net in [2, 3, 6, 9] {
+            let mut block = crate::testing::regions_block();
+            let r9 = block.part("r9").expect("r9");
+            block.parts[r9].pins[0].net = Some(net);
+            let first = lay(&block);
+            let mut again = block.clone();
+            again.previous = Some(first.layout.clone());
+            for out in [first, lay(&again)] {
+                let l = &out.layout;
+                assert_eq!(crate::rules::check(&block, l), [], "net {net}");
+                for (key, by) in &l.routes {
+                    for (sid, runs) in by {
+                        let labelled = l
+                            .labels
+                            .get(key)
+                            .is_some_and(|ls| ls.iter().any(|x| &x.sheet == sid));
+                        for run in runs.iter().filter(|_| labelled) {
+                            if route::length(run) <= LOCAL_REACH {
+                                continue;
+                            }
+                            let span = run
+                                .windows(2)
+                                .map(|w| Rect::new(w[0], w[1]))
+                                .reduce(|a, b| a.union(b))
+                                .expect("a run");
+                            assert!(
+                                l.regions
+                                    .values()
+                                    .any(|r| &r.sheet == sid && r.frame_on_sheet().contains(&span)),
+                                "net {net}: {key} runs {} mm across regions",
+                                route::length(run) / 1_000_000
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Over a previous layout a new pull-up joins its host's region, the

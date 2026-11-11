@@ -340,7 +340,7 @@ const THRESHOLDS: &[(&str, &str, i64)] = &[
     ("rp2040", "mitayi", 14),
     ("buck", "buck", 24),
     ("frontend", "amp", 51),
-    ("frontend", "baldiff", 48),
+    ("frontend", "baldiff", 42),
     ("frontend", "ivconv", 73),
     ("ethernet", "eth", 46),
     ("ethernet", "status_led", 92),
@@ -2340,4 +2340,60 @@ fn an_annotate_changes_only_designators() {
     }
     let again = ryueda(&board, 1, &["annotate", "--reset", "all"]);
     assert_eq!(again["changes"], serde_json::json!([]), "{again}");
+}
+
+/// A net drawn with labels on a sheet is wired between regions only where
+/// the wire is short (design 348: "a wire where the regions are
+/// neighbours and the channel is free and short, under LOCAL_REACH, else
+/// labels"): every longer run of such a net lies inside one region's
+/// frame. The RP2040's `qspi_ss` ran 155 mm from R2 (region J3 Header-1)
+/// to R1's label (region U3C RP2040), crossing two wires (#718, plan 2.G).
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn the_corpus_from_nothing_wires_labelled_nets_long_only_inside_a_region() {
+    use ryusch::geom::{GRID, Rect};
+    let reach = 16 * GRID;
+    let dir = tempfile::tempdir().unwrap();
+    let mut out = Vec::new();
+    for name in ["breakout", "rp2040", "buck", "frontend", "ethernet"] {
+        let (board, _) = fresh(dir.path(), name);
+        let p = ryueda::project::Project::load(&board).unwrap();
+        for b in p.conn.blocks.values() {
+            let laid = ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None).unwrap();
+            let l = &laid.outcome.layout;
+            for (net, by) in &l.routes {
+                for (sid, runs) in by {
+                    let labelled = l
+                        .labels
+                        .get(net)
+                        .is_some_and(|ls| ls.iter().any(|x| &x.sheet == sid));
+                    if !labelled {
+                        continue;
+                    }
+                    for run in runs {
+                        if ryusch::route::length(run) <= reach {
+                            continue;
+                        }
+                        let span = run
+                            .windows(2)
+                            .map(|w| Rect::new(w[0], w[1]))
+                            .reduce(Rect::union)
+                            .unwrap();
+                        let inside = l
+                            .regions
+                            .values()
+                            .any(|r| &r.sheet == sid && r.frame_on_sheet().contains(&span));
+                        if !inside {
+                            out.push(format!(
+                                "{name}/{}/{sid}: {net} runs {} mm across regions",
+                                b.id,
+                                ryusch::route::length(run) / 1_000_000
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(out.is_empty(), "{out:#?}");
 }
