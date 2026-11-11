@@ -19,18 +19,179 @@ use crate::solid::Solids;
 use ryukei::geom::{Rigid, Surface, UnitVector3, Vector3};
 use ryukei::name::{Event, Name};
 use ryukei::topo::EntityId;
-// 17.A's tweaks keep the body's topology (`Topology::Keep`); changing it
-// (ryukei 13's re-trim) is a later plan's.
-use ryukei::tweak::{DraftFace, DraftSpec, Hinge, MoveSpec, OffsetFacesSpec, Topology};
+use ryukei::tweak::{Blends, DraftFace, DraftSpec, Hinge, MoveSpec, OffsetFacesSpec, Topology};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Whether `f` is a face tweak, reported as one.
 pub fn takes_sheets(f: &Feature) -> bool {
     matches!(
         f,
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_)
+        Feature::MoveFace(_)
+            | Feature::ReplaceFace(_)
+            | Feature::Draft(_)
+            | Feature::DeleteFace(_)
+            | Feature::DeleteBlend(_)
+            | Feature::ResizeBlend(_)
     )
+}
+
+/// The face tweaks and direct edits this module builds (ryucad 17 and 22).
+pub const TYPES: [&str; 6] = [
+    "move_face",
+    "replace_face",
+    "draft",
+    "delete_face",
+    "delete_blend",
+    "resize_blend",
+];
+
+/// The work units a direct edit may spend before it fails with
+/// `edit_budget_exceeded` (`edit.budget`'s default): the smallest power of
+/// two at least four times [`LARGEST_EDIT`] (and at least `1 << 20`),
+/// measured in plan 22.A (Task 20) in a release build on bc2 (Intel Core
+/// Ultra 5 250K Plus, 18 threads, load average about 2 to 4), 2026-11-10,
+/// and again in plan 22.B (Task 23) in a release build on cox-worker-5
+/// (Intel Core Ultra 7 265KF, 8 threads, load average about 2 to 5),
+/// 2026-11-11, the committed NIST corpus included: nothing moved. Units
+/// are the same on every machine.
+pub const DEFAULT_EDIT_BUDGET: u64 = 1 << 24;
+
+/// The most work units a direct edit that builds was measured spending
+/// (plans 22.A, Task 20, and 22.B, Task 23; the boxes and dates as
+/// [`DEFAULT_EDIT_BUDGET`]'s): ryukei's `edit_props` seed 70, a replace on
+/// 10 faces, 3,249,017 units. ryucad's own largest is 38,149
+/// (`direct_edits`' groove run through, 29,957 in 22.A, before ryukei
+/// 16.A); its largest blend edit 9,705 (`a_bosss_foot_and_a_pockets_rim_
+/// are_defeatured`); the goldens' 12,478 (`topology_tweaks`' slide). No
+/// edit of the committed NIST corpus's `delete_blend --below 2mm` built
+/// (22.B, Task 14), so none sets it.
+pub const LARGEST_EDIT: u64 = 3_249_017;
+
+const _: () = {
+    assert!(DEFAULT_EDIT_BUDGET.is_power_of_two());
+    assert!(DEFAULT_EDIT_BUDGET >= 4 * LARGEST_EDIT);
+};
+
+/// The fields a request may give feature type `ty` of this module.
+pub fn request_fields(ty: &str) -> &'static [&'static str] {
+    match ty {
+        "delete_face" => crate::doc::edit::DELETE_REQUEST,
+        "delete_blend" => crate::doc::edit::DELETE_BLEND_REQUEST,
+        "resize_blend" => crate::doc::edit::RESIZE_REQUEST,
+        _ => crate::doc::tweak::request_fields(ty),
+    }
+}
+
+/// Whether `f`'s kernel call runs under the edit budget: a `delete_face`,
+/// a `delete_blend` or a `resize_blend`, or a tweak that may change topology or remake its blends. A tweak that
+/// keeps both runs as ryucad 17's, unbudgeted.
+pub fn budgeted(f: &Feature) -> bool {
+    matches!(
+        f,
+        Feature::DeleteFace(_) | Feature::DeleteBlend(_) | Feature::ResizeBlend(_)
+    ) || f.retrim().is_some_and(|r| !r.is_keep())
+}
+
+/// What a file's `topology` asks the kernel.
+fn topology(r: crate::doc::edit::Retrim) -> Topology {
+    if r.topology {
+        Topology::Change
+    } else {
+        Topology::Keep
+    }
+}
+
+/// What a file's `blends` asks the kernel.
+fn blends(r: crate::doc::edit::Retrim) -> Blends {
+    if r.blends {
+        Blends::Rebuild
+    } else {
+        Blends::Keep
+    }
+}
+
+/// The kernel's healing for a file's.
+fn heal(h: crate::doc::edit::Heal) -> ryukei::tweak::Heal {
+    match h {
+        crate::doc::edit::Heal::Auto => ryukei::tweak::Heal::Auto,
+        crate::doc::edit::Heal::Cap => ryukei::tweak::Heal::Cap,
+        crate::doc::edit::Heal::Grow => ryukei::tweak::Heal::Grow,
+    }
+}
+
+/// Recognition's tolerance for a blend edit's: its own, else the
+/// kernel's 10 µm.
+fn recognition(t: Option<&crate::units::Quantity>) -> f64 {
+    t.map_or(ryukei::tweak::DEFAULT_TOLERANCE, |q| q.meters())
+}
+
+/// Each seed of a delete with the faces it found, by name.
+type Found = Vec<(Name, Vec<Name>)>;
+
+/// A delete's spec on `body`: its faces, then each seed's feature's
+/// (`feature_faces`), each face once in the order first named; and what
+/// each seed found.
+fn expand(
+    body: &ryukei::topo::Body,
+    faces: &[Name],
+    seeds: &[Name],
+    how: ryukei::tweak::Heal,
+) -> core::result::Result<(ryukei::tweak::DeleteSpec, Found), ryukei::Error> {
+    let mut all: Vec<Name> = Vec::new();
+    for n in faces {
+        if !all.contains(n) {
+            all.push(*n);
+        }
+    }
+    let mut found = Vec::with_capacity(seeds.len());
+    for s in seeds {
+        let of = ryukei::tweak::feature_faces(body, *s)?;
+        for n in &of {
+            if !all.contains(n) {
+                all.push(*n);
+            }
+        }
+        found.push((*s, of));
+    }
+    Ok((
+        ryukei::tweak::DeleteSpec {
+            faces: all,
+            heal: how,
+        },
+        found,
+    ))
+}
+
+/// What a delete's report keeps (`Made::report`): its target, and each
+/// seed with the faces it found, by name.
+pub(crate) fn delete_report(target: &Id, found: &[(Name, Vec<Name>)]) -> Value {
+    json!({
+        "target": target,
+        "seeds": found.iter().map(|(s, of)| json!({
+            "seed": s.to_string(),
+            "faces": of.iter().map(|n| n.to_string()).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// What a blend delete's report keeps: its target, each blend it took
+/// (as [`crate::blends::blend_raw`]) and the faces of the corners they
+/// reached, by name.
+pub(crate) fn blend_delete_report(
+    target: &Id,
+    rec: &ryukei::tweak::Recognition,
+    taken: &std::collections::BTreeSet<usize>,
+) -> Value {
+    json!({
+        "target": target,
+        "blends": taken.iter().map(|&i| crate::blends::blend_raw(rec, i)).collect::<Vec<_>>(),
+        "corners": crate::blends::corners_of(rec, taken)
+            .into_iter()
+            .map(|j| rec.corners[j].face.to_string())
+            .collect::<Vec<_>>(),
+    })
 }
 
 /// What a tweak asks the kernel.
@@ -44,6 +205,26 @@ pub(crate) enum Spec {
         spec: DraftSpec,
         parting: bool,
         asked: Vec<(Name, f64)>,
+    },
+    /// A delete: the faces listed, the seeds whose features go whole
+    /// (found when it builds), and how gaps heal.
+    Delete {
+        faces: Vec<Name>,
+        seeds: Vec<Name>,
+        heal: ryukei::tweak::Heal,
+    },
+    /// A blend delete: every blend at most `below` meters and those
+    /// holding `faces`, recognised at `tolerance`.
+    DeleteBlend {
+        below: Option<f64>,
+        faces: Vec<Name>,
+        tolerance: f64,
+    },
+    /// A resize: each group's faces and the kind it gives their blends,
+    /// recognised at `tolerance`.
+    ResizeBlend {
+        groups: Vec<(Vec<Name>, ryukei::blend::BlendKind)>,
+        tolerance: f64,
     },
 }
 
@@ -163,9 +344,10 @@ pub(crate) fn line(
 }
 
 /// The face (or, with `edge`, the edge) `r` names (in `role` of tweak
-/// `id`) in the target's view: `targets_mixed` for another solid's,
-/// `reference_wrong_kind` for another kind, and whatever the reference
-/// fails with.
+/// `id`) in the target's view, as the names it is now (every piece of one
+/// a later feature split, design 447): `targets_mixed` for another
+/// solid's, `reference_wrong_kind` for another kind, and whatever the
+/// reference fails with.
 #[allow(clippy::too_many_arguments)]
 fn named(
     part: &Part,
@@ -176,7 +358,7 @@ fn named(
     r: &Reference,
     results: &dyn Results,
     edge: bool,
-) -> Result<Name> {
+) -> Result<Vec<Name>> {
     let what = if edge { "an edge" } else { "a face" };
     if r.feature != *target {
         return Err(Error::new(
@@ -191,18 +373,22 @@ fn named(
         .with("role", role)
         .with("solids", [target.as_str(), r.feature.as_str()]));
     }
-    let (_, e) = crate::reference::resolve(part, part.order(), id, role, r, results)?;
-    match (e, edge) {
-        (EntityId::Face(_), false) | (EntityId::Edge(_), true) => Ok(r.name),
-        (e, _) => Err(crate::reference::wrong_kind(
-            part,
-            id,
-            role,
-            r,
-            crate::reference::kind(e),
-            what,
-        )),
-    }
+    let (b, found) = crate::reference::resolve_all(part, part.order(), id, role, r, results)?;
+    found
+        .into_iter()
+        .map(|e| match (e, edge) {
+            (EntityId::Face(f), false) => Ok(b.body.face(f).expect("a live face").name),
+            (EntityId::Edge(x), true) => Ok(b.body.edge(x).expect("a live edge").name),
+            (e, _) => Err(crate::reference::wrong_kind(
+                part,
+                id,
+                role,
+                r,
+                crate::reference::kind(e),
+                what,
+            )),
+        })
+        .collect()
 }
 
 fn face(
@@ -213,7 +399,7 @@ fn face(
     role: &str,
     r: &Reference,
     results: &dyn Results,
-) -> Result<Name> {
+) -> Result<Vec<Name>> {
     named(part, id, target, ty, role, r, results, false)
 }
 
@@ -228,7 +414,15 @@ fn surface(
     results: &dyn Results,
 ) -> Result<Surface> {
     if let Some(r) = with.reference() {
-        let (b, e) = crate::reference::resolve(part, part.order(), id, role, r, results)?;
+        let (b, e) = crate::reference::resolve(
+            part,
+            part.order(),
+            id,
+            role,
+            crate::reference::Follow::Carrier,
+            r,
+            results,
+        )?;
         return match e {
             EntityId::Face(f) => {
                 let face = b.body.face(f).expect("a live face");
@@ -275,7 +469,7 @@ pub(crate) fn hinge(
             };
             let mut names = Vec::with_capacity(edges.len());
             for (i, r) in edges.iter().enumerate() {
-                names.push(named(
+                names.extend(named(
                     part,
                     id,
                     &d.target,
@@ -312,7 +506,7 @@ pub(crate) fn resolve<'a>(
                 _ => 0.0,
             };
             for (role, r) in m.faces() {
-                let n = face(part, id, &m.target, ty, &role, r, before)?;
+                let pieces = face(part, id, &m.target, ty, &role, r, before)?;
                 // A grouped face's distance is its group's.
                 let q = match (&m.by, role.strip_prefix("groups.")) {
                     (MoveBy::Offset { groups, .. }, Some(rest)) => {
@@ -325,21 +519,21 @@ pub(crate) fn resolve<'a>(
                     }
                     _ => d,
                 };
-                faces.push((n, q));
+                faces.extend(pieces.into_iter().map(|n| (n, q)));
             }
             let spec = match motion(part, id, m, before)? {
                 Some(motion) => Spec::Move(MoveSpec {
                     faces: faces.into_iter().map(|(n, _)| n).collect(),
                     motion,
                     tangent: m.tangent,
-                    topology: Topology::Keep,
-                    blends: Default::default(),
+                    topology: topology(m.retrim),
+                    blends: blends(m.retrim),
                 }),
                 None => Spec::Offset(OffsetFacesSpec {
                     faces,
                     tangent: m.tangent,
-                    topology: Topology::Keep,
-                    blends: Default::default(),
+                    topology: topology(m.retrim),
+                    blends: blends(m.retrim),
                 }),
             };
             Ok(Resolved {
@@ -354,7 +548,7 @@ pub(crate) fn resolve<'a>(
             for (i, g) in x.groups.iter().enumerate() {
                 let s = surface(part, id, &format!("groups.{i}.with"), &g.with, before)?;
                 for (j, r) in g.faces.iter().enumerate() {
-                    let n = face(
+                    for n in face(
                         part,
                         id,
                         &x.target,
@@ -362,8 +556,9 @@ pub(crate) fn resolve<'a>(
                         &format!("groups.{i}.faces.{j}"),
                         r,
                         before,
-                    )?;
-                    faces.push((n, s.clone()));
+                    )? {
+                        faces.push((n, s.clone()));
+                    }
                 }
             }
             Ok(Resolved {
@@ -371,8 +566,8 @@ pub(crate) fn resolve<'a>(
                 built,
                 spec: Spec::Replace(ryukei::tweak::ReplaceSpec {
                     faces,
-                    topology: Topology::Keep,
-                    blends: Default::default(),
+                    topology: topology(x.retrim),
+                    blends: blends(x.retrim),
                 }),
             })
         }
@@ -382,14 +577,15 @@ pub(crate) fn resolve<'a>(
             let mut faces = Vec::new();
             let mut asked = Vec::new();
             for (role, r) in d.drafted() {
-                let n = face(part, id, &d.target, ty, &role, r, before)?;
                 let a = d.angle_of(r);
-                faces.push(DraftFace {
-                    face: n,
-                    angle: role.starts_with("groups.").then_some(a),
-                    flip: d.flip.contains(r),
-                });
-                asked.push((n, a));
+                for n in face(part, id, &d.target, ty, &role, r, before)? {
+                    faces.push(DraftFace {
+                        face: n,
+                        angle: role.starts_with("groups.").then_some(a),
+                        flip: d.flip.contains(r),
+                    });
+                    asked.push((n, a));
+                }
             }
             Ok(Resolved {
                 target: &d.target,
@@ -401,11 +597,136 @@ pub(crate) fn resolve<'a>(
                         hinge,
                         faces,
                         tangent: d.tangent,
-                        topology: Topology::Keep,
-                        blends: Default::default(),
+                        topology: topology(d.retrim),
+                        blends: blends(d.retrim),
                     },
                     parting: matches!(d.hinge, DraftHinge::Parting { .. }),
                     asked,
+                },
+            })
+        }
+        Feature::DeleteFace(x) => {
+            let built = crate::rebuild::read(part, solids, id, f, "target", &x.target, before)?;
+            let mut faces = Vec::with_capacity(x.faces.len());
+            for (i, r) in x.faces.iter().enumerate() {
+                faces.extend(face(
+                    part,
+                    id,
+                    &x.target,
+                    ty,
+                    &format!("faces.{i}"),
+                    r,
+                    before,
+                )?);
+            }
+            let mut seeds = Vec::with_capacity(x.seeds.len());
+            for (i, r) in x.seeds.iter().enumerate() {
+                seeds.extend(face(
+                    part,
+                    id,
+                    &x.target,
+                    ty,
+                    &format!("seeds.{i}"),
+                    r,
+                    before,
+                )?);
+            }
+            Ok(Resolved {
+                target: &x.target,
+                built,
+                spec: Spec::Delete {
+                    faces,
+                    seeds,
+                    heal: heal(x.heal),
+                },
+            })
+        }
+        Feature::DeleteBlend(x) => {
+            let built = crate::rebuild::read(part, solids, id, f, "target", &x.target, before)?;
+            let mut faces = Vec::with_capacity(x.faces.len());
+            for (i, r) in x.faces.iter().enumerate() {
+                faces.push(face(
+                    part,
+                    id,
+                    &x.target,
+                    ty,
+                    &format!("faces.{i}"),
+                    r,
+                    before,
+                )?);
+            }
+            Ok(Resolved {
+                target: &x.target,
+                built,
+                spec: Spec::DeleteBlend {
+                    below: x.below.as_ref().map(|q| q.meters()),
+                    faces,
+                    tolerance: recognition(x.tolerance.as_ref()),
+                },
+            })
+        }
+        Feature::ResizeBlend(x) => {
+            use crate::doc::blend::ChamferForm;
+            use crate::doc::edit::BlendSize;
+            use ryukei::blend::{BlendKind, Chamfer};
+            let built = crate::rebuild::read(part, solids, id, f, "target", &x.target, before)?;
+            let mut groups = Vec::with_capacity(x.groups.len());
+            for (i, g) in x.groups.iter().enumerate() {
+                let support = |r: &Reference| {
+                    face(
+                        part,
+                        id,
+                        &x.target,
+                        ty,
+                        &format!("groups.{i}.face"),
+                        r,
+                        before,
+                    )
+                };
+                let kind = match &g.size {
+                    BlendSize::Fillet { radius } => BlendKind::Fillet {
+                        radius: radius.meters(),
+                    },
+                    BlendSize::Chamfer(ChamferForm::Equal { d }) => {
+                        BlendKind::Chamfer(Chamfer::Equal {
+                            distance: d.meters(),
+                        })
+                    }
+                    BlendSize::Chamfer(ChamferForm::Distances { d1, d2, face: on }) => {
+                        BlendKind::Chamfer(Chamfer::Distances {
+                            first: d1.meters(),
+                            second: d2.meters(),
+                            first_face: support(on)?,
+                        })
+                    }
+                    BlendSize::Chamfer(ChamferForm::DistanceAngle { d, angle, face: on }) => {
+                        BlendKind::Chamfer(Chamfer::DistanceAngle {
+                            distance: d.meters(),
+                            angle: angle.radians(),
+                            face: support(on)?,
+                        })
+                    }
+                };
+                let mut faces = Vec::with_capacity(g.faces.len());
+                for (j, r) in g.faces.iter().enumerate() {
+                    faces.push(face(
+                        part,
+                        id,
+                        &x.target,
+                        ty,
+                        &format!("groups.{i}.faces.{j}"),
+                        r,
+                        before,
+                    )?);
+                }
+                groups.push((faces, kind));
+            }
+            Ok(Resolved {
+                target: &x.target,
+                built,
+                spec: Spec::ResizeBlend {
+                    groups,
+                    tolerance: recognition(x.tolerance.as_ref()),
                 },
             })
         }
@@ -600,23 +921,68 @@ pub(crate) fn refusal(e: &ryukei::TweakError) -> Refusal {
 pub(crate) fn hint(r: &Refusal) -> Option<&'static str> {
     match (r.reason, r.case) {
         ("tangency_broken", _) => Some(
-            "set tangent true, so faces tangent to a tweaked face move with it; or put the fillet after this feature in the list, where it is built again on the tweaked edges",
+            "set tangent true, so faces tangent to a tweaked face move with it; or blends: rebuild (--blends rebuild), which makes the fillet again on the tweaked faces; or put the fillet after this feature in the list, where it is built again on the tweaked edges",
         ),
         ("edge_vanishes" | "vertex_splits" | "face_collapses", _) => Some(
-            "the tweak would change the body's topology, which ryucad can't do yet (ryukei 13): a smaller motion, or the faces it reaches listed too, may keep it",
+            "the tweak would change the solid's topology: set topology: change (--topology change) to let faces grow over their neighbours, shrink away or split, and edges and vertices come and go; or a smaller motion, or the faces it reaches listed too, may keep it",
         ),
         ("hinge_not_on_face", _) | ("unsupported", Some("hinge_chain")) => {
             Some("split the face along the parting line first (a split, or a sketch's cut)")
         }
         ("hinge_along_pull", _) => Some("give a pull more nearly square to the face"),
-        ("cap_not_on_face", _) => {
-            Some("heal the gap by growing its neighbours instead, or delete the faces round it too")
-        }
-        ("grow_would_cap", _) => Some("heal the gap by a cap instead"),
+        ("gap_not_healed", _) => Some(
+            "delete the faces round the gap too, try heal: grow or heal: cap, or give one face of a hole, boss or pocket as a seed to delete it whole",
+        ),
+        ("heal_ambiguous" | "region_too_small", _) => Some(
+            "a smaller motion, or the neighbouring faces listed too, gives the edit less to decide",
+        ),
+        ("cap_not_on_face", _) => Some(
+            "heal the gap by growing its neighbours instead (heal: grow), or delete the faces round it too",
+        ),
+        ("grow_would_cap", _) => Some("heal the gap by a cap instead (heal: cap or auto)"),
         ("no_feature", _) => Some(
             "name the feature's faces yourself: a hole's or a boss's faces, which leave a gap a cap closes",
         ),
+        ("not_a_blend", _) => Some(
+            "ryucad blends <part> lists the faces recognised as fillets, chamfers and corners: name one of those (a chamfer's distances face is one of its two supports); a blend made from a file may be read at a looser tolerance (tolerance, up to 0.1 mm)",
+        ),
+        ("blend_lost", _) => Some(
+            "delete the blend first (delete_blend), make the edit, and fillet or chamfer the edges again after it; or a size nearer the blend's own",
+        ),
+        ("bad_tolerance", _) => Some("give a tolerance from 0.00001 mm to 0.1 mm"),
         _ => None,
+    }
+}
+
+/// [`hint`] for a feature that does (`changes`) or doesn't change
+/// topology, refused on `body` (the target as built): a self-intersection
+/// and a lone vertex are topology changes only where the tweak keeps its
+/// topology.
+pub(crate) fn hint_for(
+    r: &Refusal,
+    changes: bool,
+    body: &ryukei::topo::Body,
+) -> Option<&'static str> {
+    // ryukei re-trims an `Uncertain` only at one of the body's vertices
+    // (`ryukei::tweak::retrim::takes`); every other one is refused again
+    // under `topology: change`, so only those get its hint.
+    let at_vertex = || {
+        r.entities.iter().any(|(role, n)| {
+            *role == "at" && matches!(body.by_name(*n), Some(ryukei::topo::EntityId::Vertex(_)))
+        })
+    };
+    match (r.reason, r.case) {
+        ("self_intersecting", _) | ("unsupported", Some("lone_vertex")) if !changes => Some(
+            "the tweak would change the solid's topology: set topology: change (--topology change) to let the kernel re-trim the faces it reaches",
+        ),
+        // The fixed-topology engine leaves a face reaching past its
+        // neighbour (a wall drafted past the box's top) uncertain at the
+        // vertex where they meet.
+        ("uncertain", _) if !changes && at_vertex() => Some(
+            "a decision rounding left uncertain, as where a tweaked face reaches past its neighbour: set topology: change (--topology change) to let the kernel re-trim the faces it reaches",
+        ),
+        ("self_intersecting", _) | ("unsupported", Some("lone_vertex")) => None,
+        _ => hint(r),
     }
 }
 
@@ -631,6 +997,7 @@ fn kernel_error(
     ty: &str,
     (target, built): (&Id, &Built),
     e: ryukei::Error,
+    changes: bool,
 ) -> Error {
     let entity = |role: &str, n: &Name| -> Value {
         let mut v = json!({"role": role});
@@ -648,6 +1015,12 @@ fn kernel_error(
     };
     let r = match &e {
         ryukei::Error::InvalidTweak(t) => refusal(t),
+        ryukei::Error::NotASolid { .. } => Refusal {
+            reason: "not_a_solid",
+            case: None,
+            message: "this edit needs a solid, and the target is a sheet",
+            entities: vec![],
+        },
         _ => Refusal {
             reason: "kernel",
             case: None,
@@ -664,7 +1037,7 @@ fn kernel_error(
     if let Some(c) = r.case {
         err = err.with("case", c);
     }
-    if let Some(h) = hint(&r) {
+    if let Some(h) = hint_for(&r, changes, &built.body) {
         err = err.with("hint", h);
     }
     if !r.entities.is_empty() {
@@ -679,6 +1052,116 @@ fn kernel_error(
     err
 }
 
+/// What to do about a budgeted edit of type `ty` that would turn the
+/// solid inside out. A delete's gap was healed the wrong way round
+/// (ryukei #692); a tweak has no gap, `heal` or `seeds` (`request_fields`
+/// refuses them), so it is pointed at a smaller motion or more faces. No
+/// tweak case is known to reach the guard yet: every case of #692 seen is
+/// a delete's.
+fn inside_out_hint(ty: &str) -> &'static str {
+    if ty == "delete_face" {
+        "the kernel healed the gap the wrong way round (ryukei #692): delete the faces round the gap too, try heal: cap or heal: grow, or give one face of a hole, boss or pocket as a seed"
+    } else {
+        "the kernel re-trimmed the faces the wrong way round (ryukei #692): a smaller motion, or the neighbouring faces listed too, gives the edit less to decide"
+    }
+}
+
+/// A direct edit's result's signed volume (m³) where it is negative: a
+/// solid turned inside out, its faces wound against their region. The
+/// body checks decide winding only for planar faces with straight edges,
+/// and mass properties don't read it (ryukei #692), so a coarse mesh's
+/// signed volume says (1 mm chord, half a radian: a gross inversion, not
+/// a measurement). A sheet, or a body that doesn't mesh: `None`.
+fn inside_out(body: &ryukei::topo::Body) -> Option<f64> {
+    if body.kind() != ryukei::topo::BodyKind::Solid {
+        return None;
+    }
+    let m = ryukei::mesh::tessellate(body, &ryukei::mesh::MeshParams::new(1e-3, 0.5)).ok()?;
+    if !m.faults.is_empty() {
+        return None;
+    }
+    let mut v = 0.0;
+    for [a, b, c] in m.welded_triangles() {
+        let [a, b, c] = [a, b, c].map(|i| m.positions[i as usize].to_vector());
+        v += a.dot(b.cross(c)) / 6.0;
+    }
+    (v < 0.0).then_some(v)
+}
+
+/// `edit_budget_exceeded` for a direct edit (feature `id`, `ty`) its
+/// budget stopped; `None` for any other error.
+pub(crate) fn budget_error(id: &Id, ty: &str, e: &ryukei::Error) -> Option<Error> {
+    let ryukei::Error::BudgetExceeded { spent, budget } = *e else {
+        return None;
+    };
+    Some(
+        Error::new(
+            Code::EditBudgetExceeded,
+            format!("{ty} {id}: the edit didn't finish within edit.budget ({budget} work units; it had spent {spent})"),
+        )
+        .with("feature", id)
+        .with("spent", spent)
+        .with("budget", budget)
+        .with(
+            "hint",
+            "raise edit.budget (ryucad config set edit.budget <units>) to let it run longer, or edit less at once",
+        ),
+    )
+}
+
+/// Origins of a body a direct edit made of `built`: as
+/// [`crate::rebuild::replaced_origins`] gives them (a grown edge in
+/// place of a fillet is `{feature, replaces}`), but where that gives an
+/// entity the feature's own origin, a split's child takes its parent's,
+/// and a merge's child its parents' when they share one (a parent being
+/// a split's child too). A tweak that
+/// keeps its topology journals neither, so its origins are ryucad 17's.
+pub(crate) fn edit_origins(
+    id: &Id,
+    built: &Built,
+    made: &(ryukei::topo::Body, ryukei::name::Journal),
+) -> crate::rebuild::Origins {
+    // Splits first, then merges, whatever order the journal gives them:
+    // the re-trim splits a face it only re-trims and merges the pieces
+    // again (ryukei 13), journalling the merge first, and the merged face
+    // is still the one it was.
+    let mut from: BTreeMap<String, Value> = BTreeMap::new();
+    for e in made.1.events() {
+        if let Event::Split { parent, children } = e
+            && let Some(o) = built.origins.get(&parent.to_string())
+        {
+            for c in children {
+                from.entry(c.to_string()).or_insert_with(|| o.clone());
+            }
+        }
+    }
+    for e in made.1.events() {
+        if let Event::Merged { parents, child } = e {
+            let of = |p: &Name| {
+                let k = p.to_string();
+                built.origins.get(&k).or_else(|| from.get(&k)).cloned()
+            };
+            let mut theirs = parents.iter().map(of);
+            if let Some(Some(o)) = theirs.next()
+                && theirs.all(|x| x.as_ref() == Some(&o))
+            {
+                from.insert(child.to_string(), o);
+            }
+        }
+    }
+    let own = json!({"feature": id});
+    crate::rebuild::replaced_origins(id, built, made)
+        .iter()
+        .map(|(k, o)| {
+            let o = match from.get(k) {
+                Some(p) if *o == own => p.clone(),
+                _ => o.clone(),
+            };
+            (k.clone(), o)
+        })
+        .collect()
+}
+
 /// A tweak: its target as it sees it, through one kernel call. It makes
 /// nothing, so every entity keeps its origin.
 pub fn build(
@@ -691,7 +1174,17 @@ pub fn build(
 ) -> Result<Made> {
     let ty = f.type_name();
     let r = resolve(part, solids, id, f, before)?;
-    let work = crate::work::work(run.job);
+    let budgeted = budgeted(f);
+    let changes = f.retrim().is_some_and(|r| r.topology)
+        || matches!(
+            f,
+            Feature::DeleteFace(_) | Feature::DeleteBlend(_) | Feature::ResizeBlend(_)
+        );
+    let work = if budgeted {
+        crate::work::work(run.job).with_budget(run.edit_budget)
+    } else {
+        crate::work::work(run.job)
+    };
     let key = crate::rebuild::op_key(&part.id, id);
     let body = &r.built.body;
     let (made, report) = match &r.spec {
@@ -709,13 +1202,79 @@ pub fn build(
             ),
             Err(e) => (Err(e), None),
         },
+        Spec::Delete { faces, seeds, heal } => match expand(body, faces, seeds, *heal) {
+            Ok((spec, found)) => (
+                ryukei::tweak::delete_faces_with(key, body, &spec, &work),
+                Some(delete_report(r.target, &found)),
+            ),
+            Err(e) => (Err(e), None),
+        },
+        Spec::DeleteBlend {
+            below,
+            faces,
+            tolerance,
+        } => {
+            let options = ryukei::tweak::RecogniseOptions {
+                tolerance: *tolerance,
+            };
+            match ryukei::tweak::recognise_blends_with(body, &options, &work) {
+                Err(e) => (Err(e), None),
+                Ok(rec) => {
+                    let taken = crate::blends::taken(&rec, *below, faces);
+                    let spec = ryukei::tweak::DeleteBlends {
+                        max_size: *below,
+                        faces: faces.clone(),
+                        options,
+                    };
+                    (
+                        ryukei::tweak::delete_blends_with(key, body, &spec, &work),
+                        Some(blend_delete_report(r.target, &rec, &taken)),
+                    )
+                }
+            }
+        }
+        Spec::ResizeBlend { groups, tolerance } => {
+            let options = ryukei::tweak::RecogniseOptions {
+                tolerance: *tolerance,
+            };
+            match ryukei::tweak::recognise_blends_with(body, &options, &work) {
+                Err(e) => (Err(e), None),
+                Ok(rec) => {
+                    let sizes = crate::blends::sizes(id, &rec, groups)?;
+                    (
+                        ryukei::tweak::resize_blends_with(key, body, &sizes, &options, &work),
+                        Some(crate::blends::resize_report(r.target, &rec, &sizes)),
+                    )
+                }
+            }
+        }
     };
     let made = made.map_err(|e| {
         crate::work::stopped(&e, run.job)
-            .unwrap_or_else(|| kernel_error(part, id, ty, (r.target, r.built), e))
+            .or_else(|| budget_error(id, ty, &e))
+            .unwrap_or_else(|| kernel_error(part, id, ty, (r.target, r.built), e, changes))
     })?;
-    let origins = crate::rebuild::replaced_origins(id, r.built, &made);
+    if budgeted && let Some(v) = inside_out(&made.0) {
+        return Err(Error::new(
+            Code::TweakFailed,
+            format!("{ty} {id}: the edit would turn the solid inside out (its volume would be {:.6} mm³)", v * 1e9),
+        )
+        .with("feature", id)
+        .with("solid", r.target)
+        .with("reason", "inside_out")
+        .with("kernel", "tweak")
+        .with("volume_mm3", v * 1e9)
+        .with("hint", inside_out_hint(ty)));
+    }
+    let origins = edit_origins(id, r.built, &made);
     let built = crate::rebuild::finish(id, ty, made, origins)?;
+    let report = if budgeted {
+        let mut rep = report.unwrap_or_else(|| json!({"target": r.target}));
+        rep["spent"] = json!(work.spent());
+        Some(rep)
+    } else {
+        report
+    };
     Ok(Made {
         report: report.map(Arc::new),
         ..Made::new(vec![(r.target.clone(), Arc::new(built))])
@@ -765,7 +1324,7 @@ pub fn check(part: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result
 /// in `faces`. After it, `faces` holds the listed faces and `groups` the
 /// groups; `face` is taken. Any other type is left alone.
 pub fn take_given(ty: &str, f: &mut FeatureFields) -> Result<()> {
-    if !crate::doc::tweak::TYPES.contains(&ty) {
+    if !TYPES.contains(&ty) {
         return Ok(());
     }
     let mut faces: Vec<Value> = f.face.take().map(|x| vec![json!(x)]).unwrap_or_default();
@@ -786,6 +1345,19 @@ pub fn take_given(ty: &str, f: &mut FeatureFields) -> Result<()> {
             return Err(Error::new(
                 Code::InvalidParam,
                 format!("a {ty}'s faces are a list of faces, each <part>/<solid>/<name>"),
+            )
+            .with("param", "faces"));
+        }
+    }
+    if ty == "delete_face" || ty == "delete_blend" {
+        // The CLI's --seed goes as a pattern's features.
+        if ty == "delete_face" && f.seeds.is_none() {
+            f.seeds = f.features.take();
+        }
+        if !groups.is_empty() {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("a {ty}'s faces are a list of faces, each <part>/<solid>/<name>: it has no groups"),
             )
             .with("param", "faces"));
         }
@@ -827,7 +1399,8 @@ pub fn default_target(ty: &str, f: &FeatureFields, before: &[Id], part: &Id) -> 
         .or_else(|| {
             let g = f.groups.as_ref()?.as_array()?.first()?;
             g.get("faces")?.as_array()?.first().cloned()
-        });
+        })
+        .or_else(|| f.seeds.as_ref()?.first().map(|t| json!(t)));
     if let Some(t) = first.as_ref().and_then(Value::as_str)
         && let Ok(r) = Reference::parse(t, part)
     {
@@ -861,6 +1434,9 @@ pub fn from_given(
         Some(Feature::MoveFace(m)) => m.fields(),
         Some(Feature::ReplaceFace(r)) => r.fields(),
         Some(Feature::Draft(d)) => d.fields(),
+        Some(Feature::DeleteFace(x)) => x.fields(),
+        Some(Feature::DeleteBlend(x)) => x.fields(),
+        Some(Feature::ResizeBlend(x)) => x.fields(),
         _ => json!({}),
     };
     let o = v.as_object_mut().expect("fields are an object");
@@ -930,6 +1506,13 @@ pub fn from_given(
                 None => o.remove("groups"),
             };
         }
+        retrim_given(o, f)?;
+    } else if ty == "delete_blend" {
+        delete_blend_given(o, f, &reference)?;
+    } else if ty == "resize_blend" {
+        resize_given(o, f, &reference)?;
+    } else if ty == "delete_face" {
+        delete_given(o, f, &reference)?;
     } else {
         if ty == "draft" {
             draft_given(o, f, &reference, &geom)?;
@@ -1003,6 +1586,7 @@ pub fn from_given(
             }
             None => {}
         }
+        retrim_given(o, f)?;
     }
     let mut r = crate::doc::files::Obj::new(&v, "")?;
     let out = match ty {
@@ -1012,10 +1596,226 @@ pub fn from_given(
         "draft" => Feature::Draft(Box::new(crate::doc::tweak::Draft::from_fields(
             &mut r, env,
         )?)),
+        "delete_face" => {
+            Feature::DeleteFace(Box::new(crate::doc::edit::DeleteFace::from_fields(&mut r)?))
+        }
+        "delete_blend" => Feature::DeleteBlend(Box::new(
+            crate::doc::edit::DeleteBlend::from_fields(&mut r, unit, env)?,
+        )),
+        "resize_blend" => Feature::ResizeBlend(Box::new(
+            crate::doc::edit::ResizeBlend::from_fields(&mut r, unit, env)?,
+        )),
         _ => Feature::MoveFace(Box::new(MoveFace::from_fields(&mut r, unit, env)?)),
     };
     r.finish()?;
     Ok(out)
+}
+
+/// A text list of faces (`faces` as the request gives them after
+/// [`take_given`]) as references, each at `/<key>/<i>`; `None` when not
+/// given.
+fn face_list(
+    f: &FeatureFields,
+    key: &str,
+    reference: &dyn Fn(&str, &str) -> Result<Value>,
+) -> Result<Option<Vec<Value>>> {
+    let Some(Value::Array(a)) = &f.faces else {
+        return Ok(None);
+    };
+    a.iter()
+        .filter_map(|x| x.as_str())
+        .enumerate()
+        .map(|(i, t)| reference(t, &format!("/{key}/{i}")))
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
+/// A scalar given as text or a number, `""` taking it away.
+fn put(o: &mut serde_json::Map<String, Value>, key: &str, given: &Option<Value>) {
+    match given {
+        None => {}
+        Some(Value::String(s)) if s.is_empty() => {
+            o.remove(key);
+        }
+        Some(v) => {
+            o.insert(key.into(), v.clone());
+        }
+    }
+}
+
+/// A blend delete's own fields from what was given, over `o` (its file's):
+/// its faces as text (`[]` for none), `below` and `tolerance`.
+fn delete_blend_given(
+    o: &mut serde_json::Map<String, Value>,
+    f: &FeatureFields,
+    reference: &dyn Fn(&str, &str) -> Result<Value>,
+) -> Result<()> {
+    if let Some(refs) = face_list(f, "faces", reference)? {
+        if refs.is_empty() {
+            o.remove("faces");
+        } else {
+            o.insert("faces".into(), json!(refs));
+        }
+    }
+    put(o, "below", &f.below);
+    put(o, "tolerance", &f.tolerance);
+    Ok(())
+}
+
+/// A resize's own fields from what was given, over `o` (its file's): its
+/// groups whole (faces and a chamfer's face as text), or its one group's
+/// fields: a fillet's `radius` (which takes a chamfer's form away), a
+/// chamfer's `form` (keeping only what it takes) and sizes, its
+/// `chamfer_face`, and the blends' `faces`. A file of several groups
+/// takes them whole.
+fn resize_given(
+    o: &mut serde_json::Map<String, Value>,
+    f: &FeatureFields,
+    reference: &dyn Fn(&str, &str) -> Result<Value>,
+) -> Result<()> {
+    let sizes = [
+        ("radius", &f.radius),
+        ("d", &f.d),
+        ("d1", &f.d1),
+        ("d2", &f.d2),
+        ("angle", &f.angle),
+    ];
+    let faces = face_list(f, "groups/0/faces", reference)?;
+    let one = sizes.iter().any(|(_, x)| x.is_some())
+        || f.form.is_some()
+        || f.chamfer_face.is_some()
+        || faces.is_some();
+    if let Some(gs) = &f.groups {
+        if one {
+            return Err(Error::new(
+                Code::Usage,
+                "give a resize_blend's groups, or its one group's fields (radius, or form, d, d1, d2, angle and chamfer_face; and faces), not both",
+            ));
+        }
+        let Value::Array(gs) = gs else {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "a resize_blend's groups are a list, each a size and the blends' faces",
+            )
+            .with("param", "groups"));
+        };
+        let mut out = Vec::with_capacity(gs.len());
+        for (i, g) in gs.iter().enumerate() {
+            let mut g = g.clone();
+            if let Some(Value::Array(fs)) = g.get_mut("faces") {
+                for (j, x) in fs.iter_mut().enumerate() {
+                    if let Some(t) = x.as_str().map(str::to_owned) {
+                        *x = reference(&t, &format!("/groups/{i}/faces/{j}"))?;
+                    }
+                }
+            }
+            if let Some(t) = g.get("face").and_then(Value::as_str).map(str::to_owned) {
+                g["face"] = reference(&t, &format!("/groups/{i}/face"))?;
+            }
+            out.push(g);
+        }
+        o.insert("groups".into(), Value::Array(out));
+    } else if one {
+        let gs = o
+            .entry("groups")
+            .or_insert_with(|| json!([{}]))
+            .as_array_mut()
+            .expect("groups are a list");
+        if gs.len() != 1 {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "this resize_blend has {} groups: give them all, as groups",
+                    gs.len()
+                ),
+            )
+            .with("param", "groups"));
+        }
+        let g = gs[0].as_object_mut().expect("a group");
+        if f.radius.is_some() {
+            g.retain(|k, _| k == "faces");
+        }
+        if let Some(form) = &f.form {
+            let takes: &[&str] = match form.as_str() {
+                "equal" => &["d", "faces"],
+                "distances" => &["d1", "d2", "face", "faces"],
+                "distance_angle" => &["d", "angle", "face", "faces"],
+                _ => &["faces"],
+            };
+            g.retain(|k, _| takes.contains(&k.as_str()));
+            g.insert("form".into(), json!(form));
+        }
+        for (k, x) in sizes {
+            if let Some(x) = x {
+                g.insert(k.into(), x.clone());
+            }
+        }
+        if let Some(t) = &f.chamfer_face {
+            g.insert("face".into(), reference(t, "/groups/0/face")?);
+        }
+        if let Some(refs) = faces {
+            g.insert("faces".into(), json!(refs));
+        }
+    }
+    put(o, "tolerance", &f.tolerance);
+    Ok(())
+}
+
+/// A delete's own fields from what was given, over `o` (its file's):
+/// faces and seeds as text, each list replacing the file's (`[]` for
+/// none), and its healing (`auto` taking it away). A heal it doesn't
+/// know, or neither faces nor seeds left, is refused at its param.
+fn delete_given(
+    o: &mut serde_json::Map<String, Value>,
+    f: &FeatureFields,
+    reference: &dyn Fn(&str, &str) -> Result<Value>,
+) -> Result<()> {
+    let texts: Option<Vec<String>> = match &f.faces {
+        None => None,
+        Some(Value::Array(a)) => Some(
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect(),
+        ),
+        Some(_) => None,
+    };
+    for (key, list) in [("faces", texts.as_ref()), ("seeds", f.seeds.as_ref())] {
+        let Some(list) = list else { continue };
+        let refs = list
+            .iter()
+            .enumerate()
+            .map(|(i, t)| reference(t, &format!("/{key}/{i}")))
+            .collect::<Result<Vec<_>>>()?;
+        if refs.is_empty() {
+            o.remove(key);
+        } else {
+            o.insert(key.into(), json!(refs));
+        }
+    }
+    match f.heal.as_deref() {
+        None => {}
+        Some("auto") => {
+            o.remove("heal");
+        }
+        Some(h @ ("cap" | "grow")) => {
+            o.insert("heal".into(), json!(h));
+        }
+        Some(h) => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("a delete_face's heal is auto, cap or grow, not {h:?}"),
+            )
+            .with("param", "heal"));
+        }
+    }
+    if !o.contains_key("faces") && !o.contains_key("seeds") {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a delete_face names the faces it deletes (faces), or a face of each hole, boss or pocket it deletes whole (seeds)",
+        )
+        .with("param", "faces"));
+    }
+    Ok(())
 }
 
 /// A draft's own fields from what was given, over `o` (its file's): an
@@ -1110,6 +1910,7 @@ pub fn report(part: &Id, f: &Feature) -> Value {
                 }
             }
             v["tangent"] = json!(m.tangent);
+            retrim_report(&mut v, m.retrim);
             for (role, r) in m.faces() {
                 *v.pointer_mut(&pointer(&role)).expect("its own face") = json!(r.text(part));
             }
@@ -1117,6 +1918,7 @@ pub fn report(part: &Id, f: &Feature) -> Value {
         }
         Feature::ReplaceFace(x) => {
             let mut v = x.fields();
+            retrim_report(&mut v, x.retrim);
             for (i, g) in x.groups.iter().enumerate() {
                 v["groups"][i]["with"] = json!(g.with.text(part));
             }
@@ -1127,6 +1929,7 @@ pub fn report(part: &Id, f: &Feature) -> Value {
         }
         Feature::Draft(d) => {
             let mut v = d.fields();
+            retrim_report(&mut v, d.retrim);
             v["angle"] = d.angle.report();
             for (i, g) in d.groups.iter().enumerate() {
                 v["groups"][i]["angle"] = g.quantity.report();
@@ -1148,8 +1951,93 @@ pub fn report(part: &Id, f: &Feature) -> Value {
             }
             v
         }
+        Feature::DeleteFace(x) => {
+            let mut v = x.fields();
+            v["heal"] = json!(x.heal.as_str());
+            for (role, r) in x.references() {
+                *v.pointer_mut(&pointer(&role)).expect("its own face") = json!(r.text(part));
+            }
+            v
+        }
+        Feature::DeleteBlend(x) => {
+            let mut v = x.fields();
+            if let Some(b) = &x.below {
+                v["below"] = b.report();
+            }
+            if let Some(t) = &x.tolerance {
+                v["tolerance"] = t.report();
+            }
+            for (role, r) in x.references() {
+                *v.pointer_mut(&pointer(&role)).expect("its own face") = json!(r.text(part));
+            }
+            v
+        }
+        Feature::ResizeBlend(x) => {
+            let mut v = x.fields();
+            for (i, g) in x.groups.iter().enumerate() {
+                let q = &mut v["groups"][i];
+                match &g.size {
+                    crate::doc::edit::BlendSize::Fillet { radius } => q["radius"] = radius.report(),
+                    crate::doc::edit::BlendSize::Chamfer(form) => {
+                        use crate::doc::blend::ChamferForm as F;
+                        match form {
+                            F::Equal { d } => q["d"] = d.report(),
+                            F::Distances { d1, d2, .. } => {
+                                q["d1"] = d1.report();
+                                q["d2"] = d2.report();
+                            }
+                            F::DistanceAngle { d, angle, .. } => {
+                                q["d"] = d.report();
+                                q["angle"] = angle.report();
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(t) = &x.tolerance {
+                v["tolerance"] = t.report();
+            }
+            for (role, r) in x.references() {
+                *v.pointer_mut(&pointer(&role)).expect("its own face") = json!(r.text(part));
+            }
+            v
+        }
         _ => unreachable!("a tweak"),
     }
+}
+
+/// A face tweak's `topology` and `blends` from what was given, over `o`
+/// (its file's): `keep` takes each away, `change` and `rebuild` set it.
+fn retrim_given(o: &mut serde_json::Map<String, Value>, f: &FeatureFields) -> Result<()> {
+    for (key, given, other) in [
+        ("topology", &f.topology, "change"),
+        ("blends", &f.blends, "rebuild"),
+    ] {
+        match given.as_deref() {
+            None => {}
+            Some("keep") => {
+                o.remove(key);
+            }
+            Some(x) if x == other => {
+                o.insert(key.into(), json!(other));
+            }
+            Some(x) => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("a face tweak's {key} is keep or {other}, not {x:?}"),
+                )
+                .with("param", key));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A face tweak's `topology` and `blends` as a report gives them: each
+/// always, `keep` when not set.
+fn retrim_report(v: &mut Value, r: crate::doc::edit::Retrim) {
+    v["topology"] = json!(if r.topology { "change" } else { "keep" });
+    v["blends"] = json!(if r.blends { "rebuild" } else { "keep" });
 }
 
 /// What a tweak resolved to, beside its fields: a move's rigid `motion`
@@ -1163,6 +2051,7 @@ pub fn resolved(
     id: &Id,
     f: &Feature,
     references: bool,
+    unit: crate::units::Unit,
 ) -> Option<Value> {
     if !takes_sheets(f) {
         return None;
@@ -1210,6 +2099,83 @@ pub fn resolved(
             refs.sort();
             v["modified"]["references"] = json!(refs);
         }
+        // A direct edit's new and lost entities, against its target as it
+        // saw it (a split face's pieces are new, the face it was is gone),
+        // and what it spent of its budget.
+        if budgeted(f)
+            && let Ok(was) =
+                crate::rebuild::read(part, &Solids::of(part), id, f, "target", target, results)
+        {
+            let (had, has) = (
+                crate::rebuild::names(&was.body),
+                crate::rebuild::names(&b.body),
+            );
+            v["created"] = tally(
+                (&part.id, target),
+                &b.body,
+                has.difference(&had),
+                references,
+            );
+            v["deleted"] = tally(
+                (&part.id, target),
+                &was.body,
+                had.difference(&has),
+                references,
+            );
+        }
+        if let crate::rebuild::Output::Solids(m) = out
+            && let Some(rep) = &m.report
+            && let Some(n) = rep.get("spent")
+        {
+            v["spent"] = n.clone();
+        }
+        if let crate::rebuild::Output::Solids(m) = out
+            && let Some(rep) = &m.report
+            && let Some(Value::Array(found)) = rep.get("seeds")
+        {
+            let at = |n: &Value| {
+                json!(format!(
+                    "{}/{target}/{}",
+                    part.id,
+                    n.as_str().unwrap_or_default()
+                ))
+            };
+            v["seeds"] = Value::Array(
+                found
+                    .iter()
+                    .map(|x| json!({
+                        "seed": at(&x["seed"]),
+                        "faces": x["faces"].as_array().into_iter().flatten().map(at).collect::<Vec<_>>(),
+                    }))
+                    .collect(),
+            );
+        }
+        // A blend edit's kept report: each blend it took, each corner, each
+        // blend it made again, as references and quantities.
+        if let crate::rebuild::Output::Solids(m) = out
+            && let Some(rep) = &m.report
+        {
+            let show = |x: &Value| crate::blends::render(&part.id, target, unit, x);
+            if let Some(Value::Array(bs)) = rep.get("blends") {
+                v["blends"] = Value::Array(bs.iter().map(show).collect());
+            }
+            if let Some(Value::Array(cs)) = rep.get("corners") {
+                v["corners"] = Value::Array(
+                    cs.iter()
+                        .map(|c| {
+                            json!(format!(
+                                "{}/{target}/{}",
+                                part.id,
+                                c.as_str().unwrap_or_default()
+                            ))
+                        })
+                        .collect(),
+                );
+            }
+            if let Some(Value::Array(rs)) = rep.get("resized") {
+                v["resized"] = Value::Array(rs.iter().map(show).collect());
+            }
+        }
         if let crate::rebuild::Output::Solids(m) = out
             && let Some(rep) = &m.report
             && let Some(a) = angles(&part.id, rep)
@@ -1218,6 +2184,33 @@ pub fn resolved(
         }
     }
     Some(v)
+}
+
+/// Counts of `names` by kind as `body` holds them, and with `references`
+/// each as `<part>/<target>/<name>`, sorted.
+fn tally<'a>(
+    (part, target): (&Id, &Id),
+    body: &ryukei::topo::Body,
+    names: impl Iterator<Item = &'a Name>,
+    references: bool,
+) -> Value {
+    let (mut faces, mut edges, mut vertices) = (0u64, 0u64, 0u64);
+    let mut refs = Vec::new();
+    for n in names {
+        match body.by_name(*n) {
+            Some(EntityId::Face(_)) => faces += 1,
+            Some(EntityId::Edge(_)) => edges += 1,
+            Some(EntityId::Vertex(_)) => vertices += 1,
+            _ => continue,
+        }
+        refs.push(format!("{part}/{target}/{n}"));
+    }
+    let mut v = json!({"faces": faces, "edges": edges, "vertices": vertices});
+    if references {
+        refs.sort();
+        v["references"] = json!(refs);
+    }
+    v
 }
 
 /// A draft report's angles as output gives them: each face as
@@ -1313,9 +2306,191 @@ pub fn draft_warnings(part: &Id, id: &Id, rep: &Value) -> Vec<Value> {
         .collect()
 }
 
+/// A read-only query's kernel refusal (`feature_faces.get`'s, `blends.get`'s):
+/// `tweak_failed` with its reason, `kernel: tweak`, the kernel's text and
+/// a hint, `key` naming what was asked about.
+pub(crate) fn query_error(key: &str, at: &str, e: ryukei::Error) -> Error {
+    let r = match &e {
+        ryukei::Error::InvalidTweak(t) => refusal(t),
+        _ => Refusal {
+            reason: "kernel",
+            case: None,
+            message: "the kernel refused it",
+            entities: vec![],
+        },
+    };
+    let mut err = Error::new(Code::TweakFailed, format!("{at}: {} ({e})", r.message))
+        .with(key, at)
+        .with("reason", r.reason)
+        .with("kernel", "tweak")
+        .with("refusal", format!("{e:?}"));
+    if let Some(h) = hint(&r) {
+        err = err.with("hint", h);
+    }
+    err
+}
+
+/// `feature_faces.get`: the faces of the hole, boss or pocket `face` (one
+/// face of a part's solid, `<part>/<solid>/<name>`) belongs to, in the
+/// part as it shows at `rev`. A face of no such feature is `tweak_failed`
+/// `no_feature`, a reference import's `reference_body`.
+pub fn feature_faces_get(
+    session: &mut crate::session::Session,
+    face: &str,
+    rev: Option<&str>,
+) -> Result<Value> {
+    let (commit, s) = session.at(rev)?;
+    let part = crate::entity::EntityRef::parse(face)?.part;
+    if crate::server::part_kind(s.project().part(&part)?) == crate::doc::files::PartKind::Assembly {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("{face}: feature-faces takes a part's face, not an assembly's"),
+        )
+        .with("face", face));
+    }
+    let found = crate::measure::locate(s, face)?;
+    let [l] = found.as_slice() else {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "{face}: feature-faces takes one face of a part's solid, <part>/<solid>/<name>"
+            ),
+        )
+        .with("face", face));
+    };
+    let ryukei::measure::Entity::Face(f) = l.entity else {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "{face} is {} {}, not a face",
+                if l.kind == "edge" { "an" } else { "a" },
+                l.kind
+            ),
+        )
+        .with("face", face)
+        .with("kind", l.kind));
+    };
+    if l.built.reference {
+        return Err(Error::new(
+            Code::ReferenceBody,
+            format!("{face} is a face of a reference import, which nothing edits: convert it to a solid first"),
+        )
+        .with("face", face)
+        .with("hint", format!("ryucad import convert {}/{}", l.part, l.solid)));
+    }
+    let seed = l.built.body.face(f).expect("a live face").name;
+    let names = ryukei::tweak::feature_faces(&l.built.body, seed)
+        .map_err(|e| query_error("face", face, e))?;
+    let mut v = json!({
+        "face": face,
+        "solid": format!("{}/{}", l.part, l.solid),
+        "faces": names.iter().map(|n| format!("{}/{}/{n}", l.part, l.solid)).collect::<Vec<_>>(),
+    });
+    if let Some(c) = commit {
+        v["commit"] = json!(c);
+    }
+    Ok(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hints_point_at_topology_and_blends() {
+        use ryukei::TweakError as T;
+        let n = Name::from_u128(7);
+        let (body, _) = ryukei::primitive::block(
+            ryukei::name::OpKey::from_bytes(b"b"),
+            0.01,
+            0.01,
+            0.01,
+            &ryukei::geom::Rigid::IDENTITY,
+        )
+        .unwrap();
+        let hint_for = |r: &Refusal, changes: bool| hint_for(r, changes, &body);
+        let h = |e: T, changes: bool| hint_for(&refusal(&e), changes).unwrap_or_default();
+        assert!(h(T::EdgeVanishes { edge: n }, false).contains("topology: change"));
+        assert!(h(T::VertexSplits { vertex: n }, false).contains("topology: change"));
+        assert!(h(T::FaceCollapses { face: n }, false).contains("topology: change"));
+        assert!(h(T::SelfIntersecting { faces: [n, n] }, false).contains("topology: change"));
+        assert_eq!(
+            hint_for(&refusal(&T::SelfIntersecting { faces: [n, n] }), true),
+            None
+        );
+        // ryukei re-trims an Uncertain only at one of the body's vertices:
+        // at a face (or a name the body lacks) the hint would be refused
+        // again, so there is none.
+        let vertex = body.vertices().next().unwrap();
+        let vertex = body
+            .name_of(ryukei::topo::EntityId::Vertex(vertex))
+            .unwrap();
+        let face = body.faces().next().unwrap();
+        let face = body.name_of(ryukei::topo::EntityId::Face(face)).unwrap();
+        assert!(h(T::Uncertain { at: vertex }, false).contains("topology: change"));
+        assert_eq!(hint_for(&refusal(&T::Uncertain { at: vertex }), true), None);
+        assert_eq!(hint_for(&refusal(&T::Uncertain { at: face }), false), None);
+        assert_eq!(hint_for(&refusal(&T::Uncertain { at: n }), false), None);
+        let lone = T::Unsupported {
+            at: n,
+            case: ryukei::TweakCase::LoneVertex,
+        };
+        assert!(h(lone, false).contains("topology: change"));
+        assert!(h(T::TangencyBroken { edge: n }, false).contains("blends: rebuild"));
+        assert!(h(T::TangencyBroken { edge: n }, false).contains("tangent true"));
+        assert!(h(T::GapNotHealed { face: n }, true).contains("heal"));
+        assert!(h(T::HealAmbiguous { face: n }, true).contains("smaller motion"));
+        assert!(h(T::RegionTooSmall { face: n }, true).contains("smaller motion"));
+    }
+
+    #[test]
+    fn a_budget_refusal_has_its_own_code() {
+        let id = Id::parse("d", "feature").unwrap();
+        let spent = ryukei::Error::BudgetExceeded {
+            spent: 9,
+            budget: 4,
+        };
+        let e = budget_error(&id, "delete_face", &spent).unwrap();
+        assert_eq!(e.code, Code::EditBudgetExceeded);
+        assert_eq!(e.details["spent"], 9);
+        assert_eq!(e.details["budget"], 4);
+        assert_eq!(e.details["feature"], "d");
+        assert!(e.details["hint"].as_str().unwrap().contains("edit.budget"));
+        assert!(budget_error(&id, "delete_face", &ryukei::Error::Cancelled).is_none());
+    }
+
+    #[test]
+    fn an_inside_out_tweak_is_not_told_to_heal() {
+        let delete = inside_out_hint("delete_face");
+        assert!(delete.contains("heal: cap") && delete.contains("seed"));
+        for ty in ["move_face", "replace_face", "draft"] {
+            let h = inside_out_hint(ty);
+            assert!(h.contains("smaller motion"), "{ty}: {h}");
+            assert!(!h.contains("heal") && !h.contains("seed"), "{ty}: {h}");
+        }
+    }
+
+    #[test]
+    fn only_deletes_and_retrims_are_budgeted() {
+        let read = |v: Value| {
+            Feature::from_json(&v, crate::units::Unit::Mm, &crate::expr::Env::empty()).unwrap()
+        };
+        let face = json!({"feature": "b", "name": format!("{:032x}", 1)});
+        let mv = |extra: Value| {
+            let mut v = json!({"format": crate::doc::edit::FORMAT, "kind": "ryucad.feature",
+                "type": "move_face", "target": "b", "by": "translate", "direction": "x",
+                "distance": "1 mm", "faces": [face]});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            read(v)
+        };
+        assert!(!budgeted(&mv(json!({}))));
+        assert!(budgeted(&mv(json!({"topology": "change"}))));
+        assert!(budgeted(&mv(json!({"blends": "rebuild"}))));
+        assert!(budgeted(&read(json!({"format": crate::doc::edit::FORMAT,
+            "kind": "ryucad.feature", "type": "delete_face", "target": "b", "faces": [face]}))));
+    }
     use ryukei::geom::{Point3, UnitVector3, Vector3};
 
     fn close(a: Point3, b: Point3) {
@@ -1518,6 +2693,137 @@ mod tests {
                 .unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn the_protocol_sets_and_clears_topology_and_blends() {
+        let (dir, mut s) = boxes();
+        let b = names(&mut s, "b", "faces");
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "move_face", "id": "m",
+            "direction": "z", "distance": "1 mm", "faces": [format!("p/b/{}", b[0])],
+            "topology": "change", "blends": "rebuild"}),
+        )
+        .unwrap();
+        let v = file(&dir, "m");
+        assert_eq!(
+            (v["topology"].as_str(), v["blends"].as_str()),
+            (Some("change"), Some("rebuild"))
+        );
+        assert_eq!(v["format"], crate::doc::edit::FORMAT);
+        // feature.show gives both always.
+        let shown = call(&mut s, "feature.show", json!({"part": "p", "id": "m"})).unwrap();
+        assert_eq!(shown["topology"], "change", "{shown}");
+        // keep clears each; the file goes back to ryucad 17's format.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "m", "topology": "keep",
+            "blends": "keep"}),
+        )
+        .unwrap();
+        let v = file(&dir, "m");
+        assert!(
+            v.get("topology").is_none() && v.get("blends").is_none(),
+            "{v}"
+        );
+        assert_eq!(v["format"], crate::doc::tweak::FORMAT);
+        let shown = call(&mut s, "feature.show", json!({"part": "p", "id": "m"})).unwrap();
+        assert_eq!(
+            (shown["topology"].as_str(), shown["blends"].as_str()),
+            (Some("keep"), Some("keep")),
+            "{shown}"
+        );
+        // Anything else is refused at its param.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "m", "topology": "grow"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["param"].as_str()),
+            (Code::InvalidParam, Some("topology"))
+        );
+        // A primitive takes neither.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "c", "topology": "change"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+    }
+
+    #[test]
+    fn the_protocol_adds_and_edits_a_delete() {
+        let (dir, mut s) = boxes();
+        let b = names(&mut s, "b", "faces");
+        // Seeds as the CLI sends --seed (features); no target, two solids:
+        // the seed names it.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "delete_face", "id": "d",
+            "features": [format!("p/b/{}", b[0])], "heal": "grow"}),
+        )
+        .unwrap();
+        let v = file(&dir, "d");
+        assert_eq!(
+            (v["target"].as_str(), v["heal"].as_str()),
+            (Some("b"), Some("grow")),
+            "{v}"
+        );
+        assert_eq!(v["seeds"][0]["name"], json!(b[0]), "{v}");
+        assert_eq!(v["format"], crate::doc::edit::FORMAT);
+        // A face as `face`; heal auto isn't written; seeds cleared.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "d",
+            "face": format!("p/b/{}", b[1]), "heal": "auto", "seeds": []}),
+        )
+        .unwrap();
+        let v = file(&dir, "d");
+        assert!(v.get("heal").is_none() && v.get("seeds").is_none(), "{v}");
+        assert_eq!(v["faces"][0]["name"], json!(b[1]), "{v}");
+        // Neither faces nor seeds; a field it doesn't take; a bad heal.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "d", "faces": []}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam, "{e}");
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "d", "tangent": false}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["param"].as_str()),
+            (Code::InvalidParam, Some("tangent"))
+        );
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "d", "heal": "patch"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam, "{e}");
+        // A face of another solid.
+        let c = names(&mut s, "c", "faces");
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "d",
+            "faces": [format!("p/c/{}", c[0])]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::TargetsMixed, "{e}");
     }
 
     #[test]
@@ -2231,5 +3537,120 @@ mod tests {
         assert!(draft_warnings(&part, &id, &rep("neutral", t - 0.01, t + 0.01)).is_empty());
         // Any other report (an import's, a fill's) says nothing here.
         assert!(draft_warnings(&part, &id, &json!({"sides": []})).is_empty());
+    }
+
+    #[test]
+    fn blend_edits_are_made_from_what_was_given() {
+        let part = Id::parse("p", "part").unwrap();
+        let env = crate::expr::Env::empty();
+        let n = |k: u128| format!("p/b/{k:032x}");
+        let given = |v: serde_json::Value| -> FeatureFields { serde_json::from_value(v).unwrap() };
+        // A blend delete by size, then by face too.
+        let mut f = given(json!({"target": "b", "below": "2 mm"}));
+        take_given("delete_blend", &mut f).unwrap();
+        let d = from_given(
+            "delete_blend",
+            None,
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(d.to_json()["below"], "2 mm");
+        let mut f = given(json!({"faces": [n(1)], "tolerance": "0.001 mm"}));
+        take_given("delete_blend", &mut f).unwrap();
+        let d = from_given(
+            "delete_blend",
+            Some(&d),
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(d.to_json()["faces"][0]["name"], format!("{:032x}", 1));
+        assert_eq!(d.to_json()["tolerance"], "0.001 mm");
+        // Neither left: refused at faces.
+        let mut f = given(json!({"target": "b"}));
+        take_given("delete_blend", &mut f).unwrap();
+        let e = from_given(
+            "delete_blend",
+            None,
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap_err();
+        assert_eq!(e.details["pointer"], "/faces");
+        // A resize's one group from the flags: a radius and two faces.
+        let mut f = given(json!({"target": "b", "radius": "3 mm", "faces": [n(1), n(2)]}));
+        take_given("resize_blend", &mut f).unwrap();
+        let r = from_given(
+            "resize_blend",
+            None,
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap();
+        let v = r.to_json();
+        assert_eq!(v["groups"][0]["radius"], "3 mm");
+        assert_eq!(v["groups"][0]["faces"].as_array().unwrap().len(), 2);
+        // Made a chamfer by distances: the radius goes, the faces stay.
+        let f =
+            given(json!({"form": "distances", "d1": "1 mm", "d2": "2 mm", "chamfer_face": n(9)}));
+        let r = from_given(
+            "resize_blend",
+            Some(&r),
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap();
+        let g = &r.to_json()["groups"][0];
+        assert!(g.get("radius").is_none(), "{g}");
+        assert_eq!(
+            (g["form"].as_str(), g["d2"].as_str()),
+            (Some("distances"), Some("2 mm"))
+        );
+        assert_eq!(g["face"]["name"], format!("{:032x}", 9));
+        assert_eq!(g["faces"].as_array().unwrap().len(), 2);
+        // Groups whole, with the one group's flags too: refused.
+        let mut f = given(json!({"radius": "3 mm",
+                                 "groups": [{"radius": "1 mm", "faces": [n(1)]}]}));
+        take_given("resize_blend", &mut f).unwrap();
+        let e = from_given(
+            "resize_blend",
+            Some(&r),
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Usage);
+        assert_eq!(
+            request_fields("resize_blend"),
+            crate::doc::edit::RESIZE_REQUEST
+        );
+        assert!(budgeted(&r));
+    }
+
+    #[test]
+    fn blend_refusals_point_at_the_query_and_the_way_round() {
+        let n =
+            ryukei::name::Name::derive(ryukei::name::OpKey(1), ryukei::name::Role::NewFace, &[]);
+        let hint_of = |e: ryukei::TweakError| hint(&refusal(&e)).unwrap_or_default();
+        assert!(hint_of(ryukei::TweakError::NotABlend { face: n }).contains("ryucad blends"));
+        let lost = hint_of(ryukei::TweakError::BlendLost {
+            face: n,
+            reason: ryukei::BlendLoss::Overflow,
+        });
+        assert!(lost.contains("delete_blend"), "{lost}");
+        assert!(hint_of(ryukei::TweakError::BadTolerance).contains("0.1 mm"));
     }
 }

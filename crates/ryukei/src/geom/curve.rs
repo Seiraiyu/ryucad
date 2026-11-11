@@ -292,6 +292,33 @@ impl Curve {
         }
     }
 
+    /// A box holding the curve over `[t0, t1]`, tight for short ranges:
+    /// a NURBS's pieces cut to the range (grown by a few ulps of their
+    /// size for the cutting's rounding), an arc shorter than a half turn
+    /// its chord's box grown by its sagitta (an arc lies within that of
+    /// its chord), a line's ends. Anything else as [`Self::bounds`].
+    pub(crate) fn piece_bounds(&self, range: [f64; 2]) -> Box3 {
+        match self {
+            Self::Nurbs(n) => {
+                let b = n.clipped_bounds(range);
+                let size = (b.max() - b.min())
+                    .length()
+                    .max(b.max().to_vector().length());
+                b.grow(1e-14 * size)
+            }
+            Self::Circle(c) => {
+                let half = 0.5 * (range[1] - range[0]).abs();
+                if half >= core::f64::consts::FRAC_PI_2 {
+                    return self.bounds(range);
+                }
+                let (p0, p1) = (self.point(range[0]), self.point(range[1]));
+                let sag = c.radius * (1.0 - crate::math::cos(half));
+                Box3::new(p0, p1).grow(sag * (1.0 + 1e-12) + 1e-15 * c.radius)
+            }
+            _ => self.bounds(range),
+        }
+    }
+
     /// The curve moved by a rigid transform. Parameters are unchanged.
     pub fn transformed(&self, r: &Rigid) -> Self {
         match self {
@@ -325,6 +352,18 @@ impl Curve {
             Self::Ellipse(e) => Self::Ellipse(e.mirrored(m)?),
             Self::Nurbs(n) => Self::Nurbs(Arc::new(n.mapped(|p| m.apply_point(p)))),
         })
+    }
+}
+
+impl Curve {
+    /// The parameter range a curve's own parameter takes for a circle's
+    /// `r`: itself for the circle, the domain for its conversion.
+    #[cfg(test)]
+    fn domain_of(&self, r: [f64; 2]) -> [f64; 2] {
+        match self {
+            Self::Nurbs(n) => n.domain(),
+            _ => r,
+        }
     }
 }
 
@@ -553,5 +592,32 @@ mod tests {
                 .radius(),
             1e-8
         );
+    }
+
+    /// A piece's bounds hold the curve over the piece and shrink with it:
+    /// a NURBS's pieces cut to the range, an arc's chord grown by its
+    /// sagitta (the check's halving along an edge needs both).
+    #[test]
+    fn piece_bounds_hold_the_piece_and_shrink_with_it() {
+        let frame = Frame::new(
+            Point3::new(0.0, 0.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        let circle = Curve::Circle(Circle::new(frame, 2.0).unwrap());
+        let nurbs = Curve::Nurbs(Arc::new(circle.to_nurbs([0.0, 1.5]).unwrap().0));
+        for c in [&circle, &nurbs] {
+            let [t0, t1] = c.domain_of([0.0, 1.5]);
+            let whole = c.piece_bounds([t0, t1]);
+            let piece = [t0 + 0.4 * (t1 - t0), t0 + 0.45 * (t1 - t0)];
+            let b = c.piece_bounds(piece);
+            assert!((b.max() - b.min()).length() < 0.2 * (whole.max() - whole.min()).length());
+            for k in 0..=64 {
+                let t = piece[0] + (piece[1] - piece[0]) * f64::from(k) / 64.0;
+                let p = c.point(t);
+                assert!(b.grow(0.0).intersects(&Box3::from_point(p)), "{t}");
+            }
+        }
     }
 }

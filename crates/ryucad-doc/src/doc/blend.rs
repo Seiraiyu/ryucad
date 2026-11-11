@@ -128,20 +128,8 @@ impl Chamfer {
             .groups
             .iter()
             .map(|g| {
-                let mut v = json!({"form": g.form.type_name(), "edges": edges_json(&g.edges)});
-                match &g.form {
-                    ChamferForm::Equal { d } => v["d"] = json!(d.text()),
-                    ChamferForm::Distances { d1, d2, face } => {
-                        v["d1"] = json!(d1.text());
-                        v["d2"] = json!(d2.text());
-                        v["face"] = face.to_json();
-                    }
-                    ChamferForm::DistanceAngle { d, angle, face } => {
-                        v["d"] = json!(d.text());
-                        v["angle"] = json!(angle.text());
-                        v["face"] = face.to_json();
-                    }
-                }
+                let mut v = json!({"edges": edges_json(&g.edges)});
+                chamfer_form_json(&g.form, &mut v);
                 v
             })
             .collect();
@@ -152,38 +140,9 @@ impl Chamfer {
 
     #[doc(hidden)]
     pub fn from_fields(o: &mut Obj, default: Unit, env: &Env) -> Result<Chamfer> {
-        let length = Field::Length(default);
         let groups = groups_json(o, |g, at| {
             let form = g.take("form")?;
-            let form = match form.as_str() {
-                Some("equal") => ChamferForm::Equal {
-                    d: size(&g.take("d")?, length, env, at, "d")?,
-                },
-                Some("distances") => ChamferForm::Distances {
-                    d1: size(&g.take("d1")?, length, env, at, "d1")?,
-                    d2: size(&g.take("d2")?, length, env, at, "d2")?,
-                    face: Reference::from_json(&g.take("face")?, &format!("{at}/face"))?,
-                },
-                Some("distance_angle") => {
-                    let d = size(&g.take("d")?, length, env, at, "d")?;
-                    let angle = size(&g.take("angle")?, Field::Angle, env, at, "angle")?;
-                    if angle.radians() > core::f64::consts::FRAC_PI_2 {
-                        return Err(bad_size(
-                            &format!("{at}/angle"),
-                            "a chamfer's angle to its face is at most 90 deg",
-                            &angle,
-                        ));
-                    }
-                    let face = Reference::from_json(&g.take("face")?, &format!("{at}/face"))?;
-                    ChamferForm::DistanceAngle { d, angle, face }
-                }
-                _ => {
-                    return Err(invalid(
-                        &format!("{at}/form"),
-                        "a chamfer's form is equal, distances or distance_angle",
-                    ));
-                }
-            };
+            let form = chamfer_form(&form, g, at, default, env)?;
             let edges = edges_from_json(&g.take("edges")?, &format!("{at}/edges"))?;
             Ok(ChamferGroup { form, edges })
         })?;
@@ -204,6 +163,68 @@ impl Chamfer {
             }
         }
         out
+    }
+}
+
+/// A chamfer group's form from `form` (its `form` field, taken) and the
+/// group's other fields at `at`: `d`; or `d1`, `d2` and `face`; or `d`,
+/// `angle` and `face`. A chamfer's group and a `resize_blend`'s chamfer
+/// group read alike.
+pub(crate) fn chamfer_form(
+    form: &Value,
+    g: &mut Obj,
+    at: &str,
+    default: Unit,
+    env: &Env,
+) -> Result<ChamferForm> {
+    let length = Field::Length(default);
+    Ok(match form.as_str() {
+        Some("equal") => ChamferForm::Equal {
+            d: size(&g.take("d")?, length, env, at, "d")?,
+        },
+        Some("distances") => ChamferForm::Distances {
+            d1: size(&g.take("d1")?, length, env, at, "d1")?,
+            d2: size(&g.take("d2")?, length, env, at, "d2")?,
+            face: Reference::from_json(&g.take("face")?, &format!("{at}/face"))?,
+        },
+        Some("distance_angle") => {
+            let d = size(&g.take("d")?, length, env, at, "d")?;
+            let angle = size(&g.take("angle")?, Field::Angle, env, at, "angle")?;
+            if angle.radians() > core::f64::consts::FRAC_PI_2 {
+                return Err(bad_size(
+                    &format!("{at}/angle"),
+                    "a chamfer's angle to its face is at most 90 deg",
+                    &angle,
+                ));
+            }
+            let face = Reference::from_json(&g.take("face")?, &format!("{at}/face"))?;
+            ChamferForm::DistanceAngle { d, angle, face }
+        }
+        _ => {
+            return Err(invalid(
+                &format!("{at}/form"),
+                "a chamfer's form is equal, distances or distance_angle",
+            ));
+        }
+    })
+}
+
+/// Writes a chamfer form's fields into `v`, a group's object: `form` and
+/// its sizes, and its face where it has one.
+pub(crate) fn chamfer_form_json(form: &ChamferForm, v: &mut Value) {
+    v["form"] = json!(form.type_name());
+    match form {
+        ChamferForm::Equal { d } => v["d"] = json!(d.text()),
+        ChamferForm::Distances { d1, d2, face } => {
+            v["d1"] = json!(d1.text());
+            v["d2"] = json!(d2.text());
+            v["face"] = face.to_json();
+        }
+        ChamferForm::DistanceAngle { d, angle, face } => {
+            v["d"] = json!(d.text());
+            v["angle"] = json!(angle.text());
+            v["face"] = face.to_json();
+        }
     }
 }
 
@@ -286,7 +307,7 @@ fn edges_from_json(v: &Value, at: &str) -> Result<Vec<Reference>> {
 }
 
 /// A size or an angle greater than zero: `key` of the group at `at`.
-fn size(v: &Value, field: Field, env: &Env, at: &str, key: &str) -> Result<Quantity> {
+pub(crate) fn size(v: &Value, field: Field, env: &Env, at: &str, key: &str) -> Result<Quantity> {
     let at = format!("{at}/{key}");
     let q =
         Quantity::from_json_as(v, field, &|n| env.get(n)).map_err(|e| e.with("pointer", &at))?;
@@ -317,6 +338,29 @@ mod tests {
 
     const A: &str = "0123456789abcdef0123456789abcdef";
     const B: &str = "fedcba9876543210fedcba9876543210";
+
+    #[test]
+    fn a_chamfer_form_reads_and_writes_alone() {
+        let face = json!({"feature": "box1", "name": A});
+        for g in [
+            json!({"form": "equal", "d": "1 mm"}),
+            json!({"form": "distances", "d1": "1 mm", "d2": "2 mm", "face": face}),
+            json!({"form": "distance_angle", "d": "1 mm", "angle": "30 deg", "face": face}),
+        ] {
+            let mut o = Obj::new(&g, "/groups/0").unwrap();
+            let form = o.take("form").unwrap();
+            let f = chamfer_form(&form, &mut o, "/groups/0", Unit::Mm, &Env::empty()).unwrap();
+            o.finish().unwrap();
+            let mut back = json!({});
+            chamfer_form_json(&f, &mut back);
+            assert_eq!(back, g);
+        }
+        let g = json!({"form": "bevel", "d": "1 mm"});
+        let mut o = Obj::new(&g, "/groups/2").unwrap();
+        let form = o.take("form").unwrap();
+        let e = chamfer_form(&form, &mut o, "/groups/2", Unit::Mm, &Env::empty()).unwrap_err();
+        assert_eq!(e.details["pointer"], "/groups/2/form");
+    }
 
     fn edge(n: &str) -> Value {
         json!({"feature": "box1", "name": n})

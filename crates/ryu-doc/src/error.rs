@@ -101,6 +101,15 @@ pub enum Code {
     /// A reference to a face, edge or vertex whose name the referenced
     /// feature's body no longer has.
     ReferenceUnresolved,
+    /// A reference whose face or edge a later feature split or merged, in
+    /// a role that can't take what it became (design 447): `reason`
+    /// (`one_needed`, or `carriers_differ` where the pieces don't all lie
+    /// on the old surface or curve), `candidates`, `was`, `removed_by`.
+    ReferenceSplit,
+    /// A warning: a reference whose face or edge a later feature split or
+    /// merged, followed to what it became: `role`, `reference`, `pieces`
+    /// and `by`, the feature that split or merged it.
+    ReferenceFollowed,
     /// An edge a sketch can't project: neither a line nor a circle parallel
     /// to the sketch, or one that projects to nothing.
     ProjectionUnsupported,
@@ -679,6 +688,12 @@ pub enum Code {
     /// (`entities`, each with its `role`) and, where there is a known way
     /// out, a `hint` are in the details.
     TweakFailed,
+    /// A direct edit (ryucad 22: a `delete_face`, or a face tweak with
+    /// `topology: change` or `blends: rebuild`) didn't finish within the
+    /// `edit.budget` preference's work units: the `feature`, what it had
+    /// `spent` and the `budget` are in the details, with a `hint`. Units
+    /// are the same on every machine, so it is kept as any refusal is.
+    EditBudgetExceeded,
     /// ryueda: an instruction naming a region (`region:<id>`) the layout
     /// no longer has, kept until released (a warning).
     RegionUnresolved,
@@ -839,6 +854,17 @@ pub enum Code {
     /// A sheet's template that is neither built in nor in `templates/`;
     /// the details name it (`template`).
     TemplateNotFound,
+    /// `packages.formats` in `ryupdm.json` naming a format a package can't
+    /// hold (design 436): the name and its pointer are in the details.
+    PackagesFormatUnknown,
+    /// A release package that couldn't be built whole: each file that
+    /// failed, with its own error, is in `failures`. Never written in part.
+    PackageFailed,
+    /// A package that doesn't verify: its `clause` (stable name) is in the
+    /// details.
+    PackageInvalid,
+    /// A package of an obsolete release: obsolete releases have none.
+    ReleaseObsolete,
     /// ryueda lint: an off-sheet connector on a net that stays on its
     /// sheet, or a region of a net that leaves with none (plan 2.C).
     SchOffSheetLocal,
@@ -1008,8 +1034,23 @@ mod tests {
     }
 
     #[test]
+    fn package_codes_are_the_agents_to_fix() {
+        for (c, name) in [
+            (Code::PackagesFormatUnknown, "packages_format_unknown"),
+            (Code::PackageFailed, "package_failed"),
+            (Code::PackageInvalid, "package_invalid"),
+            (Code::ReleaseObsolete, "release_obsolete"),
+        ] {
+            assert_eq!(json!(c), json!(name));
+            assert_eq!(c.exit_code(), 1, "{name}");
+        }
+    }
+
+    #[test]
     fn reference_codes() {
         for (c, name) in [
+            (Code::ReferenceSplit, "reference_split"),
+            (Code::ReferenceFollowed, "reference_followed"),
             (Code::ReferenceBody, "reference_body"),
             (Code::ReferenceNotSolid, "reference_not_solid"),
             (Code::ReferenceFacesUnmeshed, "reference_faces_unmeshed"),
@@ -1036,6 +1077,15 @@ mod tests {
     fn draft_angle_varies_code() {
         assert_eq!(json!(Code::DraftAngleVaries), json!("draft_angle_varies"));
         assert_eq!(Code::DraftAngleVaries.exit_code(), 1);
+    }
+
+    #[test]
+    fn edit_budget_code() {
+        assert_eq!(
+            json!(Code::EditBudgetExceeded),
+            json!("edit_budget_exceeded")
+        );
+        assert_eq!(Code::EditBudgetExceeded.exit_code(), 1);
     }
 
     #[test]

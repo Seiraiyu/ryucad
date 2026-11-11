@@ -1791,6 +1791,43 @@ mod tests {
     }
 
     #[test]
+    fn a_delete_merges_per_key_and_a_dropped_retrim_drops_the_format() {
+        let r = |n: u128| json!({"feature": "b", "name": format!("{n:032x}")});
+        let base = json!({"format": 20, "kind": "ryucad.feature", "type": "delete_face",
+            "target": "b", "faces": [r(1)]});
+        let mut ours = base.clone();
+        ours["heal"] = json!("cap");
+        let mut theirs = base.clone();
+        theirs["seeds"] = json!([r(2)]);
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        assert_eq!(
+            (m.value["heal"].as_str(), &m.value["seeds"]),
+            (Some("cap"), &json!([r(2)]))
+        );
+        // faces is one value: both sides changing it differently conflict.
+        let mut a = base.clone();
+        a["faces"] = json!([r(3)]);
+        let mut b = base.clone();
+        b["faces"] = json!([r(4)]);
+        assert!(merge(Some(&base), &a, &b).conflicts.contains_key("/faces"));
+        // A tweak whose one side drops topology: change, the other its
+        // distance: ryucad 17's format again.
+        let mv = json!({"format": 20, "kind": "ryucad.feature", "type": "move_face", "target": "b",
+            "by": "translate", "direction": "z", "distance": "1 mm", "faces": [r(1)],
+            "topology": "change"});
+        let mut kept = mv.clone();
+        kept.as_object_mut().unwrap().remove("topology");
+        kept["format"] = json!(crate::doc::tweak::FORMAT);
+        let mut moved = mv.clone();
+        moved["distance"] = json!("2 mm");
+        let m = merge(Some(&mv), &kept, &moved);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        assert!(m.value.get("topology").is_none());
+        assert_eq!(m.value["format"], crate::doc::tweak::FORMAT);
+    }
+
+    #[test]
     fn a_moves_by_is_one_value_and_its_lists_merge_whole() {
         let n = |k: u8| json!({"feature": "b", "name": format!("{k:032x}")});
         let mv = |extra: Value| {
@@ -3382,5 +3419,35 @@ mod tests {
         let at: Vec<&String> = m.conflicts.keys().collect();
         assert_eq!(at, [&format!("/dependencies/{lib}")]);
         assert_eq!(newest("ryucad.lock"), Some(1));
+    }
+
+    #[test]
+    fn blend_edits_merge_per_key_and_groups_whole() {
+        let r = |n: u128| json!({"feature": "b", "name": format!("{n:032x}")});
+        let base = json!({"format": 20, "kind": "ryucad.feature", "type": "delete_blend",
+            "target": "b", "below": "2 mm"});
+        let mut ours = base.clone();
+        ours["below"] = json!("3 mm");
+        let mut theirs = base.clone();
+        theirs["faces"] = json!([r(1)]);
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        assert_eq!(
+            (m.value["below"].as_str(), &m.value["faces"]),
+            (Some("3 mm"), &json!([r(1)]))
+        );
+        let z = json!({"format": 20, "kind": "ryucad.feature", "type": "resize_blend",
+            "target": "b", "groups": [{"radius": "3 mm", "faces": [r(1)]}]});
+        let mut a = z.clone();
+        a["groups"][0]["radius"] = json!("4 mm");
+        let mut b = z.clone();
+        b["groups"][0]["faces"] = json!([r(2)]);
+        assert!(merge(Some(&z), &a, &b).conflicts.contains_key("/groups"));
+        let mut t = z.clone();
+        t["tolerance"] = json!("0.001 mm");
+        let m = merge(Some(&z), &a, &t);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        assert_eq!(m.value["groups"][0]["radius"], "4 mm");
+        assert_eq!(m.value["tolerance"], "0.001 mm");
     }
 }

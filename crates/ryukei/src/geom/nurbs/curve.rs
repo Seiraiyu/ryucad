@@ -244,6 +244,28 @@ impl NurbsCurve {
         self.pieces.get_or_init(|| self.spline.pieces().into())
     }
 
+    /// The box of the control hulls of the pieces over `[t0, t1]`, each
+    /// cut to it: tighter than [`Self::bounds`], which takes whole pieces,
+    /// though cutting rounds (callers grow it). The 3D twin of
+    /// [`super::NurbsCurve2::clipped_bounds`].
+    pub(crate) fn clipped_bounds(&self, [t0, t1]: [f64; 2]) -> Box3 {
+        let ranges = match self.period() {
+            Some(period) if t1 - t0 < period => {
+                let a = self.spline.knots.wrap(t0);
+                let b = a + (t1 - t0);
+                vec![[a, b], [a - period, b - period]]
+            }
+            Some(_) => vec![self.domain()],
+            None => vec![[t0, t1]],
+        };
+        self.pieces()
+            .iter()
+            .flat_map(|p| ranges.iter().filter_map(|&r| p.clipped(r)))
+            .map(|p| p.bounds())
+            .reduce(|x, y| x.union(&y))
+            .unwrap_or_else(|| self.bounds([t0, t1]))
+    }
+
     /// A box holding the curve over the parts of `[t0, t1]` inside the
     /// domain (a periodic range wraps): the union of the control-hull boxes
     /// of the Bézier pieces it overlaps.

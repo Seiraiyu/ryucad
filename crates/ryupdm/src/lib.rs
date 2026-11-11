@@ -38,6 +38,7 @@ pub mod history;
 pub mod items;
 pub mod label;
 pub mod merge;
+pub mod package;
 pub mod props;
 pub mod record;
 pub mod state;

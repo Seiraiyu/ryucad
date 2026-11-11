@@ -388,8 +388,15 @@ fn unit(at: &At, i: usize, role: &str, curve: &GeomRef, propagate: bool) -> Resu
     let part = &at.part.id;
     match curve {
         GeomRef::Entity(r) => {
-            let (b, e) =
-                crate::reference::resolve(at.part, at.order, at.owner, &role, r, at.results)?;
+            let (b, e) = crate::reference::resolve(
+                at.part,
+                at.order,
+                at.owner,
+                &role,
+                crate::reference::Follow::One,
+                r,
+                at.results,
+            )?;
             let EntityId::Edge(edge) = e else {
                 return Err(at
                     .fail(
@@ -1059,7 +1066,15 @@ pub fn check(
                         }
                     }
                     GeomRef::Entity(r) => {
-                        let (_, e) = crate::reference::resolve(part, order, id, &role, r, results)?;
+                        let (_, e) = crate::reference::resolve(
+                            part,
+                            order,
+                            id,
+                            &role,
+                            crate::reference::Follow::One,
+                            r,
+                            results,
+                        )?;
                         if !matches!(e, EntityId::Edge(_)) {
                             unit(&at, i, &role, &s.curve, false)?;
                         }

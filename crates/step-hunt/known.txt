@@ -2677,3 +2677,15 @@ case d7a30d6bd29b5db6 #598 ref_mesh/slow/faces<200/BOUNDED_SURFACE&B_SPLINE_SURF
 case d87a0183947acb40 #598 ref_mesh/slow/faces>=1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE
 case da2f0704f7a2e97a #598 ref_mesh/slow/faces<1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+CYLINDRICAL_SURFACE+PLANE+TOROIDAL_SURFACE
 case ff5ab432e0aaeaca #598 ref_mesh/slow/faces<1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+B_SPLINE_SURFACE_WITH_KNOTS+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE
+
+# defeature: step-hunt's defeature stage (ryucad 22.B)
+# --stages defeature over committed, occt, nist and occt-pinned on cox-worker-5 (Intel Core Ultra 7
+# 265KF, 8 threads, load 1 to 7), 2026-11-11, --jobs 4 --timeout 1800: 191 s, 1 s, 1,451 s and 8 s.
+# No defeature finding: every other case was a typed refusal or had no blend that small. The two
+# new groups are the defeature run's own solid imports.
+case 4ab5bfa4425fd0f9 file import/import_failed/faces_overlap/PLANE two solids of one representation touch, so their faces overlap and their union is non-manifold: the file should hold them as separate parts (#208)
+case 518e2cbdf9e9a29f #708 import/import_failed/non_manifold/CIRCLE
+count committed defeature 3 24
+count occt defeature 13 29
+count nist defeature 15 90
+count occt-pinned defeature 1 4

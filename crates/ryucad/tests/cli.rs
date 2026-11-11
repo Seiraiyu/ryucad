@@ -1108,6 +1108,8 @@ fn every_protocol_method_has_a_command() {
         ("bom.renumber", &["bom", "renumber"]),
         ("release.check", &["release", "check"]),
         ("release.sync", &["release", "sync"]),
+        ("release.package", &["release", "package"]),
+        ("release.package.verify", &["release", "package", "verify"]),
         ("release.propose", &["release", "propose"]),
         ("release.obsolete", &["release", "obsolete"]),
         ("sketch.edit", &["sketch", "edit"]),
@@ -1122,6 +1124,8 @@ fn every_protocol_method_has_a_command() {
         ("measure", &["measure"]),
         ("mass", &["mass"]),
         ("sheet.get", &["sheet"]),
+        ("feature_faces.get", &["feature-faces"]),
+        ("blends.get", &["blends"]),
         ("flat.get", &["flat"]),
         ("clearance", &["clearance"]),
         ("deps.add", &["deps", "add"]),
@@ -2289,6 +2293,101 @@ fn blends_from_the_cli() {
 }
 
 #[test]
+fn packages_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "bracket"]);
+    p.ok(&[
+        "feature", "add", "bracket", "box", "--id", "b", "--param", "x=40", "--param", "y=20",
+        "--param", "z=5",
+    ]);
+    // One ID for both projects, so the two ways write the same packages.
+    p.write(
+        "ryucad.json",
+        "{\n  \"default_unit\": \"mm\",\n  \"format\": 2,\n  \"kind\": \"ryucad.project\",\n  \"project\": \"0123456789abcdef0123456789abcdef\"\n}\n",
+    );
+    p.ok(&["props", "set", "bracket", "number=100-0042"]);
+    p.ok(&["drawing", "create", "bracket", "d", "--views", "standard"]);
+    p.fails(
+        &["pdm", "configure", "--package-formats", "step,stl"],
+        "packages_format_unknown",
+        1,
+    );
+    p.ok(&[
+        "pdm",
+        "configure",
+        "--package-formats",
+        "step,pdf,dxf,render",
+    ]);
+    p.git(&["init", "-q", "-b", "main"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start"]);
+    p.fails(&["release", "package", "bracket"], "label_not_found", 1);
+    p.ok(&["release", "propose", "bracket"]);
+    p.fails(
+        &["release", "package", "bracket", "--label", "A"],
+        "label_not_official",
+        1,
+    );
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "release A"]);
+    let v = p.ok(&["release", "package", "bracket", "--out", "a.zip"]);
+    let paths: Vec<&str> = v["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "drawings/d-s1.dxf",
+            "drawings/d.pdf",
+            "record.json",
+            "render/iso.png",
+            "step/100-0042-A.step"
+        ]
+    );
+    assert_eq!(v["file_name"], "100-0042-A.zip");
+    // The same package both ways, byte for byte, and again.
+    let zip = fs::read(p.direct.join("a.zip")).unwrap();
+    assert_eq!(zip, fs::read(p.daemon.join("a.zip")).unwrap());
+    p.ok(&["release", "package", "bracket"]);
+    assert_eq!(zip, fs::read(p.daemon.join("100-0042-A.zip")).unwrap());
+    let v = p.ok(&["release", "package", "verify", "a.zip", "--rebuild"]);
+    assert_eq!(
+        (&v["verdict"], &v["rebuilt"], &v["tag"]["status"]),
+        (&json!("unattested"), &json!(true), &json!("missing"))
+    );
+    let listed = p.ok(&["release", "list", "bracket"]);
+    assert_eq!(listed["records"][0]["package"], json!({"tag": "missing"}));
+    // A byte changed in a file is named.
+    let (m, mut files) = ryupdm::package::verify::files(&zip).unwrap();
+    files[0].1.push(b'\n');
+    let bad = ryupdm::package::archive(&m, &files).unwrap();
+    fs::write(p.direct.join("bad.zip"), &bad).unwrap();
+    fs::write(p.daemon.join("bad.zip"), &bad).unwrap();
+    let e = p.fails(
+        &["release", "package", "verify", "bad.zip"],
+        "package_invalid",
+        1,
+    );
+    assert_eq!(e["details"]["clause"], "file_changed");
+    // As a folder, outside the project; never inside it.
+    let e = p.fails(
+        &["release", "package", "bracket", "--out", "folder/"],
+        "invalid_param",
+        1,
+    );
+    assert_eq!(e["details"]["param"], "out");
+    assert!(!p.daemon.join("folder").exists());
+    let out = tempfile::tempdir().unwrap();
+    let folder = format!("{}/", out.path().join("folder").display());
+    p.ok(&["release", "package", "bracket", "--out", &folder]);
+    assert!(out.path().join("folder/step/100-0042-A.step").is_file());
+}
+
+#[test]
 fn releases_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init"]);
@@ -2854,6 +2953,37 @@ fn review_against_a_fake_service() {
             "text/csv",
             b"at,event,part,label\n2026-11-02T09:20:11Z,attestation_signed,p,A\n".to_vec(),
         ),
+        json(
+            "GET",
+            "/api/v1/repos/acme/widget/releases/p/A/package",
+            200,
+            serde_json::json!({"state": "built", "url": "/api/v1/artifacts/pk", "size": 9}),
+        ),
+        json(
+            "GET",
+            "/api/v1/repos/acme/widget/releases/p/B/package",
+            200,
+            serde_json::json!({"state": "building"}),
+        ),
+        (
+            "GET",
+            "/api/v1/artifacts/pk".to_owned(),
+            200,
+            "application/zip",
+            b"not a zip".to_vec(),
+        ),
+        json(
+            "POST",
+            "/api/v1/repos/acme/widget/releases/p/A/package",
+            202,
+            serde_json::json!({"state": "queued"}),
+        ),
+        json(
+            "POST",
+            "/api/v1/repos/acme/widget/releases/p/A/package/share",
+            201,
+            serde_json::json!({"url": "https://review.example/s/x", "expires": "2026-11-17T00:00:00Z"}),
+        ),
     ]);
     let dir = tempfile::tempdir().unwrap();
     git(dir.path(), &["init", "-q", "-b", "main"]);
@@ -2926,6 +3056,42 @@ fn review_against_a_fake_service() {
         fs::read_to_string(dir.path().join("audit.csv"))
             .unwrap()
             .contains("attestation_signed")
+    );
+    // A package is downloaded and verified against the clone, which
+    // refuses what the service sent here (it isn't a package).
+    let (code, v) = run(&["init"], None);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = run(&["review", "package", "get", "p", "A"], Some("tok"));
+    assert_eq!(
+        (code, &v["error"]["code"], &v["error"]["details"]["clause"]),
+        (
+            1,
+            &serde_json::json!("package_invalid"),
+            &serde_json::json!("unreadable")
+        ),
+        "{v}"
+    );
+    assert_eq!(fs::read(dir.path().join("p-A.zip")).unwrap(), b"not a zip");
+    let (code, v) = run(&["review", "package", "get", "p", "B"], Some("tok"));
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &serde_json::json!("review_not_found")),
+        "{v}"
+    );
+    assert_eq!(
+        run(&["review", "package", "build", "p", "A"], Some("tok")).1["error"]["code"],
+        "review_pending"
+    );
+    let sh = ok(&["review", "package", "share", "p", "A", "--days", "7"]);
+    assert_eq!(sh["url"], "https://review.example/s/x");
+    let seen = fake.seen.lock().unwrap().clone();
+    let share = seen
+        .iter()
+        .find(|r| r.path.ends_with("/package/share"))
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&share.body).unwrap(),
+        serde_json::json!({"days": 7})
     );
     let r = ok(&["review", "renders", "7", "--out", "shots"]);
     assert_eq!(r["files"].as_array().unwrap().len(), 2);
@@ -3533,6 +3699,123 @@ fn drafts_from_the_cli() {
     let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
     assert_eq!(code, 0, "{v}");
     assert!(file.exists());
+}
+
+#[test]
+fn direct_edits_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "base", "--param", "x=40", "--param", "y=30",
+        "--param", "z=10",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "cylinder",
+        "--id",
+        "boss",
+        "--operation",
+        "join",
+        "--radius",
+        "4",
+        "--param",
+        "height=6",
+        "--origin",
+        "20,15,10",
+    ]);
+    let j = p.ok(&["inspect", "plate", "boss"])["bodies"][0].clone();
+    let wall = j["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["surface"]["type"] == "cylinder")
+        .map(|f| format!("plate/base/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    // What the seed takes, then the delete by it.
+    let ff = p.ok(&["feature-faces", &wall]);
+    assert_eq!(ff["faces"].as_array().unwrap().len(), 2, "{ff}");
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "delete_face",
+        "--id",
+        "flat",
+        "--seed",
+        &wall,
+        "--heal",
+        "cap",
+    ]);
+    assert_eq!(r["feature"]["seeds"], json!([wall]), "{r}");
+    assert_eq!(r["feature"]["heal"], "cap", "{r}");
+    // A tweak told it may change topology.
+    let base = p.ok(&["inspect", "plate", "base"])["bodies"][0].clone();
+    let side = base["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+            f["surface"]["type"] == "plane"
+                && f["surface"]["frame"]["z"][0].as_f64().unwrap() * sign == -1.0
+        })
+        .map(|f| format!("plate/base/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "draft",
+        "--id",
+        "lean",
+        "--neutral",
+        "xy",
+        "--angle",
+        "1.3rad",
+        "--face",
+        &side,
+        "--topology",
+        "change",
+    ]);
+    assert_eq!(r["feature"]["topology"], "change", "{r}");
+    p.ok(&[
+        "feature",
+        "edit",
+        "plate",
+        "lean",
+        "--topology",
+        "keep",
+        "--blends",
+        "rebuild",
+    ]);
+    let shown = p.ok(&["feature", "show", "plate", "lean"]);
+    assert_eq!(
+        (shown["topology"].as_str(), shown["blends"].as_str()),
+        (Some("keep"), Some("rebuild")),
+        "{shown}"
+    );
+    // A bad heal is the protocol's invalid_param.
+    p.fails(
+        &["feature", "edit", "plate", "flat", "--heal", "patch"],
+        "invalid_param",
+        1,
+    );
+    // The daemon logged the delete: undo takes its file away, redo puts it
+    // back.
+    let flat = p.daemon.join("parts/plate/features/flat.json");
+    let lean = p.daemon.join("parts/plate/features/lean.json");
+    assert!(flat.exists() && lean.exists());
+    for _ in 0..3 {
+        let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+        assert_eq!(code, 0, "{v}");
+    }
+    assert!(!flat.exists());
+    let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(flat.exists());
 }
 
 #[test]
@@ -6181,8 +6464,10 @@ fn mates_from_the_cli() {
 
 #[test]
 fn a_failing_mate_warns_from_the_cli() {
-    // Issues #155 and #158: a slot cut across the plate splits the face
-    // m1 stands on, in frame, which top places.
+    // Issues #155 and #158: the slot grown into a skim over the plate's
+    // whole top takes away the face m1 stands on, in frame, which top
+    // places. (A slot across the top only splits it, both pieces on its
+    // plane, and m1 follows the first: design 447.)
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
     let params: [(&str, &str, &str, &[&str]); 2] = [
@@ -6272,7 +6557,23 @@ fn a_failing_mate_warns_from_the_cli() {
             .filter(|w| w.as_str().unwrap().contains("m1"))
             .count()
     };
-    let (code, v) = p.both_from("", &["feature", "edit", "plate", "slot", "--param", "y=60"]);
+    let (code, v) = p.both_from(
+        "",
+        &[
+            "feature",
+            "edit",
+            "plate",
+            "slot",
+            "--param",
+            "x=200",
+            "--param",
+            "y=200",
+            "--param",
+            "z=2",
+            "--origin",
+            "-50,-50,4",
+        ],
+    );
     assert_eq!((code, naming(&v)), (0, 1), "{v}");
     for args in [
         &["assembly", "tree", "frame"][..],
@@ -7832,4 +8133,83 @@ fn modes_from_the_cli() {
     assert_eq!(code, 0, "{v}");
     let (code, v) = p.run_in(&p.daemon, "", &["part", "create", "q"]);
     assert_eq!(code, 0, "{v}");
+}
+
+#[test]
+fn blend_edits_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "box"]);
+    p.ok(&[
+        "feature", "add", "box", "box", "--id", "base", "--param", "x=40", "--param", "y=30",
+        "--param", "z=20",
+    ]);
+    let base = p.ok(&["inspect", "box", "base"])["bodies"][0].clone();
+    let every: Vec<String> = base["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| format!("box/base/{}", e["name"].as_str().unwrap()))
+        .collect();
+    let mut args = vec![
+        "feature", "add", "box", "fillet", "--id", "round", "--radius", "3",
+    ];
+    for e in &every {
+        args.extend(["--edge", e.as_str()]);
+    }
+    p.ok(&args);
+    // What a delete would take, then the delete.
+    let listed = p.ok(&["blends", "box", "--below", "3.5mm"]);
+    assert_eq!(listed["blends"].as_array().unwrap().len(), 12, "{listed}");
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "box",
+        "delete_blend",
+        "--id",
+        "flat",
+        "--below",
+        "3.5mm",
+    ]);
+    assert_eq!(r["feature"]["below"]["value"], "3.5 mm", "{r}");
+    // A resize of one fillet, by its flags; then made a chamfer.
+    let face = listed["blends"][0]["faces"][0].as_str().unwrap().to_owned();
+    p.ok(&["feature", "edit", "box", "flat", "--below", "1mm"]);
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "box",
+        "resize_blend",
+        "--id",
+        "bigger",
+        "--radius",
+        "4mm",
+        "--face",
+        &face,
+    ]);
+    assert_eq!(r["feature"]["groups"][0]["radius"]["value"], "4 mm", "{r}");
+    p.ok(&[
+        "feature", "edit", "box", "bigger", "--form", "equal", "--d", "2mm",
+    ]);
+    let shown = p.ok(&["feature", "show", "box", "bigger"]);
+    assert_eq!(shown["groups"][0]["form"], "equal", "{shown}");
+    assert!(shown["groups"][0].get("radius").is_none(), "{shown}");
+    // A bad tolerance is the protocol's invalid_param.
+    p.fails(
+        &["feature", "edit", "box", "flat", "--tolerance", "1mm"],
+        "invalid_param",
+        1,
+    );
+    // The daemon logged both: undo takes the resize's file away, redo puts
+    // it back.
+    let bigger = p.daemon.join("parts/box/features/bigger.json");
+    assert!(bigger.exists());
+    for _ in 0..2 {
+        let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+        assert_eq!(code, 0, "{v}");
+    }
+    assert!(!bigger.exists());
+    let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(bigger.exists());
 }

@@ -680,7 +680,11 @@ impl Releases {
         self.tags
             .keys()
             .filter(|key| {
-                let path = format!("{RELEASES}/{key}.json");
+                // A package tag answers to its release (design 436).
+                let release = key
+                    .strip_suffix(crate::package::attest::TAG_SUFFIX)
+                    .unwrap_or(key);
+                let path = format!("{RELEASES}/{release}.json");
                 !self.official.contains_key(&path)
             })
             .map(String::as_str)

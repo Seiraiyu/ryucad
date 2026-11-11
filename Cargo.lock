@@ -5132,6 +5132,7 @@ dependencies = [
  "getrandom 0.3.4",
  "gix",
  "gix-transport",
+ "miniz_oxide 0.8.9",
  "regex-lite",
  "ryucad-doc",
  "ryupdm",

@@ -12,6 +12,7 @@ pub mod drawing;
 pub mod drawing_annotation;
 pub mod drawing_lint;
 pub mod drawing_template;
+pub mod edit;
 pub mod explode;
 pub mod files;
 #[cfg(any(test, feature = "test-support"))]

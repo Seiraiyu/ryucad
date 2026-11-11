@@ -50,6 +50,7 @@ pub mod appearance;
 pub mod assembly;
 #[cfg(feature = "bench")]
 pub mod bench;
+pub mod blends;
 pub mod body;
 pub mod bom;
 pub mod budget;
@@ -90,6 +91,7 @@ pub mod measure;
 pub mod merge;
 pub mod mesh;
 pub mod notify;
+pub mod package;
 pub mod param;
 pub mod path;
 pub mod pattern;

@@ -195,6 +195,9 @@ pub struct Found {
     pub instance: Id,
     pub copy: Option<(Id, [u32; 2])>,
     pub frame: Pose,
+    /// Where its entity went, when a later feature of its part split or
+    /// merged it and the connector followed (design 447).
+    pub followed: Option<crate::reference::Trail>,
 }
 
 /// What a connector is resolved in: an assembly's instances, by ID, and
@@ -281,19 +284,30 @@ pub fn resolve(owner: &Id, role: &str, c: &Connector, scope: &dyn Scope) -> Resu
             ),
         ));
     };
-    let on_part = match &c.at {
-        At::Origin => Pose::IDENTITY,
-        At::Datum(d) => datum(o, d).map_err(|(code, msg)| {
-            fail(code, msg)
-                .with("part", &o.part)
-                .with("rev", o.rev.to_json())
-        })?,
-        At::Entity(r) => entity(o, r).map_err(|(code, msg)| {
-            let mut e = fail(code, msg)
+    let (on_part, followed) = match &c.at {
+        At::Origin => (Pose::IDENTITY, None),
+        At::Datum(d) => (
+            datum(o, d).map_err(|(code, msg)| {
+                fail(code, msg)
+                    .with("part", &o.part)
+                    .with("rev", o.rev.to_json())
+            })?,
+            None,
+        ),
+        At::Entity(r) => entity(o, r).map_err(|miss| {
+            let mut e = fail(miss.code, miss.message)
                 .with("part", &o.part)
                 .with("rev", o.rev.to_json());
-            if code == Code::ReferenceUnresolved {
+            if matches!(miss.code, Code::ReferenceUnresolved | Code::ReferenceSplit) {
                 e = e.with("solid", &r.feature);
+            }
+            // The pieces, written as the assembly names them, are the
+            // session's to add (`Session::explain`).
+            if let Some((reason, t)) = miss.split {
+                e = e.with("reason", reason);
+                if let Some(by) = &t.by {
+                    e = e.with("removed_by", by);
+                }
             }
             e
         })?,
@@ -303,6 +317,7 @@ pub fn resolve(owner: &Id, role: &str, c: &Connector, scope: &dyn Scope) -> Resu
         instance,
         copy,
         frame: offset(&frame, &c.offset),
+        followed,
     })
 }
 
@@ -335,15 +350,36 @@ fn datum(o: &Occurrence, d: &Id) -> core::result::Result<Pose, (Code, String)> {
     })
 }
 
+/// Why a connector's entity gave no frame: the code, the message, and
+/// for `reference_split` its reason and where the entity went.
+struct Miss {
+    code: Code,
+    message: String,
+    split: Option<(&'static str, crate::reference::Trail)>,
+}
+
+impl Miss {
+    fn new(code: Code, message: String) -> Miss {
+        Miss {
+            code,
+            message,
+            split: None,
+        }
+    }
+}
+
 /// The frame of the entity `r` names in occurrence `o`, in its part's
-/// coordinates.
+/// coordinates, and where it went if the connector followed it: a face or
+/// edge a later feature of the part split, every piece on the old surface
+/// or curve, gives the first piece's frame (`Carrier`, design 447).
 fn entity(
     o: &Occurrence,
     r: &crate::doc::reference::Reference,
-) -> core::result::Result<Pose, (Code, String)> {
+) -> core::result::Result<(Pose, Option<crate::reference::Trail>), Miss> {
+    use crate::reference::{Follow, Followed};
     let rev = o.rev.text();
     let Some(s) = o.solids.iter().find(|s| s.founder == r.feature) else {
-        return Err((
+        return Err(Miss::new(
             Code::ReferenceWrongKind,
             format!(
                 "names {}, which founds no solid {} shows at {rev}",
@@ -351,18 +387,37 @@ fn entity(
             ),
         ));
     };
-    let Some(e) = s.built.body.by_name(r.name) else {
-        return Err((
-            Code::ReferenceUnresolved,
-            format!("is gone from solid {} of {} at {rev}", r.feature, o.part),
-        ));
+    let (e, followed) = match s.built.body.by_name(r.name) {
+        Some(e) => (e, None),
+        None => match s.lineage.follow(r.name, Follow::Carrier, &s.built.body) {
+            Followed::To(found, t) => (found[0], Some(t)),
+            Followed::Gone => {
+                return Err(Miss::new(
+                    Code::ReferenceUnresolved,
+                    format!("is gone from solid {} of {} at {rev}", r.feature, o.part),
+                ));
+            }
+            Followed::Refused(reason, t) => {
+                return Err(Miss {
+                    code: Code::ReferenceSplit,
+                    message: format!(
+                        "was split into {} pieces of solid {} of {} at {rev} that no longer lie on its surface or curve: refer to a piece",
+                        t.pieces.len(),
+                        r.feature,
+                        o.part
+                    ),
+                    split: Some((reason, t)),
+                });
+            }
+        },
     };
-    entity_frame(&s.built.body, e).map_err(|what| {
-        (
+    let frame = entity_frame(&s.built.body, e).map_err(|what| {
+        Miss::new(
             Code::ConnectorUnsupported,
             format!("is on {what}, which defines no connector frame"),
         )
-    })
+    })?;
+    Ok((frame, followed))
 }
 
 #[cfg(test)]

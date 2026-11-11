@@ -410,6 +410,33 @@ pub struct FeatureFields {
     /// A parting-line draft's pull: any axis, or a plane's normal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull: Option<String>,
+    /// A face tweak's topology: `change` lets its faces grow over their
+    /// neighbours, shrink away or split, and edges and vertices come and
+    /// go; `keep` (the default) refuses that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology: Option<String>,
+    /// A face tweak's blends: `rebuild` makes again the fillets and
+    /// chamfers it breaks; `keep` (the default) refuses that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blends: Option<String>,
+    /// A delete_face's healing: `auto` (a cap where one closes a gap, else
+    /// its neighbours grow; the default), `cap` or `grow`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heal: Option<String>,
+    /// A delete_face's seeds, replacing them all: one face of each hole,
+    /// boss or pocket deleted whole, each `<part>/<solid>/<name>` (`[]` for
+    /// none). The CLI sends `--seed` as `features`, which a delete_face
+    /// takes as its seeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seeds: Option<Vec<String>>,
+    /// A delete_blend's size: every blend at most this length goes (a
+    /// fillet's radius, a chamfer's larger distance; `""` takes it away).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub below: Option<Value>,
+    /// A resize_blend's one chamfer group: the face its first distance
+    /// runs along, `<part>/<solid>/<name>` (its blends are `faces`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chamfer_face: Option<String>,
     /// A path's segments in order, replacing them all: each a curve as
     /// text (an edge `<part>/<solid>/<name>`, a sketch's line, arc or
     /// circle `<part>/<sketch>/<entity>`, a path or helix
@@ -815,6 +842,10 @@ pub enum Request {
         /// service opens pull requests moving to newer releases.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bump: Option<String>,
+        /// `packages.formats`: what a release's package holds (bom, dxf,
+        /// pdf, render, step); `[]` for the default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        package_formats: Option<Vec<String>>,
         /// Write even if parts' properties stop fitting.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         force: bool,
@@ -928,6 +959,29 @@ pub enum Request {
     ReleaseCheck {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         results: bool,
+    },
+    /// Builds an official release's package (design 436): to `out` (a
+    /// zip, or a folder), into `into` as `<number>-<label>.zip`, or as the
+    /// bytes after the answer.
+    #[serde(rename = "release.package")]
+    ReleasePackage {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        out: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        into: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        formats: Option<Vec<String>>,
+    },
+    /// Judges a package someone was sent (an absolute path) against this
+    /// clone, offline; with `rebuild` built again and compared.
+    #[serde(rename = "release.package.verify")]
+    ReleasePackageVerify {
+        file: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        rebuild: bool,
     },
     /// Creates the local tag of every official release that has none, and
     /// moves those that point elsewhere. Logged, not undoable.
@@ -1111,6 +1165,35 @@ pub enum Request {
         part: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         solid: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
+    /// The faces of the hole, boss or pocket a face of a part's solid
+    /// belongs to, as a `delete_face` seed takes them: `face` is
+    /// `<part>/<solid>/<name>`, in the part as it shows at `rev`. The
+    /// smallest set a cap closes: a counterbored hole's bore is the bore
+    /// alone, and its counterbore's wall takes it all.
+    #[serde(rename = "feature_faces.get")]
+    FeatureFacesGet {
+        face: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
+    /// A solid's fillets, chamfers and ball corners as `delete_blend` and
+    /// `resize_blend` read them: each blend's faces, kind and size,
+    /// supports and chain, by least face name, in the part as it shows at
+    /// `rev`. With `below` (a length), only those a `delete_blend` of that
+    /// size takes, closed over chains and corners. `solid` is the part's
+    /// one solid unless named; `tolerance` is recognition's (10 µm).
+    #[serde(rename = "blends.get")]
+    BlendsGet {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        solid: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tolerance: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        below: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
@@ -2440,8 +2523,20 @@ mod tests {
                 properties: [("finish".to_owned(), Value::Null)].into_iter().collect(),
                 approvals: Some(json!(false)),
                 bump: Some("pr".into()),
+                package_formats: Some(vec!["dxf".into(), "step".into()]),
                 force: true,
                 expected_revision: None,
+            },
+            Request::ReleasePackage {
+                part: "p".into(),
+                label: Some("B".into()),
+                out: None,
+                into: Some("/tmp/out".into()),
+                formats: Some(vec!["step".into()]),
+            },
+            Request::ReleasePackageVerify {
+                file: "/tmp/out/100-B.zip".into(),
+                rebuild: true,
             },
             Request::PropsSet {
                 part: "p".into(),

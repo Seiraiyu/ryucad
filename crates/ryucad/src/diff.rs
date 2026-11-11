@@ -406,21 +406,26 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
         // A tweak's groups, each on one line: a move's
         // `groups[0] = 1 mm: base/<hex>, base/<hex>`, a replacement's
         // `groups[0] = lid/<hex>: base/<hex>` (its surface first), a
-        // draft's `groups[0] = 5 deg: base/<hex>`.
+        // draft's `groups[0] = 5 deg: base/<hex>`, a resize's
+        // `groups[0] = 3 mm: base/<hex>` or
+        // `groups[1] = distances 1 mm, 2 mm from base/<hex>: base/<hex>`.
         Some("ryucad.feature")
             if matches!(
                 o.get("type").and_then(Value::as_str),
-                Some("move_face" | "replace_face" | "draft")
+                Some("move_face" | "replace_face" | "draft" | "resize_blend")
             ) =>
         {
             if let Some(Value::Array(groups)) = rest.remove("groups") {
                 for (i, g) in groups.iter().enumerate() {
-                    let head = g
-                        .get("distance")
-                        .or_else(|| g.get("angle"))
-                        .or_else(|| g.get("with"))
-                        .map(|x| reference(x).unwrap_or_else(|| scalar(x)))
-                        .unwrap_or_default();
+                    let head = if o.get("type").and_then(Value::as_str) == Some("resize_blend") {
+                        resize_head(g)
+                    } else {
+                        g.get("distance")
+                            .or_else(|| g.get("angle"))
+                            .or_else(|| g.get("with"))
+                            .map(|x| reference(x).unwrap_or_else(|| scalar(x)))
+                            .unwrap_or_default()
+                    };
                     let faces: Vec<String> = g["faces"]
                         .as_array()
                         .into_iter()
@@ -1060,6 +1065,29 @@ fn explode_step(v: &Value) -> String {
 }
 
 /// A leaf value on its line: strings bare, everything else as JSON.
+/// A resize group's size as one text: a fillet's `3 mm`, a chamfer's
+/// `equal 1 mm`, `distances 1 mm, 2 mm from base/<hex>` or
+/// `distance_angle 1 mm, 30 deg from base/<hex>`.
+fn resize_head(g: &Value) -> String {
+    if let Some(r) = g.get("radius") {
+        return scalar(r);
+    }
+    let form = g.get("form").map(scalar).unwrap_or_default();
+    let sizes: Vec<String> = ["d", "d1", "d2", "angle"]
+        .iter()
+        .filter_map(|k| g.get(*k))
+        .map(scalar)
+        .collect();
+    let mut head = format!("{form} {}", sizes.join(", "));
+    if let Some(f) = g.get("face") {
+        head.push_str(&format!(
+            " from {}",
+            reference(f).unwrap_or_else(|| scalar(f))
+        ));
+    }
+    head
+}
+
 fn scalar(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -3071,6 +3099,38 @@ mod tests {
     }
 
     #[test]
+    fn a_delete_and_a_tweaks_new_fields_read_a_line_each() {
+        let r = |n: u128| json!({"feature": "b", "name": format!("{n:032x}")});
+        let v = json!({"format": 20, "kind": "ryucad.feature", "type": "delete_face",
+            "target": "b", "faces": [r(1), r(2)], "seeds": [r(3)], "heal": "grow"});
+        let t = text(v.clone());
+        assert!(
+            t.starts_with("ryucad.feature delete_face (format 20)\n"),
+            "{t}"
+        );
+        for line in ["heal = grow", "target = b"] {
+            assert!(t.lines().any(|l| l == line), "{line}: {t}");
+        }
+        assert_eq!(
+            t.lines().filter(|l| l.starts_with("faces")).count(),
+            1,
+            "{t}"
+        );
+        assert_eq!(
+            t.lines().filter(|l| l.starts_with("seeds")).count(),
+            1,
+            "{t}"
+        );
+        let m = json!({"format": 20, "kind": "ryucad.feature", "type": "move_face", "target": "b",
+            "by": "translate", "direction": "z", "distance": "1 mm", "faces": [r(1)],
+            "topology": "change", "blends": "rebuild"});
+        let t = text(m.clone());
+        for line in ["topology = change", "blends = rebuild"] {
+            assert!(t.lines().any(|l| l == line), "{line}: {t}");
+        }
+    }
+
+    #[test]
     fn a_tweaks_groups_read_on_a_line_each() {
         let (a, b) = (
             "0123456789abcdef0123456789abcdef",
@@ -4927,5 +4987,50 @@ mod tests {
             assert_eq!(textconv(b), b);
         }
         assert_eq!(textconv(b"{\"a\": [{\"b\": 1}]}"), b"json\na.0.b = 1\n");
+    }
+
+    #[test]
+    fn blend_edits_read_a_line_a_field_and_a_group() {
+        let r = |n: u128| json!({"feature": "b", "name": format!("{n:032x}")});
+        let d = json!({"format": 20, "kind": "ryucad.feature", "type": "delete_blend",
+            "target": "b", "below": "2 mm", "faces": [r(1), r(2)], "tolerance": "0.001 mm"});
+        let t = text(d);
+        assert!(
+            t.starts_with("ryucad.feature delete_blend (format 20)\n"),
+            "{t}"
+        );
+        for line in ["below = 2 mm", "target = b", "tolerance = 0.001 mm"] {
+            assert!(t.lines().any(|l| l == line), "{line}: {t}");
+        }
+        assert_eq!(
+            t.lines().filter(|l| l.starts_with("faces")).count(),
+            1,
+            "{t}"
+        );
+        let z = json!({"format": 20, "kind": "ryucad.feature", "type": "resize_blend",
+            "target": "b", "groups": [
+                {"radius": "3 mm", "faces": [r(1)]},
+                {"form": "distances", "d1": "1 mm", "d2": "2 mm", "face": r(9), "faces": [r(2), r(3)]},
+                {"form": "distance_angle", "d": "1 mm", "angle": "30 deg", "face": r(9), "faces": [r(4)]},
+                {"form": "equal", "d": "1 mm", "faces": [r(5)]}]});
+        let t = text(z);
+        let b = |n: u128| format!("b/{n:032x}");
+        for line in [
+            format!("groups[0] = 3 mm: {}", b(1)),
+            format!(
+                "groups[1] = distances 1 mm, 2 mm from {}: {}, {}",
+                b(9),
+                b(2),
+                b(3)
+            ),
+            format!(
+                "groups[2] = distance_angle 1 mm, 30 deg from {}: {}",
+                b(9),
+                b(4)
+            ),
+            format!("groups[3] = equal 1 mm: {}", b(5)),
+        ] {
+            assert!(t.lines().any(|l| l == line), "{line}: {t}");
+        }
     }
 }
