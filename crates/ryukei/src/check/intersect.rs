@@ -40,7 +40,7 @@ use crate::intersect::broad::BoxTree;
 use crate::intersect::coincide::coincident;
 use crate::intersect::{
     BESIDE_CELLS, FaceMeet, Place, face_beside, face_box, face_face_in, face_face_within,
-    faces_apart, point_in_face,
+    face_off_ball, faces_apart, point_in_face,
 };
 use crate::topo::{Body, EdgeId, FaceId, VertexId};
 use crate::work::{Meter, Work};
@@ -293,8 +293,109 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
         {
             None
         }
+        // Faces sharing vertices whose every trace failed, one running
+        // along the other's surface on edges of its own (#302).
+        Err(_) if shared.is_empty() && apart_by_own_edges(body, a, b, BESIDE_CELLS, m) => None,
         Err(_) => Some(Fault::CannotCheck { a, b }),
     }
+}
+
+/// The edges of `f` whose curve lies within `reach` of `other` at a
+/// quarter, a half and three quarters along: where the face may run along
+/// the other's surface. Which edges are taken only chooses the strips;
+/// [`apart_by_own_edges`] certifies them.
+fn edges_on(body: &Body, f: FaceId, other: &Surface, reach: f64) -> Vec<EdgeId> {
+    let mut out: Vec<EdgeId> = body
+        .face_loops(f)
+        .flat_map(|l| {
+            body.loop_fins(l)
+                .map(|fin| body.fins[fin].edge)
+                .collect::<Vec<_>>()
+        })
+        .filter(|&e| {
+            let x = &body.edges[e];
+            let c = &body.curves[x.curve];
+            (1..4).all(|k| {
+                let t = x.interval[0] + (x.interval[1] - x.interval[0]) * f64::from(k) / 4.0;
+                other.distance(c.point(t)) <= reach
+            })
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Whether face `f` keeps more than `strip` from every point of `edges`'
+/// curves outside balls of radius `ball` round `points`: each edge's
+/// range halved until its piece's box ([`crate::geom::Curve::piece_bounds`])
+/// lies in a ball, or the ball round the box grown by `strip` is
+/// certified clear of the face ([`face_off_ball`]), 20 halvings at most.
+/// Certified, since each box holds its piece.
+fn face_off_edges(
+    body: &Body,
+    f: FaceId,
+    edges: &[EdgeId],
+    points: &[crate::geom::Point3],
+    strip: f64,
+    ball: f64,
+    m: &Meter,
+) -> bool {
+    let middle = |bx: &crate::geom::Box3| bx.min() + (bx.max() - bx.min()) * 0.5;
+    let half = |bx: &crate::geom::Box3| (bx.max() - bx.min()).length() / 2.0;
+    for &e in edges {
+        let x = &body.edges[e];
+        let curve = &body.curves[x.curve];
+        let mut stack = vec![(x.interval, 0u32)];
+        while let Some((iv, depth)) = stack.pop() {
+            let bx = curve.piece_bounds(iv);
+            let (c, r) = (middle(&bx), half(&bx));
+            if points.iter().any(|p| c.distance(*p) + r <= ball) {
+                continue;
+            }
+            if matches!(face_off_ball(body, f, c, r + strip, m), Ok(true)) {
+                continue;
+            }
+            if depth >= 20 {
+                return false;
+            }
+            let mid = (iv[0] + iv[1]) / 2.0;
+            stack.push(([iv[0], mid], depth + 1));
+            stack.push(([mid, iv[1]], depth + 1));
+        }
+    }
+    true
+}
+
+/// Whether faces sharing vertices but no edge, one of which runs along
+/// the other's surface on edges of its own, are certified to meet only
+/// near the vertices: a can's rim tangent to its wall along the rim's
+/// edge with a third face, the wall's own edge running on from the vertex
+/// the other way (#302's CP_Radial, design 444). That face keeps off the
+/// other's surface outside strips round those edges and balls round the
+/// vertices ([`face_beside`], under `cells` parts), and the other face
+/// keeps off the strips outside balls of two strips ([`face_off_edges`]).
+/// The faces' common points then lie within three strips of a vertex,
+/// where tangent wedges touch.
+fn apart_by_own_edges(body: &Body, a: FaceId, b: FaceId, cells: usize, m: &Meter) -> bool {
+    let vertices = shared_vertices(body, a, b);
+    if vertices.is_empty() {
+        return false;
+    }
+    let reach = TOUCH * slack(body, a).max(slack(body, b));
+    let size = {
+        let bx = face_box(body, a).union(&face_box(body, b));
+        (bx.max() - bx.min()).length()
+    };
+    let strip = (2.0 * size * reach).sqrt();
+    let surface = |f: FaceId| &body.surfaces[body.faces[f].surface];
+    let points: Vec<_> = vertices.iter().map(|&v| body.vertices[v].point).collect();
+    [(a, b), (b, a)].into_iter().any(|(x, y)| {
+        let ex = edges_on(body, x, surface(y), reach);
+        !ex.is_empty()
+            && face_beside(body, x, surface(y), &ex, &vertices, strip, cells, m).is_ok()
+            && face_off_edges(body, y, &ex, &points, strip, 2.0 * strip, m)
+    })
 }
 
 /// The edges two faces both use, each once.
@@ -809,5 +910,48 @@ mod tests {
             fault(a, b, &touch([Place::OnEdge(e), Place::Inside])),
             Some(Fault::FacesCross { a, b })
         );
+    }
+
+    /// A unit cube by [`polyhedron`], its faces bottom, top, then the
+    /// sides, and its vertices in the order given.
+    fn unit_cube() -> Body {
+        let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+        polyhedron(
+            &[
+                p(0.0, 0.0, 0.0),
+                p(1.0, 0.0, 0.0),
+                p(1.0, 1.0, 0.0),
+                p(0.0, 1.0, 0.0),
+                p(0.0, 0.0, 1.0),
+                p(1.0, 0.0, 1.0),
+                p(1.0, 1.0, 1.0),
+                p(0.0, 1.0, 1.0),
+            ],
+            &[
+                &[0, 3, 2, 1],
+                &[4, 5, 6, 7],
+                &[0, 1, 5, 4],
+                &[1, 2, 6, 5],
+                &[2, 3, 7, 6],
+                &[3, 0, 4, 7],
+            ],
+        )
+    }
+
+    /// Faces that share no vertex are never apart by their own edges: the
+    /// certificate needs the vertices its balls are round, and leaves
+    /// every other pair to the trace's verdict.
+    #[test]
+    fn faces_sharing_no_vertex_are_not_apart_by_their_own_edges() {
+        let body = unit_cube();
+        let faces: Vec<FaceId> = body.faces().collect();
+        let m = Meter::free();
+        assert!(!apart_by_own_edges(
+            &body,
+            faces[0],
+            faces[1],
+            BESIDE_CELLS,
+            &m
+        ));
     }
 }
