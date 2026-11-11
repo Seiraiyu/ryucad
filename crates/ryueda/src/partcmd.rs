@@ -233,6 +233,7 @@ pub fn component_add(
         parameters: BTreeMap::new(),
         pins: BTreeMap::new(),
         tags: Default::default(),
+        refdes_locked: false,
     };
     fill(
         p,
