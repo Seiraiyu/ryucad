@@ -19,10 +19,9 @@ use crate::solid::Solids;
 use ryukei::geom::{Rigid, Surface, UnitVector3, Vector3};
 use ryukei::name::{Event, Name};
 use ryukei::topo::EntityId;
-// 17.A's tweaks keep the body's topology (`Topology::Keep`); changing it
-// (ryukei 13's re-trim) is a later plan's.
-use ryukei::tweak::{DraftFace, DraftSpec, Hinge, MoveSpec, OffsetFacesSpec, Topology};
+use ryukei::tweak::{Blends, DraftFace, DraftSpec, Hinge, MoveSpec, OffsetFacesSpec, Topology};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Whether `f` is a face tweak, reported as one.
@@ -55,6 +54,24 @@ const _: () = {
 /// keeps both runs as ryucad 17's, unbudgeted.
 pub fn budgeted(f: &Feature) -> bool {
     matches!(f, Feature::DeleteFace(_)) || f.retrim().is_some_and(|r| !r.is_keep())
+}
+
+/// What a file's `topology` asks the kernel.
+fn topology(r: crate::doc::edit::Retrim) -> Topology {
+    if r.topology {
+        Topology::Change
+    } else {
+        Topology::Keep
+    }
+}
+
+/// What a file's `blends` asks the kernel.
+fn blends(r: crate::doc::edit::Retrim) -> Blends {
+    if r.blends {
+        Blends::Rebuild
+    } else {
+        Blends::Keep
+    }
 }
 
 /// What a tweak asks the kernel.
@@ -356,14 +373,14 @@ pub(crate) fn resolve<'a>(
                     faces: faces.into_iter().map(|(n, _)| n).collect(),
                     motion,
                     tangent: m.tangent,
-                    topology: Topology::Keep,
-                    blends: Default::default(),
+                    topology: topology(m.retrim),
+                    blends: blends(m.retrim),
                 }),
                 None => Spec::Offset(OffsetFacesSpec {
                     faces,
                     tangent: m.tangent,
-                    topology: Topology::Keep,
-                    blends: Default::default(),
+                    topology: topology(m.retrim),
+                    blends: blends(m.retrim),
                 }),
             };
             Ok(Resolved {
@@ -395,8 +412,8 @@ pub(crate) fn resolve<'a>(
                 built,
                 spec: Spec::Replace(ryukei::tweak::ReplaceSpec {
                     faces,
-                    topology: Topology::Keep,
-                    blends: Default::default(),
+                    topology: topology(x.retrim),
+                    blends: blends(x.retrim),
                 }),
             })
         }
@@ -425,8 +442,8 @@ pub(crate) fn resolve<'a>(
                         hinge,
                         faces,
                         tangent: d.tangent,
-                        topology: Topology::Keep,
-                        blends: Default::default(),
+                        topology: topology(d.retrim),
+                        blends: blends(d.retrim),
                     },
                     parting: matches!(d.hinge, DraftHinge::Parting { .. }),
                     asked,
@@ -632,23 +649,47 @@ pub(crate) fn refusal(e: &ryukei::TweakError) -> Refusal {
 pub(crate) fn hint(r: &Refusal) -> Option<&'static str> {
     match (r.reason, r.case) {
         ("tangency_broken", _) => Some(
-            "set tangent true, so faces tangent to a tweaked face move with it; or put the fillet after this feature in the list, where it is built again on the tweaked edges",
+            "set tangent true, so faces tangent to a tweaked face move with it; or blends: rebuild (--blends rebuild), which makes the fillet again on the tweaked faces; or put the fillet after this feature in the list, where it is built again on the tweaked edges",
         ),
         ("edge_vanishes" | "vertex_splits" | "face_collapses", _) => Some(
-            "the tweak would change the body's topology, which ryucad can't do yet (ryukei 13): a smaller motion, or the faces it reaches listed too, may keep it",
+            "the tweak would change the solid's topology: set topology: change (--topology change) to let faces grow over their neighbours, shrink away or split, and edges and vertices come and go; or a smaller motion, or the faces it reaches listed too, may keep it",
         ),
         ("hinge_not_on_face", _) | ("unsupported", Some("hinge_chain")) => {
             Some("split the face along the parting line first (a split, or a sketch's cut)")
         }
         ("hinge_along_pull", _) => Some("give a pull more nearly square to the face"),
-        ("cap_not_on_face", _) => {
-            Some("heal the gap by growing its neighbours instead, or delete the faces round it too")
-        }
-        ("grow_would_cap", _) => Some("heal the gap by a cap instead"),
+        ("gap_not_healed", _) => Some(
+            "delete the faces round the gap too, try heal: grow or heal: cap, or give one face of a hole, boss or pocket as a seed to delete it whole",
+        ),
+        ("heal_ambiguous" | "region_too_small", _) => Some(
+            "a smaller motion, or the neighbouring faces listed too, gives the edit less to decide",
+        ),
+        ("cap_not_on_face", _) => Some(
+            "heal the gap by growing its neighbours instead (heal: grow), or delete the faces round it too",
+        ),
+        ("grow_would_cap", _) => Some("heal the gap by a cap instead (heal: cap or auto)"),
         ("no_feature", _) => Some(
             "name the feature's faces yourself: a hole's or a boss's faces, which leave a gap a cap closes",
         ),
         _ => None,
+    }
+}
+
+/// [`hint`] for a feature that does (`changes`) or doesn't change
+/// topology: a self-intersection and a lone vertex are topology changes
+/// only where the tweak keeps its topology.
+pub(crate) fn hint_for(r: &Refusal, changes: bool) -> Option<&'static str> {
+    match (r.reason, r.case) {
+        ("self_intersecting", _) | ("unsupported", Some("lone_vertex")) if !changes => Some(
+            "the tweak would change the solid's topology: set topology: change (--topology change) to let the kernel re-trim the faces it reaches",
+        ),
+        // The fixed-topology engine leaves a face reaching past its
+        // neighbour (a wall drafted past the box's top) uncertain.
+        ("uncertain", _) if !changes => Some(
+            "a decision rounding left uncertain, as where a tweaked face reaches past its neighbour: set topology: change (--topology change) to let the kernel re-trim the faces it reaches",
+        ),
+        ("self_intersecting", _) | ("unsupported", Some("lone_vertex")) => None,
+        _ => hint(r),
     }
 }
 
@@ -663,6 +704,7 @@ fn kernel_error(
     ty: &str,
     (target, built): (&Id, &Built),
     e: ryukei::Error,
+    changes: bool,
 ) -> Error {
     let entity = |role: &str, n: &Name| -> Value {
         let mut v = json!({"role": role});
@@ -680,6 +722,12 @@ fn kernel_error(
     };
     let r = match &e {
         ryukei::Error::InvalidTweak(t) => refusal(t),
+        ryukei::Error::NotASolid { .. } => Refusal {
+            reason: "not_a_solid",
+            case: None,
+            message: "this edit needs a solid, and the target is a sheet",
+            entities: vec![],
+        },
         _ => Refusal {
             reason: "kernel",
             case: None,
@@ -696,7 +744,7 @@ fn kernel_error(
     if let Some(c) = r.case {
         err = err.with("case", c);
     }
-    if let Some(h) = hint(&r) {
+    if let Some(h) = hint_for(&r, changes) {
         err = err.with("hint", h);
     }
     if !r.entities.is_empty() {
@@ -711,6 +759,72 @@ fn kernel_error(
     err
 }
 
+/// `edit_budget_exceeded` for a direct edit (feature `id`, `ty`) its
+/// budget stopped; `None` for any other error.
+pub(crate) fn budget_error(id: &Id, ty: &str, e: &ryukei::Error) -> Option<Error> {
+    let ryukei::Error::BudgetExceeded { spent, budget } = *e else {
+        return None;
+    };
+    Some(
+        Error::new(
+            Code::EditBudgetExceeded,
+            format!("{ty} {id}: the edit didn't finish within edit.budget ({budget} work units; it had spent {spent})"),
+        )
+        .with("feature", id)
+        .with("spent", spent)
+        .with("budget", budget)
+        .with(
+            "hint",
+            "raise edit.budget (ryucad config set edit.budget <units>) to let it run longer, or edit less at once",
+        ),
+    )
+}
+
+/// Origins of a body a direct edit made of `built`: as
+/// [`crate::rebuild::replaced_origins`] gives them (a grown edge in
+/// place of a fillet is `{feature, replaces}`), but where that gives an
+/// entity the feature's own origin, a split's child takes its parent's,
+/// and a merge's child its parents' when they share one. A tweak that
+/// keeps its topology journals neither, so its origins are ryucad 17's.
+pub(crate) fn edit_origins(
+    id: &Id,
+    built: &Built,
+    made: &(ryukei::topo::Body, ryukei::name::Journal),
+) -> crate::rebuild::Origins {
+    let mut from: BTreeMap<String, Value> = BTreeMap::new();
+    for e in made.1.events() {
+        match e {
+            Event::Split { parent, children } => {
+                if let Some(o) = built.origins.get(&parent.to_string()) {
+                    for c in children {
+                        from.entry(c.to_string()).or_insert_with(|| o.clone());
+                    }
+                }
+            }
+            Event::Merged { parents, child } => {
+                let mut theirs = parents.iter().map(|p| built.origins.get(&p.to_string()));
+                if let Some(Some(o)) = theirs.next()
+                    && theirs.all(|x| x == Some(o))
+                {
+                    from.insert(child.to_string(), o.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    let own = json!({"feature": id});
+    crate::rebuild::replaced_origins(id, built, made)
+        .iter()
+        .map(|(k, o)| {
+            let o = match from.get(k) {
+                Some(p) if *o == own => p.clone(),
+                _ => o.clone(),
+            };
+            (k.clone(), o)
+        })
+        .collect()
+}
+
 /// A tweak: its target as it sees it, through one kernel call. It makes
 /// nothing, so every entity keeps its origin.
 pub fn build(
@@ -723,7 +837,13 @@ pub fn build(
 ) -> Result<Made> {
     let ty = f.type_name();
     let r = resolve(part, solids, id, f, before)?;
-    let work = crate::work::work(run.job);
+    let budgeted = budgeted(f);
+    let changes = f.retrim().is_some_and(|r| r.topology) || matches!(f, Feature::DeleteFace(_));
+    let work = if budgeted {
+        crate::work::work(run.job).with_budget(run.edit_budget)
+    } else {
+        crate::work::work(run.job)
+    };
     let key = crate::rebuild::op_key(&part.id, id);
     let body = &r.built.body;
     let (made, report) = match &r.spec {
@@ -744,10 +864,18 @@ pub fn build(
     };
     let made = made.map_err(|e| {
         crate::work::stopped(&e, run.job)
-            .unwrap_or_else(|| kernel_error(part, id, ty, (r.target, r.built), e))
+            .or_else(|| budget_error(id, ty, &e))
+            .unwrap_or_else(|| kernel_error(part, id, ty, (r.target, r.built), e, changes))
     })?;
-    let origins = crate::rebuild::replaced_origins(id, r.built, &made);
+    let origins = edit_origins(id, r.built, &made);
     let built = crate::rebuild::finish(id, ty, made, origins)?;
+    let report = if budgeted {
+        let mut rep = report.unwrap_or_else(|| json!({"target": r.target}));
+        rep["spent"] = json!(work.spent());
+        Some(rep)
+    } else {
+        report
+    };
     Ok(Made {
         report: report.map(Arc::new),
         ..Made::new(vec![(r.target.clone(), Arc::new(built))])
@@ -1355,6 +1483,49 @@ pub fn draft_warnings(part: &Id, id: &Id, rep: &Value) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hints_point_at_topology_and_blends() {
+        use ryukei::TweakError as T;
+        let n = Name::from_u128(7);
+        let h = |e: T, changes: bool| hint_for(&refusal(&e), changes).unwrap_or_default();
+        assert!(h(T::EdgeVanishes { edge: n }, false).contains("topology: change"));
+        assert!(h(T::VertexSplits { vertex: n }, false).contains("topology: change"));
+        assert!(h(T::FaceCollapses { face: n }, false).contains("topology: change"));
+        assert!(h(T::SelfIntersecting { faces: [n, n] }, false).contains("topology: change"));
+        assert_eq!(
+            hint_for(&refusal(&T::SelfIntersecting { faces: [n, n] }), true),
+            None
+        );
+        assert!(h(T::Uncertain { at: n }, false).contains("topology: change"));
+        assert_eq!(hint_for(&refusal(&T::Uncertain { at: n }), true), None);
+        let lone = T::Unsupported {
+            at: n,
+            case: ryukei::TweakCase::LoneVertex,
+        };
+        assert!(h(lone, false).contains("topology: change"));
+        assert!(h(T::TangencyBroken { edge: n }, false).contains("blends: rebuild"));
+        assert!(h(T::TangencyBroken { edge: n }, false).contains("tangent true"));
+        assert!(h(T::GapNotHealed { face: n }, true).contains("heal"));
+        assert!(h(T::HealAmbiguous { face: n }, true).contains("smaller motion"));
+        assert!(h(T::RegionTooSmall { face: n }, true).contains("smaller motion"));
+    }
+
+    #[test]
+    fn a_budget_refusal_has_its_own_code() {
+        let id = Id::parse("d", "feature").unwrap();
+        let spent = ryukei::Error::BudgetExceeded {
+            spent: 9,
+            budget: 4,
+        };
+        let e = budget_error(&id, "delete_face", &spent).unwrap();
+        assert_eq!(e.code, Code::EditBudgetExceeded);
+        assert_eq!(e.details["spent"], 9);
+        assert_eq!(e.details["budget"], 4);
+        assert_eq!(e.details["feature"], "d");
+        assert!(e.details["hint"].as_str().unwrap().contains("edit.budget"));
+        assert!(budget_error(&id, "delete_face", &ryukei::Error::Cancelled).is_none());
+    }
 
     #[test]
     fn only_deletes_and_retrims_are_budgeted() {
