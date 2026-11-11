@@ -51,16 +51,22 @@ pub const TYPES: [&str; 6] = [
 /// `edit_budget_exceeded` (`edit.budget`'s default): the smallest power of
 /// two at least four times [`LARGEST_EDIT`] (and at least `1 << 20`),
 /// measured in plan 22.A (Task 20) in a release build on bc2 (Intel Core
-/// Ultra 5 250K Plus, 18 threads, load average about 2 to 4), 2026-11-10.
-/// Units are the same on every machine. Plan 22.B measures again with the
-/// committed corpus.
+/// Ultra 5 250K Plus, 18 threads, load average about 2 to 4), 2026-11-10,
+/// and again in plan 22.B (Task 23) in a release build on cox-worker-5
+/// (Intel Core Ultra 7 265KF, 8 threads, load average about 2 to 5),
+/// 2026-11-11, the committed NIST corpus included: nothing moved. Units
+/// are the same on every machine.
 pub const DEFAULT_EDIT_BUDGET: u64 = 1 << 24;
 
 /// The most work units a direct edit that builds was measured spending
-/// (plan 22.A, Task 20; the box and date as [`DEFAULT_EDIT_BUDGET`]'s):
-/// ryukei's `edit_props` seed 70, a replace on 10 faces, 3,249,017 units.
-/// ryucad's own largest is 29,957 (`direct_edits`' groove run through);
-/// the goldens' 12,478 (`topology_tweaks`' slide).
+/// (plans 22.A, Task 20, and 22.B, Task 23; the boxes and dates as
+/// [`DEFAULT_EDIT_BUDGET`]'s): ryukei's `edit_props` seed 70, a replace on
+/// 10 faces, 3,249,017 units. ryucad's own largest is 38,149
+/// (`direct_edits`' groove run through, 29,957 in 22.A, before ryukei
+/// 16.A); its largest blend edit 9,705 (`a_bosss_foot_and_a_pockets_rim_
+/// are_defeatured`); the goldens' 12,478 (`topology_tweaks`' slide). No
+/// edit of the committed NIST corpus's `delete_blend --below 2mm` built
+/// (22.B, Task 14), so none sets it.
 pub const LARGEST_EDIT: u64 = 3_249_017;
 
 const _: () = {
