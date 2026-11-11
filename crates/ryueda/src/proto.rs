@@ -599,6 +599,51 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sheet: Option<String>,
     },
+    /// Properties on an object's override, or on a selector's rule.
+    #[serde(rename = "style.set")]
+    StyleSet {
+        /// The agent's name for an object (with `block`), `rail:NAME`, or
+        /// a selector `key=value,…` (a rule).
+        target: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+        /// Property to its text, in order.
+        set: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Properties off an object's override or a selector's rule.
+    #[serde(rename = "style.unset")]
+    StyleUnset {
+        target: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+        names: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// `add` a rule (`select`, `set`) at the end, or `remove` the one at
+    /// `index`.
+    #[serde(rename = "style.rule")]
+    StyleRule {
+        op: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        select: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        set: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A palette entry: `#light/#dark`, or `default` to remove it.
+    #[serde(rename = "style.palette")]
+    StylePalette {
+        name: String,
+        value: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// The standards that judge a library's symbols (this project's own by
     /// default), whole, and where they come from.
     #[serde(rename = "standards.get")]
@@ -800,6 +845,10 @@ impl Request {
                 | Request::RailAdd { .. }
                 | Request::RailEdit { .. }
                 | Request::Tag { .. }
+                | Request::StyleSet { .. }
+                | Request::StyleUnset { .. }
+                | Request::StyleRule { .. }
+                | Request::StylePalette { .. }
                 | Request::RailDelete { .. }
                 | Request::ClassAdd { .. }
                 | Request::ClassEdit { .. }

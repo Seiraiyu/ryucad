@@ -1130,6 +1130,69 @@ enum StyleCmd {
         #[arg(long)]
         sheet: Option<String>,
     },
+    /// Set properties (NAME=VALUE: colour=hv, fill=#ffffff/#202020,
+    /// line_weight=heavy, text_size=large, emphasis=true, dash=true,
+    /// visible.pin_numbers=false) on an object (by the agent's name, with
+    /// --block; rail:NAME without) or on the rule of a selector
+    /// (tag=hv,kind=net).
+    Set {
+        target: String,
+        #[arg(value_parser = pair, required = true, value_name = "NAME=VALUE")]
+        set: Vec<(String, String)>,
+        #[arg(long)]
+        block: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Take properties off an object's override or a selector's rule.
+    Unset {
+        target: String,
+        #[arg(required = true)]
+        names: Vec<String>,
+        #[arg(long)]
+        block: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Add a rule (a selector and NAME=VALUE...) or remove one by index.
+    Rule {
+        #[command(subcommand)]
+        cmd: StyleRuleCmd,
+    },
+    /// Set a palette colour: NAME #light/#dark, or NAME default.
+    Palette {
+        #[command(subcommand)]
+        cmd: StylePaletteCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum StyleRuleCmd {
+    /// A rule at the end: a selector (tag=hv,kind=net) and NAME=VALUE...
+    Add {
+        select: String,
+        #[arg(value_parser = pair, required = true, value_name = "NAME=VALUE")]
+        set: Vec<(String, String)>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// The rule at INDEX (from 0) removed.
+    Remove {
+        index: usize,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum StylePaletteCmd {
+    /// A palette colour: NAME #light/#dark, or NAME default.
+    Set {
+        name: String,
+        value: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1925,6 +1988,68 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             }
         }
         Command::Style { cmd: None } => Request::StyleGet {},
+        Command::Style {
+            cmd:
+                Some(StyleCmd::Set {
+                    target,
+                    set,
+                    block,
+                    expect,
+                }),
+        } => Request::StyleSet {
+            target: target.clone(),
+            block: block.clone(),
+            set: set.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Style {
+            cmd:
+                Some(StyleCmd::Unset {
+                    target,
+                    names,
+                    block,
+                    expect,
+                }),
+        } => Request::StyleUnset {
+            target: target.clone(),
+            block: block.clone(),
+            names: names.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Style {
+            cmd:
+                Some(StyleCmd::Rule {
+                    cmd: StyleRuleCmd::Add { select, set, expect },
+                }),
+        } => Request::StyleRule {
+            op: "add".into(),
+            select: Some(select.clone()),
+            set: set.clone(),
+            index: None,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Style {
+            cmd:
+                Some(StyleCmd::Rule {
+                    cmd: StyleRuleCmd::Remove { index, expect },
+                }),
+        } => Request::StyleRule {
+            op: "remove".into(),
+            select: None,
+            set: Vec::new(),
+            index: Some(*index),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Style {
+            cmd:
+                Some(StyleCmd::Palette {
+                    cmd: StylePaletteCmd::Set { name, value, expect },
+                }),
+        } => Request::StylePalette {
+            name: name.clone(),
+            value: value.clone(),
+            expected_revision: expect.expect.clone(),
+        },
         Command::Style {
             cmd:
                 Some(StyleCmd::Explain {

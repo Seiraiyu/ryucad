@@ -482,6 +482,10 @@ fn every_protocol_method_has_a_command() {
         ("lib.check", &["lib", "check"]),
         ("style.get", &["style"]),
         ("style.explain", &["style", "explain"]),
+        ("style.set", &["style", "set"]),
+        ("style.unset", &["style", "unset"]),
+        ("style.rule", &["style", "rule", "add"]),
+        ("style.palette", &["style", "palette", "set"]),
         ("standards.get", &["standards"]),
         ("standards.set", &["standards", "set"]),
         ("check", &["check"]),
@@ -1061,6 +1065,7 @@ impl Pair {
         p.ok(&["block", "create", "Top", "--id", "top"]);
         p.ok(&["component", "add", "top", "--of", "r_100k", "--id", "r1"]);
         p.ok(&["connect", "top/r1/1", "SDA", "--new"]);
+        p.ok(&["design", "create", "Board", "--root", "top", "--id", "d"]);
         p
     }
 
@@ -3501,4 +3506,88 @@ fn a_style_is_read_and_explained() {
         "not_found",
         1,
     );
+}
+
+/// Style writes: an override by the agent's vocabulary, a rule by a
+/// selector, a palette entry; a text size lays its block out again; a
+/// colour moves no layout; undo takes each back; locks refuse.
+#[test]
+fn the_style_is_written_by_commands() {
+    let p = Pair::with_placed_resistor();
+    let block = "top";
+    p.ok(&["layout"]);
+    let layout = |top: &Path| fs::read_to_string(top.join("board/blocks/top/layout.json")).unwrap();
+    let before = layout(&p.direct);
+    p.ok(&["style", "set", "R1", "colour=hv", "--block", block]);
+    assert_eq!(layout(&p.direct), before, "a colour moves no layout");
+    let s = p.ok(&["style"]);
+    let id = s["project"]["overrides"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    assert!(id.starts_with(&format!("component/{block}/")), "{s}");
+    let svg = || {
+        p.ok(&["render", "--block", block, "--out", "look.svg"]);
+        fs::read_to_string(p.direct.join("board/look.svg")).unwrap()
+    };
+    assert!(!svg().contains("font-size=\"1.778\""));
+    p.ok(&["style", "set", "R1", "text_size=large", "--block", block]);
+    // The engine reads it: R1's text is drawn large, and stays where it
+    // stood while it still fits there.
+    assert!(svg().contains("font-size=\"1.778\""), "a larger text");
+    assert_eq!(layout(&p.direct), before, "text that still fits stays");
+    p.ok(&["style", "set", "tag=dnp", "dash=true"]);
+    assert_eq!(
+        p.ok(&["style"])["project"]["rules"][0]["select"]["tag"],
+        "dnp"
+    );
+    p.ok(&["style", "rule", "add", "kind=net", "line_weight=heavy"]);
+    p.ok(&["style", "rule", "remove", "1"]);
+    p.ok(&["style", "palette", "set", "brand", "#0055aa/#66aaff"]);
+    p.ok(&["style", "set", "R1", "fill=brand", "--block", block]);
+    p.fails(
+        &["style", "set", "R1", "colour=#ff0000", "--block", block],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &["style", "set", "R1", "fill=nowhere", "--block", block],
+        "style_invalid",
+        1,
+    );
+    p.ok(&["style", "unset", "R1", "text_size", "--block", block]);
+    assert!(!svg().contains("font-size=\"1.778\""), "the text goes back");
+    assert_eq!(layout(&p.direct), before);
+    let style = |top: &Path| fs::read_to_string(top.join("board/style.json")).unwrap();
+    assert!(!style(&p.daemon).contains("text_size"));
+    let (code, u) = p.run_in(&p.daemon, "board", &["undo"]);
+    assert_eq!(code, 0, "{u}");
+    assert!(style(&p.daemon).contains("text_size"), "undo puts it back");
+}
+
+#[test]
+fn an_organisations_locks_refuse_a_projects_writes() {
+    let p = Pair::with_placed_resistor();
+    p.write(
+        "passives/style.json",
+        r#"{"kind": "ryueda.style", "format": 1, "locks": ["colour", "palette.wire", "lint.severity.sch_jog"],
+            "lint": {"severity": {"sch_jog": "error"}}}"#,
+    );
+    p.ok(&["project", "edit", "--style-from", "passives"]);
+    let block = "top";
+    let e = p.fails(
+        &["style", "set", "R1", "colour=hv", "--block", block],
+        "style_locked",
+        1,
+    );
+    assert_eq!(e["details"]["lock"], "colour", "{e}");
+    p.fails(
+        &["style", "palette", "set", "wire", "#000000/#ffffff"],
+        "style_locked",
+        1,
+    );
+    p.ok(&["style", "set", "R1", "dash=true", "--block", block]);
 }

@@ -752,6 +752,69 @@ fn dispatch(
             dry_run,
         ),
         Request::StyleGet {} => crate::style::get(session.project()),
+        Request::StyleSet {
+            target,
+            block,
+            set,
+            expected_revision,
+        } => crate::style::write(
+            session,
+            crate::style::Edit::Set {
+                target: &target,
+                block: block.as_deref(),
+                props: &set,
+            },
+            expected_revision.as_deref(),
+        ),
+        Request::StyleUnset {
+            target,
+            block,
+            names,
+            expected_revision,
+        } => crate::style::write(
+            session,
+            crate::style::Edit::Unset {
+                target: &target,
+                block: block.as_deref(),
+                names: &names,
+            },
+            expected_revision.as_deref(),
+        ),
+        Request::StyleRule {
+            op,
+            select,
+            set,
+            index,
+            expected_revision,
+        } => {
+            let edit = match (op.as_str(), select.as_deref(), index) {
+                ("add", Some(select), _) => crate::style::Edit::RuleAdd {
+                    select,
+                    props: &set,
+                },
+                ("remove", _, Some(index)) => crate::style::Edit::RuleRemove { index },
+                _ => {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        "op is add (with select and set) or remove (with index)",
+                    )
+                    .with("param", "op"));
+                }
+            };
+            crate::style::write(session, edit, expected_revision.as_deref())
+        }
+        Request::StylePalette {
+            name,
+            value,
+            expected_revision,
+        } => crate::style::write(
+            session,
+            crate::style::Edit::Palette {
+                name: &name,
+                value: &value,
+            },
+            expected_revision.as_deref(),
+        ),
         Request::StyleExplain {
             target,
             block,

@@ -796,6 +796,236 @@ pub fn explain(
     }))
 }
 
+/// What a style write changes.
+pub enum Edit<'a> {
+    /// Over the override of `target` (in `block`), or over the rule with
+    /// exactly `target`'s selector when it is one (`key=value,…`).
+    Set {
+        target: &'a str,
+        block: Option<&'a str>,
+        props: &'a [(String, String)],
+    },
+    /// Those properties off, likewise; an entry left empty goes.
+    Unset {
+        target: &'a str,
+        block: Option<&'a str>,
+        names: &'a [String],
+    },
+    /// A new rule at the end.
+    RuleAdd {
+        select: &'a str,
+        props: &'a [(String, String)],
+    },
+    /// The rule at `index` (from 0).
+    RuleRemove { index: usize },
+    /// A palette entry, `light/dark`; `default` removes it.
+    Palette { name: &'a str, value: &'a str },
+}
+
+fn usage(param: &str, msg: String) -> crate::error::Error {
+    crate::error::Error::new(Code::InvalidParam, msg).with("param", param)
+}
+
+/// The override key of what `target` names in `block`.
+fn override_key(
+    p: &crate::project::Project,
+    block: Option<&str>,
+    target: &str,
+) -> crate::error::Result<String> {
+    if let Some(r) = target.strip_prefix("rail:") {
+        let (id, _) = crate::topcmd::rail_named(p, r)?;
+        return Ok(format!("rail/{id}"));
+    }
+    let block = block.ok_or_else(|| {
+        usage(
+            "block",
+            "name the block an object is in with --block".into(),
+        )
+    })?;
+    Ok(object_named(p, block, target)?.0.id)
+}
+
+fn props_of(pairs: &[(String, String)]) -> crate::error::Result<Props> {
+    let mut out = Props::default();
+    for (k, v) in pairs {
+        out.set(k, v).map_err(|m| usage("set", m))?;
+    }
+    Ok(out)
+}
+
+/// A style write: `edit` applied to this project's style, refused where
+/// the organisation locks what it sets (`style_locked`) or where the file
+/// would fail its checks (`style_invalid`); written as one logged change
+/// guarded by the project's revision, the file deleted when it holds
+/// nothing. Blocks whose drawing it moves are laid out again in the same
+/// change (`write::commit`'s `keep_current`).
+pub fn write(
+    session: &mut crate::session::Session,
+    edit: Edit,
+    expected: Option<&str>,
+) -> crate::error::Result<serde_json::Value> {
+    let p = session.project();
+    crate::server::check_revision("the project", &p.revision, expected)?;
+    let mut s = p.style.item.clone().map_err(|e| e.clone())?;
+    let layers = crate::cascade::Layers::of(p);
+    let locked = |lock: &str| -> crate::error::Result<()> {
+        if layers.locked(lock) {
+            return Err(crate::error::Error::new(
+                Code::StyleLocked,
+                format!("the organisation's style locks {lock}"),
+            )
+            .with("lock", lock)
+            .with("path", layers.org_path().unwrap_or_default()));
+        }
+        Ok(())
+    };
+    let what;
+    match edit {
+        Edit::Set {
+            target,
+            block,
+            props,
+        } => {
+            let set = props_of(props)?;
+            for n in set.names() {
+                locked(n)?;
+            }
+            if target.contains('=') {
+                let select = Select::parse(target).map_err(|m| usage("target", m))?;
+                match s.rules.iter_mut().find(|r| r.select == select) {
+                    Some(r) => r.set.over(&set),
+                    None => s.rules.push(Rule { select, set }),
+                }
+                what = format!("style rule {target}");
+            } else {
+                let key = override_key(p, block, target)?;
+                s.overrides.entry(key.clone()).or_default().over(&set);
+                what = format!("style {key}");
+            }
+        }
+        Edit::Unset {
+            target,
+            block,
+            names,
+        } => {
+            let take = |pr: &mut Props| -> crate::error::Result<()> {
+                for n in names {
+                    if !pr.unset(n) {
+                        return Err(usage(
+                            "names",
+                            format!("{n} isn't a property: {}", PROPERTIES.join(", ")),
+                        ));
+                    }
+                }
+                Ok(())
+            };
+            if target.contains('=') {
+                let select = Select::parse(target).map_err(|m| usage("target", m))?;
+                let i = s
+                    .rules
+                    .iter()
+                    .position(|r| r.select == select)
+                    .ok_or_else(|| {
+                        crate::error::Error::new(
+                            Code::NotFound,
+                            format!("no rule selects {target}"),
+                        )
+                        .with("reference", target)
+                    })?;
+                take(&mut s.rules[i].set)?;
+                if s.rules[i].set.is_empty() {
+                    s.rules.remove(i);
+                }
+                what = format!("style rule {target}");
+            } else {
+                let key = override_key(p, block, target)?;
+                let pr = s.overrides.get_mut(&key).ok_or_else(|| {
+                    crate::error::Error::new(Code::NotFound, format!("{target} has no override"))
+                        .with("reference", target)
+                })?;
+                take(pr)?;
+                if pr.is_empty() {
+                    s.overrides.remove(&key);
+                }
+                what = format!("style {key}");
+            }
+        }
+        Edit::RuleAdd { select, props } => {
+            let select = Select::parse(select).map_err(|m| usage("select", m))?;
+            let set = props_of(props)?;
+            for n in set.names() {
+                locked(n)?;
+            }
+            s.rules.push(Rule { select, set });
+            what = "style rules".into();
+        }
+        Edit::RuleRemove { index } => {
+            if index >= s.rules.len() {
+                return Err(usage(
+                    "index",
+                    format!(
+                        "the style has {} rule(s); rules count from 0",
+                        s.rules.len()
+                    ),
+                ));
+            }
+            s.rules.remove(index);
+            what = "style rules".into();
+        }
+        Edit::Palette { name, value } => {
+            locked(&format!("palette.{name}"))?;
+            if value == "default" {
+                s.palette.remove(name);
+            } else {
+                let (l, d) = value
+                    .split_once('/')
+                    .filter(|(l, d)| Rgb::parse(l).is_some() && Rgb::parse(d).is_some())
+                    .ok_or_else(|| {
+                        usage("value", format!("{value:?} is #light/#dark, or default"))
+                    })?;
+                s.palette.insert(
+                    name.to_owned(),
+                    Pair {
+                        light: l.to_ascii_lowercase(),
+                        dark: d.to_ascii_lowercase(),
+                    },
+                );
+            }
+            what = format!("style palette {name}");
+        }
+    }
+    let builtin = builtin();
+    let org = p
+        .org_style
+        .as_ref()
+        .and_then(|o| o.style.item.as_ref().ok());
+    let known = |n: &str| {
+        builtin.palette.contains_key(n)
+            || org.is_some_and(|o| o.palette.contains_key(n))
+            || s.palette.contains_key(n)
+    };
+    let faults: Vec<_> = s
+        .check(Layer::Project, &known)
+        .into_iter()
+        .map(|f| f.with("path", FILE))
+        .collect();
+    let errors: Vec<_> = faults.into_iter().filter(|f| f.is_error()).collect();
+    if !errors.is_empty() {
+        return Err(crate::write::refused(FILE, &errors));
+    }
+    let mut w = crate::write::Writes::default();
+    if s == Style::default() {
+        w.delete(FILE.to_owned());
+    } else {
+        w.0.push((
+            FILE.to_owned(),
+            Some(crate::doc::to_string(&s, KIND, FORMAT)),
+        ));
+    }
+    crate::write::commit(session, &what, w)?;
+    get(session.project())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
