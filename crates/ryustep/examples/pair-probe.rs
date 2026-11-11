@@ -123,8 +123,9 @@ fn main() {
                 .split(',')
                 .map(|x| x.parse().expect("a face index"))
                 .collect();
-            let fa = body.faces().nth(ids[0]).expect("a face");
-            let fb = body.faces().nth(ids[1]).expect("a face");
+            // By `FaceId` index, as the faults name them.
+            let face = |i: usize| body.faces().find(|f| f.index() == i).expect("a face");
+            let (fa, fb) = (face(ids[0]), face(ids[1]));
             for f in [fa, fb] {
                 face_line(body, f);
             }
