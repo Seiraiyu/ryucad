@@ -858,6 +858,28 @@ fn kernel_error(
     err
 }
 
+/// A direct edit's result's signed volume (m³) where it is negative: a
+/// solid turned inside out, its faces wound against their region. The
+/// body checks decide winding only for planar faces with straight edges,
+/// and mass properties don't read it (ryukei #692), so a coarse mesh's
+/// signed volume says (1 mm chord, half a radian: a gross inversion, not
+/// a measurement). A sheet, or a body that doesn't mesh: `None`.
+fn inside_out(body: &ryukei::topo::Body) -> Option<f64> {
+    if body.kind() != ryukei::topo::BodyKind::Solid {
+        return None;
+    }
+    let m = ryukei::mesh::tessellate(body, &ryukei::mesh::MeshParams::new(1e-3, 0.5)).ok()?;
+    if !m.faults.is_empty() {
+        return None;
+    }
+    let mut v = 0.0;
+    for [a, b, c] in m.welded_triangles() {
+        let [a, b, c] = [a, b, c].map(|i| m.positions[i as usize].to_vector());
+        v += a.dot(b.cross(c)) / 6.0;
+    }
+    (v < 0.0).then_some(v)
+}
+
 /// `edit_budget_exceeded` for a direct edit (feature `id`, `ty`) its
 /// budget stopped; `None` for any other error.
 pub(crate) fn budget_error(id: &Id, ty: &str, e: &ryukei::Error) -> Option<Error> {
@@ -981,6 +1003,21 @@ pub fn build(
             .or_else(|| budget_error(id, ty, &e))
             .unwrap_or_else(|| kernel_error(part, id, ty, (r.target, r.built), e, changes))
     })?;
+    if budgeted && let Some(v) = inside_out(&made.0) {
+        return Err(Error::new(
+            Code::TweakFailed,
+            format!("{ty} {id}: the edit would turn the solid inside out (its volume would be {:.6} mm³)", v * 1e9),
+        )
+        .with("feature", id)
+        .with("solid", r.target)
+        .with("reason", "inside_out")
+        .with("kernel", "tweak")
+        .with("volume_mm3", v * 1e9)
+        .with(
+            "hint",
+            "the kernel healed the gap the wrong way round (ryukei #692): delete the faces round the gap too, try heal: cap or heal: grow, or give one face of a hole, boss or pocket as a seed",
+        ));
+    }
     let origins = edit_origins(id, r.built, &made);
     let built = crate::rebuild::finish(id, ty, made, origins)?;
     let report = if budgeted {

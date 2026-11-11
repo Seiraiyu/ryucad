@@ -68,6 +68,19 @@ fn boxed() -> (tempfile::TempDir, Session) {
     (dir, s)
 }
 
+/// Solid `solid` in the part's model, in `inspect` (a reference import
+/// shows only there).
+fn model_body(s: &mut Session, solid: &str) -> Value {
+    let v = must(s, "inspect", json!({"part": "p"}));
+    v["bodies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["solid"] == solid)
+        .unwrap_or_else(|| panic!("no {solid} in {v}"))
+        .clone()
+}
+
 /// What feature `f` leaves, in `inspect`.
 fn body(s: &mut Session, f: &str) -> Value {
     must(s, "inspect", json!({"part": "p", "feature": f}))["bodies"][0].clone()
@@ -592,4 +605,348 @@ fn feature_faces_shows_what_a_seed_takes() {
     let rim = edge(&b, "b", [0.0, 0.0, 10.0], [40.0, 0.0, 10.0]);
     let e = call(&mut s, "feature_faces.get", json!({"face": rim})).unwrap_err();
     assert_eq!(e.code, Code::InvalidParam, "{e}");
+}
+
+/// The hole made a counterbore after the delete was written: the seed
+/// still names the bore and the delete follows it, found again on the
+/// rebuild. A seed's feature is the smallest a cap closes (ryukei's
+/// `feature_faces`), and the counterbore's floor caps the bore, so the
+/// bore goes and the counterbore (10 mm across, 3 deep) stays; seeded from
+/// the counterbore's wall, the delete takes it all.
+#[test]
+fn a_counterbore_added_before_the_delete_is_followed_by_its_seed() {
+    let (_dir, mut s) = drilled();
+    let bore = cylinders(&body(&mut s, "h"), "b");
+    add(
+        &mut s,
+        json!({"type": "delete_face", "id": "d", "features": [bore[0]]}),
+    );
+    near(volume(&mut s, "d", "b"), 12000.0, 1e-9);
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "h", "form": "counterbore",
+        "counterbore": {"diameter": 10, "depth": 3}}),
+    );
+    near(volume(&mut s, "d", "b"), 12000.0 - PI * 25.0 * 3.0, 1e-6);
+    let left = cylinders(&body(&mut s, "d"), "b");
+    assert!(
+        !left.is_empty() && bore.iter().all(|f| !left.contains(f)),
+        "{left:?}"
+    );
+    let rep = report(&mut s, "d");
+    assert_eq!(
+        rep["seeds"][0]["faces"].as_array().unwrap().len(),
+        bore.len(),
+        "{rep}"
+    );
+    // Seeded from the counterbore's wall: its floor and the bore go too.
+    let wall = cylinders(&body(&mut s, "h"), "b")
+        .into_iter()
+        .find(|f| !bore.contains(f))
+        .expect("the counterbore's wall");
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "d", "features": [wall]}),
+    );
+    near(volume(&mut s, "d", "b"), 12000.0, 1e-9);
+    assert!(cylinders(&body(&mut s, "d"), "b").is_empty());
+    report(&mut s, "d");
+}
+
+/// A boss (r 5, 5 high) with a 1 mm fillet round its foot, and a pocket
+/// 20 × 10 × 5 mm: each deleted by one seed and capped.
+#[test]
+fn a_boss_with_its_foot_fillet_and_a_pocket_are_deleted_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": 60, "y": 30, "z": 10}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "j", "operation": "join",
+        "params": {"radius": 5, "height": 5}, "placement": {"origin": [15, 15, 10]}}),
+    );
+    let joined = body(&mut s, "j");
+    let foot = joined["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| {
+            e["curve"]["type"] == "circle"
+                && (e["curve"]["frame"]["origin"][2].as_f64().unwrap() - 0.010).abs() < 1e-12
+        })
+        .map(|e| format!("p/b/{}", e["name"].as_str().unwrap()))
+        .expect("the boss's foot");
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "f", "radius": 1, "edges": [foot]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "k", "operation": "cut", "targets": ["b"],
+        "params": {"x": 20, "y": 10, "z": 10}, "placement": {"origin": [35, 10, 5]}}),
+    );
+    let k = body(&mut s, "k");
+    let boss = cylinders(&k, "b")[0].clone();
+    let floor = plane(&k, "b", 2, 1.0, 5.0);
+    add(
+        &mut s,
+        json!({"type": "delete_face", "id": "d", "features": [boss, floor]}),
+    );
+    near(volume(&mut s, "d", "b"), 60.0 * 30.0 * 10.0, 1e-6);
+    let rep = report(&mut s, "d");
+    // The boss's wall, top and fillet; the pocket's floor and four walls.
+    assert_eq!(
+        rep["seeds"][0]["faces"].as_array().unwrap().len(),
+        3,
+        "{rep}"
+    );
+    assert_eq!(
+        rep["seeds"][1]["faces"].as_array().unwrap().len(),
+        5,
+        "{rep}"
+    );
+}
+
+/// An edge's fillet deleted and grown back to the box; the edge growth
+/// makes in its place says what it replaces.
+#[test]
+fn an_edges_fillet_grows_back_to_the_box() {
+    let (_dir, mut s) = boxed();
+    let rim = edge(
+        &body(&mut s, "b"),
+        "b",
+        [40.0, 0.0, 20.0],
+        [40.0, 30.0, 20.0],
+    );
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "f", "radius": 4, "edges": [rim]}),
+    );
+    let round = cylinders(&body(&mut s, "f"), "b");
+    add(
+        &mut s,
+        json!({"type": "delete_face", "id": "d", "faces": round, "heal": "grow"}),
+    );
+    near(volume(&mut s, "d", "b"), 24000.0, 1e-9);
+    let b = built(&mut s, "d", "b");
+    assert!(
+        b.origins
+            .values()
+            .any(|o| o["feature"] == "d" && o.get("replaces").is_some()),
+        "{:?}",
+        b.origins.iter().collect::<Vec<_>>()
+    );
+    report(&mut s, "d");
+}
+
+/// A move of the pocket's floor reads it; a delete of the pocket moved
+/// in before the move takes the floor away: the move fails, naming the
+/// delete.
+#[test]
+fn a_reference_to_a_deleted_face_fails_naming_the_delete() {
+    let (_dir, mut s) = boxed();
+    add(
+        &mut s,
+        json!({"type": "box", "id": "k", "operation": "cut", "targets": ["b"],
+        "params": {"x": 20, "y": 10, "z": 30}, "placement": {"origin": [10, 10, 15]}}),
+    );
+    let floor = plane(&body(&mut s, "k"), "b", 2, 1.0, 15.0);
+    add(
+        &mut s,
+        json!({"type": "move_face", "id": "m", "by": "offset", "distance": 1,
+        "faces": [floor.clone()]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "delete_face", "id": "d", "features": [floor]}),
+    );
+    must(
+        &mut s,
+        "feature.move",
+        json!({"part": "p", "id": "d", "after": "k"}),
+    );
+    let e = failure(&mut s, "m");
+    assert_eq!(e.code, Code::ReferenceUnresolved, "{e}");
+    assert_eq!(e.details["removed_by"], "d", "{e}");
+}
+
+/// A reference import is refused, with the convert hint; converted to a
+/// solid, its hole is deleted.
+#[test]
+fn a_reference_import_is_converted_then_its_hole_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    let bytes = std::fs::read(format!(
+        "{}/../ryustep/tests/data/occt/plate_hole.stp",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let root = s.root().to_owned();
+    ryucad::doc::project::write_atomic(&root.join("imports/imp.step"), &bytes).unwrap();
+    let file = ryucad::doc::project::ImportFile::new(bytes.to_vec());
+    write_feature(
+        &mut s,
+        "imp",
+        json!({"type": "import", "body": 0, "mode": "reference",
+        "product": {"id": "part 10", "name": "part 10"},
+        "file": {"blake3": file.blake3, "path": "imports/imp.step"}}),
+    );
+    let bore = cylinders(&model_body(&mut s, "imp"), "imp");
+    assert!(!bore.is_empty());
+    let e = call(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "delete_face", "id": "d",
+        "features": [bore[0]]}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, Code::ReferenceBody, "{e}");
+    assert!(
+        e.details["hint"]
+            .as_str()
+            .unwrap()
+            .contains("import convert"),
+        "{e}"
+    );
+    must(
+        &mut s,
+        "import.convert",
+        json!({"part": "p", "feature": "imp"}),
+    );
+    let bore = cylinders(&model_body(&mut s, "imp"), "imp");
+    add(
+        &mut s,
+        json!({"type": "delete_face", "id": "d", "features": [bore[0]]}),
+    );
+    // OCCT's plate: 10 × 20 × 30 mm, its hole gone.
+    near(volume(&mut s, "d", "imp"), 10.0 * 20.0 * 30.0, 1e-6);
+}
+
+#[test]
+fn deletes_refuse_with_their_hints() {
+    // A box's side: nothing closes the gap.
+    {
+        let (_dir, mut s) = boxed();
+        let side = plane(&body(&mut s, "b"), "b", 0, 1.0, 40.0);
+        add(
+            &mut s,
+            json!({"type": "delete_face", "id": "d", "faces": [side]}),
+        );
+        let e = failure(&mut s, "d");
+        assert_eq!(
+            (e.code, e.details["reason"].as_str()),
+            (Code::TweakFailed, Some("gap_not_healed")),
+            "{e}"
+        );
+        assert!(e.details["hint"].as_str().unwrap().contains("heal"), "{e}");
+    }
+    let (_dir, mut s) = drilled();
+    let side = plane(&body(&mut s, "b"), "b", 0, 1.0, 40.0);
+    // A seed on no feature.
+    add(
+        &mut s,
+        json!({"type": "delete_face", "id": "d", "seeds": [side.clone()]}),
+    );
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "d", "faces": [], "seeds": [side]}),
+    );
+    let e = failure(&mut s, "d");
+    assert_eq!(e.details["reason"], "no_feature", "{e}");
+    // A hole's bore grown: a cap closes it, not growth.
+    let bore = cylinders(&body(&mut s, "h"), "b");
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "d", "seeds": [],
+        "faces": bore, "heal": "grow"}),
+    );
+    let e = failure(&mut s, "d");
+    assert_eq!(e.details["reason"], "grow_would_cap", "{e}");
+    assert!(
+        e.details["hint"].as_str().unwrap().contains("heal: cap"),
+        "{e}"
+    );
+}
+
+#[test]
+fn deletes_build_alike_on_one_thread_and_eight() {
+    let (_dir, mut s) = drilled();
+    let bore = cylinders(&body(&mut s, "h"), "b");
+    add(
+        &mut s,
+        json!({"type": "delete_face", "id": "d", "features": [bore[0]]}),
+    );
+    let part = Id::parse("p", "part").unwrap();
+    let p = s.project().part(&part).unwrap().clone();
+    let on = |n: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+            .install(|| ryucad::rebuild::rebuild_part(&p))
+    };
+    assert_eq!(on(1).hash, on(8).hash);
+}
+
+/// A drilled plate's side deleted: like a box's, nothing closes the gap.
+/// ryukei builds the hole's plug instead (#692: inside out from a
+/// cylinder's cut, the right way out from a hole feature's, as here), so
+/// this waits on the kernel's fix.
+#[test]
+#[ignore = "ryukei builds the hole's plug (#692)"]
+fn a_drilled_plates_side_is_not_healed() {
+    let (_dir, mut s) = drilled();
+    let side = plane(&body(&mut s, "b"), "b", 0, 1.0, 40.0);
+    add(
+        &mut s,
+        json!({"type": "delete_face", "id": "d", "faces": [side]}),
+    );
+    let e = failure(&mut s, "d");
+    assert_eq!(e.details["reason"], "gap_not_healed", "{e}");
+}
+
+/// Until then, ryucad's guard refuses an inside-out result, typed, so an
+/// agent never gets a solid of negative volume: a plate 40 × 30 × 10 mm
+/// with a 6 mm cylinder cut through it, its side deleted. (A hole
+/// feature's plate gives the plug the right way out, which only the
+/// kernel's fix refuses: the case above.)
+#[test]
+fn an_inside_out_result_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": 40, "y": 30, "z": 10}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "h", "operation": "cut", "targets": ["b"],
+        "params": {"radius": 3, "height": 20}, "placement": {"origin": [20, 15, -5]}}),
+    );
+    let side = plane(&body(&mut s, "b"), "b", 0, 1.0, 40.0);
+    add(
+        &mut s,
+        json!({"type": "delete_face", "id": "d", "faces": [side]}),
+    );
+    let e = failure(&mut s, "d");
+    assert_eq!(
+        (e.code, e.details["reason"].as_str()),
+        (Code::TweakFailed, Some("inside_out")),
+        "{e}"
+    );
+    assert!(e.details["volume_mm3"].as_f64().unwrap() < 0.0, "{e}");
+    assert!(e.details["hint"].as_str().unwrap().contains("heal"), "{e}");
 }
