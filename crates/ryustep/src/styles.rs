@@ -130,9 +130,17 @@ fn is_styled(name: &str) -> bool {
 /// Every styled item of `e`; `name_of` names each instance as its record
 /// does (the census's names), so a styled item that doesn't decode is
 /// `failed` too.
-pub fn read<'n>(e: &Entities, name_of: &dyn Fn(Id) -> Option<&'n str>) -> Styles {
+pub fn read<'n>(e: &Entities, name_of: &(dyn Fn(Id) -> Option<&'n str> + Sync)) -> Styles {
     let mut out = Styles::default();
-    for &id in e.ids() {
+    // The few instances read here, found in one parallel pass: styled
+    // items, mapped items, and what failed to decode that names itself a
+    // styled item.
+    let found = e.select(|id, x| match x {
+        Ok(Entity::StyledItem { .. } | Entity::MappedItem { .. }) => true,
+        Ok(_) => false,
+        Err(_) => name_of(id).is_some_and(is_styled),
+    });
+    for id in found {
         let x = match e.get(id, id) {
             Ok(x) => x,
             Err(err) => {

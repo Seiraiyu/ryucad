@@ -508,6 +508,24 @@ impl Entities {
         self.ids.is_empty()
     }
 
+    /// Every instance number for which `keep` holds of it and what it
+    /// decoded to, ascending: the instances scanned in parallel, a chunk
+    /// at a time, so a pass over a large file for a few of them costs a
+    /// fraction of decoding it. The same on any number of threads.
+    pub fn select(&self, keep: impl Fn(Id, &Result<Entity, ImportError>) -> bool + Sync) -> Vec<Id> {
+        self.ids
+            .par_chunks(crate::census::CHUNK)
+            .zip(self.items.par_iter())
+            .flat_map_iter(|(ids, items)| {
+                ids.iter()
+                    .zip(items)
+                    .filter(|(id, x)| keep(**id, x))
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
     /// Every instance number, ascending.
     pub fn ids(&self) -> &[Id] {
         &self.ids
