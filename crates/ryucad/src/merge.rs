@@ -1791,6 +1791,43 @@ mod tests {
     }
 
     #[test]
+    fn a_delete_merges_per_key_and_a_dropped_retrim_drops_the_format() {
+        let r = |n: u128| json!({"feature": "b", "name": format!("{n:032x}")});
+        let base = json!({"format": 20, "kind": "ryucad.feature", "type": "delete_face",
+            "target": "b", "faces": [r(1)]});
+        let mut ours = base.clone();
+        ours["heal"] = json!("cap");
+        let mut theirs = base.clone();
+        theirs["seeds"] = json!([r(2)]);
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        assert_eq!(
+            (m.value["heal"].as_str(), &m.value["seeds"]),
+            (Some("cap"), &json!([r(2)]))
+        );
+        // faces is one value: both sides changing it differently conflict.
+        let mut a = base.clone();
+        a["faces"] = json!([r(3)]);
+        let mut b = base.clone();
+        b["faces"] = json!([r(4)]);
+        assert!(merge(Some(&base), &a, &b).conflicts.contains_key("/faces"));
+        // A tweak whose one side drops topology: change, the other its
+        // distance: ryucad 17's format again.
+        let mv = json!({"format": 20, "kind": "ryucad.feature", "type": "move_face", "target": "b",
+            "by": "translate", "direction": "z", "distance": "1 mm", "faces": [r(1)],
+            "topology": "change"});
+        let mut kept = mv.clone();
+        kept.as_object_mut().unwrap().remove("topology");
+        kept["format"] = json!(crate::doc::tweak::FORMAT);
+        let mut moved = mv.clone();
+        moved["distance"] = json!("2 mm");
+        let m = merge(Some(&mv), &kept, &moved);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        assert!(m.value.get("topology").is_none());
+        assert_eq!(m.value["format"], crate::doc::tweak::FORMAT);
+    }
+
+    #[test]
     fn a_moves_by_is_one_value_and_its_lists_merge_whole() {
         let n = |k: u8| json!({"feature": "b", "name": format!("{k:032x}")});
         let mv = |extra: Value| {

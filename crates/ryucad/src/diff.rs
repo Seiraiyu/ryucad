@@ -3071,6 +3071,38 @@ mod tests {
     }
 
     #[test]
+    fn a_delete_and_a_tweaks_new_fields_read_a_line_each() {
+        let r = |n: u128| json!({"feature": "b", "name": format!("{n:032x}")});
+        let v = json!({"format": 20, "kind": "ryucad.feature", "type": "delete_face",
+            "target": "b", "faces": [r(1), r(2)], "seeds": [r(3)], "heal": "grow"});
+        let t = text(v.clone());
+        assert!(
+            t.starts_with("ryucad.feature delete_face (format 20)\n"),
+            "{t}"
+        );
+        for line in ["heal = grow", "target = b"] {
+            assert!(t.lines().any(|l| l == line), "{line}: {t}");
+        }
+        assert_eq!(
+            t.lines().filter(|l| l.starts_with("faces")).count(),
+            1,
+            "{t}"
+        );
+        assert_eq!(
+            t.lines().filter(|l| l.starts_with("seeds")).count(),
+            1,
+            "{t}"
+        );
+        let m = json!({"format": 20, "kind": "ryucad.feature", "type": "move_face", "target": "b",
+            "by": "translate", "direction": "z", "distance": "1 mm", "faces": [r(1)],
+            "topology": "change", "blends": "rebuild"});
+        let t = text(m.clone());
+        for line in ["topology = change", "blends = rebuild"] {
+            assert!(t.lines().any(|l| l == line), "{line}: {t}");
+        }
+    }
+
+    #[test]
     fn a_tweaks_groups_read_on_a_line_each() {
         let (a, b) = (
             "0123456789abcdef0123456789abcdef",
