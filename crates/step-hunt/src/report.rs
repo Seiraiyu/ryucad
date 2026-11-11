@@ -141,6 +141,32 @@ pub fn report(
         }
         counts.push(v);
     }
+    // Each source's transfer counts (design 448), summed over its cases:
+    // counts for campaigns, never judged.
+    let mut sums: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+    for r in records.values() {
+        let sources: std::collections::BTreeSet<&str> =
+            r.case.origins.iter().map(|o| o.source.as_str()).collect();
+        for src in sources {
+            let e = sums.entry(src.to_owned()).or_default();
+            for (k, n) in &r.ran.transfer {
+                *e.entry(k.clone()).or_default() += n;
+            }
+        }
+    }
+    let transfer: Vec<Value> = sums
+        .into_iter()
+        .filter(|(_, m)| !m.is_empty())
+        .map(|(src, m)| {
+            let mut counts: Vec<(String, u64)> = m.into_iter().collect();
+            counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let counts: Vec<Value> = counts
+                .into_iter()
+                .map(|(k, n)| json!({"what": k, "count": n}))
+                .collect();
+            json!({"source": src, "counts": counts})
+        })
+        .collect();
     let failed = records
         .values()
         .filter(|r| {
@@ -160,6 +186,7 @@ pub fn report(
         "fixed": fixed,
         "counts": counts,
         "count_regressed": regressed,
+        "transfer": transfer,
         "records": cases,
     })
 }
@@ -195,6 +222,20 @@ pub fn markdown(report: &Value, records: &BTreeMap<String, Record>) -> String {
                 c["passed"],
                 c["of"],
                 c["judged"].as_str().unwrap_or_default()
+            );
+        }
+        for t in report["transfer"].as_array().into_iter().flatten() {
+            let counts: Vec<String> = t["counts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|c| format!("{} {}", c["what"].as_str().unwrap_or_default(), c["count"]))
+                .collect();
+            let _ = writeln!(
+                out,
+                "- {} transfer: {}",
+                t["source"].as_str().unwrap_or_default(),
+                counts.join(", ")
             );
         }
         let _ = writeln!(out);
@@ -305,6 +346,7 @@ mod tests {
                     },
                 }],
                 key: None,
+                transfer: Default::default(),
             },
             findings: findings.iter().map(|s| (*s).to_owned()).collect(),
             key_dependent: false,

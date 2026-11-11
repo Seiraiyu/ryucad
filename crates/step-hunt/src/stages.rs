@@ -83,6 +83,11 @@ pub struct Ran {
     /// The import tried again under another part ID, after it failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<Stage>,
+    /// What `whole_import` interpreted, retained, found unreferenced and
+    /// failed, as `<category>/<bucket>` counts ([`transfer_counts`]):
+    /// counts for campaigns, never findings.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub transfer: std::collections::BTreeMap<String, u64>,
 }
 
 /// A stage's running total: commands' seconds add, the first that doesn't
@@ -362,6 +367,7 @@ pub fn body(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
         Ran {
             stages: Vec::new(),
             key: None,
+            transfer: Default::default(),
         }
     } else {
         solid_body(ryucad, case, home)
@@ -448,7 +454,11 @@ fn solid_body(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
             });
             key = again.pop();
         }
-        return Ran { stages, key };
+        return Ran {
+            stages,
+            key,
+            transfer: Default::default(),
+        };
     }
     let ok = stage(&mut stages, ryucad, home, "check", |r| {
         r.cmd(&p1, &["check", "body"]).map(|_| ())
@@ -457,7 +467,11 @@ fn solid_body(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
             .map(|_| ())
     });
     if !ok {
-        return Ran { stages, key };
+        return Ran {
+            stages,
+            key,
+            transfer: Default::default(),
+        };
     }
     let mut p2 = PathBuf::new();
     let ok = stage(&mut stages, ryucad, home, "reimport", |r| {
@@ -497,7 +511,11 @@ fn solid_body(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
             Ok(())
         });
     }
-    Ran { stages, key }
+    Ran {
+        stages,
+        key,
+        transfer: Default::default(),
+    }
 }
 
 /// The parts an import answer made: `part -> (kind, features, built, placed)`.
@@ -590,6 +608,7 @@ pub fn whole(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
         Ran {
             stages: Vec::new(),
             key: None,
+            transfer: Default::default(),
         }
     } else {
         solid_whole(ryucad, case, home)
@@ -634,8 +653,14 @@ fn solid_whole(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
         first = made(&answer);
         Ok(())
     });
+    // What the import made of the file, for the campaign's counts.
+    let transfer = transfer_counts(&answer);
     if !ok {
-        return Ran { stages, key: None };
+        return Ran {
+            stages,
+            key: None,
+            transfer: transfer.clone(),
+        };
     }
     // A part that failed to import is its body case's finding, unless it
     // builds alone under another part ID: healing can depend on the ID
@@ -660,6 +685,7 @@ fn solid_whole(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
             return Ran {
                 stages,
                 key: again.pop(),
+                transfer: transfer.clone(),
             };
         }
     }
@@ -707,7 +733,29 @@ fn solid_whole(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
             Ok(())
         });
     }
-    Ran { stages, key: None }
+    Ran {
+        stages,
+        key: None,
+        transfer: transfer.clone(),
+    }
+}
+
+/// An import answer's transfer report (design 448) as
+/// `<category>/<bucket>` counts, zeros left out; empty for a binary
+/// older than 24.A.
+pub fn transfer_counts(v: &serde_json::Value) -> std::collections::BTreeMap<String, u64> {
+    let mut out = std::collections::BTreeMap::new();
+    for c in v["transfer"]["categories"].as_array().into_iter().flatten() {
+        let Some(cat) = c["category"].as_str() else {
+            continue;
+        };
+        for b in ["interpreted", "retained", "unreferenced", "failed"] {
+            if let Some(n) = c[b]["count"].as_u64().filter(|n| *n > 0) {
+                out.insert(format!("{cat}/{b}"), n);
+            }
+        }
+    }
+    out
 }
 
 /// Runs a case in a folder of its own under `work` (kept with `keep`).
@@ -728,6 +776,7 @@ pub fn run(ryucad: &Ryucad, case: &Case, work: &Path, keep: bool) -> Ran {
                 },
             }],
             key: None,
+            transfer: Default::default(),
         },
     };
     if !keep {
@@ -739,6 +788,27 @@ pub fn run(ryucad: &Ryucad, case: &Case, work: &Path, keep: bool) -> Ran {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_counts_are_read_from_an_import_answer() {
+        let v = serde_json::json!({"transfer": {"categories": [
+            {"category": "geometry", "interpreted": {"count": 10}, "retained": {"count": 2},
+             "unreferenced": {"count": 0}, "failed": {"count": 1}},
+            {"category": "appearance", "interpreted": {"count": 0}, "retained": {"count": 7},
+             "unreferenced": {"count": 0}, "failed": {"count": 0}}]}});
+        let c = transfer_counts(&v);
+        assert_eq!(c.get("geometry/interpreted"), Some(&10));
+        assert_eq!(c.get("geometry/failed"), Some(&1));
+        assert_eq!(c.get("appearance/retained"), Some(&7));
+        assert!(
+            !c.contains_key("appearance/interpreted"),
+            "zeros are left out"
+        );
+        assert!(
+            transfer_counts(&serde_json::json!({})).is_empty(),
+            "an older binary's answer"
+        );
+    }
 
     #[test]
     fn a_sheet_is_measured_by_its_area() {
