@@ -20,6 +20,13 @@ const MAX_CELLS: usize = 1 << 14;
 /// How many times [`Offset::jet_box`] halves a part of a box.
 const ENCLOSE_DEPTH: u32 = 6;
 
+/// The most a part's bounds may let the normal turn across it, in
+/// radians, before [`Offset::derivative_bound`] halves it.
+const BOUND_TURN: f64 = 1.0;
+
+/// How many times [`Offset::derivative_bound`] halves a part.
+const BOUND_DEPTH: u32 = 2;
+
 /// A box of parameters.
 type Cell = [[f64; 2]; 2];
 
@@ -644,8 +651,18 @@ impl Offset {
 
     /// Bounds over a parameter box, the worst of those from the
     /// enclosures over its parts in the offset's cells (see
-    /// [`super::bound2::from_jets`]).
-    pub(crate) fn derivative_bound(&self, [ru, rv]: Cell) -> SurfaceBound {
+    /// [`super::bound2::from_jets`]), a part halved where they let the
+    /// normal turn across it by more than [`BOUND_TURN`].
+    pub(crate) fn derivative_bound(&self, rect: Cell) -> SurfaceBound {
+        let Some(parts) = self.parts(rect) else {
+            return super::bound2::INFINITE_BOUND;
+        };
+        if parts.is_empty() {
+            return match self.jet_box(rect) {
+                Some(q) => super::bound2::from_jets(&q),
+                None => super::bound2::INFINITE_BOUND,
+            };
+        }
         let mut out = SurfaceBound {
             duu: 0.0,
             duv: 0.0,
@@ -653,32 +670,45 @@ impl Offset {
             turn_u: 0.0,
             turn_v: 0.0,
         };
-        let (pu, pv) = self.base.periods();
-        let mut any = false;
-        for c in &self.cells {
-            for u in cut(c[0], ru, pu) {
-                for v in cut(c[1], rv, pv) {
-                    let Some(q) = self.jet_box([u, v]) else {
-                        return super::bound2::INFINITE_BOUND;
-                    };
-                    any = true;
-                    let b = super::bound2::from_jets(&q);
-                    out.duu = out.duu.max(b.duu);
-                    out.duv = out.duv.max(b.duv);
-                    out.dvv = out.dvv.max(b.dvv);
-                    out.turn_u = out.turn_u.max(b.turn_u);
-                    out.turn_v = out.turn_v.max(b.turn_v);
+        let mut stack: Vec<(Cell, JVec<Interval>, u32)> =
+            parts.into_iter().map(|(c, q)| (c, q, 0)).collect();
+        while let Some((c, q, depth)) = stack.pop() {
+            let b = super::bound2::from_jets(&q);
+            // The unit normal's interval over a long part bounds its turn
+            // loosely: halve a part across which it may turn more than
+            // [`BOUND_TURN`], up to [`BOUND_DEPTH`] times.
+            let span = [c[0][1] - c[0][0], c[1][1] - c[1][0]];
+            let turns = [b.turn_u * span[0], b.turn_v * span[1]];
+            let loose = |t: f64| t.partial_cmp(&BOUND_TURN).is_none_or(|o| o.is_gt());
+            if depth < BOUND_DEPTH && turns.iter().any(|&t| loose(t)) {
+                // The direction it turns more along, or where neither
+                // turn is bounded, the longer in model space.
+                let reach = |k: usize| {
+                    let speed: f64 = (0..3).map(|c| q[c].d[k].mag() * q[c].d[k].mag()).sum();
+                    span[k] * crate::math::sqrt(speed)
+                };
+                let k = if turns[0].is_finite() || turns[1].is_finite() {
+                    usize::from(turns[1].partial_cmp(&turns[0]).is_none_or(|o| o.is_gt()))
+                } else {
+                    usize::from(reach(1) > reach(0))
+                };
+                let m = (c[k][0] + c[k][1]) / 2.0;
+                let (mut lo, mut hi) = (c, c);
+                lo[k][1] = m;
+                hi[k][0] = m;
+                if let (Some(a), Some(z)) = (self.jets_over(lo), self.jets_over(hi)) {
+                    stack.push((lo, a, depth + 1));
+                    stack.push((hi, z, depth + 1));
+                    continue;
                 }
             }
+            out.duu = out.duu.max(b.duu);
+            out.duv = out.duv.max(b.duv);
+            out.dvv = out.dvv.max(b.dvv);
+            out.turn_u = out.turn_u.max(b.turn_u);
+            out.turn_v = out.turn_v.max(b.turn_v);
         }
-        if any {
-            out
-        } else {
-            match self.jet_box([ru, rv]) {
-                Some(q) => super::bound2::from_jets(&q),
-                None => super::bound2::INFINITE_BOUND,
-            }
-        }
+        out
     }
 }
 

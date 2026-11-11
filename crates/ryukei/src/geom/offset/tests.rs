@@ -540,3 +540,37 @@ fn enclosures_lie_within_reach_of_the_base() {
         }
     }
 }
+
+/// #599: the unit normal's interval over a part of a cell can leave the
+/// turning rates unbounded, which the mesher's estimate and its chord
+/// test read. Halved where loose (up to twice), more of a revolution's
+/// parts are bounded than enclosed at once, and none is bounded worse.
+#[test]
+fn derivative_bounds_halve_where_the_turn_is_loose() {
+    let [_, rev] = swept();
+    let o = Offset::new(rev, 0.2, [[0.0, TAU], [0.0, TAU]]).unwrap();
+    let (mut once, mut halved, mut all) = (0, 0, 0);
+    for c in o.cells() {
+        for i in 0..4 {
+            for k in 0..4 {
+                let at = |r: [f64; 2], j: usize| {
+                    let w = (r[1] - r[0]) / 4.0;
+                    [r[0] + w * j as f64, r[0] + w * (j + 1) as f64]
+                };
+                let q = [at(c[0], i), at(c[1], k)];
+                let a = crate::geom::bound2::from_jets(&o.jet_box(q).unwrap());
+                let b = o.derivative_bound(q);
+                let bounded = |x: &SurfaceBound| x.turn_u.is_finite() && x.turn_v.is_finite();
+                all += 1;
+                once += usize::from(bounded(&a));
+                halved += usize::from(bounded(&b));
+                assert!(bounded(&b) || !bounded(&a), "{q:?}: {b:?} against {a:?}");
+            }
+        }
+    }
+    println!("{once} bounded at once, {halved} halved, of {all}");
+    assert!(
+        halved > once,
+        "{once} bounded at once, {halved} halved, of {all}"
+    );
+}
