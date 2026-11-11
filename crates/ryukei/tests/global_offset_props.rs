@@ -155,3 +155,54 @@ fn offsets_lie_at_their_distance() {
         assert!(KNOWN_SLOW.contains(s), "seed {s} past the deadline");
     }
 }
+
+/// #421 (plan 17.A): seeded rings whose rounded corners are revolutions
+/// of splines, shrunk past their corners' radius. Each builds as its
+/// analytic twin (tori for corners) does: four faces, checking clean,
+/// enclosing the inset rectangle's ring (Pappus) within a mesh's error.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
+fn spline_rings_shrunk_past_their_corners() {
+    use ryukei::mesh::{MeshParams, tessellate};
+    use ryukei_testkit::rings::{Ring, ring};
+    let mut rng = Lcg::new(0x1a21);
+    for seed in 0..12u64 {
+        let r = Ring {
+            inner: rng.next_f64(0.3, 2.0),
+            width: rng.next_f64(0.3, 1.0),
+            height: rng.next_f64(0.3, 1.0),
+            radius: rng.next_f64(0.03, 0.07),
+        };
+        // Past the corners by at least a fifth of their radius, short of
+        // half the rectangle by a tenth of it.
+        let most = 0.4 * r.width.min(r.height);
+        let d = rng.next_f64(1.2 * r.radius, most.max(1.3 * r.radius));
+        let spec = OffsetSpec {
+            distance: -d,
+            faces: Vec::new(),
+        };
+        for spline in [false, true] {
+            let key = OpKey(0x1a210 + u128::from(seed));
+            let body = ring(key, &r, spline).unwrap();
+            let started = Instant::now();
+            let (o, _) = offset_body_with(OpKey(0x1a2f), &body, &spec, &Work::unlimited())
+                .unwrap_or_else(|e| panic!("seed {seed} spline {spline}: {e:?}"));
+            println!(
+                "seed {seed} spline {spline}: {r:?} by {d:.4}: {:.2} s",
+                started.elapsed().as_secs_f64()
+            );
+            assert_eq!(o.counts().faces, 4, "seed {seed} spline {spline}");
+            assert_eq!(check(&o), [], "seed {seed}");
+            assert_eq!(check_intersections(&o), [], "seed {seed}");
+            let chord = 1e-4;
+            let m = tessellate(&o, &MeshParams::new(chord, 0.1)).unwrap();
+            assert_eq!(m.faults, [], "seed {seed}");
+            let (v, area) = ryukei_testkit::mesh::volume_and_area(&m);
+            let want = r.shrunk_volume(d);
+            assert!(
+                (v - want).abs() <= 2.0 * chord * area,
+                "seed {seed} spline {spline}: {v} against {want}"
+            );
+        }
+    }
+}
