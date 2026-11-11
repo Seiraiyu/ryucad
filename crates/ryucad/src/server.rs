@@ -4402,7 +4402,10 @@ fn check_resolved(
         }
         // Faces of its target, its direction, axis or surfaces their
         // kinds; what the kernel makes of them only rebuild can tell.
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
+        Feature::MoveFace(_)
+        | Feature::ReplaceFace(_)
+        | Feature::Draft(_)
+        | Feature::DeleteFace(_) => {
             crate::tweak::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
         Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
@@ -5066,6 +5069,7 @@ fn feature_edit(
                 | Feature::MoveFace(_)
                 | Feature::ReplaceFace(_)
                 | Feature::Draft(_)
+                | Feature::DeleteFace(_)
         ) && f.targets() != old.targets())
         || ((f.base_flange().is_some()
             || f.flange().is_some()
@@ -5373,9 +5377,10 @@ pub(crate) fn part_report(
                 // A fill's rebuild report is what it measured (see
                 // `Made::report`), an extract's its faces.
                 Feature::Extract(_) => crate::surface::report(id, f),
-                Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
-                    crate::tweak::report(id, f)
-                }
+                Feature::MoveFace(_)
+                | Feature::ReplaceFace(_)
+                | Feature::Draft(_)
+                | Feature::DeleteFace(_) => crate::tweak::report(id, f),
                 _ => return None,
             };
             Some((fid.clone(), (f.type_name(), report)))
@@ -5408,6 +5413,7 @@ pub(crate) fn part_report(
                             | Feature::MoveFace(_)
                             | Feature::ReplaceFace(_)
                             | Feature::Draft(_)
+                            | Feature::DeleteFace(_)
                     )
             })
         })
@@ -7880,6 +7886,7 @@ fn inspect(
                                 | Feature::MoveFace(_)
                                 | Feature::ReplaceFace(_)
                                 | Feature::Draft(_)
+                                | Feature::DeleteFace(_)
                         ))
             }) =>
         {
@@ -8048,7 +8055,8 @@ fn inspect(
             | Feature::Split(_)
             | Feature::MoveFace(_)
             | Feature::ReplaceFace(_)
-            | Feature::Draft(_)),
+            | Feature::Draft(_)
+            | Feature::DeleteFace(_)),
         )) = features.iter().find(|(i, _)| i == f)
     {
         let k = x.type_name();

@@ -549,4 +549,17 @@ fn a_through_hole_deleted_by_its_seed_is_capped() {
     let rep = report(&mut s, "d");
     let found = rep["seeds"][0]["faces"].as_array().unwrap().len();
     assert_eq!(found, bore.len(), "{rep}");
+    // inspect --feature and feature.show give it as a tweak's: fields as
+    // text, what each seed found, what went.
+    let v = must(&mut s, "inspect", json!({"part": "p", "feature": "d"}));
+    let d = &v["delete_face"];
+    assert_eq!(d["seeds"][0]["seed"], json!(bore[0]), "{v}");
+    assert_eq!(d["heal"], "auto", "{v}");
+    assert_eq!(
+        d["deleted"]["faces"].as_u64(),
+        Some(bore.len() as u64),
+        "{v}"
+    );
+    let shown = must(&mut s, "feature.show", json!({"part": "p", "id": "d"}));
+    assert_eq!(shown["seeds"], json!([bore[0]]), "{shown}");
 }

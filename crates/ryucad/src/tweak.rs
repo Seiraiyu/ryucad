@@ -1420,6 +1420,7 @@ pub fn report(part: &Id, f: &Feature) -> Value {
         }
         Feature::DeleteFace(x) => {
             let mut v = x.fields();
+            v["heal"] = json!(x.heal.as_str());
             for (role, r) in x.references() {
                 *v.pointer_mut(&pointer(&role)).expect("its own face") = json!(r.text(part));
             }
@@ -1550,6 +1551,27 @@ pub fn resolved(
             && let Some(n) = rep.get("spent")
         {
             v["spent"] = n.clone();
+        }
+        if let crate::rebuild::Output::Solids(m) = out
+            && let Some(rep) = &m.report
+            && let Some(Value::Array(found)) = rep.get("seeds")
+        {
+            let at = |n: &Value| {
+                json!(format!(
+                    "{}/{target}/{}",
+                    part.id,
+                    n.as_str().unwrap_or_default()
+                ))
+            };
+            v["seeds"] = Value::Array(
+                found
+                    .iter()
+                    .map(|x| json!({
+                        "seed": at(&x["seed"]),
+                        "faces": x["faces"].as_array().into_iter().flatten().map(at).collect::<Vec<_>>(),
+                    }))
+                    .collect(),
+            );
         }
         if let crate::rebuild::Output::Solids(m) = out
             && let Some(rep) = &m.report
