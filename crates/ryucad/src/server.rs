@@ -11731,6 +11731,8 @@ pub(crate) mod tests {
             "ryucad.json.",
             "ryucad.json ",
             "parts. /p/part.json",
+            // An NTFS stream names the file it's on (#581).
+            "ryucad.json::$DATA",
         ]
         .into_iter()
         .filter(|rel| cfg!(not(windows)) || !rel.starts_with("parts. "))
@@ -11754,6 +11756,79 @@ pub(crate) mod tests {
             call_live(&mut s, &mut live, Some(&h), "export", export(&out)).unwrap();
             assert!(out.exists(), "{}", out.display());
         }
+    }
+
+    #[test]
+    fn an_export_never_writes_over_a_project_file_through_an_alias_the_file_system_resolves() {
+        // #581: APFS folds Unicode case (`ſ` is `s`) and NTFS answers to
+        // 8.3 short names, past the spelled check's ASCII folding. An
+        // `out` the file system resolves to a project file is refused;
+        // one it doesn't is a new file, and the project's is untouched.
+        let (dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 1, "y": 1, "z": 1}}),
+        )
+        .unwrap();
+        let project = dir.path().join("ryucad.json");
+        let before = std::fs::read(&project).unwrap();
+        #[allow(unused_mut)]
+        let mut aliases = vec!["ryucad.j\u{17f}on".to_owned()];
+        #[cfg(windows)]
+        {
+            let short = short_name(&project);
+            // CI's Windows runners make 8.3 names on their temp volume;
+            // a volume without them can't alias this way.
+            assert!(
+                short != "ryucad.json" || std::env::var_os("CI").is_none(),
+                "no 8.3 name for {}: the case #581 needs isn't tested",
+                project.display()
+            );
+            aliases.push(short);
+        }
+        for alias in aliases {
+            let out = dir.path().join(&alias);
+            let resolves = out.exists();
+            let r = call(
+                &mut s,
+                "export",
+                json!({"part": "p", "format": "stl", "out": out.to_str().unwrap()}),
+            );
+            if resolves {
+                let e = r.expect_err(&alias);
+                assert_eq!(e.code, Code::InvalidParam, "{alias}: {e:?}");
+                assert_eq!(e.details["param"], "out", "{alias}");
+            } else {
+                r.unwrap();
+            }
+            assert_eq!(
+                std::fs::read(&project).unwrap(),
+                before,
+                "{alias}: ryucad.json unchanged"
+            );
+        }
+    }
+
+    /// The 8.3 short name Windows gives `path`'s file, or its own name
+    /// where the volume makes none.
+    #[cfg(windows)]
+    fn short_name(path: &std::path::Path) -> String {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+        let long: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        let mut buf = vec![0u16; 1024];
+        // SAFETY: `long` is NUL-terminated, and `buf.len()` is the room
+        // `buf` gives the answer.
+        let n = unsafe { GetShortPathNameW(long.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+        assert!(
+            n > 0 && (n as usize) < buf.len(),
+            "GetShortPathNameW: {}",
+            std::io::Error::last_os_error()
+        );
+        let short = std::path::PathBuf::from(String::from_utf16(&buf[..n as usize]).unwrap());
+        short.file_name().unwrap().to_string_lossy().into_owned()
     }
 
     /// Every queued notification of `sub`, as JSON.
