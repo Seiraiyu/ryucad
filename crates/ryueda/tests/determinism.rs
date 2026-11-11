@@ -451,6 +451,14 @@ fn schematic(golden: &mut Golden, dir: &Path, name: &str) {
             golden.json(&format!("schematic.{name}.{b}.explain"), &e);
         }
     }
+    // What annotate would number, each order, alike on one thread and
+    // eight (plan 2.F); a dry run, so nothing above moves.
+    for order in ["down", "across"] {
+        let args = ["annotate", "--reset", "all", "--order", order, "--dry-run"];
+        let a = ryueda(dir, 1, &args);
+        assert_eq!(ryueda(dir, 8, &args), a, "{name} {order}");
+        golden.json(&format!("schematic.{name}.annotate.{order}"), &a);
+    }
 }
 
 /// The blocks a project lays out, by ID.

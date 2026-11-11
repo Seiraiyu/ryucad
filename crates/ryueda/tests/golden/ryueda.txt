@@ -13,6 +13,8 @@ parts.search.capacitor 5be75fa2b26f83eabfcd01291ce286c7
 parts.search.like e1035f75997d04ad056b470f50a16999
 parts.search.resistor a4d933aa8d4db78a5a774af86b274f4e
 parts.supply dd736c99f67f9b57a7a2ed86738a3270
+schematic.breakout.annotate.across 10b923fcb1ea497a6d763dd72ceb060a
+schematic.breakout.annotate.down a2006042e6b7f256ef63364bd734b21e
 schematic.breakout.breakout.dark.svg 5c781598523050624623f7efc63fccbe
 schematic.breakout.breakout.describe cde5089bf130be61dd64e256c635d99f
 schematic.breakout.breakout.explain 48c8716d6565d33a9dadea9c66b50250
@@ -28,12 +30,16 @@ schematic.breakout.styled.breakout.dark.svg c136e4d44edb393bcdb2b9d2e9c27c14
 schematic.breakout.styled.breakout.layout 79aa2a98ca69bc79c96ee46f92909cca
 schematic.breakout.styled.breakout.light.svg ea144c1e018749b62a65727240821825
 schematic.breakout.styled.pdf 42c84fae91459567bb45e837bede09d8
+schematic.buck.annotate.across 964ff899c2f178535b682d1d484fa05c
+schematic.buck.annotate.down dfcb7dda8c910421715eecf01ce7a039
 schematic.buck.buck.dark.svg 4d4739a770087a5b4afe6a605529e0fb
 schematic.buck.buck.describe 02e5b789184147a63feff5a471d84025
 schematic.buck.buck.explain df83a1118c0e3fa3120d12f80696d444
 schematic.buck.buck.layout 387fb9ef09ae7f3df70b83a1a2e15660
 schematic.buck.buck.svg 4f4351f647daec6be89bd850a6eb7bda
 schematic.buck.pdf df3bcc39aa2ab14655e6b8bd72e0dd66
+schematic.ethernet.annotate.across f85ae4507e7d7ed0b0ceb644a0000137
+schematic.ethernet.annotate.down d33ffb954bf6b52349f3fc83dae1051c
 schematic.ethernet.eth.dark.svg c60b67ccb489f386cf377b338bd75d31
 schematic.ethernet.eth.describe a65c1e7044dae77cce0d1936cca73dc7
 schematic.ethernet.eth.explain dc9129b090d2a52b9e39402312458e10
@@ -52,6 +58,8 @@ schematic.frontend.amp.describe b0650c937a46ee9bdb52600904086d89
 schematic.frontend.amp.explain 1cf2a520ca572c2ba29caed32caacb5c
 schematic.frontend.amp.layout 63263d5cf3253f6e4bf4ba0c082f334b
 schematic.frontend.amp.svg 143cf590a0773ff196d4296d3ad12d8c
+schematic.frontend.annotate.across 0ba7c24fde503dcae2c85ddf2e573e5a
+schematic.frontend.annotate.down 790b5d16f65091379379b99ea30bd322
 schematic.frontend.baldiff.bd_l.svg 27c9534ee47d1bec2caeac20af4a0937
 schematic.frontend.baldiff.bd_r.svg 66243c316fb5cdb368bb1a565c88cc9d
 schematic.frontend.baldiff.dark.svg f25979f8baac501cb240b3f78784b9df
@@ -67,6 +75,8 @@ schematic.frontend.ivconv.iv_r.svg 846cb546536bb3aab5a687e69e1eee79
 schematic.frontend.ivconv.layout dd136701fd3ff184a24cb343be001a3e
 schematic.frontend.ivconv.svg 46c103140bc875fb914ac3415ec836b7
 schematic.frontend.pdf 44a09d0227576f1c336a2bb3ac996d40
+schematic.rp2040.annotate.across 23c8580aae9b6c71b618c057b82839ad
+schematic.rp2040.annotate.down 9495c1845934f21281220da20ed2bfae
 schematic.rp2040.mitayi.dark.svg 8a3311b251b8e25959f6cb7d7a44a433
 schematic.rp2040.mitayi.describe b3cacd1f045a4a42c565ee9a2da729e1
 schematic.rp2040.mitayi.explain 16cb1458d0f830d4d3405620deb0dcf0

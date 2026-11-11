@@ -64,7 +64,12 @@ pub fn format_of(kind: &str, v: &serde_json::Value) -> u64 {
     let newer = match kind {
         BLOCK_KIND => v.get("properties").is_some(),
         INSTANCE_KIND => v.get("properties").is_some() || v.get("refdes").is_some(),
-        COMPONENT_KIND | NET_KIND | RAIL_KIND => v.get("tags").is_some(),
+        COMPONENT_KIND => {
+            v.get("tags").is_some()
+                || v.get("refdes_locked").is_some()
+                || v["refdes"].as_str().is_some_and(refdes_placeholder)
+        }
+        NET_KIND | RAIL_KIND => v.get("tags").is_some(),
         _ => false,
     };
     if newer { FORMAT_2 } else { FORMAT }
@@ -214,6 +219,9 @@ pub struct Component {
     /// a sorted set, format 2.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub tags: BTreeSet<String>,
+    /// Never renumbered by `annotate` (plan 2.F): format 2.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refdes_locked: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -379,6 +387,26 @@ pub fn refdes_ok(text: &str) -> bool {
         && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
 }
 
+/// Whether `text` is a placeholder for a designator `annotate` will
+/// number: a designator's letters and `?` (`R?`), at most 32 in all.
+pub fn refdes_placeholder(text: &str) -> bool {
+    text.strip_suffix('?').is_some_and(|l| {
+        !l.is_empty() && l.len() < 32 && l.bytes().all(|c| c.is_ascii_alphabetic())
+    })
+}
+
+/// A numbered designator's parts (`R5_A`: `R`, 5, `_A`), or `None` for
+/// one with no digits after its letters (`TP_GND`), which names rather
+/// than numbers, and for a placeholder.
+pub fn numbered(text: &str) -> Option<(&str, u64, &str)> {
+    let letters = text.find(|c: char| !c.is_ascii_alphabetic())?;
+    if !text[letters..].starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let (prefix, n, rest) = refdes_parts(text);
+    (prefix.len() == letters && n > 0).then_some((prefix, n, rest))
+}
+
 /// A reference designator's parts: its leading letters, the number after
 /// them (0 when it has none) and the rest (`R5_A` is `R`, 5, `_A`).
 pub fn refdes_parts(text: &str) -> (&str, u64, &str) {
@@ -525,6 +553,7 @@ impl Component {
         let mut out = Vec::new();
         if let Some(r) = &self.refdes
             && !refdes_ok(r)
+            && !refdes_placeholder(r)
         {
             out.push(bad(
                 Code::InvalidDocument,
@@ -761,6 +790,7 @@ pub(crate) mod tests {
             parameters: BTreeMap::new(),
             pins: BTreeMap::new(),
             tags: BTreeSet::new(),
+            refdes_locked: false,
         };
         assert_eq!(c.check().len(), 1);
         c.refdes = Some("R5_A".into());
@@ -804,6 +834,13 @@ pub(crate) mod tests {
             ("R", 0, "99999999999999999999x")
         );
         assert!(refdes_ok("SW1") && !refdes_ok("1R") && !refdes_ok("R-1") && !refdes_ok(""));
+        assert!(refdes_placeholder("R?") && refdes_placeholder("SW?"));
+        assert!(!refdes_placeholder("?") && !refdes_placeholder("R1?") && !refdes_placeholder("R"));
+        assert_eq!(numbered("R5_A"), Some(("R", 5, "_A")));
+        assert_eq!(numbered("U12"), Some(("U", 12, "")));
+        assert_eq!(numbered("TP_GND"), None);
+        assert_eq!(numbered("R?"), None);
+        assert_eq!(numbered("R0"), None);
     }
 
     #[test]
