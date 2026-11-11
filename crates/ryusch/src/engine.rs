@@ -291,13 +291,20 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
             out = attempt(block, &r, 0, &again);
         }
     }
-    // A shift is applied as asked: one that leaves a hard rule broken (a
-    // part over another's room, or off the sheet) is refused, naming it.
-    if let Some(n) = block
-        .moves
-        .iter()
-        .position(|m| matches!(m, Instruction::Shift { .. }))
+    // A move is applied as asked and holds its part where it puts it: one
+    // that leaves a hard rule broken is refused, naming it -- a shift for
+    // any (a part over another's room, or off the sheet), another move
+    // where the rule names a part it moved (a connector turned to face
+    // the sheet's edge, its pins' labels with no room; plan 2.G).
+    if !block.moves.is_empty()
         && let Some(v) = crate::rules::check(block, &out.layout).first()
+        && let Some(n) = block.moves.iter().position(|m| {
+            matches!(m, Instruction::Shift { .. })
+                || m.parts()
+                    .iter()
+                    .flat_map(|s| instr::parts_named(block, s))
+                    .any(|p| names_part(&v.refs, &block.parts[p].key))
+        })
     {
         let id = format!("move {}", n + 1);
         return Err(instr::Refusal {
@@ -307,6 +314,17 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
         });
     }
     Ok(out)
+}
+
+/// Whether a hard rule's refs (a part's key, `label N at KEY/PIN`, `KEY's
+/// value`, `KEY's connector` …) name the part keyed `key`.
+fn names_part(refs: &[String], key: &str) -> bool {
+    refs.iter().any(|r| {
+        r == key
+            || r.starts_with(&format!("{key}'s "))
+            || r.split(' ')
+                .any(|w| w.split_once('/').is_some_and(|(k, _)| k == key))
+    })
 }
 
 /// Parts a released instruction moved, back where they stood before it:
@@ -4383,6 +4401,7 @@ fn place_labels(
     }
     order.sort();
     let mut order: Vec<usize> = order.into_iter().map(|(_, _, _, _, i)| i).collect();
+    let first_order = order.clone();
     // A label left with no place is tried again first: a neighbour's stub
     // may have taken the place it needs. The fewest left so wins.
     // The fewest (stuck, demoted) so far, and what made them.
@@ -4400,6 +4419,7 @@ fn place_labels(
             want,
             carriers,
             &order,
+            &BTreeSet::new(),
             prev_labels,
             prev_runs,
             sid,
@@ -4423,6 +4443,36 @@ fn place_labels(
                 order.insert(0, i);
             }
             _ => break,
+        }
+    }
+    // Labels still with no place: once more with the stuck labels' parts
+    // labelled along their pins (a connector turned to point its pins
+    // up or down, its labels a step apart; plan 2.G).
+    let along: BTreeSet<usize> = best
+        .as_ref()
+        .map(|b| b.4.iter().copied().collect())
+        .unwrap_or_default();
+    if !along.is_empty() {
+        let mut f = field.clone();
+        let mut l = labels.clone();
+        let mut r = routes.clone();
+        let (stuck, demoted) = place_labels_in(
+            block,
+            st,
+            &mut f,
+            want,
+            carriers,
+            &first_order,
+            &along,
+            prev_labels,
+            prev_runs,
+            sid,
+            &mut l,
+            &mut r,
+        );
+        let count = (stuck.len(), demoted.len());
+        if best.as_ref().is_none_or(|b| count < b.0) {
+            best = Some((count, f, l, r, stuck.iter().map(|i| want[*i].1).collect()));
         }
     }
     let (_, f, l, r, parts) = best.expect("tried once");
@@ -4596,6 +4646,7 @@ fn place_labels_in(
     want: &[(usize, usize, usize, LabelKind)],
     carriers: &BTreeMap<(usize, usize), (usize, usize)>,
     order: &[usize],
+    along: &BTreeSet<usize>,
     prev_labels: &dyn Fn(usize) -> Vec<Label>,
     prev_runs: &BTreeMap<usize, Vec<Vec<Point>>>,
     sid: &str,
@@ -4795,7 +4846,14 @@ fn place_labels_in(
                 }
             }
         }
-        let cands = label::candidates(kind, pin.end, pin.side);
+        let mut cands = label::candidates(kind, pin.end, pin.side);
+        // A part whose labels found no room otherwise: its signal labels
+        // along their pins first, side by side as its pins stand.
+        if along.contains(&p) && kind.signal() {
+            let mut first = label::sideways(pin.end, pin.side);
+            first.extend(cands);
+            cands = first;
+        }
         let detours = label::detours(kind, pin.end, pin.side);
         let last = label::sideways(pin.end, pin.side);
         // A rail's pin beside another of its rail's (a part's row of

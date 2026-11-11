@@ -40,3 +40,22 @@ fn beside_goes_onto_the_named_parts_sheet() {
 fn an_instruction_already_tried_is_left_as_it_lies() {
     check_bytes(&[255, 34, 34, 93, 1, 43, 0, 57, 57, 0]);
 }
+
+/// A connector turned a quarter by a move: its pins point up or down,
+/// and adjacent pins' labels stood over each other (plan 2.G's sweep,
+/// nine seeds; failing since phase 1). Then the same turned by a lasting
+/// instruction (seed 143), and a part of seed 150's and 258's: the first
+/// label turned off its pin covered its neighbours' way out, so they
+/// now stand along their pins.
+#[test]
+fn a_part_turned_a_quarter_keeps_its_labels_apart() {
+    check_bytes(&[91, 139, 109, 1, 79, 116, 67]);
+    check_bytes(&[91, 139, 109, 178, 79, 116, 65]);
+    check_bytes(&[91, 139, 109, 178, 79, 116, 67, 150, 39]);
+    check_bytes(&[
+        11, 143, 201, 98, 87, 11, 22, 37, 44, 182, 91, 133, 1, 94, 114, 241,
+    ]);
+    check_bytes(&[
+        222, 209, 228, 83, 87, 44, 232, 233, 167, 25, 163, 24, 201, 2, 193, 39, 218, 234,
+    ]);
+}
