@@ -6494,7 +6494,17 @@ fn transfer_reports_from_the_cli() {
         .unwrap()
         .to_owned();
     p.ok(&["colour", &part, "--colour", "#ff0000"]);
-    let (code, v) = p.both_from("", &["export", &part, "--out", "../out.step"]);
+    let (code, v) = p.both_from(
+        "",
+        &[
+            "export",
+            &part,
+            "--out",
+            "../out.step",
+            "--time-stamp",
+            "2026-11-10T00:00:00",
+        ],
+    );
     assert_eq!((code, &v["ok"]), (0, &Value::Bool(true)), "{v}");
     assert!(v["result"]["transfer"]["written"].is_array(), "{v}");
     let codes: Vec<&str> = v["warnings"]

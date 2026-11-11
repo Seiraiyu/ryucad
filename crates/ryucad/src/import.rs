@@ -987,7 +987,7 @@ fn import_opened(
             if ask.flatten {
                 vec![
                     plan::Flat {
-                        opened: opened,
+                        opened,
                         file: &file_ref,
                         stem: &stem,
                         part,
@@ -999,7 +999,7 @@ fn import_opened(
                 ]
             } else {
                 plan::Fresh {
-                    opened: opened,
+                    opened,
                     file: &file_ref,
                     stem: &stem,
                     part,
@@ -1105,7 +1105,7 @@ fn reimport_opened(
         })
     };
     let fresh = plan::Fresh {
-        opened: opened,
+        opened,
         file: &file_ref,
         stem: &stem,
         part: None,
