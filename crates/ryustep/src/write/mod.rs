@@ -14,6 +14,7 @@
 //! unit by one division, and the header's time stamp is the caller's.
 
 mod body;
+mod style;
 
 use crate::WriteError;
 use crate::part21::{self, File, Header, Instance, Param, Part, Record};
@@ -24,6 +25,8 @@ use ryukei::heal::{Origins, seamed_with_origins};
 use ryukei::name::Name;
 use ryukei::topo::Body;
 use std::collections::BTreeMap;
+
+pub use style::{BodyPaint, OccurrencePaint, Paint, Paints};
 
 /// A product to write: its identifier, name and description, its
 /// revision (the `PRODUCT_DEFINITION_FORMATION`'s identifier; empty for
@@ -276,12 +279,34 @@ pub fn write_report(
     write_inner(model, passed, opts).map(|(w, _, _)| w)
 }
 
+/// [`write_report`], with `paints`: each body's, face's and occurrence's
+/// style (design 448, plan 24.B), written after everything else.
+pub fn write_styled(
+    model: &WriteModel,
+    passed: &[Passed],
+    paints: &Paints,
+    opts: &WriteOptions,
+) -> Result<Written, WriteError> {
+    write_inner_styled(model, passed, paints, opts).map(|(w, _, _)| w)
+}
+
 /// [`write_report`], with what it wrote of each product's bodies and
 /// each product's usages' `NEXT_ASSEMBLY_USAGE_OCCURRENCE` instances.
 #[allow(clippy::type_complexity)]
 pub(crate) fn write_inner(
     model: &WriteModel,
     passed: &[Passed],
+    opts: &WriteOptions,
+) -> Result<(Written, Vec<Vec<WrittenBody>>, Vec<Vec<u64>>), WriteError> {
+    write_inner_styled(model, passed, &Paints::default(), opts)
+}
+
+/// [`write_inner`], with `paints` written after everything else.
+#[allow(clippy::type_complexity)]
+pub(crate) fn write_inner_styled(
+    model: &WriteModel,
+    passed: &[Passed],
+    paints: &Paints,
     opts: &WriteOptions,
 ) -> Result<(Written, Vec<Vec<WrittenBody>>, Vec<Vec<u64>>), WriteError> {
     // Each body as a file must describe it, in parallel; the first body
@@ -496,6 +521,7 @@ pub(crate) fn write_inner(
             );
         }
     }
+    style::write(&mut out, &cx, model, &bodies, &usages, paints);
     let file = File {
         header: header(opts),
         instances: out.instances,
@@ -739,5 +765,69 @@ mod written_tests {
             assert_eq!(kind(wb.items[0]), "MANIFOLD_SOLID_BREP");
             assert!(wb.faces.values().all(|&f| kind(f) == "ADVANCED_FACE"));
         }
+    }
+
+    #[test]
+    fn body_and_face_styles_are_written_after_the_geometry_and_shared() {
+        let b = block();
+        let names: Vec<Name> = b.faces().map(|f| b.face(f).unwrap().name).collect();
+        let model = WriteModel {
+            products: vec![Product {
+                id: "b".into(),
+                bodies: vec![b],
+                ..Default::default()
+            }],
+        };
+        let red = Paint {
+            colour: [255, 0, 0],
+            opacity: 1.0,
+        };
+        let glass = Paint {
+            colour: [0, 0, 255],
+            opacity: 0.25,
+        };
+        let paints = Paints {
+            bodies: vec![BodyPaint {
+                product: 0,
+                body: 0,
+                base: Some(red),
+                faces: vec![(names[0], glass), (names[1], glass)],
+            }],
+            occurrences: Vec::new(),
+        };
+        let opts = WriteOptions::default();
+        let plain = crate::part21::parse(&write(&model, &opts).unwrap()).unwrap();
+        let w = write_styled(&model, &[], &paints, &opts).unwrap();
+        let styled = crate::part21::parse(&w.bytes).unwrap();
+        // Every instance the plain file has, as it has it.
+        assert_eq!(
+            format!("{:?}", &styled.instances[..plain.instances.len()]),
+            format!("{:?}", plain.instances)
+        );
+        let count = |n: &str| {
+            styled
+                .instances
+                .iter()
+                .filter(|i| crate::census::joined(i.record.parts()) == n)
+                .count()
+        };
+        assert_eq!(count("STYLED_ITEM"), 3);
+        // Two styles, written once each; the glass one transparent.
+        assert_eq!(count("PRESENTATION_STYLE_ASSIGNMENT"), 2);
+        assert_eq!(count("COLOUR_RGB"), 2);
+        assert_eq!(count("SURFACE_STYLE_TRANSPARENT"), 1);
+        assert_eq!(count("MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION"), 1);
+        // And they read back.
+        let o = crate::open(&w.bytes).unwrap();
+        let s = o.body_styles(0);
+        assert_eq!(s.body.unwrap().colour, Some([255, 0, 0]));
+        let faces: Vec<_> = s.faces.values().collect();
+        assert_eq!(faces.len(), 2);
+        assert!(faces.iter().all(|f| f.colour == Some([0, 0, 255]) && f.opacity == Some(0.25)));
+        // No paint, the bytes `write_with` writes.
+        assert_eq!(
+            write_styled(&model, &[], &Paints::default(), &opts).unwrap().bytes,
+            write(&model, &opts).unwrap()
+        );
     }
 }
