@@ -894,4 +894,208 @@ mod tests {
             assert_eq!(f["error"]["details"]["role"], "target", "{f}");
         }
     }
+
+    #[test]
+    fn a_draft_s_roles_have_their_classes() {
+        use super::Follow;
+        use crate::units::Unit;
+        let r = |k: u8| json!({"feature": "b", "name": format!("{k:032x}")});
+        let v = json!({"format": crate::doc::tweak::DRAFT_FORMAT, "kind": "ryucad.feature",
+            "type": "draft", "target": "b", "angle": "2 deg", "parting": [r(3)], "pull": "z",
+            "faces": [r(1)], "groups": [{"angle": "5 deg", "faces": [r(2)]}], "flip": [r(2)]});
+        let f = crate::doc::files::Feature::from_json(&v, Unit::Mm, &crate::expr::Env::empty())
+            .unwrap();
+        let classes: Vec<(String, Option<Follow>)> = f
+            .references()
+            .into_iter()
+            .map(|(role, _)| {
+                let c = Follow::classify(&f, &role);
+                (role, c)
+            })
+            .collect();
+        assert_eq!(
+            classes,
+            [
+                ("faces.0".to_owned(), Some(Follow::All)),
+                ("groups.0.faces.0".to_owned(), Some(Follow::All)),
+                ("parting.0".to_owned(), Some(Follow::All)),
+                ("flip.0".to_owned(), Some(Follow::One)),
+            ]
+        );
+        // A role the feature never names has none, and refuses.
+        assert_eq!(Follow::classify(&f, "plane"), None);
+        assert_eq!(Follow::of(&f, "plane"), Follow::One);
+    }
+
+    /// The 1 mm slot `c` cut across the box `b` (20 x 10 x 5 mm): short,
+    /// from y = 7 mm out through the back, it notches the top; long, from
+    /// y = -5 mm, it cuts the top and its front edge in two.
+    fn slot(s: &mut Session, long: bool) {
+        let y = if long { -5 } else { 7 };
+        let placement = json!({"origin": [9.5, y, -5], "z": [0, 0, 1], "x": [1, 0, 0]});
+        let exists = call(s, "feature.show", json!({"part": "p", "id": "c"})).is_ok();
+        if exists {
+            call(
+                s,
+                "feature.edit",
+                json!({"part": "p", "id": "c", "placement": placement}),
+            )
+            .unwrap();
+        } else {
+            call(
+                s,
+                "feature.add",
+                json!({"part": "p", "type": "box", "id": "c", "operation": "cut",
+                       "params": {"x": 1, "y": 20, "z": 20}, "placement": placement}),
+            )
+            .unwrap();
+        }
+    }
+
+    /// Feature `id`'s entry in the rebuild's report, whether it built or
+    /// not.
+    fn reported(s: &mut Session, id: &str) -> Value {
+        let report = match call(s, "rebuild", json!({})) {
+            Ok(v) => v,
+            Err(e) => e.details,
+        };
+        report["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == id)
+            .unwrap()
+            .clone()
+    }
+
+    /// The names of `feature`'s faces in `b` whose outward normal is `n`.
+    fn faces_along(s: &mut Session, feature: &str, n: [f64; 3]) -> Vec<String> {
+        let body = call(s, "inspect", json!({"part": "p", "feature": feature})).unwrap()["bodies"]
+            [0]
+        .clone();
+        let mut out: Vec<String> = body["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|x| {
+                let z = &x["surface"]["frame"]["z"];
+                let sign = if x["reversed"] == true { -1.0 } else { 1.0 };
+                x["surface"]["type"] == "plane"
+                    && (0..3).all(|k| (z[k].as_f64().unwrap() * sign - n[k]).abs() < 1e-12)
+            })
+            .map(|x| x["name"].as_str().unwrap().to_owned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn a_sketch_on_a_split_face_follows_its_first_piece_and_says_so() {
+        let (_dir, mut s, body) = with_box();
+        let top = format!("p/b/{}", face_along(&body, [0.0, 0.0, 1.0]));
+        slot(&mut s, false);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "t", "face": top}),
+        )
+        .unwrap();
+        assert!(reported(&mut s, "t")["warnings"].is_null());
+        slot(&mut s, true);
+        let pieces: Vec<String> = faces_along(&mut s, "c", [0.0, 0.0, 1.0])
+            .iter()
+            .map(|n| format!("p/b/{n}"))
+            .collect();
+        assert_eq!(pieces.len(), 2);
+        let t = reported(&mut s, "t");
+        assert_eq!(t["ok"], true, "{t}");
+        assert_eq!(
+            t["warnings"],
+            json!([{"code": "reference_followed", "part": "p", "feature": "t",
+                    "role": "plane", "reference": top, "pieces": pieces, "by": "c",
+                    "message": t["warnings"][0]["message"]}]),
+            "{t}"
+        );
+        // Shortened again, the top is whole and its name resolves as
+        // written: nothing followed.
+        slot(&mut s, false);
+        let t = reported(&mut s, "t");
+        assert_eq!(t["ok"], true, "{t}");
+        assert!(t["warnings"].is_null(), "{t}");
+    }
+
+    #[test]
+    fn a_set_takes_every_piece_of_a_split_face() {
+        let (_dir, mut s, body) = with_box();
+        let top = format!("p/b/{}", face_along(&body, [0.0, 0.0, 1.0]));
+        slot(&mut s, false);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extract", "id": "x", "faces": [top]}),
+        )
+        .unwrap();
+        slot(&mut s, true);
+        let x = reported(&mut s, "x");
+        assert_eq!(x["ok"], true, "{x}");
+        assert_eq!(x["warnings"][0]["role"], "faces.0", "{x}");
+        let v = call(&mut s, "inspect", json!({"part": "p", "feature": "x"})).unwrap();
+        assert_eq!(v["bodies"][0]["faces"].as_array().unwrap().len(), 2, "{v}");
+    }
+
+    #[test]
+    fn a_projection_of_a_split_edge_is_refused_with_its_pieces() {
+        let (_dir, mut s, body) = with_box();
+        let (a, b) = (
+            vertex_at(&body, [0.0, 0.0, 0.005]),
+            vertex_at(&body, [0.02, 0.0, 0.005]),
+        );
+        let front = format!("p/b/{}", edge_between(&body, &a, &b));
+        slot(&mut s, false);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "u"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "u",
+                   "ops": [{"op": "add", "type": "line", "projected": front}]}),
+        )
+        .unwrap();
+        slot(&mut s, true);
+        let u = reported(&mut s, "u");
+        let e = &u["error"];
+        assert_eq!(e["code"], "reference_split", "{u}");
+        assert_eq!(e["details"]["reason"], "one_needed");
+        assert_eq!(e["details"]["removed_by"], "c");
+        assert_eq!(e["details"]["candidates"].as_array().unwrap().len(), 2);
+        assert_eq!(e["details"]["was"]["kind"], "edge", "{u}");
+    }
+
+    #[test]
+    fn pieces_off_the_old_surface_are_refused() {
+        let (_dir, mut s, body) = with_box();
+        let top = format!("p/b/{}", face_along(&body, [0.0, 0.0, 1.0]));
+        slot(&mut s, true);
+        let pieces = faces_along(&mut s, "c", [0.0, 0.0, 1.0]);
+        // One piece lifted a millimetre: the two no longer share a plane.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "move_face", "id": "m", "by": "offset",
+                   "distance": 1, "faces": [format!("p/b/{}", pieces[0])]}),
+        )
+        .unwrap();
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "t", "face": top}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceSplit, "{e}");
+        assert_eq!(e.details["reason"], "carriers_differ");
+    }
 }
