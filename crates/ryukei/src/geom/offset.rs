@@ -41,13 +41,17 @@ pub struct Offset {
     domain: Cell,
     /// The base's own cells cut to the box: certifying, bounds and
     /// searches start from them.
+    /// How the offset lies against its base's focal surface (design
+    /// 484): regular for every offset but the global offset's envelope's.
+    turn: Turn,
     cells: Vec<Cell>,
     bounds: Box3,
 }
 
 impl PartialEq for Offset {
     fn eq(&self, o: &Self) -> bool {
-        (&self.base, self.distance, self.domain) == (&o.base, o.distance, o.domain)
+        (&self.base, self.distance, self.domain, self.turn)
+            == (&o.base, o.distance, o.domain, o.turn)
     }
 }
 
@@ -204,6 +208,22 @@ impl Offset {
     /// principal curvatures, so the offset never folds or turns inside
     /// out.
     pub fn new(base: Surface, distance: f64, domain: Cell) -> Result<Self, Error> {
+        Self::build(base, distance, domain, false)
+    }
+
+    /// [`Offset::new`], but also where the offset passes its base's focal
+    /// surface over the whole box (design 484): both principal factors
+    /// negative, or one, of one sign over every cell. Its parameters are
+    /// still its base's; where one factor is negative it is
+    /// [`Offset::turned`]. A box where the signs change folds in part,
+    /// and fails `Degenerate` as in [`Offset::new`].
+    pub(crate) fn inverted_new(base: Surface, distance: f64, domain: Cell) -> Result<Self, Error> {
+        Self::build(base, distance, domain, true)
+    }
+
+    /// [`Offset::new`] (`any` false: regular only) or
+    /// [`Offset::inverted_new`] (`any` true).
+    fn build(base: Surface, distance: f64, domain: Cell, any: bool) -> Result<Self, Error> {
         if !distance.is_finite() || domain.iter().flatten().any(|x| x.is_nan()) {
             return Err(Error::NonFinite);
         }
@@ -214,7 +234,19 @@ impl Offset {
                     domain[k][1].min(o.domain[k][1]),
                 ]
             });
-            return Self::new(o.base.clone(), o.distance + distance, cut);
+            // Along a turned offset's normal is against its base's.
+            let sum = if o.turned() {
+                o.distance - distance
+            } else {
+                o.distance + distance
+            };
+            let out = Self::build(o.base.clone(), sum, cut, true)?;
+            // Regular against the first offset is the first's own turn
+            // against the base: the factors multiply.
+            if !any && out.turn() != o.turn() {
+                return Err(Error::Degenerate);
+            }
+            return Ok(out);
         }
         if !matches!(
             base,
@@ -273,10 +305,16 @@ impl Offset {
             base,
             distance,
             domain,
+            turn: Turn::Regular,
             cells,
             bounds: crate::tol::size_box(),
         };
-        s.bounds = s.certify()?;
+        let (bounds, turn) = s.certify(any)?;
+        if !any && turn != Turn::Regular {
+            return Err(Error::Degenerate);
+        }
+        s.turn = turn;
+        s.bounds = bounds;
         Ok(s)
     }
 
@@ -288,6 +326,25 @@ impl Offset {
         self.distance
     }
 
+    /// Whether the offset's natural normal is its base's turned over: it
+    /// passed the focal surface of one principal curvature (design 484).
+    /// Only the global offset's envelope makes such offsets.
+    pub fn turned(&self) -> bool {
+        self.turn == Turn::Turned
+    }
+
+    /// How the offset lies against its base's focal surface, one way over
+    /// its whole box, as certified.
+    pub(crate) fn turn(&self) -> Turn {
+        self.turn
+    }
+
+    /// Whether the offset passes its base's focal surface (inverted or
+    /// turned): only [`Offset::inverted_new`] makes these.
+    pub fn passes_focal(&self) -> bool {
+        self.turn != Turn::Regular
+    }
+
     /// The box of the base's parameters the offset is over.
     pub fn domain(&self) -> Cell {
         self.domain
@@ -297,30 +354,33 @@ impl Offset {
         &self.cells
     }
 
-    /// Certifies the offset regular over its box and returns the box its
-    /// cells' enclosures fill.
-    fn certify(&self) -> Result<Box3, Error> {
+    /// Certifies the offset one way over its box, regular, inverted or
+    /// turned ([`Turn`]), and returns the box its cells' enclosures fill
+    /// with that way. A cell whose way differs from another's folds:
+    /// `Degenerate`; so is any way but regular unless `any`.
+    fn certify(&self, any: bool) -> Result<(Box3, Turn), Error> {
         let sheet = Sheet::of(&self.base);
         let mut stack: Vec<(Cell, u32)> = self.cells.iter().map(|&c| (c, 0)).collect();
         let mut seen = 0usize;
         let mut bounds: Option<Box3> = None;
+        let mut way: Option<Turn> = None;
         while let Some((cell, depth)) = stack.pop() {
             seen += 1;
             if seen > MAX_CELLS {
                 return Err(Error::Degenerate);
             }
             let d = sheet.jet3_box(cell);
-            match self.local_box(cell).map(|d| turn_over(&d, self.distance)) {
-                Some(Over::Is(Turn::Regular)) => {
-                    if let Some(q) = d.and_then(|d| offset_jets(d, self.distance)) {
-                        let b = point_box(&q);
-                        bounds = Some(bounds.map_or(b, |o| o.union(&b)));
-                        continue;
-                    }
+            if let Some(Over::Is(t)) = self.local_box(cell).map(|d| turn_over(&d, self.distance)) {
+                // A fold, or (for [`Offset::new`]) not regular.
+                if way.is_some_and(|w| w != t) || (!any && t != Turn::Regular) {
+                    return Err(Error::Degenerate);
                 }
-                // Certified past the focal surface somewhere: not regular.
-                Some(Over::Is(_)) => return Err(Error::Degenerate),
-                _ => {}
+                if let Some(q) = d.and_then(|d| offset_jets(d, self.distance)) {
+                    way = Some(t);
+                    let b = point_box(&q);
+                    bounds = Some(bounds.map_or(b, |o| o.union(&b)));
+                    continue;
+                }
             }
             if depth == MAX_DEPTH {
                 return Err(Error::Degenerate);
@@ -346,7 +406,8 @@ impl Offset {
             stack.push((b, depth + 1));
         }
         let b = bounds.ok_or(Error::Degenerate)?;
-        Ok(b.grow(1e-12 * (1.0 + b.max().to_vector().length())))
+        let way = way.ok_or(Error::Degenerate)?;
+        Ok((b.grow(1e-12 * (1.0 + b.max().to_vector().length())), way))
     }
 
     /// The direction along which the base's fundamental forms don't
@@ -462,9 +523,11 @@ impl Offset {
         }
     }
 
-    /// The base's normal, which is the offset's (see [`Offset::new`]).
+    /// The base's normal, which is the offset's (see [`Offset::new`]),
+    /// turned over where the offset is [`Offset::turned`].
     pub(crate) fn normal(&self, u: f64, v: f64) -> Option<UnitVector3> {
-        self.base.normal(u, v)
+        let n = self.base.normal(u, v)?;
+        Some(if self.turned() { -n } else { n })
     }
 
     /// The base's periods in the directions the box covers whole.
@@ -504,6 +567,7 @@ impl Offset {
             base: self.base.transformed(r),
             distance: self.distance,
             domain: self.domain,
+            turn: self.turn,
             cells: self.cells.clone(),
             bounds: moved_box(&self.bounds, |p| r.apply_point(p)),
         }
@@ -533,6 +597,7 @@ impl Offset {
                 base,
                 distance,
                 domain: map(self.domain),
+                turn: self.turn,
                 cells,
                 bounds: moved_box(&self.bounds, |p| m.apply_point(p)),
             },

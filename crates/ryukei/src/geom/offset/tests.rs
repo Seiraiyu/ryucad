@@ -381,3 +381,116 @@ fn turn_over_reads_the_three_ways() {
     assert_eq!(turn_over(&d, -1.4), Over::Is(Turn::Inverted));
     assert_eq!(turn_over(&d, -2.0), Over::Is(Turn::Inverted));
 }
+
+/// Offsets past their focal surfaces, each with its way: the tube and
+/// the revolution's tube inward past their radii (one factor negative),
+/// the ball inward past its centre (both).
+fn passing() -> Vec<(Surface, Cell, f64, Turn)> {
+    let [_, rev] = swept();
+    let (p, n) = (rev.point(0.0, 0.0), rev.normal(0.0, 0.0).unwrap().get());
+    let core = Point3::new(2.0, 0.0, 0.3);
+    let inward = if n.dot(core - p) > 0.0 { 1.0 } else { -1.0 };
+    let (b, band) = ball();
+    vec![
+        (tube(), [[0.0, 1.0], [-0.5, 0.5]], -0.75, Turn::Turned),
+        (rev, [[0.0, TAU], [0.0, TAU]], 0.6 * inward, Turn::Turned),
+        (b, band, -2.0, Turn::Inverted),
+    ]
+}
+
+#[test]
+fn offsets_past_their_focal_surface_keep_their_parameters() {
+    for (base, cell, d, way) in passing() {
+        assert_eq!(Offset::new(base.clone(), d, cell), Err(Error::Degenerate));
+        let o = Offset::inverted_new(base.clone(), d, cell)
+            .unwrap_or_else(|e| panic!("{way:?} by {d}: {e:?}"));
+        assert_eq!(o.turn(), way);
+        assert_eq!(o.turned(), way == Turn::Turned);
+        assert!(o.passes_focal());
+        let sign = if o.turned() { -1.0 } else { 1.0 };
+        for (u, v) in grid(cell) {
+            let n = base.normal(u, v).unwrap().get();
+            let want = base.point(u, v) + n * d;
+            assert!(o.point(u, v).distance(want) < 1e-12, "{way:?} {u} {v}");
+            // The natural normal is along `O_u × O_v`, and the base's
+            // times the turn's sign.
+            let m = o.normal(u, v).unwrap().get();
+            assert!((m.dot(n) - sign).abs() < 1e-12, "{way:?} {u} {v}");
+            let e = o.eval(u, v);
+            assert!(e.du.cross(e.dv).dot(m) > 0.0, "{way:?} {u} {v}");
+            let s = Sheet::Offset(&o).normal_jets_at(u, v).unwrap();
+            let s = Vector3::new(s[0].v, s[1].v, s[2].v);
+            assert!(s.dot(m) > 0.0, "{way:?} {u} {v}");
+        }
+    }
+}
+
+#[test]
+fn a_regular_offset_is_regular_either_way() {
+    for (base, cell, [a, b]) in cases() {
+        for d in [a, b] {
+            let o = Offset::inverted_new(base.clone(), d, cell).unwrap();
+            assert_eq!(o, Offset::new(base.clone(), d, cell).unwrap());
+            assert_eq!(o.turn(), Turn::Regular);
+        }
+    }
+}
+
+#[test]
+fn an_offset_folding_in_part_is_refused() {
+    // A spline cone offset inward by more than its radius at one end and
+    // less than at the other folds where its focal line crosses it.
+    let c = Surface::Cone(crate::geom::Cone::new(Frame::WORLD, 1.0, 0.4).unwrap());
+    let (n, _) = c.to_nurbs([[0.0, PI], [0.0, 1.0]]).unwrap();
+    let n = Surface::Nurbs(Arc::new(n));
+    let at = |v: f64| {
+        let p = n.point(0.0, v);
+        math::sqrt(p.x * p.x + p.y * p.y)
+    };
+    let (lo, hi) = (at(0.0).min(at(1.0)), at(0.0).max(at(1.0)));
+    assert!(hi - lo > 0.2, "{lo} {hi}");
+    // The focal line is the axis, `r / cos α` along the normal.
+    let reach = |r: f64| r / math::cos(0.4);
+    let d = -(reach(lo) + reach(hi)) / 2.0;
+    let r = Offset::inverted_new(n.clone(), d, [[0.0, PI], [0.0, 1.0]]);
+    assert_eq!(r, Err(Error::Degenerate));
+    // Past both radii it is turned whole.
+    let o = Offset::inverted_new(n, -(reach(hi) + 0.1), [[0.0, PI], [0.0, 1.0]]).unwrap();
+    assert!(o.turned());
+}
+
+#[test]
+fn offsets_of_turned_offsets_add_along_their_normal() {
+    let a = Surface::Offset(Arc::new(
+        Offset::inverted_new(tube(), -0.75, [[0.0, 1.0], [-0.5, 0.5]]).unwrap(),
+    ));
+    // Along the turned offset's normal is against the tube's.
+    let b = Offset::inverted_new(a.clone(), 0.05, [[0.0, 1.0], [-0.5, 0.5]]).unwrap();
+    assert_eq!(b.distance(), -0.75 - 0.05);
+    assert!(b.turned());
+    // Regular against the turned offset keeps its turn.
+    let c = Offset::new(a.clone(), 0.05, [[0.0, 1.0], [-0.5, 0.5]]).unwrap();
+    assert_eq!(c, b);
+    // The turned offset is a tube of radius 0.05 about the same axis:
+    // 0.1 back along its normal passes that axis, regular against the
+    // tube (0.65 inward) but not against the turned offset.
+    assert_eq!(
+        Offset::new(a.clone(), -0.1, [[0.0, 1.0], [-0.5, 0.5]]),
+        Err(Error::Degenerate)
+    );
+    let back = Offset::inverted_new(a, -0.1, [[0.0, 1.0], [-0.5, 0.5]]).unwrap();
+    assert_eq!(back.turn(), Turn::Regular);
+}
+
+#[test]
+fn turned_offsets_move_and_reflect_with_their_turn() {
+    let o = Offset::inverted_new(tube(), -0.75, [[0.0, 1.0], [-0.5, 0.5]]).unwrap();
+    let r = Rigid::translation(Vector3::new(0.1, 0.2, 0.3));
+    assert!(o.transformed(&r).turned());
+    let m = Mirror::new(Point3::ORIGIN, UnitVector3::Y);
+    let (mo, _) = o.mirrored(&m).unwrap();
+    assert!(mo.turned());
+    let want = m.apply_point(o.point(0.4, 0.1));
+    let q = mo.project(want).param;
+    assert!(mo.point(q.0, q.1).distance(want) < 1e-9);
+}
