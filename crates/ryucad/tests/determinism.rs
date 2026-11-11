@@ -3723,6 +3723,7 @@ fn pdm_section(golden: &mut Golden) {
                     login: "alice".into(),
                 },
                 review: 2154874321,
+                via: vec![],
             }],
             commit: commit.clone(),
             label: "B".into(),
@@ -3758,6 +3759,7 @@ fn pdm_section(golden: &mut Golden) {
             rules: &rules,
             rules_at: &a.rules_at,
             keys: &keys,
+            revoked: &Default::default(),
         };
         let mut u = a.clone();
         u.outcome = Outcome::Unapproved;
@@ -3780,6 +3782,112 @@ fn pdm_section(golden: &mut Golden) {
             s.str(&format!("{} {clause}", v.status()));
         }
     }
+}
+
+/// An attestation approved through a team (format 2): its canonical
+/// bytes and signature under the test key, and the verdicts on it, on one
+/// whose `via` names a team its rules don't, on it under a revoked key
+/// (signed "years before": still revoked), and on a format 3 one.
+fn pdm_teams_section(golden: &mut Golden) {
+    use ryupdm::attest::*;
+    let mut s = golden.section("pdm_teams");
+    let rules = vec![ryupdm::approvals::Rule {
+        parts: vec!["*".into()],
+        count: 2,
+        from: vec!["@acme/quality".into(), "dave".into()],
+    }];
+    let approval = |login: &str, id: u64, via: &[&str]| Approval {
+        at: "2026-11-12T09:14:03Z".into(),
+        commit: "1".repeat(40),
+        github: User {
+            id,
+            login: login.into(),
+        },
+        review: id * 10,
+        via: via.iter().map(|t| (*t).to_owned()).collect(),
+    };
+    let a = Attestation {
+        approvals: vec![
+            approval("quinn", 11, &["@acme/quality"]),
+            approval("dave", 12, &[]),
+        ],
+        commit: "2".repeat(40),
+        label: "C".into(),
+        missing: vec![],
+        outcome: Outcome::Approved,
+        part: Id::parse("bracket", "part").unwrap(),
+        project: ryucad::doc::id::ProjectId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+        proposed_by: User {
+            id: 7654321,
+            login: "dstonely".into(),
+        },
+        pull: Some(Pull {
+            number: 43,
+            repo: "acme/widgets".into(),
+        }),
+        record: "3".repeat(64),
+        record_kind: ryupdm::record::Kind::Release,
+        rules: rules.clone(),
+        rules_at: "4".repeat(40),
+        signed_at: "2026-11-12T09:20:11Z".into(),
+    };
+    s.str(&a.canonical());
+    let signed = sign(&a, &TEST_SEED);
+    s.str(&signed);
+    let keys = std::collections::BTreeMap::from([(test_key_id(), public_key(&TEST_SEED))]);
+    let none = std::collections::BTreeMap::new();
+    let gone = std::collections::BTreeMap::from([(test_key_id(), "2026-11-10".to_owned())]);
+    let verdict = |m: &str, revoked: &std::collections::BTreeMap<String, String>| {
+        let v = verify_message(
+            m.as_bytes(),
+            &Expect {
+                project: &a.project,
+                part: &a.part,
+                label: &a.label,
+                kind: a.record_kind,
+                commit: &a.commit,
+                record: &a.record,
+                rules: &rules,
+                rules_at: &a.rules_at,
+                keys: &keys,
+                revoked,
+            },
+        );
+        match &v {
+            Verdict::Invalid(c) => format!("invalid {}", c.name()),
+            Verdict::Revoked { key, revoked } => format!("revoked {key} {revoked}"),
+            Verdict::Unknown { key, format } => format!("unknown {key} {format}"),
+            other => other.status().to_owned(),
+        }
+    };
+    let mut other = a.clone();
+    other.approvals[0].via = vec!["@acme/other".into()];
+    let mut old = a.clone();
+    old.signed_at = "2020-01-01T00:00:00Z".into();
+    let mut v3 = ryucad::doc::canonical::parse(&a.canonical()).unwrap();
+    v3["format"] = serde_json::json!(3);
+    let text3 = ryucad::doc::canonical::to_string(&v3);
+    let mut signed3 = DOMAIN.to_vec();
+    signed3.extend_from_slice(text3.as_bytes());
+    let newer = message_of(&text3, &test_key_id(), &raw_sign(&TEST_SEED, &signed3));
+    for (m, revoked) in [
+        (signed.clone(), &none),
+        (sign(&other, &TEST_SEED), &none),
+        (sign(&old, &TEST_SEED), &gone),
+        (newer, &none),
+    ] {
+        s.str(&verdict(&m, revoked));
+    }
+}
+
+/// A tag message of canonical `text` and a signature, as [`message`]
+/// writes one, for a format this build doesn't model.
+fn message_of(text: &str, key: &str, ed25519: &[u8; 64]) -> String {
+    use ryupdm::attest::{BEGIN, END, hex};
+    format!(
+        "{text}{BEGIN}\n{{\"ed25519\":\"{}\",\"key\":\"{key}\"}}\n{END}\n",
+        hex(ed25519)
+    )
 }
 
 /// BOMs of seeded projects of parts and assemblies (indented and flat, as
@@ -5040,8 +5148,11 @@ fn packages_section(golden: &mut Golden) {
                     v[k] = json!("-");
                 }
                 for f in v["files"].as_array_mut().unwrap() {
+                    // The record and a BOM's JSON name commits, the STEP its
+                    // build: hashed above without them, so left out here.
                     if f["path"] == ryupdm::package::RECORD
                         || f["path"].as_str().unwrap().ends_with(".step")
+                        || f["path"].as_str().unwrap().ends_with(".json")
                     {
                         f["blake3"] = json!("-");
                         f["size"] = json!("-");
@@ -5686,6 +5797,7 @@ sections! {
     diff => diff_section(&mut golden),
     merge => merge_section(&mut golden),
     pdm => pdm_section(&mut golden),
+    pdm_teams => pdm_teams_section(&mut golden),
     boms => boms_section(&mut golden),
     assemblies => assemblies_section(&mut golden),
     mates => mates_section(&mut golden),

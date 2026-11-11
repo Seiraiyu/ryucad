@@ -31,9 +31,10 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 pub const KIND: &str = "ryupdm.config";
-/// The newest format this build reads: 2 added `approvals`, 3
-/// `packages` (design 436).
-pub const FORMAT: u64 = 3;
+/// The newest format this build reads: 2 added `approvals` (and
+/// `dependencies`), 3 teams in its rules and revoked keys, 4 `packages`
+/// (design 436).
+pub const FORMAT: u64 = 4;
 
 /// How a part's revisions are labelled. Labels are always derived from the
 /// scheme, never typed.
@@ -338,7 +339,7 @@ pub struct Config {
     /// projects' parts this project places (`dependencies.bump`, format
     /// 2): `None` unless the file says `pr`.
     pub bump: Bump,
-    /// What a release's package holds (`packages.formats`, format 3):
+    /// What a release's package holds (`packages.formats`, format 4):
     /// `None` for the default, [`crate::package::Format::DEFAULT`].
     pub packages: Option<Vec<crate::package::Format>>,
 }
@@ -375,6 +376,12 @@ impl Config {
     /// The lowest format that holds these settings.
     pub fn format(&self) -> u64 {
         if self.packages.is_some() {
+            4
+        } else if self
+            .approvals
+            .as_ref()
+            .is_some_and(|a| a.format_3_at("").is_some())
+        {
             3
         } else if self.approvals.is_some() || self.bump != Bump::None {
             2
@@ -467,7 +474,14 @@ impl Config {
                     "approvals needs format 2: write the file at format 2 (pdm configure does)",
                 ));
             }
-            c.approvals = Some(Approvals::from_json(&a, "/approvals")?);
+            let a = Approvals::from_json(&a, "/approvals")?;
+            if let Some(at) = a.format_3_at("/approvals").filter(|_| declared < 3) {
+                return Err(invalid(
+                    &at,
+                    "teams and revoked keys need format 3: write the file at format 3 (pdm configure does)",
+                ));
+            }
+            c.approvals = Some(a);
         }
         if let Some(deps) = o.take_opt("dependencies") {
             if declared < 2 {
@@ -486,10 +500,10 @@ impl Config {
             d.finish()?;
         }
         if let Some(p) = o.take_opt("packages") {
-            if declared < 3 {
+            if declared < 4 {
                 return Err(invalid(
                     "/packages",
-                    "packages needs format 3: write the file at format 3 (pdm configure does)",
+                    "packages needs format 4: write the file at format 4 (pdm configure does)",
                 ));
             }
             let mut po = Obj::new(&p, "/packages")?;
@@ -754,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn packages_are_the_default_unless_written_and_need_format_3() {
+    fn packages_are_the_default_unless_written_and_need_format_4() {
         let c = Config::default();
         assert_eq!(
             c.package_formats(),
@@ -770,11 +784,11 @@ mod tests {
         let v = set.to_json();
         assert_eq!(
             (v["format"].clone(), v["packages"].clone()),
-            (json!(3), json!({"formats": ["dxf", "step"]}))
+            (json!(4), json!({"formats": ["dxf", "step"]}))
         );
         assert_eq!(Config::from_json(&v).unwrap(), set);
         let mut old = v.clone();
-        old["format"] = json!(2);
+        old["format"] = json!(3);
         assert_eq!(
             Config::from_json(&old).unwrap_err().details["pointer"],
             json!("/packages")
@@ -821,5 +835,22 @@ mod tests {
         old["format"] = json!(1);
         let e = Config::from_json(&old).unwrap_err();
         assert_eq!(e.details["pointer"], "/dependencies");
+    }
+
+    #[test]
+    fn teams_and_revoked_keys_need_format_3_and_write_it() {
+        let rules = json!({"rules": [{"count": 1, "from": ["@acme/qa"], "parts": ["*"]}]});
+        let v = json!({"approvals": rules, "format": 3, "kind": "ryupdm.config"});
+        let c = Config::from_json(&v).unwrap();
+        assert_eq!(c.format(), 3);
+        assert_eq!(c.to_json()["format"], 3);
+        let mut old = v.clone();
+        old["format"] = json!(2);
+        let e = Config::from_json(&old).unwrap_err();
+        assert_eq!(e.details["pointer"], "/approvals/rules/0/from/0");
+        // Logins alone stay at format 2.
+        let plain = json!({"approvals": {"rules": [{"count": 1, "from": ["alice"], "parts": ["*"]}]},
+                           "format": 3, "kind": "ryupdm.config"});
+        assert_eq!(Config::from_json(&plain).unwrap().to_json()["format"], 2);
     }
 }

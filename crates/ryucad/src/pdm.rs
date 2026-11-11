@@ -286,7 +286,21 @@ pub fn configure(session: &mut Session, change: Change, expected: Option<&str>) 
     if let Some(a) = &change.approvals {
         c.approvals = match a {
             Value::Bool(false) => None,
-            v => Some(ryupdm::approvals::Approvals::from_json(v, "/approvals")?),
+            v => {
+                let a = ryupdm::approvals::Approvals::from_json(v, "/approvals")?;
+                // Teams are the repository owner's: refused here where the
+                // clone's origin says who that is, and by the service always.
+                if let Some((owner, _)) = crate::git::Repo::open(session.root())
+                    .ok()
+                    .flatten()
+                    .and_then(|r| r.origin_url())
+                    .as_deref()
+                    .and_then(crate::git::github_repo)
+                {
+                    a.check_owner(&owner, "/approvals")?;
+                }
+                Some(a)
+            }
         };
     }
     if let Some(f) = &change.package_formats {
@@ -763,19 +777,51 @@ mod tests {
             (e.code, e.details["pointer"].as_str()),
             (Code::ApprovalRuleInvalid, Some("/approvals/rules/0/count"))
         );
-        let e = call(
-            &mut s,
-            "pdm.configure",
-            json!({"approvals": {"rules": [{"count": 1, "from": ["@acme/qa"], "parts": ["*"]}]}}),
-        )
-        .unwrap_err();
-        assert_eq!(e.details["team"], "@acme/qa");
         assert_eq!(config(&s).unwrap()["approvals"], rules);
         // `false` removes them; the file goes back to format 1.
         let v = call(&mut s, "pdm.configure", json!({"approvals": false})).unwrap();
         assert_eq!(v["approvals"], Value::Null);
         let file = std::fs::read_to_string(dir.path().join("ryupdm.json")).unwrap();
         assert_eq!(crate::doc::canonical::parse(&file).unwrap()["format"], 1);
+        // A team is taken (format 3); one of another owner than the
+        // origin's is refused.
+        let team = json!({"rules": [{"count": 2, "from": ["@acme/qa", "alice"], "parts": ["*"]}]});
+        let v = call(&mut s, "pdm.configure", json!({"approvals": team})).unwrap();
+        assert_eq!(v["approvals"], team);
+        let file = std::fs::read_to_string(dir.path().join("ryupdm.json")).unwrap();
+        assert_eq!(crate::doc::canonical::parse(&file).unwrap()["format"], 3);
+        let out = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let out = std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/widgets/bracket.git",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let e = call(&mut s, "pdm.configure", json!({"approvals": team})).unwrap_err();
+        assert_eq!(
+            (
+                e.code,
+                e.details["pointer"].as_str(),
+                e.details["owner"].as_str()
+            ),
+            (
+                Code::ApprovalRuleInvalid,
+                Some("/approvals/rules/0/from/0"),
+                Some("widgets")
+            )
+        );
+        // Refused, the file is as it was.
+        assert_eq!(config(&s).unwrap()["approvals"], team);
     }
 
     #[test]

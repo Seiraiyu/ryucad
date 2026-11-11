@@ -2526,6 +2526,7 @@ fn approvals_from_the_cli() {
                 login: "alice".into(),
             },
             review: 1,
+            via: vec![],
         }],
         commit: official.clone(),
         label: "A".into(),
@@ -2570,6 +2571,30 @@ fn approvals_from_the_cli() {
         "alice"
     );
     assert_eq!(p.ok(&["release", "check"])["findings"], json!([]));
+    p.ok(&["check"]);
+    // The test key revoked at the tip: A stays official, its approvals lose
+    // their proof, and that is a warning, which `check` doesn't fail on.
+    let revoked = json!({"keys": {test_key_id(): {"key": hex(&public_key(&TEST_SEED)),
+                                                   "revoked": "2026-11-10"}},
+                         "rules": [{"count": 1, "from": ["alice"], "parts": ["*"]}]});
+    p.ok(&["pdm", "configure", "--approvals", &revoked.to_string()]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "revoke the test key"]);
+    let v = p.ok(&["release", "list", "p"]);
+    let a = &v["records"][0]["approval"];
+    assert_eq!(
+        (&a["status"], &a["key"], &a["revoked"]),
+        (
+            &json!("revoked"),
+            &json!(test_key_id()),
+            &json!("2026-11-10")
+        )
+    );
+    let v = p.ok(&["release", "check"]);
+    assert_eq!(
+        (&v["findings"][0]["code"], &v["findings"][0]["severity"]),
+        (&json!("release_attestation_revoked"), &json!("warning"))
+    );
     p.ok(&["check"]);
 }
 

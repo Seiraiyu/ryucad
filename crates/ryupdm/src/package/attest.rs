@@ -141,6 +141,10 @@ pub struct Expect<'a> {
     /// tag alone (`release list`).
     pub hash: Option<&'a str>,
     pub keys: &'a BTreeMap<String, [u8; 32]>,
+    /// The keys revoked, with their days: [`crate::attest::revoked`] of
+    /// `approvals.keys`' revoked entries where the record arrived and at
+    /// the release branch's tip, as for its release tag.
+    pub revoked: &'a BTreeMap<String, String>,
 }
 
 /// How a release's package tag stands.
@@ -151,6 +155,11 @@ pub enum Verdict {
         key: String,
     },
     Invalid(Clause),
+    /// Signed by a revoked key: whatever it says, it proves nothing.
+    Revoked {
+        key: String,
+        revoked: String,
+    },
     Missing,
 }
 
@@ -159,6 +168,7 @@ impl Verdict {
         match self {
             Verdict::Attested { .. } => "attested",
             Verdict::Invalid(_) => "invalid",
+            Verdict::Revoked { .. } => "revoked",
             Verdict::Missing => "missing",
         }
     }
@@ -176,6 +186,13 @@ pub fn verify_message(bytes: &[u8], expect: &Expect) -> Verdict {
     };
     if let Err(c) = check_signature(expect.keys, &sig, DOMAIN, &text) {
         return Verdict::Invalid(c);
+    }
+    // A revoked key's signature proves nothing, whatever date it claims.
+    if let Some(day) = expect.revoked.get(&sig.key) {
+        return Verdict::Revoked {
+            key: sig.key,
+            revoked: day.clone(),
+        };
     }
     let fields = [
         ("project", a.project == *expect.project),
@@ -236,7 +253,7 @@ pub fn of_release(
         return Verdict::Invalid(Clause::Unreadable("the record doesn't read".into()));
     };
     // The keys trusted where the record arrived, as for its release tag.
-    let extra = repo
+    let at = repo
         .find_commit(match gix::ObjectId::from_hex(o.commit.as_bytes()) {
             Ok(id) => id,
             Err(_) => return Verdict::Missing,
@@ -244,9 +261,14 @@ pub fn of_release(
         .ok()
         .and_then(|c| c.parent_ids().next().map(|p| p.to_string()))
         .and_then(|parent| crate::history::config_at(repo, &parent, prefix).ok())
-        .and_then(|c| c.approvals.map(|a| a.keys))
-        .unwrap_or_default();
-    let keys = crate::attest::trusted(&extra);
+        .and_then(|c| c.approvals);
+    let keys = crate::attest::trusted(&at.as_ref().map(|a| a.keys.clone()).unwrap_or_default());
+    // A key revoked now proves nothing it signed earlier.
+    let mut revoked =
+        crate::attest::revoked(&at.as_ref().map(|a| a.revoked.clone()).unwrap_or_default());
+    for (id, day) in releases.tip_approvals.iter().flat_map(|a| &a.revoked) {
+        revoked.entry(id.clone()).or_insert_with(|| day.clone());
+    }
     let Ok(obj) = repo.find_object(*object) else {
         return Verdict::Invalid(Clause::Unreadable("the tag's object is missing".into()));
     };
@@ -266,6 +288,7 @@ pub fn of_release(
                 record: &record,
                 hash,
                 keys: &keys,
+                revoked: &revoked,
             },
         ),
     }
@@ -317,6 +340,8 @@ mod tests {
         BTreeMap::from([(test_key_id(), public_key(&TEST_SEED))])
     }
 
+    static NONE_REVOKED: BTreeMap<String, String> = BTreeMap::new();
+
     fn expect<'a>(
         a: &'a Attestation,
         keys: &'a BTreeMap<String, [u8; 32]>,
@@ -330,7 +355,28 @@ mod tests {
             record: &a.record,
             hash,
             keys,
+            revoked: &NONE_REVOKED,
         }
+    }
+
+    #[test]
+    fn a_revoked_keys_package_tag_proves_nothing() {
+        let a = attestation();
+        let k = keys();
+        let msg = sign(&a, &TEST_SEED);
+        let revoked = BTreeMap::from([(test_key_id(), "2026-11-01".to_owned())]);
+        let e = Expect {
+            revoked: &revoked,
+            ..expect(&a, &k, Some(&a.hash))
+        };
+        assert_eq!(
+            verify_message(msg.as_bytes(), &e),
+            Verdict::Revoked {
+                key: test_key_id(),
+                revoked: "2026-11-01".into()
+            }
+        );
+        assert_eq!(verify_message(msg.as_bytes(), &e).status(), "revoked");
     }
 
     #[test]

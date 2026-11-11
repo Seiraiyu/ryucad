@@ -30,6 +30,23 @@ pub const HOSTED_KEYS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Hosted keys revoked, `(ID, YYYY-MM-DD)`: each also in [`HOSTED_KEYS`],
+/// which never loses one. Every attestation a revoked key signed verifies
+/// as revoked, whatever date it claims, since a stolen key can backdate.
+/// A revocation needs a ryucad release, as a new key does.
+pub const HOSTED_REVOKED: &[(&str, &str)] = &[];
+
+/// The revoked keys an attestation may name: the hosted ones and `extra`
+/// (`approvals.keys`' revoked entries, read where the rules are read).
+pub fn revoked(extra: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut out: BTreeMap<String, String> = HOSTED_REVOKED
+        .iter()
+        .map(|(id, day)| ((*id).to_owned(), (*day).to_owned()))
+        .collect();
+    out.extend(extra.iter().map(|(id, d)| (id.clone(), d.clone())));
+    out
+}
+
 /// `bytes` as lower-case hex.
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|c| format!("{c:02x}")).collect()
@@ -71,7 +88,10 @@ pub fn trusted(extra: &BTreeMap<String, [u8; 32]>) -> BTreeMap<String, [u8; 32]>
 }
 
 pub const KIND: &str = "ryupdm.attestation";
-pub const FORMAT: u64 = 1;
+/// The newest format this build reads: 2 added an approval's `via`. An
+/// attestation is written at the lowest format holding it, so one with
+/// no team reads in any ryucad that reads attestations.
+pub const FORMAT: u64 = 2;
 
 /// A GitHub account, by its numeric ID and the login it had then.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,6 +110,10 @@ pub struct Approval {
     pub github: User,
     /// GitHub's review ID.
     pub review: u64,
+    /// The teams a rule names through which the service counted it, as the
+    /// rules write them, sorted; empty for a login the rules name
+    /// directly (format 2).
+    pub via: Vec<String>,
 }
 
 /// The pull request that brought the record.
@@ -207,19 +231,32 @@ fn user_from(v: &Value, at: &str) -> Result<User> {
 }
 
 impl Attestation {
+    /// The lowest format that holds it: 2 when an approval has a `via`.
+    pub fn format(&self) -> u64 {
+        if self.approvals.iter().any(|a| !a.via.is_empty()) {
+            2
+        } else {
+            1
+        }
+    }
+
     pub fn to_json(&self) -> Value {
         let approvals: Vec<Value> = self
             .approvals
             .iter()
             .map(|a| {
-                json!({"at": a.at, "commit": a.commit, "github": user_json(&a.github),
-                            "review": a.review})
+                let mut v = json!({"at": a.at, "commit": a.commit, "github": user_json(&a.github),
+                            "review": a.review});
+                if !a.via.is_empty() {
+                    v["via"] = json!(a.via);
+                }
+                v
             })
             .collect();
         let mut v = json!({
             "approvals": approvals,
             "commit": self.commit,
-            "format": FORMAT,
+            "format": self.format(),
             "kind": KIND,
             "label": self.label,
             "outcome": self.outcome.as_str(),
@@ -248,6 +285,7 @@ impl Attestation {
 
     pub fn from_json(v: &Value) -> Result<Attestation> {
         let mut o = header(v, KIND, FORMAT)?;
+        let declared = v["format"].as_u64().unwrap_or(1);
         let list = |o: &mut Obj, key: &str| -> Result<Vec<Value>> {
             o.take(key)?
                 .as_array()
@@ -265,6 +303,31 @@ impl Attestation {
                     commit: take_str(&mut a, "commit", &at, |s| is_hex(s, 40), "40 hex")?,
                     github: user_from(&a.take("github")?, &format!("{at}/github"))?,
                     review: take_u64(&mut a, "review", &at)?,
+                    via: match a.take_opt("via") {
+                        None => Vec::new(),
+                        Some(_) if declared < 2 => {
+                            return Err(invalid(&format!("{at}/via"), "via needs format 2"));
+                        }
+                        Some(list) => {
+                            let teams: Option<Vec<String>> = list.as_array().and_then(|l| {
+                                l.iter()
+                                    .map(|t| {
+                                        t.as_str()
+                                            .filter(|t| crate::approvals::team_ok(t))
+                                            .map(str::to_owned)
+                                    })
+                                    .collect()
+                            });
+                            teams
+                                .filter(|t| !t.is_empty() && t.windows(2).all(|w| w[0] < w[1]))
+                                .ok_or_else(|| {
+                                    invalid(
+                                        &format!("{at}/via"),
+                                        "via must be a sorted array of GitHub teams, each once",
+                                    )
+                                })?
+                        }
+                    },
                 };
                 a.finish()?;
                 Ok(out)
@@ -338,7 +401,7 @@ impl Attestation {
         let rules_at = take_str(&mut o, "rules_at", "", |s| is_hex(s, 40), "40 hex")?;
         let signed_at = take_str(&mut o, "signed_at", "", is_time, "a UTC time")?;
         o.finish()?;
-        Ok(Attestation {
+        let a = Attestation {
             approvals,
             commit,
             label,
@@ -353,7 +416,15 @@ impl Attestation {
             rules,
             rules_at,
             signed_at,
-        })
+        };
+        // Written at the lowest format that holds it, so read back the same.
+        if a.format() != declared {
+            return Err(invalid(
+                "/format",
+                &format!("format must be {}, the lowest that holds it", a.format()),
+            ));
+        }
+        Ok(a)
     }
 }
 
@@ -402,6 +473,8 @@ pub enum Clause {
     NotMet,
     /// It counts the proposer as an approver.
     ProposerApproved,
+    /// An approval's `via` names a team its rules don't (the team).
+    Via(String),
 }
 
 impl Clause {
@@ -416,6 +489,7 @@ impl Clause {
             Clause::Mismatch(f) => f,
             Clause::NotMet => "not_met",
             Clause::ProposerApproved => "proposer_approved",
+            Clause::Via(_) => "via",
         }
     }
 
@@ -435,6 +509,9 @@ impl Clause {
             Clause::Mismatch(f) => format!("names another {f} than this clone reads"),
             Clause::NotMet => "says approved, but its approvals don't meet its rules".into(),
             Clause::ProposerApproved => "counts the proposer as an approver".into(),
+            Clause::Via(t) => {
+                format!("counts an approval through {t}, a team its rules don't name")
+            }
         }
     }
 }
@@ -500,6 +577,15 @@ pub fn check_signature(
         .map_err(|_| Clause::BadSignature)
 }
 
+/// The format of an attestation newer than this build reads, if `v` is
+/// one.
+fn newer(v: &Value) -> Option<u64> {
+    (v["kind"] == KIND)
+        .then(|| v["format"].as_u64())
+        .flatten()
+        .filter(|f| *f > FORMAT)
+}
+
 /// Reads a tag message: the attestation, its signature and the canonical
 /// text signed.
 pub fn parse_message(
@@ -528,6 +614,9 @@ pub struct Expect<'a> {
     pub rules_at: &'a str,
     /// The keys trusted: [`trusted`] of `approvals.keys` at `rules_at`.
     pub keys: &'a BTreeMap<String, [u8; 32]>,
+    /// The keys revoked, with their days: [`revoked`] of `approvals.keys`'
+    /// revoked entries at `rules_at`.
+    pub revoked: &'a BTreeMap<String, String>,
 }
 
 /// How an official record's attestation stands.
@@ -542,6 +631,17 @@ pub enum Verdict {
         key: String,
     },
     Invalid(Clause),
+    /// Signed by a revoked key: whatever it says, it proves nothing.
+    Revoked {
+        key: String,
+        revoked: String,
+    },
+    /// A format newer than this build reads, its signature good: an older
+    /// ryucad can't judge it.
+    Unknown {
+        key: String,
+        format: u64,
+    },
     /// No tag here: not fetched, or the service hasn't tagged it yet.
     Missing,
 }
@@ -552,6 +652,8 @@ impl Verdict {
             Verdict::Approved { .. } => "approved",
             Verdict::Unapproved { .. } => "unapproved",
             Verdict::Invalid(_) => "invalid",
+            Verdict::Revoked { .. } => "revoked",
+            Verdict::Unknown { .. } => "unknown",
             Verdict::Missing => "missing",
         }
     }
@@ -568,13 +670,30 @@ impl Verdict {
 
 /// Judges a tag message against what this clone reads.
 pub fn verify_message(message: &[u8], expect: &Expect) -> Verdict {
-    let (a, sig, text) = match parse_message(message) {
+    let (v, sig, text) = match split_message(message) {
         Ok(x) => x,
         Err(c) => return Verdict::Invalid(c),
     };
     if let Err(c) = check_signature(expect.keys, &sig, DOMAIN, &text) {
         return Verdict::Invalid(c);
     }
+    // A revoked key's signature proves nothing, whatever date it claims.
+    if let Some(day) = expect.revoked.get(&sig.key) {
+        return Verdict::Revoked {
+            key: sig.key,
+            revoked: day.clone(),
+        };
+    }
+    if let Some(format) = newer(&v) {
+        return Verdict::Unknown {
+            key: sig.key,
+            format,
+        };
+    }
+    let a = match Attestation::from_json(&v) {
+        Ok(a) => a,
+        Err(e) => return Verdict::Invalid(Clause::Unreadable(e.message)),
+    };
     let fields = [
         ("project", a.project == *expect.project),
         ("part", a.part == *expect.part),
@@ -600,6 +719,16 @@ pub fn verify_message(message: &[u8], expect: &Expect) -> Verdict {
             }) {
                 return Verdict::Invalid(Clause::ProposerApproved);
             }
+            // A `via` vouches for membership (the signature does); it must
+            // name a team the rules name.
+            if let Some(t) = a
+                .approvals
+                .iter()
+                .flat_map(|x| &x.via)
+                .find(|t| !a.rules.iter().any(|r| r.names(t)))
+            {
+                return Verdict::Invalid(Clause::Via(t.clone()));
+            }
             let reviews: Vec<crate::approvals::Review> = a
                 .approvals
                 .iter()
@@ -608,7 +737,18 @@ pub fn verify_message(message: &[u8], expect: &Expect) -> Verdict {
                     state: crate::approvals::ReviewState::Approve,
                 })
                 .collect();
-            if !crate::approvals::judge(&a.rules, &reviews, &proposer.login).met {
+            let via = |team: &str, login: &str| {
+                let member = a.approvals.iter().any(|x| {
+                    x.github.login.eq_ignore_ascii_case(login)
+                        && x.via.iter().any(|t| t.eq_ignore_ascii_case(team))
+                });
+                if member {
+                    crate::approvals::Membership::Member
+                } else {
+                    crate::approvals::Membership::NotMember
+                }
+            };
+            if !crate::approvals::judge_with(&a.rules, &reviews, &proposer.login, &via).met {
                 return Verdict::Invalid(Clause::NotMet);
             }
             Verdict::Approved {
@@ -705,6 +845,7 @@ mod tests {
                     login: "alice".into(),
                 },
                 review: 2154874321,
+                via: vec![],
             }],
             commit: "2".repeat(40),
             label: "B".into(),
@@ -840,6 +981,7 @@ mod tests {
     struct Case {
         a: Attestation,
         keys: BTreeMap<String, [u8; 32]>,
+        revoked: BTreeMap<String, String>,
     }
 
     impl Case {
@@ -847,6 +989,7 @@ mod tests {
             Case {
                 a: sample(),
                 keys: BTreeMap::from([(test_key_id(), public_key(&TEST_SEED))]),
+                revoked: BTreeMap::new(),
             }
         }
 
@@ -864,6 +1007,7 @@ mod tests {
                     rules: &e.rules,
                     rules_at: &e.rules_at,
                     keys: &self.keys,
+                    revoked: &self.revoked,
                 },
             )
         }
@@ -924,5 +1068,138 @@ mod tests {
         a.proposed_by = a.approvals[0].github.clone();
         assert_eq!(invalid(&sign(&a, &TEST_SEED)), "proposer_approved");
         assert_eq!(invalid("just a note\n"), "no_attestation");
+    }
+
+    /// The sample approved by quinn through @acme/quality, under a rule
+    /// naming the team.
+    fn through_a_team() -> Attestation {
+        let mut a = sample();
+        a.rules[0].from = vec!["@acme/quality".into(), "bob".into()];
+        a.approvals[0].github.login = "quinn".into();
+        a.approvals[0].via = vec!["@acme/quality".into()];
+        a
+    }
+
+    #[test]
+    fn an_approval_through_a_team_is_format_2() {
+        let a = through_a_team();
+        assert_eq!(a.format(), 2);
+        let v = ryucad_doc::doc::canonical::parse(&a.canonical()).unwrap();
+        assert_eq!(
+            (&v["format"], &v["approvals"][0]["via"]),
+            (&json!(2), &json!(["@acme/quality"]))
+        );
+        assert_eq!(Attestation::from_json(&v).unwrap(), a);
+        // Without a via it stays format 1, byte for byte what it was.
+        assert_eq!(sample().format(), 1);
+        // A via in format 1, format 2 with none, or a via that isn't a
+        // sorted list of teams: refused.
+        let mut one = v.clone();
+        one["format"] = json!(1);
+        assert!(Attestation::from_json(&one).is_err());
+        let plain = ryucad_doc::doc::canonical::parse(&sample().canonical()).unwrap();
+        let mut two = plain.clone();
+        two["format"] = json!(2);
+        assert!(Attestation::from_json(&two).is_err());
+        for bad in [
+            json!([]),
+            json!(["quinn"]),
+            json!(["@b/x", "@a/x"]),
+            json!("@acme/quality"),
+        ] {
+            let mut w = v.clone();
+            w["approvals"][0]["via"] = bad.clone();
+            assert!(Attestation::from_json(&w).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_via_vouches_for_a_team_its_rules_name() {
+        let c = Case::new();
+        let e = through_a_team();
+        let verdict = |a: &Attestation| {
+            verify_message(
+                sign(a, &TEST_SEED).as_bytes(),
+                &Expect {
+                    project: &e.project,
+                    part: &e.part,
+                    label: &e.label,
+                    kind: e.record_kind,
+                    commit: &e.commit,
+                    record: &e.record,
+                    rules: &e.rules,
+                    rules_at: &e.rules_at,
+                    keys: &c.keys,
+                    revoked: &c.revoked,
+                },
+            )
+        };
+        assert_eq!(verdict(&e).status(), "approved");
+        // A team the rules don't name.
+        let mut a = e.clone();
+        a.approvals[0].via = vec!["@acme/other".into()];
+        assert_eq!(
+            verdict(&a),
+            Verdict::Invalid(Clause::Via("@acme/other".into()))
+        );
+        // Without the via, quinn is no one the rule names.
+        let mut a = e.clone();
+        a.approvals[0].via.clear();
+        assert_eq!(verdict(&a), Verdict::Invalid(Clause::NotMet));
+    }
+
+    #[test]
+    fn a_revoked_key_proves_nothing_whatever_date_it_claims() {
+        let mut c = Case::new();
+        c.revoked.insert(test_key_id(), "2026-11-10".into());
+        // Signed "before" the revocation: still revoked.
+        let mut a = c.a.clone();
+        a.signed_at = "2020-01-01T00:00:00Z".into();
+        let gone = Verdict::Revoked {
+            key: test_key_id(),
+            revoked: "2026-11-10".into(),
+        };
+        assert_eq!(c.verdict(&sign(&a, &TEST_SEED)), gone);
+        // A bad signature is still invalid: the key never signed it.
+        let m = sign(&c.a, &TEST_SEED).replacen("\"B\"", "\"C\"", 1);
+        assert_eq!(c.verdict(&m).status(), "invalid");
+        // Hosted revocations are hosted keys.
+        for (id, day) in HOSTED_REVOKED {
+            assert!(HOSTED_KEYS.iter().any(|(k, _)| k == id), "{id}");
+            assert!(crate::approvals::is_date(day), "{day}");
+        }
+        let extra = BTreeMap::from([("x".to_owned(), "2026-11-10".to_owned())]);
+        assert_eq!(revoked(&extra).len(), HOSTED_REVOKED.len() + 1);
+    }
+
+    #[test]
+    fn a_newer_attestation_is_unknown_not_invalid() {
+        let c = Case::new();
+        // A format 3 a later ryupdm might write, signed properly.
+        let mut v = ryucad_doc::doc::canonical::parse(&c.a.canonical()).unwrap();
+        v["format"] = json!(3);
+        v["new_field"] = json!(true);
+        let text = ryucad_doc::doc::canonical::to_string(&v);
+        let mut signed = DOMAIN.to_vec();
+        signed.extend_from_slice(text.as_bytes());
+        let sig = Signature {
+            key: test_key_id(),
+            ed25519: raw_sign(&TEST_SEED, &signed),
+        };
+        let m = format!(
+            "{text}{BEGIN}\n{{\"ed25519\":\"{}\",\"key\":\"{}\"}}\n{END}\n",
+            hex(&sig.ed25519),
+            sig.key
+        );
+        assert_eq!(
+            c.verdict(&m),
+            Verdict::Unknown {
+                key: test_key_id(),
+                format: 3
+            }
+        );
+        // Signed by a key this build doesn't trust, it is still invalid.
+        let forged = m.replacen(&test_key_id(), &"0".repeat(16), 1);
+        assert_eq!(c.verdict(&forged).status(), "invalid");
     }
 }

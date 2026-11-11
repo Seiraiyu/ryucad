@@ -569,6 +569,16 @@ pub fn verify(session: &mut Session, file: &str, rebuild: bool) -> Result<Value>
         package::attest::Verdict::Invalid(c) => {
             return Err(invalid(&package::verify::Clause::Tag(c.clone())));
         }
+        package::attest::Verdict::Revoked { key, revoked } => {
+            v["tag"]["key"] = json!(key);
+            v["tag"]["revoked"] = json!(revoked);
+            warnings.push(
+                json!({"code": "package_attestation_revoked", "message": format!(
+                "{} is signed by key {key}, revoked on {revoked}: it proves nothing",
+                package::attest::tag_name(&m.part, &m.label))}),
+            );
+            "unattested"
+        }
         package::attest::Verdict::Missing => {
             warnings.push(json!({"code": "package_unattested", "message": format!(
                 "{} isn't here: fetch it with {}", package::attest::tag_name(&m.part, &m.label),

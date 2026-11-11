@@ -118,6 +118,7 @@ fn attestation(data: &[u8]) {
             rules: &[],
             rules_at: &"0".repeat(40),
             keys: &keys,
+            revoked: &Default::default(),
         },
     );
     // No key is trusted, so nothing verifies.
@@ -161,6 +162,7 @@ fn package(data: &[u8]) {
             record: &"0".repeat(64),
             hash: None,
             keys: &keys,
+            revoked: &Default::default(),
         },
     );
     assert!(matches!(v, Verdict::Invalid(_)));

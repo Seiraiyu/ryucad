@@ -19,6 +19,8 @@
 //! | `release_unapproved` | error | An official record under approval rules whose service attestation says it became official without them |
 //! | `release_attestation_invalid` | error | A record under rules whose tag is lightweight, holds no attestation, doesn't verify, or doesn't match the record, its commit or the rules |
 //! | `release_attestation_missing` | warning | A record under rules with no tag here: not fetched, or not tagged yet |
+//! | `release_attestation_revoked` | warning | A record under rules whose tag a revoked key signed: its approvals have no proof, whatever date it claims |
+//! | `release_attestation_unknown` | warning | A record under rules whose tag is a newer attestation than this ryucad reads, its signature good |
 //! | `release_package_invalid` | error | An official release's package tag (`…/<label>.package`) whose attestation doesn't verify or names another release (a missing one is never a finding: a project with no service has none) |
 
 use crate::attest::Verdict;
@@ -40,7 +42,7 @@ use std::collections::BTreeMap;
 pub const SCHEMA: u64 = 1;
 
 /// Every code a release check reports, with its severity.
-pub const CODES: [(&str, &str); 14] = [
+pub const CODES: [(&str, &str); 16] = [
     ("release_hash_mismatch", "error"),
     ("release_stale", "error"),
     ("release_modified", "error"),
@@ -54,6 +56,8 @@ pub const CODES: [(&str, &str); 14] = [
     ("release_unapproved", "error"),
     ("release_attestation_invalid", "error"),
     ("release_attestation_missing", "warning"),
+    ("release_attestation_revoked", "warning"),
+    ("release_attestation_unknown", "warning"),
     ("release_package_invalid", "error"),
 ];
 
@@ -542,6 +546,31 @@ fn approval_finding(
         .with("tag", &tag)
         .with("official", commit)
         .with("fetch", FETCH_TAGS),
+        Some(Verdict::Revoked { key, revoked }) => Finding::new(
+            "release_attestation_revoked",
+            part,
+            Some(&e.label),
+            format!(
+                "the attestation on {tag} is signed by key {key}, revoked on {revoked}: {what} stays official, but its approvals have no proof"
+            ),
+        )
+        .with("tag", &tag)
+        .with("official", commit)
+        .with("key", key)
+        .with("revoked", revoked),
+        Some(Verdict::Unknown { key, format }) => Finding::new(
+            "release_attestation_unknown",
+            part,
+            Some(&e.label),
+            format!(
+                "the attestation on {tag} is format {format}, newer than this ryucad reads ({}): upgrade ryucad to judge it",
+                crate::attest::FORMAT
+            ),
+        )
+        .with("tag", &tag)
+        .with("official", commit)
+        .with("key", key)
+        .with("format", format),
     };
     Some(f.with("rules", rules).with("rules_at", &a.rules_at))
 }

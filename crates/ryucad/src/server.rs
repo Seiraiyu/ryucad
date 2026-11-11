@@ -6670,9 +6670,6 @@ fn render_past_budget(part: &Id, drawn: usize, total: usize, bytes: usize, budge
     .with("budget", budget)
 }
 
-/// [`render`], counting the meshes it makes against its budget, and
-/// taking them back out of the mesh cache when its budget refuses it, so
-/// a refused render leaves nothing behind (#407).
 /// A release package's render (design 436): `render <part> --rev <commit>
 /// --view iso --size 1600x1200` with the CLI's other defaults, no
 /// participant's view, highlights, hidden set, sections or explode.
@@ -6705,6 +6702,9 @@ pub(crate) fn render_for_package(session: &mut Session, part: &Id, commit: &str)
     render_noting(session, None, Vec::new(), ask)
 }
 
+/// [`render`], counting the meshes it makes against its budget, and
+/// taking them back out of the mesh cache when its budget refuses it, so
+/// a refused render leaves nothing behind (#407).
 fn render_noting(
     session: &mut Session,
     target: Option<(&str, Option<&Live>)>,
