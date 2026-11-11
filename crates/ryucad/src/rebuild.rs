@@ -3278,38 +3278,46 @@ pub fn rebuild_part_in(
 /// deleted, or isn't gone at all. What `reference_unresolved` offers as
 /// `candidates` (issue #271).
 pub fn successors_in(journals: &[&Journal], name: Name, alive: impl Fn(Name) -> bool) -> Vec<Name> {
+    successors_of(journals.iter().flat_map(|j| j.events()), name, alive)
+}
+
+/// [`successors_in`] over the events of a chain's journals in order: what
+/// [`crate::reference::Lineage`] keeps of them.
+pub fn successors_of<'e>(
+    events: impl IntoIterator<Item = &'e Event>,
+    name: Name,
+    alive: impl Fn(Name) -> bool,
+) -> Vec<Name> {
     let mut live = BTreeSet::from([name]);
-    for j in journals {
-        for ev in j.events() {
-            match ev {
-                Event::Split { parent, children } => {
-                    if live.remove(parent) {
-                        live.extend(children.iter().copied());
-                    }
+    for ev in events {
+        match ev {
+            Event::Split { parent, children } => {
+                if live.remove(parent) {
+                    live.extend(children.iter().copied());
                 }
-                Event::Merged { parents, child } => {
-                    if parents.iter().any(|p| live.contains(p)) {
-                        for p in parents {
-                            live.remove(p);
-                        }
-                        live.insert(*child);
-                    }
-                }
-                Event::Replaced { old, new } => {
-                    if live.remove(old) {
-                        live.extend(new.iter().copied());
-                    }
-                }
-                Event::Placed { from, to, .. } => {
-                    if live.remove(from) {
-                        live.insert(*to);
-                    }
-                }
-                Event::Deleted(n) => {
-                    live.remove(n);
-                }
-                Event::Created(_) | Event::Modified(_) => {}
             }
+            Event::Merged { parents, child } => {
+                if parents.iter().any(|p| live.contains(p)) {
+                    for p in parents {
+                        live.remove(p);
+                    }
+                    live.insert(*child);
+                }
+            }
+            Event::Replaced { old, new } => {
+                if live.remove(old) {
+                    live.extend(new.iter().copied());
+                }
+            }
+            Event::Placed { from, to, .. } => {
+                if live.remove(from) {
+                    live.insert(*to);
+                }
+            }
+            Event::Deleted(n) => {
+                live.remove(n);
+            }
+            Event::Created(_) | Event::Modified(_) => {}
         }
     }
     live.remove(&name);
@@ -3617,6 +3625,11 @@ mod tests {
         let mut k = Journal::new();
         k.push(Event::Deleted(b));
         assert_eq!(successors_in(&[&j, &k], a, |_| true), vec![e]);
+        // The same walk over the events alone, as a lineage keeps them.
+        assert_eq!(
+            successors_of(j.events().iter().chain(k.events()), a, |_| true),
+            successors_in(&[&j, &k], a, |_| true)
+        );
     }
 
     fn feature(ty: PrimitiveType, params: &[(&str, &str)]) -> Feature {
