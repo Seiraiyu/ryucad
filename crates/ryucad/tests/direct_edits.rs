@@ -1337,3 +1337,212 @@ fn a_bosss_foot_and_a_pockets_rim_are_defeatured() {
     );
     report(&mut s, "d");
 }
+
+/// A sketch on a chamfer's face reads it; a delete of the chamfer moved
+/// in before the sketch takes the face away: the sketch fails, naming the
+/// delete.
+#[test]
+fn a_sketch_on_a_deleted_chamfer_fails_naming_the_delete() {
+    let (_dir, mut s) = boxed();
+    let lip = edge(&body(&mut s, "b"), "b", [0.0, 0.0, 20.0], [0.0, 30.0, 20.0]);
+    add(
+        &mut s,
+        json!({"type": "chamfer", "id": "c", "d": 4, "edges": [lip]}),
+    );
+    let bevel = body(&mut s, "c")["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let z = &f["surface"]["frame"]["z"];
+            f["surface"]["type"] == "plane"
+                && z[0].as_f64().unwrap() != 0.0
+                && z[2].as_f64().unwrap() != 0.0
+        })
+        .map(|f| format!("p/b/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "s", "face": bevel.clone()}),
+    );
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "faces": [bevel]}),
+    );
+    must(
+        &mut s,
+        "feature.move",
+        json!({"part": "p", "id": "d", "after": "c"}),
+    );
+    let e = failure(&mut s, "s");
+    assert_eq!(e.code, Code::ReferenceUnresolved, "{e}");
+    assert_eq!(e.details["removed_by"], "d", "{e}");
+}
+
+/// A lid mated flat on the box's top: the top is the fillet's neighbour
+/// and keeps its name and plane through every size the resize gives the
+/// fillet, so the lid stays where it was.
+#[test]
+fn a_mate_to_a_kept_face_holds_across_a_resize() {
+    let (_dir, mut s) = boxed();
+    let rim = edge(
+        &body(&mut s, "b"),
+        "b",
+        [40.0, 0.0, 20.0],
+        [40.0, 30.0, 20.0],
+    );
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "f", "radius": 4, "edges": [rim]}),
+    );
+    let round = cylinders(&body(&mut s, "f"), "b");
+    add(
+        &mut s,
+        json!({"type": "resize_blend", "id": "r",
+               "groups": [{"radius": "3 mm", "faces": [round[0]]}]}),
+    );
+    let top = plane(&body(&mut s, "r"), "b", 2, 1.0, 20.0);
+    must(&mut s, "part.create", json!({"part": "lid"}));
+    add(
+        &mut s,
+        json!({"part": "lid", "type": "box", "id": "c", "params": {"x": 10, "y": 10, "z": 2}}),
+    );
+    let under = plane(
+        &must(&mut s, "inspect", json!({"part": "lid", "feature": "c"}))["bodies"][0],
+        "c",
+        2,
+        -1.0,
+        0.0,
+    )
+    .replacen("p/", "", 1);
+    must(
+        &mut s,
+        "part.create",
+        json!({"part": "asm", "kind": "assembly"}),
+    );
+    add(
+        &mut s,
+        json!({"part": "asm", "type": "instance", "id": "base", "of": "p", "fixed": true}),
+    );
+    add(
+        &mut s,
+        json!({"part": "asm", "type": "instance", "id": "top", "of": "lid"}),
+    );
+    add(
+        &mut s,
+        json!({"part": "asm", "type": "mate", "id": "on", "form": "planar",
+               "a": format!("asm/base/{}", top.replacen("p/", "", 1)),
+               "b": format!("asm/top/{under}")}),
+    );
+    let lid_z = |s: &mut Session| -> f64 {
+        let r = must(s, "rebuild", json!({"part": "asm"}));
+        let asm = r["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["part"] == "asm")
+            .unwrap()
+            .clone();
+        let i = asm["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "top")
+            .unwrap()
+            .clone();
+        i["instance"]["pose"]["origin_m"][2].as_f64().unwrap()
+    };
+    let z0 = lid_z(&mut s);
+    assert!((z0 - 0.020).abs() < 1e-9, "{z0}");
+    for r in ["2 mm", "5 mm"] {
+        must(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "r", "groups": [{"radius": r, "faces": [round[0]]}]}),
+        );
+        assert!((lid_z(&mut s) - z0).abs() < 1e-12, "{r}");
+    }
+}
+
+#[test]
+fn blend_edits_refuse_with_their_hints() {
+    let (_dir, mut s) = boxed();
+    let b = body(&mut s, "b");
+    let top = plane(&b, "b", 2, 1.0, 20.0);
+    // A face of no blend.
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "faces": [top.clone()]}),
+    );
+    let e = failure(&mut s, "d");
+    assert_eq!(
+        (e.code, e.details["reason"].as_str()),
+        (Code::TweakFailed, Some("not_a_blend")),
+        "{e}"
+    );
+    assert!(
+        e.details["hint"]
+            .as_str()
+            .unwrap()
+            .contains("ryucad blends"),
+        "{e}"
+    );
+    must(&mut s, "feature.delete", json!({"part": "p", "id": "d"}));
+    // A fillet too large for its box: lost.
+    let rim = edge(&b, "b", [40.0, 0.0, 20.0], [40.0, 30.0, 20.0]);
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "f", "radius": 4, "edges": [rim]}),
+    );
+    let round = cylinders(&body(&mut s, "f"), "b");
+    add(
+        &mut s,
+        json!({"type": "resize_blend", "id": "r",
+               "groups": [{"radius": "25 mm", "faces": [round[0]]}]}),
+    );
+    let e = failure(&mut s, "r");
+    assert_eq!(e.details["reason"], "blend_lost", "{e}");
+    assert!(
+        e.details["hint"].as_str().unwrap().contains("delete_blend"),
+        "{e}"
+    );
+    // Two faces of one blend, or here one face, in two groups: refused
+    // when written.
+    let e = call(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "r", "groups": [
+            {"radius": "3 mm", "faces": [round[0]]}, {"radius": "2 mm", "faces": [round[0]]}]}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, Code::InvalidParam, "{e}");
+    // A tolerance out of range: refused when written.
+    let e = call(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "delete_blend", "id": "t", "below": "1 mm",
+               "tolerance": "1 mm"}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, Code::InvalidParam, "{e}");
+}
+
+#[test]
+fn blend_edits_build_alike_on_one_thread_and_eight() {
+    let (_dir, mut s) = boxed();
+    rounded(&mut s, 3.0);
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "below": "3.5 mm"}),
+    );
+    let part = Id::parse("p", "part").unwrap();
+    let p = s.project().part(&part).unwrap().clone();
+    let on = |n: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+            .install(|| ryucad::rebuild::rebuild_part(&p))
+    };
+    assert_eq!(on(1).hash, on(8).hash);
+}
