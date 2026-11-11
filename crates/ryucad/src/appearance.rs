@@ -18,6 +18,15 @@
 //! one part each, guarded by its revision. An entry naming a solid, face
 //! or occurrence the model no longer has is kept and reported
 //! (`appearance_unresolved`), never moved to another.
+//!
+//! Between the levels of entries sits the file layer (design 448,
+//! [`crate::file_styles`]): the styles an imported part's committed STEP
+//! files give its occurrences, faces and bodies, each one step under the
+//! entries of its level: an assembly's occurrence entries, then the
+//! files' occurrence styles; the face entry, the file's face style; the
+//! solid entry, the file's body style; then the part entry, the material
+//! and the viewer. `file_styles: false` in a part's (or an assembly's)
+//! `part` entry turns its layer off.
 
 use crate::assembly::path_text;
 use crate::doc::appearance::{APPEARANCE, AppearanceFile, Look, check_opacity, face_key};
@@ -34,12 +43,24 @@ use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+/// Where a look in a face's chain comes from (design 448).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// An entry of the project's `appearance.json` files.
+    Entry,
+    /// The file layer of an imported STEP file.
+    File,
+}
+
 /// A face's appearance as drawn: its colour (`#rrggbb`; `None` for the
-/// viewer's default) and its opacity.
+/// viewer's default), its opacity, and whether an imported file gave
+/// each.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Effective {
     pub colour: Option<String>,
     pub opacity: f64,
+    /// `[colour, opacity]`: from an imported file's styles.
+    pub from_file: [bool; 2],
 }
 
 impl Default for Effective {
@@ -47,15 +68,28 @@ impl Default for Effective {
         Effective {
             colour: None,
             opacity: 1.0,
+            from_file: [false; 2],
         }
     }
 }
 
 impl Effective {
+    /// As answers give it: `source` names the values a file gave, and is
+    /// left out when none did.
     pub fn to_json(&self) -> Value {
         let mut v = json!({"opacity": crate::doc::files::number(self.opacity)});
         if let Some(c) = &self.colour {
             v["colour"] = json!(c);
+        }
+        if self.from_file != [false; 2] {
+            let mut source = Map::new();
+            if self.from_file[0] {
+                source.insert("colour".into(), json!("file"));
+            }
+            if self.from_file[1] {
+                source.insert("opacity".into(), json!("file"));
+            }
+            v["source"] = Value::Object(source);
         }
         v
     }
@@ -73,17 +107,23 @@ pub fn rgb(c: &str) -> Option<crate::render::Rgb> {
     Some([byte(0)?, byte(2)?, byte(4)?].map(|b| f32::from(b) / 255.0))
 }
 
-/// What entries, most specific first, make of a face whose part's
-/// material's colour is `material`.
-pub fn effective(chain: &[&Look], material: Option<&str>) -> Effective {
-    let colour = chain
+/// What a chain of looks, most specific first, makes of a face whose
+/// part's material's colour is `material`.
+pub fn effective(chain: &[(&Look, Source)], material: Option<&str>) -> Effective {
+    let hit = chain.iter().find(|(l, _)| l.colour.is_some() || l.material);
+    let (colour, colour_file) = match hit {
+        Some((l, s)) if l.colour.is_some() => (l.colour.clone(), *s == Source::File),
+        _ => (material.map(str::to_owned), false),
+    };
+    let (opacity, opacity_file) = chain
         .iter()
-        .find(|l| l.colour.is_some() || l.material)
-        .map_or(material.map(str::to_owned), |l| {
-            l.colour.clone().or_else(|| material.map(str::to_owned))
-        });
-    let opacity = chain.iter().find_map(|l| l.opacity).unwrap_or(1.0);
-    Effective { colour, opacity }
+        .find_map(|(l, s)| l.opacity.map(|o| (o, *s == Source::File)))
+        .unwrap_or((1.0, false));
+    Effective {
+        colour,
+        opacity,
+        from_file: [colour_file, opacity_file],
+    }
 }
 
 /// A drawn solid's appearance: its faces', all `base` but those in
@@ -140,7 +180,9 @@ pub struct Drawn {
     /// What its solid's chain did to the names it retired: a colour on a
     /// face a later feature split colours every piece (design 447).
     pub lineage: Arc<crate::reference::Lineage>,
-    pub above: Vec<Look>,
+    /// The assemblies' entries over it, then the files' occurrence
+    /// styles, most specific first.
+    pub above: Vec<(Look, Source)>,
     /// Its part is another project's (a dependency's): this project's
     /// files say nothing of its own look or material (#386).
     pub foreign: bool,
@@ -187,21 +229,116 @@ fn assemblies(session: &Session, root: &Id, path: &[Id]) -> Vec<(Id, usize)> {
     out
 }
 
-/// The assemblies' entries over a solid `founder` of the occurrence at
-/// `path` in `root`, most specific first: each assembly from the root
-/// down, its entry for the solid, then for the path from the longest to
-/// the shortest.
-pub fn above(session: &Session, root: &Id, path: &[Id], founder: &Id) -> Vec<Look> {
-    let mut out = Vec::new();
-    for (assembly, start) in assemblies(session, root, path) {
-        let Some(f) = file(session, &assembly) else {
-            continue;
+/// The file layers one request has worked out, by part: `None` for one
+/// with none, or whose `part` entry turns its layer off.
+#[derive(Default)]
+pub struct Layers(BTreeMap<Id, Option<Arc<AppearanceFile>>>);
+
+/// Whether `part`'s own entry turns its file layer off.
+fn layer_off(session: &Session, part: &Id) -> bool {
+    file(session, part)
+        .and_then(|f| f.part.as_ref())
+        .is_some_and(|p| p.no_file_styles)
+}
+
+impl Layers {
+    /// A part's layer, from its import features' bodies (rebuilt). A
+    /// part with no import feature is never rebuilt for it.
+    pub fn part(&mut self, session: &mut Session, part: &Id) -> Option<Arc<AppearanceFile>> {
+        if let Some(l) = self.0.get(part) {
+            return l.clone();
+        }
+        let imports = session.project().parts.get(part).is_some_and(|p| {
+            p.features
+                .values()
+                .any(|f| matches!(f, Ok(Feature::Import(_))))
+        });
+        let l = if !imports || layer_off(session, part) {
+            None
+        } else {
+            session
+                .rebuilt(part)
+                .ok()
+                .cloned()
+                .and_then(|r| {
+                    let p = session.project().parts.get(part)?;
+                    Some(crate::file_styles::of_part(p, &r))
+                })
+                .filter(|f| !f.is_empty())
+                .map(Arc::new)
         };
-        let rest = &path[start..];
-        let key = format!("{}/{founder}", path_text(rest));
-        out.extend(f.occurrences.get(&key).cloned());
-        for k in (1..=rest.len()).rev() {
-            out.extend(f.occurrences.get(&path_text(&rest[..k])).cloned());
+        self.0.insert(part.clone(), l.clone());
+        l
+    }
+
+    /// An assembly's layer, from its imported instances' usages.
+    pub fn assembly(&mut self, session: &Session, part: &Id) -> Option<Arc<AppearanceFile>> {
+        if let Some(l) = self.0.get(part) {
+            return l.clone();
+        }
+        let project = session.project();
+        let l = project
+            .parts
+            .get(part)
+            .filter(|_| !layer_off(session, part))
+            .map(|p| {
+                crate::file_styles::of_assembly(
+                    p,
+                    &|id| project.parts.get(id),
+                    &|path| project.imports.get(path),
+                )
+            })
+            .filter(|f| !f.is_empty())
+            .map(Arc::new);
+        self.0.insert(part.clone(), l.clone());
+        l
+    }
+}
+
+/// The entries of an assembly's file `f` over solid `founder` of the
+/// occurrence whose path below that assembly is `rest`: the solid's
+/// entry, then the path's from the longest to the shortest.
+pub fn over(f: &AppearanceFile, rest: &[Id], founder: &Id) -> Vec<Look> {
+    let mut out = Vec::new();
+    out.extend(
+        f.occurrences
+            .get(&format!("{}/{founder}", path_text(rest)))
+            .cloned(),
+    );
+    for k in (1..=rest.len()).rev() {
+        out.extend(f.occurrences.get(&path_text(&rest[..k])).cloned());
+    }
+    out
+}
+
+/// What the assemblies over solid `founder` of the occurrence at `path`
+/// in `root` say, most specific first: every assembly's entries (from the
+/// root down), then every assembly's file layer the same way.
+pub fn above(
+    session: &Session,
+    layers: &mut Layers,
+    root: &Id,
+    path: &[Id],
+    founder: &Id,
+) -> Vec<(Look, Source)> {
+    let chain = assemblies(session, root, path);
+    let mut out = Vec::new();
+    for (assembly, start) in &chain {
+        if let Some(f) = file(session, assembly) {
+            out.extend(
+                over(f, &path[*start..], founder)
+                    .into_iter()
+                    .map(|l| (l, Source::Entry)),
+            );
+        }
+    }
+    for (assembly, start) in &chain {
+        if let Some(f) = layers.assembly(session, assembly) {
+            out.extend(
+                over(&f, &path[*start..], founder)
+                    .into_iter()
+                    .map(|l| (l, Source::File)),
+            );
         }
     }
     out
@@ -210,6 +347,11 @@ pub fn above(session: &Session, root: &Id, path: &[Id], founder: &Id) -> Vec<Loo
 /// Every solid `part` draws: a part's solids as shown, an assembly's
 /// occurrences' solids.
 pub fn drawn(session: &mut Session, part: &Id) -> Result<Vec<Drawn>> {
+    drawn_with(session, &mut Layers::default(), part)
+}
+
+/// [`drawn`], with the file layers worked out so far.
+pub fn drawn_with(session: &mut Session, layers: &mut Layers, part: &Id) -> Result<Vec<Drawn>> {
     let p = session.project().part(part)?;
     if part_kind(p) == PartKind::Assembly {
         let model = session.model(part, &Rev::Working)?;
@@ -223,7 +365,7 @@ pub fn drawn(session: &mut Session, part: &Id) -> Result<Vec<Drawn>> {
                     founder: s.founder.clone(),
                     built: Arc::clone(&s.built),
                     lineage: Arc::clone(&s.lineage),
-                    above: above(session, part, &o.path, &s.founder),
+                    above: above(session, layers, part, &o.path, &s.founder),
                     foreign: matches!(o.rev, Rev::Foreign { .. }),
                 });
             }
@@ -250,27 +392,14 @@ pub fn drawn(session: &mut Session, part: &Id) -> Result<Vec<Drawn>> {
         .collect())
 }
 
-/// How `d` is drawn, the part's material's colour `material`.
-pub fn look_of(session: &Session, d: &Drawn, material: Option<&str>) -> SolidLook {
-    let f = if d.foreign {
-        None
-    } else {
-        file(session, &d.part)
-    };
-    let mut chain: Vec<&Look> = d.above.iter().collect();
-    let solid = f.and_then(|f| f.solids.get(d.founder.as_str()));
-    let part = f.and_then(|f| f.part.as_ref());
-    let base = {
-        let mut c = chain.clone();
-        c.extend(solid);
-        c.extend(part);
-        effective(&c, material)
-    };
-    let mut faces = BTreeMap::new();
-    // Entries on faces a later feature split, on each piece; an entry
-    // naming a piece itself wins (design 447).
+/// The entries of `f` over faces of `d`'s solid, by the name of the face
+/// they colour now: one naming a face the body has, else one naming a
+/// face a later feature split, on each piece (design 447); a piece's own
+/// entry wins over a followed one, whatever the key order.
+fn faces_named<'a>(d: &Drawn, f: Option<&'a AppearanceFile>) -> BTreeMap<String, &'a Look> {
+    use crate::reference::{Follow, Followed};
+    let mut named = BTreeMap::new();
     let mut followed = BTreeMap::new();
-    let mut named = std::collections::BTreeSet::new();
     let prefix = format!("{}/", d.founder);
     for (k, l) in f.into_iter().flat_map(|f| &f.faces) {
         let Some(name) = k.strip_prefix(&prefix) else {
@@ -279,39 +408,52 @@ pub fn look_of(session: &Session, d: &Drawn, material: Option<&str>) -> SolidLoo
         let Some(n) = crate::doc::reference::parse_name(name) else {
             continue;
         };
-        let direct = d.built.body.by_name(n).is_some();
-        let pieces: Vec<String> = if direct {
-            named.insert(name.to_owned());
-            vec![name.to_owned()]
-        } else {
-            use crate::reference::{Follow, Followed};
-            match d.lineage.follow(n, Follow::All, &d.built.body) {
-                Followed::To(_, t) => t.pieces.iter().map(ToString::to_string).collect(),
-                _ => continue,
-            }
-        };
-        chain.truncate(d.above.len());
-        chain.push(l);
-        chain.extend(solid);
-        chain.extend(part);
-        let e = effective(&chain, material);
-        if e == base {
-            continue;
-        }
-        // Only an entry naming the piece itself goes straight in; a
-        // followed one waits, whatever the key order, so it never
-        // overrides a piece's own entry.
-        if direct {
-            faces.insert(name.to_owned(), e);
-        } else {
-            for p in pieces {
-                followed.insert(p, e.clone());
+        if d.built.body.by_name(n).is_some() {
+            named.insert(name.to_owned(), l);
+        } else if let Followed::To(_, t) = d.lineage.follow(n, Follow::All, &d.built.body) {
+            for p in &t.pieces {
+                followed.insert(p.to_string(), l);
             }
         }
     }
-    for (p, e) in followed {
-        if !named.contains(&p) {
-            faces.insert(p, e);
+    for (p, l) in followed {
+        named.entry(p).or_insert(l);
+    }
+    named
+}
+
+/// How `d` is drawn, its part's file layer `layer` and its material's
+/// colour `material`.
+pub fn look_of(
+    session: &Session,
+    d: &Drawn,
+    layer: Option<&AppearanceFile>,
+    material: Option<&str>,
+) -> SolidLook {
+    let (own, layer) = if d.foreign {
+        (None, None)
+    } else {
+        (file(session, &d.part), layer)
+    };
+    let above: Vec<(&Look, Source)> = d.above.iter().map(|(l, s)| (l, *s)).collect();
+    let key = d.founder.as_str();
+    let mut tail: Vec<(&Look, Source)> = Vec::new();
+    tail.extend(own.and_then(|f| f.solids.get(key)).map(|l| (l, Source::Entry)));
+    tail.extend(layer.and_then(|f| f.solids.get(key)).map(|l| (l, Source::File)));
+    tail.extend(own.and_then(|f| f.part.as_ref()).map(|l| (l, Source::Entry)));
+    let base = effective(&[above.as_slice(), tail.as_slice()].concat(), material);
+    let own_faces = faces_named(d, own);
+    let file_faces = faces_named(d, layer);
+    let names: BTreeSet<&String> = own_faces.keys().chain(file_faces.keys()).collect();
+    let mut faces = BTreeMap::new();
+    for name in names {
+        let mut chain = above.clone();
+        chain.extend(own_faces.get(name).map(|l| (*l, Source::Entry)));
+        chain.extend(file_faces.get(name).map(|l| (*l, Source::File)));
+        chain.extend(tail.iter().copied());
+        let e = effective(&chain, material);
+        if e != base {
+            faces.insert(name.clone(), e);
         }
     }
     SolidLook { base, faces }
@@ -320,19 +462,24 @@ pub fn look_of(session: &Session, d: &Drawn, material: Option<&str>) -> SolidLoo
 /// How every solid `part` draws is drawn, by key.
 pub fn looks(session: &mut Session, part: &Id) -> Result<BTreeMap<String, SolidLook>> {
     let library = crate::materials::library(session)?;
-    let drawn = drawn(session, part)?;
+    let mut layers = Layers::default();
+    let drawn = drawn_with(session, &mut layers, part)?;
     let mut colours: BTreeMap<Id, Option<String>> = BTreeMap::new();
     let mut out = BTreeMap::new();
     for d in &drawn {
-        let material = if d.foreign {
-            None
+        let (material, layer) = if d.foreign {
+            (None, None)
         } else {
-            colours
+            let m = colours
                 .entry(d.part.clone())
                 .or_insert_with(|| material_colour(session, &library, &d.part))
-                .clone()
+                .clone();
+            (m, layers.part(session, &d.part))
         };
-        out.insert(d.key.clone(), look_of(session, d, material.as_deref()));
+        out.insert(
+            d.key.clone(),
+            look_of(session, d, layer.as_deref(), material.as_deref()),
+        );
     }
     Ok(out)
 }
@@ -883,27 +1030,38 @@ mod tests {
         let half = look(None, Some(0.5), false);
         let blue_quarter = look(Some("#0000ff"), Some(0.25), false);
         let material = look(None, None, true);
-        let e = |chain: &[&Look], m: Option<&str>| effective(chain, m);
+        let e = |chain: &[&Look], m: Option<&str>| {
+            effective(
+                &chain
+                    .iter()
+                    .map(|l| (*l, Source::Entry))
+                    .collect::<Vec<_>>(),
+                m,
+            )
+        };
         assert_eq!(e(&[], None), Effective::default());
         assert_eq!(
             e(&[], Some("#b8bcc2")),
             Effective {
                 colour: Some("#b8bcc2".into()),
-                opacity: 1.0
+                opacity: 1.0,
+                from_file: [false; 2],
             }
         );
         assert_eq!(
             e(&[&half, &blue_quarter], None),
             Effective {
                 colour: Some("#0000ff".into()),
-                opacity: 0.5
+                opacity: 0.5,
+                from_file: [false; 2],
             }
         );
         assert_eq!(
             e(&[&red, &blue_quarter], Some("#b8bcc2")),
             Effective {
                 colour: Some("#ff0000".into()),
-                opacity: 0.25
+                opacity: 0.25,
+                from_file: [false; 2],
             }
         );
         // The material's colour ends the search, whatever is below.
@@ -1390,5 +1548,113 @@ mod tests {
             glass[mid],
             red[mid]
         );
+    }
+
+    /// The order of design 448: occurrence entries, the file's
+    /// occurrence styles, the face entry, the file's face style, the
+    /// solid entry, the file's body style, the part entry, the material.
+    #[test]
+    fn a_files_styles_sit_one_step_under_each_level_of_entries() {
+        use crate::file_styles::tests::{imported, part_of};
+        let (_dir, mut s, v) = imported("painted.stp", json!({}));
+        let part = part_of(&v, "part", 0);
+        let get = |s: &mut Session| {
+            let v = call(s, "appearance.get", json!({"part": part.as_str()})).unwrap();
+            v["solids"][0].clone()
+        };
+        let x = get(&mut s);
+        assert_eq!(x["colour"], "#ff0000", "{x}");
+        let solid = x["solid"].as_str().unwrap().to_owned();
+        let (blue, face) = x["faces"].as_object().unwrap().iter().next().unwrap();
+        let blue = blue.clone();
+        assert_eq!(face["colour"], "#0000ff");
+        // The part entry is under the file's body style.
+        let set = |s: &mut Session, e: String, c: &str| {
+            call(s, "appearance.set", json!({"entities": [e], "colour": c})).unwrap();
+        };
+        set(&mut s, part.to_string(), "#ffff00");
+        assert_eq!(get(&mut s)["colour"], "#ff0000");
+        // The solid entry is over it, and under the file's face style.
+        set(&mut s, format!("{part}/{solid}"), "#00ff00");
+        let x = get(&mut s);
+        assert_eq!(x["colour"], "#00ff00");
+        assert_eq!(x["faces"][&blue]["colour"], "#0000ff");
+        // The face entry is over the file's face style.
+        set(&mut s, format!("{part}/{solid}/{blue}"), "#ffffff");
+        assert_eq!(get(&mut s)["faces"][&blue]["colour"], "#ffffff");
+        // Turned off, only entries colour it.
+        call(
+            &mut s,
+            "appearance.clear",
+            json!({"entities": [format!("{part}/{solid}"), format!("{part}/{solid}/{blue}")]}),
+        )
+        .unwrap();
+        let file = s.root().join(format!("parts/{part}/appearance.json"));
+        std::fs::write(
+            &file,
+            crate::doc::canonical::to_string(&json!({"format": 2,
+                "kind": "ryucad.appearance", "part": {"colour": "#ffff00", "file_styles": false}})),
+        )
+        .unwrap();
+        s.reload().unwrap();
+        let x = get(&mut s);
+        assert_eq!(x["colour"], "#ffff00");
+        assert!(x.get("faces").is_none(), "{x}");
+    }
+
+    #[test]
+    fn an_assemblys_entries_beat_the_files_occurrences_and_those_beat_the_parts() {
+        use crate::file_styles::tests::{imported, part_of};
+        let (_dir, mut s, v) = imported("painted_assembly.stp", json!({}));
+        let rack = part_of(&v, "assembly", 0);
+        let colours = |s: &mut Session| -> BTreeMap<String, Value> {
+            let v = call(s, "appearance.get", json!({"part": rack.as_str()})).unwrap();
+            v["solids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| (x["solid"].as_str().unwrap().to_owned(), x["colour"].clone()))
+                .collect()
+        };
+        let before = colours(&mut s);
+        let key = |c: &str| {
+            before
+                .iter()
+                .find(|(_, x)| **x == c)
+                .map(|(k, _)| k.clone())
+                .unwrap_or_else(|| panic!("no {c} in {before:?}"))
+        };
+        // `<instance>/<founder>`: the block red in one, green in the other.
+        let (green, red) = (key("#00ff00"), key("#ff0000"));
+        let (red_instance, founder) = red.split_once('/').unwrap();
+        let (green_instance, _) = green.split_once('/').unwrap();
+        let block = match s
+            .project()
+            .part(&rack)
+            .unwrap()
+            .features
+            .get(&Id::parse(red_instance, "feature").unwrap())
+        {
+            Some(Ok(Feature::Instance(i))) => i.part.clone(),
+            other => panic!("{other:?}"),
+        };
+        // The block's solid entry is under the file's occurrence style.
+        call(
+            &mut s,
+            "appearance.set",
+            json!({"entities": [format!("{block}/{founder}")], "colour": "#ffff00"}),
+        )
+        .unwrap();
+        let now = colours(&mut s);
+        assert_eq!(now[&red], "#ffff00");
+        assert_eq!(now[&green], "#00ff00");
+        // The assembly's own entry is over it.
+        call(
+            &mut s,
+            "appearance.set",
+            json!({"entities": [format!("{rack}/{green_instance}")], "colour": "#123456"}),
+        )
+        .unwrap();
+        assert_eq!(colours(&mut s)[&green], "#123456");
     }
 }
