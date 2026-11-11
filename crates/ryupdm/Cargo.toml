@@ -22,6 +22,8 @@ gix = { version = "0.89", default-features = false, features = ["sha1", "revisio
 gix-transport = { version = "0.61", default-features = false, features = ["http-client"] }
 # Fresh project IDs.
 getrandom = "0.3"
+# Release packages' zips (`package::zip`), as PDF and 3MF deflate.
+miniz_oxide = "0.8"
 # Part number patterns: Rust's regex syntax, ASCII classes (`\d` is 0-9).
 regex-lite = "0.1"
 ryucad-doc = { path = "../ryucad-doc" }

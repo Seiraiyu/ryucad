@@ -485,6 +485,22 @@ pub fn answer_live(
             a.result = noted(Ok(a.result), commit)?;
             Ok(a)
         }),
+        Request::ReleasePackage {
+            part,
+            label,
+            out,
+            into,
+            formats,
+        } => crate::package::package(
+            session,
+            crate::package::Ask {
+                part,
+                label,
+                out,
+                into,
+                formats,
+            },
+        ),
         Request::Rebuild { part, rev } => session.at(rev.as_deref()).and_then(|(commit, s)| {
             rebuild(s, part.as_deref(), commit.as_deref())
                 .map_err(|e| noted(Err(e), commit).expect_err("an error"))
@@ -619,6 +635,7 @@ pub(crate) fn dispatch(
             properties,
             approvals,
             bump,
+            package_formats,
             force,
             expected_revision,
         } => crate::pdm::configure(
@@ -630,6 +647,7 @@ pub(crate) fn dispatch(
                 properties,
                 approvals,
                 bump,
+                package_formats,
                 force,
             },
             expected_revision.as_deref(),
@@ -690,6 +708,9 @@ pub(crate) fn dispatch(
         Request::ReleaseList { part } => versioned(crate::release::list(session, part.as_deref())),
         Request::ReleaseSync {} => crate::release::sync(session),
         Request::ReleaseCheck { results } => crate::release::check(session, results),
+        Request::ReleasePackageVerify { file, rebuild } => {
+            crate::package::verify(session, &file, rebuild)
+        }
         Request::ReleasePropose {
             part,
             note,
@@ -1820,6 +1841,10 @@ pub(crate) fn dispatch(
         // A render's answer is bytes: `answer_live` handles it.
         Request::Render { .. } => Err(Error::new(Code::Internal, "render answers with bytes")),
         Request::Export { .. } => Err(Error::new(Code::Internal, "export answers with bytes")),
+        Request::ReleasePackage { .. } => Err(Error::new(
+            Code::Internal,
+            "release.package answers with bytes",
+        )),
         Request::DrawingRender { .. } | Request::DrawingExport { .. } => Err(Error::new(
             Code::Internal,
             "drawings render and export with bytes",
@@ -6662,6 +6687,38 @@ fn render_past_budget(part: &Id, drawn: usize, total: usize, bytes: usize, budge
     .with("drawn", drawn)
     .with("bytes", bytes)
     .with("budget", budget)
+}
+
+/// A release package's render (design 436): `render <part> --rev <commit>
+/// --view iso --size 1600x1200` with the CLI's other defaults, no
+/// participant's view, highlights, hidden set, sections or explode.
+pub(crate) fn render_for_package(session: &mut Session, part: &Id, commit: &str) -> Result<Answer> {
+    let ask = RenderAsk {
+        part: Some(part.to_string()),
+        camera: None,
+        view: Some("iso".into()),
+        width: 1600,
+        height: 1200,
+        highlight: Vec::new(),
+        edges: true,
+        labels: false,
+        sketches: true,
+        datums: true,
+        rev: Some(commit.to_owned()),
+        frame: Vec::new(),
+        compare: None,
+        hidden: Default::default(),
+        origin: false,
+        appearance: true,
+        sections: Vec::new(),
+        explode: None,
+        annotations: false,
+        flat: None,
+        camera_m: None,
+        pick: false,
+        annotation: None,
+    };
+    render_noting(session, None, Vec::new(), ask)
 }
 
 /// [`render`], counting the meshes it makes against its budget, and

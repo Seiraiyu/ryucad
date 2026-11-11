@@ -35,6 +35,9 @@ pub enum Phase {
     Fetch,
     /// Projecting a drawing's views (ryucad's drawings), a view a step.
     Project,
+    /// Building a release package's files (ryucad's `release.package`),
+    /// a format a step.
+    Package,
 }
 
 /// What a request asked of its job: `progress` and `token`, taken out of

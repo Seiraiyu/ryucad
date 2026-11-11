@@ -839,6 +839,17 @@ pub enum Code {
     /// A sheet's template that is neither built in nor in `templates/`;
     /// the details name it (`template`).
     TemplateNotFound,
+    /// `packages.formats` in `ryupdm.json` naming a format a package can't
+    /// hold (design 436): the name and its pointer are in the details.
+    PackagesFormatUnknown,
+    /// A release package that couldn't be built whole: each file that
+    /// failed, with its own error, is in `failures`. Never written in part.
+    PackageFailed,
+    /// A package that doesn't verify: its `clause` (stable name) is in the
+    /// details.
+    PackageInvalid,
+    /// A package of an obsolete release: obsolete releases have none.
+    ReleaseObsolete,
     /// ryueda lint: an off-sheet connector on a net that stays on its
     /// sheet, or a region of a net that leaves with none (plan 2.C).
     SchOffSheetLocal,
@@ -976,6 +987,19 @@ mod tests {
                 "drawing_reference_not_shown",
             ),
             (Code::TemplateNotFound, "template_not_found"),
+        ] {
+            assert_eq!(json!(c), json!(name));
+            assert_eq!(c.exit_code(), 1, "{name}");
+        }
+    }
+
+    #[test]
+    fn package_codes_are_the_agents_to_fix() {
+        for (c, name) in [
+            (Code::PackagesFormatUnknown, "packages_format_unknown"),
+            (Code::PackageFailed, "package_failed"),
+            (Code::PackageInvalid, "package_invalid"),
+            (Code::ReleaseObsolete, "release_obsolete"),
         ] {
             assert_eq!(json!(c), json!(name));
             assert_eq!(c.exit_code(), 1, "{name}");

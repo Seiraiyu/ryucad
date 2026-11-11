@@ -90,6 +90,7 @@ pub mod measure;
 pub mod merge;
 pub mod mesh;
 pub mod notify;
+pub mod package;
 pub mod param;
 pub mod path;
 pub mod pattern;
