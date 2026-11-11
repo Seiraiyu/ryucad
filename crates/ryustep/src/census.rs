@@ -185,7 +185,7 @@ impl PartialEq for Census {
 }
 
 /// How many instances one parallel task takes.
-const CHUNK: usize = 4096;
+pub(crate) const CHUNK: usize = 4096;
 
 /// A name not in [`TABLE`], interned once the chunks are in.
 const OVERFLOW: u32 = u32::MAX;
@@ -237,7 +237,7 @@ fn refs(p: &Param, index: &impl Fn(u64) -> Option<u32>, out: &mut Vec<u32>) {
 }
 
 /// What one chunk of instances gives the census, indices local to it.
-struct Chunk {
+pub(crate) struct Chunk {
     name: Vec<u32>,
     category: Vec<Category>,
     /// Each instance's end in `targets`.
@@ -251,7 +251,31 @@ struct Chunk {
 
 /// The census of `instances`, a chunk of a file whose instance numbers
 /// are `ids` (ascending).
+/// The census of `instances`, a chunk of a file whose instance numbers
+/// are `ids`, calling `each` on every instance as it is met: the decode
+/// reads the same records in the same pass, while they are in cache.
+pub(crate) fn chunk_with(
+    instances: &[Instance],
+    ids: &[u64],
+    mut each: impl FnMut(&Instance),
+) -> Chunk {
+    chunk_inner(instances, ids, pdr_index(), &mut each)
+}
+
+fn pdr_index() -> u32 {
+    table_index("PROPERTY_DEFINITION_REPRESENTATION").expect("in the table") as u32
+}
+
 fn chunk(instances: &[Instance], ids: &[u64], pdr: u32) -> Chunk {
+    chunk_inner(instances, ids, pdr, &mut |_| {})
+}
+
+fn chunk_inner(
+    instances: &[Instance],
+    ids: &[u64],
+    pdr: u32,
+    each: &mut dyn FnMut(&Instance),
+) -> Chunk {
     let first = ids.first().copied().unwrap_or(0);
     // Instance numbers are nearly always dense: look there first.
     let index = |r: u64| -> Option<u32> {
@@ -271,6 +295,7 @@ fn chunk(instances: &[Instance], ids: &[u64], pdr: u32) -> Chunk {
         representations: Vec::new(),
     };
     for (j, inst) in instances.iter().enumerate() {
+        each(inst);
         let parts = inst.record.parts();
         let (key, category) = match parts {
             [one] => match table_index(&one.name) {
@@ -337,13 +362,20 @@ impl Census {
     pub fn of(file: &File) -> Census {
         use rayon::prelude::*;
         let ids: Vec<u64> = file.instances.par_iter().map(|i| i.id).collect();
-        let pdr = table_index("PROPERTY_DEFINITION_REPRESENTATION").expect("in the table") as u32;
-        let pd = table_index("PROPERTY_DEFINITION").expect("in the table") as u32;
+        let pdr = pdr_index();
         let chunks: Vec<Chunk> = file
             .instances
             .par_chunks(CHUNK)
             .map(|c| chunk(c, &ids, pdr))
             .collect();
+        Census::from_chunks(ids, chunks)
+    }
+
+    /// The census of instances `ids` from their chunks
+    /// ([`chunk_with`]), in order.
+    pub(crate) fn from_chunks(ids: Vec<u64>, chunks: Vec<Chunk>) -> Census {
+        use rayon::prelude::*;
+        let pd = table_index("PROPERTY_DEFINITION").expect("in the table") as u32;
         let n = ids.len();
         // Laid out side by side, each chunk where it goes, in parallel.
         let mut bases = Vec::with_capacity(chunks.len());

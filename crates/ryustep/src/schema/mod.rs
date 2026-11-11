@@ -382,7 +382,9 @@ impl Entity {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Entities {
     ids: Vec<Id>,
-    items: Vec<Result<Entity, ImportError>>,
+    /// Decoded instances, [`crate::census::CHUNK`] to a chunk: built a
+    /// chunk at a time, never copied into one.
+    items: Vec<Vec<Result<Entity, ImportError>>>,
 }
 
 impl Entities {
@@ -391,23 +393,31 @@ impl Entities {
     pub fn decode(file: &File) -> Entities {
         let items = file
             .instances
-            .par_iter()
-            .with_min_len(256)
-            .map(decode)
+            .par_chunks(crate::census::CHUNK)
+            .map(|c| c.iter().map(decode).collect())
             .collect();
         Entities {
-            ids: file.instances.iter().map(|i| i.id).collect(),
+            ids: file.instances.par_iter().map(|i| i.id).collect(),
             items,
         }
     }
 
     /// [`Entities::decode`], with the file's [`crate::census::Census`]
-    /// taken beside it on the same thread pool.
+    /// taken in the same pass: each chunk of instances decoded and counted
+    /// together, while its records are in cache.
     pub fn decode_counted(file: &File) -> (Entities, crate::census::Census) {
-        rayon::join(
-            || Entities::decode(file),
-            || crate::census::Census::of(file),
-        )
+        let ids: Vec<Id> = file.instances.par_iter().map(|i| i.id).collect();
+        let (items, chunks): (Vec<Vec<_>>, Vec<_>) = file
+            .instances
+            .par_chunks(crate::census::CHUNK)
+            .map(|c| {
+                let mut out = Vec::with_capacity(c.len());
+                let census = crate::census::chunk_with(c, &ids, |i| out.push(decode(i)));
+                (out, census)
+            })
+            .unzip();
+        let census = crate::census::Census::from_chunks(ids.clone(), chunks);
+        (Entities { ids, items }, census)
     }
 
     pub fn len(&self) -> usize {
@@ -427,7 +437,9 @@ impl Entities {
     /// file doesn't define it, or its own fault if it couldn't be decoded.
     pub fn get(&self, from: Id, id: Id) -> Result<&Entity, ImportError> {
         match self.ids.binary_search(&id) {
-            Ok(k) => self.items[k].as_ref().map_err(Clone::clone),
+            Ok(k) => self.items[k / crate::census::CHUNK][k % crate::census::CHUNK]
+                .as_ref()
+                .map_err(Clone::clone),
             Err(_) => Err(ImportError::DanglingReference {
                 instance: from,
                 reference: id,
