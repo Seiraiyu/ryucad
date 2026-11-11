@@ -293,6 +293,52 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
             out = attempt(block, &r, 0, &again);
         }
     }
+    // A `near` whose parts, placed by the pin it names, break a hard rule
+    // (a stage's feedback pulled beside its amplifier's pin, its label
+    // with no room; #664): laid out again without it, it moves nothing,
+    // noted, while it lasts (plan 2.G).
+    let mut left_out: Vec<String> = Vec::new();
+    while left_out.len() < block.instructions.len() {
+        let broken = crate::rules::check(block, &out.layout);
+        let Some(id) = broken.iter().find_map(|v| {
+            block.instructions.iter().find_map(|(id, i)| {
+                (matches!(i, Instruction::Near { .. })
+                    && !left_out.contains(id)
+                    && i.parts()
+                        .iter()
+                        .flat_map(|s| instr::parts_named(block, s))
+                        .any(|p| names_part(&v.refs, &block.parts[p].key)))
+                .then(|| id.clone())
+            })
+        }) else {
+            break;
+        };
+        left_out.push(id);
+        let mut without = block.clone();
+        for id in &left_out {
+            without.instructions.remove(id);
+        }
+        let Ok(r2) = instr::resolve(&without) else {
+            break;
+        };
+        let mut tried = attempt(&without, &r2, 0, &BTreeSet::new());
+        if !crate::rules::check(block, &tried.layout).is_empty() {
+            continue;
+        }
+        tried.layout.instructions = block.instructions.clone();
+        for id in &left_out {
+            tried.notes.push(Note {
+                code: "instruction_unresolved".into(),
+                message: format!(
+                    "{id} can't hold: its parts by that pin would break a hard rule ({}); they stay where the layout puts them while it lasts",
+                    broken.first().map_or("", |v| v.rule)
+                ),
+                details: json!({"instruction": id, "rule": broken.first().map(|v| v.rule)}),
+            });
+        }
+        out = tried;
+        break;
+    }
     // A `paper` instruction pins its sheet's size: one too small for what
     // the sheet holds (from nothing, the sheet is packed before its pin
     // applies) is refused, naming it, rather than drawn past its edge
@@ -3598,10 +3644,18 @@ fn draw(
                             done.extend(group.iter().map(|(n, _)| *n));
                             let ts: Vec<Line> = group.iter().map(|(_, t)| *t).collect();
                             let cands = text::candidates_on(body, &ts, *side);
-                            let at = cands.iter().copied().find(|c| {
+                            let clear = |c: &Point| {
                                 let bs = text::boxes(&ts, *c);
                                 bs.iter().all(|b| field.clear(*b)) && clear_of(&bs)
-                            });
+                            };
+                            // No room on the side asked (a connector at the
+                            // sheet's edge, its value asked past it): where
+                            // phase 1 puts it, on the sheet, and the
+                            // instruction reads as not held (plan 2.G).
+                            let at =
+                                cands.iter().copied().find(clear).or_else(|| {
+                                    text::candidates(body, &ts).into_iter().find(clear)
+                                });
                             let fallback = cands
                                 .first()
                                 .copied()

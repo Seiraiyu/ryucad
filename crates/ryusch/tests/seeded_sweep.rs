@@ -36,7 +36,7 @@ fn why(e: &(dyn std::any::Any + Send)) -> String {
 }
 
 #[test]
-#[ignore = "plan 2.G: green after Tasks 8 and 9"]
+#[cfg_attr(debug_assertions, ignore)]
 fn four_hundred_seeded_inputs_keep_every_hard_rule() {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
