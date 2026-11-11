@@ -114,9 +114,38 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
     // Every hard rule on every sheet, each block laid out again over its
     // own layout unchanged; each block's sheets and scores printed (the
     // numbers round 1's report starts from).
+    let look = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ryueda-look");
+    std::fs::create_dir_all(&look).unwrap();
     for (name, board, _) in &built {
         let p = ryueda::project::Project::load(board).unwrap();
         for b in p.conn.blocks.values() {
+            // Each sheet dark too, for the visual review (plan 2.E).
+            let out = look.join(format!("{name}.{}.dark.svg", b.id));
+            ryueda(
+                board,
+                1,
+                &[
+                    "render",
+                    "--block",
+                    b.id.as_str(),
+                    "--theme",
+                    "dark",
+                    "--out",
+                    out.to_str().unwrap(),
+                ],
+            );
+            let out = look.join(format!("{name}.{}.light.svg", b.id));
+            ryueda(
+                board,
+                1,
+                &[
+                    "render",
+                    "--block",
+                    b.id.as_str(),
+                    "--out",
+                    out.to_str().unwrap(),
+                ],
+            );
             let laid = ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None).unwrap();
             assert!(
                 !laid.stale && laid.invalid.is_none(),
@@ -2012,5 +2041,89 @@ fn the_asks_change_only_what_they_name() {
     assert_ne!(first["placed"]["u1"], second["placed"]["u1"], "U1 moved");
     for k in ["c5", "r1", "c6"] {
         assert_eq!(rel(&first, k), rel(&second, k), "{k} moved with U1");
+    }
+}
+
+/// Scripted style edits over each circuit laid out from nothing (plan
+/// 2.E): the built-in look has no contrast finding; a resistor's larger
+/// text moves only its text (and the frames round it); a palette colour
+/// and a tag move nothing.
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn style_edits_move_only_what_they_draw() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["breakout", "rp2040", "buck", "frontend", "ethernet"] {
+        let (board, _) = fresh(dir.path(), name);
+        let s = ryueda(&board, 1, &["style"]);
+        assert!(
+            !s["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "sch_contrast"),
+            "{name}: {s}"
+        );
+        // A resistor of some block, its block and its component's ID.
+        let p = ryueda::project::Project::load(&board).unwrap();
+        let (block, id, refdes) = p
+            .conn
+            .blocks
+            .iter()
+            .filter(|(_, b)| matches!(&b.layout, Some(Ok(_))))
+            .find_map(|(bid, b)| {
+                b.components.iter().find_map(|(cid, c)| {
+                    let r = c.item.as_ref().ok()?.refdes.clone()?;
+                    let digits = r.trim_start_matches('R');
+                    (r.starts_with('R') && digits.starts_with(|c: char| c.is_ascii_digit()))
+                        .then(|| (bid.to_string(), cid.to_string(), r))
+                })
+            })
+            .unwrap_or_else(|| panic!("{name} has a resistor"));
+        let read = || -> Value {
+            serde_json::from_slice(
+                &std::fs::read(board.join(format!("blocks/{block}/layout.json"))).unwrap(),
+            )
+            .unwrap()
+        };
+        let before = read();
+        ryueda(
+            &board,
+            1,
+            &["style", "palette", "set", "wire", "#000000/#ffffff"],
+        );
+        assert_eq!(read(), before, "{name}: a colour moves no layout");
+        ryueda(
+            &board,
+            1,
+            &["tag", &refdes, "--block", &block, "--add", "dnp"],
+        );
+        assert_eq!(read(), before, "{name}: a tag moves no layout");
+        ryueda(
+            &board,
+            1,
+            &[
+                "style",
+                "set",
+                &refdes,
+                "text_size=large",
+                "--block",
+                &block,
+            ],
+        );
+        let after = read();
+        // Everything but its text (each unit's) and region frames as it was.
+        let strip = |v: &Value| {
+            let mut v = v.clone();
+            v.as_object_mut().unwrap().remove("regions");
+            if let Some(t) = v["text"].as_object_mut() {
+                t.retain(|k, _| k != &id && !k.starts_with(&format!("{id}:")));
+            }
+            v
+        };
+        assert_eq!(
+            strip(&after),
+            strip(&before),
+            "{name}: {refdes}'s text alone"
+        );
     }
 }
