@@ -333,7 +333,12 @@ impl At<'_> {
         }
     }
 
-    fn source(&self, role: &str, g: &GeomRef) -> Result<Source<'_>> {
+    fn source(
+        &self,
+        role: &str,
+        g: &GeomRef,
+        follow: crate::reference::Follow,
+    ) -> Result<Source<'_>> {
         match g {
             GeomRef::Plane(p) => Ok(Source::OriginPlane(*p)),
             GeomRef::Axis(a) => Ok(Source::OriginAxis(*a)),
@@ -344,6 +349,7 @@ impl At<'_> {
                     self.order,
                     self.owner,
                     role,
+                    follow,
                     r,
                     self.results,
                 )?;
@@ -582,7 +588,14 @@ fn sketch_entity_kinds(s: &crate::sketch::Solved, id: &Id) -> (String, Vec<Geom>
 /// do; one that gives none of `wants` is `reference_wrong_kind` with
 /// `wanted` and `got`.
 pub fn resolve(at: &At, role: &str, g: &GeomRef, wants: &[Want]) -> Result<Geom> {
-    let s = at.source(role, g)?;
+    // A curve is its extent; anything else this gives is its carrier
+    // (design 447).
+    let follow = if wants.contains(&Want::Curve) {
+        crate::reference::Follow::One
+    } else {
+        crate::reference::Follow::Carrier
+    };
+    let s = at.source(role, g, follow)?;
     let (got, mut gives) = kinds(&s);
     // A helix is its axis only where a field takes an axis and no curve:
     // where it meets a plane is where the helix does.

@@ -483,7 +483,15 @@ pub fn of_face(
     use ryukei::geom::{Plane, Surface};
     use ryukei::topo::{EntityId, Sense};
     let text = face.text(&part.id);
-    let found = crate::reference::resolve(part, order, owner, role, face, results)?;
+    let found = crate::reference::resolve(
+        part,
+        order,
+        owner,
+        role,
+        crate::reference::Follow::One,
+        face,
+        results,
+    )?;
     crate::reference::plane(part, owner, role, face, found)?;
     let (built, entity) = found;
     let EntityId::Face(f) = entity else {

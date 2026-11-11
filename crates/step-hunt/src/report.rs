@@ -147,7 +147,7 @@ pub fn report(
             r.ran
                 .stages
                 .iter()
-                .any(|s| s.outcome != crate::stages::Outcome::Ok)
+                .any(|s| crate::classify::of_stage(&r.case, s).is_some())
         })
         .count();
     json!({
@@ -357,5 +357,35 @@ mod tests {
         assert!(md.contains("- `aaaa` #5: s f.stp #7 Pin"), "{md}");
         assert!(md.contains("- `bbbb` new"), "{md}");
         assert!(md.contains("## Fixed"), "{md}");
+    }
+
+    #[test]
+    fn a_refusal_is_counted_not_failed() {
+        let mut r = record("eeee", 4, &[]);
+        r.ran.stages.push(Stage {
+            stage: "defeature".into(),
+            seconds: 2.0,
+            outcome: Outcome::Refused {
+                error: json!({"code": "edit_budget_exceeded"}),
+            },
+        });
+        let records: BTreeMap<String, Record> = [(r.case.id.clone(), r)].into();
+        let ledger = Ledger::parse("count s defeature 0 1\n").unwrap();
+        let v = report(&json!({}), &records, &ledger, false);
+        assert_eq!(v["failed"], 0, "{v}");
+        assert_eq!(v["groups"], json!([]), "{v}");
+        let c = v["counts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["stage"] == "defeature")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (c["passed"].as_u64(), c["of"].as_u64()),
+            (Some(0), Some(1)),
+            "{c}"
+        );
+        assert_eq!(c["judged"], "same", "{c}");
     }
 }

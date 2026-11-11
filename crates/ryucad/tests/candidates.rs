@@ -1,6 +1,8 @@
-//! `reference_unresolved` names what the lost face became (issue #271):
-//! a slot lengthened across a bore splits the bore's face, and a mate on it
-//! is told both pieces.
+//! A reference follows a face a later feature split (design 447, issue
+//! #156): a slot lengthened across a bore splits the bore's face, and a
+//! revolute mate on it holds on the first piece, both pieces lying on the
+//! bore's cylinder, with a `reference_followed` warning naming both
+//! (#271 named them as `candidates` of a failure before).
 
 use assert_cmd::cargo::cargo_bin;
 use serde_json::Value;
@@ -39,31 +41,34 @@ fn face(dir: &Path, part: &str, pick: impl Fn(&Value) -> bool) -> Vec<String> {
 }
 
 #[test]
-fn a_split_face_s_pieces_are_the_mate_s_candidates() {
+fn a_mate_on_a_split_bore_follows_its_first_piece() {
     let dir = tempfile::tempdir().unwrap();
-    let j = split_bore(dir.path());
-    // What the name was, learnt from the rebuild the edit judged (#156).
-    let was = &j["error"]["details"]["was"];
-    assert_eq!(was["kind"], "face", "{j}");
-    assert_eq!(was["from"]["feature"], "bore", "{j}");
+    split_bore(dir.path());
+    // check passes, and says the mate now rides on a piece.
+    let c = r(dir.path(), &["check"]);
+    assert_eq!(c["result"]["passed"], true, "{c}");
+    let found = c["result"]["findings"].as_array().unwrap();
+    assert!(
+        found
+            .iter()
+            .any(|f| f["code"] == "reference_followed" && f["severity"] == "warning"),
+        "{c}"
+    );
 }
 
 /// Through a daemon, which built the bore before the slot split it, the
-/// mate's refusal also says what the name was (#156): the bore's
-/// cylinder face, made by the `bore` cut.
+/// mate follows the same way: the session's memory of the name explains,
+/// never decides.
 #[test]
-fn through_a_daemon_the_mate_is_told_what_the_split_face_was() {
+fn through_a_daemon_the_mate_follows_the_split_face_the_same_way() {
     let (dir, run) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     RUN.with(|r| *r.borrow_mut() = Some(run.path().to_owned()));
-    let j = split_bore(dir.path());
+    split_bore(dir.path());
     let _ = r(dir.path(), &["daemon", "stop"]);
-    let was = &j["error"]["details"]["was"];
-    assert_eq!(was["kind"], "face", "{j}");
-    assert_eq!(was["from"]["feature"], "bore", "{j}");
 }
 
 /// A bore, a mate on its face, and the slot lengthened across it: the
-/// mate's report, its `candidates` both pieces.
+/// mate's report, which builds and names both pieces as what it follows.
 fn split_bore(d: &Path) -> Value {
     for a in [
         &["init", "--unit", "mm"][..],
@@ -175,28 +180,29 @@ fn split_bore(d: &Path) -> Value {
     pieces.sort();
     assert_eq!(pieces.len(), 2);
     let report = r(d, &["rebuild", "sub"]);
-    let j = report["error"]["details"]["parts"][0]["features"]
+    assert_eq!(report["ok"], true, "{report}");
+    let j = report["result"]["parts"][0]["features"]
         .as_array()
         .unwrap()
         .iter()
         .find(|f| f["id"] == "j_bore")
         .unwrap()
         .clone();
-    assert_eq!(j["error"]["code"], "reference_unresolved", "{j}");
+    assert_eq!(j["ok"], true, "{j}");
     let want: Vec<Value> = pieces
         .iter()
         .map(|n| Value::from(format!("sub/base/blk/{n}")))
         .collect();
-    assert_eq!(
-        j["error"]["details"]["candidates"],
-        Value::from(want),
-        "{j}"
-    );
+    let w = &j["warnings"][0];
+    assert_eq!(w["code"], "reference_followed", "{j}");
+    assert_eq!(w["role"], "a", "{j}");
+    assert_eq!(w["reference"], Value::from(a), "{j}");
+    assert_eq!(w["pieces"], Value::from(want), "{j}");
     j
 }
 
 #[test]
-fn a_part_reference_to_a_split_face_names_its_pieces() {
+fn a_sketch_on_a_split_face_follows_its_first_piece() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
     for a in [
@@ -269,16 +275,18 @@ fn a_part_reference_to_a_split_face_names_its_pieces() {
         )["ok"],
         true
     );
-    let s = r(d, &["rebuild", "p"])["error"]["details"]["parts"][0]["features"]
+    let s = r(d, &["rebuild", "p"])["result"]["parts"][0]["features"]
         .as_array()
         .unwrap()
         .iter()
         .find(|f| f["id"] == "s")
         .unwrap()
         .clone();
-    assert_eq!(s["error"]["code"], "reference_unresolved", "{s}");
+    assert_eq!(s["ok"], true, "{s}");
+    assert_eq!(s["warnings"][0]["code"], "reference_followed", "{s}");
+    assert_eq!(s["warnings"][0]["by"], "slot", "{s}");
     assert_eq!(
-        s["error"]["details"]["candidates"].as_array().map(Vec::len),
+        s["warnings"][0]["pieces"].as_array().map(Vec::len),
         Some(2),
         "{s}"
     );

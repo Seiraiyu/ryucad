@@ -3420,4 +3420,34 @@ mod tests {
         assert_eq!(at, [&format!("/dependencies/{lib}")]);
         assert_eq!(newest("ryucad.lock"), Some(1));
     }
+
+    #[test]
+    fn blend_edits_merge_per_key_and_groups_whole() {
+        let r = |n: u128| json!({"feature": "b", "name": format!("{n:032x}")});
+        let base = json!({"format": 20, "kind": "ryucad.feature", "type": "delete_blend",
+            "target": "b", "below": "2 mm"});
+        let mut ours = base.clone();
+        ours["below"] = json!("3 mm");
+        let mut theirs = base.clone();
+        theirs["faces"] = json!([r(1)]);
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        assert_eq!(
+            (m.value["below"].as_str(), &m.value["faces"]),
+            (Some("3 mm"), &json!([r(1)]))
+        );
+        let z = json!({"format": 20, "kind": "ryucad.feature", "type": "resize_blend",
+            "target": "b", "groups": [{"radius": "3 mm", "faces": [r(1)]}]});
+        let mut a = z.clone();
+        a["groups"][0]["radius"] = json!("4 mm");
+        let mut b = z.clone();
+        b["groups"][0]["faces"] = json!([r(2)]);
+        assert!(merge(Some(&z), &a, &b).conflicts.contains_key("/groups"));
+        let mut t = z.clone();
+        t["tolerance"] = json!("0.001 mm");
+        let m = merge(Some(&z), &a, &t);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        assert_eq!(m.value["groups"][0]["radius"], "4 mm");
+        assert_eq!(m.value["tolerance"], "0.001 mm");
+    }
 }

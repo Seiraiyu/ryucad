@@ -435,6 +435,35 @@ fn on(f: &Found, body: &dyn Fn(&Id) -> u32, pattern: &dyn Fn(&Id) -> u32) -> ryu
     ryumate::Connector { on, frame: f.frame }
 }
 
+/// The `reference_followed` warnings of feature `id` of assembly `asm`:
+/// each connector of a mate or an instance pattern whose face or edge a
+/// later feature of its part split, followed to a piece (design 447),
+/// resolved in `result` as a write checks connectors.
+pub(crate) fn followed(
+    asm: &Id,
+    id: &Id,
+    f: &Feature,
+    result: &crate::rebuild::PartResult,
+) -> Vec<serde_json::Value> {
+    f.connectors()
+        .into_iter()
+        .filter_map(|(role, c)| {
+            let found = crate::connector::resolve(id, role, c, &Rebuilt(result)).ok()?;
+            let t = found.followed?;
+            let text = c.text();
+            let prefix = text.rsplit_once('/').map_or("", |(p, _)| p);
+            Some(crate::reference::followed_warning(
+                asm,
+                id,
+                role,
+                &format!("{asm}/{text}"),
+                &format!("{asm}/{prefix}"),
+                &t,
+            ))
+        })
+        .collect()
+}
+
 /// An assembly's rebuild, as connectors are resolved in it when a write
 /// checks them.
 struct Rebuilt<'a>(&'a crate::rebuild::PartResult);
@@ -1842,8 +1871,10 @@ pub(crate) mod tests {
 
     #[test]
     fn the_edit_that_breaks_a_mate_warns_of_it() {
-        // Issue #155: a slot cut across the plate's top splits the face
-        // m1 stands on.
+        // Issue #155: the slot grown into a skim over the plate's whole
+        // top takes away the face m1 stands on. (A slot across the top
+        // only splits it, both pieces on its plane, and m1 follows the
+        // first: design 447.)
         let (_dir, mut s) = hinged();
         call(
             &mut s,
@@ -1857,7 +1888,8 @@ pub(crate) mod tests {
         let v = call(
             &mut s,
             "feature.edit",
-            json!({"part": "plate", "id": "slot", "params": {"y": 60}}),
+            json!({"part": "plate", "id": "slot", "params": {"x": 200, "y": 200, "z": 2},
+                   "placement": {"origin": [-50, -50, 4], "z": [0, 0, 1], "x": [1, 0, 0]}}),
         )
         .unwrap();
         assert!(result_of(&mut s, "frame", "m1").is_err());

@@ -89,6 +89,8 @@ pub struct Session {
     pub sections: crate::drawing::section::Cache,
     /// Mass properties worked out, for `mass`.
     pub mass: crate::mass::Cache,
+    /// Blends recognised, for `blends`, by body hash and tolerance.
+    pub blends: crate::blends::Cache,
     /// Distances between placed solids, for `clearance`.
     pub clearance: crate::clearance::Cache,
     /// A revision's session: its files never change, and it never reads
@@ -267,6 +269,7 @@ impl Session {
             projections: crate::drawing::Cache::default(),
             sections: crate::drawing::section::Cache::default(),
             mass: crate::mass::Cache::default(),
+            blends: crate::blends::Cache::default(),
             clearance: crate::clearance::Cache::default(),
             frozen: false,
             revisions: Vec::new(),
@@ -367,7 +370,8 @@ impl Session {
             self.known.len() as u64,
             self.known.values().map(|n| n.len() as u64).sum(),
             self.store.models.len() as u64,
-            (self.interference.len() + self.clearance.len() + self.mass.len()) as u64,
+            (self.interference.len() + self.clearance.len() + self.mass.len() + self.blends.len())
+                as u64,
             crate::import::opened_bytes(),
             self.store.results.len() as u64,
         ];
@@ -475,6 +479,7 @@ impl Session {
             projections: from.projections.clone(),
             sections: from.sections.clone(),
             mass: from.mass.clone(),
+            blends: from.blends.clone(),
             clearance: from.clearance.clone(),
             frozen: true,
             revisions: Vec::new(),
@@ -1308,6 +1313,12 @@ impl Session {
             .retain(|(project, _, _), _| project.is_none());
     }
 
+    /// The rebuild of `part` this session holds, if it holds one: what
+    /// [`Session::rebuilt`] left, read beside the project's files.
+    pub(crate) fn cached(&self, part: &Id) -> Option<&PartResult> {
+        self.store.results.get(part).map(|(_, r)| r)
+    }
+
     /// The cached rebuild of `part`, to make it wrong in tests.
     #[cfg(test)]
     pub(crate) fn cached_mut(&mut self, part: &Id) -> Option<&mut PartResult> {
@@ -1333,7 +1344,8 @@ impl Session {
     /// [`Session::explain`] for the part's list as `order` has it: as a
     /// write would leave it.
     pub fn explain_in(&self, part: &Id, order: &[Id], mut e: Error) -> Error {
-        if e.code != crate::error::Code::ReferenceUnresolved {
+        use crate::error::Code;
+        if !matches!(e.code, Code::ReferenceUnresolved | Code::ReferenceSplit) {
             return e;
         }
         if e.details["connector"].is_string() {
@@ -1355,6 +1367,11 @@ impl Session {
             .map(Known::to_json);
         if let Some(w) = &was {
             e.details["was"] = w.clone();
+        }
+        // A split's pieces and the feature that split it came from the
+        // rebuild's journals already (design 447).
+        if e.code == Code::ReferenceSplit {
+            return e;
         }
         let reader = e.details["feature"]
             .as_str()

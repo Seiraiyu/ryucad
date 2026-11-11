@@ -429,6 +429,14 @@ pub struct FeatureFields {
     /// takes as its seeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seeds: Option<Vec<String>>,
+    /// A delete_blend's size: every blend at most this length goes (a
+    /// fillet's radius, a chamfer's larger distance; `""` takes it away).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub below: Option<Value>,
+    /// A resize_blend's one chamfer group: the face its first distance
+    /// runs along, `<part>/<solid>/<name>` (its blends are `faces`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chamfer_face: Option<String>,
     /// A path's segments in order, replacing them all: each a curve as
     /// text (an edge `<part>/<solid>/<name>`, a sketch's line, arc or
     /// circle `<part>/<sketch>/<entity>`, a path or helix
@@ -1168,6 +1176,24 @@ pub enum Request {
     #[serde(rename = "feature_faces.get")]
     FeatureFacesGet {
         face: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
+    /// A solid's fillets, chamfers and ball corners as `delete_blend` and
+    /// `resize_blend` read them: each blend's faces, kind and size,
+    /// supports and chain, by least face name, in the part as it shows at
+    /// `rev`. With `below` (a length), only those a `delete_blend` of that
+    /// size takes, closed over chains and corners. `solid` is the part's
+    /// one solid unless named; `tolerance` is recognition's (10 µm).
+    #[serde(rename = "blends.get")]
+    BlendsGet {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        solid: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tolerance: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        below: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },

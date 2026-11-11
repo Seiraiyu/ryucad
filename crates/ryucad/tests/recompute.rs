@@ -1802,6 +1802,64 @@ fn drafts_recompute_as_from_nothing() {
     }
 }
 
+/// A slot lengthened across a box's top and shortened again, with a
+/// sketch on the top and a chamfer of its front edge (design 447): the
+/// sketch follows the first piece of the split top and the chamfer both
+/// pieces of the split edge, and every incremental rebuild is the
+/// rebuild from nothing on one thread and on eight.
+#[test]
+fn followed_references_recompute_as_from_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    let part = Id::parse("p", "part").unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "box", "id": "b", "params": {"x": 20, "y": 10, "z": 5}}),
+    );
+    let top = face(&mut s, "b", [0.0, 0.0, 1.0]);
+    let front = edge(&mut s, "b", [0.0, 0.0, 0.005], [0.02, 0.0, 0.005]);
+    let slot = |s: &mut Session, y: i32| {
+        let placement = json!({"origin": [9.5, y, -5], "z": [0, 0, 1], "x": [1, 0, 0]});
+        if call(s, "feature.show", json!({"part": "p", "id": "c"})).is_ok() {
+            must(
+                s,
+                "feature.edit",
+                json!({"part": "p", "id": "c", "placement": placement}),
+            );
+        } else {
+            must(
+                s,
+                "feature.add",
+                json!({"part": "p", "type": "box", "id": "c", "operation": "cut",
+                       "params": {"x": 1, "y": 20, "z": 20}, "placement": placement}),
+            );
+        }
+    };
+    slot(&mut s, 7);
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "sketch", "id": "t", "face": top}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "chamfer", "id": "f", "d": 0.5, "edges": [front]}),
+    );
+    for y in [-5, 7, -5] {
+        slot(&mut s, y);
+        let (one, eight) = (full(&s, 1), full(&s, 8));
+        let r = s.rebuilt(&part).unwrap();
+        assert_eq!(r.failed(), 0, "y = {y}: {:?}", summary(r));
+        let incremental = (r.hash.clone(), summary(r));
+        assert_eq!(incremental, one, "y = {y}");
+        assert_eq!(incremental, eight, "y = {y}");
+    }
+}
+
 /// Part `p`: a plate `b` (`w` × 30 × 10 mm) with a hole `h` (`dia`) at
 /// (15, 15), deleted by its seed (`d`), and a box `c` beside it whose −x
 /// wall a draft `t` (`ang`) leans past its +x wall with topology: change.
@@ -1901,6 +1959,108 @@ fn direct_edits_recompute_as_from_nothing() {
         let mut g = Lcg::new(seed);
         for step in 0..10 {
             edit_edit(&mut g, &mut s);
+            let (one, eight) = (full(&s, 1), full(&s, 8));
+            let r = s.rebuilt(&part).unwrap();
+            let incremental = (r.hash.clone(), summary(r));
+            assert_eq!(incremental, one, "seed {seed}, step {step}");
+            assert_eq!(incremental, eight, "seed {seed}, step {step}");
+        }
+    }
+}
+
+/// Part `p`: a box `b` 40 × 30 × 20 mm with a fillet `f` (`r`) on one top
+/// edge and a chamfer `c` (`d`) on the opposite one, the fillet resized
+/// (`z`); and a box `e` beside it whose every edge a fillet `g` (`r`)
+/// rounds, defeatured below `below` (`x`).
+fn blended() -> (tempfile::TempDir, Session, String) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    must(
+        &mut s,
+        "param.set",
+        json!({"part": "p", "parameters": {"r": "4 mm", "d": "2 mm", "below": "5 mm"}}),
+    );
+    let add = |s: &mut Session, f: Value| {
+        let mut f = f;
+        f["part"] = json!("p");
+        must(s, "feature.add", f);
+    };
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": "40 mm", "y": "30 mm", "z": "20 mm"}}),
+    );
+    let rim = edge(&mut s, "b", [0.04, 0.0, 0.02], [0.04, 0.03, 0.02]);
+    let lip = edge(&mut s, "b", [0.0, 0.0, 0.02], [0.0, 0.03, 0.02]);
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "f", "radius": "r", "edges": [rim]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "chamfer", "id": "c", "d": "d", "edges": [lip]}),
+    );
+    let round = entities(&mut s, "c", "faces")
+        .into_iter()
+        .find(|f| f["surface"]["type"] == "cylinder")
+        .map(|f| format!("p/b/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    add(
+        &mut s,
+        json!({"type": "resize_blend", "id": "z",
+               "groups": [{"radius": "3 mm", "faces": [round.clone()]}]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "e", "params": {"x": "40 mm", "y": "30 mm", "z": "20 mm"},
+               "placement": {"origin": [80, 0, 0]}}),
+    );
+    let every: Vec<String> = entities(&mut s, "e", "edges")
+        .into_iter()
+        .map(|e| format!("p/e/{}", e["name"].as_str().unwrap()))
+        .collect();
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "g", "radius": "r", "edges": every}),
+    );
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "x", "target": "e", "below": "below"}),
+    );
+    (dir, s, round)
+}
+
+/// One random edit of [`blended`]'s part.
+fn blend_edit(g: &mut Lcg, s: &mut Session, round: &str) {
+    let (method, params) = match g.next_u64() % 5 {
+        0 => ("param.set", json!({"parameters": {"r": mm(g, 3, 6)}})),
+        1 => ("param.set", json!({"parameters": {"d": mm(g, 1, 4)}})),
+        2 => ("param.set", json!({"parameters": {"below": mm(g, 2, 7)}})),
+        3 => (
+            "feature.edit",
+            json!({"id": "z", "groups": [{"radius": mm(g, 2, 6), "faces": [round]}]}),
+        ),
+        _ => (
+            "feature.edit",
+            json!({"id": "x", "tolerance": (["0.01 mm", "0.001 mm"][(g.next_u64() % 2) as usize])}),
+        ),
+    };
+    let mut params = params;
+    params["part"] = json!("p");
+    let _ = call(s, method, params);
+}
+
+#[test]
+fn blend_edits_recompute_as_from_nothing() {
+    for seed in [24, 25] {
+        let (_dir, mut s, round) = blended();
+        let part = Id::parse("p", "part").unwrap();
+        let first = s.rebuilt(&part).unwrap();
+        assert_eq!(first.failed(), 0, "{:?}", summary(first));
+        let mut g = Lcg::new(seed);
+        for step in 0..10 {
+            blend_edit(&mut g, &mut s, &round);
             let (one, eight) = (full(&s, 1), full(&s, 8));
             let r = s.rebuilt(&part).unwrap();
             let incremental = (r.hash.clone(), summary(r));

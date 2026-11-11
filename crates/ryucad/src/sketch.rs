@@ -372,11 +372,20 @@ impl Projection<'_> {
         results: &dyn Results,
         out: &mut BTreeMap<Id, Projected>,
     ) -> Result<()> {
-        use crate::reference::{kind, resolve, wrong_kind};
+        use crate::reference::{Follow, kind, resolve, wrong_kind};
         use ryukei::geom::{Curve, Vector3};
         use ryukei::topo::EntityId;
         let role = self.role();
-        let (b, found) = resolve(self.part, self.order, self.sketch, &role, self.r, results)?;
+        // A projection takes the edge's extent, not only its line.
+        let (b, found) = resolve(
+            self.part,
+            self.order,
+            self.sketch,
+            &role,
+            Follow::One,
+            self.r,
+            results,
+        )?;
         let body = &b.body;
         let wrong =
             |what: &str, want: &str| wrong_kind(self.part, self.sketch, &role, self.r, what, want);
@@ -499,9 +508,9 @@ pub(crate) fn face_frame(
     results: &dyn Results,
 ) -> Result<Rigid> {
     use crate::geometry::{At, Want, one};
-    use crate::reference::{plane, resolve};
+    use crate::reference::{Follow, plane, resolve};
     use ryukei::geom::{Frame, Point3, Vector3};
-    let found = resolve(part, order, id, "plane", &on.face, results)?;
+    let found = resolve(part, order, id, "plane", Follow::Carrier, &on.face, results)?;
     let (p0, n) = plane(part, id, "plane", &on.face, found)?;
     let at = At {
         part,
