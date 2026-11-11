@@ -111,6 +111,17 @@ pub fn resistor_body(shapes: Shapes, a: Point, b: Point) -> Option<Graphic> {
     })
 }
 
+/// A graphic as the `add` op that draws it (`edit::apply`'s names: a
+/// rect's `start` and `end`, a polyline's `points`, each with `fill`).
+pub fn add_op(g: &Graphic) -> serde_json::Value {
+    let mut v = serde_json::to_value(g).expect("graphics serialize");
+    let o = v.as_object_mut().expect("a graphic is an object");
+    let ty = o.remove("type").expect("tagged by type");
+    o.insert("op".into(), "add".into());
+    o.insert("graphic".into(), ty);
+    v
+}
+
 /// A two-pin part, standing up, pin 1 on top (a diode's and an LED's
 /// cathode, pin 1, below, as KiCad numbers them).
 fn two_pin(class: Class, st: &Standards) -> Option<Symbol> {

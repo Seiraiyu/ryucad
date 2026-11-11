@@ -501,12 +501,71 @@ fn groups(s: &Symbol, class: Option<Class>, cx: &Context, out: &mut Vec<Raw>) {
     }
 }
 
+/// Where standards come from, in a message.
+fn from_words(from: &str) -> String {
+    if from == "built_in" {
+        "the built-in standards".to_owned()
+    } else {
+        format!("{from}'s standards.json")
+    }
+}
+
+fn shape(s: &Symbol, class: Option<Class>, cx: &Context, out: &mut Vec<Raw>) {
+    use crate::standards::Shapes;
+    use ryusch::lint::ResistorStyle;
+    if class != Some(Class::Resistor) || s.pins.len() != 2 {
+        return;
+    }
+    let part = crate::schem::unit_part(s, 1, String::new(), "R");
+    let Some(drawn) = ryusch::lint::resistor_style(&part) else {
+        return;
+    };
+    let drawn = match drawn {
+        ResistorStyle::Us => Shapes::Ansi,
+        ResistorStyle::Iec => Shapes::Iec,
+    };
+    let want = cx.standards.shapes;
+    if drawn == want {
+        return;
+    }
+    let word = |sh: Shapes| match sh {
+        Shapes::Ansi => "the US zigzag (ANSI)",
+        Shapes::Iec => "the IEC box",
+    };
+    let mut r = raw(
+        "sym_shape",
+        Vec::new(),
+        format!(
+            "the resistor is drawn as {}; {} draw {}",
+            word(drawn),
+            from_words(cx.from),
+            word(want)
+        ),
+        json!({"drawn": drawn.as_str(), "standard": want.as_str(), "from": cx.from}),
+    );
+    if cx.from == "built_in" && cx.prefs.prefer.resistor == ResistorStyle::Iec {
+        r.prefs.push("prefer.resistor = iec".to_owned());
+    }
+    let pins: Vec<&Pin> = s.pins.values().collect();
+    if let Some(body) = crate::template::resistor_body(want, base(pins[0]), base(pins[1])) {
+        let mut ops: Vec<Value> = s
+            .graphics
+            .keys()
+            .map(|id| json!({"op": "remove", "graphic": id}))
+            .collect();
+        ops.push(crate::template::add_op(&body));
+        r.fixes.push(ops);
+    }
+    out.push(r);
+}
+
 /// Every rule's raw findings, in the catalogue's order.
 fn found(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Raw> {
     let mut out = Vec::new();
     off_grid(s, cx, &mut out);
     sides(s, class, cx, &mut out);
     groups(s, class, cx, &mut out);
+    shape(s, class, cx, &mut out);
     length(s, class, cx, &mut out);
     unit_size(s, class, cx, &mut out);
     out
@@ -758,5 +817,48 @@ mod tests {
         let group = found.iter().find(|f| f.code == "sym_pin_group").unwrap();
         assert_eq!(group.details["split"], true);
         assert!(group.fixes.is_empty());
+    }
+
+    #[test]
+    fn a_resistor_drawn_to_the_other_standard_is_redrawn_between_its_pins() {
+        let ansi = Standards::default();
+        let iec = Standards {
+            shapes: crate::standards::Shapes::Iec,
+            ..Standards::default()
+        };
+        let prefs = Prefs::default();
+        let zigzag = template("R", Class::Resistor, &[], &ansi).unwrap();
+        let boxed = template("R", Class::Resistor, &[], &iec).unwrap();
+        let cx = Context {
+            standards: &ansi,
+            prefs: &prefs,
+            from: "self",
+        };
+        assert!(lint(&zigzag, Some(Class::Resistor), &cx).is_empty());
+        let found = lint(&boxed, Some(Class::Resistor), &cx);
+        assert_eq!(codes(&found), [("sym_shape", vec![])]);
+        assert_eq!(found[0].details["drawn"], "iec");
+        assert!(
+            found[0].message.contains("self's standards.json"),
+            "{}",
+            found[0].message
+        );
+        let mut fixed = boxed.clone();
+        crate::edit::apply(&mut fixed, &found[0].fixes[0], crate::units::Unit::Mm).unwrap();
+        assert!(lint(&fixed, Some(Class::Resistor), &cx).is_empty());
+        assert_eq!(fixed.pins, zigzag.pins);
+        // Not a resistor, or not judged as one: nothing.
+        assert!(lint(&boxed, None, &cx).is_empty());
+        assert!(lint(&boxed, Some(Class::Capacitor), &cx).is_empty());
+        // The built-in standards follow prefer.resistor, and say so.
+        let mut prefs = Prefs::default();
+        prefs.prefer.resistor = ryusch::lint::ResistorStyle::Iec;
+        let cx = Context {
+            standards: &iec,
+            prefs: &prefs,
+            from: "built_in",
+        };
+        let found = lint(&zigzag, Some(Class::Resistor), &cx);
+        assert_eq!(found[0].prefs, ["prefer.resistor = iec"]);
     }
 }
