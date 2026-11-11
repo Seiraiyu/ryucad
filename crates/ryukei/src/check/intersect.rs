@@ -945,6 +945,7 @@ mod tests {
     fn faces_sharing_no_vertex_are_not_apart_by_their_own_edges() {
         let body = unit_cube();
         let faces: Vec<FaceId> = body.faces().collect();
+        // unmetered: a test of a pair that settles at once
         let m = Meter::free();
         assert!(!apart_by_own_edges(
             &body,
