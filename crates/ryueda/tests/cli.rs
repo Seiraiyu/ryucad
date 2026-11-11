@@ -2308,8 +2308,55 @@ fn a_library_is_checked_from_the_cli() {
         "--ops",
         r#"[{"op": "set", "pin": "1", "side": "left"}]"#,
     ]);
-    p.fails(&["lib", "check"], "check_failed", 1);
+    let failed = p.fails(&["lib", "check"], "check_failed", 1);
+    assert_eq!(failed["details"]["report"]["errors"], 1, "{failed}");
     p.fails(&["lib", "check", "--symbol", "nope"], "not_found", 1);
+    // Counts first (#711): by code, and each symbol's, with no findings.
+    let all = p.both_in("board", &["lib", "check"]).1["error"]["details"]["report"].clone();
+    let sum =
+        p.both_in("board", &["lib", "check", "--summary"]).1["error"]["details"]["report"].clone();
+    let total: u64 = sum["by_code"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|n| n.as_u64().unwrap())
+        .sum();
+    assert_eq!(
+        total,
+        all["errors"].as_u64().unwrap() + all["warnings"].as_u64().unwrap()
+    );
+    assert_eq!(sum["by_code"]["sym_pin_side"], 1, "{sum}");
+    assert!(
+        sum["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x.get("findings").is_none() && x["counts"].is_object())
+    );
+    // One code's findings, and only the symbols holding one.
+    let side = p
+        .both_in("board", &["lib", "check", "--code", "sym_pin_side"])
+        .1["error"]["details"]["report"]
+        .clone();
+    let refs: Vec<&Value> = side["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| &x["reference"])
+        .collect();
+    assert_eq!(refs, [&json!("lib/self/symbol/u")], "{side}");
+    assert!(
+        side["symbols"][0]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["code"] == "sym_pin_side")
+    );
+    assert_eq!(
+        (side["errors"].clone(), side["warnings"].clone()),
+        (all["errors"].clone(), all["warnings"].clone())
+    );
+    p.fails(&["lib", "check", "--code", "sch_jog"], "invalid_param", 1);
 }
 
 /// check judges the project's own symbols and those its designs place
