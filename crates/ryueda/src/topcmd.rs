@@ -156,6 +156,7 @@ pub fn rail_add(
         voltage: None,
         current: None,
         impedance: None,
+        tags: Default::default(),
     };
     fill_intent(
         p,
@@ -180,7 +181,7 @@ pub fn rail_edit(
 ) -> Result<Value> {
     let p = session.project();
     check_revision("the project", &p.revision, expected)?;
-    let (id, mut r) = top_get(&p.conn.rails, p.conn.rail(rail), "rail", rail)?;
+    let (id, mut r) = rail_named(p, rail)?;
     if let Some(n) = name {
         r.name = n.to_owned();
     }
@@ -191,10 +192,20 @@ pub fn rail_edit(
         [&mut r.voltage, &mut r.current, &mut r.impedance],
     )?;
     let mut w = Writes::default();
-    w.put(top_path(RAILS, &id), &r, conn::RAIL_KIND);
+    w.put(rail_path(&id), &r, conn::RAIL_KIND);
     commit(session, &format!("rail {id}"), w)?;
     let p = session.project();
     Ok(top_json(p, RAILS, "rail", &p.conn.rails, &id))
+}
+
+/// The rail `text` names (an ID or a name), as read.
+pub fn rail_named(p: &Project, text: &str) -> Result<(Id, Rail)> {
+    top_get(&p.conn.rails, p.conn.rail(text), "rail", text)
+}
+
+/// A rail's file.
+pub fn rail_path(id: &Id) -> String {
+    top_path(RAILS, id)
 }
 
 /// `rail.delete`: refused while a pin or an instance's port names it.

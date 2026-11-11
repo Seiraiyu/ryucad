@@ -153,6 +153,19 @@ enum Command {
     /// and group name patterns, and each class's side rules; `standards
     /// set` changes this project's own.
     #[command(args_conflicts_with_subcommands = true)]
+    /// Add or remove tags (critical, hv, dnp, or your own) on a component
+    /// or net (by designator or name, with --block) or a rail (rail:NAME).
+    Tag {
+        target: String,
+        #[arg(long)]
+        block: Option<String>,
+        #[arg(long = "add", value_name = "TAG")]
+        add: Vec<String>,
+        #[arg(long = "remove", value_name = "TAG")]
+        remove: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
     Standards {
         /// A library project's alias, to read the standards that judge it.
         #[arg(long)]
@@ -2072,6 +2085,19 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             expected_revision: expect.expect.clone(),
         },
         Command::Rail(RailCmd::List) => Request::RailList {},
+        Command::Tag {
+            target,
+            block,
+            add,
+            remove,
+            expect,
+        } => Request::Tag {
+            target: target.clone(),
+            block: block.clone(),
+            add: add.clone(),
+            remove: remove.clone(),
+            expected_revision: expect.expect.clone(),
+        },
         Command::Class(ClassCmd::Add {
             name,
             id,

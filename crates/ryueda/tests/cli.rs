@@ -440,6 +440,7 @@ fn every_protocol_method_has_a_command() {
         ("import.kicad", &["import", "kicad"]),
         ("rail.add", &["rail", "add"]),
         ("rail.edit", &["rail", "edit"]),
+        ("tag", &["tag"]),
         ("rail.delete", &["rail", "delete"]),
         ("rail.list", &["rail", "list"]),
         ("class.add", &["class", "add"]),
@@ -1049,6 +1050,16 @@ impl Pair {
     /// project's 0402 footprint.
     fn with_resistor() -> Pair {
         Pair::with_resistor_in(Pair::new())
+    }
+
+    /// [`Pair::with_resistor`] with a block `top` holding `R1` (`r1`)
+    /// on a net `SDA` (plan 2.E's style scenarios).
+    fn with_placed_resistor() -> Pair {
+        let p = Pair::with_resistor();
+        p.ok(&["block", "create", "Top", "--id", "top"]);
+        p.ok(&["component", "add", "top", "--of", "r_100k", "--id", "r1"]);
+        p.ok(&["connect", "top/r1/1", "SDA", "--new"]);
+        p
     }
 
     fn with_resistor_in(p: Pair) -> Pair {
@@ -3393,4 +3404,46 @@ fn text_from_the_cli() {
         1,
     );
     p.fails(&["place", "breakout", "text R1 refdes"], "invalid_param", 1);
+}
+
+/// Tags on a component, a net and a rail: added, removed, refused when
+/// badly formed, each one logged change.
+#[test]
+fn objects_take_tags() {
+    let p = Pair::with_placed_resistor();
+    let block = "top";
+    let t = p.ok(&[
+        "tag", "R1", "--block", block, "--add", "dnp", "--add", "critical",
+    ]);
+    assert_eq!(t["tags"], json!(["critical", "dnp"]), "{t}");
+    let t = p.ok(&["tag", "R1", "--block", block, "--remove", "critical"]);
+    assert_eq!(t["tags"], json!(["dnp"]));
+    assert_eq!(
+        p.ok(&["tag", "SDA", "--block", block, "--add", "hv"])["tags"],
+        json!(["hv"])
+    );
+    p.ok(&["rail", "add", "VBUS", "--voltage", "5 V"]);
+    assert_eq!(
+        p.ok(&["tag", "rail:VBUS", "--add", "hv"])["tags"],
+        json!(["hv"])
+    );
+    p.fails(
+        &["tag", "R1", "--block", block, "--add", "High Voltage"],
+        "invalid_param",
+        1,
+    );
+    p.fails(&["tag", "R1", "--add", "hv"], "invalid_param", 1);
+    // Each one logged change: undo (the daemon's) takes the rail's back.
+    let (code, u) = p.run_in(&p.daemon, "board", &["undo"]);
+    assert_eq!(code, 0, "{u}");
+    let rails: Vec<String> = fs::read_dir(p.daemon.join("board/rails"))
+        .unwrap()
+        .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
+        .collect();
+    assert!(
+        rails
+            .iter()
+            .any(|r| r.contains("VBUS") && !r.contains("tags")),
+        "{rails:?}"
+    );
 }

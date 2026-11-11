@@ -263,6 +263,19 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Adds and removes tags on a component, a net or a rail (plan 2.E).
+    #[serde(rename = "tag")]
+    Tag {
+        target: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        add: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remove: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// A rail's name, class or intent; an empty text clears a field.
     #[serde(rename = "rail.edit")]
     RailEdit {
@@ -771,6 +784,7 @@ impl Request {
                 | Request::ImportKicad { .. }
                 | Request::RailAdd { .. }
                 | Request::RailEdit { .. }
+                | Request::Tag { .. }
                 | Request::RailDelete { .. }
                 | Request::ClassAdd { .. }
                 | Request::ClassEdit { .. }

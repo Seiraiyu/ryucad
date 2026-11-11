@@ -473,6 +473,20 @@ fn dispatch(
             rail,
             expected_revision,
         } => topcmd::rail_delete(session, &rail, expected_revision.as_deref()),
+        Request::Tag {
+            target,
+            block,
+            add,
+            remove,
+            expected_revision,
+        } => crate::partcmd::tag(
+            session,
+            &target,
+            block.as_deref(),
+            &add,
+            &remove,
+            expected_revision.as_deref(),
+        ),
         Request::RailList {} => Ok(topcmd::rail_list(session.project())),
         Request::ClassAdd {
             name,
