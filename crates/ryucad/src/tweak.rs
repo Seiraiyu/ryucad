@@ -1242,15 +1242,15 @@ pub fn take_given(ty: &str, f: &mut FeatureFields) -> Result<()> {
             .with("param", "faces"));
         }
     }
-    if ty == "delete_face" {
+    if ty == "delete_face" || ty == "delete_blend" {
         // The CLI's --seed goes as a pattern's features.
-        if f.seeds.is_none() {
+        if ty == "delete_face" && f.seeds.is_none() {
             f.seeds = f.features.take();
         }
         if !groups.is_empty() {
             return Err(Error::new(
                 Code::InvalidParam,
-                "a delete_face's faces are a list of faces, each <part>/<solid>/<name>: it has no groups",
+                format!("a {ty}'s faces are a list of faces, each <part>/<solid>/<name>: it has no groups"),
             )
             .with("param", "faces"));
         }
@@ -1328,6 +1328,8 @@ pub fn from_given(
         Some(Feature::ReplaceFace(r)) => r.fields(),
         Some(Feature::Draft(d)) => d.fields(),
         Some(Feature::DeleteFace(x)) => x.fields(),
+        Some(Feature::DeleteBlend(x)) => x.fields(),
+        Some(Feature::ResizeBlend(x)) => x.fields(),
         _ => json!({}),
     };
     let o = v.as_object_mut().expect("fields are an object");
@@ -1398,6 +1400,10 @@ pub fn from_given(
             };
         }
         retrim_given(o, f)?;
+    } else if ty == "delete_blend" {
+        delete_blend_given(o, f, &reference)?;
+    } else if ty == "resize_blend" {
+        resize_given(o, f, &reference)?;
     } else if ty == "delete_face" {
         delete_given(o, f, &reference)?;
     } else {
@@ -1486,10 +1492,166 @@ pub fn from_given(
         "delete_face" => {
             Feature::DeleteFace(Box::new(crate::doc::edit::DeleteFace::from_fields(&mut r)?))
         }
+        "delete_blend" => Feature::DeleteBlend(Box::new(
+            crate::doc::edit::DeleteBlend::from_fields(&mut r, unit, env)?,
+        )),
+        "resize_blend" => Feature::ResizeBlend(Box::new(
+            crate::doc::edit::ResizeBlend::from_fields(&mut r, unit, env)?,
+        )),
         _ => Feature::MoveFace(Box::new(MoveFace::from_fields(&mut r, unit, env)?)),
     };
     r.finish()?;
     Ok(out)
+}
+
+/// A text list of faces (`faces` as the request gives them after
+/// [`take_given`]) as references, each at `/<key>/<i>`; `None` when not
+/// given.
+fn face_list(
+    f: &FeatureFields,
+    key: &str,
+    reference: &dyn Fn(&str, &str) -> Result<Value>,
+) -> Result<Option<Vec<Value>>> {
+    let Some(Value::Array(a)) = &f.faces else {
+        return Ok(None);
+    };
+    a.iter()
+        .filter_map(|x| x.as_str())
+        .enumerate()
+        .map(|(i, t)| reference(t, &format!("/{key}/{i}")))
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
+/// A scalar given as text or a number, `""` taking it away.
+fn put(o: &mut serde_json::Map<String, Value>, key: &str, given: &Option<Value>) {
+    match given {
+        None => {}
+        Some(Value::String(s)) if s.is_empty() => {
+            o.remove(key);
+        }
+        Some(v) => {
+            o.insert(key.into(), v.clone());
+        }
+    }
+}
+
+/// A blend delete's own fields from what was given, over `o` (its file's):
+/// its faces as text (`[]` for none), `below` and `tolerance`.
+fn delete_blend_given(
+    o: &mut serde_json::Map<String, Value>,
+    f: &FeatureFields,
+    reference: &dyn Fn(&str, &str) -> Result<Value>,
+) -> Result<()> {
+    if let Some(refs) = face_list(f, "faces", reference)? {
+        if refs.is_empty() {
+            o.remove("faces");
+        } else {
+            o.insert("faces".into(), json!(refs));
+        }
+    }
+    put(o, "below", &f.below);
+    put(o, "tolerance", &f.tolerance);
+    Ok(())
+}
+
+/// A resize's own fields from what was given, over `o` (its file's): its
+/// groups whole (faces and a chamfer's face as text), or its one group's
+/// fields: a fillet's `radius` (which takes a chamfer's form away), a
+/// chamfer's `form` (keeping only what it takes) and sizes, its
+/// `chamfer_face`, and the blends' `faces`. A file of several groups
+/// takes them whole.
+fn resize_given(
+    o: &mut serde_json::Map<String, Value>,
+    f: &FeatureFields,
+    reference: &dyn Fn(&str, &str) -> Result<Value>,
+) -> Result<()> {
+    let sizes = [
+        ("radius", &f.radius),
+        ("d", &f.d),
+        ("d1", &f.d1),
+        ("d2", &f.d2),
+        ("angle", &f.angle),
+    ];
+    let faces = face_list(f, "groups/0/faces", reference)?;
+    let one = sizes.iter().any(|(_, x)| x.is_some())
+        || f.form.is_some()
+        || f.chamfer_face.is_some()
+        || faces.is_some();
+    if let Some(gs) = &f.groups {
+        if one {
+            return Err(Error::new(
+                Code::Usage,
+                "give a resize_blend's groups, or its one group's fields (radius, or form, d, d1, d2, angle and chamfer_face; and faces), not both",
+            ));
+        }
+        let Value::Array(gs) = gs else {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "a resize_blend's groups are a list, each a size and the blends' faces",
+            )
+            .with("param", "groups"));
+        };
+        let mut out = Vec::with_capacity(gs.len());
+        for (i, g) in gs.iter().enumerate() {
+            let mut g = g.clone();
+            if let Some(Value::Array(fs)) = g.get_mut("faces") {
+                for (j, x) in fs.iter_mut().enumerate() {
+                    if let Some(t) = x.as_str().map(str::to_owned) {
+                        *x = reference(&t, &format!("/groups/{i}/faces/{j}"))?;
+                    }
+                }
+            }
+            if let Some(t) = g.get("face").and_then(Value::as_str).map(str::to_owned) {
+                g["face"] = reference(&t, &format!("/groups/{i}/face"))?;
+            }
+            out.push(g);
+        }
+        o.insert("groups".into(), Value::Array(out));
+    } else if one {
+        let gs = o
+            .entry("groups")
+            .or_insert_with(|| json!([{}]))
+            .as_array_mut()
+            .expect("groups are a list");
+        if gs.len() != 1 {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "this resize_blend has {} groups: give them all, as groups",
+                    gs.len()
+                ),
+            )
+            .with("param", "groups"));
+        }
+        let g = gs[0].as_object_mut().expect("a group");
+        if f.radius.is_some() {
+            g.retain(|k, _| k == "faces");
+        }
+        if let Some(form) = &f.form {
+            let takes: &[&str] = match form.as_str() {
+                "equal" => &["d", "faces"],
+                "distances" => &["d1", "d2", "face", "faces"],
+                "distance_angle" => &["d", "angle", "face", "faces"],
+                _ => &["faces"],
+            };
+            g.retain(|k, _| takes.contains(&k.as_str()));
+            g.insert("form".into(), json!(form));
+        }
+        for (k, x) in sizes {
+            if let Some(x) = x {
+                g.insert(k.into(), x.clone());
+            }
+        }
+        if let Some(t) = &f.chamfer_face {
+            g.insert("face".into(), reference(t, "/groups/0/face")?);
+        }
+        if let Some(refs) = faces {
+            g.insert("faces".into(), json!(refs));
+        }
+    }
+    put(o, "tolerance", &f.tolerance);
+    Ok(())
 }
 
 /// A delete's own fields from what was given, over `o` (its file's):
@@ -3192,5 +3354,106 @@ mod tests {
         assert!(draft_warnings(&part, &id, &rep("neutral", t - 0.01, t + 0.01)).is_empty());
         // Any other report (an import's, a fill's) says nothing here.
         assert!(draft_warnings(&part, &id, &json!({"sides": []})).is_empty());
+    }
+
+    #[test]
+    fn blend_edits_are_made_from_what_was_given() {
+        let part = Id::parse("p", "part").unwrap();
+        let env = crate::expr::Env::empty();
+        let n = |k: u128| format!("p/b/{k:032x}");
+        let given = |v: serde_json::Value| -> FeatureFields { serde_json::from_value(v).unwrap() };
+        // A blend delete by size, then by face too.
+        let mut f = given(json!({"target": "b", "below": "2 mm"}));
+        take_given("delete_blend", &mut f).unwrap();
+        let d = from_given(
+            "delete_blend",
+            None,
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(d.to_json()["below"], "2 mm");
+        let mut f = given(json!({"faces": [n(1)], "tolerance": "0.001 mm"}));
+        take_given("delete_blend", &mut f).unwrap();
+        let d = from_given(
+            "delete_blend",
+            Some(&d),
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(d.to_json()["faces"][0]["name"], format!("{:032x}", 1));
+        assert_eq!(d.to_json()["tolerance"], "0.001 mm");
+        // Neither left: refused at faces.
+        let mut f = given(json!({"target": "b"}));
+        take_given("delete_blend", &mut f).unwrap();
+        let e = from_given(
+            "delete_blend",
+            None,
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap_err();
+        assert_eq!(e.details["pointer"], "/faces");
+        // A resize's one group from the flags: a radius and two faces.
+        let mut f = given(json!({"target": "b", "radius": "3 mm", "faces": [n(1), n(2)]}));
+        take_given("resize_blend", &mut f).unwrap();
+        let r = from_given(
+            "resize_blend",
+            None,
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap();
+        let v = r.to_json();
+        assert_eq!(v["groups"][0]["radius"], "3 mm");
+        assert_eq!(v["groups"][0]["faces"].as_array().unwrap().len(), 2);
+        // Made a chamfer by distances: the radius goes, the faces stay.
+        let f =
+            given(json!({"form": "distances", "d1": "1 mm", "d2": "2 mm", "chamfer_face": n(9)}));
+        let r = from_given(
+            "resize_blend",
+            Some(&r),
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap();
+        let g = &r.to_json()["groups"][0];
+        assert!(g.get("radius").is_none(), "{g}");
+        assert_eq!(
+            (g["form"].as_str(), g["d2"].as_str()),
+            (Some("distances"), Some("2 mm"))
+        );
+        assert_eq!(g["face"]["name"], format!("{:032x}", 9));
+        assert_eq!(g["faces"].as_array().unwrap().len(), 2);
+        // Groups whole, with the one group's flags too: refused.
+        let mut f = given(json!({"radius": "3 mm",
+                                 "groups": [{"radius": "1 mm", "faces": [n(1)]}]}));
+        take_given("resize_blend", &mut f).unwrap();
+        let e = from_given(
+            "resize_blend",
+            Some(&r),
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Usage);
+        assert_eq!(
+            request_fields("resize_blend"),
+            crate::doc::edit::RESIZE_REQUEST
+        );
+        assert!(budgeted(&r));
     }
 }

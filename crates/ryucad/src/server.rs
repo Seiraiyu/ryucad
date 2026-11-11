@@ -4751,7 +4751,8 @@ fn feature_add(
             given.only(ty, crate::doc::body::request_fields(ty))?;
             crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
-        "move_face" | "replace_face" | "draft" | "delete_face" => {
+        "move_face" | "replace_face" | "draft" | "delete_face" | "delete_blend"
+        | "resize_blend" => {
             given.only(ty, crate::tweak::request_fields(ty))?;
             crate::tweak::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }

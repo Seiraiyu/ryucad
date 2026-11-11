@@ -1209,6 +1209,11 @@ enum FeatureCmd {
     /// rebuild, making again the blends it breaks; a delete_face (--face repeated,
     /// --seed repeated, --heal auto, cap or grow) taking faces out of a solid and
     /// healing each gap (`ryucad feature-faces` shows what a seed takes); a
+    /// delete_blend (--below LEN, --face repeated, --tolerance) deleting a solid's
+    /// fillets and chamfers by size or by face, their supports growing back (`ryucad
+    /// blends` lists them); a resize_blend (--face repeated, with --radius, or --form,
+    /// --d, --d1, --d2, --angle and --chamfer-face; or --groups) giving blends a new
+    /// size and keeping their names; a
     /// mirror (--solid, --plane, --operation) of a whole solid, joined to
     /// it unless told otherwise; a split (--target, --plane, or --tool
     /// BODY, or --tool-face FACE...; --flip, --keep): the target keeps the
@@ -2936,8 +2941,9 @@ struct FieldArgs {
     /// on); a fill's side, in order with --edge.
     #[arg(long = "curve", value_name = "CURVE")]
     curve: Vec<String>,
-    /// A fill's or a sew's tolerance: how far its sides, or the sheets'
-    /// edges, may be apart.
+    /// A fill's or a sew's tolerance (how far its sides, or the sheets'
+    /// edges, may be apart), or a blend edit's recognition tolerance (10 µm
+    /// when not given).
     #[arg(long, value_name = "LENGTH")]
     tolerance: Option<String>,
     /// A fill's sides as written: --edge, --curve and --tangent in order.
@@ -3152,6 +3158,15 @@ struct FieldArgs {
     /// neighbours grow; the default), cap or grow.
     #[arg(long, value_name = "HOW")]
     heal: Option<String>,
+    /// A delete_blend's size: every fillet and chamfer at most this length goes (a
+    /// fillet's radius, a chamfer's larger distance), closed over the chains and corners
+    /// it reaches (`ryucad blends <part> --below LEN` lists them).
+    #[arg(long, value_name = "LENGTH")]
+    below: Option<String>,
+    /// A resize_blend's chamfer group: the face its --d1 (or its --d with --angle) runs
+    /// along, one of the chamfer's two supports. --face names the blends it resizes.
+    #[arg(long, value_name = "REFERENCE")]
+    chamfer_face: Option<String>,
     /// The surface a replace_face gives the --face values after it, until the next
     /// --with: a face <part>/<solid>/<name> (its surface whole), or a plane (xy, a datum
     /// plane <part>/<datum>, a sketch).
@@ -3512,6 +3527,8 @@ impl FieldArgs {
             topology: self.topology.clone(),
             blends: self.blends.clone(),
             heal: self.heal.clone(),
+            below: self.below.clone().map(Value::String),
+            chamfer_face: self.chamfer_face.clone(),
             seeds: None,
             radius: self.radius.clone().map(Value::String),
             edges: (!self.edges.is_empty() && !ordered).then(|| self.edges.clone()),
@@ -6758,6 +6775,43 @@ mod tests {
             );
             assert_eq!(f.make_solid, Some(false));
             assert_eq!(f.tolerance, Some(json!("0.02mm")));
+        });
+    }
+
+    #[test]
+    fn blend_edits_take_below_and_a_chamfer_face() {
+        on_cli_stack(|| {
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "resize_blend",
+                "--form",
+                "distances",
+                "--d1",
+                "1mm",
+                "--d2",
+                "2mm",
+                "--chamfer-face",
+                "p/b/aa",
+                "--face",
+                "p/b/bb",
+            ])
+            .unwrap();
+            assert_eq!(f.chamfer_face.as_deref(), Some("p/b/aa"));
+            assert_eq!(f.face.as_deref(), Some("p/b/bb"));
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "delete_blend",
+                "--below",
+                "2mm",
+            ])
+            .unwrap();
+            assert_eq!(f.below, Some(json!("2mm")));
         });
     }
 

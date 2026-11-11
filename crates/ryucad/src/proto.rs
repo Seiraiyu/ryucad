@@ -429,6 +429,14 @@ pub struct FeatureFields {
     /// takes as its seeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seeds: Option<Vec<String>>,
+    /// A delete_blend's size: every blend at most this length goes (a
+    /// fillet's radius, a chamfer's larger distance; `""` takes it away).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub below: Option<Value>,
+    /// A resize_blend's one chamfer group: the face its first distance
+    /// runs along, `<part>/<solid>/<name>` (its blends are `faces`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chamfer_face: Option<String>,
     /// A path's segments in order, replacing them all: each a curve as
     /// text (an edge `<part>/<solid>/<name>`, a sketch's line, arc or
     /// circle `<part>/<sketch>/<entity>`, a path or helix
