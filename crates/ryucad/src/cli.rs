@@ -322,6 +322,32 @@ enum Command {
         #[command(flatten)]
         rev: RevArg,
     },
+    /// The faces of the hole, boss or pocket a face belongs to, as a delete_face
+    /// --seed takes them: <part>/<solid>/<name>. It is the smallest set a cap
+    /// closes, so a counterbored hole's bore is the bore alone; seed from the
+    /// counterbore's wall to take it all.
+    FeatureFaces {
+        face: String,
+        #[command(flatten)]
+        rev: RevArg,
+    },
+    /// A solid's fillets, chamfers and ball corners as delete_blend and resize_blend
+    /// read them (the part's one solid unless named): each blend's faces, kind and size,
+    /// the faces it rolls on and its chain. --below LEN lists only what `feature add
+    /// <part> delete_blend --below LEN` deletes.
+    Blends {
+        part: String,
+        solid: Option<String>,
+        /// Recognition's tolerance: how far a face may be from a fillet's or chamfer's
+        /// form and be read as one (0.01 mm by default; up to 0.1 mm).
+        #[arg(long, value_name = "LENGTH")]
+        tolerance: Option<String>,
+        /// Only the blends delete_blend --below takes at this size.
+        #[arg(long, value_name = "LENGTH")]
+        below: Option<String>,
+        #[command(flatten)]
+        rev: RevArg,
+    },
     /// A solid's flat pattern (the part's one sheet metal solid unless
     /// named): its outline, holes and bend lines with their notes, in
     /// millimetres. A folded solid is unfolded in memory, about --fixed
@@ -1195,7 +1221,16 @@ enum FeatureCmd {
     /// --pull; --angle; --face repeated, --face-angle, --flip, --reverse, --no-tangent)
     /// of a solid, keeping every name (offset
     /// moves every face, filling where they part; move_face --by offset moves
-    /// only the faces named, keeping the topology); a
+    /// only the faces named, keeping the topology); each face tweak takes
+    /// --topology change, letting it change the solid's topology, and --blends
+    /// rebuild, making again the blends it breaks; a delete_face (--face repeated,
+    /// --seed repeated, --heal auto, cap or grow) taking faces out of a solid and
+    /// healing each gap (`ryucad feature-faces` shows what a seed takes); a
+    /// delete_blend (--below LEN, --face repeated, --tolerance) deleting a solid's
+    /// fillets and chamfers by size or by face, their supports growing back (`ryucad
+    /// blends` lists them); a resize_blend (--face repeated, with --radius, or --form,
+    /// --d, --d1, --d2, --angle and --chamfer-face; or --groups) giving blends a new
+    /// size and keeping their names; a
     /// mirror (--solid, --plane, --operation) of a whole solid, joined to
     /// it unless told otherwise; a split (--target, --plane, or --tool
     /// BODY, or --tool-face FACE...; --flip, --keep): the target keeps the
@@ -2849,7 +2884,8 @@ struct FieldArgs {
     /// A hole's bottom: flat (the default), or a drill point's included angle: 118.
     #[arg(long, value_name = "BOTTOM")]
     bottom: Option<String>,
-    /// A join, cut or hole a pattern repeats; repeat for several.
+    /// A join, cut or hole a pattern repeats, or a delete_face's seed: one face of a
+    /// hole, boss or pocket, deleted whole. Repeat for several.
     #[arg(long = "seed", value_name = "FEATURE")]
     seeds: Vec<String>,
     /// A linear pattern's direction: x, y, z, or a straight edge or planar face
@@ -2932,8 +2968,9 @@ struct FieldArgs {
     /// on); a fill's side, in order with --edge.
     #[arg(long = "curve", value_name = "CURVE")]
     curve: Vec<String>,
-    /// A fill's or a sew's tolerance: how far its sides, or the sheets'
-    /// edges, may be apart.
+    /// A fill's or a sew's tolerance (how far its sides, or the sheets'
+    /// edges, may be apart), or a blend edit's recognition tolerance (10 µm
+    /// when not given).
     #[arg(long, value_name = "LENGTH")]
     tolerance: Option<String>,
     /// A fill's sides as written: --edge, --curve and --tangent in order.
@@ -3135,6 +3172,28 @@ struct FieldArgs {
     /// refused (tangency_broken).
     #[arg(long)]
     no_tangent: bool,
+    /// Let a face tweak change the solid's topology: keep (the default) or change, which
+    /// lets faces grow over their neighbours, shrink away or split, and edges and vertices
+    /// come and go.
+    #[arg(long, value_name = "KEEP|CHANGE")]
+    topology: Option<String>,
+    /// Make again the fillets and chamfers a face tweak breaks: keep (the default) or
+    /// rebuild.
+    #[arg(long, value_name = "KEEP|REBUILD")]
+    blends: Option<String>,
+    /// How a delete_face heals each gap: auto (a cap where one closes it, else its
+    /// neighbours grow; the default), cap or grow.
+    #[arg(long, value_name = "HOW")]
+    heal: Option<String>,
+    /// A delete_blend's size: every fillet and chamfer at most this length goes (a
+    /// fillet's radius, a chamfer's larger distance), closed over the chains and corners
+    /// it reaches (`ryucad blends <part> --below LEN` lists them).
+    #[arg(long, value_name = "LENGTH")]
+    below: Option<String>,
+    /// A resize_blend's chamfer group: the face its --d1 (or its --d with --angle) runs
+    /// along, one of the chamfer's two supports. --face names the blends it resizes.
+    #[arg(long, value_name = "REFERENCE")]
+    chamfer_face: Option<String>,
     /// The surface a replace_face gives the --face values after it, until the next
     /// --with: a face <part>/<solid>/<name> (its surface whole), or a plane (xy, a datum
     /// plane <part>/<datum>, a sketch).
@@ -3492,6 +3551,12 @@ impl FieldArgs {
             } else {
                 self.tangent
             },
+            topology: self.topology.clone(),
+            blends: self.blends.clone(),
+            heal: self.heal.clone(),
+            below: self.below.clone().map(Value::String),
+            chamfer_face: self.chamfer_face.clone(),
+            seeds: None,
             radius: self.radius.clone().map(Value::String),
             edges: (!self.edges.is_empty() && !ordered).then(|| self.edges.clone()),
             form: self.form.clone(),
@@ -4906,6 +4971,23 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Sheet { part, solid, rev } => Request::SheetGet {
             part: part.clone(),
             solid: solid.clone(),
+            rev: rev.rev.clone(),
+        },
+        Command::FeatureFaces { face, rev } => Request::FeatureFacesGet {
+            face: face.clone(),
+            rev: rev.rev.clone(),
+        },
+        Command::Blends {
+            part,
+            solid,
+            tolerance,
+            below,
+            rev,
+        } => Request::BlendsGet {
+            part: part.clone(),
+            solid: solid.clone(),
+            tolerance: tolerance.clone(),
+            below: below.clone(),
             rev: rev.rev.clone(),
         },
         Command::Flat {
@@ -6743,6 +6825,43 @@ mod tests {
         });
     }
 
+    #[test]
+    fn blend_edits_take_below_and_a_chamfer_face() {
+        on_cli_stack(|| {
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "resize_blend",
+                "--form",
+                "distances",
+                "--d1",
+                "1mm",
+                "--d2",
+                "2mm",
+                "--chamfer-face",
+                "p/b/aa",
+                "--face",
+                "p/b/bb",
+            ])
+            .unwrap();
+            assert_eq!(f.chamfer_face.as_deref(), Some("p/b/aa"));
+            assert_eq!(f.face.as_deref(), Some("p/b/bb"));
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "delete_blend",
+                "--below",
+                "2mm",
+            ])
+            .unwrap();
+            assert_eq!(f.below, Some(json!("2mm")));
+        });
+    }
+
     /// What `ryucad <args>` sends as a feature's fields, after the passes
     /// `main` makes over the command line.
     fn sent(args: &[&str]) -> Result<FeatureFields> {
@@ -6953,6 +7072,38 @@ mod tests {
             ])
             .unwrap_err();
             assert_eq!(e.code, Code::Usage);
+        });
+    }
+
+    #[test]
+    fn a_tweaks_topology_and_blends_parse() {
+        on_cli_stack(|| {
+            let cli = Cli::try_parse_from([
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "move_face",
+                "--direction",
+                "z",
+                "--distance",
+                "1mm",
+                "--face",
+                "p/b/x",
+                "--topology",
+                "change",
+                "--blends",
+                "rebuild",
+            ])
+            .unwrap();
+            let Command::Feature(FeatureCmd::Add { fields, .. }) = &cli.command else {
+                panic!()
+            };
+            let f = fields.to_fields();
+            assert_eq!(
+                (f.topology.as_deref(), f.blends.as_deref()),
+                (Some("change"), Some("rebuild"))
+            );
         });
     }
 }

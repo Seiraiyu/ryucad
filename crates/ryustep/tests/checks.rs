@@ -51,8 +51,13 @@ fn files(dir: &str) -> Vec<PathBuf> {
 
 /// Each distinct body healed from the file, with its representation.
 fn bodies(path: &Path) -> Vec<(u64, Body)> {
+    bodies_keyed(path, OpKey(7))
+}
+
+/// [`bodies`] healed under `key`.
+fn bodies_keyed(path: &Path, key: OpKey) -> Vec<(u64, Body)> {
     let opts = ReadOptions {
-        key: OpKey(7),
+        key,
         heal: Default::default(),
     };
     let model = read(&std::fs::read(path).unwrap(), &opts).unwrap();
@@ -257,6 +262,152 @@ fn coincident_halves_sharing_their_meridians_check() {
     };
     let (rep, body) = bodies(&path).remove(0);
     assert_eq!(rep, 2155);
+    assert_eq!(named(&body, &check_intersections(&body)), []);
+}
+
+/// KiCad's 3D models, fetched by `scripts/fetch-kicad.sh` (CC-BY-SA-4.0
+/// with KiCad's exception: never committed). `None` (or a panic with
+/// `RYUEDA_REQUIRE_KICAD=1`) when they aren't there.
+fn kicad(name: &str) -> Option<PathBuf> {
+    let dir = std::env::var_os("RYUEDA_KICAD_CORPUS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/kicad"));
+    let path = dir.join("kicad-packages3D-9.0.9").join(name);
+    if path.exists() {
+        return Some(path);
+    }
+    assert!(
+        std::env::var("RYUEDA_REQUIRE_KICAD").as_deref() != Ok("1"),
+        "{} missing: run scripts/fetch-kicad.sh",
+        path.display()
+    );
+    None
+}
+
+/// #302: KiCad's CP_Radial_D12.5mm can. Its rim spline is tangent to the
+/// wall's cylinder along the rim's edge with the wall's other sector,
+/// sharing one vertex with the wall (four pairs), and its bottom rounds
+/// are sectors of one torus written as revolutions turned and mirrored
+/// about the axis (three pairs): seven `CannotCheck` pairs on main, none
+/// now, in under 30 s on one thread with `RYUKEI_BARS=1`.
+#[test]
+#[ignore = "needs the KiCad corpus (scripts/fetch-kicad.sh)"]
+fn cp_radial_rims_and_rounds_check() {
+    let _serial = serial();
+    let Some(path) = kicad("Capacitor_THT.3dshapes/CP_Radial_D12.5mm_P5.00mm.step") else {
+        return;
+    };
+    // Healed as ryucad imports it (part `body`, feature `body`), as
+    // step-hunt found it: under `OpKey(7)` healing refuses the can with
+    // two of its wall's cylinders overlapping, on main as here.
+    let key = OpKey::from_bytes(b"ryucad.feature\0body\0body");
+    let (_, body) = bodies_keyed(&path, key).remove(0);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let t = std::time::Instant::now();
+    let faults = pool.install(|| check_intersections(&body));
+    eprintln!("CP_Radial_D12.5mm: {:?}", t.elapsed());
+    assert_eq!(named(&body, &faults), []);
+    assert!(
+        !bars() || t.elapsed().as_secs_f64() < 30.0,
+        "{:?}",
+        t.elapsed()
+    );
+}
+
+/// #322: KiCad's two CP_Radial_D8.0mm cans. Their top is a ring of
+/// torus sectors (`SURFACE_OF_REVOLUTION`s of one circle) whose healed
+/// corners leave gaps of a few nanometres between pcurves; a ray from a
+/// neighbour's rim slipped through one, so healing read sectors that only
+/// abut as overlapping and its self-union failed (`FacesOverlap`). Now
+/// each heals as one solid, without a repair, and checks clean in under
+/// 30 s on one thread with `RYUKEI_BARS=1`.
+#[test]
+#[ignore = "needs the KiCad corpus (scripts/fetch-kicad.sh)"]
+fn cp_radial_d8_cans_heal_and_check() {
+    let _serial = serial();
+    let key = OpKey::from_bytes(b"ryucad.feature\0body\0body");
+    for name in [
+        "Capacitor_THT.3dshapes/CP_Radial_D8.0mm_P2.50mm.step",
+        "Capacitor_THT.3dshapes/CP_Radial_D8.0mm_P5.00mm.step",
+    ] {
+        let Some(path) = kicad(name) else {
+            return;
+        };
+        let bodies = bodies_keyed(&path, key);
+        assert_eq!(bodies.len(), 1, "{name}");
+        let body = &bodies[0].1;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let t = std::time::Instant::now();
+        let faults = pool.install(|| check_intersections(body));
+        eprintln!("{name}: {:?}", t.elapsed());
+        assert_eq!(named(body, &faults), [], "{name}");
+        assert!(
+            !bars() || t.elapsed().as_secs_f64() < 30.0,
+            "{name}: {:?}",
+            t.elapsed()
+        );
+    }
+}
+
+/// #550: KiCad's L_Wurth_WE-HCFT-2012 inductor. Its four solids overlap,
+/// so ryustep heals each alone and unites them; one face pair (the coil's
+/// spline face against a lead's cylinder) traced 23.5M units in 25 s on
+/// main before the union refused (26 to 31 s in all). Under the union
+/// scope's cap (`1 << 24` units a pair) the import answers in 19.9 s on
+/// one thread on cox-worker-2 (AMD Ryzen 7 9700X, load 2): the file's own
+/// `FacesOverlap`, or a solid that checks clean. With `RYUKEI_BARS=1` it
+/// is asserted under 25 s; design 444's 10 s bar is left to 16.D's
+/// record, the cap keeping the caps' rule (plan 16.B, question 495).
+#[test]
+#[ignore = "needs the KiCad corpus (scripts/fetch-kicad.sh)"]
+fn the_wurth_inductors_union_refuses_in_bounded_time() {
+    let _serial = serial();
+    let Some(path) =
+        kicad("Inductor_THT_Wurth.3dshapes/L_Wurth_WE-HCFT-2012_LeadDiameter1.5mm.step")
+    else {
+        return;
+    };
+    let opts = ReadOptions {
+        key: OpKey::from_bytes(b"ryucad.feature\0body\0body"),
+        heal: Default::default(),
+    };
+    let bytes = std::fs::read(&path).unwrap();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let t = std::time::Instant::now();
+    let model = pool.install(|| read(&bytes, &opts)).unwrap();
+    let secs = t.elapsed().as_secs_f64();
+    eprintln!("L_Wurth_WE-HCFT-2012: {secs:.1} s");
+    assert_eq!(model.bodies.len(), 1);
+    match &model.bodies[0].result {
+        Ok((body, _, _)) => assert_eq!(named(body, &check_intersections(body)), []),
+        Err(ryustep::ImportError::Heal(ryukei::HealError::FacesOverlap { .. })) => {}
+        Err(e) => panic!("{e:?}"),
+    }
+    assert!(!bars() || secs < 25.0, "{secs:.1} s");
+}
+
+/// #264: ftc_07's AP242 edition. Four planes, each tangent to a fillet
+/// torus at a saddle of its tube (a critical value of 2.6e-13 m), at the
+/// one vertex they share: the trace fails on the cells there. Traced
+/// outside a cube round the vertex within the touch reach, they settle.
+#[test]
+#[ignore = "needs the pinned corpus (scripts/fetch-corpus.sh)"]
+fn saddle_tangencies_at_shared_vertices_check() {
+    let _serial = serial();
+    let Some(path) = pinned("NIST-PMI-STEP-Files/nist_ftc_07_asme1_ap242-e2.stp") else {
+        return;
+    };
+    let (rep, body) = bodies(&path).remove(0);
+    assert_eq!(rep, 13541);
     assert_eq!(named(&body, &check_intersections(&body)), []);
 }
 

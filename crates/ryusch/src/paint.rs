@@ -195,28 +195,34 @@ pub fn draws_names(part: &crate::input::Part) -> bool {
 /// Where a pin's name is drawn: half a step inside the body from its base,
 /// reading away from the pin (up the page beside a pin on the top or
 /// bottom).
-fn name_at(at: &crate::shape::PinAt) -> (Point, Anchor) {
+fn name_at(at: &crate::shape::PinAt, size: Nm) -> (Point, Anchor) {
     let dir = at.side.step();
     let inward = [-dir[0] / GRID, -dir[1] / GRID];
     let off = GRID / 2;
     let p = [at.base[0] + inward[0] * off, at.base[1] + inward[1] * off];
     match at.side {
-        Side::Left => ([p[0], p[1] - SIZE / 3], Anchor::Start),
-        Side::Right => ([p[0], p[1] - SIZE / 3], Anchor::End),
-        Side::Up => ([p[0] + SIZE / 3, p[1]], Anchor::End),
-        Side::Down => ([p[0] + SIZE / 3, p[1]], Anchor::Start),
+        Side::Left => ([p[0], p[1] - size / 3], Anchor::Start),
+        Side::Right => ([p[0], p[1] - size / 3], Anchor::End),
+        Side::Up => ([p[0] + size / 3, p[1]], Anchor::End),
+        Side::Down => ([p[0] + size / 3, p[1]], Anchor::Start),
     }
 }
 
 /// The box a pin's name takes, as [`sheet`] draws it.
 pub fn name_box(name: &str, at: &crate::shape::PinAt) -> Rect {
-    let (p, anchor) = name_at(at);
+    name_box_sized(name, at, SIZE)
+}
+
+/// The box a pin's name takes drawn at `size`: what ryueda's symbol lint
+/// measures a standards' name size by.
+pub fn name_box_sized(name: &str, at: &crate::shape::PinAt, size: Nm) -> Rect {
+    let (p, anchor) = name_at(at, size);
     if at.side.horizontal() {
-        crate::font::text_box(name, SIZE, p, anchor)
+        crate::font::text_box(name, size, p, anchor)
     } else {
         // Reading up the page: turned a quarter counterclockwise about its
         // anchor.
-        let flat = crate::font::text_box(name, SIZE, [0, 0], anchor);
+        let flat = crate::font::text_box(name, size, [0, 0], anchor);
         Rect::new(
             [p[0] - flat.max[1], p[1] + flat.min[0]],
             [p[0] - flat.min[1], p[1] + flat.max[0]],
@@ -456,7 +462,7 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
                 *arms.entry((n, route::node_of(at.end))).or_default() += 1;
             }
             if names && !pin.name.is_empty() {
-                let (p, anchor) = name_at(&at);
+                let (p, anchor) = name_at(&at, SIZE);
                 items.push(Item::Text {
                     text: pin.name.clone(),
                     at: p,
@@ -596,6 +602,21 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_name_box_at_its_size_is_the_drawn_one_at_the_drawn_size() {
+        let b = crate::testing::seeded(1, 2);
+        let part = b
+            .parts
+            .iter()
+            .find(|p| draws_names(p) && !p.pins.is_empty())
+            .unwrap();
+        let sh = crate::shape::Shape::of(part, crate::geom::Place::new([0, 0], 0, false));
+        let at = &sh.pins[0];
+        assert_eq!(name_box("VDD", at), name_box_sized("VDD", at, SIZE));
+        let big = name_box_sized("VDD", at, 2 * SIZE);
+        assert!(big.width() > name_box("VDD", at).width());
+    }
 
     #[test]
     fn a_region_is_drawn_as_a_dashed_frame_and_a_title_tab() {

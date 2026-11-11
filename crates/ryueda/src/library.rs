@@ -11,6 +11,7 @@ use crate::footprint::{self, Footprint, Model};
 use crate::id::Id;
 use crate::libcomp::{self, LibComp};
 use crate::source::{Kind, Source, join};
+use crate::standards::{self, Standards};
 use crate::symbol::{self, Symbol};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
@@ -95,6 +96,8 @@ pub struct Library {
     pub components: BTreeMap<Id, Loaded<LibComp>>,
     /// By file name (`r_0402.step`).
     pub models: BTreeMap<String, ModelFile>,
+    /// `library/standards.json` as read, if the library has one.
+    pub standards: Option<Loaded<Standards>>,
     /// Files in the library that are none of these: a bad name, or a
     /// folder or file ryueda doesn't know.
     pub faults: Vec<Fault>,
@@ -138,8 +141,18 @@ pub fn load(src: &dyn Source, alias: &str, base: &str) -> Result<Library> {
     hasher.update(b"ryueda.library.1");
     // Every file, in path order, for the revision and the loaders.
     let mut files: BTreeMap<&'static str, Vec<Named>> = BTreeMap::new();
+    let mut standards_bytes: Option<Arc<[u8]>> = None;
     for (name, kind) in src.list(&dir)? {
         let at = join(&dir, &name);
+        if name == standards::FILE && kind == Kind::File {
+            let bytes = src
+                .read_shared(&at)?
+                .ok_or_else(|| Error::new(Code::NotFound, format!("{at} vanished")))?;
+            piece(&mut hasher, name.as_bytes());
+            piece(&mut hasher, &bytes);
+            standards_bytes = Some(bytes);
+            continue;
+        }
         let known = [SYMBOLS, FOOTPRINTS, COMPONENTS, MODELS]
             .into_iter()
             .find(|f| *f == name);
@@ -161,6 +174,23 @@ pub fn load(src: &dyn Source, alias: &str, base: &str) -> Result<Library> {
             files.entry(folder).or_default().push((file, bytes));
         }
     }
+    let standards = standards_bytes.map(|bytes| {
+        let path = join(&dir, standards::FILE);
+        match doc::read::<Standards>(&bytes, &path, standards::KIND, standards::FORMAT) {
+            Ok(s) => Loaded {
+                faults: s
+                    .check()
+                    .into_iter()
+                    .map(|f| f.with("path", &path))
+                    .collect(),
+                item: Ok(s),
+            },
+            Err(e) => Loaded {
+                item: Err(e),
+                faults: Vec::new(),
+            },
+        }
+    });
     let take = |folder: &str| files.get(folder).cloned().unwrap_or_default();
     let symbols = read_all(&take(SYMBOLS), &dir, SYMBOLS, &mut faults, |b, p| {
         let s: Symbol = doc::read(b, p, symbol::KIND, symbol::FORMAT)?;
@@ -216,6 +246,7 @@ pub fn load(src: &dyn Source, alias: &str, base: &str) -> Result<Library> {
         footprints,
         components,
         models,
+        standards,
         faults,
     })
 }
@@ -369,6 +400,34 @@ pub(crate) mod tests {
         .into_iter()
         .map(|(p, b)| (p.to_owned(), b))
         .collect()
+    }
+
+    #[test]
+    fn a_standards_file_is_read_with_its_faults_and_its_revision() {
+        let plain = load(&files(STEP), "self", "").unwrap();
+        assert!(plain.standards.is_none());
+        let mut fs = files(STEP);
+        fs.insert(
+            "library/standards.json".into(),
+            b"{\"format\": 1, \"kind\": \"ryueda.standards\", \"shapes\": \"iec\"}\n".to_vec(),
+        );
+        let lib = load(&fs, "self", "").unwrap();
+        assert!(lib.faults.is_empty(), "{:?}", lib.faults);
+        let st = lib.standards.as_ref().unwrap();
+        assert_eq!(
+            st.item.as_ref().unwrap().shapes,
+            crate::standards::Shapes::Iec
+        );
+        assert_ne!(lib.revision, plain.revision);
+        fs.insert(
+            "library/standards.json".into(),
+            b"{\"format\": 1, \"kind\": \"ryueda.standards\", \"grid_nm\": 0}\n".to_vec(),
+        );
+        let bad = load(&fs, "self", "").unwrap();
+        let f = &bad.standards.as_ref().unwrap().faults[0];
+        assert_eq!(f.error.code, Code::StandardsInvalid);
+        assert_eq!(f.error.details["path"], "library/standards.json");
+        assert_eq!(f.error.details["pointer"], "/grid_nm");
     }
 
     pub const STEP: &[u8] = b"ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((''),'2;1');\nFILE_NAME('r','',(''),(''),'','','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n#1=CARTESIAN_POINT('',(0.,0.,0.));\nENDSEC;\nEND-ISO-10303-21;\n";

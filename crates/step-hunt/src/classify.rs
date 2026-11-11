@@ -5,7 +5,8 @@
 //! differs, `<stage>/timeout/<faces>/<surfaces>`, `<stage>/crash/<exit>`,
 //! and `<stage>/slow/<faces>/<surfaces>` for a stage that passed slowly.
 //! They group mechanically; which group is one root cause is the filer's
-//! judgement.
+//! judgement. A typed refusal (`Refused`) signs nothing: the stage didn't
+//! pass, and its count says so.
 
 use crate::split::Case;
 use crate::stages::{Outcome, Ran, Stage};
@@ -32,7 +33,7 @@ fn joined(kinds: &[String]) -> String {
 pub fn of_stage(case: &Case, s: &Stage) -> Option<String> {
     let st = &s.stage;
     Some(match &s.outcome {
-        Outcome::Ok => return None,
+        Outcome::Ok | Outcome::Refused { .. } => return None,
         Outcome::Failed { error, kinds } => {
             let code = error["code"].as_str().unwrap_or("unknown");
             let mut sig = format!("{st}/{code}");
@@ -272,5 +273,24 @@ mod tests {
         assert!(key_dependent(&case(1), &ran));
         ran.key = Some(failed);
         assert!(!key_dependent(&case(1), &ran));
+    }
+
+    #[test]
+    fn a_typed_refusal_signs_nothing() {
+        let s = stage(
+            "defeature",
+            1.0,
+            Outcome::Refused {
+                error: json!({"code": "tweak_failed", "details": {"reason": "blend_lost"}}),
+            },
+        );
+        assert_eq!(of_stage(&case(6), &s), None);
+        let ran = Ran {
+            // The import passes quickly; the refusal, slow as it is, signs
+            // nothing either.
+            stages: vec![stage("import", 0.1, Outcome::Ok), s],
+            key: None,
+        };
+        assert!(findings(&case(6), &ran, 0.5).is_empty());
     }
 }

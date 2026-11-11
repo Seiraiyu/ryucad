@@ -6,8 +6,8 @@
 //! 1.5 mm across bend lines and 1,500 of 3 mm in the base; a refold folds
 //! it back. On one thread, in release: the part rebuilt cold within 1.5
 //! times the kernel's own flange, unfold, boolean and refold on the same
-//! bodies, and the folded enclosure's DXF (before it is drilled: the
-//! refolded drilled one doesn't unfold again, #606) within 0.5 s. With
+//! bodies, the folded enclosure's DXF within 0.5 s, and the refolded
+//! drilled one's (unfolded again, #606) within 2 s. With
 //! `RYUCAD_BARS=1` the bars are asserted as they are, else ten times
 //! looser. Release only.
 
@@ -159,9 +159,8 @@ fn the_bar() {
         "angle": "90 deg", "length": "20 mm", "measured": "tangent", "position": "bend_outside"}),
     );
     // The folded enclosure's DXF, its flat unfolded whole in memory, timed
-    // before anything is drilled: the refolded drilled enclosure doesn't
-    // unfold again (the kernel leaves a small hole's wall across a bend
-    // line uncertain, #606), which this bar leaves to ryukei.
+    // before anything is drilled; the refolded drilled one is exported at
+    // the end (#606).
     one_thread(|| s.rebuilt(&Id::parse("p", "part").unwrap()).map(drop)).unwrap();
     let t = Instant::now();
     let req = Request::from_rpc("export", Some(json!({"part": "p", "format": "dxf"}))).unwrap();
@@ -265,6 +264,15 @@ fn the_bar() {
     for (id, out) in &r.features {
         assert!(out.is_ok(), "{id} failed: {:?}", out.as_ref().err());
     }
+    // The refolded, drilled enclosure's flat pattern as DXF: recognized
+    // and unfolded again in memory, its holes across the bend lines
+    // radial (#606).
+    let req = Request::from_rpc("export", Some(json!({"part": "p", "format": "dxf"}))).unwrap();
+    let t = Instant::now();
+    let drilled = one_thread(|| ryucad::server::answer_live(&mut cold, None, None, req))
+        .unwrap_or_else(|e| panic!("the refolded enclosure's DXF: {e}"));
+    let drilled_s = t.elapsed().as_secs_f64();
+    let drilled_bytes = drilled.binary.expect("DXF bytes").len();
     // The kernel's own calls on the same bodies, one thread.
     let solid = |f: &str| {
         r.output(&Id::parse(f, "feature").unwrap())
@@ -335,7 +343,7 @@ fn the_bar() {
         t.elapsed().as_secs_f64()
     });
     eprintln!(
-        "the enclosure: ryucad cold {ryucad_s:.2} s, the kernel's own {kernel_s:.2} s ({:.2} times); DXF {dxf_s:.3} s, {bytes} bytes",
+        "the enclosure: ryucad cold {ryucad_s:.2} s, the kernel's own {kernel_s:.2} s ({:.2} times); DXF {dxf_s:.3} s, {bytes} bytes; refolded and drilled, DXF {drilled_s:.3} s, {drilled_bytes} bytes",
         ryucad_s / kernel_s
     );
     assert!(
@@ -346,5 +354,10 @@ fn the_bar() {
         dxf_s <= bar(0.5),
         "the DXF took {dxf_s:.3} s, over {} s",
         bar(0.5)
+    );
+    assert!(
+        drilled_s <= bar(2.0),
+        "the refolded enclosure's DXF took {drilled_s:.3} s, over {} s",
+        bar(2.0)
     );
 }

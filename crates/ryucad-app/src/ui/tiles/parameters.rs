@@ -8,9 +8,10 @@ use crate::ui::view::View;
 use eframe::egui;
 
 /// The parameters of the chosen feature's part (or the first part), each
-/// editable, with its value beside it and what reads it on hover, and a
-/// row to add one. Apply (or Enter) sends `param.set` against the revision
-/// they were read at; Revert (or Esc) puts back what was read.
+/// editable, with its value beside it, what reads it on hover, a weak
+/// `unused` under one nothing reads, and a row to add one. Apply (or
+/// Enter) sends `param.set` against the revision they were read at;
+/// Revert (or Esc) puts back what was read.
 pub fn parameters(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
     let part = view
         .chosen
@@ -54,6 +55,12 @@ pub fn parameters(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
             let r = rows.quantity(&name, &mut row.field);
             if !row.used_by.is_empty() {
                 r.on_hover_text(format!("used by {}", row.used_by.join(", ")));
+            }
+            if row.unused {
+                rows.mark(
+                    "unused",
+                    "Nothing reads it, directly or through other parameters: changing it moves no result. `ryucad param delete` removes it.",
+                );
             }
             if let Some(e) = &row.error {
                 rows.note(&format!("fails: {e}"));

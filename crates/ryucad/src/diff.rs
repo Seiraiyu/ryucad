@@ -5,6 +5,7 @@
 //! and release states); [`model`] adds what that did to the rebuilt bodies.
 
 use crate::activity::Files;
+use crate::doc::reads::{self, ReadBy};
 use ryupdm::history::Releases;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -406,21 +407,26 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
         // A tweak's groups, each on one line: a move's
         // `groups[0] = 1 mm: base/<hex>, base/<hex>`, a replacement's
         // `groups[0] = lid/<hex>: base/<hex>` (its surface first), a
-        // draft's `groups[0] = 5 deg: base/<hex>`.
+        // draft's `groups[0] = 5 deg: base/<hex>`, a resize's
+        // `groups[0] = 3 mm: base/<hex>` or
+        // `groups[1] = distances 1 mm, 2 mm from base/<hex>: base/<hex>`.
         Some("ryucad.feature")
             if matches!(
                 o.get("type").and_then(Value::as_str),
-                Some("move_face" | "replace_face" | "draft")
+                Some("move_face" | "replace_face" | "draft" | "resize_blend")
             ) =>
         {
             if let Some(Value::Array(groups)) = rest.remove("groups") {
                 for (i, g) in groups.iter().enumerate() {
-                    let head = g
-                        .get("distance")
-                        .or_else(|| g.get("angle"))
-                        .or_else(|| g.get("with"))
-                        .map(|x| reference(x).unwrap_or_else(|| scalar(x)))
-                        .unwrap_or_default();
+                    let head = if o.get("type").and_then(Value::as_str) == Some("resize_blend") {
+                        resize_head(g)
+                    } else {
+                        g.get("distance")
+                            .or_else(|| g.get("angle"))
+                            .or_else(|| g.get("with"))
+                            .map(|x| reference(x).unwrap_or_else(|| scalar(x)))
+                            .unwrap_or_default()
+                    };
                     let faces: Vec<String> = g["faces"]
                         .as_array()
                         .into_iter()
@@ -1060,6 +1066,29 @@ fn explode_step(v: &Value) -> String {
 }
 
 /// A leaf value on its line: strings bare, everything else as JSON.
+/// A resize group's size as one text: a fillet's `3 mm`, a chamfer's
+/// `equal 1 mm`, `distances 1 mm, 2 mm from base/<hex>` or
+/// `distance_angle 1 mm, 30 deg from base/<hex>`.
+fn resize_head(g: &Value) -> String {
+    if let Some(r) = g.get("radius") {
+        return scalar(r);
+    }
+    let form = g.get("form").map(scalar).unwrap_or_default();
+    let sizes: Vec<String> = ["d", "d1", "d2", "angle"]
+        .iter()
+        .filter_map(|k| g.get(*k))
+        .map(scalar)
+        .collect();
+    let mut head = format!("{form} {}", sizes.join(", "));
+    if let Some(f) = g.get("face") {
+        head.push_str(&format!(
+            " from {}",
+            reference(f).unwrap_or_else(|| scalar(f))
+        ));
+    }
+    head
+}
+
 fn scalar(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -1716,9 +1745,47 @@ fn parameter_changes(qa: &Map<String, Value>, qb: &Map<String, Value>) -> Value 
     json!({"added": added, "removed": removed, "changed": changed})
 }
 
+/// Gives each entry of a `parameters` block `read_by: {from, to}`: who
+/// reaches the parameter on each side (features, explodes as
+/// `explodes/<id>`, or for the project's, parts), through other
+/// parameters too (`doc::reads`). `unused: true` when neither side has
+/// any, so a reviewer sees the change moves nothing.
+fn mark_read_by(block: &mut Value, from: &ReadBy, to: &ReadBy) {
+    for k in ["added", "removed", "changed"] {
+        for e in block[k].as_array_mut().into_iter().flatten() {
+            let name = e["name"].as_str().unwrap_or_default().to_owned();
+            let side = |by: &ReadBy| -> Vec<String> {
+                by.get(&name)
+                    .map(|s| s.iter().cloned().collect())
+                    .unwrap_or_default()
+            };
+            let (f, t) = (side(from), side(to));
+            if f.is_empty() && t.is_empty() {
+                e["unused"] = json!(true);
+            }
+            e["read_by"] = json!({"from": f, "to": t});
+        }
+    }
+}
+
+/// Whether a `parameters` block lists anything.
+fn lists_any(block: &Value) -> bool {
+    ["added", "removed", "changed"]
+        .iter()
+        .any(|k| block[k].as_array().is_some_and(|a| !a.is_empty()))
+}
+
+/// Who reaches each of `part`'s own parameters in `files`.
+fn part_read_by(files: &Files, part: &crate::doc::id::Id) -> ReadBy {
+    let project = reads::parameters_in(files, crate::doc::project::PARAMETERS);
+    let (own, readers) = reads::readers_in(files, part);
+    reads::reach_part(&own, &project, &readers).0
+}
+
 /// What changed between two versions of a project's files, `from` and
 /// `to`: the manifest, and per part its feature order, its parameters as
-/// written, an assembly's item numbers by part (`items`, when either side
+/// written, each with who reads it on each side (`read_by`, and
+/// `unused`), an assembly's item numbers by part (`items`, when either side
 /// has any), its named views (`views`, when either side has any: each
 /// view added, removed or changed by pointer), and each feature by JSON
 /// pointer (a sketch by entity and constraint, its solved positions
@@ -1782,7 +1849,16 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
             }
         }
         let order = order(&listed(from, part), &listed(to, part));
-        let parameters = parameter_changes(&parameters(from, part), &parameters(to, part));
+        let mut parameters = parameter_changes(&parameters(from, part), &parameters(to, part));
+        if lists_any(&parameters)
+            && let Ok(id) = crate::doc::id::Id::parse(part, "part")
+        {
+            mark_read_by(
+                &mut parameters,
+                &part_read_by(from, &id),
+                &part_read_by(to, &id),
+            );
+        }
         let prefixes = [
             format!("parts/{part}/"),
             format!("{}/{part}/", crate::doc::project::RELEASES),
@@ -1880,7 +1956,10 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
         v["pdm"] = json!({ "changes": settings });
     }
     // The project's parameters by name, when they differ, with the parts
-    // that read any that changed on either side: what they rebuild.
+    // that read any that changed on either side: what they rebuild. Each
+    // entry says who reads it on each side (`read_by`), and `unused` when
+    // nothing does: `parts` is what rebuilds (its revision hashes the
+    // names), `read_by` what the model reads.
     let (qa, qb) = (
         parameters_at(from, crate::doc::project::PARAMETERS),
         parameters_at(to, crate::doc::project::PARAMETERS),
@@ -1907,6 +1986,11 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
             })
             .collect();
         p["parts"] = json!(reading);
+        mark_read_by(
+            &mut p,
+            &reads::in_source(from).project,
+            &reads::in_source(to).project,
+        );
         v["parameters"] = p;
     }
     let mut materials = Vec::new();
@@ -3068,6 +3152,38 @@ mod tests {
         changes("", Some(&before), Some(&after), &mut out);
         let pointers: Vec<&str> = out.iter().map(|c| c["at"].as_str().unwrap()).collect();
         assert_eq!(pointers, ["/angle", "/flip"]);
+    }
+
+    #[test]
+    fn a_delete_and_a_tweaks_new_fields_read_a_line_each() {
+        let r = |n: u128| json!({"feature": "b", "name": format!("{n:032x}")});
+        let v = json!({"format": 20, "kind": "ryucad.feature", "type": "delete_face",
+            "target": "b", "faces": [r(1), r(2)], "seeds": [r(3)], "heal": "grow"});
+        let t = text(v.clone());
+        assert!(
+            t.starts_with("ryucad.feature delete_face (format 20)\n"),
+            "{t}"
+        );
+        for line in ["heal = grow", "target = b"] {
+            assert!(t.lines().any(|l| l == line), "{line}: {t}");
+        }
+        assert_eq!(
+            t.lines().filter(|l| l.starts_with("faces")).count(),
+            1,
+            "{t}"
+        );
+        assert_eq!(
+            t.lines().filter(|l| l.starts_with("seeds")).count(),
+            1,
+            "{t}"
+        );
+        let m = json!({"format": 20, "kind": "ryucad.feature", "type": "move_face", "target": "b",
+            "by": "translate", "direction": "z", "distance": "1 mm", "faces": [r(1)],
+            "topology": "change", "blends": "rebuild"});
+        let t = text(m.clone());
+        for line in ["topology = change", "blends = rebuild"] {
+            assert!(t.lines().any(|l| l == line), "{line}: {t}");
+        }
     }
 
     #[test]
@@ -4373,7 +4489,8 @@ mod tests {
         assert_eq!(
             v["parameters"],
             json!({"added": [], "removed": [], "parts": ["p"],
-                   "changed": [{"name": "wall", "from": "3 mm", "to": "4 mm"}]})
+                   "changed": [{"name": "wall", "from": "3 mm", "to": "4 mm",
+                                "read_by": {"from": ["p"], "to": ["p"]}}]})
         );
         // No part's own files changed.
         assert_eq!(v["parts"], json!({}));
@@ -4384,6 +4501,49 @@ mod tests {
         assert_eq!(
             text,
             "ryucad.parameters (format 1)\nparameters.gap = 1 mm\nparameters.wall = 3 mm\n"
+        );
+    }
+
+    #[test]
+    fn a_changed_parameter_says_what_reads_it_on_each_side() {
+        let manifest = json!({"default_unit": "mm", "format": 1, "kind": "ryucad.project"});
+        let part = json!({"features": ["fin"], "format": 1, "kind": "ryucad.part"});
+        let params = |p: Value| json!({"format": 1, "kind": "ryucad.parameters", "parameters": p});
+        // #672: `fin_t` is read by nothing on either side; `fin_k` reads
+        // it, and nothing reads `fin_k`. `span` stops being read.
+        let side = |t: &str, x: &str| {
+            files(&[
+                ("ryucad.json", manifest.clone()),
+                ("parameters.json", params(json!({"gap": "1 mm"}))),
+                ("parts/heatsink/part.json", part.clone()),
+                (
+                    "parts/heatsink/parameters.json",
+                    params(json!({"fin_t": t, "fin_k": "fin_t * 2", "span": "72 mm",
+                                  "fin_h": "30 mm"})),
+                ),
+                ("parts/heatsink/features/fin.json", box_x(x)),
+            ])
+        };
+        let (from, to) = (side("1.6 mm", "span"), side("1.2 mm", "fin_h"));
+        let v = structural(&from, &to, &Options::default(), &Releases::default());
+        assert_eq!(
+            v["parts"]["heatsink"]["parameters"]["changed"],
+            json!([{"name": "fin_t", "from": "1.6 mm", "to": "1.2 mm",
+                    "read_by": {"from": [], "to": []}, "unused": true}])
+        );
+        // The project's `gap`, changed and read by no part, is unused too.
+        let mut to = to;
+        to.insert(
+            "parameters.json".to_owned(),
+            crate::doc::canonical::to_string(&params(json!({"gap": "2 mm"})))
+                .into_bytes()
+                .into(),
+        );
+        let v = structural(&from, &to, &Options::default(), &Releases::default());
+        assert_eq!(
+            v["parameters"]["changed"],
+            json!([{"name": "gap", "from": "1 mm", "to": "2 mm",
+                    "read_by": {"from": [], "to": []}, "unused": true}])
         );
     }
 
@@ -4439,11 +4599,16 @@ mod tests {
             p["order"],
             json!({"added": ["c"], "removed": ["b"], "moved": ["a"]})
         );
+        // Who reads each, on each side: `w` the sketch both times; `k`
+        // (new) and `h` (gone) nothing, so unused.
         assert_eq!(
             p["parameters"],
-            json!({"added": [{"name": "k", "to": "w * 2"}],
-                   "removed": [{"name": "h", "from": "1 mm"}],
-                   "changed": [{"name": "w", "from": "3 mm", "to": "4 mm"}]})
+            json!({"added": [{"name": "k", "to": "w * 2",
+                              "read_by": {"from": [], "to": []}, "unused": true}],
+                   "removed": [{"name": "h", "from": "1 mm",
+                                "read_by": {"from": [], "to": []}, "unused": true}],
+                   "changed": [{"name": "w", "from": "3 mm", "to": "4 mm",
+                                "read_by": {"from": ["s"], "to": ["s"]}}]})
         );
         let f = &p["features"];
         assert_eq!(
@@ -4927,5 +5092,50 @@ mod tests {
             assert_eq!(textconv(b), b);
         }
         assert_eq!(textconv(b"{\"a\": [{\"b\": 1}]}"), b"json\na.0.b = 1\n");
+    }
+
+    #[test]
+    fn blend_edits_read_a_line_a_field_and_a_group() {
+        let r = |n: u128| json!({"feature": "b", "name": format!("{n:032x}")});
+        let d = json!({"format": 20, "kind": "ryucad.feature", "type": "delete_blend",
+            "target": "b", "below": "2 mm", "faces": [r(1), r(2)], "tolerance": "0.001 mm"});
+        let t = text(d);
+        assert!(
+            t.starts_with("ryucad.feature delete_blend (format 20)\n"),
+            "{t}"
+        );
+        for line in ["below = 2 mm", "target = b", "tolerance = 0.001 mm"] {
+            assert!(t.lines().any(|l| l == line), "{line}: {t}");
+        }
+        assert_eq!(
+            t.lines().filter(|l| l.starts_with("faces")).count(),
+            1,
+            "{t}"
+        );
+        let z = json!({"format": 20, "kind": "ryucad.feature", "type": "resize_blend",
+            "target": "b", "groups": [
+                {"radius": "3 mm", "faces": [r(1)]},
+                {"form": "distances", "d1": "1 mm", "d2": "2 mm", "face": r(9), "faces": [r(2), r(3)]},
+                {"form": "distance_angle", "d": "1 mm", "angle": "30 deg", "face": r(9), "faces": [r(4)]},
+                {"form": "equal", "d": "1 mm", "faces": [r(5)]}]});
+        let t = text(z);
+        let b = |n: u128| format!("b/{n:032x}");
+        for line in [
+            format!("groups[0] = 3 mm: {}", b(1)),
+            format!(
+                "groups[1] = distances 1 mm, 2 mm from {}: {}, {}",
+                b(9),
+                b(2),
+                b(3)
+            ),
+            format!(
+                "groups[2] = distance_angle 1 mm, 30 deg from {}: {}",
+                b(9),
+                b(4)
+            ),
+            format!("groups[3] = equal 1 mm: {}", b(5)),
+        ] {
+            assert!(t.lines().any(|l| l == line), "{line}: {t}");
+        }
     }
 }

@@ -43,6 +43,27 @@ pub fn target(text: &str, kind: ObjKind) -> Result<(String, Id)> {
 }
 
 /// The library a write may change: this project's own.
+/// A class as a request names it: one of the classes, or (`none_ok`)
+/// `none` for no class.
+fn class_param(text: &str, none_ok: bool) -> Result<Option<crate::standards::Class>> {
+    if none_ok && text == "none" {
+        return Ok(None);
+    }
+    crate::standards::Class::parse(text)
+        .map(Some)
+        .ok_or_else(|| {
+            Error::new(
+                Code::InvalidParam,
+                format!(
+                    "{text} isn't a class of part{}",
+                    if none_ok { " (or none)" } else { "" }
+                ),
+            )
+            .with("param", "class")
+            .with("classes", crate::standards::Class::names())
+        })
+}
+
 fn writable<'a>(p: &'a Project, alias: &str) -> Result<&'a Library> {
     if alias != SELF {
         return Err(Error::new(
@@ -187,11 +208,15 @@ fn symbol_json(lib: &Library, id: &Id) -> Result<Value> {
 
 /// `symbol.create`: a symbol called `name`, with `units` (1 by default)
 /// and the batch `ops` applied to it.
+#[allow(clippy::too_many_arguments)]
 pub fn symbol_create(
     session: &mut Session,
     name: &str,
     id: Option<&str>,
     units: Option<u32>,
+    class: Option<&str>,
+    template: Option<&str>,
+    pins: &[crate::template::PinSpec],
     ops: &[Value],
     expected: Option<&str>,
 ) -> Result<Value> {
@@ -212,11 +237,36 @@ pub fn symbol_create(
         }
         None => name::free(name, |s| lib.has(ObjKind::Symbol, s)),
     };
-    let mut s = Symbol {
-        name: name.to_owned(),
-        units: units.unwrap_or(1),
-        pins: Default::default(),
-        graphics: Default::default(),
+    if template.is_none() && !pins.is_empty() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "pins are placed by a template: give --template",
+        )
+        .with("param", "pins"));
+    }
+    let class = class.map(|c| class_param(c, false)).transpose()?.flatten();
+    let mut s = match template {
+        Some(t) => {
+            let Some(tc) = class_param(t, false)? else {
+                unreachable!("none is refused")
+            };
+            if class.is_some_and(|c| c != tc) || units.is_some_and(|u| u != 1) {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("a {t} template draws one unit of class {t}"),
+                )
+                .with("param", "template"));
+            }
+            let (st, _) = p.standards_for(SELF)?;
+            crate::template::template(name, tc, pins, &st)?
+        }
+        None => Symbol {
+            name: name.to_owned(),
+            units: units.unwrap_or(1),
+            class,
+            pins: Default::default(),
+            graphics: Default::default(),
+        },
     };
     let applied = edit::apply(&mut s, ops, p.manifest.default_unit)?;
     let errors = added_errors(&[], &s.check());
@@ -224,7 +274,7 @@ pub fn symbol_create(
         return Err(refused(&format!("symbol {id}"), &errors));
     }
     let path = lib.path(ObjKind::Symbol, &id);
-    save(session, &path, &s, symbol::KIND, symbol::FORMAT)?;
+    save(session, &path, &s, symbol::KIND, symbol::format_of(&s))?;
     let lib = session.project().library(SELF)?;
     let mut v = symbol_json(lib, &id)?;
     v["added"] = json!(applied.added);
@@ -238,6 +288,7 @@ pub fn symbol_edit(
     target: &str,
     name: Option<&str>,
     units: Option<u32>,
+    class: Option<&str>,
     ops: &[Value],
     expected: Option<&str>,
 ) -> Result<Value> {
@@ -255,6 +306,9 @@ pub fn symbol_edit(
     }
     if let Some(u) = units {
         s.units = u;
+    }
+    if let Some(c) = class {
+        s.class = class_param(c, true)?;
     }
     let applied = edit::apply(&mut s, ops, p.manifest.default_unit)?;
     let users = symbol_users(lib, &id);
@@ -279,7 +333,7 @@ pub fn symbol_edit(
         return Err(refused(&format!("symbol {id}"), &errors));
     }
     let path = lib.path(ObjKind::Symbol, &id);
-    save(session, &path, &s, symbol::KIND, symbol::FORMAT)?;
+    save(session, &path, &s, symbol::KIND, symbol::format_of(&s))?;
     let p = session.project();
     let mut v = symbol_json(p.library(SELF)?, &id)?;
     v["added"] = json!(applied.added);

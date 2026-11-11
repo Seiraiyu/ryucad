@@ -226,6 +226,7 @@ pub(crate) mod tests {
             views: BTreeMap::new(),
             appearance: None,
             explodes: Default::default(),
+            explode_uses: Default::default(),
             drawings: Default::default(),
             revision: String::new(),
         }

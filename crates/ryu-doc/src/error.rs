@@ -101,6 +101,15 @@ pub enum Code {
     /// A reference to a face, edge or vertex whose name the referenced
     /// feature's body no longer has.
     ReferenceUnresolved,
+    /// A reference whose face or edge a later feature split or merged, in
+    /// a role that can't take what it became (design 447): `reason`
+    /// (`one_needed`, or `carriers_differ` where the pieces don't all lie
+    /// on the old surface or curve), `candidates`, `was`, `removed_by`.
+    ReferenceSplit,
+    /// A warning: a reference whose face or edge a later feature split or
+    /// merged, followed to what it became: `role`, `reference`, `pieces`
+    /// and `by`, the feature that split or merged it.
+    ReferenceFollowed,
     /// An edge a sketch can't project: neither a line nor a circle parallel
     /// to the sketch, or one that projects to nothing.
     ProjectionUnsupported,
@@ -574,6 +583,11 @@ pub enum Code {
     /// written, and when a file has one anyway (a merge, an edit by hand)
     /// it and what reads it fail with this, and doctor reports it.
     ParameterShadows,
+    /// A warning: parameters nothing reads (design 447), once for the
+    /// project's (`scope: project`) and once per part (`part`), with
+    /// `parameters: [{name, read_by, error?}]`: `read_by` the unused
+    /// parameters that name it, `error` where it doesn't evaluate either.
+    ParameterUnused,
     /// A datum its references can't define: collinear points, parallel
     /// planes for an axis, a point on the axis it would turn about, an
     /// axis not parallel to the plane it turns, an axis with no length.
@@ -679,6 +693,12 @@ pub enum Code {
     /// (`entities`, each with its `role`) and, where there is a known way
     /// out, a `hint` are in the details.
     TweakFailed,
+    /// A direct edit (ryucad 22: a `delete_face`, or a face tweak with
+    /// `topology: change` or `blends: rebuild`) didn't finish within the
+    /// `edit.budget` preference's work units: the `feature`, what it had
+    /// `spent` and the `budget` are in the details, with a `hint`. Units
+    /// are the same on every machine, so it is kept as any refusal is.
+    EditBudgetExceeded,
     /// ryueda: an instruction naming a region (`region:<id>`) the layout
     /// no longer has, kept until released (a warning).
     RegionUnresolved,
@@ -856,6 +876,31 @@ pub enum Code {
     /// ryueda lint: four or more members of a bus between the same parts'
     /// sides drawn apart (plan 2.C).
     SchBusUnbundled,
+    /// ryueda: a symbol standards file (`library/standards.json`) whose
+    /// values its checks refuse; the file's `path` and a JSON `pointer`
+    /// are in the details (plan 2.D).
+    StandardsInvalid,
+    /// ryueda symbol lint: a pin's connection point off the standards'
+    /// grid.
+    SymPinOffGrid,
+    /// ryueda symbol lint: a pin on a side its class's standards don't
+    /// put its role on (a power pin off the top, an output on the left).
+    SymPinSide,
+    /// ryueda symbol lint: a function's pins (I2C, SPI, GPIO…) split up,
+    /// or a numbered group out of order.
+    SymPinGroup,
+    /// ryueda symbol lint: a pin longer or shorter than the standards'.
+    SymPinLength,
+    /// ryueda symbol lint: a resistor drawn to the other standard (the US
+    /// zigzag or the IEC box) than its library's (plan 2.D; was
+    /// `sch_resistor_style`).
+    SymShape,
+    /// ryueda symbol lint: a pin's name nearer its body's edge, or
+    /// another name, than the standards' margin.
+    SymBodyMargin,
+    /// ryueda symbol lint: a unit with more pins than its class draws in
+    /// one unit.
+    SymUnits,
 }
 
 impl Code {
@@ -1009,6 +1054,8 @@ mod tests {
     #[test]
     fn reference_codes() {
         for (c, name) in [
+            (Code::ReferenceSplit, "reference_split"),
+            (Code::ReferenceFollowed, "reference_followed"),
             (Code::ReferenceBody, "reference_body"),
             (Code::ReferenceNotSolid, "reference_not_solid"),
             (Code::ReferenceFacesUnmeshed, "reference_faces_unmeshed"),
@@ -1035,6 +1082,15 @@ mod tests {
     fn draft_angle_varies_code() {
         assert_eq!(json!(Code::DraftAngleVaries), json!("draft_angle_varies"));
         assert_eq!(Code::DraftAngleVaries.exit_code(), 1);
+    }
+
+    #[test]
+    fn edit_budget_code() {
+        assert_eq!(
+            json!(Code::EditBudgetExceeded),
+            json!("edit_budget_exceeded")
+        );
+        assert_eq!(Code::EditBudgetExceeded.exit_code(), 1);
     }
 
     #[test]
@@ -1145,6 +1201,17 @@ mod tests {
         assert_eq!(json!(Code::SchPaperFit), json!("sch_paper_fit"));
         assert_eq!(json!(Code::SchOffSheetLocal), json!("sch_off_sheet_local"));
         assert_eq!(json!(Code::SchBusUnbundled), json!("sch_bus_unbundled"));
+        assert_eq!(json!(Code::StandardsInvalid), json!("standards_invalid"));
+        assert_eq!(json!(Code::SymPinOffGrid), json!("sym_pin_off_grid"));
+        assert_eq!(json!(Code::SymPinSide), json!("sym_pin_side"));
+        assert_eq!(json!(Code::SymPinGroup), json!("sym_pin_group"));
+        assert_eq!(json!(Code::SymPinLength), json!("sym_pin_length"));
+        assert_eq!(json!(Code::SymShape), json!("sym_shape"));
+        assert_eq!(json!(Code::SymBodyMargin), json!("sym_body_margin"));
+        assert_eq!(json!(Code::SymUnits), json!("sym_units"));
+        for c in [Code::StandardsInvalid, Code::SymShape, Code::SymUnits] {
+            assert_eq!(c.exit_code(), 1);
+        }
         assert_eq!(json!(Code::SchFunctionSplit), json!("sch_function_split"));
         assert_eq!(json!(Code::SchRegionUntitled), json!("sch_region_untitled"));
         assert_eq!(json!(Code::LayoutConflict), json!("layout_conflict"));
@@ -1181,6 +1248,8 @@ mod tests {
         assert_eq!(Code::ApprovalRuleInvalid.exit_code(), 1);
         assert_eq!(json!(Code::ParameterShadows), json!("parameter_shadows"));
         assert_eq!(Code::ParameterShadows.exit_code(), 1);
+        assert_eq!(json!(Code::ParameterUnused), json!("parameter_unused"));
+        assert_eq!(Code::ParameterUnused.exit_code(), 1);
         assert_eq!(Code::DependencyFetchFailed.exit_code(), 4);
         assert_eq!(Code::DependencyNotFetched.exit_code(), 1);
         assert_eq!(Code::DependencyRewritten.exit_code(), 1);

@@ -12,6 +12,7 @@ pub mod drawing;
 pub mod drawing_annotation;
 pub mod drawing_lint;
 pub mod drawing_template;
+pub mod edit;
 pub mod explode;
 pub mod files;
 #[cfg(any(test, feature = "test-support"))]
@@ -26,6 +27,7 @@ pub mod materials;
 pub mod path;
 pub mod pattern;
 pub mod project;
+pub mod reads;
 pub mod redline;
 pub mod reference;
 pub mod sheet_metal;

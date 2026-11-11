@@ -1114,6 +1114,40 @@ mod tests {
     }
 
     #[test]
+    fn a_delete_follows_its_target_faces_and_seeds() {
+        let old = |k: u8| format!("{k:032x}");
+        let new = |k: u8| format!("{:032x}", k + 100);
+        let r = |k: u8| json!({"feature": "b", "name": old(k)});
+        let del = json!({"format": crate::doc::edit::FORMAT, "kind": "ryucad.feature",
+            "type": "delete_face", "target": "b", "faces": [r(1), r(2)], "seeds": [r(3)],
+            "heal": "cap"});
+        let f = files(&[("parts/a/features/d.json", del)]);
+        let rename = Rename::Feature {
+            part: "a".into(),
+            from: "b".into(),
+            to: "b-1".into(),
+        };
+        let names = BTreeMap::from([(
+            "b".to_owned(),
+            (1..=3)
+                .map(|k| (old(k), new(k)))
+                .collect::<BTreeMap<_, _>>(),
+        )]);
+        let out = renumbered(&f, &rename, &names);
+        let d = serde_json::from_slice::<Value>(&out["parts/a/features/d.json"]).unwrap();
+        let to = |k: u8| json!({"feature": "b-1", "name": new(k)});
+        assert_eq!(
+            (&d["target"], &d["faces"], &d["seeds"], &d["heal"]),
+            (
+                &json!("b-1"),
+                &json!([to(1), to(2)]),
+                &json!([to(3)]),
+                &json!("cap")
+            )
+        );
+    }
+
+    #[test]
     fn tweaks_follow_their_target_faces_and_axis() {
         let old = |k: u8| format!("{k:032x}");
         let new = |k: u8| format!("{:032x}", k + 100);
@@ -1758,5 +1792,48 @@ mod tests {
         .unwrap();
         assert_eq!(r.to(), "d5");
         assert!(rename("parts/p/part.json", "/features/x", [&a, &b, &a]).is_none());
+    }
+
+    #[test]
+    fn blend_edits_follow_their_target_faces_and_chamfer_faces() {
+        let old = |k: u8| format!("{k:032x}");
+        let new = |k: u8| format!("{:032x}", k + 100);
+        let r = |k: u8| json!({"feature": "b", "name": old(k)});
+        let del = json!({"format": crate::doc::edit::FORMAT, "kind": "ryucad.feature",
+            "type": "delete_blend", "target": "b", "below": "2 mm", "faces": [r(1)]});
+        let rz = json!({"format": crate::doc::edit::FORMAT, "kind": "ryucad.feature",
+            "type": "resize_blend", "target": "b", "groups": [
+                {"form": "distances", "d1": "1 mm", "d2": "2 mm", "face": r(2), "faces": [r(3)]}]});
+        let f = files(&[
+            ("parts/a/features/d.json", del),
+            ("parts/a/features/z.json", rz),
+        ]);
+        let rename = Rename::Feature {
+            part: "a".into(),
+            from: "b".into(),
+            to: "b-1".into(),
+        };
+        let names = BTreeMap::from([(
+            "b".to_owned(),
+            (1..=3)
+                .map(|k| (old(k), new(k)))
+                .collect::<BTreeMap<_, _>>(),
+        )]);
+        let out = renumbered(&f, &rename, &names);
+        let to = |k: u8| json!({"feature": "b-1", "name": new(k)});
+        let d = serde_json::from_slice::<Value>(&out["parts/a/features/d.json"]).unwrap();
+        assert_eq!(
+            (&d["target"], &d["faces"]),
+            (&json!("b-1"), &json!([to(1)]))
+        );
+        let z = serde_json::from_slice::<Value>(&out["parts/a/features/z.json"]).unwrap();
+        assert_eq!(
+            (
+                &z["target"],
+                &z["groups"][0]["face"],
+                &z["groups"][0]["faces"]
+            ),
+            (&json!("b-1"), &to(2), &json!([to(3)]))
+        );
     }
 }

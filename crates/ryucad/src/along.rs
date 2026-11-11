@@ -472,7 +472,15 @@ pub fn check(part: &Part, order: &[Id], id: &Id, w: &Sweep, results: &dyn Result
     match &w.profile.source {
         Source::Sketch(_) => {}
         Source::Face(GeomRef::Entity(r)) => {
-            let found = crate::reference::resolve(part, order, id, "profile", r, results)?;
+            let found = crate::reference::resolve(
+                part,
+                order,
+                id,
+                "profile",
+                crate::reference::Follow::One,
+                r,
+                results,
+            )?;
             crate::reference::plane(part, id, "profile", r, found)?;
         }
         Source::Face(_) => unreachable!("a face section is an entity, as read"),

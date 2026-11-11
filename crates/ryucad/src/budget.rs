@@ -48,7 +48,7 @@ pub const NAME_BYTES: u64 = 96;
 pub const OCCURRENCE_BYTES: u64 = 432;
 
 /// What a session holds of each verdict it keeps (`interference`,
-/// `clearance` and `mass`, by bodies and poses): 22 MiB for the benchmark
+/// `clearance` and `mass`, by bodies and poses, and `blends`, by body): 22 MiB for the benchmark
 /// root's 92,703 pairs.
 pub const VERDICT_BYTES: u64 = 256;
 
@@ -73,7 +73,7 @@ pub struct Fixed {
     /// The bytes of source of the imported files kept open, for the
     /// process (see [`crate::import::opened`]).
     pub opened_bytes: u64,
-    /// The verdicts kept: interference's, clearance's and mass's.
+    /// The verdicts kept: interference's, clearance's, mass's and blends'.
     pub verdicts: u64,
 }
 

@@ -66,32 +66,36 @@ fn resolve<'a>(
         }
     }
     let built = crate::rebuild::read(part, solids, id, f, "target", target, before)?;
-    let face = |role: &str, r: &Reference| -> Result<Name> {
-        let (_, e) = crate::reference::resolve(part, part.order(), id, role, r, before)?;
-        match e {
-            EntityId::Face(_) => Ok(r.name),
-            e => Err(crate::reference::wrong_kind(
-                part,
-                id,
-                role,
-                r,
-                crate::reference::kind(e),
-                "a face",
-            )),
-        }
+    // Each face as the names it is now: a face a later feature split is
+    // every piece (design 447).
+    let face = |role: &str, r: &Reference| -> Result<Vec<Name>> {
+        let (b, found) = crate::reference::resolve_all(part, part.order(), id, role, r, before)?;
+        found
+            .into_iter()
+            .map(|e| match e {
+                EntityId::Face(f) => Ok(b.body.face(f).expect("a live face").name),
+                e => Err(crate::reference::wrong_kind(
+                    part,
+                    id,
+                    role,
+                    r,
+                    crate::reference::kind(e),
+                    "a face",
+                )),
+            })
+            .collect()
     };
-    let open = open
-        .iter()
-        .enumerate()
-        .map(|(i, r)| face(&format!("open.{i}"), r))
-        .collect::<Result<Vec<_>>>()?;
+    let mut open_faces = Vec::new();
+    for (i, r) in open.iter().enumerate() {
+        open_faces.extend(face(&format!("open.{i}"), r)?);
+    }
+    let open = open_faces;
     let mut faces = Vec::new();
     for (i, g) in groups.iter().enumerate() {
         for (j, r) in g.faces.iter().enumerate() {
-            faces.push((
-                face(&format!("faces.{i}.faces.{j}"), r)?,
-                g.quantity.meters(),
-            ));
+            for n in face(&format!("faces.{i}.faces.{j}"), r)? {
+                faces.push((n, g.quantity.meters()));
+            }
         }
     }
     Ok(Resolved {
@@ -1054,8 +1058,14 @@ pub(crate) fn split_tool(
         }
         SplitBy::Faces(_) => {
             let refs = s.references();
-            let (from, built, names) =
-                crate::surface::resolve_faces(part, id, "split", &refs, before)?;
+            let (from, built, names) = crate::surface::resolve_faces(
+                part,
+                id,
+                "split",
+                crate::reference::Follow::One,
+                &refs,
+                before,
+            )?;
             let (sheet, _) =
                 ryukei::sheet::extract(split_extract_key(&part.id, id), &built.body, &names)
                     .map_err(|e| crate::surface::extract_error(part, id, from, &e))?;

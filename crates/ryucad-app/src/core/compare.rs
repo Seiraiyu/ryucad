@@ -135,6 +135,10 @@ pub struct Compare {
     pub removed: BTreeMap<String, Vec<String>>,
     /// What differs in each part's PDM, by part (only parts that differ).
     pub pdm: BTreeMap<String, PdmMark>,
+    /// Each part's parameter changes, by part (only parts with any).
+    pub params: BTreeMap<String, Vec<ParamChange>>,
+    /// The project's parameter changes.
+    pub project_params: Vec<ParamChange>,
     /// Faces of the working bodies that differ, by body and name (hex).
     pub faces: BTreeMap<BodyKey, BTreeMap<String, FaceMark>>,
     /// Working bodies new as a whole: added, or failing on the other side.
@@ -303,6 +307,44 @@ fn lines(f: &Value) -> Vec<String> {
     out
 }
 
+/// A parameter change as the Changes tab lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParamChange {
+    /// `fin_t: 1.6 mm → 1.2 mm`, `k added: w * 2`, `h removed (was 1 mm)`.
+    pub line: String,
+    /// Nothing reads it on either side (`diff`'s `unused`): the change
+    /// moves no result.
+    pub unused: bool,
+}
+
+/// A diff's `parameters` block as lines: added, removed, then changed.
+fn param_changes(v: &Value) -> Vec<ParamChange> {
+    let mut out = Vec::new();
+    let mut push = |e: &Value, line: String| {
+        out.push(ParamChange {
+            line,
+            unused: e["unused"] == true,
+        })
+    };
+    let name = |e: &Value| e["name"].as_str().unwrap_or("?").to_owned();
+    for e in v["added"].as_array().into_iter().flatten() {
+        push(e, format!("{} added: {}", name(e), shown(&e["to"])));
+    }
+    for e in v["removed"].as_array().into_iter().flatten() {
+        push(
+            e,
+            format!("{} removed (was {})", name(e), shown(&e["from"])),
+        );
+    }
+    for e in v["changed"].as_array().into_iter().flatten() {
+        push(
+            e,
+            format!("{}: {} → {}", name(e), shown(&e["from"]), shown(&e["to"])),
+        );
+    }
+    out
+}
+
 impl Compare {
     /// A compare with `rev` whose diff hasn't come yet.
     pub fn new(rev: &str) -> Compare {
@@ -331,6 +373,8 @@ impl Compare {
         self.features.clear();
         self.removed.clear();
         self.pdm.clear();
+        self.params.clear();
+        self.project_params = param_changes(&v["parameters"]);
         self.faces.clear();
         self.new_bodies.clear();
         self.wanted.clear();
@@ -341,6 +385,10 @@ impl Compare {
         for (part, p) in parts {
             if p["pdm"].is_object() {
                 self.pdm.insert(part.clone(), PdmMark::of(&p["pdm"]));
+            }
+            let params = param_changes(&p["parameters"]);
+            if !params.is_empty() {
+                self.params.insert(part.clone(), params);
             }
             let moved = strings(&p["order"]["moved"]);
             let features = p["features"].as_object().into_iter().flatten();
@@ -791,5 +839,48 @@ mod tests {
         assert!(c.ghosts.is_empty());
         c.failed(Error::new(ryucad::error::Code::RevNotFound, "gone"));
         assert!(c.features.is_empty() && c.error.is_some() && c.rev == "HEAD");
+    }
+
+    #[test]
+    fn parameter_changes_are_listed_and_unused_ones_marked() {
+        let mut c = Compare::new("main");
+        c.take_diff(&json!({
+            "from": {"rev": "main", "commit": "c0ffee"},
+            "to": {"rev": "working"},
+            "parts": {"heatsink": {
+                "status": "changed", "order": {"moved": []}, "features": {},
+                "parameters": {
+                    "added": [{"name": "k", "to": "w * 2",
+                               "read_by": {"from": [], "to": []}, "unused": true}],
+                    "removed": [],
+                    "changed": [{"name": "fin_t", "from": "1.6 mm", "to": "1.2 mm",
+                                 "read_by": {"from": [], "to": []}, "unused": true},
+                                {"name": "span", "from": "72 mm", "to": "80 mm",
+                                 "read_by": {"from": ["fin"], "to": ["fin"]}}]
+                }
+            }},
+            "parameters": {"added": [], "changed": [],
+                           "removed": [{"name": "gap", "from": "1 mm",
+                                        "read_by": {"from": ["heatsink"], "to": []}}],
+                           "parts": ["heatsink"]}
+        }));
+        fn line(p: &ParamChange) -> (&str, bool) {
+            (p.line.as_str(), p.unused)
+        }
+        assert_eq!(
+            c.params["heatsink"].iter().map(line).collect::<Vec<_>>(),
+            [
+                ("k added: w * 2", true),
+                ("fin_t: 1.6 mm → 1.2 mm", true),
+                ("span: 72 mm → 80 mm", false),
+            ]
+        );
+        assert_eq!(
+            c.project_params.iter().map(line).collect::<Vec<_>>(),
+            [("gap removed (was 1 mm)", false)]
+        );
+        // A diff without parameter changes lists none.
+        c.take_diff(&diff());
+        assert!(c.params.is_empty() && c.project_params.is_empty());
     }
 }

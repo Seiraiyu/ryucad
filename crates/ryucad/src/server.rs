@@ -882,6 +882,23 @@ pub(crate) fn dispatch(
         Request::SheetGet { part, solid, rev } => {
             crate::sheet_metal::report::get(session, &part, solid.as_deref(), rev.as_deref())
         }
+        Request::FeatureFacesGet { face, rev } => {
+            crate::tweak::feature_faces_get(session, &face, rev.as_deref())
+        }
+        Request::BlendsGet {
+            part,
+            solid,
+            tolerance,
+            below,
+            rev,
+        } => crate::blends::get(
+            session,
+            &part,
+            solid.as_deref(),
+            tolerance.as_deref(),
+            below.as_deref(),
+            rev.as_deref(),
+        ),
         Request::FlatGet {
             part,
             solid,
@@ -2024,9 +2041,10 @@ pub fn handle_job_raw(
     let watch = live.is_some();
     guarded(slot, root, watch, |s| {
         s.job = job.clone();
-        // A `config set heal.budget` in another process reaches this
-        // session at its next request.
+        // A `config set heal.budget` or `edit.budget` in another process
+        // reaches this session at its next request.
         s.set_heal_budget(crate::session::heal_budget());
+        s.set_edit_budget(crate::session::edit_budget());
         let a = answer_live(s, live, me, req);
         s.job = Job::default();
         // A write a cancel came too late for says so, as a daemon's does.
@@ -2549,9 +2567,12 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Boolean(b) => b.fields(),
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
-            crate::tweak::report(part, f)
-        }
+        Feature::MoveFace(_)
+        | Feature::ReplaceFace(_)
+        | Feature::Draft(_)
+        | Feature::DeleteFace(_)
+        | Feature::DeleteBlend(_)
+        | Feature::ResizeBlend(_) => crate::tweak::report(part, f),
         Feature::Datum(d) => crate::datum::report(part, d),
         Feature::Path(x) => crate::path::report(part, x),
         Feature::Sweep(w) => crate::along::feature_report(part, w),
@@ -4301,14 +4322,15 @@ fn sketch_plane(
 
 /// Refuses a feature whose references don't resolve to what they must
 /// now, in the part's current rebuild; `order` is the list as the write
-/// leaves it.
+/// leaves it. Gives the `reference_followed` warnings of those that
+/// follow a face or edge a later feature split or merged (design 447).
 fn check_references(
     session: &mut Session,
     part: &Id,
     order: &[Id],
     id: &Id,
     f: &Feature,
-) -> Result<()> {
+) -> Result<Vec<Value>> {
     // Nothing may change a reference import's body, whether or not the
     // feature references anything (a cut, a boolean). Only an import in
     // reference mode makes one, so a part without one isn't rebuilt here.
@@ -4353,14 +4375,19 @@ fn check_references(
         && !planar
         && !matches!(f, Feature::Split(s) if s.plane().is_none())
     {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let p = session.project().part(part)?.clone();
     let results = session.rebuilt(part)?;
     let q = proposed(&p, order, &[(id, f)]);
     let checked = crate::kind::check(&q, order, id, f, results)
         .and_then(|()| check_resolved(&p, order, id, f, results));
-    checked.map_err(|e| session.explain_in(part, order, e))
+    let followed = match &checked {
+        Ok(()) => crate::reference::followed_by(&q, &Solids::of_order(&q, order), id, f, results),
+        Err(_) => Vec::new(),
+    };
+    checked.map_err(|e| session.explain_in(part, order, e))?;
+    Ok(followed)
 }
 
 /// [`check_references`] against `results`.
@@ -4428,7 +4455,12 @@ fn check_resolved(
         }
         // Faces of its target, its direction, axis or surfaces their
         // kinds; what the kernel makes of them only rebuild can tell.
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
+        Feature::MoveFace(_)
+        | Feature::ReplaceFace(_)
+        | Feature::Draft(_)
+        | Feature::DeleteFace(_)
+        | Feature::DeleteBlend(_)
+        | Feature::ResizeBlend(_) => {
             crate::tweak::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
         Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
@@ -4638,7 +4670,7 @@ fn feature_add(
     }
     // A tweak sorts what it was given; with no target it acts on the part's
     // one solid, else the one its faces name. The file names it all the same.
-    if crate::doc::tweak::TYPES.contains(&ty) {
+    if crate::tweak::TYPES.contains(&ty) {
         crate::tweak::take_given(ty, &mut given.fields)?;
         if given.fields.target.is_none() && given.fields.targets.is_none() {
             let before = solids_before(p, &list, at);
@@ -4744,8 +4776,9 @@ fn feature_add(
             given.only(ty, crate::doc::body::request_fields(ty))?;
             crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
-        "move_face" | "replace_face" | "draft" => {
-            given.only(ty, crate::doc::tweak::request_fields(ty))?;
+        "move_face" | "replace_face" | "draft" | "delete_face" | "delete_blend"
+        | "resize_blend" => {
+            given.only(ty, crate::tweak::request_fields(ty))?;
             crate::tweak::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
         "base_flange" | "flange" | "unfold" | "refold" => {
@@ -4805,8 +4838,12 @@ fn feature_add(
     if f.instance().is_some() {
         check_instance(session, &pid, &list, &fid, &f)?;
     }
+    // What its references follow: a split face or edge (design 447).
+    let mut followed = Vec::new();
     if !f.connectors().is_empty() || f.instance_pattern().is_some() {
         crate::mate::check(session, &pid, &list, &fid, &f)?;
+        let r = session.rebuilt(&pid)?;
+        followed.extend(crate::mate::followed(&pid, &fid, &f, r));
     }
     let p = session.project().part(&pid)?;
     if !f.profiles().is_empty() {
@@ -4816,7 +4853,7 @@ fn feature_add(
     if let Feature::Pattern(x) = &f {
         crate::pattern::check_seeds(&proposed(p, &list, &[(&fid, &f)]), &fid, x)?;
     }
-    check_references(session, &pid, &list, &fid, &f)?;
+    followed.extend(check_references(session, &pid, &list, &fid, &f)?);
     if crate::assembly::assembles(&f) {
         let p = session.project().part(&pid)?;
         let q = proposed(p, &list, &[(&fid, &f)]);
@@ -4830,6 +4867,9 @@ fn feature_add(
     let mut v = json!({"feature": feature_report(saved, &fid, &f), "revision": revision});
     if !assemblies.is_empty() {
         v["assemblies"] = json!(assemblies);
+    }
+    if !followed.is_empty() {
+        v["warnings"] = json!(followed);
     }
     Ok(v)
 }
@@ -4985,10 +5025,15 @@ fn feature_edit(
                 given.only(ty, crate::doc::surface::request_fields(ty))?;
                 crate::surface::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
             }
-            f @ (Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_)) => {
+            f @ (Feature::MoveFace(_)
+            | Feature::ReplaceFace(_)
+            | Feature::Draft(_)
+            | Feature::DeleteFace(_)
+            | Feature::DeleteBlend(_)
+            | Feature::ResizeBlend(_)) => {
                 let ty = f.type_name();
                 crate::tweak::take_given(ty, &mut given.fields)?;
-                given.only(ty, crate::doc::tweak::request_fields(ty))?;
+                given.only(ty, crate::tweak::request_fields(ty))?;
                 crate::tweak::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
             }
             Feature::Datum(d) => {
@@ -5057,8 +5102,12 @@ fn feature_edit(
     if f.instance().is_some() && f != old {
         check_instance(session, &pid, &list, &fid, &f)?;
     }
+    // What its references follow: a split face or edge (design 447).
+    let mut followed = Vec::new();
     if (!f.connectors().is_empty() || f.instance_pattern().is_some()) && f != old {
         crate::mate::check(session, &pid, &list, &fid, &f)?;
+        let r = session.rebuilt(&pid)?;
+        followed.extend(crate::mate::followed(&pid, &fid, &f, r));
     }
     let p = session.project().part(&pid)?;
     check_solids(&proposed(p, &list, &[(&fid, &f)]), &[&fid])?;
@@ -5089,6 +5138,9 @@ fn feature_edit(
                 | Feature::MoveFace(_)
                 | Feature::ReplaceFace(_)
                 | Feature::Draft(_)
+                | Feature::DeleteFace(_)
+                | Feature::DeleteBlend(_)
+                | Feature::ResizeBlend(_)
         ) && f.targets() != old.targets())
         || ((f.base_flange().is_some()
             || f.flange().is_some()
@@ -5101,7 +5153,7 @@ fn feature_edit(
         ) && f != old)
         || f.source() != old.source()
     {
-        check_references(session, &pid, &list, &fid, &f)?;
+        followed.extend(check_references(session, &pid, &list, &fid, &f)?);
     }
     if crate::assembly::assembles(&f) {
         let p = session.project().part(&pid)?;
@@ -5117,7 +5169,8 @@ fn feature_edit(
     // edit broke them or drives an assembly they already left half
     // solved (issue #155).
     let reached = crate::mate::reached(session.project(), &pid);
-    let warnings = crate::mate::failing_warnings(session, &reached, "");
+    let mut warnings = crate::mate::failing_warnings(session, &reached, "");
+    warnings.extend(followed);
     let saved = session.project().part(&pid)?;
     let revision = &saved.revision;
     let mut v = json!({"feature": feature_report(saved, &fid, &f), "revision": revision});
@@ -5283,6 +5336,7 @@ pub(crate) fn part_report(
     id: &Id,
     occurrences: bool,
 ) -> Result<(Value, Option<String>)> {
+    let unit = session.project().manifest.default_unit;
     let part = session.project().part(id)?;
     let revision = part.revision.clone();
     let assembly = part_kind(part) == PartKind::Assembly;
@@ -5396,9 +5450,12 @@ pub(crate) fn part_report(
                 // A fill's rebuild report is what it measured (see
                 // `Made::report`), an extract's its faces.
                 Feature::Extract(_) => crate::surface::report(id, f),
-                Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
-                    crate::tweak::report(id, f)
-                }
+                Feature::MoveFace(_)
+                | Feature::ReplaceFace(_)
+                | Feature::Draft(_)
+                | Feature::DeleteFace(_)
+                | Feature::DeleteBlend(_)
+                | Feature::ResizeBlend(_) => crate::tweak::report(id, f),
                 _ => return None,
             };
             Some((fid.clone(), (f.type_name(), report)))
@@ -5431,6 +5488,9 @@ pub(crate) fn part_report(
                             | Feature::MoveFace(_)
                             | Feature::ReplaceFace(_)
                             | Feature::Draft(_)
+                            | Feature::DeleteFace(_)
+                            | Feature::DeleteBlend(_)
+                            | Feature::ResizeBlend(_)
                     )
             })
         })
@@ -5440,6 +5500,13 @@ pub(crate) fn part_report(
         crate::import::usage_warnings(session.project(), id)
     } else {
         Vec::new()
+    };
+    // References that follow a face or edge a later feature split or
+    // merged (design 447): under their features and the part's warnings.
+    session.rebuilt(id)?;
+    let followed = match (session.project().parts.get(id), session.cached(id)) {
+        (Some(p), Some(r)) => crate::reference::followed(p, r),
+        _ => Vec::new(),
     };
     let r = session.rebuilt(id)?;
     let features: Vec<Value> = r
@@ -5454,11 +5521,14 @@ pub(crate) fn part_report(
                         && let Some(i) = &m.report
                     {
                         // A fill's report under its own type, else an
-                        // import's; a draft's angles come with its own
-                        // report (`tweak::resolved`).
+                        // import's; a tweak's report comes with its own
+                        // fields (`tweak::resolved`).
                         let key = match types.get(fid).and_then(Value::as_str) {
                             Some("fill") => Some("fill"),
-                            Some("draft") => None,
+                            Some(
+                                "draft" | "move_face" | "replace_face" | "delete_face"
+                                | "delete_blend" | "resize_blend",
+                            ) => None,
                             _ => Some("import"),
                         };
                         if let Some(key) = key {
@@ -5546,7 +5616,7 @@ pub(crate) fn part_report(
                     held.as_ref().filter(|_| v["ok"] == true).and_then(|q| {
                         let f = q.features.get(fid)?.as_ref().ok()?;
                         crate::body::resolved(q, r, fid, f)
-                            .or_else(|| crate::tweak::resolved(q, r, fid, f, false))
+                            .or_else(|| crate::tweak::resolved(q, r, fid, f, false, unit))
                     })
                 {
                     for (key, x) in extra {
@@ -5580,6 +5650,13 @@ pub(crate) fn part_report(
                     v["consumes"] = json!(tools);
                 }
             }
+            let own: Vec<&Value> = followed
+                .iter()
+                .filter(|w| w["feature"] == fid.as_str())
+                .collect();
+            if !own.is_empty() {
+                v["warnings"] = json!(own);
+            }
             v
         })
         .collect();
@@ -5609,6 +5686,7 @@ pub(crate) fn part_report(
                        "failed": r.failed(), "features": features, "solids": shown});
     let mut all = None;
     let mut warnings = r.warnings(id);
+    warnings.extend(followed);
     // An assembly's model is what its instances place.
     warnings.extend(kept);
     if assembly {
@@ -7908,6 +7986,7 @@ fn inspect(
         return inspect_assembly(session, &part_id(part)?, only, entity);
     }
     let pid = part_id(part)?;
+    let unit = session.project().manifest.default_unit;
     let only = only.map(feature_id).transpose()?;
     if let Some(f) = &only {
         feature(session.project().part(&pid)?, f)?;
@@ -7935,6 +8014,9 @@ fn inspect(
                                 | Feature::MoveFace(_)
                                 | Feature::ReplaceFace(_)
                                 | Feature::Draft(_)
+                                | Feature::DeleteFace(_)
+                                | Feature::DeleteBlend(_)
+                                | Feature::ResizeBlend(_)
                         ))
             }) =>
         {
@@ -8103,7 +8185,10 @@ fn inspect(
             | Feature::Split(_)
             | Feature::MoveFace(_)
             | Feature::ReplaceFace(_)
-            | Feature::Draft(_)),
+            | Feature::Draft(_)
+            | Feature::DeleteFace(_)
+            | Feature::DeleteBlend(_)
+            | Feature::ResizeBlend(_)),
         )) = features.iter().find(|(i, _)| i == f)
     {
         let k = x.type_name();
@@ -8116,7 +8201,7 @@ fn inspect(
         let built = matches!(crate::rebuild::Results::result(result, f), Some(Ok(_)));
         if let Some(Value::Object(extra)) = held.as_ref().filter(|_| built).and_then(|q| {
             if tweak {
-                crate::tweak::resolved(q, result, f, x, true)
+                crate::tweak::resolved(q, result, f, x, true, unit)
             } else {
                 crate::body::resolved(q, result, f, x)
             }

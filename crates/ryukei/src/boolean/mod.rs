@@ -101,12 +101,50 @@ pub fn boolean_with(
     crate::work::run(work, |m| boolean_in(key, op, target, tools, m))
 }
 
+/// The union of a file's solids (ryustep's, plan 14.C) under `work`:
+/// [`boolean_with`]'s `Unite`, each pair of faces met under the union
+/// scope's cap. A pair whose trace can't settle (a coil's spline face
+/// against a lead's cylinder, #550: 23.5M units) is refused `Uncertain`
+/// in bounded units on every machine, where the trace's own cap would
+/// let it run 25 s and more. A union no pair of which reaches the cap is
+/// [`boolean_with`]'s, bit for bit.
+pub fn unite_solids_with(
+    key: OpKey,
+    target: &Body,
+    tools: &[Tool],
+    work: &Work,
+) -> Result<(Body, Journal), Error> {
+    crate::work::run(work, |m| {
+        boolean_scoped_in(
+            key,
+            BooleanOp::Unite,
+            target,
+            tools,
+            Some(crate::work::Scope::Union),
+            m,
+        )
+    })
+}
+
 /// [`boolean`] charging `m`, for operations made of booleans (shells).
 pub(crate) fn boolean_in(
     key: OpKey,
     op: BooleanOp,
     target: &Body,
     tools: &[Tool],
+    m: &Meter,
+) -> Result<(Body, Journal), Error> {
+    boolean_scoped_in(key, op, target, tools, None, m)
+}
+
+/// [`boolean_in`], each face pair of the table met under `pair`'s cap
+/// when given ([`unite_solids_with`]).
+fn boolean_scoped_in(
+    key: OpKey,
+    op: BooleanOp,
+    target: &Body,
+    tools: &[Tool],
+    pair: Option<crate::work::Scope>,
     m: &Meter,
 ) -> Result<(Body, Journal), Error> {
     // A sheet is trimmed by solids (plan 12.D); a sheet as a tool divides
@@ -142,7 +180,7 @@ pub(crate) fn boolean_in(
     }
     let ops = place::operands(target, tools)?;
     let named = |f: Fail| error(&ops, f);
-    let table = table::build(&ops, m).map_err(named)?;
+    let table = table::build_capped(&ops, table::Scope::Operands, pair, m).map_err(named)?;
     let pieces = crate::split::split_all(&ops, &table, m).map_err(named)?;
     let (kept, built) = if sheet {
         // Only the sheet's pieces are kept, by their class against the

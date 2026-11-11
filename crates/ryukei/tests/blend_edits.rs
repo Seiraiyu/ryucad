@@ -245,8 +245,9 @@ fn a_side_offset_under_its_fillet_rebuilds_it() {
     assert_eq!(names(&o), names(&f));
 }
 
-#[test]
-fn a_hole_moved_into_a_fillets_strip() {
+/// A plate 1 × 1 × 0.2 drilled through at (0.5, 0.4) with radius 0.05,
+/// its top's `-y` edge filleted at 0.1, and the name of the hole's wall.
+fn drilled_and_filleted() -> (Body, Name) {
     let (p, _) = primitive::block(K, 1.0, 1.0, 0.2, &Rigid::IDENTITY).unwrap();
     let (pin, _) = primitive::cylinder(OpKey(9), 0.05, 0.6, &Rigid::IDENTITY).unwrap();
     let tool = Tool {
@@ -266,6 +267,12 @@ fn a_hole_moved_into_a_fillets_strip() {
         .find(|&x| matches!(f.surface(f.face(x).unwrap().surface).unwrap(), Surface::Cylinder(c) if c.radius() < 0.06))
         .map(|x| f.face(x).unwrap().name)
         .unwrap();
+    (f, wall)
+}
+
+#[test]
+fn a_hole_moved_into_a_fillets_strip() {
+    let (f, wall) = drilled_and_filleted();
     let mut spec = MoveSpec {
         faces: vec![wall],
         motion: Rigid::translation(Vector3::new(0.0, -0.33, 0.0)),
@@ -292,6 +299,42 @@ fn a_hole_moved_into_a_fillets_strip() {
         v < 0.2 - fillet_loss(0.1, 1.0) && v > 0.2 - fillet_loss(0.1, 1.0) - PI * 0.05 * 0.05 * 0.2,
         "{v}"
     );
+}
+
+/// #626: the hole moved 0.33, 0.30 and 0.27 towards the fillet. At 0.30
+/// and 0.27 its plug's top circle crosses the remade fillet's tangent
+/// line, where the fillet's stretch along the plug's wall leaves the
+/// circle tangent to it; the split ordered the two by their first chords
+/// and walked out of the wall (`Uncertain` naming one face twice). Each
+/// position keeps every face name and the volume between the plate less
+/// its fillet and that less the whole hole.
+#[test]
+fn a_hole_moved_into_a_fillets_strip_at_every_position() {
+    let (f, wall) = drilled_and_filleted();
+    let mut was: Vec<Name> = f.faces().map(|x| f.face(x).unwrap().name).collect();
+    was.sort();
+    for dy in [-0.33, -0.30, -0.27] {
+        let spec = MoveSpec {
+            faces: vec![wall],
+            motion: Rigid::translation(Vector3::new(0.0, dy, 0.0)),
+            tangent: false,
+            topology: Topology::Change,
+            blends: Blends::Rebuild,
+        };
+        let (o, _) = move_faces(OpKey(5), &f, &spec).unwrap_or_else(|e| panic!("dy {dy}: {e:?}"));
+        let mut now: Vec<Name> = o.faces().map(|x| o.face(x).unwrap().name).collect();
+        now.sort();
+        assert_eq!(now, was, "dy {dy}");
+        let v = volume(&o);
+        let full = 0.2 - fillet_loss(0.1, 1.0);
+        // At 0.27 the hole barely reaches under the fillet, so the true
+        // volume is within about 1e-6 of the lower bound: the mesh's chord
+        // error (1e-5, as `near`) is allowed below it.
+        assert!(
+            v < full && v > full - PI * 0.05 * 0.05 * 0.2 - 1e-5,
+            "dy {dy}: {v}"
+        );
+    }
 }
 
 #[test]

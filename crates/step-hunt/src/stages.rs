@@ -26,6 +26,15 @@
 //! `whole_import` is imported once more alone, `--into` a part of another
 //! ID (`key`): if it builds there, no body case sees the failure, so the
 //! whole case signs it.
+//!
+//! With `--stages defeature` (design 445, plan 22.B) a body case runs only
+//! its solid `import` and `defeature`: the body's bounds (`inspect`), its
+//! blends at most a hundredth of its diagonal (`blends --below`), and if
+//! there are any a `delete_blend --below` of that size, rebuilt and
+//! checked. A panic, a hang or a body that fails `check` is a finding; a
+//! typed refusal (`tweak_failed`, but for `kernel` and `inside_out`, and
+//! `edit_budget_exceeded`) is `Refused`, counted; a body with no blend
+//! that small passes untouched. A whole-file case runs nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -65,6 +74,12 @@ pub enum Outcome {
     /// faces left out): a finding, but later stages run.
     Found {
         codes: Vec<String>,
+    },
+    /// ryucad refused, typed, where the kernel is expected to do better
+    /// one day (`defeature`'s `tweak_failed` or `edit_budget_exceeded`):
+    /// counted against the ledger's `count` lines, never a finding.
+    Refused {
+        error: Value,
     },
 }
 
@@ -759,11 +774,116 @@ pub fn transfer_counts(v: &serde_json::Value) -> std::collections::BTreeMap<Stri
 }
 
 /// Runs a case in a folder of its own under `work` (kept with `keep`).
+/// Whether an error is a typed refusal the `defeature` stage counts and
+/// doesn't file: the kernel's (`tweak_failed`, but not `kernel`, an
+/// untyped kernel error, nor `inside_out`, ryucad's guard catching a
+/// kernel fault, #692) or the edit budget's.
+pub fn typed_refusal(error: &Value) -> bool {
+    match error["code"].as_str() {
+        Some("edit_budget_exceeded") => true,
+        Some("tweak_failed") => !matches!(
+            error["details"]["reason"].as_str(),
+            None | Some("kernel" | "inside_out")
+        ),
+        _ => false,
+    }
+}
+
+/// A command's refusal as `defeature` judges it: typed, counted.
+fn refused(o: Outcome) -> Outcome {
+    match o {
+        Outcome::Failed { error, .. } if typed_refusal(&error) => Outcome::Refused { error },
+        o => o,
+    }
+}
+
+/// A body case's solid `import`, then `defeature` (see the module doc).
+fn defeature(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
+    let mut stages = Vec::new();
+    let mut p1 = PathBuf::new();
+    let imported = stage(&mut stages, ryucad, home, "import", |r| {
+        (p1, _) = r.import("p1", &case.path, "body")?;
+        Ok(())
+    });
+    if !imported {
+        return Ran { stages, key: None };
+    }
+    stage(&mut stages, ryucad, home, "defeature", |r| {
+        let v = r.cmd(&p1, &["inspect", "body"])?;
+        let b = &v["bodies"][0]["bounds"];
+        let side = |i: usize| Some(b["max"][i].as_f64()? - b["min"][i].as_f64()?);
+        let diagonal = (0..3)
+            .map(|i| side(i).map(|d| d * d))
+            .sum::<Option<f64>>()
+            .map(f64::sqrt)
+            .ok_or_else(|| Outcome::Mismatch {
+                what: "no_bounds".into(),
+                details: v.clone(),
+            })?;
+        // A hundredth of the diagonal, in millimetres (the project's unit).
+        let below = format!("{} mm", diagonal * 1e3 / 100.0);
+        let listed = r
+            .cmd(&p1, &["blends", "body", "--below", &below])
+            .map_err(refused)?;
+        if listed["blends"].as_array().is_none_or(Vec::is_empty) {
+            return Ok(());
+        }
+        r.cmd(
+            &p1,
+            &[
+                "feature",
+                "add",
+                "body",
+                "delete_blend",
+                "--id",
+                "defeature",
+                "--below",
+                &below,
+            ],
+        )
+        .map_err(refused)?;
+        // A feature that fails makes `rebuild` refuse, `rebuild_failed`,
+        // with the part's report in its details.
+        let rebuilt = match r.cmd(&p1, &["rebuild", "body"]) {
+            Ok(v) => v,
+            Err(Outcome::Failed { error, .. }) if error["code"] == "rebuild_failed" => {
+                error["details"].clone()
+            }
+            Err(o) => return Err(o),
+        };
+        let f = rebuilt["parts"][0]["features"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|f| f["id"] == "defeature")
+            .cloned()
+            .unwrap_or(Value::Null);
+        if f["ok"] != true {
+            let error = if f.is_null() {
+                json!({"code": "no_feature", "message": "the rebuild answered no defeature", "details": rebuilt})
+            } else {
+                f["error"].clone()
+            };
+            return Err(refused(Outcome::Failed {
+                error,
+                kinds: Vec::new(),
+            }));
+        }
+        r.cmd(&p1, &["check", "body"]).map(|_| ())
+    });
+    Ran { stages, key: None }
+}
+
 pub fn run(ryucad: &Ryucad, case: &Case, work: &Path, keep: bool) -> Ran {
     let home = work.join("runs").join(&case.id);
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::create_dir_all(&home);
     let ran = match case.kind {
+        Kind::Body if ryucad.defeature => defeature(ryucad, case, &home),
+        Kind::Whole if ryucad.defeature => Ran {
+            stages: Vec::new(),
+            key: None,
+        },
         Kind::Body => body(ryucad, case, &home),
         Kind::Whole => whole(ryucad, case, &home),
         Kind::Open => Ran {
@@ -916,5 +1036,19 @@ mod tests {
         assert_eq!(names, ["loose", "top"]);
         assert_eq!(r[1].1.len(), 3);
         assert_eq!(r[1].1["pin"].2, 0);
+    }
+
+    #[test]
+    fn typed_refusals_are_told_from_faults() {
+        let e = |code: &str, reason: Option<&str>| match reason {
+            Some(r) => json!({"code": code, "details": {"reason": r}}),
+            None => json!({"code": code, "details": {}}),
+        };
+        assert!(typed_refusal(&e("tweak_failed", Some("blend_lost"))));
+        assert!(typed_refusal(&e("tweak_failed", Some("gap_not_healed"))));
+        assert!(typed_refusal(&e("edit_budget_exceeded", None)));
+        assert!(!typed_refusal(&e("tweak_failed", Some("kernel"))));
+        assert!(!typed_refusal(&e("tweak_failed", Some("inside_out"))));
+        assert!(!typed_refusal(&e("internal", None)));
     }
 }

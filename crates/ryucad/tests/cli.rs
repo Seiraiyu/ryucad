@@ -1124,6 +1124,8 @@ fn every_protocol_method_has_a_command() {
         ("measure", &["measure"]),
         ("mass", &["mass"]),
         ("sheet.get", &["sheet"]),
+        ("feature_faces.get", &["feature-faces"]),
+        ("blends.get", &["blends"]),
         ("flat.get", &["flat"]),
         ("clearance", &["clearance"]),
         ("deps.add", &["deps", "add"]),
@@ -1924,6 +1926,91 @@ fn diff_and_check_through_the_cli() {
     p.fails(&["diff", "--from", "nowhere"], "rev_not_found", 1);
     p.fails(&["rebuild", "--rev", "HEAD~5"], "rev_not_found", 1);
     p.fails(&["check", "--against", "nowhere"], "rev_not_found", 1);
+}
+
+/// #672: a parameter nothing reads is a warning `check` passes with, and
+/// `diff` says a change to it reaches nothing, both ways.
+#[test]
+fn unused_parameters_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "heatsink"]);
+    p.ok(&[
+        "param",
+        "set",
+        "heatsink",
+        "fin_n=9",
+        "fin_h=30 mm",
+        "fin_t=1.6 mm",
+        "span=72 mm",
+        "fin_k=fin_t * 2",
+    ]);
+    // The fin never reads `fin_t`.
+    p.ok(&[
+        "feature",
+        "add",
+        "heatsink",
+        "box",
+        "--id",
+        "fin",
+        "--param",
+        "x=span",
+        "--param",
+        "y=fin_h",
+        "--param",
+        "z=span / (fin_n - 1)",
+    ]);
+    let c = p.ok(&["check"]);
+    assert_eq!(c["passed"], true, "{c}");
+    let unused: Vec<&Value> = c["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "parameter_unused")
+        .collect();
+    assert_eq!(unused.len(), 1, "{c}");
+    assert_eq!(
+        (&unused[0]["severity"], &unused[0]["part"]),
+        (&json!("warning"), &json!("heatsink"))
+    );
+    assert_eq!(
+        unused[0]["parameters"],
+        json!([{"name": "fin_k", "read_by": []}, {"name": "fin_t", "read_by": ["fin_k"]}])
+    );
+    let listed = p.ok(&["param", "list", "heatsink"]);
+    let marked: Vec<&str> = listed["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["unused"] == true)
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(marked, ["fin_k", "fin_t"]);
+    let doctor = p.ok(&["doctor"]);
+    assert_eq!(doctor["healthy"], false, "{doctor}");
+    // Committed, then `fin_t` changed on a branch: the change reaches
+    // nothing.
+    p.git(&["init", "-q", "-b", "main"]);
+    p.ok(&["git", "install"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start"]);
+    p.git(&["switch", "-q", "-c", "fan-v2"]);
+    p.ok(&["param", "set", "heatsink", "fin_t=1.2 mm"]);
+    p.git(&["commit", "-q", "-am", "thinner fins"]);
+    let d = p.ok(&["diff", "--from", "main", "--to", "fan-v2"]);
+    assert_eq!(
+        d["parts"]["heatsink"]["parameters"]["changed"],
+        json!([{"name": "fin_t", "from": "1.6 mm", "to": "1.2 mm",
+                "read_by": {"from": [], "to": []}, "unused": true}])
+    );
+    // A change the fin reads says so.
+    p.ok(&["param", "set", "heatsink", "span=80 mm"]);
+    let d = p.ok(&["diff"]);
+    assert_eq!(
+        d["parts"]["heatsink"]["parameters"]["changed"],
+        json!([{"name": "span", "from": "72 mm", "to": "80 mm",
+                "read_by": {"from": ["fin"], "to": ["fin"]}}])
+    );
 }
 
 #[test]
@@ -3698,6 +3785,123 @@ fn drafts_from_the_cli() {
     let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
     assert_eq!(code, 0, "{v}");
     assert!(file.exists());
+}
+
+#[test]
+fn direct_edits_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "base", "--param", "x=40", "--param", "y=30",
+        "--param", "z=10",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "cylinder",
+        "--id",
+        "boss",
+        "--operation",
+        "join",
+        "--radius",
+        "4",
+        "--param",
+        "height=6",
+        "--origin",
+        "20,15,10",
+    ]);
+    let j = p.ok(&["inspect", "plate", "boss"])["bodies"][0].clone();
+    let wall = j["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["surface"]["type"] == "cylinder")
+        .map(|f| format!("plate/base/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    // What the seed takes, then the delete by it.
+    let ff = p.ok(&["feature-faces", &wall]);
+    assert_eq!(ff["faces"].as_array().unwrap().len(), 2, "{ff}");
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "delete_face",
+        "--id",
+        "flat",
+        "--seed",
+        &wall,
+        "--heal",
+        "cap",
+    ]);
+    assert_eq!(r["feature"]["seeds"], json!([wall]), "{r}");
+    assert_eq!(r["feature"]["heal"], "cap", "{r}");
+    // A tweak told it may change topology.
+    let base = p.ok(&["inspect", "plate", "base"])["bodies"][0].clone();
+    let side = base["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+            f["surface"]["type"] == "plane"
+                && f["surface"]["frame"]["z"][0].as_f64().unwrap() * sign == -1.0
+        })
+        .map(|f| format!("plate/base/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "draft",
+        "--id",
+        "lean",
+        "--neutral",
+        "xy",
+        "--angle",
+        "1.3rad",
+        "--face",
+        &side,
+        "--topology",
+        "change",
+    ]);
+    assert_eq!(r["feature"]["topology"], "change", "{r}");
+    p.ok(&[
+        "feature",
+        "edit",
+        "plate",
+        "lean",
+        "--topology",
+        "keep",
+        "--blends",
+        "rebuild",
+    ]);
+    let shown = p.ok(&["feature", "show", "plate", "lean"]);
+    assert_eq!(
+        (shown["topology"].as_str(), shown["blends"].as_str()),
+        (Some("keep"), Some("rebuild")),
+        "{shown}"
+    );
+    // A bad heal is the protocol's invalid_param.
+    p.fails(
+        &["feature", "edit", "plate", "flat", "--heal", "patch"],
+        "invalid_param",
+        1,
+    );
+    // The daemon logged the delete: undo takes its file away, redo puts it
+    // back.
+    let flat = p.daemon.join("parts/plate/features/flat.json");
+    let lean = p.daemon.join("parts/plate/features/lean.json");
+    assert!(flat.exists() && lean.exists());
+    for _ in 0..3 {
+        let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+        assert_eq!(code, 0, "{v}");
+    }
+    assert!(!flat.exists());
+    let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(flat.exists());
 }
 
 #[test]
@@ -6346,8 +6550,10 @@ fn mates_from_the_cli() {
 
 #[test]
 fn a_failing_mate_warns_from_the_cli() {
-    // Issues #155 and #158: a slot cut across the plate splits the face
-    // m1 stands on, in frame, which top places.
+    // Issues #155 and #158: the slot grown into a skim over the plate's
+    // whole top takes away the face m1 stands on, in frame, which top
+    // places. (A slot across the top only splits it, both pieces on its
+    // plane, and m1 follows the first: design 447.)
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
     let params: [(&str, &str, &str, &[&str]); 2] = [
@@ -6437,7 +6643,23 @@ fn a_failing_mate_warns_from_the_cli() {
             .filter(|w| w.as_str().unwrap().contains("m1"))
             .count()
     };
-    let (code, v) = p.both_from("", &["feature", "edit", "plate", "slot", "--param", "y=60"]);
+    let (code, v) = p.both_from(
+        "",
+        &[
+            "feature",
+            "edit",
+            "plate",
+            "slot",
+            "--param",
+            "x=200",
+            "--param",
+            "y=200",
+            "--param",
+            "z=2",
+            "--origin",
+            "-50,-50,4",
+        ],
+    );
     assert_eq!((code, naming(&v)), (0, 1), "{v}");
     for args in [
         &["assembly", "tree", "frame"][..],
@@ -8060,4 +8282,83 @@ fn modes_from_the_cli() {
     assert_eq!(code, 0, "{v}");
     let (code, v) = p.run_in(&p.daemon, "", &["part", "create", "q"]);
     assert_eq!(code, 0, "{v}");
+}
+
+#[test]
+fn blend_edits_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "box"]);
+    p.ok(&[
+        "feature", "add", "box", "box", "--id", "base", "--param", "x=40", "--param", "y=30",
+        "--param", "z=20",
+    ]);
+    let base = p.ok(&["inspect", "box", "base"])["bodies"][0].clone();
+    let every: Vec<String> = base["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| format!("box/base/{}", e["name"].as_str().unwrap()))
+        .collect();
+    let mut args = vec![
+        "feature", "add", "box", "fillet", "--id", "round", "--radius", "3",
+    ];
+    for e in &every {
+        args.extend(["--edge", e.as_str()]);
+    }
+    p.ok(&args);
+    // What a delete would take, then the delete.
+    let listed = p.ok(&["blends", "box", "--below", "3.5mm"]);
+    assert_eq!(listed["blends"].as_array().unwrap().len(), 12, "{listed}");
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "box",
+        "delete_blend",
+        "--id",
+        "flat",
+        "--below",
+        "3.5mm",
+    ]);
+    assert_eq!(r["feature"]["below"]["value"], "3.5 mm", "{r}");
+    // A resize of one fillet, by its flags; then made a chamfer.
+    let face = listed["blends"][0]["faces"][0].as_str().unwrap().to_owned();
+    p.ok(&["feature", "edit", "box", "flat", "--below", "1mm"]);
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "box",
+        "resize_blend",
+        "--id",
+        "bigger",
+        "--radius",
+        "4mm",
+        "--face",
+        &face,
+    ]);
+    assert_eq!(r["feature"]["groups"][0]["radius"]["value"], "4 mm", "{r}");
+    p.ok(&[
+        "feature", "edit", "box", "bigger", "--form", "equal", "--d", "2mm",
+    ]);
+    let shown = p.ok(&["feature", "show", "box", "bigger"]);
+    assert_eq!(shown["groups"][0]["form"], "equal", "{shown}");
+    assert!(shown["groups"][0].get("radius").is_none(), "{shown}");
+    // A bad tolerance is the protocol's invalid_param.
+    p.fails(
+        &["feature", "edit", "box", "flat", "--tolerance", "1mm"],
+        "invalid_param",
+        1,
+    );
+    // The daemon logged both: undo takes the resize's file away, redo puts
+    // it back.
+    let bigger = p.daemon.join("parts/box/features/bigger.json");
+    assert!(bigger.exists());
+    for _ in 0..2 {
+        let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+        assert_eq!(code, 0, "{v}");
+    }
+    assert!(!bigger.exists());
+    let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(bigger.exists());
 }
