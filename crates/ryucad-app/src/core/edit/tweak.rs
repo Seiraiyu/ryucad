@@ -46,6 +46,8 @@ pub struct DraftForm {
     pub flip: Picks,
     pub reverse: Flag,
     pub tangent: Flag,
+    /// Its topology and blends (ryucad 22).
+    pub retrim: RetrimForm,
 }
 
 /// A move face's form.
@@ -64,6 +66,8 @@ pub struct MoveFaceForm {
     /// An offset's faces at distances of their own.
     pub groups: Vec<TweakGroup>,
     pub tangent: Flag,
+    /// Its topology and blends (ryucad 22).
+    pub retrim: RetrimForm,
 }
 
 /// A replace face's form.
@@ -71,6 +75,8 @@ pub struct MoveFaceForm {
 pub struct ReplaceFaceForm {
     pub target: String,
     pub groups: Vec<WithGroup>,
+    /// Its topology and blends (ryucad 22).
+    pub retrim: RetrimForm,
 }
 
 /// A delete face's form: its faces and seeds, each a checkbox to take it
@@ -166,6 +172,53 @@ fn flag(name: &str, read: bool) -> Flag {
     }
 }
 
+/// A face tweak's `topology: change` and `blends: rebuild` (ryucad 22),
+/// each a checkbox: off is `keep`, ryucad 17's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RetrimForm {
+    pub topology: Flag,
+    pub blends: Flag,
+}
+
+impl RetrimForm {
+    fn from_show(v: &Value) -> RetrimForm {
+        RetrimForm {
+            topology: flag("topology", v["topology"] == "change"),
+            blends: flag("blends", v["blends"] == "rebuild"),
+        }
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.topology.dirty() || self.blends.dirty()
+    }
+
+    fn revert(&mut self) {
+        self.topology.chosen = self.topology.read;
+        self.blends.chosen = self.blends.read;
+    }
+
+    /// Each flag changed: `change` or `rebuild` when on, `keep` (which
+    /// takes the field out of the file) when off.
+    fn given(&self, out: &mut FeatureFields) {
+        if self.topology.dirty() {
+            let t = if self.topology.chosen {
+                "change"
+            } else {
+                "keep"
+            };
+            out.topology = Some(t.to_owned());
+        }
+        if self.blends.dirty() {
+            let b = if self.blends.chosen {
+                "rebuild"
+            } else {
+                "keep"
+            };
+            out.blends = Some(b.to_owned());
+        }
+    }
+}
+
 /// `feature.show`'s groups, each quantity under `key`.
 fn groups(v: &Value, key: &str) -> Vec<TweakGroup> {
     v["groups"]
@@ -228,6 +281,7 @@ impl TweakForm {
                     flip: Picks::new("flipped faces", texts(&v["flip"])),
                     reverse: flag("reverse", v["reverse"] == true),
                     tangent,
+                    retrim: RetrimForm::from_show(v),
                 }))
             }
             "move_face" => {
@@ -245,6 +299,7 @@ impl TweakForm {
                     groups: groups(v, "distance"),
                     tangent,
                     by,
+                    retrim: RetrimForm::from_show(v),
                 }))
             }
             "replace_face" => TweakForm::ReplaceFace(Box::new(ReplaceFaceForm {
@@ -259,6 +314,7 @@ impl TweakForm {
                         faces: Picks::new(&format!("faces (group {})", i + 1), texts(&g["faces"])),
                     })
                     .collect(),
+                retrim: RetrimForm::from_show(v),
             })),
             "delete_face" => TweakForm::DeleteFace(Box::new(DeleteFaceForm {
                 target,
@@ -378,7 +434,30 @@ impl TweakForm {
         }
     }
 
+    /// A face tweak's topology and blends; `None` for a direct edit.
+    pub fn retrim(&self) -> Option<&RetrimForm> {
+        match self {
+            TweakForm::Draft(d) => Some(&d.retrim),
+            TweakForm::MoveFace(m) => Some(&m.retrim),
+            TweakForm::ReplaceFace(r) => Some(&r.retrim),
+            _ => None,
+        }
+    }
+
+    pub fn retrim_mut(&mut self) -> Option<&mut RetrimForm> {
+        match self {
+            TweakForm::Draft(d) => Some(&mut d.retrim),
+            TweakForm::MoveFace(m) => Some(&mut m.retrim),
+            TweakForm::ReplaceFace(r) => Some(&mut r.retrim),
+            _ => None,
+        }
+    }
+
     pub fn dirty(&self) -> bool {
+        self.own_dirty() || self.retrim().is_some_and(RetrimForm::dirty)
+    }
+
+    fn own_dirty(&self) -> bool {
         match self {
             TweakForm::Draft(d) => {
                 d.angle.dirty()
@@ -433,6 +512,9 @@ impl TweakForm {
             }
             // Its sizes and tolerance went back with every field.
             TweakForm::ResizeBlend(_) => {}
+        }
+        if let Some(r) = self.retrim_mut() {
+            r.revert();
         }
     }
 
@@ -536,6 +618,9 @@ impl TweakForm {
                     out.tolerance = Some(typed(&r.tolerance));
                 }
             }
+        }
+        if let Some(r) = self.retrim() {
+            r.given(out);
         }
     }
 }
@@ -802,5 +887,53 @@ mod tests {
             "id":"r","revision":"r1","target":"base","type":"resize_blend"});
         let t = TweakForm::from_show("resize_blend", &v).unwrap();
         assert_eq!(t.fields()[0].name, "radius");
+    }
+
+    #[test]
+    fn a_tweaks_topology_and_blends_are_two_checkboxes() {
+        // Kept, as feature.show gives a tweak that sets neither.
+        let mut v = draft();
+        v["topology"] = json!("keep");
+        v["blends"] = json!("keep");
+        let mut t = TweakForm::from_show("draft", &v).unwrap();
+        let r = t.retrim_mut().unwrap();
+        assert!(!r.topology.read && !r.blends.read);
+        r.topology.chosen = true;
+        assert!(t.dirty());
+        let out = given(&t);
+        assert_eq!(
+            (out.topology.as_deref(), out.blends.as_deref()),
+            (Some("change"), None)
+        );
+        t.revert();
+        assert!(!t.dirty());
+        // A move that changes both, turned back: keep, keep.
+        let v = json!({"by":"offset","distance":{"m":0.001,"value":"1 mm"},
+            "faces":["box/base/t"],"id":"m","revision":"r1","tangent":true,
+            "target":"base","type":"move_face","topology":"change","blends":"rebuild"});
+        let mut t = TweakForm::from_show("move_face", &v).unwrap();
+        let r = t.retrim_mut().unwrap();
+        assert!(r.topology.read && r.blends.read);
+        r.topology.chosen = false;
+        r.blends.chosen = false;
+        let out = given(&t);
+        assert_eq!(
+            (out.topology.as_deref(), out.blends.as_deref()),
+            (Some("keep"), Some("keep"))
+        );
+        // A replacement has both too; the direct edits have neither.
+        let v = json!({"groups":[{"faces":["box/base/t"],"with":"box/lid"}],
+            "id":"r","revision":"r1","target":"base","type":"replace_face",
+            "topology":"keep","blends":"rebuild"});
+        let mut t = TweakForm::from_show("replace_face", &v).unwrap();
+        assert!(t.retrim_mut().unwrap().blends.read);
+        let v = json!({"heal":"auto","id":"x","revision":"r1","seeds":["box/hole/s"],
+            "target":"base","type":"delete_face"});
+        assert!(
+            TweakForm::from_show("delete_face", &v)
+                .unwrap()
+                .retrim_mut()
+                .is_none()
+        );
     }
 }

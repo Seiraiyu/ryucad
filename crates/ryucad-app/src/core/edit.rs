@@ -18,7 +18,7 @@ mod surface;
 pub use surface::{ExtractForm, FillForm, FillSide, SewForm, SideGroup, SurfaceForm, ThickenForm};
 pub use tweak::{
     DeleteBlendForm, DeleteFaceForm, DraftForm, MoveFaceForm, ReplaceFaceForm, ResizeBlendForm,
-    ResizeGroup, TweakForm, TweakGroup, WithGroup,
+    ResizeGroup, RetrimForm, TweakForm, TweakGroup, WithGroup,
 };
 
 use ryucad::error::Error;
