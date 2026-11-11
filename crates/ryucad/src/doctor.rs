@@ -46,7 +46,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 43] = [
+pub const CODES: [(&str, &str); 44] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -84,6 +84,7 @@ pub const CODES: [(&str, &str); 43] = [
     ("material_unknown", "warning"),
     ("appearance_unresolved", "warning"),
     ("explode_unresolved", "warning"),
+    ("reference_followed", "warning"),
     ("parameter_shadows", "error"),
     ("dependency_invalid", "error"),
     ("project_id_duplicate", "error"),
@@ -510,6 +511,7 @@ fn diagnose_in(builds: &mut Builds) -> Vec<Issue> {
     }
     drop(stage);
     diagnose_assemblies(builds, &part_ids, &mut issues);
+    diagnose_followed(builds, &part_ids, &mut issues);
     diagnose_items(&mut issues, root);
     diagnose_imports(root, &part_ids, unit, &mut issues);
     diagnose_annotations(root, &mut issues);
@@ -720,6 +722,45 @@ fn diagnose_assemblies(builds: &mut Builds, parts: &[&str], issues: &mut Vec<Iss
             files,
             format!("parts/{part}: its stored poses don't satisfy its mates"),
         ));
+    }
+}
+
+/// Each reference that follows a face or edge a later feature split or
+/// merged (design 447): `reference_followed`, a warning with no repair,
+/// since the name as written is the more robust one (it resolves again if
+/// the split goes away). Only parts whose features name faces, edges or
+/// vertices, or hold connectors, are rebuilt for it.
+fn diagnose_followed(builds: &mut Builds, parts: &[&str], issues: &mut Vec<Issue>) {
+    for part in parts {
+        let Ok(id) = Id::parse(part, "part") else {
+            continue;
+        };
+        let Some(s) = builds.session() else {
+            return;
+        };
+        let reads = s.project().parts.get(&id).is_some_and(|p| {
+            p.features.values().any(|f| {
+                f.as_ref()
+                    .is_ok_and(|f| !f.references().is_empty() || !f.connectors().is_empty())
+            })
+        });
+        if !reads {
+            continue;
+        }
+        let Some((p, r)) = builds.rebuilt(part) else {
+            continue;
+        };
+        for w in crate::reference::followed(&p, &r) {
+            let feature = w["feature"].as_str().unwrap_or_default();
+            issues.push(issue(
+                "reference_followed",
+                vec![format!("parts/{part}/features/{feature}.json")],
+                format!(
+                    "parts/{part}: {}; nothing to repair, or point it at a piece with `ryucad feature edit`",
+                    w["message"].as_str().unwrap_or_default()
+                ),
+            ));
+        }
     }
 }
 
@@ -2452,6 +2493,43 @@ pub fn repair_with(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn a_reference_that_follows_a_split_face_is_a_warning() {
+        use crate::server::tests::call;
+        use serde_json::json;
+        let (dir, mut s, body) = crate::sketch::tests::with_box();
+        let top = format!(
+            "p/b/{}",
+            crate::sketch::tests::face_along(&body, [0.0, 0.0, 1.0])
+        );
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "c", "operation": "cut",
+                   "params": {"x": 1, "y": 20, "z": 20},
+                   "placement": {"origin": [9.5, -5, -5]}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "t", "face": top}),
+        )
+        .unwrap();
+        let found: Vec<Issue> = diagnose(dir.path())
+            .into_iter()
+            .filter(|i| i.code == "reference_followed")
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].severity, "warning");
+        assert_eq!(found[0].files, ["parts/p/features/t.json"]);
+        assert!(
+            found[0].message.contains("split or merged by c"),
+            "{}",
+            found[0].message
+        );
+    }
 
     #[test]
     fn annotations_that_dont_read_are_reported() {
