@@ -123,3 +123,20 @@ The design is document 364 in the Coxswain planning project `ryucad-ryukei`; thi
   - the pinned Switchwire imported whole as references through a daemon: 470 parts, 1,181 bodies, none refused, in 58.9, 73.2 and 91.8 s as the load rose from 6.7 to 8.7 (bar 5 minutes): met;
   - the committed corpus as references, in process on one thread: 3.12, 3.16 and 5.79 s (bar 1 s), missed on this CPU. Nearly all of it is the kernel's reference build (ctc_05's import 1.10 s of which 0.82 s is `Opened::reference` alone; ftc_07's 1.10 s of 1.0 s), and ryustep's own `every_body_builds_and_meshes_as_a_reference` took 2.63 s here against 21.A's 0.81 to 0.86 s on cox-worker-2's Ryzen 7 9700X. The bar is design 364's on cox-worker-2, where it is met: 0.694, 0.695 and 0.712 s (AMD Ryzen 7 9700X, 8 cores, 32 GB, release, load average 1.95 to 1.96, at e96e14c4), ctc_05 0.21 s and ftc_07 0.23 s of it.
 - **Limits.** A flattened part's own bodies aren't checked against each other (interference pairs occurrences); a flattened part exported and imported whole comes back as an assembly of its references; doctor's `import_misplaced` doesn't judge places; an interference judged on meshes gives no volume.
+
+## The transfer report (decided in ryucad phase 24)
+
+The design is document 448 in the Coxswain planning project `ryucad-ryukei`; this is its plan 24.A (#593).
+
+- **On import.** Every `import` answer (dry runs, updates, flattens) gives `transfer` (`crate::transfer::json`): per category its `interpreted`, `retained`, `unreferenced` and `failed` buckets, at most 8 names each with `more`, `codes` for failures, and a `summary` line; `detail` lists every name with its first 64 instances as `#n`. Interpreted are the bodies the import features built and the product tree when anything was made; failed are the instances a failing feature's `step` names. Every refusal after the file is read gains `transfer` (nothing interpreted, `file` the path as given) and keeps its code.
+- **`import.report {file, detail?}`** (`ryucad import report <imports/…> [--detail]`, `import::transfer_report`): the same report of a committed file from what the project's import features make of it now. Not a long request.
+- **#443's interim.** `import_body_missing` gains `external` (`{file, products, format?}` per file the externally defined products name), its message naming the files ryucad doesn't read yet (24.D).
+- **On export.** A STEP export's answer gives `transfer`:
+  - `written`: the writer's counts by category;
+  - `omitted`: `history` always, then `sketches`, `datums`, `annotations`, `appearance` and `properties` when the written parts have them;
+  - `approximated`: bodies written within a tolerance, with `bound_m`.
+
+  `export_metadata_omitted` warns for appearance and properties. Its message begins with its code, so the warning lifted into the CLI's envelope (a message alone) still names it. No byte of any export changes.
+- **The app.** The import dialog shows the summaries under "What the file holds:", the export dialog what STEP left out under "Not written to STEP:".
+- **step-hunt.** `whole_import` records `transfer_counts` per case (`Ran::transfer`) and the report sums them per source (`transfer` in report.json, a line under the counts in report.md); nothing judges them.
+- **Testing.** `import.rs` unit tests (answers, refusals, external names, `import.report`), `export.rs` (written, omitted, a colour warned, the same bytes), `tests/cli.rs`'s `transfer_reports_from_the_cli` both ways, the `transfer` golden section (one thread and four; the external refusal's fixture path replaced, as it differs between machines), the app's `core::step` and `core::export` tests and the import window test.
