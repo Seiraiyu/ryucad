@@ -327,8 +327,8 @@ fn refdes_findings(p: &Project, d: &Id) -> Vec<Value> {
         .collect()
 }
 
-/// `annotate`: one logged, undoable change guarded by the project's
-/// revision, or with `dry_run` what it would be.
+/// `annotate`: one logged, undoable change guarded by [`revision`], or
+/// with `dry_run` what it would be.
 pub fn annotate(
     session: &mut Session,
     design: Option<&str>,
@@ -404,7 +404,7 @@ fn named(p: &Project, design: &Id, refs: &[String]) -> Result<Vec<(Id, Id)>> {
 }
 
 /// `annotate.lock` and `annotate.unlock`: one logged, undoable change
-/// guarded by the project's revision.
+/// guarded by [`revision`].
 pub fn lock(
     session: &mut Session,
     design: Option<&str>,
