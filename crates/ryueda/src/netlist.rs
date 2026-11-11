@@ -255,6 +255,17 @@ fn refdes(
     c: &crate::conn::Component,
     value: Option<&str>,
 ) -> std::result::Result<Option<String>, Error> {
+    if let Some(r) = c
+        .refdes
+        .as_deref()
+        .filter(|r| crate::conn::refdes_placeholder(r))
+    {
+        return Err(Error::new(
+            Code::RefdesMissing,
+            format!("{r} is a placeholder: `ryueda annotate` numbers it"),
+        )
+        .with("placeholder", r));
+    }
     let mut r = c.refdes.clone();
     let path = &occs[o].path;
     let levels = levels(p, occs, o, c);

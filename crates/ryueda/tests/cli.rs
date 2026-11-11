@@ -441,6 +441,9 @@ fn every_protocol_method_has_a_command() {
         ("rail.add", &["rail", "add"]),
         ("rail.edit", &["rail", "edit"]),
         ("tag", &["tag"]),
+        ("annotate", &["annotate"]),
+        ("annotate.lock", &["annotate", "lock"]),
+        ("annotate.unlock", &["annotate", "unlock"]),
         ("rail.delete", &["rail", "delete"]),
         ("rail.list", &["rail", "list"]),
         ("class.add", &["class", "add"]),
@@ -2305,8 +2308,55 @@ fn a_library_is_checked_from_the_cli() {
         "--ops",
         r#"[{"op": "set", "pin": "1", "side": "left"}]"#,
     ]);
-    p.fails(&["lib", "check"], "check_failed", 1);
+    let failed = p.fails(&["lib", "check"], "check_failed", 1);
+    assert_eq!(failed["details"]["report"]["errors"], 1, "{failed}");
     p.fails(&["lib", "check", "--symbol", "nope"], "not_found", 1);
+    // Counts first (#711): by code, and each symbol's, with no findings.
+    let all = p.both_in("board", &["lib", "check"]).1["error"]["details"]["report"].clone();
+    let sum =
+        p.both_in("board", &["lib", "check", "--summary"]).1["error"]["details"]["report"].clone();
+    let total: u64 = sum["by_code"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|n| n.as_u64().unwrap())
+        .sum();
+    assert_eq!(
+        total,
+        all["errors"].as_u64().unwrap() + all["warnings"].as_u64().unwrap()
+    );
+    assert_eq!(sum["by_code"]["sym_pin_side"], 1, "{sum}");
+    assert!(
+        sum["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x.get("findings").is_none() && x["counts"].is_object())
+    );
+    // One code's findings, and only the symbols holding one.
+    let side = p
+        .both_in("board", &["lib", "check", "--code", "sym_pin_side"])
+        .1["error"]["details"]["report"]
+        .clone();
+    let refs: Vec<&Value> = side["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| &x["reference"])
+        .collect();
+    assert_eq!(refs, [&json!("lib/self/symbol/u")], "{side}");
+    assert!(
+        side["symbols"][0]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["code"] == "sym_pin_side")
+    );
+    assert_eq!(
+        (side["errors"].clone(), side["warnings"].clone()),
+        (all["errors"].clone(), all["warnings"].clone())
+    );
+    p.fails(&["lib", "check", "--code", "sch_jog"], "invalid_param", 1);
 }
 
 /// check judges the project's own symbols and those its designs place
@@ -3692,4 +3742,128 @@ fn the_look_is_linted() {
             .iter()
             .any(|r| r["code"] == "sch_override_unused")
     );
+}
+
+#[test]
+fn annotate_from_the_cli() {
+    let p = Pair::breakout();
+    // Every designator is numbered: nothing to do by default.
+    let a = p.ok(&["annotate", "--dry-run"]);
+    assert_eq!(a["changes"], json!([]), "{a}");
+    let rev = a["revision"].as_str().unwrap().to_owned();
+    // A placeholder is numbered, and ERC says why it has none till then.
+    p.ok(&["component", "edit", "sensor/c1", "--refdes", "C?"]);
+    let e = p.ok(&["erc"]);
+    assert_eq!(
+        e["designs"][0]["findings"][0]["code"], "refdes_missing",
+        "{e}"
+    );
+    // The edit moved the revision annotate is guarded by.
+    let stale = p.fails(&["annotate", "--expect", &rev], "conflict", 1);
+    assert_eq!(stale["details"]["expected"], json!(rev));
+    let a = p.ok(&["annotate"]);
+    assert_eq!(
+        a["changes"],
+        json!([{"component": "sensor/c1", "from": "C?", "to": "C1"}])
+    );
+    assert_eq!(a["erc"], json!([]));
+    let to = |v: &Value| -> Vec<(String, String)> {
+        v["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["component"].as_str().unwrap().to_owned(),
+                    c["to"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let pairs = |l: &[(&str, &str)]| -> Vec<(String, String)> {
+        l.iter()
+            .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
+            .collect()
+    };
+    // Never laid out, each block's components go in ID order (the root's
+    // block first, then the sensor's).
+    let all = p.ok(&["annotate", "--reset", "all", "--dry-run"]);
+    assert_eq!(
+        to(&all),
+        pairs(&[
+            ("breakout/c2", "C1"),
+            ("breakout/c3", "C2"),
+            ("breakout/u2", "U1"),
+            ("sensor/c1", "C3"),
+            ("sensor/u1", "U2"),
+        ])
+    );
+    // Laid out, in canvas order: the root's sheet down each column, then
+    // the sensor's block.
+    p.ok(&["layout"]);
+    let all = p.ok(&["annotate", "--reset", "all", "--dry-run"]);
+    assert_eq!(
+        to(&all),
+        pairs(&[
+            ("breakout/c2", "C1"),
+            ("breakout/u2", "U1"),
+            ("breakout/c3", "C2"),
+            ("breakout/r2", "R1"),
+            ("breakout/r1", "R2"),
+            ("sensor/u1", "U2"),
+            ("sensor/c1", "C3"),
+        ])
+    );
+    // A locked one keeps its designator; the numbers count past it.
+    let l = p.ok(&["annotate", "lock", "R2"]);
+    assert_eq!(
+        l["locked"],
+        json!([{"component": "breakout/r2", "refdes": "R2"}])
+    );
+    let c = fs::read_to_string(p.direct.join("board/blocks/breakout/components/r2.json")).unwrap();
+    assert!(
+        c.contains("\"refdes_locked\": true") && c.contains("\"format\": 2"),
+        "{c}"
+    );
+    let all = p.ok(&["annotate", "--reset", "all", "--dry-run"]);
+    assert!(
+        all["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["component"] != "breakout/r2" && c["to"] != "R2"),
+        "{all}"
+    );
+    // Two locked as one designator: refused, naming both.
+    p.ok(&["component", "edit", "breakout/r1", "--refdes", "R2"]);
+    let c = p.fails(&["annotate", "lock", "breakout/r1"], "annotate_conflict", 1);
+    assert_eq!(
+        c["details"]["components"],
+        json!(["breakout/r1", "breakout/r2"])
+    );
+    // A designator two components show names neither.
+    p.fails(&["annotate", "lock", "R2"], "refdes_duplicate", 1);
+    p.fails(&["annotate", "lock", "R9"], "not_found", 1);
+    let u = p.ok(&["annotate", "unlock", "breakout/r2"]);
+    assert_eq!(u["unlocked"][0]["component"], "breakout/r2");
+    p.fails(&["annotate", "--order", "sideways"], "usage", 2);
+    p.fails(&["annotate", "--reset", "some"], "usage", 2);
+    // One logged change, undone whole through the daemon.
+    let run = |args: &[&str]| p.run_in(&p.daemon, "board", args);
+    let (code, a) = run(&["annotate", "--reset", "all"]);
+    assert_eq!(code, 0, "{a}");
+    assert!(a["result"]["changes"].as_array().unwrap().len() > 1, "{a}");
+    let (code, h) = run(&["history"]);
+    assert_eq!(code, 0, "{h}");
+    let last = h["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last["method"], "annotate", "{h}");
+    let (code, u) = run(&["undo"]);
+    assert_eq!(code, 0, "{u}");
+    let (_, d) = run(&["annotate", "--reset", "all", "--dry-run"]);
+    assert_eq!(d["result"]["changes"], a["result"]["changes"]);
 }

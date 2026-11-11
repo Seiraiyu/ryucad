@@ -238,6 +238,7 @@ fn part(f: Feature, reference: bool, placed: bool) -> Part {
         project_reads: Default::default(),
         features,
         uses: BTreeMap::new(),
+        explode_uses: Default::default(),
         acts: BTreeMap::new(),
         imports: BTreeMap::from([("imports/seeded.step".to_owned(), seeded().clone())]),
         views: BTreeMap::new(),

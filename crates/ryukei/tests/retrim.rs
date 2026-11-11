@@ -10,7 +10,7 @@ use ryukei::name::{Event, FaceRole, Name, OpKey, Role, ToolKey};
 use ryukei::primitive;
 use ryukei::topo::Body;
 use ryukei::tweak::{
-    DraftFace, DraftSpec, Hinge, MoveSpec, OffsetFacesSpec, Topology, draft, move_faces,
+    Blends, DraftFace, DraftSpec, Hinge, MoveSpec, OffsetFacesSpec, Topology, draft, move_faces,
     offset_faces,
 };
 use ryukei::{Error, TweakError};
@@ -132,6 +132,21 @@ fn a_groove_run_through_splits_the_top() {
     }
     let top = face(K, FaceRole::PlusZ);
     assert!(o.by_name(top).is_none());
+    // The plate's sides and bottom are only re-trimmed: each keeps its
+    // name (#691: the table split each side and the merge named it anew).
+    for r in [
+        FaceRole::MinusX,
+        FaceRole::PlusX,
+        FaceRole::MinusY,
+        FaceRole::PlusY,
+        FaceRole::MinusZ,
+    ] {
+        assert!(o.by_name(face(K, r)).is_some(), "{r:?}");
+    }
+    assert!(!j.events().iter().any(|e| matches!(
+        e,
+        Event::Merged { parents, .. } if parents.iter().any(|p| [FaceRole::MinusX, FaceRole::PlusX, FaceRole::MinusY, FaceRole::PlusY].iter().any(|&r| { let n = face(K, r); *p == n }))
+    )));
     assert!(j.events().iter().any(
         |e| matches!(e, Event::Split { parent, children } if *parent == top && children.len() == 2)
     ));
@@ -438,4 +453,44 @@ fn one_thread_and_eight_alike() {
         })
     };
     assert_eq!(run(1), run(8));
+}
+
+/// The `feature` fuzz target's box (20 × 10 × 5 mm, a 2 mm pocket in its
+/// top), its top or bottom offset 30 mm into it, past the opposite face:
+/// the solid between them would collapse, so the re-trim refuses
+/// `FaceCollapses`, in debug builds too (#704: `repair::resolve` panicked
+/// `NotOutward` on these two, faces `37b23efd` and `87f1d1ef`).
+#[test]
+fn an_offset_past_the_opposite_side_collapses() {
+    let (b, _) = primitive::block(K, 0.02, 0.01, 0.005, &Rigid::IDENTITY).unwrap();
+    let (pocket, _) =
+        primitive::block(OpKey(0x704), 0.002, 0.002, 0.002, &Rigid::IDENTITY).unwrap();
+    let (b, _) = boolean(
+        OpKey(0x705),
+        BooleanOp::Subtract,
+        &b,
+        &[Tool {
+            key: ToolKey(1),
+            body: &pocket,
+            place: Rigid::translation(Vector3::new(0.009, 0.004, 0.004)),
+        }],
+    )
+    .unwrap();
+    for side in [FaceRole::MinusZ, FaceRole::PlusZ] {
+        let spec = OffsetFacesSpec {
+            faces: vec![(face(K, side), -0.03)],
+            tangent: false,
+            topology: Topology::Change,
+            blends: Blends::Rebuild,
+        };
+        let r = offset_faces(T, &b, &spec);
+        assert!(
+            matches!(
+                r,
+                Err(Error::InvalidTweak(TweakError::FaceCollapses { face: f })) if f == face(K, side)
+            ),
+            "{side:?}: {:?}",
+            r.map(|_| ())
+        );
+    }
 }

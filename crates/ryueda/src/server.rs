@@ -207,6 +207,17 @@ pub fn answer(
             expected_revision.as_deref(),
             render,
         ),
+        Request::LibCheck {
+            library,
+            symbol,
+            summary,
+            codes,
+        } => crate::symlint::library_check(
+            session.project(),
+            library.as_deref(),
+            symbol.as_deref(),
+            &crate::symlint::Listing { summary, codes },
+        ),
         Request::Output { design, layers } => crate::output::output(
             session.project(),
             design.as_deref(),
@@ -254,9 +265,6 @@ fn dispatch(
             expected_revision,
         } => lib_add(session, &alias, &path, expected_revision.as_deref()),
         Request::LibList {} => Ok(lib_list(session.project())),
-        Request::LibCheck { library, symbol } => {
-            crate::symlint::library_check(session.project(), library.as_deref(), symbol.as_deref())
-        }
         Request::ProjectEdit {
             properties,
             sheet_size,
@@ -477,6 +485,42 @@ fn dispatch(
             rail,
             expected_revision,
         } => topcmd::rail_delete(session, &rail, expected_revision.as_deref()),
+        Request::Annotate {
+            design,
+            order,
+            reset,
+            dry_run,
+            expected_revision,
+        } => crate::annotate::annotate(
+            session,
+            design.as_deref(),
+            order.unwrap_or_default(),
+            reset.unwrap_or_default(),
+            dry_run,
+            expected_revision.as_deref(),
+        ),
+        Request::AnnotateLock {
+            design,
+            refs,
+            expected_revision,
+        } => crate::annotate::lock(
+            session,
+            design.as_deref(),
+            &refs,
+            true,
+            expected_revision.as_deref(),
+        ),
+        Request::AnnotateUnlock {
+            design,
+            refs,
+            expected_revision,
+        } => crate::annotate::lock(
+            session,
+            design.as_deref(),
+            &refs,
+            false,
+            expected_revision.as_deref(),
+        ),
         Request::Tag {
             target,
             block,
@@ -844,6 +888,7 @@ fn dispatch(
         ),
         Request::Render { .. }
         | Request::Output { .. }
+        | Request::LibCheck { .. }
         | Request::LayoutPlace { .. }
         | Request::Layout { .. } => {
             unreachable!("answered before dispatch")

@@ -176,6 +176,14 @@ pub(crate) fn global_in(
     else {
         return Err(OffsetError::Empty.into());
     };
+    // `resolve` leaves an inside-out result to its caller (#704); a
+    // global offset's is a bug, as every other fault of it is.
+    debug_assert!(
+        !crate::check::check(&out)
+            .iter()
+            .any(crate::check::inside_out),
+        "a resolved offset is inside out"
+    );
     if let Some((at, needed)) = past_cap(&out) {
         return Err(OffsetError::ToleranceTooLarge { at, needed }.into());
     }

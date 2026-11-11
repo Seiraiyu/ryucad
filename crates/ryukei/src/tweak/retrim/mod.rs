@@ -18,7 +18,7 @@ pub(crate) mod working;
 use crate::boolean::build::Kept;
 use crate::boolean::table::Table;
 use crate::boolean::{Fail, past_cap};
-use crate::check::{Fault, check_intersections_in};
+use crate::check::Fault;
 use crate::name::{Journal, Name, OpKey};
 use crate::split::Piece;
 use crate::topo::{Body, FaceId};
@@ -82,7 +82,11 @@ pub(crate) fn retrim(
         if rung == 1 {
             bx = doubled(&bx);
         }
-        match attempt(key, body, changes, &region, &bx, m) {
+        // Each rung under its own cap: one that can't settle refuses
+        // `Uncertain` in bounded units, as the caps do.
+        match m.capped(crate::work::Scope::Rung, || {
+            attempt(key, body, changes, &region, &bx, m)
+        }) {
             Rung::Done(r) => return *r,
             Rung::Next(e) => last = Some(e),
         }
@@ -160,7 +164,13 @@ fn attempt(
     m: &Meter,
 ) -> Rung {
     let mut ws = BTreeMap::new();
-    for &f in region.faces.iter().filter(|f| !changes.deleted.contains(f)) {
+    let absorbed = absorbed(body, changes, region);
+    let absorbing: std::collections::BTreeSet<FaceId> = absorbed.values().copied().collect();
+    for &f in region
+        .faces
+        .iter()
+        .filter(|f| !changes.deleted.contains(f) && !absorbed.contains_key(f))
+    {
         if m.poll().is_err() {
             return done(Err(Error::Cancelled));
         }
@@ -178,7 +188,19 @@ fn attempt(
             working::same_params(mo),
             bx,
         ) {
-            Ok(w) => {
+            Ok(mut w) => {
+                // A face standing for others on its surface covers them
+                // all: its whole turn (NIST FTC 09's hole halves).
+                if !absorbing.contains(&f) {
+                    for (k, t) in working::delete_turn(body, changes, f, &w.surface)
+                        .into_iter()
+                        .enumerate()
+                    {
+                        if let Some(t) = t {
+                            w.rect[k] = t;
+                        }
+                    }
+                }
                 ws.insert(f, w);
             }
             Err(e) => return done(Err(e)),
@@ -199,6 +221,15 @@ fn attempt(
         // faces' alone. A region with no outside face takes the plan's
         // one shell seed instead (below).
         let mut tries: Vec<Vec<usize>> = vec![outside.clone()];
+        // A delete whose region is the whole body: every face it keeps
+        // seeds by rule 3 too, not one face alone (#692: a drilled plate's
+        // side deleted closed from the hole's wall alone, its plug).
+        if outside.is_empty() && !changes.deleted.is_empty() && changes.motion.is_empty() {
+            let (same, _) = seeds::face_seeds(body, changes, &w, &arr, table, pieces, m);
+            if same.len() > 1 {
+                tries = vec![same];
+            }
+        }
         if !outside.is_empty() {
             let (same, moved) = seeds::face_seeds(body, changes, &w, &arr, table, pieces, m);
             if !same.is_empty() || !moved.is_empty() {
@@ -295,10 +326,31 @@ fn attempt(
             return Rung::Next(TweakError::HealAmbiguous { face: at }.into());
         }
     };
-    if !crate::check::check(&out).is_empty() {
+    let faults = crate::check::check(&out);
+    if !faults.is_empty() {
+        // Inside out: a face carried past the opposite side (#704); the
+        // solid between them would have to collapse.
+        if faults.iter().all(crate::check::inside_out) {
+            let face = region
+                .changed
+                .iter()
+                .map(|&f| body.faces[f].name)
+                .min()
+                .unwrap_or(Name::from_u128(0));
+            return done(Err(TweakError::FaceCollapses { face }.into()));
+        }
         return done(Err(Error::Topology(TopologyError::Inconsistent)));
     }
-    for fault in check_intersections_in(&out, m) {
+    // Only pairs with a face the re-trim made: the faces outside the
+    // region come back as they were (it never cuts them), so their pairs
+    // are the input's (NIST CTC 04: 4 s of a fillet's 8.2 s delete).
+    let outside: std::collections::BTreeSet<Name> = body
+        .faces()
+        .filter(|f| !region.faces.contains(f))
+        .map(|f| body.faces[f].name)
+        .collect();
+    let made = |f: FaceId| !outside.contains(&out.faces[f].name);
+    for fault in crate::check::check_pairs_in(&out, m, |a, b| made(a) || made(b)) {
         match fault {
             Fault::FacesCross { a, b } | Fault::FacesOverlap { a, b } => {
                 let mut faces = [out.faces[a].name, out.faces[b].name];
@@ -317,10 +369,90 @@ fn attempt(
     if let Some((at, needed)) = past_cap(&out) {
         return done(Err(TweakError::ToleranceTooLarge { at, needed }.into()));
     }
+    // A curved result inside out, as #704's planar one is.
+    if !crate::check::curved_orientation(&out).is_empty() {
+        let face = region
+            .changed
+            .iter()
+            .map(|&f| body.faces[f].name)
+            .min()
+            .unwrap_or(Name::from_u128(0));
+        return done(Err(TweakError::FaceCollapses { face }.into()));
+    }
     let mut out = out;
     let moved = changes.motion.keys().map(|&f| body.faces[f].name).collect();
-    let journal = names::finish(key, body, &w, &mut out, journal, &moved);
+    let mut journal = names::finish(key, body, &w, &mut out, journal, &moved);
+    // Faces absorbed into a neighbour on their surface are merged into it.
+    let mut into: BTreeMap<Name, Vec<Name>> = BTreeMap::new();
+    for (&g, &a) in &absorbed {
+        into.entry(body.faces[a].name)
+            .or_default()
+            .push(body.faces[g].name);
+    }
+    for (a, mut parents) in into {
+        if out.by_name(a).is_some() {
+            parents.push(a);
+            parents.sort();
+            journal.push(crate::name::Event::Merged { parents, child: a });
+        }
+    }
     done(Ok((out, journal)))
+}
+
+/// Region faces left as they are that share an edge with another such
+/// face on the same surface, the same way round: each mapped to the
+/// least-named face of its group, whose working face covers them all.
+/// Their own working faces would coincide with it (NIST FTC 09's hole
+/// walls, each two half cylinders carried a whole turn each, closed two
+/// ways).
+fn absorbed(body: &Body, changes: &Changes, region: &Region) -> BTreeMap<FaceId, FaceId> {
+    let still = |f: FaceId| {
+        region.faces.contains(&f)
+            && !changes.deleted.contains(&f)
+            && !changes.motion.contains_key(&f)
+            && !changes.surface.contains_key(&f)
+    };
+    let mut up: BTreeMap<FaceId, FaceId> = BTreeMap::new();
+    fn root(up: &BTreeMap<FaceId, FaceId>, mut f: FaceId) -> FaceId {
+        while let Some(&g) = up.get(&f) {
+            if g == f {
+                break;
+            }
+            f = g;
+        }
+        f
+    }
+    for e in body.edges() {
+        let fs: Vec<FaceId> = body
+            .edge_fins(e)
+            .map(|fin| body.loops[body.fins[fin].loop_].face)
+            .collect();
+        let [a, b] = fs.as_slice() else { continue };
+        let (a, b) = (*a, *b);
+        if a == b || !still(a) || !still(b) {
+            continue;
+        }
+        let (fa, fb) = (&body.faces[a], &body.faces[b]);
+        if fa.sense != fb.sense || body.surfaces[fa.surface] != body.surfaces[fb.surface] {
+            continue;
+        }
+        let (ra, rb) = (root(&up, a), root(&up, b));
+        if ra != rb {
+            let (keep, go) = if body.faces[ra].name < body.faces[rb].name {
+                (ra, rb)
+            } else {
+                (rb, ra)
+            };
+            up.insert(go, keep);
+            up.entry(keep).or_insert(keep);
+        }
+    }
+    up.keys()
+        .filter_map(|&f| {
+            let r = root(&up, f);
+            (r != f).then_some((f, r))
+        })
+        .collect()
 }
 
 /// A walk's failure at face `face` of the working body as a refusal.

@@ -19,7 +19,7 @@ mod geometry;
 mod intersect;
 mod topology;
 
-pub(crate) use geometry::outside_size_box;
+pub(crate) use geometry::{curved_orientation, outside_size_box};
 pub use intersect::{check_intersections, check_intersections_with, check_overlaps};
 pub(crate) use intersect::{check_intersections_in, check_overlaps_in, check_pairs_in};
 
@@ -152,6 +152,12 @@ pub fn check_topology(body: &Body) -> Vec<Fault> {
     }
     topology::names(body, &mut out);
     out
+}
+
+/// Whether `f` says a solid is inside out: a face wound against its
+/// normal, or a region whose shells don't enclose it outward.
+pub(crate) fn inside_out(f: &Fault) -> bool {
+    matches!(f, Fault::NotOutward { .. } | Fault::FaceInsideOut { .. })
 }
 
 #[cfg(test)]
@@ -773,5 +779,39 @@ mod tests {
                 region: RegionId::from_index(1)
             }]
         );
+    }
+
+    /// A cylinder turned inside out, every face's sense and loops
+    /// reversed: `check` can't tell (no face is planar with straight
+    /// edges), and `check_intersections`, with no pair crossing, reads it
+    /// `NotOutward` (#692).
+    #[test]
+    fn an_inside_out_cylinder_is_not_outward() {
+        use crate::layout::{Layout, Plan};
+        use std::collections::BTreeSet;
+        let k = OpKey(0x692);
+        let (c, _) = crate::primitive::cylinder(k, 0.1, 0.3, &Rigid::IDENTITY).unwrap();
+        assert_eq!(check(&c), []);
+        let mut lay = Layout::default();
+        let all: BTreeSet<FaceId> = c.faces().collect();
+        crate::sheet::copy(&mut lay, &c, &all);
+        for f in &mut lay.faces {
+            crate::tweak::retrim::body::flipped(f);
+        }
+        let plan = Plan::new(&lay).unwrap();
+        let shells = plan.shells();
+        let outer = vec![None; shells.len()];
+        let built = plan
+            .build(k, Role::Edit(crate::name::EditRole::Edge), &shells, &outer)
+            .unwrap();
+        assert_eq!(check(&built.body), []);
+        assert!(
+            check_intersections(&built.body)
+                .iter()
+                .any(|f| matches!(f, Fault::NotOutward { .. })),
+            "{:?}",
+            check_intersections(&built.body)
+        );
+        assert_eq!(check_intersections(&c), []);
     }
 }
