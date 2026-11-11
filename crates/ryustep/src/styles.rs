@@ -1,0 +1,476 @@
+//! Styles (design 448, plan 24.B): the colours and transparencies a
+//! file gives its faces, bodies and occurrences, as ISO 10303-46 and
+//! CAx-IF's *Model Styling and Organization* give them.
+//!
+//! [`read`] follows every `STYLED_ITEM` (over-riding and context
+//! dependent ones too) through its `PRESENTATION_STYLE_ASSIGNMENT`s to
+//! the surface style a face can take: a `SURFACE_STYLE_USAGE` on both
+//! sides or the positive one, its `SURFACE_SIDE_STYLE`, a
+//! `SURFACE_STYLE_FILL_AREA`'s `FILL_AREA_STYLE_COLOUR` (a `COLOUR_RGB`
+//! or one of CAx-IF's eight `DRAUGHTING_PRE_DEFINED_COLOUR`s), and a
+//! `SURFACE_STYLE_RENDERING_WITH_PROPERTIES`' `SURFACE_STYLE_TRANSPARENT`
+//! for its transparency alone. A styled item with nothing a face can take
+//! (curve and point styles, back sides, `NULL_STYLE`) is `retained`; one
+//! whose chain or context doesn't read is `failed`, and fails nothing
+//! else. Colours round to the nearest 8-bit channel and opacities
+//! (1 − transparency) to six decimals, so what ryucad writes reads back
+//! as it was.
+
+use crate::ImportError;
+use crate::schema::{Entities, Entity, Id, Side, wrong};
+use std::collections::BTreeMap;
+
+/// A surface style: an sRGB colour and an opacity, either unset.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Style {
+    pub colour: Option<[u8; 3]>,
+    pub opacity: Option<f64>,
+}
+
+impl Style {
+    /// Its fields where set, `under`'s where not.
+    pub fn over(self, under: Option<Style>) -> Style {
+        let u = under.unwrap_or_default();
+        Style {
+            colour: self.colour.or(u.colour),
+            opacity: self.opacity.or(u.opacity),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.colour.is_none() && self.opacity.is_none()
+    }
+}
+
+/// The smallest opacity a transparency reads as: a face ryucad draws is
+/// never wholly invisible.
+pub const MIN_OPACITY: f64 = 0.001;
+
+/// A colour component as the nearest 8-bit channel (`[0, 1]`, clamped).
+pub fn channel(x: f64) -> u8 {
+    let x = if x.is_nan() { 0.0 } else { x.clamp(0.0, 1.0) };
+    (x * 255.0 + 0.5).floor() as u8
+}
+
+/// The opacity a transparency gives: `1 − t`, to six decimals, in
+/// `[MIN_OPACITY, 1]`.
+pub fn opacity_of(t: f64) -> f64 {
+    let o = 1.0 - if t.is_nan() { 0.0 } else { t };
+    ((o * 1e6 + 0.5).floor() / 1e6).clamp(MIN_OPACITY, 1.0)
+}
+
+/// The transparency written for an opacity.
+pub fn transparency_of(opacity: f64) -> f64 {
+    1.0 - opacity
+}
+
+/// CAx-IF's eight predefined colours, by name in any case.
+pub fn predefined(name: &str) -> Option<[u8; 3]> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "red" => [255, 0, 0],
+        "green" => [0, 255, 0],
+        "blue" => [0, 0, 255],
+        "yellow" => [255, 255, 0],
+        "magenta" => [255, 0, 255],
+        "cyan" => [0, 255, 255],
+        "black" => [0, 0, 0],
+        "white" => [255, 255, 255],
+        _ => return None,
+    })
+}
+
+/// One styled item read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Assigned {
+    /// The styled item.
+    pub instance: Id,
+    /// What it styles: a face, a B-rep item or shell, a mapped item or a
+    /// representation.
+    pub item: Id,
+    pub style: Style,
+    pub over_riding: bool,
+    /// A context dependent one's usage path:
+    /// `NEXT_ASSEMBLY_USAGE_OCCURRENCE`s from the outermost assembly
+    /// down. Empty for any other.
+    pub path: Vec<Id>,
+    /// Every instance its style was read from: the styled item, then the
+    /// rest ascending.
+    pub instances: Vec<Id>,
+}
+
+/// Every styled item of a file.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Styles {
+    /// Those with a style a face takes, by instance.
+    pub assigned: Vec<Assigned>,
+    /// For each item a style that isn't context dependent styles, the
+    /// one it takes (an index into `assigned`): an over-riding one before
+    /// a plain one, then the lowest instance.
+    pub plain: BTreeMap<Id, usize>,
+    /// For each representation a `MAPPED_ITEM` maps, the mapped items, by
+    /// instance.
+    pub mapped: BTreeMap<Id, Vec<Id>>,
+    /// Styled items with nothing a face takes, ascending.
+    pub retained: Vec<Id>,
+    /// Styled items whose style or context doesn't read, with why.
+    pub failed: Vec<(Id, ImportError)>,
+}
+
+/// Whether `name` (a record's entity name, a complex instance's joined)
+/// is a styled item's.
+fn is_styled(name: &str) -> bool {
+    name.split(' ').any(|n| {
+        matches!(
+            n,
+            "STYLED_ITEM" | "OVER_RIDING_STYLED_ITEM" | "CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM"
+        )
+    })
+}
+
+/// Every styled item of `e`; `name_of` names each instance as its record
+/// does (the census's names), so a styled item that doesn't decode is
+/// `failed` too.
+pub fn read<'n>(e: &Entities, name_of: &dyn Fn(Id) -> Option<&'n str>) -> Styles {
+    let mut out = Styles::default();
+    for &id in e.ids() {
+        let x = match e.get(id, id) {
+            Ok(x) => x,
+            Err(err) => {
+                if name_of(id).is_some_and(is_styled) {
+                    out.failed.push((id, err));
+                }
+                continue;
+            }
+        };
+        if let Entity::MappedItem { source, .. } = x
+            && let Ok(Entity::RepresentationMap { representation, .. }) = e.get(id, *source)
+        {
+            out.mapped.entry(*representation).or_default().push(id);
+            continue;
+        }
+        let Entity::StyledItem {
+            styles,
+            item,
+            over_riding,
+            context,
+        } = x
+        else {
+            continue;
+        };
+        let read = assigned(e, id, styles).and_then(|style| {
+            let path = match context {
+                Some(c) => usage_path(e, id, c)?,
+                None => Vec::new(),
+            };
+            Ok((style, path))
+        });
+        match read {
+            Ok((Some((style, mut instances)), path)) => {
+                instances.sort_unstable();
+                instances.dedup();
+                instances.retain(|&i| i != id);
+                instances.insert(0, id);
+                if path.is_empty() {
+                    let k = out.assigned.len();
+                    match out.plain.get(item) {
+                        Some(&j) if out.assigned[j].over_riding || !*over_riding => {}
+                        _ => drop(out.plain.insert(*item, k)),
+                    }
+                }
+                out.assigned.push(Assigned {
+                    instance: id,
+                    item: *item,
+                    style,
+                    over_riding: *over_riding,
+                    path,
+                    instances,
+                });
+            }
+            Ok((None, _)) => out.retained.push(id),
+            Err(err) => out.failed.push((id, err)),
+        }
+    }
+    out
+}
+
+/// The surface style a styled item's assignments give a face, and the
+/// instances it came from; `None` for one with nothing a face takes.
+fn assigned(e: &Entities, id: Id, styles: &[Id]) -> Result<Option<(Style, Vec<Id>)>, ImportError> {
+    let mut used = Vec::new();
+    let mut style = Style::default();
+    for &psa in styles {
+        let Entity::StyleAssignment { styles } = e.get(id, psa)? else {
+            return Err(wrong(psa, "a PRESENTATION_STYLE_ASSIGNMENT"));
+        };
+        for &s in styles {
+            let Entity::SurfaceStyleUsage { side, style: sss } = e.get(psa, s)? else {
+                continue;
+            };
+            // A back side's style: ryucad draws no back sides.
+            if *side == Side::Negative {
+                continue;
+            }
+            let got = side_style(e, s, *sss, &mut used)?;
+            if !got.is_empty() {
+                style = style.over(Some(got));
+                used.extend([psa, s]);
+            }
+        }
+    }
+    Ok((!style.is_empty()).then_some((style, used)))
+}
+
+fn side_style(e: &Entities, from: Id, sss: Id, used: &mut Vec<Id>) -> Result<Style, ImportError> {
+    let Entity::SurfaceSideStyle { styles } = e.get(from, sss)? else {
+        return Err(wrong(sss, "a SURFACE_SIDE_STYLE"));
+    };
+    let mut out = Style::default();
+    for &el in styles {
+        match e.get(sss, el)? {
+            Entity::SurfaceFill { fill } => {
+                if let Some(c) = fill_colour(e, el, *fill, used)? {
+                    out.colour = out.colour.or(Some(c));
+                    used.extend([el, *fill]);
+                }
+            }
+            Entity::Rendering { properties } => {
+                for &p in properties {
+                    if let Entity::Transparent { transparency } = e.get(el, p)? {
+                        out.opacity = out.opacity.or(Some(opacity_of(*transparency)));
+                        used.extend([el, p]);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if !out.is_empty() {
+        used.push(sss);
+    }
+    Ok(out)
+}
+
+fn fill_colour(e: &Entities, from: Id, fas: Id, used: &mut Vec<Id>) -> Result<Option<[u8; 3]>, ImportError> {
+    let Entity::FillAreaStyle { styles } = e.get(from, fas)? else {
+        return Err(wrong(fas, "a FILL_AREA_STYLE"));
+    };
+    for &s in styles {
+        let Entity::FillColour { colour } = e.get(fas, s)? else {
+            continue;
+        };
+        let c = match e.get(s, *colour)? {
+            Entity::ColourRgb { rgb } => Some(rgb.map(channel)),
+            Entity::PredefinedColour { name } => predefined(name),
+            _ => None,
+        };
+        if let Some(c) = c {
+            used.extend([s, *colour]);
+            return Ok(Some(c));
+        }
+    }
+    Ok(None)
+}
+
+/// The usage path an over-riding style's context names, outermost
+/// first: each `NEXT_ASSEMBLY_USAGE_OCCURRENCE`, a
+/// `SPECIFIED_HIGHER_USAGE_OCCURRENCE`'s chain, or a
+/// `CONTEXT_DEPENDENT_SHAPE_REPRESENTATION`'s usage, joined in order (and
+/// reversed when the file lists them innermost first). Anything else in
+/// a context isn't a usage. A path whose usages don't run parent to
+/// child is `Malformed`.
+fn usage_path(e: &Entities, id: Id, context: &[Id]) -> Result<Vec<Id>, ImportError> {
+    let mut path = Vec::new();
+    for &c in context {
+        usages(e, id, c, &mut path, 0)?;
+    }
+    let chains = |p: &[Id]| -> Result<bool, ImportError> {
+        for w in p.windows(2) {
+            let (Entity::Usage { child, .. }, Entity::Usage { parent, .. }) =
+                (e.get(id, w[0])?, e.get(id, w[1])?)
+            else {
+                return Ok(false);
+            };
+            if child != parent {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
+    if chains(&path)? {
+        return Ok(path);
+    }
+    path.reverse();
+    if chains(&path)? {
+        return Ok(path);
+    }
+    Err(ImportError::Malformed {
+        instance: id,
+        attribute: 4,
+        what: "a style's context isn't one usage path",
+    })
+}
+
+fn usages(e: &Entities, from: Id, c: Id, out: &mut Vec<Id>, depth: usize) -> Result<(), ImportError> {
+    if depth > 64 {
+        return Err(ImportError::Malformed {
+            instance: from,
+            attribute: 4,
+            what: "a style's context nests too deep",
+        });
+    }
+    match e.get(from, c)? {
+        Entity::Usage { .. } => out.push(c),
+        Entity::HigherUsage { upper, next } => {
+            usages(e, c, *upper, out, depth + 1)?;
+            out.push(*next);
+        }
+        Entity::ContextDependentShape { product_shape, .. } => {
+            if let Entity::DefinitionShape { definition } = e.get(c, *product_shape)?
+                && let Entity::Usage { .. } = e.get(*product_shape, *definition)?
+            {
+                out.push(*definition);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::part21::parse;
+    use crate::schema::Entities;
+
+    /// The styles of a file whose data section is `data`, every instance
+    /// named as its record names it.
+    pub(crate) fn styles_of(data: &str) -> Styles {
+        let text = format!(
+            "ISO-10303-21;HEADER;FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));ENDSEC;\
+             DATA;{data}ENDSEC;END-ISO-10303-21;"
+        );
+        let file = parse(text.as_bytes()).unwrap();
+        let names: BTreeMap<Id, String> = file
+            .instances
+            .iter()
+            .map(|i| (i.id, crate::census::joined(i.record.parts())))
+            .collect();
+        read(&Entities::decode(&file), &|id| names.get(&id).map(String::as_str))
+    }
+
+    /// One fill colour `#1` and its chain to assignment `#9`; `extra`
+    /// adds the rest.
+    fn chain(rgb: &str, extra: &str) -> String {
+        format!(
+            "#1=COLOUR_RGB('',{rgb});#2=FILL_AREA_STYLE_COLOUR('',#1);\
+             #3=FILL_AREA_STYLE('',(#2));#4=SURFACE_STYLE_FILL_AREA(#3);\
+             #7=SURFACE_SIDE_STYLE('',(#4));#8=SURFACE_STYLE_USAGE(.BOTH.,#7);\
+             #9=PRESENTATION_STYLE_ASSIGNMENT((#8));{extra}"
+        )
+    }
+
+    #[test]
+    fn colours_round_to_the_nearest_channel_and_back() {
+        for k in 0..=255u8 {
+            assert_eq!(channel(f64::from(k) / 255.0), k);
+        }
+        assert_eq!(channel(0.5), 128);
+        assert_eq!(channel(-1.0), 0);
+        assert_eq!(channel(2.0), 255);
+        assert_eq!(channel(f64::NAN), 0);
+        for o in [1.0, 0.5, 0.3, 0.123456, 0.001, 0.999] {
+            assert_eq!(opacity_of(transparency_of(o)), o, "{o}");
+        }
+        assert_eq!(opacity_of(1.0), MIN_OPACITY);
+        assert_eq!(opacity_of(-0.5), 1.0);
+        assert_eq!(predefined("RED"), Some([255, 0, 0]));
+        assert_eq!(predefined("white"), Some([255, 255, 255]));
+        assert_eq!(predefined("mauve"), None);
+    }
+
+    #[test]
+    fn a_styled_item_reads_its_colour_and_transparency() {
+        let s = styles_of(&chain(
+            "0.8,0.4,0.",
+            "#5=SURFACE_STYLE_TRANSPARENT(0.25);\
+             #6=SURFACE_STYLE_RENDERING_WITH_PROPERTIES(.NORMAL_SHADING.,#1,(#5));\
+             #17=SURFACE_SIDE_STYLE('',(#4,#6));#18=SURFACE_STYLE_USAGE(.POSITIVE.,#17);\
+             #19=PRESENTATION_STYLE_ASSIGNMENT((#18));\
+             #20=STYLED_ITEM('',(#9),#100);#21=STYLED_ITEM('',(#19),#101);\
+             #22=OVER_RIDING_STYLED_ITEM('',(#9),#101,#21);",
+        ));
+        assert_eq!(s.failed, []);
+        let at = |item: Id| &s.assigned[s.plain[&item]];
+        assert_eq!(
+            at(100).style,
+            Style {
+                colour: Some([204, 102, 0]),
+                opacity: None
+            }
+        );
+        assert_eq!(at(100).instances, [20, 1, 2, 3, 4, 7, 8, 9]);
+        // An over-riding style beats a plain one on the same item.
+        assert_eq!(at(101).instance, 22);
+        assert_eq!(s.assigned[1].style.opacity, Some(0.75));
+        assert_eq!(s.assigned[1].style.colour, Some([204, 102, 0]));
+    }
+
+    #[test]
+    fn styles_a_face_cannot_take_are_retained_and_broken_ones_failed() {
+        let s = styles_of(&chain(
+            "1.,0.,0.",
+            "#10=SURFACE_STYLE_USAGE(.NEGATIVE.,#7);#11=PRESENTATION_STYLE_ASSIGNMENT((#10));\
+             #12=CURVE_STYLE('',$,$,$);#13=PRESENTATION_STYLE_ASSIGNMENT((#12));\
+             #14=PRESENTATION_STYLE_ASSIGNMENT((NULL_STYLE(.NULL.)));\
+             #20=STYLED_ITEM('',(#11),#100);#21=STYLED_ITEM('',(#13),#100);\
+             #22=STYLED_ITEM('',(#14),#100);#23=STYLED_ITEM('',(#99),#100);\
+             #24=STYLED_ITEM('',(#9));#99=CARTESIAN_POINT('',(0.,0.,0.));",
+        ));
+        assert!(s.assigned.is_empty());
+        assert_eq!(s.retained, [20, 21, 22]);
+        let failed: Vec<Id> = s.failed.iter().map(|f| f.0).collect();
+        assert_eq!(failed, [23, 24]);
+    }
+
+    #[test]
+    fn predefined_colours_read_by_name() {
+        let s = styles_of(
+            "#1=DRAUGHTING_PRE_DEFINED_COLOUR('green');#2=FILL_AREA_STYLE_COLOUR('',#1);\
+             #3=FILL_AREA_STYLE('',(#2));#4=SURFACE_STYLE_FILL_AREA(#3);\
+             #7=SURFACE_SIDE_STYLE('',(#4));#8=SURFACE_STYLE_USAGE(.BOTH.,#7);\
+             #9=PRESENTATION_STYLE_ASSIGNMENT((#8));#20=STYLED_ITEM('',(#9),#100);",
+        );
+        assert_eq!(s.assigned[0].style.colour, Some([0, 255, 0]));
+    }
+
+    /// A root `#50` using `#51` (`#40`), which uses `#52` (`#41`): a
+    /// context of usages outermost first, innermost first, as a higher
+    /// usage, and as shape relationships all read as `[40, 41]`; usages
+    /// that don't chain fail.
+    #[test]
+    fn contexts_read_as_usage_paths_outermost_first() {
+        let tree = "#40=NEXT_ASSEMBLY_USAGE_OCCURRENCE('1','','',#50,#51,$);\
+                    #41=NEXT_ASSEMBLY_USAGE_OCCURRENCE('2','','',#51,#52,$);\
+                    #42=NEXT_ASSEMBLY_USAGE_OCCURRENCE('3','','',#50,#52,$);\
+                    #43=SPECIFIED_HIGHER_USAGE_OCCURRENCE('','','',#50,#52,$,#40,#41);\
+                    #44=PRODUCT_DEFINITION_SHAPE('','',#40);#45=PRODUCT_DEFINITION_SHAPE('','',#41);\
+                    #46=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#60,#44);\
+                    #47=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#61,#45);";
+        let with = |context: &str| {
+            styles_of(&chain(
+                "1.,0.,0.",
+                &format!(
+                    "{tree}#20=STYLED_ITEM('',(#9),#100);\
+                     #21=CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM('',(#9),#100,#20,({context}));"
+                ),
+            ))
+        };
+        for context in ["#40,#41", "#41,#40", "#43", "#46,#47"] {
+            let s = with(context);
+            let a = s.assigned.iter().find(|a| a.instance == 21).unwrap();
+            assert_eq!(a.path, [40, 41], "{context}");
+        }
+        let s = with("#40,#42");
+        assert_eq!(s.failed.iter().map(|f| f.0).collect::<Vec<_>>(), [21]);
+    }
+}

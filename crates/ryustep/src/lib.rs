@@ -17,6 +17,7 @@ pub use ryu_part21 as part21;
 pub mod products;
 pub mod read;
 pub mod schema;
+pub mod styles;
 pub mod write;
 
 pub use error::{ImportError, StepError, WriteError};
