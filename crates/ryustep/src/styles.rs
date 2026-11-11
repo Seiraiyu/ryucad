@@ -336,6 +336,133 @@ fn usages(e: &Entities, from: Id, c: Id, out: &mut Vec<Id>, depth: usize) -> Res
     Ok(())
 }
 
+/// The styles a body takes from its file.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BodyStyles {
+    /// Its own: a style on its representation (or the first holding its
+    /// items), else on its first B-rep item, or that item's shells, that
+    /// has one, else on a mapped item mapping its representation.
+    pub body: Option<Style>,
+    /// Its faces', by face instance: a face's own, else its B-rep item's
+    /// where that differs from the body's.
+    pub faces: BTreeMap<Id, Style>,
+    /// Every instance read for them, ascending.
+    pub instances: Vec<Id>,
+}
+
+impl crate::Opened {
+    /// Every styled item of the file, read once.
+    pub fn styles(&self) -> &Styles {
+        self.styles
+            .get_or_init(|| read(&self.entities, &|id| self.census.name_at(id)))
+    }
+
+    /// The styles `held[k]` takes, none of them context dependent.
+    pub fn body_styles(&self, k: usize) -> BodyStyles {
+        let st = self.styles();
+        if st.assigned.is_empty() {
+            return BodyStyles::default();
+        }
+        let h = &self.held[k];
+        let first = &self.held[self.first[k]];
+        let mut used = Vec::new();
+        let take = |id: Id, used: &mut Vec<Id>| -> Option<Style> {
+            let a = &st.assigned[*st.plain.get(&id)?];
+            used.extend(&a.instances);
+            Some(a.style)
+        };
+        let items: Vec<(Id, Option<Style>)> = h
+            .items
+            .iter()
+            .map(|&item| {
+                let own = take(item, &mut used).or_else(|| {
+                    self.shells_of(item)
+                        .into_iter()
+                        .find_map(|s| take(s, &mut used))
+                });
+                (item, own)
+            })
+            .collect();
+        let rep = take(h.representation, &mut used)
+            .or_else(|| {
+                (first.representation != h.representation)
+                    .then(|| take(first.representation, &mut used))
+                    .flatten()
+            })
+            .or_else(|| {
+                st.mapped
+                    .get(&h.representation)
+                    .into_iter()
+                    .flatten()
+                    .find_map(|&m| take(m, &mut used))
+            });
+        let body = rep.or_else(|| items.iter().find_map(|(_, s)| *s));
+        let mut faces = BTreeMap::new();
+        for &(item, own) in &items {
+            for face in self.faces_of(item) {
+                if let Some(s) = take(face, &mut used) {
+                    faces.insert(face, s);
+                } else if let Some(s) = own.filter(|s| Some(*s) != body) {
+                    faces.insert(face, s);
+                }
+            }
+        }
+        used.sort_unstable();
+        used.dedup();
+        BodyStyles {
+            body,
+            faces,
+            instances: used,
+        }
+    }
+
+    /// The shells of B-rep item `item`, in its order: a solid's outer
+    /// shell and voids, a surface model's shells or face sets.
+    pub fn shells_of(&self, item: Id) -> Vec<Id> {
+        use crate::schema::Brep;
+        let e = &self.entities;
+        match e.get(item, item) {
+            Ok(Entity::Brep(Brep::Solid { outer, voids, .. })) => {
+                let mut out = vec![*outer];
+                for &v in voids {
+                    match e.get(item, v) {
+                        Ok(Entity::OrientedShell { shell, .. }) => out.push(*shell),
+                        _ => out.push(v),
+                    }
+                }
+                out
+            }
+            Ok(Entity::Brep(Brep::Shells(s))) | Ok(Entity::Brep(Brep::Faces(s))) => s.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The faces of B-rep item `item`, ascending.
+    pub fn faces_of(&self, item: Id) -> Vec<Id> {
+        let e = &self.entities;
+        let mut out = Vec::new();
+        for shell in self.shells_of(item) {
+            let faces = match e.get(item, shell) {
+                Ok(Entity::Shell { faces, .. }) | Ok(Entity::FaceSet { faces }) => faces.clone(),
+                Ok(Entity::OrientedShell { shell, .. }) => match e.get(item, *shell) {
+                    Ok(Entity::Shell { faces, .. }) => faces.clone(),
+                    _ => Vec::new(),
+                },
+                _ => Vec::new(),
+            };
+            for f in faces {
+                match e.get(shell, f) {
+                    Ok(Entity::OrientedFace { face, .. }) => out.push(*face),
+                    _ => out.push(f),
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,4 +600,77 @@ mod tests {
         let s = with("#40,#42");
         assert_eq!(s.failed.iter().map(|f| f.0).collect::<Vec<_>>(), [21]);
     }
+
+    /// OCCT's AP214 box (`tests/data/occt/box_ap214.stp`) with `extra`
+    /// added to its data section: what a test styles it with.
+    pub(crate) fn styled_box(extra: impl Fn(&crate::Opened) -> String) -> crate::Opened {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/occt/box_ap214.stp"
+        ))
+        .unwrap();
+        let plain = crate::open(&bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let end = text.rfind("ENDSEC;").unwrap();
+        let more = extra(&plain);
+        crate::open(format!("{}{more}{}", &text[..end], &text[end..]).as_bytes()).unwrap()
+    }
+
+    /// A red style `#9001`…`#9009` and a blue one `#9011`…`#9019`.
+    fn two_styles() -> String {
+        let one = |base: u64, rgb: &str| {
+            format!(
+                "#{a}=COLOUR_RGB('',{rgb});#{b}=FILL_AREA_STYLE_COLOUR('',#{a});\
+                 #{c}=FILL_AREA_STYLE('',(#{b}));#{d}=SURFACE_STYLE_FILL_AREA(#{c});\
+                 #{e}=SURFACE_SIDE_STYLE('',(#{d}));#{f}=SURFACE_STYLE_USAGE(.BOTH.,#{e});\
+                 #{g}=PRESENTATION_STYLE_ASSIGNMENT((#{f}));",
+                a = base + 1,
+                b = base + 2,
+                c = base + 3,
+                d = base + 4,
+                e = base + 5,
+                f = base + 6,
+                g = base + 9,
+            )
+        };
+        one(9000, "1.,0.,0.") + &one(9010, "0.,0.,1.")
+    }
+
+    #[test]
+    fn a_body_takes_its_items_style_and_a_face_its_own() {
+        let o = styled_box(|o| {
+            let item = o.held[0].items[0];
+            let face = o.faces_of(item)[0];
+            format!(
+                "{}#9100=STYLED_ITEM('',(#9009),#{item});#9101=STYLED_ITEM('',(#9019),#{face});",
+                two_styles()
+            )
+        });
+        let s = o.body_styles(0);
+        assert_eq!(s.body.unwrap().colour, Some([255, 0, 0]));
+        let face = o.faces_of(o.held[0].items[0])[0];
+        assert_eq!(s.faces.len(), 1);
+        assert_eq!(s.faces[&face].colour, Some([0, 0, 255]));
+        assert!(s.instances.contains(&9100) && s.instances.contains(&9101));
+        assert!(s.instances.contains(&9001) && s.instances.contains(&9011));
+    }
+
+    #[test]
+    fn a_representations_style_is_the_bodys_and_a_shells_its_items() {
+        let o = styled_box(|o| {
+            let rep = o.held[0].representation;
+            format!("{}#9100=STYLED_ITEM('',(#9019),#{rep});", two_styles())
+        });
+        assert_eq!(o.body_styles(0).body.unwrap().colour, Some([0, 0, 255]));
+        let o = styled_box(|o| {
+            let shell = o.shells_of(o.held[0].items[0])[0];
+            format!("{}#9100=STYLED_ITEM('',(#9009),#{shell});", two_styles())
+        });
+        assert_eq!(o.body_styles(0).body.unwrap().colour, Some([255, 0, 0]));
+        // An unstyled file reads no styles, and costs nothing more.
+        let plain = styled_box(|_| String::new());
+        assert_eq!(plain.body_styles(0), BodyStyles::default());
+        assert!(plain.styles().assigned.is_empty());
+    }
+
 }
