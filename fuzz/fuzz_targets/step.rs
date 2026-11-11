@@ -24,6 +24,32 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(format!("{back:?}"), format!("{file:?}"));
     assert_eq!(part21::write(&back).unwrap(), bytes);
     let e = Entities::decode(&file);
+    // The census (design 448) decodes alike, counts every instance and
+    // buckets any read without panicking.
+    let (counted, census) = Entities::decode_counted(&file);
+    assert_eq!(counted, e);
+    assert_eq!(census.len(), file.instances.len());
+    let read = ryustep::census::Read {
+        roots: e.ids().iter().copied().take(16).collect(),
+        product_tree: true,
+    };
+    let failed: Vec<ryustep::census::Failed> = e
+        .ids()
+        .iter()
+        .rev()
+        .take(4)
+        .map(|&instance| ryustep::census::Failed {
+            instance,
+            code: "fuzz".into(),
+        })
+        .collect();
+    let t = census.transfer(&read, &failed);
+    let total: u64 = t
+        .lines
+        .iter()
+        .flat_map(|l| l.buckets.iter().map(|b| b.count))
+        .sum();
+    assert_eq!(total, t.instances);
     let p = Products::build(&e);
     for d in &p.definitions {
         for s in &d.shapes {
