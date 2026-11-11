@@ -46,7 +46,9 @@ use crate::topo::{Body, EdgeId, FaceId, VertexId};
 use crate::work::{Meter, Work};
 
 /// Faces that cross, overlap or can't be checked, by pair in face order.
-/// For a body that passes [`super::check`].
+/// For a body that passes [`super::check`]. Once no faces cross, overlap
+/// or go unchecked, also `NotOutward` for a solid with a curved face
+/// wound inside out, which `check` can't decide (#692).
 pub fn check_intersections(body: &Body) -> Vec<Fault> {
     match check_intersections_with(body, &Work::unlimited()) {
         Ok(faults) => faults,
@@ -63,7 +65,13 @@ pub fn check_intersections_with(body: &Body, work: &Work) -> Result<Vec<Fault>, 
 /// [`check_intersections`] with a meter, for the operations that check
 /// what they build (sweeps along paths, lofts, offsets).
 pub(crate) fn check_intersections_in(body: &Body, m: &Meter) -> Vec<Fault> {
-    check_pairs_in(body, m, |_, _| true)
+    let mut faults = check_pairs_in(body, m, |_, _| true);
+    // With no face crossing or overlapping another, a winding number
+    // decides a curved solid's orientation (#692).
+    if faults.is_empty() {
+        faults = super::geometry::curved_orientation(body);
+    }
+    faults
 }
 
 /// [`check_intersections_in`] over only the pairs of faces `wanted`

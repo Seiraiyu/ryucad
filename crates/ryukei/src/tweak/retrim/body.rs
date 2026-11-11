@@ -43,7 +43,7 @@ fn sheet_key(key: OpKey, face: Name) -> OpKey {
 
 /// `face` run the other way round: under the other sense, its loops
 /// reversed so they still run counterclockwise about its normal.
-fn flipped(face: &mut layout::Face) {
+pub(crate) fn flipped(face: &mut layout::Face) {
     face.sense = match face.sense {
         Sense::Forward => Sense::Reversed,
         Sense::Reversed => Sense::Forward,

@@ -369,6 +369,16 @@ fn attempt(
     if let Some((at, needed)) = past_cap(&out) {
         return done(Err(TweakError::ToleranceTooLarge { at, needed }.into()));
     }
+    // A curved result inside out, as #704's planar one is.
+    if !crate::check::curved_orientation(&out).is_empty() {
+        let face = region
+            .changed
+            .iter()
+            .map(|&f| body.faces[f].name)
+            .min()
+            .unwrap_or(Name::from_u128(0));
+        return done(Err(TweakError::FaceCollapses { face }.into()));
+    }
     let mut out = out;
     let moved = changes.motion.keys().map(|&f| body.faces[f].name).collect();
     let mut journal = names::finish(key, body, &w, &mut out, journal, &moved);
