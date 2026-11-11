@@ -3123,6 +3123,18 @@ fn file_import_step_plans_then_imports() {
             .is_some_and(|i| i.current().is_some())
     });
     shown(&mut h, "part-2 (new part, product part 2)");
+    let first = h
+        .state()
+        .opened()
+        .ws
+        .import
+        .as_ref()
+        .and_then(|i| i.current())
+        .map(|p| p.transfer[0].clone())
+        .unwrap();
+    assert!(first.starts_with("geometry: "), "{first}");
+    shown(&mut h, "What the file holds:");
+    shown(&mut h, &format!("    {first}"));
     assert!(!p.root.join("imports").exists(), "a plan writes nothing");
     h.get_by_label("Import").click();
     frames(&mut h, |a| {
