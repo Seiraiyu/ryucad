@@ -423,6 +423,13 @@ fn tweak_groups(ui: &mut egui::Ui, groups: &mut [crate::core::edit::TweakGroup],
     }
 }
 
+/// A face tweak's topology and blends (ryucad 22), each a checkbox: off
+/// as ryucad 17 builds it.
+fn retrim(rows: &mut Rows<'_>, r: &mut crate::core::edit::RetrimForm) {
+    rows.flag("change topology", &mut r.topology);
+    rows.flag("rebuild blends", &mut r.blends);
+}
+
 /// A draft's target, hinge and pull (an agent's to change); its angle,
 /// `reverse` and `tangent`; its faces, groups and flipped faces, each a
 /// checkbox to take it out; and each drafted face's certified angle from
@@ -441,6 +448,7 @@ pub(crate) fn draft(
         rows.quantity("angle", &mut d.angle);
         rows.flag("reverse the pull", &mut d.reverse);
         rows.flag("tangent faces join", &mut d.tangent);
+        retrim(rows, &mut d.retrim);
     });
     removable(ui, &mut d.faces, "face");
     tweak_groups(ui, &mut d.groups, &mut keys);
@@ -479,6 +487,7 @@ pub(crate) fn move_face(ui: &mut egui::Ui, m: &mut crate::core::edit::MoveFaceFo
             rows.quantity("angle", f);
         }
         rows.flag("tangent faces join", &mut m.tangent);
+        retrim(rows, &mut m.retrim);
     });
     removable(ui, &mut m.faces, "face");
     tweak_groups(ui, &mut m.groups, &mut keys);
@@ -490,6 +499,7 @@ pub(crate) fn move_face(ui: &mut egui::Ui, m: &mut crate::core::edit::MoveFaceFo
 pub(crate) fn replace_face(ui: &mut egui::Ui, r: &mut crate::core::edit::ReplaceFaceForm) -> Keys {
     let mut keys = form::grid(ui, "replace face", |rows| {
         rows.read_only("target", &r.target, true, None);
+        retrim(rows, &mut r.retrim);
     });
     for (i, g) in r.groups.iter_mut().enumerate() {
         let k = form::grid(ui, ("replace group", i), |rows| {
@@ -497,6 +507,70 @@ pub(crate) fn replace_face(ui: &mut egui::Ui, r: &mut crate::core::edit::Replace
         });
         keys.apply |= k.apply;
         removable(ui, &mut g.faces, "face");
+    }
+    keys
+}
+
+/// A delete's target (an agent's to change), how it heals, and its faces
+/// and seeds, each a checkbox to take it out.
+pub(crate) fn delete_face(ui: &mut egui::Ui, x: &mut crate::core::edit::DeleteFaceForm) -> Keys {
+    let keys = form::grid(ui, "delete face", |rows| {
+        rows.read_only("target", &x.target, true, None);
+        rows.choice("heal", &mut x.heal);
+    });
+    if !x.faces.options.is_empty() {
+        removable(ui, &mut x.faces, "face");
+    }
+    if !x.seeds.options.is_empty() {
+        removable(ui, &mut x.seeds, "seed");
+    }
+    keys
+}
+
+/// A blend delete's target, the size it takes blends below and its
+/// recognition tolerance (empty for the kernel's 10 µm), and its faces,
+/// each a checkbox to take it out.
+pub(crate) fn delete_blend(ui: &mut egui::Ui, d: &mut crate::core::edit::DeleteBlendForm) -> Keys {
+    let keys = form::grid(ui, "delete blend", |rows| {
+        rows.read_only("target", &d.target, true, None);
+        rows.quantity("below", &mut d.below);
+        rows.quantity("tolerance", &mut d.tolerance);
+    });
+    if !d.faces.options.is_empty() {
+        removable(ui, &mut d.faces, "face");
+    }
+    keys
+}
+
+/// A resize's target and tolerance, and each group's chamfer form and
+/// face (an agent's to change), sizes, and the faces naming its blends.
+pub(crate) fn resize_blend(ui: &mut egui::Ui, r: &mut crate::core::edit::ResizeBlendForm) -> Keys {
+    let mut keys = form::grid(ui, "resize blend", |rows| {
+        rows.read_only("target", &r.target, true, None);
+        rows.quantity("tolerance", &mut r.tolerance);
+    });
+    for (i, g) in r.groups.iter_mut().enumerate() {
+        let k = form::grid(ui, ("resize group", i), |rows| {
+            let n = i + 1;
+            if let Some(f) = &g.form {
+                rows.read_only(&format!("form (group {n})"), f, false, None);
+            }
+            if let Some(f) = &g.face {
+                rows.read_only(&format!("from face (group {n})"), f, true, None);
+            }
+            for (_, f) in &mut g.sizes {
+                let name = f.name.clone();
+                rows.quantity(&name, f);
+            }
+            rows.read_only(
+                &format!("blends (group {n})"),
+                &g.faces.join("\n"),
+                true,
+                None,
+            );
+        });
+        keys.apply |= k.apply;
+        keys.revert |= k.revert;
     }
     keys
 }
@@ -839,8 +913,9 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
                 T::Draft(d) => draft(ui, d, &angles),
                 T::MoveFace(m) => move_face(ui, m),
                 T::ReplaceFace(r) => replace_face(ui, r),
-                // Drawn in Task 7.
-                T::DeleteFace(_) | T::DeleteBlend(_) | T::ResizeBlend(_) => Keys::default(),
+                T::DeleteFace(x) => delete_face(ui, x),
+                T::DeleteBlend(d) => delete_blend(ui, d),
+                T::ResizeBlend(r) => resize_blend(ui, r),
             }
         }),
     ]
