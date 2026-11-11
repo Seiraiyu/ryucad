@@ -37,7 +37,7 @@ fn tilted() -> Frame {
 }
 
 /// A NURBS cylinder of radius 0.7 over half a turn and a unit height.
-fn tube() -> Surface {
+pub(crate) fn tube() -> Surface {
     let c = Surface::Cylinder(Cylinder::new(tilted(), 0.7).unwrap());
     let (n, _) = c.to_nurbs([[0.0, PI], [-0.5, 0.5]]).unwrap();
     Surface::Nurbs(Arc::new(n))
@@ -350,4 +350,34 @@ fn nurbs_forms_keep_within_their_bound() {
         o.to_nurbs_within([[0.5, 1.5], [0.0, 1.0]], 1e-6).err(),
         Some(Error::Degenerate)
     );
+}
+
+/// A NURBS sphere's band clear of its poles.
+pub(crate) fn ball() -> (Surface, Cell) {
+    let sphere = Surface::Sphere(Sphere::new(Frame::WORLD, 1.0).unwrap());
+    let (n, _) = sphere.to_nurbs([[0.0; 2]; 2]).unwrap();
+    let n = Surface::Nurbs(Arc::new(n));
+    let band = n.domain();
+    let band = [band[0], [band[1][0] + 0.3, band[1][1] - 0.3]];
+    (n, band)
+}
+
+/// The three ways over small cells: regular short of the focal
+/// surface; turned past a tube's axis (one factor negative); inverted
+/// past a sphere's centre (both), where the expanded product cancels
+/// (`-1.4` leaves both factors `-0.4`).
+#[test]
+fn turn_over_reads_the_three_ways() {
+    let cell = [[0.4, 0.41], [0.1, 0.11]];
+    let o = Offset::new(tube(), 0.1, [[0.0, 1.0], [-0.5, 0.5]]).unwrap();
+    let d = o.local_box(cell).unwrap();
+    assert_eq!(turn_over(&d, 0.3), Over::Is(Turn::Regular));
+    assert_eq!(turn_over(&d, -0.75), Over::Is(Turn::Turned));
+    let (b, band) = ball();
+    let o = Offset::new(b, 0.1, band).unwrap();
+    let d = o.local_box([[1.0, 1.0001], [0.0, 0.0001]]).unwrap();
+    assert_eq!(turn_over(&d, 0.1), Over::Is(Turn::Regular));
+    assert_eq!(turn_over(&d, -0.5), Over::Is(Turn::Regular));
+    assert_eq!(turn_over(&d, -1.4), Over::Is(Turn::Inverted));
+    assert_eq!(turn_over(&d, -2.0), Over::Is(Turn::Inverted));
 }

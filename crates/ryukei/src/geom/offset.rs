@@ -51,6 +51,28 @@ impl PartialEq for Offset {
     }
 }
 
+/// How an offset lies against its base's focal surface over a cell, by
+/// the signs of the principal factors `1 - d κ₁` and `1 - d κ₂`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Turn {
+    /// Both positive: regular, its normal its base's.
+    Regular,
+    /// Both negative: past the focal surface of both curvatures, like a
+    /// sphere past its centre; its normal still its base's.
+    Inverted,
+    /// One negative: like a cylinder past its axis; its normal turned.
+    Turned,
+}
+
+/// What [`turn_over`] finds over a cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Over {
+    /// One sign over the whole cell, certified.
+    Is(Turn),
+    /// Rounding can't tell: halve the cell.
+    Unsure,
+}
+
 /// The parts of `[c0, c1]`, moved by whole periods where the direction
 /// has one, that lie within `[a, b]`; where `[a, b]` is a single value (a
 /// parameter line), the cells holding it.
@@ -107,27 +129,38 @@ fn icross(a: IVec3, b: IVec3) -> IVec3 {
     ]
 }
 
-/// Whether the offset by `distance` is regular over a cell, from the
-/// base's derivative enclosures there: `Some(true)` where certified,
-/// `Some(false)` where certified to fold or turn inside out somewhere,
-/// `None` where rounding can't tell.
+/// How the offset by `distance` lies over a cell, from the base's
+/// derivative enclosures there.
 ///
 /// With `κ₁`, `κ₂` the principal curvatures against the natural normal
 /// (`N_u = -A S_u`, `A` the shape operator), `O_u × O_v = (1 - d κ₁)(1 -
-/// d κ₂) (S_u × S_v)`: the offset is regular, its normal its base's,
-/// exactly when both factors are positive, that is when their product and
-/// their sum are. From the fundamental forms (`E`, `F`, `G`; `L'`, `M'`,
-/// `N'` against `W = S_u × S_v`, unnormalized; `a = |W|²`), with `T = E
-/// N' - 2 F M' + G L'`: the product times `a²` is `a² - d T √a + d² (L'
-/// N' - M'²)`, and the sum times `a √a` is `2 a √a - d T`.
-fn regular_over(d: &[IVec3; 10], distance: f64) -> Option<bool> {
+/// d κ₂) (S_u × S_v)`. Regular, both factors positive, is decided as it
+/// always was, so a regular offset's cells and bounds keep their bits:
+/// from the fundamental forms (`E`, `F`, `G`; `L'`, `M'`, `N'` against
+/// `W = S_u × S_v`, unnormalized; `a = |W|²`), with `T = E N' - 2 F
+/// M' + G L'`, the product of the factors times `a²` is `a² - d T √a +
+/// d² (L' N' - M'²)` and their sum times `a √a` is `2 a √a - d T`,
+/// both positive beyond a margin far above the rounding of the moved
+/// control points.
+///
+/// Past the focal surface that expanded product cancels: its terms grow
+/// with `d²` while it doesn't. The factors are the eigenvalues of `I⁻¹
+/// (I - d II)` (`I`, `II` the forms' matrices, `II` against the unit
+/// normal), so by Sylvester's law of inertia, `I` being positive
+/// definite, their signs are those of the symmetric `M = √a I - d II'`'s
+/// eigenvalues: `det M < 0` is one negative (turned), `det M > 0` with
+/// `M₁₁ < 0` both (inverted). Each entry of `M` is one difference, so it
+/// certifies where the expanded form can't.
+fn turn_over(d: &[IVec3; 10], distance: f64) -> Over {
     let (su, sv) = (d[1], d[2]);
     let w = icross(su, sv);
     let a = idot(w, w);
     if a.lo() <= 0.0 {
-        return None;
+        return Over::Unsure;
     }
-    let root = a.sqrt()?;
+    let Some(root) = a.sqrt() else {
+        return Over::Unsure;
+    };
     let (e, f, g) = (idot(su, su), idot(su, sv), idot(sv, sv));
     let (l, m, n) = (idot(d[3], w), idot(d[4], w), idot(d[5], w));
     let k = Interval::point(distance);
@@ -137,11 +170,19 @@ fn regular_over(d: &[IVec3; 10], distance: f64) -> Option<bool> {
     // A margin far above the rounding of the moved control points.
     let scale = a.hi() * a.hi();
     if product.lo() > 1e-9 * scale && sum.lo() > 1e-9 * a.hi() * root.hi() {
-        Some(true)
-    } else if product.hi() < 0.0 || sum.hi() < 0.0 {
-        Some(false)
+        return Over::Is(Turn::Regular);
+    }
+    let (m11, m12, m22) = (root * e - k * l, root * f - k * m, root * g - k * n);
+    let size = |x: Interval| x.lo().abs().max(x.hi().abs());
+    let det = m11 * m22 - m12 * m12;
+    let det_margin = 1e-9 * (size(m11) * size(m22) + size(m12) * size(m12));
+    let m11_margin = 1e-9 * (size(root * e) + size(k * l));
+    if det.hi() < -det_margin {
+        Over::Is(Turn::Turned)
+    } else if det.lo() > det_margin && m11.hi() < -m11_margin {
+        Over::Is(Turn::Inverted)
     } else {
-        None
+        Over::Unsure
     }
 }
 
@@ -269,19 +310,17 @@ impl Offset {
                 return Err(Error::Degenerate);
             }
             let d = sheet.jet3_box(cell);
-            match self
-                .local_box(cell)
-                .and_then(|d| regular_over(&d, self.distance))
-            {
-                Some(true) => {
+            match self.local_box(cell).map(|d| turn_over(&d, self.distance)) {
+                Some(Over::Is(Turn::Regular)) => {
                     if let Some(q) = d.and_then(|d| offset_jets(d, self.distance)) {
                         let b = point_box(&q);
                         bounds = Some(bounds.map_or(b, |o| o.union(&b)));
                         continue;
                     }
                 }
-                Some(false) => return Err(Error::Degenerate),
-                None => {}
+                // Certified past the focal surface somewhere: not regular.
+                Some(Over::Is(_)) => return Err(Error::Degenerate),
+                _ => {}
             }
             if depth == MAX_DEPTH {
                 return Err(Error::Degenerate);
