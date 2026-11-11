@@ -128,6 +128,9 @@ impl Follow {
                 "groups.#.with" => Some(Carrier),
                 _ => None,
             },
+            // Every piece of a split face goes, and each piece of a split
+            // seed finds the same feature.
+            Feature::DeleteFace(_) => matches!(r, "faces.#" | "seeds.#").then_some(All),
             Feature::Draft(_) => match r {
                 "faces.#" | "groups.#.faces.#" | "parting.#" => Some(All),
                 // Matched against the faces as written, never resolved.

@@ -615,7 +615,8 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Refold(_)
         | Feature::MoveFace(_)
         | Feature::ReplaceFace(_)
-        | Feature::Draft(_) => Err(Error::new(
+        | Feature::Draft(_)
+        | Feature::DeleteFace(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} makes no body of its own", f.type_name()),
         )
@@ -2346,31 +2347,36 @@ pub(crate) fn finish_reference(
 }
 
 /// What a rebuild hands every kernel call it makes: its request's job
-/// (whose cancel stops a kernel call inside), and the work units each
-/// imported body may heal in (`heal.budget`).
+/// (whose cancel stops a kernel call inside), the work units each
+/// imported body may heal in (`heal.budget`), and those each direct edit
+/// may spend (`edit.budget`).
 #[derive(Clone, Copy)]
 pub struct Run<'a> {
     pub job: &'a Job,
     pub heal_budget: u64,
+    /// The work units each direct edit may spend (`edit.budget`).
+    pub edit_budget: u64,
 }
 
 impl Run<'static> {
-    /// No job, and the default heal budget.
+    /// No job, and the default heal and edit budgets.
     pub fn none() -> Run<'static> {
         static NO_JOB: std::sync::LazyLock<Job> = std::sync::LazyLock::new(Job::default);
         Run {
             job: &NO_JOB,
             heal_budget: crate::import::DEFAULT_HEAL_BUDGET,
+            edit_budget: crate::tweak::DEFAULT_EDIT_BUDGET,
         }
     }
 }
 
 impl<'a> Run<'a> {
-    /// `job`'s, with the default heal budget.
+    /// `job`'s, with the default heal and edit budgets.
     pub fn with_job(job: &'a Job) -> Run<'a> {
         Run {
             job,
             heal_budget: crate::import::DEFAULT_HEAL_BUDGET,
+            edit_budget: crate::tweak::DEFAULT_EDIT_BUDGET,
         }
     }
 }
@@ -2602,7 +2608,10 @@ fn rebuild_with(
             crate::body::build(part, solids, id, f, before, run).map(solid),
             None,
         ),
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => (
+        Feature::MoveFace(_)
+        | Feature::ReplaceFace(_)
+        | Feature::Draft(_)
+        | Feature::DeleteFace(_) => (
             crate::tweak::build(part, solids, id, f, before, run).map(solid),
             None,
         ),
@@ -2705,6 +2714,15 @@ pub(crate) fn input_hash(
         x.update(h.as_bytes());
         x.update(b"ryucad.heal_budget\0");
         x.update(&run.heal_budget.to_le_bytes());
+        h = x.finalize();
+    }
+    // A direct edit's budget other than the default may refuse what the
+    // default builds, so it keys the result; the default keys nothing.
+    if crate::tweak::budgeted(f) && run.edit_budget != crate::tweak::DEFAULT_EDIT_BUDGET {
+        let mut x = blake3::Hasher::new();
+        x.update(h.as_bytes());
+        x.update(b"ryucad.edit_budget\0");
+        x.update(&run.edit_budget.to_le_bytes());
         h = x.finalize();
     }
     // An import reads its file as it is, which its feature names only by
@@ -2918,6 +2936,7 @@ pub fn failure_kept(e: &Error) -> bool {
             | Code::OffsetFailed
             | Code::MirrorFailed
             | Code::TweakFailed
+            | Code::EditBudgetExceeded
             | Code::SheetMetalFailed
             | Code::FillFailed
             | Code::ExtractFailed

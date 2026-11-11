@@ -2005,6 +2005,7 @@ pub(crate) mod tests {
         let run = crate::rebuild::Run {
             job: &job,
             heal_budget: 1,
+            edit_budget: crate::tweak::DEFAULT_EDIT_BUDGET,
         };
         let e = build(&part, &fid, i, &run).unwrap_err();
         assert_eq!(e.code, Code::ImportBudgetExceeded, "{e:?}");

@@ -851,6 +851,8 @@ pub struct Rebuild<'p> {
     pub stamp: Option<(u64, String)>,
     /// The work units each imported body may heal in (`heal.budget`).
     pub heal_budget: u64,
+    /// The work units each direct edit may spend (`edit.budget`).
+    pub edit_budget: u64,
 }
 
 impl<'p> Rebuild<'p> {
@@ -877,6 +879,7 @@ impl<'p> Rebuild<'p> {
             job: Default::default(),
             stamp: None,
             heal_budget: crate::import::DEFAULT_HEAL_BUDGET,
+            edit_budget: crate::tweak::DEFAULT_EDIT_BUDGET,
         }
     }
 
@@ -958,15 +961,24 @@ impl<'p> Rebuild<'p> {
         let empty = Cache::new();
         let (caches, disk, job) = (&self.store.caches, self.store.disk.as_deref(), &self.job);
         let heal_budget = self.heal_budget;
+        let edit_budget = self.edit_budget;
         let stage = job.begin(Phase::Rebuild, "parts", todo.len());
         let built: Vec<(Id, Rebuilt)> = todo
             .into_par_iter()
             .map(|(id, p)| {
                 let cache = caches.get(id).unwrap_or(&empty);
                 let r = match stage.step(|| id.to_string()) {
-                    Ok(()) => {
-                        rebuild_part_in(p, cache, &Children::new(), disk, &Run { job, heal_budget })
-                    }
+                    Ok(()) => rebuild_part_in(
+                        p,
+                        cache,
+                        &Children::new(),
+                        disk,
+                        &Run {
+                            job,
+                            heal_budget,
+                            edit_budget,
+                        },
+                    ),
                     Err(error) => Err(Cancelled {
                         error,
                         cache: cache.clone(),
@@ -1024,6 +1036,7 @@ impl<'p> Rebuild<'p> {
                 &Run {
                     job: &self.job,
                     heal_budget: self.heal_budget,
+                    edit_budget: self.edit_budget,
                 },
             ) {
                 Ok(done) => done,
@@ -1062,6 +1075,7 @@ impl<'p> Rebuild<'p> {
                 &Run {
                     job: &self.job,
                     heal_budget: self.heal_budget,
+                    edit_budget: self.edit_budget,
                 },
             ) {
                 Ok((result, cache)) => {

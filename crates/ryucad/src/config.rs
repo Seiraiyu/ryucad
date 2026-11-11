@@ -301,6 +301,15 @@ const KEYS: &[Key] = &[
                 alone with import_budget_exceeded",
     },
     Key {
+        name: "edit.budget",
+        scope: Scope::User,
+        rule: Rule::Int(1, 1 << 62),
+        default: || json!(crate::tweak::DEFAULT_EDIT_BUDGET),
+        about: "how many work units a direct edit (delete_face, or a face tweak with \
+                topology change or blends rebuild) may take before it fails with \
+                edit_budget_exceeded",
+    },
+    Key {
         name: "daemon.rescan_s",
         scope: Scope::User,
         rule: Rule::Int(5, 3600),
@@ -747,6 +756,20 @@ pub fn project_revision_from(read: &dyn Fn(&str) -> Result<Option<Vec<u8>>>) -> 
 pub(crate) mod tests {
     use super::*;
     use crate::doc::canonical;
+
+    #[test]
+    fn the_edit_budget_is_a_users_whole_number_of_units() {
+        let k = key("edit.budget").unwrap();
+        assert_eq!(k.scope, Scope::User);
+        assert_eq!((k.default)(), json!(crate::tweak::DEFAULT_EDIT_BUDGET));
+        assert!(k.check(&json!(1)).is_ok());
+        assert!(k.check(&json!(0)).is_err());
+        assert!(k.check(&json!("lots")).is_err());
+        assert_eq!(
+            crate::rebuild::Run::none().edit_budget,
+            crate::tweak::DEFAULT_EDIT_BUDGET
+        );
+    }
 
     #[test]
     fn the_heal_budget_is_a_users_whole_number_of_units() {
