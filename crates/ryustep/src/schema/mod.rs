@@ -16,6 +16,7 @@ mod document;
 mod geometry;
 mod product;
 mod representation;
+mod style;
 mod surface;
 mod topology;
 mod units;
@@ -28,6 +29,7 @@ pub use curve::Curve;
 pub use derived::{OnSurface, Trim};
 pub use geometry::{Placement, Point};
 pub use surface::Surface;
+pub use style::Side;
 pub use topology::{Brep, Edge, Face, Loop};
 pub use units::{Quantity, Unit, Units};
 
@@ -308,6 +310,66 @@ pub enum Entity {
         name: Box<str>,
         description: Box<str>,
     },
+    /// `STYLED_ITEM`, `OVER_RIDING_STYLED_ITEM` (`over_riding`) or
+    /// `CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM` (`context`, the
+    /// usages or relationships it holds in): its presentation style
+    /// assignments on `item`.
+    StyledItem {
+        styles: Vec<Id>,
+        item: Id,
+        over_riding: bool,
+        context: Option<Vec<Id>>,
+    },
+    /// `PRESENTATION_STYLE_ASSIGNMENT`: the styles it assigns that are
+    /// instances.
+    StyleAssignment {
+        styles: Vec<Id>,
+    },
+    /// `SURFACE_STYLE_USAGE`: a `SURFACE_SIDE_STYLE` for `side`.
+    SurfaceStyleUsage {
+        side: Side,
+        style: Id,
+    },
+    /// `SURFACE_SIDE_STYLE`: its style elements.
+    SurfaceSideStyle {
+        styles: Vec<Id>,
+    },
+    /// `SURFACE_STYLE_FILL_AREA`: its `FILL_AREA_STYLE`.
+    SurfaceFill {
+        fill: Id,
+    },
+    /// `FILL_AREA_STYLE`: its fill styles.
+    FillAreaStyle {
+        styles: Vec<Id>,
+    },
+    /// `FILL_AREA_STYLE_COLOUR`: its colour.
+    FillColour {
+        colour: Id,
+    },
+    /// `COLOUR_RGB`: red, green and blue as the file gives them, in
+    /// `[0, 1]`.
+    ColourRgb {
+        rgb: [f64; 3],
+    },
+    /// `DRAUGHTING_PRE_DEFINED_COLOUR`: its name.
+    PredefinedColour {
+        name: Box<str>,
+    },
+    /// `SURFACE_STYLE_RENDERING_WITH_PROPERTIES`: its rendering
+    /// properties.
+    Rendering {
+        properties: Vec<Id>,
+    },
+    /// `SURFACE_STYLE_TRANSPARENT`.
+    Transparent {
+        transparency: f64,
+    },
+    /// `SPECIFIED_HIGHER_USAGE_OCCURRENCE`: the usage `next` within the
+    /// occurrence `upper` (a usage, or another of these).
+    HigherUsage {
+        upper: Id,
+        next: Id,
+    },
     /// An entity this crate doesn't read: its name, or a complex
     /// instance's names joined by spaces.
     Other(Box<str>),
@@ -373,6 +435,24 @@ impl Entity {
             Entity::PropertyDefinition { .. } => "PROPERTY_DEFINITION",
             Entity::PropertyRepresentation { .. } => "PROPERTY_DEFINITION_REPRESENTATION",
             Entity::Descriptive { .. } => "DESCRIPTIVE_REPRESENTATION_ITEM",
+            Entity::StyledItem {
+                context: Some(_), ..
+            } => "CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM",
+            Entity::StyledItem {
+                over_riding: true, ..
+            } => "OVER_RIDING_STYLED_ITEM",
+            Entity::StyledItem { .. } => "STYLED_ITEM",
+            Entity::StyleAssignment { .. } => "PRESENTATION_STYLE_ASSIGNMENT",
+            Entity::SurfaceStyleUsage { .. } => "SURFACE_STYLE_USAGE",
+            Entity::SurfaceSideStyle { .. } => "SURFACE_SIDE_STYLE",
+            Entity::SurfaceFill { .. } => "SURFACE_STYLE_FILL_AREA",
+            Entity::FillAreaStyle { .. } => "FILL_AREA_STYLE",
+            Entity::FillColour { .. } => "FILL_AREA_STYLE_COLOUR",
+            Entity::ColourRgb { .. } => "COLOUR_RGB",
+            Entity::PredefinedColour { .. } => "DRAUGHTING_PRE_DEFINED_COLOUR",
+            Entity::Rendering { .. } => "SURFACE_STYLE_RENDERING_WITH_PROPERTIES",
+            Entity::Transparent { .. } => "SURFACE_STYLE_TRANSPARENT",
+            Entity::HigherUsage { .. } => "SPECIFIED_HIGHER_USAGE_OCCURRENCE",
             Entity::Other(name) => name,
         }
     }
@@ -522,6 +602,9 @@ fn simple(id: Id, name: &str, params: &[Param]) -> Result<Entity, ImportError> {
     if let Some(d) = document::simple(id, name, params) {
         return d;
     }
+    if let Some(s) = style::simple(id, name, params) {
+        return s;
+    }
     if let Some(p) = product::simple(id, name, params) {
         return p;
     }
@@ -668,5 +751,60 @@ pub(crate) mod tests {
             .unwrap()
             .install(|| entities(&data));
         assert_eq!(e, one);
+    }
+
+    #[test]
+    fn styles_decode() {
+        let e = entities(
+            "#1=COLOUR_RGB('',1.,0.5,0);\
+             #2=FILL_AREA_STYLE_COLOUR('',#1);\
+             #3=FILL_AREA_STYLE('',(#2));\
+             #4=SURFACE_STYLE_FILL_AREA(#3);\
+             #5=SURFACE_STYLE_TRANSPARENT(0.25);\
+             #6=SURFACE_STYLE_RENDERING_WITH_PROPERTIES(.NORMAL_SHADING.,#1,(#5));\
+             #7=SURFACE_SIDE_STYLE('',(#4,#6));\
+             #8=SURFACE_STYLE_USAGE(.BOTH.,#7);\
+             #9=PRESENTATION_STYLE_ASSIGNMENT((#8,NULL_STYLE(.NULL.)));\
+             #10=STYLED_ITEM('color',(#9),#30);\
+             #11=OVER_RIDING_STYLED_ITEM('',(#9),#30,#10);\
+             #12=CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM('',(#9),#30,#10,(#40,#41));\
+             #13=DRAUGHTING_PRE_DEFINED_COLOUR('red');\
+             #14=SPECIFIED_HIGHER_USAGE_OCCURRENCE('','','',#50,#51,$,#40,#41);\
+             #15=SURFACE_STYLE_USAGE(.SIDEWAYS.,#7);",
+        );
+        assert_eq!(e.get(0, 1), Ok(&Entity::ColourRgb { rgb: [1.0, 0.5, 0.0] }));
+        assert_eq!(e.get(0, 2), Ok(&Entity::FillColour { colour: 1 }));
+        assert_eq!(e.get(0, 3), Ok(&Entity::FillAreaStyle { styles: vec![2] }));
+        assert_eq!(e.get(0, 4), Ok(&Entity::SurfaceFill { fill: 3 }));
+        assert_eq!(e.get(0, 5), Ok(&Entity::Transparent { transparency: 0.25 }));
+        assert_eq!(e.get(0, 6), Ok(&Entity::Rendering { properties: vec![5] }));
+        assert_eq!(e.get(0, 7), Ok(&Entity::SurfaceSideStyle { styles: vec![4, 6] }));
+        assert_eq!(
+            e.get(0, 8),
+            Ok(&Entity::SurfaceStyleUsage { side: Side::Both, style: 7 })
+        );
+        // NULL_STYLE is a typed value, not an instance: it styles nothing.
+        assert_eq!(e.get(0, 9), Ok(&Entity::StyleAssignment { styles: vec![8] }));
+        let styled = |over_riding, context| Entity::StyledItem {
+            styles: vec![9],
+            item: 30,
+            over_riding,
+            context,
+        };
+        assert_eq!(e.get(0, 10), Ok(&styled(false, None)));
+        assert_eq!(e.get(0, 11), Ok(&styled(true, None)));
+        assert_eq!(e.get(0, 12), Ok(&styled(true, Some(vec![40, 41]))));
+        assert_eq!(e.get(0, 13), Ok(&Entity::PredefinedColour { name: "red".into() }));
+        assert_eq!(e.get(0, 14), Ok(&Entity::HigherUsage { upper: 40, next: 41 }));
+        assert!(matches!(e.get(0, 15), Err(ImportError::Malformed { instance: 15, .. })));
+        for (id, kind) in [
+            (10, "STYLED_ITEM"),
+            (11, "OVER_RIDING_STYLED_ITEM"),
+            (12, "CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM"),
+            (14, "SPECIFIED_HIGHER_USAGE_OCCURRENCE"),
+            (6, "SURFACE_STYLE_RENDERING_WITH_PROPERTIES"),
+        ] {
+            assert_eq!(e.get(0, id).unwrap().kind(), kind);
+        }
     }
 }

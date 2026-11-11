@@ -1146,6 +1146,10 @@ const TABLE: &[(&str, Category)] = &[
     ("SI_UNIT", Category::Units),
     ("SOLID_ANGLE_MEASURE_WITH_UNIT", Category::Units),
     ("SOLID_ANGLE_UNIT", Category::Units),
+    (
+        "SPECIFIED_HIGHER_USAGE_OCCURRENCE",
+        Category::ProductStructure,
+    ),
     ("SPHERICAL_PAIR", Category::Kinematics),
     ("SPHERICAL_SURFACE", Category::Geometry),
     ("STRAIGHTNESS_TOLERANCE", Category::Pmi),
@@ -1393,6 +1397,20 @@ mod tests {
             "PROPERTY_DEFINITION",
             "PROPERTY_DEFINITION_REPRESENTATION",
             "DESCRIPTIVE_REPRESENTATION_ITEM",
+            "STYLED_ITEM",
+            "OVER_RIDING_STYLED_ITEM",
+            "CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM",
+            "PRESENTATION_STYLE_ASSIGNMENT",
+            "SURFACE_STYLE_USAGE",
+            "SURFACE_SIDE_STYLE",
+            "SURFACE_STYLE_FILL_AREA",
+            "FILL_AREA_STYLE",
+            "FILL_AREA_STYLE_COLOUR",
+            "COLOUR_RGB",
+            "DRAUGHTING_PRE_DEFINED_COLOUR",
+            "SURFACE_STYLE_RENDERING_WITH_PROPERTIES",
+            "SURFACE_STYLE_TRANSPARENT",
+            "SPECIFIED_HIGHER_USAGE_OCCURRENCE",
         ] {
             assert_ne!(category_of(n), Unknown, "{n}");
         }
