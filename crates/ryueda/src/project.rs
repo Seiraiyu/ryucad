@@ -707,7 +707,8 @@ impl Project {
     /// The library `alias` names, or why it can't be used.
     /// The standards that judge library `alias`'s symbols, and where they
     /// come from (the alias whose file they are, or `built_in`): the
-    /// library's own `standards.json`, else this project's own, else the
+    /// library's own `standards.json`, else the organisation's when its
+    /// style pins them (plan 2.E), else this project's own, else the
     /// built-in standards, whose resistor shape follows `lint.json`'s
     /// `prefer.resistor`. A file that doesn't read, or fails its checks,
     /// judges nothing: its fault is the answer (`standards_invalid`).
@@ -735,6 +736,14 @@ impl Project {
         };
         if let Some(s) = own(alias)? {
             return Ok((s, alias.to_owned()));
+        }
+        // The organisation's pinned standards take the project's own place
+        // (plan 2.E; plan 2.D's question 444).
+        if let Some(o) = &self.org_style
+            && o.style.item.as_ref().is_ok_and(|s| s.standards)
+            && let Some(s) = own(&o.alias)?
+        {
+            return Ok((s, o.alias.clone()));
         }
         if alias != SELF
             && let Some(s) = own(SELF)?

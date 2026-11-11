@@ -3590,4 +3590,30 @@ fn an_organisations_locks_refuse_a_projects_writes() {
         1,
     );
     p.ok(&["style", "set", "R1", "dash=true", "--block", block]);
+    // The organisation's lint raises sch_jog, and lint configure can't
+    // lower it.
+    let l = p.ok(&["lint"]);
+    assert_eq!(l["prefs"]["severity"]["sch_jog"], "error", "{l}");
+    assert!(l["own"]["severity"].get("sch_jog").is_none());
+    let e = p.fails(
+        &["lint", "configure", "--severity", "sch_jog=warning"],
+        "style_locked",
+        1,
+    );
+    assert_eq!(e["details"]["lock"], "lint.severity.sch_jog");
+    // Its standards judge the project's library once it pins them.
+    p.write(
+        "passives/style.json",
+        r#"{"kind": "ryueda.style", "format": 1, "standards": true}"#,
+    );
+    p.write(
+        "passives/library/standards.json",
+        r#"{"kind": "ryueda.standards", "format": 1, "shapes": "iec"}"#,
+    );
+    let s = p.ok(&["standards"]);
+    assert_eq!(
+        (&s["from"], &s["standards"]["shapes"]),
+        (&json!("passives"), &json!("iec")),
+        "{s}"
+    );
 }
