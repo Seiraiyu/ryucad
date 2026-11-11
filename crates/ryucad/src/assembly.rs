@@ -44,13 +44,17 @@ pub struct Occurrence {
 }
 
 /// A solid of an occurrence's part as the part shows it: its founder, the
-/// feature whose result shows (which sizes its display mesh), and its
-/// body.
+/// feature whose result shows (which sizes its display mesh), its body,
+/// and what its chain did to the names it retired, so a connector on a
+/// face a later feature split follows it (design 447). The body's names
+/// hash their parents, so the model's hash, over the bodies, already
+/// covers the lineage a connector reads.
 #[derive(Clone, Debug)]
 pub struct Solid {
     pub founder: Id,
     pub feature: Arc<Feature>,
     pub built: Arc<Built>,
+    pub lineage: Arc<crate::reference::Lineage>,
 }
 
 /// What an instance of a part places: its occurrences in order, a hash
@@ -139,6 +143,7 @@ impl Model {
                     founder: s.solid.clone(),
                     feature: Arc::new(part.features.get(f)?.as_ref().ok()?.clone()),
                     built: Arc::clone(b),
+                    lineage: Arc::new(crate::reference::Lineage::of(&solids, s.solid, f, result)),
                 })
             })
             .collect();
