@@ -2223,3 +2223,67 @@ fn style_measurements() {
         }
     }
 }
+
+/// The breakout styled (plan 2.E's visual review): a palette entry, a
+/// rule by tag and two tagged parts (critical, dnp), drawn light and dark and
+/// paged into `target/ryueda-look`.
+#[test]
+#[ignore]
+fn styled_breakout_look() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = circuit(dir.path(), "breakout");
+    ryueda(&board, 1, &["layout"]);
+    let b = "breakout";
+    ryueda(
+        &board,
+        1,
+        &["style", "palette", "set", "brand", "#0055aa/#66aaff"],
+    );
+    ryueda(
+        &board,
+        1,
+        &[
+            "style",
+            "rule",
+            "add",
+            "tag=critical",
+            "colour=brand",
+            "emphasis=true",
+        ],
+    );
+    let shown = ryueda(&board, 1, &["block", "show", b]);
+    let refs: Vec<String> = shown["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["refdes"].as_str().map(str::to_owned))
+        .collect();
+    eprintln!("critical: {}, dnp: {}", refs[0], refs[1]);
+    ryueda(
+        &board,
+        1,
+        &["tag", &refs[0], "--block", b, "--add", "critical"],
+    );
+    ryueda(&board, 1, &["tag", &refs[1], "--block", b, "--add", "dnp"]);
+    ryueda(&board, 1, &["layout"]);
+    let look = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ryueda-look");
+    std::fs::create_dir_all(&look).unwrap();
+    for theme in ["light", "dark"] {
+        let out = look.join(format!("styled.breakout.{theme}.svg"));
+        ryueda(
+            &board,
+            1,
+            &[
+                "render",
+                "--block",
+                b,
+                "--theme",
+                theme,
+                "--out",
+                out.to_str().unwrap(),
+            ],
+        );
+    }
+    let out = look.join("styled.breakout.pdf");
+    ryueda(&board, 1, &["output", "--out", out.to_str().unwrap()]);
+}
