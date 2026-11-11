@@ -3279,6 +3279,45 @@ fn draw(
                 joined.insert(row.pin);
                 joined.extend(row.members.iter().copied());
             }
+            // A port's flag beside its sole pin's part on this sheet is
+            // wired to that pin by a short run, and neither takes a label:
+            // the flag names the net (plan 2.G; a clamp beside a stack).
+            for f in 0..block.parts.len() {
+                if !matches!(block.parts[f].kind, PartKind::Port { .. }) {
+                    continue;
+                }
+                let Some((p, k)) = place::sole_pin(block, f) else {
+                    continue;
+                };
+                if st.place[f].map(|x| x.0) != Some(s)
+                    || st.place[p].map(|x| x.0) != Some(s)
+                    || joined.contains(&(p, k))
+                {
+                    continue;
+                }
+                let Some(n) = block.parts[p].pins[k].net else {
+                    continue;
+                };
+                // Only a net drawn by labels: a wired net routes its flag
+                // with its pins.
+                if styles.get(&n).is_some_and(|st| *st == NetStyle::Wire) && !instead.contains(&n) {
+                    continue;
+                }
+                let end = |(q, j): (usize, usize)| {
+                    let pin = st.shape(q).expect("placed").pins[j];
+                    (pin.end, pin.side)
+                };
+                if let Some((_, runs)) =
+                    route_net(&field, n, &[end((p, k)), end((f, 0))], LOCAL_REACH)
+                    && let [run] = runs.as_slice()
+                    && route::length(run) <= LOCAL_REACH
+                    && field.mark(n, run).is_ok()
+                {
+                    routes.entry(n).or_default().push(run.clone());
+                    joined.insert((p, k));
+                    joined.insert((f, 0));
+                }
+            }
             // Labels, the previous ones where they still fit.
             let mut want_label: Vec<(usize, usize, usize, LabelKind)> = Vec::new();
             for (n, list) in &pins_of {
@@ -5905,6 +5944,73 @@ mod tests {
     /// An in-port whose net reaches one part's pin stands beside that pin,
     /// wired, as an out-port beside its driver does (Ethernet's RMII
     /// flags stood on the sheet's edges, every one labelled).
+    /// The front end's balanced outputs (plan 2.G): a port's net meets a
+    /// stack's output pin (labelled, a net a layer) and a clamp's middle
+    /// pin. The flag stands on the clamp's pin, wired, and that pin takes
+    /// no label of its own: the clamp isn't floating.
+    #[test]
+    fn a_clamp_hosts_its_ports_flag_beside_a_stack() {
+        use crate::input::{Flow, PinKind};
+        use crate::testing::{net, port};
+        let nets = vec![
+            net("rail:p", "+5VA", NetKind::Supply),
+            net("rail:n", "-5VA", NetKind::Supply),
+            net("out_l", "OUT_L", NetKind::Signal),
+            net("out_r", "OUT_R", NetKind::Signal),
+        ];
+        // The stack: a block symbol whose pin is OUT_L on its front layer
+        // and OUT_R behind.
+        let stack = crate::shape::stack_symbol(
+            "amp",
+            "Amp",
+            &[("1".into(), "OUT".into(), Flow::Out, vec![Some(2), Some(3)])],
+        );
+        // The clamp: a BAV99, its signal pin 1 (K) on the left.
+        let clamp = crate::testing::ic(
+            "d1",
+            "D1",
+            "BAV99",
+            &[("K", PinKind::Passive, Some(2))],
+            &[
+                ("A1", PinKind::Passive, Some(1)),
+                ("A2", PinKind::Passive, Some(0)),
+            ],
+        );
+        let block = Block {
+            parts: vec![
+                stack,
+                clamp,
+                port("port:l", "OUT_L", Flow::Out, Some(2)),
+                port("port:r", "OUT_R", Flow::Out, Some(3)),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let out = lay(&block);
+        assert_eq!(crate::rules::check(&block, &out.layout), []);
+        let (found, _) = crate::lint::lint(&block, &out);
+        assert!(
+            !found.iter().any(|f| f.code == "sch_floating"),
+            "{:#?}",
+            found
+                .iter()
+                .filter(|f| f.code == "sch_floating")
+                .collect::<Vec<_>>()
+        );
+        // No label of its own on the clamp's signal pin.
+        assert!(
+            !out.layout
+                .labels
+                .get("out_l")
+                .into_iter()
+                .flatten()
+                .any(|l| l.on == "d1/1"),
+            "{:?}",
+            out.layout.labels.get("out_l")
+        );
+    }
+
     #[test]
     fn an_in_port_stands_beside_the_pin_it_feeds() {
         use crate::input::{Flow, Net, PinKind};
