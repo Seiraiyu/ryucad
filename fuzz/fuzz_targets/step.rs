@@ -29,7 +29,7 @@ fuzz_target!(|data: &[u8]| {
     let (counted, census) = Entities::decode_counted(&file);
     assert_eq!(counted, e);
     assert_eq!(census.len(), file.instances.len());
-    let read = ryustep::census::Read {
+    let census_read = ryustep::census::Read {
         roots: e.ids().iter().copied().take(16).collect(),
         product_tree: true,
     };
@@ -43,7 +43,7 @@ fuzz_target!(|data: &[u8]| {
             code: "fuzz".into(),
         })
         .collect();
-    let t = census.transfer(&read, &failed);
+    let t = census.transfer(&census_read, &failed);
     let total: u64 = t
         .lines
         .iter()
