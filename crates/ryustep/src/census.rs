@@ -377,6 +377,197 @@ impl Census {
     }
 }
 
+use std::collections::BTreeMap;
+
+/// What a caller read from a file: the instances it followed (each
+/// body's representation, context and items: [`crate::Opened::roots`])
+/// and whether it read the product tree.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Read {
+    pub roots: Vec<u64>,
+    pub product_tree: bool,
+}
+
+/// An instance a refusal names, with the refusal's code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Failed {
+    pub instance: u64,
+    pub code: String,
+}
+
+/// Where a report puts an instance. Names are stable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Bucket {
+    /// Mapped into the project.
+    Interpreted = 0,
+    /// Not interpreted, but kept in the committed bytes.
+    Retained = 1,
+    /// Reached by no product, representation or style.
+    Unreferenced = 2,
+    /// Named by a refusal.
+    Failed = 3,
+}
+
+impl Bucket {
+    pub const ALL: [Bucket; 4] = [
+        Bucket::Interpreted,
+        Bucket::Retained,
+        Bucket::Unreferenced,
+        Bucket::Failed,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Bucket::Interpreted => "interpreted",
+            Bucket::Retained => "retained",
+            Bucket::Unreferenced => "unreferenced",
+            Bucket::Failed => "failed",
+        }
+    }
+}
+
+/// How many instances of one entity name, the first 64 of them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Named {
+    pub name: String,
+    pub count: u64,
+    /// Ascending, at most [`FIRST`].
+    pub first: Vec<u64>,
+}
+
+/// One bucket: its count and its names, the largest first (then by
+/// name).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Counted {
+    pub count: u64,
+    pub names: Vec<Named>,
+}
+
+/// One category's buckets (indexed by [`Bucket`]) and its failures'
+/// codes with their counts, by code.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Line {
+    pub category: Category,
+    pub buckets: [Counted; 4],
+    pub codes: Vec<(String, u64)>,
+}
+
+/// Every category a file has instances of, in [`Category::ALL`]'s order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Transfer {
+    pub instances: u64,
+    pub lines: Vec<Line>,
+}
+
+/// How many instance numbers a name keeps.
+pub const FIRST: usize = 64;
+
+/// What 24.A interprets: bodies and the product tree. Later plans add
+/// appearance (24.B), properties and materials (24.C) and external
+/// references (24.D).
+pub const INTERPRETED: [Category; 4] = [
+    Category::Geometry,
+    Category::Topology,
+    Category::Units,
+    Category::ProductStructure,
+];
+
+impl Census {
+    /// Every instance in a bucket: `failed` first (its code counted),
+    /// then interpreted (an [`INTERPRETED`] category reached from
+    /// `read.roots`, or anchored product structure when the tree was
+    /// read), then unreferenced, else retained.
+    pub fn transfer(&self, read: &Read, failed: &[Failed]) -> Transfer {
+        let n = self.len();
+        let mut reached = vec![false; n];
+        let mut stack: Vec<u32> = read
+            .roots
+            .iter()
+            .filter_map(|&r| self.index(r).map(|k| k as u32))
+            .collect();
+        while let Some(k) = stack.pop() {
+            if std::mem::replace(&mut reached[k as usize], true) {
+                continue;
+            }
+            stack.extend(
+                self.out(k as usize)
+                    .iter()
+                    .copied()
+                    .filter(|&t| !reached[t as usize]),
+            );
+        }
+        let mut code_of: BTreeMap<usize, &str> = BTreeMap::new();
+        for f in failed {
+            if let Some(k) = self.index(f.instance) {
+                code_of.entry(k).or_insert(&f.code);
+            }
+        }
+        type Tally = BTreeMap<u32, (u64, Vec<u64>)>;
+        let mut tally: BTreeMap<(Category, Bucket), Tally> = BTreeMap::new();
+        let mut codes: BTreeMap<Category, BTreeMap<&str, u64>> = BTreeMap::new();
+        for k in 0..n {
+            let c = self.category[k];
+            let b = if let Some(code) = code_of.get(&k) {
+                *codes.entry(c).or_default().entry(code).or_default() += 1;
+                Bucket::Failed
+            } else if INTERPRETED.contains(&c)
+                && (reached[k]
+                    || (read.product_tree && c == Category::ProductStructure && self.anchored[k]))
+            {
+                Bucket::Interpreted
+            } else if !self.anchored[k] {
+                Bucket::Unreferenced
+            } else {
+                Bucket::Retained
+            };
+            let e = tally
+                .entry((c, b))
+                .or_default()
+                .entry(self.name[k])
+                .or_insert((0, Vec::new()));
+            e.0 += 1;
+            if e.1.len() < FIRST {
+                e.1.push(self.ids[k]);
+            }
+        }
+        let lines = Category::ALL
+            .iter()
+            .filter_map(|&c| {
+                let buckets = Bucket::ALL.map(|b| self.counted(tally.get(&(c, b))));
+                buckets.iter().any(|x| x.count > 0).then(|| Line {
+                    category: c,
+                    buckets,
+                    codes: codes
+                        .get(&c)
+                        .map(|m| m.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect())
+                        .unwrap_or_default(),
+                })
+            })
+            .collect();
+        Transfer {
+            instances: n as u64,
+            lines,
+        }
+    }
+
+    fn counted(&self, tally: Option<&BTreeMap<u32, (u64, Vec<u64>)>>) -> Counted {
+        let mut names: Vec<Named> = tally
+            .into_iter()
+            .flatten()
+            .map(|(&k, (count, first))| Named {
+                name: self.names[k as usize].to_string(),
+                count: *count,
+                first: first.clone(),
+            })
+            .collect();
+        names.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+        Counted {
+            count: names.iter().map(|x| x.count).sum(),
+            names,
+        }
+    }
+}
+
 /// Entity names and their categories, sorted by name. ISO 10303-42, -43,
 /// -41, -46, -47 and -242's names, and CAx-IF's recommended practices'.
 const TABLE: &[(&str, Category)] = &[
@@ -1134,5 +1325,80 @@ mod tests {
             Some(false),
             "no product, representation or style"
         );
+    }
+
+    fn bucket<'t>(t: &'t Transfer, c: Category, b: Bucket) -> &'t Counted {
+        let line = t.lines.iter().find(|l| l.category == c).expect("listed");
+        &line.buckets[b as usize]
+    }
+
+    #[test]
+    fn an_import_buckets_every_instance() {
+        let f = parse(SMALL).unwrap();
+        let (_, c) = crate::schema::Entities::decode_counted(&f);
+        let t = c.transfer(
+            &Read {
+                roots: vec![9],
+                product_tree: true,
+            },
+            &[Failed {
+                instance: 12,
+                code: "import_failed".into(),
+            }],
+        );
+        assert_eq!(t.instances, 21);
+        let order: Vec<Category> = t.lines.iter().map(|l| l.category).collect();
+        assert_eq!(
+            order,
+            [Geometry, ProductStructure, Units, Validation, Management]
+        );
+        assert_eq!(bucket(&t, ProductStructure, Bucket::Interpreted).count, 8);
+        // The shape and its placement; the point it names failed; the
+        // stray point is unreferenced.
+        assert_eq!(bucket(&t, Geometry, Bucket::Interpreted).count, 2);
+        assert_eq!(bucket(&t, Geometry, Bucket::Failed).count, 1);
+        let stray = bucket(&t, Geometry, Bucket::Unreferenced);
+        assert_eq!(
+            (stray.count, stray.names[0].first.as_slice()),
+            (1, &[13][..])
+        );
+        let geometry = t.lines.iter().find(|l| l.category == Geometry).unwrap();
+        assert_eq!(geometry.codes, [("import_failed".to_owned(), 1)]);
+        assert_eq!(
+            bucket(&t, Units, Bucket::Interpreted).count,
+            1,
+            "the context"
+        );
+        assert_eq!(
+            bucket(&t, Units, Bucket::Retained).count,
+            1,
+            "the property's unit"
+        );
+        assert_eq!(bucket(&t, Validation, Bucket::Retained).count, 4);
+        assert_eq!(bucket(&t, Management, Bucket::Retained).count, 3);
+        // Nothing read: everything anchored is retained.
+        let none = c.transfer(&Read::default(), &[]);
+        assert_eq!(bucket(&none, ProductStructure, Bucket::Retained).count, 8);
+        assert_eq!(bucket(&none, Geometry, Bucket::Interpreted).count, 0);
+    }
+
+    #[test]
+    fn names_are_largest_first_and_keep_their_first_instances() {
+        let mut data = String::new();
+        for k in 1..=100 {
+            data.push_str(&format!("#{k}=CARTESIAN_POINT('',(0.,0.,0.));"));
+        }
+        data.push_str("#101=DIRECTION('',(0.,0.,1.));");
+        let text = format!(
+            "ISO-10303-21;HEADER;FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));ENDSEC;DATA;{data}ENDSEC;END-ISO-10303-21;"
+        );
+        let (_, c) = crate::schema::Entities::decode_counted(&parse(text.as_bytes()).unwrap());
+        let t = c.transfer(&Read::default(), &[]);
+        let u = bucket(&t, Geometry, Bucket::Unreferenced);
+        assert_eq!(u.count, 101);
+        assert_eq!(u.names[0].name, "CARTESIAN_POINT");
+        assert_eq!(u.names[0].count, 100);
+        assert_eq!(u.names[0].first, (1..=64).collect::<Vec<u64>>());
+        assert_eq!(u.names[1].name, "DIRECTION");
     }
 }
