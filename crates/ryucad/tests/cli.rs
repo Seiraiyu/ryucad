@@ -1927,6 +1927,91 @@ fn diff_and_check_through_the_cli() {
     p.fails(&["check", "--against", "nowhere"], "rev_not_found", 1);
 }
 
+/// #672: a parameter nothing reads is a warning `check` passes with, and
+/// `diff` says a change to it reaches nothing, both ways.
+#[test]
+fn unused_parameters_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "heatsink"]);
+    p.ok(&[
+        "param",
+        "set",
+        "heatsink",
+        "fin_n=9",
+        "fin_h=30 mm",
+        "fin_t=1.6 mm",
+        "span=72 mm",
+        "fin_k=fin_t * 2",
+    ]);
+    // The fin never reads `fin_t`.
+    p.ok(&[
+        "feature",
+        "add",
+        "heatsink",
+        "box",
+        "--id",
+        "fin",
+        "--param",
+        "x=span",
+        "--param",
+        "y=fin_h",
+        "--param",
+        "z=span / (fin_n - 1)",
+    ]);
+    let c = p.ok(&["check"]);
+    assert_eq!(c["passed"], true, "{c}");
+    let unused: Vec<&Value> = c["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "parameter_unused")
+        .collect();
+    assert_eq!(unused.len(), 1, "{c}");
+    assert_eq!(
+        (&unused[0]["severity"], &unused[0]["part"]),
+        (&json!("warning"), &json!("heatsink"))
+    );
+    assert_eq!(
+        unused[0]["parameters"],
+        json!([{"name": "fin_k", "read_by": []}, {"name": "fin_t", "read_by": ["fin_k"]}])
+    );
+    let listed = p.ok(&["param", "list", "heatsink"]);
+    let marked: Vec<&str> = listed["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["unused"] == true)
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(marked, ["fin_k", "fin_t"]);
+    let doctor = p.ok(&["doctor"]);
+    assert_eq!(doctor["healthy"], false, "{doctor}");
+    // Committed, then `fin_t` changed on a branch: the change reaches
+    // nothing.
+    p.git(&["init", "-q", "-b", "main"]);
+    p.ok(&["git", "install"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start"]);
+    p.git(&["switch", "-q", "-c", "fan-v2"]);
+    p.ok(&["param", "set", "heatsink", "fin_t=1.2 mm"]);
+    p.git(&["commit", "-q", "-am", "thinner fins"]);
+    let d = p.ok(&["diff", "--from", "main", "--to", "fan-v2"]);
+    assert_eq!(
+        d["parts"]["heatsink"]["parameters"]["changed"],
+        json!([{"name": "fin_t", "from": "1.6 mm", "to": "1.2 mm",
+                "read_by": {"from": [], "to": []}, "unused": true}])
+    );
+    // A change the fin reads says so.
+    p.ok(&["param", "set", "heatsink", "span=80 mm"]);
+    let d = p.ok(&["diff"]);
+    assert_eq!(
+        d["parts"]["heatsink"]["parameters"]["changed"],
+        json!([{"name": "span", "from": "72 mm", "to": "80 mm",
+                "read_by": {"from": ["fin"], "to": ["fin"]}}])
+    );
+}
+
 #[test]
 fn merges_through_the_cli() {
     let p = Pair::new();

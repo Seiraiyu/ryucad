@@ -141,11 +141,14 @@ fn readers(part: &Part, file: &ParametersFile, name: &str) -> (Vec<Id>, Vec<Stri
     (features, parameters)
 }
 
-/// `param.list`: every parameter as written, its value or error, and what
-/// reads it.
+/// `param.list`: every parameter as written, its value or error, what
+/// reads it, and `unused: true` when nothing reaches it (`doc::reads`).
 pub fn list(session: &Session, part: &str) -> Result<Value> {
     let p = session.project().part(&part_id(part)?)?;
     let file = current(p)?;
+    let project = current_project(session.project()).unwrap_or_default();
+    let (reached, _) =
+        crate::doc::reads::reach_part(&file, &project, &crate::doc::reads::readers(p));
     let parameters: Vec<Value> = file
         .parameters
         .iter()
@@ -154,6 +157,10 @@ pub fn list(session: &Session, part: &str) -> Result<Value> {
             report_into(&mut v, p.env.get(name));
             let (features, parameters) = readers(p, &file, name);
             v["used_by"] = json!({"features": features, "parameters": parameters});
+            // Nothing reaches it; a shadow is `parameter_shadows`'s.
+            if reached.get(name).is_none_or(BTreeSet::is_empty) && !p.env.outer_has(name) {
+                v["unused"] = json!(true);
+            }
             v
         })
         .collect();
@@ -166,10 +173,12 @@ pub fn list(session: &Session, part: &str) -> Result<Value> {
 
 /// `param.list` of the project's parameters: each as written, its value
 /// or error, the project parameters that read it and the parts that read
-/// it (directly, or through another project parameter).
+/// it (directly, or through another project parameter), and
+/// `unused: true` when no part's features or explodes reach it.
 pub fn list_project(session: &Session) -> Result<Value> {
     let project = session.project();
     let file = current_project(project)?;
+    let reached = crate::doc::reads::in_project(project).project;
     let parameters: Vec<Value> = file
         .parameters
         .iter()
@@ -189,6 +198,10 @@ pub fn list_project(session: &Session) -> Result<Value> {
                 .map(|(k, _)| k)
                 .collect();
             v["used_by"] = json!({"parts": parts, "parameters": parameters});
+            let shadowed = project.parts.values().any(|p| own(p).contains(name));
+            if reached.get(name).is_none_or(BTreeSet::is_empty) && !shadowed {
+                v["unused"] = json!(true);
+            }
             v
         })
         .collect();
@@ -669,11 +682,11 @@ mod tests {
             r["parameters"],
             json!([
                 {"name": "hole", "value": "wall * 2", "kind": "length", "m": 0.006,
-                 "used_by": {"features": [], "parameters": []}},
+                 "used_by": {"features": [], "parameters": []}, "unused": true},
                 {"name": "n", "value": "4", "kind": "number", "n": 4.0,
-                 "used_by": {"features": [], "parameters": []}},
+                 "used_by": {"features": [], "parameters": []}, "unused": true},
                 {"name": "wall", "value": "3 mm", "kind": "length", "m": 0.003,
-                 "used_by": {"features": [], "parameters": ["hole"]}},
+                 "used_by": {"features": [], "parameters": ["hole"]}, "unused": true},
             ])
         );
         let text = fs::read_to_string(dir.path().join("parts/p/parameters.json")).unwrap();
@@ -682,6 +695,61 @@ mod tests {
         let list = call(&mut s, "param.list", json!({"part": "p"})).unwrap();
         assert_eq!(list["parameters"], r["parameters"]);
         assert_eq!(list["revision"], r["revision"]);
+    }
+
+    #[test]
+    fn parameters_nothing_reads_are_marked_unused() {
+        let (dir, mut s) = with_part();
+        call(
+            &mut s,
+            "param.set",
+            json!({"scope": "project", "parameters": {"wall": "3 mm", "gap": "1 mm"}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "param.set",
+            json!({"part": "p", "parameters": {"r": "wall / 2", "spare": "gap * 2",
+                                               "twice": "spare * 2"}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "ball", "params": {"radius": "r"}}),
+        )
+        .unwrap();
+        let unused = |v: &serde_json::Value| -> Vec<String> {
+            v["parameters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|p| p["unused"] == true)
+                .map(|p| p["name"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let part = call(&mut s, "param.list", json!({"part": "p"})).unwrap();
+        assert_eq!(unused(&part), ["spare", "twice"]);
+        // `gap` is read only by `spare`, which nothing reads.
+        let project = call(&mut s, "param.list", json!({"scope": "project"})).unwrap();
+        assert_eq!(unused(&project), ["gap"]);
+        // A parameter that doesn't evaluate, and that nothing reads, is
+        // still unused, beside its error.
+        fs::write(
+            dir.path().join("parts/p/parameters.json"),
+            crate::doc::canonical::to_string(&json!({"format": 1, "kind": "ryucad.parameters",
+                "parameters": {"r": "wall / 2", "bad": "1 mm + 1 deg"}})),
+        )
+        .unwrap();
+        s.reload().unwrap();
+        let part = call(&mut s, "param.list", json!({"part": "p"})).unwrap();
+        let bad = &part["parameters"][0];
+        assert_eq!(
+            (&bad["name"], &bad["unused"]),
+            (&json!("bad"), &json!(true))
+        );
+        assert!(bad["error"].is_object(), "{bad}");
+        assert_eq!(unused(&part), ["bad"]);
     }
 
     #[test]

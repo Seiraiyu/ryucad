@@ -21,7 +21,7 @@ use crate::rebuild::PartResult;
 use crate::session::Session;
 use crate::units::Unit;
 use ryu_session::job::{Job, Phase};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -36,17 +36,30 @@ pub struct Issue {
     /// The files involved, relative to the root.
     pub files: Vec<String>,
     pub message: String,
+    /// Fields its report has besides these (`parameter_unused`'s `part`
+    /// or `scope` and `parameters`); most issues have none.
+    pub details: Map<String, Value>,
 }
 
 impl Issue {
     pub fn to_json(&self) -> Value {
-        json!({"code": self.code, "severity": self.severity, "files": self.files,
-               "message": self.message})
+        let mut v = json!({"code": self.code, "severity": self.severity, "files": self.files,
+                           "message": self.message});
+        for (k, x) in &self.details {
+            v[k] = x.clone();
+        }
+        v
+    }
+
+    /// The issue with `key` among its details.
+    pub fn with(mut self, key: &str, value: Value) -> Issue {
+        self.details.insert(key.to_owned(), value);
+        self
     }
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 44] = [
+pub const CODES: [(&str, &str); 45] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -86,6 +99,7 @@ pub const CODES: [(&str, &str); 44] = [
     ("explode_unresolved", "warning"),
     ("reference_followed", "warning"),
     ("parameter_shadows", "error"),
+    ("parameter_unused", "warning"),
     ("dependency_invalid", "error"),
     ("project_id_duplicate", "error"),
     ("lock_invalid", "error"),
@@ -118,6 +132,7 @@ fn issue(code: &'static str, files: Vec<String>, message: String) -> Issue {
         severity,
         files,
         message,
+        details: Map::new(),
     }
 }
 
@@ -512,6 +527,7 @@ fn diagnose_in(builds: &mut Builds) -> Vec<Issue> {
     drop(stage);
     diagnose_assemblies(builds, &part_ids, &mut issues);
     diagnose_followed(builds, &part_ids, &mut issues);
+    diagnose_unused(root, &mut issues);
     diagnose_items(&mut issues, root);
     diagnose_imports(root, &part_ids, unit, &mut issues);
     diagnose_annotations(root, &mut issues);
@@ -761,6 +777,81 @@ fn diagnose_followed(builds: &mut Builds, parts: &[&str], issues: &mut Vec<Issue
                 ),
             ));
         }
+    }
+}
+
+/// Parameters nothing reads (design 447): `parameter_unused`, a warning
+/// with no repair, once for the project's and once per part, each listing
+/// its unused parameters with the (unused) parameters that name each
+/// (`read_by`), and `error` where one doesn't evaluate either. Read means
+/// reached from a listed feature or an explode, through parameters, in
+/// the files as they are (`doc::reads`). A name both scopes have is
+/// `parameter_shadows`'s, never unused.
+fn diagnose_unused(root: &Path, issues: &mut Vec<Issue>) {
+    use crate::doc::project::PARAMETERS;
+    use crate::doc::reads::{self, ReadBy};
+    let src = Folder(root);
+    let found = reads::in_source(&src);
+    let project = reads::parameters_in(&src, PARAMETERS);
+    let project_env = project.env();
+    let owns: BTreeMap<&Id, ParametersFile> = found
+        .parts
+        .keys()
+        .map(|id| {
+            (
+                id,
+                reads::parameters_in(&src, &format!("parts/{id}/{PARAMETERS}")),
+            )
+        })
+        .collect();
+    let list = |by: &ReadBy, file: &ParametersFile, env: &Env, shadow: &dyn Fn(&str) -> bool| {
+        by.iter()
+            .filter(|(n, r)| r.is_empty() && !shadow(n))
+            .map(|(n, _)| {
+                let mut v = json!({"name": n, "read_by": reads::named_by(file, n)});
+                if let Err(e) = env.get(n) {
+                    v["error"] = json!(e.code);
+                }
+                v
+            })
+            .collect::<Vec<Value>>()
+    };
+    let names = |l: &[Value]| {
+        l.iter()
+            .filter_map(|v| v["name"].as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let shadowed = |n: &str| owns.values().any(|f| f.parameters.contains_key(n));
+    let unused = list(&found.project, &project, &project_env, &shadowed);
+    if !unused.is_empty() {
+        let message = format!(
+            "{PARAMETERS}: nothing reads {}: changing them moves no part; delete one with `ryucad param delete --project NAME`, its readers first",
+            names(&unused)
+        );
+        issues.push(
+            issue("parameter_unused", vec![PARAMETERS.to_owned()], message)
+                .with("scope", json!("project"))
+                .with("parameters", json!(unused)),
+        );
+    }
+    for (id, own) in &owns {
+        let env = Env::within(&own.parameters, &project_env);
+        let theirs = |n: &str| project.parameters.contains_key(n);
+        let unused = list(&found.parts[*id], own, &env, &theirs);
+        if unused.is_empty() {
+            continue;
+        }
+        let at = format!("parts/{id}/{PARAMETERS}");
+        let message = format!(
+            "{at}: nothing reads {}: changing them moves no result; delete one with `ryucad param delete {id} NAME`, its readers first",
+            names(&unused)
+        );
+        issues.push(
+            issue("parameter_unused", vec![at], message)
+                .with("part", json!(id))
+                .with("parameters", json!(unused)),
+        );
     }
 }
 
@@ -3920,5 +4011,134 @@ pub(crate) mod tests {
             p(json!({"unit": "parsec"})).unwrap_err().code,
             Code::InvalidParam
         );
+    }
+
+    #[test]
+    fn an_issues_details_join_its_report() {
+        let i = issue(
+            "parameter_unused",
+            vec!["parameters.json".to_owned()],
+            "m".to_owned(),
+        )
+        .with("scope", json!("project"));
+        assert_eq!(
+            i.to_json(),
+            json!({"code": "parameter_unused", "severity": "warning",
+                   "files": ["parameters.json"], "message": "m", "scope": "project"})
+        );
+    }
+
+    #[test]
+    fn parameters_nothing_reads_are_a_warning() {
+        let dir = healthy();
+        let r = dir.path();
+        let mut s = crate::session::Session::open(r).unwrap();
+        call(
+            &mut s,
+            "param.set",
+            json!({"scope": "project", "parameters": {"wall": "1 mm", "gap": "3 mm"}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "param.set",
+            json!({"part": "p", "parameters": {"r": "1 mm", "spare": "2 mm",
+                                               "twice": "spare * 2"}}),
+        )
+        .unwrap();
+        for (f, radius) in [("a", "r"), ("b", "wall")] {
+            call(
+                &mut s,
+                "feature.edit",
+                json!({"part": "p", "id": f, "params": {"radius": radius}}),
+            )
+            .unwrap();
+        }
+        drop(s);
+        let unused = |r: &Path| -> Vec<Value> {
+            diagnose(r)
+                .into_iter()
+                .filter(|i| i.code == "parameter_unused")
+                .map(|i| i.to_json())
+                .collect()
+        };
+        let found = unused(r);
+        assert_eq!(found.len(), 2, "{found:?}");
+        // The project's first, then each part's.
+        assert_eq!(found[0]["severity"], "warning");
+        assert_eq!(found[0]["files"], json!(["parameters.json"]));
+        assert_eq!(found[0]["scope"], "project");
+        assert_eq!(
+            found[0]["parameters"],
+            json!([{"name": "gap", "read_by": []}])
+        );
+        assert_eq!(found[1]["files"], json!(["parts/p/parameters.json"]));
+        assert_eq!(found[1]["part"], "p");
+        // Transitive: `spare` is read only by `twice`, which nothing reads.
+        assert_eq!(
+            found[1]["parameters"],
+            json!([{"name": "spare", "read_by": ["twice"]},
+                   {"name": "twice", "read_by": []}])
+        );
+        // No repair is offered: deleting is the author's call.
+        assert!(!offered(r).keys().any(|k| k.starts_with("parameter_unused")));
+        // A broken parameter nothing reads is still unused, with its error.
+        w(
+            r,
+            "parts/p/parameters.json",
+            &canonical::to_string(&json!({"format": 1, "kind": "ryucad.parameters",
+                "parameters": {"r": "1 mm", "bad": "1 mm + 1 deg"}})),
+        );
+        let found = unused(r);
+        assert_eq!(found[1]["parameters"][0]["name"], "bad");
+        assert!(found[1]["parameters"][0]["error"].is_string(), "{found:?}");
+        // A shadow is `parameter_shadows`'s, never unused, on either side.
+        w(
+            r,
+            "parts/p/parameters.json",
+            &canonical::to_string(&json!({"format": 1, "kind": "ryucad.parameters",
+                "parameters": {"r": "1 mm", "gap": "2 mm"}})),
+        );
+        assert!(unused(r).is_empty(), "{:?}", unused(r));
+    }
+
+    #[test]
+    fn an_explode_reads_its_assemblys_parameters() {
+        let dir = healthy();
+        let r = dir.path();
+        let mut s = crate::session::Session::open(r).unwrap();
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "asm", "kind": "assembly"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "asm", "type": "instance", "id": "one", "of": "p"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "param.set",
+            json!({"part": "asm", "parameters": {"lift": "5 mm"}}),
+        )
+        .unwrap();
+        drop(s);
+        assert_eq!(
+            codes(r),
+            [(
+                "parameter_unused",
+                vec!["parts/asm/parameters.json".to_owned()]
+            )]
+        );
+        w(
+            r,
+            "parts/asm/explodes/apart.json",
+            &canonical::to_string(&json!({"format": 1, "kind": "ryucad.explode",
+                "steps": [{"instances": ["one"], "translate": ["0 mm", "0 mm", "lift"]}]})),
+        );
+        assert!(codes(r).is_empty(), "{:?}", codes(r));
     }
 }

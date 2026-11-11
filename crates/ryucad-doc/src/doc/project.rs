@@ -167,6 +167,10 @@ pub struct Part {
     /// that isn't an assembly, `wrong_part_kind`). Nothing a rebuild makes
     /// reads them.
     pub explodes: BTreeMap<Id, Result<super::explode::ExplodeFile>>,
+    /// The parameters each explode file names, by ID, read from its text,
+    /// so it is known even for an explode that doesn't load
+    /// (`doc::reads`).
+    pub explode_uses: BTreeMap<Id, BTreeSet<String>>,
     /// Its drawings, by ID, or why each can't be used. Nothing a rebuild
     /// makes reads them.
     pub drawings: BTreeMap<Id, Result<super::drawing::DrawingFile>>,
@@ -967,7 +971,7 @@ fn load_part(
     // Exploded views, by ID, after the appearance: tagged, so a part
     // without them hashes as before.
     let mut explodes = BTreeMap::new();
-    let mut explode_names = BTreeSet::new();
+    let mut explode_uses = BTreeMap::new();
     let mut tagged = false;
     let explodes_dir = join(&dir, super::explode::EXPLODES);
     let assembly = file
@@ -982,7 +986,7 @@ fn load_part(
         match eid {
             Some(eid) if kind == Kind::File => {
                 let explode = read_json(src, &at).and_then(|(bytes, v)| {
-                    explode_names.extend(super::explode::names(&v));
+                    explode_uses.insert(eid.clone(), super::explode::names(&v));
                     if !tagged {
                         piece(&mut hasher, super::explode::EXPLODES.as_bytes());
                         tagged = true;
@@ -1050,7 +1054,7 @@ fn load_part(
         Some(Ok(p)) => p.parameters.keys().cloned().collect(),
         _ => BTreeSet::new(),
     };
-    let mut names: BTreeSet<String> = explode_names;
+    let mut names: BTreeSet<String> = explode_uses.values().flatten().cloned().collect();
     for fid in file.as_ref().map_or(&[][..], |f| &f.features[..]) {
         names.extend(uses.get(fid).into_iter().flatten().cloned());
     }
@@ -1097,6 +1101,7 @@ fn load_part(
         views,
         appearance,
         explodes,
+        explode_uses,
         drawings,
         revision,
     })
@@ -2043,5 +2048,58 @@ mod tests {
         // Some other folder called parts isn't a project.
         fs::write(part.join("part.json"), "{}").unwrap();
         assert_ne!(find_root(&part).unwrap_err().code, Code::ProjectDamaged);
+    }
+
+    #[test]
+    fn a_part_keeps_what_each_explode_names() {
+        use crate::doc::source::Source;
+        let text = |v: serde_json::Value| crate::doc::canonical::to_string(&v).into_bytes();
+        let mut src: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        src.insert(
+            "ryucad.json".into(),
+            text(serde_json::json!({"default_unit": "mm", "format": 1, "kind": "ryucad.project"})),
+        );
+        src.insert(
+            "parts/asm/part.json".into(),
+            text(
+                serde_json::json!({"features": [], "format": 3, "kind": "ryucad.part",
+                                    "part_kind": "assembly"}),
+            ),
+        );
+        src.insert(
+            "parts/asm/parameters.json".into(),
+            text(serde_json::json!({"format": 1, "kind": "ryucad.parameters",
+                                    "parameters": {"lift": "5 mm"}})),
+        );
+        // One explode reads `lift`; one doesn't read as an explode at all,
+        // yet what its text names is still known.
+        src.insert(
+            "parts/asm/explodes/apart.json".into(),
+            text(serde_json::json!({"format": 1, "kind": "ryucad.explode",
+                                    "steps": [{"instances": ["one"],
+                                               "translate": ["0 mm", "0 mm", "lift"]}]})),
+        );
+        // A field no explode has: `ExplodeFile::from_json` refuses it
+        // (`Obj::finish`), but its text still names `lift`.
+        src.insert(
+            "parts/asm/explodes/broken.json".into(),
+            text(
+                serde_json::json!({"format": 1, "kind": "ryucad.explode", "extra": true,
+                                    "steps": [{"instances": ["one"],
+                                               "translate": ["0 mm", "0 mm", "lift * 2"]}]}),
+            ),
+        );
+        assert!(src.read("parts/asm/part.json").unwrap().is_some());
+        let project = Project::load_from(Path::new("/explodes"), &src).unwrap();
+        let asm = &project.parts[&Id::parse("asm", "part").unwrap()];
+        let e = |s: &str| Id::parse(s, "explode").unwrap();
+        assert_eq!(
+            asm.explode_uses,
+            BTreeMap::from([
+                (e("apart"), BTreeSet::from(["lift".to_owned()])),
+                (e("broken"), BTreeSet::from(["lift".to_owned()])),
+            ])
+        );
+        assert!(asm.explodes[&e("broken")].is_err());
     }
 }

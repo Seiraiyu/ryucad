@@ -169,6 +169,7 @@ fn rebuild_section(golden: &mut Golden) {
         views: Default::default(),
         appearance: None,
         explodes: Default::default(),
+        explode_uses: Default::default(),
         drawings: Default::default(),
         features,
         revision: String::new(),
