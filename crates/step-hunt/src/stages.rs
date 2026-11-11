@@ -806,7 +806,11 @@ fn defeature(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
         Ok(())
     });
     if !imported {
-        return Ran { stages, key: None };
+        return Ran {
+            stages,
+            key: None,
+            transfer: Default::default(),
+        };
     }
     stage(&mut stages, ryucad, home, "defeature", |r| {
         let v = r.cmd(&p1, &["inspect", "body"])?;
@@ -871,7 +875,11 @@ fn defeature(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
         }
         r.cmd(&p1, &["check", "body"]).map(|_| ())
     });
-    Ran { stages, key: None }
+    Ran {
+        stages,
+        key: None,
+        transfer: Default::default(),
+    }
 }
 
 pub fn run(ryucad: &Ryucad, case: &Case, work: &Path, keep: bool) -> Ran {
@@ -883,6 +891,7 @@ pub fn run(ryucad: &Ryucad, case: &Case, work: &Path, keep: bool) -> Ran {
         Kind::Whole if ryucad.defeature => Ran {
             stages: Vec::new(),
             key: None,
+            transfer: Default::default(),
         },
         Kind::Body => body(ryucad, case, &home),
         Kind::Whole => whole(ryucad, case, &home),

@@ -290,6 +290,7 @@ mod tests {
             // nothing either.
             stages: vec![stage("import", 0.1, Outcome::Ok), s],
             key: None,
+            transfer: Default::default(),
         };
         assert!(findings(&case(6), &ran, 0.5).is_empty());
     }
