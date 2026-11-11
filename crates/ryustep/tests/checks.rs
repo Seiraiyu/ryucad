@@ -51,8 +51,13 @@ fn files(dir: &str) -> Vec<PathBuf> {
 
 /// Each distinct body healed from the file, with its representation.
 fn bodies(path: &Path) -> Vec<(u64, Body)> {
+    bodies_keyed(path, OpKey(7))
+}
+
+/// [`bodies`] healed under `key`.
+fn bodies_keyed(path: &Path, key: OpKey) -> Vec<(u64, Body)> {
     let opts = ReadOptions {
-        key: OpKey(7),
+        key,
         heal: Default::default(),
     };
     let model = read(&std::fs::read(path).unwrap(), &opts).unwrap();
@@ -258,6 +263,58 @@ fn coincident_halves_sharing_their_meridians_check() {
     let (rep, body) = bodies(&path).remove(0);
     assert_eq!(rep, 2155);
     assert_eq!(named(&body, &check_intersections(&body)), []);
+}
+
+/// KiCad's 3D models, fetched by `scripts/fetch-kicad.sh` (CC-BY-SA-4.0
+/// with KiCad's exception: never committed). `None` (or a panic with
+/// `RYUEDA_REQUIRE_KICAD=1`) when they aren't there.
+fn kicad(name: &str) -> Option<PathBuf> {
+    let dir = std::env::var_os("RYUEDA_KICAD_CORPUS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/kicad"));
+    let path = dir.join("kicad-packages3D-9.0.9").join(name);
+    if path.exists() {
+        return Some(path);
+    }
+    assert!(
+        std::env::var("RYUEDA_REQUIRE_KICAD").as_deref() != Ok("1"),
+        "{} missing: run scripts/fetch-kicad.sh",
+        path.display()
+    );
+    None
+}
+
+/// #302: KiCad's CP_Radial_D12.5mm can. Its rim spline is tangent to the
+/// wall's cylinder along the rim's edge with the wall's other sector,
+/// sharing one vertex with the wall (four pairs), and its bottom rounds
+/// are sectors of one torus written as revolutions turned and mirrored
+/// about the axis (three pairs): seven `CannotCheck` pairs on main, none
+/// now, in under 30 s on one thread with `RYUKEI_BARS=1`.
+#[test]
+#[ignore = "needs the KiCad corpus (scripts/fetch-kicad.sh)"]
+fn cp_radial_rims_and_rounds_check() {
+    let _serial = serial();
+    let Some(path) = kicad("Capacitor_THT.3dshapes/CP_Radial_D12.5mm_P5.00mm.step") else {
+        return;
+    };
+    // Healed as ryucad imports it (part `body`, feature `body`), as
+    // step-hunt found it: under `OpKey(7)` healing refuses the can with
+    // two of its wall's cylinders overlapping, on main as here.
+    let key = OpKey::from_bytes(b"ryucad.feature\0body\0body");
+    let (_, body) = bodies_keyed(&path, key).remove(0);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let t = std::time::Instant::now();
+    let faults = pool.install(|| check_intersections(&body));
+    eprintln!("CP_Radial_D12.5mm: {:?}", t.elapsed());
+    assert_eq!(named(&body, &faults), []);
+    assert!(
+        !bars() || t.elapsed().as_secs_f64() < 30.0,
+        "{:?}",
+        t.elapsed()
+    );
 }
 
 /// ftc_07's planes against its spline faces enclosed the same patches
