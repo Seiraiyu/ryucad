@@ -59,3 +59,38 @@ fn a_part_turned_a_quarter_keeps_its_labels_apart() {
         222, 209, 228, 83, 87, 44, 232, 233, 167, 25, 163, 24, 201, 2, 193, 39, 218, 234,
     ]);
 }
+
+/// Regions and papers from plan 2.A's bytes (#665): a sheet pinned to
+/// A4 by `paper` too small for what it holds (refused), a label stuck
+/// where a neighbour's detour took its pin's way out, and an `align` of
+/// parts of two named regions putting their frames over each other
+/// (refused).
+#[test]
+fn regions_and_papers_keep_every_hard_rule() {
+    check_bytes(&[
+        162, 90, 73, 163, 246, 247, 15, 12, 25, 255, 45, 35, 124, 126, 117, 232, 14, 168, 24, 14,
+        46, 3, 218, 175, 91, 52, 200, 159, 254, 226, 102, 75, 43, 238, 127, 36, 192, 66, 31, 105,
+        160, 180, 10, 177, 60, 167, 41, 162, 21, 79, 220, 45, 192, 254,
+    ]);
+    check_bytes(&[
+        154, 251, 160, 163, 219, 91, 248, 85, 79, 91, 122, 24, 120, 63, 226, 34, 20, 165, 96, 82,
+        62, 99, 234, 49, 209, 138, 179, 53, 7, 50, 144, 106, 180, 79, 245, 57, 88, 34, 113, 213,
+        238, 195, 138, 203, 205, 115, 198, 130, 108, 227, 47, 169, 93, 230,
+    ]);
+    check_bytes(&[
+        154, 251, 160, 163, 219, 91, 248, 85, 79, 91, 122, 24, 120, 63, 226, 34, 20, 165, 96, 82,
+        62, 99, 234, 49, 209, 138, 179, 53, 7, 50, 144, 106, 180, 79, 245, 57, 88, 34, 113, 213,
+        238, 195, 138, 203, 205, 115, 198, 130, 108, 227, 47, 169, 93, 230, 45, 125, 114, 136,
+    ]);
+}
+
+/// Two `region` instructions giving one title: over a previous layout
+/// both regions took the second's parts (plan 2.G's sweep, seed 232).
+#[test]
+fn two_regions_of_one_title_keep_their_own_parts() {
+    check_bytes(&[
+        189, 95, 203, 238, 218, 215, 236, 107, 237, 165, 26, 166, 182, 163, 24, 40, 211, 35, 203,
+        4, 16, 107, 28, 59, 12, 66, 58, 67, 186, 8, 150, 174, 237, 42, 196, 154, 40, 67, 203, 196,
+        205, 7, 19, 111, 39, 138, 194, 248, 176, 176, 205, 142, 29, 240, 96, 179, 200, 245,
+    ]);
+}

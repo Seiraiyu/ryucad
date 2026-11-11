@@ -273,7 +273,9 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
                 }
                 again = attempt(&whole, &r, spread, &BTreeSet::new());
             }
-            if crate::rules::check(&whole, &again.layout).is_empty() {
+            // Judged under the block's own papers: a sheet a `paper`
+            // instruction pins keeps its size there (#665).
+            if crate::rules::check(block, &again.layout).is_empty() {
                 out = again;
             }
         }
@@ -290,6 +292,101 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
         if !again.is_empty() {
             out = attempt(block, &r, 0, &again);
         }
+    }
+    // A `paper` instruction pins its sheet's size: one too small for what
+    // the sheet holds (from nothing, the sheet is packed before its pin
+    // applies) is refused, naming it, rather than drawn past its edge
+    // (#665, plan 2.G).
+    if let Some(v) = crate::rules::check(block, &out.layout)
+        .into_iter()
+        .find(|v| v.rule == "inside")
+        && let Some((id, size)) = block.instructions.iter().find_map(|(id, i)| match i {
+            Instruction::Paper { sheet, size, .. }
+                if *sheet == v.sheet
+                    || out
+                        .layout
+                        .sheets
+                        .get(&v.sheet)
+                        .is_some_and(|x| x.name == *sheet) =>
+            {
+                Some((id.clone(), size.clone()))
+            }
+            _ => None,
+        })
+    {
+        return Err(instr::Refusal {
+            code: "layout_rule",
+            message: format!(
+                "{id} pins sheet {} to {size}, which can't hold what it holds: {}",
+                v.sheet, v.message
+            ),
+            details: json!({"instructions": [id], "rule": "paper"}),
+        });
+    }
+    // Two regions the agent named can't merge: where an instruction puts
+    // parts of both where their frames overlap (an `align` of a part of
+    // each), the instructions can't all hold (#665, plan 2.G).
+    if let Some(v) = crate::rules::check(block, &out.layout)
+        .into_iter()
+        .find(|v| v.rule == "region_overlap")
+        && let [a, b] = v.refs.as_slice()
+        && let (Some(ra), Some(rb)) = (out.layout.regions.get(a), out.layout.regions.get(b))
+        && ra.named
+        && rb.named
+    {
+        let in_region = |r: &crate::layout::Region, p: usize| r.parts.contains(&block.parts[p].key);
+        let joins = |i: &Instruction| {
+            !matches!(
+                i,
+                Instruction::Region { .. } | Instruction::RegionNone { .. }
+            ) && {
+                let ps: Vec<usize> = i
+                    .parts()
+                    .iter()
+                    .flat_map(|s| instr::parts_named(block, s))
+                    .collect();
+                let other: Vec<usize> = match i {
+                    Instruction::Beside { of, .. } => {
+                        instr::parts_named(block, of).into_iter().collect()
+                    }
+                    _ => Vec::new(),
+                };
+                let all: Vec<usize> = ps.into_iter().chain(other).collect();
+                all.iter().any(|p| in_region(ra, *p)) && all.iter().any(|p| in_region(rb, *p))
+            }
+        };
+        let titled = |t: &str| {
+            block.instructions.iter().find_map(|(id, i)| match i {
+                Instruction::Region { title, .. } if title == t => Some(id.clone()),
+                _ => None,
+            })
+        };
+        let named: Vec<String> = block
+            .instructions
+            .iter()
+            .filter(|(_, i)| joins(i))
+            .map(|(id, _)| id.clone())
+            .chain(
+                block
+                    .moves
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| joins(m))
+                    .map(|(n, _)| format!("move {}", n + 1)),
+            )
+            .chain(titled(&ra.title))
+            .chain(titled(&rb.title))
+            .collect();
+        return Err(instr::Refusal {
+            code: "instruction_conflict",
+            message: format!(
+                "{} can't all hold: they put parts of regions {} and {} where their frames overlap",
+                named.join(", "),
+                ra.title,
+                rb.title
+            ),
+            details: json!({"instructions": named}),
+        });
     }
     // A move is applied as asked and holds its part where it puts it: one
     // that leaves a hard rule broken is refused, naming it -- a shift for
@@ -1959,6 +2056,10 @@ fn keep(st: &mut State, prev: Option<&Layout>, fresh: Option<&str>, not: &BTreeS
 /// takes parts out of named regions.
 fn named_regions(st: &mut State, r: &instr::Resolved) {
     let block = st.block;
+    // Each instruction's region by ID: two instructions may give one
+    // title, so a title alone doesn't say which (plan 2.G; both took the
+    // second's parts over a previous layout).
+    let mut claimed: BTreeSet<String> = BTreeSet::new();
     for (title, set) in &r.regions {
         let keys: Vec<String> = set
             .iter()
@@ -1968,9 +2069,22 @@ fn named_regions(st: &mut State, r: &instr::Resolved) {
         let Some(first) = set.iter().copied().find(|p| st.place[*p].is_some()) else {
             continue;
         };
+        // A named region of this title not yet claimed, one holding some
+        // of these parts first.
+        let mine = |st: &State| -> Option<String> {
+            let open: Vec<&(String, crate::layout::Region)> = st
+                .regions
+                .iter()
+                .filter(|(id, g)| g.named && &g.title == title && !claimed.contains(id))
+                .collect();
+            open.iter()
+                .find(|(_, g)| g.parts.iter().any(|k| keys.contains(k)))
+                .or(open.first())
+                .map(|(id, _)| id.clone())
+        };
         // A region holding only these parts takes the title, keeping its
         // ID (what `region rename` writes).
-        if !st.regions.iter().any(|(_, g)| g.named && &g.title == title)
+        if mine(st).is_none()
             && let Some((_, g)) = st.regions.iter_mut().find(|(_, g)| {
                 !g.named && !g.parts.is_empty() && g.parts.iter().all(|k| keys.contains(k))
             })
@@ -1978,21 +2092,19 @@ fn named_regions(st: &mut State, r: &instr::Resolved) {
             g.title = title.clone();
             g.named = true;
         }
-        for (_, g) in st.regions.iter_mut() {
-            if !(g.named && &g.title == title) {
+        let id = mine(st);
+        for (gid, g) in st.regions.iter_mut() {
+            if id.as_deref() != Some(gid.as_str()) {
                 g.parts.retain(|k| !keys.contains(k));
             }
         }
         let (s, place, _) = st.place[first].expect("placed");
         let sid = st.sheets[s].0.clone();
-        match st
-            .regions
-            .iter_mut()
-            .find(|(_, g)| g.named && &g.title == title)
-        {
-            Some((_, g)) => {
+        match id.and_then(|id| st.regions.iter_mut().find(|(g, _)| *g == id)) {
+            Some((gid, g)) => {
                 g.parts = keys;
                 g.parts.sort();
+                claimed.insert(gid.clone());
             }
             None => {
                 let n = st
@@ -2003,8 +2115,10 @@ fn named_regions(st: &mut State, r: &instr::Resolved) {
                     .unwrap_or(0);
                 let mut parts = keys;
                 parts.sort();
+                let gid = format!("r{}", n + 1);
+                claimed.insert(gid.clone());
                 st.regions.push((
-                    format!("r{}", n + 1),
+                    gid,
                     crate::layout::Region {
                         sheet: sid,
                         at: place.at,
@@ -4773,10 +4887,32 @@ fn place_labels_in(
             }
         }
     }
+    // Each pin's way out: three steps straight off its end. A label or
+    // its stub keeps off the ways out of pins still to take theirs where
+    // it can (plan 2.G: a detour across a neighbour's row left that pin
+    // nowhere to go).
+    let ways_out: Vec<Rect> = want
+        .iter()
+        .map(|&(_, q, l, _)| {
+            let pin = st.shape(q).expect("placed").pins[l];
+            let d = pin.side.step();
+            Rect::new(
+                [pin.end[0] + d[0], pin.end[1] + d[1]],
+                [pin.end[0] + 3 * d[0], pin.end[1] + 3 * d[1]],
+            )
+            .grow(1)
+        })
+        .collect();
+    let mut pending: BTreeSet<usize> = order
+        .iter()
+        .copied()
+        .filter(|i| !done.contains(i))
+        .collect();
     for &i in order {
         if done.contains(&i) {
             continue;
         }
+        pending.remove(&i);
         let (n, p, k, kind) = want[i];
         let part = &block.parts[p];
         let on = format!("{}/{}", part.key, part.pins[k].number);
@@ -4812,6 +4948,15 @@ fn place_labels_in(
         };
         let fits = |field: &Field, stub: &[Point], at: Point, side: Side| -> bool {
             fits_as(field, kind, stub, at, side)
+        };
+        // Clear of the ways out of the pins still to be labelled.
+        let aside = |stub: &[Point], at: Point, side: Side| -> bool {
+            let intent = label::intent_on(&block.nets[n], kind);
+            let b = label::label_box_with(kind, name, intent, at, side);
+            pending.iter().all(|j| {
+                let w = ways_out[*j];
+                !w.overlaps(&b) && stub.windows(2).all(|s| !Rect::new(s[0], s[1]).overlaps(&w))
+            })
         };
         // An off-sheet connector with no room for its longer outline is
         // drawn as a net label where one fits (plan 2.C): kept labels
@@ -4891,7 +5036,8 @@ fn place_labels_in(
                 }
                 cands
                     .iter()
-                    .find(|(s, a, side)| fits(field, s, *a, *side))
+                    .find(|(s, a, side)| fits(field, s, *a, *side) && aside(s, *a, *side))
+                    .or_else(|| cands.iter().find(|(s, a, side)| fits(field, s, *a, *side)))
                     .cloned()
             })
             .or_else(|| {
@@ -4913,7 +5059,13 @@ fn place_labels_in(
                 detours
                     .iter()
                     .chain(&last)
-                    .find(|(s, a, side)| fits(field, s, *a, *side))
+                    .find(|(s, a, side)| fits(field, s, *a, *side) && aside(s, *a, *side))
+                    .or_else(|| {
+                        detours
+                            .iter()
+                            .chain(&last)
+                            .find(|(s, a, side)| fits(field, s, *a, *side))
+                    })
                     .cloned()
             })
             .or_else(|| {
