@@ -1124,6 +1124,7 @@ fn every_protocol_method_has_a_command() {
         ("measure", &["measure"]),
         ("mass", &["mass"]),
         ("sheet.get", &["sheet"]),
+        ("feature_faces.get", &["feature-faces"]),
         ("flat.get", &["flat"]),
         ("clearance", &["clearance"]),
         ("deps.add", &["deps", "add"]),
@@ -3697,6 +3698,123 @@ fn drafts_from_the_cli() {
     let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
     assert_eq!(code, 0, "{v}");
     assert!(file.exists());
+}
+
+#[test]
+fn direct_edits_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "plate"]);
+    p.ok(&[
+        "feature", "add", "plate", "box", "--id", "base", "--param", "x=40", "--param", "y=30",
+        "--param", "z=10",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "cylinder",
+        "--id",
+        "boss",
+        "--operation",
+        "join",
+        "--radius",
+        "4",
+        "--param",
+        "height=6",
+        "--origin",
+        "20,15,10",
+    ]);
+    let j = p.ok(&["inspect", "plate", "boss"])["bodies"][0].clone();
+    let wall = j["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["surface"]["type"] == "cylinder")
+        .map(|f| format!("plate/base/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    // What the seed takes, then the delete by it.
+    let ff = p.ok(&["feature-faces", &wall]);
+    assert_eq!(ff["faces"].as_array().unwrap().len(), 2, "{ff}");
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "delete_face",
+        "--id",
+        "flat",
+        "--seed",
+        &wall,
+        "--heal",
+        "cap",
+    ]);
+    assert_eq!(r["feature"]["seeds"], json!([wall]), "{r}");
+    assert_eq!(r["feature"]["heal"], "cap", "{r}");
+    // A tweak told it may change topology.
+    let base = p.ok(&["inspect", "plate", "base"])["bodies"][0].clone();
+    let side = base["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+            f["surface"]["type"] == "plane"
+                && f["surface"]["frame"]["z"][0].as_f64().unwrap() * sign == -1.0
+        })
+        .map(|f| format!("plate/base/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "plate",
+        "draft",
+        "--id",
+        "lean",
+        "--neutral",
+        "xy",
+        "--angle",
+        "1.3rad",
+        "--face",
+        &side,
+        "--topology",
+        "change",
+    ]);
+    assert_eq!(r["feature"]["topology"], "change", "{r}");
+    p.ok(&[
+        "feature",
+        "edit",
+        "plate",
+        "lean",
+        "--topology",
+        "keep",
+        "--blends",
+        "rebuild",
+    ]);
+    let shown = p.ok(&["feature", "show", "plate", "lean"]);
+    assert_eq!(
+        (shown["topology"].as_str(), shown["blends"].as_str()),
+        (Some("keep"), Some("rebuild")),
+        "{shown}"
+    );
+    // A bad heal is the protocol's invalid_param.
+    p.fails(
+        &["feature", "edit", "plate", "flat", "--heal", "patch"],
+        "invalid_param",
+        1,
+    );
+    // The daemon logged the delete: undo takes its file away, redo puts it
+    // back.
+    let flat = p.daemon.join("parts/plate/features/flat.json");
+    let lean = p.daemon.join("parts/plate/features/lean.json");
+    assert!(flat.exists() && lean.exists());
+    for _ in 0..3 {
+        let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+        assert_eq!(code, 0, "{v}");
+    }
+    assert!(!flat.exists());
+    let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(flat.exists());
 }
 
 #[test]

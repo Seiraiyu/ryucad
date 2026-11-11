@@ -13,7 +13,8 @@
 //! its shells and offsets (seeded with `b`'s faces) hollow and grow `b`,
 //! its face tweaks (seeded with `b`'s faces) move, offset and replace
 //! `b`'s faces, its drafts (seeded with `b`'s walls) draft them about xy
-//! and from a parting line, and
+//! and from a parting line, its direct edits delete `b`'s faces, by face
+//! and by seed, and let a tweak change its topology, and
 //! its mirrors and splits copy and divide `b`, its base flanges make
 //! plates of `s` and bent sections of `u` (an open L, so its radius
 //! bends a corner), and its flanges bend and flange `b`'s

@@ -679,6 +679,12 @@ pub enum Code {
     /// (`entities`, each with its `role`) and, where there is a known way
     /// out, a `hint` are in the details.
     TweakFailed,
+    /// A direct edit (ryucad 22: a `delete_face`, or a face tweak with
+    /// `topology: change` or `blends: rebuild`) didn't finish within the
+    /// `edit.budget` preference's work units: the `feature`, what it had
+    /// `spent` and the `budget` are in the details, with a `hint`. Units
+    /// are the same on every machine, so it is kept as any refusal is.
+    EditBudgetExceeded,
     /// ryueda: an instruction naming a region (`region:<id>`) the layout
     /// no longer has, kept until released (a warning).
     RegionUnresolved,
@@ -1035,6 +1041,15 @@ mod tests {
     fn draft_angle_varies_code() {
         assert_eq!(json!(Code::DraftAngleVaries), json!("draft_angle_varies"));
         assert_eq!(Code::DraftAngleVaries.exit_code(), 1);
+    }
+
+    #[test]
+    fn edit_budget_code() {
+        assert_eq!(
+            json!(Code::EditBudgetExceeded),
+            json!("edit_budget_exceeded")
+        );
+        assert_eq!(Code::EditBudgetExceeded.exit_code(), 1);
     }
 
     #[test]

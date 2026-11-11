@@ -882,6 +882,9 @@ pub(crate) fn dispatch(
         Request::SheetGet { part, solid, rev } => {
             crate::sheet_metal::report::get(session, &part, solid.as_deref(), rev.as_deref())
         }
+        Request::FeatureFacesGet { face, rev } => {
+            crate::tweak::feature_faces_get(session, &face, rev.as_deref())
+        }
         Request::FlatGet {
             part,
             solid,
@@ -2021,9 +2024,10 @@ pub fn handle_job_raw(
     let watch = live.is_some();
     guarded(slot, root, watch, |s| {
         s.job = job.clone();
-        // A `config set heal.budget` in another process reaches this
-        // session at its next request.
+        // A `config set heal.budget` or `edit.budget` in another process
+        // reaches this session at its next request.
         s.set_heal_budget(crate::session::heal_budget());
+        s.set_edit_budget(crate::session::edit_budget());
         let a = answer_live(s, live, me, req);
         s.job = Job::default();
         // A write a cancel came too late for says so, as a daemon's does.
@@ -2546,9 +2550,10 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Boolean(b) => b.fields(),
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
-            crate::tweak::report(part, f)
-        }
+        Feature::MoveFace(_)
+        | Feature::ReplaceFace(_)
+        | Feature::Draft(_)
+        | Feature::DeleteFace(_) => crate::tweak::report(part, f),
         Feature::Datum(d) => crate::datum::report(part, d),
         Feature::Path(x) => crate::path::report(part, x),
         Feature::Sweep(w) => crate::along::feature_report(part, w),
@@ -4425,7 +4430,10 @@ fn check_resolved(
         }
         // Faces of its target, its direction, axis or surfaces their
         // kinds; what the kernel makes of them only rebuild can tell.
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
+        Feature::MoveFace(_)
+        | Feature::ReplaceFace(_)
+        | Feature::Draft(_)
+        | Feature::DeleteFace(_) => {
             crate::tweak::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
         Feature::BaseFlange(_) | Feature::Flange(_) | Feature::Unfold(_) | Feature::Refold(_) => {
@@ -4635,7 +4643,7 @@ fn feature_add(
     }
     // A tweak sorts what it was given; with no target it acts on the part's
     // one solid, else the one its faces name. The file names it all the same.
-    if crate::doc::tweak::TYPES.contains(&ty) {
+    if crate::tweak::TYPES.contains(&ty) {
         crate::tweak::take_given(ty, &mut given.fields)?;
         if given.fields.target.is_none() && given.fields.targets.is_none() {
             let before = solids_before(p, &list, at);
@@ -4741,8 +4749,8 @@ fn feature_add(
             given.only(ty, crate::doc::body::request_fields(ty))?;
             crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
-        "move_face" | "replace_face" | "draft" => {
-            given.only(ty, crate::doc::tweak::request_fields(ty))?;
+        "move_face" | "replace_face" | "draft" | "delete_face" => {
+            given.only(ty, crate::tweak::request_fields(ty))?;
             crate::tweak::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
         "base_flange" | "flange" | "unfold" | "refold" => {
@@ -4982,10 +4990,13 @@ fn feature_edit(
                 given.only(ty, crate::doc::surface::request_fields(ty))?;
                 crate::surface::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
             }
-            f @ (Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_)) => {
+            f @ (Feature::MoveFace(_)
+            | Feature::ReplaceFace(_)
+            | Feature::Draft(_)
+            | Feature::DeleteFace(_)) => {
                 let ty = f.type_name();
                 crate::tweak::take_given(ty, &mut given.fields)?;
-                given.only(ty, crate::doc::tweak::request_fields(ty))?;
+                given.only(ty, crate::tweak::request_fields(ty))?;
                 crate::tweak::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
             }
             Feature::Datum(d) => {
@@ -5086,6 +5097,7 @@ fn feature_edit(
                 | Feature::MoveFace(_)
                 | Feature::ReplaceFace(_)
                 | Feature::Draft(_)
+                | Feature::DeleteFace(_)
         ) && f.targets() != old.targets())
         || ((f.base_flange().is_some()
             || f.flange().is_some()
@@ -5393,9 +5405,10 @@ pub(crate) fn part_report(
                 // A fill's rebuild report is what it measured (see
                 // `Made::report`), an extract's its faces.
                 Feature::Extract(_) => crate::surface::report(id, f),
-                Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
-                    crate::tweak::report(id, f)
-                }
+                Feature::MoveFace(_)
+                | Feature::ReplaceFace(_)
+                | Feature::Draft(_)
+                | Feature::DeleteFace(_) => crate::tweak::report(id, f),
                 _ => return None,
             };
             Some((fid.clone(), (f.type_name(), report)))
@@ -5428,6 +5441,7 @@ pub(crate) fn part_report(
                             | Feature::MoveFace(_)
                             | Feature::ReplaceFace(_)
                             | Feature::Draft(_)
+                            | Feature::DeleteFace(_)
                     )
             })
         })
@@ -5451,11 +5465,11 @@ pub(crate) fn part_report(
                         && let Some(i) = &m.report
                     {
                         // A fill's report under its own type, else an
-                        // import's; a draft's angles come with its own
-                        // report (`tweak::resolved`).
+                        // import's; a tweak's report comes with its own
+                        // fields (`tweak::resolved`).
                         let key = match types.get(fid).and_then(Value::as_str) {
                             Some("fill") => Some("fill"),
-                            Some("draft") => None,
+                            Some("draft" | "move_face" | "replace_face" | "delete_face") => None,
                             _ => Some("import"),
                         };
                         if let Some(key) = key {
@@ -7932,6 +7946,7 @@ fn inspect(
                                 | Feature::MoveFace(_)
                                 | Feature::ReplaceFace(_)
                                 | Feature::Draft(_)
+                                | Feature::DeleteFace(_)
                         ))
             }) =>
         {
@@ -8100,7 +8115,8 @@ fn inspect(
             | Feature::Split(_)
             | Feature::MoveFace(_)
             | Feature::ReplaceFace(_)
-            | Feature::Draft(_)),
+            | Feature::Draft(_)
+            | Feature::DeleteFace(_)),
         )) = features.iter().find(|(i, _)| i == f)
     {
         let k = x.type_name();

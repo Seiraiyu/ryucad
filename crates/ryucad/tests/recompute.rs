@@ -1801,3 +1801,111 @@ fn drafts_recompute_as_from_nothing() {
         }
     }
 }
+
+/// Part `p`: a plate `b` (`w` × 30 × 10 mm) with a hole `h` (`dia`) at
+/// (15, 15), deleted by its seed (`d`), and a box `c` beside it whose −x
+/// wall a draft `t` (`ang`) leans past its +x wall with topology: change.
+fn edited() -> (tempfile::TempDir, Session, String) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    must(
+        &mut s,
+        "param.set",
+        json!({"part": "p", "parameters": {"w": "40 mm", "dia": "6 mm", "ang": "1.3 rad"}}),
+    );
+    let add = |s: &mut Session, f: Value| {
+        let mut f = f;
+        f["part"] = json!("p");
+        must(s, "feature.add", f);
+    };
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": "w", "y": "30 mm", "z": "10 mm"}}),
+    );
+    let top = face(&mut s, "b", [0.0, 0.0, 1.0]);
+    add(&mut s, json!({"type": "sketch", "id": "s", "face": top}));
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "s", "ops": [
+        {"op": "add", "type": "point", "at": [15, 15]}, {"op": "add", "type": "fix", "a": "p1"}]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "h", "sketch": "s", "points": ["p1"],
+        "diameter": "dia", "depth": "through_all", "targets": ["b"]}),
+    );
+    let v = must(&mut s, "inspect", json!({"part": "p", "feature": "h"}));
+    let bore = v["bodies"][0]["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["surface"]["type"] == "cylinder")
+        .map(|f| format!("p/b/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    add(
+        &mut s,
+        json!({"type": "delete_face", "id": "d", "seeds": [bore.clone()]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "c", "params": {"x": "40 mm", "y": "30 mm", "z": "20 mm"},
+                       "placement": {"origin": [80, 0, 0]}}),
+    );
+    let wall = face(&mut s, "c", [-1.0, 0.0, 0.0]);
+    add(
+        &mut s,
+        json!({"type": "draft", "id": "t", "target": "c", "angle": "ang", "neutral": "xy",
+                       "faces": [wall], "topology": "change"}),
+    );
+    (dir, s, bore)
+}
+
+/// One random edit of [`edited`]'s part.
+fn edit_edit(g: &mut Lcg, s: &mut Session) {
+    let (method, params) = match g.next_u64() % 6 {
+        0 => ("param.set", json!({"parameters": {"w": mm(g, 30, 50)}})),
+        1 => ("param.set", json!({"parameters": {"dia": mm(g, 3, 8)}})),
+        2 => (
+            "param.set",
+            json!({"parameters": {"ang": format!("{} rad", 1.1 + (g.next_u64() % 4) as f64 * 0.1)}}),
+        ),
+        3 => (
+            "feature.edit",
+            json!({"id": "d", "heal": (["auto", "cap", "grow"][(g.next_u64() % 3) as usize])}),
+        ),
+        4 => (
+            "feature.edit",
+            json!({"id": "t", "topology": (["keep", "change"][(g.next_u64() % 2) as usize])}),
+        ),
+        _ => (
+            "feature.edit",
+            json!({"id": "h", "form": "counterbore",
+                                     "counterbore": {"diameter": "10 mm", "depth": "3 mm"}}),
+        ),
+    };
+    let mut params = params;
+    params["part"] = json!("p");
+    let _ = call(s, method, params);
+}
+
+#[test]
+fn direct_edits_recompute_as_from_nothing() {
+    for seed in [22, 23] {
+        let (_dir, mut s, _bore) = edited();
+        let part = Id::parse("p", "part").unwrap();
+        let first = s.rebuilt(&part).unwrap();
+        assert_eq!(first.failed(), 0, "{:?}", summary(first));
+        let mut g = Lcg::new(seed);
+        for step in 0..10 {
+            edit_edit(&mut g, &mut s);
+            let (one, eight) = (full(&s, 1), full(&s, 8));
+            let r = s.rebuilt(&part).unwrap();
+            let incremental = (r.hash.clone(), summary(r));
+            assert_eq!(incremental, one, "seed {seed}, step {step}");
+            assert_eq!(incremental, eight, "seed {seed}, step {step}");
+        }
+    }
+}
