@@ -206,6 +206,14 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
     if touching && apart_at_vertices(body, a, b, EARLY_VERTICES, m) {
         return None;
     }
+    // One face running along the other's surface on its own edges is
+    // certified apart cheaply before any trace (#302's CP_Radial: 24 s of
+    // failed traces, then this in a few thousand units). Under the early
+    // part limit, so pairs it can't settle there cost little: the full
+    // search runs after the traces (below).
+    if touching && apart_by_own_edges(body, a, b, EARLY_VERTICES, m) {
+        return None;
+    }
     // Faces tangent along an edge they share are tried apart beside it
     // under the ladder's smaller limits, then traced under
     // [`TANGENT_TRACE_FIRST`] units, then apart under its largest limit and
