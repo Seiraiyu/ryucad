@@ -148,13 +148,31 @@ enum Command {
         #[command(subcommand)]
         action: Option<LintCmd>,
     },
-    /// The symbol standards that judge a library (this project's own by
-    /// default): resistor shapes, grid, pin lengths, name margins, ground
-    /// and group name patterns, and each class's side rules; `standards
-    /// set` changes this project's own.
+    /// Number a design's designators in canvas order: sheets as the PDF
+    /// pages them, by region, then down each column (or across each row).
+    /// Only those with none or a placeholder (R?) unless --reset all;
+    /// locked ones never.
     #[command(args_conflicts_with_subcommands = true)]
+    Annotate {
+        /// The design (the only one by default).
+        design: Option<String>,
+        /// down (each column, then across) or across (each row, then down).
+        #[arg(long)]
+        order: Option<String>,
+        /// unannotated (none or R?) or all (every unlocked one).
+        #[arg(long)]
+        reset: Option<String>,
+        /// Answer the changes and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        expect: Expect,
+        #[command(subcommand)]
+        cmd: Option<AnnotateCmd>,
+    },
     /// Add or remove tags (critical, hv, dnp, or your own) on a component
     /// or net (by designator or name, with --block) or a rail (rail:NAME).
+    #[command(args_conflicts_with_subcommands = true)]
     Tag {
         target: String,
         #[arg(long)]
@@ -172,6 +190,10 @@ enum Command {
         #[command(subcommand)]
         cmd: Option<StyleCmd>,
     },
+    /// The symbol standards that judge a library (this project's own by
+    /// default): resistor shapes, grid, pin lengths, name margins, ground
+    /// and group name patterns, and each class's side rules; `standards
+    /// set` changes this project's own.
     Standards {
         /// A library project's alias, to read the standards that judge it.
         #[arg(long)]
@@ -412,6 +434,14 @@ enum LibCmd {
         /// One symbol (<id>, or lib/<alias>/symbol/<id>).
         #[arg(long)]
         symbol: Option<String>,
+        /// Each symbol's counts by code and the library's (by_code), not
+        /// the findings: what to read first over a large library.
+        #[arg(long)]
+        summary: bool,
+        /// Only this code's findings (sym_pin_off_grid, …), and only the
+        /// symbols holding one; repeat for more.
+        #[arg(long = "code", value_name = "CODE")]
+        codes: Vec<String>,
     },
 }
 
@@ -979,6 +1009,28 @@ enum DesignCmd {
     List,
 }
 
+#[derive(Subcommand)]
+enum AnnotateCmd {
+    /// Keep components' designators (by designator, or <block>/<component>).
+    Lock {
+        #[arg(required = true)]
+        refs: Vec<String>,
+        #[arg(long)]
+        design: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Let annotate renumber them again.
+    Unlock {
+        #[arg(required = true)]
+        refs: Vec<String>,
+        #[arg(long)]
+        design: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
 /// A component's fields; an edit keeps those left out.
 #[derive(Args)]
 struct ComponentArgs {
@@ -1531,9 +1583,16 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             expected_revision: expect.expect.clone(),
         },
         Command::Lib(LibCmd::List) => Request::LibList {},
-        Command::Lib(LibCmd::Check { library, symbol }) => Request::LibCheck {
+        Command::Lib(LibCmd::Check {
+            library,
+            symbol,
+            summary,
+            codes,
+        }) => Request::LibCheck {
             library: library.clone(),
             symbol: symbol.clone(),
+            summary: *summary,
+            codes: codes.clone(),
         },
         Command::Symbol(SymbolCmd::Create {
             name,
@@ -2256,6 +2315,66 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             expected_revision: expect.expect.clone(),
         },
         Command::Rail(RailCmd::List) => Request::RailList {},
+        Command::Annotate {
+            design,
+            order,
+            reset,
+            dry_run,
+            expect,
+            cmd: None,
+        } => Request::Annotate {
+            design: design.clone(),
+            order: match order.as_deref() {
+                None => None,
+                Some("down") => Some(ryueda::annotate::Order::Down),
+                Some("across") => Some(ryueda::annotate::Order::Across),
+                Some(o) => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        format!("{o:?} isn't an order: down or across"),
+                    ));
+                }
+            },
+            reset: match reset.as_deref() {
+                None => None,
+                Some("unannotated") => Some(ryueda::annotate::Reset::Unannotated),
+                Some("all") => Some(ryueda::annotate::Reset::All),
+                Some(r) => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        format!("{r:?} isn't a reset: unannotated or all"),
+                    ));
+                }
+            },
+            dry_run: *dry_run,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Annotate {
+            cmd:
+                Some(AnnotateCmd::Lock {
+                    refs,
+                    design,
+                    expect,
+                }),
+            ..
+        } => Request::AnnotateLock {
+            design: design.clone(),
+            refs: refs.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Annotate {
+            cmd:
+                Some(AnnotateCmd::Unlock {
+                    refs,
+                    design,
+                    expect,
+                }),
+            ..
+        } => Request::AnnotateUnlock {
+            design: design.clone(),
+            refs: refs.clone(),
+            expected_revision: expect.expect.clone(),
+        },
         Command::Tag {
             target,
             block,
@@ -2504,6 +2623,9 @@ fn picture_format(given: Option<&str>, out: &std::path::Path) -> Result<ryueda::
 /// The result to print; bytes the answer carries go to `--out` (relative
 /// to where the CLI runs as if started), atomically.
 fn deliver(cmd: &Command, here: &std::path::Path, a: Answer) -> Result<Value> {
+    // A report written as text (lib check's, #711) is read back here, in
+    // a process that ends once it prints it.
+    let a = a.into_json()?;
     let Some(bytes) = a.binary else {
         return Ok(a.result);
     };

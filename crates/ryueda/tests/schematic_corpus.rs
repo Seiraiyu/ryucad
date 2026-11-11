@@ -2287,3 +2287,57 @@ fn styled_breakout_look() {
     let out = look.join("styled.breakout.pdf");
     ryueda(&board, 1, &["output", "--out", out.to_str().unwrap()]);
 }
+
+/// Plan 2.F: an annotate changes only designators. Over the front end
+/// (two stacks of two), every block's parts, wires and labels stay where
+/// they were, and only the text of the parts it renumbers may move; each
+/// stack's layers keep their own designators through their format, so no
+/// two occurrences share one; and annotating again changes nothing.
+#[test]
+fn an_annotate_changes_only_designators() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = circuit(dir.path(), "frontend");
+    ryueda(&board, 1, &["layout"]);
+    let p = ryueda::project::Project::load(&board).unwrap();
+    let blocks: Vec<String> = p.conn.blocks.keys().map(|b| b.to_string()).collect();
+    let before: Vec<Value> = blocks.iter().map(|b| layout_of(&board, b)).collect();
+    let a = ryueda(&board, 1, &["annotate", "--reset", "all"]);
+    let changes = a["changes"].as_array().unwrap();
+    assert!(!changes.is_empty(), "{a}");
+    assert_eq!(a["erc"], serde_json::json!([]), "{a}");
+    for (b, was) in blocks.iter().zip(&before) {
+        let now = layout_of(&board, b);
+        let renumbered: Vec<String> = changes
+            .iter()
+            .filter_map(|c| c["component"].as_str()?.strip_prefix(&format!("{b}/")))
+            .map(str::to_owned)
+            .collect();
+        for field in ["placed", "routes", "labels", "sheets"] {
+            assert_eq!(was[field], now[field], "{b}: {field}");
+        }
+        // A region's frame is drawn round its text, so it may narrow or
+        // widen with a designator; its origin, title and parts stay.
+        let held = |v: &Value| -> Value {
+            let mut v = v["regions"].clone();
+            for r in v.as_object_mut().into_iter().flat_map(|m| m.values_mut()) {
+                r.as_object_mut().unwrap().remove("frame");
+            }
+            v
+        };
+        assert_eq!(held(was), held(&now), "{b}: regions");
+        for (k, v) in was["text"].as_object().unwrap() {
+            let c = k.split(':').next().unwrap();
+            if !renumbered.iter().any(|r| r == c) {
+                assert_eq!(&now["text"][k], v, "{b}: text of {k}");
+            }
+        }
+    }
+    let n = ryueda(&board, 1, &["netlist"]);
+    let mut seen = BTreeSet::new();
+    for o in n["occurrences"].as_array().unwrap() {
+        let r = o["refdes"].as_str().unwrap();
+        assert!(seen.insert(r.to_owned()), "{r} twice");
+    }
+    let again = ryueda(&board, 1, &["annotate", "--reset", "all"]);
+    assert_eq!(again["changes"], serde_json::json!([]), "{again}");
+}

@@ -914,6 +914,9 @@ pub enum Code {
     SchContrast,
     /// ryueda style lint: an override naming an object that is gone.
     SchOverrideUnused,
+    /// ryueda: two components locked with one designator, which
+    /// `annotate` can't number round; both are in the details (plan 2.F).
+    AnnotateConflict,
 }
 
 impl Code {
@@ -1226,6 +1229,8 @@ mod tests {
         assert_eq!(json!(Code::StyleLocked), json!("style_locked"));
         assert_eq!(json!(Code::SchContrast), json!("sch_contrast"));
         assert_eq!(json!(Code::SchOverrideUnused), json!("sch_override_unused"));
+        assert_eq!(json!(Code::AnnotateConflict), json!("annotate_conflict"));
+        assert_eq!(Code::AnnotateConflict.exit_code(), 1);
         for c in [Code::StyleInvalid, Code::StyleLocked, Code::SchContrast] {
             assert_eq!(c.exit_code(), 1);
         }
