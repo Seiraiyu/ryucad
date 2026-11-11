@@ -154,6 +154,12 @@ pub fn check_topology(body: &Body) -> Vec<Fault> {
     out
 }
 
+/// Whether `f` says a solid is inside out: a face wound against its
+/// normal, or a region whose shells don't enclose it outward.
+pub(crate) fn inside_out(f: &Fault) -> bool {
+    matches!(f, Fault::NotOutward { .. } | Fault::FaceInsideOut { .. })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

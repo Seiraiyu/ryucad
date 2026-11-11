@@ -317,7 +317,19 @@ fn attempt(
             return Rung::Next(TweakError::HealAmbiguous { face: at }.into());
         }
     };
-    if !crate::check::check(&out).is_empty() {
+    let faults = crate::check::check(&out);
+    if !faults.is_empty() {
+        // Inside out: a face carried past the opposite side (#704); the
+        // solid between them would have to collapse.
+        if faults.iter().all(crate::check::inside_out) {
+            let face = region
+                .changed
+                .iter()
+                .map(|&f| body.faces[f].name)
+                .min()
+                .unwrap_or(Name::from_u128(0));
+            return done(Err(TweakError::FaceCollapses { face }.into()));
+        }
         return done(Err(Error::Topology(TopologyError::Inconsistent)));
     }
     // Only pairs with a face the re-trim made: the faces outside the
