@@ -400,6 +400,9 @@ fn along(p: &Pin) -> i64 {
     }
 }
 
+/// A group's pin: its number, the pin, and its number within a `#` group.
+type GroupPin<'a> = (&'a String, &'a Pin, Option<u64>);
+
 fn groups(s: &Symbol, class: Option<Class>, cx: &Context, out: &mut Vec<Raw>) {
     let Some(class) = class else { return };
     let st = cx.standards;
@@ -410,8 +413,7 @@ fn groups(s: &Symbol, class: Option<Class>, cx: &Context, out: &mut Vec<Raw>) {
     for unit in units(s) {
         let pins = unit_pins(s, unit);
         // Each group's pins whose role has no side of its own.
-        let mut by_group: std::collections::BTreeMap<&str, Vec<(&String, &Pin, Option<u64>)>> =
-            Default::default();
+        let mut by_group: std::collections::BTreeMap<&str, Vec<GroupPin>> = Default::default();
         for (n, p) in &pins {
             if st
                 .role(&p.name, p.ty)

@@ -208,6 +208,7 @@ fn symbol_json(lib: &Library, id: &Id) -> Result<Value> {
 
 /// `symbol.create`: a symbol called `name`, with `units` (1 by default)
 /// and the batch `ops` applied to it.
+#[allow(clippy::too_many_arguments)]
 pub fn symbol_create(
     session: &mut Session,
     name: &str,

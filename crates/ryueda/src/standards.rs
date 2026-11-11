@@ -653,11 +653,13 @@ mod tests {
 
     #[test]
     fn checks_name_each_bad_value_by_pointer() {
-        let mut s = Standards::default();
-        s.grid_nm = 0;
-        s.pin_length_nm = -1;
-        s.pin_name_size_nm = 0;
-        s.ground = vec![String::new()];
+        let mut s = Standards {
+            grid_nm: 0,
+            pin_length_nm: -1,
+            pin_name_size_nm: 0,
+            ground: vec![String::new()],
+            ..Standards::default()
+        };
         s.groups.insert("bad".into(), vec![]);
         s.groups.insert("spaced".into(), vec!["A B".into()]);
         s.classes.insert(
