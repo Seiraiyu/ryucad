@@ -2435,3 +2435,137 @@ fn the_corpus_from_nothing_wires_labelled_nets_long_only_inside_a_region() {
     }
     assert!(out.is_empty(), "{out:#?}");
 }
+
+/// #712 (plan 2.G): every template placed in one block, as plan 2.D's
+/// visual drew them: no part's designator or value covers one of its own
+/// pins' lines or the room in front of its end (the regulator's
+/// designator stood on its VOUT pin; plan 2.E's guard keeps it off).
+#[test]
+fn a_templates_designator_stands_off_its_pins() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = dir.path().join("t");
+    std::fs::create_dir_all(&board).unwrap();
+    ryueda(&board, 1, &["init"]);
+    for class in ["resistor", "capacitor", "inductor", "diode", "led"] {
+        ryueda(&board, 1, &["symbol", "create", class, "--template", class]);
+    }
+    ryueda(
+        &board,
+        1,
+        &[
+            "symbol",
+            "create",
+            "reg",
+            "--template",
+            "regulator",
+            "--pins",
+            r#"[{"number":"1","name":"VIN","type":"power_in"},{"number":"2","name":"GND","type":"power_in"},{"number":"3","name":"VOUT","type":"power_out"},{"number":"4","name":"EN","type":"input"}]"#,
+        ],
+    );
+    ryueda(
+        &board,
+        1,
+        &[
+            "symbol",
+            "create",
+            "mcu",
+            "--template",
+            "ic",
+            "--pins",
+            r#"[{"number":"1","name":"VDD","type":"power_in"},{"number":"2","name":"IOVDD","type":"power_in"},{"number":"3","name":"GND","type":"power_in"},{"number":"4","name":"AGND","type":"power_in"},{"number":"5","name":"RUN","type":"input"},{"number":"6","name":"TX","type":"output"},{"number":"7","name":"SDA","type":"bidirectional"},{"number":"8","name":"SCL","type":"bidirectional"},{"number":"9","name":"MOSI","type":"bidirectional"},{"number":"10","name":"MISO","type":"bidirectional"},{"number":"11","name":"SCK","type":"bidirectional"},{"number":"12","name":"CS","type":"bidirectional"},{"number":"13","name":"USB_D+","type":"bidirectional"},{"number":"14","name":"USB_D-","type":"bidirectional"}]"#,
+        ],
+    );
+    ryueda(
+        &board,
+        1,
+        &[
+            "symbol",
+            "create",
+            "conn",
+            "--template",
+            "connector",
+            "--pins",
+            r#"[{"number":"1","name":"~","type":"passive"},{"number":"2","name":"~","type":"passive"},{"number":"3","name":"~","type":"passive"},{"number":"4","name":"~","type":"passive"}]"#,
+        ],
+    );
+    for (id, prefix, value) in [
+        ("conn", "J", "Conn_01x04"),
+        ("resistor", "R", "10k"),
+        ("capacitor", "C", "100n"),
+        ("inductor", "L", "10u"),
+        ("diode", "D", "1N4148"),
+        ("led", "D", "red"),
+        ("mcu", "U", "MCU"),
+        ("reg", "U", "AP2112K-3.3"),
+    ] {
+        ryueda(
+            &board,
+            1,
+            &[
+                "libcomp", "create", id, "--id", id, "--symbol", id, "--prefix", prefix, "--value",
+                value,
+            ],
+        );
+    }
+    ryueda(&board, 1, &["block", "create", "Templates", "--id", "top"]);
+    for id in [
+        "conn",
+        "resistor",
+        "capacitor",
+        "inductor",
+        "diode",
+        "led",
+        "mcu",
+        "reg",
+    ] {
+        ryueda(&board, 1, &["component", "add", "top", "--of", id]);
+    }
+    let p = ryueda::project::Project::load(&board).unwrap();
+    let mut over = Vec::new();
+    let mut checked = 0;
+    for b in p.conn.blocks.values() {
+        let laid = ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None).unwrap();
+        let (block, l) = (&laid.built.input, &laid.outcome.layout);
+        for part in &block.parts {
+            let (Some(x), Some(fields)) = (l.placed.get(&part.key), l.text.get(&part.key)) else {
+                continue;
+            };
+            let shape = ryusch::shape::Shape::of(
+                part,
+                ryusch::geom::Place::new(x.at, x.rotation, x.mirror),
+            );
+            for (name, line) in part.lines() {
+                let Some(at) = fields.get(name) else { continue };
+                let b = line.boxed(*at);
+                checked += 1;
+                for (k, pin) in shape.pins.iter().enumerate() {
+                    // Its line (a hard rule already) and the room in front
+                    // of its end, where its wire or label goes.
+                    use ryusch::geom::{GRID, Rect, Side};
+                    let e = pin.end;
+                    let front = match pin.side {
+                        Side::Right => {
+                            Rect::new([e[0], e[1] - GRID], [e[0] + 3 * GRID, e[1] + GRID])
+                        }
+                        Side::Left => {
+                            Rect::new([e[0] - 3 * GRID, e[1] - GRID], [e[0], e[1] + GRID])
+                        }
+                        Side::Up => Rect::new([e[0] - GRID, e[1]], [e[0] + GRID, e[1] + 3 * GRID]),
+                        Side::Down => {
+                            Rect::new([e[0] - GRID, e[1] - 3 * GRID], [e[0] + GRID, e[1]])
+                        }
+                    };
+                    if Rect::new(pin.base, pin.end).grow(1).overlaps(&b) || front.overlaps(&b) {
+                        over.push(format!(
+                            "{}'s {name} over its pin {}",
+                            part.refdes, part.pins[k].number
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    // Eight parts, a designator and a value each.
+    assert_eq!(checked, 16);
+    assert!(over.is_empty(), "{over:#?}");
+}
