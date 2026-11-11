@@ -557,6 +557,69 @@ pub fn unreadable(path: &str, e: &StepError) -> Error {
     err
 }
 
+/// `import.report`: the transfer report of `path`, a file the project
+/// holds, from what its import features and imported instances make of
+/// it now (design 448). Each part reading it is rebuilt (side by side);
+/// a feature that builds read its body, one that fails names its
+/// instances.
+pub fn transfer_report(
+    session: &mut crate::session::Session,
+    path: &str,
+    detail: bool,
+) -> Result<Value> {
+    use crate::doc::files::Feature;
+    let Some(file) = session.project().imports.get(path).cloned() else {
+        return Err(Error::new(
+            Code::NotFound,
+            format!("{path} isn't a file the project has imported"),
+        )
+        .with("path", path));
+    };
+    let opened = opened(&file).map_err(|e| unreadable(path, &e))?;
+    let mut read = ryustep::census::Read::default();
+    let mut failed = Vec::new();
+    let mut parts: Vec<Id> = Vec::new();
+    for (id, p) in &session.project().parts {
+        let reads = p.features.values().any(|f| match f {
+            Ok(Feature::Import(i)) => i.file.path == path,
+            Ok(Feature::Instance(i)) => i.import.as_ref().is_some_and(|u| u.file == path),
+            _ => false,
+        });
+        if reads {
+            parts.push(id.clone());
+        }
+    }
+    session.rebuild_parts(&parts)?;
+    for id in &parts {
+        read.product_tree = true;
+        let r = session.rebuilt(id)?.clone();
+        let p = session.project().part(id)?;
+        for (fid, f) in &p.features {
+            let Ok(Feature::Import(i)) = f else {
+                continue;
+            };
+            if i.file.path != path {
+                continue;
+            }
+            match r.features.iter().find(|(x, _)| x == fid).map(|(_, o)| o) {
+                Some(Ok(_)) => {
+                    if let Ok(k) = select(fid, i, &opened) {
+                        read.roots.extend(opened.roots(k));
+                    }
+                }
+                Some(Err(e)) => failed.extend(crate::transfer::failed_instances(&json!(e))),
+                None => {}
+            }
+        }
+    }
+    let t = opened.census.transfer(&read, &failed);
+    Ok(json!({
+        "file": {"path": path, "blake3": file.blake3, "schema": schema_name(opened.schema)},
+        "parts": parts,
+        "transfer": crate::transfer::json(&t, path, detail),
+    }))
+}
+
 /// `import_body_missing` for `path`: with `external` (each file the
 /// file's externally defined products name, the products naming it by
 /// id, else name, and the format the writer gave) and a message saying
@@ -2407,6 +2470,47 @@ pub(crate) mod tests {
             .unwrap()
             .clone();
         assert!(docs["retained"]["count"].as_u64().unwrap() > 0, "{docs}");
+    }
+
+    /// `import.report` reads a committed file again: what the project's
+    /// import features made of it, `detail` listing every name with its
+    /// first instances; a path the project hasn't imported is not_found.
+    #[test]
+    fn a_committed_file_is_reported_again() {
+        let (_src, path) = outside("assembly.stp");
+        let (_dir, mut s) = crate::server::tests::fresh();
+        let made = import_call(&mut s, json!({"path": path})).unwrap();
+        let stored = made["file"]["path"].as_str().unwrap().to_owned();
+        let v =
+            crate::server::tests::call(&mut s, "import.report", json!({"file": stored})).unwrap();
+        assert_eq!(v["file"]["path"], stored.as_str());
+        assert_eq!(
+            v["transfer"]["categories"], made["transfer"]["categories"],
+            "the same as the import said"
+        );
+        let d = crate::server::tests::call(
+            &mut s,
+            "import.report",
+            json!({"file": stored, "detail": true}),
+        )
+        .unwrap();
+        assert_eq!(d["transfer"]["detail"], true);
+        let geometry = &d["transfer"]["categories"][0];
+        assert_eq!(geometry["category"], "geometry");
+        let first = &geometry["interpreted"]["names"][0];
+        assert!(
+            first["instances"]
+                .as_array()
+                .is_some_and(|i| !i.is_empty() && i.len() <= 64),
+            "{first}"
+        );
+        let e = crate::server::tests::call(
+            &mut s,
+            "import.report",
+            json!({"file": "imports/none.step"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
     }
 
     #[test]

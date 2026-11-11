@@ -1377,6 +1377,17 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// The transfer report of a file the project has imported
+    /// (`imports/…`), read again from its committed bytes: what the
+    /// project's import features interpret, retain, find unreferenced and
+    /// fail (design 448). `detail` lists every entity name with its first
+    /// 64 instances. Writes nothing.
+    #[serde(rename = "import.report")]
+    ImportReport {
+        file: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        detail: bool,
+    },
     /// Writes a part or an assembly as a file: at the working files, a Git
     /// revision `rev`, or a release `label:<L>`; in `format` (`step`,
     /// `stl`, `3mf`, `usda`, `usdc`, `usdz`), else the one `out`'s
@@ -2398,6 +2409,10 @@ mod tests {
     #[test]
     fn requests_round_trip_through_rpc() {
         let reqs = [
+            Request::ImportReport {
+                file: "imports/box.step".into(),
+                detail: true,
+            },
             Request::ProjectInfo {},
             Request::ProjectInit {
                 default_unit: Some(Unit::In),
