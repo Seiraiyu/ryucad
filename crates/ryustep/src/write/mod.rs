@@ -830,4 +830,71 @@ mod written_tests {
             write(&model, &opts).unwrap()
         );
     }
+
+    /// A block placed twice in a root, the second painted green in that
+    /// occurrence only; the block itself unpainted, so its override is
+    /// over a `NULL_STYLE` styled item.
+    #[test]
+    fn an_occurrence_override_reads_back_in_its_usage() {
+        let place = |x: f64| Rigid::translation(ryukei::geom::Vector3::new(x, 0.0, 0.0));
+        let model = WriteModel {
+            products: vec![
+                Product {
+                    id: "root".into(),
+                    children: vec![
+                        Child {
+                            product: 1,
+                            place: place(0.0),
+                            id: "a".into(),
+                        },
+                        Child {
+                            product: 1,
+                            place: place(0.1),
+                            id: "b".into(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                Product {
+                    id: "block".into(),
+                    bodies: vec![block()],
+                    ..Default::default()
+                },
+            ],
+        };
+        let green = Paint {
+            colour: [0, 255, 0],
+            opacity: 1.0,
+        };
+        let paints = Paints {
+            bodies: Vec::new(),
+            occurrences: vec![OccurrencePaint {
+                path: vec![(0, 1)],
+                body: 0,
+                paint: green,
+            }],
+        };
+        let w = write_styled(&model, &[], &paints, &WriteOptions::default()).unwrap();
+        let o = crate::open(&w.bytes).unwrap();
+        // The block has no style of its own.
+        let k = o
+            .held
+            .iter()
+            .position(|h| h.definition.is_some_and(|d| &*o.products.definitions[d].product_id == "block"))
+            .unwrap();
+        assert_eq!(o.body_styles(k).body, None);
+        let occ = o.occurrence_styles();
+        assert_eq!(occ.len(), 1, "{occ:?}");
+        let root = o.products.roots[0];
+        let second = o.products.definitions[root]
+            .children
+            .iter()
+            .position(|c| &*c.id == "b")
+            .unwrap();
+        assert_eq!(occ[0].path, [(root, second)]);
+        assert_eq!(occ[0].target, crate::styles::Target::Body(k));
+        assert_eq!(occ[0].style.colour, Some([0, 255, 0]));
+        // The NULL_STYLE item is retained: it styles nothing.
+        assert_eq!(o.styles().retained.len(), 1);
+    }
 }

@@ -184,16 +184,73 @@ pub(crate) fn write(
     occurrences(out, cx, model, bodies, usages, paints, &mut shared, &mut own);
 }
 
-/// Task 8 writes them; until then, none.
+/// Each occurrence paint as a `CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM`
+/// on each B-rep item of the body, in the context of its usages
+/// (outermost first), over the item's own styled item or a `NULL_STYLE`
+/// one written for it; all in one presentation representation.
 #[allow(clippy::too_many_arguments)]
 fn occurrences(
-    _out: &mut Out,
-    _cx: &Contexts,
-    _model: &WriteModel,
-    _bodies: &[Vec<WrittenBody>],
-    _usages: &[Vec<u64>],
-    _paints: &Paints,
-    _shared: &mut Shared,
-    _own: &mut BTreeMap<u64, u64>,
+    out: &mut Out,
+    cx: &Contexts,
+    model: &WriteModel,
+    bodies: &[Vec<WrittenBody>],
+    usages: &[Vec<u64>],
+    paints: &Paints,
+    shared: &mut Shared,
+    own: &mut BTreeMap<u64, u64>,
 ) {
+    let mut styled = Vec::new();
+    for o in &paints.occurrences {
+        let Some(&(parent, n)) = o.path.last() else {
+            continue;
+        };
+        let Some(leaf) = model
+            .products
+            .get(parent)
+            .and_then(|p| p.children.get(n))
+            .map(|c| c.product)
+        else {
+            continue;
+        };
+        let context: Vec<u64> = o
+            .path
+            .iter()
+            .filter_map(|&(p, c)| usages.get(p)?.get(c).copied())
+            .collect();
+        if context.len() != o.path.len() {
+            continue;
+        }
+        let Some(w) = bodies.get(leaf).and_then(|p| p.get(o.body)) else {
+            continue;
+        };
+        let psa = shared.assignment(out, o.paint);
+        for &item in &w.items {
+            let over = match own.get(&item) {
+                Some(&id) => id,
+                None => {
+                    let null = shared.null(out);
+                    let id = out.add("STYLED_ITEM", vec![s(""), refs([null]), r(item)]);
+                    own.insert(item, id);
+                    styled.push(id);
+                    id
+                }
+            };
+            styled.push(out.add(
+                "CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM",
+                vec![
+                    s(""),
+                    refs([psa]),
+                    r(item),
+                    r(over),
+                    refs(context.iter().copied()),
+                ],
+            ));
+        }
+    }
+    if !styled.is_empty() {
+        out.add(
+            "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION",
+            vec![s(""), refs(styled), r(cx.geometric)],
+        );
+    }
 }
