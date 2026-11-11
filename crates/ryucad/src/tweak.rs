@@ -785,16 +785,30 @@ pub(crate) fn hint(r: &Refusal) -> Option<&'static str> {
 }
 
 /// [`hint`] for a feature that does (`changes`) or doesn't change
-/// topology: a self-intersection and a lone vertex are topology changes
-/// only where the tweak keeps its topology.
-pub(crate) fn hint_for(r: &Refusal, changes: bool) -> Option<&'static str> {
+/// topology, refused on `body` (the target as built): a self-intersection
+/// and a lone vertex are topology changes only where the tweak keeps its
+/// topology.
+pub(crate) fn hint_for(
+    r: &Refusal,
+    changes: bool,
+    body: &ryukei::topo::Body,
+) -> Option<&'static str> {
+    // ryukei re-trims an `Uncertain` only at one of the body's vertices
+    // (`ryukei::tweak::retrim::takes`); every other one is refused again
+    // under `topology: change`, so only those get its hint.
+    let at_vertex = || {
+        r.entities.iter().any(|(role, n)| {
+            *role == "at" && matches!(body.by_name(*n), Some(ryukei::topo::EntityId::Vertex(_)))
+        })
+    };
     match (r.reason, r.case) {
         ("self_intersecting", _) | ("unsupported", Some("lone_vertex")) if !changes => Some(
             "the tweak would change the solid's topology: set topology: change (--topology change) to let the kernel re-trim the faces it reaches",
         ),
         // The fixed-topology engine leaves a face reaching past its
-        // neighbour (a wall drafted past the box's top) uncertain.
-        ("uncertain", _) if !changes => Some(
+        // neighbour (a wall drafted past the box's top) uncertain at the
+        // vertex where they meet.
+        ("uncertain", _) if !changes && at_vertex() => Some(
             "a decision rounding left uncertain, as where a tweaked face reaches past its neighbour: set topology: change (--topology change) to let the kernel re-trim the faces it reaches",
         ),
         ("self_intersecting", _) | ("unsupported", Some("lone_vertex")) => None,
@@ -853,7 +867,7 @@ fn kernel_error(
     if let Some(c) = r.case {
         err = err.with("case", c);
     }
-    if let Some(h) = hint_for(&r, changes) {
+    if let Some(h) = hint_for(&r, changes, &built.body) {
         err = err.with("hint", h);
     }
     if !r.entities.is_empty() {
@@ -866,6 +880,20 @@ fn kernel_error(
         );
     }
     err
+}
+
+/// What to do about a budgeted edit of type `ty` that would turn the
+/// solid inside out. A delete's gap was healed the wrong way round
+/// (ryukei #692); a tweak has no gap, `heal` or `seeds` (`request_fields`
+/// refuses them), so it is pointed at a smaller motion or more faces. No
+/// tweak case is known to reach the guard yet: every case of #692 seen is
+/// a delete's.
+fn inside_out_hint(ty: &str) -> &'static str {
+    if ty == "delete_face" {
+        "the kernel healed the gap the wrong way round (ryukei #692): delete the faces round the gap too, try heal: cap or heal: grow, or give one face of a hole, boss or pocket as a seed"
+    } else {
+        "the kernel re-trimmed the faces the wrong way round (ryukei #692): a smaller motion, or the neighbouring faces listed too, gives the edit less to decide"
+    }
 }
 
 /// A direct edit's result's signed volume (m³) where it is negative: a
@@ -1023,10 +1051,7 @@ pub fn build(
         .with("reason", "inside_out")
         .with("kernel", "tweak")
         .with("volume_mm3", v * 1e9)
-        .with(
-            "hint",
-            "the kernel healed the gap the wrong way round (ryukei #692): delete the faces round the gap too, try heal: cap or heal: grow, or give one face of a hole, boss or pocket as a seed",
-        ));
+        .with("hint", inside_out_hint(ty)));
     }
     let origins = edit_origins(id, r.built, &made);
     let built = crate::rebuild::finish(id, ty, made, origins)?;
@@ -1924,6 +1949,15 @@ mod tests {
     fn the_hints_point_at_topology_and_blends() {
         use ryukei::TweakError as T;
         let n = Name::from_u128(7);
+        let (body, _) = ryukei::primitive::block(
+            ryukei::name::OpKey::from_bytes(b"b"),
+            0.01,
+            0.01,
+            0.01,
+            &ryukei::geom::Rigid::IDENTITY,
+        )
+        .unwrap();
+        let hint_for = |r: &Refusal, changes: bool| hint_for(r, changes, &body);
         let h = |e: T, changes: bool| hint_for(&refusal(&e), changes).unwrap_or_default();
         assert!(h(T::EdgeVanishes { edge: n }, false).contains("topology: change"));
         assert!(h(T::VertexSplits { vertex: n }, false).contains("topology: change"));
@@ -1933,8 +1967,19 @@ mod tests {
             hint_for(&refusal(&T::SelfIntersecting { faces: [n, n] }), true),
             None
         );
-        assert!(h(T::Uncertain { at: n }, false).contains("topology: change"));
-        assert_eq!(hint_for(&refusal(&T::Uncertain { at: n }), true), None);
+        // ryukei re-trims an Uncertain only at one of the body's vertices:
+        // at a face (or a name the body lacks) the hint would be refused
+        // again, so there is none.
+        let vertex = body.vertices().next().unwrap();
+        let vertex = body
+            .name_of(ryukei::topo::EntityId::Vertex(vertex))
+            .unwrap();
+        let face = body.faces().next().unwrap();
+        let face = body.name_of(ryukei::topo::EntityId::Face(face)).unwrap();
+        assert!(h(T::Uncertain { at: vertex }, false).contains("topology: change"));
+        assert_eq!(hint_for(&refusal(&T::Uncertain { at: vertex }), true), None);
+        assert_eq!(hint_for(&refusal(&T::Uncertain { at: face }), false), None);
+        assert_eq!(hint_for(&refusal(&T::Uncertain { at: n }), false), None);
         let lone = T::Unsupported {
             at: n,
             case: ryukei::TweakCase::LoneVertex,
@@ -1961,6 +2006,17 @@ mod tests {
         assert_eq!(e.details["feature"], "d");
         assert!(e.details["hint"].as_str().unwrap().contains("edit.budget"));
         assert!(budget_error(&id, "delete_face", &ryukei::Error::Cancelled).is_none());
+    }
+
+    #[test]
+    fn an_inside_out_tweak_is_not_told_to_heal() {
+        let delete = inside_out_hint("delete_face");
+        assert!(delete.contains("heal: cap") && delete.contains("seed"));
+        for ty in ["move_face", "replace_face", "draft"] {
+            let h = inside_out_hint(ty);
+            assert!(h.contains("smaller motion"), "{ty}: {h}");
+            assert!(!h.contains("heal") && !h.contains("seed"), "{ty}: {h}");
+        }
     }
 
     #[test]
