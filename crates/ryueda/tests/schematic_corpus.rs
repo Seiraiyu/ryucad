@@ -2350,7 +2350,7 @@ fn an_annotate_changes_only_designators() {
 /// to R1's label (region U3C RP2040), crossing two wires (#718, plan 2.G).
 #[test]
 #[cfg_attr(debug_assertions, ignore)]
-fn a_labelled_nets_long_wire_stays_in_its_region() {
+fn the_corpus_from_nothing_wires_labelled_nets_long_only_inside_a_region() {
     use ryusch::geom::{GRID, Rect};
     let reach = 16 * GRID;
     let dir = tempfile::tempdir().unwrap();
