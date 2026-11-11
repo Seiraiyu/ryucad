@@ -1031,7 +1031,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
         }
         // Off-sheet connectors where their nets stay, and regions of a net
         // that leaves with none (plan 2.C).
-        off_sheet_local(block, layout, sid, &shapes, &mut found, &f);
+        off_sheet_local(block, &out.idioms, layout, sid, &shapes, &mut found, &f);
         // Buses whose members could be one bundle here, drawn apart.
         bus_unbundled(block, layout, sid, &shapes, &mut found, &f);
         // A two-pin part standing upside down against its rail: ground up,
@@ -1796,8 +1796,6 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
     (findings, scores)
 }
 
-/// Whether the wires of a net touching the pin end `at` reach another of
-/// the net's pin ends (`ends`), not only its own label's stub.
 /// `sch_bus_unbundled` on sheet `sid` (plan 2.C): each bus not drawn here
 /// whose members make a bundle here as the engine finds one (placed
 /// sides, nets that leave), its points two a member, its fix the bus
@@ -1853,12 +1851,14 @@ fn bus_unbundled(
 
 /// `sch_off_sheet_local` on sheet `sid` (plan 2.C): each off-sheet
 /// connector whose net has no pin on another sheet (its fix the net's
-/// wires); and each net with a pin on another sheet, a stacked pin's net
-/// and a bus drawn here aside, whose pins in some region of this sheet (a
+/// wires); and each net with a pin on another sheet, a stacked pin's net,
+/// a ported bank row's ([`crate::idiom::BankRow::names`]) and a bus drawn
+/// here aside, whose pins in some region of this sheet (a
 /// part in no region a group of its own) carry no connector and are wired
 /// to none.
 fn off_sheet_local(
     block: &Block,
+    idioms: &[crate::idiom::Idiom],
     layout: &crate::layout::Layout,
     sid: &str,
     shapes: &BTreeMap<usize, Shape>,
@@ -1897,6 +1897,18 @@ fn off_sheet_local(
         }
     }
     let region_of = layout.region_of();
+    // A ported bank row's net keeps its labels in the row, as the engine
+    // draws it: no connector is asked of it.
+    let at: BTreeMap<usize, Place> = block
+        .parts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            let x = layout.placed.get(&p.key)?;
+            Some((i, Place::new(x.at, x.rotation, x.mirror)))
+        })
+        .collect();
+    let rows = crate::idiom::bank_rows(block, idioms, &at);
     let bused: BTreeSet<&String> = layout
         .buses
         .values()
@@ -1930,7 +1942,10 @@ fn off_sheet_local(
     }
     let mut leaves: BTreeMap<usize, bool> = BTreeMap::new();
     for ((n, group), pins) in &groups {
-        if stacked.contains(n) || !*leaves.entry(*n).or_insert_with(|| elsewhere(*n)) {
+        if stacked.contains(n)
+            || rows.iter().any(|r| r.names(*n))
+            || !*leaves.entry(*n).or_insert_with(|| elsewhere(*n))
+        {
             continue;
         }
         let key = &block.nets[*n].key;
@@ -1966,6 +1981,8 @@ fn off_sheet_local(
     }
 }
 
+/// Whether the wires of a net touching the pin end `at` reach another of
+/// the net's pin ends (`ends`), not only its own label's stub.
 fn wired_to_another(runs: &[Vec<[Nm; 2]>], at: route::Node, ends: &[route::Node]) -> bool {
     let nodes: Vec<BTreeSet<route::Node>> = runs
         .iter()

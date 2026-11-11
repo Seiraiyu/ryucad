@@ -106,6 +106,10 @@ pub struct Painted {
     /// Each block port's flag: its net's key and its body's box (plan 2.C:
     /// cross-references go under it).
     pub ports: Vec<(String, Rect)>,
+    /// Each drawn bus's off-sheet connector: its bus's key, its members'
+    /// net keys on the sheet and its box (plan 2.C: cross-references go
+    /// under it as under a net's).
+    pub buses: Vec<BusConnector>,
     /// The keys of every net a pin on the sheet is on.
     pub nets: BTreeSet<String>,
 }
@@ -287,7 +291,22 @@ pub fn note_box(text: &str, at: Point) -> Rect {
 /// The buses drawn on sheet `sid` (plan 2.C): each member's stub and 45°
 /// entry, its name on its stub, the spine through a column of entries,
 /// the trunk, the bundle's name on the trunk and its off-sheet connector.
-fn bus_items(block: &Block, layout: &Layout, sid: &str, items: &mut Vec<Item>) {
+/// A drawn bus's off-sheet connector, as [`Painted::buses`] lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BusConnector {
+    pub bus: String,
+    pub nets: Vec<String>,
+    pub rect: Rect,
+}
+
+/// Draws sheet `sid`'s buses; their off-sheet connectors.
+fn bus_items(
+    block: &Block,
+    layout: &Layout,
+    sid: &str,
+    items: &mut Vec<Item>,
+) -> Vec<BusConnector> {
+    let mut connectors = Vec::new();
     for (key, by_sheet) in &layout.buses {
         let Some(drawn) = by_sheet.get(sid) else {
             continue;
@@ -365,8 +384,14 @@ fn bus_items(block: &Block, layout: &Layout, sid: &str, items: &mut Vec<Item>) {
                     label::flow_on_sheet(block, layout, *n, sid)
                 });
             label_items(items, LabelKind::OffSheet, &c.text, c.at, c.side, flow, "");
+            connectors.push(BusConnector {
+                bus: key.clone(),
+                nets: members.iter().map(|n| block.nets[*n].key.clone()).collect(),
+                rect: label::drawn_flow(&c.text, c.at, c.side, flow).bounds,
+            });
         }
     }
+    connectors
 }
 
 /// What sheet `sid` of `layout` draws: parts in key order (each its
@@ -511,7 +536,7 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
             });
         }
     }
-    bus_items(block, layout, sid, items);
+    out.buses = bus_items(block, layout, sid, items);
     for (key, list) in &layout.labels {
         for l in list.iter().filter(|l| l.sheet == sid) {
             let flow = match (l.kind, block.net(key)) {

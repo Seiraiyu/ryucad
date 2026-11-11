@@ -127,17 +127,20 @@ pub fn bundle_with(
 }
 
 /// What a bundle is called: the bus's name and its members' range where
-/// every member is the name (or a prefix of it ending where the member's
-/// number starts) and a number, the numbers running without a gap;
-/// else the bus's name.
+/// every member is one stem and a number, the stem the name or a prefix
+/// of it, the numbers running without a gap; else the bus's name.
 pub fn name(block: &Block, bus: usize, members: &[usize]) -> String {
     let base = &block.buses[bus].name;
     let mut nums: Vec<u64> = Vec::new();
+    let mut first: Option<&str> = None;
     for &n in members {
         let m = &block.nets[n].name;
         let digits = m.len() - m.trim_end_matches(|c: char| c.is_ascii_digit()).len();
         let (stem, num) = m.split_at(m.len() - digits);
         if digits == 0 || !base.starts_with(stem) || stem.is_empty() {
+            return base.clone();
+        }
+        if *first.get_or_insert(stem) != stem {
             return base.clone();
         }
         let Ok(v) = num.parse::<u64>() else {
@@ -256,6 +259,13 @@ mod tests {
         assert_eq!(name(&b, 0, &[0, 2]), "QSPI_SD");
         let odd = named(&["QSPI_SD0", "CLK"]);
         assert_eq!(name(&odd, 0, &[0, 1]), "QSPI_SD");
+        // Stems that are each a prefix of the name but not one stem: the
+        // name.
+        let mixed = named(&["Q0", "QSPI1", "QSPI_SD2", "QS3"]);
+        assert_eq!(name(&mixed, 0, &[0, 1, 2, 3]), "QSPI_SD");
+        // One stem, a prefix of the name: the range.
+        let short = named(&["QSPI0", "QSPI1"]);
+        assert_eq!(name(&short, 0, &[0, 1]), "QSPI_SD[0..1]");
     }
 
     #[test]

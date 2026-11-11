@@ -341,30 +341,7 @@ fn output_pages(
                 });
             }
         }
-        // Each off-sheet connector and each block port's flag: its net's
-        // other pages, under it, each a link (plan 2.C; zones are 2.E's).
-        // A local net label continues nowhere, so it carries none.
-        let mut under: Vec<(String, Rect)> = paint
-            .labels
-            .iter()
-            .filter(|l| l.kind == LabelKind::OffSheet)
-            .map(|l| (l.net.clone(), l.rect))
-            .collect();
-        under.extend(paint.ports.iter().cloned());
-        for (net, rect) in under {
-            let Some(f) = flat_of[s.node].get(&net) else {
-                continue;
-            };
-            let others: Vec<usize> = net_pages
-                .get(f)
-                .into_iter()
-                .flatten()
-                .copied()
-                .filter(|x| *x != pg)
-                .collect();
-            if others.is_empty() {
-                continue;
-            }
+        for (rect, others) in cross_references(paint, &flat_of[s.node], &net_pages, pg) {
             xref_items(
                 [rect.min[0], rect.min[1] - MIN_SIZE],
                 &others,
@@ -479,6 +456,42 @@ fn net_key(n: &crate::conn::Node) -> Option<String> {
 
 /// A cross-reference's text at `at` (`→ 2, 3`) and a link on each page
 /// number.
+/// Each off-sheet connector, a bus's included, and each block port's flag
+/// on page `pg`: its box and its nets' other pages (by `flat`, the page's
+/// net keys' flattened nets, and `net_pages`, each flattened net's pages),
+/// for the cross-reference under it (plan 2.C; zones are 2.E's). A local
+/// net label continues nowhere, so it carries none; neither does a
+/// connector whose nets are on no other page.
+fn cross_references(
+    paint: &ryusch::paint::Painted,
+    flat: &BTreeMap<String, usize>,
+    net_pages: &BTreeMap<usize, BTreeSet<usize>>,
+    pg: usize,
+) -> Vec<(Rect, Vec<usize>)> {
+    let mut under: Vec<(Vec<String>, Rect)> = paint
+        .labels
+        .iter()
+        .filter(|l| l.kind == LabelKind::OffSheet)
+        .map(|l| (vec![l.net.clone()], l.rect))
+        .collect();
+    under.extend(paint.ports.iter().map(|(n, r)| (vec![n.clone()], *r)));
+    under.extend(paint.buses.iter().map(|c| (c.nets.clone(), c.rect)));
+    under
+        .into_iter()
+        .filter_map(|(nets, rect)| {
+            let others: BTreeSet<usize> = nets
+                .iter()
+                .filter_map(|n| flat.get(n))
+                .filter_map(|f| net_pages.get(f))
+                .flatten()
+                .copied()
+                .filter(|x| *x != pg)
+                .collect();
+            (!others.is_empty()).then(|| (rect, others.into_iter().collect()))
+        })
+        .collect()
+}
+
 fn xref_items(
     at: ryusch::geom::Point,
     others: &[usize],
@@ -578,6 +591,40 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// A bus leaving its sheet: its connector carries its members' other
+    /// pages, as a net's does.
+    #[test]
+    fn a_bus_connector_carries_its_members_pages() {
+        use ryusch::layout::Instruction;
+        let mut b = ryusch::testing::bus_block();
+        b.instructions.insert(
+            "i1".into(),
+            Instruction::Sheet {
+                parts: vec!["u2".into()],
+                sheet: "Away".into(),
+            },
+        );
+        let out = ryusch::engine::lay_out(&b).unwrap();
+        let sid = out.layout.placed["u1"].sheet.clone();
+        let paint = ryusch::paint::sheet(&b, &out.layout, &sid);
+        assert_eq!(paint.buses.len(), 1, "{:?}", paint.buses);
+        let bus = &paint.buses[0];
+        assert_eq!(bus.bus, "bus:q");
+        assert_eq!(bus.nets, ["d0", "d1", "d2", "d3"]);
+        // d0 to d3 flatten to 0 to 3; d2 is also on page 3, the rest on
+        // page 2: one cross-reference under the connector, both pages.
+        let flat: BTreeMap<String, usize> = (0..4).map(|i| (format!("d{i}"), i)).collect();
+        let mut net_pages: BTreeMap<usize, BTreeSet<usize>> =
+            (0..4).map(|i| (i, BTreeSet::from([0, 1]))).collect();
+        net_pages.get_mut(&2).unwrap().insert(2);
+        let refs = cross_references(&paint, &flat, &net_pages, 0);
+        assert_eq!(refs, [(bus.rect, vec![1, 2])]);
+        // On no other page: none.
+        let alone: BTreeMap<usize, BTreeSet<usize>> =
+            (0..4).map(|i| (i, BTreeSet::from([0]))).collect();
+        assert!(cross_references(&paint, &flat, &alone, 0).is_empty());
     }
 
     #[test]

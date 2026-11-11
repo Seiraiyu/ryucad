@@ -2727,25 +2727,10 @@ struct Bypass {
     cap: (usize, usize),
 }
 
-/// A bank's row on a port's net (#429): the pin, its members' pins on
-/// the net. Drawn as a wire along the row carrying a net label named as
-/// the port; the port's flag stands with the block's ports.
-#[derive(Clone, Debug)]
-struct BankRow {
-    net: usize,
-    pin: (usize, usize),
-    members: Vec<(usize, usize)>,
-    /// A port is on its net, or a pin beyond the row: the row carries
-    /// the net's name.
-    ported: bool,
-    /// The side of its part the bank stands on.
-    side: Side,
-}
-
 /// The bank row whose first member is `p`, when `p` stands on it (its
 /// pin on the row's net at the row's height): a member kept elsewhere
 /// isn't drawn as one.
-fn bank_row_of<'r>(st: &State, rows: &'r [BankRow], p: usize) -> Option<&'r BankRow> {
+fn bank_row_of<'r>(st: &State, rows: &'r [idiom::BankRow], p: usize) -> Option<&'r idiom::BankRow> {
     let row = rows
         .iter()
         .find(|r| r.members.first().map(|m| m.0) == Some(p))?;
@@ -2755,62 +2740,11 @@ fn bank_row_of<'r>(st: &State, rows: &'r [BankRow], p: usize) -> Option<&'r Bank
 }
 
 /// The banks' rows, from the idioms and where parts stand.
-fn bank_rows(st: &State, idioms: &[idiom::Idiom]) -> Vec<BankRow> {
-    let block = st.block;
-    let at: BTreeMap<usize, Place> = (0..block.parts.len())
+fn bank_rows(st: &State, idioms: &[idiom::Idiom]) -> Vec<idiom::BankRow> {
+    let at: BTreeMap<usize, Place> = (0..st.block.parts.len())
         .filter_map(|p| st.place[p].map(|(_, pl, _)| (p, pl)))
         .collect();
-    let mut out = Vec::new();
-    for b in idiom::banks(block, idioms, &at) {
-        for (k, list) in &b.rows {
-            let Some(net) = block.parts[b.part].pins[*k].net else {
-                continue;
-            };
-            // A port on its net, or a pin beyond the row's own: the row
-            // carries the net's name.
-            let row_parts: BTreeSet<usize> = list
-                .iter()
-                .map(|i| idioms[*i].parts[0])
-                .chain([b.part])
-                .collect();
-            let ported = block.parts.iter().enumerate().any(|(q, part)| {
-                (matches!(part.kind, PartKind::Port { .. }) || !row_parts.contains(&q))
-                    && part.pins.iter().any(|x| x.net == Some(net))
-            });
-            let ported = ported && block.nets[net].kind == NetKind::Signal;
-            let members = list
-                .iter()
-                .filter_map(|i| {
-                    let q = idioms[*i].parts[0];
-                    let kq = block.parts[q]
-                        .pins
-                        .iter()
-                        .position(|x| x.net == Some(net))?;
-                    Some((q, kq))
-                })
-                .collect::<Vec<(usize, usize)>>();
-            // Only a row whose first member stands on it (one kept
-            // elsewhere is drawn as any part is).
-            let on_row =
-                members
-                    .first()
-                    .is_some_and(|&(q, kq)| match (st.shape(b.part), st.shape(q)) {
-                        (Some(a), Some(m)) => a.pins[*k].end[1] == m.pins[kq].end[1],
-                        _ => false,
-                    });
-            if !on_row {
-                continue;
-            }
-            out.push(BankRow {
-                net,
-                pin: (b.part, *k),
-                members,
-                ported,
-                side: b.side,
-            });
-        }
-    }
-    out
+    idiom::bank_rows(st.block, idioms, &at)
 }
 
 /// Draws every sheet: labels, wires and text.
@@ -2820,7 +2754,7 @@ fn draw(
     asked: &BTreeMap<usize, NetStyle>,
     bus_styles: &BTreeMap<usize, NetStyle>,
     bypass: &[Bypass],
-    bank_rows: &[BankRow],
+    bank_rows: &[idiom::BankRow],
     asks: &BTreeMap<usize, Vec<(crate::layout::TextField, Side)>>,
 ) -> Outcome {
     let block = st.block;
@@ -2965,7 +2899,7 @@ fn draw(
                 if stacked.contains(n) && block.nets[*n].kind == NetKind::Signal {
                     st = NetStyle::Label;
                 }
-                if bank_rows.iter().any(|r| r.ported && r.net == *n) {
+                if bank_rows.iter().any(|r| r.names(*n)) {
                     st = NetStyle::Label;
                 }
                 (*n, st)
@@ -3820,10 +3754,6 @@ fn route_net(
     Some((f, runs))
 }
 
-/// Places labels for `want` (net, part, pin, kind): the previous label
-/// for the pin if it still fits, else the first candidate that does, else
-/// the first.
-#[allow(clippy::too_many_arguments)]
 /// Gives each net in `want` that leaves its sheet one off-sheet connector
 /// a region: in each group of its pins (by their part's region), the pin
 /// of the part with the most pins (then the least part key, then the
@@ -3838,7 +3768,7 @@ fn carriers(
     want: &mut [(usize, usize, usize, LabelKind)],
     net_sheets: &BTreeMap<usize, BTreeSet<usize>>,
     stacked: &BTreeSet<usize>,
-    bank_rows: &[BankRow],
+    bank_rows: &[idiom::BankRow],
     prev_labels: &dyn Fn(usize) -> Vec<Label>,
 ) -> BTreeMap<(usize, usize), (usize, usize)> {
     let block = st.block;
@@ -3855,7 +3785,7 @@ fn carriers(
             || kind != LabelKind::Net
             || block.nets[n].kind != NetKind::Signal
             || stacked.contains(&n)
-            || bank_rows.iter().any(|r| r.ported && r.net == n)
+            || bank_rows.iter().any(|r| r.names(n))
         {
             continue;
         }
@@ -4337,6 +4267,9 @@ fn was_kind(was: LabelKind, now: LabelKind) -> bool {
     was == now || (now == LabelKind::OffSheet && was == LabelKind::Net)
 }
 
+/// Places labels for `want` (net, part, pin, kind): the previous label
+/// for the pin if it still fits, else the first candidate that does, else
+/// the first.
 #[allow(clippy::too_many_arguments)]
 fn place_labels(
     block: &Block,
@@ -5318,6 +5251,44 @@ mod tests {
         let (found, _) = crate::lint::lint(&block, &out);
         assert!(
             !found.iter().any(|f| f.code == "sch_floating"),
+            "{found:#?}"
+        );
+    }
+
+    /// A bank row whose net continues on another sheet keeps its net
+    /// label on the row and takes no off-sheet connector; the lint asks
+    /// none of it (`sch_off_sheet_local` exempts what the engine does).
+    #[test]
+    fn a_bank_row_leaving_its_sheet_takes_no_connector_and_no_finding() {
+        let mut block = crate::testing::dense_block(false);
+        // S0 (net 2, R1's row) also reaches J9 on another sheet.
+        block
+            .parts
+            .push(crate::testing::connector("j9", "J9", &[Some(2), None]));
+        block.instructions.insert(
+            "i1".into(),
+            Instruction::Sheet {
+                parts: vec!["j9".into()],
+                sheet: "Away".into(),
+            },
+        );
+        let out = lay(&block);
+        assert_eq!(crate::rules::check(&block, &out.layout), []);
+        let sheet = &out.layout.placed["u1"].sheet;
+        assert_ne!(&out.layout.placed["j9"].sheet, sheet);
+        let labels = &out.layout.labels["s0"];
+        assert!(
+            labels
+                .iter()
+                .filter(|l| &l.sheet == sheet)
+                .all(|l| l.kind == LabelKind::Net),
+            "{labels:#?}"
+        );
+        let (found, _) = crate::lint::lint(&block, &out);
+        assert!(
+            !found
+                .iter()
+                .any(|f| f.code == "sch_off_sheet_local" && f.refs.iter().any(|r| r == "s0")),
             "{found:#?}"
         );
     }
@@ -6507,6 +6478,42 @@ mod tests {
                 "{k}"
             );
         }
+    }
+
+    /// A region moved whole in the file (its origin, one key) carries its
+    /// note: laid out again, the note keeps its place in the region.
+    #[test]
+    fn a_moved_region_keeps_its_note() {
+        let mut b = crate::testing::regions_block();
+        let first = lay(&b);
+        let (rid, _) = first.layout.regions.iter().next().expect("a region");
+        let rid = rid.clone();
+        b.instructions.insert(
+            "i9".into(),
+            Instruction::Note {
+                on: format!("region:{rid}"),
+                text: "Fused at 2 A".into(),
+            },
+        );
+        b.previous = Some(first.layout.clone());
+        let out = lay(&b);
+        let mut file = out.layout.relative();
+        file.regions.get_mut(&rid).unwrap().at[0] += 10 * GRID;
+        b.previous = Some(file.absolute());
+        let again = lay(&b);
+        assert!(crate::rules::check(&b, &again.layout).is_empty());
+        assert_eq!(again.layout.regions[&rid].at, file.regions[&rid].at);
+        assert_eq!(
+            again.layout.relative().notes["i9"],
+            out.layout.relative().notes["i9"],
+            "the note moved with its region"
+        );
+        let n = &again.layout.notes["i9"];
+        assert!(
+            again.layout.regions[&rid]
+                .frame_on_sheet()
+                .contains(&crate::paint::note_box("Fused at 2 A", n.at))
+        );
     }
 
     #[test]

@@ -569,6 +569,16 @@ impl Layout {
                 }
             }
         }
+        // A note on a region stands in it as its parts do (plan 2.C).
+        for (id, n) in &mut out.notes {
+            let Some(Instruction::Note { on, .. }) = self.instructions.get(id) else {
+                continue;
+            };
+            let Some(r) = on.strip_prefix("region:").and_then(|r| self.regions.get(r)) else {
+                continue;
+            };
+            n.at = [n.at[0] + sign * r.at[0], n.at[1] + sign * r.at[1]];
+        }
         out
     }
 }
@@ -805,5 +815,47 @@ mod tests {
         );
         let back: Layout = serde_json::from_value(serde_json::to_value(&l).unwrap()).unwrap();
         assert_eq!(back, l);
+    }
+    /// A note on a region is kept relative to the region's origin in the
+    /// file, as its parts are, so the region's move is one key; a note on
+    /// a sheet stays where it is.
+    #[test]
+    fn a_regions_note_is_relative_to_it_in_the_file() {
+        let mut l = Layout::default();
+        l.regions.insert(
+            "r2".into(),
+            Region {
+                sheet: "s1".into(),
+                at: [100, 200],
+                frame: Rect::new([0, 0], [500, 500]),
+                title: "F".into(),
+                named: false,
+                parts: Vec::new(),
+            },
+        );
+        for (id, on) in [("i1", "region:r2"), ("i2", "s1")] {
+            l.instructions.insert(
+                id.into(),
+                Instruction::Note {
+                    on: on.into(),
+                    text: "x".into(),
+                },
+            );
+            l.notes.insert(
+                id.into(),
+                PlacedNote {
+                    sheet: "s1".into(),
+                    at: [150, 260],
+                },
+            );
+        }
+        let rel = l.relative();
+        assert_eq!(rel.notes["i1"].at, [50, 60]);
+        assert_eq!(rel.notes["i2"].at, [150, 260]);
+        assert_eq!(rel.absolute(), l);
+        // The region moved in the file: its note with it.
+        let mut moved = rel.clone();
+        moved.regions.get_mut("r2").unwrap().at = [300, 0];
+        assert_eq!(moved.absolute().notes["i1"].at, [350, 60]);
     }
 }

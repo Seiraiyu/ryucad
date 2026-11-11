@@ -123,8 +123,6 @@ impl Cluster {
         self.room_labelled(block, origin, |_| true)
     }
 
-    /// Its room with a label on each signal pin whose net `labelled` says
-    /// will take one.
     /// [`Cluster::room_labelled`], with the room a bus's members need
     /// where they leave the sheet (`away`: its stubs, entries, a short
     /// trunk and its connector; plan 2.C).
@@ -144,6 +142,8 @@ impl Cluster {
         r
     }
 
+    /// Its room with a label on each signal pin whose net `labelled` says
+    /// will take one.
     pub fn room_labelled(
         &self,
         block: &Block,
