@@ -1358,4 +1358,62 @@ mod tests {
                 .all(|f| f.fixes.iter().all(|o| !o.is_empty()))
         );
     }
+
+    /// Every template, drawn to either standard, passes the lint it is
+    /// drawn for: the templates are the standards' own examples.
+    #[test]
+    fn every_template_lints_clean() {
+        let mcu: Vec<PinSpec> = [
+            ("1", "VDD", PinType::PowerIn),
+            ("2", "IOVDD", PinType::PowerIn),
+            ("3", "GND", PinType::PowerIn),
+            ("4", "AGND", PinType::PowerIn),
+            ("5", "RUN", PinType::Input),
+            ("6", "TX", PinType::Output),
+            ("7", "SDA", PinType::Bidirectional),
+            ("8", "SCL", PinType::Bidirectional),
+            ("9", "MOSI", PinType::Bidirectional),
+            ("10", "MISO", PinType::Bidirectional),
+            ("11", "SCK", PinType::Bidirectional),
+            ("12", "CS", PinType::Bidirectional),
+            ("13", "USB_D+", PinType::Bidirectional),
+            ("14", "USB_D-", PinType::Bidirectional),
+        ]
+        .iter()
+        .map(|(n, name, ty)| PinSpec {
+            number: (*n).into(),
+            name: (*name).into(),
+            ty: *ty,
+        })
+        .chain((0..30).map(|i| PinSpec {
+            number: format!("{}", 15 + i),
+            name: format!("GPIO{}", 29 - i),
+            ty: PinType::Bidirectional,
+        }))
+        .collect();
+        let prefs = Prefs::default();
+        for shapes in [
+            crate::standards::Shapes::Ansi,
+            crate::standards::Shapes::Iec,
+        ] {
+            let st = Standards {
+                shapes,
+                ..Standards::default()
+            };
+            let cx = Context {
+                standards: &st,
+                prefs: &prefs,
+                from: "self",
+            };
+            for class in crate::template::TEMPLATES {
+                let pins: &[PinSpec] = match class {
+                    Class::Ic | Class::Regulator | Class::Connector => &mcu,
+                    _ => &[],
+                };
+                let s = template("T", class, pins, &st).unwrap();
+                let found = lint(&s, Some(class), &cx);
+                assert!(found.is_empty(), "{class:?} {shapes:?}: {found:?}");
+            }
+        }
+    }
 }
