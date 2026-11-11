@@ -583,6 +583,11 @@ pub enum Code {
     /// written, and when a file has one anyway (a merge, an edit by hand)
     /// it and what reads it fail with this, and doctor reports it.
     ParameterShadows,
+    /// A warning: parameters nothing reads (design 447), once for the
+    /// project's (`scope: project`) and once per part (`part`), with
+    /// `parameters: [{name, read_by, error?}]`: `read_by` the unused
+    /// parameters that name it, `error` where it doesn't evaluate either.
+    ParameterUnused,
     /// A datum its references can't define: collinear points, parallel
     /// planes for an axis, a point on the axis it would turn about, an
     /// axis not parallel to the plane it turns, an axis with no length.
@@ -1207,6 +1212,8 @@ mod tests {
         assert_eq!(Code::ApprovalRuleInvalid.exit_code(), 1);
         assert_eq!(json!(Code::ParameterShadows), json!("parameter_shadows"));
         assert_eq!(Code::ParameterShadows.exit_code(), 1);
+        assert_eq!(json!(Code::ParameterUnused), json!("parameter_unused"));
+        assert_eq!(Code::ParameterUnused.exit_code(), 1);
         assert_eq!(Code::DependencyFetchFailed.exit_code(), 4);
         assert_eq!(Code::DependencyNotFetched.exit_code(), 1);
         assert_eq!(Code::DependencyRewritten.exit_code(), 1);
