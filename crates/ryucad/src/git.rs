@@ -467,6 +467,31 @@ impl Repo {
         }
     }
 
+    /// The size and time of each file Git keeps while a step waits, and
+    /// of the index: what a merge status read from can have moved by,
+    /// though the state's key reads the same (a file rewritten as it was).
+    pub fn merge_stamp(&self) -> String {
+        let dir = self.repo.git_dir();
+        let stamp = |p: &Path| match std::fs::metadata(p) {
+            Ok(m) => {
+                let t = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_nanos());
+                format!("{}:{t}", m.len())
+            }
+            Err(_) => String::new(),
+        };
+        let mut out = String::new();
+        for name in WAITING {
+            out.push_str(&stamp(&dir.join(name)));
+            out.push(';');
+        }
+        out.push_str(&stamp(&self.repo.index_path()));
+        out
+    }
+
     /// The merge of `heads` into `HEAD` that `step` makes.
     fn merging(&self, step: Step, heads: &[String]) -> Result<MergeState> {
         let head = match heads {

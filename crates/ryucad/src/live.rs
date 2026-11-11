@@ -84,6 +84,10 @@ pub struct Seen {
     pub project: Value,
     pub parts: BTreeMap<Id, String>,
     pub merge: Option<String>,
+    /// While the last status announced failed, what it is asked again on
+    /// ([`crate::validate::retry_stamp`]): a failure is said again once
+    /// its inputs move, though its key reads the same.
+    pub merge_failed: Option<String>,
     /// Each part's release state and tags, while anyone watches.
     pub pdm: Option<BTreeMap<Id, Value>>,
     /// What `parts` and `pdm` were last worked out from, while anyone
