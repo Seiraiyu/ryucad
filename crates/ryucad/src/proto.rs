@@ -1135,7 +1135,9 @@ pub enum Request {
     },
     /// The faces of the hole, boss or pocket a face of a part's solid
     /// belongs to, as a `delete_face` seed takes them: `face` is
-    /// `<part>/<solid>/<name>`, in the part as it shows at `rev`.
+    /// `<part>/<solid>/<name>`, in the part as it shows at `rev`. The
+    /// smallest set a cap closes: a counterbored hole's bore is the bore
+    /// alone, and its counterbore's wall takes it all.
     #[serde(rename = "feature_faces.get")]
     FeatureFacesGet {
         face: String,

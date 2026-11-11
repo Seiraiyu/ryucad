@@ -323,7 +323,9 @@ enum Command {
         rev: RevArg,
     },
     /// The faces of the hole, boss or pocket a face belongs to, as a delete_face
-    /// --seed takes them: <part>/<solid>/<name>.
+    /// --seed takes them: <part>/<solid>/<name>. It is the smallest set a cap
+    /// closes, so a counterbored hole's bore is the bore alone; seed from the
+    /// counterbore's wall to take it all.
     FeatureFaces {
         face: String,
         #[command(flatten)]
