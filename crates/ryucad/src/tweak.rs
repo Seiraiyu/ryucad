@@ -403,6 +403,45 @@ fn face(
     named(part, id, target, ty, role, r, results, false)
 }
 
+/// The one face `r` names (in `role` of tweak `id`), as [`face`] finds
+/// it, where the kernel takes a single face (a chamfer's support): a face
+/// a later feature split is refused, as `Follow::One` refuses it
+/// (`reference_split`, naming the pieces).
+fn one_face(
+    part: &Part,
+    id: &Id,
+    target: &Id,
+    ty: &str,
+    role: &str,
+    r: &Reference,
+    results: &dyn Results,
+) -> Result<Name> {
+    let pieces = face(part, id, target, ty, role, r, results)?;
+    if let [one] = pieces[..] {
+        return Ok(one);
+    }
+    let (b, e) = crate::reference::resolve(
+        part,
+        part.order(),
+        id,
+        role,
+        crate::reference::Follow::One,
+        r,
+        results,
+    )?;
+    match e {
+        EntityId::Face(f) => Ok(b.body.face(f).expect("a live face").name),
+        e => Err(crate::reference::wrong_kind(
+            part,
+            id,
+            role,
+            r,
+            crate::reference::kind(e),
+            "a face",
+        )),
+    }
+}
+
 /// The surface `with` names (in `role` of tweak `id`): a face's, whole,
 /// as its body holds it (any solid of the part, the target's own too, in
 /// the feature's view); else a plane's, through its frame.
@@ -645,7 +684,7 @@ pub(crate) fn resolve<'a>(
             let built = crate::rebuild::read(part, solids, id, f, "target", &x.target, before)?;
             let mut faces = Vec::with_capacity(x.faces.len());
             for (i, r) in x.faces.iter().enumerate() {
-                faces.push(face(
+                faces.extend(face(
                     part,
                     id,
                     &x.target,
@@ -673,7 +712,7 @@ pub(crate) fn resolve<'a>(
             let mut groups = Vec::with_capacity(x.groups.len());
             for (i, g) in x.groups.iter().enumerate() {
                 let support = |r: &Reference| {
-                    face(
+                    one_face(
                         part,
                         id,
                         &x.target,
@@ -709,7 +748,7 @@ pub(crate) fn resolve<'a>(
                 };
                 let mut faces = Vec::with_capacity(g.faces.len());
                 for (j, r) in g.faces.iter().enumerate() {
-                    faces.push(face(
+                    faces.extend(face(
                         part,
                         id,
                         &x.target,
