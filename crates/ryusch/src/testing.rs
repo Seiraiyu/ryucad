@@ -329,11 +329,8 @@ pub fn seeded(seed: u64, ics: usize) -> Block {
     let mut signals: Vec<usize> = Vec::new();
     let mut conn_nets = vec![vcc, gnd];
     // The first two ICs' sides, for a bus between them (plan 2.C).
-    let mut sides: Vec<(
-        usize,
-        Vec<(&str, PinKind, Option<usize>)>,
-        Vec<(&str, PinKind, Option<usize>)>,
-    )> = Vec::new();
+    type PinList<'a> = Vec<(&'a str, PinKind, Option<usize>)>;
+    let mut sides: Vec<(usize, PinList, PinList)> = Vec::new();
     for i in 0..ics {
         let ins = 2 + rng.below(4) as usize;
         let outs = 1 + rng.below(4) as usize;

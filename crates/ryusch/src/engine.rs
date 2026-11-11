@@ -4337,6 +4337,7 @@ fn was_kind(was: LabelKind, now: LabelKind) -> bool {
     was == now || (now == LabelKind::OffSheet && was == LabelKind::Net)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn place_labels(
     block: &Block,
     st: &State,
@@ -4394,7 +4395,9 @@ fn place_labels(
     let mut order: Vec<usize> = order.into_iter().map(|(_, _, _, _, i)| i).collect();
     // A label left with no place is tried again first: a neighbour's stub
     // may have taken the place it needs. The fewest left so wins.
-    let mut best: Option<((usize, usize), Field, Labels, Routes, Vec<usize>)> = None;
+    // The fewest (stuck, demoted) so far, and what made them.
+    type Best = ((usize, usize), Field, Labels, Routes, Vec<usize>);
+    let mut best: Option<Best> = None;
     let mut tried: BTreeSet<usize> = BTreeSet::new();
     loop {
         let mut f = field.clone();

@@ -169,7 +169,7 @@ fn name_says_voltage(name: &str, voltage: &str) -> bool {
         return false;
     };
     let upper = name.to_ascii_uppercase();
-    if q("0 V") == Some(want.clone())
+    if q("0 V") == Some(want)
         && ["GND", "VSS", "AGND", "DGND", "PGND", "0V"]
             .iter()
             .any(|g| upper == *g || upper.starts_with(&format!("{g}_")))
@@ -199,7 +199,7 @@ fn name_says_voltage(name: &str, voltage: &str) -> bool {
             } else {
                 format!("{whole}.{} V", &upper[frac..i])
             };
-            if q(&text) == Some(want.clone()) {
+            if q(&text) == Some(want) {
                 return true;
             }
         }
