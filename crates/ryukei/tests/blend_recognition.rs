@@ -4,7 +4,8 @@
 
 use ryukei::blend::{BlendKind, Chamfer, EdgeBlend, blend};
 use ryukei::boolean::{BooleanOp, Tool, boolean};
-use ryukei::geom::{Rigid, Surface, Vector3};
+use ryukei::check::check;
+use ryukei::geom::{Frame, Point3, Rigid, Surface, Vector3};
 use ryukei::name::{FaceRole, Name, OpKey, Role, ToolKey};
 use ryukei::primitive;
 use ryukei::topo::{Body, EdgeId};
@@ -248,4 +249,32 @@ fn one_thread_and_eight_recognise_alike() {
     let one = pool(1).install(|| recognise(&r));
     let eight = pool(8).install(|| recognise(&r));
     assert_eq!(one, eight);
+}
+
+/// A rib 2.8 mm wide whose top is rounded whole at 1.4 mm, one wall 4 µm
+/// inside the round's tangent, so the round's arc runs on past a half
+/// turn on that side: NIST CTC 03's, 04's, 05's, FTC 06's, 08's and 09's
+/// rib (#650, #651, #653, #654). Its walls face apart and never meet: no
+/// fillet.
+#[test]
+fn a_ribs_full_round_is_no_fillet() {
+    let r = 1.4e-3;
+    let (block, _) = primitive::block(K, 2.0 * r - 4e-6, 0.01, 0.005, &Rigid::IDENTITY).unwrap();
+    let (pin, _) = primitive::cylinder(OpKey(9), r, 0.01, &Rigid::IDENTITY).unwrap();
+    let place = Rigid::from_frame(
+        &Frame::new(
+            Point3::new(r, 0.0, 0.005),
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap(),
+    );
+    let tool = Tool {
+        key: ToolKey(1),
+        body: &pin,
+        place,
+    };
+    let (rib, _) = boolean(OpKey(12), BooleanOp::Unite, &block, &[tool]).unwrap();
+    assert_eq!(check(&rib), []);
+    assert!(recognise(&rib).blends.is_empty());
 }

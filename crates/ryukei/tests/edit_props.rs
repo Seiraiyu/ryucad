@@ -34,27 +34,20 @@ const SEEDS: u64 = 128;
 /// of plan 13.D from what the seeds give.
 const MIN_BUILT: usize = 32;
 
-/// Seeds known to run past the deadline, each with its issue.
-///
-/// - 76: an offset of a face of a 19-face body traces past two minutes
-///   (#659).
-///
-/// The `edit` fuzz target's first find is slow the same way, and isn't a
-/// seed here: an offset with `Topology::Change` of a face of a 16-face
-/// body refuses `Uncertain` after about 200 s (#647; replayed, cancelled,
-/// by `fuzz_regressions.rs`' `a_cancel_stops_an_edits_working_sheets`).
-const KNOWN_SLOW: &[u64] = &[76];
+/// Seeds known to run past the deadline, each with its issue: none.
+/// Seed 76, an offset of a face of a 19-face body that traced past two
+/// minutes on cox-worker-4 (#659), refuses `RegionTooSmall` in about 24 s
+/// on cox-worker-2 (AMD Ryzen 7 9700X, one thread; plan 16.C). The
+/// `edit` fuzz target's first find, slow the same way (#647), isn't a seed
+/// here: `fuzz_regressions.rs`' `the_edit_targets_first_find_answers`
+/// holds its answer.
+const KNOWN_SLOW: &[u64] = &[];
 
 /// Seeds of `seeded_blends_are_recognised_back` whose blend isn't read
-/// back, each with why:
-///
-/// - 32 and 92: chamfers on a cone setting back more than
-///   `CHAMFER_SHARE` (0.4) of a support's width, which recognition leaves
-///   out by design (plan 13.C);
-/// - 39, 100 and 102: a chamfer along a line of three edges a cylinder's
-///   hole splits, a chamfer ending on a torus, and a chamfer between a
-///   disc and a cone coaxial with another (#660).
-const KNOWN_UNRECOGNISED: &[u64] = &[32, 39, 92, 100, 102];
+/// back, each with why: 32 and 92, chamfers on a cone setting back more
+/// than `CHAMFER_SHARE` (0.4) of a support's width, which recognition
+/// leaves out by design (plan 13.C).
+const KNOWN_UNRECOGNISED: &[u64] = &[32, 92];
 
 /// Seeds whose result the mesher refuses at a thousandth of its size,
 /// each with its issue: their volume isn't judged, the rest is.
