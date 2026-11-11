@@ -644,6 +644,71 @@ pub(crate) fn resolve<'a>(
                 },
             })
         }
+        Feature::ResizeBlend(x) => {
+            use crate::doc::blend::ChamferForm;
+            use crate::doc::edit::BlendSize;
+            use ryukei::blend::{BlendKind, Chamfer};
+            let built = crate::rebuild::read(part, solids, id, f, "target", &x.target, before)?;
+            let mut groups = Vec::with_capacity(x.groups.len());
+            for (i, g) in x.groups.iter().enumerate() {
+                let support = |r: &Reference| {
+                    face(
+                        part,
+                        id,
+                        &x.target,
+                        ty,
+                        &format!("groups.{i}.face"),
+                        r,
+                        before,
+                    )
+                };
+                let kind = match &g.size {
+                    BlendSize::Fillet { radius } => BlendKind::Fillet {
+                        radius: radius.meters(),
+                    },
+                    BlendSize::Chamfer(ChamferForm::Equal { d }) => {
+                        BlendKind::Chamfer(Chamfer::Equal {
+                            distance: d.meters(),
+                        })
+                    }
+                    BlendSize::Chamfer(ChamferForm::Distances { d1, d2, face: on }) => {
+                        BlendKind::Chamfer(Chamfer::Distances {
+                            first: d1.meters(),
+                            second: d2.meters(),
+                            first_face: support(on)?,
+                        })
+                    }
+                    BlendSize::Chamfer(ChamferForm::DistanceAngle { d, angle, face: on }) => {
+                        BlendKind::Chamfer(Chamfer::DistanceAngle {
+                            distance: d.meters(),
+                            angle: angle.radians(),
+                            face: support(on)?,
+                        })
+                    }
+                };
+                let mut faces = Vec::with_capacity(g.faces.len());
+                for (j, r) in g.faces.iter().enumerate() {
+                    faces.push(face(
+                        part,
+                        id,
+                        &x.target,
+                        ty,
+                        &format!("groups.{i}.faces.{j}"),
+                        r,
+                        before,
+                    )?);
+                }
+                groups.push((faces, kind));
+            }
+            Ok(Resolved {
+                target: &x.target,
+                built,
+                spec: Spec::ResizeBlend {
+                    groups,
+                    tolerance: recognition(x.tolerance.as_ref()),
+                },
+            })
+        }
         _ => unreachable!("a tweak"),
     }
 }
@@ -857,6 +922,13 @@ pub(crate) fn hint(r: &Refusal) -> Option<&'static str> {
         ("no_feature", _) => Some(
             "name the feature's faces yourself: a hole's or a boss's faces, which leave a gap a cap closes",
         ),
+        ("not_a_blend", _) => Some(
+            "ryucad blends <part> lists the faces recognised as fillets, chamfers and corners: name one of those (a chamfer's distances face is one of its two supports); a blend made from a file may be read at a looser tolerance (tolerance, up to 0.1 mm)",
+        ),
+        ("blend_lost", _) => Some(
+            "delete the blend first (delete_blend), make the edit, and fillet or chamfer the edges again after it; or a size nearer the blend's own",
+        ),
+        ("bad_tolerance", _) => Some("give a tolerance from 0.00001 mm to 0.1 mm"),
         _ => None,
     }
 }
@@ -1140,7 +1212,21 @@ pub fn build(
                 }
             }
         }
-        Spec::ResizeBlend { .. } => unreachable!("Task 6"),
+        Spec::ResizeBlend { groups, tolerance } => {
+            let options = ryukei::tweak::RecogniseOptions {
+                tolerance: *tolerance,
+            };
+            match ryukei::tweak::recognise_blends_with(body, &options, &work) {
+                Err(e) => (Err(e), None),
+                Ok(rec) => {
+                    let sizes = crate::blends::sizes(id, &rec, groups)?;
+                    (
+                        ryukei::tweak::resize_blends_with(key, body, &sizes, &options, &work),
+                        Some(crate::blends::resize_report(r.target, &rec, &sizes)),
+                    )
+                }
+            }
+        }
     };
     let made = made.map_err(|e| {
         crate::work::stopped(&e, run.job)
@@ -1852,6 +1938,49 @@ pub fn report(part: &Id, f: &Feature) -> Value {
             }
             v
         }
+        Feature::DeleteBlend(x) => {
+            let mut v = x.fields();
+            if let Some(b) = &x.below {
+                v["below"] = b.report();
+            }
+            if let Some(t) = &x.tolerance {
+                v["tolerance"] = t.report();
+            }
+            for (role, r) in x.references() {
+                *v.pointer_mut(&pointer(&role)).expect("its own face") = json!(r.text(part));
+            }
+            v
+        }
+        Feature::ResizeBlend(x) => {
+            let mut v = x.fields();
+            for (i, g) in x.groups.iter().enumerate() {
+                let q = &mut v["groups"][i];
+                match &g.size {
+                    crate::doc::edit::BlendSize::Fillet { radius } => q["radius"] = radius.report(),
+                    crate::doc::edit::BlendSize::Chamfer(form) => {
+                        use crate::doc::blend::ChamferForm as F;
+                        match form {
+                            F::Equal { d } => q["d"] = d.report(),
+                            F::Distances { d1, d2, .. } => {
+                                q["d1"] = d1.report();
+                                q["d2"] = d2.report();
+                            }
+                            F::DistanceAngle { d, angle, .. } => {
+                                q["d"] = d.report();
+                                q["angle"] = angle.report();
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(t) = &x.tolerance {
+                v["tolerance"] = t.report();
+            }
+            for (role, r) in x.references() {
+                *v.pointer_mut(&pointer(&role)).expect("its own face") = json!(r.text(part));
+            }
+            v
+        }
         _ => unreachable!("a tweak"),
     }
 }
@@ -1901,6 +2030,7 @@ pub fn resolved(
     id: &Id,
     f: &Feature,
     references: bool,
+    unit: crate::units::Unit,
 ) -> Option<Value> {
     if !takes_sheets(f) {
         return None;
@@ -1998,6 +2128,32 @@ pub fn resolved(
                     }))
                     .collect(),
             );
+        }
+        // A blend edit's kept report: each blend it took, each corner, each
+        // blend it made again, as references and quantities.
+        if let crate::rebuild::Output::Solids(m) = out
+            && let Some(rep) = &m.report
+        {
+            let show = |x: &Value| crate::blends::render(&part.id, target, unit, x);
+            if let Some(Value::Array(bs)) = rep.get("blends") {
+                v["blends"] = Value::Array(bs.iter().map(show).collect());
+            }
+            if let Some(Value::Array(cs)) = rep.get("corners") {
+                v["corners"] = Value::Array(
+                    cs.iter()
+                        .map(|c| {
+                            json!(format!(
+                                "{}/{target}/{}",
+                                part.id,
+                                c.as_str().unwrap_or_default()
+                            ))
+                        })
+                        .collect(),
+                );
+            }
+            if let Some(Value::Array(rs)) = rep.get("resized") {
+                v["resized"] = Value::Array(rs.iter().map(show).collect());
+            }
         }
         if let crate::rebuild::Output::Solids(m) = out
             && let Some(rep) = &m.report
@@ -3455,5 +3611,19 @@ mod tests {
             crate::doc::edit::RESIZE_REQUEST
         );
         assert!(budgeted(&r));
+    }
+
+    #[test]
+    fn blend_refusals_point_at_the_query_and_the_way_round() {
+        let n =
+            ryukei::name::Name::derive(ryukei::name::OpKey(1), ryukei::name::Role::NewFace, &[]);
+        let hint_of = |e: ryukei::TweakError| hint(&refusal(&e)).unwrap_or_default();
+        assert!(hint_of(ryukei::TweakError::NotABlend { face: n }).contains("ryucad blends"));
+        let lost = hint_of(ryukei::TweakError::BlendLost {
+            face: n,
+            reason: ryukei::BlendLoss::Overflow,
+        });
+        assert!(lost.contains("delete_blend"), "{lost}");
+        assert!(hint_of(ryukei::TweakError::BadTolerance).contains("0.1 mm"));
     }
 }

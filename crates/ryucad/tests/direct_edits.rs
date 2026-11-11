@@ -983,6 +983,24 @@ fn a_rounded_box_is_defeatured_by_size() {
     assert_eq!(rep["blends"].as_array().unwrap().len(), 12, "{rep}");
     assert_eq!(rep["corners"].as_array().unwrap().len(), 8, "{rep}");
     assert_eq!(rep["blends"][0]["kind"], "fillet", "{rep}");
+    // inspect --feature and feature.show give it as a tweak's: fields as
+    // text, each blend it took with its references and sizes.
+    let v = must(&mut s, "inspect", json!({"part": "p", "feature": "d"}));
+    let d = &v["delete_blend"];
+    assert_eq!(d["below"]["value"], "3.5 mm", "{v}");
+    assert_eq!(d["blends"].as_array().unwrap().len(), 12, "{v}");
+    assert_eq!(d["blends"][0]["radius"]["value"], "3 mm", "{v}");
+    assert!(
+        d["blends"][0]["faces"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("p/b/"),
+        "{v}"
+    );
+    assert_eq!(d["corners"].as_array().unwrap().len(), 8, "{v}");
+    assert_eq!(d["deleted"]["faces"].as_u64(), Some(20), "{v}");
+    let shown = must(&mut s, "feature.show", json!({"part": "p", "id": "d"}));
+    assert_eq!(shown["below"]["m"], 0.0035, "{shown}");
     // The box's six faces are back under their own names.
     let faces: Vec<String> = body(&mut s, "d")["faces"]
         .as_array()
@@ -1044,4 +1062,131 @@ fn a_named_fillet_is_deleted_leaving_the_chamfer() {
         "{:?}",
         b.origins.iter().collect::<Vec<_>>()
     );
+}
+
+/// A fillet resized from 4 to 3 mm: the box less (1 − π/4) × 9 × 30 mm³,
+/// every name kept and the fillet's faces still the fillet's. A hole on
+/// the top, the fillet's neighbour, sketched after the resize, survives
+/// the resize's every size.
+#[test]
+fn a_fillet_resized_keeps_its_names() {
+    let (_dir, mut s) = boxed();
+    let rim = edge(
+        &body(&mut s, "b"),
+        "b",
+        [40.0, 0.0, 20.0],
+        [40.0, 30.0, 20.0],
+    );
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "f", "radius": 4, "edges": [rim]}),
+    );
+    let round = cylinders(&body(&mut s, "f"), "b");
+    add(
+        &mut s,
+        json!({"type": "resize_blend", "id": "r",
+               "groups": [{"radius": "3 mm", "faces": [round[0]]}]}),
+    );
+    near(
+        volume(&mut s, "r", "b"),
+        24000.0 - (1.0 - PI / 4.0) * 9.0 * 30.0,
+        1e-5,
+    );
+    assert_eq!(names(&mut s, "r"), names(&mut s, "f"));
+    let b = built(&mut s, "r", "b");
+    let name = round[0].rsplit('/').next().unwrap();
+    assert_eq!(b.origins.get(name).unwrap()["feature"], "f");
+    let rep = report(&mut s, "r");
+    assert_eq!(rep["resized"][0]["was"]["radius"], 4e-3, "{rep}");
+    assert_eq!(rep["resized"][0]["now"]["radius"], 3e-3, "{rep}");
+    let v = must(&mut s, "inspect", json!({"part": "p", "feature": "r"}));
+    let r = &v["resize_blend"];
+    assert_eq!(r["groups"][0]["faces"][0], json!(round[0]), "{v}");
+    assert_eq!(r["resized"][0]["was"]["radius"]["value"], "4 mm", "{v}");
+    assert_eq!(r["resized"][0]["now"]["radius"]["value"], "3 mm", "{v}");
+    assert_eq!(r["created"]["faces"].as_u64(), Some(0), "{v}");
+    // A hole in the top, after the resize.
+    let top = plane(&body(&mut s, "r"), "b", 2, 1.0, 20.0);
+    add(&mut s, json!({"type": "sketch", "id": "s", "face": top}));
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "s", "ops": [
+        {"op": "add", "type": "point", "at": [10, 15]}, {"op": "add", "type": "fix", "a": "p1"}]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "h", "sketch": "s", "points": ["p1"],
+        "diameter": "4 mm", "depth": "through_all", "targets": ["b"]}),
+    );
+    for r in ["2 mm", "5 mm", "3 mm"] {
+        must(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "r", "groups": [{"radius": r, "faces": [round[0]]}]}),
+        );
+        let v = must(&mut s, "rebuild", json!({"part": "p"}));
+        assert_eq!(v["parts"][0]["failed"], 0, "{r}: {v}");
+    }
+}
+
+/// A chamfer resized from 2 to 3 mm (the box less 4.5 × 30 mm³), then to
+/// 1 mm on the top and 3 mm on the side (1.5 × 30 mm³); a fillet given a
+/// chamfer's size (8 × 30 mm³).
+#[test]
+fn chamfers_resize_and_a_fillet_becomes_one() {
+    let (_dir, mut s) = boxed();
+    let b = body(&mut s, "b");
+    let lip = edge(&b, "b", [0.0, 0.0, 20.0], [0.0, 30.0, 20.0]);
+    add(
+        &mut s,
+        json!({"type": "chamfer", "id": "c", "d": 2, "edges": [lip]}),
+    );
+    let bevel = body(&mut s, "c")["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let z = &f["surface"]["frame"]["z"];
+            f["surface"]["type"] == "plane"
+                && z[0].as_f64().unwrap() != 0.0
+                && z[2].as_f64().unwrap() != 0.0
+        })
+        .map(|f| format!("p/b/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    add(
+        &mut s,
+        json!({"type": "resize_blend", "id": "r",
+               "groups": [{"form": "equal", "d": "3 mm", "faces": [bevel.clone()]}]}),
+    );
+    near(volume(&mut s, "r", "b"), 24000.0 - 4.5 * 30.0, 1e-9);
+    let top = plane(&body(&mut s, "c"), "b", 2, 1.0, 20.0);
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "r", "groups": [{"form": "distances", "d1": "1 mm",
+               "d2": "3 mm", "face": top, "faces": [bevel]}]}),
+    );
+    near(volume(&mut s, "r", "b"), 24000.0 - 1.5 * 30.0, 1e-9);
+    // A fillet made a 4 mm chamfer.
+    let (_dir2, mut t) = boxed();
+    let rim = edge(
+        &body(&mut t, "b"),
+        "b",
+        [40.0, 0.0, 20.0],
+        [40.0, 30.0, 20.0],
+    );
+    add(
+        &mut t,
+        json!({"type": "fillet", "id": "f", "radius": 4, "edges": [rim]}),
+    );
+    let round = cylinders(&body(&mut t, "f"), "b");
+    add(
+        &mut t,
+        json!({"type": "resize_blend", "id": "r",
+               "groups": [{"form": "equal", "d": "4 mm", "faces": [round[0]]}]}),
+    );
+    near(volume(&mut t, "r", "b"), 24000.0 - 8.0 * 30.0, 1e-9);
+    let rep = report(&mut t, "r");
+    assert_eq!(rep["resized"][0]["now"]["kind"], "chamfer", "{rep}");
 }

@@ -6,6 +6,7 @@
 //! its cache.
 
 use crate::doc::id::Id;
+use crate::error::{Code, Error, Result};
 use crate::units::Unit;
 use ryukei::blend::{BlendKind, Chamfer};
 use ryukei::name::Name;
@@ -77,6 +78,66 @@ pub fn corners_of(rec: &Recognition, blends: &BTreeSet<usize>) -> Vec<usize> {
         .filter(|(_, c)| c.blends.iter().any(|i| blends.contains(i)))
         .map(|(j, _)| j)
         .collect()
+}
+
+/// A resize's `(face, kind)` pairs for the kernel, in group order: each
+/// group's faces at its kind. Faces of one blend, or of one chain of
+/// blends, in two groups are refused (`invalid_param` at the later face,
+/// `first` the earlier): the kernel sizes a chain as one. A face no blend
+/// holds is left for the kernel to refuse (`not_a_blend`).
+pub fn sizes(
+    id: &Id,
+    rec: &Recognition,
+    groups: &[(Vec<Name>, BlendKind)],
+) -> Result<Vec<(Name, BlendKind)>> {
+    let mut chains: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
+    let mut out = Vec::new();
+    for (i, (faces, kind)) in groups.iter().enumerate() {
+        for (j, f) in faces.iter().enumerate() {
+            if let Some(Ok(b)) = rec.holding(*f) {
+                match chains.get(&rec.blends[b].chain) {
+                    Some(&(gi, gj)) if gi != i => {
+                        return Err(Error::new(
+                            Code::InvalidParam,
+                            format!("resize_blend {id}: groups {gi} and {i} name one blend, or one chain of blends, which takes one size"),
+                        )
+                        .with("feature", id)
+                        .with("pointer", format!("/groups/{i}/faces/{j}"))
+                        .with("first", format!("/groups/{gi}/faces/{gj}")));
+                    }
+                    Some(_) => {}
+                    None => {
+                        chains.insert(rec.blends[b].chain, (i, j));
+                    }
+                }
+            }
+            out.push((*f, *kind));
+        }
+    }
+    Ok(out)
+}
+
+/// What a resize's report keeps: its target and each blend it makes again
+/// (every blend of a chain one of `sizes` names), with its index, faces,
+/// chain, the kind it `was` and the kind it is `now`.
+pub fn resize_report(target: &Id, rec: &Recognition, sizes: &[(Name, BlendKind)]) -> Value {
+    let mut now: BTreeMap<usize, BlendKind> = BTreeMap::new();
+    for (f, k) in sizes {
+        if let Some(Ok(i)) = rec.holding(*f) {
+            now.entry(rec.blends[i].chain).or_insert(*k);
+        }
+    }
+    let resized: Vec<Value> = rec
+        .blends
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| {
+            let k = now.get(&b.chain)?;
+            Some(json!({"index": i, "faces": hex(&b.faces), "chain": b.chain,
+                        "was": kind_raw(&b.kind), "now": kind_raw(k)}))
+        })
+        .collect();
+    json!({"target": target, "resized": resized})
 }
 
 /// A blend kind as a report keeps it: `kind`, `size`, a fillet's
@@ -288,5 +349,32 @@ mod tests {
             })),
         );
         assert_eq!(a["angle"]["value"], "45 deg");
+    }
+
+    #[test]
+    fn a_blend_in_two_groups_is_refused() {
+        let r = rec();
+        let id = Id::parse("rz", "feature").unwrap();
+        let three = BlendKind::Fillet { radius: 3e-3 };
+        let four = BlendKind::Fillet { radius: 4e-3 };
+        // Faces 1 and 2 are one chain: one group may name both.
+        let ok = sizes(&id, &r, &[(vec![n(1), n(2)], three), (vec![n(3)], four)]).unwrap();
+        assert_eq!(ok.len(), 3);
+        // In two groups they are refused, at the second.
+        let e = sizes(&id, &r, &[(vec![n(1)], three), (vec![n(2)], four)]).unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        assert_eq!(e.details["pointer"], "/groups/1/faces/0");
+        assert_eq!(e.details["first"], "/groups/0/faces/0");
+        // What the resize reports: the chain's two blends and the 5 mm's.
+        let rep = resize_report(&id, &r, &ok);
+        let got: Vec<u64> = rep["resized"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["index"].as_u64().unwrap())
+            .collect();
+        assert_eq!(got, [0, 1, 2]);
+        assert_eq!(rep["resized"][2]["was"]["radius"], 5e-3);
+        assert_eq!(rep["resized"][2]["now"]["radius"], 4e-3);
     }
 }
