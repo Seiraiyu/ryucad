@@ -674,33 +674,76 @@ fn found(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Raw> {
     out
 }
 
+/// Whether `ops` remove the finding `code` on `pins` from `s` and add no
+/// `library_*` error: a fix is offered only so (round 2's ask).
+fn fixes_it(
+    s: &Symbol,
+    class: Option<Class>,
+    cx: &Context,
+    code: &str,
+    pins: &[String],
+    ops: &[Value],
+) -> bool {
+    if ops.is_empty() {
+        return false;
+    }
+    let mut t = s.clone();
+    if crate::edit::apply(&mut t, ops, crate::units::Unit::Mm).is_err() {
+        return false;
+    }
+    let key = |f: &crate::fault::Fault| (f.error.code, f.error.details.get("pointer").cloned());
+    let before: Vec<_> = s.check().iter().filter(|f| f.is_error()).map(key).collect();
+    if t.check()
+        .iter()
+        .filter(|f| f.is_error())
+        .any(|f| !before.contains(&key(f)))
+    {
+        return false;
+    }
+    !found(&t, class, cx)
+        .iter()
+        .any(|r| r.code == code && r.pins == pins)
+}
+
 /// `s`'s findings as `cx` judges a symbol of `class` (`None`: only the
 /// rules every symbol answers to), weighted, severities applied (`off`
 /// drops a rule), sorted by code then pins.
 pub fn lint(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Finding> {
     let mut out = Vec::new();
     for r in found(s, class, cx) {
-        let (severity, sp) = cx.prefs.severity(r.code);
+        let Raw {
+            code,
+            pins,
+            message,
+            details,
+            fixes,
+            prefs: rp,
+        } = r;
+        let (severity, sp) = cx.prefs.severity(code);
         if severity == Severity::Off {
             continue;
         }
-        let (points, wp) = weight(cx.prefs, r.code);
-        let mut message = r.message;
+        let (points, wp) = weight(cx.prefs, code);
+        let mut message = message;
         if let Some(w) = &wp {
             message.push_str(&format!(" ({w})"));
         }
-        let mut prefs = r.prefs;
+        let mut prefs = rp;
         prefs.extend(sp);
         prefs.extend(wp);
+        let fixes = fixes
+            .into_iter()
+            .filter(|ops| fixes_it(s, class, cx, code, &pins, ops))
+            .collect();
         out.push(Finding {
-            code: r.code,
-            pins: r.pins,
+            code,
+            pins,
             message,
-            details: r.details,
+            details,
             points,
             severity,
             prefs,
-            fixes: r.fixes,
+            fixes,
         });
     }
     out.sort_by(|a, b| (a.code, &a.pins).cmp(&(b.code, &b.pins)));
@@ -1039,6 +1082,73 @@ mod tests {
             lint(&clean, Some(Class::Ic), &cx)
                 .iter()
                 .any(|f| f.code == "sym_body_margin")
+        );
+    }
+
+    #[test]
+    fn a_fix_is_offered_only_when_it_removes_its_finding() {
+        let st = Standards::default();
+        let prefs = Prefs::default();
+        let cx = Context {
+            standards: &st,
+            prefs: &prefs,
+            from: "self",
+        };
+        // An output on the left of a body with no room on its right: the
+        // pin_side fix's slot is outside the body, so none is offered; and
+        // a fix that would leave the finding is dropped.
+        let mut s = template("U", Class::Ic, &inputs(2), &st).unwrap();
+        let one = s.pins.get_mut("1").unwrap();
+        one.ty = PinType::Output;
+        let found = lint(&s, Some(Class::Ic), &cx);
+        let side = found.iter().find(|f| f.code == "sym_pin_side").unwrap();
+        for ops in &side.fixes {
+            let mut t = s.clone();
+            crate::edit::apply(&mut t, ops, crate::units::Unit::Mm).unwrap();
+            assert!(
+                !lint(&t, Some(Class::Ic), &cx)
+                    .iter()
+                    .any(|f| f.code == "sym_pin_side" && f.pins == side.pins)
+            );
+        }
+        // Every fix the lint offers anywhere in this module's cases removes
+        // its finding and adds no library_* error.
+        for f in &found {
+            for ops in &f.fixes {
+                let mut t = s.clone();
+                crate::edit::apply(&mut t, ops, crate::units::Unit::Mm).unwrap();
+                assert!(t.check().iter().all(|x| !x.is_error()));
+            }
+        }
+    }
+
+    #[test]
+    fn fixes_that_change_nothing_are_not_offered() {
+        let st = Standards::default();
+        let prefs = Prefs::default();
+        let cx = Context {
+            standards: &st,
+            prefs: &prefs,
+            from: "self",
+        };
+        // A group "out of order" only by equal numbers can't be fixed by
+        // moving: GPIO1 twice (two names, one number) is in order.
+        let gp = |n: &str, name: &str| PinSpec {
+            number: n.into(),
+            name: name.into(),
+            ty: PinType::Bidirectional,
+        };
+        let s = template(
+            "U",
+            Class::Ic,
+            &[gp("1", "GPIO1"), gp("2", "GPIO1_ALT")],
+            &st,
+        )
+        .unwrap();
+        assert!(
+            lint(&s, Some(Class::Ic), &cx)
+                .iter()
+                .all(|f| f.fixes.iter().all(|o| !o.is_empty()))
         );
     }
 }
