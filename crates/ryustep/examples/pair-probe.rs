@@ -1,7 +1,7 @@
 //! Dumps the face pairs the self-intersection check can't settle, for
 //! diagnosing them: each body healed as `check-split` heals it (ryucad's
 //! import key, or `CHECK_SPLIT_KEY`), checked on one thread, and for each
-//! fault both faces' surfaces and edges (index, tolerance, the faces
+//! fault both faces' names, surfaces and edges (index, tolerance, the faces
 //! using it, ends and middle in millimetres, curve kind). A refused body
 //! names the refusal's faces by STEP instance and dumps them as the
 //! reference body has them.
@@ -25,8 +25,9 @@ fn short<T: std::fmt::Debug>(t: &T, n: usize) -> String {
 fn face_line(body: &Body, f: FaceId) {
     let face = body.face(f).unwrap();
     println!(
-        "  face {} {:?} surface {}",
+        "  face {} {:032x} {:?} surface {}",
         f.index(),
+        face.name.to_u128(),
         face.sense,
         short(body.surface(face.surface).unwrap(), 90)
     );
