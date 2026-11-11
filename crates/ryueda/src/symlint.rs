@@ -212,9 +212,21 @@ pub fn unit_pins(s: &Symbol, unit: u32) -> Vec<(&String, &Pin)> {
         .collect()
 }
 
-fn off_grid(s: &Symbol, cx: &Context, out: &mut Vec<Raw>) {
+/// The pins a per-pin rule judges: every pin, or (a fix's trial) only
+/// those of the finding it tries to remove, which no other pin decides.
+fn scoped<'a>(
+    s: &'a Symbol,
+    only: Option<&'a [String]>,
+) -> Box<dyn Iterator<Item = (&'a String, &'a Pin)> + 'a> {
+    match only {
+        None => Box::new(s.pins.iter()),
+        Some(ns) => Box::new(ns.iter().filter_map(|n| s.pins.get_key_value(n))),
+    }
+}
+
+fn off_grid(s: &Symbol, only: Option<&[String]>, cx: &Context, out: &mut Vec<Raw>) {
     let g = cx.standards.grid_nm;
-    for (n, p) in &s.pins {
+    for (n, p) in scoped(s, only) {
         if p.at[0] % g == 0 && p.at[1] % g == 0 {
             continue;
         }
@@ -236,13 +248,19 @@ fn off_grid(s: &Symbol, cx: &Context, out: &mut Vec<Raw>) {
     }
 }
 
-fn length(s: &Symbol, class: Option<Class>, cx: &Context, out: &mut Vec<Raw>) {
+fn length(
+    s: &Symbol,
+    only: Option<&[String]>,
+    class: Option<Class>,
+    cx: &Context,
+    out: &mut Vec<Raw>,
+) {
     let Some(class) = class else { return };
     if !cx.standards.rule(class).pin_length {
         return;
     }
     let want = cx.standards.pin_length_nm;
-    for (n, p) in &s.pins {
+    for (n, p) in scoped(s, only) {
         if p.length_nm == want {
             continue;
         }
@@ -354,10 +372,16 @@ fn side_word(s: Side) -> &'static str {
     }
 }
 
-fn sides(s: &Symbol, class: Option<Class>, cx: &Context, out: &mut Vec<Raw>) {
+fn sides(
+    s: &Symbol,
+    only: Option<&[String]>,
+    class: Option<Class>,
+    cx: &Context,
+    out: &mut Vec<Raw>,
+) {
     let Some(class) = class else { return };
     let rule = cx.standards.rule(class);
-    for (n, p) in &s.pins {
+    for (n, p) in scoped(s, only) {
         let Some(role) = cx.standards.role(&p.name, p.ty) else {
             continue;
         };
@@ -673,20 +697,56 @@ fn margins(s: &Symbol, cx: &Context, out: &mut Vec<Raw>) {
 /// Every rule's raw findings, in the catalogue's order.
 fn found(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Raw> {
     let mut out = Vec::new();
-    off_grid(s, cx, &mut out);
-    sides(s, class, cx, &mut out);
+    off_grid(s, None, cx, &mut out);
+    sides(s, None, class, cx, &mut out);
     groups(s, class, cx, &mut out);
     shape(s, class, cx, &mut out);
     margins(s, cx, &mut out);
-    length(s, class, cx, &mut out);
+    length(s, None, class, cx, &mut out);
     unit_size(s, class, cx, &mut out);
     out
 }
 
+/// What the rule behind `code` finds on `s`: on `pins` alone where the
+/// rule judges each pin by itself (a fix's trial needs no more).
+fn found_by(
+    s: &Symbol,
+    class: Option<Class>,
+    cx: &Context,
+    code: &str,
+    pins: &[String],
+) -> Vec<Raw> {
+    let mut out = Vec::new();
+    match code {
+        "sym_pin_off_grid" => off_grid(s, Some(pins), cx, &mut out),
+        "sym_pin_side" => sides(s, Some(pins), class, cx, &mut out),
+        "sym_pin_length" => length(s, Some(pins), class, cx, &mut out),
+        "sym_pin_group" => groups(s, class, cx, &mut out),
+        "sym_shape" => shape(s, class, cx, &mut out),
+        "sym_body_margin" => margins(s, cx, &mut out),
+        "sym_units" => unit_size(s, class, cx, &mut out),
+        _ => out = found(s, class, cx),
+    }
+    out
+}
+
+/// A symbol's own errors, as a fix's trial compares them.
+type ErrorKey = (Code, Option<Value>);
+
+fn error_keys(s: &Symbol) -> Vec<ErrorKey> {
+    s.check()
+        .iter()
+        .filter(|f| f.is_error())
+        .map(|f| (f.error.code, f.error.details.get("pointer").cloned()))
+        .collect()
+}
+
 /// Whether `ops` remove the finding `code` on `pins` from `s` and add no
 /// `library_*` error: a fix is offered only so (round 2's ask).
+/// `before` is `s`'s own errors (`error_keys`), worked out once a symbol.
 fn fixes_it(
     s: &Symbol,
+    before: &[ErrorKey],
     class: Option<Class>,
     cx: &Context,
     code: &str,
@@ -700,16 +760,10 @@ fn fixes_it(
     if crate::edit::apply(&mut t, ops, crate::units::Unit::Mm).is_err() {
         return false;
     }
-    let key = |f: &crate::fault::Fault| (f.error.code, f.error.details.get("pointer").cloned());
-    let before: Vec<_> = s.check().iter().filter(|f| f.is_error()).map(key).collect();
-    if t.check()
-        .iter()
-        .filter(|f| f.is_error())
-        .any(|f| !before.contains(&key(f)))
-    {
+    if error_keys(&t).iter().any(|k| !before.contains(k)) {
         return false;
     }
-    !found(&t, class, cx)
+    !found_by(&t, class, cx, code, pins)
         .iter()
         .any(|r| r.code == code && r.pins == pins)
 }
@@ -718,8 +772,28 @@ fn fixes_it(
 /// rules every symbol answers to), weighted, severities applied (`off`
 /// drops a rule), sorted by code then pins.
 pub fn lint(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Finding> {
+    use rayon::prelude::*;
+    let raw = found(s, class, cx);
+    let before = if raw.iter().any(|r| !r.fixes.is_empty()) {
+        error_keys(s)
+    } else {
+        Vec::new()
+    };
+    // Every fix tried on its own copy, in parallel; kept in order.
+    let kept: Vec<Vec<bool>> = raw
+        .par_iter()
+        .map(|r| {
+            if cx.prefs.severity(r.code).0 == Severity::Off {
+                return Vec::new();
+            }
+            r.fixes
+                .iter()
+                .map(|ops| fixes_it(s, &before, class, cx, r.code, &r.pins, ops))
+                .collect()
+        })
+        .collect();
     let mut out = Vec::new();
-    for r in found(s, class, cx) {
+    for (r, kept) in raw.into_iter().zip(kept) {
         let Raw {
             code,
             pins,
@@ -742,7 +816,8 @@ pub fn lint(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Finding> {
         prefs.extend(wp);
         let fixes = fixes
             .into_iter()
-            .filter(|ops| fixes_it(s, class, cx, code, &pins, ops))
+            .zip(kept)
+            .filter_map(|(ops, k)| k.then_some(ops))
             .collect();
         out.push(Finding {
             code,
@@ -833,36 +908,44 @@ pub fn library_check(p: &Project, library: Option<&str>, symbol: Option<&str>) -
         prefs: &prefs,
         from: &from,
     };
+    // Each symbol judged on its own, in parallel; the list in ID order.
+    use rayon::prelude::*;
+    let picked: Vec<_> = lib
+        .symbols
+        .iter()
+        .filter(|(id, _)| only.as_ref().is_none_or(|o| o == *id))
+        .collect();
+    let judged: Vec<(Value, u64, u64)> = picked
+        .par_iter()
+        .map(|(id, l)| {
+            let reference = ref_text(&alias, ObjKind::Symbol, id);
+            let s = match &l.item {
+                Ok(s) => s,
+                Err(e) => return (json!({"reference": reference, "error": e}), 0, 0),
+            };
+            let (class, inferred) = class_of(lib, id, s);
+            let found = lint(s, class, &cx);
+            let errors = found
+                .iter()
+                .filter(|f| f.severity == Severity::Error)
+                .count() as u64;
+            let v = json!({
+                "reference": reference,
+                "path": lib.path(ObjKind::Symbol, id),
+                "class": class,
+                "class_inferred": inferred,
+                "score": score(&found),
+                "findings": found.iter().map(|f| shown(f, id, lib)).collect::<Vec<_>>(),
+            });
+            (v, errors, found.len() as u64 - errors)
+        })
+        .collect();
     let (mut errors, mut warnings) = (0u64, 0u64);
-    let mut list = Vec::new();
-    for (id, l) in &lib.symbols {
-        if only.as_ref().is_some_and(|o| o != id) {
-            continue;
-        }
-        let reference = ref_text(&alias, ObjKind::Symbol, id);
-        let s = match &l.item {
-            Ok(s) => s,
-            Err(e) => {
-                list.push(json!({"reference": reference, "error": e}));
-                continue;
-            }
-        };
-        let (class, inferred) = class_of(lib, id, s);
-        let found = lint(s, class, &cx);
-        for f in &found {
-            match f.severity {
-                Severity::Error => errors += 1,
-                _ => warnings += 1,
-            }
-        }
-        list.push(json!({
-            "reference": reference,
-            "path": lib.path(ObjKind::Symbol, id),
-            "class": class,
-            "class_inferred": inferred,
-            "score": score(&found),
-            "findings": found.iter().map(|f| shown(f, id, lib)).collect::<Vec<_>>(),
-        }));
+    let mut list = Vec::with_capacity(judged.len());
+    for (v, e, w) in judged {
+        errors += e;
+        warnings += w;
+        list.push(v);
     }
     let report = json!({
         "library": alias,
@@ -1292,6 +1375,62 @@ mod tests {
                 .iter()
                 .any(|f| f.code == "sym_body_margin")
         );
+    }
+
+    #[test]
+    fn a_fixs_trial_judges_as_the_whole_lint_does() {
+        // A fix is tried against its own rule alone, and a per-pin rule on
+        // the finding's pins alone (a 1,924-pin FPGA took minutes trying
+        // every fix against every rule): the answer must be the same.
+        let st = Standards::default();
+        let prefs = Prefs::default();
+        let cx = Context {
+            standards: &st,
+            prefs: &prefs,
+            from: "self",
+        };
+        let mut pins = inputs(12);
+        for (k, p) in pins.iter_mut().enumerate() {
+            p.name = format!("GPIO{k}");
+            p.ty = PinType::Bidirectional;
+        }
+        pins[0].ty = PinType::Output;
+        pins[1].ty = PinType::PowerIn;
+        pins[1].name = "GND".into();
+        let mut s = template("U", Class::Ic, &pins, &st).unwrap();
+        let (a, c) = (s.pins["5"].at, s.pins["9"].at);
+        s.pins.get_mut("5").unwrap().at = c;
+        s.pins.get_mut("9").unwrap().at = a;
+        s.pins.get_mut("3").unwrap().length_nm += 1_000_000;
+        s.pins.get_mut("4").unwrap().at[1] += 1_000;
+        s.pins.get_mut("1").unwrap().side = Side::Left;
+        let class = Some(Class::Ic);
+        let all = found(&s, class, &cx);
+        let codes: BTreeSet<&str> = all.iter().map(|r| r.code).collect();
+        assert!(codes.len() >= 3, "{codes:?}");
+        let has = |v: &[Raw], code: &str, pins: &[String]| {
+            v.iter().any(|r| r.code == code && r.pins == pins)
+        };
+        for r in &all {
+            assert!(has(
+                &found_by(&s, class, &cx, r.code, &r.pins),
+                r.code,
+                &r.pins
+            ));
+            for ops in &r.fixes {
+                let mut t = s.clone();
+                if crate::edit::apply(&mut t, ops, crate::units::Unit::Mm).is_err() {
+                    continue;
+                }
+                assert_eq!(
+                    has(&found_by(&t, class, &cx, r.code, &r.pins), r.code, &r.pins),
+                    has(&found(&t, class, &cx), r.code, &r.pins),
+                    "{} {:?}",
+                    r.code,
+                    r.pins
+                );
+            }
+        }
     }
 
     #[test]
