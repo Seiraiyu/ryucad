@@ -762,8 +762,6 @@ pub fn free(base: &Id, taken: impl Fn(&str) -> bool) -> Id {
 
 /// `import`: plans every file change and, unless `dry_run`, makes them.
 pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> {
-    use crate::doc::import::FileRef;
-    use crate::doc::project::{IMPORTS, PDM_CONFIG};
     // Its rebuilds heal the file's bodies.
     session.job.phase(ryu_session::job::Phase::Heal);
     if ask.update.is_some() {
@@ -781,6 +779,21 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
     let bytes = std::fs::read(&source).map_err(|e| Error::io(&source, &e))?;
     let file = ImportFile::new(bytes);
     let opened = opened(&file).map_err(|e| unreadable(&ask.path, &e))?;
+    import_opened(session, &ask, root, source, file, &opened)
+        .map_err(|e| refused(e, &opened, &ask.path))
+}
+
+/// [`import`] once the file is read.
+fn import_opened(
+    session: &mut crate::session::Session,
+    ask: &Ask,
+    root: std::path::PathBuf,
+    source: std::path::PathBuf,
+    file: ImportFile,
+    opened: &Opened,
+) -> Result<Value> {
+    use crate::doc::import::FileRef;
+    use crate::doc::project::{IMPORTS, PDM_CONFIG};
     // Where it goes: where the same bytes already are, else a free name.
     let project = session.project();
     let (stored, reused) = match project
@@ -820,7 +833,7 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
                     "give a part to make or one to add to (into), not both",
                 ));
             }
-            vec![into_plan(session, &opened, &file_ref, into, &ask)?]
+            vec![into_plan(session, opened, &file_ref, into, ask)?]
         }
         None => {
             crate::config::check_project_revision(&root, ask.expected.as_deref())?;
@@ -853,7 +866,7 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
             if ask.flatten {
                 vec![
                     plan::Flat {
-                        opened: &opened,
+                        opened: opened,
                         file: &file_ref,
                         stem: &stem,
                         part,
@@ -865,7 +878,7 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
                 ]
             } else {
                 plan::Fresh {
-                    opened: &opened,
+                    opened: opened,
                     file: &file_ref,
                     stem: &stem,
                     part,
@@ -877,7 +890,7 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
             }
         }
     };
-    let warnings = mapped_warnings(&opened, &ask.path);
+    let warnings = mapped_warnings(opened, &ask.path);
     let mut writes = plan::writes(project, &plan)?;
     if !reused {
         writes.insert(stored.clone(), Some(file.bytes.to_vec()));
@@ -886,9 +899,9 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
                       "schema": schema_name(opened.schema)});
     if ask.dry_run {
         let mut s = session.proposed(&writes)?;
-        let parts = parts_report(&mut s, &opened, &plan)?;
-        let transfer = transfer_of(&opened, &stored, &plan, &parts);
-        return Ok(answer(head, &opened, parts, warnings, true, transfer));
+        let parts = parts_report(&mut s, opened, &plan)?;
+        let transfer = transfer_of(opened, &stored, &plan, &parts);
+        return Ok(answer(head, opened, parts, warnings, true, transfer));
     }
     // PDM names need the project's ID; Git's attributes keep the file's
     // bytes once it is there.
@@ -901,9 +914,9 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
     plan::apply(&root, &writes)?;
     crate::drivers::write_attributes(&root)?;
     session.reload()?;
-    let parts = parts_report(session, &opened, &plan)?;
-    let transfer = transfer_of(&opened, &stored, &plan, &parts);
-    Ok(answer(head, &opened, parts, warnings, false, transfer))
+    let parts = parts_report(session, opened, &plan)?;
+    let transfer = transfer_of(opened, &stored, &plan, &parts);
+    Ok(answer(head, opened, parts, warnings, false, transfer))
 }
 
 /// `import --update <stored> <file>`: `file`'s bytes replace the stored
@@ -913,8 +926,6 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
 /// features that would build now and won't after, found by rebuilding
 /// the planned files before anything is written.
 pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value> {
-    use crate::doc::import::FileRef;
-    use crate::doc::project::PDM_CONFIG;
     let target = ask.update.clone().expect("an update");
     if ask.part.is_some() || ask.into.is_some() || ask.product.is_some() || ask.flatten {
         return Err(Error::new(
@@ -942,6 +953,22 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
     let bytes = std::fs::read(&source).map_err(|e| Error::io(&source, &e))?;
     let file = ImportFile::new(bytes);
     let opened = opened(&file).map_err(|e| unreadable(&ask.path, &e))?;
+    reimport_opened(session, &ask, root, target, old, file, &opened)
+        .map_err(|e| refused(e, &opened, &ask.path))
+}
+
+/// [`reimport`] once the file is read.
+fn reimport_opened(
+    session: &mut crate::session::Session,
+    ask: &Ask,
+    root: std::path::PathBuf,
+    target: String,
+    old: ImportFile,
+    file: ImportFile,
+    opened: &Opened,
+) -> Result<Value> {
+    use crate::doc::import::FileRef;
+    use crate::doc::project::PDM_CONFIG;
     let file_ref = FileRef {
         path: target.clone(),
         blake3: file.blake3.clone(),
@@ -957,7 +984,7 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
         })
     };
     let fresh = plan::Fresh {
-        opened: &opened,
+        opened: opened,
         file: &file_ref,
         stem: &stem,
         part: None,
@@ -965,12 +992,12 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
         pdm: root.join(PDM_CONFIG).is_file(),
         mode: ask.mode(),
     };
-    let u = update::plan(project, &opened, &file_ref, &fresh)?;
+    let u = update::plan(project, opened, &file_ref, &fresh)?;
     let mut writes = plan::writes(project, &u.planned)?;
     if old.blake3 != file.blake3 {
         writes.insert(target.clone(), Some(file.bytes.to_vec()));
     }
-    let mut warnings = mapped_warnings(&opened, &ask.path);
+    let mut warnings = mapped_warnings(opened, &ask.path);
     warnings.extend(u.warnings.iter().cloned());
     for (a, i) in &u.kept {
         warnings.push(format!(
@@ -1025,10 +1052,10 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
         v
     };
     if ask.dry_run {
-        let parts = parts_report(&mut proposed, &opened, &u.planned)?;
-        let transfer = transfer_of(&opened, &target, &u.planned, &parts);
+        let parts = parts_report(&mut proposed, opened, &u.planned)?;
+        let transfer = transfer_of(opened, &target, &u.planned, &parts);
         return Ok(extra(
-            answer(head, &opened, parts, warnings, true, transfer),
+            answer(head, opened, parts, warnings, true, transfer),
             None,
         ));
     }
@@ -1051,12 +1078,25 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
     plan::apply(&root, &writes)?;
     session.reload()?;
     let assemblies = crate::mate::keep_current(session, &current)?;
-    let parts = parts_report(session, &opened, &u.planned)?;
-    let transfer = transfer_of(&opened, &target, &u.planned, &parts);
+    let parts = parts_report(session, opened, &u.planned)?;
+    let transfer = transfer_of(opened, &target, &u.planned, &parts);
     Ok(extra(
-        answer(head, &opened, parts, warnings, false, transfer),
+        answer(head, opened, parts, warnings, false, transfer),
         Some(assemblies),
     ))
+}
+
+/// A refusal once the file is read gains the file's transfer report,
+/// nothing interpreted (design 448). Its code and other details don't
+/// change, so callers that read codes see no change.
+fn refused(e: Error, opened: &Opened, path: &str) -> Error {
+    if e.details.get("transfer").is_some() {
+        return e;
+    }
+    let t = opened
+        .census
+        .transfer(&ryustep::census::Read::default(), &[]);
+    e.with("transfer", crate::transfer::json(&t, path, false))
 }
 
 /// What `import --update` writes when the bytes already at `path` (a
@@ -2256,6 +2296,28 @@ pub(crate) mod tests {
                 },
             ]
         );
+    }
+
+    /// A refusal once the file is read keeps its code and gains the
+    /// file's transfer report, nothing interpreted (design 448).
+    #[test]
+    fn a_refusal_after_reading_carries_the_transfer_report() {
+        let (_src, path) = outside("assembly.stp");
+        let (_dir, mut s) = crate::server::tests::fresh();
+        // Adding the file's bodies to a part that doesn't exist.
+        let e = import_call(&mut s, json!({"path": path, "into": "nope"})).unwrap_err();
+        assert_eq!(e.code, Code::NotFound, "{e:?}");
+        let t = &e.details["transfer"];
+        assert!(
+            t["categories"].as_array().is_some_and(|c| !c.is_empty()),
+            "{t}"
+        );
+        for c in t["categories"].as_array().unwrap() {
+            assert_eq!(c["interpreted"]["count"], 0, "{c}");
+        }
+        // Before the file is read there is nothing to report.
+        let e = import_call(&mut s, json!({"path": "/nowhere/at/all.step"})).unwrap_err();
+        assert!(e.details.get("transfer").is_none());
     }
 
     #[test]
