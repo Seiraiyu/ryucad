@@ -161,6 +161,7 @@ fn attempt(
 ) -> Rung {
     let mut ws = BTreeMap::new();
     let absorbed = absorbed(body, changes, region);
+    let absorbing: std::collections::BTreeSet<FaceId> = absorbed.values().copied().collect();
     for &f in region
         .faces
         .iter()
@@ -184,12 +185,16 @@ fn attempt(
             bx,
         ) {
             Ok(mut w) => {
-                for (k, t) in working::delete_turn(body, changes, f, &w.surface)
-                    .into_iter()
-                    .enumerate()
-                {
-                    if let Some(t) = t {
-                        w.rect[k] = t;
+                // A face standing for others on its surface covers them
+                // all: its whole turn (NIST FTC 09's hole halves).
+                if !absorbing.contains(&f) {
+                    for (k, t) in working::delete_turn(body, changes, f, &w.surface)
+                        .into_iter()
+                        .enumerate()
+                    {
+                        if let Some(t) = t {
+                            w.rect[k] = t;
+                        }
                     }
                 }
                 ws.insert(f, w);
