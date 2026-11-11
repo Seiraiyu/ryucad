@@ -807,7 +807,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
         ));
         of.push(Of::Port(pid.clone()));
     }
-    Ok(Built {
+    let mut built = Built {
         input: input::Block {
             name: block.name.clone(),
             sheet: [w - 2 * BORDER, h - 2 * BORDER],
@@ -819,7 +819,66 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
         },
         of,
         stacks,
-    })
+    };
+    style_inputs(p, b, &mut built);
+    Ok(built)
+}
+
+/// The geometry the style moves (plan 2.E), as engine input: each
+/// component's text size and emphasis, and each net's and rail's intent
+/// where the style shows it (a rail's voltage, a net's class, voltage,
+/// current and impedance). Resolved with no sheet: rules naming a sheet
+/// or a region can't set these.
+fn style_inputs(p: &Project, b: &BlockFiles, built: &mut Built) {
+    use crate::style::Kind;
+    let layers = crate::cascade::Layers::of(p);
+    for o in crate::cascade::objects(p, b, built) {
+        let r = layers.resolve(&o, None).props;
+        match o.kind {
+            Kind::Component => {
+                let text = ryusch::input::PartText {
+                    size: r.text_size.unwrap_or_default().nm(),
+                    emphasis: r.emphasis.unwrap_or(false),
+                };
+                for part in &mut built.input.parts {
+                    if part.key == o.key || part.key.split(':').next() == Some(o.key.as_str()) {
+                        part.text = text;
+                    }
+                }
+            }
+            Kind::Rail if r.visible.intent == Some(false) => {
+                if let Some(n) = built.input.nets.iter_mut().find(|n| n.key == o.key) {
+                    n.intent.clear();
+                }
+            }
+            Kind::Net if r.visible.intent == Some(true) => {
+                let Some(Ok(net)) = Id::parse(&o.key, "net")
+                    .ok()
+                    .and_then(|id| b.nets.get(&id))
+                    .map(|n| n.item.as_ref())
+                else {
+                    continue;
+                };
+                let class = net.class.as_ref().map(|c| {
+                    p.conn
+                        .classes
+                        .get(c)
+                        .and_then(|x| x.item.as_ref().ok())
+                        .map_or_else(|| c.to_string(), |x| x.name.clone())
+                });
+                let text: Vec<String> = class
+                    .into_iter()
+                    .chain(net.voltage.clone())
+                    .chain(net.current.clone())
+                    .chain(net.impedance.clone())
+                    .collect();
+                if let Some(n) = built.input.nets.iter_mut().find(|n| n.key == o.key) {
+                    n.intent = text.join(" · ");
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// A block laid out as its files stand: over its layout file where that
@@ -1231,5 +1290,36 @@ mod tests {
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].code, "note_property_unknown");
         assert_eq!(notes[0].details["property"], "nothing");
+    }
+
+    /// The test project with SDA at 3.3 V and `style` as its style.json.
+    fn styled_project(style: &str) -> (tempfile::TempDir, Project) {
+        let (dir, _) = project(&[]);
+        let board = dir.path().join("board");
+        crate::source::write_atomic(
+            &board.join("blocks/top/nets/sda.json"),
+            r#"{"format": 1, "kind": "ryueda.net", "name": "SDA", "voltage": "3.3 V"}"#,
+        )
+        .unwrap();
+        crate::source::write_atomic(&board.join(crate::style::FILE), style).unwrap();
+        let p = Project::load(&board).unwrap();
+        (dir, p)
+    }
+
+    #[test]
+    fn the_style_sets_text_sizes_emphasis_and_intent() {
+        let (dir, p) = styled_project(
+            r#"{"kind": "ryueda.style", "format": 1,
+                "rules": [{"select": {"kind": "net"}, "set": {"visible": {"intent": true}}},
+                          {"select": {"component_class": "resistor"}, "set": {"text_size": "large", "emphasis": true}}]}"#,
+        );
+        let b = &p.conn.blocks[&Id::parse("top", "block").unwrap()];
+        let built = build(&p, b).unwrap();
+        let r = built.input.parts.iter().find(|x| x.refdes == "R1").unwrap();
+        assert_eq!(r.text.size, 1_778_000);
+        assert!(r.text.emphasis);
+        let sda = built.input.nets.iter().find(|n| n.name == "SDA").unwrap();
+        assert_eq!(sda.intent, "3.3 V");
+        drop(dir);
     }
 }
