@@ -406,3 +406,33 @@ fn names_and_threads() {
     };
     assert_eq!(run(1), run(8));
 }
+
+/// Two fillets far apart, the top's +x edge's and the bottom's -x edge's:
+/// deleted together they give the bits deleting one, then the other, does
+/// (NIST CTC 01's three fillets, each grown alone in 0.7 s, together
+/// passed the walk's 4,096 choices).
+#[test]
+fn far_apart_sets_grow_as_one_after_another() {
+    let (b, _) = primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let edges = [
+        edge_between(&b, face(FaceRole::PlusZ), face(FaceRole::PlusX)),
+        edge_between(&b, face(FaceRole::MinusZ), face(FaceRole::MinusX)),
+    ]
+    .map(|edge| EdgeBlend {
+        edge,
+        kind: BlendKind::Fillet { radius: 0.05 },
+    });
+    let (b, _) = blend(OpKey(1), &b, &edges).unwrap();
+    let mut cyl = not_planes(&b);
+    cyl.sort();
+    assert_eq!(cyl.len(), 2);
+    let grow = |faces: Vec<Name>| DeleteSpec {
+        faces,
+        heal: Heal::Grow,
+    };
+    let (both, _) = delete_faces(D, &b, &grow(cyl.clone())).unwrap();
+    let (first, _) = delete_faces(D, &b, &grow(vec![cyl[0]])).unwrap();
+    let (then, _) = delete_faces(D, &first, &grow(vec![cyl[1]])).unwrap();
+    assert_eq!(both.dump(), then.dump());
+    assert!((volume(&both) - 0.24).abs() < 1e-6);
+}
