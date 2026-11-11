@@ -802,7 +802,7 @@ fn surface_of((body, face): (&Body, FaceId)) -> Result<&Surface, Failure> {
 }
 
 /// The largest tolerance of a face's edges and vertices.
-fn max_tolerance((body, face): (&Body, FaceId)) -> f64 {
+pub(crate) fn max_tolerance((body, face): (&Body, FaceId)) -> f64 {
     let mut t = LINEAR_RESOLUTION;
     for e in edges((body, face)) {
         let edge = &body.edges[e];

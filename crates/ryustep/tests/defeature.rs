@@ -370,3 +370,49 @@ fn a_delete_checks_only_its_own_pairs() {
     );
     assert!(w.spent() < c.spent(), "{} against {}", w.spent(), c.spent());
 }
+
+/// NIST FTC 08's pocket floor: 16 fillets (8 cylinders, 8 tori) round
+/// its floor, one set, deleted and checked clean (#653).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "seconds in release, minutes in a debug build: CI runs it in release"
+)]
+fn ftc_08s_pocket_floor_loses_its_fillets() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/nist_ftc_08_asme1_rc.stp");
+    let m = read(
+        &std::fs::read(path).unwrap(),
+        &ReadOptions {
+            key: OpKey(7),
+            heal: Default::default(),
+        },
+    )
+    .unwrap();
+    let (body, _, _) = m.bodies[0].result.clone().unwrap();
+    let r = recognise_blends(&body, &RecogniseOptions::default()).unwrap();
+    // The chain of 16 blends, all 1.524 mm.
+    let mut sizes: std::collections::BTreeMap<usize, usize> = Default::default();
+    for b in &r.blends {
+        *sizes.entry(b.chain).or_default() += 1;
+    }
+    let chain = sizes
+        .iter()
+        .find(|(_, n)| **n == 16)
+        .map(|(c, _)| *c)
+        .unwrap();
+    let faces: Vec<_> = r
+        .blends
+        .iter()
+        .filter(|b| b.chain == chain)
+        .flat_map(|b| b.faces.clone())
+        .collect();
+    let spec = DeleteBlends {
+        max_size: None,
+        faces,
+        options: RecogniseOptions::default(),
+    };
+    let (o, _) = delete_blends_with(OpKey(0x16c), &body, &spec, &Work::unlimited()).unwrap();
+    assert_eq!(check(&o), []);
+    assert_eq!(check_intersections(&o), []);
+    assert_eq!(o.counts().faces, body.counts().faces - 16);
+}

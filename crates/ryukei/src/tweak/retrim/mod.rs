@@ -183,7 +183,15 @@ fn attempt(
             working::same_params(mo),
             bx,
         ) {
-            Ok(w) => {
+            Ok(mut w) => {
+                for (k, t) in working::delete_turn(body, changes, f, &w.surface)
+                    .into_iter()
+                    .enumerate()
+                {
+                    if let Some(t) = t {
+                        w.rect[k] = t;
+                    }
+                }
                 ws.insert(f, w);
             }
             Err(e) => return done(Err(e)),
