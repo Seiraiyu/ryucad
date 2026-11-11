@@ -339,6 +339,20 @@ impl Entities {
         }
     }
 
+    /// [`Entities::decode`], with the file's [`crate::census::Census`]
+    /// taken in the same parallel pass over its instances.
+    pub fn decode_counted(file: &File) -> (Entities, crate::census::Census) {
+        let ids: Vec<Id> = file.instances.iter().map(|i| i.id).collect();
+        let (items, seen): (Vec<_>, Vec<_>) = file
+            .instances
+            .par_iter()
+            .with_min_len(256)
+            .map(|i| (decode(i), crate::census::seen(i, &ids)))
+            .unzip();
+        let census = crate::census::Census::from_seen(ids.clone(), seen);
+        (Entities { ids, items }, census)
+    }
+
     pub fn len(&self) -> usize {
         self.ids.len()
     }

@@ -145,6 +145,238 @@ pub fn joined(parts: &[Part]) -> String {
     names.join(" ")
 }
 
+use crate::part21::{File, Instance};
+use std::borrow::Cow;
+use std::collections::HashMap;
+
+/// Every instance of a file: its entity name, its category, and the
+/// instances it refers to, kept as a graph by index (dangling references
+/// left out), with whether its weakly connected component holds an
+/// anchor (product structure, a style, or a representation): an
+/// instance outside every such component is unreferenced.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Census {
+    ids: Vec<u64>,
+    names: Vec<Box<str>>,
+    name: Vec<u32>,
+    category: Vec<Category>,
+    offsets: Vec<u32>,
+    targets: Vec<u32>,
+    anchored: Vec<bool>,
+}
+
+/// One instance as the parallel decode sees it.
+pub(crate) struct Seen<'f> {
+    name: Cow<'f, str>,
+    category: Category,
+    refs: Vec<u32>,
+}
+
+fn refs(p: &Param, out: &mut Vec<u64>) {
+    match p {
+        Param::Ref(r) => out.push(*r),
+        Param::List(l) => l.iter().for_each(|x| refs(x, out)),
+        Param::Typed(_, v) => refs(v, out),
+        _ => {}
+    }
+}
+
+/// What the census keeps of `inst`, whose file's instance numbers are
+/// `ids` (ascending).
+pub(crate) fn seen<'f>(inst: &'f Instance, ids: &[u64]) -> Seen<'f> {
+    let parts = inst.record.parts();
+    let name = match parts {
+        [one] => Cow::Borrowed(&*one.name),
+        _ => Cow::Owned(joined(parts)),
+    };
+    let mut raw = Vec::new();
+    for p in parts {
+        p.params.iter().for_each(|x| refs(x, &mut raw));
+    }
+    let mut out: Vec<u32> = raw
+        .into_iter()
+        .filter_map(|r| ids.binary_search(&r).ok().map(|k| k as u32))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    Seen {
+        name,
+        category: category_of_record(&inst.record),
+        refs: out,
+    }
+}
+
+/// Whether an instance anchors its component: product structure, a
+/// style, or a representation (not a relationship between them).
+fn is_anchor(c: Category, name: &str) -> bool {
+    matches!(c, Category::ProductStructure | Category::Appearance)
+        || name == "REPRESENTATION"
+        || (name.ends_with("_REPRESENTATION") && !name.contains("RELATIONSHIP"))
+}
+
+fn find(parent: &mut [u32], mut x: u32) -> u32 {
+    while parent[x as usize] != x {
+        let up = parent[parent[x as usize] as usize];
+        parent[x as usize] = up;
+        x = up;
+    }
+    x
+}
+
+impl Census {
+    /// The census of `file`, decoded one instance at a time (in
+    /// parallel, as [`crate::schema::Entities::decode_counted`] does).
+    pub fn of(file: &File) -> Census {
+        use rayon::prelude::*;
+        let ids: Vec<u64> = file.instances.iter().map(|i| i.id).collect();
+        let seen: Vec<Seen<'_>> = file
+            .instances
+            .par_iter()
+            .with_min_len(256)
+            .map(|i| seen(i, &ids))
+            .collect();
+        Census::from_seen(ids, seen)
+    }
+
+    /// The census of instances `ids` as `seen`, in order: names
+    /// interned, the graph laid out, properties' representations given
+    /// their category, and components found. Sequential, so the same on
+    /// any number of threads.
+    pub(crate) fn from_seen(ids: Vec<u64>, seen: Vec<Seen<'_>>) -> Census {
+        let n = ids.len();
+        let mut lookup: HashMap<String, u32> = HashMap::new();
+        let mut names: Vec<Box<str>> = Vec::new();
+        let mut name = Vec::with_capacity(n);
+        let mut category = Vec::with_capacity(n);
+        let mut offsets = Vec::with_capacity(n + 1);
+        let mut targets = Vec::new();
+        offsets.push(0u32);
+        for s in &seen {
+            let k = match lookup.get(s.name.as_ref()) {
+                Some(&k) => k,
+                None => {
+                    let k = names.len() as u32;
+                    names.push(s.name.as_ref().into());
+                    lookup.insert(s.name.to_string(), k);
+                    k
+                }
+            };
+            name.push(k);
+            category.push(s.category);
+            targets.extend_from_slice(&s.refs);
+            offsets.push(targets.len() as u32);
+        }
+        drop(seen);
+        let out = |k: usize| offsets[k] as usize..offsets[k + 1] as usize;
+        // A property's representation, and that representation's
+        // property and geometry items, are what the property is about.
+        if let (Some(&pdr), Some(&pd)) = (
+            lookup.get("PROPERTY_DEFINITION_REPRESENTATION"),
+            lookup.get("PROPERTY_DEFINITION"),
+        ) {
+            for k in 0..n {
+                if name[k] != pdr {
+                    continue;
+                }
+                let refs = &targets[out(k)];
+                let Some(&def) = refs.iter().find(|&&t| name[t as usize] == pd) else {
+                    continue;
+                };
+                let c = category[def as usize];
+                if c == Category::Properties {
+                    continue;
+                }
+                category[k] = c;
+                for &rep in refs.iter().filter(|&&t| t != def) {
+                    category[rep as usize] = c;
+                    for &item in &targets[out(rep as usize)] {
+                        if matches!(
+                            category[item as usize],
+                            Category::Properties | Category::Geometry
+                        ) {
+                            category[item as usize] = c;
+                        }
+                    }
+                }
+            }
+        }
+        // Weakly connected components, by union and find.
+        let mut parent: Vec<u32> = (0..n as u32).collect();
+        for k in 0..n {
+            for &t in &targets[out(k)] {
+                let (a, b) = (find(&mut parent, k as u32), find(&mut parent, t));
+                if a != b {
+                    parent[a.max(b) as usize] = a.min(b);
+                }
+            }
+        }
+        let mut root_anchored = vec![false; n];
+        for k in 0..n {
+            if is_anchor(category[k], &names[name[k] as usize]) {
+                let r = find(&mut parent, k as u32);
+                root_anchored[r as usize] = true;
+            }
+        }
+        let mut anchored = Vec::with_capacity(n);
+        for k in 0..n {
+            let r = find(&mut parent, k as u32);
+            anchored.push(root_anchored[r as usize]);
+        }
+        Census {
+            ids,
+            names,
+            name,
+            category,
+            offsets,
+            targets,
+            anchored,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    fn index(&self, id: u64) -> Option<usize> {
+        self.ids.binary_search(&id).ok()
+    }
+
+    /// The instances instance `k` (an index) refers to, as indices.
+    fn out(&self, k: usize) -> &[u32] {
+        &self.targets[self.offsets[k] as usize..self.offsets[k + 1] as usize]
+    }
+
+    /// Instance `id`'s category.
+    pub fn category_at(&self, id: u64) -> Option<Category> {
+        self.index(id).map(|k| self.category[k])
+    }
+
+    /// Instance `id`'s entity name ([`joined`] for a complex one).
+    pub fn name_at(&self, id: u64) -> Option<&str> {
+        self.index(id).map(|k| &*self.names[self.name[k] as usize])
+    }
+
+    /// Whether instance `id`'s component holds an anchor.
+    pub fn anchored_at(&self, id: u64) -> Option<bool> {
+        self.index(id).map(|k| self.anchored[k])
+    }
+
+    /// Every instance counted by category and entity name, in category
+    /// order then by name.
+    pub fn counts(&self) -> Vec<(Category, &str, u64)> {
+        let mut m: std::collections::BTreeMap<(Category, &str), u64> = Default::default();
+        for k in 0..self.len() {
+            *m.entry((self.category[k], &*self.names[self.name[k] as usize]))
+                .or_default() += 1;
+        }
+        m.into_iter().map(|((c, n), k)| (c, n, k)).collect()
+    }
+}
+
 /// Entity names and their categories, sorted by name. ISO 10303-42, -43,
 /// -41, -46, -47 and -242's names, and CAx-IF's recommended practices'.
 const TABLE: &[(&str, Category)] = &[
@@ -162,15 +394,27 @@ const TABLE: &[(&str, Category)] = &[
     ("ANNOTATION_PLANE", Category::Pmi),
     ("ANNOTATION_TEXT_OCCURRENCE", Category::Pmi),
     ("APPLICATION_CONTEXT", Category::ProductStructure),
-    ("APPLICATION_PROTOCOL_DEFINITION", Category::ProductStructure),
+    (
+        "APPLICATION_PROTOCOL_DEFINITION",
+        Category::ProductStructure,
+    ),
     ("APPLIED_APPROVAL_ASSIGNMENT", Category::Management),
     ("APPLIED_DATE_AND_TIME_ASSIGNMENT", Category::Management),
     ("APPLIED_DATE_ASSIGNMENT", Category::Management),
     ("APPLIED_DOCUMENT_REFERENCE", Category::ExternalReferences),
-    ("APPLIED_EXTERNAL_IDENTIFICATION_ASSIGNMENT", Category::ExternalReferences),
+    (
+        "APPLIED_EXTERNAL_IDENTIFICATION_ASSIGNMENT",
+        Category::ExternalReferences,
+    ),
     ("APPLIED_ORGANIZATION_ASSIGNMENT", Category::Management),
-    ("APPLIED_PERSON_AND_ORGANIZATION_ASSIGNMENT", Category::Management),
-    ("APPLIED_SECURITY_CLASSIFICATION_ASSIGNMENT", Category::Management),
+    (
+        "APPLIED_PERSON_AND_ORGANIZATION_ASSIGNMENT",
+        Category::Management,
+    ),
+    (
+        "APPLIED_SECURITY_CLASSIFICATION_ASSIGNMENT",
+        Category::Management,
+    ),
     ("APPROVAL", Category::Management),
     ("APPROVAL_DATE_TIME", Category::Management),
     ("APPROVAL_PERSON_ORGANIZATION", Category::Management),
@@ -204,7 +448,10 @@ const TABLE: &[(&str, Category)] = &[
     ("CC_DESIGN_CERTIFICATION", Category::Management),
     ("CC_DESIGN_CONTRACT", Category::Management),
     ("CC_DESIGN_DATE_AND_TIME_ASSIGNMENT", Category::Management),
-    ("CC_DESIGN_PERSON_AND_ORGANIZATION_ASSIGNMENT", Category::Management),
+    (
+        "CC_DESIGN_PERSON_AND_ORGANIZATION_ASSIGNMENT",
+        Category::Management,
+    ),
     ("CC_DESIGN_SECURITY_CLASSIFICATION", Category::Management),
     ("CENTRE_OF_SYMMETRY", Category::Pmi),
     ("CERTIFICATION", Category::Management),
@@ -230,10 +477,22 @@ const TABLE: &[(&str, Category)] = &[
     ("CONNECTED_EDGE_SET", Category::Topology),
     ("CONNECTED_FACE_SET", Category::Topology),
     ("CONSTRUCTIVE_GEOMETRY_REPRESENTATION", Category::Geometry),
-    ("CONSTRUCTIVE_GEOMETRY_REPRESENTATION_RELATIONSHIP", Category::Geometry),
-    ("CONTEXT_DEPENDENT_KINEMATIC_LINK_REPRESENTATION", Category::Kinematics),
-    ("CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM", Category::Appearance),
-    ("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION", Category::ProductStructure),
+    (
+        "CONSTRUCTIVE_GEOMETRY_REPRESENTATION_RELATIONSHIP",
+        Category::Geometry,
+    ),
+    (
+        "CONTEXT_DEPENDENT_KINEMATIC_LINK_REPRESENTATION",
+        Category::Kinematics,
+    ),
+    (
+        "CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM",
+        Category::Appearance,
+    ),
+    (
+        "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION",
+        Category::ProductStructure,
+    ),
     ("CONTEXT_DEPENDENT_UNIT", Category::Units),
     ("CONTRACT", Category::Management),
     ("CONVERSION_BASED_UNIT", Category::Units),
@@ -281,13 +540,19 @@ const TABLE: &[(&str, Category)] = &[
     ("DRAUGHTING_CALLOUT", Category::Pmi),
     ("DRAUGHTING_MODEL", Category::Pmi),
     ("DRAUGHTING_MODEL_ITEM_ASSOCIATION", Category::Pmi),
-    ("DRAUGHTING_MODEL_ITEM_ASSOCIATION_WITH_PLACEHOLDER", Category::Pmi),
+    (
+        "DRAUGHTING_MODEL_ITEM_ASSOCIATION_WITH_PLACEHOLDER",
+        Category::Pmi,
+    ),
     ("DRAUGHTING_PRE_DEFINED_COLOUR", Category::Appearance),
     ("DRAUGHTING_PRE_DEFINED_CURVE_FONT", Category::Appearance),
     ("DRAUGHTING_PRE_DEFINED_TEXT_FONT", Category::Appearance),
     ("EDGE", Category::Topology),
     ("EDGE_BASED_WIREFRAME_MODEL", Category::Topology),
-    ("EDGE_BASED_WIREFRAME_SHAPE_REPRESENTATION", Category::Geometry),
+    (
+        "EDGE_BASED_WIREFRAME_SHAPE_REPRESENTATION",
+        Category::Geometry,
+    ),
     ("EDGE_CURVE", Category::Topology),
     ("EDGE_LOOP", Category::Topology),
     ("ELEMENTARY_SURFACE", Category::Geometry),
@@ -308,8 +573,14 @@ const TABLE: &[(&str, Category)] = &[
     ("GENERAL_PROPERTY", Category::Properties),
     ("GENERAL_PROPERTY_ASSOCIATION", Category::Properties),
     ("GENERAL_PROPERTY_RELATIONSHIP", Category::Properties),
-    ("GEOMETRICALLY_BOUNDED_SURFACE_SHAPE_REPRESENTATION", Category::Geometry),
-    ("GEOMETRICALLY_BOUNDED_WIREFRAME_SHAPE_REPRESENTATION", Category::Geometry),
+    (
+        "GEOMETRICALLY_BOUNDED_SURFACE_SHAPE_REPRESENTATION",
+        Category::Geometry,
+    ),
+    (
+        "GEOMETRICALLY_BOUNDED_WIREFRAME_SHAPE_REPRESENTATION",
+        Category::Geometry,
+    ),
     ("GEOMETRIC_CURVE_SET", Category::Geometry),
     ("GEOMETRIC_ITEM_SPECIFIC_USAGE", Category::Pmi),
     ("GEOMETRIC_REPRESENTATION_CONTEXT", Category::Units),
@@ -330,17 +601,26 @@ const TABLE: &[(&str, Category)] = &[
     ("KINEMATIC_GROUND_REPRESENTATION", Category::Kinematics),
     ("KINEMATIC_JOINT", Category::Kinematics),
     ("KINEMATIC_LINK", Category::Kinematics),
-    ("KINEMATIC_LINK_REPRESENTATION_ASSOCIATION", Category::Kinematics),
+    (
+        "KINEMATIC_LINK_REPRESENTATION_ASSOCIATION",
+        Category::Kinematics,
+    ),
     ("KINEMATIC_PAIR", Category::Kinematics),
     ("KINEMATIC_PATH", Category::Kinematics),
-    ("KINEMATIC_PROPERTY_DEFINITION_REPRESENTATION", Category::Kinematics),
+    (
+        "KINEMATIC_PROPERTY_DEFINITION_REPRESENTATION",
+        Category::Kinematics,
+    ),
     ("KINEMATIC_TOPOLOGY_STRUCTURE", Category::Kinematics),
     ("LENGTH_MEASURE_WITH_UNIT", Category::Units),
     ("LENGTH_UNIT", Category::Units),
     ("LIMITS_AND_FITS", Category::Pmi),
     ("LINE", Category::Geometry),
     ("LINE_PROFILE_TOLERANCE", Category::Pmi),
-    ("LINK_MOTION_REPRESENTATION_ALONG_PATH", Category::Kinematics),
+    (
+        "LINK_MOTION_REPRESENTATION_ALONG_PATH",
+        Category::Kinematics,
+    ),
     ("LOCAL_TIME", Category::Management),
     ("LOOP", Category::Topology),
     ("MANIFOLD_SOLID_BREP", Category::Topology),
@@ -356,13 +636,22 @@ const TABLE: &[(&str, Category)] = &[
     ("MEASURE_REPRESENTATION_ITEM", Category::Properties),
     ("MEASURE_WITH_UNIT", Category::Units),
     ("MECHANICAL_CONTEXT", Category::ProductStructure),
-    ("MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_AREA", Category::Appearance),
-    ("MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION", Category::Appearance),
+    (
+        "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_AREA",
+        Category::Appearance,
+    ),
+    (
+        "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION",
+        Category::Appearance,
+    ),
     ("MECHANISM_REPRESENTATION", Category::Kinematics),
     ("MECHANISM_STATE_REPRESENTATION", Category::Kinematics),
     ("NAMED_UNIT", Category::Units),
     ("NEXT_ASSEMBLY_USAGE_OCCURRENCE", Category::ProductStructure),
-    ("NON_MANIFOLD_SURFACE_SHAPE_REPRESENTATION", Category::Geometry),
+    (
+        "NON_MANIFOLD_SURFACE_SHAPE_REPRESENTATION",
+        Category::Geometry,
+    ),
     ("OBJECT_ROLE", Category::ExternalReferences),
     ("OFFSET_CURVE_2D", Category::Geometry),
     ("OFFSET_CURVE_3D", Category::Geometry),
@@ -417,10 +706,16 @@ const TABLE: &[(&str, Category)] = &[
     ("PRODUCT_DEFINITION", Category::ProductStructure),
     ("PRODUCT_DEFINITION_CONTEXT", Category::ProductStructure),
     ("PRODUCT_DEFINITION_FORMATION", Category::ProductStructure),
-    ("PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE", Category::ProductStructure),
+    (
+        "PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE",
+        Category::ProductStructure,
+    ),
     ("PRODUCT_DEFINITION_SHAPE", Category::ProductStructure),
     ("PRODUCT_DEFINITION_USAGE", Category::ProductStructure),
-    ("PRODUCT_DEFINITION_WITH_ASSOCIATED_DOCUMENTS", Category::ProductStructure),
+    (
+        "PRODUCT_DEFINITION_WITH_ASSOCIATED_DOCUMENTS",
+        Category::ProductStructure,
+    ),
     ("PRODUCT_RELATED_PRODUCT_CATEGORY", Category::Management),
     ("PROJECTED_ZONE_DEFINITION", Category::Pmi),
     ("PROPERTY_DEFINITION", Category::Properties),
@@ -440,7 +735,10 @@ const TABLE: &[(&str, Category)] = &[
     ("REPRESENTATION_ITEM", Category::Geometry),
     ("REPRESENTATION_MAP", Category::Geometry),
     ("REPRESENTATION_RELATIONSHIP", Category::ProductStructure),
-    ("REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION", Category::ProductStructure),
+    (
+        "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION",
+        Category::ProductStructure,
+    ),
     ("REVOLUTE_PAIR", Category::Kinematics),
     ("ROLE_ASSOCIATION", Category::ExternalReferences),
     ("ROUNDNESS_TOLERANCE", Category::Pmi),
@@ -450,14 +748,23 @@ const TABLE: &[(&str, Category)] = &[
     ("SECURITY_CLASSIFICATION_LEVEL", Category::Management),
     ("SHAPE_ASPECT", Category::Pmi),
     ("SHAPE_ASPECT_RELATIONSHIP", Category::Pmi),
-    ("SHAPE_DEFINITION_REPRESENTATION", Category::ProductStructure),
+    (
+        "SHAPE_DEFINITION_REPRESENTATION",
+        Category::ProductStructure,
+    ),
     ("SHAPE_DIMENSION_REPRESENTATION", Category::Pmi),
     ("SHAPE_REPRESENTATION", Category::Geometry),
-    ("SHAPE_REPRESENTATION_RELATIONSHIP", Category::ProductStructure),
+    (
+        "SHAPE_REPRESENTATION_RELATIONSHIP",
+        Category::ProductStructure,
+    ),
     ("SHAPE_REPRESENTATION_WITH_PARAMETERS", Category::Geometry),
     ("SHELL_BASED_SURFACE_MODEL", Category::Topology),
     ("SHELL_BASED_WIREFRAME_MODEL", Category::Topology),
-    ("SHELL_BASED_WIREFRAME_SHAPE_REPRESENTATION", Category::Geometry),
+    (
+        "SHELL_BASED_WIREFRAME_SHAPE_REPRESENTATION",
+        Category::Geometry,
+    ),
     ("SI_UNIT", Category::Units),
     ("SOLID_ANGLE_MEASURE_WITH_UNIT", Category::Units),
     ("SOLID_ANGLE_UNIT", Category::Units),
@@ -478,10 +785,19 @@ const TABLE: &[(&str, Category)] = &[
     ("SURFACE_STYLE_FILL_AREA", Category::Appearance),
     ("SURFACE_STYLE_PARAMETER_LINE", Category::Appearance),
     ("SURFACE_STYLE_REFLECTANCE_AMBIENT", Category::Appearance),
-    ("SURFACE_STYLE_REFLECTANCE_AMBIENT_DIFFUSE", Category::Appearance),
-    ("SURFACE_STYLE_REFLECTANCE_AMBIENT_DIFFUSE_SPECULAR", Category::Appearance),
+    (
+        "SURFACE_STYLE_REFLECTANCE_AMBIENT_DIFFUSE",
+        Category::Appearance,
+    ),
+    (
+        "SURFACE_STYLE_REFLECTANCE_AMBIENT_DIFFUSE_SPECULAR",
+        Category::Appearance,
+    ),
     ("SURFACE_STYLE_RENDERING", Category::Appearance),
-    ("SURFACE_STYLE_RENDERING_WITH_PROPERTIES", Category::Appearance),
+    (
+        "SURFACE_STYLE_RENDERING_WITH_PROPERTIES",
+        Category::Appearance,
+    ),
     ("SURFACE_STYLE_SEGMENTATION_CURVE", Category::Appearance),
     ("SURFACE_STYLE_SILHOUETTE", Category::Appearance),
     ("SURFACE_STYLE_TRANSPARENT", Category::Appearance),
@@ -537,14 +853,29 @@ mod tests {
 
     #[test]
     fn the_table_is_sorted_and_the_names_are_stable() {
-        assert!(TABLE.windows(2).all(|w| w[0].0 < w[1].0), "sorted, no duplicates");
+        assert!(
+            TABLE.windows(2).all(|w| w[0].0 < w[1].0),
+            "sorted, no duplicates"
+        );
         let names: Vec<&str> = Category::ALL.iter().map(|c| c.as_str()).collect();
         assert_eq!(
             names,
             [
-                "geometry", "topology", "product_structure", "units", "appearance", "layers",
-                "properties", "materials", "pmi", "validation", "external_references",
-                "management", "tessellated", "kinematics", "unknown"
+                "geometry",
+                "topology",
+                "product_structure",
+                "units",
+                "appearance",
+                "layers",
+                "properties",
+                "materials",
+                "pmi",
+                "validation",
+                "external_references",
+                "management",
+                "tessellated",
+                "kinematics",
+                "unknown"
             ]
         );
     }
@@ -554,130 +885,136 @@ mod tests {
     #[test]
     fn every_name_the_decoder_types_has_a_category() {
         const DECODED: &[&str] = &[
-                    "ADVANCED_BREP_SHAPE_REPRESENTATION",
-                    "ADVANCED_FACE",
-                    "APPLICATION_CONTEXT",
-                    "AXIS1_PLACEMENT",
-                    "AXIS2_PLACEMENT_2D",
-                    "AXIS2_PLACEMENT_3D",
-                    "BEZIER_CURVE",
-                    "BEZIER_SURFACE",
-                    "BOUNDARY_CURVE",
-                    "BREP_WITH_VOIDS",
-                    "B_SPLINE_CURVE",
-                    "B_SPLINE_CURVE_WITH_KNOTS",
-                    "B_SPLINE_SURFACE",
-                    "B_SPLINE_SURFACE_WITH_KNOTS",
-                    "CARTESIAN_POINT",
-                    "CARTESIAN_TRANSFORMATION_OPERATOR_3D",
-                    "CIRCLE",
-                    "CLOSED_SHELL",
-                    "COMPOSITE_CURVE",
-                    "COMPOSITE_CURVE_ON_SURFACE",
-                    "COMPOSITE_CURVE_SEGMENT",
-                    "CONICAL_SURFACE",
-                    "CONNECTED_FACE_SET",
-                    "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION",
-                    "CONVERSION_BASED_UNIT",
-                    "CURVE",
-                    "CYLINDRICAL_SURFACE",
-                    "DEFINITIONAL_REPRESENTATION",
-                    "DEGENERATE_TOROIDAL_SURFACE",
-                    "DIRECTION",
-                    "EDGE_BASED_WIREFRAME_SHAPE_REPRESENTATION",
-                    "EDGE_CURVE",
-                    "EDGE_LOOP",
-                    "ELLIPSE",
-                    "FACE",
-                    "FACETED_BREP",
-                    "FACETED_BREP_SHAPE_REPRESENTATION",
-                    "FACE_BASED_SURFACE_MODEL",
-                    "FACE_BOUND",
-                    "FACE_OUTER_BOUND",
-                    "FACE_SURFACE",
-                    "GEOMETRICALLY_BOUNDED_SURFACE_SHAPE_REPRESENTATION",
-                    "GEOMETRICALLY_BOUNDED_WIREFRAME_SHAPE_REPRESENTATION",
-                    "GEOMETRIC_REPRESENTATION_CONTEXT",
-                    "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT",
-                    "GLOBAL_UNIT_ASSIGNED_CONTEXT",
-                    "HYPERBOLA",
-                    "INTERSECTION_CURVE",
-                    "ITEM_DEFINED_TRANSFORMATION",
-                    "LENGTH_MEASURE_WITH_UNIT",
-                    "LENGTH_UNIT",
-                    "LINE",
-                    "MANIFOLD_SOLID_BREP",
-                    "MANIFOLD_SURFACE_SHAPE_REPRESENTATION",
-                    "MAPPED_ITEM",
-                    "MEASURE_WITH_UNIT",
-                    "NAMED_UNIT",
-                    "NEXT_ASSEMBLY_USAGE_OCCURRENCE",
-                    "NON_MANIFOLD_SURFACE_SHAPE_REPRESENTATION",
-                    "OFFSET_CURVE_2D",
-                    "OFFSET_CURVE_3D",
-                    "OFFSET_SURFACE",
-                    "OPEN_SHELL",
-                    "ORIENTED_CLOSED_SHELL",
-                    "ORIENTED_EDGE",
-                    "ORIENTED_FACE",
-                    "ORIENTED_OPEN_SHELL",
-                    "OUTER_BOUNDARY_CURVE",
-                    "PARABOLA",
-                    "PCURVE",
-                    "PLANE",
-                    "PLANE_ANGLE_MEASURE_WITH_UNIT",
-                    "PLANE_ANGLE_UNIT",
-                    "POLYLINE",
-                    "POLY_LOOP",
-                    "PRODUCT",
-                    "PRODUCT_DEFINITION",
-                    "PRODUCT_DEFINITION_FORMATION",
-                    "PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE",
-                    "PRODUCT_DEFINITION_SHAPE",
-                    "PRODUCT_DEFINITION_WITH_ASSOCIATED_DOCUMENTS",
-                    "QUASI_UNIFORM_CURVE",
-                    "QUASI_UNIFORM_SURFACE",
-                    "RATIONAL_B_SPLINE_CURVE",
-                    "RATIONAL_B_SPLINE_SURFACE",
-                    "RECTANGULAR_TRIMMED_SURFACE",
-                    "REPARAMETRISED_COMPOSITE_CURVE_SEGMENT",
-                    "REPRESENTATION",
-                    "REPRESENTATION_CONTEXT",
-                    "REPRESENTATION_MAP",
-                    "REPRESENTATION_RELATIONSHIP",
-                    "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION",
-                    "SEAM_CURVE",
-                    "SHAPE_DEFINITION_REPRESENTATION",
-                    "SHAPE_REPRESENTATION",
-                    "SHAPE_REPRESENTATION_RELATIONSHIP",
-                    "SHAPE_REPRESENTATION_WITH_PARAMETERS",
-                    "SHELL_BASED_SURFACE_MODEL",
-                    "SHELL_BASED_WIREFRAME_SHAPE_REPRESENTATION",
-                    "SI_UNIT",
-                    "SOLID_ANGLE_UNIT",
-                    "SPHERICAL_SURFACE",
-                    "SURFACE",
-                    "SURFACE_CURVE",
-                    "SURFACE_OF_LINEAR_EXTRUSION",
-                    "SURFACE_OF_REVOLUTION",
-                    "TESSELLATED_SHAPE_REPRESENTATION",
-                    "TOROIDAL_SURFACE",
-                    "TRIMMED_CURVE",
-                    "UNCERTAINTY_MEASURE_WITH_UNIT",
-                    "UNIFORM_CURVE",
-                    "UNIFORM_SURFACE",
-                    "VECTOR",
-                    "VERTEX_LOOP",
-                    "VERTEX_POINT",
-                ];
+            "ADVANCED_BREP_SHAPE_REPRESENTATION",
+            "ADVANCED_FACE",
+            "APPLICATION_CONTEXT",
+            "AXIS1_PLACEMENT",
+            "AXIS2_PLACEMENT_2D",
+            "AXIS2_PLACEMENT_3D",
+            "BEZIER_CURVE",
+            "BEZIER_SURFACE",
+            "BOUNDARY_CURVE",
+            "BREP_WITH_VOIDS",
+            "B_SPLINE_CURVE",
+            "B_SPLINE_CURVE_WITH_KNOTS",
+            "B_SPLINE_SURFACE",
+            "B_SPLINE_SURFACE_WITH_KNOTS",
+            "CARTESIAN_POINT",
+            "CARTESIAN_TRANSFORMATION_OPERATOR_3D",
+            "CIRCLE",
+            "CLOSED_SHELL",
+            "COMPOSITE_CURVE",
+            "COMPOSITE_CURVE_ON_SURFACE",
+            "COMPOSITE_CURVE_SEGMENT",
+            "CONICAL_SURFACE",
+            "CONNECTED_FACE_SET",
+            "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION",
+            "CONVERSION_BASED_UNIT",
+            "CURVE",
+            "CYLINDRICAL_SURFACE",
+            "DEFINITIONAL_REPRESENTATION",
+            "DEGENERATE_TOROIDAL_SURFACE",
+            "DIRECTION",
+            "EDGE_BASED_WIREFRAME_SHAPE_REPRESENTATION",
+            "EDGE_CURVE",
+            "EDGE_LOOP",
+            "ELLIPSE",
+            "FACE",
+            "FACETED_BREP",
+            "FACETED_BREP_SHAPE_REPRESENTATION",
+            "FACE_BASED_SURFACE_MODEL",
+            "FACE_BOUND",
+            "FACE_OUTER_BOUND",
+            "FACE_SURFACE",
+            "GEOMETRICALLY_BOUNDED_SURFACE_SHAPE_REPRESENTATION",
+            "GEOMETRICALLY_BOUNDED_WIREFRAME_SHAPE_REPRESENTATION",
+            "GEOMETRIC_REPRESENTATION_CONTEXT",
+            "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT",
+            "GLOBAL_UNIT_ASSIGNED_CONTEXT",
+            "HYPERBOLA",
+            "INTERSECTION_CURVE",
+            "ITEM_DEFINED_TRANSFORMATION",
+            "LENGTH_MEASURE_WITH_UNIT",
+            "LENGTH_UNIT",
+            "LINE",
+            "MANIFOLD_SOLID_BREP",
+            "MANIFOLD_SURFACE_SHAPE_REPRESENTATION",
+            "MAPPED_ITEM",
+            "MEASURE_WITH_UNIT",
+            "NAMED_UNIT",
+            "NEXT_ASSEMBLY_USAGE_OCCURRENCE",
+            "NON_MANIFOLD_SURFACE_SHAPE_REPRESENTATION",
+            "OFFSET_CURVE_2D",
+            "OFFSET_CURVE_3D",
+            "OFFSET_SURFACE",
+            "OPEN_SHELL",
+            "ORIENTED_CLOSED_SHELL",
+            "ORIENTED_EDGE",
+            "ORIENTED_FACE",
+            "ORIENTED_OPEN_SHELL",
+            "OUTER_BOUNDARY_CURVE",
+            "PARABOLA",
+            "PCURVE",
+            "PLANE",
+            "PLANE_ANGLE_MEASURE_WITH_UNIT",
+            "PLANE_ANGLE_UNIT",
+            "POLYLINE",
+            "POLY_LOOP",
+            "PRODUCT",
+            "PRODUCT_DEFINITION",
+            "PRODUCT_DEFINITION_FORMATION",
+            "PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE",
+            "PRODUCT_DEFINITION_SHAPE",
+            "PRODUCT_DEFINITION_WITH_ASSOCIATED_DOCUMENTS",
+            "QUASI_UNIFORM_CURVE",
+            "QUASI_UNIFORM_SURFACE",
+            "RATIONAL_B_SPLINE_CURVE",
+            "RATIONAL_B_SPLINE_SURFACE",
+            "RECTANGULAR_TRIMMED_SURFACE",
+            "REPARAMETRISED_COMPOSITE_CURVE_SEGMENT",
+            "REPRESENTATION",
+            "REPRESENTATION_CONTEXT",
+            "REPRESENTATION_MAP",
+            "REPRESENTATION_RELATIONSHIP",
+            "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION",
+            "SEAM_CURVE",
+            "SHAPE_DEFINITION_REPRESENTATION",
+            "SHAPE_REPRESENTATION",
+            "SHAPE_REPRESENTATION_RELATIONSHIP",
+            "SHAPE_REPRESENTATION_WITH_PARAMETERS",
+            "SHELL_BASED_SURFACE_MODEL",
+            "SHELL_BASED_WIREFRAME_SHAPE_REPRESENTATION",
+            "SI_UNIT",
+            "SOLID_ANGLE_UNIT",
+            "SPHERICAL_SURFACE",
+            "SURFACE",
+            "SURFACE_CURVE",
+            "SURFACE_OF_LINEAR_EXTRUSION",
+            "SURFACE_OF_REVOLUTION",
+            "TESSELLATED_SHAPE_REPRESENTATION",
+            "TOROIDAL_SURFACE",
+            "TRIMMED_CURVE",
+            "UNCERTAINTY_MEASURE_WITH_UNIT",
+            "UNIFORM_CURVE",
+            "UNIFORM_SURFACE",
+            "VECTOR",
+            "VERTEX_LOOP",
+            "VERTEX_POINT",
+        ];
         for n in DECODED {
             assert_ne!(category_of(n), Unknown, "{n}");
         }
         for n in [
-            "DOCUMENT", "DOCUMENT_FILE", "DOCUMENT_TYPE", "DOCUMENT_REPRESENTATION_TYPE",
-            "APPLIED_DOCUMENT_REFERENCE", "DOCUMENT_PRODUCT_EQUIVALENCE",
-            "APPLIED_EXTERNAL_IDENTIFICATION_ASSIGNMENT", "PROPERTY_DEFINITION",
-            "PROPERTY_DEFINITION_REPRESENTATION", "DESCRIPTIVE_REPRESENTATION_ITEM",
+            "DOCUMENT",
+            "DOCUMENT_FILE",
+            "DOCUMENT_TYPE",
+            "DOCUMENT_REPRESENTATION_TYPE",
+            "APPLIED_DOCUMENT_REFERENCE",
+            "DOCUMENT_PRODUCT_EQUIVALENCE",
+            "APPLIED_EXTERNAL_IDENTIFICATION_ASSIGNMENT",
+            "PROPERTY_DEFINITION",
+            "PROPERTY_DEFINITION_REPRESENTATION",
+            "DESCRIPTIVE_REPRESENTATION_ITEM",
         ] {
             assert_ne!(category_of(n), Unknown, "{n}");
         }
@@ -699,11 +1036,103 @@ mod tests {
               ENDSEC;END-ISO-10303-21;",
         )
         .unwrap();
-        let c: Vec<Category> = f.instances.iter().map(|i| category_of_record(&i.record)).collect();
+        let c: Vec<Category> = f
+            .instances
+            .iter()
+            .map(|i| category_of_record(&i.record))
+            .collect();
         assert_eq!(
             c,
-            [Units, Geometry, Pmi, Properties, Validation, Properties, Materials, Unknown, Geometry]
+            [
+                Units, Geometry, Pmi, Properties, Validation, Properties, Materials, Unknown,
+                Geometry
+            ]
         );
-        assert_eq!(joined(f.instances[0].record.parts()), "LENGTH_UNIT NAMED_UNIT SI_UNIT");
+        assert_eq!(
+            joined(f.instances[0].record.parts()),
+            "LENGTH_UNIT NAMED_UNIT SI_UNIT"
+        );
+    }
+
+    /// A product with a shape, a stray point, an approval of the
+    /// definition and a validation property of its shape.
+    const SMALL: &[u8] = b"ISO-10303-21;HEADER;FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));ENDSEC;DATA;\
+        #1=APPLICATION_CONTEXT('');\
+        #2=PRODUCT_CONTEXT('',#1,'');\
+        #3=PRODUCT('P','P','',(#2));\
+        #4=PRODUCT_DEFINITION_FORMATION('','',#3);\
+        #5=PRODUCT_DEFINITION_CONTEXT('',#1,'');\
+        #6=PRODUCT_DEFINITION('design','',#4,#5);\
+        #7=PRODUCT_DEFINITION_SHAPE('','',#6);\
+        #8=SHAPE_DEFINITION_REPRESENTATION(#7,#9);\
+        #9=SHAPE_REPRESENTATION('',(#10),#11);\
+        #10=AXIS2_PLACEMENT_3D('',#12,$,$);\
+        #11=REPRESENTATION_CONTEXT('','');\
+        #12=CARTESIAN_POINT('',(0.,0.,0.));\
+        #13=CARTESIAN_POINT('stray',(1.,0.,0.));\
+        #14=APPROVAL(#15,'');\
+        #15=APPROVAL_STATUS('approved');\
+        #16=CC_DESIGN_APPROVAL(#14,(#6));\
+        #17=PROPERTY_DEFINITION('geometric validation property','volume',#7);\
+        #18=PROPERTY_DEFINITION_REPRESENTATION(#17,#19);\
+        #19=REPRESENTATION('volume',(#20),#11);\
+        #20=MEASURE_REPRESENTATION_ITEM('volume measure',VOLUME_MEASURE(1.),#21);\
+        #21=DIMENSIONAL_EXPONENTS(3.,0.,0.,0.,0.,0.,0.);\
+        ENDSEC;END-ISO-10303-21;";
+
+    #[test]
+    fn instances_are_named_categorised_and_anchored() {
+        let f = parse(SMALL).unwrap();
+        let (e, c) = crate::schema::Entities::decode_counted(&f);
+        assert_eq!(
+            e,
+            crate::schema::Entities::decode(&f),
+            "decoding doesn't change"
+        );
+        assert_eq!(c.len(), 21);
+        let cat = |id| c.category_at(id).unwrap();
+        for id in 1..=8 {
+            assert_eq!(cat(id), ProductStructure, "#{id}");
+        }
+        assert_eq!(
+            [cat(9), cat(10), cat(11), cat(12), cat(13)],
+            [Geometry, Geometry, Units, Geometry, Geometry]
+        );
+        assert_eq!([cat(14), cat(15), cat(16)], [Management; 3]);
+        // The property's representation and its item take its category;
+        // the item's unit and the context don't.
+        assert_eq!(
+            [cat(17), cat(18), cat(19), cat(20), cat(21)],
+            [Validation, Validation, Validation, Validation, Units]
+        );
+        assert_eq!(c.name_at(13), Some("CARTESIAN_POINT"));
+        for id in 1..=21 {
+            assert_eq!(c.anchored_at(id), Some(id != 13), "#{id}");
+        }
+        assert_eq!(c.category_at(99), None);
+    }
+
+    #[test]
+    fn the_census_is_the_same_on_one_thread_and_many() {
+        let mut data = String::from("#1=CARTESIAN_POINT('',(0.,0.,0.));");
+        for k in 2..=3000 {
+            data.push_str(&format!("#{k}=VERTEX_POINT('',#{});", k - 1));
+        }
+        let text = format!(
+            "ISO-10303-21;HEADER;FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));ENDSEC;DATA;{data}ENDSEC;END-ISO-10303-21;"
+        );
+        let f = parse(text.as_bytes()).unwrap();
+        let many = crate::schema::Entities::decode_counted(&f).1;
+        let one = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(|| crate::schema::Entities::decode_counted(&f).1);
+        assert_eq!(many, one);
+        assert_eq!(
+            many.anchored_at(1),
+            Some(false),
+            "no product, representation or style"
+        );
     }
 }

@@ -11,8 +11,8 @@
 //! It knows nothing of documents or projects: ryucad decides where a file
 //! comes from and what its bodies become.
 
-mod error;
 pub mod census;
+mod error;
 pub use ryu_part21 as part21;
 pub mod products;
 pub mod read;
