@@ -253,6 +253,21 @@ impl Names<'_> {
         Err(not_found("net", text, self.b))
     }
 
+    /// The bus `text` names (plan 2.C): `bus:<name or id>`, or a bus's
+    /// name: its key `bus:<id>`.
+    pub fn bus(&self, text: &str) -> Result<String> {
+        let want = text.strip_prefix("bus:").unwrap_or(text);
+        let buses = &self.built.input.buses;
+        if let Some(b) = buses.iter().find(|b| b.key == format!("bus:{want}")) {
+            return Ok(b.key.clone());
+        }
+        let named: Vec<&ryusch::input::Bus> = buses.iter().filter(|b| b.name == want).collect();
+        if let [one] = named.as_slice() {
+            return Ok(one.key.clone());
+        }
+        Err(not_found("bus", text, self.b))
+    }
+
     /// How a part key reads: a designator, a unit, an instance or a port.
     pub fn part_text(&self, key: &str) -> String {
         if key.starts_with("instance:") {
@@ -289,6 +304,23 @@ impl Names<'_> {
     pub fn net_text(&self, key: &str) -> String {
         if let Some(port) = key.strip_prefix("port:") {
             return self.part_text(&format!("port:{port}"));
+        }
+        // A bus by its name, `bus:` before it where a net has that name or
+        // the name doesn't read back as the bus (plan 2.C).
+        if key.starts_with("bus:") {
+            let input = &self.built.input;
+            return match input.buses.iter().find(|b| b.key == key) {
+                Some(b) => {
+                    let clash = input.nets.iter().any(|n| n.name == b.name)
+                        || self.bus(&b.name).ok().as_deref() != Some(key);
+                    if clash {
+                        format!("bus:{}", b.name)
+                    } else {
+                        b.name.clone()
+                    }
+                }
+                None => key.to_owned(),
+            };
         }
         match self.built.input.nets.iter().find(|n| n.key == key) {
             Some(n) if key.starts_with("rail:") => format!("rail:{}", n.name),
@@ -415,6 +447,7 @@ impl Names<'_> {
                     NetStyle::Wire => "wire",
                     NetStyle::Label => "label",
                     NetStyle::Port => "port",
+                    NetStyle::Bus => "bus",
                 }
             ),
             Instruction::Idiom { parts: l, kind } => format!(
@@ -463,6 +496,22 @@ impl Names<'_> {
                 side: s,
             } => {
                 format!("text {} {} {}", parts(l), field.as_str(), side(*s))
+            }
+            Instruction::Note { on, text } => {
+                // A region by its title where that names it back, a sheet
+                // by its ID.
+                let on = match on.strip_prefix("region:") {
+                    Some(id) => match &self.b.layout {
+                        Some(Ok(l)) => l
+                            .regions
+                            .get(id)
+                            .filter(|r| self.region(&r.title).ok().as_deref() == Some(id))
+                            .map_or_else(|| on.clone(), |r| r.title.clone()),
+                        _ => on.clone(),
+                    },
+                    None => on.clone(),
+                };
+                format!("note {} {}", Self::quote(&on), Self::quote(text))
             }
         }
     }
@@ -515,7 +564,8 @@ pub const FORMS: &[&str] = &[
     "edge X... left|right|top|bottom",
     "orient X... 0|90|180|270 [mirror]",
     "text X... refdes|value|both left|right|above|below",
-    "net N wire|label|port",
+    "net N wire|label|port|bus (a bus by its name or bus:NAME)",
+    "note REGION|SHEET TEXT (one line, up to 120 characters; {property} filled)",
     "idiom X... KIND|none",
     "flow X... reversed",
     "shift X... up|down|left|right STEPS (a move only)",
@@ -588,6 +638,39 @@ impl Names<'_> {
                     title: title.clone(),
                     parts: many(x)?,
                 }
+            }
+            "note" => {
+                let Some((on, words)) = rest.split_first() else {
+                    return Err(usage(text, "note REGION|SHEET TEXT"));
+                };
+                let note = words.join(" ");
+                if note.trim().is_empty()
+                    || note.chars().count() > ryusch::layout::NOTE_MAX
+                    || note.contains(['\n', '\r'])
+                {
+                    return Err(usage(
+                        text,
+                        "note REGION|SHEET TEXT (one line of 1 to 120 characters)",
+                    ));
+                }
+                let on = if let Some(id) = on.strip_prefix("region:") {
+                    format!("region:{}", self.region(id)?)
+                } else if let Ok(id) = self.region(on) {
+                    format!("region:{id}")
+                } else {
+                    // A sheet by its ID or its name; any other name is
+                    // kept as said, unresolved until a sheet takes it.
+                    match &self.b.layout {
+                        Some(Ok(l)) => l
+                            .sheets
+                            .iter()
+                            .find(|(id, x)| *id == on || x.name == *on)
+                            .map(|(id, _)| id.clone()),
+                        _ => None,
+                    }
+                    .unwrap_or_else(|| on.clone())
+                };
+                Instruction::Note { on, text: note }
             }
             "paper" => {
                 let (sheet, size, orientation) = match rest {
@@ -727,15 +810,30 @@ impl Names<'_> {
                 if rest.len() != 2 {
                     return Err(usage(text, form));
                 }
-                Instruction::Net {
-                    net: self.net(&rest[0])?,
-                    style: match rest[1].as_str() {
-                        "wire" => NetStyle::Wire,
-                        "label" => NetStyle::Label,
-                        "port" => NetStyle::Port,
-                        _ => return Err(usage(text, form)),
-                    },
+                let style = match rest[1].as_str() {
+                    "wire" => NetStyle::Wire,
+                    "label" => NetStyle::Label,
+                    "port" => NetStyle::Port,
+                    "bus" => NetStyle::Bus,
+                    _ => return Err(usage(text, form)),
+                };
+                // A net first; a bus by `bus:NAME`, or by its name where no
+                // net has it (plan 2.C).
+                let net = if rest[0].starts_with("bus:") {
+                    self.bus(&rest[0])?
+                } else {
+                    match self.net(&rest[0]) {
+                        Ok(n) => n,
+                        Err(e) => self.bus(&rest[0]).map_err(|_| e)?,
+                    }
+                };
+                if style == NetStyle::Bus && !net.starts_with("bus:") {
+                    return Err(usage(
+                        text,
+                        "net BUS bus: only a bus is drawn as one (bus:NAME)",
+                    ));
                 }
+                Instruction::Net { net, style }
             }
             "idiom" => {
                 let (x, t) = last(1)?;
@@ -815,5 +913,114 @@ mod tests {
         );
         assert!(words("sheet \"x").is_err());
         assert_eq!(words("  a  b ").unwrap(), ["a", "b"]);
+    }
+
+    #[test]
+    fn notes_read_on_regions_and_sheets_and_write_back() {
+        let (dir, _) = crate::netlist::tests::project(&[]);
+        let mut session = crate::session::Session::open(&dir.path().join("board")).unwrap();
+        crate::schemcmd::layout(&mut session, None, None, None, false, None, None).unwrap();
+        session.reload().unwrap();
+        let p = session.project();
+        let b = p
+            .conn
+            .block(&crate::id::Id::parse("top", "b").unwrap())
+            .unwrap();
+        let built = crate::schem::build(p, b).unwrap();
+        let names = Names {
+            p,
+            b,
+            built: &built,
+        };
+        let l = match &b.layout {
+            Some(Ok(l)) => l.clone(),
+            _ => panic!("laid out"),
+        };
+        let (rid, region) = l.regions.iter().next().expect("a region");
+        let sid = l.sheets.keys().next().unwrap().clone();
+        let quoted = format!("note {} \"Fused at 2 A\"", Names::quote(&region.title));
+        let Said::Do(i) = names.read(&quoted).unwrap() else {
+            panic!("an instruction")
+        };
+        assert_eq!(
+            i,
+            Instruction::Note {
+                on: format!("region:{rid}"),
+                text: "Fused at 2 A".into()
+            }
+        );
+        assert_eq!(names.text(&i), quoted);
+        // On a sheet, its words unquoted.
+        let Said::Do(i) = names.read(&format!("note {sid} Rev {{rev}}")).unwrap() else {
+            panic!("an instruction")
+        };
+        assert_eq!(
+            i,
+            Instruction::Note {
+                on: sid.clone(),
+                text: "Rev {rev}".into()
+            }
+        );
+        assert_eq!(names.text(&i), format!("note {sid} \"Rev {{rev}}\""));
+        // Too long, or empty: refused.
+        let long = "x".repeat(121);
+        assert_eq!(
+            names.read(&format!("note {sid} {long}")).unwrap_err().code,
+            Code::InvalidParam
+        );
+        assert_eq!(
+            names.read(&format!("note {sid}")).unwrap_err().code,
+            Code::InvalidParam
+        );
+    }
+
+    #[test]
+    fn a_bus_is_named_by_its_name_or_bus_name() {
+        use serde_json::json;
+        let (_dir, p) = crate::netlist::tests::project(&[
+            (
+                "blocks/top/block.json",
+                json!({"format": 1, "kind": crate::conn::BLOCK_KIND, "name": "Top",
+                    "buses": {"b1": {"name": "D", "nets": ["sda", "scl"]},
+                              "b2": {"name": "SDA", "nets": ["sda"]}}}),
+            ),
+            (
+                "blocks/top/nets/scl.json",
+                json!({"format": 1, "kind": crate::conn::NET_KIND, "name": "SCL"}),
+            ),
+        ]);
+        let b = p
+            .conn
+            .block(&crate::id::Id::parse("top", "b").unwrap())
+            .unwrap();
+        let built = crate::schem::build(&p, b).unwrap();
+        let names = Names {
+            p: &p,
+            b,
+            built: &built,
+        };
+        let read = |t: &str| match names.read(t) {
+            Ok(Said::Do(i)) => i,
+            other => panic!("{t}: {other:?}"),
+        };
+        let bus = |key: &str, style| Instruction::Net {
+            net: key.into(),
+            style,
+        };
+        assert_eq!(read("net D bus"), bus("bus:b1", NetStyle::Bus));
+        assert_eq!(read("net bus:D label"), bus("bus:b1", NetStyle::Label));
+        // A net and a bus of one name: the net, and the bus as bus:NAME.
+        assert_eq!(read("net SDA label"), bus("sda", NetStyle::Label));
+        assert_eq!(read("net bus:SDA bus"), bus("bus:b2", NetStyle::Bus));
+        let e = names.read("net SDA bus").unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        assert!(
+            e.message.contains("only a bus is drawn as one"),
+            "{}",
+            e.message
+        );
+        // Written back as read.
+        assert_eq!(names.text(&bus("bus:b1", NetStyle::Bus)), "net D bus");
+        assert_eq!(names.text(&bus("bus:b2", NetStyle::Bus)), "net bus:SDA bus");
     }
 }

@@ -291,6 +291,7 @@ pub fn net(key: &str, name: &str, kind: NetKind) -> Net {
         key: key.into(),
         name: name.into(),
         kind,
+        intent: String::new(),
     }
 }
 
@@ -327,6 +328,9 @@ pub fn seeded(seed: u64, ics: usize) -> Block {
     let mut parts = Vec::new();
     let mut signals: Vec<usize> = Vec::new();
     let mut conn_nets = vec![vcc, gnd];
+    // The first two ICs' sides, for a bus between them (plan 2.C).
+    type PinList<'a> = Vec<(&'a str, PinKind, Option<usize>)>;
+    let mut sides: Vec<(usize, PinList, PinList)> = Vec::new();
     for i in 0..ics {
         let ins = 2 + rng.below(4) as usize;
         let outs = 1 + rng.below(4) as usize;
@@ -369,6 +373,9 @@ pub fn seeded(seed: u64, ics: usize) -> Block {
             ));
             conn_nets.push(Some(n));
         }
+        if i < 2 {
+            sides.push((parts.len(), left.clone(), right.clone()));
+        }
         parts.push(ic(
             &format!("u{i}"),
             &format!("U{}", i + 1),
@@ -385,11 +392,45 @@ pub fn seeded(seed: u64, ics: usize) -> Block {
     }
     conn_nets.truncate(12);
     parts.push(connector("j1", "J1", &conn_nets));
+    // Every fifth seed of two ICs or more: a bus of four nets from the
+    // first IC's right to the second's left (plan 2.C), drawn after the
+    // rest, so other seeds keep their bits.
+    let mut buses = Vec::new();
+    if seed.is_multiple_of(5) && sides.len() == 2 {
+        let first = nets.len();
+        for k in 0..4 {
+            nets.push(net(&format!("d{k}"), &format!("DATA{k}"), NetKind::Signal));
+        }
+        let names = ["D0", "D1", "D2", "D3"];
+        for (s, (at, left, right)) in sides.iter_mut().enumerate() {
+            for (k, name) in names.iter().enumerate() {
+                let pin = (*name, PinKind::Bidirectional, Some(first + k));
+                if s == 0 {
+                    right.push(pin);
+                } else {
+                    left.push(pin);
+                }
+            }
+            parts[*at] = ic(
+                &format!("u{s}"),
+                &format!("U{}", s + 1),
+                "LOGIC",
+                left,
+                right,
+            );
+        }
+        buses.push(crate::input::Bus {
+            key: "bus:data".into(),
+            name: "DATA".into(),
+            members: (first..first + 4).collect(),
+        });
+    }
     Block {
         name: format!("Seeded {seed}"),
         sheet: [420_000_000 - 20_000_000, 297_000_000 - 20_000_000],
         parts,
         nets,
+        buses,
         ..Block::default()
     }
 }
@@ -615,6 +656,47 @@ pub fn check_bytes(data: &[u8]) {
         };
         block.instructions.insert(format!("t{}", i + 1), ins);
     }
+    // Plan 2.C, from the bytes past the 112th: a bus asked for by labels
+    // or as a bus, or a note on the first region or the first sheet.
+    let mut last = Bytes(data.get(112..).unwrap_or(&[]), 0);
+    match last.next() {
+        4 | 5 if !block.buses.is_empty() => {
+            let style = if data.get(112) == Some(&4) {
+                NetStyle::Label
+            } else {
+                NetStyle::Bus
+            };
+            block.instructions.insert(
+                "b1".into(),
+                Instruction::Net {
+                    net: block.buses[0].key.clone(),
+                    style,
+                },
+            );
+        }
+        k @ (6 | 7) => {
+            let len = last.next() % 41;
+            let text: String = (0..len)
+                .map(|_| {
+                    let c = last.next() as u8;
+                    if (0x20..0x7f).contains(&c) {
+                        c as char
+                    } else {
+                        'x'
+                    }
+                })
+                .collect();
+            let on = if k == 6 { "region:r1" } else { "s1" };
+            block.instructions.insert(
+                "n1".into(),
+                Instruction::Note {
+                    on: on.into(),
+                    text,
+                },
+            );
+        }
+        _ => {}
+    }
     let out = match crate::engine::lay_out(&block) {
         Ok(o) => o,
         Err(r) => {
@@ -645,6 +727,75 @@ pub fn check_bytes(data: &[u8]) {
             );
         }
     }
+}
+
+/// A block for plan 2.C's off-sheet connectors: an IC and two resistors
+/// on SIG in one region, a second IC on SIG asked onto another sheet.
+pub fn leaving_block() -> Block {
+    use crate::input::PinKind::Bidirectional as Bd;
+    use crate::layout::Instruction;
+    let mut b = Block {
+        sheet: [400_000_000, 277_000_000],
+        ..Default::default()
+    };
+    b.nets.push(net("sig", "SIG", NetKind::Signal));
+    b.nets.push(net("o1", "O1", NetKind::Signal));
+    b.nets.push(net("o2", "O2", NetKind::Signal));
+    b.nets.push(net("o3", "O3", NetKind::Signal));
+    b.parts.push(ic(
+        "u1",
+        "U1",
+        "MCU",
+        &[("A", Bd, Some(0)), ("B", Bd, Some(1)), ("C", Bd, Some(2))],
+        &[("D", Bd, None)],
+    ));
+    b.parts.push(resistor("r1", "R1", "1k", [Some(0), Some(1)]));
+    b.parts.push(resistor("r2", "R2", "1k", [Some(0), Some(2)]));
+    b.parts.push(ic(
+        "u2",
+        "U2",
+        "ADC",
+        &[("IN", Bd, Some(0)), ("X", Bd, Some(3))],
+        &[("Y", Bd, None)],
+    ));
+    b.instructions.insert(
+        "i1".into(),
+        Instruction::Sheet {
+            parts: vec!["u2".into()],
+            sheet: "Away".into(),
+        },
+    );
+    b
+}
+
+/// A block for plan 2.C's buses: four nets QSPI_SD0 to QSPI_SD3, a bus
+/// of them, from an MCU's right side to a flash's left.
+pub fn bus_block() -> Block {
+    use crate::input::{Bus, PinKind::Bidirectional as Bd};
+    let mut b = Block {
+        sheet: [400_000_000, 277_000_000],
+        ..Default::default()
+    };
+    for i in 0..4 {
+        b.nets.push(net(
+            &format!("d{i}"),
+            &format!("QSPI_SD{i}"),
+            NetKind::Signal,
+        ));
+    }
+    b.buses.push(Bus {
+        key: "bus:q".into(),
+        name: "QSPI_SD".into(),
+        members: vec![0, 1, 2, 3],
+    });
+    let side: Vec<(&str, PinKind, Option<usize>)> = ["IO0", "IO1", "IO2", "IO3"]
+        .into_iter()
+        .enumerate()
+        .map(|(i, n)| (n, Bd, Some(i)))
+        .collect();
+    b.parts.push(ic("u1", "U1", "MCU", &[], &side));
+    b.parts.push(ic("u2", "U2", "FLASH", &side, &[]));
+    b
 }
 
 /// A block for plan 2.A's regions: a dense IC (U1, 10 pins) with a bypass

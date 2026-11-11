@@ -44,6 +44,8 @@ pub struct Resolved {
     pub shift: Vec<(Vec<usize>, Side, u16)>,
     pub groups: Vec<Vec<usize>>,
     pub styles: BTreeMap<usize, NetStyle>,
+    /// How each bus is asked to be drawn, by bus index (plan 2.C).
+    pub bus_styles: BTreeMap<usize, NetStyle>,
     pub idiom: BTreeMap<usize, IdiomChoice>,
     pub flow: BTreeSet<usize>,
     /// Parts a move of this batch places: held where they go.
@@ -217,7 +219,11 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
             {
                 missing.push(to.clone())
             }
-            Instruction::Net { net, .. } if block.net(net).is_none() => missing.push(net.clone()),
+            Instruction::Net { net, .. }
+                if block.net(net).is_none() && block.bus(net).is_none() =>
+            {
+                missing.push(net.clone())
+            }
             _ => {}
         }
         if !missing.is_empty() {
@@ -250,6 +256,42 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
             }
         }
         match ins {
+            Instruction::Note { on, text } => {
+                if text.trim().is_empty()
+                    || text.chars().count() > crate::layout::NOTE_MAX
+                    || text.contains(['\n', '\r'])
+                {
+                    return Err(rule(
+                        &id,
+                        "note",
+                        format!(
+                            "a note is one line of 1 to {} characters",
+                            crate::layout::NOTE_MAX
+                        ),
+                    ));
+                }
+                // On a region or a sheet the previous layout has (from
+                // nothing every region is new: the note waits for its
+                // region's ID, kept).
+                if let Some(prev) = &block.previous {
+                    let known = match on.strip_prefix("region:") {
+                        Some(r) => prev.regions.contains_key(r),
+                        None => {
+                            prev.sheets.contains_key(on)
+                                || prev.sheets.values().any(|s| &s.name == on)
+                        }
+                    };
+                    if !known {
+                        r.notes.push(Note {
+                            code: "instruction_unresolved".into(),
+                            message: format!(
+                                "{id} names {on} which the layout no longer has; it is kept until released"
+                            ),
+                            details: json!({"instruction": id, "missing": [on]}),
+                        });
+                    }
+                }
+            }
             Instruction::Orient {
                 rotation, mirror, ..
             } => {
@@ -440,6 +482,17 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
                     grouped.insert(p, id.clone());
                 }
                 r.groups.push(parts.clone());
+            }
+            Instruction::Net { net, style } if block.net(net).is_none() => {
+                let b = block.bus(net).expect("resolved");
+                if !matches!(style, NetStyle::Bus | NetStyle::Label) {
+                    return Err(rule(
+                        &id,
+                        "bus",
+                        format!("{net} is a bus: it is drawn as one (bus) or by labels (label)"),
+                    ));
+                }
+                r.bus_styles.insert(b, *style);
             }
             Instruction::Net { net, style } => {
                 let n = block.net(net).expect("resolved");
@@ -832,7 +885,14 @@ pub fn judge(block: &Block, layout: &Layout, ins: &Instruction) -> Result<(), St
                 .net(net)
                 .map_or(net.clone(), |n| block.nets[n].name.clone());
             Err(match style {
+                _ if block.bus(net).is_some() => match style {
+                    NetStyle::Bus => {
+                        format!("{net} is drawn by labels: it can't be drawn as a bus")
+                    }
+                    _ => format!("{net} is drawn as a bus"),
+                },
                 NetStyle::Wire => format!("{n} is drawn by labels"),
+                NetStyle::Bus => format!("{n} isn't a bus: only a bus is drawn as one"),
                 _ => format!("{n} is drawn by wires"),
             })
         }
@@ -887,6 +947,10 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
         .collect();
     let all = |f: &dyn Fn(usize) -> bool| !parts.is_empty() && parts.iter().all(|p| f(*p));
     match ins {
+        Instruction::Note { .. } => layout
+            .instructions
+            .iter()
+            .any(|(id, i)| i == ins && layout.notes.contains_key(id)),
         Instruction::Sheet { sheet, .. } => all(&|p| {
             shape(p).is_some_and(|(s, _)| layout.sheets.get(&s).is_some_and(|x| &x.name == sheet))
         }),
@@ -1004,12 +1068,18 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
                             .overlaps(&w[1].1.extent)
                 })
         }
+        Instruction::Net { net, style } if block.bus(net).is_some() => match style {
+            NetStyle::Bus => layout.buses.get(net).is_some_and(|b| !b.is_empty()),
+            _ => !layout.buses.contains_key(net),
+        },
         Instruction::Net { net, style } => {
             let labelled = layout.labels.contains_key(net);
             let wired = layout.routes.contains_key(net) && !labelled;
             match style {
                 NetStyle::Wire => wired,
                 NetStyle::Label | NetStyle::Port => labelled,
+                // Only a bus is drawn as one.
+                NetStyle::Bus => false,
             }
         }
         Instruction::Idiom { .. } | Instruction::Flow { .. } => true,
@@ -1223,5 +1293,28 @@ mod tests {
                 .center()[0]
         };
         assert_eq!(r.is_ok(), (x("u1") - x("r1")).abs() <= GRID / 2, "{r:?}");
+    }
+
+    #[test]
+    fn a_note_is_one_line_of_at_most_120_characters() {
+        let mut b = crate::testing::leaving_block();
+        b.instructions.insert(
+            "i9".into(),
+            Instruction::Note {
+                on: "s1".into(),
+                text: "Rev A".into(),
+            },
+        );
+        assert!(resolve(&b).is_ok());
+        for text in ["".to_owned(), "x".repeat(121), "two\nlines".to_owned()] {
+            b.instructions.insert(
+                "i9".into(),
+                Instruction::Note {
+                    on: "s1".into(),
+                    text,
+                },
+            );
+            assert_eq!(resolve(&b).unwrap_err().code, "layout_rule");
+        }
     }
 }

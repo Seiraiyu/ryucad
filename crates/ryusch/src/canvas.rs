@@ -305,26 +305,31 @@ mod tests {
                 key: "a".into(),
                 name: "A".into(),
                 kind: NetKind::Signal,
+                intent: String::new(),
             },
             Net {
                 key: "b".into(),
                 name: "B".into(),
                 kind: NetKind::Signal,
+                intent: String::new(),
             },
             Net {
                 key: "c".into(),
                 name: "C".into(),
                 kind: NetKind::Signal,
+                intent: String::new(),
             },
             Net {
                 key: "rail:v".into(),
                 name: "3V3".into(),
                 kind: NetKind::Supply,
+                intent: String::new(),
             },
             Net {
                 key: "rail:g".into(),
                 name: "GND".into(),
                 kind: NetKind::Ground,
+                intent: String::new(),
             },
         ];
         let mut ldo = testing::resistor("ldo", "U9", "", [Some(3), Some(4)]);
