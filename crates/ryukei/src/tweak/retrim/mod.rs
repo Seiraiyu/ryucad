@@ -221,6 +221,15 @@ fn attempt(
         // faces' alone. A region with no outside face takes the plan's
         // one shell seed instead (below).
         let mut tries: Vec<Vec<usize>> = vec![outside.clone()];
+        // A delete whose region is the whole body: every face it keeps
+        // seeds by rule 3 too, not one face alone (#692: a drilled plate's
+        // side deleted closed from the hole's wall alone, its plug).
+        if outside.is_empty() && !changes.deleted.is_empty() && changes.motion.is_empty() {
+            let (same, _) = seeds::face_seeds(body, changes, &w, &arr, table, pieces, m);
+            if same.len() > 1 {
+                tries = vec![same];
+            }
+        }
         if !outside.is_empty() {
             let (same, moved) = seeds::face_seeds(body, changes, &w, &arr, table, pieces, m);
             if !same.is_empty() || !moved.is_empty() {

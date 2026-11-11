@@ -436,3 +436,28 @@ fn far_apart_sets_grow_as_one_after_another() {
     assert_eq!(both.dump(), then.dump());
     assert!((volume(&both) - 0.24).abs() < 1e-6);
 }
+
+/// A drilled plate's side deleted: nothing grows over the gap, as on a
+/// plain block, so a typed refusal. Its hole's plug is no answer (#692:
+/// with the whole plate in the region, the walk was seeded by the hole's
+/// wall alone and closed its plug).
+#[test]
+fn deleting_a_drilled_plates_side_is_refused() {
+    let drilled = cut(
+        &plate(),
+        &pin(0.1, 0.4),
+        Vector3::new(0.5, 0.5, -0.1),
+        BooleanOp::Subtract,
+    );
+    let r = delete_faces(D, &drilled, &spec(vec![face(FaceRole::PlusX)]));
+    assert!(
+        matches!(
+            r,
+            Err(Error::InvalidTweak(
+                TweakError::GapNotHealed { .. } | TweakError::HealAmbiguous { .. }
+            ))
+        ),
+        "{:?}",
+        r.map(|(b, _)| b.counts().faces)
+    );
+}
