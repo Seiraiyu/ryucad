@@ -477,6 +477,7 @@ impl Census {
     /// then interpreted (an [`INTERPRETED`] category reached from
     /// `read.roots`, or anchored product structure when the tree was
     /// read), then unreferenced, else retained.
+    #[allow(clippy::needless_range_loop)] // `k` indexes several arrays
     pub fn transfer(&self, read: &Read, failed: &[Failed]) -> Transfer {
         let n = self.len();
         let mut reached = vec![false; n];
@@ -1338,7 +1339,7 @@ mod tests {
         );
     }
 
-    fn bucket<'t>(t: &'t Transfer, c: Category, b: Bucket) -> &'t Counted {
+    fn bucket(t: &Transfer, c: Category, b: Bucket) -> &Counted {
         let line = t.lines.iter().find(|l| l.category == c).expect("listed");
         &line.buckets[b as usize]
     }

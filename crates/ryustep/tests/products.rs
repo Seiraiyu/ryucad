@@ -119,10 +119,11 @@ fn external_fixture(name: &str) -> ryustep::Opened {
     ryustep::open(&std::fs::read(path).unwrap()).unwrap()
 }
 
+/// A document as a definition names it: file, location, format.
+type Named = (String, Option<String>, Option<String>);
+
 /// What each definition names, by product id: (file, location, format).
-fn externals(
-    o: &ryustep::Opened,
-) -> Vec<(String, Vec<(String, Option<String>, Option<String>)>, bool)> {
+fn externals(o: &ryustep::Opened) -> Vec<(String, Vec<Named>, bool)> {
     o.products
         .definitions
         .iter()
