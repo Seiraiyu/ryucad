@@ -1158,6 +1158,8 @@ fn every_protocol_method_has_a_command() {
         ("merge.resolve", &["merge", "resolve"]),
         ("merge.preview", &["merge", "preview"]),
         ("worktree.list", &["worktree", "list"]),
+        ("branch.list", &["branch", "list"]),
+        ("branch.switch", &["switch"]),
         ("daemon.status", &["daemon", "status"]),
         ("daemon.shutdown", &["daemon", "stop"]),
         ("session.hello", &["participants"]),

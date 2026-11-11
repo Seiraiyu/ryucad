@@ -1548,9 +1548,6 @@ pub enum Request {
     /// What the merge Git is in the middle of leaves to settle.
     #[serde(rename = "merge.status")]
     MergeStatus {},
-    /// Every worktree of the repository that holds the project: branch,
-    /// head, ahead and behind, uncommitted changes, and who is attached to
-    /// its daemon when one is running.
     /// What merging `rev` into the working files would leave to settle, as
     /// `merge.status` would say after the merge, merging nothing.
     #[serde(rename = "merge.preview")]
@@ -1559,8 +1556,29 @@ pub enum Request {
         /// `worktree:<path>` (absolute).
         rev: String,
     },
+    /// Every worktree of the repository that holds the project: branch,
+    /// head, ahead and behind, uncommitted changes, and who is attached to
+    /// its daemon when one is running.
     #[serde(rename = "worktree.list")]
     WorktreeList {},
+    /// The repository's branches: local ones, and remote-tracking ones
+    /// with no local branch of their name, each with its tip, upstream,
+    /// commits ahead of and behind this worktree's head, and the worktree
+    /// it is checked out in; with the project revision a switch is
+    /// guarded by.
+    #[serde(rename = "branch.list")]
+    BranchList {},
+    /// Checks out `branch` in the project's work tree (`git switch`):
+    /// refused while project files differ from `HEAD` (`checkout_dirty`)
+    /// or a merge is in progress; the session reloads at once, and the
+    /// activity log records a `switch` entry undo never takes.
+    #[serde(rename = "branch.switch")]
+    BranchSwitch {
+        branch: String,
+        /// The project revision the caller read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Settles merge conflicts, as one change.
     #[serde(rename = "merge.resolve")]
     MergeResolve {
@@ -2394,7 +2412,10 @@ impl Request {
         use crate::live::Mode;
         if self.annotates() {
             Some(&[Mode::Annotate, Mode::Edit])
-        } else if self.mutates() {
+        // A switch rewrites the project's files, which only Direct edit
+        // does; it isn't `mutates()`, which would log it as an undoable
+        // change.
+        } else if self.mutates() || matches!(self, Request::BranchSwitch { .. }) {
             Some(&[Mode::Edit])
         } else {
             None
