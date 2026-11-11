@@ -1503,6 +1503,9 @@ pub enum Request {
         pipe_tolerance: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         skip_failing: bool,
+        /// STEP: `false` writes no styles (design 448).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        appearance: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         solid: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

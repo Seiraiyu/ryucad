@@ -6706,7 +6706,7 @@ fn transfer_reports_from_the_cli() {
     assert_eq!(e["details"]["external"][0]["file"], "bracket.stp", "{e}");
     assert!(e["details"]["transfer"]["categories"].is_array());
     p.fails(&["import", "report", "imports/none.step"], "not_found", 1);
-    // An export of a part whose colour STEP doesn't carry yet.
+    // An export asked to leave a part's colour out says so.
     let part = made["parts"]
         .as_array()
         .unwrap()
@@ -6725,6 +6725,7 @@ fn transfer_reports_from_the_cli() {
             "../out.step",
             "--time-stamp",
             "2026-11-10T00:00:00",
+            "--no-appearance",
         ],
     );
     assert_eq!((code, &v["ok"]), (0, &Value::Bool(true)), "{v}");

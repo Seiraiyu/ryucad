@@ -105,7 +105,8 @@ pub struct Child {
 /// longest edge, STL's `ascii`, and USD's `brep` and `mesh` (both by
 /// default) and the tolerance pipes and sweeps are written within, and
 /// `skip_failing`: write what built, leaving out what a failing feature
-/// would have made, rather than refuse.
+/// would have made, rather than refuse; and STEP's `appearance` (styles,
+/// written unless `false`).
 #[derive(Clone, Debug, Default)]
 pub struct Ask {
     pub part: String,
@@ -124,6 +125,8 @@ pub struct Ask {
     pub mesh: Option<bool>,
     pub pipe_tolerance: Option<String>,
     pub skip_failing: bool,
+    /// STEP: write the appearance as styles (true by default; design 448).
+    pub appearance: Option<bool>,
     /// DXF: the sheet metal solid (the part's one unless named), whether
     /// to write bend notes (true), the side face held still and allowance
     /// overrides, as `flat.get` takes them.
@@ -553,6 +556,7 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
 /// stamps its own) and a development build. STEP's header names
 /// ryustep's version, which this doesn't change.
 pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<Answer> {
+    let appearance = ask.appearance;
     let format = format(&ask)?;
     let options = Options::read(format, &ask, session.project().manifest.default_unit)?;
     let out = ask
@@ -685,16 +689,25 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                 ..WriteOptions::default()
             };
             let (model, passed) = step_parts(&walk)?;
-            let (paints, unpainted) = {
+            let (paints, unpainted) = if appearance == Some(false) {
+                (ryustep::Paints::default(), None)
+            } else {
                 let sess = match &looks_at {
                     Some(c) => s.at(Some(c))?.1,
                     None => &mut *s,
                 };
-                step_paints(sess, &walk)
+                let (p, u) = step_paints(sess, &walk);
+                (p, Some(u))
             };
             let report = ryustep::write_styled(&model, &passed, &paints, &opts)
                 .map_err(|e| walk.unwritable(e))?;
-            let (transfer, omitted) = step_transfer(s, &walk, &report, &model, Some(&unpainted))?;
+            let off = if appearance == Some(false) {
+                Some(appearance_left_out(s, &walk)?)
+            } else {
+                None
+            };
+            let (transfer, omitted) =
+                step_transfer(s, &walk, &report, &model, unpainted.as_ref(), off)?;
             result["transfer"] = transfer;
             if !omitted.is_empty() {
                 warn(&mut result, omitted);
@@ -1869,6 +1882,22 @@ fn occurrence_paints(
         .sort_by(|a, b| (&a.path, a.body).cmp(&(&b.path, b.body)));
 }
 
+/// How many solids of the parts an export with `appearance: false`
+/// writes have a look: what it leaves out.
+fn appearance_left_out(s: &mut Session, walk: &Walk) -> Result<usize> {
+    let mut seen = BTreeSet::new();
+    let mut n = 0;
+    for p in &walk.scene.products {
+        if matches!(p.rev, Rev::Foreign { .. }) || !seen.insert(p.part.clone()) {
+            continue;
+        }
+        n += crate::appearance::looks(s, &p.part)
+            .map(|l| l.values().filter(|x| !x.is_plain()).count())
+            .unwrap_or(0);
+    }
+    Ok(n)
+}
+
 /// What a STEP export wrote and left out (design 448): `written`, the
 /// writer's instances by category (at most eight names each, the
 /// largest first); `omitted`, what the written parts hold that STEP
@@ -1880,6 +1909,7 @@ fn step_transfer(
     w: &ryustep::Written,
     model: &WriteModel,
     unpainted: Option<&Unpainted>,
+    off: Option<usize>,
 ) -> Result<(Value, Vec<Value>)> {
     use crate::doc::files::Feature;
     use crate::transfer::SUMMARY_NAMES;
@@ -1977,6 +2007,10 @@ fn step_transfer(
     }
     if let Some(u) = unpainted.filter(|u| u.count() > 0) {
         omitted.push(json!({"what": "appearance", "count": u.count(), "summary": u.summary()}));
+    }
+    if let Some(n) = off.filter(|n| *n > 0) {
+        omitted.push(json!({"what": "appearance", "count": n,
+            "summary": format!("{n} solid(s) with a colour or opacity, not written (appearance: false)")}));
     }
     let warnings: Vec<Value> = omitted
         .iter()
@@ -2083,8 +2117,8 @@ pub(crate) mod tests {
     }
 
     /// A STEP export says what it wrote by category, what it left out
-    /// (always the history; a colour, warned) and what it approximated;
-    /// none of it changes a byte (design 448).
+    /// (always the history; the appearance when asked not to write it)
+    /// and what it approximated (design 448).
     #[test]
     fn a_step_export_reports_what_it_wrote_and_left_out() {
         let (_dir, mut s) = fresh();
@@ -2120,16 +2154,32 @@ pub(crate) mod tests {
             json!({"entities": ["p"], "colour": "#ff0000"}),
         )
         .unwrap();
-        let (coloured, after) = exported(&mut s, opts).unwrap();
-        assert_eq!(after, before, "the bytes don't change");
-        let what: Vec<&str> = coloured["transfer"]["omitted"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|o| o["what"].as_str().unwrap())
-            .collect();
-        assert_eq!(what, ["history", "appearance"]);
-        let w = coloured["warnings"].as_array().unwrap();
+        // Written now: the bytes grow by the styles, the geometry's stay.
+        let (coloured, after) = exported(&mut s, opts.clone()).unwrap();
+        assert_ne!(after, before);
+        let plain_file = ryustep::part21::parse(&before).unwrap();
+        let styled = ryustep::part21::parse(&after).unwrap();
+        assert_eq!(
+            format!("{:?}", &styled.instances[..plain_file.instances.len()]),
+            format!("{:?}", plain_file.instances)
+        );
+        let what = |v: &Value| -> Vec<String> {
+            v["transfer"]["omitted"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o["what"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(what(&coloured), ["history"]);
+        assert!(coloured.get("warnings").is_none(), "{coloured}");
+        // Asked to leave it out: the plain bytes, the omission said.
+        let mut off = opts;
+        off["appearance"] = json!(false);
+        let (left_out, bytes) = exported(&mut s, off).unwrap();
+        assert_eq!(bytes, before, "the bytes don't change");
+        assert_eq!(what(&left_out), ["history", "appearance"]);
+        let w = left_out["warnings"].as_array().unwrap();
         assert_eq!(w.len(), 1, "{w:?}");
         assert_eq!(
             (&w[0]["code"], &w[0]["what"]),

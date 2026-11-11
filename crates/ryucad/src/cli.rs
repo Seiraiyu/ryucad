@@ -187,6 +187,10 @@ enum Command {
         /// that didn't heal), listing what was left out, rather than refuse.
         #[arg(long)]
         skip_failing: bool,
+        /// STEP: write no colours or transparency (by default the
+        /// appearance renders show is written as STEP styles).
+        #[arg(long)]
+        no_appearance: bool,
         /// DXF: the sheet metal solid (the part's one unless named).
         #[arg(long)]
         solid: Option<String>,
@@ -4812,6 +4816,7 @@ fn request(cmd: &Command) -> Option<Request> {
             no_mesh,
             pipe_tolerance,
             skip_failing,
+            no_appearance,
             solid,
             no_notes,
             fixed,
@@ -4841,6 +4846,7 @@ fn request(cmd: &Command) -> Option<Request> {
             mesh: no_mesh.then_some(false),
             pipe_tolerance: pipe_tolerance.clone(),
             skip_failing: *skip_failing,
+            appearance: no_appearance.then_some(false),
             solid: solid.clone(),
             notes: no_notes.then_some(false),
             fixed: fixed.clone(),
