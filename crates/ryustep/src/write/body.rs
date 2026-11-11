@@ -33,8 +33,14 @@ use ryukei::topo::Sense;
 use std::collections::BTreeMap;
 
 /// Writes a shape's solids, named `name`, and its sheets as one surface
-/// model; returns their B-rep items.
-pub(crate) fn solid_items(out: &mut Out, cx: &Contexts, sh: &Shape, name: &str) -> Vec<u64> {
+/// model; returns their B-rep items and each face's instance, by the
+/// shape's face index.
+pub(crate) fn solid_items(
+    out: &mut Out,
+    cx: &Contexts,
+    sh: &Shape,
+    name: &str,
+) -> (Vec<u64>, BTreeMap<usize, u64>) {
     let mut w = Writer {
         out,
         cx,
@@ -43,8 +49,10 @@ pub(crate) fn solid_items(out: &mut Out, cx: &Contexts, sh: &Shape, name: &str) 
         curves: BTreeMap::new(),
         vertices: BTreeMap::new(),
         edges: BTreeMap::new(),
+        faces: BTreeMap::new(),
     };
-    w.solids(name)
+    let items = w.solids(name);
+    (items, w.faces)
 }
 
 struct Writer<'a, 'b> {
@@ -55,6 +63,7 @@ struct Writer<'a, 'b> {
     curves: BTreeMap<usize, u64>,
     vertices: BTreeMap<usize, u64>,
     edges: BTreeMap<usize, u64>,
+    faces: BTreeMap<usize, u64>,
 }
 
 impl Writer<'_, '_> {
@@ -166,10 +175,12 @@ impl Writer<'_, '_> {
         }
         let surface = self.surfaces[&face.surface];
         let forward = (face.sense == Sense::Forward) != flip;
-        self.out.add(
+        let id = self.out.add(
             "ADVANCED_FACE",
             vec![s(""), refs(bounds), r(surface), b(forward)],
-        )
+        );
+        self.faces.insert(k, id);
+        id
     }
 
     fn vertex(&mut self, k: usize) -> u64 {

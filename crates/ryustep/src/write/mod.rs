@@ -20,9 +20,10 @@ use crate::part21::{self, File, Header, Instance, Param, Part, Record};
 use crate::schema::Schema;
 use rayon::prelude::*;
 use ryukei::geom::{Point3, Rigid, Vector3};
-use ryukei::heal::seamed;
+use ryukei::heal::{Origins, seamed_with_origins};
 use ryukei::name::Name;
 use ryukei::topo::Body;
+use std::collections::BTreeMap;
 
 /// A product to write: its identifier, name and description, its
 /// revision (the `PRODUCT_DEFINITION_FORMATION`'s identifier; empty for
@@ -248,6 +249,22 @@ pub fn write_with(
     write_report(model, passed, opts).map(|w| w.bytes)
 }
 
+/// What the writer wrote of one body: its B-rep items (a solid's, or a
+/// sheet's surface model) and each face's instance, by name.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WrittenBody {
+    pub(crate) items: Vec<u64>,
+    pub(crate) faces: BTreeMap<Name, u64>,
+}
+
+/// Each body's faces' names, by the shape's face index.
+fn face_names(b: &Body, o: &Origins) -> Vec<Name> {
+    o.faces
+        .iter()
+        .map(|&f| b.face(f).expect("live").name)
+        .collect()
+}
+
 /// [`write_with`], with what it wrote counted (design 448): every
 /// instance by category and entity name, and each body written as an
 /// approximation.
@@ -256,15 +273,26 @@ pub fn write_report(
     passed: &[Passed],
     opts: &WriteOptions,
 ) -> Result<Written, WriteError> {
+    write_inner(model, passed, opts).map(|(w, _, _)| w)
+}
+
+/// [`write_report`], with what it wrote of each product's bodies and
+/// each product's usages' `NEXT_ASSEMBLY_USAGE_OCCURRENCE` instances.
+#[allow(clippy::type_complexity)]
+pub(crate) fn write_inner(
+    model: &WriteModel,
+    passed: &[Passed],
+    opts: &WriteOptions,
+) -> Result<(Written, Vec<Vec<WrittenBody>>, Vec<Vec<u64>>), WriteError> {
     // Each body as a file must describe it, in parallel; the first body
     // that can't be fails, whatever the number of threads.
     let all: Vec<&Body> = model.products.iter().flat_map(|p| &p.bodies).collect();
     let mut seamed_all = all
         .par_iter()
-        .map(|b| seamed(b, opts.pipe_tolerance).map_err(|err| not_representable(b, err)))
+        .map(|b| seamed_with_origins(b, opts.pipe_tolerance).map_err(|err| not_representable(b, err)))
         .collect::<Vec<_>>()
         .into_iter();
-    let shapes: Vec<Vec<ryukei::heal::Shape>> = model
+    let shapes: Vec<Vec<(ryukei::heal::Shape, Origins)>> = model
         .products
         .iter()
         .map(|p| {
@@ -278,7 +306,7 @@ pub fn write_report(
         .iter()
         .enumerate()
         .flat_map(|(product, bodies)| {
-            bodies.iter().enumerate().filter_map(move |(body, sh)| {
+            bodies.iter().enumerate().filter_map(move |(body, (sh, _))| {
                 let faces = sh.faces.iter().filter(|f| f.tolerance > 0.0).count();
                 (faces > 0).then(|| Approximated {
                     product,
@@ -299,14 +327,29 @@ pub fn write_report(
             shapes
                 .iter()
                 .flatten()
-                .flat_map(|s| s.faces.iter().map(|f| f.tolerance)),
+                .flat_map(|(s, _)| s.faces.iter().map(|f| f.tolerance)),
         )
         .fold(ryukei::tol::LINEAR_RESOLUTION, f64::max);
     let cx = contexts(&mut out, opts, uncertainty);
     // Products: each one's definition and representation, then its
     // bodies; the usages after, once every product has its number.
     let mut defs = Vec::with_capacity(model.products.len());
+    let mut bodies: Vec<Vec<WrittenBody>> = Vec::with_capacity(model.products.len());
+    let mut usages: Vec<Vec<u64>> = vec![Vec::new(); model.products.len()];
     for (k, p) in model.products.iter().enumerate() {
+        let names: Vec<Vec<Name>> = p
+            .bodies
+            .iter()
+            .zip(&shapes[k])
+            .map(|(b, (_, o))| face_names(b, o))
+            .collect();
+        let named = |n: usize, faces: BTreeMap<usize, u64>| -> BTreeMap<Name, u64> {
+            faces
+                .into_iter()
+                .map(|(i, id)| (names[n][i], id))
+                .collect()
+        };
+        let mut written = Vec::with_capacity(p.bodies.len());
         let product = out.add(
             "PRODUCT",
             vec![s(&p.id), s(&p.name), s(&p.description), refs([cx.product])],
@@ -348,16 +391,17 @@ pub fn write_report(
         let kind = match shapes[k].len() {
             0 => "SHAPE_REPRESENTATION",
             1 => {
-                items.extend(body::solid_items(
-                    &mut out,
-                    &cx,
-                    &shapes[k][0],
-                    p.body_name(0),
-                ));
-                representation(&shapes[k][0])
+                let (got, faces) =
+                    body::solid_items(&mut out, &cx, &shapes[k][0].0, p.body_name(0));
+                items.extend(&got);
+                written.push(WrittenBody {
+                    items: got,
+                    faces: named(0, faces),
+                });
+                representation(&shapes[k][0].0)
             }
             _ => {
-                for (n, sh) in shapes[k].iter().enumerate() {
+                for (n, (sh, _)) in shapes[k].iter().enumerate() {
                     let own = placement(
                         &mut out,
                         &cx,
@@ -366,7 +410,12 @@ pub fn write_report(
                         Vector3::new(1.0, 0.0, 0.0),
                     );
                     let mut body_items = vec![own];
-                    body_items.extend(body::solid_items(&mut out, &cx, sh, p.body_name(n)));
+                    let (got, faces) = body::solid_items(&mut out, &cx, sh, p.body_name(n));
+                    body_items.extend(&got);
+                    written.push(WrittenBody {
+                        items: got,
+                        faces: named(n, faces),
+                    });
                     let body_rep = out.add(
                         representation(sh),
                         vec![s(p.body_name(n)), refs(body_items), r(cx.geometric)],
@@ -381,6 +430,7 @@ pub fn write_report(
         };
         out.fill(rep, kind, vec![s(""), refs(items), r(cx.geometric)]);
         defs.push((definition, rep, origin, child_axes));
+        bodies.push(written);
     }
     for p in passed {
         let (_, rep, _, _) = defs[p.product];
@@ -420,6 +470,7 @@ pub fn write_report(
                     Param::Unset,
                 ],
             );
+            usages[k].push(usage);
             let shape = out.add(
                 "PRODUCT_DEFINITION_SHAPE",
                 vec![s("Placement"), s("Placement of an item"), r(usage)],
@@ -450,11 +501,15 @@ pub fn write_report(
         instances: out.instances,
     };
     let counts = crate::census::count(&file.instances);
-    Ok(Written {
-        bytes: part21::write(&file)?,
-        counts,
-        approximated,
-    })
+    Ok((
+        Written {
+            bytes: part21::write(&file)?,
+            counts,
+            approximated,
+        },
+        bodies,
+        usages,
+    ))
 }
 
 /// The representation a body's items go in: a sheet's surface model in a
@@ -636,5 +691,53 @@ fn header(opts: &WriteOptions) -> Header {
                 params: vec![Param::List(vec![s(schema)])],
             },
         ],
+    }
+}
+
+#[cfg(test)]
+mod written_tests {
+    use super::*;
+    use ryukei::name::OpKey;
+
+    fn block() -> Body {
+        ryukei::primitive::block(OpKey(1), 0.01, 0.02, 0.03, &Rigid::IDENTITY)
+            .unwrap()
+            .0
+    }
+
+    /// Every face of every body is written once, under its name; the
+    /// bytes are `write_with`'s.
+    #[test]
+    fn faces_are_kept_by_name_and_bytes_do_not_move() {
+        let model = WriteModel {
+            products: vec![Product {
+                id: "b".into(),
+                bodies: vec![block(), block()],
+                ..Default::default()
+            }],
+        };
+        let opts = WriteOptions::default();
+        let (w, bodies, _) = write_inner(&model, &[], &opts).unwrap();
+        assert_eq!(w.bytes, write_with(&model, &[], &opts).unwrap());
+        let b = &model.products[0].bodies[0];
+        let names: std::collections::BTreeSet<Name> =
+            b.faces().map(|f| b.face(f).unwrap().name).collect();
+        assert_eq!(bodies[0].len(), 2);
+        for wb in &bodies[0] {
+            assert_eq!(wb.faces.keys().copied().collect::<std::collections::BTreeSet<_>>(), names);
+            assert_eq!(wb.items.len(), 1);
+        }
+        let file = crate::part21::parse(&w.bytes).unwrap();
+        let kind = |id: u64| {
+            file.instances
+                .iter()
+                .find(|i| i.id == id)
+                .map(|i| crate::census::joined(i.record.parts()))
+                .unwrap()
+        };
+        for wb in &bodies[0] {
+            assert_eq!(kind(wb.items[0]), "MANIFOLD_SOLID_BREP");
+            assert!(wb.faces.values().all(|&f| kind(f) == "ADVANCED_FACE"));
+        }
     }
 }
