@@ -21,6 +21,11 @@
 //! `colour` (`#rrggbb`, lower case), `opacity` (in `(0, 1]`) and
 //! `material: true` (the part's material's colour), never `colour` and
 //! `material` together, and at least one of them.
+//!
+//! Format 2 adds `file_styles: false` in `part`, written only when set:
+//! the colours an imported STEP file gives the part (the file layer,
+//! design 448) are left out. An assembly's file may hold it, and nothing
+//! else, in `part`.
 
 use super::files::{Obj, header, invalid, number};
 use super::id::{Id, parse_step};
@@ -32,7 +37,7 @@ use std::collections::BTreeMap;
 pub const KIND: &str = "ryucad.appearance";
 
 /// The newest format this build reads.
-pub const FORMAT: u64 = 1;
+pub const FORMAT: u64 = 2;
 
 /// The file, inside its part's folder.
 pub const APPEARANCE: &str = "appearance.json";
@@ -46,12 +51,15 @@ pub struct Look {
     pub opacity: Option<f64>,
     /// The part's material's colour, in place of a colour of its own.
     pub material: bool,
+    /// `file_styles: false` (the part entry only, format 2): the file
+    /// layer of imported styles is off for the part.
+    pub no_file_styles: bool,
 }
 
 impl Look {
     /// Whether it sets nothing (and so has no place in the file).
     pub fn is_empty(&self) -> bool {
-        self.colour.is_none() && self.opacity.is_none() && !self.material
+        self.colour.is_none() && self.opacity.is_none() && !self.material && !self.no_file_styles
     }
 
     pub fn to_json(&self) -> Value {
@@ -64,6 +72,9 @@ impl Look {
         }
         if let Some(o) = self.opacity {
             v["opacity"] = number(o);
+        }
+        if self.no_file_styles {
+            v["file_styles"] = json!(false);
         }
         v
     }
@@ -105,6 +116,7 @@ impl Look {
             colour,
             opacity,
             material,
+            no_file_styles: false,
         };
         if look.material && look.colour.is_some() {
             return Err(invalid(
@@ -194,7 +206,12 @@ impl AppearanceFile {
     }
 
     pub fn to_json(&self) -> Value {
-        let mut v = json!({"format": FORMAT, "kind": KIND});
+        let format = if self.part.as_ref().is_some_and(|p| p.no_file_styles) {
+            FORMAT
+        } else {
+            1
+        };
+        let mut v = json!({"format": format, "kind": KIND});
         if let Some(p) = &self.part {
             v["part"] = p.to_json();
         }
@@ -220,9 +237,10 @@ impl AppearanceFile {
     /// Reads a file: entries that read, under keys of their kind.
     pub fn from_json(v: &Value) -> Result<AppearanceFile> {
         let mut o = header(v, KIND, FORMAT)?;
+        let format = v["format"].as_u64().unwrap_or(1);
         let part = match o.take_opt("part") {
             None => None,
-            Some(p) => Some(Look::from_json(&p, "/part")?),
+            Some(p) => Some(part_entry(&p, format)?),
         };
         let mut out = AppearanceFile {
             part,
@@ -259,7 +277,7 @@ impl AppearanceFile {
     pub fn check_kind(&self, assembly: bool) -> Result<()> {
         if assembly {
             for (key, has) in [
-                ("part", self.part.is_some()),
+                ("part", self.part.as_ref().is_some_and(|p| !p.is_file_styles_only())),
                 ("solids", !self.solids.is_empty()),
                 ("faces", !self.faces.is_empty()),
             ] {
@@ -277,6 +295,49 @@ impl AppearanceFile {
             ));
         }
         Ok(())
+    }
+}
+
+impl Look {
+    /// Whether it says nothing but `file_styles: false`.
+    pub fn is_file_styles_only(&self) -> bool {
+        self.no_file_styles
+            && self.colour.is_none()
+            && self.opacity.is_none()
+            && !self.material
+    }
+}
+
+/// The part entry at `/part` of a file at `format`: an entry's fields,
+/// and `file_styles: false` from format 2.
+fn part_entry(v: &Value, format: u64) -> Result<Look> {
+    let at = "/part/file_styles";
+    let mut rest = v.clone();
+    let off = match rest.as_object_mut().and_then(|m| m.remove("file_styles")) {
+        None => false,
+        Some(_) if format < 2 => {
+            return Err(invalid(at, "file_styles needs format 2 of the file"));
+        }
+        Some(Value::Bool(false)) => true,
+        Some(_) => return Err(invalid(at, "file_styles is false or left out")),
+    };
+    if off && rest.as_object().is_some_and(|m| m.is_empty()) {
+        return Ok(Look {
+            no_file_styles: true,
+            ..Default::default()
+        });
+    }
+    let mut l = Look::from_json(&rest, "/part")?;
+    l.no_file_styles = off;
+    Ok(l)
+}
+
+/// The lowest format that holds file `v`: 2 with `file_styles`, else 1.
+pub fn format_of(v: &Value) -> u64 {
+    if v["part"].get("file_styles").is_some() {
+        2
+    } else {
+        1
     }
 }
 
@@ -380,10 +441,53 @@ mod tests {
         );
         assert_eq!(at(&|v| v["edges"] = json!({})), bad("/edges"));
         let mut newer = file();
-        newer["format"] = json!(2);
+        newer["format"] = json!(3);
         assert_eq!(
             AppearanceFile::from_json(&newer).unwrap_err().code,
             Code::FormatTooNew
         );
+    }
+
+    #[test]
+    fn format_2_turns_the_file_layer_off() {
+        let v = json!({"format": 2, "kind": KIND, "part": {"file_styles": false}});
+        let a = AppearanceFile::from_json(&v).unwrap();
+        assert!(a.part.as_ref().unwrap().no_file_styles);
+        assert!(!a.is_empty());
+        assert_eq!(a.to_json(), v);
+        assert_eq!(format_of(&v), 2);
+        // An assembly may say it, and nothing else in `part`.
+        a.check_kind(true).unwrap();
+        a.check_kind(false).unwrap();
+        let both = json!({"format": 2, "kind": KIND,
+                          "part": {"colour": "#d03030", "file_styles": false}});
+        let b = AppearanceFile::from_json(&both).unwrap();
+        assert_eq!(b.to_json(), both);
+        assert_eq!(b.check_kind(true).unwrap_err().code, Code::InvalidDocument);
+        for (bad, pointer) in [
+            (
+                json!({"format": 1, "kind": KIND, "part": {"file_styles": false}}),
+                "/part/file_styles",
+            ),
+            (
+                json!({"format": 2, "kind": KIND, "part": {"file_styles": true}}),
+                "/part/file_styles",
+            ),
+            (
+                json!({"format": 2, "kind": KIND, "solids": {"lid": {"file_styles": false}}}),
+                "/solids/lid/file_styles",
+            ),
+        ] {
+            let e = AppearanceFile::from_json(&bad).unwrap_err();
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str().unwrap_or("")),
+                (Code::InvalidDocument, pointer),
+                "{bad}"
+            );
+        }
+        // Without it, format 1 again.
+        let mut plain = b.clone();
+        plain.part.as_mut().unwrap().no_file_styles = false;
+        assert_eq!(plain.to_json()["format"], 1);
     }
 }

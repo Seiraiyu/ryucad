@@ -873,6 +873,7 @@ mod tests {
             colour: colour.map(str::to_owned),
             opacity,
             material,
+            no_file_styles: false,
         }
     }
 
