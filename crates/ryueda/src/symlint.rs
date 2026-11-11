@@ -559,6 +559,108 @@ fn shape(s: &Symbol, class: Option<Class>, cx: &Context, out: &mut Vec<Raw>) {
     out.push(r);
 }
 
+fn far_grown(r: Rect, side: ryusch::geom::Side, m: i64) -> Rect {
+    use ryusch::geom::Side as S;
+    let mut r = r;
+    match side {
+        S::Left => r.max[0] += m,
+        S::Right => r.min[0] -= m,
+        S::Up => r.min[1] -= m,
+        S::Down => r.max[1] += m,
+    }
+    r
+}
+
+fn margins(s: &Symbol, cx: &Context, out: &mut Vec<Raw>) {
+    let st = cx.standards;
+    let m = st.body_margin_nm;
+    let p = 2 * st.grid_nm;
+    for unit in units(s) {
+        let part = crate::schem::unit_part(s, unit, String::new(), "U");
+        if !ryusch::paint::draws_names(&part) {
+            continue;
+        }
+        let sh = ryusch::shape::Shape::of(&part, ryusch::geom::Place::new([0, 0], 0, false));
+        let boxes: Vec<(usize, Rect)> = part
+            .pins
+            .iter()
+            .enumerate()
+            .filter(|(_, pin)| !pin.name.is_empty())
+            .map(|(k, pin)| {
+                let b = ryusch::paint::name_box_sized(&pin.name, &sh.pins[k], st.pin_name_size_nm);
+                (k, far_grown(b, sh.pins[k].side, m))
+            })
+            .collect();
+        for (i, (k, b)) in boxes.iter().enumerate() {
+            let past = !sh.body.contains(b);
+            let into = boxes[i + 1..].iter().find(|(_, o)| o.overlaps(b));
+            if !past && into.is_none() {
+                continue;
+            }
+            let pin = &part.pins[*k];
+            let mut r = raw(
+                "sym_body_margin",
+                vec![pin.number.clone()],
+                format!(
+                    "pin {}'s name {} {} {} mm",
+                    pin.number,
+                    pin.name,
+                    if past {
+                        "comes nearer its body's edge than"
+                    } else {
+                        "comes nearer another pin's name than"
+                    },
+                    mm(m)
+                ),
+                json!({"past_edge": past, "margin_nm": m}),
+            );
+            // Widen the far edge by what it lacks, in two-grid steps, and
+            // move the pins on that edge with it: only for a left or right
+            // pin of a unit whose body is one rectangle.
+            let over = match sh.pins[*k].side {
+                ryusch::geom::Side::Left => {
+                    let o = into.map_or(0, |(_, o)| b.max[0] - o.min[0]);
+                    Some((b.max[0] - sh.body.max[0]).max(o))
+                }
+                ryusch::geom::Side::Right => {
+                    let o = into.map_or(0, |(_, o)| o.max[0] - b.min[0]);
+                    Some((sh.body.min[0] - b.min[0]).max(o))
+                }
+                _ => None,
+            };
+            let rects: Vec<(&crate::id::Id, &crate::symbol::Graphic)> = s
+                .graphics
+                .iter()
+                .filter(|(_, g)| g.unit().is_none_or(|u| u == unit))
+                .filter(|(_, g)| matches!(g, crate::symbol::Graphic::Rect { .. }))
+                .collect();
+            if let (Some(over), [(id, crate::symbol::Graphic::Rect { start, end, .. })]) =
+                (over, rects.as_slice())
+                && over > 0
+            {
+                let d = ceil(over, p);
+                let r0 = Rect::new(*start, *end);
+                let (far, moved, by) = if sh.pins[*k].side == ryusch::geom::Side::Left {
+                    ([r0.min[0], r0.max[0] + d], Side::Right, d)
+                } else {
+                    ([r0.min[0] - d, r0.max[0]], Side::Left, -d)
+                };
+                let mut ops = vec![json!({
+                    "op": "set", "graphic": id,
+                    "start": [far[0], r0.max[1]], "end": [far[1], r0.min[1]],
+                })];
+                for (n, q) in unit_pins(s, unit) {
+                    if q.side == moved {
+                        ops.push(json!({"op": "move", "pin": n, "by": [by, 0]}));
+                    }
+                }
+                r.fixes.push(ops);
+            }
+            out.push(r);
+        }
+    }
+}
+
 /// Every rule's raw findings, in the catalogue's order.
 fn found(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Raw> {
     let mut out = Vec::new();
@@ -566,6 +668,7 @@ fn found(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Raw> {
     sides(s, class, cx, &mut out);
     groups(s, class, cx, &mut out);
     shape(s, class, cx, &mut out);
+    margins(s, cx, &mut out);
     length(s, class, cx, &mut out);
     unit_size(s, class, cx, &mut out);
     out
@@ -860,5 +963,82 @@ mod tests {
         };
         let found = lint(&zigzag, Some(Class::Resistor), &cx);
         assert_eq!(found[0].prefs, ["prefer.resistor = iec"]);
+    }
+
+    #[test]
+    fn names_keep_their_margin_from_the_edge_and_each_other() {
+        let st = Standards::default();
+        let prefs = Prefs::default();
+        let cx = Context {
+            standards: &st,
+            prefs: &prefs,
+            from: "self",
+        };
+        let wide = vec![
+            PinSpec {
+                number: "1".into(),
+                name: "RESET_N_LONG_NAME".into(),
+                ty: PinType::Input,
+            },
+            PinSpec {
+                number: "2".into(),
+                name: "IRQ".into(),
+                ty: PinType::Output,
+            },
+            PinSpec {
+                number: "3".into(),
+                name: "VDD".into(),
+                ty: PinType::PowerIn,
+            },
+        ];
+        let clean = template("U", Class::Ic, &wide, &st).unwrap();
+        assert!(
+            lint(&clean, Some(Class::Ic), &cx).is_empty(),
+            "{:?}",
+            lint(&clean, Some(Class::Ic), &cx)
+        );
+        // The body narrowed: the long name runs into the right side's.
+        let mut s = clean.clone();
+        let (id, rect) = s.graphics.iter_mut().next().unwrap();
+        let id = id.clone();
+        let crate::symbol::Graphic::Rect { start, end, .. } = rect else {
+            panic!()
+        };
+        let narrow = 2 * st.grid_nm * 2;
+        start[0] += narrow;
+        end[0] -= narrow;
+        for p in s.pins.values_mut() {
+            match p.side {
+                Side::Left => p.at[0] += narrow,
+                Side::Right => p.at[0] -= narrow,
+                _ => {}
+            }
+        }
+        let found = lint(&s, Some(Class::Ic), &cx);
+        let margin: Vec<&Finding> = found
+            .iter()
+            .filter(|f| f.code == "sym_body_margin")
+            .collect();
+        assert_eq!(margin[0].pins, ["1"]);
+        // Its fix widens the far edge and moves that edge's pins.
+        let ops = &margin[0].fixes[0];
+        assert_eq!(ops[0]["op"], "set");
+        assert_eq!(ops[0]["graphic"], serde_json::json!(id));
+        assert!(ops.iter().any(|o| o["pin"] == "2" && o["op"] == "move"));
+        // A larger margin finds the template too narrow.
+        let roomy = Standards {
+            body_margin_nm: 5_000_000,
+            ..Standards::default()
+        };
+        let cx = Context {
+            standards: &roomy,
+            prefs: &prefs,
+            from: "self",
+        };
+        assert!(
+            lint(&clean, Some(Class::Ic), &cx)
+                .iter()
+                .any(|f| f.code == "sym_body_margin")
+        );
     }
 }
