@@ -228,24 +228,25 @@ fn on(origin: Point, q: Point) -> P {
 }
 
 /// Every character the pages' text needs.
-fn chars(pages: &[Page]) -> BTreeSet<char> {
-    let mut out: BTreeSet<char> = BTreeSet::new();
+fn chars(pages: &[Page]) -> (BTreeSet<char>, BTreeSet<char>) {
+    let mut regular: BTreeSet<char> = BTreeSet::new();
+    let mut bold: BTreeSet<char> = BTreeSet::new();
     for p in pages {
-        for it in zone_items(p.paper)
+        let extra: Vec<Item> = zone_items(p.paper)
             .into_iter()
             .chain(title_items(p.paper, &p.title))
-        {
-            if let Item::Text { text, .. } = it {
-                out.extend(text.chars());
-            }
-        }
-        for it in &p.items {
-            if let Item::Text { text, .. } = it {
-                out.extend(text.chars());
+            .collect();
+        for it in extra.iter().chain(&p.items) {
+            if let Item::Text { text, bold: b, .. } = it {
+                if *b {
+                    bold.extend(text.chars());
+                } else {
+                    regular.extend(text.chars());
+                }
             }
         }
     }
-    out
+    (regular, bold)
 }
 
 /// The circle through three points, and whether `a` to `c` through `b`
@@ -432,10 +433,20 @@ fn draw(c: &mut Canvas, origin: Point, it: &Item) {
             anchor,
             vertical,
             colour: col,
-            // SemiBold from Task 22 (plan 2.E); Regular until then.
-            bold: _,
+            bold,
         } => {
-            let w = ryusch::font::width(text, *size);
+            let weight = if *bold {
+                ryusch::font::Weight::SemiBold
+            } else {
+                ryusch::font::Weight::Regular
+            };
+            let w = ryusch::font::width_in(
+                text,
+                ryusch::font::Font {
+                    size: *size,
+                    weight,
+                },
+            );
             let shift = match anchor {
                 Anchor::Start => 0,
                 Anchor::Middle => w / 2,
@@ -449,20 +460,33 @@ fn draw(c: &mut Canvas, origin: Point, it: &Item) {
             };
             fill(c, *col);
             let dir = if *vertical { [0.0, 1.0] } else { [1.0, 0.0] };
-            c.text(text, at([px, py]), *size as f64, dir);
+            if *bold {
+                c.text_bold(text, at([px, py]), *size as f64, dir);
+            } else {
+                c.text(text, at([px, py]), *size as f64, dir);
+            }
         }
-        Item::Begin(_) | Item::End => {}
+        Item::Begin(l) => c.begin_layer(l.index()),
+        Item::End => c.end_layer(),
     }
 }
 
 /// The PDF of `pages`, with `marks` as its bookmarks and `title` its
 /// document title.
 pub fn write(title: &str, pages: &[Page], marks: &[Mark]) -> Vec<u8> {
+    let (regular, bold) = chars(pages);
     let doc = Doc {
         title,
         creator: "ryueda",
         pt: PT,
-        chars: chars(pages),
+        chars: regular,
+    };
+    let extras = ryu_draw::pdf::Extras {
+        bold_chars: bold,
+        layers: ryusch::paint::Layer::ALL
+            .iter()
+            .map(|l| l.title().to_owned())
+            .collect(),
     };
     let shapes: Vec<ryu_draw::pdf::Page> = pages
         .iter()
@@ -478,7 +502,7 @@ pub fn write(title: &str, pages: &[Page], marks: &[Mark]) -> Vec<u8> {
                 .collect(),
         })
         .collect();
-    ryu_draw::pdf::write(&doc, &shapes, marks, &mut |i, c| {
+    ryu_draw::pdf::write_with(&doc, &extras, &shapes, marks, &mut |i, c| {
         let page = &pages[i];
         c.line_width(LINE as f64);
         c.content()
@@ -655,5 +679,35 @@ mod tests {
         assert_eq!(labels.iter().filter(|t| **t == "6").count(), 2);
         assert_eq!(labels.iter().filter(|t| **t == "D").count(), 2);
         assert!(!labels.contains(&"I"));
+    }
+
+    #[test]
+    fn layers_and_bold_text_are_written() {
+        let mut pages = vec![page("A", vec![])];
+        pages[0]
+            .items
+            .insert(0, Item::Begin(ryusch::paint::Layer::PinNumbers));
+        pages[0].items.insert(1, Item::End);
+        if let Some(Item::Text { bold, .. }) = pages[0]
+            .items
+            .iter_mut()
+            .find(|i| matches!(i, Item::Text { .. }))
+        {
+            *bold = true;
+        }
+        let a = write("design", &pages, &[]);
+        let text = String::from_utf8_lossy(&a);
+        for want in [
+            "/OCProperties",
+            "(Region frames)",
+            "(Notes)",
+            "(Intent)",
+            "(Pin numbers)",
+            "+Inter-SemiBold",
+            "/OC /oc4 BDC",
+        ] {
+            assert!(text.contains(want), "{want}");
+        }
+        assert_eq!(a, write("design", &pages, &[]));
     }
 }

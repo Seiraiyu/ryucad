@@ -283,6 +283,7 @@ fn output_pages(
     }
     // Where each flattened net is drawn by labels.
     let mut painted: Vec<ryusch::paint::Painted> = Vec::new();
+    let mut looks_of: BTreeMap<Id, BTreeMap<String, ryusch::style::Look>> = BTreeMap::new();
     let mut net_pages: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
     // The least zone (row, column) of each flattened net's connectors,
     // flags and labels on each page (plan 2.E).
@@ -306,7 +307,27 @@ fn output_pages(
         let l = &laid[&node.block];
         let mut built = l.built.clone();
         built.designators(&refdes[s.node]);
-        let paint = ryusch::paint::sheet(&built.input, &l.outcome.layout, &s.sheet);
+        // In the project's look, light (plan 2.E): the PDF is always so.
+        let look = looks_of
+            .entry(node.block.clone())
+            .or_insert_with(|| {
+                p.conn.block(&node.block).map_or_else(
+                    |_| BTreeMap::new(),
+                    |b| {
+                        crate::schemcmd::looks(
+                            p,
+                            b,
+                            &l.built,
+                            &l.outcome.layout,
+                            ryusch::style::Theme::Light,
+                        )
+                    },
+                )
+            })
+            .get(&s.sheet)
+            .cloned()
+            .unwrap_or_default();
+        let paint = ryusch::paint::sheet_in(&built.input, &l.outcome.layout, &s.sheet, &look);
         // Every flattened net a pin on the page is on (plan 2.C): a
         // connector's or a port's cross-reference names the pages its net
         // is drawn on.

@@ -2789,6 +2789,8 @@ fn each_sheet_is_drawn_and_paged_at_its_own_paper() {
     let pdf = fs::read(p.daemon.join("board/s.pdf")).unwrap();
     let text = String::from_utf8_lossy(&pdf);
     assert!(text.contains("/MediaBox [0 0 841.8"), "an A4 page");
+    // Its layers and its SemiBold designators and title (plan 2.E).
+    assert!(text.contains("/OCProperties") && text.contains("+Inter-SemiBold"));
 }
 
 /// Parametric search over the project's libraries (design 347), in
