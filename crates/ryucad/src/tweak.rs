@@ -33,6 +33,30 @@ pub fn takes_sheets(f: &Feature) -> bool {
     )
 }
 
+/// The face tweaks and direct edits this module builds (ryucad 17 and 22).
+pub const TYPES: [&str; 4] = ["move_face", "replace_face", "draft", "delete_face"];
+
+/// The work units a direct edit may spend before it fails with
+/// `edit_budget_exceeded` (`edit.budget`'s default): a power of two at
+/// least four times [`LARGEST_EDIT`] (Task 20 of plan 22.A measures it).
+pub const DEFAULT_EDIT_BUDGET: u64 = 1 << 24;
+
+/// The most work units a direct edit that builds spends in ryucad's tests,
+/// goldens and recompute runs (plan 22.A, Task 20).
+pub const LARGEST_EDIT: u64 = 1 << 20;
+
+const _: () = {
+    assert!(DEFAULT_EDIT_BUDGET.is_power_of_two());
+    assert!(DEFAULT_EDIT_BUDGET >= 4 * LARGEST_EDIT);
+};
+
+/// Whether `f`'s kernel call runs under the edit budget: a `delete_face`,
+/// or a tweak that may change topology or remake its blends. A tweak that
+/// keeps both runs as ryucad 17's, unbudgeted.
+pub fn budgeted(f: &Feature) -> bool {
+    matches!(f, Feature::DeleteFace(_)) || f.retrim().is_some_and(|r| !r.is_keep())
+}
+
 /// What a tweak asks the kernel.
 pub(crate) enum Spec {
     Move(MoveSpec),
@@ -1331,6 +1355,28 @@ pub fn draft_warnings(part: &Id, id: &Id, rep: &Value) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_deletes_and_retrims_are_budgeted() {
+        let read = |v: Value| {
+            Feature::from_json(&v, crate::units::Unit::Mm, &crate::expr::Env::empty()).unwrap()
+        };
+        let face = json!({"feature": "b", "name": format!("{:032x}", 1)});
+        let mv = |extra: Value| {
+            let mut v = json!({"format": crate::doc::edit::FORMAT, "kind": "ryucad.feature",
+                "type": "move_face", "target": "b", "by": "translate", "direction": "x",
+                "distance": "1 mm", "faces": [face]});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            read(v)
+        };
+        assert!(!budgeted(&mv(json!({}))));
+        assert!(budgeted(&mv(json!({"topology": "change"}))));
+        assert!(budgeted(&mv(json!({"blends": "rebuild"}))));
+        assert!(budgeted(&read(json!({"format": crate::doc::edit::FORMAT,
+            "kind": "ryucad.feature", "type": "delete_face", "target": "b", "faces": [face]}))));
+    }
     use ryukei::geom::{Point3, UnitVector3, Vector3};
 
     fn close(a: Point3, b: Point3) {

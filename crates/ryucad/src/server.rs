@@ -1996,9 +1996,10 @@ pub fn handle_job_raw(
     let watch = live.is_some();
     guarded(slot, root, watch, |s| {
         s.job = job.clone();
-        // A `config set heal.budget` in another process reaches this
-        // session at its next request.
+        // A `config set heal.budget` or `edit.budget` in another process
+        // reaches this session at its next request.
         s.set_heal_budget(crate::session::heal_budget());
+        s.set_edit_budget(crate::session::edit_budget());
         let a = answer_live(s, live, me, req);
         s.job = Job::default();
         // A write a cancel came too late for says so, as a daemon's does.

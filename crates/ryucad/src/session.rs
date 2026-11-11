@@ -137,6 +137,9 @@ pub struct Session {
     /// The work units each imported body may heal in: the user's
     /// `heal.budget`, read when the session opens and before each request.
     pub heal_budget: u64,
+    /// The work units each direct edit may spend: the user's
+    /// `edit.budget`, read when the session opens and before each request.
+    pub edit_budget: u64,
     /// What the budget last counted the session holding besides parts'
     /// rebuilds, by what it was counted from (the epoch, the names learnt,
     /// the models and verdicts kept, the files kept open): counted again
@@ -204,6 +207,23 @@ impl Session {
             return;
         }
         self.heal_budget = budget;
+        self.let_results_go();
+    }
+
+    /// Takes a new `edit.budget`, as [`Session::set_heal_budget`] takes
+    /// its own.
+    pub fn set_edit_budget(&mut self, budget: u64) {
+        if budget == self.edit_budget {
+            return;
+        }
+        self.edit_budget = budget;
+        self.let_results_go();
+    }
+
+    /// Lets every part's and model's results go: a budget keys features'
+    /// own results, which come back from the caches where they were built
+    /// under the same one.
+    fn let_results_go(&mut self) {
         self.store.results.clear();
         self.store.verified = Default::default();
         self.store.pinned.clear();
@@ -265,6 +285,7 @@ impl Session {
             fixed_key: None,
             job: Job::default(),
             heal_budget: heal_budget(),
+            edit_budget: edit_budget(),
             sink: Sink::Disk,
             rev_warnings: Vec::new(),
         };
@@ -472,6 +493,7 @@ impl Session {
             fixed_key: None,
             job: from.job.clone(),
             heal_budget: from.heal_budget,
+            edit_budget: from.edit_budget,
             sink: Sink::Disk,
             rev_warnings: Vec::new(),
         })
@@ -517,6 +539,7 @@ impl Session {
         let mut used = self.revisions.remove(i);
         used.1.job = self.job.clone();
         used.1.heal_budget = self.heal_budget;
+        used.1.edit_budget = self.edit_budget;
         self.revisions.insert(0, used);
         self.revisions.truncate(REVISIONS);
         Ok((Some(commit), &mut self.revisions[0].1))
@@ -540,6 +563,7 @@ impl Session {
         let mut used = self.revisions.remove(i);
         used.1.job = self.job.clone();
         used.1.heal_budget = self.heal_budget;
+        used.1.edit_budget = self.edit_budget;
         self.revisions.insert(0, used);
         self.revisions.truncate(REVISIONS);
         Ok((None, &mut self.revisions[0].1))
@@ -664,6 +688,7 @@ impl Session {
         let mut used = self.revisions.remove(i);
         used.1.job = self.job.clone();
         used.1.heal_budget = self.heal_budget;
+        used.1.edit_budget = self.edit_budget;
         self.revisions.insert(0, used);
         self.revisions.truncate(REVISIONS);
         Ok(&mut self.revisions[0].1)
@@ -957,6 +982,7 @@ impl Session {
         let mut r = Rebuild::new(&project, &pins, store);
         r.job = self.job.clone();
         r.heal_budget = self.heal_budget;
+        r.edit_budget = self.edit_budget;
         Ok(r.result(&id)?.clone())
     }
 
@@ -1127,6 +1153,7 @@ impl Session {
         r.job = self.job.clone();
         r.stamp = Some(stamp);
         r.heal_budget = self.heal_budget;
+        r.edit_budget = self.edit_budget;
         let out = f(&mut r);
         let fresh = std::mem::take(&mut r.fresh);
         let learned = std::mem::take(&mut r.learned);
@@ -1960,6 +1987,13 @@ pub fn heal_budget() -> u64 {
     crate::config::user("heal.budget")
         .as_u64()
         .unwrap_or(crate::import::DEFAULT_HEAL_BUDGET)
+}
+
+/// The user's `edit.budget`, else its default.
+pub fn edit_budget() -> u64 {
+    crate::config::user("edit.budget")
+        .as_u64()
+        .unwrap_or(crate::tweak::DEFAULT_EDIT_BUDGET)
 }
 
 #[cfg(test)]
