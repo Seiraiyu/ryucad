@@ -84,7 +84,7 @@ pub fn next_refdes(p: &Project, prefix: &str) -> String {
 }
 
 fn check_refdes(r: &str) -> Result<()> {
-    if refdes_ok(r) {
+    if refdes_ok(r) || conn::refdes_placeholder(r) {
         Ok(())
     } else {
         Err(Error::new(
