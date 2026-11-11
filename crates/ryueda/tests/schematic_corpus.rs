@@ -315,6 +315,50 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
     assert!(over.is_empty(), "{over:#?}");
 }
 
+/// Design 348's bar: each corpus circuit laid out from nothing, regions
+/// and paper fit included, under 2 s on one thread (the median of three,
+/// each block in process; with `RYUEDA_BARS=1` as it is, else ten times
+/// looser on a shared runner). Plan 2.B measured the RP2040's `mitayi` at
+/// 2.2 to 2.5 s on cox-worker-1 (Intel Xeon E5-2650); plan 2.G at 323 ms
+/// on cox-worker-2 (AMD Ryzen 7 9700X).
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn the_corpus_from_nothing_lays_out_within_its_bar() {
+    use std::time::{Duration, Instant};
+    let bar = if std::env::var("RYUEDA_BARS").is_ok_and(|v| v == "1") {
+        Duration::from_secs(2)
+    } else {
+        Duration::from_secs(20)
+    };
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["breakout", "rp2040", "buck", "frontend", "ethernet"] {
+        let board = circuit(dir.path(), name);
+        let p = ryueda::project::Project::load(&board).unwrap();
+        let mut times: Vec<Duration> = (0..3)
+            .map(|_| {
+                pool.install(|| {
+                    let t = Instant::now();
+                    for b in p.conn.blocks.values() {
+                        ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::Block)
+                            .unwrap();
+                    }
+                    t.elapsed()
+                })
+            })
+            .collect();
+        times.sort();
+        eprintln!(
+            "{name}: from nothing {:?} (median of 3, one thread)",
+            times[1]
+        );
+        assert!(times[1] < bar, "{name}: {:?}", times[1]);
+    }
+}
+
 /// Design 236's score bars: each block's least sheet score laid out from
 /// nothing, (circuit, block, threshold). Each is the score measured less
 /// 5, measured on cox-worker-4 (AMD Opteron 6380, 8 threads, shared with
