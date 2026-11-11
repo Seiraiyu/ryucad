@@ -11,6 +11,7 @@ use ryukei::name::{FaceRole, Name, OpKey, Role, ToolKey};
 use ryukei::primitive;
 use ryukei::topo::Body;
 use ryukei::tweak::{DraftFace, DraftSpec, Hinge, Topology, draft};
+use ryukei::{Error, TweakError};
 
 const K: OpKey = OpKey(0xe0);
 const T: OpKey = OpKey(0xe1);
@@ -445,4 +446,37 @@ fn a_spline_wall_drafts_to_a_sweep_at_its_angle() {
     // Certified over cells a thousandth of a radian wide at most.
     assert!(a.greatest - a.least < 2e-3, "{a:?}");
     assert_eq!(names(&o), names(&b));
+}
+
+/// A block's -x wall drafted 1.3 rad about its bottom with its topology
+/// kept: it would meet the +x wall below the top, so the top's side edge
+/// would run backwards. `EdgeVanishes`, a topology reason ryucad's hint
+/// names, not `Uncertain` (#687). With `Topology::Change` it is a wedge
+/// (`retrim.rs`).
+#[test]
+fn a_wall_drafted_past_its_neighbour_keeping_topology_loses_an_edge() {
+    let (b, _) = primitive::block(K, 1.0, 0.75, 0.5, &Rigid::IDENTITY).unwrap();
+    for angle in [1.2, 1.3] {
+        let spec = DraftSpec {
+            pull: UnitVector3::exact(Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+            angle,
+            hinge: Hinge::Neutral {
+                origin: Point3::ORIGIN,
+            },
+            faces: vec![DraftFace {
+                face: Name::derive(K, Role::Face(FaceRole::MinusX), &[]),
+                angle: None,
+                flip: false,
+            }],
+            tangent: true,
+            topology: Topology::Keep,
+            blends: Default::default(),
+        };
+        let r = draft(OpKey(0x687), &b, &spec);
+        assert!(
+            matches!(r, Err(Error::InvalidTweak(TweakError::EdgeVanishes { .. }))),
+            "{angle}: {:?}",
+            r.map(|_| ())
+        );
+    }
 }
