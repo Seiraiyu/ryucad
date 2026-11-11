@@ -3,7 +3,7 @@ breakout.erc f84678494c89aa19a5910ab3c7a8330e
 breakout.netlist 16daf5eca5b841dca1e0b3b6ee23a6b0
 generated.erc 78239ee711bef7fca90a828cc74caab3
 generated.netlist 5320f73be71d1afe60130384cd00fcea
-kicad.library a8dfd19c6c120da465272302f8978842
+kicad.library 9acdf4c928678cfba0ea7435e1848d06
 parts.digikey.records 22ee956abb9ece594e25dd55164199c9
 parts.erc 2ff58524a6d1db3950b280aa911f6dcb
 parts.jlc.search 89035579682f3f880b534a9c10a8223e

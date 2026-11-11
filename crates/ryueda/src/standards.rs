@@ -89,6 +89,44 @@ impl Class {
         Class::ALL.into_iter().find(|c| c.as_str() == s)
     }
 
+    /// The class a designator's prefix says, if it says one.
+    pub fn infer(prefix: &str) -> Option<Class> {
+        Some(match prefix.to_ascii_uppercase().as_str() {
+            "R" | "RN" | "RA" | "RM" => Class::Resistor,
+            "C" => Class::Capacitor,
+            "L" => Class::Inductor,
+            "D" => Class::Diode,
+            "LED" => Class::Led,
+            "Q" => Class::Transistor,
+            "U" | "IC" => Class::Ic,
+            "VR" | "REG" => Class::Regulator,
+            "J" | "P" | "CN" | "CON" => Class::Connector,
+            _ => return None,
+        })
+    }
+
+    /// The class from a prefix and the words a library gives a part (its
+    /// keywords and description): an LED among diodes, an op-amp or a
+    /// regulator among ICs.
+    pub fn classify(prefix: &str, words: &str) -> Option<Class> {
+        let w = words.to_ascii_lowercase();
+        let has = |k: &str| {
+            w.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                .any(|t| t == k)
+        };
+        let base = Class::infer(prefix);
+        match base {
+            Some(Class::Diode) | None if has("led") => Some(Class::Led),
+            Some(Class::Ic) | None
+                if has("opamp") || has("op-amp") || w.contains("operational amplifier") =>
+            {
+                Some(Class::Opamp)
+            }
+            Some(Class::Ic) | None if has("regulator") || has("ldo") => Some(Class::Regulator),
+            _ => base,
+        }
+    }
+
     /// Every class's name, for refusals.
     pub fn names() -> Vec<&'static str> {
         Class::ALL.iter().map(|c| c.as_str()).collect()
@@ -501,6 +539,36 @@ mod tests {
     use super::*;
     use crate::doc;
     use serde_json::json;
+
+    #[test]
+    fn classes_come_from_prefixes_and_words() {
+        assert_eq!(Class::infer("R"), Some(Class::Resistor));
+        assert_eq!(Class::infer("RN"), Some(Class::Resistor));
+        assert_eq!(Class::infer("c"), Some(Class::Capacitor));
+        assert_eq!(Class::infer("U"), Some(Class::Ic));
+        assert_eq!(Class::infer("J"), Some(Class::Connector));
+        assert_eq!(Class::infer("Y"), None);
+        assert_eq!(Class::classify("D", "LED red 0603"), Some(Class::Led));
+        assert_eq!(Class::classify("D", "Schottky diode"), Some(Class::Diode));
+        assert_eq!(
+            Class::classify("U", "LDO voltage regulator 3.3V"),
+            Some(Class::Regulator)
+        );
+        assert_eq!(
+            Class::classify("U", "dual operational amplifier"),
+            Some(Class::Opamp)
+        );
+        assert_eq!(
+            Class::classify("U", "opamp rail-to-rail"),
+            Some(Class::Opamp)
+        );
+        assert_eq!(Class::classify("U", "MCU ARM Cortex-M0+"), Some(Class::Ic));
+        // Words never turn a resistor into anything else.
+        assert_eq!(
+            Class::classify("R", "LED current limit"),
+            Some(Class::Resistor)
+        );
+    }
 
     #[test]
     fn patterns_match_tokens_digits_and_runs() {
