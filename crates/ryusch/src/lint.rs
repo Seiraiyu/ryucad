@@ -260,7 +260,7 @@ pub const RULES: &[Rule] = &[
         what: "Four or more members of a bus run between the same two parts' sides on a sheet but are drawn as separate labels or wires.",
         why: "A bus drawn as one bundle reads as one interface; drawn member by member it reads as unrelated signals and costs a label or a wire each.",
         fix: "Ask for the bus (net BUS bus); if it can't be drawn, the note bus_not_drawn says why.",
-        evidence: "Design 348's grammar (figure 5): a bus of four members or more between two regions or parts is drawn as a bus wire with entries, as KiCad's buses and the hand-drawn references' data buses are. A drafting convention; no round has judged it yet.",
+        evidence: "Design 348's grammar (figure 5): a bus of four members or more between two regions or parts is drawn as a bus wire with entries, as KiCad's buses and the hand-drawn references' data buses are. A drafting convention; no round has judged it yet. In round 3's blind review (plan 2.G, three judges a pair), no session's sheets drew a bus, so the rule had nothing to judge.",
     },
     Rule {
         code: "sch_off_sheet_local",
@@ -269,7 +269,7 @@ pub const RULES: &[Rule] = &[
         what: "An off-sheet connector on a net with no pin on another sheet, or a net that continues on another sheet drawn in some region of this one by local labels alone.",
         why: "The connector's outline is the reader's sign that a net leaves the sheet: on a net that stays it sends them looking for a page that isn't there, and where it is missing they take a net that continues for one that doesn't.",
         fix: "Lay the sheet out again (layout --relayout B/S), or ask for the net's wires where it stays (net N wire).",
-        evidence: "Design 348's grammar (figure 3) and the owner's comment #11 on 1.B's renders: a net that leaves its sheet is drawn with a connector distinct from a local label. IEEE 315 and IEC 60617 both draw off-sheet connectors apart from net names. A drafting convention; no round has judged it yet.",
+        evidence: "Design 348's grammar (figure 3) and the owner's comment #11 on 1.B's renders: a net that leaves its sheet is drawn with a connector distinct from a local label. IEEE 315 and IEC 60617 both draw off-sheet connectors apart from net names. A drafting convention. In round 3's blind review (plan 2.G, three judges a pair), the judges' labels-against-wires score rose on all five circuits from nothing to the sessions' last sheets (mean 2.4 to 3.4 of 5) while the points of this rule and the label and floating rules fell on all five (72 to 24 in all).",
     },
     Rule {
         code: "sch_out_of_line",
@@ -278,7 +278,7 @@ pub const RULES: &[Rule] = &[
         what: "A part's body middle, or a two-pin part's pin axis, lines up with no other part across or down.",
         why: "Parts on common lines read as an ordered drawing; a part off every line looks dropped where it fell.",
         fix: "Put it in a row or a column with its neighbours (align X Y row|column).",
-        evidence: "A drafting convention of rows and columns; round 1 (F20) asked that a part beside its idiom's pin count as in line, which it does. In round 2's blind review (plan 1.D, three judges a pair), this rule and the judges' grouping score moved together on the buck and the front end but apart on the breakout (2 to 4 points, +0.3 of 5) and the RP2040 (26 to 28, +2.0): the judges grouped by function, which lines don't show.",
+        evidence: "A drafting convention of rows and columns; round 1 (F20) asked that a part beside its idiom's pin count as in line, which it does. In round 2's blind review (plan 1.D, three judges a pair), this rule and the judges' grouping score moved together on the buck and the front end but apart on the breakout (2 to 4 points, +0.3 of 5) and the RP2040 (26 to 28, +2.0): the judges grouped by function, which lines don't show. In round 3's blind review (plan 2.G, three judges a pair), its points rose on the RP2040 (18 to 36) and the front end (2 to 8) where the judges' flow score stayed at 3.0: the sessions' aligned columns cost points no judge took off.",
     },
     Rule {
         code: "sch_bank_not_in_row",
@@ -323,7 +323,7 @@ pub const RULES: &[Rule] = &[
         what: "A sheet on paper larger than its drawing needs: a smaller paper of the project's series would hold it, or it fills under 100 per mille of its 10 mm cells on paper larger than the series' smallest.",
         why: "A small drawing on a large sheet prints small and reads as empty; the reader zooms and pans for what one smaller page would show at once.",
         fix: "Lay the sheet out again so paper fit chooses (layout --relayout BLOCK/SHEET); a paper of your own choosing can be pinned (paper SHEET a4).",
-        evidence: "The references fill 115 to 336 per mille of their drawing area's 10 mm cells and draw on the smallest paper that holds them: the buck, the front end's three sheets on A4, Mitayi-Pico-D1 on A3, the ESP32-PoE on A2 (measure.py, plan 2.A's Task 1). In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the reference on all four circuits on paper fit, 3 to 0.",
+        evidence: "The references fill 115 to 336 per mille of their drawing area's 10 mm cells and draw on the smallest paper that holds them: the buck, the front end's three sheets on A4, Mitayi-Pico-D1 on A3, the ESP32-PoE on A2 (measure.py, plan 2.A's Task 1). In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the reference on all four circuits on paper fit, 3 to 0. In round 3's blind review (plan 2.G, three judges a pair), it found nothing on any sheet, yet the judges still put the reference ahead on paper on all four circuits (a mean lead of 1.9 points): the rule's floor holds, and what the judges fault is empty space inside a fitted sheet.",
     },
     Rule {
         code: "sch_function_split",
@@ -332,7 +332,7 @@ pub const RULES: &[Rule] = &[
         what: "One function's parts (a recognised circuit, a dense IC with its satellites and guests, a connector and its breakout) are in more than one region, or some in none.",
         why: "A reader finds a function by its titled region; split, its parts read as two functions, or one is missing from where the title says it is.",
         fix: "Name its region with all of them (region TITLE X...), as the finding's fix says.",
-        evidence: "Design 348's regions: the references group each function on its own part of the sheet (Mitayi-Pico-D1's USB, regulator and RP2040 corners; the ESP32-PoE's Ethernet panel). In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the reference on all four circuits on grouping by function, 3 to 0.",
+        evidence: "Design 348's regions: the references group each function on its own part of the sheet (Mitayi-Pico-D1's USB, regulator and RP2040 corners; the ESP32-PoE's Ethernet panel). In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the reference on all four circuits on grouping by function, 3 to 0. In round 3's blind review (plan 2.G, three judges a pair), the judges' grouping score rose on all five circuits from nothing to the sessions' last sheets (2.3 to 3.7 of 5) as this rule's and sch_region_untitled's points fell to none on all five, and the reference's lead on grouping fell from 3 points to 1.5.",
     },
     Rule {
         code: "sch_region_untitled",
@@ -341,7 +341,7 @@ pub const RULES: &[Rule] = &[
         what: "A region titled Misc: nothing in it names its function.",
         why: "A region's title is what a reader scans for; Misc says nothing about what the parts do.",
         fix: "Give it a title (region rename REGION TITLE), or a function property to its main component.",
-        evidence: "Design 348: every region is titled by its function. The references title their panels (the ESP32-PoE's ETHERNET, Mitayi-Pico-D1's power and USB blocks).",
+        evidence: "Design 348: every region is titled by its function. The references title their panels (the ESP32-PoE's ETHERNET, Mitayi-Pico-D1's power and USB blocks). In round 3's blind review (plan 2.G, three judges a pair), the judges named the sessions' titled regions (\"I2C header and pull-ups\", \"Output clamps\") among what read better, and engine titles such as \"Misc\", \"SCL\" and \"N_J2_A5\" among what read worse.",
     },
 ];
 

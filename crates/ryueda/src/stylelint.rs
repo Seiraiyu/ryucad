@@ -21,7 +21,7 @@ pub const RULES: [Rule; 2] = [
         what: "A colour the style draws with stands under 3:1 against the paper, a symbol's body or a port's flag it is drawn on, in the light or the dark theme.",
         why: "A line or text that barely stands off its background is missed by the eye, worst on a projector, a printout or a dark screen; a theme that reads in one mode and not the other fails half its readers.",
         fix: "Choose a darker (light theme) or lighter (dark theme) value for the palette entry or the rule's colour named (style palette set NAME #light/#dark, style set).",
-        evidence: "WCAG 2.x's 3:1 for graphics and large text (success criterion 1.4.11); the built-in ryu palette passes it in both themes (computed while planning plan 2.E). A convention; no round has judged it yet.",
+        evidence: "WCAG 2.x's 3:1 for graphics and large text (success criterion 1.4.11); the built-in ryu palette passes it in both themes (computed while planning plan 2.E). A convention. In round 3's blind review (plan 2.G, three judges a pair), every sheet used the built-in look and the rule found nothing; the judges' text score rose or held on every circuit.",
     },
     Rule {
         code: "sch_override_unused",
