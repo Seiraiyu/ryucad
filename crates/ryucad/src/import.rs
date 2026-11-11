@@ -28,6 +28,7 @@ mod update;
 
 use plan::Planned;
 pub use plan::Writes;
+pub(crate) use plan::{product_of, usage_ordinal};
 pub use update::{products_diff, usage_warnings};
 
 /// The work units one imported body may heal in by default: at least
