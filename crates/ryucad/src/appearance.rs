@@ -137,6 +137,9 @@ pub struct Drawn {
     pub part: Id,
     pub founder: Id,
     pub built: Arc<Built>,
+    /// What its solid's chain did to the names it retired: a colour on a
+    /// face a later feature split colours every piece (design 447).
+    pub lineage: Arc<crate::reference::Lineage>,
     pub above: Vec<Look>,
     /// Its part is another project's (a dependency's): this project's
     /// files say nothing of its own look or material (#386).
@@ -219,6 +222,7 @@ pub fn drawn(session: &mut Session, part: &Id) -> Result<Vec<Drawn>> {
                     part: o.part.clone(),
                     founder: s.founder.clone(),
                     built: Arc::clone(&s.built),
+                    lineage: Arc::clone(&s.lineage),
                     above: above(session, part, &o.path, &s.founder),
                     foreign: matches!(o.rev, Rev::Foreign { .. }),
                 });
@@ -232,12 +236,13 @@ pub fn drawn(session: &mut Session, part: &Id) -> Result<Vec<Drawn>> {
         .shown(&solids)
         .into_iter()
         .filter_map(|s| {
-            let (_, b) = s.state?;
+            let (f, b) = s.state?;
             Some(Drawn {
                 key: s.solid.to_string(),
                 part: part.clone(),
                 founder: s.solid.clone(),
                 built: Arc::clone(b),
+                lineage: Arc::new(crate::reference::Lineage::of(&solids, s.solid, f, built)),
                 above: Vec::new(),
                 foreign: false,
             })
@@ -262,23 +267,47 @@ pub fn look_of(session: &Session, d: &Drawn, material: Option<&str>) -> SolidLoo
         effective(&c, material)
     };
     let mut faces = BTreeMap::new();
+    // Entries on faces a later feature split, on each piece; an entry
+    // naming a piece itself wins (design 447).
+    let mut followed = BTreeMap::new();
+    let mut named = std::collections::BTreeSet::new();
     let prefix = format!("{}/", d.founder);
     for (k, l) in f.into_iter().flat_map(|f| &f.faces) {
         let Some(name) = k.strip_prefix(&prefix) else {
             continue;
         };
-        let alive = crate::doc::reference::parse_name(name)
-            .is_some_and(|n| d.built.body.by_name(n).is_some());
-        if !alive {
+        let Some(n) = crate::doc::reference::parse_name(name) else {
             continue;
-        }
+        };
+        let pieces: Vec<String> = if d.built.body.by_name(n).is_some() {
+            named.insert(name.to_owned());
+            vec![name.to_owned()]
+        } else {
+            use crate::reference::{Follow, Followed};
+            match d.lineage.follow(n, Follow::All, &d.built.body) {
+                Followed::To(_, t) => t.pieces.iter().map(ToString::to_string).collect(),
+                _ => continue,
+            }
+        };
         chain.truncate(d.above.len());
         chain.push(l);
         chain.extend(solid);
         chain.extend(part);
         let e = effective(&chain, material);
-        if e != base {
-            faces.insert(name.to_owned(), e);
+        if e == base {
+            continue;
+        }
+        if pieces.len() == 1 && named.contains(&pieces[0]) {
+            faces.insert(pieces[0].clone(), e);
+        } else {
+            for p in pieces {
+                followed.insert(p, e.clone());
+            }
+        }
+    }
+    for (p, e) in followed {
+        if !named.contains(&p) {
+            faces.insert(p, e);
         }
     }
     SolidLook { base, faces }
@@ -324,16 +353,49 @@ fn occurrence_keys(session: &mut Session, part: &Id) -> Result<BTreeSet<String>>
     Ok(keys)
 }
 
-/// A part's solids as shown, by founder.
-fn shown_solids(session: &mut Session, part: &Id) -> Result<BTreeMap<Id, Arc<Built>>> {
+/// A part's solids as shown, by founder, each with its body and whether
+/// a face name is its (as written, or followed through its chain to the
+/// pieces a later feature split it into, design 447).
+fn shown_solids(session: &mut Session, part: &Id) -> Result<BTreeMap<Id, Shown>> {
     let p = session.project().part(part)?;
     let solids = crate::solid::Solids::of(p);
     let built = session.rebuilt(part)?;
     Ok(built
         .shown(&solids)
         .into_iter()
-        .filter_map(|s| Some((s.solid.clone(), Arc::clone(s.state?.1))))
+        .filter_map(|s| {
+            let (f, b) = s.state?;
+            Some((
+                s.solid.clone(),
+                Shown {
+                    built: Arc::clone(b),
+                    lineage: crate::reference::Lineage::of(&solids, s.solid, f, built),
+                },
+            ))
+        })
         .collect())
+}
+
+/// A shown solid's body and lineage.
+struct Shown {
+    built: Arc<Built>,
+    lineage: crate::reference::Lineage,
+}
+
+impl Shown {
+    /// Whether `name` is a face of it, or was one a later feature split
+    /// or merged into faces it has.
+    fn has_face(&self, name: ryukei::name::Name) -> bool {
+        use crate::reference::{Follow, Followed};
+        match self.built.body.by_name(name) {
+            Some(ryukei::topo::EntityId::Face(_)) => true,
+            Some(_) => false,
+            None => matches!(
+                self.lineage.follow(name, Follow::All, &self.built.body),
+                Followed::To(..)
+            ),
+        }
+    }
 }
 
 /// `appearance_unresolved`, for `key` of `part`'s file at `pointer`.
@@ -394,7 +456,8 @@ pub fn unresolved_entries(session: &mut Session, part: &Id) -> Vec<Value> {
         };
         let solid = Id::parse(solid, "solid").ok();
         let alive = solid.as_ref().and_then(|s| shown.get(s)).is_some_and(|b| {
-            crate::doc::reference::parse_name(name).is_some_and(|n| b.body.by_name(n).is_some())
+            crate::doc::reference::parse_name(name)
+                .is_some_and(|n| b.built.body.by_name(n).is_some() || b.has_face(n))
         });
         if alive {
             continue;
@@ -590,15 +653,17 @@ fn check_resolves(session: &mut Session, part: &Id, entry: &Entry, reference: &s
             let shown = shown_solids(session, part)?;
             let body = Id::parse(solid, "solid")
                 .ok()
-                .and_then(|s| shown.get(&s).cloned())
+                .and_then(|s| shown.get(&s))
                 .ok_or_else(|| missing("solid"))?;
             let n = crate::doc::reference::parse_name(name).ok_or_else(|| missing("face"))?;
-            match body.body.by_name(n) {
+            match body.built.body.by_name(n) {
                 Some(ryukei::topo::EntityId::Face(_)) => Ok(()),
                 Some(_) => Err(not_colourable(
                     reference,
                     "it is an edge or a vertex; colour faces",
                 )),
+                // A face a later feature split: every piece takes it.
+                None if body.has_face(n) => Ok(()),
                 None => Err(missing("face")),
             }
         }
@@ -955,6 +1020,37 @@ mod tests {
             .find(|x| x["part"] == part && x["solid"] == key)
             .unwrap_or_else(|| panic!("no {part} {key} in {v}"))
             .clone()
+    }
+
+    /// A colour on a face a later feature splits colours both pieces
+    /// (design 447), and the entry isn't `appearance_unresolved`.
+    #[test]
+    fn a_colour_on_a_split_face_colours_every_piece() {
+        let (_dir, mut s, body) = crate::sketch::tests::with_box();
+        let top = crate::sketch::tests::face_along(&body, [0.0, 0.0, 1.0]);
+        call(
+            &mut s,
+            "appearance.set",
+            json!({"entities": [format!("p/b/{top}")], "colour": "#2050c0"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "c", "operation": "cut",
+                   "params": {"x": 1, "y": 20, "z": 20},
+                   "placement": {"origin": [9.5, -5, -5]}}),
+        )
+        .unwrap();
+        let v = call(&mut s, "appearance.get", json!({"part": "p"})).unwrap();
+        let faces = solid(&v, "p", "b")["faces"].clone();
+        let pieces = faces.as_object().map(|m| m.len());
+        assert_eq!(pieces, Some(2), "{v}");
+        assert!(faces.get(&top).is_none(), "{v}");
+        for (_, look) in faces.as_object().unwrap() {
+            assert_eq!(look["colour"], "#2050c0", "{v}");
+        }
+        assert_eq!(v["warnings"], json!([]), "{v}");
     }
 
     #[test]
