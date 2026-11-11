@@ -2521,9 +2521,10 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Boolean(b) => b.fields(),
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) => {
-            crate::tweak::report(part, f)
-        }
+        Feature::MoveFace(_)
+        | Feature::ReplaceFace(_)
+        | Feature::Draft(_)
+        | Feature::DeleteFace(_) => crate::tweak::report(part, f),
         Feature::Datum(d) => crate::datum::report(part, d),
         Feature::Path(x) => crate::path::report(part, x),
         Feature::Sweep(w) => crate::along::feature_report(part, w),
@@ -4957,7 +4958,10 @@ fn feature_edit(
                 given.only(ty, crate::doc::surface::request_fields(ty))?;
                 crate::surface::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
             }
-            f @ (Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_)) => {
+            f @ (Feature::MoveFace(_)
+            | Feature::ReplaceFace(_)
+            | Feature::Draft(_)
+            | Feature::DeleteFace(_)) => {
                 let ty = f.type_name();
                 crate::tweak::take_given(ty, &mut given.fields)?;
                 given.only(ty, crate::doc::tweak::request_fields(ty))?;

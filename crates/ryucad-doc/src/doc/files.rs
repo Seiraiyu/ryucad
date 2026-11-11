@@ -6,6 +6,7 @@ use super::assembly::Instance;
 use super::blend::{Chamfer, Fillet};
 use super::body::{Mirror, Offset, Shell, Split};
 use super::datum::Datum;
+use super::edit::DeleteFace;
 use super::geometry::GeomRef;
 use super::hole::Hole;
 use super::id::{Id, ProjectId};
@@ -238,6 +239,8 @@ pub enum Feature {
     /// Faces of a solid drafted about a neutral plane or a parting line
     /// (ryucad 17.B).
     Draft(Box<Draft>),
+    /// Faces of a solid deleted, each gap healed (ryucad 22).
+    DeleteFace(Box<DeleteFace>),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -729,7 +732,9 @@ pub fn feature_format(v: &Value) -> u64 {
     let ty = v.get("type").and_then(Value::as_str);
     let retrims = v.get("topology").and_then(Value::as_str) == Some("change")
         || v.get("blends").and_then(Value::as_str) == Some("rebuild");
-    if ty.is_some_and(|t| super::tweak::TYPES.contains(&t)) && retrims {
+    if ty.is_some_and(|t| super::edit::TYPES.contains(&t))
+        || (ty.is_some_and(|t| super::tweak::TYPES.contains(&t)) && retrims)
+    {
         return super::edit::FORMAT;
     }
     if v.get("type").and_then(Value::as_str) == Some("import") && v.get("place").is_some() {
@@ -953,7 +958,9 @@ pub fn feature_acts(v: &Value) -> Acts {
         Some("base_flange") => out.founds = true,
         Some("flange" | "unfold" | "refold") => out.acts_on = ids(v.get("target")),
         Some("shell" | "offset") => out.acts_on = ids(v.get("target")),
-        Some("move_face" | "replace_face" | "draft") => out.acts_on = ids(v.get("target")),
+        Some("move_face" | "replace_face" | "draft" | "delete_face") => {
+            out.acts_on = ids(v.get("target"))
+        }
         _ => {}
     }
     out
@@ -989,7 +996,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold, fill, extract, sew, thicken, move_face, replace_face, draft"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold, fill, extract, sew, thicken, move_face, replace_face, draft, delete_face"),
     )
     .with("type", s)
 }
@@ -1031,6 +1038,7 @@ impl Feature {
             Feature::MoveFace(_) => "move_face",
             Feature::ReplaceFace(_) => "replace_face",
             Feature::Draft(_) => "draft",
+            Feature::DeleteFace(_) => "delete_face",
         }
     }
 
@@ -1071,7 +1079,7 @@ impl Feature {
     pub fn format(&self) -> u64 {
         // A tweak that may change topology or remake its blends is
         // ryucad 22's, whatever ryucad 17 wrote it at.
-        if self.retrim().is_some_and(|r| !r.is_keep()) {
+        if self.retrim().is_some_and(|r| !r.is_keep()) || matches!(self, Feature::DeleteFace(_)) {
             return super::edit::FORMAT;
         }
         if let Feature::Split(s) = self {
@@ -1142,6 +1150,7 @@ impl Feature {
             }
             Feature::MoveFace(_) | Feature::ReplaceFace(_) => super::tweak::FORMAT,
             Feature::Draft(_) => super::tweak::DRAFT_FORMAT,
+            Feature::DeleteFace(_) => super::edit::FORMAT,
         }
     }
 
@@ -1189,6 +1198,7 @@ impl Feature {
             Feature::MoveFace(m) => m.fields(),
             Feature::ReplaceFace(r) => r.fields(),
             Feature::Draft(d) => d.fields(),
+            Feature::DeleteFace(x) => x.fields(),
         }
     }
 
@@ -1221,6 +1231,7 @@ impl Feature {
             }
             "replace_face" => Feature::ReplaceFace(Box::new(ReplaceFace::from_fields(&mut o)?)),
             "draft" => Feature::Draft(Box::new(Draft::from_fields(&mut o, env)?)),
+            "delete_face" => Feature::DeleteFace(Box::new(DeleteFace::from_fields(&mut o)?)),
             "mirror" => Feature::Mirror(Box::new(Mirror::from_fields(&mut o)?)),
             "split" => Feature::Split(Box::new(Split::from_fields(&mut o)?)),
             "base_flange" => {
@@ -1299,7 +1310,8 @@ impl Feature {
             | Feature::Refold(_)
             | Feature::MoveFace(_)
             | Feature::ReplaceFace(_)
-            | Feature::Draft(_) => None,
+            | Feature::Draft(_)
+            | Feature::DeleteFace(_) => None,
         }
     }
 
@@ -1335,6 +1347,7 @@ impl Feature {
             Feature::MoveFace(m) => vec![&m.target],
             Feature::ReplaceFace(r) => vec![&r.target],
             Feature::Draft(d) => vec![&d.target],
+            Feature::DeleteFace(x) => vec![&x.target],
             f => f
                 .combine()
                 .map_or(Vec::new(), |c| c.targets.iter().collect()),
@@ -1501,6 +1514,7 @@ impl Feature {
             Feature::MoveFace(m) => m.references(),
             Feature::ReplaceFace(r) => r.references(),
             Feature::Draft(d) => d.references(),
+            Feature::DeleteFace(x) => x.references(),
             _ => self
                 .geometry()
                 .into_iter()
@@ -2698,6 +2712,26 @@ mod tests {
                        "target": "a", "tools": ["t"]});
         let f = Feature::from_json(&b, Unit::Mm, &Env::empty()).unwrap();
         assert_eq!(ids(f.consumes()), ["t"]);
+    }
+
+    #[test]
+    fn a_delete_face_loads_at_its_format_and_acts_on_its_target() {
+        let edit = super::super::edit::FORMAT;
+        let face = json!({"feature": "base", "name": format!("{:032x}", 9)});
+        let v = json!({"format": edit, "kind": "ryucad.feature", "type": "delete_face",
+                       "target": "plate", "seeds": [face], "heal": "grow"});
+        let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!(f.type_name(), "delete_face");
+        assert_eq!((f.format(), feature_format(&v)), (edit, edit));
+        assert_eq!(f.to_json(), v);
+        assert_eq!(f.targets(), [&Id::parse("plate", "feature").unwrap()]);
+        let roles: Vec<String> = f.references().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(roles, ["seeds.0"]);
+        // It acts on its target as a shell does.
+        let shell = json!({"type": "shell", "target": "plate"});
+        assert_eq!(feature_acts(&v).acts_on, feature_acts(&shell).acts_on);
+        assert!(f.retrim().is_none());
+        const { assert!(FEATURE_FORMAT >= super::super::edit::FORMAT) };
     }
 
     #[test]

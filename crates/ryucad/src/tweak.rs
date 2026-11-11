@@ -409,6 +409,14 @@ pub(crate) fn resolve<'a>(
                 },
             })
         }
+        // Resolved and built from Task 10 of plan 22.A.
+        Feature::DeleteFace(_) => Err(Error::new(
+            Code::TweakFailed,
+            format!("{ty} {id}: the kernel refused it"),
+        )
+        .with("feature", id)
+        .with("reason", "kernel")
+        .with("kernel", "tweak")),
         _ => unreachable!("a tweak"),
     }
 }
@@ -1145,6 +1153,13 @@ pub fn report(part: &Id, f: &Feature) -> Value {
             }
             if !d.flip.is_empty() {
                 v["flip"] = json!(d.flip.iter().map(|r| r.text(part)).collect::<Vec<_>>());
+            }
+            v
+        }
+        Feature::DeleteFace(x) => {
+            let mut v = x.fields();
+            for (role, r) in x.references() {
+                *v.pointer_mut(&pointer(&role)).expect("its own face") = json!(r.text(part));
             }
             v
         }
