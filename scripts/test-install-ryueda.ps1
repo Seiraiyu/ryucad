@@ -109,10 +109,15 @@ try {
     Start-Sleep -Seconds 1
     $r = Invoke-Installer 'fresh' $good $null
     Test-Case 'replacing a running binary succeeds' ($r.Ok -and $r.Out -match '"ryueda":') $r
+    # Again while the first upgrade's moved copy still runs: an upgrade
+    # never stops on it (#725).
+    $r = Invoke-Installer 'fresh' $good $null
+    Test-Case 'upgrading again while an earlier upgrade''s copy runs succeeds' ($r.Ok -and $r.Out -match '"ryueda":') $r
     Stop-Process -Id $running.Id -Force -ErrorAction SilentlyContinue
     $running.WaitForExit()
     $r = Invoke-Installer 'fresh' $good $null
-    Test-Case 'the next install removes ryueda.exe.old' ($r.Ok -and -not (Test-Path "$exe.old")) $r
+    $left = @(Get-ChildItem -Force (Split-Path $exe) | Where-Object { $_.Name -like '*.old' })
+    Test-Case 'the next install removes every moved copy' ($r.Ok -and $left.Count -eq 0) $r
 
     foreach ($v in @('0.0.9', 'v0.0.9', 'ryueda-v0.0.9')) {
         $r = Invoke-Installer "pinned-$v" $good @{ RYUEDA_VERSION = $v }
