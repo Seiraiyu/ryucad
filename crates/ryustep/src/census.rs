@@ -341,6 +341,19 @@ impl Census {
         self.ids.is_empty()
     }
 
+    /// The heap it holds, in bytes: what it adds beside a file's source.
+    pub fn heap_bytes(&self) -> usize {
+        use std::mem::size_of;
+        self.ids.capacity() * size_of::<u64>()
+            + self.names.capacity() * size_of::<Box<str>>()
+            + self.names.iter().map(|n| n.len()).sum::<usize>()
+            + self.name.capacity() * size_of::<u32>()
+            + self.category.capacity() * size_of::<Category>()
+            + self.offsets.capacity() * size_of::<u32>()
+            + self.targets.capacity() * size_of::<u32>()
+            + self.anchored.capacity() * size_of::<bool>()
+    }
+
     fn index(&self, id: u64) -> Option<usize> {
         self.ids.binary_search(&id).ok()
     }

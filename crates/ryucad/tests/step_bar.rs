@@ -263,3 +263,45 @@ fn the_race_imports_rebuilds_and_exports_within_its_bars() {
         "3mf: {three_mf:.1} s"
     );
 }
+
+/// The census (design 448) adds at most 5% to ryustep's parse and decode
+/// of the race's 125.8 MB file, the best of three each way. With
+/// `RYUCAD_BARS=1` the bar is asserted as it is; elsewhere ten times
+/// looser. Also prints the census's size beside the source's.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
+fn the_census_adds_at_most_five_percent_to_reading() {
+    let bytes = race();
+    let best = |f: &dyn Fn()| {
+        (0..3)
+            .map(|_| {
+                let t = Instant::now();
+                f();
+                t.elapsed().as_secs_f64()
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    let plain = best(&|| {
+        let file = ryustep::part21::parse(&bytes).unwrap();
+        std::hint::black_box(ryustep::schema::Entities::decode(&file));
+    });
+    let counted = best(&|| {
+        let file = ryustep::part21::parse(&bytes).unwrap();
+        std::hint::black_box(ryustep::schema::Entities::decode_counted(&file));
+    });
+    let file = ryustep::part21::parse(&bytes).unwrap();
+    let (_, census) = ryustep::schema::Entities::decode_counted(&file);
+    eprintln!(
+        "census: {} instances; parse and decode {plain:.2} s, with the census {counted:.2} s ({:+.1}%); \
+         census {:.1} MB beside the file's {:.1} MB",
+        census.len(),
+        (counted / plain - 1.0) * 100.0,
+        census.heap_bytes() as f64 / 1e6,
+        bytes.len() as f64 / 1e6
+    );
+    let bar = 1.0 + 0.05 * slack();
+    assert!(
+        counted <= plain * bar,
+        "{counted:.2} s against {plain:.2} s"
+    );
+}
