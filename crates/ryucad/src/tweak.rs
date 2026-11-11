@@ -1090,6 +1090,7 @@ pub fn from_given(
                 None => o.remove("groups"),
             };
         }
+        retrim_given(o, f)?;
     } else {
         if ty == "draft" {
             draft_given(o, f, &reference, &geom)?;
@@ -1163,6 +1164,7 @@ pub fn from_given(
             }
             None => {}
         }
+        retrim_given(o, f)?;
     }
     let mut r = crate::doc::files::Obj::new(&v, "")?;
     let out = match ty {
@@ -1270,6 +1272,7 @@ pub fn report(part: &Id, f: &Feature) -> Value {
                 }
             }
             v["tangent"] = json!(m.tangent);
+            retrim_report(&mut v, m.retrim);
             for (role, r) in m.faces() {
                 *v.pointer_mut(&pointer(&role)).expect("its own face") = json!(r.text(part));
             }
@@ -1277,6 +1280,7 @@ pub fn report(part: &Id, f: &Feature) -> Value {
         }
         Feature::ReplaceFace(x) => {
             let mut v = x.fields();
+            retrim_report(&mut v, x.retrim);
             for (i, g) in x.groups.iter().enumerate() {
                 v["groups"][i]["with"] = json!(g.with.text(part));
             }
@@ -1287,6 +1291,7 @@ pub fn report(part: &Id, f: &Feature) -> Value {
         }
         Feature::Draft(d) => {
             let mut v = d.fields();
+            retrim_report(&mut v, d.retrim);
             v["angle"] = d.angle.report();
             for (i, g) in d.groups.iter().enumerate() {
                 v["groups"][i]["angle"] = g.quantity.report();
@@ -1317,6 +1322,40 @@ pub fn report(part: &Id, f: &Feature) -> Value {
         }
         _ => unreachable!("a tweak"),
     }
+}
+
+/// A face tweak's `topology` and `blends` from what was given, over `o`
+/// (its file's): `keep` takes each away, `change` and `rebuild` set it.
+fn retrim_given(o: &mut serde_json::Map<String, Value>, f: &FeatureFields) -> Result<()> {
+    for (key, given, other) in [
+        ("topology", &f.topology, "change"),
+        ("blends", &f.blends, "rebuild"),
+    ] {
+        match given.as_deref() {
+            None => {}
+            Some("keep") => {
+                o.remove(key);
+            }
+            Some(x) if x == other => {
+                o.insert(key.into(), json!(other));
+            }
+            Some(x) => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("a face tweak's {key} is keep or {other}, not {x:?}"),
+                )
+                .with("param", key));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A face tweak's `topology` and `blends` as a report gives them: each
+/// always, `keep` when not set.
+fn retrim_report(v: &mut Value, r: crate::doc::edit::Retrim) {
+    v["topology"] = json!(if r.topology { "change" } else { "keep" });
+    v["blends"] = json!(if r.blends { "rebuild" } else { "keep" });
 }
 
 /// What a tweak resolved to, beside its fields: a move's rigid `motion`
@@ -1807,6 +1846,68 @@ mod tests {
                 .unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn the_protocol_sets_and_clears_topology_and_blends() {
+        let (dir, mut s) = boxes();
+        let b = names(&mut s, "b", "faces");
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "move_face", "id": "m",
+            "direction": "z", "distance": "1 mm", "faces": [format!("p/b/{}", b[0])],
+            "topology": "change", "blends": "rebuild"}),
+        )
+        .unwrap();
+        let v = file(&dir, "m");
+        assert_eq!(
+            (v["topology"].as_str(), v["blends"].as_str()),
+            (Some("change"), Some("rebuild"))
+        );
+        assert_eq!(v["format"], crate::doc::edit::FORMAT);
+        // feature.show gives both always.
+        let shown = call(&mut s, "feature.show", json!({"part": "p", "id": "m"})).unwrap();
+        assert_eq!(shown["topology"], "change", "{shown}");
+        // keep clears each; the file goes back to ryucad 17's format.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "m", "topology": "keep",
+            "blends": "keep"}),
+        )
+        .unwrap();
+        let v = file(&dir, "m");
+        assert!(
+            v.get("topology").is_none() && v.get("blends").is_none(),
+            "{v}"
+        );
+        assert_eq!(v["format"], crate::doc::tweak::FORMAT);
+        let shown = call(&mut s, "feature.show", json!({"part": "p", "id": "m"})).unwrap();
+        assert_eq!(
+            (shown["topology"].as_str(), shown["blends"].as_str()),
+            (Some("keep"), Some("keep")),
+            "{shown}"
+        );
+        // Anything else is refused at its param.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "m", "topology": "grow"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["param"].as_str()),
+            (Code::InvalidParam, Some("topology"))
+        );
+        // A primitive takes neither.
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "c", "topology": "change"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
     }
 
     #[test]

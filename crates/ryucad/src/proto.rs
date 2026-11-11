@@ -410,6 +410,25 @@ pub struct FeatureFields {
     /// A parting-line draft's pull: any axis, or a plane's normal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull: Option<String>,
+    /// A face tweak's topology: `change` lets its faces grow over their
+    /// neighbours, shrink away or split, and edges and vertices come and
+    /// go; `keep` (the default) refuses that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology: Option<String>,
+    /// A face tweak's blends: `rebuild` makes again the fillets and
+    /// chamfers it breaks; `keep` (the default) refuses that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blends: Option<String>,
+    /// A delete_face's healing: `auto` (a cap where one closes a gap, else
+    /// its neighbours grow; the default), `cap` or `grow`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heal: Option<String>,
+    /// A delete_face's seeds, replacing them all: one face of each hole,
+    /// boss or pocket deleted whole, each `<part>/<solid>/<name>` (`[]` for
+    /// none). The CLI sends `--seed` as `features`, which a delete_face
+    /// takes as its seeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seeds: Option<Vec<String>>,
     /// A path's segments in order, replacing them all: each a curve as
     /// text (an edge `<part>/<solid>/<name>`, a sketch's line, arc or
     /// circle `<part>/<sketch>/<entity>`, a path or helix

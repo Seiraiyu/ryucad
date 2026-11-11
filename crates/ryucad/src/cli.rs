@@ -1168,7 +1168,9 @@ enum FeatureCmd {
     /// --pull; --angle; --face repeated, --face-angle, --flip, --reverse, --no-tangent)
     /// of a solid, keeping every name (offset
     /// moves every face, filling where they part; move_face --by offset moves
-    /// only the faces named, keeping the topology); a
+    /// only the faces named, keeping the topology); each face tweak takes
+    /// --topology change, letting it change the solid's topology, and --blends
+    /// rebuild, making again the blends it breaks; a
     /// mirror (--solid, --plane, --operation) of a whole solid, joined to
     /// it unless told otherwise; a split (--target, --plane, or --tool
     /// BODY, or --tool-face FACE...; --flip, --keep): the target keeps the
@@ -3042,6 +3044,19 @@ struct FieldArgs {
     /// refused (tangency_broken).
     #[arg(long)]
     no_tangent: bool,
+    /// Let a face tweak change the solid's topology: keep (the default) or change, which
+    /// lets faces grow over their neighbours, shrink away or split, and edges and vertices
+    /// come and go.
+    #[arg(long, value_name = "KEEP|CHANGE")]
+    topology: Option<String>,
+    /// Make again the fillets and chamfers a face tweak breaks: keep (the default) or
+    /// rebuild.
+    #[arg(long, value_name = "KEEP|REBUILD")]
+    blends: Option<String>,
+    /// How a delete_face heals each gap: auto (a cap where one closes it, else its
+    /// neighbours grow; the default), cap or grow.
+    #[arg(long, value_name = "HOW")]
+    heal: Option<String>,
     /// The surface a replace_face gives the --face values after it, until the next
     /// --with: a face <part>/<solid>/<name> (its surface whole), or a plane (xy, a datum
     /// plane <part>/<datum>, a sketch).
@@ -3399,6 +3414,10 @@ impl FieldArgs {
             } else {
                 self.tangent
             },
+            topology: self.topology.clone(),
+            blends: self.blends.clone(),
+            heal: self.heal.clone(),
+            seeds: None,
             radius: self.radius.clone().map(Value::String),
             edges: (!self.edges.is_empty() && !ordered).then(|| self.edges.clone()),
             form: self.form.clone(),
@@ -6766,6 +6785,38 @@ mod tests {
             ])
             .unwrap_err();
             assert_eq!(e.code, Code::Usage);
+        });
+    }
+
+    #[test]
+    fn a_tweaks_topology_and_blends_parse() {
+        on_cli_stack(|| {
+            let cli = Cli::try_parse_from([
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "move_face",
+                "--direction",
+                "z",
+                "--distance",
+                "1mm",
+                "--face",
+                "p/b/x",
+                "--topology",
+                "change",
+                "--blends",
+                "rebuild",
+            ])
+            .unwrap();
+            let Command::Feature(FeatureCmd::Add { fields, .. }) = &cli.command else {
+                panic!()
+            };
+            let f = fields.to_fields();
+            assert_eq!(
+                (f.topology.as_deref(), f.blends.as_deref()),
+                (Some("change"), Some("rebuild"))
+            );
         });
     }
 }
