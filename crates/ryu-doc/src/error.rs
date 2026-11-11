@@ -876,6 +876,31 @@ pub enum Code {
     /// ryueda lint: four or more members of a bus between the same parts'
     /// sides drawn apart (plan 2.C).
     SchBusUnbundled,
+    /// ryueda: a symbol standards file (`library/standards.json`) whose
+    /// values its checks refuse; the file's `path` and a JSON `pointer`
+    /// are in the details (plan 2.D).
+    StandardsInvalid,
+    /// ryueda symbol lint: a pin's connection point off the standards'
+    /// grid.
+    SymPinOffGrid,
+    /// ryueda symbol lint: a pin on a side its class's standards don't
+    /// put its role on (a power pin off the top, an output on the left).
+    SymPinSide,
+    /// ryueda symbol lint: a function's pins (I2C, SPI, GPIO…) split up,
+    /// or a numbered group out of order.
+    SymPinGroup,
+    /// ryueda symbol lint: a pin longer or shorter than the standards'.
+    SymPinLength,
+    /// ryueda symbol lint: a resistor drawn to the other standard (the US
+    /// zigzag or the IEC box) than its library's (plan 2.D; was
+    /// `sch_resistor_style`).
+    SymShape,
+    /// ryueda symbol lint: a pin's name nearer its body's edge, or
+    /// another name, than the standards' margin.
+    SymBodyMargin,
+    /// ryueda symbol lint: a unit with more pins than its class draws in
+    /// one unit.
+    SymUnits,
 }
 
 impl Code {
@@ -1176,6 +1201,17 @@ mod tests {
         assert_eq!(json!(Code::SchPaperFit), json!("sch_paper_fit"));
         assert_eq!(json!(Code::SchOffSheetLocal), json!("sch_off_sheet_local"));
         assert_eq!(json!(Code::SchBusUnbundled), json!("sch_bus_unbundled"));
+        assert_eq!(json!(Code::StandardsInvalid), json!("standards_invalid"));
+        assert_eq!(json!(Code::SymPinOffGrid), json!("sym_pin_off_grid"));
+        assert_eq!(json!(Code::SymPinSide), json!("sym_pin_side"));
+        assert_eq!(json!(Code::SymPinGroup), json!("sym_pin_group"));
+        assert_eq!(json!(Code::SymPinLength), json!("sym_pin_length"));
+        assert_eq!(json!(Code::SymShape), json!("sym_shape"));
+        assert_eq!(json!(Code::SymBodyMargin), json!("sym_body_margin"));
+        assert_eq!(json!(Code::SymUnits), json!("sym_units"));
+        for c in [Code::StandardsInvalid, Code::SymShape, Code::SymUnits] {
+            assert_eq!(c.exit_code(), 1);
+        }
         assert_eq!(json!(Code::SchFunctionSplit), json!("sch_function_split"));
         assert_eq!(json!(Code::SchRegionUntitled), json!("sch_region_untitled"));
         assert_eq!(json!(Code::LayoutConflict), json!("layout_conflict"));

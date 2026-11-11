@@ -148,6 +148,18 @@ enum Command {
         #[command(subcommand)]
         action: Option<LintCmd>,
     },
+    /// The symbol standards that judge a library (this project's own by
+    /// default): resistor shapes, grid, pin lengths, name margins, ground
+    /// and group name patterns, and each class's side rules; `standards
+    /// set` changes this project's own.
+    #[command(args_conflicts_with_subcommands = true)]
+    Standards {
+        /// A library project's alias, to read the standards that judge it.
+        #[arg(long)]
+        library: Option<String>,
+        #[command(subcommand)]
+        action: Option<StandardsCmd>,
+    },
     /// Load the project from nothing and report every file's faults and
     /// every design's ERC, and supply findings from the catalogues this
     /// machine holds; fails (check_failed) on any error.
@@ -367,6 +379,18 @@ enum LibCmd {
     },
     /// Every library with its revision, what it holds and its faults.
     List,
+    /// Judge a library's symbols by the standards that apply to it
+    /// (`ryueda standards`): each symbol's class, score and findings, with
+    /// symbol edit ops that fix them. This project's own library by
+    /// default.
+    Check {
+        /// A library project's alias.
+        #[arg(long)]
+        library: Option<String>,
+        /// One symbol (<id>, or lib/<alias>/symbol/<id>).
+        #[arg(long)]
+        symbol: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -384,6 +408,20 @@ enum SymbolCmd {
         /// "rect", "start": [...], "end": [...]}, ...
         #[arg(long, value_parser = ops, default_value = "[]")]
         ops: Ops,
+        /// The class of part it draws: resistor, capacitor, inductor,
+        /// diode, led, transistor, opamp, connector, regulator, ic (none
+        /// takes it off an edit).
+        #[arg(long)]
+        class: Option<String>,
+        /// Draw it from the standards' template for a class: resistor,
+        /// capacitor, inductor, diode, led (whole), ic, regulator,
+        /// connector (a box round --pins); --ops apply after.
+        #[arg(long)]
+        template: Option<String>,
+        /// A box template's pins, as JSON: [{"number": "1", "name":
+        /// "VDD", "type": "power_in"}, ...].
+        #[arg(long, value_parser = pin_specs, default_value = "[]")]
+        pins: PinSpecs,
         #[command(flatten)]
         expect: Expect,
     },
@@ -397,6 +435,11 @@ enum SymbolCmd {
         units: Option<u32>,
         #[arg(long, value_parser = ops, default_value = "[]")]
         ops: Ops,
+        /// The class of part it draws: resistor, capacitor, inductor,
+        /// diode, led, transistor, opamp, connector, regulator, ic (none
+        /// takes it off an edit).
+        #[arg(long)]
+        class: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1058,6 +1101,19 @@ enum ErcCmd {
 }
 
 #[derive(Subcommand)]
+enum StandardsCmd {
+    /// Change this project's own standards by a JSON merge patch:
+    /// '{"shapes": "iec"}', '{"classes": {"ic": {"max_pins_per_unit": 100}}}';
+    /// null puts a field back.
+    Set {
+        #[arg(value_parser = json_value)]
+        patch: Value,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
 enum LintCmd {
     /// Set rules' weights (CODE=N) and severities (CODE=error|warning|off),
     /// and preferred styles (resistor=us|iec, local_nets=wires|labels);
@@ -1257,6 +1313,19 @@ enum DaemonCmd {
     },
 }
 
+fn json_value(s: &str) -> std::result::Result<Value, String> {
+    serde_json::from_str(s).map_err(|e| format!("not JSON: {e}"))
+}
+
+#[derive(Clone)]
+struct PinSpecs(Vec<ryueda::template::PinSpec>);
+
+fn pin_specs(s: &str) -> std::result::Result<PinSpecs, String> {
+    serde_json::from_str(s)
+        .map(PinSpecs)
+        .map_err(|e| format!("not a list of pins: {e}"))
+}
+
 /// A batch of ops, as JSON.
 #[derive(Clone)]
 struct Ops(Vec<Value>);
@@ -1358,17 +1427,27 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             expected_revision: expect.expect.clone(),
         },
         Command::Lib(LibCmd::List) => Request::LibList {},
+        Command::Lib(LibCmd::Check { library, symbol }) => Request::LibCheck {
+            library: library.clone(),
+            symbol: symbol.clone(),
+        },
         Command::Symbol(SymbolCmd::Create {
             name,
             id,
             units,
             ops,
+            class,
+            template,
+            pins,
             expect,
         }) => Request::SymbolCreate {
             name: name.clone(),
             id: id.clone(),
             units: *units,
             ops: ops.0.clone(),
+            class: class.clone(),
+            template: template.clone(),
+            pins: pins.0.clone(),
             expected_revision: expect.expect.clone(),
         },
         Command::Symbol(SymbolCmd::Edit {
@@ -1376,12 +1455,14 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             name,
             units,
             ops,
+            class,
             expect,
         }) => Request::SymbolEdit {
             symbol: symbol.clone(),
             name: name.clone(),
             units: *units,
             ops: ops.0.clone(),
+            class: class.clone(),
             expected_revision: expect.expect.clone(),
         },
         Command::Symbol(SymbolCmd::Show { symbol }) => Request::SymbolShow {
@@ -1805,6 +1886,19 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 dry_run: *dry_run,
             }
         }
+        Command::Standards {
+            library,
+            action: None,
+        } => Request::StandardsGet {
+            library: library.clone(),
+        },
+        Command::Standards {
+            library: _,
+            action: Some(StandardsCmd::Set { patch, expect }),
+        } => Request::StandardsSet {
+            patch: patch.clone(),
+            expected_revision: expect.expect.clone(),
+        },
         Command::Erc {
             design,
             action: None,

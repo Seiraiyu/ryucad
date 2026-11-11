@@ -472,13 +472,16 @@ impl Project {
                 crate::lint::KIND,
                 crate::lint::FORMAT,
             ) {
-                Ok(c) => Loaded {
-                    faults: crate::lint::check(&c)
-                        .into_iter()
-                        .map(|f| f.with("path", LINT))
-                        .collect(),
-                    item: Ok(c),
-                },
+                Ok(mut c) => {
+                    crate::lint::upgrade(&mut c);
+                    Loaded {
+                        faults: crate::lint::check(&c)
+                            .into_iter()
+                            .map(|f| f.with("path", LINT))
+                            .collect(),
+                        item: Ok(c),
+                    }
+                }
                 Err(e) => Loaded {
                     item: Err(e),
                     faults: Vec::new(),
@@ -586,6 +589,49 @@ impl Project {
     }
 
     /// The library `alias` names, or why it can't be used.
+    /// The standards that judge library `alias`'s symbols, and where they
+    /// come from (the alias whose file they are, or `built_in`): the
+    /// library's own `standards.json`, else this project's own, else the
+    /// built-in standards, whose resistor shape follows `lint.json`'s
+    /// `prefer.resistor`. A file that doesn't read, or fails its checks,
+    /// judges nothing: its fault is the answer (`standards_invalid`).
+    pub fn standards_for(&self, alias: &str) -> Result<(crate::standards::Standards, String)> {
+        self.standards_with(alias, &crate::lint::prefs(self))
+    }
+
+    /// [`Project::standards_for`] under lint preferences `prefs` (what
+    /// `lint configure --dry-run` tries).
+    pub fn standards_with(
+        &self,
+        alias: &str,
+        prefs: &ryusch::lint::Prefs,
+    ) -> Result<(crate::standards::Standards, String)> {
+        use crate::standards::{Shapes, Standards};
+        let own = |a: &str| -> Result<Option<Standards>> {
+            let Some(st) = &self.library(a)?.standards else {
+                return Ok(None);
+            };
+            let s = st.item.as_ref().map_err(|e| e.clone())?;
+            if let Some(f) = st.faults.iter().find(|f| f.is_error()) {
+                return Err(f.error.clone());
+            }
+            Ok(Some(s.clone()))
+        };
+        if let Some(s) = own(alias)? {
+            return Ok((s, alias.to_owned()));
+        }
+        if alias != SELF
+            && let Some(s) = own(SELF)?
+        {
+            return Ok((s, SELF.to_owned()));
+        }
+        let mut s = Standards::default();
+        if prefs.prefer.resistor == ryusch::lint::ResistorStyle::Iec {
+            s.shapes = Shapes::Iec;
+        }
+        Ok((s, "built_in".to_owned()))
+    }
+
     pub fn library(&self, alias: &str) -> Result<&Library> {
         match self.libraries.get(alias) {
             Some(Ok(l)) => Ok(l),
@@ -699,6 +745,15 @@ impl Project {
                 }
             };
             out.extend(lib.faults.iter().cloned());
+            if let Some(st) = &lib.standards {
+                if let Err(e) = &st.item {
+                    out.push(Fault {
+                        severity: Severity::Error,
+                        error: e.clone(),
+                    });
+                }
+                out.extend(st.faults.iter().cloned());
+            }
             for kind in [ObjKind::Symbol, ObjKind::Footprint, ObjKind::Libcomp] {
                 for id in lib.ids(kind) {
                     let (item, faults) = match kind {
@@ -1116,6 +1171,45 @@ pub(crate) mod tests {
         assert_eq!(
             (e.code, &e.details["pointer"]),
             (Code::InvalidDocument, &serde_json::json!("/libraries/self"))
+        );
+    }
+
+    #[test]
+    fn a_library_is_judged_by_its_own_standards_else_the_projects() {
+        use crate::standards::Shapes;
+        let dir = tempfile::tempdir().unwrap();
+        let (board, passives) = (dir.path().join("board"), dir.path().join("passives"));
+        manifest(&board, ProjectKind::Design, &[("passives", "../passives")]);
+        manifest(&passives, ProjectKind::Library, &[]);
+        let p = Project::load(&board).unwrap();
+        assert_eq!(p.standards_for(SELF).unwrap().1, "built_in");
+        assert_eq!(p.standards_for("passives").unwrap().1, "built_in");
+        let iec = "{\"format\": 1, \"kind\": \"ryueda.standards\", \"shapes\": \"iec\"}\n";
+        write_atomic(&board.join("library/standards.json"), iec).unwrap();
+        let p = Project::load(&board).unwrap();
+        let (s, from) = p.standards_for("passives").unwrap();
+        assert_eq!((s.shapes, from.as_str()), (Shapes::Iec, SELF));
+        let ansi = "{\"format\": 1, \"kind\": \"ryueda.standards\", \"shapes\": \"ansi\"}\n";
+        write_atomic(&passives.join("library/standards.json"), ansi).unwrap();
+        let p = Project::load(&board).unwrap();
+        let (s, from) = p.standards_for("passives").unwrap();
+        assert_eq!((s.shapes, from.as_str()), (Shapes::Ansi, "passives"));
+        // A file that doesn't pass its checks judges nothing, and is a
+        // fault of the project.
+        write_atomic(
+            &board.join("library/standards.json"),
+            "{\"format\": 1, \"kind\": \"ryueda.standards\", \"grid_nm\": 0}\n",
+        )
+        .unwrap();
+        let p = Project::load(&board).unwrap();
+        assert_eq!(
+            p.standards_for(SELF).unwrap_err().code,
+            Code::StandardsInvalid
+        );
+        assert!(
+            p.faults()
+                .iter()
+                .any(|f| f.error.code == Code::StandardsInvalid)
         );
     }
 

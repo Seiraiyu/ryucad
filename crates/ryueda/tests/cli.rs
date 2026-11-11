@@ -478,6 +478,9 @@ fn every_protocol_method_has_a_command() {
         ("erc.configure", &["erc", "configure"]),
         ("lint.get", &["lint"]),
         ("lint.configure", &["lint", "configure"]),
+        ("lib.check", &["lib", "check"]),
+        ("standards.get", &["standards"]),
+        ("standards.set", &["standards", "set"]),
         ("check", &["check"]),
         ("layout", &["layout"]),
         ("layout.place", &["place"]),
@@ -1556,13 +1559,14 @@ fn netlists_from_the_cli() {
     p.ok(&["erc", "configure", "--severity", "pin_unconnected=default"]);
     // With nothing left in it, erc.json goes.
     assert!(!p.direct.join("board/erc.json").exists());
-    // `check` reads every file and runs ERC on every design. The one
-    // warning: its parts have LCSC offers and this machine has no
-    // catalogue to judge their supply by.
+    // `check` reads every file and runs ERC on every design. The two
+    // warnings: its parts have LCSC offers and this machine has no
+    // catalogue to judge their supply by, and its resistor `r` is a box
+    // under the built-in ANSI standards (sym_shape).
     let report = p.ok(&["check"]);
     assert_eq!(
         (&report["errors"], &report["warnings"]),
-        (&json!(0), &json!(1)),
+        (&json!(0), &json!(2)),
         "{report}"
     );
     assert_eq!(report["supply"][0]["details"]["reason"], "missing");
@@ -2076,6 +2080,242 @@ fn keep_for_looking(from: &Path, name: &str) {
     fs::copy(from, dir.join(name)).unwrap();
 }
 
+/// The project's own standards: read whole, changed by a merge patch,
+/// written only where they differ from the built-in ones, undone.
+#[test]
+fn standards_from_the_cli() {
+    let p = Pair::projects();
+    let got = p.ok(&["standards"]);
+    assert_eq!(got["from"], "built_in", "{got}");
+    assert_eq!(got["standards"]["shapes"], "ansi");
+    assert_eq!(got["standards"]["grid_nm"], 1_270_000);
+    assert!(got["standards"]["classes"]["ic"]["sides"]["power_in"] == "up");
+    let set = p.ok(&[
+        "standards",
+        "set",
+        r#"{"shapes": "iec", "classes": {"ic": {"max_pins_per_unit": 100}}}"#,
+    ]);
+    assert_eq!(set["from"], "self", "{set}");
+    assert_eq!(set["standards"]["shapes"], "iec");
+    // A class patched keeps the rest of its rule.
+    assert_eq!(set["standards"]["classes"]["ic"]["max_pins_per_unit"], 100);
+    assert_eq!(set["standards"]["classes"]["ic"]["sides"]["power_in"], "up");
+    let file: Value =
+        serde_json::from_slice(&fs::read(p.direct.join("board/library/standards.json")).unwrap())
+            .unwrap();
+    assert_eq!(file["shapes"], "iec");
+    assert!(file.get("grid_nm").is_none(), "{file}");
+    // The library project has none of its own: the project's judge it.
+    assert_eq!(
+        p.ok(&["standards", "--library", "passives"])["from"],
+        "self"
+    );
+    // Refusals: a bad value, a field no standards have.
+    let e = p.fails(
+        &["standards", "set", r#"{"grid_nm": 0}"#],
+        "standards_invalid",
+        1,
+    );
+    assert_eq!(e["details"]["faults"][0]["details"]["pointer"], "/grid_nm");
+    p.fails(
+        &["standards", "set", r#"{"colour": "red"}"#],
+        "invalid_param",
+        1,
+    );
+    // Back to the built-in shapes and class: the file goes.
+    p.ok(&["standards", "set", r#"{"shapes": null, "classes": null}"#]);
+    assert!(!p.direct.join("board/library/standards.json").exists());
+}
+
+/// A symbol's class: given, changed, taken off; a symbol with none stays
+/// format 1.
+#[test]
+fn a_symbols_class_from_the_cli() {
+    let p = Pair::projects();
+    let made = p.ok(&[
+        "symbol", "create", "R", "--ops", RESISTOR, "--class", "resistor",
+    ]);
+    assert_eq!(made["symbol"]["class"], "resistor", "{made}");
+    let file = fs::read_to_string(p.direct.join("board/library/symbols/r.json")).unwrap();
+    assert!(file.contains("\"format\": 2"), "{file}");
+    let edited = p.ok(&["symbol", "edit", "r", "--class", "none"]);
+    assert!(edited["symbol"].get("class").is_none(), "{edited}");
+    let file = fs::read_to_string(p.direct.join("board/library/symbols/r.json")).unwrap();
+    assert!(file.contains("\"format\": 1"), "{file}");
+    let e = p.fails(
+        &["symbol", "edit", "r", "--class", "gizmo"],
+        "invalid_param",
+        1,
+    );
+    assert!(
+        e["details"]["classes"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("ic"))
+    );
+}
+
+/// Symbols drawn from the standards' templates: a resistor to the
+/// project's shapes, an IC from its pins, ops applied after.
+#[test]
+fn symbols_from_templates() {
+    let p = Pair::projects();
+    let r = p.ok(&["symbol", "create", "R", "--template", "resistor"]);
+    assert_eq!(r["symbol"]["class"], "resistor", "{r}");
+    assert_eq!(r["symbol"]["graphics"]["g1"]["type"], "polyline");
+    p.ok(&["standards", "set", r#"{"shapes": "iec"}"#]);
+    let box_r = p.ok(&["symbol", "create", "R box", "--template", "resistor"]);
+    assert_eq!(box_r["symbol"]["graphics"]["g1"]["type"], "rect");
+    let u = p.ok(&[
+        "symbol",
+        "create",
+        "Sensor",
+        "--template",
+        "ic",
+        "--pins",
+        r#"[{"number": "1", "name": "VDD", "type": "power_in"},
+            {"number": "2", "name": "GND", "type": "power_in"},
+            {"number": "3", "name": "SDA", "type": "bidirectional"},
+            {"number": "4", "name": "SCL", "type": "bidirectional"}]"#,
+        "--ops",
+        r#"[{"op": "add", "graphic": "text", "text": "BME", "at": [0, 0], "size": "1.27 mm"}]"#,
+    ]);
+    let pins = &u["symbol"]["pins"];
+    assert_eq!(
+        (&pins["1"]["side"], &pins["2"]["side"]),
+        (&json!("up"), &json!("down"))
+    );
+    assert_eq!(u["added"], json!(["g2"]));
+    // Refusals.
+    p.fails(
+        &["symbol", "create", "Q", "--template", "transistor"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &[
+            "symbol",
+            "create",
+            "X",
+            "--pins",
+            r#"[{"number": "1", "type": "input"}]"#,
+        ],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &[
+            "symbol",
+            "create",
+            "X",
+            "--template",
+            "ic",
+            "--class",
+            "led",
+            "--pins",
+            r#"[{"number": "1", "type": "input"}]"#,
+        ],
+        "invalid_param",
+        1,
+    );
+}
+
+/// A library's symbols judged: the box resistor under ANSI standards, its
+/// class inferred from the component that places it, its fix applied.
+#[test]
+fn a_library_is_checked_from_the_cli() {
+    let p = Pair::with_resistor();
+    let c = p.ok(&["lib", "check"]);
+    assert_eq!(c["library"], "self");
+    assert_eq!(c["standards"]["from"], "built_in");
+    let r = &c["symbols"][0];
+    assert_eq!(
+        (&r["reference"], &r["class"], &r["class_inferred"]),
+        (
+            &json!("lib/self/symbol/r"),
+            &json!("resistor"),
+            &json!(true)
+        ),
+        "{c}"
+    );
+    let shape = r["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "sym_shape")
+        .unwrap()
+        .clone();
+    let points: i64 = r["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["points"].as_i64().unwrap())
+        .sum();
+    assert_eq!(r["score"].as_i64().unwrap(), (100 - points).max(0));
+    let fix = &shape["fixes"][0];
+    assert_eq!(fix["symbol"], "r");
+    let ops = serde_json::to_string(&fix["ops"]).unwrap();
+    p.ok(&["symbol", "edit", "r", "--ops", &ops]);
+    let c = p.ok(&["lib", "check", "--symbol", "r"]);
+    assert!(
+        !c["symbols"][0]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "sym_shape"),
+        "{c}"
+    );
+    // The library project, and a rule raised to an error.
+    assert_eq!(
+        p.ok(&["lib", "check", "--library", "passives"])["symbols"],
+        json!([])
+    );
+    p.ok(&["lint", "configure", "--severity", "sym_pin_side=error"]);
+    p.ok(&[
+        "symbol",
+        "create",
+        "U",
+        "--template",
+        "ic",
+        "--pins",
+        r#"[{"number": "1", "name": "VDD", "type": "power_in"}]"#,
+    ]);
+    p.ok(&[
+        "symbol",
+        "edit",
+        "u",
+        "--ops",
+        r#"[{"op": "set", "pin": "1", "side": "left"}]"#,
+    ]);
+    p.fails(&["lib", "check"], "check_failed", 1);
+    p.fails(&["lib", "check", "--symbol", "nope"], "not_found", 1);
+}
+
+/// check judges the project's own symbols and those its designs place
+/// from a library project, and fails on a rule raised to an error.
+#[test]
+fn check_judges_the_symbols_a_project_draws() {
+    let p = Pair::with_resistor();
+    let report = p.ok(&["check"]);
+    let sym: Vec<&Value> = report["symbols"].as_array().unwrap().iter().collect();
+    assert!(
+        sym.iter()
+            .any(|f| f["code"] == "sym_shape" && f["details"]["symbol"] == "lib/self/symbol/r"),
+        "{report}"
+    );
+    assert!(sym.iter().all(|f| f["severity"] == "warning"));
+    assert!(report["warnings"].as_u64().unwrap() >= sym.len() as u64);
+    p.ok(&["lint", "configure", "--severity", "sym_shape=error"]);
+    let e = p.fails(&["check"], "check_failed", 1);
+    assert!(
+        e["details"]["report"]["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "sym_shape" && f["severity"] == "error")
+    );
+}
+
 #[test]
 fn lint_preferences_from_the_cli() {
     let p = Pair::breakout();
@@ -2124,19 +2364,17 @@ fn lint_preferences_from_the_cli() {
     };
     let before = p.ok(&["describe", "--block", "breakout"]);
     assert!(!codes(&before).contains(&"sch_resistor_style".to_owned()));
-    // Tried first, without writing: R1 and R2 would come as findings.
+    // The box preferred: R1 and R2 are zigzags, and their symbol is judged
+    // once, in the library, not on the sheet.
     let tried = p.ok(&["lint", "configure", "--prefer", "resistor=iec", "--dry-run"]);
     assert!(!p.direct.join("board/lint.json").exists());
-    let came = tried["blocks"]
+    let came: Vec<&Value> = tried["symbols"]["came"]
         .as_array()
         .unwrap()
         .iter()
-        .flat_map(|b| b["sheets"].as_array().unwrap().iter())
-        .flat_map(|s| s["came"].as_array().unwrap().iter())
-        .filter(|f| f["code"] == "sch_resistor_style")
-        .count();
-    assert_eq!(came, 2, "{tried}");
-    // The box preferred, its finding weighted: R1 and R2 are zigzags.
+        .filter(|f| f["code"] == "sym_shape")
+        .collect();
+    assert_eq!(came.len(), 1, "{tried}");
     p.ok(&[
         "lint",
         "configure",
@@ -2145,28 +2383,13 @@ fn lint_preferences_from_the_cli() {
         "--weight",
         "sch_resistor_style=4",
     ]);
-    assert!(p.direct.join("board/lint.json").is_file());
+    let lint = p.ok(&["lint"]);
+    assert_eq!(lint["prefs"]["weights"]["sym_shape"], 4, "{lint}");
     let after = p.ok(&["describe", "--block", "breakout"]);
-    let style: Vec<Value> = sheet(&after)["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|f| f["code"] == "sch_resistor_style")
-        .cloned()
-        .collect();
-    assert_eq!(style.len(), 2, "{style:?}");
-    for f in &style {
-        let m = f["message"].as_str().unwrap();
-        assert!(
-            m.contains("prefers the IEC box (prefer.resistor = iec)"),
-            "{m}"
-        );
-        assert!(m.contains("(weights.sch_resistor_style = 4)"), "{m}");
-        assert_eq!(f["points"], json!(4));
-    }
     assert_eq!(
-        sheet(&after)["score"].as_u64().unwrap() + 8,
-        sheet(&before)["score"].as_u64().unwrap()
+        sheet(&after)["score"],
+        sheet(&before)["score"],
+        "a resistor's drawing costs the sheet nothing"
     );
     // A rule made an error fails the check.
     p.ok(&["lint", "configure", "--severity", "sch_out_of_line=error"]);
@@ -2178,7 +2401,7 @@ fn lint_preferences_from_the_cli() {
         "--prefer",
         "resistor=default",
         "--weight",
-        "sch_resistor_style=default",
+        "sym_shape=default",
         "--severity",
         "sch_out_of_line=default",
     ]);

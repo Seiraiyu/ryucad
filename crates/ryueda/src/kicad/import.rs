@@ -257,11 +257,7 @@ fn component(props: &[(String, String)], symbol: LibRef, footprints: Vec<Use>) -
         let key = squash(k);
         match k.as_str() {
             "Reference" => {
-                let letters: String = v
-                    .trim_start_matches('#')
-                    .chars()
-                    .take_while(char::is_ascii_alphabetic)
-                    .collect();
+                let letters = prefix_letters(v);
                 if !letters.is_empty() {
                     c.prefix = letters;
                 }
@@ -661,6 +657,24 @@ pub fn import(session: &mut Session, opts: &Options, expected: Option<&str>) -> 
                 .push(n.to_string());
         }
         let Some(s) = &it.symbol else { continue };
+        let mut s = s.clone();
+        let prop = |name: &str| {
+            it.properties
+                .iter()
+                .find(|(k, _)| k == name)
+                .map_or("", |(_, v)| v.as_str())
+        };
+        let prefix = match prefix_letters(prop("Reference")) {
+            l if l.is_empty() => "U".to_owned(),
+            l => l,
+        };
+        let words = format!(
+            "{} {} {}",
+            prop("ki_keywords"),
+            prop("Description"),
+            prop("ki_description")
+        );
+        s.class = crate::standards::Class::classify(&prefix, &words);
         if it.power {
             continue;
         }
@@ -674,7 +688,7 @@ pub fn import(session: &mut Session, opts: &Options, expected: Option<&str>) -> 
         symbol_ok.insert(id.clone());
         planned.push(Planned {
             kind: ObjKind::Symbol,
-            text: doc::to_string::<Symbol>(s, symbol::KIND, symbol::FORMAT),
+            text: doc::to_string::<Symbol>(&s, symbol::KIND, symbol::format_of(&s)),
             id,
         });
     }
@@ -906,6 +920,15 @@ fn written_faults(lib: &Library, planned: &[Planned]) -> Value {
         }
     }
     Value::Array(out)
+}
+
+/// A KiCad `Reference`'s letters, after any `#`: a component's prefix.
+fn prefix_letters(reference: &str) -> String {
+    reference
+        .trim_start_matches('#')
+        .chars()
+        .take_while(char::is_ascii_alphabetic)
+        .collect()
 }
 
 #[cfg(test)]

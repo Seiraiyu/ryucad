@@ -475,6 +475,55 @@ pub fn papers(sheet: &crate::project::Sheet) -> Vec<input::Paper> {
 
 /// Builds block `b` of project `p` for ryusch, with no previous layout
 /// and no instructions.
+/// One unit of a library symbol as ryusch draws it, joined to nothing: its
+/// own pins and the common ones on the unit with the power pins (else the
+/// first), names KiCad leaves generic not drawn, and its graphics.
+/// `build` joins the pins to their nets; the symbol lint measures it.
+pub(crate) fn unit_part(sym: &crate::symbol::Symbol, unit: u32, key: String, prefix: &str) -> Part {
+    let home = crate::symlint::home(sym);
+    let pins = sym
+        .pins
+        .iter()
+        .filter(|(_, x)| x.unit == Some(unit) || (x.unit.is_none() && unit == home))
+        .map(|(num, x)| {
+            // KiCad's generic names (`~`, `Pin_3`) say nothing.
+            let shown = !(x.name.is_empty()
+                || x.name == "~"
+                || x.name == *num
+                || x.name == format!("Pin_{num}"));
+            Pin {
+                number: num.clone(),
+                name: if shown { x.name.clone() } else { String::new() },
+                at: x.at,
+                side: side(x.side),
+                length: x.length_nm,
+                kind: pin_kind(x.ty),
+                net: None,
+                nc: false,
+                show_number: sym.pins.len() > 2,
+                layers: Vec::new(),
+            }
+        })
+        .collect();
+    let graphics = sym
+        .graphics
+        .values()
+        .filter(|g| g.unit().is_none_or(|u| u == unit))
+        .map(graphic)
+        .collect();
+    Part {
+        key,
+        kind: PartKind::Symbol {
+            prefix: prefix.to_owned(),
+        },
+        refdes: String::new(),
+        value: String::new(),
+        function: String::new(),
+        graphics,
+        pins,
+    }
+}
+
 pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
     let block = b
         .block
@@ -619,67 +668,26 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
             .unwrap_or_else(|| format!("{prefix}?"));
         match lib.map(|(_, s)| s) {
             Some(sym) => {
-                // Pins every unit has go on the unit with the power pins,
-                // else the first.
-                let home = sym
-                    .pins
-                    .values()
-                    .find(|x| matches!(x.ty, PinType::PowerIn | PinType::PowerOut))
-                    .and_then(|x| x.unit)
-                    .unwrap_or(1);
                 for unit in 1..=sym.units {
                     let key = if sym.units == 1 {
                         cid.to_string()
                     } else {
                         format!("{cid}:{unit}")
                     };
-                    let pins: Vec<Pin> = sym
-                        .pins
-                        .iter()
-                        .filter(|(_, x)| x.unit == Some(unit) || (x.unit.is_none() && unit == home))
-                        .map(|(num, x)| {
-                            let node = c.pins.get(num);
-                            // KiCad's generic names (`~`, `Pin_3`) say nothing.
-                            let shown = !(x.name.is_empty()
-                                || x.name == "~"
-                                || x.name == *num
-                                || x.name == format!("Pin_{num}"));
-                            Pin {
-                                number: num.clone(),
-                                name: if shown { x.name.clone() } else { String::new() },
-                                at: x.at,
-                                side: side(x.side),
-                                length: x.length_nm,
-                                kind: pin_kind(x.ty),
-                                net: net_of(node),
-                                nc: node == Some(&Node::Nc),
-                                show_number: sym.pins.len() > 2,
-                                layers: Vec::new(),
-                            }
-                        })
-                        .collect();
-                    let graphics = sym
-                        .graphics
-                        .values()
-                        .filter(|g| g.unit().is_none_or(|u| u == unit))
-                        .map(graphic)
-                        .collect();
-                    let label = if sym.units == 1 {
+                    let mut part = unit_part(sym, unit, key, &prefix);
+                    for pin in &mut part.pins {
+                        let node = c.pins.get(&pin.number);
+                        pin.net = net_of(node);
+                        pin.nc = node == Some(&Node::Nc);
+                    }
+                    part.refdes = if sym.units == 1 {
                         refdes.clone()
                     } else {
                         format!("{refdes}{}", crate::props::letter(u64::from(unit)))
                     };
-                    parts.push(Part {
-                        key,
-                        kind: PartKind::Symbol {
-                            prefix: prefix.clone(),
-                        },
-                        refdes: label,
-                        value: value.clone(),
-                        function: function_of(c),
-                        graphics,
-                        pins,
-                    });
+                    part.value = value.clone();
+                    part.function = function_of(c);
+                    parts.push(part);
                     of.push(Of::Unit {
                         component: cid.clone(),
                         unit,

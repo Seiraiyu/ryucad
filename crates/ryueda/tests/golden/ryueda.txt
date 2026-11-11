@@ -3,7 +3,7 @@ breakout.erc f84678494c89aa19a5910ab3c7a8330e
 breakout.netlist 16daf5eca5b841dca1e0b3b6ee23a6b0
 generated.erc 78239ee711bef7fca90a828cc74caab3
 generated.netlist 5320f73be71d1afe60130384cd00fcea
-kicad.library a8dfd19c6c120da465272302f8978842
+kicad.library 9acdf4c928678cfba0ea7435e1848d06
 parts.digikey.records 22ee956abb9ece594e25dd55164199c9
 parts.erc 2ff58524a6d1db3950b280aa911f6dcb
 parts.jlc.search 89035579682f3f880b534a9c10a8223e
@@ -51,3 +51,5 @@ schematic.rp2040.mitayi.describe 2003ef62ed2b8c6795de146c1ac51669
 schematic.rp2040.mitayi.layout 3a0c2b242dc6d4e72a5ccefc88629c5d
 schematic.rp2040.mitayi.svg dc62ef0f24c1b7cfe62183aa2d08d339
 schematic.rp2040.pdf f452d2d32ac0691c627134fd68e0d7e0
+symbols.lint 674b164854a974b7bb718d051e7a1109
+symbols.templates 8f6cbe0cb46df1053cc0a54407f7deeb

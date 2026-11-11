@@ -233,6 +233,7 @@ fn item(node: &Sexpr, notes: &mut Notes) -> Result<Item> {
     it.symbol = Some(Symbol {
         name: name.to_owned(),
         units,
+        class: None,
         pins,
         graphics,
     });
