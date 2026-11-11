@@ -257,6 +257,16 @@ pub(crate) fn fillet(body: &Body, f: FaceId, tol: f64, m: &Meter) -> Option<Cand
     if turn > core::f64::consts::PI - FULL_ROUND {
         return None;
     }
+    // The supports' own normals there: walls facing apart are a full
+    // round's, however far past their tangency its rails run. A rib's
+    // round top whose wall lies 4.7 µm inside its tangent (NIST CTC 03)
+    // turns 0.08 rad past a half turn, which `acos` of the face's own
+    // normals folds back below it.
+    let s0 = outward(body, *a, mid(rails[a][0]))?;
+    let s1 = outward(body, *b, mid(rails[b][0]))?;
+    if crate::math::acos(s0.dot(s1).clamp(-1.0, 1.0)) > core::f64::consts::PI - FULL_ROUND {
+        return None;
+    }
     let mut sides = [*a, *b];
     sides.sort_by_key(|&g| body.faces[g].name);
     Some(Candidate {
