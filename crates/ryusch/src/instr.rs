@@ -256,6 +256,42 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
             }
         }
         match ins {
+            Instruction::Note { on, text } => {
+                if text.trim().is_empty()
+                    || text.chars().count() > crate::layout::NOTE_MAX
+                    || text.contains(['\n', '\r'])
+                {
+                    return Err(rule(
+                        &id,
+                        "note",
+                        format!(
+                            "a note is one line of 1 to {} characters",
+                            crate::layout::NOTE_MAX
+                        ),
+                    ));
+                }
+                // On a region or a sheet the previous layout has (from
+                // nothing every region is new: the note waits for its
+                // region's ID, kept).
+                if let Some(prev) = &block.previous {
+                    let known = match on.strip_prefix("region:") {
+                        Some(r) => prev.regions.contains_key(r),
+                        None => {
+                            prev.sheets.contains_key(on)
+                                || prev.sheets.values().any(|s| &s.name == on)
+                        }
+                    };
+                    if !known {
+                        r.notes.push(Note {
+                            code: "instruction_unresolved".into(),
+                            message: format!(
+                                "{id} names {on} which the layout no longer has; it is kept until released"
+                            ),
+                            details: json!({"instruction": id, "missing": [on]}),
+                        });
+                    }
+                }
+            }
             Instruction::Orient {
                 rotation, mirror, ..
             } => {
@@ -911,6 +947,10 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
         .collect();
     let all = |f: &dyn Fn(usize) -> bool| !parts.is_empty() && parts.iter().all(|p| f(*p));
     match ins {
+        Instruction::Note { .. } => layout
+            .instructions
+            .iter()
+            .any(|(id, i)| i == ins && layout.notes.contains_key(id)),
         Instruction::Sheet { sheet, .. } => all(&|p| {
             shape(p).is_some_and(|(s, _)| layout.sheets.get(&s).is_some_and(|x| &x.name == sheet))
         }),
@@ -1253,5 +1293,28 @@ mod tests {
                 .center()[0]
         };
         assert_eq!(r.is_ok(), (x("u1") - x("r1")).abs() <= GRID / 2, "{r:?}");
+    }
+
+    #[test]
+    fn a_note_is_one_line_of_at_most_120_characters() {
+        let mut b = crate::testing::leaving_block();
+        b.instructions.insert(
+            "i9".into(),
+            Instruction::Note {
+                on: "s1".into(),
+                text: "Rev A".into(),
+            },
+        );
+        assert!(resolve(&b).is_ok());
+        for text in ["".to_owned(), "x".repeat(121), "two\nlines".to_owned()] {
+            b.instructions.insert(
+                "i9".into(),
+                Instruction::Note {
+                    on: "s1".into(),
+                    text,
+                },
+            );
+            assert_eq!(resolve(&b).unwrap_err().code, "layout_rule");
+        }
     }
 }

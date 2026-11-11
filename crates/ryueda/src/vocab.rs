@@ -465,6 +465,22 @@ impl Names<'_> {
             } => {
                 format!("text {} {} {}", parts(l), field.as_str(), side(*s))
             }
+            Instruction::Note { on, text } => {
+                // A region by its title where that names it back, a sheet
+                // by its ID.
+                let on = match on.strip_prefix("region:") {
+                    Some(id) => match &self.b.layout {
+                        Some(Ok(l)) => l
+                            .regions
+                            .get(id)
+                            .filter(|r| self.region(&r.title).ok().as_deref() == Some(id))
+                            .map_or_else(|| on.clone(), |r| r.title.clone()),
+                        _ => on.clone(),
+                    },
+                    None => on.clone(),
+                };
+                format!("note {} {}", Self::quote(&on), Self::quote(text))
+            }
         }
     }
 }
@@ -517,6 +533,7 @@ pub const FORMS: &[&str] = &[
     "orient X... 0|90|180|270 [mirror]",
     "text X... refdes|value|both left|right|above|below",
     "net N wire|label|port",
+    "note REGION|SHEET TEXT (one line, up to 120 characters; {property} filled)",
     "idiom X... KIND|none",
     "flow X... reversed",
     "shift X... up|down|left|right STEPS (a move only)",
@@ -589,6 +606,39 @@ impl Names<'_> {
                     title: title.clone(),
                     parts: many(x)?,
                 }
+            }
+            "note" => {
+                let Some((on, words)) = rest.split_first() else {
+                    return Err(usage(text, "note REGION|SHEET TEXT"));
+                };
+                let note = words.join(" ");
+                if note.trim().is_empty()
+                    || note.chars().count() > ryusch::layout::NOTE_MAX
+                    || note.contains(['\n', '\r'])
+                {
+                    return Err(usage(
+                        text,
+                        "note REGION|SHEET TEXT (one line of 1 to 120 characters)",
+                    ));
+                }
+                let on = if let Some(id) = on.strip_prefix("region:") {
+                    format!("region:{}", self.region(id)?)
+                } else if let Ok(id) = self.region(on) {
+                    format!("region:{id}")
+                } else {
+                    // A sheet by its ID or its name; any other name is
+                    // kept as said, unresolved until a sheet takes it.
+                    match &self.b.layout {
+                        Some(Ok(l)) => l
+                            .sheets
+                            .iter()
+                            .find(|(id, x)| *id == on || x.name == *on)
+                            .map(|(id, _)| id.clone()),
+                        _ => None,
+                    }
+                    .unwrap_or_else(|| on.clone())
+                };
+                Instruction::Note { on, text: note }
             }
             "paper" => {
                 let (sheet, size, orientation) = match rest {
@@ -816,5 +866,64 @@ mod tests {
         );
         assert!(words("sheet \"x").is_err());
         assert_eq!(words("  a  b ").unwrap(), ["a", "b"]);
+    }
+
+    #[test]
+    fn notes_read_on_regions_and_sheets_and_write_back() {
+        let (dir, _) = crate::netlist::tests::project(&[]);
+        let mut session = crate::session::Session::open(&dir.path().join("board")).unwrap();
+        crate::schemcmd::layout(&mut session, None, None, None, false, None, None).unwrap();
+        session.reload().unwrap();
+        let p = session.project();
+        let b = p
+            .conn
+            .block(&crate::id::Id::parse("top", "b").unwrap())
+            .unwrap();
+        let built = crate::schem::build(p, b).unwrap();
+        let names = Names {
+            p,
+            b,
+            built: &built,
+        };
+        let l = match &b.layout {
+            Some(Ok(l)) => l.clone(),
+            _ => panic!("laid out"),
+        };
+        let (rid, region) = l.regions.iter().next().expect("a region");
+        let sid = l.sheets.keys().next().unwrap().clone();
+        let quoted = format!("note {} \"Fused at 2 A\"", Names::quote(&region.title));
+        let Said::Do(i) = names.read(&quoted).unwrap() else {
+            panic!("an instruction")
+        };
+        assert_eq!(
+            i,
+            Instruction::Note {
+                on: format!("region:{rid}"),
+                text: "Fused at 2 A".into()
+            }
+        );
+        assert_eq!(names.text(&i), quoted);
+        // On a sheet, its words unquoted.
+        let Said::Do(i) = names.read(&format!("note {sid} Rev {{rev}}")).unwrap() else {
+            panic!("an instruction")
+        };
+        assert_eq!(
+            i,
+            Instruction::Note {
+                on: sid.clone(),
+                text: "Rev {rev}".into()
+            }
+        );
+        assert_eq!(names.text(&i), format!("note {sid} \"Rev {{rev}}\""));
+        // Too long, or empty: refused.
+        let long = "x".repeat(121);
+        assert_eq!(
+            names.read(&format!("note {sid} {long}")).unwrap_err().code,
+            Code::InvalidParam
+        );
+        assert_eq!(
+            names.read(&format!("note {sid}")).unwrap_err().code,
+            Code::InvalidParam
+        );
     }
 }

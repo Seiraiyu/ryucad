@@ -42,6 +42,18 @@ pub struct Layout {
     /// Each bus drawn as a bus wire, by bus key and sheet (format 4).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub buses: BTreeMap<String, BTreeMap<String, DrawnBus>>,
+    /// Each note's place, by its instruction's ID (format 4).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub notes: BTreeMap<String, PlacedNote>,
+}
+
+/// Where a note stands.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlacedNote {
+    pub sheet: String,
+    /// Its box's lower left, on the sheet.
+    pub at: Point,
 }
 
 /// A bus drawn on one sheet: its trunk, and each member's entry. Each
@@ -371,7 +383,13 @@ pub enum Instruction {
         field: TextField,
         side: Side,
     },
+    /// A note: one line of text in a region (`region:<id>`) or on a sheet
+    /// (its ID), placed by the engine (format 4).
+    Note { on: String, text: String },
 }
+
+/// The longest a note may be, in characters.
+pub const NOTE_MAX: usize = 120;
 
 /// Which of a part's text fields an instruction places.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -415,7 +433,7 @@ impl Instruction {
             | Instruction::Region { parts, .. }
             | Instruction::RegionNone { parts }
             | Instruction::Text { parts, .. } => parts,
-            Instruction::Net { .. } | Instruction::Paper { .. } => &[],
+            Instruction::Net { .. } | Instruction::Paper { .. } | Instruction::Note { .. } => &[],
         }
     }
 
@@ -428,6 +446,7 @@ impl Instruction {
             Instruction::Near { to, .. } => out.push(to),
             Instruction::Net { net, .. } => out.push(net),
             Instruction::Paper { sheet, .. } => out.push(sheet),
+            Instruction::Note { on, .. } => out.push(on),
             _ => {}
         }
         out
@@ -450,6 +469,7 @@ impl Instruction {
             Instruction::Region { .. } | Instruction::RegionNone { .. } => "region",
             Instruction::Paper { .. } => "paper",
             Instruction::Text { .. } => "text",
+            Instruction::Note { .. } => "note",
         }
     }
 }
@@ -473,7 +493,18 @@ impl Layout {
             .values()
             .flatten()
             .any(|l| l.kind == LabelKind::OffSheet)
-            || !self.buses.is_empty();
+            || !self.buses.is_empty()
+            || !self.notes.is_empty()
+            || self.instructions.values().any(|i| {
+                matches!(
+                    i,
+                    Instruction::Note { .. }
+                        | Instruction::Net {
+                            style: NetStyle::Bus,
+                            ..
+                        }
+                )
+            });
         if four {
             return 4;
         }
@@ -748,5 +779,27 @@ mod tests {
         assert_eq!(l.format(), 4);
         let json = serde_json::to_value(&l).unwrap();
         assert_eq!(serde_json::from_value::<Layout>(json).unwrap(), l);
+    }
+
+    #[test]
+    fn a_note_round_trips_and_makes_format_4() {
+        let note: Instruction = serde_json::from_value(serde_json::json!({
+            "op": "note", "on": "region:r2", "text": "Keep C4 within 2 mm of U1"
+        }))
+        .unwrap();
+        assert_eq!(note.verb(), "note");
+        assert_eq!(note.subjects(), vec!["region:r2"]);
+        let mut l = Layout::default();
+        l.instructions.insert("i1".into(), note);
+        assert_eq!(l.format(), 4);
+        l.notes.insert(
+            "i1".into(),
+            PlacedNote {
+                sheet: "s1".into(),
+                at: [0, 0],
+            },
+        );
+        let back: Layout = serde_json::from_value(serde_json::to_value(&l).unwrap()).unwrap();
+        assert_eq!(back, l);
     }
 }
