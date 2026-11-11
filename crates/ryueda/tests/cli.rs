@@ -478,6 +478,7 @@ fn every_protocol_method_has_a_command() {
         ("erc.configure", &["erc", "configure"]),
         ("lint.get", &["lint"]),
         ("lint.configure", &["lint", "configure"]),
+        ("lib.check", &["lib", "check"]),
         ("standards.get", &["standards"]),
         ("standards.set", &["standards", "set"]),
         ("check", &["check"]),
@@ -2216,6 +2217,77 @@ fn symbols_from_templates() {
         "invalid_param",
         1,
     );
+}
+
+/// A library's symbols judged: the box resistor under ANSI standards, its
+/// class inferred from the component that places it, its fix applied.
+#[test]
+fn a_library_is_checked_from_the_cli() {
+    let p = Pair::with_resistor();
+    let c = p.ok(&["lib", "check"]);
+    assert_eq!(c["library"], "self");
+    assert_eq!(c["standards"]["from"], "built_in");
+    let r = &c["symbols"][0];
+    assert_eq!(
+        (&r["reference"], &r["class"], &r["class_inferred"]),
+        (
+            &json!("lib/self/symbol/r"),
+            &json!("resistor"),
+            &json!(true)
+        ),
+        "{c}"
+    );
+    let shape = r["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "sym_shape")
+        .unwrap()
+        .clone();
+    let points: i64 = r["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["points"].as_i64().unwrap())
+        .sum();
+    assert_eq!(r["score"].as_i64().unwrap(), (100 - points).max(0));
+    let fix = &shape["fixes"][0];
+    assert_eq!(fix["symbol"], "r");
+    let ops = serde_json::to_string(&fix["ops"]).unwrap();
+    p.ok(&["symbol", "edit", "r", "--ops", &ops]);
+    let c = p.ok(&["lib", "check", "--symbol", "r"]);
+    assert!(
+        !c["symbols"][0]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "sym_shape"),
+        "{c}"
+    );
+    // The library project, and a rule raised to an error.
+    assert_eq!(
+        p.ok(&["lib", "check", "--library", "passives"])["symbols"],
+        json!([])
+    );
+    p.ok(&["lint", "configure", "--severity", "sym_pin_side=error"]);
+    p.ok(&[
+        "symbol",
+        "create",
+        "U",
+        "--template",
+        "ic",
+        "--pins",
+        r#"[{"number": "1", "name": "VDD", "type": "power_in"}]"#,
+    ]);
+    p.ok(&[
+        "symbol",
+        "edit",
+        "u",
+        "--ops",
+        r#"[{"op": "set", "pin": "1", "side": "left"}]"#,
+    ]);
+    p.fails(&["lib", "check"], "check_failed", 1);
+    p.fails(&["lib", "check", "--symbol", "nope"], "not_found", 1);
 }
 
 #[test]

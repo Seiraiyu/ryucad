@@ -79,6 +79,15 @@ pub enum Request {
     /// Every library with its revision, what it holds and its faults.
     #[serde(rename = "lib.list")]
     LibList {},
+    /// A library's symbols judged by the standards that apply to it (this
+    /// project's own library by default, or one symbol).
+    #[serde(rename = "lib.check")]
+    LibCheck {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        symbol: Option<String>,
+    },
     /// A symbol called `name`, its ID from the name unless given, with
     /// `units` (1 by default) and a batch of ops applied.
     #[serde(rename = "symbol.create")]

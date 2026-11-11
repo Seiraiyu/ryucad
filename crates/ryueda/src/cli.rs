@@ -379,6 +379,18 @@ enum LibCmd {
     },
     /// Every library with its revision, what it holds and its faults.
     List,
+    /// Judge a library's symbols by the standards that apply to it
+    /// (`ryueda standards`): each symbol's class, score and findings, with
+    /// symbol edit ops that fix them. This project's own library by
+    /// default.
+    Check {
+        /// A library project's alias.
+        #[arg(long)]
+        library: Option<String>,
+        /// One symbol (<id>, or lib/<alias>/symbol/<id>).
+        #[arg(long)]
+        symbol: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1415,6 +1427,10 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             expected_revision: expect.expect.clone(),
         },
         Command::Lib(LibCmd::List) => Request::LibList {},
+        Command::Lib(LibCmd::Check { library, symbol }) => Request::LibCheck {
+            library: library.clone(),
+            symbol: symbol.clone(),
+        },
         Command::Symbol(SymbolCmd::Create {
             name,
             id,

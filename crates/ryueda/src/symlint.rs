@@ -5,6 +5,9 @@
 //! carries what it finds, why, how to fix it and its evidence; its weight
 //! and severity are `lint.json`'s, as the sheet lint's are.
 
+use crate::error::{Code, Error, Result};
+use crate::library::{Library, ObjKind};
+use crate::project::{Project, SELF, ref_text};
 use crate::standards::{Class, Standards};
 use crate::symbol::{Pin, PinType, Point, Side, Symbol};
 use ryusch::geom::Rect;
@@ -748,6 +751,129 @@ pub fn lint(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Finding> {
     }
     out.sort_by(|a, b| (a.code, &a.pins).cmp(&(b.code, &b.pins)));
     out
+}
+
+/// A symbol's class: its own, else (`true`: inferred) what the prefix of
+/// the first library component (by ID) of its library that places it
+/// says.
+pub fn class_of(lib: &Library, id: &crate::id::Id, s: &Symbol) -> (Option<Class>, bool) {
+    if let Some(c) = s.class {
+        return (Some(c), false);
+    }
+    let inferred = lib
+        .components
+        .values()
+        .filter_map(|c| c.item.as_ref().ok())
+        .find(|c| {
+            c.symbol.id == *id && c.symbol.library.as_ref().is_none_or(|l| l.as_str() == SELF)
+        })
+        .and_then(|c| Class::infer(&c.prefix));
+    (inferred, inferred.is_some())
+}
+
+/// A finding as an answer gives it: its fixes as `symbol edit`'s params,
+/// run in the symbol's own project (`project`, for another library's).
+fn shown(f: &Finding, id: &crate::id::Id, lib: &Library) -> Value {
+    let mut v = json!(f);
+    let fixes: Vec<Value> = f
+        .fixes
+        .iter()
+        .map(|ops| {
+            let mut x = json!({"symbol": id, "ops": ops});
+            if lib.alias != SELF {
+                x["project"] = json!(lib.base);
+            }
+            x
+        })
+        .collect();
+    if !fixes.is_empty() {
+        v["fixes"] = json!(fixes);
+    }
+    v
+}
+
+/// `lib.check`: a library's symbols (this project's own by default, or
+/// one symbol) judged by the standards that apply to it, each with its
+/// class (given or inferred), score and findings; `check_failed` (the
+/// report in its details) when a finding is an error.
+pub fn library_check(p: &Project, library: Option<&str>, symbol: Option<&str>) -> Result<Value> {
+    let (alias, only) = match symbol {
+        Some(t) => {
+            let (a, id) = crate::libcmd::target(t, ObjKind::Symbol)?;
+            if library.is_some_and(|l| l != a) {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("{t} isn't in library {}", library.unwrap_or_default()),
+                )
+                .with("param", "symbol"));
+            }
+            (a, Some(id))
+        }
+        None => (library.unwrap_or(SELF).to_owned(), None),
+    };
+    let lib = p.library(&alias)?;
+    if let Some(id) = &only
+        && !lib.symbols.contains_key(id)
+    {
+        let at = ref_text(&alias, ObjKind::Symbol, id);
+        return Err(
+            Error::new(Code::NotFound, format!("{at} isn't in the library")).with("reference", at),
+        );
+    }
+    let (st, from) = p.standards_for(&alias)?;
+    let prefs = crate::lint::prefs(p);
+    let cx = Context {
+        standards: &st,
+        prefs: &prefs,
+        from: &from,
+    };
+    let (mut errors, mut warnings) = (0u64, 0u64);
+    let mut list = Vec::new();
+    for (id, l) in &lib.symbols {
+        if only.as_ref().is_some_and(|o| o != id) {
+            continue;
+        }
+        let reference = ref_text(&alias, ObjKind::Symbol, id);
+        let s = match &l.item {
+            Ok(s) => s,
+            Err(e) => {
+                list.push(json!({"reference": reference, "error": e}));
+                continue;
+            }
+        };
+        let (class, inferred) = class_of(lib, id, s);
+        let found = lint(s, class, &cx);
+        for f in &found {
+            match f.severity {
+                Severity::Error => errors += 1,
+                _ => warnings += 1,
+            }
+        }
+        list.push(json!({
+            "reference": reference,
+            "path": lib.path(ObjKind::Symbol, id),
+            "class": class,
+            "class_inferred": inferred,
+            "score": score(&found),
+            "findings": found.iter().map(|f| shown(f, id, lib)).collect::<Vec<_>>(),
+        }));
+    }
+    let report = json!({
+        "library": alias,
+        "revision": lib.revision,
+        "standards": {"from": from},
+        "symbols": list,
+        "errors": errors,
+        "warnings": warnings,
+    });
+    if errors > 0 {
+        return Err(Error::new(
+            Code::CheckFailed,
+            format!("the symbol lint found {errors} error(s) and {warnings} warning(s)"),
+        )
+        .with("report", report));
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
