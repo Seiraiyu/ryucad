@@ -1902,8 +1902,15 @@ fn groups<'a>(
             .map(|(i, g)| {
                 let face = |r: &Reference| -> Result<Name> {
                     let role = format!("groups.{i}.face");
-                    let found =
-                        crate::reference::resolve(part, part.order(), id, &role, r, before)?;
+                    let found = crate::reference::resolve(
+                        part,
+                        part.order(),
+                        id,
+                        &role,
+                        crate::reference::Follow::One,
+                        r,
+                        before,
+                    )?;
                     match found.1 {
                         EntityId::Face(_) => Ok(r.name),
                         e => Err(crate::reference::wrong_kind(
@@ -1962,36 +1969,39 @@ fn blend_edges<'g>(
     let mut out = Vec::new();
     for (i, g) in groups.iter().enumerate() {
         for (role, r) in &g.edges {
-            let found = crate::reference::resolve(part, part.order(), id, role, r, before)?;
-            let EntityId::Edge(e) = found.1 else {
-                return Err(crate::reference::wrong_kind(
-                    part,
-                    id,
-                    role,
-                    r,
-                    crate::reference::kind(found.1),
-                    "an edge",
-                ));
-            };
-            // The kernel rounds only edges with a face either side; a
-            // tangent chain from an inner edge never reaches a laminar one.
-            if body.is_laminar(e) {
-                let name = body.edge(e).expect("a live edge").name;
-                return Err(laminar_blend(part, id, ty, solid, name));
-            }
-            let chain = if propagate {
-                ryukei::blend::tangent_chain(body, e).map_err(|k| {
-                    Error::new(Code::Internal, format!("{id}: {k}")).with("feature", id)
-                })?
-            } else {
-                vec![e]
-            };
-            for x in chain {
-                match seen.get(&x) {
-                    Some((j, _)) if *j == i => {}
-                    Some((j, other)) => {
-                        let name = body.edge(x).expect("a live edge").name;
-                        return Err(Error::new(
+            // An edge a later feature split is every piece (design 447).
+            let (_, found) =
+                crate::reference::resolve_all(part, part.order(), id, role, r, before)?;
+            for e in found {
+                let EntityId::Edge(e) = e else {
+                    return Err(crate::reference::wrong_kind(
+                        part,
+                        id,
+                        role,
+                        r,
+                        crate::reference::kind(e),
+                        "an edge",
+                    ));
+                };
+                // The kernel rounds only edges with a face either side; a
+                // tangent chain from an inner edge never reaches a laminar one.
+                if body.is_laminar(e) {
+                    let name = body.edge(e).expect("a live edge").name;
+                    return Err(laminar_blend(part, id, ty, solid, name));
+                }
+                let chain = if propagate {
+                    ryukei::blend::tangent_chain(body, e).map_err(|k| {
+                        Error::new(Code::Internal, format!("{id}: {k}")).with("feature", id)
+                    })?
+                } else {
+                    vec![e]
+                };
+                for x in chain {
+                    match seen.get(&x) {
+                        Some((j, _)) if *j == i => {}
+                        Some((j, other)) => {
+                            let name = body.edge(x).expect("a live edge").name;
+                            return Err(Error::new(
                             Code::EdgeListedTwice,
                             format!(
                                 "{id}: edge {}/{solid}/{name} is in group {j} (by its {other}) and group {i} (by its {role})",
@@ -2002,14 +2012,15 @@ fn blend_edges<'g>(
                         .with("edge", format!("{}/{solid}/{name}", part.id))
                         .with("groups", [*j, i])
                         .with("roles", [*other, role.as_str()]));
-                    }
-                    None => {
-                        seen.insert(x, (i, role.as_str()));
-                        let edge = ryukei::blend::EdgeBlend {
-                            edge: body.edge(x).expect("a live edge").name,
-                            kind: g.kind,
-                        };
-                        out.push((edge, role.as_str()));
+                        }
+                        None => {
+                            seen.insert(x, (i, role.as_str()));
+                            let edge = ryukei::blend::EdgeBlend {
+                                edge: body.edge(x).expect("a live edge").name,
+                                kind: g.kind,
+                            };
+                            out.push((edge, role.as_str()));
+                        }
                     }
                 }
             }
@@ -4026,8 +4037,16 @@ mod tests {
             feature: id("t"),
             name,
         };
-        let e =
-            crate::reference::resolve(&p, p.order(), &id("more"), "plane", &face, &r).unwrap_err();
+        let e = crate::reference::resolve(
+            &p,
+            p.order(),
+            &id("more"),
+            "plane",
+            crate::reference::Follow::Carrier,
+            &face,
+            &r,
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::BodyConsumed, "{e}");
         // What the model shows: every tool is consumed, x by the boolean
         // that failed with it too.
@@ -4137,9 +4156,27 @@ mod tests {
         // Read from between a and j it is there; from after j it is gone.
         let between = [id("a"), id("o"), id("j")];
         let after = [id("a"), id("j"), id("o")];
-        let found = crate::reference::resolve(&p, &between, &id("o"), "plane", &face, &r).unwrap();
+        let found = crate::reference::resolve(
+            &p,
+            &between,
+            &id("o"),
+            "plane",
+            crate::reference::Follow::Carrier,
+            &face,
+            &r,
+        )
+        .unwrap();
         assert_eq!(found.1, EntityId::Face(right));
-        let e = crate::reference::resolve(&p, &after, &id("o"), "plane", &face, &r).unwrap_err();
+        let e = crate::reference::resolve(
+            &p,
+            &after,
+            &id("o"),
+            "plane",
+            crate::reference::Follow::Carrier,
+            &face,
+            &r,
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::ReferenceUnresolved, "{e}");
         assert_eq!(e.details["dependency"], "a");
         // A feature that acts on a solid isn't one.
@@ -4147,7 +4184,16 @@ mod tests {
             feature: id("j"),
             name,
         };
-        let e = crate::reference::resolve(&p, &after, &id("o"), "plane", &at_j, &r).unwrap_err();
+        let e = crate::reference::resolve(
+            &p,
+            &after,
+            &id("o"),
+            "plane",
+            crate::reference::Follow::Carrier,
+            &at_j,
+            &r,
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
         assert_eq!(e.details["solids"], json!(["a"]));
     }

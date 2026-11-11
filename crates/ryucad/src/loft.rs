@@ -1130,7 +1130,15 @@ pub fn check(part: &Part, order: &[Id], id: &Id, l: &Loft, results: &dyn Results
     for (k, s) in l.sections.iter().enumerate() {
         if let Source::Face(GeomRef::Entity(r)) = &s.source {
             let role = format!("sections.{k}");
-            let found = crate::reference::resolve(part, order, id, &role, r, results)?;
+            let found = crate::reference::resolve(
+                part,
+                order,
+                id,
+                &role,
+                crate::reference::Follow::One,
+                r,
+                results,
+            )?;
             crate::reference::plane(part, id, &role, r, found)?;
         }
     }

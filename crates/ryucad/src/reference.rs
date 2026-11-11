@@ -5,25 +5,372 @@
 //! view, see [`crate::solid`]), or the feature holding the reference
 //! fails. Never a nearest match.
 
+use crate::doc::files::Feature;
 use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::doc::reference::Reference;
 use crate::error::{Code, Error, Result};
 use crate::rebuild::{Built, Results};
+use crate::solid::Solids;
 use ryukei::geom::{Curve, Point3, Surface, Vector3};
-use ryukei::topo::{EntityId, Sense};
+use ryukei::name::{Event, Name};
+use ryukei::topo::{Body, EntityId, Sense};
+use std::collections::BTreeMap;
+
+/// What a role takes from a face or edge a later feature split or merged
+/// (design 447): every role that reads one says which, where it reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Follow {
+    /// Only the surface or curve it lies on: a mate's connector, a sketch
+    /// plane, an up-to target, a datum, an axis or a direction. Follows
+    /// to the first piece when every piece lies on the old one, bit for
+    /// bit.
+    Carrier,
+    /// The entity as a member of a set: a fillet's edges, a shell's or a
+    /// tweak's faces. Follows to every piece.
+    All,
+    /// Its extent or boundary: a profile, a section, a path segment, a
+    /// fixed face, a tool. Never follows: `reference_split`.
+    One,
+}
+
+impl Follow {
+    /// The class of `role` in `f`, or `None` for a role `f` never names
+    /// (a test walks every feature's roles through this). Roles are
+    /// matched with their indices as `#`; a sketch's projections by their
+    /// `entities.` prefix.
+    pub fn classify(f: &Feature, role: &str) -> Option<Follow> {
+        use Follow::{All, Carrier, One};
+        let shape: String = role
+            .split('.')
+            .map(|seg| {
+                if !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()) {
+                    "#"
+                } else {
+                    seg
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(".");
+        let r = shape.as_str();
+        match f {
+            Feature::Sketch(_) => match r {
+                "plane" | "origin" | "x" => Some(Carrier),
+                _ if r.starts_with("entities.") => Some(One),
+                _ => None,
+            },
+            Feature::Extrude(_) => (r == "target").then_some(Carrier),
+            Feature::Revolve(_) => (r == "axis").then_some(Carrier),
+            Feature::Hole(_) => (r == "depth").then_some(Carrier),
+            Feature::Fillet(_) => (r == "groups.#.edges.#").then_some(All),
+            Feature::Chamfer(_) => match r {
+                "groups.#.edges.#" => Some(All),
+                // Which side the first distance is on: the kernel takes the
+                // face itself, beside the edge.
+                "groups.#.face" => Some(One),
+                _ => None,
+            },
+            Feature::Pattern(_) => {
+                matches!(r, "direction" | "direction2" | "axis" | "plane").then_some(Carrier)
+            }
+            Feature::Datum(_) => match r {
+                "curve" => Some(One),
+                "from" | "about" | "points.#" | "through" | "axis" | "point" | "at"
+                | "between.#" | "origin" | "x" | "plane" | "in" | "of.#" | "onto" => Some(Carrier),
+                _ => None,
+            },
+            Feature::Path(_) => match r {
+                "segments.#" => Some(One),
+                "axis" | "start" => Some(Carrier),
+                _ => None,
+            },
+            Feature::Sweep(_) => match r {
+                "profile" | "path" => Some(One),
+                "direction" => Some(Carrier),
+                _ => None,
+            },
+            Feature::Loft(_) => match r {
+                "sections.#" => Some(One),
+                "start_tangent" | "end_tangent" => Some(Carrier),
+                _ => None,
+            },
+            Feature::Shell(_) => matches!(r, "open.#" | "faces.#.faces.#").then_some(All),
+            Feature::Offset(_) => (r == "faces.#.faces.#").then_some(All),
+            Feature::Mirror(_) => (r == "plane").then_some(Carrier),
+            Feature::Split(_) => match r {
+                "tool.faces.#" => Some(One),
+                "plane" => Some(Carrier),
+                _ => None,
+            },
+            Feature::Planar(_) => (r == "profile").then_some(One),
+            Feature::Fill(_) => matches!(r, "sides.#.edge" | "sides.#.curve").then_some(One),
+            Feature::Extract(_) => (r == "faces.#").then_some(All),
+            Feature::Thicken(_) => match r {
+                "from.faces.#" => Some(All),
+                // Matched by name, never resolved: a piece isn't the face.
+                "faces.#.faces.#" => Some(One),
+                _ => None,
+            },
+            Feature::Flange(_) => matches!(
+                r,
+                "edges.#" | "edges.#.edge" | "edges.#.side" | "ends.#.vertex"
+            )
+            .then_some(One),
+            Feature::Unfold(_) => matches!(r, "fixed" | "only.#" | "bends.#.bend").then_some(One),
+            Feature::Refold(_) => (r == "only.#").then_some(One),
+            Feature::MoveFace(_) => match r {
+                "faces.#" | "groups.#.faces.#" => Some(All),
+                "direction" | "axis" => Some(Carrier),
+                _ => None,
+            },
+            Feature::ReplaceFace(_) => match r {
+                "groups.#.faces.#" => Some(All),
+                "groups.#.with" => Some(Carrier),
+                _ => None,
+            },
+            Feature::Draft(_) => match r {
+                "faces.#" | "groups.#.faces.#" | "parting.#" => Some(All),
+                // Matched against the faces as written, never resolved.
+                "flip.#" => Some(One),
+                "neutral" | "pull" => Some(Carrier),
+                _ => None,
+            },
+            Feature::Primitive(_)
+            | Feature::Boolean(_)
+            | Feature::Instance(_)
+            | Feature::Mate(_)
+            | Feature::InstancePattern(_)
+            | Feature::Import(_)
+            | Feature::Sew(_)
+            | Feature::BaseFlange(_) => None,
+        }
+    }
+
+    /// [`Follow::classify`], `One` for a role it doesn't know: refusing
+    /// is never wrong.
+    pub fn of(f: &Feature, role: &str) -> Follow {
+        Follow::classify(f, role).unwrap_or(Follow::One)
+    }
+}
+
+/// What an entity lies on, as the last body that had it left it.
+#[derive(Clone, Debug, PartialEq)]
+enum Carrier {
+    Face(Surface, Sense),
+    Edge(Curve),
+    Vertex(Point3),
+}
+
+/// `e`'s carrier in `body`.
+fn carrier(body: &Body, e: EntityId) -> Option<Carrier> {
+    match e {
+        EntityId::Face(f) => {
+            let face = body.face(f)?;
+            Some(Carrier::Face(
+                body.surface(face.surface)?.clone(),
+                face.sense,
+            ))
+        }
+        EntityId::Edge(x) => Some(Carrier::Edge(body.curve(body.edge(x)?.curve)?.clone())),
+        EntityId::Vertex(v) => Some(Carrier::Vertex(body.vertex(v)?.point)),
+        _ => None,
+    }
+}
+
+/// Whether `a` and `b` are the same kind of entity.
+fn same_kind(a: &Carrier, b: EntityId) -> bool {
+    matches!(
+        (a, b),
+        (Carrier::Face(..), EntityId::Face(_))
+            | (Carrier::Edge(_), EntityId::Edge(_))
+            | (Carrier::Vertex(_), EntityId::Vertex(_))
+    )
+}
+
+/// Where a retired name went: the pieces of its kind the reader's body
+/// has, in name order, and the feature whose journal first retired it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Trail {
+    pub pieces: Vec<Name>,
+    pub by: Option<Id>,
+}
+
+/// What a name a reader's body lacks became.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Followed {
+    /// Nothing of its kind: `reference_unresolved`, as before.
+    Gone,
+    /// Followed: the entities the role reads (the first piece for
+    /// `Carrier`, every piece for `All`).
+    To(Vec<EntityId>, Trail),
+    /// Split or merged, and the role can't take it: `one_needed` or
+    /// `carriers_differ`.
+    Refused(&'static str, Trail),
+}
+
+/// What a solid's chain did to the names it retired, from the journals
+/// of the rebuild that is running and nothing else: each split, merge,
+/// replacement, placement and deletion with the feature whose journal
+/// has it, in order, and what each retired name lay on in the last body
+/// that had it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Lineage {
+    events: Vec<(Id, Event)>,
+    carriers: BTreeMap<Name, Carrier>,
+}
+
+impl Lineage {
+    /// The lineage of a chain's results in order, each with the feature
+    /// that made it.
+    pub fn of_chain<'a>(chain: impl IntoIterator<Item = (&'a Id, &'a Built)>) -> Lineage {
+        let mut out = Lineage::default();
+        let mut before: Option<&Body> = None;
+        for (f, b) in chain {
+            for ev in b.journal.events() {
+                let retired: Vec<Name> = match ev {
+                    Event::Split { parent, .. } => vec![*parent],
+                    Event::Merged { parents, .. } => parents.clone(),
+                    Event::Replaced { old, .. } => vec![*old],
+                    Event::Deleted(n) => vec![*n],
+                    Event::Placed { .. } => Vec::new(),
+                    Event::Created(_) | Event::Modified(_) => continue,
+                };
+                out.events.push((f.clone(), ev.clone()));
+                if let Some(body) = before {
+                    for n in retired {
+                        if let Some(c) = body.by_name(n).and_then(|e| carrier(body, e)) {
+                            out.carriers.entry(n).or_insert(c);
+                        }
+                    }
+                }
+            }
+            before = Some(&b.body);
+        }
+        out
+    }
+
+    /// The lineage of `solid` in `results`, its chain as `solids` has it,
+    /// up to and including `last`.
+    pub fn of(solids: &Solids, solid: &Id, last: &Id, results: &dyn Results) -> Lineage {
+        let Some(chain) = solids.chain(solid) else {
+            return Lineage::default();
+        };
+        let end = chain
+            .iter()
+            .position(|f| f == last)
+            .map_or(chain.len(), |i| i + 1);
+        Lineage::of_chain(
+            chain[..end]
+                .iter()
+                .filter_map(|f| match results.result(f)? {
+                    Ok(o) => Some((f, o.solid(solid)?)),
+                    Err(_) => None,
+                }),
+        )
+    }
+
+    /// Whether it records nothing: no name of its chain was retired.
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    /// What `name`, which `body` (the reader's) lacks, became for a role
+    /// of class `follow`.
+    pub fn follow(&self, name: Name, follow: Follow, body: &Body) -> Followed {
+        let Some(old) = self.carriers.get(&name) else {
+            return Followed::Gone;
+        };
+        let by = self
+            .events
+            .iter()
+            .find(|(_, ev)| retires(ev, name))
+            .map(|(f, _)| f.clone());
+        let pieces: Vec<(Name, EntityId)> =
+            crate::rebuild::successors_of(self.events.iter().map(|(_, e)| e), name, |n| {
+                body.by_name(n).is_some()
+            })
+            .into_iter()
+            .filter_map(|n| Some((n, body.by_name(n)?)))
+            .filter(|(_, e)| same_kind(old, *e))
+            .collect();
+        if pieces.is_empty() {
+            return Followed::Gone;
+        }
+        let trail = Trail {
+            pieces: pieces.iter().map(|(n, _)| *n).collect(),
+            by,
+        };
+        match follow {
+            Follow::All => Followed::To(pieces.iter().map(|(_, e)| *e).collect(), trail),
+            Follow::One => Followed::Refused("one_needed", trail),
+            Follow::Carrier => {
+                if pieces
+                    .iter()
+                    .all(|(_, e)| carrier(body, *e).as_ref() == Some(old))
+                {
+                    Followed::To(vec![pieces[0].1], trail)
+                } else {
+                    Followed::Refused("carriers_differ", trail)
+                }
+            }
+        }
+    }
+}
+
+/// Whether `ev` retires `name`.
+fn retires(ev: &Event, name: Name) -> bool {
+    match ev {
+        Event::Split { parent, .. } => *parent == name,
+        Event::Merged { parents, .. } => parents.contains(&name),
+        Event::Replaced { old, .. } => *old == name,
+        Event::Deleted(n) => *n == name,
+        _ => false,
+    }
+}
 
 /// The solid `r` names, as `owner` sees it, and the entity its name
-/// carries. `owner` holds the reference in its `role`; `order` is the
+/// carries. `owner` holds the reference in its `role`, of class `follow`
+/// (never `All`: a set's role reads [`resolve_all`]); `order` is the
 /// part's list as it is, or as a write would leave it.
 pub fn resolve<'a>(
     part: &Part,
     order: &[Id],
     owner: &Id,
     role: &str,
+    follow: Follow,
     r: &Reference,
     results: &'a dyn Results,
 ) -> Result<(&'a Built, EntityId)> {
+    debug_assert!(
+        follow != Follow::All,
+        "{role}: a set's role reads resolve_all"
+    );
+    let (b, mut found) = lookup(part, order, owner, role, follow, r, results)?;
+    Ok((b, found.remove(0)))
+}
+
+/// [`resolve`] for a role that reads a set (`Follow::All`): every entity
+/// the name is now, in name order.
+pub fn resolve_all<'a>(
+    part: &Part,
+    order: &[Id],
+    owner: &Id,
+    role: &str,
+    r: &Reference,
+    results: &'a dyn Results,
+) -> Result<(&'a Built, Vec<EntityId>)> {
+    lookup(part, order, owner, role, Follow::All, r, results)
+}
+
+fn lookup<'a>(
+    part: &Part,
+    order: &[Id],
+    owner: &Id,
+    role: &str,
+    follow: Follow,
+    r: &Reference,
+    results: &'a dyn Results,
+) -> Result<(&'a Built, Vec<EntityId>)> {
     let text = r.text(&part.id);
     let fail = |code, msg: String| {
         Error::new(code, format!("{owner}: its {role} {text} {msg}"))
@@ -47,7 +394,7 @@ pub fn resolve<'a>(
         }
         _ => {}
     }
-    let solids = crate::solid::Solids::of_order(part, order);
+    let solids = Solids::of_order(part, order);
     if let Some(by) = solids.consumed_by(&r.feature, owner) {
         return Err(fail(
             Code::BodyConsumed,
@@ -86,13 +433,46 @@ pub fn resolve<'a>(
                         .with("reference", &text),
                 );
             };
-            match b.body.by_name(r.name) {
-                Some(e) => Ok((b, e)),
-                None => Err(fail(
+            if let Some(e) = b.body.by_name(r.name) {
+                return Ok((b, vec![e]));
+            }
+            // Gone: what the chain's journals made of it (design 447).
+            let lineage = Lineage::of(&solids, &r.feature, read, results);
+            let prefix = text.rsplit_once('/').map_or("", |(p, _)| p);
+            match lineage.follow(r.name, follow, &b.body) {
+                Followed::To(found, _) => Ok((b, found)),
+                Followed::Gone => Err(fail(
                     Code::ReferenceUnresolved,
                     format!("is gone from solid {}", r.feature),
                 )
                 .with("dependency", &r.feature)),
+                Followed::Refused(reason, t) => {
+                    let by = t.by.as_ref().map_or(String::new(), |b| format!(" by {b}"));
+                    let msg = match reason {
+                        "one_needed" => format!(
+                            "was split{by} into {} pieces, and its {role} needs the one entity: refer to a piece",
+                            t.pieces.len()
+                        ),
+                        _ => format!(
+                            "was split{by} into {} pieces that no longer lie on its surface or curve: refer to a piece",
+                            t.pieces.len()
+                        ),
+                    };
+                    let mut e = fail(Code::ReferenceSplit, msg)
+                        .with("dependency", &r.feature)
+                        .with("reason", reason)
+                        .with(
+                            "candidates",
+                            t.pieces
+                                .iter()
+                                .map(|n| format!("{prefix}/{n}"))
+                                .collect::<Vec<_>>(),
+                        );
+                    if let Some(by) = &t.by {
+                        e = e.with("removed_by", by);
+                    }
+                    Err(e)
+                }
             }
         }
     }

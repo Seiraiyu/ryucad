@@ -51,8 +51,15 @@ fn resolve_sides<'a>(
         .map(|(i, s)| match s {
             Side::Edge { edge, tangent } => {
                 let role = format!("sides.{i}.edge");
-                let (built, e) =
-                    crate::reference::resolve(part, part.order(), id, &role, edge, before)?;
+                let (built, e) = crate::reference::resolve(
+                    part,
+                    part.order(),
+                    id,
+                    &role,
+                    crate::reference::Follow::One,
+                    edge,
+                    before,
+                )?;
                 match e {
                     EntityId::Edge(_) => Ok(Resolved::Edge(&built.body, edge.name, *tangent)),
                     e => Err(crate::reference::wrong_kind(
@@ -266,11 +273,14 @@ fn fill_error(part: &Part, id: &Id, x: &Fill, place: &[Place], e: ryukei::Error)
 }
 
 /// Faces resolved in the feature's view: the one body they are faces of
-/// (`targets_mixed` for faces of several), its founder, and each name.
+/// (`targets_mixed` for faces of several), its founder, and each name. A
+/// face a later feature split is every piece where they read a set
+/// (`follow` is `All`), refused where they read the one face (`One`).
 pub(crate) fn resolve_faces<'a, 'f>(
     part: &Part,
     id: &Id,
     ty: &str,
+    follow: crate::reference::Follow,
     faces: &[(String, &'f crate::doc::reference::Reference)],
     before: &'a dyn Results,
 ) -> Result<(&'f Id, &'a Built, Vec<Name>)> {
@@ -293,31 +303,57 @@ pub(crate) fn resolve_faces<'a, 'f>(
     let mut built = None;
     let mut names = Vec::with_capacity(faces.len());
     for (role, r) in faces {
-        let (b, e) = crate::reference::resolve(part, part.order(), id, role, r, before)?;
-        if !matches!(e, EntityId::Face(_)) {
-            return Err(crate::reference::wrong_kind(
-                part,
-                id,
-                role,
-                r,
-                crate::reference::kind(e),
-                "a face",
-            ));
+        let (b, found) = match follow {
+            crate::reference::Follow::All => {
+                crate::reference::resolve_all(part, part.order(), id, role, r, before)?
+            }
+            _ => {
+                let (b, e) =
+                    crate::reference::resolve(part, part.order(), id, role, follow, r, before)?;
+                (b, vec![e])
+            }
+        };
+        for e in found {
+            let EntityId::Face(f) = e else {
+                return Err(crate::reference::wrong_kind(
+                    part,
+                    id,
+                    role,
+                    r,
+                    crate::reference::kind(e),
+                    "a face",
+                ));
+            };
+            names.push(b.body.face(f).expect("a live face").name);
         }
         built = Some(b);
-        names.push(r.name);
     }
     Ok((first, built.expect("at least one face"), names))
 }
 
 /// Refuses an extract whose faces aren't faces of one body, in `results`.
 pub fn check_extract(part: &Part, id: &Id, x: &Extract, results: &dyn Results) -> Result<()> {
-    resolve_faces(part, id, "extract", &x.references(), results).map(drop)
+    resolve_faces(
+        part,
+        id,
+        "extract",
+        crate::reference::Follow::All,
+        &x.references(),
+        results,
+    )
+    .map(drop)
 }
 
 /// An extract: the named faces of their body, as it sees it, as a sheet.
 pub fn extract(part: &Part, id: &Id, x: &Extract, before: &dyn Results) -> Result<Built> {
-    let (from, built, names) = resolve_faces(part, id, "extract", &x.references(), before)?;
+    let (from, built, names) = resolve_faces(
+        part,
+        id,
+        "extract",
+        crate::reference::Follow::All,
+        &x.references(),
+        before,
+    )?;
     let key = crate::rebuild::op_key(&part.id, id);
     let made = ryukei::sheet::extract(key, &built.body, &names)
         .map_err(|e| extract_error(part, id, from, &e))?;
@@ -577,7 +613,14 @@ fn thicken_input<'a>(
                 .into_iter()
                 .filter(|(role, _)| role.starts_with("from."))
                 .collect();
-            let (from, built, names) = resolve_faces(part, id, "thicken", &refs, before)?;
+            let (from, built, names) = resolve_faces(
+                part,
+                id,
+                "thicken",
+                crate::reference::Follow::All,
+                &refs,
+                before,
+            )?;
             let (sheet, _) = ryukei::sheet::extract(extract_key(&part.id, id), &built.body, &names)
                 .map_err(|e| extract_error(part, id, from, &e))?;
             Ok((from, built, std::borrow::Cow::Owned(sheet)))
