@@ -134,14 +134,73 @@ pub(crate) fn face_face_within(
     m: &Meter,
 ) -> Result<FaceMeet, Failure> {
     m.charge(1)?;
-    let faces = [a, b];
-    let sa = surface_of(a)?;
-    let sb = surface_of(b)?;
     let slack = max_tolerance(a).max(max_tolerance(b));
     let (ba, bb) = (face_box(a.0, a.1), face_box(b.0, b.1));
     let Some(region) = overlap(&ba, &bb, slack + margin) else {
         return Ok(FaceMeet::apart());
     };
+    face_face_over(a, b, &region, m)
+}
+
+/// The boxes `region` holds outside cubes of half side `half` round
+/// `points`: for each cube, what is left of every box it meets, cut into
+/// up to six slabs (its x sides, then y, then z, each taken off what is
+/// left). Together they cover the region less the cubes' insides.
+pub(crate) fn region_outside(region: &Box3, points: &[Point3], half: f64) -> Vec<Box3> {
+    let mut boxes = vec![*region];
+    for p in points {
+        let lo_c = Point3::new(p.x - half, p.y - half, p.z - half);
+        let hi_c = Point3::new(p.x + half, p.y + half, p.z + half);
+        let cube = Box3::new(lo_c, hi_c);
+        let mut next = Vec::new();
+        for bx in boxes {
+            if !bx.intersects(&cube) {
+                next.push(bx);
+                continue;
+            }
+            let (mut lo, mut hi) = (bx.min(), bx.max());
+            if lo.x < lo_c.x {
+                next.push(Box3::new(lo, Point3::new(lo_c.x, hi.y, hi.z)));
+                lo.x = lo_c.x;
+            }
+            if hi.x > hi_c.x {
+                next.push(Box3::new(Point3::new(hi_c.x, lo.y, lo.z), hi));
+                hi.x = hi_c.x;
+            }
+            if lo.y < lo_c.y {
+                next.push(Box3::new(lo, Point3::new(hi.x, lo_c.y, hi.z)));
+                lo.y = lo_c.y;
+            }
+            if hi.y > hi_c.y {
+                next.push(Box3::new(Point3::new(lo.x, hi_c.y, lo.z), hi));
+                hi.y = hi_c.y;
+            }
+            if lo.z < lo_c.z {
+                next.push(Box3::new(lo, Point3::new(hi.x, hi.y, lo_c.z)));
+            }
+            if hi.z > hi_c.z {
+                next.push(Box3::new(Point3::new(lo.x, lo.y, hi_c.z), hi));
+            }
+        }
+        boxes = next;
+    }
+    boxes
+}
+
+/// [`face_face`] over `region` alone: what the faces' surfaces share
+/// there, placed in both faces. [`face_face_within`] is it over the
+/// faces' boxes' overlap.
+pub(crate) fn face_face_over(
+    a: (&Body, FaceId),
+    b: (&Body, FaceId),
+    region: &Box3,
+    m: &Meter,
+) -> Result<FaceMeet, Failure> {
+    let region = *region;
+    let faces = [a, b];
+    let sa = surface_of(a)?;
+    let sb = surface_of(b)?;
+    let slack = max_tolerance(a).max(max_tolerance(b));
     // Planes that are one over the region though not everywhere (a part
     // placed by a pose written in single precision, standing on a board:
     // issue #436) meet as coincident faces there, not in a line the
@@ -1972,5 +2031,31 @@ mod tests {
             met += stretches.len();
         }
         assert!(met >= 2, "{met}");
+    }
+
+    /// A region less cubes round points is covered by the boxes
+    /// `region_outside` gives, which don't meet the cubes' insides and
+    /// add up to the region's volume less the cubes' parts inside it.
+    #[test]
+    fn a_region_less_cubes_is_its_slabs() {
+        let region = Box3::new(Point3::new(0.0, 0.0, 0.0), Point3::new(4.0, 3.0, 2.0));
+        let points = [Point3::new(1.0, 1.0, 1.0), Point3::new(4.0, 3.0, 2.0)];
+        let boxes = region_outside(&region, &points, 0.5);
+        let volume = |b: &Box3| {
+            let d = b.max() - b.min();
+            d.x * d.y * d.z
+        };
+        let total: f64 = boxes.iter().map(volume).sum();
+        // 24 less a whole cube (1) and the corner cube's eighth (0.125).
+        assert!((total - (24.0 - 1.0 - 0.125)).abs() < 1e-12, "{total}");
+        for b in &boxes {
+            for p in &points {
+                let inside = Box3::new(
+                    Point3::new(p.x - 0.499, p.y - 0.499, p.z - 0.499),
+                    Point3::new(p.x + 0.499, p.y + 0.499, p.z + 0.499),
+                );
+                assert!(!b.intersects(&inside), "{b:?}");
+            }
+        }
     }
 }
