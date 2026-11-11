@@ -416,3 +416,58 @@ fn ftc_08s_pocket_floor_loses_its_fillets() {
     assert_eq!(check_intersections(&o), []);
     assert_eq!(o.counts().faces, body.counts().faces - 16);
 }
+
+/// NIST FTC 07's and FTC 10's blends under 2 mm (87 and 86) deleted and
+/// checked clean within the bar's 120 s on one thread (#652). The time is
+/// asserted only with `RYUKEI_BARS=1`, on the bar machine.
+///
+/// Still refused (plan 16.C): each refusal is a pair of kept region faces
+/// sharing one edge along which they are tangent (a pipe-like round's
+/// straight run against its corner torus, cylinders and spheres against a
+/// NURBS face), whose working faces, carried past that seam, meet
+/// tangentially along it; the trace can't certify it within its cap
+/// (3 to 34 s a pair) and refuses `Uncertain`. FTC 07 in 85 s, FTC 10 in
+/// 65 s, one thread on cox-worker-2 (AMD Ryzen 7 9700X).
+#[test]
+#[ignore = "#652: kept faces tangent along a seam, carried past it, meet uncertain"]
+fn ftc_07s_and_ftc_10s_blends_are_deleted() {
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    for name in ["nist_ftc_07_asme1_rd.stp", "nist_ftc_10_asme1_rb.stp"] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/corpus")
+            .join(name);
+        let m = read(
+            &std::fs::read(path).unwrap(),
+            &ReadOptions {
+                key: OpKey(7),
+                heal: Default::default(),
+            },
+        )
+        .unwrap();
+        let (body, _, _) = m.bodies[0].result.clone().unwrap();
+        let spec = DeleteBlends {
+            max_size: Some(MAX_SIZE),
+            faces: Vec::new(),
+            options: RecogniseOptions::default(),
+        };
+        let t = Instant::now();
+        let (o, _) = one
+            .install(|| within_deadline(|w| delete_blends_with(OpKey(0x13d), &body, &spec, w)))
+            .unwrap();
+        let s = t.elapsed().as_secs_f64();
+        println!(
+            "{name}: {} faces to {} in {s:.1} s",
+            body.counts().faces,
+            o.counts().faces
+        );
+        assert_eq!(check(&o), []);
+        assert_eq!(check_intersections(&o), []);
+        assert_eq!(small_blends(&o).unwrap(), 0);
+        if std::env::var("RYUKEI_BARS").as_deref() == Ok("1") {
+            assert!(s < 120.0, "{name}: {s} s");
+        }
+    }
+}
