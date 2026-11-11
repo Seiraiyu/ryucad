@@ -511,7 +511,11 @@ impl Geo<'_> {
                     .map(|r| Surface::Revolution(Arc::new(r)))
                     .map_err(fail)
             }
-            SSurface::Offset { basis, distance } => {
+            SSurface::Offset {
+                basis,
+                distance,
+                crosses,
+            } => {
                 let base = self.surface(*basis)?;
                 // STEP offsets along `σ_u × σ_v`; a surface of revolution
                 // runs on its curve first, the reverse of ryukei's, so its
@@ -523,7 +527,14 @@ impl Geo<'_> {
                 } else {
                     d
                 };
-                match base.offset(d) {
+                // One marked as crossing itself may pass its basis's focal
+                // surface, as ryukei writes those (design 484).
+                let made = if *crosses {
+                    base.offset_through(d)
+                } else {
+                    base.offset(d)
+                };
+                match made {
                     Some(s) => s.map_err(fail),
                     None => Err(ImportError::NotBounded { instance: id }),
                 }

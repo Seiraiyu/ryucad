@@ -494,3 +494,18 @@ fn turned_offsets_move_and_reflect_with_their_turn() {
     let q = mo.project(want).param;
     assert!(mo.point(q.0, q.1).distance(want) < 1e-9);
 }
+
+/// STEP reads an offset marked `self_intersect` through
+/// `Surface::offset_through`: past the focal surface over the base's
+/// whole domain where `Surface::offset` refuses, and the same offset
+/// where it is regular.
+#[test]
+fn offset_through_passes_the_focal_surface() {
+    let t = tube();
+    assert_eq!(t.offset(-0.8), Some(Err(Error::Degenerate)));
+    let Some(Ok(Surface::Offset(o))) = t.offset_through(-0.8) else {
+        panic!("turned past the axis")
+    };
+    assert!(o.turned());
+    assert_eq!(t.offset_through(0.2), t.offset(0.2));
+}
