@@ -28,7 +28,7 @@ pub fn branches(ui: &mut egui::Ui, ws: &mut Workspace) {
         ui.spinner();
         return;
     }
-    let compared = ws.compare.as_ref().map(|c| c.rev.clone());
+    let compared = ws.compare.as_ref().map(|c| c.named().to_owned());
     let (mut open, mut compare, mut show) = (None, None, None);
     if let Some(me) = b.current() {
         ui.label(format!("This window: {} ({})", name(me), standing(me)));

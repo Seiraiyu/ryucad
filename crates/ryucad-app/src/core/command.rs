@@ -749,6 +749,8 @@ pub struct State {
     pub weighable: bool,
     /// The revision being compared with.
     pub comparing: Option<String>,
+    /// The compare's blink: which side is drawn, and whether alone.
+    pub blink: crate::core::compare::Blink,
     /// Display toggles and the Measure tool, as they stand.
     pub edges: bool,
     pub sketches: bool,
@@ -819,10 +821,30 @@ const CAMERA: [&str; 27] = [
     "view.farther",
 ];
 
+/// The commands that write, off while a compare's revision is drawn
+/// (design 447): the model on screen isn't the files.
+const WRITES: [&str; 12] = [
+    "edit.undo",
+    "edit.redo",
+    "edit.move",
+    "edit.mate",
+    "file.import_step",
+    "file.update_import",
+    "import.to_solid",
+    "import.to_reference",
+    "annotation.add",
+    "annotation.here",
+    "annotation.markup",
+    "deps.place",
+];
+
 /// Whether the window's mode allows `id`, or which mode would: the part
 /// of [`enabled`] that holds whatever was right-clicked, so a context
 /// menu's targeted entries are gated by mode too.
 pub fn mode_allows(id: &str, s: &State) -> Result<(), &'static str> {
+    if s.blink.draws_rev() && WRITES.contains(&id) {
+        return Err(crate::core::compare::SWAPPED);
+    }
     let need = |ok: bool, why: &'static str| if ok { Ok(()) } else { Err(why) };
     match id {
         "annotation.add" | "annotation.here" => need(
@@ -1001,6 +1023,48 @@ pub fn toolbar() -> impl Iterator<Item = &'static Command> {
 mod tests {
     use super::*;
     use crate::core::keys::Chord;
+
+    #[test]
+    fn writes_wait_while_the_compared_revision_is_drawn() {
+        use crate::core::compare::{Blink, Front, SWAPPED};
+        use crate::core::modes::Mode;
+        let mut s = State {
+            mode: Mode::Edit,
+            ..State::default()
+        };
+        assert!(enabled("edit.undo", &s).is_ok());
+        s.blink = Blink {
+            of: Some("HEAD".into()),
+            front: Front::Rev,
+            alone: false,
+        };
+        for id in WRITES {
+            assert_eq!(enabled(id, &s), Err(SWAPPED), "{id}");
+            assert_eq!(mode_allows(id, &s), Err(SWAPPED), "{id}");
+        }
+        // Looking, measuring and cutting stay on.
+        for id in [
+            "view.fit",
+            "measure.tool",
+            "section.edit",
+            "view.compare_stop",
+        ] {
+            assert!(
+                enabled(
+                    id,
+                    &State {
+                        comparing: Some("HEAD".into()),
+                        ..s.clone()
+                    }
+                )
+                .is_ok(),
+                "{id}"
+            );
+        }
+        // The working files in front: writes are back.
+        s.blink.front = Front::Working;
+        assert!(enabled("edit.undo", &s).is_ok());
+    }
 
     #[test]
     fn move_needs_one_movable_instance_and_a_mode_that_edits() {
