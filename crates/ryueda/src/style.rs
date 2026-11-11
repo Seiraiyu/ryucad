@@ -637,6 +637,165 @@ pub fn builtin() -> Style {
     }
 }
 
+/// What an object of `kind` draws `property` in when no layer sets it:
+/// its role (a colour or fill), or the default value.
+fn default_of(kind: Kind, property: &str) -> Option<(&'static str, serde_json::Value)> {
+    use serde_json::json;
+    let role = |r: ryusch::style::Role| Some((r.name(), json!(r.name())));
+    match (property, kind) {
+        ("colour", Kind::Component | Kind::Port) => role(ryusch::style::Role::Ink),
+        ("colour", Kind::Net) => role(ryusch::style::Role::Wire),
+        ("colour", Kind::Rail) => role(ryusch::style::Role::Power),
+        ("colour", Kind::Region) => role(ryusch::style::Role::Frame),
+        ("fill", Kind::Component) => role(ryusch::style::Role::Body),
+        ("fill", Kind::Port) => role(ryusch::style::Role::PortFill),
+        ("line_weight", _) => Some(("", json!("normal"))),
+        ("text_size", Kind::Component) => Some(("", json!("normal"))),
+        ("emphasis", Kind::Component) | ("dash", _) => Some(("", json!(false))),
+        ("visible.pin_numbers", Kind::Component) | ("visible.frame", Kind::Region) => {
+            Some(("", json!(true)))
+        }
+        ("visible.intent", Kind::Net) => Some(("", json!(false))),
+        ("visible.intent", Kind::Rail) => Some(("", json!(true))),
+        _ => None,
+    }
+}
+
+/// `style.get`: the project's style, the organisation's (its alias and
+/// path), the built-in one, the organisation's locks, and the project's
+/// revision.
+pub fn get(p: &crate::project::Project) -> crate::error::Result<serde_json::Value> {
+    use serde_json::json;
+    let own = p.style.item.clone().map_err(|e| e.clone())?;
+    let org = match &p.org_style {
+        None => serde_json::Value::Null,
+        Some(o) => json!({
+            "alias": o.alias,
+            "path": o.path,
+            "style": o.style.item.as_ref().map_err(|e| e.clone())?,
+        }),
+    };
+    let locks = p
+        .org_style
+        .as_ref()
+        .and_then(|o| o.style.item.as_ref().ok())
+        .map(|s| s.locks.clone())
+        .unwrap_or_default();
+    Ok(json!({
+        "project": own,
+        "organisation": org,
+        "builtin": builtin(),
+        "locks": locks,
+        "revision": p.revision,
+    }))
+}
+
+/// The object `target` names in `block` (the agent's vocabulary: a
+/// designator, a net's name, `rail:NAME`, `port:NAME`, a region's title
+/// or ID), as the cascade knows it.
+pub fn object_named(
+    p: &crate::project::Project,
+    block: &str,
+    target: &str,
+) -> crate::error::Result<(crate::cascade::Object, crate::schem::Built)> {
+    let b = crate::write::block(p, block)?;
+    let built = crate::schem::build(p, b)?;
+    let names = crate::vocab::Names {
+        p,
+        b,
+        built: &built,
+    };
+    let key = names
+        .part(target)
+        .map(|k| match k.split_once(':') {
+            // A unit names its component.
+            Some((c, _))
+                if !k.starts_with("port:")
+                    && !k.starts_with("region:")
+                    && !k.starts_with("instance:") =>
+            {
+                c.to_owned()
+            }
+            _ => k,
+        })
+        .or_else(|_| names.net(target))?;
+    let objects = crate::cascade::objects(p, b, &built);
+    let o = objects.into_iter().find(|o| o.key == key).ok_or_else(|| {
+        crate::error::Error::new(
+            Code::NotFound,
+            format!("{target} is drawn but takes no style (an instance's symbol)"),
+        )
+        .with("reference", target)
+    })?;
+    Ok((o, built))
+}
+
+/// `style.explain`: each property `target` is drawn with, its value (a
+/// colour's both values too) and the layer, rule or override that set
+/// it, or the role or default it falls to; on `sheet` when given.
+pub fn explain(
+    p: &crate::project::Project,
+    block: &str,
+    target: &str,
+    sheet: Option<&str>,
+) -> crate::error::Result<serde_json::Value> {
+    use serde_json::json;
+    let (o, _) = object_named(p, block, target)?;
+    let sheet_of = sheet.map(|s| {
+        crate::write::block(p, block)
+            .ok()
+            .and_then(|b| match &b.layout {
+                Some(Ok(l)) => l
+                    .sheets
+                    .iter()
+                    .find(|(k, v)| *k == s || v.name == s)
+                    .map(|(k, v)| (k.clone(), v.name.clone())),
+                _ => None,
+            })
+            .unwrap_or((s.to_owned(), s.to_owned()))
+    });
+    let layers = crate::cascade::Layers::of(p);
+    let r = layers.resolve(&o, sheet_of.as_ref().map(|(a, b)| (a.as_str(), b.as_str())));
+    let full = serde_json::to_value(&r.props).expect("props serialize");
+    let mut props = serde_json::Map::new();
+    for name in PROPERTIES {
+        let value = match name.split_once('.') {
+            Some((a, b)) => full.get(a).and_then(|v| v.get(b)).cloned(),
+            None => full.get(name).cloned(),
+        };
+        let mut entry = match (value, r.from.get(name)) {
+            (Some(v), Some(from)) => json!({"value": v, "from": from}),
+            _ => match default_of(o.kind, name) {
+                Some((role, v)) if !role.is_empty() => {
+                    json!({"value": v, "from": {"layer": "built_in", "role": role}})
+                }
+                Some((_, v)) => json!({"value": v, "from": {"layer": "built_in", "default": true}}),
+                None => continue,
+            },
+        };
+        if name == "colour" || name == "fill" {
+            let c: Option<Colour> = serde_json::from_value(entry["value"].clone()).ok();
+            if let Some(c) = c {
+                for theme in [Theme::Light, Theme::Dark] {
+                    if let Some(rgb) = layers.colour(&c, theme) {
+                        entry[if theme == Theme::Light {
+                            "light"
+                        } else {
+                            "dark"
+                        }] = json!(rgb.hex());
+                    }
+                }
+            }
+        }
+        props.insert(name.to_owned(), entry);
+    }
+    Ok(json!({
+        "object": {"kind": o.kind, "id": o.id, "key": o.key, "tags": o.tags},
+        "sheet": sheet_of.map(|(a, _)| a),
+        "properties": props,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

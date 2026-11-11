@@ -480,6 +480,8 @@ fn every_protocol_method_has_a_command() {
         ("lint.get", &["lint"]),
         ("lint.configure", &["lint", "configure"]),
         ("lib.check", &["lib", "check"]),
+        ("style.get", &["style"]),
+        ("style.explain", &["style", "explain"]),
         ("standards.get", &["standards"]),
         ("standards.set", &["standards", "set"]),
         ("check", &["check"]),
@@ -3474,4 +3476,29 @@ fn the_style_revision_follows_style_files() {
     assert_ne!(e["revision"], before);
     let e = p.ok(&["project", "edit", "--style-from", ""]);
     assert!(e["schematic"].get("style_from").is_none(), "{e}");
+}
+
+/// The style whole, and one object's properties with where each came
+/// from.
+#[test]
+fn a_style_is_read_and_explained() {
+    let p = Pair::with_placed_resistor();
+    let block = "top";
+    let s = p.ok(&["style"]);
+    assert_eq!(s["builtin"]["palette"]["wire"]["light"], "#1f5fbf", "{s}");
+    assert_eq!(s["project"], json!({}));
+    p.ok(&["tag", "R1", "--block", block, "--add", "hv"]);
+    let e = p.ok(&["style", "explain", "R1", "--block", block]);
+    assert_eq!(e["object"]["kind"], "component");
+    let colour = &e["properties"]["colour"];
+    assert_eq!(colour["value"], "hv", "{e}");
+    assert_eq!(colour["light"], "#c0261c");
+    assert_eq!(colour["from"]["layer"], "built_in");
+    assert_eq!(colour["from"]["select"]["tag"], "hv");
+    assert_eq!(e["properties"]["fill"]["from"]["role"], "body");
+    p.fails(
+        &["style", "explain", "nope", "--block", block],
+        "not_found",
+        1,
+    );
 }

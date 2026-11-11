@@ -751,6 +751,12 @@ fn dispatch(
             expected_revision.as_deref(),
             dry_run,
         ),
+        Request::StyleGet {} => crate::style::get(session.project()),
+        Request::StyleExplain {
+            target,
+            block,
+            sheet,
+        } => crate::style::explain(session.project(), &block, &target, sheet.as_deref()),
         Request::StandardsGet { library } => {
             crate::standards::get(session.project(), library.as_deref())
         }

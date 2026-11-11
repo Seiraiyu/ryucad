@@ -588,6 +588,17 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         dry_run: bool,
     },
+    /// The style: the project's, the organisation's, the built-in one.
+    #[serde(rename = "style.get")]
+    StyleGet {},
+    /// One object's properties and where each came from.
+    #[serde(rename = "style.explain")]
+    StyleExplain {
+        target: String,
+        block: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<String>,
+    },
     /// The standards that judge a library's symbols (this project's own by
     /// default), whole, and where they come from.
     #[serde(rename = "standards.get")]

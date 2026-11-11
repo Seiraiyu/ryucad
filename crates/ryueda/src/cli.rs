@@ -166,6 +166,12 @@ enum Command {
         #[command(flatten)]
         expect: Expect,
     },
+    /// The style (the project's, the organisation's, the built-in one),
+    /// or a subcommand.
+    Style {
+        #[command(subcommand)]
+        cmd: Option<StyleCmd>,
+    },
     Standards {
         /// A library project's alias, to read the standards that judge it.
         #[arg(long)]
@@ -1114,6 +1120,19 @@ enum ErcCmd {
 }
 
 #[derive(Subcommand)]
+enum StyleCmd {
+    /// An object's properties (by designator, net name, rail:NAME,
+    /// port:NAME or a region's title) and where each came from.
+    Explain {
+        target: String,
+        #[arg(long)]
+        block: String,
+        #[arg(long)]
+        sheet: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum StandardsCmd {
     /// Change this project's own standards by a JSON merge patch:
     /// '{"shapes": "iec"}', '{"classes": {"ic": {"max_pins_per_unit": 100}}}';
@@ -1905,6 +1924,19 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 dry_run: *dry_run,
             }
         }
+        Command::Style { cmd: None } => Request::StyleGet {},
+        Command::Style {
+            cmd:
+                Some(StyleCmd::Explain {
+                    target,
+                    block,
+                    sheet,
+                }),
+        } => Request::StyleExplain {
+            target: target.clone(),
+            block: block.clone(),
+            sheet: sheet.clone(),
+        },
         Command::Standards {
             library,
             action: None,
