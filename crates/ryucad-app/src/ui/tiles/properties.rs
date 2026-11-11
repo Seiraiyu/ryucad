@@ -839,6 +839,8 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
                 T::Draft(d) => draft(ui, d, &angles),
                 T::MoveFace(m) => move_face(ui, m),
                 T::ReplaceFace(r) => replace_face(ui, r),
+                // Drawn in Task 7.
+                T::DeleteFace(_) | T::DeleteBlend(_) | T::ResizeBlend(_) => Keys::default(),
             }
         }),
     ]
