@@ -1803,8 +1803,8 @@ fn drafts_recompute_as_from_nothing() {
 }
 
 /// A slot lengthened across a box's top and shortened again, with a
-/// sketch on the top and a fillet of its front edge (design 447): the
-/// sketch follows the first piece of the split top and the fillet both
+/// sketch on the top and a chamfer of its front edge (design 447): the
+/// sketch follows the first piece of the split top and the chamfer both
 /// pieces of the split edge, and every incremental rebuild is the
 /// rebuild from nothing on one thread and on eight.
 #[test]

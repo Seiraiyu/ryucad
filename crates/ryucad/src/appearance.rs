@@ -279,7 +279,8 @@ pub fn look_of(session: &Session, d: &Drawn, material: Option<&str>) -> SolidLoo
         let Some(n) = crate::doc::reference::parse_name(name) else {
             continue;
         };
-        let pieces: Vec<String> = if d.built.body.by_name(n).is_some() {
+        let direct = d.built.body.by_name(n).is_some();
+        let pieces: Vec<String> = if direct {
             named.insert(name.to_owned());
             vec![name.to_owned()]
         } else {
@@ -297,8 +298,11 @@ pub fn look_of(session: &Session, d: &Drawn, material: Option<&str>) -> SolidLoo
         if e == base {
             continue;
         }
-        if pieces.len() == 1 && named.contains(&pieces[0]) {
-            faces.insert(pieces[0].clone(), e);
+        // Only an entry naming the piece itself goes straight in; a
+        // followed one waits, whatever the key order, so it never
+        // overrides a piece's own entry.
+        if direct {
+            faces.insert(name.to_owned(), e);
         } else {
             for p in pieces {
                 followed.insert(p, e.clone());
@@ -1051,6 +1055,55 @@ mod tests {
             assert_eq!(look["colour"], "#2050c0", "{v}");
         }
         assert_eq!(v["warnings"], json!([]), "{v}");
+    }
+
+    /// A piece's own entry wins over a followed entry that resolves to
+    /// that piece alone, whichever key sorts first: the slot cut's id
+    /// names the surviving piece, and `c` sorts it after the split top's
+    /// name, `d` before.
+    #[test]
+    fn a_pieces_own_colour_beats_a_followed_one_in_either_order() {
+        let mut orders = Vec::new();
+        for id in ["c", "d"] {
+            let (_dir, mut s, body) = crate::sketch::tests::with_box();
+            let top = crate::sketch::tests::face_along(&body, [0.0, 0.0, 1.0]);
+            call(
+                &mut s,
+                "appearance.set",
+                json!({"entities": [format!("p/b/{top}")], "colour": "#2050c0"}),
+            )
+            .unwrap();
+            // A slot splits the top, and a second cut takes the right
+            // piece away, so the top follows to the left piece alone.
+            for (id, x, origin) in [(id, 1.0, 9.5), ("trim", 14.5, 10.5)] {
+                call(
+                    &mut s,
+                    "feature.add",
+                    json!({"part": "p", "type": "box", "id": id, "operation": "cut",
+                           "params": {"x": x, "y": 20, "z": 20},
+                           "placement": {"origin": [origin, -5, -5]}}),
+                )
+                .unwrap();
+            }
+            let v = call(&mut s, "appearance.get", json!({"part": "p"})).unwrap();
+            let faces = solid(&v, "p", "b")["faces"].clone();
+            let followed: Vec<&String> = faces.as_object().unwrap().keys().collect();
+            assert_eq!(followed.len(), 1, "{v}");
+            let piece = followed[0].clone();
+            orders.push(piece < top);
+            call(
+                &mut s,
+                "appearance.set",
+                json!({"entities": [format!("p/b/{piece}")], "colour": "#c02020"}),
+            )
+            .unwrap();
+            let v = call(&mut s, "appearance.get", json!({"part": "p"})).unwrap();
+            let faces = solid(&v, "p", "b")["faces"].clone();
+            assert_eq!(faces[&piece]["colour"], "#c02020", "{id}: {v}");
+            assert_eq!(faces.as_object().unwrap().len(), 1, "{id}: {v}");
+            assert_eq!(v["warnings"], json!([]), "{id}: {v}");
+        }
+        assert_eq!(orders, [false, true], "both key orders");
     }
 
     #[test]
