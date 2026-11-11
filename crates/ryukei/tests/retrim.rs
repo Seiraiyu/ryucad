@@ -132,6 +132,21 @@ fn a_groove_run_through_splits_the_top() {
     }
     let top = face(K, FaceRole::PlusZ);
     assert!(o.by_name(top).is_none());
+    // The plate's sides and bottom are only re-trimmed: each keeps its
+    // name (#691: the table split each side and the merge named it anew).
+    for r in [
+        FaceRole::MinusX,
+        FaceRole::PlusX,
+        FaceRole::MinusY,
+        FaceRole::PlusY,
+        FaceRole::MinusZ,
+    ] {
+        assert!(o.by_name(face(K, r)).is_some(), "{r:?}");
+    }
+    assert!(!j.events().iter().any(|e| matches!(
+        e,
+        Event::Merged { parents, .. } if parents.iter().any(|p| [FaceRole::MinusX, FaceRole::PlusX, FaceRole::MinusY, FaceRole::PlusY].iter().any(|&r| { let n = face(K, r); *p == n }))
+    )));
     assert!(j.events().iter().any(
         |e| matches!(e, Event::Split { parent, children } if *parent == top && children.len() == 2)
     ));
