@@ -938,6 +938,19 @@ impl Project {
             }
             out.extend(o.style.faults.iter().cloned());
         }
+        let layers = crate::cascade::Layers::of(self);
+        for (lock, ptr) in layers.broken_locks() {
+            out.push(
+                Fault::error(
+                    Code::StyleLocked,
+                    format!("the organisation's style locks {lock}; this project's style sets it"),
+                )
+                .with("path", STYLE)
+                .with("pointer", ptr)
+                .with("lock", &lock)
+                .with("organisation", layers.org_path().unwrap_or_default()),
+            );
+        }
         out.extend(self.conn.faults());
         out
     }
