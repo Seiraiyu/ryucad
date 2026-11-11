@@ -77,7 +77,7 @@ pub const MANIFEST_FORMAT: u64 = 4;
 /// 13 reference imports (ryucad 21), 14 unfolds and refolds (ryucad
 /// 16.B), 15 fills, extracts, sews and thickens (ryucad 18), 16 face
 /// tweaks (ryucad 17), 17 a flattened import's place (ryucad 21.D), 18
-/// drafts (ryucad 17.B), 19 splits by a body or faces (ryucad 18.C). A
+/// drafts (ryucad 17.B), 19 splits by a body or faces (ryucad 18.C), 20 direct edits (ryucad 22). A
 /// feature is written at the lowest format that holds it, so one with
 /// only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
@@ -91,6 +91,7 @@ pub const FEATURE_FORMAT: u64 = {
         super::import::PLACE_FORMAT,
         super::tweak::DRAFT_FORMAT,
         super::body::TOOL_FORMAT,
+        super::edit::FORMAT,
     ];
     let (mut max, mut i) = (0, 0);
     while i < all.len() {
@@ -725,6 +726,12 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    let ty = v.get("type").and_then(Value::as_str);
+    let retrims = v.get("topology").and_then(Value::as_str) == Some("change")
+        || v.get("blends").and_then(Value::as_str) == Some("rebuild");
+    if ty.is_some_and(|t| super::tweak::TYPES.contains(&t)) && retrims {
+        return super::edit::FORMAT;
+    }
     if v.get("type").and_then(Value::as_str) == Some("import") && v.get("place").is_some() {
         return super::import::PLACE_FORMAT;
     }
@@ -1049,8 +1056,24 @@ impl Feature {
             || matches!(self, Feature::Sew(s) if !s.solid)
     }
 
+    /// A face tweak's topology and blends (ryucad 22); `None` for any
+    /// other feature.
+    pub fn retrim(&self) -> Option<super::edit::Retrim> {
+        match self {
+            Feature::MoveFace(m) => Some(m.retrim),
+            Feature::ReplaceFace(r) => Some(r.retrim),
+            Feature::Draft(d) => Some(d.retrim),
+            _ => None,
+        }
+    }
+
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
+        // A tweak that may change topology or remake its blends is
+        // ryucad 22's, whatever ryucad 17 wrote it at.
+        if self.retrim().is_some_and(|r| !r.is_keep()) {
+            return super::edit::FORMAT;
+        }
         if let Feature::Split(s) = self {
             return s.format();
         }

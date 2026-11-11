@@ -7,6 +7,7 @@
 //! target as the feature sees it.
 
 use super::body::{FaceGroup, refs, refs_json, solid_id};
+use super::edit::Retrim;
 use super::files::{Obj, invalid};
 use super::geometry::GeomRef;
 use super::id::Id;
@@ -87,6 +88,9 @@ pub struct MoveFace {
     pub by: MoveBy,
     pub faces: Vec<Reference>,
     pub tangent: bool,
+    /// Whether it may change the solid's topology and make its broken
+    /// blends again (ryucad 22); keep, keep when written neither.
+    pub retrim: Retrim,
 }
 
 /// Faces given the surface `with` names: a face's (any solid of the part,
@@ -102,6 +106,9 @@ pub struct Replacement {
 pub struct ReplaceFace {
     pub target: Id,
     pub groups: Vec<Replacement>,
+    /// Whether it may change the solid's topology and make its broken
+    /// blends again (ryucad 22); keep, keep when written neither.
+    pub retrim: Retrim,
 }
 
 /// What a draft's faces turn about.
@@ -134,15 +141,18 @@ pub struct Draft {
     pub groups: Vec<FaceGroup>,
     pub flip: Vec<Reference>,
     pub tangent: bool,
+    /// Whether it may change the solid's topology and make its broken
+    /// blends again (ryucad 22); keep, keep when written neither.
+    pub retrim: Retrim,
 }
 
 /// The fields a request may give a tweak of type `ty`.
 pub fn request_fields(ty: &str) -> &'static [&'static str] {
     match ty {
-        "replace_face" => &["target", "targets", "groups"],
+        "replace_face" => &["target", "targets", "groups", "topology", "blends"],
         "draft" => &[
             "target", "targets", "angle", "neutral", "parting", "pull", "reverse", "faces",
-            "groups", "flip", "tangent",
+            "groups", "flip", "tangent", "topology", "blends",
         ],
         _ => &[
             "target",
@@ -155,6 +165,8 @@ pub fn request_fields(ty: &str) -> &'static [&'static str] {
             "faces",
             "groups",
             "tangent",
+            "topology",
+            "blends",
         ],
     }
 }
@@ -194,6 +206,7 @@ impl MoveFace {
         if !self.tangent {
             v["tangent"] = json!(false);
         }
+        self.retrim.write(&mut v);
         v
     }
 
@@ -255,11 +268,13 @@ impl MoveFace {
                 "a move_face names the faces it moves: a non-empty array of faces {feature, name}",
             ));
         }
+        let retrim = Retrim::take(o)?;
         let m = MoveFace {
             target,
             by,
             faces,
             tangent,
+            retrim,
         };
         once(m.faces())?;
         Ok(m)
@@ -308,12 +323,14 @@ impl MoveFace {
 
 impl ReplaceFace {
     pub fn fields(&self) -> Value {
-        json!({
+        let mut v = json!({
             "target": self.target,
             "groups": self.groups.iter()
                 .map(|g| json!({"with": g.with.to_json(), "faces": refs_json(&g.faces)}))
                 .collect::<Vec<_>>(),
-        })
+        });
+        self.retrim.write(&mut v);
+        v
     }
 
     #[doc(hidden)]
@@ -347,7 +364,12 @@ impl ReplaceFace {
             }
             groups.push(Replacement { with, faces });
         }
-        let r = ReplaceFace { target, groups };
+        let retrim = Retrim::take(o)?;
+        let r = ReplaceFace {
+            target,
+            groups,
+            retrim,
+        };
         once(r.faces())?;
         Ok(r)
     }
@@ -419,6 +441,7 @@ impl Draft {
         if !self.tangent {
             v["tangent"] = json!(false);
         }
+        self.retrim.write(&mut v);
         v
     }
 
@@ -494,6 +517,7 @@ impl Draft {
                 "a draft names the faces it drafts: a non-empty array of faces {feature, name}, or groups",
             ));
         }
+        let retrim = Retrim::take(o)?;
         let d = Draft {
             target,
             angle,
@@ -503,6 +527,7 @@ impl Draft {
             groups,
             flip,
             tangent,
+            retrim,
         };
         once(d.drafted())?;
         let flipped: Vec<(String, &Reference)> = d
@@ -1069,5 +1094,55 @@ mod tests {
         let d = Draft::from_fields(&mut o, &Env::new(&p)).unwrap();
         assert!((d.angle.radians() - 2f64.to_radians()).abs() < 1e-15);
         assert!((d.groups[0].quantity.radians() + 4f64.to_radians()).abs() < 1e-15);
+    }
+
+    #[test]
+    fn a_tweaks_topology_and_blends_round_trip_and_raise_its_format() {
+        use crate::doc::files::{Feature, feature_format};
+        let edit = super::super::edit::FORMAT;
+        let face = json!({"feature": "b", "name": format!("{:032x}", 1)});
+        let read = |v: &Value| Feature::from_json(v, Unit::Mm, &Env::empty()).unwrap();
+        let mv = json!({"format": edit, "kind": "ryucad.feature", "type": "move_face",
+            "target": "b", "by": "translate", "direction": "x", "distance": "5 mm",
+            "faces": [face], "topology": "change"});
+        let f = read(&mv);
+        assert_eq!((f.format(), feature_format(&mv)), (edit, edit));
+        assert_eq!(f.to_json(), mv);
+        let Feature::MoveFace(m) = &f else {
+            panic!("a move")
+        };
+        assert!(m.retrim.topology && !m.retrim.blends);
+        // Without them: ryucad 17's format and bytes.
+        let mut old = mv.clone();
+        old.as_object_mut().unwrap().remove("topology");
+        old["format"] = json!(FORMAT);
+        let f = read(&old);
+        assert_eq!((f.format(), feature_format(&old)), (FORMAT, FORMAT));
+        assert_eq!(f.to_json(), old);
+        // `keep` spelled out reads, and isn't written.
+        let mut kept = old.clone();
+        kept["topology"] = json!("keep");
+        assert_eq!(read(&kept).to_json(), old);
+        // A draft with its blends rebuilt; a replacement with both.
+        let d = json!({"format": edit, "kind": "ryucad.feature", "type": "draft", "target": "b",
+            "angle": "2 deg", "neutral": "xy", "faces": [face], "blends": "rebuild"});
+        assert_eq!((read(&d).format(), read(&d).to_json()), (edit, d.clone()));
+        assert_eq!(feature_format(&d), edit);
+        let r = json!({"format": edit, "kind": "ryucad.feature", "type": "replace_face",
+            "target": "b", "groups": [{"with": "xy", "faces": [face]}],
+            "topology": "change", "blends": "rebuild"});
+        assert_eq!((read(&r).format(), read(&r).to_json()), (edit, r.clone()));
+        assert_eq!(
+            read(&r).retrim(),
+            Some(super::super::edit::Retrim {
+                topology: true,
+                blends: true
+            })
+        );
+        // Every tweak's request takes them.
+        for ty in TYPES {
+            assert!(request_fields(ty).contains(&"topology"), "{ty}");
+            assert!(request_fields(ty).contains(&"blends"), "{ty}");
+        }
     }
 }
