@@ -35,7 +35,7 @@ use crate::boolean::build::Kept;
 use crate::boolean::classify::inner_point;
 use crate::boolean::table::Table;
 use crate::boolean::{Fail, past_cap};
-use crate::check::{Fault, check_intersections_in};
+use crate::check::{Fault, check_pairs_in};
 use crate::geom::{Point2, Point3};
 use crate::intersect::{
     Inclusion, Place, face_box, face_off_ball, point_in_body_in, point_in_face,
@@ -88,22 +88,6 @@ pub(crate) fn global_in(
         },
         m,
     )?;
-    let mut pairs: BTreeSet<(FaceId, FaceId)> = BTreeSet::new();
-    for fault in check_intersections_in(&envelope, m) {
-        match fault {
-            Fault::FacesCross { a, b } | Fault::FacesOverlap { a, b } => {
-                pairs.insert((a.min(b), a.max(b)));
-            }
-            Fault::CannotCheck { a, .. } => {
-                return Err(OffsetError::Uncertain {
-                    at: envelope.faces[a].name,
-                }
-                .into());
-            }
-            _ => {}
-        }
-    }
-    let moving: Vec<FaceId> = body.faces().collect();
     // Faces of the envelope that are inverted: inverted offsets, fills
     // about edges whose offsets close, and spheres at vertices where only
     // such fills meet. Every point of them is nearer the original than
@@ -133,6 +117,27 @@ pub(crate) fn global_in(
             ));
         }
     }
+    let mut pairs: BTreeSet<(FaceId, FaceId)> = BTreeSet::new();
+    // An inverted face's points all lie nearer the original than `|d|`,
+    // so where one meets a forward face that face is dropped on both
+    // sides: no kept piece is bounded there, and the pair needn't be
+    // checked or cut (design 484). Their own pieces are dropped untested.
+    let dropped = |f: FaceId| inverted.contains(&envelope.faces[f].name);
+    for fault in check_pairs_in(&envelope, m, |a, b| !dropped(a) && !dropped(b)) {
+        match fault {
+            Fault::FacesCross { a, b } | Fault::FacesOverlap { a, b } => {
+                pairs.insert((a.min(b), a.max(b)));
+            }
+            Fault::CannotCheck { a, .. } => {
+                return Err(OffsetError::Uncertain {
+                    at: envelope.faces[a].name,
+                }
+                .into());
+            }
+            _ => {}
+        }
+    }
+    let moving: Vec<FaceId> = body.faces().collect();
     // A fan's triangles meet across spokes no crossing need touch where
     // one is kept and the next dropped: each is judged alone.
     let mut lonely: BTreeSet<Name> = inverted.clone();
@@ -148,7 +153,6 @@ pub(crate) fn global_in(
         }
     }
     let alone = |f: FaceId| lonely.contains(&envelope.faces[f].name);
-    let dropped = |f: FaceId| inverted.contains(&envelope.faces[f].name);
     let select = |ops: &[Body], table: &Table, pieces: &[Piece], groups: &[usize], m: &Meter| {
         by_distance(body, &moving, d, &dropped, (ops, table, pieces, groups), m)
     };

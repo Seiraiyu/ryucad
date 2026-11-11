@@ -355,6 +355,13 @@ pub(crate) fn normal(body: &Body, fin: FinId, t: f64) -> Vector3 {
 /// its own kind, any other an [`crate::geom::Offset`] over the face's box
 /// grown by [`MARGIN`] each way (or the box alone, where that folds).
 pub(crate) fn offset_surface(body: &Body, f: FaceId, d: f64) -> Result<Surface, Error> {
+    offset_surface_in(body, f, d, false)
+}
+
+/// [`offset_surface`]; with `through`, a spline, swept or bent face's
+/// offset may pass its focal surface over the whole box
+/// ([`crate::geom::Offset::inverted_new`], design 484).
+fn offset_surface_in(body: &Body, f: FaceId, d: f64, through: bool) -> Result<Surface, Error> {
     let face = &body.faces[f];
     let s = &body.surfaces[face.surface];
     if d == 0.0 {
@@ -392,18 +399,23 @@ pub(crate) fn offset_surface(body: &Body, f: FaceId, d: f64) -> Result<Surface, 
             None => [(a - m).max(whole[k][0]), (b + m).min(whole[k][1])],
         }
     });
-    match s.offset_within(d, grown) {
-        Some(Ok(o)) => Ok(o),
-        _ => s
-            .offset_within(d, rect)
-            .ok_or_else(collapses)?
-            .map_err(|_| collapses()),
-    }
+    let within = |r: [[f64; 2]; 2]| -> Result<Surface, Error> {
+        if through {
+            crate::geom::Offset::inverted_new(s.clone(), d, r)
+                .map(|o| Surface::Offset(std::sync::Arc::new(o)))
+        } else {
+            s.offset_within(d, r).ok_or(Error::Degenerate)?
+        }
+    };
+    within(grown).or_else(|_| within(rect).map_err(|_| collapses()))
 }
 
 /// The face's offset, as [`offset_surface`] finds it; in an envelope, a
-/// cylinder, sphere or torus whose offset passes its centre is kept
-/// inverted ([`inverted`]).
+/// cylinder, sphere, torus or pipe whose offset passes its centre is kept
+/// inverted ([`inverted`]), and any other face whose offset collapses is
+/// tried again past its focal surface (design 484): kept where it passes
+/// it whole, on its base's parameters and with its sense, its natural
+/// normal along `O_u × O_v` as the turned cylinder's and torus's are.
 fn envelope_surface(
     body: &Body,
     f: FaceId,
@@ -419,8 +431,35 @@ fn envelope_surface(
             Some(None) => return Err(OffsetError::FaceCollapses { face: face.name }.into()),
             None => {}
         }
+        return match offset_surface(body, f, d) {
+            Err(Error::InvalidOffset(OffsetError::FaceCollapses { .. })) if inverts(s) => {
+                let o = offset_surface_in(body, f, d, true)?;
+                Ok((
+                    o,
+                    Some(Inversion {
+                        map: None,
+                        flip: false,
+                    }),
+                ))
+            }
+            r => r.map(|s| (s, None)),
+        };
     }
     offset_surface(body, f, d).map(|s| (s, None))
+}
+
+/// Whether a surface's offset is an [`crate::geom::Offset`], which may
+/// pass its focal surface.
+fn inverts(s: &Surface) -> bool {
+    matches!(
+        s,
+        Surface::Nurbs(_)
+            | Surface::Extrusion(_)
+            | Surface::Revolution(_)
+            | Surface::Sweep(_)
+            | Surface::Offset(_)
+            | Surface::Bent(_)
+    )
 }
 
 /// How the edge's faces move, and for a smooth edge how far apart their
