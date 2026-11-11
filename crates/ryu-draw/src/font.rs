@@ -1,5 +1,5 @@
-//! The one face every ryu drawing writes: Inter Regular 4.1 (OFL 1.1;
-//! `fonts/LICENSES.md`), its advance widths and extent, and the subset
+//! The faces ryu drawings write: Inter Regular 4.1, and SemiBold for
+//! ryueda's emphasis (OFL 1.1; `fonts/LICENSES.md`), its advance widths and extent, and the subset
 //! a PDF embeds.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -9,8 +9,42 @@ use std::sync::OnceLock;
 /// PDFs embed a subset of.
 pub const INTER: &[u8] = include_bytes!("../fonts/Inter-Regular.ttf");
 
+/// Inter SemiBold, static: ryueda's designators, titles and emphasis
+/// (plan 2.E).
+pub const INTER_SEMIBOLD: &[u8] = include_bytes!("../fonts/Inter-SemiBold.ttf");
+
+/// One of the bundled faces.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Face {
+    #[default]
+    Regular,
+    SemiBold,
+}
+
+impl Face {
+    /// The face's file.
+    pub fn bytes(self) -> &'static [u8] {
+        match self {
+            Face::Regular => INTER,
+            Face::SemiBold => INTER_SEMIBOLD,
+        }
+    }
+
+    /// Its PostScript name's family and style, as a subset's name ends.
+    pub fn name(self) -> &'static str {
+        match self {
+            Face::Regular => "Inter-Regular",
+            Face::SemiBold => "Inter-SemiBold",
+        }
+    }
+}
+
+fn parsed(f: Face) -> ttf_parser::Face<'static> {
+    ttf_parser::Face::parse(f.bytes(), 0).expect("the bundled font reads")
+}
+
 fn face() -> ttf_parser::Face<'static> {
-    ttf_parser::Face::parse(INTER, 0).expect("the bundled font reads")
+    parsed(Face::Regular)
 }
 
 struct Metrics {
@@ -31,24 +65,30 @@ fn metrics() -> &'static Metrics {
     })
 }
 
-/// A character's advance in font units, read once a process.
-fn advance(c: char) -> u16 {
-    static A: OnceLock<std::sync::Mutex<HashMap<char, u16>>> = OnceLock::new();
+/// A character's advance in font units in face `f`, read once a process.
+fn advance_in(f: Face, c: char) -> u16 {
+    static A: OnceLock<std::sync::Mutex<HashMap<(Face, char), u16>>> = OnceLock::new();
     let table = A.get_or_init(Default::default);
     let mut t = table.lock().unwrap_or_else(|e| e.into_inner());
-    *t.entry(c).or_insert_with(|| {
-        let f = face();
-        f.glyph_index(c)
-            .and_then(|g| f.glyph_hor_advance(g))
+    *t.entry((f, c)).or_insert_with(|| {
+        let face = parsed(f);
+        face.glyph_index(c)
+            .and_then(|g| face.glyph_hor_advance(g))
             .unwrap_or(0)
     })
+}
+
+/// How wide `text` is at `size` in face `f`, by its advance widths (both
+/// faces have 2048 units to the em).
+pub fn width_in(f: Face, text: &str, size: f64) -> f64 {
+    let units: u32 = text.chars().map(|c| u32::from(advance_in(f, c))).sum();
+    f64::from(units) * size / metrics().units
 }
 
 /// How wide `text` is at `size` (its em), by Inter's advance widths: no
 /// kerning, a character Inter lacks counting 0.
 pub fn width(text: &str, size: f64) -> f64 {
-    let units: u32 = text.chars().map(|c| u32::from(advance(c))).sum();
-    f64::from(units) * size / metrics().units
+    width_in(Face::Regular, text, size)
 }
 
 /// How far Inter reaches above its baseline and below it (negative) at
@@ -61,6 +101,7 @@ pub fn extent(size: f64) -> (f64, f64) {
 /// The glyphs a PDF holds: each character's glyph, renumbered in the
 /// order of the characters.
 pub struct Subset {
+    pub face: Face,
     pub(crate) units: f64,
     pub(crate) gids: BTreeMap<char, u16>,
     pub(crate) remap: subsetter::GlyphRemapper,
@@ -68,7 +109,12 @@ pub struct Subset {
 
 impl Subset {
     pub fn new(chars: &BTreeSet<char>) -> Subset {
-        let face = face();
+        Subset::new_in(Face::Regular, chars)
+    }
+
+    /// The glyphs of `chars` in face `f`.
+    pub fn new_in(f: Face, chars: &BTreeSet<char>) -> Subset {
+        let face = parsed(f);
         let mut remap = subsetter::GlyphRemapper::new();
         let mut gids = BTreeMap::new();
         for c in chars {
@@ -76,6 +122,7 @@ impl Subset {
             gids.insert(*c, remap.remap(g));
         }
         Subset {
+            face: f,
             units: f64::from(face.units_per_em()),
             gids,
             remap,
@@ -127,5 +174,16 @@ mod tests {
         assert_eq!(s.tag().len(), 6);
         assert_eq!(s.tag(), Subset::new(&"AB".chars().collect()).tag());
         assert_ne!(s.tag(), Subset::new(&"AC".chars().collect()).tag());
+    }
+
+    #[test]
+    fn semibold_is_wider_and_subsets_alike() {
+        assert!(width_in(Face::SemiBold, "MM", 10.0) > width("MM", 10.0));
+        assert_eq!(width_in(Face::Regular, "MM", 10.0), width("MM", 10.0));
+        let chars = "R1".chars().collect();
+        let s = Subset::new_in(Face::SemiBold, &chars);
+        assert_eq!(s.face, Face::SemiBold);
+        assert_eq!(s.encode("1R").len(), 4);
+        assert_eq!(Subset::new(&chars).face, Face::Regular);
     }
 }
