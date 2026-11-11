@@ -109,41 +109,6 @@ pub fn deviation(b: &Body, m: &BodyMesh, n: u32, every: usize) -> f64 {
     worst
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ryukei::check::check;
-
-    #[test]
-    fn a_bump_block_is_valid() {
-        let at = Rigid::translation(Vector3::new(1.0, 2.0, 3.0));
-        let b = bump_block(OpKey(1), [1.0, 2.0, 0.5], 0.3, &at).unwrap();
-        assert_eq!(check(&b), []);
-        let nurbs = b
-            .faces()
-            .filter(|&f| {
-                matches!(
-                    b.surface(b.face(f).unwrap().surface),
-                    Some(Surface::Nurbs(_))
-                )
-            })
-            .count();
-        assert_eq!(nurbs, 1);
-    }
-
-    #[test]
-    fn distances_to_a_triangle() {
-        let t = [
-            Point3::ORIGIN,
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
-        ];
-        assert_eq!(point_triangle(Point3::new(0.2, 0.2, 3.0), t), 3.0);
-        assert_eq!(point_triangle(Point3::new(-1.0, 0.0, 0.0), t), 1.0);
-        assert!((point_triangle(Point3::new(1.0, 1.0, 0.0), t) - 0.5f64.sqrt()).abs() < 1e-15);
-    }
-}
-
 /// The twin of a Coilcraft SQ coil's wire end (#598): one plane face
 /// whose loop runs down a half circle of radius `r` about the origin in
 /// z = 0, from (0, r) through (r, 0) to (0, -r), and back up an ellipse
@@ -216,5 +181,40 @@ pub fn crossing_sliver(r: f64, a: f64) -> ryukei::heal::Shape {
         }],
         solids: Vec::new(),
         sheets: vec![0],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryukei::check::check;
+
+    #[test]
+    fn a_bump_block_is_valid() {
+        let at = Rigid::translation(Vector3::new(1.0, 2.0, 3.0));
+        let b = bump_block(OpKey(1), [1.0, 2.0, 0.5], 0.3, &at).unwrap();
+        assert_eq!(check(&b), []);
+        let nurbs = b
+            .faces()
+            .filter(|&f| {
+                matches!(
+                    b.surface(b.face(f).unwrap().surface),
+                    Some(Surface::Nurbs(_))
+                )
+            })
+            .count();
+        assert_eq!(nurbs, 1);
+    }
+
+    #[test]
+    fn distances_to_a_triangle() {
+        let t = [
+            Point3::ORIGIN,
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+        assert_eq!(point_triangle(Point3::new(0.2, 0.2, 3.0), t), 3.0);
+        assert_eq!(point_triangle(Point3::new(-1.0, 0.0, 0.0), t), 1.0);
+        assert!((point_triangle(Point3::new(1.0, 1.0, 0.0), t) - 0.5f64.sqrt()).abs() < 1e-15);
     }
 }
