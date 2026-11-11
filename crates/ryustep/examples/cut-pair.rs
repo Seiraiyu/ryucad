@@ -24,7 +24,8 @@ fn main() {
         key: OpKey(7),
         heal: Default::default(),
     };
-    let model = ryustep::read(&std::fs::read(path).expect("the file reads"), &opts).expect("a model");
+    let model =
+        ryustep::read(&std::fs::read(path).expect("the file reads"), &opts).expect("a model");
     let body = model
         .bodies
         .into_iter()
@@ -45,7 +46,10 @@ fn main() {
             for fin in body.loop_fins(l) {
                 let e = body.fin(fin).expect("live").edge;
                 for g in body.edge_fins(e) {
-                    let face = body.loop_(body.fin(g).expect("live").loop_).expect("live").face;
+                    let face = body
+                        .loop_(body.fin(g).expect("live").loop_)
+                        .expect("live")
+                        .face;
                     if !faces.contains(&face) {
                         faces.push(face);
                     }
@@ -53,7 +57,10 @@ fn main() {
             }
         }
     }
-    let names: Vec<Name> = faces.iter().map(|&f| body.face(f).expect("live").name).collect();
+    let names: Vec<Name> = faces
+        .iter()
+        .map(|&f| body.face(f).expect("live").name)
+        .collect();
     let (sheet, _) = ryukei::sheet::extract(OpKey(7), &body, &names).expect("a sheet");
     std::fs::write(out, ryukei::codec::encode_body(&sheet)).expect("written");
     println!("{out}: {} faces", sheet.faces().count());
