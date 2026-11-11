@@ -559,12 +559,15 @@ fn apart_beside_by(
     // not only the shared ones: a lead's end circle cut where its bend's
     // circle crosses the axis gives its lune two pieces and its lens the
     // third (#316). Each gets the shared edges' strip, by the same rule.
-    let curve = &body.curves[body.edges[shared[0]].curve];
+    let curves: Vec<&crate::geom::Curve> = shared
+        .iter()
+        .map(|&e| &body.curves[body.edges[e].curve])
+        .collect();
     let mut rails: Vec<EdgeId> = [a, b]
         .into_iter()
         .flat_map(|f| body.face_loops(f).flat_map(|l| body.loop_fins(l)))
         .map(|fin| body.fins[fin].edge)
-        .filter(|&e| &body.curves[body.edges[e].curve] == curve)
+        .filter(|&e| curves.contains(&&body.curves[body.edges[e].curve]))
         .collect();
     rails.sort();
     rails.dedup();
@@ -652,11 +655,49 @@ fn section_plane(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> Option
         .iter()
         .any(|x| &body.curves[body.edges[*x].curve] != curve)
     {
-        return None;
+        return lines_plane(body, shared);
     }
     let x = &body.edges[*e];
     let surface = |f: FaceId| &body.surfaces[body.faces[f].surface];
     crate::intersect::section_plane(curve, x.interval, x.tolerance.get(), surface(a), surface(b))
+}
+
+/// The plane of several shared straight edges on different lines (a
+/// cone's two halves split along two generators in one plane: NIST CTC
+/// 02's AP242 edition, #264): through the first and the end of the others
+/// farthest from its line, when every edge's ends lie within its
+/// tolerance of it (so the edge does). `None` otherwise. It only
+/// separates faces, each certified on its side by `face_beside`.
+fn lines_plane(body: &Body, shared: &[EdgeId]) -> Option<Surface> {
+    use crate::geom::{Curve, Frame, Plane, Point3};
+    if shared
+        .iter()
+        .any(|&e| !matches!(body.curves[body.edges[e].curve], Curve::Line(_)))
+    {
+        return None;
+    }
+    let ends = |e: EdgeId| {
+        let x = &body.edges[e];
+        let c = &body.curves[x.curve];
+        [c.point(x.interval[0]), c.point(x.interval[1])]
+    };
+    let [p0, p1] = ends(shared[0]);
+    let d = p1 - p0;
+    let off_line = |p: &Point3| (*p - p0).cross(d).length();
+    let far = shared[1..]
+        .iter()
+        .flat_map(|&e| ends(e))
+        .max_by(|p, q| off_line(p).total_cmp(&off_line(q)))?;
+    let frame = Frame::new(p0, d.cross(far - p0), d).ok()?;
+    let off = |p: Point3| (p - p0).dot(frame.z().get()).abs();
+    shared
+        .iter()
+        .all(|&e| {
+            ends(e)
+                .iter()
+                .all(|&p| off(p) <= body.edges[e].tolerance.get())
+        })
+        .then_some(Surface::Plane(Plane::new(frame)))
 }
 
 /// The largest tolerance on a face's boundary.
@@ -1002,5 +1043,45 @@ mod tests {
             BESIDE_CELLS,
             &m
         ));
+    }
+
+    /// Several shared straight edges in one plane give its section plane
+    /// (a cone's halves split along two generators, NIST CTC 02's AP242
+    /// edition, #264); skew ones give none.
+    #[test]
+    fn coplanar_shared_lines_give_their_plane() {
+        let body = unit_cube();
+        // The edge between the cube's corners `p` and `q`.
+        let edge = |p: [f64; 3], q: [f64; 3]| {
+            let at = |v: VertexId, c: [f64; 3]| {
+                body.vertices[v]
+                    .point
+                    .distance(Point3::new(c[0], c[1], c[2]))
+                    < 1e-12
+            };
+            body.edges()
+                .find(|&e| {
+                    let x = &body.edges[e];
+                    (at(x.start, p) && at(x.end, q)) || (at(x.start, q) && at(x.end, p))
+                })
+                .unwrap()
+        };
+        // The bottom's edges y = 0 and y = 1 lie in z = 0.
+        let bottom = [
+            edge([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            edge([1.0, 1.0, 0.0], [0.0, 1.0, 0.0]),
+        ];
+        let plane = lines_plane(&body, &bottom).expect("a plane");
+        let Surface::Plane(_) = &plane else {
+            panic!("{plane:?}")
+        };
+        let f = plane.frame().unwrap();
+        assert!(f.z().get().z.abs() > 1.0 - 1e-12);
+        // The bottom's y = 0 edge and the top's x = 1 edge are skew.
+        let skew = [
+            edge([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            edge([1.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
+        ];
+        assert!(lines_plane(&body, &skew).is_none());
     }
 }
