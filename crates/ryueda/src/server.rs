@@ -477,6 +477,42 @@ fn dispatch(
             rail,
             expected_revision,
         } => topcmd::rail_delete(session, &rail, expected_revision.as_deref()),
+        Request::Annotate {
+            design,
+            order,
+            reset,
+            dry_run,
+            expected_revision,
+        } => crate::annotate::annotate(
+            session,
+            design.as_deref(),
+            order.unwrap_or_default(),
+            reset.unwrap_or_default(),
+            dry_run,
+            expected_revision.as_deref(),
+        ),
+        Request::AnnotateLock {
+            design,
+            refs,
+            expected_revision,
+        } => crate::annotate::lock(
+            session,
+            design.as_deref(),
+            &refs,
+            true,
+            expected_revision.as_deref(),
+        ),
+        Request::AnnotateUnlock {
+            design,
+            refs,
+            expected_revision,
+        } => crate::annotate::lock(
+            session,
+            design.as_deref(),
+            &refs,
+            false,
+            expected_revision.as_deref(),
+        ),
         Request::Tag {
             target,
             block,
