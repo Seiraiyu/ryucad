@@ -253,6 +253,21 @@ impl Names<'_> {
         Err(not_found("net", text, self.b))
     }
 
+    /// The bus `text` names (plan 2.C): `bus:<name or id>`, or a bus's
+    /// name: its key `bus:<id>`.
+    pub fn bus(&self, text: &str) -> Result<String> {
+        let want = text.strip_prefix("bus:").unwrap_or(text);
+        let buses = &self.built.input.buses;
+        if let Some(b) = buses.iter().find(|b| b.key == format!("bus:{want}")) {
+            return Ok(b.key.clone());
+        }
+        let named: Vec<&ryusch::input::Bus> = buses.iter().filter(|b| b.name == want).collect();
+        if let [one] = named.as_slice() {
+            return Ok(one.key.clone());
+        }
+        Err(not_found("bus", text, self.b))
+    }
+
     /// How a part key reads: a designator, a unit, an instance or a port.
     pub fn part_text(&self, key: &str) -> String {
         if key.starts_with("instance:") {
@@ -289,6 +304,23 @@ impl Names<'_> {
     pub fn net_text(&self, key: &str) -> String {
         if let Some(port) = key.strip_prefix("port:") {
             return self.part_text(&format!("port:{port}"));
+        }
+        // A bus by its name, `bus:` before it where a net has that name or
+        // the name doesn't read back as the bus (plan 2.C).
+        if key.starts_with("bus:") {
+            let input = &self.built.input;
+            return match input.buses.iter().find(|b| b.key == key) {
+                Some(b) => {
+                    let clash = input.nets.iter().any(|n| n.name == b.name)
+                        || self.bus(&b.name).ok().as_deref() != Some(key);
+                    if clash {
+                        format!("bus:{}", b.name)
+                    } else {
+                        b.name.clone()
+                    }
+                }
+                None => key.to_owned(),
+            };
         }
         match self.built.input.nets.iter().find(|n| n.key == key) {
             Some(n) if key.starts_with("rail:") => format!("rail:{}", n.name),
@@ -532,7 +564,7 @@ pub const FORMS: &[&str] = &[
     "edge X... left|right|top|bottom",
     "orient X... 0|90|180|270 [mirror]",
     "text X... refdes|value|both left|right|above|below",
-    "net N wire|label|port",
+    "net N wire|label|port|bus (a bus by its name or bus:NAME)",
     "note REGION|SHEET TEXT (one line, up to 120 characters; {property} filled)",
     "idiom X... KIND|none",
     "flow X... reversed",
@@ -778,15 +810,30 @@ impl Names<'_> {
                 if rest.len() != 2 {
                     return Err(usage(text, form));
                 }
-                Instruction::Net {
-                    net: self.net(&rest[0])?,
-                    style: match rest[1].as_str() {
-                        "wire" => NetStyle::Wire,
-                        "label" => NetStyle::Label,
-                        "port" => NetStyle::Port,
-                        _ => return Err(usage(text, form)),
-                    },
+                let style = match rest[1].as_str() {
+                    "wire" => NetStyle::Wire,
+                    "label" => NetStyle::Label,
+                    "port" => NetStyle::Port,
+                    "bus" => NetStyle::Bus,
+                    _ => return Err(usage(text, form)),
+                };
+                // A net first; a bus by `bus:NAME`, or by its name where no
+                // net has it (plan 2.C).
+                let net = if rest[0].starts_with("bus:") {
+                    self.bus(&rest[0])?
+                } else {
+                    match self.net(&rest[0]) {
+                        Ok(n) => n,
+                        Err(e) => self.bus(&rest[0]).map_err(|_| e)?,
+                    }
+                };
+                if style == NetStyle::Bus && !net.starts_with("bus:") {
+                    return Err(usage(
+                        text,
+                        "net BUS bus: only a bus is drawn as one (bus:NAME)",
+                    ));
                 }
+                Instruction::Net { net, style }
             }
             "idiom" => {
                 let (x, t) = last(1)?;
@@ -925,5 +972,55 @@ mod tests {
             names.read(&format!("note {sid}")).unwrap_err().code,
             Code::InvalidParam
         );
+    }
+
+    #[test]
+    fn a_bus_is_named_by_its_name_or_bus_name() {
+        use serde_json::json;
+        let (_dir, p) = crate::netlist::tests::project(&[
+            (
+                "blocks/top/block.json",
+                json!({"format": 1, "kind": crate::conn::BLOCK_KIND, "name": "Top",
+                    "buses": {"b1": {"name": "D", "nets": ["sda", "scl"]},
+                              "b2": {"name": "SDA", "nets": ["sda"]}}}),
+            ),
+            (
+                "blocks/top/nets/scl.json",
+                json!({"format": 1, "kind": crate::conn::NET_KIND, "name": "SCL"}),
+            ),
+        ]);
+        let b = p
+            .conn
+            .block(&crate::id::Id::parse("top", "b").unwrap())
+            .unwrap();
+        let built = crate::schem::build(&p, b).unwrap();
+        let names = Names {
+            p: &p,
+            b,
+            built: &built,
+        };
+        let read = |t: &str| match names.read(t) {
+            Ok(Said::Do(i)) => i,
+            other => panic!("{t}: {other:?}"),
+        };
+        let bus = |key: &str, style| Instruction::Net {
+            net: key.into(),
+            style,
+        };
+        assert_eq!(read("net D bus"), bus("bus:b1", NetStyle::Bus));
+        assert_eq!(read("net bus:D label"), bus("bus:b1", NetStyle::Label));
+        // A net and a bus of one name: the net, and the bus as bus:NAME.
+        assert_eq!(read("net SDA label"), bus("sda", NetStyle::Label));
+        assert_eq!(read("net bus:SDA bus"), bus("bus:b2", NetStyle::Bus));
+        let e = names.read("net SDA bus").unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        assert!(
+            e.message.contains("only a bus is drawn as one"),
+            "{}",
+            e.message
+        );
+        // Written back as read.
+        assert_eq!(names.text(&bus("bus:b1", NetStyle::Bus)), "net D bus");
+        assert_eq!(names.text(&bus("bus:b2", NetStyle::Bus)), "net bus:SDA bus");
     }
 }
