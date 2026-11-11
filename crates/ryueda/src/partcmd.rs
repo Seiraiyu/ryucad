@@ -232,6 +232,7 @@ pub fn component_add(
         value: None,
         parameters: BTreeMap::new(),
         pins: BTreeMap::new(),
+        tags: Default::default(),
     };
     fill(
         p,
@@ -366,6 +367,7 @@ pub fn wire(session: &mut Session, pin: &str, how: Wire, expected: Option<&str>)
                 current: None,
                 impedance: None,
                 pair: None,
+                tags: Default::default(),
             };
             w.put(part_path(&bid, Part::Net, &nid), &n, conn::NET_KIND);
             Some(Node::Net(nid))
@@ -458,6 +460,7 @@ pub fn net_add(
         current: None,
         impedance: None,
         pair: None,
+        tags: Default::default(),
     };
     crate::topcmd::fill_intent(
         p,
@@ -986,4 +989,116 @@ pub fn instance_delete(
 pub fn instance_show(p: &Project, target: &str) -> Result<Value> {
     let (b, id) = write::in_block(p, target, "instance")?;
     instance_json(b, &id)
+}
+
+/// `tag`: adds and removes tags on a component or net (by the agent's
+/// vocabulary, in `block`) or a rail (`rail:<name>`, a name or an ID,
+/// no block), one logged change guarded by the block's revision (a
+/// rail's: the project's).
+pub fn tag(
+    session: &mut Session,
+    target: &str,
+    block: Option<&str>,
+    add: &[String],
+    remove: &[String],
+    expected: Option<&str>,
+) -> Result<Value> {
+    for t in add {
+        if !conn::tag_ok(t) {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("{t:?} isn't a tag: 1 to 32 of a-z, 0-9, _ and -"),
+            )
+            .with("param", "add"));
+        }
+    }
+    let edit = |tags: &mut std::collections::BTreeSet<String>| {
+        tags.extend(add.iter().cloned());
+        for t in remove {
+            tags.remove(t);
+        }
+    };
+    let p = session.project();
+    let rail = match (target.strip_prefix("rail:"), block) {
+        (Some(r), _) => Some(r),
+        (None, None) if p.conn.rail(target).is_some() => Some(target),
+        (None, None) => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "a component or net is tagged with --block <block>",
+            )
+            .with("param", "block"));
+        }
+        (None, Some(_)) => None,
+    };
+    if let Some(r) = rail {
+        check_revision("the project", &p.revision, expected)?;
+        let (id, mut rail) = crate::topcmd::rail_named(p, r)?;
+        edit(&mut rail.tags);
+        let mut w = Writes::default();
+        w.put(crate::topcmd::rail_path(&id), &rail, conn::RAIL_KIND);
+        commit(session, &format!("rail {id}"), w)?;
+        return Ok(json!({"rail": id, "tags": rail.tags, "revision": session.project().revision}));
+    }
+    let b = write::block(p, block.expect("a block unless a rail"))?;
+    check_revision(&format!("block {}", b.id), &b.revision, expected)?;
+    let built = crate::schem::build(p, b)?;
+    let names = crate::vocab::Names {
+        p,
+        b,
+        built: &built,
+    };
+    let bid = b.id.clone();
+    let mut w = Writes::default();
+    // A component (any unit of it); an instance, a port or a region takes
+    // no tags.
+    let part = names.part(target).ok().filter(|k| {
+        !(k.starts_with("instance:") || k.starts_with("port:") || k.starts_with("region:"))
+    });
+    let (what, tags) = if let Some(key) = part {
+        let cid = key.split(':').next().unwrap_or(&key);
+        let id = Id::parse(cid, "component")?;
+        let mut c = b
+            .components
+            .get(&id)
+            .and_then(|c| c.item.clone().ok())
+            .ok_or_else(|| {
+                Error::new(Code::NotFound, format!("block {bid} has no component {id}"))
+                    .with("reference", target)
+            })?;
+        edit(&mut c.tags);
+        w.put(
+            part_path(&bid, Part::Component, &id),
+            &c,
+            conn::COMPONENT_KIND,
+        );
+        (format!("component {bid}/{id}"), c.tags)
+    } else {
+        let key = names.net(target)?;
+        if key.contains(':') {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("{target} is a port or a rail: tag a rail as rail:<name>, without --block"),
+            )
+            .with("reference", target));
+        }
+        let id = Id::parse(&key, "net")?;
+        let mut n = b
+            .nets
+            .get(&id)
+            .and_then(|n| n.item.clone().ok())
+            .ok_or_else(|| {
+                Error::new(Code::NotFound, format!("block {bid} has no net {id}"))
+                    .with("reference", target)
+            })?;
+        edit(&mut n.tags);
+        w.put(part_path(&bid, Part::Net, &id), &n, conn::NET_KIND);
+        (format!("net {bid}/{id}"), n.tags)
+    };
+    commit(session, &what, w)?;
+    Ok(json!({
+        "target": what,
+        "tags": tags,
+        "revision": session.project().conn.block(&bid)?.revision,
+    }))
 }

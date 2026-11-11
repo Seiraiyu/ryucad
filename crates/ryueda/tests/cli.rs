@@ -440,6 +440,7 @@ fn every_protocol_method_has_a_command() {
         ("import.kicad", &["import", "kicad"]),
         ("rail.add", &["rail", "add"]),
         ("rail.edit", &["rail", "edit"]),
+        ("tag", &["tag"]),
         ("rail.delete", &["rail", "delete"]),
         ("rail.list", &["rail", "list"]),
         ("class.add", &["class", "add"]),
@@ -479,6 +480,12 @@ fn every_protocol_method_has_a_command() {
         ("lint.get", &["lint"]),
         ("lint.configure", &["lint", "configure"]),
         ("lib.check", &["lib", "check"]),
+        ("style.get", &["style"]),
+        ("style.explain", &["style", "explain"]),
+        ("style.set", &["style", "set"]),
+        ("style.unset", &["style", "unset"]),
+        ("style.rule", &["style", "rule", "add"]),
+        ("style.palette", &["style", "palette", "set"]),
         ("standards.get", &["standards"]),
         ("standards.set", &["standards", "set"]),
         ("check", &["check"]),
@@ -1049,6 +1056,17 @@ impl Pair {
     /// project's 0402 footprint.
     fn with_resistor() -> Pair {
         Pair::with_resistor_in(Pair::new())
+    }
+
+    /// [`Pair::with_resistor`] with a block `top` holding `R1` (`r1`)
+    /// on a net `SDA` (plan 2.E's style scenarios).
+    fn with_placed_resistor() -> Pair {
+        let p = Pair::with_resistor();
+        p.ok(&["block", "create", "Top", "--id", "top"]);
+        p.ok(&["component", "add", "top", "--of", "r_100k", "--id", "r1"]);
+        p.ok(&["connect", "top/r1/1", "SDA", "--new"]);
+        p.ok(&["design", "create", "Board", "--root", "top", "--id", "d"]);
+        p
     }
 
     fn with_resistor_in(p: Pair) -> Pair {
@@ -2764,12 +2782,15 @@ fn each_sheet_is_drawn_and_paged_at_its_own_paper() {
     assert_eq!(d["blocks"][0]["sheets"][0]["paper"]["size"], "a4", "{d}");
     p.ok(&["render", "--block", "sensor", "--out", "s.svg"]);
     let svg = fs::read_to_string(p.daemon.join("board/s.svg")).unwrap();
-    // The A4 sheet's drawing area: 277 by 190 mm.
-    assert!(svg.contains("width=\"277\" height=\"190\""), "{svg}");
+    // The A4 sheet's drawing area: 277 by 170 mm (the title band takes
+    // 20 mm at its foot, plan 2.E).
+    assert!(svg.contains("width=\"277\" height=\"170\""), "{svg}");
     p.ok(&["output", "--out", "s.pdf"]);
     let pdf = fs::read(p.daemon.join("board/s.pdf")).unwrap();
     let text = String::from_utf8_lossy(&pdf);
     assert!(text.contains("/MediaBox [0 0 841.8"), "an A4 page");
+    // Its layers and its SemiBold designators and title (plan 2.E).
+    assert!(text.contains("/OCProperties") && text.contains("+Inter-SemiBold"));
 }
 
 /// Parametric search over the project's libraries (design 347), in
@@ -3393,4 +3414,282 @@ fn text_from_the_cli() {
         1,
     );
     p.fails(&["place", "breakout", "text R1 refdes"], "invalid_param", 1);
+}
+
+/// Tags on a component, a net and a rail: added, removed, refused when
+/// badly formed, each one logged change.
+#[test]
+fn objects_take_tags() {
+    let p = Pair::with_placed_resistor();
+    let block = "top";
+    let t = p.ok(&[
+        "tag", "R1", "--block", block, "--add", "dnp", "--add", "critical",
+    ]);
+    assert_eq!(t["tags"], json!(["critical", "dnp"]), "{t}");
+    let t = p.ok(&["tag", "R1", "--block", block, "--remove", "critical"]);
+    assert_eq!(t["tags"], json!(["dnp"]));
+    assert_eq!(
+        p.ok(&["tag", "SDA", "--block", block, "--add", "hv"])["tags"],
+        json!(["hv"])
+    );
+    p.ok(&["rail", "add", "VBUS", "--voltage", "5 V"]);
+    assert_eq!(
+        p.ok(&["tag", "rail:VBUS", "--add", "hv"])["tags"],
+        json!(["hv"])
+    );
+    p.fails(
+        &["tag", "R1", "--block", block, "--add", "High Voltage"],
+        "invalid_param",
+        1,
+    );
+    p.fails(&["tag", "R1", "--add", "hv"], "invalid_param", 1);
+    // Each one logged change: undo (the daemon's) takes the rail's back.
+    let (code, u) = p.run_in(&p.daemon, "board", &["undo"]);
+    assert_eq!(code, 0, "{u}");
+    let rails: Vec<String> = fs::read_dir(p.daemon.join("board/rails"))
+        .unwrap()
+        .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
+        .collect();
+    assert!(
+        rails
+            .iter()
+            .any(|r| r.contains("VBUS") && !r.contains("tags")),
+        "{rails:?}"
+    );
+}
+
+/// The style revision moves when a style file does, and project edit names
+/// an organisation's style.
+#[test]
+fn the_style_revision_follows_style_files() {
+    let p = Pair::with_resistor();
+    // A library project named for a style must hold one.
+    p.fails(
+        &["project", "edit", "--style-from", "passives"],
+        "style_invalid",
+        1,
+    );
+    p.write(
+        "passives/style.json",
+        "{\"kind\": \"ryueda.style\", \"format\": 1}\n",
+    );
+    let before = p.ok(&["info"])["revision"].clone();
+    let e = p.ok(&["project", "edit", "--style-from", "passives"]);
+    assert_eq!(e["schematic"]["style_from"], "passives", "{e}");
+    p.fails(
+        &["project", "edit", "--style-from", "nowhere"],
+        "invalid_param",
+        1,
+    );
+    assert_ne!(e["revision"], before);
+    let e = p.ok(&["project", "edit", "--style-from", ""]);
+    assert!(e["schematic"].get("style_from").is_none(), "{e}");
+}
+
+/// The style whole, and one object's properties with where each came
+/// from.
+#[test]
+fn a_style_is_read_and_explained() {
+    let p = Pair::with_placed_resistor();
+    let block = "top";
+    let s = p.ok(&["style"]);
+    assert_eq!(s["builtin"]["palette"]["wire"]["light"], "#1f5fbf", "{s}");
+    assert_eq!(s["project"], json!({}));
+    p.ok(&["tag", "R1", "--block", block, "--add", "hv"]);
+    let e = p.ok(&["style", "explain", "R1", "--block", block]);
+    assert_eq!(e["object"]["kind"], "component");
+    let colour = &e["properties"]["colour"];
+    assert_eq!(colour["value"], "hv", "{e}");
+    assert_eq!(colour["light"], "#c0261c");
+    assert_eq!(colour["from"]["layer"], "built_in");
+    assert_eq!(colour["from"]["select"]["tag"], "hv");
+    assert_eq!(e["properties"]["fill"]["from"]["role"], "body");
+    p.fails(
+        &["style", "explain", "nope", "--block", block],
+        "not_found",
+        1,
+    );
+}
+
+/// Style writes: an override by the agent's vocabulary, a rule by a
+/// selector, a palette entry; a text size lays its block out again; a
+/// colour moves no layout; undo takes each back; locks refuse.
+#[test]
+fn the_style_is_written_by_commands() {
+    let p = Pair::with_placed_resistor();
+    let block = "top";
+    p.ok(&["layout"]);
+    let layout = |top: &Path| fs::read_to_string(top.join("board/blocks/top/layout.json")).unwrap();
+    let before = layout(&p.direct);
+    p.ok(&["style", "set", "R1", "colour=hv", "--block", block]);
+    assert_eq!(layout(&p.direct), before, "a colour moves no layout");
+    let s = p.ok(&["style"]);
+    let id = s["project"]["overrides"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    assert!(id.starts_with(&format!("component/{block}/")), "{s}");
+    let svg = || {
+        p.ok(&["render", "--block", block, "--out", "look.svg"]);
+        fs::read_to_string(p.direct.join("board/look.svg")).unwrap()
+    };
+    assert!(!svg().contains("font-size=\"1.778\""));
+    p.ok(&["style", "set", "R1", "text_size=large", "--block", block]);
+    // The engine reads it: R1's text is drawn large, and stays where it
+    // stood while it still fits there.
+    assert!(svg().contains("font-size=\"1.778\""), "a larger text");
+    assert_eq!(layout(&p.direct), before, "text that still fits stays");
+    p.ok(&["style", "set", "tag=dnp", "dash=true"]);
+    assert_eq!(
+        p.ok(&["style"])["project"]["rules"][0]["select"]["tag"],
+        "dnp"
+    );
+    p.ok(&["style", "rule", "add", "kind=net", "line_weight=heavy"]);
+    p.ok(&["style", "rule", "remove", "1"]);
+    p.ok(&["style", "palette", "set", "brand", "#0055aa/#66aaff"]);
+    p.ok(&["style", "set", "R1", "fill=brand", "--block", block]);
+    p.fails(
+        &["style", "set", "R1", "colour=#ff0000", "--block", block],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &["style", "set", "R1", "fill=nowhere", "--block", block],
+        "style_invalid",
+        1,
+    );
+    p.ok(&["style", "unset", "R1", "text_size", "--block", block]);
+    assert!(!svg().contains("font-size=\"1.778\""), "the text goes back");
+    assert_eq!(layout(&p.direct), before);
+    let style = |top: &Path| fs::read_to_string(top.join("board/style.json")).unwrap();
+    assert!(!style(&p.daemon).contains("text_size"));
+    let (code, u) = p.run_in(&p.daemon, "board", &["undo"]);
+    assert_eq!(code, 0, "{u}");
+    assert!(style(&p.daemon).contains("text_size"), "undo puts it back");
+}
+
+#[test]
+fn an_organisations_locks_refuse_a_projects_writes() {
+    let p = Pair::with_placed_resistor();
+    p.write(
+        "passives/style.json",
+        r#"{"kind": "ryueda.style", "format": 1, "locks": ["colour", "palette.wire", "lint.severity.sch_jog"],
+            "lint": {"severity": {"sch_jog": "error"}}}"#,
+    );
+    p.ok(&["project", "edit", "--style-from", "passives"]);
+    let block = "top";
+    let e = p.fails(
+        &["style", "set", "R1", "colour=hv", "--block", block],
+        "style_locked",
+        1,
+    );
+    assert_eq!(e["details"]["lock"], "colour", "{e}");
+    p.fails(
+        &["style", "palette", "set", "wire", "#000000/#ffffff"],
+        "style_locked",
+        1,
+    );
+    p.ok(&["style", "set", "R1", "dash=true", "--block", block]);
+    // The organisation's lint raises sch_jog, and lint configure can't
+    // lower it.
+    let l = p.ok(&["lint"]);
+    assert_eq!(l["prefs"]["severity"]["sch_jog"], "error", "{l}");
+    assert!(l["own"]["severity"].get("sch_jog").is_none());
+    let e = p.fails(
+        &["lint", "configure", "--severity", "sch_jog=warning"],
+        "style_locked",
+        1,
+    );
+    assert_eq!(e["details"]["lock"], "lint.severity.sch_jog");
+    // Its standards judge the project's library once it pins them.
+    p.write(
+        "passives/style.json",
+        r#"{"kind": "ryueda.style", "format": 1, "standards": true}"#,
+    );
+    p.write(
+        "passives/library/standards.json",
+        r#"{"kind": "ryueda.standards", "format": 1, "shapes": "iec"}"#,
+    );
+    let s = p.ok(&["standards"]);
+    assert_eq!(
+        (&s["from"], &s["standards"]["shapes"]),
+        (&json!("passives"), &json!("iec")),
+        "{s}"
+    );
+}
+
+/// A render in either theme, through the project's style.
+#[test]
+fn renders_take_a_theme_and_the_style() {
+    let p = Pair::with_placed_resistor();
+    let block = "top";
+    p.ok(&["layout"]);
+    p.ok(&["tag", "R1", "--block", block, "--add", "hv"]);
+    let svg = |theme: &str| {
+        let out = format!("{theme}.svg");
+        let a = p.ok(&["render", "--block", block, "--theme", theme, "--out", &out]);
+        assert_eq!(a["theme"], theme);
+        fs::read_to_string(p.direct.join("board").join(&out)).unwrap()
+    };
+    let light = svg("light");
+    let dark = svg("dark");
+    assert!(
+        light.contains("fill=\"#ffffff\"") && light.contains("#c0261c"),
+        "paper, and R1 in hv red"
+    );
+    assert!(dark.contains("fill=\"#1d2025\"") && dark.contains("#ff6a5c"));
+    assert!(
+        light.contains("font-weight=\"600\""),
+        "the designator in SemiBold"
+    );
+    p.ok(&[
+        "render", "--block", block, "--theme", "dark", "--format", "png", "--out", "dark.png",
+    ]);
+    assert!(
+        fs::read(p.direct.join("board/dark.png"))
+            .unwrap()
+            .starts_with(b"\x89PNG")
+    );
+    p.fails(
+        &[
+            "render", "--block", block, "--theme", "sepia", "--out", "x.svg",
+        ],
+        "usage",
+        2,
+    );
+}
+
+/// The look's lint: a pale wire and an override of nothing are found by
+/// check (warnings) and style; raised to an error, check fails.
+#[test]
+fn the_look_is_linted() {
+    let p = Pair::with_placed_resistor();
+    p.ok(&["style", "palette", "set", "wire", "#f0f0f0/#202326"]);
+    p.ok(&["style", "set", "R1", "dash=true", "--block", "top"]);
+    p.ok(&["component", "delete", "top/r1"]);
+    let s = p.ok(&["style"]);
+    let codes: Vec<&str> = s["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert!(
+        codes.contains(&"sch_contrast") && codes.contains(&"sch_override_unused"),
+        "{s}"
+    );
+    let c = p.ok(&["check"]);
+    assert!(!c["style"].as_array().unwrap().is_empty(), "{c}");
+    p.ok(&["lint", "configure", "--severity", "sch_contrast=error"]);
+    p.fails(&["check"], "check_failed", 1);
+    assert!(
+        p.ok(&["lint"])["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["code"] == "sch_override_unused")
+    );
 }

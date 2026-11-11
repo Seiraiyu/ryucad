@@ -9,6 +9,7 @@
 pub use ryu_doc::{canonical, error, expr, id, source, units};
 
 pub mod activity;
+pub mod cascade;
 pub mod client;
 pub mod conn;
 pub mod coord;
@@ -42,6 +43,8 @@ pub mod server;
 pub mod session;
 pub mod sourcing;
 pub mod standards;
+pub mod style;
+pub mod stylelint;
 pub mod supply;
 pub mod symbol;
 pub mod symlint;

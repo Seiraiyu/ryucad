@@ -46,6 +46,7 @@ fn symbol(
         refdes: refdes.into(),
         value: value.into(),
         function: String::new(),
+        text: crate::input::PartText::default(),
         graphics,
         pins,
     }
@@ -242,6 +243,34 @@ pub fn ic(
             fill: Fill::Body,
         }],
         pins,
+    )
+}
+
+/// A regulator as plan 2.D's template draws it: VIN and EN on the left,
+/// VOUT on the right on the top row, GND below; nothing connected (#712).
+pub fn regulator(key: &str, refdes: &str, value: &str) -> Part {
+    let g = 2 * GRID;
+    let mk = |n: &str, name: &str, at: Point, side: Side, kind: PinKind| {
+        let mut p = pin(n, name, at, side, g, kind, None);
+        p.show_number = true;
+        p
+    };
+    symbol(
+        key,
+        "U",
+        refdes,
+        value,
+        vec![Graphic::Rect {
+            start: [-2 * g, 3 * g],
+            end: [2 * g, -3 * g],
+            fill: Fill::Body,
+        }],
+        vec![
+            mk("1", "VIN", [-3 * g, 2 * g], Side::Left, PinKind::PowerIn),
+            mk("2", "GND", [0, -4 * g], Side::Down, PinKind::PowerIn),
+            mk("3", "VOUT", [3 * g, 2 * g], Side::Right, PinKind::PowerOut),
+            mk("4", "EN", [-3 * g, g], Side::Left, PinKind::Input),
+        ],
     )
 }
 

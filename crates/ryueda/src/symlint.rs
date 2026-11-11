@@ -428,6 +428,17 @@ fn along(p: &Pin) -> i64 {
 type GroupPin<'a> = (&'a String, &'a Pin, Option<u64>);
 
 fn groups(s: &Symbol, class: Option<Class>, cx: &Context, out: &mut Vec<Raw>) {
+    groups_in(s, class, cx, None, out)
+}
+
+/// [`groups`] on the units `only` names (`None`: every unit).
+fn groups_in(
+    s: &Symbol,
+    class: Option<Class>,
+    cx: &Context,
+    only: Option<&BTreeSet<u32>>,
+    out: &mut Vec<Raw>,
+) {
     let Some(class) = class else { return };
     let st = cx.standards;
     let rule = st.rule(class);
@@ -435,6 +446,9 @@ fn groups(s: &Symbol, class: Option<Class>, cx: &Context, out: &mut Vec<Raw>) {
         return;
     }
     for unit in units(s) {
+        if only.is_some_and(|o| !o.contains(&unit)) {
+            continue;
+        }
         let pins = unit_pins(s, unit);
         // Each group's pins whose role has no side of its own.
         let mut by_group: std::collections::BTreeMap<&str, Vec<GroupPin>> = Default::default();
@@ -605,10 +619,18 @@ fn far_grown(r: Rect, side: ryusch::geom::Side, m: i64) -> Rect {
 }
 
 fn margins(s: &Symbol, cx: &Context, out: &mut Vec<Raw>) {
+    margins_in(s, cx, None, out)
+}
+
+/// [`margins`] on the units `only` names (`None`: every unit).
+fn margins_in(s: &Symbol, cx: &Context, only: Option<&BTreeSet<u32>>, out: &mut Vec<Raw>) {
     let st = cx.standards;
     let m = st.body_margin_nm;
     let p = 2 * st.grid_nm;
     for unit in units(s) {
+        if only.is_some_and(|o| !o.contains(&unit)) {
+            continue;
+        }
         let part = crate::schem::unit_part(s, unit, String::new(), "U");
         if !ryusch::paint::draws_names(&part) {
             continue;
@@ -741,12 +763,16 @@ fn error_keys(s: &Symbol) -> Vec<ErrorKey> {
         .collect()
 }
 
-/// Whether `ops` remove the finding `code` on `pins` from `s` and add no
-/// `library_*` error: a fix is offered only so (round 2's ask).
-/// `before` is `s`'s own errors (`error_keys`), worked out once a symbol.
+/// Whether `ops` remove the finding `code` on `pins` from `s`, add no
+/// `library_*` error (round 2's ask) and add no finding of any rule
+/// (#712's review): a fix is offered only so. `before` is `s`'s own
+/// errors (`error_keys`) and `before_found` its findings, each worked out
+/// once a symbol.
+#[allow(clippy::too_many_arguments)]
 fn fixes_it(
     s: &Symbol,
     before: &[ErrorKey],
+    before_found: &[(&'static str, Vec<String>)],
     class: Option<Class>,
     cx: &Context,
     code: &str,
@@ -763,9 +789,68 @@ fn fixes_it(
     if error_keys(&t).iter().any(|k| !before.contains(k)) {
         return false;
     }
-    !found_by(&t, class, cx, code, pins)
+    if found_by(&t, class, cx, code, pins)
         .iter()
         .any(|r| r.code == code && r.pins == pins)
+    {
+        return false;
+    }
+    // Nothing it adds under any rule its edit can touch (#712's review):
+    // every such finding after it was there before, the rules turned off
+    // aside. The whole lint on every trial took a 1,924-pin Virtex-7 from
+    // 2.8 s to 380 s, so the check is scoped to what `ops` change.
+    touched(&t, class, cx, ops)
+        .iter()
+        .filter(|r| cx.prefs.severity(r.code).0 != Severity::Off)
+        .all(|r| {
+            before_found
+                .iter()
+                .any(|(c, p)| *c == r.code && *p == r.pins)
+        })
+}
+
+/// What every rule an edit `ops` can change finds on `s` (the symbol after
+/// it): the per-pin rules on the pins it names, groups and margins on
+/// those pins' units (every unit when it reshapes a graphic shared by
+/// all), the shape when it touches a graphic.
+fn touched(s: &Symbol, class: Option<Class>, cx: &Context, ops: &[Value]) -> Vec<Raw> {
+    let h = home(s);
+    let pins: Vec<String> = ops
+        .iter()
+        .filter_map(|o| o["pin"].as_str().map(str::to_owned))
+        .collect();
+    let mut units: Option<BTreeSet<u32>> = Some(
+        pins.iter()
+            .filter_map(|n| s.pins.get(n))
+            .map(|p| p.unit.unwrap_or(h))
+            .collect(),
+    );
+    let mut graphic = false;
+    for id in ops.iter().filter_map(|o| o["graphic"].as_str()) {
+        graphic = true;
+        let unit = s
+            .graphics
+            .iter()
+            .find(|(k, _)| k.as_str() == id)
+            .and_then(|(_, g)| g.unit());
+        match (unit, units.as_mut()) {
+            (Some(u), Some(set)) => {
+                set.insert(u);
+            }
+            (None, _) => units = None,
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    off_grid(s, Some(&pins), cx, &mut out);
+    sides(s, Some(&pins), class, cx, &mut out);
+    length(s, Some(&pins), class, cx, &mut out);
+    groups_in(s, class, cx, units.as_ref(), &mut out);
+    margins_in(s, cx, units.as_ref(), &mut out);
+    if graphic {
+        shape(s, class, cx, &mut out);
+    }
+    out
 }
 
 /// `s`'s findings as `cx` judges a symbol of `class` (`None`: only the
@@ -779,6 +864,8 @@ pub fn lint(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Finding> {
     } else {
         Vec::new()
     };
+    let keys: Vec<(&'static str, Vec<String>)> =
+        raw.iter().map(|r| (r.code, r.pins.clone())).collect();
     // Every fix tried on its own copy, in parallel; kept in order.
     let kept: Vec<Vec<bool>> = raw
         .par_iter()
@@ -788,7 +875,7 @@ pub fn lint(s: &Symbol, class: Option<Class>, cx: &Context) -> Vec<Finding> {
             }
             r.fixes
                 .iter()
-                .map(|ops| fixes_it(s, &before, class, cx, r.code, &r.pins, ops))
+                .map(|ops| fixes_it(s, &before, &keys, class, cx, r.code, &r.pins, ops))
                 .collect()
         })
         .collect();
@@ -1554,6 +1641,49 @@ mod tests {
                 let s = template("T", class, pins, &st).unwrap();
                 let found = lint(&s, Some(class), &cx);
                 assert!(found.is_empty(), "{class:?} {shapes:?}: {found:?}");
+            }
+        }
+    }
+
+    /// A fix that would add a finding of another rule isn't offered
+    /// (#712's review): a pin shorter than the standards' with its end on
+    /// the grid; setting its length keeping its base would put its end
+    /// off the grid.
+    #[test]
+    fn a_fix_that_adds_a_finding_is_not_offered() {
+        let st = Standards::default();
+        let prefs = Prefs::default();
+        let cx = Context {
+            standards: &st,
+            prefs: &prefs,
+            from: "built_in",
+        };
+        let mut s = template("U", Class::Ic, &inputs(4), &st).unwrap();
+        s.pins.get_mut("2").unwrap().length_nm -= 540_000;
+        let found = lint(&s, Some(Class::Ic), &cx);
+        let length = found
+            .iter()
+            .find(|f| f.code == "sym_pin_length")
+            .expect("pin 2 is short");
+        assert!(
+            !found.iter().any(|f| f.code == "sym_pin_off_grid"),
+            "its end is on the grid"
+        );
+        assert_eq!(length.fixes, Vec::<Vec<Value>>::new(), "{:?}", length.fixes);
+        // Every fix still offered anywhere adds nothing.
+        for f in &found {
+            for ops in &f.fixes {
+                let mut t = s.clone();
+                crate::edit::apply(&mut t, ops, crate::units::Unit::Mm).unwrap();
+                let before = codes(&found);
+                for g in lint(&t, Some(Class::Ic), &cx) {
+                    assert!(
+                        before.contains(&(g.code, g.pins.clone())),
+                        "{} adds {}",
+                        f.code,
+                        g.code
+                    );
+                }
             }
         }
     }

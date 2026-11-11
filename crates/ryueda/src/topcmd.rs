@@ -156,6 +156,7 @@ pub fn rail_add(
         voltage: None,
         current: None,
         impedance: None,
+        tags: Default::default(),
     };
     fill_intent(
         p,
@@ -180,7 +181,7 @@ pub fn rail_edit(
 ) -> Result<Value> {
     let p = session.project();
     check_revision("the project", &p.revision, expected)?;
-    let (id, mut r) = top_get(&p.conn.rails, p.conn.rail(rail), "rail", rail)?;
+    let (id, mut r) = rail_named(p, rail)?;
     if let Some(n) = name {
         r.name = n.to_owned();
     }
@@ -191,10 +192,20 @@ pub fn rail_edit(
         [&mut r.voltage, &mut r.current, &mut r.impedance],
     )?;
     let mut w = Writes::default();
-    w.put(top_path(RAILS, &id), &r, conn::RAIL_KIND);
+    w.put(rail_path(&id), &r, conn::RAIL_KIND);
     commit(session, &format!("rail {id}"), w)?;
     let p = session.project();
     Ok(top_json(p, RAILS, "rail", &p.conn.rails, &id))
+}
+
+/// The rail `text` names (an ID or a name), as read.
+pub fn rail_named(p: &Project, text: &str) -> Result<(Id, Rail)> {
+    top_get(&p.conn.rails, p.conn.rail(text), "rail", text)
+}
+
+/// A rail's file.
+pub fn rail_path(id: &Id) -> String {
+    top_path(RAILS, id)
 }
 
 /// `rail.delete`: refused while a pin or an instance's port names it.
@@ -686,6 +697,7 @@ pub fn block_edit(
 
 /// `project.edit`: the manifest's properties and schematic settings, one
 /// logged change guarded by the project's revision.
+#[allow(clippy::too_many_arguments)]
 pub fn project_edit(
     session: &mut Session,
     properties: &serde_json::Map<String, Value>,
@@ -693,11 +705,26 @@ pub fn project_edit(
     orientation: Option<crate::project::Orientation>,
     fit: Option<bool>,
     sizes: Option<Vec<crate::project::PaperSize>>,
+    style_from: Option<&str>,
     expected: Option<&str>,
 ) -> Result<Value> {
     let p = session.project();
     check_revision("the project", &p.revision, expected)?;
     let mut m = p.manifest.clone();
+    match style_from {
+        None => {}
+        Some("") => m.schematic.style_from = None,
+        Some(a) => {
+            if !m.libraries.keys().any(|k| k.as_str() == a) {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("{a} isn't one of this project's library aliases"),
+                )
+                .with("param", "style_from"));
+            }
+            m.schematic.style_from = Some(Id::parse(a, "alias")?);
+        }
+    }
     crate::props::apply(&mut m.properties, properties)?;
     if let Some(s) = size {
         m.schematic.sheet.size = s;

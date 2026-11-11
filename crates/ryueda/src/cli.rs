@@ -153,6 +153,25 @@ enum Command {
     /// and group name patterns, and each class's side rules; `standards
     /// set` changes this project's own.
     #[command(args_conflicts_with_subcommands = true)]
+    /// Add or remove tags (critical, hv, dnp, or your own) on a component
+    /// or net (by designator or name, with --block) or a rail (rail:NAME).
+    Tag {
+        target: String,
+        #[arg(long)]
+        block: Option<String>,
+        #[arg(long = "add", value_name = "TAG")]
+        add: Vec<String>,
+        #[arg(long = "remove", value_name = "TAG")]
+        remove: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// The style (the project's, the organisation's, the built-in one),
+    /// or a subcommand.
+    Style {
+        #[command(subcommand)]
+        cmd: Option<StyleCmd>,
+    },
     Standards {
         /// A library project's alias, to read the standards that judge it.
         #[arg(long)]
@@ -277,6 +296,9 @@ enum Command {
         /// Crop to what is drawn, rather than the whole paper.
         #[arg(long)]
         fit: bool,
+        /// light (the default) or dark.
+        #[arg(long, value_parser = ["light", "dark"])]
+        theme: Option<String>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
     },
@@ -1101,6 +1123,82 @@ enum ErcCmd {
 }
 
 #[derive(Subcommand)]
+enum StyleCmd {
+    /// An object's properties (by designator, net name, rail:NAME,
+    /// port:NAME or a region's title) and where each came from.
+    Explain {
+        target: String,
+        #[arg(long)]
+        block: String,
+        #[arg(long)]
+        sheet: Option<String>,
+    },
+    /// Set properties (NAME=VALUE: colour=hv, fill=#ffffff/#202020,
+    /// line_weight=heavy, text_size=large, emphasis=true, dash=true,
+    /// visible.pin_numbers=false) on an object (by the agent's name, with
+    /// --block; rail:NAME without) or on the rule of a selector
+    /// (tag=hv,kind=net).
+    Set {
+        target: String,
+        #[arg(value_parser = pair, required = true, value_name = "NAME=VALUE")]
+        set: Vec<(String, String)>,
+        #[arg(long)]
+        block: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Take properties off an object's override or a selector's rule.
+    Unset {
+        target: String,
+        #[arg(required = true)]
+        names: Vec<String>,
+        #[arg(long)]
+        block: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Add a rule (a selector and NAME=VALUE...) or remove one by index.
+    Rule {
+        #[command(subcommand)]
+        cmd: StyleRuleCmd,
+    },
+    /// Set a palette colour: NAME #light/#dark, or NAME default.
+    Palette {
+        #[command(subcommand)]
+        cmd: StylePaletteCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum StyleRuleCmd {
+    /// A rule at the end: a selector (tag=hv,kind=net) and NAME=VALUE...
+    Add {
+        select: String,
+        #[arg(value_parser = pair, required = true, value_name = "NAME=VALUE")]
+        set: Vec<(String, String)>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// The rule at INDEX (from 0) removed.
+    Remove {
+        index: usize,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum StylePaletteCmd {
+    /// A palette colour: NAME #light/#dark, or NAME default.
+    Set {
+        name: String,
+        value: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
 enum StandardsCmd {
     /// Change this project's own standards by a JSON merge patch:
     /// '{"shapes": "iec"}', '{"classes": {"ic": {"max_pins_per_unit": 100}}}';
@@ -1175,6 +1273,10 @@ enum ProjectCmd {
         /// --sheet-size (a4,a3 by default).
         #[arg(long, value_name = "SIZES")]
         sizes: Option<String>,
+        /// The library project (an alias) whose style.json is the
+        /// organisation's style; "" for none.
+        #[arg(long)]
+        style_from: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1382,8 +1484,10 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             orientation,
             fit,
             sizes,
+            style_from,
             expect,
         }) => Request::ProjectEdit {
+            style_from: style_from.clone(),
             fit: *fit,
             sizes: sizes
                 .as_deref()
@@ -1886,6 +1990,81 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 dry_run: *dry_run,
             }
         }
+        Command::Style { cmd: None } => Request::StyleGet {},
+        Command::Style {
+            cmd:
+                Some(StyleCmd::Set {
+                    target,
+                    set,
+                    block,
+                    expect,
+                }),
+        } => Request::StyleSet {
+            target: target.clone(),
+            block: block.clone(),
+            set: set.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Style {
+            cmd:
+                Some(StyleCmd::Unset {
+                    target,
+                    names,
+                    block,
+                    expect,
+                }),
+        } => Request::StyleUnset {
+            target: target.clone(),
+            block: block.clone(),
+            names: names.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Style {
+            cmd:
+                Some(StyleCmd::Rule {
+                    cmd: StyleRuleCmd::Add { select, set, expect },
+                }),
+        } => Request::StyleRule {
+            op: "add".into(),
+            select: Some(select.clone()),
+            set: set.clone(),
+            index: None,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Style {
+            cmd:
+                Some(StyleCmd::Rule {
+                    cmd: StyleRuleCmd::Remove { index, expect },
+                }),
+        } => Request::StyleRule {
+            op: "remove".into(),
+            select: None,
+            set: Vec::new(),
+            index: Some(*index),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Style {
+            cmd:
+                Some(StyleCmd::Palette {
+                    cmd: StylePaletteCmd::Set { name, value, expect },
+                }),
+        } => Request::StylePalette {
+            name: name.clone(),
+            value: value.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Style {
+            cmd:
+                Some(StyleCmd::Explain {
+                    target,
+                    block,
+                    sheet,
+                }),
+        } => Request::StyleExplain {
+            target: target.clone(),
+            block: block.clone(),
+            sheet: sheet.clone(),
+        },
         Command::Standards {
             library,
             action: None,
@@ -2014,6 +2193,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             format,
             scale,
             fit,
+            theme,
             out,
         } => {
             let format = picture_format(format.as_deref(), out)?;
@@ -2025,6 +2205,10 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 format: Some(format),
                 scale: *scale,
                 fit: *fit,
+                theme: theme
+                    .as_deref()
+                    .map(|t| named("theme", t, "light, dark"))
+                    .transpose()?,
             }
         }
         Command::Output {
@@ -2072,6 +2256,19 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             expected_revision: expect.expect.clone(),
         },
         Command::Rail(RailCmd::List) => Request::RailList {},
+        Command::Tag {
+            target,
+            block,
+            add,
+            remove,
+            expect,
+        } => Request::Tag {
+            target: target.clone(),
+            block: block.clone(),
+            add: add.clone(),
+            remove: remove.clone(),
+            expected_revision: expect.expect.clone(),
+        },
         Command::Class(ClassCmd::Add {
             name,
             id,

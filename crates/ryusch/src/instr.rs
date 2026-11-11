@@ -1123,33 +1123,30 @@ pub fn text_sides(
         .get(&part.key)
         .map(|x| Shape::of(part, Place::new(x.at, x.rotation, x.mirror)).body);
     let texts = layout.text.get(&part.key);
-    [
-        ("refdes", part.refdes.as_str()),
-        ("value", part.value.as_str()),
-    ]
-    .into_iter()
-    .filter(|(n, t)| field.covers(n) && !t.is_empty())
-    .map(|(n, t)| {
-        let side = match (body, texts.and_then(|f| f.get(n))) {
-            (Some(body), Some(at)) => {
-                let b = crate::text::boxes(&[t], *at)[0];
-                if b.max[0] <= body.min[0] {
-                    Some(Side::Left)
-                } else if b.min[0] >= body.max[0] {
-                    Some(Side::Right)
-                } else if b.min[1] >= body.max[1] {
-                    Some(Side::Up)
-                } else if b.max[1] <= body.min[1] {
-                    Some(Side::Down)
-                } else {
-                    None
+    part.fields()
+        .into_iter()
+        .filter(|(n, l)| field.covers(n) && !l.text.is_empty())
+        .map(|(n, l)| {
+            let side = match (body, texts.and_then(|f| f.get(n))) {
+                (Some(body), Some(at)) => {
+                    let b = l.boxed(*at);
+                    if b.max[0] <= body.min[0] {
+                        Some(Side::Left)
+                    } else if b.min[0] >= body.max[0] {
+                        Some(Side::Right)
+                    } else if b.min[1] >= body.max[1] {
+                        Some(Side::Up)
+                    } else if b.max[1] <= body.min[1] {
+                        Some(Side::Down)
+                    } else {
+                        None
+                    }
                 }
-            }
-            _ => None,
-        };
-        (n, side)
-    })
-    .collect()
+                _ => None,
+            };
+            (n, side)
+        })
+        .collect()
 }
 
 #[cfg(test)]
