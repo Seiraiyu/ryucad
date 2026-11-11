@@ -434,6 +434,14 @@ enum LibCmd {
         /// One symbol (<id>, or lib/<alias>/symbol/<id>).
         #[arg(long)]
         symbol: Option<String>,
+        /// Each symbol's counts by code and the library's (by_code), not
+        /// the findings: what to read first over a large library.
+        #[arg(long)]
+        summary: bool,
+        /// Only this code's findings (sym_pin_off_grid, …), and only the
+        /// symbols holding one; repeat for more.
+        #[arg(long = "code", value_name = "CODE")]
+        codes: Vec<String>,
     },
 }
 
@@ -1575,9 +1583,16 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             expected_revision: expect.expect.clone(),
         },
         Command::Lib(LibCmd::List) => Request::LibList {},
-        Command::Lib(LibCmd::Check { library, symbol }) => Request::LibCheck {
+        Command::Lib(LibCmd::Check {
+            library,
+            symbol,
+            summary,
+            codes,
+        }) => Request::LibCheck {
             library: library.clone(),
             symbol: symbol.clone(),
+            summary: *summary,
+            codes: codes.clone(),
         },
         Command::Symbol(SymbolCmd::Create {
             name,
@@ -2608,6 +2623,9 @@ fn picture_format(given: Option<&str>, out: &std::path::Path) -> Result<ryueda::
 /// The result to print; bytes the answer carries go to `--out` (relative
 /// to where the CLI runs as if started), atomically.
 fn deliver(cmd: &Command, here: &std::path::Path, a: Answer) -> Result<Value> {
+    // A report written as text (lib check's, #711) is read back here, in
+    // a process that ends once it prints it.
+    let a = a.into_json()?;
     let Some(bytes) = a.binary else {
         return Ok(a.result);
     };

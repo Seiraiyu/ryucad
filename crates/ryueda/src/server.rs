@@ -207,6 +207,17 @@ pub fn answer(
             expected_revision.as_deref(),
             render,
         ),
+        Request::LibCheck {
+            library,
+            symbol,
+            summary,
+            codes,
+        } => crate::symlint::library_check(
+            session.project(),
+            library.as_deref(),
+            symbol.as_deref(),
+            &crate::symlint::Listing { summary, codes },
+        ),
         Request::Output { design, layers } => crate::output::output(
             session.project(),
             design.as_deref(),
@@ -254,9 +265,6 @@ fn dispatch(
             expected_revision,
         } => lib_add(session, &alias, &path, expected_revision.as_deref()),
         Request::LibList {} => Ok(lib_list(session.project())),
-        Request::LibCheck { library, symbol } => {
-            crate::symlint::library_check(session.project(), library.as_deref(), symbol.as_deref())
-        }
         Request::ProjectEdit {
             properties,
             sheet_size,
@@ -880,6 +888,7 @@ fn dispatch(
         ),
         Request::Render { .. }
         | Request::Output { .. }
+        | Request::LibCheck { .. }
         | Request::LayoutPlace { .. }
         | Request::Layout { .. } => {
             unreachable!("answered before dispatch")

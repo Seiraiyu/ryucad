@@ -91,6 +91,12 @@ pub enum Request {
         library: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         symbol: Option<String>,
+        /// Counts by code, no findings (#711).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        summary: bool,
+        /// Only these codes' findings, and the symbols holding them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        codes: Vec<String>,
     },
     /// A symbol called `name`, its ID from the name unless given, with
     /// `units` (1 by default) and a batch of ops applied.
