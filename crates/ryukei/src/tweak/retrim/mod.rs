@@ -160,7 +160,12 @@ fn attempt(
     m: &Meter,
 ) -> Rung {
     let mut ws = BTreeMap::new();
-    for &f in region.faces.iter().filter(|f| !changes.deleted.contains(f)) {
+    let absorbed = absorbed(body, changes, region);
+    for &f in region
+        .faces
+        .iter()
+        .filter(|f| !changes.deleted.contains(f) && !absorbed.contains_key(f))
+    {
         if m.poll().is_err() {
             return done(Err(Error::Cancelled));
         }
@@ -319,8 +324,78 @@ fn attempt(
     }
     let mut out = out;
     let moved = changes.motion.keys().map(|&f| body.faces[f].name).collect();
-    let journal = names::finish(key, body, &w, &mut out, journal, &moved);
+    let mut journal = names::finish(key, body, &w, &mut out, journal, &moved);
+    // Faces absorbed into a neighbour on their surface are merged into it.
+    let mut into: BTreeMap<Name, Vec<Name>> = BTreeMap::new();
+    for (&g, &a) in &absorbed {
+        into.entry(body.faces[a].name)
+            .or_default()
+            .push(body.faces[g].name);
+    }
+    for (a, mut parents) in into {
+        if out.by_name(a).is_some() {
+            parents.push(a);
+            parents.sort();
+            journal.push(crate::name::Event::Merged { parents, child: a });
+        }
+    }
     done(Ok((out, journal)))
+}
+
+/// Region faces left as they are that share an edge with another such
+/// face on the same surface, the same way round: each mapped to the
+/// least-named face of its group, whose working face covers them all.
+/// Their own working faces would coincide with it (NIST FTC 09's hole
+/// walls, each two half cylinders carried a whole turn each, closed two
+/// ways).
+fn absorbed(body: &Body, changes: &Changes, region: &Region) -> BTreeMap<FaceId, FaceId> {
+    let still = |f: FaceId| {
+        region.faces.contains(&f)
+            && !changes.deleted.contains(&f)
+            && !changes.motion.contains_key(&f)
+            && !changes.surface.contains_key(&f)
+    };
+    let mut up: BTreeMap<FaceId, FaceId> = BTreeMap::new();
+    fn root(up: &BTreeMap<FaceId, FaceId>, mut f: FaceId) -> FaceId {
+        while let Some(&g) = up.get(&f) {
+            if g == f {
+                break;
+            }
+            f = g;
+        }
+        f
+    }
+    for e in body.edges() {
+        let fs: Vec<FaceId> = body
+            .edge_fins(e)
+            .map(|fin| body.loops[body.fins[fin].loop_].face)
+            .collect();
+        let [a, b] = fs.as_slice() else { continue };
+        let (a, b) = (*a, *b);
+        if a == b || !still(a) || !still(b) {
+            continue;
+        }
+        let (fa, fb) = (&body.faces[a], &body.faces[b]);
+        if fa.sense != fb.sense || body.surfaces[fa.surface] != body.surfaces[fb.surface] {
+            continue;
+        }
+        let (ra, rb) = (root(&up, a), root(&up, b));
+        if ra != rb {
+            let (keep, go) = if body.faces[ra].name < body.faces[rb].name {
+                (ra, rb)
+            } else {
+                (rb, ra)
+            };
+            up.insert(go, keep);
+            up.entry(keep).or_insert(keep);
+        }
+    }
+    up.keys()
+        .filter_map(|&f| {
+            let r = root(&up, f);
+            (r != f).then_some((f, r))
+        })
+        .collect()
 }
 
 /// A walk's failure at face `face` of the working body as a refusal.

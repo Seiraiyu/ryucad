@@ -276,3 +276,50 @@ fn a_cancel_stops_deleting_ftc_10s_blends() {
         "stopped after {stopped:?}"
     );
 }
+
+/// NIST FTC 09's countersinks: each hole's wall is two half cylinders on
+/// one surface and its chamfer two half cones. Deleting one hole's
+/// chamfer leaves the hole a plain cylinder, checked clean (#651: the
+/// halves' working faces coincided and the walk closed two ways).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "seconds in release, minutes in a debug build: CI runs it in release"
+)]
+fn ftc_09s_split_holes_lose_their_countersinks() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/nist_ftc_09_asme1_rd.stp");
+    let m = read(
+        &std::fs::read(path).unwrap(),
+        &ReadOptions {
+            key: OpKey(7),
+            heal: Default::default(),
+        },
+    )
+    .unwrap();
+    let (body, _, _) = m.bodies[0].result.clone().unwrap();
+    let r = recognise_blends(&body, &RecogniseOptions::default()).unwrap();
+    // The first chamfer chain: one hole's two half cones.
+    let chain = r
+        .blends
+        .iter()
+        .find(|b| matches!(b.kind, BlendKind::Chamfer(_)))
+        .unwrap()
+        .chain;
+    let faces: Vec<_> = r
+        .blends
+        .iter()
+        .filter(|b| b.chain == chain)
+        .flat_map(|b| b.faces.clone())
+        .collect();
+    assert_eq!(faces.len(), 2);
+    let spec = DeleteBlends {
+        max_size: None,
+        faces,
+        options: RecogniseOptions::default(),
+    };
+    let (o, _) = delete_blends_with(OpKey(0x16c), &body, &spec, &Work::unlimited()).unwrap();
+    assert_eq!(check(&o), []);
+    assert_eq!(check_intersections(&o), []);
+    // The two cones went and the two half cylinders became one face.
+    assert_eq!(o.counts().faces, body.counts().faces - 3);
+}
