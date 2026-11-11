@@ -939,7 +939,9 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             let mut nearest: Option<(Nm, String)> = None;
             for (k, pin) in part.pins.iter().enumerate() {
                 let Some(n) = pin.drawn_net() else { continue };
-                if block.nets[n].kind != NetKind::Signal {
+                // A stack's pin on a net per layer is labelled, never
+                // wired: one wire can't carry several nets (plan 2.G).
+                if block.nets[n].kind != NetKind::Signal || pin.stacked() {
                     continue;
                 }
                 signals += 1;
@@ -2450,6 +2452,50 @@ mod tests {
         let wires = vec![vec![a, b], vec![c, [6 * g, 0]]];
         assert!(wired_to_another(&wires, n(a), &[n(a), n(b)]));
         assert!(wired_to_another(&wires, n(c), &[n(a), n(c)]));
+    }
+
+    /// A stack's pin carrying a net per layer can only be labelled (one
+    /// wire can't carry several nets): a part whose every signal pin is
+    /// such a pin isn't judged floating (plan 2.G; the front end's IV
+    /// converter and the Ethernet circuit's status LEDs).
+    #[test]
+    fn a_stacked_pin_is_not_judged_floating() {
+        let mut b = seeded(1, 2);
+        let mut out = crate::engine::lay_out(&b).unwrap();
+        let wired: Vec<String> = out
+            .layout
+            .routes
+            .keys()
+            .filter(|k| b.net(k).is_some_and(|n| b.nets[n].kind == NetKind::Signal))
+            .cloned()
+            .collect();
+        for key in &wired {
+            out.layout.routes.remove(key);
+        }
+        let first = lint(&b, &out)
+            .0
+            .into_iter()
+            .find(|f| f.code == "sch_floating")
+            .expect("a part floats")
+            .refs[0]
+            .clone();
+        let p = b.part(&first).unwrap();
+        let signals: Vec<usize> = (0..b.nets.len())
+            .filter(|n| b.nets[*n].kind == NetKind::Signal)
+            .collect();
+        for pin in &mut b.parts[p].pins {
+            if let Some(n) = pin.net {
+                let other = *signals.iter().find(|m| **m != n).unwrap();
+                pin.layers = vec![Some(other)];
+            }
+        }
+        assert!(
+            !lint(&b, &out)
+                .0
+                .iter()
+                .any(|f| f.code == "sch_floating" && f.refs[0] == first),
+            "{first} is judged though every pin is a stack's"
+        );
     }
 
     #[test]
