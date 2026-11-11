@@ -1175,6 +1175,55 @@ mod tests {
     }
 
     #[test]
+    fn a_delete_takes_every_piece_of_a_split_face() {
+        let (_dir, mut s, body) = with_box();
+        let (a, b) = (
+            vertex_at(&body, [0.0, 0.0, 0.005]),
+            vertex_at(&body, [0.02, 0.0, 0.005]),
+        );
+        let front = format!("p/b/{}", edge_between(&body, &a, &b));
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "chamfer", "id": "f", "d": 0.5, "edges": [front]}),
+        )
+        .unwrap();
+        let h = 0.5f64.sqrt();
+        let bevel = faces_along(&mut s, "f", [0.0, -h, h]);
+        assert_eq!(bevel.len(), 1);
+        let bevel = format!("p/b/{}", bevel[0]);
+        // The slot comes after the chamfer: short, it misses the bevel.
+        slot(&mut s, false);
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "delete_face", "id": "d", "faces": [bevel]}),
+        )
+        .unwrap();
+        let d = reported(&mut s, "d");
+        assert_eq!(d["ok"], true, "{d}");
+        assert!(d["warnings"].is_null(), "{d}");
+        assert!(faces_along(&mut s, "d", [0.0, -h, h]).is_empty());
+        // Long, it cuts the bevel in two, and the delete takes both.
+        slot(&mut s, true);
+        let pieces: Vec<String> = faces_along(&mut s, "c", [0.0, -h, h])
+            .iter()
+            .map(|n| format!("p/b/{n}"))
+            .collect();
+        assert_eq!(pieces.len(), 2);
+        let d = reported(&mut s, "d");
+        assert_eq!(d["ok"], true, "{d}");
+        assert_eq!(
+            d["warnings"],
+            json!([{"code": "reference_followed", "part": "p", "feature": "d",
+                    "role": "faces.0", "reference": bevel, "pieces": pieces, "by": "c",
+                    "message": d["warnings"][0]["message"]}]),
+            "{d}"
+        );
+        assert!(faces_along(&mut s, "d", [0.0, -h, h]).is_empty());
+    }
+
+    #[test]
     fn pieces_off_the_old_surface_are_refused() {
         let (_dir, mut s, body) = with_box();
         let top = format!("p/b/{}", face_along(&body, [0.0, 0.0, 1.0]));
