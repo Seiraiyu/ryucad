@@ -74,7 +74,11 @@ fn symbol_lint_64(b: divan::Bencher) {
     s.pins.get_mut("3").unwrap().at = c;
     s.pins.get_mut("9").unwrap().at = a;
     let prefs = ryusch::lint::Prefs::default();
-    let cx = ryueda::symlint::Context { standards: &st, prefs: &prefs, from: "self" };
+    let cx = ryueda::symlint::Context {
+        standards: &st,
+        prefs: &prefs,
+        from: "self",
+    };
     b.bench(|| ryueda::symlint::lint(divan::black_box(&s), Some(Class::Ic), &cx));
 }
 

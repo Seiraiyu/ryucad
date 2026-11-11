@@ -18,12 +18,14 @@ fuzz_target!(|data: &[u8]| {
     let cut = data.iter().position(|b| *b == 0).unwrap_or(data.len());
     let (file, rest) = (&data[..cut], data.get(cut + 1..).unwrap_or(&[]));
     let path = "library/standards.json";
-    let Ok(s) = ryueda::doc::read::<Standards>(file, path, standards::KIND, standards::FORMAT) else {
+    let Ok(s) = ryueda::doc::read::<Standards>(file, path, standards::KIND, standards::FORMAT)
+    else {
         return;
     };
     let text = ryueda::doc::to_string(&s, standards::KIND, standards::FORMAT);
-    let back: Standards = ryueda::doc::read(text.as_bytes(), path, standards::KIND, standards::FORMAT)
-        .expect("written standards read back");
+    let back: Standards =
+        ryueda::doc::read(text.as_bytes(), path, standards::KIND, standards::FORMAT)
+            .expect("written standards read back");
     assert_eq!(back, s);
     if s.check().iter().any(|f| f.is_error()) {
         return;
@@ -33,7 +35,12 @@ fuzz_target!(|data: &[u8]| {
         .take(64)
         .map(str::to_owned)
         .collect();
-    let types = [PinType::PowerIn, PinType::Input, PinType::Output, PinType::Bidirectional];
+    let types = [
+        PinType::PowerIn,
+        PinType::Input,
+        PinType::Output,
+        PinType::Bidirectional,
+    ];
     let pins: Vec<PinSpec> = names
         .iter()
         .enumerate()
@@ -54,7 +61,8 @@ fuzz_target!(|data: &[u8]| {
         from: "self",
     };
     for class in template::TEMPLATES {
-        let given: &[PinSpec] = if matches!(class, Class::Ic | Class::Regulator | Class::Connector) {
+        let given: &[PinSpec] = if matches!(class, Class::Ic | Class::Regulator | Class::Connector)
+        {
             &pins
         } else {
             &[]

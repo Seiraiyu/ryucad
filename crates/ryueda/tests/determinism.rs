@@ -332,11 +332,27 @@ fn netlists_and_erc_are_bit_exact() {
         let p = dir.path().join("t");
         std::fs::create_dir_all(&p).unwrap();
         ryueda(&p, 1, &["init"]);
-        ryueda(&p, 1, &["standards", "set", &format!("{{\"shapes\": \"{shapes}\"}}")]);
+        ryueda(
+            &p,
+            1,
+            &["standards", "set", &format!("{{\"shapes\": \"{shapes}\"}}")],
+        );
         for class in ["resistor", "capacitor", "inductor", "diode", "led"] {
             ryueda(&p, 1, &["symbol", "create", class, "--template", class]);
         }
-        ryueda(&p, 1, &["symbol", "create", "mcu", "--template", "ic", "--pins", MCU_PINS]);
+        ryueda(
+            &p,
+            1,
+            &[
+                "symbol",
+                "create",
+                "mcu",
+                "--template",
+                "ic",
+                "--pins",
+                MCU_PINS,
+            ],
+        );
         let mut files: Vec<_> = std::fs::read_dir(p.join("library/symbols"))
             .unwrap()
             .map(|f| f.unwrap().path())
