@@ -1306,7 +1306,8 @@ impl Session {
     /// [`Session::explain`] for the part's list as `order` has it: as a
     /// write would leave it.
     pub fn explain_in(&self, part: &Id, order: &[Id], mut e: Error) -> Error {
-        if e.code != crate::error::Code::ReferenceUnresolved {
+        use crate::error::Code;
+        if !matches!(e.code, Code::ReferenceUnresolved | Code::ReferenceSplit) {
             return e;
         }
         if e.details["connector"].is_string() {
@@ -1328,6 +1329,11 @@ impl Session {
             .map(Known::to_json);
         if let Some(w) = &was {
             e.details["was"] = w.clone();
+        }
+        // A split's pieces and the feature that split it came from the
+        // rebuild's journals already (design 447).
+        if e.code == Code::ReferenceSplit {
+            return e;
         }
         let reader = e.details["feature"]
             .as_str()
