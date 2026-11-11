@@ -1618,6 +1618,30 @@ fn reference_section(golden: &mut Golden) {
     }
 }
 
+/// Strips (#598): the crossing sliver, a Coilcraft coil's wire end, as a
+/// reference meshed at two chords narrower and wider than it.
+fn strips_section(golden: &mut Golden) {
+    use ryukei::heal::{ReferenceOptions, reference};
+    use ryukei::mesh::{MeshParams, tessellate};
+    let mut s = golden.section("strips");
+    let r = 0.445e-3;
+    for a in [r + 8e-8, r + 3e-7] {
+        let (body, _) = reference(
+            OpKey(3),
+            &ryukei_testkit::mesh::crossing_sliver(r, a),
+            &ReferenceOptions::default(),
+        )
+        .unwrap();
+        s.str(&body.dump());
+        for chord in [2e-6, 5e-7] {
+            let m =
+                tessellate(&body, &MeshParams::new(chord, core::f64::consts::PI / 12.0)).unwrap();
+            hash_mesh(&mut s, &m);
+            s.u64(m.faults.len() as u64);
+        }
+    }
+}
+
 /// Mirror images: the primitives and seeded sweeps, booleans and blends
 /// reflected in an oblique plane, with their meshes.
 fn mirror_section(golden: &mut Golden) {
@@ -3619,6 +3643,7 @@ sections! {
     blend_booleans => blend_booleans_section,
     heal => heal_section,
     reference => reference_section,
+    strips => strips_section,
     mirror => mirror_section,
     codec => codec_section,
     general_booleans => general_booleans_section,
