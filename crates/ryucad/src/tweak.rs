@@ -28,7 +28,7 @@ use std::sync::Arc;
 pub fn takes_sheets(f: &Feature) -> bool {
     matches!(
         f,
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_)
+        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) | Feature::DeleteFace(_)
     )
 }
 
@@ -74,6 +74,61 @@ fn blends(r: crate::doc::edit::Retrim) -> Blends {
     }
 }
 
+/// The kernel's healing for a file's.
+fn heal(h: crate::doc::edit::Heal) -> ryukei::tweak::Heal {
+    match h {
+        crate::doc::edit::Heal::Auto => ryukei::tweak::Heal::Auto,
+        crate::doc::edit::Heal::Cap => ryukei::tweak::Heal::Cap,
+        crate::doc::edit::Heal::Grow => ryukei::tweak::Heal::Grow,
+    }
+}
+
+/// A delete's spec on `body`: its faces, then each seed's feature's
+/// (`feature_faces`), each face once in the order first named; and what
+/// each seed found.
+fn expand(
+    body: &ryukei::topo::Body,
+    faces: &[Name],
+    seeds: &[Name],
+    how: ryukei::tweak::Heal,
+) -> core::result::Result<(ryukei::tweak::DeleteSpec, Vec<(Name, Vec<Name>)>), ryukei::Error> {
+    let mut all: Vec<Name> = Vec::new();
+    for n in faces {
+        if !all.contains(n) {
+            all.push(*n);
+        }
+    }
+    let mut found = Vec::with_capacity(seeds.len());
+    for s in seeds {
+        let of = ryukei::tweak::feature_faces(body, *s)?;
+        for n in &of {
+            if !all.contains(n) {
+                all.push(*n);
+            }
+        }
+        found.push((*s, of));
+    }
+    Ok((
+        ryukei::tweak::DeleteSpec {
+            faces: all,
+            heal: how,
+        },
+        found,
+    ))
+}
+
+/// What a delete's report keeps (`Made::report`): its target, and each
+/// seed with the faces it found, by name.
+pub(crate) fn delete_report(target: &Id, found: &[(Name, Vec<Name>)]) -> Value {
+    json!({
+        "target": target,
+        "seeds": found.iter().map(|(s, of)| json!({
+            "seed": s.to_string(),
+            "faces": of.iter().map(|n| n.to_string()).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    })
+}
+
 /// What a tweak asks the kernel.
 pub(crate) enum Spec {
     Move(MoveSpec),
@@ -85,6 +140,13 @@ pub(crate) enum Spec {
         spec: DraftSpec,
         parting: bool,
         asked: Vec<(Name, f64)>,
+    },
+    /// A delete: the faces listed, the seeds whose features go whole
+    /// (found when it builds), and how gaps heal.
+    Delete {
+        faces: Vec<Name>,
+        seeds: Vec<Name>,
+        heal: ryukei::tweak::Heal,
     },
 }
 
@@ -450,14 +512,42 @@ pub(crate) fn resolve<'a>(
                 },
             })
         }
-        // Resolved and built from Task 10 of plan 22.A.
-        Feature::DeleteFace(_) => Err(Error::new(
-            Code::TweakFailed,
-            format!("{ty} {id}: the kernel refused it"),
-        )
-        .with("feature", id)
-        .with("reason", "kernel")
-        .with("kernel", "tweak")),
+        Feature::DeleteFace(x) => {
+            let built = crate::rebuild::read(part, solids, id, f, "target", &x.target, before)?;
+            let mut faces = Vec::with_capacity(x.faces.len());
+            for (i, r) in x.faces.iter().enumerate() {
+                faces.push(face(
+                    part,
+                    id,
+                    &x.target,
+                    ty,
+                    &format!("faces.{i}"),
+                    r,
+                    before,
+                )?);
+            }
+            let mut seeds = Vec::with_capacity(x.seeds.len());
+            for (i, r) in x.seeds.iter().enumerate() {
+                seeds.push(face(
+                    part,
+                    id,
+                    &x.target,
+                    ty,
+                    &format!("seeds.{i}"),
+                    r,
+                    before,
+                )?);
+            }
+            Ok(Resolved {
+                target: &x.target,
+                built,
+                spec: Spec::Delete {
+                    faces,
+                    seeds,
+                    heal: heal(x.heal),
+                },
+            })
+        }
         _ => unreachable!("a tweak"),
     }
 }
@@ -866,6 +956,13 @@ pub fn build(
             Ok((b, j, rep)) => (
                 Ok((b, j)),
                 Some(draft_report(r.target, *parting, asked, &rep)),
+            ),
+            Err(e) => (Err(e), None),
+        },
+        Spec::Delete { faces, seeds, heal } => match expand(body, faces, seeds, *heal) {
+            Ok((spec, found)) => (
+                ryukei::tweak::delete_faces_with(key, body, &spec, &work),
+                Some(delete_report(r.target, &found)),
             ),
             Err(e) => (Err(e), None),
         },

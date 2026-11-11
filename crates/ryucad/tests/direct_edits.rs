@@ -502,3 +502,51 @@ fn the_edit_budget_refuses_and_keys_its_result() {
     );
     built(&mut s, "m", "c");
 }
+
+/// Part `p`: a plate `b` 40 × 30 × 10 mm and a hole `h` of 6 mm through it
+/// at (20, 15), sketched on its top.
+fn drilled() -> (tempfile::TempDir, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": 40, "y": 30, "z": 10}}),
+    );
+    let top = plane(&body(&mut s, "b"), "b", 2, 1.0, 10.0);
+    add(&mut s, json!({"type": "sketch", "id": "s", "face": top}));
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "s", "ops": [
+        {"op": "add", "type": "point", "at": [20, 15]},
+        {"op": "add", "type": "fix", "a": "p1"}]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "h", "sketch": "s", "points": ["p1"],
+        "diameter": 6, "depth": "through_all", "targets": ["b"]}),
+    );
+    (dir, s)
+}
+
+#[test]
+fn a_through_hole_deleted_by_its_seed_is_capped() {
+    let (_dir, mut s) = drilled();
+    let bore = cylinders(&body(&mut s, "h"), "b");
+    assert!(!bore.is_empty());
+    write_feature(
+        &mut s,
+        "d",
+        json!({"type": "delete_face", "target": "b",
+        "seeds": [file_ref(&bore[0])]}),
+    );
+    near(volume(&mut s, "d", "b"), 40.0 * 30.0 * 10.0, 1e-9);
+    assert!(cylinders(&body(&mut s, "d"), "b").is_empty());
+    assert_eq!(body(&mut s, "d")["faces"].as_array().unwrap().len(), 6);
+    // The report names what the seed found: the bore, all of it.
+    let rep = report(&mut s, "d");
+    let found = rep["seeds"][0]["faces"].as_array().unwrap().len();
+    assert_eq!(found, bore.len(), "{rep}");
+}
