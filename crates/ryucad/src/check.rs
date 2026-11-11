@@ -974,4 +974,27 @@ mod tests {
         assert_eq!(codes(&e.details), ["cache_mismatch c"]);
         assert_eq!(e.details["findings"][0]["cached"]["error"], "internal");
     }
+
+    #[test]
+    fn a_parameter_nothing_reads_is_a_warning_check_passes() {
+        let (_dir, mut s) = project();
+        call(
+            &mut s,
+            "param.set",
+            json!({"part": "q", "parameters": {"spare": "1 mm"}}),
+        )
+        .unwrap();
+        let v = call(&mut s, "check", json!({})).unwrap();
+        assert_eq!(v["passed"], true, "{v}");
+        assert_eq!(codes(&v), ["parameter_unused"]);
+        let f = &v["findings"][0];
+        assert_eq!(
+            (&f["severity"], &f["source"], &f["part"]),
+            (&json!("warning"), &json!("doctor"), &json!("q"))
+        );
+        assert_eq!(f["parameters"], json!([{"name": "spare", "read_by": []}]));
+        // A part's issue is its own: checking `p` alone doesn't report it.
+        let p = call(&mut s, "check", json!({"part": "p"})).unwrap();
+        assert!(codes(&p).is_empty(), "{p}");
+    }
 }
