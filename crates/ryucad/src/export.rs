@@ -673,8 +673,14 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                 ..WriteOptions::default()
             };
             let (model, passed) = step_parts(&walk)?;
-            let bytes =
-                ryustep::write_with(&model, &passed, &opts).map_err(|e| walk.unwritable(e))?;
+            let report =
+                ryustep::write_report(&model, &passed, &opts).map_err(|e| walk.unwritable(e))?;
+            let (transfer, omitted) = step_transfer(s, &walk, &report, &model)?;
+            result["transfer"] = transfer;
+            if !omitted.is_empty() {
+                warn(&mut result, omitted);
+            }
+            let bytes = report.bytes;
             result["time_stamp"] = json!(opts.time_stamp);
             result["schema"] = json!(schema_name);
             result["unit"] = json!(unit_name);
@@ -1426,7 +1432,7 @@ impl Walk {
         let (p, result) = self.node(s, part, rev)?;
         let k = self.scene.products.len();
         self.index.insert((part.clone(), rev.clone()), k);
-        let props = properties(s, part, rev, self.pin.as_ref().filter(|_| k == 0));
+        let props = properties_of(s, part, rev, self.pin.as_ref().filter(|_| k == 0));
         // Another project's part is named by its dependency.
         let fallback = match rev {
             Rev::Foreign { project, .. } => {
@@ -1625,9 +1631,142 @@ fn identity(fallback: &str, p: &Part, props: &Properties) -> (String, String, St
     (id, name, text("description").unwrap_or_default())
 }
 
+/// The properties STEP export writes as the product itself.
+const WRITTEN_PROPERTIES: [&str; 3] = ["number", "name", "description"];
+
+/// What a STEP export wrote and left out (design 448): `written`, the
+/// writer's instances by category (at most eight names each, the
+/// largest first); `omitted`, what the written parts hold that STEP
+/// export doesn't write; `approximated`, each body written within a
+/// tolerance. With the `export_metadata_omitted` warnings to raise.
+fn step_transfer(
+    s: &mut Session,
+    walk: &Walk,
+    w: &ryustep::Written,
+    model: &WriteModel,
+) -> Result<(Value, Vec<Value>)> {
+    use crate::doc::files::Feature;
+    use crate::transfer::SUMMARY_NAMES;
+    use ryustep::census::Category;
+    let written: Vec<Value> = Category::ALL
+        .iter()
+        .filter_map(|&c| {
+            let mut names: Vec<(&str, u64)> = w
+                .counts
+                .iter()
+                .filter(|x| x.0 == c)
+                .map(|x| (x.1.as_str(), x.2))
+                .collect();
+            if names.is_empty() {
+                return None;
+            }
+            names.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+            let count: u64 = names.iter().map(|x| x.1).sum();
+            let top: Vec<Value> = names
+                .iter()
+                .take(SUMMARY_NAMES)
+                .map(|(n, k)| json!({"name": n, "count": k}))
+                .collect();
+            let mut v = json!({"category": c.as_str(), "count": count, "names": top});
+            if names.len() > SUMMARY_NAMES {
+                v["more"] = json!(names.len() - SUMMARY_NAMES);
+            }
+            Some(v)
+        })
+        .collect();
+    let approximated: Vec<Value> = w
+        .approximated
+        .iter()
+        .map(|a| {
+            let p = &model.products[a.product];
+            json!({"product": p.id, "body": p.names.get(a.body).cloned().unwrap_or_default(),
+                   "faces": a.faces, "bound_m": a.bound})
+        })
+        .collect();
+    let mut seen: BTreeSet<(Id, Rev)> = BTreeSet::new();
+    let (mut features, mut sketches, mut datums, mut appearance) = (0usize, 0usize, 0usize, 0usize);
+    let mut properties: BTreeSet<(Id, String)> = BTreeSet::new();
+    for p in &walk.scene.products {
+        if !seen.insert((p.part.clone(), p.rev.clone())) {
+            continue;
+        }
+        if let Some((part, _, _)) = walk.built.get(&(p.part.clone(), p.rev.clone())) {
+            for f in part.features.values().flatten() {
+                features += 1;
+                match f {
+                    Feature::Sketch(_) => sketches += 1,
+                    Feature::Datum(_) => datums += 1,
+                    _ => {}
+                }
+            }
+        }
+        if p.rev == Rev::Working {
+            appearance += crate::appearance::looks(s, &p.part)?
+                .values()
+                .filter(|l| !l.is_plain())
+                .count();
+        }
+        let props = properties_of(s, &p.part, &p.rev, walk.pin.as_ref());
+        for (k, v) in &props.values {
+            if !WRITTEN_PROPERTIES.contains(&k.as_str()) && !v.is_null() {
+                properties.insert((p.part.clone(), k.clone()));
+            }
+        }
+    }
+    let written_parts: BTreeSet<&str> = seen.iter().map(|(p, _)| p.as_str()).collect();
+    let annotations = crate::annotation::readable(&crate::annotation::read_all(&s.snapshot()))
+        .values()
+        .filter(|a| a.status == crate::doc::annotation::Status::Open)
+        .filter(|a| a.pins.iter().any(|pin| written_parts.contains(pin.part())))
+        .count();
+    let mut omitted = vec![json!({
+        "what": "history",
+        "count": features,
+        "summary": format!(
+            "feature history and parameters: {features} feature(s) in {} part(s), written as their shapes",
+            seen.len()
+        ),
+    })];
+    for (what, n, words) in [
+        ("sketches", sketches, "sketch(es), not written"),
+        ("datums", datums, "datum feature(s), not written"),
+        (
+            "annotations",
+            annotations,
+            "open annotation(s) on the parts, not written",
+        ),
+        (
+            "appearance",
+            appearance,
+            "solid(s) with a colour or opacity, not written to STEP yet",
+        ),
+        (
+            "properties",
+            properties.len(),
+            "part propert(ies) beyond number, name and description, not written to STEP yet",
+        ),
+    ] {
+        if n > 0 {
+            omitted.push(json!({"what": what, "count": n, "summary": format!("{n} {words}")}));
+        }
+    }
+    let warnings: Vec<Value> = omitted
+        .iter()
+        .filter(|o| matches!(o["what"].as_str(), Some("appearance" | "properties")))
+        .map(|o| {
+            json!({"code": "export_metadata_omitted", "what": o["what"], "count": o["count"],
+                   "message": o["summary"]})
+        })
+        .collect();
+    Ok((
+        json!({"written": written, "omitted": omitted, "approximated": approximated}),
+        warnings,
+    ))
+}
+
 /// `part`'s properties at `rev`: the working files', or for an official
 /// release (`pin`, for the part exported; else looked up) its commit's.
-fn properties(s: &mut Session, part: &Id, rev: &Rev, pin: Option<&Pin>) -> Properties {
+fn properties_of(s: &mut Session, part: &Id, rev: &Rev, pin: Option<&Pin>) -> Properties {
     let commit = match (rev, pin) {
         (Rev::Working, _) => None,
         // Another project's properties are read where its files are.
@@ -1713,6 +1852,61 @@ pub(crate) mod tests {
         let mut f = f;
         f["part"] = json!(part);
         call(s, "feature.add", f).unwrap();
+    }
+
+    /// A STEP export says what it wrote by category, what it left out
+    /// (always the history; a colour, warned) and what it approximated;
+    /// none of it changes a byte (design 448).
+    #[test]
+    fn a_step_export_reports_what_it_wrote_and_left_out() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        add(
+            &mut s,
+            "p",
+            json!({"type": "box", "id": "a", "params": {"x": 10, "y": 10, "z": 10}}),
+        );
+        let opts = json!({"part": "p", "time_stamp": "2026-10-27T00:00:00", "file_name": "p.step"});
+        let (plain, before) = exported(&mut s, opts.clone()).unwrap();
+        let t = &plain["transfer"];
+        let written: Vec<&str> = t["written"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["category"].as_str().unwrap())
+            .collect();
+        for c in ["geometry", "topology", "product_structure", "units"] {
+            assert!(written.contains(&c), "{c}: {written:?}");
+        }
+        assert!(!written.contains(&"unknown"), "{written:?}");
+        assert_eq!(
+            t["omitted"],
+            json!([{"what": "history", "count": 1,
+                    "summary": "feature history and parameters: 1 feature(s) in 1 part(s), written as their shapes"}])
+        );
+        assert_eq!(t["approximated"], json!([]));
+        assert!(plain.get("warnings").is_none(), "{plain}");
+        call(
+            &mut s,
+            "appearance.set",
+            json!({"entities": ["p"], "colour": "#ff0000"}),
+        )
+        .unwrap();
+        let (coloured, after) = exported(&mut s, opts).unwrap();
+        assert_eq!(after, before, "the bytes don't change");
+        let what: Vec<&str> = coloured["transfer"]["omitted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["what"].as_str().unwrap())
+            .collect();
+        assert_eq!(what, ["history", "appearance"]);
+        let w = coloured["warnings"].as_array().unwrap();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(
+            (&w[0]["code"], &w[0]["what"]),
+            (&json!("export_metadata_omitted"), &json!("appearance"))
+        );
     }
 
     #[test]

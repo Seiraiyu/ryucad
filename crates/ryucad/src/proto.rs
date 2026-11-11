@@ -1406,7 +1406,10 @@ pub enum Request {
     /// time when exporting a commit, else now. A feature failing in what
     /// it places is `export_failed`, unless `skip_failing`: then the rest
     /// is written, and the answer lists what was left out (`skipped`, and
-    /// an `export_skipped` warning each).
+    /// an `export_skipped` warning each). A STEP export's answer gives
+    /// `transfer`: what it wrote by category, what it left out
+    /// (`omitted`, with an `export_metadata_omitted` warning for
+    /// appearance and properties) and what it approximated (design 448).
     #[serde(rename = "export")]
     Export {
         part: String,
