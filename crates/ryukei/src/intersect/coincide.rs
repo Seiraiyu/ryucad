@@ -90,8 +90,57 @@ pub(crate) fn coincident(a: &Surface, b: &Surface) -> Option<bool> {
                 && close(x.minor(), y.minor()))
             .then_some(true)
         }
+        (Surface::Revolution(x), _) if torus_of(x).is_some() => {
+            coincident(&torus_of(x)?, b).and_then(|_| same_normals(a, b))
+        }
+        (_, Surface::Revolution(y)) if torus_of(y).is_some() => {
+            coincident(a, &torus_of(y)?).and_then(|_| same_normals(a, b))
+        }
         _ => general(a, b),
     }
+}
+
+/// The torus a revolution is when its curve is a circle in a plane
+/// through its axis (a file's `SURFACE_OF_REVOLUTION` of a circle, as
+/// KiCad's CP_Radial cans have them, turned or mirrored copies about one
+/// axis: #302, #322): its centre's distance from the axis the major
+/// radius, its own the minor, about the axis at the centre's height.
+/// `None` for any other revolution, or a circle off its axis's planes.
+pub(crate) fn torus_of(x: &crate::geom::Revolution) -> Option<Surface> {
+    let f = x.frame();
+    let crate::geom::Curve::Circle(c) = x.curve() else {
+        return None;
+    };
+    if c.frame().z().dot(f.z()).abs() > ANGULAR_RESOLUTION
+        || off_plane(c.frame(), f.origin()) > LINEAR_RESOLUTION
+    {
+        return None;
+    }
+    let o = c.frame().origin();
+    let h = (o - f.origin()).dot(f.z().get());
+    let frame = Frame::new(f.origin() + f.z().get() * h, f.z().get(), f.x().get()).ok()?;
+    crate::geom::Torus::new(frame, off_axis(f, o), c.radius())
+        .ok()
+        .map(Surface::Torus)
+}
+
+/// Whether two coincident surfaces' natural normals agree, at the middle
+/// of the first's domain (0 along an unbounded direction) projected onto
+/// the second.
+fn same_normals(a: &Surface, b: &Surface) -> Option<bool> {
+    let [du, dv] = a.domain();
+    let mid = |d: [f64; 2]| {
+        if d[0].is_finite() && d[1].is_finite() {
+            (d[0] + d[1]) / 2.0
+        } else {
+            0.0
+        }
+    };
+    let (u, v) = (mid(du), mid(dv));
+    let n = a.normal(u, v)?;
+    let (ou, ov) = b.project(a.point(u, v)).param;
+    let m = b.normal(ou, ov)?;
+    Some(n.dot(m) > 0.0)
 }
 
 /// The largest sine of the angle between two planes [`planes_within`]
@@ -163,21 +212,7 @@ fn general(a: &Surface, b: &Surface) -> Option<bool> {
     if !on {
         return None;
     }
-    // The natural normals at the middle of the surface's domain (an
-    // extrusion's at height 0).
-    let [du, dv] = s.domain();
-    let mid = |d: [f64; 2]| {
-        if d[0].is_finite() && d[1].is_finite() {
-            (d[0] + d[1]) / 2.0
-        } else {
-            0.0
-        }
-    };
-    let (u, v) = (mid(du), mid(dv));
-    let n = s.normal(u, v)?;
-    let (ou, ov) = other.project(s.point(u, v)).param;
-    let m = other.normal(ou, ov)?;
-    Some(n.dot(m) > 0.0)
+    same_normals(s, other)
 }
 
 /// The plane a NURBS lies on: the one through its control net's corner
@@ -691,5 +726,53 @@ mod tests {
         let torus = Surface::Torus(Torus::new(Frame::WORLD, 3.0, 1.0).unwrap());
         assert_eq!(coincident(&rev, &torus), Some(true));
         assert_eq!(coincident(&rev, &rev.clone()), Some(true));
+    }
+
+    /// A revolution of a circle in a plane through its axis is its torus:
+    /// coincident with the torus, with a copy turned about the axis and
+    /// with one mirrored across a plane through it (its axis reversed, as
+    /// KiCad's CP_Radial cans have them, #302), and not with a revolution
+    /// of a circle farther out, or of an ellipse.
+    #[test]
+    fn revolutions_of_meridian_circles_are_tori() {
+        use crate::geom::{Circle, Curve, Ellipse, Revolution};
+        use std::sync::Arc;
+        // The revolution's frame turned to `angle` about z (reversed when
+        // `up` is false), its meridian circle of radius 1 centred `major`
+        // out along the frame's x at height 0.5.
+        let rev = |angle: f64, up: bool, major: f64, ellipse: bool| {
+            let (c, s) = (crate::math::cos(angle), crate::math::sin(angle));
+            let z = if up { 1.0 } else { -1.0 };
+            let f = Frame::new(
+                Point3::new(0.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, z),
+                Vector3::new(c, s, 0.0),
+            )
+            .unwrap();
+            let at = Frame::new(
+                Point3::new(major * c, major * s, 0.5),
+                Vector3::new(-s, c, 0.0),
+                Vector3::new(c, s, 0.0),
+            )
+            .unwrap();
+            let curve = if ellipse {
+                Curve::Ellipse(Ellipse::new(at, 1.0, 0.5).unwrap())
+            } else {
+                Curve::Circle(Circle::new(at, 1.0).unwrap())
+            };
+            Surface::Revolution(Arc::new(Revolution::new(f, curve).unwrap()))
+        };
+        let a = rev(0.0, true, 3.0, false);
+        let turned = rev(0.4, true, 3.0, false);
+        let mirrored = rev(-0.4, false, 3.0, false);
+        let torus =
+            Surface::Torus(Torus::new(frame((0.0, 0.0, 0.5), (0.0, 0.0, 1.0)), 3.0, 1.0).unwrap());
+        assert!(coincident(&a, &turned).is_some());
+        assert!(coincident(&a, &mirrored).is_some());
+        assert!(coincident(&a, &torus).is_some());
+        assert!(coincident(&torus, &a).is_some());
+        assert!(coincident(&rev(0.4, true, 3.5, false), &a).is_none());
+        assert!(coincident(&rev(0.4, true, 3.0, true), &a).is_none());
+        assert!(coincident(&torus, &rev(0.0, true, 3.0, true)).is_none());
     }
 }

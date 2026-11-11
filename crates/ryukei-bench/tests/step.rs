@@ -560,23 +560,18 @@ fn pinned_bodies(name: &str, tighten: bool) -> Vec<(u64, Body)> {
 /// of NIST cases whose AP203 files check clean (issue #264). A pair not
 /// listed fails the check; a listed pair that clears is printed, to be
 /// taken off the list. `nist_ftc_06`'s eight cleared in plan 15.C (an
-/// edge both faces use isn't crossed with itself); `nist_ftc_07`'s two
-/// are each a plane tangent to a fillet torus at a saddle of its tube, at
-/// the vertex the faces share, left for a later plan (#264).
-const PINNED_UNCHECKED: &[(&str, &str)] = &[
-    (
-        "NIST-PMI-STEP-Files/nist_ctc_02_asme1_ap242-e2.stp",
-        "33f0b149492e8adf6bb148cb901e976e a999ec9c2b833a43b6160fedc6ecc825",
-    ),
-    (
-        "NIST-PMI-STEP-Files/nist_ftc_07_asme1_ap242-e2.stp",
-        "0f4e65eba4be4862e9ba1b5cf4bf1812 813cab6f011e62375e3ca126f73bab46",
-    ),
-    (
-        "NIST-PMI-STEP-Files/nist_ftc_07_asme1_ap242-e2.stp",
-        "cfb33267bca2ec53f6613331fc8f2503 f8334885217d122514169dbf2d9a7f84",
-    ),
-];
+/// edge both faces use isn't crossed with itself), `nist_ftc_07`'s (planes
+/// tangent to fillet tori at saddles of their tubes, traced outside the
+/// vertex's cube) and `nist_ctc_02`'s cone halves (a section plane through
+/// both shared lines) in ryukei 16.A. Left: `nist_ctc_02`'s cylinder and
+/// cone (faces 605 and 614), tangent at the one vertex they share beside
+/// a fillet whose edges carry 3–5 µm tolerances, so they lie only about
+/// 5 µm apart at the vertex's cube and its trace fails there (#264: a
+/// certificate of a tangent contact at a vertex is a later stage's).
+const PINNED_UNCHECKED: &[(&str, &str)] = &[(
+    "NIST-PMI-STEP-Files/nist_ctc_02_asme1_ap242-e2.stp",
+    "03fb1a8c5bb71be1bd31f756f6eb7ec3 a6571fb65f4e1ff5d03edcaaa985a9bd",
+)];
 
 /// The faults' faces by name, each pair in name order.
 fn named(body: &Body, faults: &[ryukei::check::Fault]) -> Vec<(String, String)> {
