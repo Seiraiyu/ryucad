@@ -272,6 +272,18 @@ fn label_items(
     }
 }
 
+/// The box a note's text takes from its lower left `at`: the text at the
+/// normal size half a step in, grown by half a step, its far corner on
+/// the grid (plan 2.C).
+pub fn note_box(text: &str, at: Point) -> Rect {
+    let far = [
+        at[0] + crate::font::width(text, SIZE) + GRID,
+        at[1] + SIZE + GRID,
+    ];
+    let up = |v: Nm| (v + GRID - 1).div_euclid(GRID) * GRID;
+    Rect::new(at, [up(far[0]), up(far[1])])
+}
+
 /// The buses drawn on sheet `sid` (plan 2.C): each member's stub and 45°
 /// entry, its name on its stub, the spine through a column of entries,
 /// the trunk, the bundle's name on the trunk and its off-sheet connector.

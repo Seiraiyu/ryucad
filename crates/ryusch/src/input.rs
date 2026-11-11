@@ -34,6 +34,10 @@ pub struct Block {
     pub buses: Vec<Bus>,
     /// The lasting instructions, by ID.
     pub instructions: BTreeMap<String, Instruction>,
+    /// Each note instruction's text as drawn, by its ID (plan 2.C:
+    /// properties filled by ryueda); a note with no entry draws its
+    /// instruction's text.
+    pub notes: BTreeMap<String, String>,
     /// One-off moves: applied once, their results held as placements.
     pub moves: Vec<Instruction>,
     /// The layout the files hold, kept where it can be.
@@ -305,6 +309,18 @@ impl Block {
     /// The net keyed `key`.
     pub fn net(&self, key: &str) -> Option<usize> {
         self.nets.iter().position(|n| n.key == key)
+    }
+
+    /// What note `id` says as drawn: its entry in `notes`, else its
+    /// instruction's text.
+    pub fn note_text(&self, id: &str) -> Option<&str> {
+        self.notes
+            .get(id)
+            .map(String::as_str)
+            .or_else(|| match self.instructions.get(id) {
+                Some(Instruction::Note { text, .. }) => Some(text.as_str()),
+                _ => None,
+            })
     }
 
     /// The bus keyed `key`.

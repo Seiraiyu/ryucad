@@ -495,7 +495,7 @@ pub struct Score {
 
 /// Everything sheet `sid` draws that takes room: parts' extents, text,
 /// labels and wire segments.
-fn ink_boxes(block: &Block, layout: &crate::layout::Layout, sid: &str) -> Vec<Rect> {
+pub(crate) fn ink_boxes(block: &Block, layout: &crate::layout::Layout, sid: &str) -> Vec<Rect> {
     let mut out = Vec::new();
     for part in &block.parts {
         let Some(x) = layout.placed.get(&part.key).filter(|x| x.sheet == sid) else {
@@ -520,6 +520,55 @@ fn ink_boxes(block: &Block, layout: &crate::layout::Layout, sid: &str) -> Vec<Re
             for w in run.windows(2) {
                 out.push(Rect::new(w[0], w[1]));
             }
+        }
+    }
+    // Buses' entries, spines, trunks and connectors, and notes (plan 2.C).
+    for by in layout.buses.values() {
+        if let Some(bus) = by.get(sid) {
+            let names: Vec<&str> = bus
+                .entries
+                .iter()
+                .filter_map(|e| block.net(&e.net).map(|n| block.nets[n].name.as_str()))
+                .collect();
+            let stub = crate::bus::stub_len(names.iter().copied());
+            let mut ends: Vec<crate::geom::Point> = Vec::new();
+            for e in &bus.entries {
+                let (_, on_spine) = crate::bus::entry(e.at, e.side, stub);
+                out.push(Rect::new(e.at, on_spine));
+                ends.push(on_spine);
+                if let Some(n) = block.net(&e.net) {
+                    out.push(label::label_box(
+                        LabelKind::Net,
+                        &block.nets[n].name,
+                        e.at,
+                        e.side,
+                    ));
+                }
+            }
+            let mut columns: BTreeMap<Nm, Vec<crate::geom::Point>> = BTreeMap::new();
+            for p in ends {
+                columns.entry(p[0]).or_default().push(p);
+            }
+            for pts in columns.values() {
+                if let Some([a, b]) = crate::bus::spine(pts) {
+                    out.push(Rect::new(a, b));
+                }
+            }
+            for run in &bus.trunk {
+                for w in run.windows(2) {
+                    out.push(Rect::new(w[0], w[1]));
+                }
+            }
+            if let Some(c) = &bus.connector {
+                out.push(label::label_box(LabelKind::OffSheet, &c.text, c.at, c.side));
+            }
+        }
+    }
+    for (id, n) in &layout.notes {
+        if n.sheet == sid
+            && let Some(text) = block.note_text(id)
+        {
+            out.push(crate::paint::note_box(text, n.at));
         }
     }
     out

@@ -175,6 +175,40 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                 });
             }
         }
+        // Notes (plan 2.C): text that takes its box.
+        for (id, n) in layout.notes.iter().filter(|(_, n)| &n.sheet == sid) {
+            let Some(text) = block.note_text(id) else {
+                continue;
+            };
+            let b = crate::paint::note_box(text, n.at);
+            if !area.contains(&b) {
+                out.push(v(
+                    "inside",
+                    format!("note {id} runs past its sheet"),
+                    vec![id.clone()],
+                ));
+            }
+            items.push(Item {
+                what: format!("note {id}"),
+                rect: b,
+                kind: TEXT,
+                ink: Vec::new(),
+                row: None,
+                on_wire: None,
+            });
+            if let Some(crate::layout::Instruction::Note { on, .. }) = block.instructions.get(id)
+                && let Some(r) = on
+                    .strip_prefix("region:")
+                    .and_then(|r| layout.regions.get(r))
+                && (r.sheet != *sid || !r.frame_on_sheet().contains(&b))
+            {
+                out.push(v(
+                    "region_holds",
+                    format!("region {} doesn't hold note {id}", r.title),
+                    vec![id.clone()],
+                ));
+            }
+        }
         // Buses (plan 2.C): each member's stub a wire of its net, each
         // spine and trunk run a wire of the bus; the 45° entries between
         // stubs and spines are the bus's own, judged by nothing but the

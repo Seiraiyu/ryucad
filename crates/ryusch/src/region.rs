@@ -392,6 +392,19 @@ fn frames_once(block: &Block, layout: &mut Layout) {
                 }
             }
         }
+        // Its notes (plan 2.C).
+        for (nid, n) in &layout.notes {
+            let on = match block.instructions.get(nid) {
+                Some(crate::layout::Instruction::Note { on, .. }) => on,
+                _ => continue,
+            };
+            if on.strip_prefix("region:") == Some(id.as_str())
+                && n.sheet == r.sheet
+                && let Some(text) = block.note_text(nid)
+            {
+                add(crate::paint::note_box(text, n.at));
+            }
+        }
         let Some(mut f) = b else { continue };
         f = f.grow(FRAME);
         f.max[1] += TITLE;

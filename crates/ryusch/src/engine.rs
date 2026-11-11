@@ -3557,6 +3557,11 @@ fn draw(
         });
     }
     crate::region::frames(block, &mut layout);
+    // Notes last, in what is left (plan 2.C), and the frames again to hold
+    // those in regions.
+    if place_notes(block, &mut layout, prev, &mut notes) {
+        crate::region::frames(block, &mut layout);
+    }
     Outcome {
         layout,
         notes,
@@ -3854,6 +3859,120 @@ fn carriers(
         }
     }
     out
+}
+
+/// Places each note instruction (plan 2.C): at its previous place where
+/// that is clear, else in its region at the first clear place from the
+/// frame's lower left (rightwards, then up), the frame free to grow down by
+/// [`crate::region::WIDEN`]; on a sheet from the drawing area's lower left.
+/// Clear is off everything drawn, by half a step, and every other region's
+/// frame. A note with no place is noted `note_unplaced`. Whether any
+/// note was placed.
+fn place_notes(
+    block: &Block,
+    layout: &mut Layout,
+    prev: Option<&Layout>,
+    notes: &mut Vec<Note>,
+) -> bool {
+    let mut any = false;
+    for (id, ins) in &block.instructions {
+        let Instruction::Note { on, .. } = ins else {
+            continue;
+        };
+        let Some(text) = block.note_text(id) else {
+            continue;
+        };
+        let (sid, room, region) = match on.strip_prefix("region:") {
+            Some(r) => match layout.regions.get(r) {
+                Some(g) => {
+                    let f = g.frame_on_sheet();
+                    (
+                        g.sheet.clone(),
+                        Rect::new([f.min[0], f.min[1] - crate::region::WIDEN], f.max),
+                        Some(r.to_owned()),
+                    )
+                }
+                None => {
+                    notes.push(unplaced(id, on));
+                    continue;
+                }
+            },
+            None => {
+                let sid = layout
+                    .sheets
+                    .iter()
+                    .find(|(s, x)| *s == on || &x.name == on)
+                    .map(|(s, _)| s.clone());
+                let Some(sid) = sid else {
+                    notes.push(unplaced(id, on));
+                    continue;
+                };
+                let a = block.area_in(layout, &sid);
+                (
+                    sid,
+                    Rect::new([GRID, GRID], [a[0] - GRID, a[1] - GRID]),
+                    None,
+                )
+            }
+        };
+        let area = block.area_in(layout, &sid);
+        let inside = Rect::new([0, 0], area);
+        let mut ink = crate::lint::ink_boxes(block, layout, &sid);
+        ink.extend(
+            layout
+                .regions
+                .iter()
+                .filter(|(r, g)| g.sheet == sid && Some(r.as_str()) != region.as_deref())
+                // A frame grows round what it holds: keep its margin clear.
+                .map(|(_, g)| g.frame_on_sheet().grow(crate::region::FRAME)),
+        );
+        let clear = |b: Rect| {
+            room.contains(&b)
+                && inside.contains(&b)
+                && !ink.iter().any(|x| x.grow(GRID / 2).overlaps(&b))
+        };
+        let kept = prev
+            .and_then(|l| l.notes.get(id))
+            .filter(|n| n.sheet == sid && clear(crate::paint::note_box(text, n.at)))
+            .map(|n| n.at);
+        let lo = [
+            room.min[0].div_euclid(GRID) * GRID + GRID,
+            room.min[1].div_euclid(GRID) * GRID + GRID,
+        ];
+        let found = kept.or_else(|| {
+            let mut y = lo[1];
+            while y < room.max[1] {
+                let mut x = lo[0];
+                while x < room.max[0] {
+                    if clear(crate::paint::note_box(text, [x, y])) {
+                        return Some([x, y]);
+                    }
+                    x += GRID;
+                }
+                y += GRID;
+            }
+            None
+        });
+        match found {
+            Some(at) => {
+                layout
+                    .notes
+                    .insert(id.clone(), crate::layout::PlacedNote { sheet: sid, at });
+                any = true;
+            }
+            None => notes.push(unplaced(id, on)),
+        }
+    }
+    any
+}
+
+/// A note with no place on `on`.
+fn unplaced(id: &str, on: &str) -> Note {
+    Note {
+        code: "note_unplaced".into(),
+        message: format!("no room for note {id} on {on}"),
+        details: serde_json::json!({"instruction": id, "on": on}),
+    }
 }
 
 /// A bus noted `bus_not_drawn` on sheet `sid`, and why.
@@ -6195,5 +6314,49 @@ mod tests {
                 "{k}"
             );
         }
+    }
+
+    #[test]
+    fn a_note_stands_in_its_region_and_its_frame_holds_it() {
+        let mut b = crate::testing::regions_block();
+        let first = lay(&b);
+        let (rid, _) = first.layout.regions.iter().next().expect("a region");
+        b.instructions.insert(
+            "i9".into(),
+            Instruction::Note {
+                on: format!("region:{rid}"),
+                text: "Fused at 2 A".into(),
+            },
+        );
+        b.notes.insert("i9".into(), "Fused at 2 A".into());
+        b.previous = Some(first.layout.clone());
+        let out = lay(&b);
+        assert!(
+            crate::rules::check(&b, &out.layout).is_empty(),
+            "{:?}",
+            crate::rules::check(&b, &out.layout)
+        );
+        let placed = &out.layout.notes.get("i9").expect("placed");
+        let r = &out.layout.regions[rid];
+        assert_eq!(placed.sheet, r.sheet);
+        assert!(
+            r.frame_on_sheet()
+                .contains(&crate::paint::note_box("Fused at 2 A", placed.at))
+        );
+        // Nothing else moved: the region grew to hold it, or it fit.
+        assert_eq!(out.layout.placed, first.layout.placed);
+        // On a sheet: inside its drawing area, clear of everything.
+        let sheet = r.sheet.clone();
+        b.instructions.insert(
+            "i9".into(),
+            Instruction::Note {
+                on: sheet,
+                text: "Rev A".into(),
+            },
+        );
+        b.notes.insert("i9".into(), "Rev A".into());
+        let out = lay(&b);
+        assert!(crate::rules::check(&b, &out.layout).is_empty());
+        assert!(out.layout.notes.contains_key("i9"));
     }
 }
