@@ -400,3 +400,77 @@ fn ref_stages_alone_are_counted_against_the_ledger() {
         .collect();
     assert_eq!(regressed, ["ref_mesh"], "{}", v["counts"]);
 }
+
+/// `--stages defeature` over one box with the stand-in: the body case runs
+/// `import` then `defeature`, the whole case nothing. A typed refusal is
+/// counted and never a finding; anything else that goes wrong is.
+#[test]
+fn defeature_finds_faults_and_counts_refusals() {
+    let fake = env!("CARGO_BIN_EXE_fake-ryucad");
+    let cases = [
+        ("", None, true),
+        ("defeature:refuse", None, false),
+        ("defeature:fail", Some("defeature/internal"), false),
+        (
+            "defeature:checkfail",
+            Some("defeature/check_failed/faces_intersect"),
+            false,
+        ),
+        ("defeature:crash", Some("defeature/crash/101"), false),
+        (
+            "defeature:hang",
+            Some("defeature/timeout/faces<50/PLANE"),
+            false,
+        ),
+    ];
+    for (fault, want, passes) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let sources = one_box(dir.path());
+        let log = dir.path().join("calls.txt");
+        let v = hunt(
+            &[
+                "run",
+                "--ryucad",
+                fake,
+                "--sources",
+                sources.to_str().unwrap(),
+                "--stages",
+                "defeature",
+                "--timeout",
+                "2",
+                "--ledger",
+                "/nonexistent",
+            ],
+            &[
+                ("STEP_HUNT_FAKE", fault),
+                ("STEP_HUNT_FAKE_MODES", "1"),
+                ("STEP_HUNT_FAKE_LOG", log.to_str().unwrap()),
+            ],
+            &dir.path().join("out"),
+        );
+        assert_eq!(
+            signatures(&v),
+            want.into_iter().collect::<Vec<_>>(),
+            "{fault}"
+        );
+        assert_eq!(body_stages(&v), ["import", "defeature"], "{fault}");
+        let passed = v["counts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["stage"] == "defeature")
+            .map(|c| c["passed"].as_u64().unwrap());
+        assert_eq!(passed, Some(u64::from(passes)), "{fault}: {}", v["counts"]);
+        let calls = std::fs::read_to_string(&log).unwrap();
+        // A hundredth of the fake's 50 mm diagonal.
+        if fault.is_empty() {
+            assert!(
+                calls
+                    .lines()
+                    .any(|l| l.contains("delete_blend") && l.contains("--below 0.5 mm")),
+                "{calls}"
+            );
+        }
+        assert!(!calls.lines().any(|l| l.starts_with("export")), "{calls}");
+    }
+}

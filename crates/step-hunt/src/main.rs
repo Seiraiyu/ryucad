@@ -1,7 +1,7 @@
 //! `step-hunt`: the STEP bug finder's command line.
 //!
 //! ```text
-//! step-hunt run --ryucad <bin> --out <dir> [--source NAME]… [--jobs N] [--timeout S] [--slow S] [--resume] [--only REPORT] [--keep]
+//! step-hunt run --ryucad <bin> --out <dir> [--source NAME]… [--jobs N] [--timeout S] [--slow S] [--resume] [--only REPORT] [--keep] [--stages all|ref|defeature]
 //! step-hunt rerun <report.json> --ryucad <bin> --out <dir>      the report's failed cases only
 //! step-hunt report <dir>                                         report.json and report.md again from cases.jsonl
 //! step-hunt split --out <dir>                                    the cases, without running them
@@ -92,9 +92,11 @@ struct RunArgs {
     /// The ledger (default: crates/step-hunt/known.txt).
     #[arg(long)]
     ledger: Option<PathBuf>,
-    /// Which stages: `all`, or `ref` for the reference stages alone (a
-    /// binary whose `import` takes `--solid`).
-    #[arg(long, default_value = "all", value_parser = ["all", "ref"])]
+    /// Which stages: `all`; `ref` for the reference stages alone (a binary
+    /// whose `import` takes `--solid`); or `defeature`, a body case's
+    /// solid import and its blends deleted at a hundredth of its diagonal
+    /// (a binary with `blends`, ryucad 22.B).
+    #[arg(long, default_value = "all", value_parser = ["all", "ref", "defeature"])]
     stages: String,
 }
 
@@ -233,6 +235,16 @@ fn run(a: RunArgs) {
         }
         ryucad.only_reference = true;
     }
+    if a.stages == "defeature" {
+        if !ryucad.modes || !ryucad.takes_blends() {
+            fail(format!(
+                "{} has no solid imports or no `blends`: it can't run --stages defeature",
+                a.ryucad.display()
+            ));
+        }
+        ryucad.defeature = true;
+    }
+
     std::fs::create_dir_all(&a.out).unwrap_or_else(|e| fail(format!("{}: {e}", a.out.display())));
     std::fs::create_dir_all(&work).unwrap_or_else(|e| fail(format!("{}: {e}", work.display())));
     let version = match ryucad.call(&work, &work, "version", &["version"]).ended {
