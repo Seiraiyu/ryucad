@@ -131,6 +131,15 @@ impl Follow {
             // Every piece of a split face goes, and each piece of a split
             // seed finds the same feature.
             Feature::DeleteFace(_) => matches!(r, "faces.#" | "seeds.#").then_some(All),
+            // Every piece of a split blend face goes, or is resized, as a
+            // deleted face's pieces do; a chamfer's support is the one
+            // face the kernel takes, as `Chamfer`'s is.
+            Feature::DeleteBlend(_) => (r == "faces.#").then_some(All),
+            Feature::ResizeBlend(_) => match r {
+                "groups.#.faces.#" => Some(All),
+                "groups.#.face" => Some(One),
+                _ => None,
+            },
             Feature::Draft(_) => match r {
                 "faces.#" | "groups.#.faces.#" | "parting.#" => Some(All),
                 // Matched against the faces as written, never resolved.
