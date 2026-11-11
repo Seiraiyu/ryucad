@@ -1577,8 +1577,8 @@ fn parts_report(
 fn transfer_of(opened: &Opened, path: &str, plan: &[Planned], parts: &[Value]) -> Value {
     use crate::doc::files::Feature;
     let mut read = ryustep::census::Read {
-        roots: Vec::new(),
         product_tree: !plan.is_empty(),
+        ..Default::default()
     };
     let mut failed = Vec::new();
     for (pl, p) in plan.iter().zip(parts) {

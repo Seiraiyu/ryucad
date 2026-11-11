@@ -32,6 +32,7 @@ fuzz_target!(|data: &[u8]| {
     let census_read = ryustep::census::Read {
         roots: e.ids().iter().copied().take(16).collect(),
         product_tree: true,
+        instances: e.ids().iter().copied().skip(16).take(8).collect(),
     };
     let failed: Vec<ryustep::census::Failed> = e
         .ids()
