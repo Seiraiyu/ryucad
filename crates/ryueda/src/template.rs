@@ -229,12 +229,216 @@ pub fn template(name: &str, class: Class, pins: &[PinSpec], st: &Standards) -> R
     Ok(s)
 }
 
-/// Task 8 replaces this with the boxes.
-fn boxed(class: Class, _pins: &[PinSpec], _st: &Standards) -> Result<Symbol> {
-    Err(Error::new(
-        Code::InvalidParam,
-        format!("no {} template yet", class.as_str()),
-    ))
+/// Whether a pin's name is drawn: not empty, `~`, its number or KiCad's
+/// `Pin_<n>` (as `schem` decides).
+fn shown(s: &PinSpec) -> bool {
+    !(s.name.is_empty()
+        || s.name == "~"
+        || s.name == s.number
+        || s.name == format!("Pin_{}", s.number))
+}
+
+/// The pins given, checked: some, each numbered once, as pins are.
+fn checked(pins: &[PinSpec]) -> Result<()> {
+    if pins.is_empty() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a box template places the pins given; give some",
+        )
+        .with("param", "pins"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for (i, p) in pins.iter().enumerate() {
+        if !crate::symbol::pin_number_ok(&p.number) {
+            return Err(Error::new(Code::InvalidParam, format!("pin number {:?} has white space, a control character or /, or is longer than 32", p.number))
+                .with("pointer", format!("/pins/{i}/number")));
+        }
+        if !seen.insert(p.number.as_str()) {
+            return Err(Error::new(
+                Code::DuplicateId,
+                format!("pin {} is given twice", p.number),
+            )
+            .with("pointer", format!("/pins/{i}/number")));
+        }
+    }
+    Ok(())
+}
+
+/// A box: the pins given placed by `class`'s side rules (a role's side;
+/// the rest, a group's pins together and a numbered group in order, each
+/// run to the shorter of left and right), left and right rows two grid
+/// steps apart from the top, top and bottom pins four apart about the
+/// middle, the body grown until every name fits with the margin. A
+/// connector is one column on the left, in the order given.
+fn boxed(class: Class, pins: &[PinSpec], st: &Standards) -> Result<Symbol> {
+    checked(pins)?;
+    let g = st.grid_nm;
+    let p = 2 * g;
+    let len = st.pin_length_nm;
+    let m = st.body_margin_nm;
+    // Up to the next multiple of `p` (a step of two grid squares).
+    let up = |v: i64| (v + p - 1).div_euclid(p) * p;
+    let width = |s: &PinSpec| {
+        if shown(s) {
+            ryusch::font::width(&s.name, st.pin_name_size_nm)
+        } else {
+            0
+        }
+    };
+    let widest = |l: &[&PinSpec]| l.iter().map(|s| width(s)).max().unwrap_or(0);
+    let name_of = |s: &PinSpec| {
+        if s.name.is_empty() {
+            "~".to_owned()
+        } else {
+            s.name.clone()
+        }
+    };
+    let mut out = BTreeMap::new();
+    if class == Class::Connector {
+        let all: Vec<&PinSpec> = pins.iter().collect();
+        let right = -g + up(g / 2 + widest(&all) + m).max(p);
+        for (i, s) in pins.iter().enumerate() {
+            out.insert(
+                s.number.clone(),
+                pin(
+                    &name_of(s),
+                    [-g - len, -p * i as i64],
+                    Side::Left,
+                    len,
+                    s.ty,
+                ),
+            );
+        }
+        let n = pins.len() as i64;
+        return Ok(Symbol {
+            name: String::new(),
+            units: 1,
+            class: Some(class),
+            pins: out,
+            graphics: numbered(vec![Graphic::Rect {
+                start: [-g, g],
+                end: [right, -p * n + g],
+                fill: Fill::Body,
+                unit: None,
+            }]),
+        });
+    }
+    let rule = st.rule(class);
+    let (mut left, mut right, mut top, mut bottom): (
+        Vec<&PinSpec>,
+        Vec<&PinSpec>,
+        Vec<&PinSpec>,
+        Vec<&PinSpec>,
+    ) = Default::default();
+    let mut free = Vec::new();
+    for s in pins {
+        match st
+            .role(&s.name, s.ty)
+            .and_then(|r| rule.sides.get(&r).copied())
+        {
+            Some(Side::Left) => left.push(s),
+            Some(Side::Right) => right.push(s),
+            Some(Side::Up) => top.push(s),
+            Some(Side::Down) => bottom.push(s),
+            None => free.push(s),
+        }
+    }
+    // The free pins in runs: a group's pins where its first stands, in
+    // number order for a numbered group; every other pin a run of one.
+    let mut runs: Vec<Vec<&PinSpec>> = Vec::new();
+    let mut run_of: BTreeMap<String, usize> = BTreeMap::new();
+    for s in free {
+        match rule.groups.then(|| st.group_of(&s.name)).flatten() {
+            Some((group, _)) => match run_of.get(group) {
+                Some(&i) => runs[i].push(s),
+                None => {
+                    run_of.insert(group.to_owned(), runs.len());
+                    runs.push(vec![s]);
+                }
+            },
+            None => runs.push(vec![s]),
+        }
+    }
+    for mut run in runs {
+        run.sort_by_key(|s| st.group_of(&s.name).and_then(|(_, n)| n));
+        if right.len() < left.len() {
+            right.extend(run);
+        } else {
+            left.extend(run);
+        }
+    }
+    // Room for the names reading in from the top and bottom, past the
+    // margin; wide enough for a left and a right name apart by twice it.
+    let room = |l: &[&PinSpec]| {
+        if l.is_empty() {
+            0
+        } else {
+            up(widest(l) + g + m).max(p)
+        }
+    };
+    let (top_room, bottom_room) = (room(&top), room(&bottom));
+    let rows = left.len().max(right.len()).max(1) as i64;
+    let h = up(p * (rows + 1) + top_room + bottom_room);
+    let across = |n: usize| 2 * p * (n.max(1) as i64 - 1) + 2 * p;
+    let w = [
+        4 * p,
+        up(widest(&left) + widest(&right) + g + (2 * m).max(g)),
+        across(top.len()),
+        across(bottom.len()),
+    ]
+    .into_iter()
+    .max()
+    .expect("four widths");
+    let (half_w, half_h) = (up(w / 2), up(h / 2));
+    let first = (half_h - p - top_room).div_euclid(p) * p;
+    for (i, s) in left.iter().enumerate() {
+        out.insert(
+            s.number.clone(),
+            pin(
+                &name_of(s),
+                [-half_w - len, first - p * i as i64],
+                Side::Left,
+                len,
+                s.ty,
+            ),
+        );
+    }
+    for (i, s) in right.iter().enumerate() {
+        out.insert(
+            s.number.clone(),
+            pin(
+                &name_of(s),
+                [half_w + len, first - p * i as i64],
+                Side::Right,
+                len,
+                s.ty,
+            ),
+        );
+    }
+    for (list, y, side) in [
+        (&top, half_h + len, Side::Up),
+        (&bottom, -half_h - len, Side::Down),
+    ] {
+        let start = -p * (list.len() as i64 - 1);
+        for (i, s) in list.iter().enumerate() {
+            out.insert(
+                s.number.clone(),
+                pin(&name_of(s), [start + 2 * p * i as i64, y], side, len, s.ty),
+            );
+        }
+    }
+    Ok(Symbol {
+        name: String::new(),
+        units: 1,
+        class: Some(class),
+        pins: out,
+        graphics: numbered(vec![Graphic::Rect {
+            start: [-half_w, half_h],
+            end: [half_w, -half_h],
+            fill: Fill::Body,
+            unit: None,
+        }]),
+    })
 }
 
 #[cfg(test)]
@@ -329,5 +533,126 @@ mod tests {
         );
         assert!(resistor_body(Shapes::Ansi, [0, 0], [1, 1]).is_none());
         assert!(resistor_body(Shapes::Ansi, [0, 0], [0, 0]).is_none());
+    }
+
+    fn spec(number: &str, name: &str, ty: PinType) -> PinSpec {
+        PinSpec {
+            number: number.into(),
+            name: name.into(),
+            ty,
+        }
+    }
+
+    /// An MCU's pins in a muddled order: power, ground, GPIOs out of
+    /// order, I2C, an input and an output.
+    fn mcu() -> Vec<PinSpec> {
+        let mut v = vec![
+            spec("1", "GPIO3", PinType::Bidirectional),
+            spec("2", "VDD", PinType::PowerIn),
+            spec("3", "SDA", PinType::Bidirectional),
+            spec("4", "GPIO1", PinType::Bidirectional),
+            spec("5", "GND", PinType::PowerIn),
+            spec("6", "EN", PinType::Input),
+            spec("7", "TX", PinType::Output),
+            spec("8", "GPIO2", PinType::Bidirectional),
+            spec("9", "SCL", PinType::Bidirectional),
+            spec("10", "IOVDD", PinType::PowerIn),
+            spec("11", "AGND", PinType::PowerIn),
+        ];
+        v.push(spec("12", "GPIO0", PinType::Bidirectional));
+        v
+    }
+
+    #[test]
+    fn an_ics_pins_stand_by_role_and_group_on_the_grid() {
+        let st = Standards::default();
+        let s = template("MCU", Class::Ic, &mcu(), &st).unwrap();
+        assert!(s.check().is_empty(), "{:?}", s.check());
+        let side = |n: &str| s.pins[n].side;
+        assert_eq!((side("2"), side("10")), (Side::Up, Side::Up));
+        assert_eq!((side("5"), side("11")), (Side::Down, Side::Down));
+        assert_eq!(side("6"), Side::Left);
+        assert_eq!(side("7"), Side::Right);
+        // The GPIOs stand together, in number order down their side.
+        let gpio: Vec<&Pin> = ["12", "4", "8", "1"].iter().map(|n| &s.pins[*n]).collect();
+        assert!(gpio.iter().all(|p| p.side == gpio[0].side));
+        assert!(
+            gpio.windows(2)
+                .all(|w| w[0].at[1] - w[1].at[1] == 2 * st.grid_nm)
+        );
+        // So do SDA and SCL.
+        assert_eq!(side("3"), side("9"));
+        assert_eq!(
+            (s.pins["3"].at[1] - s.pins["9"].at[1]).abs(),
+            2 * st.grid_nm
+        );
+        for p in s.pins.values() {
+            assert_eq!(p.at[0] % st.grid_nm, 0);
+            assert_eq!(p.at[1] % st.grid_nm, 0);
+            assert_eq!(p.length_nm, st.pin_length_nm);
+        }
+        // One body, filled.
+        assert!(matches!(
+            s.graphics.values().collect::<Vec<_>>().as_slice(),
+            [Graphic::Rect {
+                fill: Fill::Body,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn a_regulators_supply_runs_left_to_right_and_a_connector_is_one_column() {
+        let st = Standards::default();
+        let reg = template(
+            "LDO",
+            Class::Regulator,
+            &[
+                spec("1", "VIN", PinType::PowerIn),
+                spec("2", "GND", PinType::PowerIn),
+                spec("3", "VOUT", PinType::PowerOut),
+                spec("4", "EN", PinType::Input),
+            ],
+            &st,
+        )
+        .unwrap();
+        let side = |n: &str| reg.pins[n].side;
+        assert_eq!(
+            [side("1"), side("2"), side("3"), side("4")],
+            [Side::Left, Side::Down, Side::Right, Side::Left]
+        );
+        let j = template(
+            "J",
+            Class::Connector,
+            &[
+                spec("1", "~", PinType::Passive),
+                spec("2", "~", PinType::Passive),
+                spec("3", "~", PinType::Passive),
+            ],
+            &st,
+        )
+        .unwrap();
+        assert!(j.check().is_empty());
+        let ys: Vec<i64> = ["1", "2", "3"].iter().map(|n| j.pins[*n].at[1]).collect();
+        assert_eq!(ys, [0, -2_540_000, -5_080_000]);
+        assert!(
+            j.pins
+                .values()
+                .all(|p| p.side == Side::Left && p.at[0] == -3_810_000)
+        );
+        // Pins are given, numbered once each.
+        assert_eq!(
+            template("U", Class::Ic, &[], &st).unwrap_err().code,
+            Code::InvalidParam
+        );
+        let twice = [
+            spec("1", "A", PinType::Input),
+            spec("1", "B", PinType::Input),
+        ];
+        let e = template("U", Class::Ic, &twice, &st).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["pointer"]),
+            (Code::DuplicateId, &serde_json::json!("/pins/1/number"))
+        );
     }
 }
