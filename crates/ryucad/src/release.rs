@@ -677,8 +677,36 @@ fn approval(a: &ryupdm::history::Approval) -> Value {
     v
 }
 
+/// An official release's `package` in `release.list` (design 436): how
+/// its package tag stands, and the hash it attests.
+fn package_of(repo: &crate::git::Repo, releases: &Releases, path: &str) -> Value {
+    use ryupdm::package::attest::Verdict as V;
+    let v = ryupdm::package::attest::of_release(repo.gix(), releases, repo.prefix(), path, None);
+    let mut out = json!({"tag": v.status()});
+    match &v {
+        V::Attested { attestation, key } => {
+            out["hash"] = json!(attestation.hash);
+            out["key"] = json!(key);
+            out["built_with"] = json!({"ryucad": attestation.built_with.ryucad,
+                                       "commit": attestation.built_with.commit});
+        }
+        V::Invalid(c) => out["clause"] = json!(c.name()),
+        V::Revoked { key, revoked } => {
+            out["key"] = json!(key);
+            out["revoked"] = json!(revoked);
+        }
+        V::Missing => {}
+    }
+    out
+}
+
 /// One record as `release.list` gives it.
-fn listed(entry: &ryupdm::record::Entry, releases: &Releases, has_repo: bool) -> Value {
+fn listed(
+    entry: &ryupdm::record::Entry,
+    releases: &Releases,
+    repo: Option<&crate::git::Repo>,
+) -> Value {
+    let has_repo = repo.is_some();
     let mut v = json!({"part": entry.part, "label": entry.label, "kind": entry.kind.as_str(),
                        "path": entry.path});
     match &entry.record {
@@ -719,6 +747,9 @@ fn listed(entry: &ryupdm::record::Entry, releases: &Releases, has_repo: bool) ->
             }
             if let Some(a) = ruled {
                 v["approval"] = approval(a);
+            }
+            if let (Kind::Release, Some(repo)) = (entry.kind, repo) {
+                v["package"] = package_of(repo, releases, &entry.path);
             }
         }
         None => {
@@ -771,7 +802,7 @@ pub fn list(session: &mut Session, part: Option<&str>) -> Result<Value> {
             .partition(|e| upstream(e));
         let show = |l: Vec<&ryupdm::record::Entry>| {
             l.into_iter()
-                .map(|e| listed(e, &releases, repo.is_some()))
+                .map(|e| listed(e, &releases, repo.as_ref()))
                 .collect()
         };
         (show(a), show(b))

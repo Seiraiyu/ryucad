@@ -945,6 +945,10 @@ enum ReviewCmd {
     /// approval rules, as the service judged it: who approved, who is
     /// still needed, what blocks it. Approve with `gh pr review --approve`.
     Approvals { pr: Option<u64> },
+    /// A release's package on the service (design 436): get it (download and verify it
+    /// against this clone), have it built, or share it.
+    #[command(subcommand)]
+    Package(ReviewPackageCmd),
     /// The repository's approval and release events, from the service's
     /// audit log: JSON, or CSV (`--format csv`, or `--out FILE`).
     Audit {
@@ -961,6 +965,29 @@ enum ReviewCmd {
         /// Write the CSV to this file.
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReviewPackageCmd {
+    /// Download a release's package and verify it against this clone, offline.
+    Get {
+        part: String,
+        label: String,
+        /// The zip to write; <part>-<label>.zip here if left out.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
+    /// Have the service build a release's package that has none, or retry one that hit a
+    /// limit (repo admin).
+    Build { part: String, label: String },
+    /// An expiring link to a release's package for someone without access (repo write).
+    Share {
+        part: String,
+        label: String,
+        /// How long it lasts, 1 to 30 days (7 if left out).
+        #[arg(long)]
+        days: Option<u64>,
     },
 }
 
@@ -1376,6 +1403,8 @@ fn shifted<'a>(
 }
 
 #[derive(Subcommand)]
+// Configure's flags, parsed once per run.
+#[allow(clippy::large_enum_variant)]
 enum PdmCmd {
     /// Give the project its ID and the default settings (keeps any it has).
     Init,
@@ -1421,6 +1450,18 @@ enum PdmCmd {
         /// moving to them).
         #[arg(long, value_name = "none|pr")]
         bump: Option<String>,
+        /// What a release's package holds, comma-separated: bom, dxf, pdf, render, step
+        /// (default: every one but dxf).
+        #[arg(
+            long,
+            value_delimiter = ',',
+            value_name = "FORMATS",
+            conflicts_with = "default_package_formats"
+        )]
+        package_formats: Option<Vec<String>>,
+        /// Back to the default package formats.
+        #[arg(long)]
+        default_package_formats: bool,
         /// Write even if parts' properties stop fitting the settings.
         #[arg(long)]
         force: bool,
@@ -2358,6 +2399,48 @@ enum ReleaseCmd {
         note: Option<String>,
         #[command(flatten)]
         expect: Expect,
+    },
+    /// Build an official release's package (design 436) from its official commit alone: the
+    /// part's STEP, its drawings, an assembly's BOM, an isometric render and the record, with a
+    /// manifest of every file's hash, as one deterministic zip. `release package verify`
+    /// checks one someone was sent.
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+    Package {
+        #[command(subcommand)]
+        cmd: Option<PackageCmd>,
+        #[command(flatten)]
+        args: PackageArgs,
+    },
+}
+
+#[derive(clap::Args)]
+struct PackageArgs {
+    /// The part or assembly.
+    #[arg(required = true)]
+    part: Option<String>,
+    /// The release; the part's latest official one if left out.
+    #[arg(long)]
+    label: Option<String>,
+    /// The zip to write, or a folder (one that exists, or a path ending in /) to write the
+    /// package's files into; <number>-<label>.zip here if left out.
+    #[arg(long, value_name = "FILE.zip|DIR")]
+    out: Option<PathBuf>,
+    /// The formats, comma-separated (bom, dxf, pdf, render, step), instead of the project's
+    /// packages.formats.
+    #[arg(long, value_delimiter = ',')]
+    formats: Option<Vec<String>>,
+}
+
+#[derive(Subcommand)]
+enum PackageCmd {
+    /// Check a package someone was sent against this clone, offline: every file against the
+    /// manifest, the manifest against the release, and the package tag
+    /// ryupdm/<part>/<label>.package when fetched. Fails (exit 1) when it doesn't verify.
+    Verify {
+        file: PathBuf,
+        /// Also build it again and compare the bytes (needs the ryucad that built it).
+        #[arg(long)]
+        rebuild: bool,
     },
 }
 
@@ -4440,6 +4523,8 @@ fn request(cmd: &Command) -> Option<Request> {
             approvals,
             no_approvals,
             bump,
+            package_formats,
+            default_package_formats,
             force,
             expect,
         }) => Request::PdmConfigure {
@@ -4457,6 +4542,11 @@ fn request(cmd: &Command) -> Option<Request> {
                 approvals.clone()
             },
             bump: bump.clone(),
+            package_formats: if *default_package_formats {
+                Some(Vec::new())
+            } else {
+                package_formats.clone()
+            },
             force: *force,
             expected_revision: expect.clone(),
         },
@@ -4479,6 +4569,48 @@ fn request(cmd: &Command) -> Option<Request> {
                 .collect(),
             expected_revision: expect.revision.clone(),
         },
+        Command::Release(ReleaseCmd::Package {
+            cmd: Some(PackageCmd::Verify { file, rebuild }),
+            ..
+        }) => Request::ReleasePackageVerify {
+            file: std::path::absolute(file)
+                .unwrap_or_else(|_| file.clone())
+                .to_string_lossy()
+                .into_owned(),
+            rebuild: *rebuild,
+        },
+        Command::Release(ReleaseCmd::Package {
+            cmd: None,
+            args:
+                PackageArgs {
+                    part,
+                    label,
+                    out,
+                    formats,
+                },
+        }) => {
+            // The daemon's folder isn't the caller's.
+            let abs = |p: &PathBuf| {
+                let a = std::path::absolute(p).unwrap_or_else(|_| p.clone());
+                let mut t = a.to_string_lossy().into_owned();
+                if p.as_os_str().to_string_lossy().ends_with(['/', '\\'])
+                    && !t.ends_with(['/', '\\'])
+                {
+                    t.push('/');
+                }
+                t
+            };
+            Request::ReleasePackage {
+                part: part.clone().unwrap_or_default(),
+                label: label.clone(),
+                into: match out {
+                    None => Some(abs(&PathBuf::from("."))),
+                    Some(_) => None,
+                },
+                out: out.as_ref().map(abs),
+                formats: formats.clone(),
+            }
+        }
         Command::Release(ReleaseCmd::List { part }) => Request::ReleaseList { part: part.clone() },
         Command::Release(ReleaseCmd::Sync) => Request::ReleaseSync {},
         Command::Release(ReleaseCmd::Check { results }) => {
@@ -5329,6 +5461,44 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                 },
                 ReviewCmd::Update { pr } => Action::Update { pr: *pr },
                 ReviewCmd::Approvals { pr } => Action::Approvals { pr: *pr },
+                ReviewCmd::Package(ReviewPackageCmd::Get { part, label, out }) => {
+                    let out = here.join(
+                        out.clone()
+                            .unwrap_or_else(|| PathBuf::from(format!("{part}-{label}.zip"))),
+                    );
+                    let mut got = ryucad::review::run(
+                        &here,
+                        Action::PackageGet {
+                            part: part.clone(),
+                            label: label.clone(),
+                            out: out.clone(),
+                        },
+                    )?;
+                    // Verified here, against this clone, whatever the service said.
+                    let root = find_root(&here)?;
+                    let req = Request::ReleasePackageVerify {
+                        file: out.to_string_lossy().into_owned(),
+                        rebuild: false,
+                    };
+                    let mut slot = None;
+                    let v = server::handle_job(&mut slot, None, None, &root, req, &Job::default())?
+                        .result;
+                    got["verify"] = v;
+                    return Ok(got);
+                }
+                ReviewCmd::Package(ReviewPackageCmd::Build { part, label }) => {
+                    Action::PackageBuild {
+                        part: part.clone(),
+                        label: label.clone(),
+                    }
+                }
+                ReviewCmd::Package(ReviewPackageCmd::Share { part, label, days }) => {
+                    Action::PackageShare {
+                        part: part.clone(),
+                        label: label.clone(),
+                        days: *days,
+                    }
+                }
                 ReviewCmd::Audit {
                     part,
                     since,

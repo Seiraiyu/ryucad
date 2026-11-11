@@ -461,7 +461,7 @@ pub(crate) fn out_path(out: &str, root: &std::path::Path) -> Result<std::path::P
         return Err(Error::new(
             Code::InvalidParam,
             format!(
-                "out {out:?} is the project's own {rel}: an export never writes over a project's files (write it elsewhere)"
+                "out \"{out}\" is the project's own {rel}: an export never writes over a project's files (write it elsewhere)"
             ),
         )
         .with("param", "out")

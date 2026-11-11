@@ -834,6 +834,10 @@ pub enum Request {
         /// service opens pull requests moving to newer releases.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bump: Option<String>,
+        /// `packages.formats`: what a release's package holds (bom, dxf,
+        /// pdf, render, step); `[]` for the default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        package_formats: Option<Vec<String>>,
         /// Write even if parts' properties stop fitting.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         force: bool,
@@ -947,6 +951,29 @@ pub enum Request {
     ReleaseCheck {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         results: bool,
+    },
+    /// Builds an official release's package (design 436): to `out` (a
+    /// zip, or a folder), into `into` as `<number>-<label>.zip`, or as the
+    /// bytes after the answer.
+    #[serde(rename = "release.package")]
+    ReleasePackage {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        out: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        into: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        formats: Option<Vec<String>>,
+    },
+    /// Judges a package someone was sent (an absolute path) against this
+    /// clone, offline; with `rebuild` built again and compared.
+    #[serde(rename = "release.package.verify")]
+    ReleasePackageVerify {
+        file: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        rebuild: bool,
     },
     /// Creates the local tag of every official release that has none, and
     /// moves those that point elsewhere. Logged, not undoable.
@@ -2470,8 +2497,20 @@ mod tests {
                 properties: [("finish".to_owned(), Value::Null)].into_iter().collect(),
                 approvals: Some(json!(false)),
                 bump: Some("pr".into()),
+                package_formats: Some(vec!["dxf".into(), "step".into()]),
                 force: true,
                 expected_revision: None,
+            },
+            Request::ReleasePackage {
+                part: "p".into(),
+                label: Some("B".into()),
+                out: None,
+                into: Some("/tmp/out".into()),
+                formats: Some(vec!["step".into()]),
+            },
+            Request::ReleasePackageVerify {
+                file: "/tmp/out/100-B.zip".into(),
+                rebuild: true,
             },
             Request::PropsSet {
                 part: "p".into(),
