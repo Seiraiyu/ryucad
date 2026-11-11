@@ -1801,13 +1801,72 @@ fn look_in<'a>(
         .unwrap_or(plain)
 }
 
-/// Task 20 adds each occurrence's override; until then, none.
+/// Each occurrence of the scene's root whose solid is drawn otherwise
+/// than its product draws it (the root's looks, by
+/// `<path>/<key>`): an override on that body in its usages; each face
+/// drawn otherwise than a reader composes it (the product's face style,
+/// else the occurrence's) is omitted.
 fn occurrence_paints(
-    _scene: &Scene,
-    _looks: &BTreeMap<Id, BTreeMap<String, crate::appearance::SolidLook>>,
-    _out: &mut ryustep::Paints,
-    _un: &mut Unpainted,
+    scene: &Scene,
+    looks: &BTreeMap<Id, BTreeMap<String, crate::appearance::SolidLook>>,
+    out: &mut ryustep::Paints,
+    un: &mut Unpainted,
 ) {
+    let Some(root_looks) = scene.products.first().and_then(|r| looks.get(&r.part)) else {
+        return;
+    };
+    let plain = crate::appearance::SolidLook::default();
+    let mut stack: Vec<(usize, Vec<(usize, usize)>, Vec<Id>)> = vec![(0, Vec::new(), Vec::new())];
+    while let Some((k, path, steps)) = stack.pop() {
+        for (n, c) in scene.products[k].children.iter().enumerate() {
+            let mut path = path.clone();
+            path.push((k, n));
+            let mut steps = steps.clone();
+            steps.extend(c.steps.iter().cloned());
+            let child = &scene.products[c.product];
+            let foreign = matches!(child.rev, Rev::Foreign { .. });
+            let mut body = 0;
+            for sol in &child.solids {
+                if sol.built.reference {
+                    continue;
+                }
+                let j = body;
+                body += 1;
+                let key = format!("{}/{}", crate::assembly::path_text(&steps), sol.key);
+                let Some(actual) = root_looks.get(&key) else {
+                    continue;
+                };
+                let written = if foreign {
+                    &plain
+                } else {
+                    look_in(looks, &plain, scene, c.product, sol)
+                };
+                let over = !alike(&actual.base, &written.base);
+                if over {
+                    match paint(&actual.base) {
+                        Some(pt) => out.occurrences.push(ryustep::OccurrencePaint {
+                            path: path.clone(),
+                            body: j,
+                            paint: pt,
+                        }),
+                        None => un.uncoloured += 1,
+                    }
+                }
+                let names: BTreeSet<&String> =
+                    actual.faces.keys().chain(written.faces.keys()).collect();
+                for name in names {
+                    let under = if over { &actual.base } else { &written.base };
+                    let reader = written.faces.get(name).unwrap_or(under);
+                    if !alike(actual.face(name), reader) {
+                        un.occurrence_faces += 1;
+                    }
+                }
+            }
+            stack.push((c.product, path, steps));
+        }
+    }
+    out.occurrences
+        .sort_by(|a, b| (&a.path, a.body).cmp(&(&b.path, b.body)));
 }
 
 /// What a STEP export wrote and left out (design 448): `written`, the
@@ -3649,5 +3708,73 @@ pub(crate) mod tests {
             .collect();
         assert!(written.contains(&"appearance"), "{written:?}");
         assert!(v.get("warnings").is_none(), "{v}");
+    }
+
+    /// An occurrence drawn otherwise than its part is an override in its
+    /// usages; a face drawn otherwise only in an assembly is omitted.
+    #[test]
+    fn occurrences_drawn_otherwise_are_overrides() {
+        let (_dir, mut s) = crate::appearance::tests::project();
+        let set = |s: &mut Session, e: &str, v: Value| {
+            let mut v = v;
+            v["entities"] = json!([e]);
+            call(s, "appearance.set", v).unwrap();
+        };
+        set(&mut s, "bolt", json!({"colour": "#101010"}));
+        set(&mut s, "pair/left", json!({"colour": "#202020", "opacity": 0.5}));
+        set(&mut s, "frame/p1", json!({"colour": "#303030"}));
+        set(&mut s, "frame/p2/right/shank", json!({"opacity": 0.25}));
+        let (v, bytes) = exported(
+            &mut s,
+            json!({"part": "frame", "time_stamp": "2026-11-11T00:00:00"}),
+        )
+        .unwrap();
+        let o = ryustep::open(&bytes).unwrap();
+        let defs = &o.products.definitions;
+        let bolt = o
+            .held
+            .iter()
+            .position(|h| h.definition.is_some_and(|d| &*defs[d].product_id == "bolt"))
+            .unwrap();
+        assert_eq!(o.body_styles(bolt).body.unwrap().colour, Some([0x10; 3]));
+        // Each occurrence by its usages' ids, outermost first.
+        let mut got: Vec<(Vec<String>, Option<[u8; 3]>, Option<f64>)> = o
+            .occurrence_styles()
+            .iter()
+            .map(|x| {
+                let ids = x
+                    .path
+                    .iter()
+                    .map(|&(k, n)| defs[k].children[n].id.to_string())
+                    .collect();
+                (ids, x.style.colour, x.style.opacity)
+            })
+            .collect();
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            got,
+            [
+                (vec!["p1".into(), "left".into()], Some([0x30; 3]), Some(0.5)),
+                (vec!["p1".into(), "right".into()], Some([0x30; 3]), None),
+                (vec!["p2".into(), "left".into()], Some([0x20; 3]), Some(0.5)),
+                (vec!["p2".into(), "right".into()], Some([0x10; 3]), Some(0.25)),
+            ]
+        );
+        assert!(v.get("warnings").is_none(), "{v}");
+        // A face of the bolt coloured in the bolt: in an occurrence drawn
+        // otherwise, that face can't be said per occurrence.
+        let face = crate::appearance::tests::face_names(&mut s, "bolt", "shank")[0].clone();
+        set(&mut s, &format!("bolt/shank/{face}"), json!({"colour": "#0000ff"}));
+        let (v, _) = exported(&mut s, json!({"part": "frame"})).unwrap();
+        let omitted = v["transfer"]["omitted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["what"] == "appearance")
+            .cloned()
+            .unwrap_or_else(|| panic!("{v}"));
+        assert_eq!(omitted["count"], 4, "{omitted}");
+        let w = v["warnings"].as_array().unwrap();
+        assert!(w.iter().any(|w| w["code"] == "export_metadata_omitted" && w["what"] == "appearance"));
     }
 }
