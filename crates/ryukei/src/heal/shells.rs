@@ -72,6 +72,10 @@ struct Shell {
 /// Meshes made before a sign is uncertain.
 const ROUNDS: usize = 5;
 
+/// The most points of its mesh a shell with no vertices is judged by in
+/// [`enclosing`].
+const MESH_POINTS: usize = 512;
+
 /// The most triangles a mesh for a sign may have.
 const BUDGET: u64 = 4_000_000;
 
@@ -278,8 +282,14 @@ fn enclosing(
     for i in 0..n {
         let mut points = shell_points(body, &shells[i].faces);
         if points.is_empty() {
-            // A sphere or torus with no loops: a point of its mesh.
-            points.extend(triangles[i].tris.first().map(|t| t[0]));
+            // A sphere or torus with no loops: points spread over its
+            // mesh. One alone decided a shell crossing another by which
+            // side it fell on (a ball through a block's top was cut out
+            // as a cavity, v0.9.0-pre.1's gate); several fall both sides,
+            // so such a pair is `ShellsCross`, as shells with vertices are.
+            let tris = &triangles[i].tris;
+            let stride = tris.len().div_ceil(MESH_POINTS).max(1);
+            points.extend(tris.iter().step_by(stride).map(|t| t[0]));
         }
         for j in 0..n {
             if i == j || !shells[j].bounds.intersects(&shells[i].bounds) {
