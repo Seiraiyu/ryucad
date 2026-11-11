@@ -486,3 +486,169 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
         }
     }
 }
+
+/// Where `scripts/fetch-corpus.sh` keeps the pinned corpus.
+fn pinned_dir() -> PathBuf {
+    match std::env::var_os("RYUCAD_CORPUS") {
+        Some(d) => PathBuf::from(d),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/corpus"),
+    }
+}
+
+/// Each `heals` line of `pinned.txt`: the file's path in the cache.
+fn pinned_files() -> Vec<String> {
+    let listed = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/pinned.txt"),
+    )
+    .unwrap();
+    listed
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("heals "))
+        .map(|rest| rest.split_once(' ').unwrap().1.to_string())
+        .collect()
+}
+
+/// The bodies a pinned file heals with tightening on, each once (a second
+/// representation of the same solid is defeatured once).
+fn pinned_bodies(name: &str) -> Vec<(u64, Body)> {
+    let path = pinned_dir().join(name);
+    let Ok(bytes) = std::fs::read(&path) else {
+        panic!("{} is missing: run scripts/fetch-corpus.sh", path.display());
+    };
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    let options = ReadOptions {
+        key: OpKey(7),
+        heal: ryukei::heal::HealOptions {
+            tighten: true,
+            ..Default::default()
+        },
+    };
+    for b in read(&bytes, &options).unwrap().bodies {
+        if let Ok((body, _, _)) = b.result {
+            let dump = body.dump_unnamed();
+            if !seen.contains(&dump) {
+                seen.push(dump);
+                out.push((b.representation, body));
+            }
+        }
+    }
+    out
+}
+
+/// The faults' faces by name, each pair in name order.
+fn named(body: &Body, faults: &[ryukei::check::Fault]) -> Vec<(String, String)> {
+    use ryukei::check::Fault;
+    let name = |f: ryukei::topo::FaceId| body.face(f).unwrap().name.to_u128();
+    let mut out: Vec<(String, String)> = faults
+        .iter()
+        .map(|f| {
+            let (kind, a, b) = match *f {
+                Fault::CannotCheck { a, b } => ("cannot_check", a, b),
+                Fault::FacesCross { a, b } => ("faces_cross", a, b),
+                Fault::FacesOverlap { a, b } => ("faces_overlap", a, b),
+                ref f => return (format!("{f:?}"), String::new()),
+            };
+            let (a, b) = (name(a), name(b));
+            (
+                kind.to_string(),
+                format!("{:032x} {:032x}", a.min(b), a.max(b)),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Every body the pinned corpus heals (tightening on), defeatured on one
+/// thread under the deadline (design 399, plans 13.D and 16.C): its
+/// recognised blends no larger than 2 mm deleted. Each result checks
+/// clean (`check` and `check_intersections`), or is a typed refusal
+/// (`InvalidTweak`) or past the deadline, printed with the time it took.
+/// The design records the pinned editions and doesn't hold them to the
+/// bar, so only soundness is asserted. One narrowing of "checks clean":
+/// a `CannotCheck` pair the body already had before the delete, by its
+/// faces' names, may stay (NIST CTC 02's AP242 edition, #264). That
+/// uncertainty is the import's, not the delete's; a crossing, an
+/// overlap, or a pair that could be checked before still fails. Moved
+/// from ryukei-bench, where it needed the `occt` feature though it uses
+/// no OCCT. Run after `scripts/fetch-corpus.sh`.
+#[test]
+#[ignore = "needs scripts/fetch-corpus.sh: run with --ignored"]
+fn pinned_bodies_defeature() {
+    let spec = DeleteBlends {
+        max_size: Some(MAX_SIZE),
+        faces: Vec::new(),
+        options: RecogniseOptions::default(),
+    };
+    let (mut defeatured, mut refused, mut none, mut slow) = (0, 0, 0, 0);
+    let start = Instant::now();
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    for name in pinned_files() {
+        for (rep, body) in pinned_bodies(&name) {
+            let t = Instant::now();
+            let blends = match small_blends(&body) {
+                Ok(n) => n,
+                Err(Error::InvalidTweak(e)) => {
+                    println!("{name} #{rep}: recognition refused {e:?}");
+                    refused += 1;
+                    continue;
+                }
+                Err(e) => panic!("{name} #{rep}: {e:?}"),
+            };
+            if blends == 0 {
+                none += 1;
+                continue;
+            }
+            match one
+                .install(|| within_deadline(|w| delete_blends_with(OpKey(0x13d), &body, &spec, w)))
+            {
+                Ok((o, _)) => {
+                    assert_eq!(check(&o), [], "{name} #{rep}");
+                    // Pairs the body couldn't be checked at before the
+                    // delete may stay unchecked (#264); anything else is
+                    // the delete's.
+                    let after = named(&o, &check_intersections(&o));
+                    if !after.is_empty() {
+                        let before = named(&body, &check_intersections(&body));
+                        let new: Vec<_> = after
+                            .iter()
+                            .filter(|f| f.0 != "cannot_check" || !before.contains(f))
+                            .collect();
+                        assert!(new.is_empty(), "{name} #{rep}: {new:?}");
+                        println!("{name} #{rep}: unchecked as before: {after:?}");
+                    }
+                    println!(
+                        "{name} #{rep}: {blends} blends deleted, {} faces to {} in {:.2} s",
+                        body.counts().faces,
+                        o.counts().faces,
+                        t.elapsed().as_secs_f64()
+                    );
+                    defeatured += 1;
+                }
+                Err(Error::InvalidTweak(e)) => {
+                    println!(
+                        "{name} #{rep}: {blends} blends, refused {e:?} in {:.2} s",
+                        t.elapsed().as_secs_f64()
+                    );
+                    refused += 1;
+                }
+                Err(Error::Cancelled) => {
+                    println!(
+                        "{name} #{rep}: {blends} blends, past the deadline ({:.2} s)",
+                        t.elapsed().as_secs_f64()
+                    );
+                    slow += 1;
+                }
+                Err(e) => panic!("{name} #{rep}: not a tweak's refusal: {e:?}"),
+            }
+        }
+    }
+    println!(
+        "pinned corpus: {defeatured} defeatured, {refused} refused, {slow} past the deadline, {none} with no blend under 2 mm, in {:.1} s",
+        start.elapsed().as_secs_f64()
+    );
+}
