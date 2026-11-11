@@ -66,6 +66,12 @@ pub enum Outcome {
     Found {
         codes: Vec<String>,
     },
+    /// ryucad refused, typed, where the kernel is expected to do better
+    /// one day (`defeature`'s `tweak_failed` or `edit_budget_exceeded`):
+    /// counted against the ledger's `count` lines, never a finding.
+    Refused {
+        error: Value,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

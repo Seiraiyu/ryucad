@@ -1618,3 +1618,108 @@ fn a_rounded_box_through_step_is_defeatured() {
         near(volume(&mut s, "d", &imp), 40.0 * 30.0 * 20.0, 1e-6);
     }
 }
+
+/// The committed NIST corpus (ryustep's `tests/corpus`), each file
+/// imported as solids, each solid's blends at most 2 mm deleted under the
+/// default edit budget: every outcome is a body that passes the kernel's
+/// checks, or a typed refusal (`tweak_failed` but for `kernel`, or
+/// `edit_budget_exceeded`), never a panic or an untyped error. Prints the
+/// counts for the area doc and the spent units for the budget (Task 23).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: edits run to the edit budget"
+)]
+fn the_committed_corpus_defeatures_or_refuses_typed() {
+    let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/corpus");
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&corpus)
+        .unwrap()
+        .filter_map(|e| {
+            let p = e.ok()?.path();
+            (p.extension()? == "stp").then_some(p)
+        })
+        .collect();
+    files.sort();
+    assert_eq!(files.len(), 10, "the committed corpus: {files:?}");
+    let (mut built_n, mut none) = (0usize, 0usize);
+    let mut refused: std::collections::BTreeMap<String, usize> = Default::default();
+    for f in &files {
+        let dir = tempfile::tempdir().unwrap();
+        ryucad::server::init(dir.path(), None).unwrap();
+        let mut s = Session::open(dir.path()).unwrap();
+        let v = must(
+            &mut s,
+            "import",
+            json!({"path": f.to_str().unwrap(), "solid": true}),
+        );
+        for part in v["parts"].as_array().unwrap() {
+            if part["kind"] != "part" {
+                continue;
+            }
+            let pid = part["part"].as_str().unwrap().to_owned();
+            let bodies = must(&mut s, "inspect", json!({"part": pid}))["bodies"].clone();
+            for (k, b) in bodies.as_array().into_iter().flatten().enumerate() {
+                let solid = b["solid"].as_str().unwrap().to_owned();
+                let listed = must(
+                    &mut s,
+                    "blends.get",
+                    json!({"part": pid, "solid": solid, "below": "2 mm"}),
+                );
+                if listed["blends"].as_array().is_none_or(Vec::is_empty) {
+                    none += 1;
+                    continue;
+                }
+                let id = format!("defeature{k}");
+                must(
+                    &mut s,
+                    "feature.add",
+                    json!({"part": pid, "type": "delete_blend",
+                    "id": id, "target": solid, "below": "2 mm"}),
+                );
+                let p = Id::parse(&pid, "part").unwrap();
+                let r = s.rebuilt(&p).unwrap();
+                let (_, out) = r.features.iter().find(|(i, _)| i.as_str() == id).unwrap();
+                match out {
+                    Ok(o) => {
+                        for (_, b) in o.solids() {
+                            assert!(
+                                ryukei::check::check(&b.body).is_empty(),
+                                "{f:?} {pid}/{solid}"
+                            );
+                            assert_eq!(
+                                ryukei::check::check_intersections(&b.body),
+                                [],
+                                "{f:?} {pid}/{solid}"
+                            );
+                        }
+                        if let ryucad::rebuild::Output::Solids(m) = o
+                            && let Some(rep) = &m.report
+                        {
+                            println!(
+                                "edit spent corpus {}/{pid}/{solid}: {}",
+                                f.display(),
+                                rep["spent"]
+                            );
+                        }
+                        built_n += 1;
+                    }
+                    Err(e) => {
+                        let reason = match e.code {
+                            Code::TweakFailed => {
+                                e.details["reason"].as_str().unwrap_or("").to_owned()
+                            }
+                            Code::EditBudgetExceeded => "edit_budget_exceeded".to_owned(),
+                            c => panic!("{f:?} {pid}/{solid}: untyped {c:?}: {e}"),
+                        };
+                        assert!(
+                            reason != "kernel" && !reason.is_empty(),
+                            "{f:?} {pid}/{solid}: {e}"
+                        );
+                        *refused.entry(reason).or_default() += 1;
+                    }
+                }
+            }
+        }
+    }
+    println!("corpus defeature: built {built_n}, nothing below 2 mm {none}, refused {refused:?}");
+}
