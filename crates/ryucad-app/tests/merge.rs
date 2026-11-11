@@ -25,9 +25,17 @@ fn the_window_follows_a_merge_and_settles_it() {
     assert!(ws.merge.is_none());
     // Git stops the merge for the conflict; the window hears of it.
     assert!(!p.try_git(&["merge", "--no-edit", "theirs"]));
-    assert!(ws.wait_until(WAIT, |ws| {
+    let heard = ws.wait_until(WAIT, |ws| {
         ws.merge.as_ref().is_some_and(|m| m.conflicts().len() == 1)
-    }));
+    });
+    // Rarely seen in CI and never reproduced: say whether the daemon or
+    // the window is the one behind.
+    assert!(
+        heard,
+        "the window holds {:?}; the daemon answers {}",
+        ws.merge,
+        p.cli(&["merge", "status"])
+    );
     let m = ws.merge.as_ref().unwrap();
     assert_eq!(m.summary(), "merge: 1 conflict");
     let c = m.conflict(CONFLICT).unwrap();
