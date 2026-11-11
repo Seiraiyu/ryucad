@@ -1789,6 +1789,86 @@ pub fn draft_warnings(part: &Id, id: &Id, rep: &Value) -> Vec<Value> {
         .collect()
 }
 
+/// `feature_faces.get`: the faces of the hole, boss or pocket `face` (one
+/// face of a part's solid, `<part>/<solid>/<name>`) belongs to, in the
+/// part as it shows at `rev`. A face of no such feature is `tweak_failed`
+/// `no_feature`, a reference import's `reference_body`.
+pub fn feature_faces_get(
+    session: &mut crate::session::Session,
+    face: &str,
+    rev: Option<&str>,
+) -> Result<Value> {
+    let (commit, s) = session.at(rev)?;
+    let part = crate::entity::EntityRef::parse(face)?.part;
+    if crate::server::part_kind(s.project().part(&part)?) == crate::doc::files::PartKind::Assembly {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("{face}: feature-faces takes a part's face, not an assembly's"),
+        )
+        .with("face", face));
+    }
+    let found = crate::measure::locate(s, face)?;
+    let [l] = found.as_slice() else {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "{face}: feature-faces takes one face of a part's solid, <part>/<solid>/<name>"
+            ),
+        )
+        .with("face", face));
+    };
+    let ryukei::measure::Entity::Face(f) = l.entity else {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "{face} is {} {}, not a face",
+                if l.kind == "edge" { "an" } else { "a" },
+                l.kind
+            ),
+        )
+        .with("face", face)
+        .with("kind", l.kind));
+    };
+    if l.built.reference {
+        return Err(Error::new(
+            Code::ReferenceBody,
+            format!("{face} is a face of a reference import, which nothing edits: convert it to a solid first"),
+        )
+        .with("face", face)
+        .with("hint", format!("ryucad import convert {}/{}", l.part, l.solid)));
+    }
+    let seed = l.built.body.face(f).expect("a live face").name;
+    let names = ryukei::tweak::feature_faces(&l.built.body, seed).map_err(|e| {
+        let r = match &e {
+            ryukei::Error::InvalidTweak(t) => refusal(t),
+            _ => Refusal {
+                reason: "kernel",
+                case: None,
+                message: "the kernel refused it",
+                entities: vec![],
+            },
+        };
+        let mut err = Error::new(Code::TweakFailed, format!("{face}: {} ({e})", r.message))
+            .with("face", face)
+            .with("reason", r.reason)
+            .with("kernel", "tweak")
+            .with("refusal", format!("{e:?}"));
+        if let Some(h) = hint(&r) {
+            err = err.with("hint", h);
+        }
+        err
+    })?;
+    let mut v = json!({
+        "face": face,
+        "solid": format!("{}/{}", l.part, l.solid),
+        "faces": names.iter().map(|n| format!("{}/{}/{n}", l.part, l.solid)).collect::<Vec<_>>(),
+    });
+    if let Some(c) = commit {
+        v["commit"] = json!(c);
+    }
+    Ok(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

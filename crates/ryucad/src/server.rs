@@ -861,6 +861,9 @@ pub(crate) fn dispatch(
         Request::SheetGet { part, solid, rev } => {
             crate::sheet_metal::report::get(session, &part, solid.as_deref(), rev.as_deref())
         }
+        Request::FeatureFacesGet { face, rev } => {
+            crate::tweak::feature_faces_get(session, &face, rev.as_deref())
+        }
         Request::FlatGet {
             part,
             solid,

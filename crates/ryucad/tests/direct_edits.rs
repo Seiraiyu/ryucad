@@ -563,3 +563,33 @@ fn a_through_hole_deleted_by_its_seed_is_capped() {
     let shown = must(&mut s, "feature.show", json!({"part": "p", "id": "d"}));
     assert_eq!(shown["seeds"], json!([bore[0]]), "{shown}");
 }
+
+#[test]
+fn feature_faces_shows_what_a_seed_takes() {
+    let (_dir, mut s) = drilled();
+    let bore = cylinders(&body(&mut s, "h"), "b");
+    let v = must(&mut s, "feature_faces.get", json!({"face": bore[0]}));
+    let mut got: Vec<String> = v["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_owned())
+        .collect();
+    got.sort();
+    let mut want = bore.clone();
+    want.sort();
+    assert_eq!(got, want, "{v}");
+    // A box's side is part of no feature.
+    let side = plane(&body(&mut s, "b"), "b", 0, 1.0, 40.0);
+    let e = call(&mut s, "feature_faces.get", json!({"face": side})).unwrap_err();
+    assert_eq!(
+        (e.code, e.details["reason"].as_str()),
+        (Code::TweakFailed, Some("no_feature")),
+        "{e}"
+    );
+    // An edge isn't a face.
+    let b = body(&mut s, "b");
+    let rim = edge(&b, "b", [0.0, 0.0, 10.0], [40.0, 0.0, 10.0]);
+    let e = call(&mut s, "feature_faces.get", json!({"face": rim})).unwrap_err();
+    assert_eq!(e.code, Code::InvalidParam, "{e}");
+}

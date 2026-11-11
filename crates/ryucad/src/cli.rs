@@ -322,6 +322,13 @@ enum Command {
         #[command(flatten)]
         rev: RevArg,
     },
+    /// The faces of the hole, boss or pocket a face belongs to, as a delete_face
+    /// --seed takes them: <part>/<solid>/<name>.
+    FeatureFaces {
+        face: String,
+        #[command(flatten)]
+        rev: RevArg,
+    },
     /// A solid's flat pattern (the part's one sheet metal solid unless
     /// named): its outline, holes and bend lines with their notes, in
     /// millimetres. A folded solid is unfolded in memory, about --fixed
@@ -4779,6 +4786,10 @@ fn request(cmd: &Command) -> Option<Request> {
         Command::Sheet { part, solid, rev } => Request::SheetGet {
             part: part.clone(),
             solid: solid.clone(),
+            rev: rev.rev.clone(),
+        },
+        Command::FeatureFaces { face, rev } => Request::FeatureFacesGet {
+            face: face.clone(),
             rev: rev.rev.clone(),
         },
         Command::Flat {

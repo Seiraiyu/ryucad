@@ -1133,6 +1133,15 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// The faces of the hole, boss or pocket a face of a part's solid
+    /// belongs to, as a `delete_face` seed takes them: `face` is
+    /// `<part>/<solid>/<name>`, in the part as it shows at `rev`.
+    #[serde(rename = "feature_faces.get")]
+    FeatureFacesGet {
+        face: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     /// A solid's flat pattern, as the part shows it: unfolded whole in
     /// memory when folded (about `fixed`, a side face, each bend at its
     /// override in `bends` else the solid's allowance), else redrawn
