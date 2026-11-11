@@ -46,6 +46,11 @@ pub enum EntryKind {
     /// Git refs a request wrote (`release.sync`'s tags): logged, but not
     /// project files, so never undone.
     Refs,
+    /// A branch switch (ryucad's `branch.switch`, `git switch`): the
+    /// files Git changed, listed as an external change's are. Like Git
+    /// refs, never undone: undo's `undoable` takes only changes and
+    /// redos.
+    Switch,
 }
 
 /// A file's content before or after a change; `None` when it didn't
@@ -94,13 +99,13 @@ pub struct Entry {
     pub undone_by: Option<u64>,
     /// Contents before and after (empty for external entries).
     pub files: Vec<FileChange>,
-    /// For external entries: `(path, created | modified | deleted)`.
+    /// For external and switch entries: `(path, created | modified | deleted)`.
     pub seen: Vec<(String, &'static str)>,
 }
 
 impl Entry {
     pub fn to_json(&self) -> Value {
-        let files: Vec<Value> = if self.kind == EntryKind::External {
+        let files: Vec<Value> = if matches!(self.kind, EntryKind::External | EntryKind::Switch) {
             self.seen
                 .iter()
                 .map(|(p, c)| json!({"path": p, "change": c}))
@@ -360,6 +365,32 @@ pub fn record_external<P: Product>(live: &mut Live<P>, seen: Vec<(String, &'stat
     live.hub.send(P::Topic::ACTIVITY, "activity.appended", &v);
 }
 
+/// Records a branch switch by `who` (`params`: `{from, to}`) with the
+/// files it changed, and tells subscribers. Returns its sequence number.
+pub fn record_switch<P: Product>(
+    live: &mut Live<P>,
+    who: &str,
+    params: Value,
+    seen: Vec<(String, &'static str)>,
+) -> u64 {
+    let participant = live
+        .get(who)
+        .map(|p| json!({"id": p.id, "kind": p.kind, "name": p.name}))
+        .unwrap_or(Value::Null);
+    let e = live.log.append(
+        EntryKind::Switch,
+        participant,
+        "branch.switch",
+        params,
+        None,
+        Vec::new(),
+        seen,
+    );
+    let (seq, v) = (e.seq, e.to_json());
+    live.hub.send(P::Topic::ACTIVITY, "activity.appended", &v);
+    seq
+}
+
 /// How undo reaches a product's project: its files as they are on disk,
 /// which of them list others (written back after them), how a file is
 /// deleted, and reloading after a revert.
@@ -501,6 +532,57 @@ pub fn undo<P: Product>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Undo's view of a project nothing is written to: a switch never
+    /// reaches it.
+    struct Nowhere;
+
+    impl Project for Nowhere {
+        fn root(&self) -> &Path {
+            Path::new("")
+        }
+        fn current(&self) -> Result<Files> {
+            Ok(Files::new())
+        }
+        fn is_index(&self, _: &str) -> bool {
+            false
+        }
+        fn remove(&self, _: &Path) -> Result<()> {
+            Ok(())
+        }
+        fn reload(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_switch_is_logged_with_its_files_and_never_undone() {
+        use crate::live::{Kind, Live};
+        use crate::testing::Test;
+        let mut live = Live::<Test>::new();
+        let me = live.hello(Kind::Agent, Some("claude-1"), None).unwrap();
+        let seq = record_switch(
+            &mut live,
+            &me,
+            json!({"from": "main", "to": "arm"}),
+            vec![("parts/p/features/b.json".to_owned(), "modified")],
+        );
+        let e = live.log.get(seq).unwrap();
+        assert_eq!(e.kind, EntryKind::Switch);
+        let v = e.to_json();
+        assert_eq!(v["kind"], "switch");
+        assert_eq!(v["method"], "branch.switch");
+        assert_eq!(v["params"], json!({"from": "main", "to": "arm"}));
+        assert_eq!(v["participant"]["name"], "claude-1");
+        assert_eq!(
+            v["files"],
+            json!([{"path": "parts/p/features/b.json", "change": "modified"}])
+        );
+        let named = undo(&mut live, &mut Nowhere, &me, Some(seq), false).unwrap_err();
+        assert_eq!(named.code, Code::NothingToUndo);
+        let latest = undo(&mut live, &mut Nowhere, &me, None, false).unwrap_err();
+        assert_eq!(latest.code, Code::NothingToUndo);
+    }
+
     use std::sync::Arc;
 
     fn files(pairs: &[(&str, &str)]) -> Files {
