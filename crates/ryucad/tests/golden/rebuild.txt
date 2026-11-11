@@ -53,7 +53,7 @@ shells f3800f7b9ddd97f4
 sketch_drawing e5f5a6030ce660c2
 solids 155341c221a54a1d
 splits 4c49bc08f2bf98e7
-styles 0028602ab8d10689
+styles 7a586ea64ee48f3f
 surfaces 2a1de81e9282eeca
 sweeps f3625ae39ba522e1
 sweeps_along 18f4200ce0067c4a
