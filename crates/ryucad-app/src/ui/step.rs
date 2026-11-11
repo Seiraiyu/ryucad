@@ -74,6 +74,12 @@ fn plan(ui: &mut egui::Ui, p: &Plan) {
             ui.label(format!("    {v}"));
         }
     }
+    if !p.transfer.is_empty() {
+        ui.label("What the file holds:");
+        for t in &p.transfer {
+            ui.label(format!("    {t}"));
+        }
+    }
     for w in &p.warnings {
         ui.colored_label(ui.visuals().warn_fg_color, w);
     }

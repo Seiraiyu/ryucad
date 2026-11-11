@@ -1089,6 +1089,9 @@ pub(crate) fn dispatch(
                 flatten,
             },
         ),
+        Request::ImportReport { file, detail } => {
+            crate::import::transfer_report(session, &file, detail)
+        }
         Request::ImportConvert {
             part,
             feature,

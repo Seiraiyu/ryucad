@@ -557,6 +557,127 @@ pub fn unreadable(path: &str, e: &StepError) -> Error {
     err
 }
 
+/// `import.report`: the transfer report of `path`, a file the project
+/// holds, from what its import features and imported instances make of
+/// it now (design 448). Each part reading it is rebuilt (side by side);
+/// a feature that builds read its body, one that fails names its
+/// instances.
+pub fn transfer_report(
+    session: &mut crate::session::Session,
+    path: &str,
+    detail: bool,
+) -> Result<Value> {
+    use crate::doc::files::Feature;
+    let Some(file) = session.project().imports.get(path).cloned() else {
+        return Err(Error::new(
+            Code::NotFound,
+            format!("{path} isn't a file the project has imported"),
+        )
+        .with("path", path));
+    };
+    let opened = opened(&file).map_err(|e| unreadable(path, &e))?;
+    let mut read = ryustep::census::Read::default();
+    let mut failed = Vec::new();
+    let mut parts: Vec<Id> = Vec::new();
+    for (id, p) in &session.project().parts {
+        let reads = p.features.values().any(|f| match f {
+            Ok(Feature::Import(i)) => i.file.path == path,
+            Ok(Feature::Instance(i)) => i.import.as_ref().is_some_and(|u| u.file == path),
+            _ => false,
+        });
+        if reads {
+            parts.push(id.clone());
+        }
+    }
+    session.rebuild_parts(&parts)?;
+    for id in &parts {
+        read.product_tree = true;
+        let r = session.rebuilt(id)?.clone();
+        let p = session.project().part(id)?;
+        for (fid, f) in &p.features {
+            let Ok(Feature::Import(i)) = f else {
+                continue;
+            };
+            if i.file.path != path {
+                continue;
+            }
+            match r.features.iter().find(|(x, _)| x == fid).map(|(_, o)| o) {
+                Some(Ok(_)) => {
+                    if let Ok(k) = select(fid, i, &opened) {
+                        read.roots.extend(opened.roots(k));
+                    }
+                }
+                Some(Err(e)) => failed.extend(crate::transfer::failed_instances(&json!(e))),
+                None => {}
+            }
+        }
+    }
+    let t = opened.census.transfer(&read, &failed);
+    Ok(json!({
+        "file": {"path": path, "blake3": file.blake3, "schema": schema_name(opened.schema)},
+        "parts": parts,
+        "transfer": crate::transfer::json(&t, path, detail),
+    }))
+}
+
+/// `import_body_missing` for `path`: with `external` (each file the
+/// file's externally defined products name, the products naming it by
+/// id, else name, and the format the writer gave) and a message saying
+/// the parts are in those files, which this version doesn't read yet
+/// (design 448; plan 24.D reads them). Without any, as before.
+pub fn body_missing(opened: &Opened, path: &str) -> Error {
+    let mut files: BTreeMap<String, (Vec<String>, Option<String>)> = BTreeMap::new();
+    for d in opened
+        .products
+        .definitions
+        .iter()
+        .filter(|d| d.externally_defined())
+    {
+        let product = if d.product_id.is_empty() {
+            d.name.to_string()
+        } else {
+            d.product_id.to_string()
+        };
+        for x in &d.external {
+            let entry = files.entry(x.name.clone()).or_default();
+            if !entry.0.contains(&product) {
+                entry.0.push(product.clone());
+            }
+            if entry.1.is_none() {
+                entry.1 = x.format.clone();
+            }
+        }
+    }
+    let plain = Error::new(
+        Code::ImportBodyMissing,
+        format!("{path} holds no solid to import"),
+    )
+    .with("path", path);
+    if files.is_empty() {
+        return plain;
+    }
+    let external: Vec<Value> = files
+        .iter()
+        .map(|(f, (products, format))| {
+            let mut v = json!({"file": f, "products": products});
+            if let Some(x) = format {
+                v["format"] = json!(x);
+            }
+            v
+        })
+        .collect();
+    let names: Vec<&str> = files.keys().map(String::as_str).collect();
+    Error::new(
+        Code::ImportBodyMissing,
+        format!(
+            "{path} holds no solid to import: its parts are in other files ({}), which ryucad doesn't read yet",
+            names.join(", ")
+        ),
+    )
+    .with("path", path)
+    .with("external", external)
+}
+
 /// `import_failed`: why a body couldn't be read or healed, its reason in
 /// snake case and the STEP instances it names (`#n`), with the names
 /// healing gave those it made. Faces that overlap or shells that cross in
@@ -762,8 +883,6 @@ pub fn free(base: &Id, taken: impl Fn(&str) -> bool) -> Id {
 
 /// `import`: plans every file change and, unless `dry_run`, makes them.
 pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> {
-    use crate::doc::import::FileRef;
-    use crate::doc::project::{IMPORTS, PDM_CONFIG};
     // Its rebuilds heal the file's bodies.
     session.job.phase(ryu_session::job::Phase::Heal);
     if ask.update.is_some() {
@@ -781,6 +900,21 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
     let bytes = std::fs::read(&source).map_err(|e| Error::io(&source, &e))?;
     let file = ImportFile::new(bytes);
     let opened = opened(&file).map_err(|e| unreadable(&ask.path, &e))?;
+    import_opened(session, &ask, root, source, file, &opened)
+        .map_err(|e| refused(e, &opened, &ask.path))
+}
+
+/// [`import`] once the file is read.
+fn import_opened(
+    session: &mut crate::session::Session,
+    ask: &Ask,
+    root: std::path::PathBuf,
+    source: std::path::PathBuf,
+    file: ImportFile,
+    opened: &Opened,
+) -> Result<Value> {
+    use crate::doc::import::FileRef;
+    use crate::doc::project::{IMPORTS, PDM_CONFIG};
     // Where it goes: where the same bytes already are, else a free name.
     let project = session.project();
     let (stored, reused) = match project
@@ -820,7 +954,7 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
                     "give a part to make or one to add to (into), not both",
                 ));
             }
-            vec![into_plan(session, &opened, &file_ref, into, &ask)?]
+            vec![into_plan(session, opened, &file_ref, into, ask)?]
         }
         None => {
             crate::config::check_project_revision(&root, ask.expected.as_deref())?;
@@ -853,7 +987,7 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
             if ask.flatten {
                 vec![
                     plan::Flat {
-                        opened: &opened,
+                        opened,
                         file: &file_ref,
                         stem: &stem,
                         part,
@@ -865,7 +999,7 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
                 ]
             } else {
                 plan::Fresh {
-                    opened: &opened,
+                    opened,
                     file: &file_ref,
                     stem: &stem,
                     part,
@@ -877,7 +1011,7 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
             }
         }
     };
-    let warnings = mapped_warnings(&opened, &ask.path);
+    let warnings = mapped_warnings(opened, &ask.path);
     let mut writes = plan::writes(project, &plan)?;
     if !reused {
         writes.insert(stored.clone(), Some(file.bytes.to_vec()));
@@ -886,8 +1020,9 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
                       "schema": schema_name(opened.schema)});
     if ask.dry_run {
         let mut s = session.proposed(&writes)?;
-        let parts = parts_report(&mut s, &opened, &plan)?;
-        return Ok(answer(head, &opened, parts, warnings, true));
+        let parts = parts_report(&mut s, opened, &plan)?;
+        let transfer = transfer_of(opened, &stored, &plan, &parts);
+        return Ok(answer(head, opened, parts, warnings, true, transfer));
     }
     // PDM names need the project's ID; Git's attributes keep the file's
     // bytes once it is there.
@@ -900,8 +1035,9 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
     plan::apply(&root, &writes)?;
     crate::drivers::write_attributes(&root)?;
     session.reload()?;
-    let parts = parts_report(session, &opened, &plan)?;
-    Ok(answer(head, &opened, parts, warnings, false))
+    let parts = parts_report(session, opened, &plan)?;
+    let transfer = transfer_of(opened, &stored, &plan, &parts);
+    Ok(answer(head, opened, parts, warnings, false, transfer))
 }
 
 /// `import --update <stored> <file>`: `file`'s bytes replace the stored
@@ -911,8 +1047,6 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
 /// features that would build now and won't after, found by rebuilding
 /// the planned files before anything is written.
 pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value> {
-    use crate::doc::import::FileRef;
-    use crate::doc::project::PDM_CONFIG;
     let target = ask.update.clone().expect("an update");
     if ask.part.is_some() || ask.into.is_some() || ask.product.is_some() || ask.flatten {
         return Err(Error::new(
@@ -940,6 +1074,22 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
     let bytes = std::fs::read(&source).map_err(|e| Error::io(&source, &e))?;
     let file = ImportFile::new(bytes);
     let opened = opened(&file).map_err(|e| unreadable(&ask.path, &e))?;
+    reimport_opened(session, &ask, root, target, old, file, &opened)
+        .map_err(|e| refused(e, &opened, &ask.path))
+}
+
+/// [`reimport`] once the file is read.
+fn reimport_opened(
+    session: &mut crate::session::Session,
+    ask: &Ask,
+    root: std::path::PathBuf,
+    target: String,
+    old: ImportFile,
+    file: ImportFile,
+    opened: &Opened,
+) -> Result<Value> {
+    use crate::doc::import::FileRef;
+    use crate::doc::project::PDM_CONFIG;
     let file_ref = FileRef {
         path: target.clone(),
         blake3: file.blake3.clone(),
@@ -955,7 +1105,7 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
         })
     };
     let fresh = plan::Fresh {
-        opened: &opened,
+        opened,
         file: &file_ref,
         stem: &stem,
         part: None,
@@ -963,12 +1113,12 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
         pdm: root.join(PDM_CONFIG).is_file(),
         mode: ask.mode(),
     };
-    let u = update::plan(project, &opened, &file_ref, &fresh)?;
+    let u = update::plan(project, opened, &file_ref, &fresh)?;
     let mut writes = plan::writes(project, &u.planned)?;
     if old.blake3 != file.blake3 {
         writes.insert(target.clone(), Some(file.bytes.to_vec()));
     }
-    let mut warnings = mapped_warnings(&opened, &ask.path);
+    let mut warnings = mapped_warnings(opened, &ask.path);
     warnings.extend(u.warnings.iter().cloned());
     for (a, i) in &u.kept {
         warnings.push(format!(
@@ -1023,8 +1173,12 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
         v
     };
     if ask.dry_run {
-        let parts = parts_report(&mut proposed, &opened, &u.planned)?;
-        return Ok(extra(answer(head, &opened, parts, warnings, true), None));
+        let parts = parts_report(&mut proposed, opened, &u.planned)?;
+        let transfer = transfer_of(opened, &target, &u.planned, &parts);
+        return Ok(extra(
+            answer(head, opened, parts, warnings, true, transfer),
+            None,
+        ));
     }
     // Assemblies kept current until now stay so: the moves this writes
     // are solved again in the same change.
@@ -1045,11 +1199,25 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
     plan::apply(&root, &writes)?;
     session.reload()?;
     let assemblies = crate::mate::keep_current(session, &current)?;
-    let parts = parts_report(session, &opened, &u.planned)?;
+    let parts = parts_report(session, opened, &u.planned)?;
+    let transfer = transfer_of(opened, &target, &u.planned, &parts);
     Ok(extra(
-        answer(head, &opened, parts, warnings, false),
+        answer(head, opened, parts, warnings, false, transfer),
         Some(assemblies),
     ))
+}
+
+/// A refusal once the file is read gains the file's transfer report,
+/// nothing interpreted (design 448). Its code and other details don't
+/// change, so callers that read codes see no change.
+fn refused(e: Error, opened: &Opened, path: &str) -> Error {
+    if e.details.get("transfer").is_some() {
+        return e;
+    }
+    let t = opened
+        .census
+        .transfer(&ryustep::census::Read::default(), &[]);
+    e.with("transfer", crate::transfer::json(&t, path, false))
 }
 
 /// What `import --update` writes when the bytes already at `path` (a
@@ -1221,11 +1389,7 @@ fn into_plan(
         groups.push(None);
     }
     if groups.is_empty() {
-        return Err(Error::new(
-            Code::ImportBodyMissing,
-            format!("{} holds no solid to import", ask.path),
-        )
-        .with("path", &ask.path));
+        return Err(body_missing(opened, &ask.path));
     }
     let pid = crate::server::part_id(into)?;
     let p = session.project().part(&pid)?;
@@ -1405,15 +1569,53 @@ fn parts_report(
     Ok(out)
 }
 
+/// The transfer report of `plan` over `opened` (design 448): each import
+/// feature that built read its body's representation; the product tree
+/// was read when anything was made; each failing feature's error names
+/// its instances (`step`) with its code. `parts` is `parts_report`'s, in
+/// `plan`'s order.
+fn transfer_of(opened: &Opened, path: &str, plan: &[Planned], parts: &[Value]) -> Value {
+    use crate::doc::files::Feature;
+    let mut read = ryustep::census::Read {
+        roots: Vec::new(),
+        product_tree: !plan.is_empty(),
+    };
+    let mut failed = Vec::new();
+    for (pl, p) in plan.iter().zip(parts) {
+        for (fid, f) in &pl.features {
+            let Feature::Import(i) = f else {
+                continue;
+            };
+            let Some(row) = p["features"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|r| r["id"] == fid.as_str())
+            else {
+                continue;
+            };
+            if row["ok"] == true {
+                if let Ok(k) = select(fid, i, opened) {
+                    read.roots.extend(opened.roots(k));
+                }
+            } else {
+                failed.extend(crate::transfer::failed_instances(&row["error"]));
+            }
+        }
+    }
+    crate::transfer::json(&opened.census.transfer(&read, &failed), path, false)
+}
+
 /// The answer: the stored file (`head`), the parts, the file's product
-/// tree faults, and warnings: those given, then each import feature that
-/// doesn't build (`import_failed`).
+/// tree faults, warnings (those given, then each import feature that
+/// doesn't build: `import_failed`) and the transfer report.
 fn answer(
     head: Value,
     opened: &Opened,
     parts: Vec<Value>,
     warnings: Vec<String>,
     dry_run: bool,
+    transfer: Value,
 ) -> Value {
     let failed: Vec<String> = parts
         .iter()
@@ -1453,6 +1655,7 @@ fn answer(
     if !warnings.is_empty() {
         v["warnings"] = json!(warnings);
     }
+    v["transfer"] = transfer;
     v
 }
 
@@ -2143,6 +2346,172 @@ pub(crate) mod tests {
             params["solid"] = json!(true);
         }
         crate::server::tests::call(s, "import", params)
+    }
+
+    /// Every import answer says what it made of the file (design 448):
+    /// a dry run and an import alike, the box's geometry, topology, units
+    /// and product tree interpreted and nothing failed.
+    #[test]
+    fn an_import_reports_its_transfer() {
+        let (_src, path) = outside("box_ap214.stp");
+        let (_dir, mut s) = crate::server::tests::fresh();
+        for dry in [true, false] {
+            let v = import_call(&mut s, json!({"path": path, "dry_run": dry})).unwrap();
+            let t = &v["transfer"];
+            assert_eq!(t["file"], "imports/box_ap214.step", "{t}");
+            let cats: Vec<&str> = t["categories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["category"].as_str().unwrap())
+                .collect();
+            for c in ["geometry", "topology", "product_structure", "units"] {
+                assert!(cats.contains(&c), "{c}: {cats:?}");
+                let line = t["categories"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|x| x["category"] == c)
+                    .unwrap();
+                assert!(line["interpreted"]["count"].as_u64().unwrap() > 0, "{line}");
+                assert_eq!(line["failed"]["count"], 0);
+                assert!(line["interpreted"]["names"].as_array().unwrap().len() <= 8);
+            }
+            let total: u64 = t["categories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| {
+                    ["interpreted", "retained", "unreferenced", "failed"]
+                        .iter()
+                        .map(|b| c[*b]["count"].as_u64().unwrap())
+                        .sum::<u64>()
+                })
+                .sum();
+            assert_eq!(t["instances"], total);
+            assert_eq!(t["summary"].as_array().unwrap().len(), cats.len());
+        }
+    }
+
+    /// A body that fails names its instances under `failed`, with its
+    /// code; what else its representation reaches is retained.
+    #[test]
+    fn a_failing_body_counts_its_instances_as_failed() {
+        let failing = crate::transfer::failed_instances(&json!({
+            "code": "import_failed",
+            "details": {"step": ["#12", "#40", "x"]}
+        }));
+        assert_eq!(
+            failing,
+            [
+                ryustep::census::Failed {
+                    instance: 12,
+                    code: "import_failed".into()
+                },
+                ryustep::census::Failed {
+                    instance: 40,
+                    code: "import_failed".into()
+                },
+            ]
+        );
+    }
+
+    /// A refusal once the file is read keeps its code and gains the
+    /// file's transfer report, nothing interpreted (design 448).
+    #[test]
+    fn a_refusal_after_reading_carries_the_transfer_report() {
+        let (_src, path) = outside("assembly.stp");
+        let (_dir, mut s) = crate::server::tests::fresh();
+        // Adding the file's bodies to a part that doesn't exist.
+        let e = import_call(&mut s, json!({"path": path, "into": "nope"})).unwrap_err();
+        assert_eq!(e.code, Code::NotFound, "{e:?}");
+        let t = &e.details["transfer"];
+        assert!(
+            t["categories"].as_array().is_some_and(|c| !c.is_empty()),
+            "{t}"
+        );
+        for c in t["categories"].as_array().unwrap() {
+            assert_eq!(c["interpreted"]["count"], 0, "{c}");
+        }
+        // Before the file is read there is nothing to report.
+        let e = import_call(&mut s, json!({"path": "/nowhere/at/all.step"})).unwrap_err();
+        assert!(e.details.get("transfer").is_none());
+    }
+
+    /// An assembly whose parts are in other files (OCCT's form, #443's
+    /// interim, design 448) is refused `import_body_missing` naming each
+    /// file and the products naming it, and the report counts the
+    /// documents retained.
+    #[test]
+    fn an_assembly_of_external_parts_names_its_files() {
+        let path = format!(
+            "{}/../ryustep/tests/data/external/occt_style.stp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let (_dir, mut s) = crate::server::tests::fresh();
+        let e = import_call(&mut s, json!({"path": path})).unwrap_err();
+        assert_eq!(e.code, Code::ImportBodyMissing);
+        assert_eq!(
+            e.details["external"],
+            json!([
+                {"file": "bracket.stp", "products": ["P1"], "format": "STEP AP214"},
+                {"file": "parts/plate.stp", "products": ["P2"], "format": "STEP AP214"},
+            ])
+        );
+        assert!(
+            e.message.contains("bracket.stp") && e.message.contains("parts/plate.stp"),
+            "{}",
+            e.message
+        );
+        let docs = e.details["transfer"]["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["category"] == "external_references")
+            .unwrap()
+            .clone();
+        assert!(docs["retained"]["count"].as_u64().unwrap() > 0, "{docs}");
+    }
+
+    /// `import.report` reads a committed file again: what the project's
+    /// import features made of it, `detail` listing every name with its
+    /// first instances; a path the project hasn't imported is not_found.
+    #[test]
+    fn a_committed_file_is_reported_again() {
+        let (_src, path) = outside("assembly.stp");
+        let (_dir, mut s) = crate::server::tests::fresh();
+        let made = import_call(&mut s, json!({"path": path})).unwrap();
+        let stored = made["file"]["path"].as_str().unwrap().to_owned();
+        let v =
+            crate::server::tests::call(&mut s, "import.report", json!({"file": stored})).unwrap();
+        assert_eq!(v["file"]["path"], stored.as_str());
+        assert_eq!(
+            v["transfer"]["categories"], made["transfer"]["categories"],
+            "the same as the import said"
+        );
+        let d = crate::server::tests::call(
+            &mut s,
+            "import.report",
+            json!({"file": stored, "detail": true}),
+        )
+        .unwrap();
+        assert_eq!(d["transfer"]["detail"], true);
+        let geometry = &d["transfer"]["categories"][0];
+        assert_eq!(geometry["category"], "geometry");
+        let first = &geometry["interpreted"]["names"][0];
+        assert!(
+            first["instances"]
+                .as_array()
+                .is_some_and(|i| !i.is_empty() && i.len() <= 64),
+            "{first}"
+        );
+        let e = crate::server::tests::call(
+            &mut s,
+            "import.report",
+            json!({"file": "imports/none.step"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
     }
 
     #[test]

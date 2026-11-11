@@ -111,3 +111,97 @@ fn the_assembly() {
     assert_eq!(p.definitions[1].shapes.len(), 1);
     assert_eq!(p.definitions[2].shapes.len(), 1);
 }
+
+fn external_fixture(name: &str) -> ryustep::Opened {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/external")
+        .join(name);
+    ryustep::open(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// A document as a definition names it: file, location, format.
+type Named = (String, Option<String>, Option<String>);
+
+/// What each definition names, by product id: (file, location, format).
+fn externals(o: &ryustep::Opened) -> Vec<(String, Vec<Named>, bool)> {
+    o.products
+        .definitions
+        .iter()
+        .filter(|d| !d.external.is_empty())
+        .map(|d| {
+            (
+                d.product_id.to_string(),
+                d.external
+                    .iter()
+                    .map(|x| (x.name.clone(), x.location.clone(), x.format.clone()))
+                    .collect(),
+                d.externally_defined(),
+            )
+        })
+        .collect()
+}
+
+/// OCCT's AP214 form: a document reference to an empty document, its
+/// document product's definition listing the file, named by an external
+/// identification; the document product itself is named by nothing.
+#[test]
+fn occt_external_references_name_their_files() {
+    let o = external_fixture("occt_style.stp");
+    let st = |s: &str| Some(s.to_owned());
+    assert_eq!(
+        externals(&o),
+        [
+            (
+                "P1".to_owned(),
+                vec![("bracket.stp".to_owned(), None, st("STEP AP214"))],
+                true
+            ),
+            (
+                "P2".to_owned(),
+                vec![("parts/plate.stp".to_owned(), None, st("STEP AP214"))],
+                true
+            ),
+        ]
+    );
+    let asm = o
+        .products
+        .definitions
+        .iter()
+        .find(|d| &*d.product_id == "ASM")
+        .unwrap();
+    assert!(asm.external.is_empty() && !asm.externally_defined());
+    assert_eq!(o.held.len(), 0, "no geometry in the file");
+}
+
+#[test]
+fn ap203_and_cax_if_external_references_name_their_files() {
+    assert_eq!(
+        externals(&external_fixture("ap203_style.stp")),
+        [(
+            "P1".to_owned(),
+            vec![("bracket.stp".to_owned(), None, None)],
+            true
+        )]
+    );
+    assert_eq!(
+        externals(&external_fixture("cax_if_style.stp")),
+        [(
+            "P1".to_owned(),
+            vec![(
+                "housing.stp".to_owned(),
+                Some("sub/housing.stp".to_owned()),
+                Some("ISO 10303-21".to_owned())
+            )],
+            true
+        )]
+    );
+}
+
+/// A file with geometry names no documents: nothing changes for it.
+#[test]
+fn files_with_their_own_geometry_name_no_documents() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/occt/assembly.stp");
+    let o = ryustep::open(&std::fs::read(path).unwrap()).unwrap();
+    assert!(o.products.definitions.iter().all(|d| d.external.is_empty()));
+}
