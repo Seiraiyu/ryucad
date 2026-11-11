@@ -298,20 +298,63 @@ jobs:
         with:
           path: .devcontainer/debs/*.deb
           key: devcontainer-debs-${{ hashFiles('.devcontainer/debs.txt') }}
-      - uses: devcontainers/ci@v0.3
+      # The devcontainer's work in four steps, so a runner that dies (out of
+      # disk or memory, as v0.9.0-pre.1's did twice, its one step's log
+      # lost with it) names its step and keeps the others' logs. Each
+      # builds the image from Docker's layer cache after the first, and
+      # target/ is the workspace's, so builds carry over. Builds take two
+      # jobs and the heaviest tests two threads: the runner has 4 cores
+      # and 16 GB, and a slow step beats a dead one.
+      - name: the workspace in the devcontainer
+        uses: devcontainers/ci@v0.3
         with:
-          # The workspace, then the OCCT, SMLib, lib3mf and USD references,
-          # which only the devcontainer (with all of them installed) builds,
-          # then ryudfm's pinned boards, exported by its KiCad, and its bars
-          # on the densest of them, then ryucad's pinned assemblies.
+          # Every test of the workspace, as the devcontainer builds it.
           runCmd: |
+            set -e
             export PROPTEST_RNG_SEED=${{ env.PROPTEST_RNG_SEED }}
+            export CARGO_BUILD_JOBS=2
+            df -h / && free -m
             RYUCAD_REQUIRE_GPU=1 cargo test --workspace
+            df -h / && free -m
+          push: never
+      - name: ryudfm's pinned boards
+        uses: devcontainers/ci@v0.3
+        with:
+          # ryudfm's pinned boards, exported by its KiCad, and its bars on the
+          # densest of them.
+          runCmd: |
+            set -e
+            export PROPTEST_RNG_SEED=${{ env.PROPTEST_RNG_SEED }}
+            export CARGO_BUILD_JOBS=2
+            df -h / && free -m
             sh scripts/fetch-dfm-corpus.sh
             cargo test -p ryudfm --release --test pinned -- --ignored
-            RYUDFM_REQUIRE_CORPUS=1 cargo test -p ryudfm --release --test bar -- --nocapture
+            RAYON_NUM_THREADS=2 RYUDFM_REQUIRE_CORPUS=1 cargo test -p ryudfm --release --test bar -- --nocapture
+            df -h / && free -m
+          push: never
+      - name: ryucad's pinned assemblies
+        uses: devcontainers/ci@v0.3
+        with:
+          # ryucad's pinned assemblies (the Vorons), imported and round-tripped.
+          runCmd: |
+            set -e
+            export PROPTEST_RNG_SEED=${{ env.PROPTEST_RNG_SEED }}
+            export CARGO_BUILD_JOBS=2
+            df -h / && free -m
             sh scripts/fetch-corpus.sh
-            RYUCAD_REQUIRE_CORPUS=1 cargo test -p ryucad --release --test corpus pinned -- --nocapture
+            RAYON_NUM_THREADS=2 RYUCAD_REQUIRE_CORPUS=1 cargo test -p ryucad --release --test corpus pinned -- --nocapture
+            df -h / && free -m
+          push: never
+      - name: the OCCT, SMLib, lib3mf and USD references
+        uses: devcontainers/ci@v0.3
+        with:
+          # The references, which only the devcontainer (with all of them
+          # installed) builds.
+          runCmd: |
+            set -e
+            export PROPTEST_RNG_SEED=${{ env.PROPTEST_RNG_SEED }}
+            export CARGO_BUILD_JOBS=2
+            df -h / && free -m
             cargo clippy -p ryukei-bench --features occt,smlib,formats,usd --all-targets -- -D warnings
             cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture
             cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture
@@ -326,6 +369,7 @@ jobs:
             cargo test -p ryukei-bench --features dxf --release --test dxf -- --nocapture
             cargo test -p ryukei-bench --features occt,usd --release --test nurbs -- --skip race --nocapture
             cargo bench -p ryukei-bench --features occt,smlib --no-run
+            df -h / && free -m
           push: never
 
   installers:
