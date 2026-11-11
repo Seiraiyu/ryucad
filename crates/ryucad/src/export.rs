@@ -3827,4 +3827,53 @@ pub(crate) mod tests {
         let w = v["warnings"].as_array().unwrap();
         assert!(w.iter().any(|w| w["code"] == "export_metadata_omitted" && w["what"] == "appearance"));
     }
+
+    /// A label's export is its official commit's: its appearance too,
+    /// whatever the working files say now (design 448, question 438).
+    #[test]
+    fn an_export_at_a_label_writes_the_release_commits_appearance() {
+        use crate::git::tests::git;
+        let (dir, mut s) = crate::assembly::tests::project();
+        let r = dir.path();
+        git(r, &["init", "-q", "-b", "main"]);
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "bolt", "properties": {"number": "100"}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "appearance.set",
+            json!({"entities": ["bolt"], "colour": "#ff0000"}),
+        )
+        .unwrap();
+        call(&mut s, "release.propose", json!({"part": "bolt"})).unwrap();
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "bolt A, red"]);
+        call(
+            &mut s,
+            "appearance.set",
+            json!({"entities": ["bolt"], "colour": "#0000ff"}),
+        )
+        .unwrap();
+        let colour = |bytes: &[u8]| {
+            let o = ryustep::open(bytes).unwrap();
+            o.body_styles(0).body.and_then(|x| x.colour)
+        };
+        let opts = |rev: Option<&str>| {
+            let mut v = json!({"part": "bolt", "time_stamp": "2026-11-11T00:00:00"});
+            if let Some(r) = rev {
+                v["rev"] = json!(r);
+            }
+            v
+        };
+        let (_, at_label) = exported(&mut s, opts(Some("label:A"))).unwrap();
+        assert_eq!(colour(&at_label), Some([255, 0, 0]));
+        let (_, working) = exported(&mut s, opts(None)).unwrap();
+        assert_eq!(colour(&working), Some([0, 0, 255]));
+        // Twice at the label, the same bytes: what ryupdm's packages need.
+        let (_, again) = exported(&mut s, opts(Some("label:A"))).unwrap();
+        assert_eq!(again, at_label);
+    }
 }
