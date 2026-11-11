@@ -10,7 +10,7 @@
 //! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft, `0xf2` a mirror or split, `0xf1` an annotation (marks on either side, design 423), `0xf0` a base
 //! flange or flange, `0xef` a planar face or a surface extrude, `0xee` an
 //! unfold or refold, `0xed` a face tweak, `0xec` a thicken or a fill (by the
-//! parity of the edit bytes), `0xeb` a draft, `0xea` a split by a tool. Merging must never panic, must give the same bytes twice,
+//! parity of the edit bytes), `0xeb` a draft, `0xea` a split by a tool, `0xe8` a delete_face or a tweak's topology and blends, `0xe7` a blend edit. Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -1331,6 +1331,76 @@ fn edit_annotation(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// Edits a delete_blend or a resize_blend: its faces, its below, its
+/// tolerance; a resize's first group's size (a radius, or a chamfer's
+/// form), or its groups whole (one or two).
+fn edit_blends(v: &mut Value, op: u8, arg: u8) {
+    let face = |a: u8| json!({"feature": "b", "name": format!("{:032x}", a % 5)});
+    let o = v.as_object_mut().unwrap();
+    let resize = o.get("type").and_then(Value::as_str) == Some("resize_blend");
+    match op % 5 {
+        0 if !resize => {
+            let mut list: Vec<Value> = o.get("faces").and_then(Value::as_array).cloned().unwrap_or_default();
+            let f = face(arg);
+            match list.iter().position(|x| *x == f) {
+                Some(i) => {
+                    list.remove(i);
+                }
+                None => list.push(f),
+            }
+            if list.is_empty() {
+                o.remove("faces");
+            } else {
+                o.insert("faces".into(), json!(list));
+            }
+        }
+        1 if !resize => {
+            if arg % 3 == 0 {
+                o.remove("below");
+            } else {
+                o.insert("below".into(), json!(format!("{} mm", arg % 7)));
+            }
+        }
+        2 => match arg % 3 {
+            0 => {
+                o.remove("tolerance");
+            }
+            1 => {
+                o.insert("tolerance".into(), json!("0.001 mm"));
+            }
+            _ => {
+                o.insert("tolerance".into(), json!("0.05 mm"));
+            }
+        },
+        3 if resize => {
+            let g = if arg % 2 == 0 {
+                json!({"radius": format!("{} mm", 1 + arg % 5), "faces": [face(arg)]})
+            } else {
+                json!({"form": "equal", "d": format!("{} mm", 1 + arg % 3), "faces": [face(arg)]})
+            };
+            o.insert("groups".into(), json!([g]));
+        }
+        4 if resize => {
+            let two = json!([{"radius": "2 mm", "faces": [face(arg)]},
+                             {"radius": "3 mm", "faces": [face(arg.wrapping_add(1))]}]);
+            o.insert("groups".into(), two);
+        }
+        _ => {
+            // Turn one type into the other, keeping the target.
+            let target = o.get("target").cloned().unwrap_or(json!("b"));
+            o.retain(|k, _| ["format", "kind"].contains(&k.as_str()));
+            o.insert("target".into(), target);
+            if resize {
+                o.insert("type".into(), json!("delete_blend"));
+                o.insert("below".into(), json!("2 mm"));
+            } else {
+                o.insert("type".into(), json!("resize_blend"));
+                o.insert("groups".into(), json!([{"radius": "3 mm", "faces": [face(arg)]}]));
+            }
+        }
+    }
+}
+
 /// Edits a delete_face: its faces, its seeds, its heal; or makes it a
 /// move_face with topology and blends set and cleared.
 fn edit_direct(v: &mut Value, op: u8, arg: u8) {
@@ -1406,9 +1476,11 @@ fuzz_target!(|data: &[u8]| {
     // surface extrude (25), `0xee` an unfold or refold (26), `0xed` a face
     // tweak (27), `0xec` a thicken or a fill (28), `0xeb` a draft (29),
     // `0xea` a split by a tool (30), `0xe9` a drawing (31), `0xe8` a
-    // delete_face or a tweak's topology and blends (32); every other byte
+    // delete_face or a tweak's topology and blends (32), `0xe7` a blend
+    // edit (33); every other byte
     // picks as it did before them.
     let kind = match mode {
+        0xe7 => 33,
         0xe8 => 32,
         0xe9 => 31,
         0xea => 30,
@@ -1511,6 +1583,9 @@ fuzz_target!(|data: &[u8]| {
                          "target": "h", "tool": {"body": "t"}}),
             32 => json!({"format": 20, "kind": "ryucad.feature", "type": "delete_face",
                          "target": "b", "faces": [{"feature": "b", "name": format!("{:032x}", 1)}]}),
+            33 => json!({"format": 20, "kind": "ryucad.feature", "type": "resize_blend",
+                         "target": "b", "groups": [{"radius": "3 mm",
+                         "faces": [{"feature": "b", "name": format!("{:032x}", 1)}]}]}),
             31 => json!({"format": 1, "kind": "ryucad.drawing", "name": "D",
                 "sheets": {"s1": {"name": "Sheet 1", "size": "ansi_b"}},
                 "views": {"v1": {"type": "base", "sheet": "s1", "orient": "front",
@@ -1614,6 +1689,7 @@ fuzz_target!(|data: &[u8]| {
             30 => edit_split_tool(v, op, arg),
             31 => edit_drawing(v, op, arg),
             32 => edit_direct(v, op, arg),
+            33 => edit_blends(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.

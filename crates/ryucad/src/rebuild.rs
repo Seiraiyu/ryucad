@@ -616,7 +616,9 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::MoveFace(_)
         | Feature::ReplaceFace(_)
         | Feature::Draft(_)
-        | Feature::DeleteFace(_) => Err(Error::new(
+        | Feature::DeleteFace(_)
+        | Feature::DeleteBlend(_)
+        | Feature::ResizeBlend(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} makes no body of its own", f.type_name()),
         )
@@ -2611,7 +2613,9 @@ fn rebuild_with(
         Feature::MoveFace(_)
         | Feature::ReplaceFace(_)
         | Feature::Draft(_)
-        | Feature::DeleteFace(_) => (
+        | Feature::DeleteFace(_)
+        | Feature::DeleteBlend(_)
+        | Feature::ResizeBlend(_) => (
             crate::tweak::build(part, solids, id, f, before, run).map(solid),
             None,
         ),

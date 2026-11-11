@@ -1125,6 +1125,7 @@ fn every_protocol_method_has_a_command() {
         ("mass", &["mass"]),
         ("sheet.get", &["sheet"]),
         ("feature_faces.get", &["feature-faces"]),
+        ("blends.get", &["blends"]),
         ("flat.get", &["flat"]),
         ("clearance", &["clearance"]),
         ("deps.add", &["deps", "add"]),
@@ -8132,4 +8133,83 @@ fn modes_from_the_cli() {
     assert_eq!(code, 0, "{v}");
     let (code, v) = p.run_in(&p.daemon, "", &["part", "create", "q"]);
     assert_eq!(code, 0, "{v}");
+}
+
+#[test]
+fn blend_edits_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "box"]);
+    p.ok(&[
+        "feature", "add", "box", "box", "--id", "base", "--param", "x=40", "--param", "y=30",
+        "--param", "z=20",
+    ]);
+    let base = p.ok(&["inspect", "box", "base"])["bodies"][0].clone();
+    let every: Vec<String> = base["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| format!("box/base/{}", e["name"].as_str().unwrap()))
+        .collect();
+    let mut args = vec![
+        "feature", "add", "box", "fillet", "--id", "round", "--radius", "3",
+    ];
+    for e in &every {
+        args.extend(["--edge", e.as_str()]);
+    }
+    p.ok(&args);
+    // What a delete would take, then the delete.
+    let listed = p.ok(&["blends", "box", "--below", "3.5mm"]);
+    assert_eq!(listed["blends"].as_array().unwrap().len(), 12, "{listed}");
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "box",
+        "delete_blend",
+        "--id",
+        "flat",
+        "--below",
+        "3.5mm",
+    ]);
+    assert_eq!(r["feature"]["below"]["value"], "3.5 mm", "{r}");
+    // A resize of one fillet, by its flags; then made a chamfer.
+    let face = listed["blends"][0]["faces"][0].as_str().unwrap().to_owned();
+    p.ok(&["feature", "edit", "box", "flat", "--below", "1mm"]);
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "box",
+        "resize_blend",
+        "--id",
+        "bigger",
+        "--radius",
+        "4mm",
+        "--face",
+        &face,
+    ]);
+    assert_eq!(r["feature"]["groups"][0]["radius"]["value"], "4 mm", "{r}");
+    p.ok(&[
+        "feature", "edit", "box", "bigger", "--form", "equal", "--d", "2mm",
+    ]);
+    let shown = p.ok(&["feature", "show", "box", "bigger"]);
+    assert_eq!(shown["groups"][0]["form"], "equal", "{shown}");
+    assert!(shown["groups"][0].get("radius").is_none(), "{shown}");
+    // A bad tolerance is the protocol's invalid_param.
+    p.fails(
+        &["feature", "edit", "box", "flat", "--tolerance", "1mm"],
+        "invalid_param",
+        1,
+    );
+    // The daemon logged both: undo takes the resize's file away, redo puts
+    // it back.
+    let bigger = p.daemon.join("parts/box/features/bigger.json");
+    assert!(bigger.exists());
+    for _ in 0..2 {
+        let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+        assert_eq!(code, 0, "{v}");
+    }
+    assert!(!bigger.exists());
+    let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(bigger.exists());
 }

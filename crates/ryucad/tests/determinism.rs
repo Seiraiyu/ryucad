@@ -2990,7 +2990,8 @@ fn sheet_metal_report_section(golden: &mut Golden) {
 /// whose edge fillet is deleted and grown back. Part `tt`: a plate whose
 /// boss slides over its edge (topology: change), a box whose wall is
 /// drafted past its neighbour, and a box whose top rises past its fillet
-/// (blends: rebuild).
+/// (blends: rebuild). Part `be`: a plate whose every edge is filleted,
+/// defeatured by size, and a lid whose fillet and chamfer are resized.
 fn edited() -> (tempfile::TempDir, ryucad::session::Session) {
     use serde_json::json;
     let dir = tempfile::tempdir().unwrap();
@@ -3164,6 +3165,74 @@ fn edited() -> (tempfile::TempDir, ryucad::session::Session) {
         "by": "translate", "direction": "z", "distance": "2 mm", "faces": [lid_top],
         "tangent": false, "blends": "rebuild"}),
     );
+    // be: a rounded plate defeatured by size; a fillet and a chamfer
+    // resized, the chamfer from a fillet's size to a chamfer's.
+    call(&mut s, "part.create", json!({"part": "be"}));
+    add(
+        &mut s,
+        "be",
+        json!({"type": "box", "id": "plate",
+        "params": {"x": "40 mm", "y": "30 mm", "z": "20 mm"}}),
+    );
+    let every: Vec<String> = body(&mut s, "be", "plate")["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| format!("be/plate/{}", e["name"].as_str().unwrap()))
+        .collect();
+    add(
+        &mut s,
+        "be",
+        json!({"type": "fillet", "id": "round", "radius": "3 mm", "edges": every}),
+    );
+    add(
+        &mut s,
+        "be",
+        json!({"type": "delete_blend", "id": "unround", "below": "3.5 mm"}),
+    );
+    add(
+        &mut s,
+        "be",
+        json!({"type": "box", "id": "lid", "params": {"x": "40 mm",
+        "y": "30 mm", "z": "20 mm"}, "placement": {"origin": ["60 mm", "0 mm", "0 mm"]}}),
+    );
+    let e = rim(&body(&mut s, "be", "lid"), "be", "lid", 0.100, 0.020);
+    add(
+        &mut s,
+        "be",
+        json!({"type": "fillet", "id": "lip", "radius": "4 mm", "edges": [e]}),
+    );
+    let lip = cylinders(&body(&mut s, "be", "lip"), "be", "lid");
+    add(
+        &mut s,
+        "be",
+        json!({"type": "resize_blend", "id": "relip", "target": "lid",
+        "groups": [{"radius": "3 mm", "faces": [lip[0]]}]}),
+    );
+    let e = rim(&body(&mut s, "be", "relip"), "be", "lid", 0.060, 0.020);
+    add(
+        &mut s,
+        "be",
+        json!({"type": "chamfer", "id": "bevel", "d": "2 mm", "edges": [e]}),
+    );
+    let bevel = body(&mut s, "be", "bevel")["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let z = &f["surface"]["frame"]["z"];
+            f["surface"]["type"] == "plane"
+                && z[0].as_f64().unwrap() != 0.0
+                && z[2].as_f64().unwrap() != 0.0
+        })
+        .map(|f| format!("be/lid/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    add(
+        &mut s,
+        "be",
+        json!({"type": "resize_blend", "id": "rebevel", "target": "lid",
+        "groups": [{"form": "equal", "d": "3 mm", "faces": [bevel]}]}),
+    );
     (dir, s)
 }
 
@@ -3216,6 +3285,10 @@ fn deletes_section(golden: &mut Golden) {
 
 fn topology_tweaks_section(golden: &mut Golden) {
     edited_section(golden, "topology_tweaks", "tt");
+}
+
+fn blend_edits_section(golden: &mut Golden) {
+    edited_section(golden, "blend_edits", "be");
 }
 
 /// Part `sf`: a tray of four flanges set back 5 mm on a 60 × 40 mm plate,
@@ -6031,6 +6104,7 @@ sections! {
     drafts => drafts_section(&mut golden),
     deletes => deletes_section(&mut golden),
     topology_tweaks => topology_tweaks_section(&mut golden),
+    blend_edits => blend_edits_section(&mut golden),
     draft_reports => draft_reports_section(&mut golden),
     mirrors => mirrors_section(&mut golden),
     splits => splits_section(&mut golden),

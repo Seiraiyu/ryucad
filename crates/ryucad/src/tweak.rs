@@ -28,27 +28,45 @@ use std::sync::Arc;
 pub fn takes_sheets(f: &Feature) -> bool {
     matches!(
         f,
-        Feature::MoveFace(_) | Feature::ReplaceFace(_) | Feature::Draft(_) | Feature::DeleteFace(_)
+        Feature::MoveFace(_)
+            | Feature::ReplaceFace(_)
+            | Feature::Draft(_)
+            | Feature::DeleteFace(_)
+            | Feature::DeleteBlend(_)
+            | Feature::ResizeBlend(_)
     )
 }
 
 /// The face tweaks and direct edits this module builds (ryucad 17 and 22).
-pub const TYPES: [&str; 4] = ["move_face", "replace_face", "draft", "delete_face"];
+pub const TYPES: [&str; 6] = [
+    "move_face",
+    "replace_face",
+    "draft",
+    "delete_face",
+    "delete_blend",
+    "resize_blend",
+];
 
 /// The work units a direct edit may spend before it fails with
 /// `edit_budget_exceeded` (`edit.budget`'s default): the smallest power of
 /// two at least four times [`LARGEST_EDIT`] (and at least `1 << 20`),
 /// measured in plan 22.A (Task 20) in a release build on bc2 (Intel Core
-/// Ultra 5 250K Plus, 18 threads, load average about 2 to 4), 2026-11-10.
-/// Units are the same on every machine. Plan 22.B measures again with the
-/// committed corpus.
+/// Ultra 5 250K Plus, 18 threads, load average about 2 to 4), 2026-11-10,
+/// and again in plan 22.B (Task 23) in a release build on cox-worker-5
+/// (Intel Core Ultra 7 265KF, 8 threads, load average about 2 to 5),
+/// 2026-11-11, the committed NIST corpus included: nothing moved. Units
+/// are the same on every machine.
 pub const DEFAULT_EDIT_BUDGET: u64 = 1 << 24;
 
 /// The most work units a direct edit that builds was measured spending
-/// (plan 22.A, Task 20; the box and date as [`DEFAULT_EDIT_BUDGET`]'s):
-/// ryukei's `edit_props` seed 70, a replace on 10 faces, 3,249,017 units.
-/// ryucad's own largest is 29,957 (`direct_edits`' groove run through);
-/// the goldens' 12,478 (`topology_tweaks`' slide).
+/// (plans 22.A, Task 20, and 22.B, Task 23; the boxes and dates as
+/// [`DEFAULT_EDIT_BUDGET`]'s): ryukei's `edit_props` seed 70, a replace on
+/// 10 faces, 3,249,017 units. ryucad's own largest is 38,149
+/// (`direct_edits`' groove run through, 29,957 in 22.A, before ryukei
+/// 16.A); its largest blend edit 9,705 (`a_bosss_foot_and_a_pockets_rim_
+/// are_defeatured`); the goldens' 12,478 (`topology_tweaks`' slide). No
+/// edit of the committed NIST corpus's `delete_blend --below 2mm` built
+/// (22.B, Task 14), so none sets it.
 pub const LARGEST_EDIT: u64 = 3_249_017;
 
 const _: () = {
@@ -58,18 +76,22 @@ const _: () = {
 
 /// The fields a request may give feature type `ty` of this module.
 pub fn request_fields(ty: &str) -> &'static [&'static str] {
-    if ty == "delete_face" {
-        crate::doc::edit::DELETE_REQUEST
-    } else {
-        crate::doc::tweak::request_fields(ty)
+    match ty {
+        "delete_face" => crate::doc::edit::DELETE_REQUEST,
+        "delete_blend" => crate::doc::edit::DELETE_BLEND_REQUEST,
+        "resize_blend" => crate::doc::edit::RESIZE_REQUEST,
+        _ => crate::doc::tweak::request_fields(ty),
     }
 }
 
 /// Whether `f`'s kernel call runs under the edit budget: a `delete_face`,
-/// or a tweak that may change topology or remake its blends. A tweak that
+/// a `delete_blend` or a `resize_blend`, or a tweak that may change topology or remake its blends. A tweak that
 /// keeps both runs as ryucad 17's, unbudgeted.
 pub fn budgeted(f: &Feature) -> bool {
-    matches!(f, Feature::DeleteFace(_)) || f.retrim().is_some_and(|r| !r.is_keep())
+    matches!(
+        f,
+        Feature::DeleteFace(_) | Feature::DeleteBlend(_) | Feature::ResizeBlend(_)
+    ) || f.retrim().is_some_and(|r| !r.is_keep())
 }
 
 /// What a file's `topology` asks the kernel.
@@ -97,6 +119,12 @@ fn heal(h: crate::doc::edit::Heal) -> ryukei::tweak::Heal {
         crate::doc::edit::Heal::Cap => ryukei::tweak::Heal::Cap,
         crate::doc::edit::Heal::Grow => ryukei::tweak::Heal::Grow,
     }
+}
+
+/// Recognition's tolerance for a blend edit's: its own, else the
+/// kernel's 10 µm.
+fn recognition(t: Option<&crate::units::Quantity>) -> f64 {
+    t.map_or(ryukei::tweak::DEFAULT_TOLERANCE, |q| q.meters())
 }
 
 /// Each seed of a delete with the faces it found, by name.
@@ -148,6 +176,24 @@ pub(crate) fn delete_report(target: &Id, found: &[(Name, Vec<Name>)]) -> Value {
     })
 }
 
+/// What a blend delete's report keeps: its target, each blend it took
+/// (as [`crate::blends::blend_raw`]) and the faces of the corners they
+/// reached, by name.
+pub(crate) fn blend_delete_report(
+    target: &Id,
+    rec: &ryukei::tweak::Recognition,
+    taken: &std::collections::BTreeSet<usize>,
+) -> Value {
+    json!({
+        "target": target,
+        "blends": taken.iter().map(|&i| crate::blends::blend_raw(rec, i)).collect::<Vec<_>>(),
+        "corners": crate::blends::corners_of(rec, taken)
+            .into_iter()
+            .map(|j| rec.corners[j].face.to_string())
+            .collect::<Vec<_>>(),
+    })
+}
+
 /// What a tweak asks the kernel.
 pub(crate) enum Spec {
     Move(MoveSpec),
@@ -166,6 +212,19 @@ pub(crate) enum Spec {
         faces: Vec<Name>,
         seeds: Vec<Name>,
         heal: ryukei::tweak::Heal,
+    },
+    /// A blend delete: every blend at most `below` meters and those
+    /// holding `faces`, recognised at `tolerance`.
+    DeleteBlend {
+        below: Option<f64>,
+        faces: Vec<Name>,
+        tolerance: f64,
+    },
+    /// A resize: each group's faces and the kind it gives their blends,
+    /// recognised at `tolerance`.
+    ResizeBlend {
+        groups: Vec<(Vec<Name>, ryukei::blend::BlendKind)>,
+        tolerance: f64,
     },
 }
 
@@ -582,6 +641,95 @@ pub(crate) fn resolve<'a>(
                 },
             })
         }
+        Feature::DeleteBlend(x) => {
+            let built = crate::rebuild::read(part, solids, id, f, "target", &x.target, before)?;
+            let mut faces = Vec::with_capacity(x.faces.len());
+            for (i, r) in x.faces.iter().enumerate() {
+                faces.push(face(
+                    part,
+                    id,
+                    &x.target,
+                    ty,
+                    &format!("faces.{i}"),
+                    r,
+                    before,
+                )?);
+            }
+            Ok(Resolved {
+                target: &x.target,
+                built,
+                spec: Spec::DeleteBlend {
+                    below: x.below.as_ref().map(|q| q.meters()),
+                    faces,
+                    tolerance: recognition(x.tolerance.as_ref()),
+                },
+            })
+        }
+        Feature::ResizeBlend(x) => {
+            use crate::doc::blend::ChamferForm;
+            use crate::doc::edit::BlendSize;
+            use ryukei::blend::{BlendKind, Chamfer};
+            let built = crate::rebuild::read(part, solids, id, f, "target", &x.target, before)?;
+            let mut groups = Vec::with_capacity(x.groups.len());
+            for (i, g) in x.groups.iter().enumerate() {
+                let support = |r: &Reference| {
+                    face(
+                        part,
+                        id,
+                        &x.target,
+                        ty,
+                        &format!("groups.{i}.face"),
+                        r,
+                        before,
+                    )
+                };
+                let kind = match &g.size {
+                    BlendSize::Fillet { radius } => BlendKind::Fillet {
+                        radius: radius.meters(),
+                    },
+                    BlendSize::Chamfer(ChamferForm::Equal { d }) => {
+                        BlendKind::Chamfer(Chamfer::Equal {
+                            distance: d.meters(),
+                        })
+                    }
+                    BlendSize::Chamfer(ChamferForm::Distances { d1, d2, face: on }) => {
+                        BlendKind::Chamfer(Chamfer::Distances {
+                            first: d1.meters(),
+                            second: d2.meters(),
+                            first_face: support(on)?,
+                        })
+                    }
+                    BlendSize::Chamfer(ChamferForm::DistanceAngle { d, angle, face: on }) => {
+                        BlendKind::Chamfer(Chamfer::DistanceAngle {
+                            distance: d.meters(),
+                            angle: angle.radians(),
+                            face: support(on)?,
+                        })
+                    }
+                };
+                let mut faces = Vec::with_capacity(g.faces.len());
+                for (j, r) in g.faces.iter().enumerate() {
+                    faces.push(face(
+                        part,
+                        id,
+                        &x.target,
+                        ty,
+                        &format!("groups.{i}.faces.{j}"),
+                        r,
+                        before,
+                    )?);
+                }
+                groups.push((faces, kind));
+            }
+            Ok(Resolved {
+                target: &x.target,
+                built,
+                spec: Spec::ResizeBlend {
+                    groups,
+                    tolerance: recognition(x.tolerance.as_ref()),
+                },
+            })
+        }
         _ => unreachable!("a tweak"),
     }
 }
@@ -795,6 +943,13 @@ pub(crate) fn hint(r: &Refusal) -> Option<&'static str> {
         ("no_feature", _) => Some(
             "name the feature's faces yourself: a hole's or a boss's faces, which leave a gap a cap closes",
         ),
+        ("not_a_blend", _) => Some(
+            "ryucad blends <part> lists the faces recognised as fillets, chamfers and corners: name one of those (a chamfer's distances face is one of its two supports); a blend made from a file may be read at a looser tolerance (tolerance, up to 0.1 mm)",
+        ),
+        ("blend_lost", _) => Some(
+            "delete the blend first (delete_blend), make the edit, and fillet or chamfer the edges again after it; or a size nearer the blend's own",
+        ),
+        ("bad_tolerance", _) => Some("give a tolerance from 0.00001 mm to 0.1 mm"),
         _ => None,
     }
 }
@@ -1020,7 +1175,11 @@ pub fn build(
     let ty = f.type_name();
     let r = resolve(part, solids, id, f, before)?;
     let budgeted = budgeted(f);
-    let changes = f.retrim().is_some_and(|r| r.topology) || matches!(f, Feature::DeleteFace(_));
+    let changes = f.retrim().is_some_and(|r| r.topology)
+        || matches!(
+            f,
+            Feature::DeleteFace(_) | Feature::DeleteBlend(_) | Feature::ResizeBlend(_)
+        );
     let work = if budgeted {
         crate::work::work(run.job).with_budget(run.edit_budget)
     } else {
@@ -1050,6 +1209,45 @@ pub fn build(
             ),
             Err(e) => (Err(e), None),
         },
+        Spec::DeleteBlend {
+            below,
+            faces,
+            tolerance,
+        } => {
+            let options = ryukei::tweak::RecogniseOptions {
+                tolerance: *tolerance,
+            };
+            match ryukei::tweak::recognise_blends_with(body, &options, &work) {
+                Err(e) => (Err(e), None),
+                Ok(rec) => {
+                    let taken = crate::blends::taken(&rec, *below, faces);
+                    let spec = ryukei::tweak::DeleteBlends {
+                        max_size: *below,
+                        faces: faces.clone(),
+                        options,
+                    };
+                    (
+                        ryukei::tweak::delete_blends_with(key, body, &spec, &work),
+                        Some(blend_delete_report(r.target, &rec, &taken)),
+                    )
+                }
+            }
+        }
+        Spec::ResizeBlend { groups, tolerance } => {
+            let options = ryukei::tweak::RecogniseOptions {
+                tolerance: *tolerance,
+            };
+            match ryukei::tweak::recognise_blends_with(body, &options, &work) {
+                Err(e) => (Err(e), None),
+                Ok(rec) => {
+                    let sizes = crate::blends::sizes(id, &rec, groups)?;
+                    (
+                        ryukei::tweak::resize_blends_with(key, body, &sizes, &options, &work),
+                        Some(crate::blends::resize_report(r.target, &rec, &sizes)),
+                    )
+                }
+            }
+        }
     };
     let made = made.map_err(|e| {
         crate::work::stopped(&e, run.job)
@@ -1151,15 +1349,15 @@ pub fn take_given(ty: &str, f: &mut FeatureFields) -> Result<()> {
             .with("param", "faces"));
         }
     }
-    if ty == "delete_face" {
+    if ty == "delete_face" || ty == "delete_blend" {
         // The CLI's --seed goes as a pattern's features.
-        if f.seeds.is_none() {
+        if ty == "delete_face" && f.seeds.is_none() {
             f.seeds = f.features.take();
         }
         if !groups.is_empty() {
             return Err(Error::new(
                 Code::InvalidParam,
-                "a delete_face's faces are a list of faces, each <part>/<solid>/<name>: it has no groups",
+                format!("a {ty}'s faces are a list of faces, each <part>/<solid>/<name>: it has no groups"),
             )
             .with("param", "faces"));
         }
@@ -1237,6 +1435,8 @@ pub fn from_given(
         Some(Feature::ReplaceFace(r)) => r.fields(),
         Some(Feature::Draft(d)) => d.fields(),
         Some(Feature::DeleteFace(x)) => x.fields(),
+        Some(Feature::DeleteBlend(x)) => x.fields(),
+        Some(Feature::ResizeBlend(x)) => x.fields(),
         _ => json!({}),
     };
     let o = v.as_object_mut().expect("fields are an object");
@@ -1307,6 +1507,10 @@ pub fn from_given(
             };
         }
         retrim_given(o, f)?;
+    } else if ty == "delete_blend" {
+        delete_blend_given(o, f, &reference)?;
+    } else if ty == "resize_blend" {
+        resize_given(o, f, &reference)?;
     } else if ty == "delete_face" {
         delete_given(o, f, &reference)?;
     } else {
@@ -1395,10 +1599,166 @@ pub fn from_given(
         "delete_face" => {
             Feature::DeleteFace(Box::new(crate::doc::edit::DeleteFace::from_fields(&mut r)?))
         }
+        "delete_blend" => Feature::DeleteBlend(Box::new(
+            crate::doc::edit::DeleteBlend::from_fields(&mut r, unit, env)?,
+        )),
+        "resize_blend" => Feature::ResizeBlend(Box::new(
+            crate::doc::edit::ResizeBlend::from_fields(&mut r, unit, env)?,
+        )),
         _ => Feature::MoveFace(Box::new(MoveFace::from_fields(&mut r, unit, env)?)),
     };
     r.finish()?;
     Ok(out)
+}
+
+/// A text list of faces (`faces` as the request gives them after
+/// [`take_given`]) as references, each at `/<key>/<i>`; `None` when not
+/// given.
+fn face_list(
+    f: &FeatureFields,
+    key: &str,
+    reference: &dyn Fn(&str, &str) -> Result<Value>,
+) -> Result<Option<Vec<Value>>> {
+    let Some(Value::Array(a)) = &f.faces else {
+        return Ok(None);
+    };
+    a.iter()
+        .filter_map(|x| x.as_str())
+        .enumerate()
+        .map(|(i, t)| reference(t, &format!("/{key}/{i}")))
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
+/// A scalar given as text or a number, `""` taking it away.
+fn put(o: &mut serde_json::Map<String, Value>, key: &str, given: &Option<Value>) {
+    match given {
+        None => {}
+        Some(Value::String(s)) if s.is_empty() => {
+            o.remove(key);
+        }
+        Some(v) => {
+            o.insert(key.into(), v.clone());
+        }
+    }
+}
+
+/// A blend delete's own fields from what was given, over `o` (its file's):
+/// its faces as text (`[]` for none), `below` and `tolerance`.
+fn delete_blend_given(
+    o: &mut serde_json::Map<String, Value>,
+    f: &FeatureFields,
+    reference: &dyn Fn(&str, &str) -> Result<Value>,
+) -> Result<()> {
+    if let Some(refs) = face_list(f, "faces", reference)? {
+        if refs.is_empty() {
+            o.remove("faces");
+        } else {
+            o.insert("faces".into(), json!(refs));
+        }
+    }
+    put(o, "below", &f.below);
+    put(o, "tolerance", &f.tolerance);
+    Ok(())
+}
+
+/// A resize's own fields from what was given, over `o` (its file's): its
+/// groups whole (faces and a chamfer's face as text), or its one group's
+/// fields: a fillet's `radius` (which takes a chamfer's form away), a
+/// chamfer's `form` (keeping only what it takes) and sizes, its
+/// `chamfer_face`, and the blends' `faces`. A file of several groups
+/// takes them whole.
+fn resize_given(
+    o: &mut serde_json::Map<String, Value>,
+    f: &FeatureFields,
+    reference: &dyn Fn(&str, &str) -> Result<Value>,
+) -> Result<()> {
+    let sizes = [
+        ("radius", &f.radius),
+        ("d", &f.d),
+        ("d1", &f.d1),
+        ("d2", &f.d2),
+        ("angle", &f.angle),
+    ];
+    let faces = face_list(f, "groups/0/faces", reference)?;
+    let one = sizes.iter().any(|(_, x)| x.is_some())
+        || f.form.is_some()
+        || f.chamfer_face.is_some()
+        || faces.is_some();
+    if let Some(gs) = &f.groups {
+        if one {
+            return Err(Error::new(
+                Code::Usage,
+                "give a resize_blend's groups, or its one group's fields (radius, or form, d, d1, d2, angle and chamfer_face; and faces), not both",
+            ));
+        }
+        let Value::Array(gs) = gs else {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "a resize_blend's groups are a list, each a size and the blends' faces",
+            )
+            .with("param", "groups"));
+        };
+        let mut out = Vec::with_capacity(gs.len());
+        for (i, g) in gs.iter().enumerate() {
+            let mut g = g.clone();
+            if let Some(Value::Array(fs)) = g.get_mut("faces") {
+                for (j, x) in fs.iter_mut().enumerate() {
+                    if let Some(t) = x.as_str().map(str::to_owned) {
+                        *x = reference(&t, &format!("/groups/{i}/faces/{j}"))?;
+                    }
+                }
+            }
+            if let Some(t) = g.get("face").and_then(Value::as_str).map(str::to_owned) {
+                g["face"] = reference(&t, &format!("/groups/{i}/face"))?;
+            }
+            out.push(g);
+        }
+        o.insert("groups".into(), Value::Array(out));
+    } else if one {
+        let gs = o
+            .entry("groups")
+            .or_insert_with(|| json!([{}]))
+            .as_array_mut()
+            .expect("groups are a list");
+        if gs.len() != 1 {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "this resize_blend has {} groups: give them all, as groups",
+                    gs.len()
+                ),
+            )
+            .with("param", "groups"));
+        }
+        let g = gs[0].as_object_mut().expect("a group");
+        if f.radius.is_some() {
+            g.retain(|k, _| k == "faces");
+        }
+        if let Some(form) = &f.form {
+            let takes: &[&str] = match form.as_str() {
+                "equal" => &["d", "faces"],
+                "distances" => &["d1", "d2", "face", "faces"],
+                "distance_angle" => &["d", "angle", "face", "faces"],
+                _ => &["faces"],
+            };
+            g.retain(|k, _| takes.contains(&k.as_str()));
+            g.insert("form".into(), json!(form));
+        }
+        for (k, x) in sizes {
+            if let Some(x) = x {
+                g.insert(k.into(), x.clone());
+            }
+        }
+        if let Some(t) = &f.chamfer_face {
+            g.insert("face".into(), reference(t, "/groups/0/face")?);
+        }
+        if let Some(refs) = faces {
+            g.insert("faces".into(), json!(refs));
+        }
+    }
+    put(o, "tolerance", &f.tolerance);
+    Ok(())
 }
 
 /// A delete's own fields from what was given, over `o` (its file's):
@@ -1599,6 +1959,49 @@ pub fn report(part: &Id, f: &Feature) -> Value {
             }
             v
         }
+        Feature::DeleteBlend(x) => {
+            let mut v = x.fields();
+            if let Some(b) = &x.below {
+                v["below"] = b.report();
+            }
+            if let Some(t) = &x.tolerance {
+                v["tolerance"] = t.report();
+            }
+            for (role, r) in x.references() {
+                *v.pointer_mut(&pointer(&role)).expect("its own face") = json!(r.text(part));
+            }
+            v
+        }
+        Feature::ResizeBlend(x) => {
+            let mut v = x.fields();
+            for (i, g) in x.groups.iter().enumerate() {
+                let q = &mut v["groups"][i];
+                match &g.size {
+                    crate::doc::edit::BlendSize::Fillet { radius } => q["radius"] = radius.report(),
+                    crate::doc::edit::BlendSize::Chamfer(form) => {
+                        use crate::doc::blend::ChamferForm as F;
+                        match form {
+                            F::Equal { d } => q["d"] = d.report(),
+                            F::Distances { d1, d2, .. } => {
+                                q["d1"] = d1.report();
+                                q["d2"] = d2.report();
+                            }
+                            F::DistanceAngle { d, angle, .. } => {
+                                q["d"] = d.report();
+                                q["angle"] = angle.report();
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(t) = &x.tolerance {
+                v["tolerance"] = t.report();
+            }
+            for (role, r) in x.references() {
+                *v.pointer_mut(&pointer(&role)).expect("its own face") = json!(r.text(part));
+            }
+            v
+        }
         _ => unreachable!("a tweak"),
     }
 }
@@ -1648,6 +2051,7 @@ pub fn resolved(
     id: &Id,
     f: &Feature,
     references: bool,
+    unit: crate::units::Unit,
 ) -> Option<Value> {
     if !takes_sheets(f) {
         return None;
@@ -1745,6 +2149,32 @@ pub fn resolved(
                     }))
                     .collect(),
             );
+        }
+        // A blend edit's kept report: each blend it took, each corner, each
+        // blend it made again, as references and quantities.
+        if let crate::rebuild::Output::Solids(m) = out
+            && let Some(rep) = &m.report
+        {
+            let show = |x: &Value| crate::blends::render(&part.id, target, unit, x);
+            if let Some(Value::Array(bs)) = rep.get("blends") {
+                v["blends"] = Value::Array(bs.iter().map(show).collect());
+            }
+            if let Some(Value::Array(cs)) = rep.get("corners") {
+                v["corners"] = Value::Array(
+                    cs.iter()
+                        .map(|c| {
+                            json!(format!(
+                                "{}/{target}/{}",
+                                part.id,
+                                c.as_str().unwrap_or_default()
+                            ))
+                        })
+                        .collect(),
+                );
+            }
+            if let Some(Value::Array(rs)) = rep.get("resized") {
+                v["resized"] = Value::Array(rs.iter().map(show).collect());
+            }
         }
         if let crate::rebuild::Output::Solids(m) = out
             && let Some(rep) = &m.report
@@ -1876,6 +2306,30 @@ pub fn draft_warnings(part: &Id, id: &Id, rep: &Value) -> Vec<Value> {
         .collect()
 }
 
+/// A read-only query's kernel refusal (`feature_faces.get`'s, `blends.get`'s):
+/// `tweak_failed` with its reason, `kernel: tweak`, the kernel's text and
+/// a hint, `key` naming what was asked about.
+pub(crate) fn query_error(key: &str, at: &str, e: ryukei::Error) -> Error {
+    let r = match &e {
+        ryukei::Error::InvalidTweak(t) => refusal(t),
+        _ => Refusal {
+            reason: "kernel",
+            case: None,
+            message: "the kernel refused it",
+            entities: vec![],
+        },
+    };
+    let mut err = Error::new(Code::TweakFailed, format!("{at}: {} ({e})", r.message))
+        .with(key, at)
+        .with("reason", r.reason)
+        .with("kernel", "tweak")
+        .with("refusal", format!("{e:?}"));
+    if let Some(h) = hint(&r) {
+        err = err.with("hint", h);
+    }
+    err
+}
+
 /// `feature_faces.get`: the faces of the hole, boss or pocket `face` (one
 /// face of a part's solid, `<part>/<solid>/<name>`) belongs to, in the
 /// part as it shows at `rev`. A face of no such feature is `tweak_failed`
@@ -1925,26 +2379,8 @@ pub fn feature_faces_get(
         .with("hint", format!("ryucad import convert {}/{}", l.part, l.solid)));
     }
     let seed = l.built.body.face(f).expect("a live face").name;
-    let names = ryukei::tweak::feature_faces(&l.built.body, seed).map_err(|e| {
-        let r = match &e {
-            ryukei::Error::InvalidTweak(t) => refusal(t),
-            _ => Refusal {
-                reason: "kernel",
-                case: None,
-                message: "the kernel refused it",
-                entities: vec![],
-            },
-        };
-        let mut err = Error::new(Code::TweakFailed, format!("{face}: {} ({e})", r.message))
-            .with("face", face)
-            .with("reason", r.reason)
-            .with("kernel", "tweak")
-            .with("refusal", format!("{e:?}"));
-        if let Some(h) = hint(&r) {
-            err = err.with("hint", h);
-        }
-        err
-    })?;
+    let names = ryukei::tweak::feature_faces(&l.built.body, seed)
+        .map_err(|e| query_error("face", face, e))?;
     let mut v = json!({
         "face": face,
         "solid": format!("{}/{}", l.part, l.solid),
@@ -3101,5 +3537,120 @@ mod tests {
         assert!(draft_warnings(&part, &id, &rep("neutral", t - 0.01, t + 0.01)).is_empty());
         // Any other report (an import's, a fill's) says nothing here.
         assert!(draft_warnings(&part, &id, &json!({"sides": []})).is_empty());
+    }
+
+    #[test]
+    fn blend_edits_are_made_from_what_was_given() {
+        let part = Id::parse("p", "part").unwrap();
+        let env = crate::expr::Env::empty();
+        let n = |k: u128| format!("p/b/{k:032x}");
+        let given = |v: serde_json::Value| -> FeatureFields { serde_json::from_value(v).unwrap() };
+        // A blend delete by size, then by face too.
+        let mut f = given(json!({"target": "b", "below": "2 mm"}));
+        take_given("delete_blend", &mut f).unwrap();
+        let d = from_given(
+            "delete_blend",
+            None,
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(d.to_json()["below"], "2 mm");
+        let mut f = given(json!({"faces": [n(1)], "tolerance": "0.001 mm"}));
+        take_given("delete_blend", &mut f).unwrap();
+        let d = from_given(
+            "delete_blend",
+            Some(&d),
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(d.to_json()["faces"][0]["name"], format!("{:032x}", 1));
+        assert_eq!(d.to_json()["tolerance"], "0.001 mm");
+        // Neither left: refused at faces.
+        let mut f = given(json!({"target": "b"}));
+        take_given("delete_blend", &mut f).unwrap();
+        let e = from_given(
+            "delete_blend",
+            None,
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap_err();
+        assert_eq!(e.details["pointer"], "/faces");
+        // A resize's one group from the flags: a radius and two faces.
+        let mut f = given(json!({"target": "b", "radius": "3 mm", "faces": [n(1), n(2)]}));
+        take_given("resize_blend", &mut f).unwrap();
+        let r = from_given(
+            "resize_blend",
+            None,
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap();
+        let v = r.to_json();
+        assert_eq!(v["groups"][0]["radius"], "3 mm");
+        assert_eq!(v["groups"][0]["faces"].as_array().unwrap().len(), 2);
+        // Made a chamfer by distances: the radius goes, the faces stay.
+        let f =
+            given(json!({"form": "distances", "d1": "1 mm", "d2": "2 mm", "chamfer_face": n(9)}));
+        let r = from_given(
+            "resize_blend",
+            Some(&r),
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap();
+        let g = &r.to_json()["groups"][0];
+        assert!(g.get("radius").is_none(), "{g}");
+        assert_eq!(
+            (g["form"].as_str(), g["d2"].as_str()),
+            (Some("distances"), Some("2 mm"))
+        );
+        assert_eq!(g["face"]["name"], format!("{:032x}", 9));
+        assert_eq!(g["faces"].as_array().unwrap().len(), 2);
+        // Groups whole, with the one group's flags too: refused.
+        let mut f = given(json!({"radius": "3 mm",
+                                 "groups": [{"radius": "1 mm", "faces": [n(1)]}]}));
+        take_given("resize_blend", &mut f).unwrap();
+        let e = from_given(
+            "resize_blend",
+            Some(&r),
+            &f,
+            &part,
+            crate::units::Unit::Mm,
+            &env,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Usage);
+        assert_eq!(
+            request_fields("resize_blend"),
+            crate::doc::edit::RESIZE_REQUEST
+        );
+        assert!(budgeted(&r));
+    }
+
+    #[test]
+    fn blend_refusals_point_at_the_query_and_the_way_round() {
+        let n =
+            ryukei::name::Name::derive(ryukei::name::OpKey(1), ryukei::name::Role::NewFace, &[]);
+        let hint_of = |e: ryukei::TweakError| hint(&refusal(&e)).unwrap_or_default();
+        assert!(hint_of(ryukei::TweakError::NotABlend { face: n }).contains("ryucad blends"));
+        let lost = hint_of(ryukei::TweakError::BlendLost {
+            face: n,
+            reason: ryukei::BlendLoss::Overflow,
+        });
+        assert!(lost.contains("delete_blend"), "{lost}");
+        assert!(hint_of(ryukei::TweakError::BadTolerance).contains("0.1 mm"));
     }
 }

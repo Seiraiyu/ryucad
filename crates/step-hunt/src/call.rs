@@ -21,6 +21,9 @@ pub struct Ryucad {
     pub modes: bool,
     /// Run only the reference stages (`--stages ref`).
     pub only_reference: bool,
+    /// Run only a body case's solid `import` and `defeature` (`--stages
+    /// defeature`, design 445).
+    pub defeature: bool,
 }
 
 /// How a command ended.
@@ -56,6 +59,7 @@ impl Ryucad {
             timeout,
             modes: false,
             only_reference: false,
+            defeature: false,
         };
         r.modes = r.probe();
         r
@@ -72,6 +76,19 @@ impl Ryucad {
             .is_ok_and(|o| {
                 String::from_utf8_lossy(&o.stdout).contains("--solid")
                     || String::from_utf8_lossy(&o.stderr).contains("--solid")
+            })
+    }
+
+    /// Whether the binary has `blends` (ryucad 22.B): `--stages
+    /// defeature` needs it.
+    pub fn takes_blends(&self) -> bool {
+        Command::new(&self.exe)
+            .args(["blends", "--help"])
+            .env("STEP_HUNT_STAGE", "probe")
+            .stdin(Stdio::null())
+            .output()
+            .is_ok_and(|o| {
+                o.status.success() && String::from_utf8_lossy(&o.stdout).contains("--below")
             })
     }
 

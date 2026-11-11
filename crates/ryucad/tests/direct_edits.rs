@@ -1,6 +1,7 @@
-//! Direct edits through the session (design 445, plan 22.A): face tweaks
-//! that change the solid's topology or remake its blends, and deleted
-//! faces healed by a cap or by growth, against exact volumes; names,
+//! Direct edits through the session (design 445, plans 22.A and 22.B):
+//! face tweaks that change the solid's topology or remake its blends,
+//! deleted faces healed by a cap or by growth, and blends listed, deleted
+//! and resized, against exact volumes; names,
 //! origins, references to what went, reference imports, the edit budget,
 //! refusals and their hints.
 
@@ -949,4 +950,776 @@ fn an_inside_out_result_is_refused() {
     );
     assert!(e.details["volume_mm3"].as_f64().unwrap() < 0.0, "{e}");
     assert!(e.details["hint"].as_str().unwrap().contains("heal"), "{e}");
+}
+
+/// Every edge of the box `b` filleted at `r` mm, in one fillet `f`: a
+/// rounded box, its twelve fillets meeting in eight ball corners.
+fn rounded(s: &mut Session, r: f64) {
+    let edges: Vec<String> = body(s, "b")["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| format!("p/b/{}", e["name"].as_str().unwrap()))
+        .collect();
+    assert_eq!(edges.len(), 12);
+    add(
+        s,
+        json!({"type": "fillet", "id": "f", "radius": r, "edges": edges}),
+    );
+}
+
+/// A rounded box defeatured by size: every fillet at most 3.5 mm goes,
+/// the corners with them, and the box is a box again, its faces' names
+/// the box's. Below 2 mm nothing goes: the same bits.
+#[test]
+fn a_rounded_box_is_defeatured_by_size() {
+    let (_dir, mut s) = boxed();
+    rounded(&mut s, 3.0);
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "below": "3.5 mm"}),
+    );
+    near(volume(&mut s, "d", "b"), 40.0 * 30.0 * 20.0, 1e-9);
+    let rep = report(&mut s, "d");
+    assert_eq!(rep["blends"].as_array().unwrap().len(), 12, "{rep}");
+    assert_eq!(rep["corners"].as_array().unwrap().len(), 8, "{rep}");
+    assert_eq!(rep["blends"][0]["kind"], "fillet", "{rep}");
+    // inspect --feature and feature.show give it as a tweak's: fields as
+    // text, each blend it took with its references and sizes.
+    let v = must(&mut s, "inspect", json!({"part": "p", "feature": "d"}));
+    let d = &v["delete_blend"];
+    assert_eq!(d["below"]["value"], "3.5 mm", "{v}");
+    assert_eq!(d["blends"].as_array().unwrap().len(), 12, "{v}");
+    assert_eq!(d["blends"][0]["radius"]["value"], "3 mm", "{v}");
+    assert!(
+        d["blends"][0]["faces"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("p/b/"),
+        "{v}"
+    );
+    assert_eq!(d["corners"].as_array().unwrap().len(), 8, "{v}");
+    assert_eq!(d["deleted"]["faces"].as_u64(), Some(20), "{v}");
+    let shown = must(&mut s, "feature.show", json!({"part": "p", "id": "d"}));
+    assert_eq!(shown["below"]["m"], 0.0035, "{shown}");
+    // The box's six faces are back under their own names.
+    let faces: Vec<String> = body(&mut s, "d")["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap().to_owned())
+        .collect();
+    let mut was: Vec<String> = body(&mut s, "b")["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap().to_owned())
+        .collect();
+    let mut faces = faces;
+    faces.sort();
+    was.sort();
+    assert_eq!(faces, was);
+    // Nothing at most 2 mm: nothing goes.
+    let kept = built(&mut s, "f", "b").body.dump();
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "d", "below": "2 mm"}),
+    );
+    assert_eq!(built(&mut s, "d", "b").body.dump(), kept);
+    assert_eq!(report(&mut s, "d")["blends"], json!([]));
+}
+
+/// A fillet named by its face goes, its chamfer neighbour stays: the
+/// box less the chamfer's 2 × 2 / 2 × 30 mm³.
+#[test]
+fn a_named_fillet_is_deleted_leaving_the_chamfer() {
+    let (_dir, mut s) = boxed();
+    let b = body(&mut s, "b");
+    let rim = edge(&b, "b", [40.0, 0.0, 20.0], [40.0, 30.0, 20.0]);
+    let lip = edge(&b, "b", [0.0, 0.0, 20.0], [0.0, 30.0, 20.0]);
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "f", "radius": 4, "edges": [rim]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "chamfer", "id": "c", "d": 2, "edges": [lip]}),
+    );
+    let round = cylinders(&body(&mut s, "c"), "b");
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "faces": [round[0]]}),
+    );
+    near(volume(&mut s, "d", "b"), 24000.0 - 60.0, 1e-9);
+    let rep = report(&mut s, "d");
+    assert_eq!(rep["blends"].as_array().unwrap().len(), 1, "{rep}");
+    // A grown edge in the fillet's place is the delete's, replacing it.
+    let b = built(&mut s, "d", "b");
+    assert!(
+        b.origins
+            .values()
+            .any(|o| o["feature"] == "d" && o.get("replaces").is_some()),
+        "{:?}",
+        b.origins.iter().collect::<Vec<_>>()
+    );
+}
+
+/// A fillet resized from 4 to 3 mm: the box less (1 − π/4) × 9 × 30 mm³,
+/// every name kept and the fillet's faces still the fillet's. A hole on
+/// the top, the fillet's neighbour, sketched after the resize, survives
+/// the resize's every size.
+#[test]
+fn a_fillet_resized_keeps_its_names() {
+    let (_dir, mut s) = boxed();
+    let rim = edge(
+        &body(&mut s, "b"),
+        "b",
+        [40.0, 0.0, 20.0],
+        [40.0, 30.0, 20.0],
+    );
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "f", "radius": 4, "edges": [rim]}),
+    );
+    let round = cylinders(&body(&mut s, "f"), "b");
+    add(
+        &mut s,
+        json!({"type": "resize_blend", "id": "r",
+               "groups": [{"radius": "3 mm", "faces": [round[0]]}]}),
+    );
+    near(
+        volume(&mut s, "r", "b"),
+        24000.0 - (1.0 - PI / 4.0) * 9.0 * 30.0,
+        1e-5,
+    );
+    assert_eq!(names(&mut s, "r"), names(&mut s, "f"));
+    let b = built(&mut s, "r", "b");
+    let name = round[0].rsplit('/').next().unwrap();
+    assert_eq!(b.origins.get(name).unwrap()["feature"], "f");
+    let rep = report(&mut s, "r");
+    assert_eq!(rep["resized"][0]["was"]["radius"], 4e-3, "{rep}");
+    assert_eq!(rep["resized"][0]["now"]["radius"], 3e-3, "{rep}");
+    let v = must(&mut s, "inspect", json!({"part": "p", "feature": "r"}));
+    let r = &v["resize_blend"];
+    assert_eq!(r["groups"][0]["faces"][0], json!(round[0]), "{v}");
+    assert_eq!(r["resized"][0]["was"]["radius"]["value"], "4 mm", "{v}");
+    assert_eq!(r["resized"][0]["now"]["radius"]["value"], "3 mm", "{v}");
+    assert_eq!(r["created"]["faces"].as_u64(), Some(0), "{v}");
+    // A hole in the top, after the resize.
+    let top = plane(&body(&mut s, "r"), "b", 2, 1.0, 20.0);
+    add(&mut s, json!({"type": "sketch", "id": "s", "face": top}));
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "s", "ops": [
+        {"op": "add", "type": "point", "at": [10, 15]}, {"op": "add", "type": "fix", "a": "p1"}]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "h", "sketch": "s", "points": ["p1"],
+        "diameter": "4 mm", "depth": "through_all", "targets": ["b"]}),
+    );
+    for r in ["2 mm", "5 mm", "3 mm"] {
+        must(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "r", "groups": [{"radius": r, "faces": [round[0]]}]}),
+        );
+        let v = must(&mut s, "rebuild", json!({"part": "p"}));
+        assert_eq!(v["parts"][0]["failed"], 0, "{r}: {v}");
+    }
+}
+
+/// A chamfer resized from 2 to 3 mm (the box less 4.5 × 30 mm³), then to
+/// 1 mm on the top and 3 mm on the side (1.5 × 30 mm³); a fillet given a
+/// chamfer's size (8 × 30 mm³).
+#[test]
+fn chamfers_resize_and_a_fillet_becomes_one() {
+    let (_dir, mut s) = boxed();
+    let b = body(&mut s, "b");
+    let lip = edge(&b, "b", [0.0, 0.0, 20.0], [0.0, 30.0, 20.0]);
+    add(
+        &mut s,
+        json!({"type": "chamfer", "id": "c", "d": 2, "edges": [lip]}),
+    );
+    let bevel = body(&mut s, "c")["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let z = &f["surface"]["frame"]["z"];
+            f["surface"]["type"] == "plane"
+                && z[0].as_f64().unwrap() != 0.0
+                && z[2].as_f64().unwrap() != 0.0
+        })
+        .map(|f| format!("p/b/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    add(
+        &mut s,
+        json!({"type": "resize_blend", "id": "r",
+               "groups": [{"form": "equal", "d": "3 mm", "faces": [bevel.clone()]}]}),
+    );
+    near(volume(&mut s, "r", "b"), 24000.0 - 4.5 * 30.0, 1e-9);
+    let top = plane(&body(&mut s, "c"), "b", 2, 1.0, 20.0);
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "r", "groups": [{"form": "distances", "d1": "1 mm",
+               "d2": "3 mm", "face": top, "faces": [bevel]}]}),
+    );
+    near(volume(&mut s, "r", "b"), 24000.0 - 1.5 * 30.0, 1e-9);
+    // A fillet made a 4 mm chamfer.
+    let (_dir2, mut t) = boxed();
+    let rim = edge(
+        &body(&mut t, "b"),
+        "b",
+        [40.0, 0.0, 20.0],
+        [40.0, 30.0, 20.0],
+    );
+    add(
+        &mut t,
+        json!({"type": "fillet", "id": "f", "radius": 4, "edges": [rim]}),
+    );
+    let round = cylinders(&body(&mut t, "f"), "b");
+    add(
+        &mut t,
+        json!({"type": "resize_blend", "id": "r",
+               "groups": [{"form": "equal", "d": "4 mm", "faces": [round[0]]}]}),
+    );
+    near(volume(&mut t, "r", "b"), 24000.0 - 8.0 * 30.0, 1e-9);
+    let rep = report(&mut t, "r");
+    assert_eq!(rep["resized"][0]["now"]["kind"], "chamfer", "{rep}");
+}
+
+/// `blends.get` lists the rounded box's twelve fillets and eight corners,
+/// with sizes and references, and with `below` exactly what a
+/// `delete_blend --below` takes (its report's blends); a second ask comes
+/// from the cache; a bad tolerance and a reference import are refused.
+#[test]
+fn the_blends_query_lists_what_delete_blend_takes() {
+    let (_dir, mut s) = boxed();
+    rounded(&mut s, 3.0);
+    // A 5 mm fillet on a second box: kept by below 3.5 mm.
+    add(
+        &mut s,
+        json!({"type": "box", "id": "c", "params": {"x": 40, "y": 30, "z": 20},
+               "placement": {"origin": [60, 0, 0]}}),
+    );
+    let rim = edge(
+        &body(&mut s, "c"),
+        "c",
+        [100.0, 0.0, 20.0],
+        [100.0, 30.0, 20.0],
+    );
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "g", "radius": 5, "edges": [rim]}),
+    );
+    let all = must(&mut s, "blends.get", json!({"part": "p", "solid": "b"}));
+    assert_eq!(all["blends"].as_array().unwrap().len(), 12, "{all}");
+    assert_eq!(all["corners"].as_array().unwrap().len(), 8, "{all}");
+    let b0 = &all["blends"][0];
+    assert_eq!(b0["kind"], "fillet");
+    assert_eq!(b0["size"]["value"], "3 mm");
+    assert!(b0["faces"][0].as_str().unwrap().starts_with("p/b/"));
+    assert_eq!(b0["supports"].as_array().unwrap().len(), 2);
+    assert_eq!(all["tolerance"]["m"], 1e-5);
+    // Two solids: one must be named.
+    let e = call(&mut s, "blends.get", json!({"part": "p"})).unwrap_err();
+    assert_eq!(e.details["param"], "solid", "{e}");
+    let c = must(
+        &mut s,
+        "blends.get",
+        json!({"part": "p", "solid": "c", "below": "3.5 mm"}),
+    );
+    assert_eq!(c["blends"], json!([]), "{c}");
+    // Below, as the delete takes it.
+    let listed = must(
+        &mut s,
+        "blends.get",
+        json!({"part": "p", "solid": "b", "below": "3.5 mm"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "target": "b", "below": "3.5 mm"}),
+    );
+    let rep = must(&mut s, "inspect", json!({"part": "p", "feature": "d"}))["delete_blend"].clone();
+    let faces = |v: &Value| {
+        let mut f: Vec<String> = v["blends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|b| b["faces"].as_array().unwrap().clone())
+            .map(|f| f.as_str().unwrap().to_owned())
+            .collect();
+        f.sort();
+        f
+    };
+    assert_eq!(faces(&listed), faces(&rep));
+    // Cached by body and tolerance: the delete shows b anew (one more
+    // body recognised), and asking again recognises nothing.
+    let n = s.blends.len();
+    must(&mut s, "blends.get", json!({"part": "p", "solid": "b"}));
+    assert_eq!(s.blends.len(), n + 1);
+    must(&mut s, "blends.get", json!({"part": "p", "solid": "b"}));
+    assert_eq!(s.blends.len(), n + 1);
+    // A tolerance outside the kernel's range is its refusal.
+    let e = call(
+        &mut s,
+        "blends.get",
+        json!({"part": "p", "solid": "b", "tolerance": "1 mm"}),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.details["reason"].as_str()),
+        (Code::TweakFailed, Some("bad_tolerance")),
+        "{e}"
+    );
+}
+
+/// A boss on a plate with its foot filleted and a filleted pocket beside
+/// it, round its whole rim: deleting every blend at most 1.5 mm leaves
+/// the sharp boss and
+/// pocket: the plate 40 × 30 × 10, the boss π × 4² × 6, the pocket
+/// 10 × 6 × 4 mm out of it.
+#[test]
+fn a_bosss_foot_and_a_pockets_rim_are_defeatured() {
+    let (_dir, mut s) = boxed();
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "b", "params": {"x": 40, "y": 30, "z": 10}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "boss", "operation": "join", "targets": ["b"],
+               "params": {"radius": 4, "height": 6}, "placement": {"origin": [12, 15, 10]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "k", "operation": "cut", "targets": ["b"],
+               "params": {"x": 10, "y": 6, "z": 4}, "placement": {"origin": [25, 12, 6]}}),
+    );
+    let j = body(&mut s, "k");
+    let foot = j["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| {
+            e["curve"]["type"] == "circle"
+                && (e["curve"]["frame"]["origin"][2].as_f64().unwrap() - 0.010).abs() < 1e-12
+        })
+        .map(|e| format!("p/b/{}", e["name"].as_str().unwrap()))
+        .expect("the boss's foot");
+    // The pocket's whole rim: one of its edges alone runs off the top at
+    // its ends (the kernel's overflow).
+    let rim = [
+        edge(&j, "b", [25.0, 12.0, 10.0], [35.0, 12.0, 10.0]),
+        edge(&j, "b", [35.0, 12.0, 10.0], [35.0, 18.0, 10.0]),
+        edge(&j, "b", [35.0, 18.0, 10.0], [25.0, 18.0, 10.0]),
+        edge(&j, "b", [25.0, 18.0, 10.0], [25.0, 12.0, 10.0]),
+    ];
+    let mut edges = vec![foot];
+    edges.extend(rim);
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "f", "radius": 1, "edges": edges}),
+    );
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "below": "1.5 mm"}),
+    );
+    near(
+        volume(&mut s, "d", "b"),
+        40.0 * 30.0 * 10.0 + PI * 16.0 * 6.0 - 10.0 * 6.0 * 4.0,
+        1e-6,
+    );
+    report(&mut s, "d");
+}
+
+/// A sketch on a chamfer's face reads it; a delete of the chamfer moved
+/// in before the sketch takes the face away: the sketch fails, naming the
+/// delete.
+#[test]
+fn a_sketch_on_a_deleted_chamfer_fails_naming_the_delete() {
+    let (_dir, mut s) = boxed();
+    let lip = edge(&body(&mut s, "b"), "b", [0.0, 0.0, 20.0], [0.0, 30.0, 20.0]);
+    add(
+        &mut s,
+        json!({"type": "chamfer", "id": "c", "d": 4, "edges": [lip]}),
+    );
+    let bevel = body(&mut s, "c")["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let z = &f["surface"]["frame"]["z"];
+            f["surface"]["type"] == "plane"
+                && z[0].as_f64().unwrap() != 0.0
+                && z[2].as_f64().unwrap() != 0.0
+        })
+        .map(|f| format!("p/b/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "s", "face": bevel.clone()}),
+    );
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "faces": [bevel]}),
+    );
+    must(
+        &mut s,
+        "feature.move",
+        json!({"part": "p", "id": "d", "after": "c"}),
+    );
+    let e = failure(&mut s, "s");
+    assert_eq!(e.code, Code::ReferenceUnresolved, "{e}");
+    assert_eq!(e.details["removed_by"], "d", "{e}");
+}
+
+/// A lid mated flat on the box's top: the top is the fillet's neighbour
+/// and keeps its name and plane through every size the resize gives the
+/// fillet, so the lid stays where it was.
+#[test]
+fn a_mate_to_a_kept_face_holds_across_a_resize() {
+    let (_dir, mut s) = boxed();
+    let rim = edge(
+        &body(&mut s, "b"),
+        "b",
+        [40.0, 0.0, 20.0],
+        [40.0, 30.0, 20.0],
+    );
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "f", "radius": 4, "edges": [rim]}),
+    );
+    let round = cylinders(&body(&mut s, "f"), "b");
+    add(
+        &mut s,
+        json!({"type": "resize_blend", "id": "r",
+               "groups": [{"radius": "3 mm", "faces": [round[0]]}]}),
+    );
+    let top = plane(&body(&mut s, "r"), "b", 2, 1.0, 20.0);
+    must(&mut s, "part.create", json!({"part": "lid"}));
+    add(
+        &mut s,
+        json!({"part": "lid", "type": "box", "id": "c", "params": {"x": 10, "y": 10, "z": 2}}),
+    );
+    let under = plane(
+        &must(&mut s, "inspect", json!({"part": "lid", "feature": "c"}))["bodies"][0],
+        "c",
+        2,
+        -1.0,
+        0.0,
+    )
+    .replacen("p/", "", 1);
+    must(
+        &mut s,
+        "part.create",
+        json!({"part": "asm", "kind": "assembly"}),
+    );
+    add(
+        &mut s,
+        json!({"part": "asm", "type": "instance", "id": "base", "of": "p", "fixed": true}),
+    );
+    add(
+        &mut s,
+        json!({"part": "asm", "type": "instance", "id": "top", "of": "lid"}),
+    );
+    add(
+        &mut s,
+        json!({"part": "asm", "type": "mate", "id": "on", "form": "planar",
+               "a": format!("asm/base/{}", top.replacen("p/", "", 1)),
+               "b": format!("asm/top/{under}")}),
+    );
+    let lid_z = |s: &mut Session| -> f64 {
+        let r = must(s, "rebuild", json!({"part": "asm"}));
+        let asm = r["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["part"] == "asm")
+            .unwrap()
+            .clone();
+        let i = asm["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "top")
+            .unwrap()
+            .clone();
+        i["instance"]["pose"]["origin_m"][2].as_f64().unwrap()
+    };
+    let z0 = lid_z(&mut s);
+    assert!((z0 - 0.020).abs() < 1e-9, "{z0}");
+    for r in ["2 mm", "5 mm"] {
+        must(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "r", "groups": [{"radius": r, "faces": [round[0]]}]}),
+        );
+        assert!((lid_z(&mut s) - z0).abs() < 1e-12, "{r}");
+    }
+}
+
+#[test]
+fn blend_edits_refuse_with_their_hints() {
+    let (_dir, mut s) = boxed();
+    let b = body(&mut s, "b");
+    let top = plane(&b, "b", 2, 1.0, 20.0);
+    // A face of no blend.
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "faces": [top.clone()]}),
+    );
+    let e = failure(&mut s, "d");
+    assert_eq!(
+        (e.code, e.details["reason"].as_str()),
+        (Code::TweakFailed, Some("not_a_blend")),
+        "{e}"
+    );
+    assert!(
+        e.details["hint"]
+            .as_str()
+            .unwrap()
+            .contains("ryucad blends"),
+        "{e}"
+    );
+    must(&mut s, "feature.delete", json!({"part": "p", "id": "d"}));
+    // A fillet too large for its box: lost.
+    let rim = edge(&b, "b", [40.0, 0.0, 20.0], [40.0, 30.0, 20.0]);
+    add(
+        &mut s,
+        json!({"type": "fillet", "id": "f", "radius": 4, "edges": [rim]}),
+    );
+    let round = cylinders(&body(&mut s, "f"), "b");
+    add(
+        &mut s,
+        json!({"type": "resize_blend", "id": "r",
+               "groups": [{"radius": "25 mm", "faces": [round[0]]}]}),
+    );
+    let e = failure(&mut s, "r");
+    assert_eq!(e.details["reason"], "blend_lost", "{e}");
+    assert!(
+        e.details["hint"].as_str().unwrap().contains("delete_blend"),
+        "{e}"
+    );
+    // Two faces of one blend, or here one face, in two groups: refused
+    // when written.
+    let e = call(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "r", "groups": [
+            {"radius": "3 mm", "faces": [round[0]]}, {"radius": "2 mm", "faces": [round[0]]}]}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, Code::InvalidParam, "{e}");
+    // A tolerance out of range: refused when written.
+    let e = call(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "delete_blend", "id": "t", "below": "1 mm",
+               "tolerance": "1 mm"}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, Code::InvalidParam, "{e}");
+}
+
+#[test]
+fn blend_edits_build_alike_on_one_thread_and_eight() {
+    let (_dir, mut s) = boxed();
+    rounded(&mut s, 3.0);
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "below": "3.5 mm"}),
+    );
+    let part = Id::parse("p", "part").unwrap();
+    let p = s.project().part(&part).unwrap().clone();
+    let on = |n: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+            .install(|| ryucad::rebuild::rebuild_part(&p))
+    };
+    assert_eq!(on(1).hash, on(8).hash);
+}
+
+/// The rounded box (3 mm fillets on every edge) written to STEP in
+/// millimetres, in `dir`.
+fn rounded_step(dir: &std::path::Path) -> std::path::PathBuf {
+    let (_d, mut s) = boxed();
+    rounded(&mut s, 3.0);
+    let out = dir.join("rounded.step");
+    must(
+        &mut s,
+        "export",
+        json!({"part": "p", "out": out.to_str().unwrap(), "unit": "mm",
+               "time_stamp": "2000-01-01T00:00:00"}),
+    );
+    out
+}
+
+/// Imported as a solid it defeatures to the box. Imported as a
+/// reference, nothing may edit it: converted, it does.
+#[test]
+fn a_rounded_box_through_step_is_defeatured() {
+    let files = tempfile::tempdir().unwrap();
+    let step = rounded_step(files.path());
+    for solid in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        ryucad::server::init(dir.path(), None).unwrap();
+        let mut s = Session::open(dir.path()).unwrap();
+        let v = must(
+            &mut s,
+            "import",
+            json!({"path": step.to_str().unwrap(), "part": "p", "solid": solid}),
+        );
+        let imp = v["parts"][0]["features"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        if solid {
+            let listed = must(&mut s, "blends.get", json!({"part": "p"}));
+            assert_eq!(listed["blends"].as_array().unwrap().len(), 12, "{listed}");
+        } else {
+            assert_eq!(
+                call(&mut s, "blends.get", json!({"part": "p"}))
+                    .unwrap_err()
+                    .code,
+                Code::ReferenceBody
+            );
+            let e = call(
+                &mut s,
+                "feature.add",
+                json!({"part": "p", "type": "delete_blend", "id": "d", "below": "3.5 mm"}),
+            )
+            .unwrap_err();
+            assert_eq!(e.code, Code::ReferenceBody, "{e}");
+            assert!(
+                e.details["hint"]
+                    .as_str()
+                    .unwrap()
+                    .contains("import convert"),
+                "{e}"
+            );
+            must(
+                &mut s,
+                "import.convert",
+                json!({"part": "p", "feature": imp}),
+            );
+        }
+        add(
+            &mut s,
+            json!({"type": "delete_blend", "id": "d", "below": "3.5 mm"}),
+        );
+        near(volume(&mut s, "d", &imp), 40.0 * 30.0 * 20.0, 1e-6);
+    }
+}
+
+/// The committed NIST corpus (ryustep's `tests/corpus`), each file
+/// imported as solids, each solid's blends at most 2 mm deleted under the
+/// default edit budget: every outcome is a body that passes the kernel's
+/// checks, or a typed refusal (`tweak_failed` but for `kernel`, or
+/// `edit_budget_exceeded`), never a panic or an untyped error. Prints the
+/// counts for the area doc and the spent units for the budget (Task 23).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: edits run to the edit budget"
+)]
+fn the_committed_corpus_defeatures_or_refuses_typed() {
+    let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/corpus");
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&corpus)
+        .unwrap()
+        .filter_map(|e| {
+            let p = e.ok()?.path();
+            (p.extension()? == "stp").then_some(p)
+        })
+        .collect();
+    files.sort();
+    assert_eq!(files.len(), 10, "the committed corpus: {files:?}");
+    let (mut built_n, mut none) = (0usize, 0usize);
+    let mut refused: std::collections::BTreeMap<String, usize> = Default::default();
+    for f in &files {
+        let dir = tempfile::tempdir().unwrap();
+        ryucad::server::init(dir.path(), None).unwrap();
+        let mut s = Session::open(dir.path()).unwrap();
+        let v = must(
+            &mut s,
+            "import",
+            json!({"path": f.to_str().unwrap(), "solid": true}),
+        );
+        for part in v["parts"].as_array().unwrap() {
+            if part["kind"] != "part" {
+                continue;
+            }
+            let pid = part["part"].as_str().unwrap().to_owned();
+            let bodies = must(&mut s, "inspect", json!({"part": pid}))["bodies"].clone();
+            for (k, b) in bodies.as_array().into_iter().flatten().enumerate() {
+                let solid = b["solid"].as_str().unwrap().to_owned();
+                let listed = must(
+                    &mut s,
+                    "blends.get",
+                    json!({"part": pid, "solid": solid, "below": "2 mm"}),
+                );
+                if listed["blends"].as_array().is_none_or(Vec::is_empty) {
+                    none += 1;
+                    continue;
+                }
+                let id = format!("defeature{k}");
+                must(
+                    &mut s,
+                    "feature.add",
+                    json!({"part": pid, "type": "delete_blend",
+                    "id": id, "target": solid, "below": "2 mm"}),
+                );
+                let p = Id::parse(&pid, "part").unwrap();
+                let r = s.rebuilt(&p).unwrap();
+                let (_, out) = r.features.iter().find(|(i, _)| i.as_str() == id).unwrap();
+                match out {
+                    Ok(o) => {
+                        for (_, b) in o.solids() {
+                            assert!(
+                                ryukei::check::check(&b.body).is_empty(),
+                                "{f:?} {pid}/{solid}"
+                            );
+                            assert_eq!(
+                                ryukei::check::check_intersections(&b.body),
+                                [],
+                                "{f:?} {pid}/{solid}"
+                            );
+                        }
+                        if let ryucad::rebuild::Output::Solids(m) = o
+                            && let Some(rep) = &m.report
+                        {
+                            println!(
+                                "edit spent corpus {}/{pid}/{solid}: {}",
+                                f.display(),
+                                rep["spent"]
+                            );
+                        }
+                        built_n += 1;
+                    }
+                    Err(e) => {
+                        let reason = match e.code {
+                            Code::TweakFailed => {
+                                e.details["reason"].as_str().unwrap_or("").to_owned()
+                            }
+                            Code::EditBudgetExceeded => "edit_budget_exceeded".to_owned(),
+                            c => panic!("{f:?} {pid}/{solid}: untyped {c:?}: {e}"),
+                        };
+                        assert!(
+                            reason != "kernel" && !reason.is_empty(),
+                            "{f:?} {pid}/{solid}: {e}"
+                        );
+                        *refused.entry(reason).or_default() += 1;
+                    }
+                }
+            }
+        }
+    }
+    println!("corpus defeature: built {built_n}, nothing below 2 mm {none}, refused {refused:?}");
 }
