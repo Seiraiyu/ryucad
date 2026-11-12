@@ -1554,6 +1554,26 @@ pub(crate) fn dispatch(
             expected_revision.as_deref(),
         ),
         Request::ExplodeList { part } => crate::explode::list(session, part.as_deref()),
+        Request::MotionList { part } => crate::motion::list(session, part.as_deref()),
+        Request::MotionSave {
+            part,
+            motion,
+            drives,
+            steps,
+            expected_revision,
+        } => crate::motion::save(
+            session,
+            &part,
+            &motion,
+            &drives,
+            steps,
+            expected_revision.as_deref(),
+        ),
+        Request::MotionDelete {
+            part,
+            motion,
+            expected_revision,
+        } => crate::motion::delete(session, &part, &motion, expected_revision.as_deref()),
         Request::ExplodeSave {
             part,
             explode,

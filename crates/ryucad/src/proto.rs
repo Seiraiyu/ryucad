@@ -1803,6 +1803,35 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// The motions of assembly `part`, or of every assembly: each one's
+    /// steps and drives as written and as they resolve now, with
+    /// warnings or its error, and each listed assembly's revision.
+    #[serde(rename = "motion.list")]
+    MotionList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
+    /// Saves a motion of assembly `part` from `drives` (as the file
+    /// writes them) and `steps` (11 when left out), replacing one of that
+    /// ID. Refused when it doesn't read or doesn't resolve.
+    #[serde(rename = "motion.save")]
+    MotionSave {
+        part: String,
+        motion: String,
+        drives: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steps: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Deletes a motion of assembly `part`.
+    #[serde(rename = "motion.delete")]
+    MotionDelete {
+        part: String,
+        motion: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// A part's drawings, or every part's (design 417).
     #[serde(rename = "drawing.list")]
     DrawingList {
@@ -2407,6 +2436,8 @@ impl Request {
                 | Request::ViewRename { .. }
                 | Request::ExplodeSave { .. }
                 | Request::ExplodeDelete { .. }
+                | Request::MotionSave { .. }
+                | Request::MotionDelete { .. }
                 | Request::DrawingCreate { .. }
                 | Request::DrawingEdit { .. }
                 | Request::DrawingDelete { .. }

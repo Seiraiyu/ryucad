@@ -74,7 +74,10 @@ impl Rest {
     }
 
     fn body(&self, id: &Id) -> Option<u32> {
-        self.instances.iter().position(|i| i == id).map(|k| k as u32)
+        self.instances
+            .iter()
+            .position(|i| i == id)
+            .map(|k| k as u32)
     }
 }
 
@@ -127,39 +130,40 @@ pub struct Resolved {
 impl Resolved {
     /// The drives as `motion.list` gives them, in radians and meters.
     pub fn to_json(&self) -> Value {
-        json!(self
-            .drives
-            .iter()
-            .map(|d| match d {
-                Drive::Mate {
-                    mate,
-                    driven,
-                    from,
-                    to,
-                    ..
-                } => match driven {
-                    Driven::Angle => json!({"mate": mate, "angle_rad": [from, to]}),
-                    Driven::Distance => json!({"mate": mate, "distance_m": [from, to]}),
-                },
-                Drive::Move {
-                    instances,
-                    rotate,
-                    translate,
-                    ..
-                } => {
-                    let mut v = json!({"instances": instances});
-                    if let Some(r) = rotate {
-                        v["rotate"] = json!({"origin_m": r.origin, "axis": r.axis,
+        json!(
+            self.drives
+                .iter()
+                .map(|d| match d {
+                    Drive::Mate {
+                        mate,
+                        driven,
+                        from,
+                        to,
+                        ..
+                    } => match driven {
+                        Driven::Angle => json!({"mate": mate, "angle_rad": [from, to]}),
+                        Driven::Distance => json!({"mate": mate, "distance_m": [from, to]}),
+                    },
+                    Drive::Move {
+                        instances,
+                        rotate,
+                        translate,
+                        ..
+                    } => {
+                        let mut v = json!({"instances": instances});
+                        if let Some(r) = rotate {
+                            v["rotate"] = json!({"origin_m": r.origin, "axis": r.axis,
                                              "angle_rad": [r.from, r.to]});
-                    }
-                    if let Some(t) = translate {
-                        v["translate"] = json!({"direction": t.direction,
+                        }
+                        if let Some(t) = translate {
+                            v["translate"] = json!({"direction": t.direction,
                                                 "distance_m": [t.from, t.to]});
+                        }
+                        v
                     }
-                    v
-                }
-            })
-            .collect::<Vec<_>>())
+                })
+                .collect::<Vec<_>>()
+        )
     }
 }
 
@@ -168,8 +172,13 @@ fn has(form: crate::doc::mate::Form, driven: Driven) -> bool {
     use crate::doc::mate::Form;
     matches!(
         (form, driven),
-        (Form::Revolute | Form::Cylindrical | Form::Planar, Driven::Angle)
-            | (Form::Slider | Form::Cylindrical | Form::Planar, Driven::Distance)
+        (
+            Form::Revolute | Form::Cylindrical | Form::Planar,
+            Driven::Angle
+        ) | (
+            Form::Slider | Form::Cylindrical | Form::Planar,
+            Driven::Distance
+        )
     )
 }
 
@@ -218,10 +227,18 @@ pub fn resolve(
     for (i, d) in file.drives.iter().enumerate() {
         let at = format!("/drives/{i}");
         match d {
-            crate::doc::motion::Drive::Mate { mate, driven, range } => {
+            crate::doc::motion::Drive::Mate {
+                mate,
+                driven,
+                range,
+            } => {
                 let here = format!("{at}/mate");
                 let Some(Ok(Feature::Mate(doc))) = part.features.get(mate) else {
-                    return Err(unresolved(here, mate.as_str(), format!("{asm} has no mate {mate}")));
+                    return Err(unresolved(
+                        here,
+                        mate.as_str(),
+                        format!("{asm} has no mate {mate}"),
+                    ));
                 };
                 if !has(doc.form, *driven) {
                     return Err(unresolved(
@@ -277,7 +294,11 @@ pub fn resolve(
                     instances: instances.clone(),
                     bodies,
                     rotate: rotate.as_ref().map(|r| Turn {
-                        origin: [r.origin[0].meters(), r.origin[1].meters(), r.origin[2].meters()],
+                        origin: [
+                            r.origin[0].meters(),
+                            r.origin[1].meters(),
+                            r.origin[2].meters(),
+                        ],
                         axis: r.direction.unit(),
                         from: r.range.from.radians(),
                         to: r.range.to.radians(),
@@ -298,6 +319,168 @@ pub fn resolve(
     })
 }
 
+/// `motion_not_found` for `id` in `asm`, naming the motions it has.
+pub fn not_found(session: &Session, asm: &Id, id: &str) -> Error {
+    let known: Vec<String> = session
+        .project()
+        .part(asm)
+        .map(|p| p.motions.keys().map(Id::to_string).collect())
+        .unwrap_or_default();
+    Error::new(Code::MotionNotFound, format!("{asm} has no motion {id}"))
+        .with("part", asm.as_str())
+        .with("motion", id)
+        .with("motions", known)
+}
+
+/// Motion `id` of assembly `asm` as the working files have it.
+pub fn file_of(session: &Session, asm: &Id, id: &str) -> Result<MotionFile> {
+    let part = session.project().part(asm)?;
+    if crate::server::part_kind(part) != PartKind::Assembly {
+        return Err(crate::doc::motion::not_an_assembly(asm.as_str()));
+    }
+    match Id::parse(id, "motion")
+        .ok()
+        .and_then(|k| part.motions.get(&k))
+    {
+        Some(Ok(f)) => Ok(f.clone()),
+        Some(Err(e)) => Err(e.clone()),
+        None => Err(not_found(session, asm, id)),
+    }
+}
+
+/// Motion `id` of assembly `asm` resolved against the assembly as the
+/// working files rebuild it.
+pub fn resolve_in(session: &mut Session, asm: &Id, id: &str) -> Result<Resolved> {
+    let file = file_of(session, asm, id)?;
+    let part = session.project().part(asm)?.clone();
+    let result = session.rebuilt(asm)?.clone();
+    resolve(asm, &part, &Rest::of(&result), id, &file)
+}
+
+/// One motion as `motion.list` gives it.
+fn entry(session: &mut Session, part: &Id, id: &Id) -> Value {
+    let file = match file_of(session, part, id.as_str()) {
+        Ok(f) => f,
+        Err(e) => return json!({"part": part, "motion": id, "error": e}),
+    };
+    let written = file.to_json();
+    let mut v = json!({"part": part, "motion": id, "steps": written["steps"],
+                       "drives": written["drives"]});
+    match resolve_in(session, part, id.as_str()) {
+        Ok(r) => {
+            v["resolved"] = r.to_json();
+            v["warnings"] = json!(r.warnings);
+        }
+        Err(e) => v["error"] = json!(e),
+    }
+    v
+}
+
+/// The motions of assembly `part`, or of every assembly, with each
+/// listed assembly's revision.
+pub fn list(session: &mut Session, part: Option<&str>) -> Result<Value> {
+    let parts: Vec<Id> = match part {
+        Some(p) => {
+            let id = crate::server::part_id(p)?;
+            let found = session.project().part(&id)?;
+            if crate::server::part_kind(found) != PartKind::Assembly {
+                return Err(crate::doc::motion::not_an_assembly(p));
+            }
+            vec![id]
+        }
+        None => session.project().parts.keys().cloned().collect(),
+    };
+    let mut motions = Vec::new();
+    let mut revisions = serde_json::Map::new();
+    for id in &parts {
+        let p = session.project().part(id)?;
+        if part.is_some() || !p.motions.is_empty() {
+            revisions.insert(id.to_string(), json!(p.revision));
+        }
+        let ids: Vec<Id> = p.motions.keys().cloned().collect();
+        for m in ids {
+            motions.push(entry(session, id, &m));
+        }
+    }
+    Ok(json!({"motions": motions, "revisions": revisions}))
+}
+
+fn path(session: &Session, part: &Id, motion: &Id) -> std::path::PathBuf {
+    crate::doc::project::part_dir(session.root(), part)
+        .join(crate::doc::motion::motion_file(motion))
+}
+
+/// The assembly `part`, refusing a part (`wrong_part_kind`) and a stale
+/// revision.
+fn assembly(session: &Session, part: &str, expected: Option<&str>) -> Result<Id> {
+    let pid = crate::server::part_id(part)?;
+    let p = session.project().part(&pid)?;
+    if crate::server::part_kind(p) != PartKind::Assembly {
+        return Err(crate::doc::motion::not_an_assembly(part));
+    }
+    crate::server::check_revision(p, expected)?;
+    Ok(pid)
+}
+
+/// A file's refusal as a request's: `invalid_param` at the same pointer.
+fn as_param(e: Error) -> Error {
+    Error::new(Code::InvalidParam, e.message.clone()).with("pointer", e.details["pointer"].clone())
+}
+
+/// Saves `drives` and `steps` as `part`'s motion `motion`, replacing one
+/// of that ID: read against the assembly's parameters and resolved
+/// against its rebuild first, so what doesn't read or resolve is never
+/// written.
+pub fn save(
+    session: &mut Session,
+    part: &str,
+    motion: &str,
+    drives: &Value,
+    steps: Option<u32>,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let pid = assembly(session, part, expected)?;
+    let mid = crate::doc::motion::check_id(motion)?;
+    let p = session.project().part(&pid)?.clone();
+    let replaced = p.motions.contains_key(&mid);
+    let unit = session.project().manifest.default_unit;
+    let doc = json!({
+        "format": crate::doc::motion::FORMAT,
+        "kind": crate::doc::motion::KIND,
+        "steps": steps.unwrap_or(crate::doc::motion::STEPS),
+        "drives": drives,
+    });
+    let file = MotionFile::from_json(&doc, unit, &p.env).map_err(as_param)?;
+    let result = session.rebuilt(&pid)?.clone();
+    resolve(&pid, &p, &Rest::of(&result), motion, &file)?;
+    session.write_json(&path(session, &pid, &mid), &file.to_json())?;
+    session.reload()?;
+    let mut v = entry(session, &pid, &mid);
+    v["replaced"] = json!(replaced);
+    v["revision"] = json!(session.project().part(&pid)?.revision);
+    Ok(v)
+}
+
+/// Deletes `part`'s motion `motion`; a file that doesn't read can be
+/// deleted too.
+pub fn delete(
+    session: &mut Session,
+    part: &str,
+    motion: &str,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let pid = assembly(session, part, expected)?;
+    let p = session.project().part(&pid)?;
+    let mid = Id::parse(motion, "motion")
+        .ok()
+        .filter(|m| p.motions.contains_key(m))
+        .ok_or_else(|| not_found(session, &pid, motion))?;
+    session.remove_file(&path(session, &pid, &mid))?;
+    session.reload()?;
+    let revision = session.project().part(&pid)?.revision.clone();
+    Ok(json!({"part": pid, "motion": mid, "revision": revision}))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -311,8 +494,7 @@ pub(crate) mod tests {
     pub(crate) fn stopped() -> (tempfile::TempDir, Session) {
         let (dir, mut s) = hinged();
         let m1 = crate::doc::project::feature_path(dir.path(), &id("frame"), &id("m1"));
-        let mut v =
-            crate::doc::canonical::parse(&std::fs::read_to_string(&m1).unwrap()).unwrap();
+        let mut v = crate::doc::canonical::parse(&std::fs::read_to_string(&m1).unwrap()).unwrap();
         v["format"] = json!(crate::doc::mate::LIMITS_FORMAT);
         v["limits"] = json!({"angle": {"min": "-6 deg", "max": "6 deg"}});
         crate::doc::project::write_json(&m1, &v).unwrap();
@@ -350,12 +532,22 @@ pub(crate) mod tests {
         let r = resolved(&mut s, "frame", &f).unwrap();
         assert_eq!(r.steps, 7);
         assert!(r.warnings.is_empty(), "{:?}", r.warnings);
-        let Drive::Mate { mate, driven, from, to, .. } = &r.drives[0] else {
+        let Drive::Mate {
+            mate,
+            driven,
+            from,
+            to,
+            ..
+        } = &r.drives[0]
+        else {
             panic!()
         };
         assert_eq!((mate.as_str(), *driven), ("m1", Driven::Angle));
         assert!((from + 3f64.to_radians()).abs() < 1e-15 && (to - 3f64.to_radians()).abs() < 1e-15);
-        let Drive::Move { bodies, translate, .. } = &r.drives[1] else {
+        let Drive::Move {
+            bodies, translate, ..
+        } = &r.drives[1]
+        else {
             panic!()
         };
         assert_eq!(bodies.len(), 1);
@@ -380,9 +572,21 @@ pub(crate) mod tests {
         assert_eq!(r.warnings[0]["limit"], "max");
         assert_eq!(r.warnings[0]["pointer"], "/drives/0");
         for (drives, pointer, name) in [
-            (json!([{"mate": "m9", "angle": {"from": 0, "to": 1}}]), "/drives/0/mate", "m9"),
-            (json!([{"mate": "m1", "distance": {"from": 0, "to": 1}}]), "/drives/0/mate", "m1"),
-            (json!([{"mate": "pin", "angle": {"from": 0, "to": 1}}]), "/drives/0/mate", "pin"),
+            (
+                json!([{"mate": "m9", "angle": {"from": 0, "to": 1}}]),
+                "/drives/0/mate",
+                "m9",
+            ),
+            (
+                json!([{"mate": "m1", "distance": {"from": 0, "to": 1}}]),
+                "/drives/0/mate",
+                "m1",
+            ),
+            (
+                json!([{"mate": "pin", "angle": {"from": 0, "to": 1}}]),
+                "/drives/0/mate",
+                "pin",
+            ),
             (
                 json!([{"instances": ["pin", "gone"], "translate":
                     {"direction": "x", "from": 0, "to": 1}}]),
@@ -396,5 +600,86 @@ pub(crate) mod tests {
             assert_eq!(e.details["pointer"], pointer, "{e:?}");
             assert_eq!(e.details["name"], name, "{e:?}");
         }
+    }
+
+    use crate::server::tests::call;
+
+    #[test]
+    fn motions_save_list_and_delete_as_explodes_do() {
+        let (dir, mut s) = stopped();
+        let drives = json!([{"mate": "m1", "angle": {"from": "0 deg", "to": "10 deg"}}]);
+        let v = call(
+            &mut s,
+            "motion.save",
+            json!({"part": "frame", "motion": "swing", "drives": drives, "steps": 11}),
+        )
+        .unwrap();
+        assert_eq!(v["replaced"], false);
+        assert_eq!(v["warnings"][0]["code"], "motion_past_limit");
+        assert_eq!(v["resolved"][0]["mate"], "m1");
+        let on_disk: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("parts/frame/motions/swing.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(on_disk["steps"], 11);
+        assert_eq!(on_disk["drives"], drives);
+        let list = call(&mut s, "motion.list", json!({"part": "frame"})).unwrap();
+        assert_eq!(list["motions"][0]["motion"], "swing");
+        assert!(list["revisions"]["frame"].is_string());
+        // Every assembly's when no part is named.
+        assert_eq!(
+            call(&mut s, "motion.list", json!({})).unwrap()["motions"],
+            list["motions"]
+        );
+        // Refusals: what doesn't read, what doesn't resolve, a part.
+        let bad = call(
+            &mut s,
+            "motion.save",
+            json!({"part": "frame", "motion": "x", "drives": [], "steps": 11}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (bad.code, bad.details["pointer"].as_str()),
+            (Code::InvalidParam, Some("/drives"))
+        );
+        let gone = call(
+            &mut s,
+            "motion.save",
+            json!({"part": "frame", "motion": "x",
+                   "drives": [{"mate": "m9", "angle": {"from": 0, "to": 1}}]}),
+        )
+        .unwrap_err();
+        assert_eq!(gone.code, Code::MotionUnresolved);
+        assert!(!dir.path().join("parts/frame/motions/x.json").exists());
+        let part = call(
+            &mut s,
+            "motion.save",
+            json!({"part": "plate", "motion": "x", "drives": drives}),
+        )
+        .unwrap_err();
+        assert_eq!(part.code, Code::WrongPartKind);
+        // A stale revision is refused.
+        let stale = call(
+            &mut s,
+            "motion.delete",
+            json!({"part": "frame", "motion": "swing", "expected_revision": "0"}),
+        )
+        .unwrap_err();
+        assert_eq!(stale.code, Code::Conflict);
+        let missing = call(
+            &mut s,
+            "motion.delete",
+            json!({"part": "frame", "motion": "nope"}),
+        )
+        .unwrap_err();
+        assert_eq!(missing.code, Code::MotionNotFound);
+        assert_eq!(missing.details["motions"], json!(["swing"]));
+        call(
+            &mut s,
+            "motion.delete",
+            json!({"part": "frame", "motion": "swing"}),
+        )
+        .unwrap();
+        assert!(!dir.path().join("parts/frame/motions/swing.json").exists());
     }
 }
