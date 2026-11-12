@@ -114,3 +114,32 @@ fn a_request_sent_aside_doesnt_wait_behind_the_other() {
     assert_ne!(slow, quick);
     assert!(order.contains(&slow) && order.contains(&quick));
 }
+
+/// The tests take `examples/ryucad-test` only while nothing it is built
+/// from changed after it was linked (#555): a file deep in a folder
+/// counts, a missing root doesn't, and a missing program is never fresh.
+#[test]
+fn an_example_is_stale_once_a_source_is_newer() {
+    use std::time::{Duration, SystemTime};
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(src.join("deep")).unwrap();
+    let file = src.join("deep/lib.rs");
+    std::fs::write(&file, "").unwrap();
+    let exe = dir.path().join("ryucad-test");
+    std::fs::write(&exe, "").unwrap();
+    let set = |p: &std::path::Path, t: SystemTime| {
+        let f = std::fs::File::options().write(true).open(p).unwrap();
+        f.set_modified(t).unwrap();
+    };
+    let hour = Duration::from_secs(3600);
+    let now = SystemTime::now();
+    let roots = [src.clone(), dir.path().join("no-such-root")];
+    // Linked after everything (folders were made just now).
+    set(&exe, now + hour);
+    assert!(common::built_after(&exe, &roots));
+    // A source saved since.
+    set(&file, now + 2 * hour);
+    assert!(!common::built_after(&exe, &roots));
+    assert!(!common::built_after(&dir.path().join("missing"), &[]));
+}

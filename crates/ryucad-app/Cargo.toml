@@ -49,6 +49,10 @@ ryupdm = { path = "../ryupdm", features = ["testing"] }
 # Whole-window and icon sheet pictures: egui_kittest renders to its images.
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# The allocator of the `ryucad-test` example, as the `ryucad` binary's.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
+mimalloc = "0.1"
+
 [[bench]]
 name = "view"
 harness = false

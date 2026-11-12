@@ -3,21 +3,15 @@
 //! reusing what it can, compared with a rebuild from nothing on one thread
 //! and on eight.
 
+mod common;
+
+use common::{call, must};
 use ryucad::doc::id::Id;
 use ryucad::proto::Request;
 use ryucad::rebuild::rebuild_part;
-use ryucad::server::handle;
 use ryucad::session::Session;
 use ryukei_testkit::Lcg;
 use serde_json::{Value, json};
-
-fn call(s: &mut Session, method: &str, params: Value) -> ryucad::error::Result<Value> {
-    handle(s, Request::from_rpc(method, Some(params)).unwrap())
-}
-
-fn must(s: &mut Session, method: &str, params: Value) -> Value {
-    call(s, method, params).unwrap_or_else(|e| panic!("{method}: {e}"))
-}
 
 /// An `inspect` body's entities of `kind` (`faces`, `edges`, `vertices`).
 fn entities(s: &mut Session, f: &str, kind: &str) -> Vec<Value> {
