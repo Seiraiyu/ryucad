@@ -332,7 +332,7 @@ The design is document 519 in the Coxswain planning project `ryucad-ryukei`; thi
 - **The figures.** Measured on cox-worker-3 (Intel Core Ultra 5 250K Plus, 18 threads, shared, load 3 to 4) on 2026-11-12, laid out from nothing:
   - breakout 84 and 98, RP2040 43/78/98, buck 25 (was 27), front end amp 94 (was 100), baldiff 90 (was 47; 40 before the stage was drawn round its amplifier), ivconv 92 (was 78), Ethernet 63 and 97;
   - 7 floating parts (bar 10), crossings within each reference's bar (the front end's 2).
-  - buck's 2 points: the join took R7's VSNS region into the converter's (the Misc title's 2 points went), the packing moved, and J4's region of one lines up with no other part.
+  - buck's 2 points: the join took R7's VSNS region into the converter's, which swapped `Misc`'s `sch_region_untitled` for r3's ("has no title") at no cost; the whole 2 points are J4's new `sch_out_of_line`, from the changed packing.
 
   Thresholds: amp 89 (its three untitled regions; titled it scores 100, `amp_titled_scores_full`), baldiff 85, ivconv 87 (each measured less 5).
 - **Limits.**

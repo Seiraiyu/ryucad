@@ -434,11 +434,10 @@ const THRESHOLDS: &[(&str, &str, i64)] = &[
     ("breakout", "breakout", 79),
     ("breakout", "sensor", 95),
     ("rp2040", "mitayi", 38),
-    // 25 measured. Plan 3.A's one-part leftover region joining its
-    // neighbour (R7's VSNS region into the converter's) took it from 27:
-    // the Misc title went (2 points), but the packing changed, and J4's
-    // region of one, standing apart, now lines up with no other part
-    // (sch_out_of_line, 2 points; the join's own R7 stands in R8's column).
+    // 25 measured, 27 on main. Plan 3.A's one-part leftover region
+    // joining its neighbour (R7's VSNS region into the converter's) swapped
+    // Misc's sch_region_untitled for r3's ("has no title"), at no cost; the
+    // whole 2 points are J4's new sch_out_of_line, from the changed packing.
     ("buck", "buck", 24),
     // Plan 3.A: 94 less 5. The 6 points are design 519's
     // sch_region_untitled on three regions no idiom names (the coxswain
