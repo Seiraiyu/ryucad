@@ -205,6 +205,7 @@ What each phase decided is recorded per area under `docs/claude/`. Read the guid
 - `docs/claude/ryueda.md` — ryueda projects, library projects, symbols, footprints, models, library components
 - `docs/claude/ryueda-schematic.md` — ryueda schematics: properties and designator formats, the ryusch engine, layout files and their commands
 - `docs/claude/ryueda-parts.md` — ryueda part data: the vocabulary, categories, alternates, library search, the parts cache and identification findings
+- `docs/claude/ryueda-git.md` — ryueda in Git: revisions, attributes and install, textconv, doctor
 
 When a plan records what it decided, it edits or adds only its area's file under `docs/claude/`. It doesn't touch CLAUDE.md, except to add one import line here for a new area, and it never writes project status anywhere in the repo.
 
