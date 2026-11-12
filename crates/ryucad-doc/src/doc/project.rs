@@ -1106,6 +1106,33 @@ fn load_part(
         }
         _ => {}
     }
+    // The hole standards its holes read, last and tagged, so a part whose
+    // holes read none hashes as before: each entry's canonical text, or
+    // "missing"; while the table can't be read, its bytes.
+    let reads = super::hole_standards::reads(features.values().filter_map(|f| f.as_ref().ok()));
+    if !reads.is_empty() {
+        piece(&mut hasher, super::hole_standards::TAG.as_bytes());
+        match scope.standards.as_deref() {
+            Some(Err(_)) => piece(
+                &mut hasher,
+                scope.standards_bytes.as_deref().unwrap_or_default(),
+            ),
+            table => {
+                for (kind, standard, size) in &reads {
+                    piece(&mut hasher, kind.key().as_bytes());
+                    piece(&mut hasher, standard.as_bytes());
+                    piece(&mut hasher, size.as_bytes());
+                    let entry = table
+                        .and_then(|t| t.as_ref().ok())
+                        .and_then(|t| t.entry_json(*kind, standard, size));
+                    match entry {
+                        Some(e) => piece(&mut hasher, super::canonical::to_string(&e).as_bytes()),
+                        None => piece(&mut hasher, b"missing"),
+                    }
+                }
+            }
+        }
+    }
     let revision = hasher.finalize().to_hex()[..32].to_owned();
     // A conflicted manifest leaves no part usable.
     let file = match manifest_fault {
@@ -1560,6 +1587,61 @@ mod tests {
             project.reload(&[path.into()]).unwrap();
             same(&project);
         }
+    }
+
+    #[test]
+    fn a_part_hashes_only_the_hole_standards_its_holes_read() {
+        use super::super::fixtures::house_standards as house;
+        use super::super::hole_standards::HOLE_STANDARDS;
+        let dir = sample();
+        let root = dir.path();
+        let p = id("p");
+        write_json(
+            &part_path(root, &p),
+            &PartFile::new(vec![id("a"), id("b"), id("h")]).to_json(),
+        )
+        .unwrap();
+        // A hole's file reads without its sketch or target being there.
+        let write_hole = |fields: serde_json::Value| {
+            let mut v = serde_json::json!({"format": 23, "kind": "ryucad.feature",
+                "type": "hole", "sketch": "s", "form": "simple", "depth": "through_all",
+                "targets": ["b"]});
+            for (k, x) in fields.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            write_json(&feature_path(root, &p, &id("h")), &v).unwrap();
+        };
+        let write_table = |t: &serde_json::Value| {
+            write_json(&root.join(HOLE_STANDARDS), t).unwrap();
+        };
+        write_hole(serde_json::json!({"fastener": {"standard": "house_cap", "size": "M5"}}));
+        let rev = || {
+            let project = Project::load(root).unwrap();
+            assert!(project.parts[&p].features[&id("h")].is_ok());
+            project.parts[&p].revision.clone()
+        };
+        let none = rev();
+        // A table without house_cap/M5: the part reads "missing" either way.
+        let mut t = house();
+        t["fasteners"].as_object_mut().unwrap().remove("house_cap");
+        write_table(&t);
+        assert_eq!(rev(), none, "an entry it doesn't read moves nothing");
+        write_table(&house());
+        let with = rev();
+        assert_ne!(with, none);
+        // Another fastener's change moves nothing; its own does.
+        let mut t = house();
+        t["fasteners"]["house_flat"]["M5"]["clearance"]["normal"] = serde_json::json!("5.7 mm");
+        write_table(&t);
+        assert_eq!(rev(), with);
+        t["fasteners"]["house_cap"]["M5"]["clearance"]["normal"] = serde_json::json!("5.7 mm");
+        write_table(&t);
+        assert_ne!(rev(), with);
+        // A part whose holes read nothing hashes as before the table existed.
+        write_hole(serde_json::json!({"diameter": "5 mm"}));
+        let plain = rev();
+        std::fs::remove_file(root.join(HOLE_STANDARDS)).unwrap();
+        assert_eq!(rev(), plain);
     }
 
     #[test]

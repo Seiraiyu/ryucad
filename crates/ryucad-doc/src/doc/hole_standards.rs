@@ -494,6 +494,26 @@ impl HoleStandards {
     }
 }
 
+/// The entries a part's holes read, in a fixed order: each thread's and
+/// fastener's (table, standard, size).
+pub fn reads<'a>(
+    features: impl IntoIterator<Item = &'a super::files::Feature>,
+) -> std::collections::BTreeSet<(Kind, String, String)> {
+    let mut out = std::collections::BTreeSet::new();
+    for f in features {
+        let super::files::Feature::Hole(h) = f else {
+            continue;
+        };
+        if let Some(t) = &h.thread {
+            out.insert((Kind::Thread, t.standard.clone(), t.size.clone()));
+        }
+        if let Some(x) = &h.fastener {
+            out.insert((Kind::Fastener, x.standard.clone(), x.size.clone()));
+        }
+    }
+    out
+}
+
 /// The project's table as read: its bytes and what they hold, or `None`
 /// when it has none. Bytes that don't read are kept with the error, so a
 /// part reading the table while it's broken hashes them.
