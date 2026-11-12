@@ -698,6 +698,101 @@ impl<L: Layout> Repo<L> {
     }
 }
 
+/// A branch of the repository as `branch.list` shows it: a local one, or
+/// a remote-tracking one with no local branch of its name, which `git
+/// switch <name>` makes a local branch from (Git's `--guess`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Branch {
+    /// What `git switch` takes: `arm`, for a remote-tracking one too.
+    pub name: String,
+    /// The full ref: `refs/heads/arm`, `refs/remotes/origin/arm`.
+    pub full: String,
+    /// A remote-tracking branch's remote (`origin`); `None` for a local
+    /// one.
+    pub remote: Option<String>,
+    /// Its tip, in hex.
+    pub head: String,
+    /// A local branch's upstream as Git shows it (`origin/arm`), from
+    /// `branch.<name>.remote` and `branch.<name>.merge`.
+    pub upstream: Option<String>,
+}
+
+impl<L: Layout> Repo<L> {
+    /// Every local branch by name, then every remote-tracking branch with
+    /// no local branch of its name, by name and remote. `<remote>/HEAD`
+    /// is left out, and so is a ref that doesn't reach a commit.
+    pub fn branches(&self) -> Result<Vec<Branch>> {
+        let refs = self.repo.references().map_err(git_error)?;
+        let mut local = Vec::new();
+        for r in refs.local_branches().map_err(git_error)? {
+            let mut r = r.map_err(git_error)?;
+            let full = r.name().as_bstr().to_string();
+            let Some(name) = full.strip_prefix("refs/heads/").map(str::to_owned) else {
+                continue;
+            };
+            let Ok(tip) = r.peel_to_commit() else {
+                continue;
+            };
+            let upstream = self.upstream(&name);
+            local.push(Branch {
+                name,
+                full,
+                remote: None,
+                head: tip.id.to_string(),
+                upstream,
+            });
+        }
+        local.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut remote = Vec::new();
+        for r in refs.remote_branches().map_err(git_error)? {
+            let mut r = r.map_err(git_error)?;
+            let full = r.name().as_bstr().to_string();
+            let Some((origin, name)) = full
+                .strip_prefix("refs/remotes/")
+                .and_then(|s| s.split_once('/'))
+                .map(|(o, n)| (o.to_owned(), n.to_owned()))
+            else {
+                continue;
+            };
+            if name == "HEAD" || local.iter().any(|b| b.name == name) {
+                continue;
+            }
+            let Ok(tip) = r.peel_to_commit() else {
+                continue;
+            };
+            remote.push(Branch {
+                name,
+                full,
+                remote: Some(origin),
+                head: tip.id.to_string(),
+                upstream: None,
+            });
+        }
+        remote.sort_by(|a, b| (&a.name, &a.full).cmp(&(&b.name, &b.full)));
+        local.extend(remote);
+        Ok(local)
+    }
+
+    /// A local branch's upstream as Git shows it: `<remote>/<branch>`, or
+    /// the branch's name when its remote is `.` (another local branch).
+    fn upstream(&self, branch: &str) -> Option<String> {
+        let config = self.repo.config_snapshot();
+        let remote_key = format!("branch.{branch}.remote");
+        let merge_key = format!("branch.{branch}.merge");
+        let remote = config.string(remote_key.as_str())?.to_string();
+        let merge = config.string(merge_key.as_str())?.to_string();
+        let merged = merge
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&merge)
+            .to_owned();
+        Some(if remote == "." {
+            merged
+        } else {
+            format!("{remote}/{merged}")
+        })
+    }
+}
+
 /// A worktree of the repository holding the project: the clone's own
 /// (the main worktree) or one `git worktree add` made. Each is a project
 /// folder of its own, with its own daemon.
