@@ -40,6 +40,8 @@ pub use beside::beside;
 pub(crate) use beside::{
     CONE_PARTS, face_beside, face_off_ball, faces_apart, normal_cones, section_plane, sine_apart,
 };
+#[cfg(test)]
+pub(crate) use beside::{Tangency, tangency};
 pub(crate) use coincide::{coincident, common, covering};
 pub(crate) use contour::fit_contour;
 pub(crate) use cs::curve_surface_in;

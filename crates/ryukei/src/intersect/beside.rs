@@ -1109,6 +1109,110 @@ mod tests {
     }
 }
 
+/// How one surface meets another at a point where they are tangent
+/// ([`tangency`]). A diagnostic only, in tests: ryukei 18.A found NIST
+/// CTC 02's tangent cylinder and cone a saddle (#264), so no certificate
+/// of a definite contact is built on it.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Tangency {
+    /// `h = f ∘ S` has a certified definite Hessian over the parameter
+    /// box round the point, and is certified non-zero there outside
+    /// `inner` (in `S`'s parameters scaled by `|S_u|` and `|S_v|` at the
+    /// point: about a length in model space).
+    Definite { inner: f64 },
+    /// The Hessian is certified indefinite: a saddle, which
+    /// `outside_vertices` handles.
+    Saddle,
+    /// Neither: semidefinite (a contact along a ruling) or too wide an
+    /// enclosure to tell.
+    Flat,
+    /// The first surface has no implicit form, or an enclosure failed.
+    Unsure,
+}
+
+/// How `implicit_of`'s surface and `sheet_of`'s meet at `at`, where they
+/// are tangent (#264): `h = f ∘ S`, with `f` the first's implicit form and
+/// `S` the second's parameterization, over the box of `S`'s parameters
+/// `radius / |S_u|` and `radius / |S_v|` round `at`'s foot ([`Field`]).
+/// With the parameters scaled to lengths at the foot, the Hessian's
+/// eigenvalues are `(h_uu + h_vv)/2 ± sqrt(((h_uu - h_vv)/2)² + h_uv²)`
+/// over the box, in intervals. Both of one sign is definite with
+/// `λ₀ = min |λ|`, and then by Taylor's theorem `|h(q)| ≥ λ₀ r²/2 - g r -
+/// |h₀|` at scaled distance `r` with `g = |∇h|` and `h₀ = h` at the foot.
+/// That is positive past `inner = (g + sqrt(g² + 2 λ₀ |h₀|)) / λ₀`.
+/// Certified opposite signs are a saddle; anything else is flat.
+#[cfg(test)]
+pub(crate) fn tangency(
+    implicit_of: &Surface,
+    sheet_of: &Surface,
+    at: Point3,
+    radius: f64,
+    m: &Meter,
+) -> Tangency {
+    let Some(imp) = Implicit::of(implicit_of) else {
+        return Tangency::Unsure;
+    };
+    let sheet = Sheet::of(sheet_of);
+    if m.charge(2 * sheet.cost()).is_err() {
+        return Tangency::Unsure;
+    }
+    let (u0, v0) = sheet_of.project(at).param;
+    let j = sheet.jets_at(u0, v0);
+    let len = |k: usize| crate::math::sqrt(j.iter().map(|c| c.d[k] * c.d[k]).sum::<f64>());
+    let (cu, cv) = (len(0), len(1));
+    if !(cu > 0.0 && cv > 0.0 && radius > 0.0) {
+        return Tangency::Unsure;
+    }
+    let field = Field {
+        sheet,
+        form: Form::Implicit(&imp),
+        table: m.enclosures(),
+    };
+    let cell = [
+        [u0 - radius / cu, u0 + radius / cu],
+        [v0 - radius / cv, v0 + radius / cv],
+    ];
+    let (Some(over), Some(here)) = (field.enclose(cell), field.enclose([[u0, u0], [v0, v0]]))
+    else {
+        return Tangency::Unsure;
+    };
+    classify(&over, &here, cu, cv).unwrap_or(Tangency::Unsure)
+}
+
+/// [`tangency`]'s verdict from `h`'s enclosures over the box and at the
+/// foot, its parameters scaled by `cu` and `cv`.
+#[cfg(test)]
+fn classify(
+    over: &super::pipe::Enclosure,
+    here: &super::pipe::Enclosure,
+    cu: f64,
+    cv: f64,
+) -> Option<Tangency> {
+    let (pu, pv) = (Interval::point(cu), Interval::point(cv));
+    let huu = over.h[0].checked_div(pu * pu)?;
+    let huv = over.h[1].checked_div(pu * pv)?;
+    let hvv = over.h[2].checked_div(pv * pv)?;
+    let half = Interval::point(0.5);
+    let mid = half * (huu + hvv);
+    let spread = ((half * (huu - hvv)).square() + huv.square()).sqrt()?;
+    let (least, most) = (mid - spread, mid + spread);
+    let lambda = if least.lo() > 0.0 {
+        least.lo()
+    } else if most.hi() < 0.0 {
+        -most.hi()
+    } else if least.hi() < 0.0 && most.lo() > 0.0 {
+        return Some(Tangency::Saddle);
+    } else {
+        return Some(Tangency::Flat);
+    };
+    let g = (here.d[0].checked_div(pu)?.square() + here.d[1].checked_div(pv)?.square()).sqrt()?;
+    let l = Interval::point(lambda);
+    let h0 = Interval::point(here.v.mag());
+    let inner = (g + (g.square() + Interval::point(2.0) * l * h0).sqrt()?).checked_div(l)?;
+    Some(Tangency::Definite { inner: inner.hi() })
+}
+
 #[cfg(test)]
 mod cone_tests {
     use super::*;
@@ -1192,5 +1296,47 @@ mod cone_tests {
             Interval::new(0.99, 1.0).unwrap(),
         ];
         assert_eq!(sine_apart(&wide, &p(0.0, 0.0, 1.0)), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod tangency_tests {
+    use super::*;
+    use crate::geom::{Cylinder, Frame, Plane, Sphere, Torus, Vector3};
+
+    fn frame(o: Point3, z: Vector3, x: Vector3) -> Frame {
+        Frame::new(o, z, x).unwrap()
+    }
+
+    /// A sphere of radius 0.5 inside a cylinder of radius 1, touching it
+    /// at (1, 0, 0): curvatures (2, 2) against (1, 0), definite (the
+    /// design's cylinder and cone is ctc_02's cut, Task 13). A plane
+    /// tangent to a torus at the inner equator: a saddle. A plane along a
+    /// cylinder's ruling: flat. A spline's form isn't implicit: unsure.
+    #[test]
+    fn tangencies_are_told_apart() {
+        let m = Meter::free();
+        let up = Vector3::new(0.0, 0.0, 1.0);
+        let x = Vector3::new(1.0, 0.0, 0.0);
+        let y = Vector3::new(0.0, 1.0, 0.0);
+        let cyl = Surface::Cylinder(Cylinder::new(frame(Point3::ORIGIN, up, x), 1.0).unwrap());
+        let ball =
+            Surface::Sphere(Sphere::new(frame(Point3::new(0.5, 0.0, 0.0), up, x), 0.5).unwrap());
+        let p = Point3::new(1.0, 0.0, 0.0);
+        match tangency(&cyl, &ball, p, 0.1, &m) {
+            Tangency::Definite { inner } => assert!(inner < 1e-6, "{inner}"),
+            t => panic!("{t:?}"),
+        }
+        let torus = Surface::Torus(Torus::new(frame(Point3::ORIGIN, up, x), 2.0, 0.5).unwrap());
+        let wall = Surface::Plane(Plane::new(frame(Point3::new(1.5, 0.0, 0.0), x, y)));
+        assert_eq!(
+            tangency(&wall, &torus, Point3::new(1.5, 0.0, 0.0), 0.05, &m),
+            Tangency::Saddle
+        );
+        let side = Surface::Plane(Plane::new(frame(p, x, y)));
+        assert_eq!(tangency(&cyl, &side, p, 0.1, &m), Tangency::Flat);
+        let (spline, _) = side.to_nurbs([[-1.0, 1.0], [-1.0, 1.0]]).unwrap();
+        let spline = Surface::Nurbs(std::sync::Arc::new(spline));
+        assert_eq!(tangency(&spline, &ball, p, 0.1, &m), Tangency::Unsure);
     }
 }
