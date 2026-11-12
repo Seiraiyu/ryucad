@@ -293,14 +293,55 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
             out = attempt(block, &r, 0, &again);
         }
     }
-    // A `near` whose parts, placed by the pin it names, break a hard rule
-    // (a stage's feedback pulled beside its amplifier's pin, its label
-    // with no room; #664): laid out again without it, it moves nothing,
-    // noted, while it lasts (plan 2.G).
+    // Laid out again without an instruction, it moves nothing, noted,
+    // while it lasts: (a) a `near` whose parts, placed by the pin it
+    // names, break a hard rule (a stage's feedback pulled beside its
+    // amplifier's pin, its label with no room; #664, plan 2.G); (b) over a
+    // previous layout, a `beside`, `near`, `group` or `edge` new in this
+    // batch (a lasting one not in the previous layout, or a move) that
+    // ends neither held nor pulled nearer (design 519: an instruction that
+    // doesn't hold moves nothing). One at a time, until none is left.
+    let positional = |i: &Instruction| {
+        matches!(
+            i,
+            Instruction::Beside { .. }
+                | Instruction::Near { .. }
+                | Instruction::Group { .. }
+                | Instruction::Edge { .. }
+        )
+    };
+    // (ID, its index among the moves, why) of an instruction to leave out.
+    let new_and_short =
+        |out: &Outcome, left_out: &[String]| -> Option<(String, Option<usize>, String)> {
+            let prev = block.previous.as_ref()?;
+            let lasting = block
+                .instructions
+                .iter()
+                .filter(|(_, i)| !prev.instructions.values().any(|x| x == *i))
+                .map(|(id, i)| (id.clone(), None, i));
+            let moves = block
+                .moves
+                .iter()
+                .enumerate()
+                .map(|(k, i)| (format!("move {}", k + 1), Some(k), i));
+            lasting.chain(moves).find_map(|(id, k, i)| {
+                if !positional(i) || left_out.contains(&id) {
+                    return None;
+                }
+                let why = instr::judge(block, &out.layout, i).err()?;
+                let pulled = matches!(
+                    (instr::shortfall(block, prev, i), instr::shortfall(block, &out.layout, i)),
+                    (Some(t), Some(n)) if n < t
+                );
+                (!pulled).then_some((id, k, why))
+            })
+        };
     let mut left_out: Vec<String> = Vec::new();
-    while left_out.len() < block.instructions.len() {
+    let mut notes: Vec<(String, (String, serde_json::Value))> = Vec::new();
+    let blocked_first = out.blocked.clone();
+    while left_out.len() < block.instructions.len() + block.moves.len() {
         let broken = crate::rules::check(block, &out.layout);
-        let Some(id) = broken.iter().find_map(|v| {
+        let near = broken.iter().find_map(|v| {
             block.instructions.iter().find_map(|(id, i)| {
                 (matches!(i, Instruction::Near { .. })
                     && !left_out.contains(id)
@@ -310,34 +351,93 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
                         .any(|p| names_part(&v.refs, &block.parts[p].key)))
                 .then(|| id.clone())
             })
-        }) else {
-            break;
+        });
+        // The note each left-out instruction gets.
+        let (id, note) = match near {
+            Some(id) => {
+                let rule = broken.first().map(|v| v.rule);
+                let message = format!(
+                    "{id} can't hold: its parts by that pin would break a hard rule ({}); they stay where the layout puts them while it lasts",
+                    rule.unwrap_or("")
+                );
+                let details = json!({"instruction": id, "rule": rule});
+                (id, (message, details))
+            }
+            None => {
+                let Some((id, _, why)) = new_and_short(&out, &left_out) else {
+                    break;
+                };
+                let message = format!(
+                    "{id} doesn't hold ({why}): laid out without it, it moves nothing{}",
+                    if id.starts_with("move ") {
+                        ""
+                    } else {
+                        " while it lasts"
+                    }
+                );
+                let details = json!({"instruction": id, "why": why});
+                (id, (message, details))
+            }
         };
-        left_out.push(id);
+        notes.push((id.clone(), note));
+        left_out.push(id.clone());
         let mut without = block.clone();
         for id in &left_out {
             without.instructions.remove(id);
         }
+        let mut k = 0;
+        without.moves.retain(|_| {
+            k += 1;
+            !left_out.contains(&format!("move {k}"))
+        });
         let Ok(r2) = instr::resolve(&without) else {
             break;
         };
         let mut tried = attempt(&without, &r2, 0, &BTreeSet::new());
+        // Over a previous layout, its crowded parts placed again, as above.
+        if !fresh {
+            let again: BTreeSet<usize> = tried
+                .crowded
+                .iter()
+                .copied()
+                .filter(|p| !r2.moved.contains(p))
+                .collect();
+            if !again.is_empty() {
+                tried = attempt(&without, &r2, 0, &again);
+            }
+        }
         if !crate::rules::check(block, &tried.layout).is_empty() {
             continue;
         }
         tried.layout.instructions = block.instructions.clone();
-        for id in &left_out {
+        // Every instruction left out so far is noted, once.
+        for (_, (message, details)) in &notes {
             tried.notes.push(Note {
                 code: "instruction_unresolved".into(),
-                message: format!(
-                    "{id} can't hold: its parts by that pin would break a hard rule ({}); they stay where the layout puts them while it lasts",
-                    broken.first().map_or("", |v| v.rule)
-                ),
-                details: json!({"instruction": id, "rule": broken.first().map(|v| v.rule)}),
+                message: message.clone(),
+                details: details.clone(),
             });
         }
+        // What stood in the way of each left out, as the first try met it.
+        for id in &left_out {
+            let ins = block.instructions.get(id).or_else(|| {
+                id.strip_prefix("move ")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .and_then(|n| block.moves.get(n - 1))
+            });
+            for p in ins.map(|i| i.parts().to_vec()).unwrap_or_default() {
+                for q in instr::parts_named(block, &p) {
+                    let key = &block.parts[q].key;
+                    if let Some(w) = blocked_first.get(key) {
+                        tried
+                            .blocked
+                            .entry(key.clone())
+                            .or_insert_with(|| w.clone());
+                    }
+                }
+            }
+        }
         out = tried;
-        break;
     }
     // A `paper` instruction pins its sheet's size: one too small for what
     // the sheet holds (from nothing, the sheet is packed before its pin
@@ -5198,18 +5298,29 @@ mod tests {
     /// part: a part, by key, or that its sheet had no room.
     #[test]
     fn a_blocked_instruction_says_what_blocks_it() {
+        let (b, keys) = crowded_beside();
+        let out = lay(&b);
+        for (ins, k) in b.instructions.values().zip(&keys[1..]) {
+            if crate::instr::judge(&b, &out.layout, ins).is_err() {
+                let why = out.blocked.get(k).expect("a blocker recorded");
+                assert!(!why.is_empty());
+            }
+        }
+    }
+
+    /// Every two-pin part of `seeded(13, 3)` asked to the left of its
+    /// first resistor, over its layout from nothing: some can't fit there.
+    fn crowded_beside() -> (Block, Vec<String>) {
         let block = seeded(13, 3);
         let first = lay(&block);
         let keys: Vec<String> = block
             .parts
             .iter()
-            .filter(|p| p.key.starts_with('r'))
+            .filter(|p| p.key.starts_with('r') || p.key.starts_with('c'))
             .map(|p| p.key.clone())
-            .take(6)
             .collect();
         let mut b = block.clone();
         b.previous = Some(first.layout.clone());
-        // Five parts all asked to the left of one: some can't fit there.
         for (i, k) in keys[1..].iter().enumerate() {
             b.instructions.insert(
                 format!("i{}", i + 1),
@@ -5220,13 +5331,44 @@ mod tests {
                 },
             );
         }
-        let out = lay(&b);
-        for (ins, k) in b.instructions.values().zip(&keys[1..]) {
-            if crate::instr::judge(&b, &out.layout, ins).is_err() {
-                let why = out.blocked.get(k).expect("a blocker recorded");
-                assert!(!why.is_empty());
+        (b, keys)
+    }
+
+    /// Design 519: an instruction that ends neither held nor pulled moves
+    /// nothing. Every two-pin part asked beside one resistor's left: those
+    /// with no room within the reach stay exactly where they stood, noted.
+    #[test]
+    fn an_instruction_that_does_not_hold_moves_nothing() {
+        let (block, _) = crowded_beside();
+        let prev = block.previous.clone().unwrap();
+        let out = lay(&block);
+        let mut short = 0;
+        for (id, ins) in &block.instructions {
+            let then = crate::instr::shortfall(&block, &prev, ins);
+            let now = crate::instr::shortfall(&block, &out.layout, ins);
+            let held = crate::instr::judge(&block, &out.layout, ins).is_ok();
+            let pulled = matches!((then, now), (Some(t), Some(n)) if n < t);
+            if held || pulled {
+                continue;
             }
+            short += 1;
+            for k in ins.parts() {
+                assert_eq!(
+                    out.layout.placed.get(k),
+                    prev.placed.get(k),
+                    "{id} moved {k} though it doesn't hold"
+                );
+            }
+            assert!(
+                out.notes.iter().any(|n| n.code == "instruction_unresolved"
+                    && n.details["instruction"] == *id.as_str()),
+                "{id} is noted: {:?}",
+                out.notes
+            );
         }
+        assert!(short > 0, "some of the five can't hold");
+        // It lasts.
+        assert_eq!(out.layout.instructions, block.instructions);
     }
 
     /// What a released instruction moved goes back where the layout before

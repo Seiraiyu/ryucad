@@ -672,6 +672,25 @@ fn a_move_brings_only_its_own_idioms() {
             );
         }
     }
+    // And the port flag standing on its output's line (in its row): since
+    // plan 3.A the move is judged by the reach, so U11:2 does move, and
+    // its own port goes with it.
+    for sheet in d["blocks"][0]["sheets"].as_array().unwrap() {
+        for part in sheet["parts"].as_array().unwrap() {
+            if part["part"] == "u11:2" {
+                for k in part["row"].as_array().into_iter().flatten() {
+                    if k.as_str().unwrap().starts_with("port:") {
+                        mine.push(k.as_str().unwrap().to_owned());
+                    }
+                }
+            }
+        }
+    }
+    assert_ne!(
+        layout_of(&board, "baldiff")["placed"]["u11:2"],
+        before["u11:2"],
+        "U11:2 moved beside U11:1"
+    );
     for (k, x) in before.as_object().unwrap() {
         if mine.contains(k) {
             continue;

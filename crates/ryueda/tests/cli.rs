@@ -2629,6 +2629,42 @@ fn schematics_from_the_cli() {
     assert_eq!(list["instructions"][0]["holds"], json!(true), "{list}");
     assert_eq!(list["instructions"][0]["state"], "held", "{list}");
     assert!(list["instructions"][0]["why"].is_null(), "{list}");
+    // Every part crowded beside J1 (design 519): left of it they come
+    // nearer but not within the reach, so it is pulled and says how far is
+    // left; below it nothing comes nearer, so it is laid out without, moves
+    // nothing, and is noted.
+    let state = |side: &str| {
+        let text = format!("beside C2 C3 R2 U2 J1 {side}");
+        let dry = p.ok(&["place", "breakout", "--dry-run", &text]);
+        let ins = dry["instructions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["text"] == text.as_str())
+            .unwrap_or_else(|| panic!("{dry}"))
+            .clone();
+        (dry, ins)
+    };
+    let (_, pulled) = state("left");
+    assert_eq!(pulled["state"], "pulled", "{pulled}");
+    assert!(
+        pulled["why"]
+            .as_str()
+            .unwrap()
+            .contains("nearer than before it"),
+        "{pulled}"
+    );
+    let (dry, short) = state("below");
+    assert_eq!(short["state"], "not_held", "{short}");
+    assert_eq!(short["unchanged"], true, "{short}");
+    assert!(
+        dry["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["code"] == "instruction_unresolved"),
+        "{dry}"
+    );
     // Repeating one changes nothing; a conflict is refused with fixes.
     assert_eq!(
         p.ok(&["place", "breakout", "net SDA label"])["added"],
