@@ -434,6 +434,111 @@ fn a_net_asked_for_as_wires_is_wired() {
     assert!(wired, "{out}");
 }
 
+/// `v` without its revisions, at any depth.
+fn without_revisions(mut v: Value) -> Value {
+    fn strip(v: &mut Value) {
+        match v {
+            Value::Object(o) => {
+                o.remove("revision");
+                o.values_mut().for_each(strip);
+            }
+            Value::Array(a) => a.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    strip(&mut v);
+    v
+}
+
+/// Design 519: a dry run is the commit. On every circuit laid out from
+/// nothing, the first fix of up to three findings in each block is sent
+/// dry, then for real, then the block described: the three descriptions
+/// are one (their revisions aside). Release only.
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn a_dry_run_is_the_commit() {
+    for name in ["breakout", "rp2040", "buck", "frontend", "ethernet"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (board, found) = fresh(dir.path(), name);
+        let mut tried = 0;
+        for f in found
+            .iter()
+            .filter(|f| f["fixes"].as_array().is_some_and(|x| !x.is_empty()))
+            .take(3)
+        {
+            let block = f["block"].as_str().unwrap();
+            let fix: Vec<String> = f["fixes"][0]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t.as_str().unwrap().to_owned())
+                .collect();
+            let mut args: Vec<&str> = vec!["place", block];
+            args.extend(fix.iter().map(String::as_str));
+            let dry_args = [&args[..], &["--dry-run"]].concat();
+            let dry = ryueda_envelope(&board, &dry_args);
+            // A fix an earlier one made stale is refused alike both ways.
+            if dry["ok"] != true {
+                let done = ryueda_envelope(&board, &args);
+                assert_eq!(
+                    done["error"]["code"], dry["error"]["code"],
+                    "{name}/{block}: {fix:?}"
+                );
+                continue;
+            }
+            let dry = without_revisions(dry["result"]["description"].clone());
+            let done = without_revisions(ryueda(&board, 1, &args)["description"].clone());
+            let read = without_revisions(ryueda(&board, 1, &["describe", "--block", block]));
+            assert_eq!(dry, done, "{name}/{block}: {fix:?} dry vs commit");
+            assert_eq!(
+                done, read,
+                "{name}/{block}: {fix:?} commit vs the next read"
+            );
+            tried += 1;
+        }
+        // And a batch as round 3's sessions sent: a lasting region over a
+        // block's first two parts, with a move shifting the first.
+        let d = ryueda(&board, 1, &["describe"]);
+        let b = &d["blocks"][0];
+        let block = b["block_id"].as_str().unwrap().to_owned();
+        let parts: Vec<String> = b["sheets"][0]["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x["refdes"].as_str().filter(|r| !r.is_empty()))
+            .take(2)
+            .map(str::to_owned)
+            .collect();
+        let region = format!("region Grouped {}", parts.join(" "));
+        let shift = format!("shift {} right 2", parts[0]);
+        let args = [
+            "place",
+            block.as_str(),
+            region.as_str(),
+            "--move",
+            shift.as_str(),
+        ];
+        let dry = ryueda_envelope(&board, &[&args[..], &["--dry-run"]].concat());
+        if dry["ok"] == true {
+            let dry = without_revisions(dry["result"]["description"].clone());
+            let done = without_revisions(ryueda(&board, 1, &args)["description"].clone());
+            let read = without_revisions(ryueda(&board, 1, &["describe", "--block", &block]));
+            assert_eq!(dry, done, "{name}/{block}: {args:?} dry vs commit");
+            assert_eq!(
+                done, read,
+                "{name}/{block}: {args:?} commit vs the next read"
+            );
+            tried += 1;
+        } else {
+            eprintln!(
+                "{name}/{block}: {args:?} refused: {}",
+                dry["error"]["message"]
+            );
+        }
+        eprintln!("{name}: {tried} batches dry, done and read alike");
+    }
+}
+
 /// `ryueda` in `dir` as `ryueda` does, its whole envelope, whether or not
 /// it succeeds.
 fn ryueda_envelope(dir: &Path, args: &[&str]) -> Value {
