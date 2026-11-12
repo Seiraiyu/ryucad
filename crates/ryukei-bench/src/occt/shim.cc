@@ -83,6 +83,19 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_ColorTool.hxx>
+#include <XCAFDoc.hxx>
+#include <XCAFDoc_MaterialTool.hxx>
+#include <TDataStd_Name.hxx>
+#include <TDataStd_NamedData.hxx>
+#include <TDataStd_TreeNode.hxx>
+#include <TDF_ChildIterator.hxx>
+#include <TDF_Tool.hxx>
+#include <TCollection_AsciiString.hxx>
+#include <TCollection_HAsciiString.hxx>
+#include <TColStd_DataMapOfStringInteger.hxx>
+#include <TDataStd_DataMapOfStringReal.hxx>
+#include <TDataStd_DataMapOfStringString.hxx>
+#include <TDataStd_DataMapOfStringByte.hxx>
 #include <TDocStd_Document.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <TopLoc_Location.hxx>
@@ -1188,6 +1201,76 @@ rust::Vec<double> xde_colours(rust::Str path) {
   st->GetFreeShapes(roots);
   rust::Vec<double> out;
   for (int i = 1; i <= roots.Length(); i++) walk(out, st, ct, roots(i), TopLoc_Location(), nullptr);
+  app->Close(doc);
+  return out;
+}
+
+static std::string ascii(const TCollection_ExtendedString& e) {
+  return TCollection_AsciiString(e, '?').ToCString();
+}
+
+static std::string hascii(const Handle(TCollection_HAsciiString)& h) {
+  return h.IsNull() ? std::string() : std::string(h->ToCString());
+}
+
+static void row(rust::Vec<XdeProp>& out, const std::string& label, const std::string& key,
+                uint32_t kind, const std::string& text, double number) {
+  XdeProp p;
+  p.label = rust::String(label);
+  p.key = rust::String(key);
+  p.kind = kind;
+  p.text = rust::String(text);
+  p.number = number;
+  out.push_back(std::move(p));
+}
+
+rust::Vec<XdeProp> xde_properties(rust::Str path) {
+  Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
+  Handle(TDocStd_Document) doc;
+  app->NewDocument("MDTV-XCAF", doc);
+  STEPCAFControl_Reader r;
+  r.SetNameMode(Standard_True);
+  r.SetMatMode(Standard_True);
+  r.SetPropsMode(Standard_True);
+  std::string p(path);
+  if (r.ReadFile(p.c_str()) != IFSelect_RetDone) throw std::runtime_error("STEP read failed");
+  if (!r.Transfer(doc)) throw std::runtime_error("XDE transfer failed");
+  Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+  rust::Vec<XdeProp> out;
+  for (TDF_ChildIterator it(st->Label(), Standard_True); it.More(); it.Next()) {
+    TDF_Label l = it.Value();
+    std::string label;
+    Handle(TDataStd_Name) nm;
+    if (l.FindAttribute(TDataStd_Name::GetID(), nm)) label = ascii(nm->Get());
+    else {
+      TCollection_AsciiString e;
+      TDF_Tool::Entry(l, e);
+      label = e.ToCString();
+    }
+    Handle(TDataStd_TreeNode) node;
+    if (l.FindAttribute(XCAFDoc::MaterialRefGUID(), node) && node->HasFather()) {
+      Handle(TCollection_HAsciiString) name, desc, dname, dtype;
+      Standard_Real density = 0.;
+      if (XCAFDoc_MaterialTool::GetMaterial(node->Father()->Label(), name, desc, density, dname,
+                                            dtype))
+        row(out, label, hascii(name), 0, hascii(dname) + " " + hascii(dtype), density);
+    }
+    Handle(TDataStd_NamedData) nd;
+    if (!l.FindAttribute(TDataStd_NamedData::GetID(), nd)) continue;
+    nd->LoadDeferredData();
+    if (nd->HasStrings())
+      for (TDataStd_DataMapOfStringString::Iterator i(nd->GetStringsContainer()); i.More(); i.Next())
+        row(out, label, ascii(i.Key()), 1, ascii(i.Value()), 0.);
+    if (nd->HasIntegers())
+      for (TColStd_DataMapOfStringInteger::Iterator i(nd->GetIntegersContainer()); i.More(); i.Next())
+        row(out, label, ascii(i.Key()), 2, "", double(i.Value()));
+    if (nd->HasReals())
+      for (TDataStd_DataMapOfStringReal::Iterator i(nd->GetRealsContainer()); i.More(); i.Next())
+        row(out, label, ascii(i.Key()), 3, "", i.Value());
+    if (nd->HasBytes())
+      for (TDataStd_DataMapOfStringByte::Iterator i(nd->GetBytesContainer()); i.More(); i.Next())
+        row(out, label, ascii(i.Key()), 4, "", double(i.Value()));
+  }
   app->Close(doc);
   return out;
 }
