@@ -316,3 +316,35 @@ fn a_torus_nearly_square_to_the_view_certifies_or_refuses_within_the_cap() {
         }
     }
 }
+
+/// A spline half circle from pole to pole turned about `z` (design 484,
+/// plan 17.B): its silhouette comes from the formula, sound, and as long
+/// as the sphere's great circle.
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn revolutions_have_their_silhouettes_in_closed_form() {
+    let sphere_like = {
+        // A rational quadratic half circle from pole to pole in the xz
+        // half-plane: turned, the sphere of radius 0.02.
+        let r = 0.02;
+        let kv = KnotVector::clamped(2, &[0.0, 0.5, 1.0], &[3, 2, 3]).unwrap();
+        let pts = vec![
+            Point3::new(0.0, 0.0, -r),
+            Point3::new(r, 0.0, -r),
+            Point3::new(r, 0.0, 0.0),
+            Point3::new(r, 0.0, r),
+            Point3::new(0.0, 0.0, r),
+        ];
+        let h = core::f64::consts::FRAC_1_SQRT_2;
+        let w = vec![1.0, h, 1.0, h, 1.0];
+        Curve::Nurbs(Arc::new(NurbsCurve::new(kv, pts, Some(w)).unwrap()))
+    };
+    let rev = |c: Curve| Surface::Revolution(Arc::new(Revolution::new(Frame::WORLD, c).unwrap()));
+    let v = view(Vector3::new(0.3, -1.0, 0.4));
+    let sphere = rev(sphere_like);
+    let b = one_face(&sphere, sphere.domain());
+    let s = silhouettes(&b, &v).unwrap();
+    sound(&b, &v, &s);
+    // A sphere's silhouette is a great circle.
+    assert!((length(&s) - TAU * 0.02).abs() < 1e-7, "{}", length(&s));
+}
