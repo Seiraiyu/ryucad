@@ -124,6 +124,29 @@ The design is document 444 in the Coxswain planning project `ryucad-ryukei`; thi
 - **MSOP-8-1EP** (#303). Its check takes 45 s and 8.2M units (cox-worker-3, Intel Core Ultra 5 250K Plus, one thread, load 2 to 3), 7.6M of them in four NURBS pairs sharing one edge, not tangent: (3, 122), (47, 49), (77, 146) and (106, 137), 1.76M to 2.02M units each. On one face the shared edge's pcurve is a line at v ≈ 5e-18, an isoline. So on the face plane where that surface's v is held at a cell's side (≈ 4e-17) the edge lies in the plane, a continuum of solutions rather than a crossing: `Face::search` recurses there to `FACE_DEPTH` without a root, and the trace settles only after retries. Design 444's named fix, the edge's pcurves as the face search's known crossings, doesn't apply to those planes, which hold the edge along their length. `apart_beside` certifies each pair in 46 to 1,242 units, and a capped trace with it tried next took the check to 3.4 s with no golden moved; but that is the ordering 16.A rejected (above): for faces crossing at an angle the beside strip would accept a crossing inside it that the trace would find. So nothing changed; the check bar (30 s) is unmet for MSOP-8-1EP alone, and a sound fix needs a beside certificate for crossing faces or a face search that knows an edge in its plane (#303). ryustep's `msop_8_1ep_checks_in_time` holds it under 60 s with `RYUKEI_BARS=1`.
 - **Healing under both keys** (#693). CP_Radial_D12.5mm heals to the same 53 faces under `OpKey(7)` and ryucad's key, both checking clean (`cp_radial_heals_alike_under_both_keys`). The faces are stored in another order and some with their surfaces the other way round, so the test compares surface kinds.
 
+## Phase 16's bars (decided in ryukei phase 16)
+
+Design 444's bars, recorded by plan 16.D on the bar machine, cox-worker-2 (AMD Ryzen 7 9700X, 8 cores, 32 GB), at `2ed1c650`, release, one thread a case, 2026-11-12, the one-minute load before each given (about 1 is the previous bar's own thread). The PCBA projects (`HUNT_PCBA`) aren't on that box, so their two rows are earlier figures, marked so.
+
+| Bar | Result | Met |
+|---|---|---|
+| Check, real files: step-hunt over `committed` and `nist`, `--jobs 1 --slow 30` (load 3.1) | 90 cases, 4 failed, all ledgered, none new; no `check` slow or timeout finding; 6 min 58 s | yes |
+| `check-split` (load 1.0): CP_Radial_D12.5mm, LQFP-64, SMA Amphenol, SMA Molex, TQFP-32 | 4.5, 8.8, 6.7, 16.4 and 4.5 s; 521,950, 6,522,544, 2,877,266, 4,901,676 and 3,486,311 units; no fault | yes |
+| `check-split` MSOP-8-1EP | 45.6 s, 8,215,098 units, no fault | no: #303 (above) |
+| gb-cart256k-a's TQFP-48 | 16.A's figure only: 40.8 s on cox-worker-4, 3,068,464 units, below LQFP-64's | by units |
+| Pinned pairs (`pinned_corpus_checks_clean`, devcontainer) | 33 bodies, no fault; `PINNED_UNCHECKED` holds only ctc_02's (605, 614); 17.2 s | yes (#264's pair recorded) |
+| Self-union: `cp_radial_d8` (#322's cans) | 2.8 and 3.3 s, clean | yes |
+| Self-union: Voron's molex body (#11774) | refused `Heal(FacesOverlap)` in 5.0 s | no: #585 |
+| PCBA interference, NUCLEO `--solid` | not on the box: v0.9.0-pre.3's e2e gives 1,214 pairs, 6 unchecked `InvalidBoolean(Uncertain)`, 90 s (Xeon w7-2475X, Windows 11); 16.B on cox-worker-2 6 unchecked | no: #436 |
+| Blend deletes, committed (`defeature`, `RYUKEI_BARS=1`) | 9 defeatured (slowest ctc_05, 13.3 s), FTC 07 and FTC 10 refused `Uncertain` (`KNOWN_REFUSED`, #652), none past the deadline; 185.6 s | yes |
+| Blend deletes, pinned | 17 defeatured, 9 refused, 2 past the deadline (ftc_07 AP242 e2, OCCT's linkrods), as 16.C | yes |
+| Edits: #647's bytes (`the_edit_targets`) | `InvalidTweak(Uncertain)` in 3.4 s, 3,489,400 units | yes |
+| Edits: `edit_props` | 40 built, 38 refused, none past the deadline; `KNOWN_SLOW` empty; unrecognised seeds 32 and 92 only | yes |
+| Coils (`coilcraft`, `RYUKEI_BARS=1`) | 16 whole, slowest 14.4 s; `ryucad check` of 2929SQ-501 14.7 s, no finding | yes |
+| Speed of refusals: L_Wurth_WE-HCFT-2012 (`step-probe`) | refused `Heal(FacesOverlap)` in 19.4 s (1.5 mm lead: 19.8 s) | no: #550, by question 495's cap rule (`kernel-booleans.md`) |
+
+- **Ledger.** step-hunt refused `known.txt` with two duplicate cases, each on main: FTC 10's surface model (#708) and ctc_02's construction sheets (#695, re-listed by ryucad 22.B's defeature group). Each is ledgered once now, and `ledger::tests::the_committed_ledger_parses` parses the committed ledger.
+
 ## Tangent crossings of pipes (decided in ryukei phase 15)
 
 The design is document 296 in the Coxswain planning project `ryucad-ryukei`; this is its plan 15.D (phase 6), issue #177.
