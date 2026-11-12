@@ -9,7 +9,10 @@ use ryukei::name::OpKey;
 use ryustep::census::{Bucket, Category, Read};
 use ryustep::part21::{self, Record};
 use ryustep::properties::Value;
-use ryustep::{LengthUnit, Product, WriteModel, WriteOptions, write};
+use ryustep::{
+    LengthUnit, MaterialData, Paints, PartData, Product, ProductData, WriteModel, WriteOptions,
+    write, write_with_data,
+};
 
 fn opts(name: &str) -> WriteOptions {
     WriteOptions {
@@ -43,7 +46,10 @@ fn vendor(v2: bool) -> Vec<u8> {
             .unwrap()
             .id
     };
-    let (pd, pds) = (first("PRODUCT_DEFINITION"), first("PRODUCT_DEFINITION_SHAPE"));
+    let (pd, pds) = (
+        first("PRODUCT_DEFINITION"),
+        first("PRODUCT_DEFINITION_SHAPE"),
+    );
     let n = file.instances.len() as u64;
     let k = |j: u64| n + j;
     let (supplier, density, thickness) = if v2 {
@@ -86,11 +92,35 @@ fn vendor(v2: bool) -> Vec<u8> {
          #{a27}=PROPERTY_DEFINITION_REPRESENTATION(#{a25},#{a28});\
          #{a28}=REPRESENTATION('',(#{a29}),#{a6});\
          #{a29}=DESCRIPTIVE_REPRESENTATION_ITEM('Thread','M4');",
-        a1 = k(1), a2 = k(2), a3 = k(3), a4 = k(4), a5 = k(5), a6 = k(6), a7 = k(7),
-        a8 = k(8), a9 = k(9), a10 = k(10), a11 = k(11), a12 = k(12), a13 = k(13),
-        a14 = k(14), a15 = k(15), a16 = k(16), a17 = k(17), a18 = k(18), a19 = k(19),
-        a20 = k(20), a21 = k(21), a22 = k(22), a23 = k(23), a24 = k(24), a25 = k(25),
-        a26 = k(26), a27 = k(27), a28 = k(28), a29 = k(29),
+        a1 = k(1),
+        a2 = k(2),
+        a3 = k(3),
+        a4 = k(4),
+        a5 = k(5),
+        a6 = k(6),
+        a7 = k(7),
+        a8 = k(8),
+        a9 = k(9),
+        a10 = k(10),
+        a11 = k(11),
+        a12 = k(12),
+        a13 = k(13),
+        a14 = k(14),
+        a15 = k(15),
+        a16 = k(16),
+        a17 = k(17),
+        a18 = k(18),
+        a19 = k(19),
+        a20 = k(20),
+        a21 = k(21),
+        a22 = k(22),
+        a23 = k(23),
+        a24 = k(24),
+        a25 = k(25),
+        a26 = k(26),
+        a27 = k(27),
+        a28 = k(28),
+        a29 = k(29),
     );
     let more = part21::parse(
         format!(
@@ -115,7 +145,10 @@ fn kept(name: &str, bytes: &[u8]) {
     }
     let on_disk =
         std::fs::read(&path).unwrap_or_else(|e| panic!("{name}: {e} (UPDATE_GOLDEN=1 writes it)"));
-    assert!(on_disk == bytes, "{name} isn't what this test makes now: UPDATE_GOLDEN=1");
+    assert!(
+        on_disk == bytes,
+        "{name} isn't what this test makes now: UPDATE_GOLDEN=1"
+    );
 }
 
 #[test]
@@ -133,7 +166,15 @@ fn vendor_reads_its_material_and_attributes() {
     let names: Vec<&str> = p.attributes.iter().map(|a| a.name.as_str()).collect();
     assert_eq!(
         names,
-        ["Supplier", "Batch Size", "Yield", "RoHS", "Wall-Thickness", "Net Mass", "Revision Count"]
+        [
+            "Supplier",
+            "Batch Size",
+            "Yield",
+            "RoHS",
+            "Wall-Thickness",
+            "Net Mass",
+            "Revision Count"
+        ]
     );
     assert_eq!(p.attributes[1].value, Value::Integer(250));
     assert_eq!(o.properties().failed.len(), 1, "Broken");
@@ -146,12 +187,127 @@ fn vendor_reads_its_material_and_attributes() {
 #[test]
 fn the_census_counts_them_by_category() {
     let o = ryustep::open(&vendor(false)).unwrap();
-    let t = o.census.transfer(&Read { product_tree: true, ..Default::default() }, &[]);
+    let t = o.census.transfer(
+        &Read {
+            product_tree: true,
+            ..Default::default()
+        },
+        &[],
+    );
     let line = |c: Category| t.lines.iter().find(|l| l.category == c).unwrap();
     // Nothing interprets them yet: kept in the bytes.
     let materials = line(Category::Materials);
-    assert!(materials.buckets[Bucket::Retained as usize].count >= 5, "{materials:?}");
+    assert!(
+        materials.buckets[Bucket::Retained as usize].count >= 5,
+        "{materials:?}"
+    );
     let props = line(Category::Properties);
-    assert!(props.buckets[Bucket::Retained as usize].count >= 10, "{props:?}");
+    assert!(
+        props.buckets[Bucket::Retained as usize].count >= 10,
+        "{props:?}"
+    );
     assert_eq!(props.buckets[Bucket::Interpreted as usize].count, 0);
+}
+
+fn block_model() -> WriteModel {
+    let block = ryukei::primitive::block(OpKey(1), 0.04, 0.02, 0.005, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    WriteModel {
+        products: vec![Product {
+            id: "P".into(),
+            name: "plate".into(),
+            bodies: vec![block],
+            ..Default::default()
+        }],
+    }
+}
+
+fn steel(density: Option<f64>) -> PartData {
+    PartData {
+        products: vec![ProductData {
+            product: 0,
+            material: Some(MaterialData {
+                name: "Steel".into(),
+                density,
+            }),
+            attributes: Vec::new(),
+        }],
+    }
+}
+
+/// The parameters of the one simple record named `name`.
+fn record(bytes: &[u8], name: &str) -> Vec<part21::Param> {
+    let f = part21::parse(bytes).unwrap();
+    let found: Vec<_> = f
+        .instances
+        .iter()
+        .filter_map(|i| match &i.record {
+            Record::Simple(p) if &*p.name == name => Some(p.params.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(found.len(), 1, "{name}");
+    found.into_iter().next().unwrap()
+}
+
+#[test]
+fn a_material_and_its_density_are_written_after_everything_else() {
+    let model = block_model();
+    let plain = write(&model, &opts("p.stp")).unwrap();
+    let with = write_with_data(
+        &model,
+        &[],
+        &Paints::default(),
+        &steel(Some(7850.0)),
+        &opts("p.stp"),
+    )
+    .unwrap()
+    .bytes;
+    let (a, b) = (
+        part21::parse(&plain).unwrap(),
+        part21::parse(&with).unwrap(),
+    );
+    assert_eq!(
+        format!("{:?}", &b.instances[..a.instances.len()]),
+        format!("{:?}", a.instances),
+        "no geometry instance renumbered"
+    );
+    let o = ryustep::open(&with).unwrap();
+    let m = o.properties().products[&0].material.clone().unwrap();
+    assert_eq!((m.name.as_str(), m.density), ("Steel", Some(7850.0)));
+    // AP242's designation is of a set of definitions; AP214's of one.
+    assert!(matches!(
+        record(&with, "MATERIAL_DESIGNATION")[1],
+        part21::Param::List(_)
+    ));
+    let mut ap214 = opts("p.stp");
+    ap214.schema = ryustep::schema::Schema::Ap214;
+    let old = write_with_data(&model, &[], &Paints::default(), &steel(None), &ap214)
+        .unwrap()
+        .bytes;
+    assert!(matches!(
+        record(&old, "MATERIAL_DESIGNATION")[1],
+        part21::Param::Ref(_)
+    ));
+    let o = ryustep::open(&old).unwrap();
+    assert_eq!(
+        o.properties().products[&0]
+            .material
+            .as_ref()
+            .unwrap()
+            .density,
+        None
+    );
+    // Nothing to write writes nothing.
+    let none = write_with_data(
+        &model,
+        &[],
+        &Paints::default(),
+        &PartData::default(),
+        &opts("p.stp"),
+    )
+    .unwrap()
+    .bytes;
+    assert_eq!(none, plain);
 }
