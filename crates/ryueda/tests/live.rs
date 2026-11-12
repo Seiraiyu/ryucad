@@ -356,3 +356,61 @@ fn an_agent_shows_the_person_what_it_means() {
         .unwrap_err();
     assert_eq!(e.code, Code::RefUnresolved);
 }
+
+#[test]
+fn what_is_deleted_leaves_every_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = breakout(dir.path());
+    let mut h = Here::open(&board);
+    let dana = h.human("Dana");
+    h.ask(
+        Some(&dana),
+        "selection.set",
+        json!({"refs": ["breakout/r1", "breakout/r2", "breakout/r2/1"]}),
+    )
+    .unwrap();
+    h.ask(
+        None,
+        "highlight.set",
+        json!({"refs": ["breakout/r2"], "style": "pending"}),
+    )
+    .unwrap();
+    h.ask(
+        None,
+        "activity.set",
+        json!({"status": "removing R2", "refs": ["breakout/r2"]}),
+    )
+    .unwrap();
+    // A write through the session.
+    h.ask(
+        None,
+        "component.delete",
+        json!({"component": "breakout/r2"}),
+    )
+    .unwrap();
+    let list = h.ask(None, "participant.list", json!({})).unwrap();
+    let get = |name: &str| {
+        list["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(get("Dana")["selection"], json!(["breakout/r1"]));
+    assert_eq!(get("agent")["highlights"], json!([]));
+    assert_eq!(get("agent")["status"]["entities"], json!([]));
+    // A change from outside: r1's file deleted by hand.
+    h.ask(
+        Some(&dana),
+        "selection.set",
+        json!({"refs": ["breakout/r1", "breakout/sda"]}),
+    )
+    .unwrap();
+    std::fs::remove_file(board.join("blocks/breakout/components/r1.json")).unwrap();
+    let got = h
+        .ask(None, "selection.get", json!({"participant": dana}))
+        .unwrap();
+    assert_eq!(got["selection"], json!(["breakout/sda"]));
+}

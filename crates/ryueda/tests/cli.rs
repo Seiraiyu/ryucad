@@ -652,6 +652,67 @@ fn protocol_methods() -> Vec<String> {
 
 /// Parity: nothing an agent can't do. Every protocol method has a CLI
 /// command, and each command exists.
+
+#[test]
+fn watchers_hear_of_pointing() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    let board = p.daemon.join("board");
+    let mut watch = ryueda(&p.run);
+    watch.current_dir(&board).args([
+        "--as",
+        "watcher",
+        "watch",
+        "--topic",
+        "participants",
+        "--timeout",
+        "20",
+    ]);
+    let waiting = std::thread::spawn(move || watch.output().unwrap());
+    let attached = || {
+        let (_, v) = p.run_in(&p.daemon, "board", &["participants"]);
+        v["result"]["participants"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|x| x["name"] == "watcher"))
+    };
+    for _ in 0..200 {
+        if attached() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    // Nothing says when the watcher has subscribed: point and clear
+    // until it has heard one change.
+    let mut on = false;
+    while !waiting.is_finished() {
+        let args: &[&str] = if on {
+            &["--as", "pointer", "select", "--clear"]
+        } else {
+            &["--as", "pointer", "select", "breakout/r1"]
+        };
+        assert_eq!(p.run_in(&p.daemon, "board", args).0, 0, "{args:?}");
+        on = !on;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let (code, v) = parse(waiting.join().unwrap(), &p.daemon);
+    assert_eq!(code, 0, "{v}");
+    let note = &v["result"]["notifications"][0];
+    assert_eq!(note["method"], "participant.changed", "{v}");
+    let who = &note["params"]["participant"];
+    for k in [
+        "selection",
+        "highlights",
+        "status",
+        "design",
+        "block",
+        "sheet",
+        "layer",
+        "camera",
+        "shown_by",
+    ] {
+        assert!(who.get(k).is_some(), "{k}: {who}");
+    }
+}
 #[test]
 fn every_protocol_method_has_a_command() {
     let commands: &[(&str, &[&str])] = &[
