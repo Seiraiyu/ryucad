@@ -74,6 +74,7 @@ pub mod entity;
 pub mod equations;
 pub mod explode;
 pub mod export;
+pub mod file_props;
 pub mod file_styles;
 pub mod geometry;
 pub mod git;

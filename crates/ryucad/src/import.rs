@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub mod convert;
-mod plan;
+pub(crate) mod plan;
 mod update;
 
 use plan::Planned;
