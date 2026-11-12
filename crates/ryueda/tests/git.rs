@@ -374,3 +374,469 @@ fn check_reports_doctor_and_a_revision_has_none() {
     };
     assert_eq!(report["doctor"], json!([]), "{report}");
 }
+
+/// The breakout, laid out and committed, then edited: R1's value, a new
+/// R3 on SDA, C3 deleted, SCL renamed and J1 moved.
+fn edited_breakout(top: &Path, run: &Path) -> PathBuf {
+    let board = breakout_in_git(top, run);
+    assert_eq!(ryueda(&board, run, false, &["layout"]).0, 0);
+    git(top, &["add", "."]);
+    git(top, &["commit", "-q", "-m", "laid out"]);
+    for args in [
+        vec!["component", "edit", "breakout/r1", "--value", "10k"],
+        vec![
+            "component",
+            "add",
+            "breakout",
+            "--of",
+            "r_4k7",
+            "--id",
+            "r3",
+        ],
+        vec!["connect", "breakout/r3/1", "SDA"],
+        vec!["connect", "breakout/r3/2", "rail:3V3"],
+        vec!["component", "delete", "breakout/c3"],
+        vec!["net", "rename", "breakout/scl", "I2C_SCL"],
+        vec!["place", "breakout", "--move", "shift J1 right 4"],
+    ] {
+        let (code, v) = ryueda(&board, run, false, &args);
+        assert_eq!(code, 0, "{args:?}: {v}");
+    }
+    board
+}
+
+#[test]
+fn diff_says_what_changed_both_ways() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = edited_breakout(&top, &run);
+        let (code, v) = ryueda(&board, &run, daemon, &["diff"]);
+        assert_eq!(code, 0, "{v}");
+        let r = &v["result"];
+        assert_eq!(r["from"]["rev"], "HEAD");
+        assert_eq!(r["from"]["commit"].as_str().unwrap().len(), 40);
+        assert_eq!(r["to"], json!({"rev": "working", "commit": null}));
+        let b = r["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["block"] == "breakout")
+            .unwrap();
+        let comp = |id: &str| {
+            b["components"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"] == id)
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(comp("r1")["status"], "changed");
+        assert_eq!(
+            (comp("r3")["status"].clone(), comp("r3")["ref"].clone()),
+            (json!("added"), json!("breakout/r3"))
+        );
+        assert_eq!(comp("c3")["status"], "removed");
+        let scl = b["nets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "scl")
+            .unwrap();
+        assert_eq!(scl["name"], "I2C_SCL");
+        assert_eq!(b["layout"]["status"], "changed");
+        assert!(
+            b["layout"]["counts"]["moved"].as_u64().unwrap() >= 1,
+            "{}",
+            b["layout"]
+        );
+        assert!(
+            b["layout"].get("changes").is_none(),
+            "counts only without --layout"
+        );
+        let (_, l) = ryueda(
+            &board,
+            &run,
+            daemon,
+            &["diff", "--layout", "--block", "breakout"],
+        );
+        let changes = l["result"]["blocks"][0]["layout"]["changes"]
+            .as_array()
+            .unwrap();
+        assert!(
+            changes
+                .iter()
+                .any(|c| c["change"] == "moved" && c["ref"] == "breakout/j1"),
+            "{changes:?}"
+        );
+        let (_, n) = ryueda(&board, &run, daemon, &["diff", "--netlist"]);
+        let nets = n["result"]["netlist"][0]["nets"].as_array().unwrap();
+        assert!(
+            nets.iter().any(|x| x["renamed"]["to"]
+                .as_str()
+                .is_some_and(|t| t.ends_with("I2C_SCL"))),
+            "{nets:?}"
+        );
+        // Nothing between a revision and itself; a revision it lacks.
+        let (_, same) = ryueda(
+            &board,
+            &run,
+            daemon,
+            &["diff", "--from", "HEAD", "--to", "HEAD"],
+        );
+        assert_eq!(same["result"]["blocks"], json!([]));
+        assert_eq!(
+            ryueda(&board, &run, daemon, &["diff", "--from", "nope"]).1["error"]["code"],
+            "rev_not_found"
+        );
+        if daemon {
+            ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}
+
+#[test]
+fn check_against_a_revision_says_what_changed_electrically() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = edited_breakout(&top, &run);
+        let (code, v) = ryueda(&board, &run, daemon, &["check", "--against", "HEAD"]);
+        let report = if code == 0 {
+            v["result"].clone()
+        } else {
+            v["error"]["details"]["report"].clone()
+        };
+        assert!(code == 0 || v["error"]["code"] == "check_failed", "{v}");
+        let a = &report["against"];
+        assert_eq!(a["from"]["rev"], "HEAD");
+        assert!(
+            !a["netlist"][0]["occurrences"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{a}"
+        );
+        assert_eq!(
+            ryueda(
+                &board,
+                &run,
+                daemon,
+                &["check", "--rev", "HEAD", "--against", "HEAD~1"]
+            )
+            .1["error"]["code"],
+            "invalid_param"
+        );
+        if daemon {
+            ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}
+
+#[test]
+fn an_unfinished_merge_fails_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    // A conflict record, as 4.C's driver will leave one.
+    let r1 = board.join("blocks/breakout/components/r1.json");
+    let mut c: Value = serde_json::from_str(&std::fs::read_to_string(&r1).unwrap()).unwrap();
+    c["conflicts"] =
+        json!({"/value": {"kind": "value", "base": "4k7", "ours": "10k", "theirs": "2k2"}});
+    std::fs::write(&r1, serde_json::to_string_pretty(&c).unwrap() + "\n").unwrap();
+    let (code, v) = ryueda(&board, &run, false, &["check"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("check_failed")),
+        "{v}"
+    );
+    let report = &v["error"]["details"]["report"];
+    assert!(
+        report["faults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "merge_conflict"),
+        "{report}"
+    );
+    let (_, d) = ryueda(&board, &run, false, &["doctor"]);
+    assert!(
+        d["result"]["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["code"] == "merge_conflict"),
+        "{d}"
+    );
+    git(&top, &["checkout", "--", "."]);
+    // A path Git left unmerged (a text merge, no driver yet).
+    git(&top, &["checkout", "-q", "-b", "theirs"]);
+    let (_, _) = ryueda(
+        &board,
+        &run,
+        false,
+        &["component", "edit", "breakout/r1", "--value", "2k2"],
+    );
+    git(&top, &["commit", "-qam", "theirs"]);
+    git(&top, &["checkout", "-q", "main"]);
+    let (_, _) = ryueda(
+        &board,
+        &run,
+        false,
+        &["component", "edit", "breakout/r1", "--value", "10k"],
+    );
+    git(&top, &["commit", "-qam", "ours"]);
+    let out = git_command(&top)
+        .args(["merge", "-q", "theirs"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "the merge stops");
+    let (code, v) = ryueda(&board, &run, false, &["check"]);
+    assert_eq!(code, 1, "{v}");
+    let doctor = v["error"]["details"]["report"]["doctor"]
+        .as_array()
+        .unwrap();
+    assert!(doctor.iter().any(|f| f["code"] == "unmerged_path"), "{v}");
+}
+
+#[test]
+fn render_compare_paints_what_changed() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = edited_breakout(&top, &run);
+        let (code, v) = ryueda(
+            &board,
+            &run,
+            daemon,
+            &[
+                "render",
+                "--block",
+                "breakout",
+                "--compare",
+                "HEAD",
+                "--out",
+                "c.svg",
+            ],
+        );
+        assert_eq!(code, 0, "{v}");
+        assert_eq!(v["result"]["compare"]["rev"], "HEAD");
+        assert_eq!(v["result"]["compare"]["commit"].as_str().unwrap().len(), 40);
+        let svg = std::fs::read_to_string(board.join("c.svg")).unwrap();
+        for want in [
+            "data-ref=\"breakout/r3\"",
+            "data-ref=\"breakout/c3\"",
+            "#1a7f37",
+            "#9a6700",
+            "#cf222e",
+            "stroke-dasharray",
+            "Against HEAD:",
+        ] {
+            assert!(svg.contains(want), "{want}");
+        }
+        let (code, _) = ryueda(
+            &board,
+            &run,
+            daemon,
+            &[
+                "render",
+                "--block",
+                "breakout",
+                "--compare",
+                "HEAD",
+                "--out",
+                "c.png",
+            ],
+        );
+        assert_eq!(code, 0);
+        assert!(
+            std::fs::read(board.join("c.png"))
+                .unwrap()
+                .starts_with(b"\x89PNG")
+        );
+        // A plain render has no references.
+        ryueda(
+            &board,
+            &run,
+            daemon,
+            &["render", "--block", "breakout", "--out", "p.svg"],
+        );
+        assert!(
+            !std::fs::read_to_string(board.join("p.svg"))
+                .unwrap()
+                .contains("data-ref")
+        );
+        assert_eq!(
+            ryueda(
+                &board,
+                &run,
+                daemon,
+                &[
+                    "render",
+                    "--rev",
+                    "HEAD",
+                    "--compare",
+                    "HEAD",
+                    "--out",
+                    "x.svg"
+                ]
+            )
+            .1["error"]["code"],
+            "invalid_param"
+        );
+        if daemon {
+            ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}
+
+#[test]
+fn output_compare_pages_only_changed_sheets() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = edited_breakout(&top, &run);
+    let (_, all) = ryueda(&board, &run, false, &["output", "--out", "all.pdf"]);
+    let (code, v) = ryueda(
+        &board,
+        &run,
+        false,
+        &["output", "--compare", "HEAD", "--out", "c.pdf"],
+    );
+    assert_eq!(code, 0, "{v}");
+    let pages = v["result"]["pages"].as_array().unwrap();
+    assert!(!pages.is_empty());
+    assert!(
+        pages.len() < all["result"]["pages"].as_array().unwrap().len(),
+        "the sensor's sheet is the same"
+    );
+    assert!(pages.iter().all(|p| p["block"] == "breakout"), "{pages:?}");
+    assert!(
+        std::fs::read(board.join("c.pdf"))
+            .unwrap()
+            .starts_with(b"%PDF")
+    );
+    // Nothing changed since the working files' own commit: no file.
+    git(&top, &["add", "."]);
+    git(&top, &["commit", "-q", "-m", "edits"]);
+    let (code, v) = ryueda(
+        &board,
+        &run,
+        false,
+        &["output", "--compare", "HEAD", "--out", "none.pdf"],
+    );
+    assert_eq!((code, &v["result"]["unchanged"]), (0, &json!(true)), "{v}");
+    assert!(!board.join("none.pdf").exists());
+}
+
+/// Three levels, breakout over sensor over a leaf, where only the leaf
+/// changed: its sheets are the only pages, and the outline still reaches
+/// them through the unchanged blocks above (which open the leaf's first
+/// page).
+#[test]
+fn output_compare_bookmarks_a_leaf_under_unchanged_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    for args in [
+        vec!["block", "create", "Decoupling", "--id", "leaf"],
+        vec!["component", "add", "leaf", "--of", "c_100n", "--id", "c9"],
+        vec!["connect", "leaf/c9/1", "rail:3V3"],
+        vec!["connect", "leaf/c9/2", "rail:GND"],
+        vec!["instance", "add", "sensor", "--of", "leaf", "--id", "d1"],
+        vec!["layout"],
+    ] {
+        let (code, v) = ryueda(&board, &run, false, &args);
+        assert_eq!(code, 0, "{args:?}: {v}");
+    }
+    git(&top, &["add", "."]);
+    git(&top, &["commit", "-q", "-m", "three levels"]);
+    let (code, v) = ryueda(
+        &board,
+        &run,
+        false,
+        &["component", "edit", "leaf/c9", "--value", "1u"],
+    );
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = ryueda(
+        &board,
+        &run,
+        false,
+        &["output", "--compare", "HEAD", "--out", "c.pdf"],
+    );
+    assert_eq!(code, 0, "{v}");
+    let pages = v["result"]["pages"].as_array().unwrap();
+    assert!(!pages.is_empty());
+    assert!(pages.iter().all(|p| p["block"] == "leaf"), "{pages:?}");
+    let pdf = String::from_utf8_lossy(&std::fs::read(board.join("c.pdf")).unwrap()).into_owned();
+    for want in [
+        "/Title (Breakout)",
+        "/Title (Sensor (s1))",
+        "/Title (Decoupling (d1))",
+    ] {
+        assert!(pdf.contains(want), "{want} in the outline");
+    }
+    for p in pages {
+        let want = format!("/Title ({})", p["name"].as_str().unwrap());
+        assert!(pdf.contains(&want), "{want} in the outline");
+    }
+}
+
+#[test]
+fn a_compare_is_set_on_a_participant() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = edited_breakout(&top, &run);
+    // No daemon, nobody to show.
+    assert_eq!(
+        ryueda(&board, &run, false, &["compare", "HEAD"]).1["error"]["code"],
+        "no_live_session"
+    );
+    let (code, v) = ryueda(&board, &run, true, &["compare", "HEAD"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["compare"]["rev"], "HEAD");
+    let who = v["result"]["participant"].as_str().unwrap().to_owned();
+    let (_, got) = ryueda(&board, &run, true, &["compare"]);
+    assert_eq!(got["result"]["participant"], json!(who));
+    assert_eq!(
+        got["result"]["compare"]["commit"].as_str().unwrap().len(),
+        40
+    );
+    let (_, list) = ryueda(&board, &run, true, &["participants"]);
+    let me = list["result"]["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == json!(who))
+        .cloned()
+        .unwrap();
+    assert_eq!(me["compare"], "HEAD");
+    for (args, code) in [
+        (vec!["compare", "working"], "invalid_param"),
+        (vec!["compare", "nope"], "rev_not_found"),
+        (vec!["compare", "HEAD", "--off"], "usage"),
+    ] {
+        assert_eq!(
+            ryueda(&board, &run, true, &args).1["error"]["code"],
+            code,
+            "{args:?}"
+        );
+    }
+    let (_, off) = ryueda(&board, &run, true, &["compare", "--off"]);
+    assert_eq!(off["result"]["compare"], Value::Null);
+    ryueda(&board, &run, true, &["daemon", "stop"]);
+}

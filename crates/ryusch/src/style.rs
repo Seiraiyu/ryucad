@@ -64,10 +64,16 @@ pub enum Role {
     Frame,
     /// A sheet's name on the canvas, and a note's box.
     Name,
+    /// What a compare paints new (plan 4.B).
+    DiffAdded,
+    /// What a compare paints changed or moved.
+    DiffChanged,
+    /// What a compare ghosts: gone since the revision.
+    DiffRemoved,
 }
 
 impl Role {
-    pub const ALL: [Role; 12] = [
+    pub const ALL: [Role; 15] = [
         Role::Paper,
         Role::Canvas,
         Role::Ink,
@@ -80,6 +86,9 @@ impl Role {
         Role::PortFill,
         Role::Frame,
         Role::Name,
+        Role::DiffAdded,
+        Role::DiffChanged,
+        Role::DiffRemoved,
     ];
 
     /// Its palette name.
@@ -97,6 +106,9 @@ impl Role {
             Role::PortFill => "port_fill",
             Role::Frame => "frame",
             Role::Name => "name",
+            Role::DiffAdded => "diff_added",
+            Role::DiffChanged => "diff_changed",
+            Role::DiffRemoved => "diff_removed",
         }
     }
 
@@ -107,11 +119,11 @@ impl Role {
 
 /// The built-in `ryu` palette (design 348's figure 4): graphite bodies
 /// with a warm fill, blue wires, red power; each name's light and dark
-/// colour. The twelve roles, then the colours the built-in style's tag
+/// colour. The fifteen roles, then the colours the built-in style's tag
 /// rules use. Every colour drawn on paper is at least 3:1 against it in
 /// its theme, and every colour drawn over a body or a port's flag at
 /// least 3:1 against that fill (ryueda's `sch_contrast` holds it so).
-pub const RYU: [(&str, Rgb, Rgb); 15] = [
+pub const RYU: [(&str, Rgb, Rgb); 18] = [
     ("paper", Rgb(0xff, 0xff, 0xff), Rgb(0x1d, 0x20, 0x25)),
     ("canvas", Rgb(0xe6, 0xe8, 0xeb), Rgb(0x12, 0x14, 0x18)),
     ("ink", Rgb(0x3a, 0x3f, 0x47), Rgb(0xc3, 0xc9, 0xd2)),
@@ -124,6 +136,9 @@ pub const RYU: [(&str, Rgb, Rgb); 15] = [
     ("port_fill", Rgb(0xdd, 0xe7, 0xf6), Rgb(0x26, 0x34, 0x4d)),
     ("frame", Rgb(0x8c, 0x93, 0x9d), Rgb(0x7d, 0x85, 0x8f)),
     ("name", Rgb(0x5f, 0x66, 0x70), Rgb(0xa0, 0xa7, 0xb1)),
+    ("diff_added", Rgb(0x1a, 0x7f, 0x37), Rgb(0x3f, 0xb9, 0x50)),
+    ("diff_changed", Rgb(0x9a, 0x67, 0x00), Rgb(0xd2, 0x99, 0x22)),
+    ("diff_removed", Rgb(0xcf, 0x22, 0x2e), Rgb(0xf8, 0x51, 0x49)),
     ("hv", Rgb(0xc0, 0x26, 0x1c), Rgb(0xff, 0x6a, 0x5c)),
     ("critical", Rgb(0xa8, 0x56, 0x0f), Rgb(0xf0, 0xa2, 0x54)),
     ("dim", Rgb(0x86, 0x8c, 0x95), Rgb(0x7b, 0x82, 0x8c)),
@@ -291,6 +306,15 @@ mod tests {
         );
         assert_eq!(builtin("hv", Theme::Light), Some(Rgb(0xc0, 0x26, 0x1c)));
         assert_eq!(builtin("nope", Theme::Light), None);
+        assert_eq!(Role::parse("diff_added"), Some(Role::DiffAdded));
+        assert_eq!(
+            builtin("diff_added", Theme::Light),
+            Some(Rgb(0x1a, 0x7f, 0x37))
+        );
+        assert_eq!(
+            builtin("diff_removed", Theme::Dark),
+            Some(Rgb(0xf8, 0x51, 0x49))
+        );
         let names: Vec<&str> = RYU.iter().map(|(n, _, _)| *n).collect();
         let mut sorted = names.clone();
         sorted.dedup();

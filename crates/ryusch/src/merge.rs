@@ -96,7 +96,7 @@ pub enum Repair {
 
 /// One layout's values by key, as JSON for comparing: so every section
 /// compares alike.
-fn values(l: &Layout) -> BTreeMap<Key, serde_json::Value> {
+pub(crate) fn values(l: &Layout) -> BTreeMap<Key, serde_json::Value> {
     let mut out = BTreeMap::new();
     let put = |out: &mut BTreeMap<Key, serde_json::Value>,
                section: &'static str,
