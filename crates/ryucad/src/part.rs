@@ -420,7 +420,7 @@ pub(crate) fn part_report(
                 }
                 Ok(crate::rebuild::Output::Mate(m)) => {
                     json!({"id": fid, "type": types.get(fid), "ok": true, "hash": m.hash,
-                           "mate": m.to_json()})
+                           "mate": m.to_json(unit)})
                 }
                 Ok(crate::rebuild::Output::Copies(c)) => {
                     json!({"id": fid, "type": types.get(fid), "ok": true, "hash": c.hash,

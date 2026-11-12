@@ -328,6 +328,7 @@ impl Export {
             pipe_tolerance: None,
             skip_failing: c.skip_failing,
             appearance: None,
+            properties: None,
             solid: self.sheet.clone().filter(|s| dxf && !s.is_empty()),
             notes: dxf.then_some(c.notes),
             fixed: None,

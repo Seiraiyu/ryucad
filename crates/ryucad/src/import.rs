@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub mod convert;
-mod plan;
+pub(crate) mod plan;
 mod update;
 
 use plan::Planned;
@@ -633,6 +633,16 @@ pub fn transfer_report(
     }
     let (instances, unplaced) = crate::file_styles::interpreted(&opened, &bodies, &made, &vias);
     read.instances = instances;
+    read.instances.extend(crate::file_props::held(
+        session.project(),
+        &*session,
+        &opened,
+        path,
+        &parts,
+    ));
+    read.instances.sort_unstable();
+    read.instances.dedup();
+    failed.extend(crate::file_props::failed(&opened));
     let t = opened.census.transfer(&read, &failed);
     let mut out = json!({
         "file": {"path": path, "blake3": file.blake3, "schema": schema_name(opened.schema)},
@@ -969,7 +979,7 @@ fn import_opened(
             "flatten makes a part of the whole file: leave out into and product",
         ));
     }
-    let plan: Vec<Planned> = match &ask.into {
+    let mut plan: Vec<Planned> = match &ask.into {
         Some(into) => {
             if ask.part.is_some() {
                 return Err(Error::new(
@@ -1034,7 +1044,21 @@ fn import_opened(
             }
         }
     };
-    let warnings = mapped_warnings(opened, &ask.path);
+    let applied = crate::file_props::apply(
+        project,
+        &*session,
+        opened,
+        None,
+        &stored,
+        &mut plan,
+        if ask.into.is_some() {
+            crate::file_props::Mode::Into
+        } else {
+            crate::file_props::Mode::Fresh
+        },
+    );
+    let mut warnings = mapped_warnings(opened, &ask.path);
+    warnings.extend(applied.warnings.iter().cloned());
     let mut writes = plan::writes(project, &plan)?;
     if !reused {
         writes.insert(stored.clone(), Some(file.bytes.to_vec()));
@@ -1044,7 +1068,7 @@ fn import_opened(
     if ask.dry_run {
         let mut s = session.proposed(&writes)?;
         let parts = parts_report(&mut s, opened, &plan)?;
-        let transfer = transfer_of(opened, &stored, &plan, &parts);
+        let transfer = transfer_of(opened, &stored, &plan, &parts, &applied.instances);
         return Ok(answer(head, opened, parts, warnings, true, transfer));
     }
     // PDM names need the project's ID; Git's attributes keep the file's
@@ -1059,7 +1083,7 @@ fn import_opened(
     crate::drivers::write_attributes(&root)?;
     session.reload()?;
     let parts = parts_report(session, opened, &plan)?;
-    let transfer = transfer_of(opened, &stored, &plan, &parts);
+    let transfer = transfer_of(opened, &stored, &plan, &parts, &applied.instances);
     Ok(answer(head, opened, parts, warnings, false, transfer))
 }
 
@@ -1136,7 +1160,17 @@ fn reimport_opened(
         pdm: root.join(PDM_CONFIG).is_file(),
         mode: ask.mode(),
     };
-    let u = update::plan(project, opened, &file_ref, &fresh)?;
+    let mut u = update::plan(project, opened, &file_ref, &fresh)?;
+    let old_opened = self::opened(&old).ok();
+    let applied = crate::file_props::apply(
+        project,
+        &*session,
+        opened,
+        old_opened.as_deref(),
+        &target,
+        &mut u.planned,
+        crate::file_props::Mode::Update,
+    );
     let mut writes = plan::writes(project, &u.planned)?;
     if old.blake3 != file.blake3 {
         writes.insert(target.clone(), Some(file.bytes.to_vec()));
@@ -1153,6 +1187,7 @@ fn reimport_opened(
             "import_usage_missing: {p}/{f}'s body is gone from {target}, but another feature reads it, so it stays"
         ));
     }
+    warnings.extend(applied.warnings.iter().cloned());
     // What builds now and wouldn't after, from the files as they would be.
     let now = failing(session)?;
     let mut proposed = session.proposed(&writes)?;
@@ -1197,7 +1232,7 @@ fn reimport_opened(
     };
     if ask.dry_run {
         let parts = parts_report(&mut proposed, opened, &u.planned)?;
-        let transfer = transfer_of(opened, &target, &u.planned, &parts);
+        let transfer = transfer_of(opened, &target, &u.planned, &parts, &applied.instances);
         return Ok(extra(
             answer(head, opened, parts, warnings, true, transfer),
             None,
@@ -1223,7 +1258,7 @@ fn reimport_opened(
     session.reload()?;
     let assemblies = crate::mate::keep_current(session, &current)?;
     let parts = parts_report(session, opened, &u.planned)?;
-    let transfer = transfer_of(opened, &target, &u.planned, &parts);
+    let transfer = transfer_of(opened, &target, &u.planned, &parts, &applied.instances);
     Ok(extra(
         answer(head, opened, parts, warnings, false, transfer),
         Some(assemblies),
@@ -1493,6 +1528,7 @@ fn into_plan(
         features,
         removed: Vec::new(),
         properties: BTreeMap::new(),
+        props_of: k,
     })
 }
 
@@ -1597,7 +1633,13 @@ fn parts_report(
 /// was read when anything was made; each failing feature's error names
 /// its instances (`step`) with its code. `parts` is `parts_report`'s, in
 /// `plan`'s order.
-fn transfer_of(opened: &Opened, path: &str, plan: &[Planned], parts: &[Value]) -> Value {
+fn transfer_of(
+    opened: &Opened,
+    path: &str,
+    plan: &[Planned],
+    parts: &[Value],
+    props: &[u64],
+) -> Value {
     use crate::doc::files::Feature;
     use std::collections::BTreeSet;
     let mut read = ryustep::census::Read {
@@ -1643,6 +1685,10 @@ fn transfer_of(opened: &Opened, path: &str, plan: &[Planned], parts: &[Value]) -
     }
     let (instances, unplaced) = crate::file_styles::interpreted(opened, &bodies, &made, &vias);
     read.instances = instances;
+    read.instances.extend(props);
+    read.instances.sort_unstable();
+    read.instances.dedup();
+    failed.extend(crate::file_props::failed(opened));
     let mut v = crate::transfer::json(&opened.census.transfer(&read, &failed), path, false);
     crate::transfer::with_unplaced(&mut v, unplaced);
     v

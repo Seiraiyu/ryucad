@@ -252,6 +252,7 @@ pub fn plan(
                 features: Vec::new(),
                 removed: Vec::new(),
                 properties: BTreeMap::new(),
+                props_of: None,
             });
         };
     // Import features: the new hash, the product as it is now, and the
@@ -472,6 +473,7 @@ pub fn plan(
                                 ),
                                 removed: Vec::new(),
                                 properties: BTreeMap::new(),
+                                props_of: None,
                             },
                         );
                         let usage = ImportUsage {
@@ -513,6 +515,16 @@ pub fn plan(
             (r.clone(), parts)
         })
         .collect();
+    let assemblies: BTreeSet<usize> = planned
+        .values()
+        .filter(|p| p.kind == PartKind::Assembly)
+        .filter_map(|p| p.definition)
+        .collect();
+    for p in planned.values_mut() {
+        p.props_of = p
+            .definition
+            .filter(|k| p.kind == PartKind::Assembly || !assemblies.contains(k));
+    }
     Ok(Update {
         planned: planned.into_values().chain(made).chain(flattened).collect(),
         vanished,
@@ -621,6 +633,20 @@ fn reflatten(
             features,
             removed,
             properties: BTreeMap::new(),
+            props_of: {
+                let makes = plan::makes(opened);
+                let roots: Vec<usize> = opened
+                    .products
+                    .roots
+                    .iter()
+                    .copied()
+                    .filter(|&k| makes[k])
+                    .collect();
+                match roots.as_slice() {
+                    [k] => Some(*k),
+                    _ => None,
+                }
+            },
         },
         kept,
     ))

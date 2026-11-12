@@ -40,6 +40,11 @@ pub struct Planned {
     pub removed: Vec<Id>,
     /// What its properties file gets, when the project uses PDM.
     pub properties: BTreeMap<String, Value>,
+    /// The definition whose product its properties come from (design
+    /// 448, plan 24.C): a plain part's, an imported assembly's own, a
+    /// flattened part's single root; `None` for the part of an assembly's
+    /// own bodies and the bodies no product reaches.
+    pub props_of: Option<usize>,
 }
 
 /// Definition `k`'s product as a feature names it: its id and name, and
@@ -343,6 +348,7 @@ impl Fresh<'_> {
                     features,
                     removed: Vec::new(),
                     properties: self.properties(Some(k)),
+                    props_of: Some(k),
                 });
                 if let Some(own) = &own_of[k] {
                     let n = bodies(opened, Some(k));
@@ -362,6 +368,7 @@ impl Fresh<'_> {
                         ),
                         removed: Vec::new(),
                         properties: BTreeMap::new(),
+                        props_of: None,
                     });
                 }
             } else {
@@ -382,6 +389,7 @@ impl Fresh<'_> {
                     ),
                     removed: Vec::new(),
                     properties: self.properties(Some(k)),
+                    props_of: Some(k),
                 });
             }
         }
@@ -402,6 +410,7 @@ impl Fresh<'_> {
                 ),
                 removed: Vec::new(),
                 properties: BTreeMap::new(),
+                props_of: None,
             });
         }
         Ok(out)
@@ -561,6 +570,10 @@ impl Flat<'_> {
             [k] => properties(opened, Some(*k), self.pdm),
             _ => BTreeMap::new(),
         };
+        let props_of = match roots.as_slice() {
+            [k] => Some(*k),
+            _ => None,
+        };
         Ok(Planned {
             part,
             new: true,
@@ -569,6 +582,7 @@ impl Flat<'_> {
             features,
             removed: Vec::new(),
             properties,
+            props_of,
         })
     }
 }

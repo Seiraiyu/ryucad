@@ -226,6 +226,7 @@ fn bodies_in_a_chain_follow_each_other() {
             kind: Kind::Fastened,
             a: on(2, a),
             b: on(3, b),
+            limits: ryumate::Limits::NONE,
         },
     );
     let (at, _, r) = solved(&asm);
@@ -235,4 +236,75 @@ fn bodies_in_a_chain_follow_each_other() {
     let link = at.bodies[&2].pose;
     let want = link.then_after(&a).then_after(&b.inverse());
     assert!(same(tip.origin, want.origin, 1e-10));
+}
+
+#[test]
+fn every_kind_stops_at_its_limits() {
+    use ryumate::{Limits, Range, Stop};
+    let z = [0.0, 0.0, 1.0];
+    let a = Some(Range {
+        min: Some(-0.1),
+        max: Some(0.1),
+    });
+    let d = Some(Range {
+        min: Some(-0.002),
+        max: Some(0.002),
+    });
+    for (kind, at, limits) in [
+        (
+            Kind::Revolute { angle: None },
+            turned(z, 0.4, [0.0; 3]),
+            Limits {
+                angle: a,
+                distance: None,
+            },
+        ),
+        (
+            Kind::Slider { distance: None },
+            moved([0.0, 0.0, 0.01]),
+            Limits {
+                angle: None,
+                distance: d,
+            },
+        ),
+        (
+            Kind::Cylindrical {
+                angle: None,
+                distance: None,
+            },
+            turned(z, -0.4, [0.0, 0.0, -0.01]),
+            Limits {
+                angle: a,
+                distance: d,
+            },
+        ),
+        (
+            Kind::Planar {
+                angle: None,
+                distance: 0.0,
+            },
+            turned(z, 0.4, [0.003, 0.004, 0.0]),
+            Limits {
+                angle: a,
+                distance: None,
+            },
+        ),
+    ] {
+        let mut asm = pair(kind, Pose::IDENTITY, Pose::IDENTITY, at);
+        asm.mates.get_mut(&10).unwrap().limits = limits;
+        let (_, arm, report) = solved(&asm);
+        let v = report.values[&10];
+        if let Some(x) = v.angle.filter(|_| limits.angle.is_some()) {
+            assert!(x.at.is_some(), "{kind:?}: {x:?}");
+            assert!((x.value.abs() - 0.1).abs() <= 1e-11, "{kind:?}: {x:?}");
+        }
+        if let Some(x) = v.distance.filter(|_| limits.distance.is_some()) {
+            assert!(
+                matches!(x.at, Some(Stop::Min | Stop::Max)),
+                "{kind:?}: {x:?}"
+            );
+        }
+        // A stop takes no freedom away.
+        assert_eq!(arm.freedom.dof, freedoms(&kind), "{kind:?}");
+    }
 }

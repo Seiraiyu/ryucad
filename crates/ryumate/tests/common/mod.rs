@@ -95,6 +95,7 @@ pub fn pair(kind: Kind, a: Pose, b: Pose, at: Pose) -> Assembly {
             kind,
             a: on(1, a),
             b: on(2, b),
+            limits: ryumate::Limits::NONE,
         },
     );
     asm
@@ -204,6 +205,7 @@ pub fn mechanism(g: &mut Lcg, n: u32, size: f64) -> (Assembly, usize) {
                 kind,
                 a: on(parent, a),
                 b: on(k, b),
+                limits: ryumate::Limits::NONE,
             },
         );
     }
@@ -215,6 +217,50 @@ pub fn jostle(asm: &mut Assembly, g: &mut Lcg, angle: f64, by: f64) {
     for b in asm.bodies.values_mut() {
         if !b.fixed {
             b.pose = nudged(g, &b.pose, angle, by);
+        }
+    }
+}
+
+/// Limits about each free value of `asm`'s mates, as built: a range from
+/// `below` under the value to `above` over it (each drawn up to `spread`
+/// radians, or `spread` times `size` meters), one-sided a third of the
+/// time, on about half the mates.
+pub fn limit(asm: &mut Assembly, g: &mut Lcg, size: f64, spread: f64) {
+    let values = ryumate::values(asm).unwrap();
+    for (id, m) in asm.mates.iter_mut() {
+        let Some(v) = values.get(id) else { continue };
+        if g.next_u64().is_multiple_of(2) {
+            continue;
+        }
+        let range = |g: &mut Lcg, x: f64, s: f64| {
+            let (lo, hi) = (x - g.next_f64(0.0, s), x + g.next_f64(0.0, s));
+            match g.next_u64() % 3 {
+                0 => ryumate::Range {
+                    min: Some(lo),
+                    max: None,
+                },
+                1 => ryumate::Range {
+                    min: None,
+                    max: Some(hi),
+                },
+                _ => ryumate::Range {
+                    min: Some(lo),
+                    max: Some(hi),
+                },
+            }
+        };
+        let (turns, slides) = match m.kind {
+            Kind::Revolute { angle } => (angle.is_none(), false),
+            Kind::Slider { distance } => (false, distance.is_none()),
+            Kind::Cylindrical { angle, distance } => (angle.is_none(), distance.is_none()),
+            Kind::Planar { angle, .. } => (angle.is_none(), false),
+            _ => (false, false),
+        };
+        if turns {
+            m.limits.angle = Some(range(g, v.angle.unwrap(), spread));
+        }
+        if slides {
+            m.limits.distance = Some(range(g, v.distance.unwrap(), spread * size));
         }
     }
 }

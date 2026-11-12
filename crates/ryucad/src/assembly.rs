@@ -1586,8 +1586,34 @@ pub fn tree(
         &prefix,
         depth.unwrap_or(u32::MAX),
     )?;
+    // Each mate of the assembly shown: its form, state, value and stop.
+    let unit = session.project().manifest.default_unit;
+    let mates: Vec<serde_json::Value> = result
+        .features
+        .iter()
+        .filter_map(|(fid, r)| {
+            let Some(Ok(Feature::Mate(doc))) = p.features.get(fid) else {
+                return None;
+            };
+            let mut m = serde_json::json!({"id": fid, "form": doc.form.as_str()});
+            match r {
+                Ok(Output::Mate(x)) => {
+                    m["state"] = serde_json::json!(crate::mate::mate_state(x.state));
+                    if let Some(vals) = &x.values {
+                        let (value, limit) = crate::mate::values_json(vals, unit);
+                        m["value"] = value;
+                        if limit.as_object().is_some_and(|o| !o.is_empty()) {
+                            m["limit"] = limit;
+                        }
+                    }
+                }
+                _ => m["state"] = serde_json::json!("failing"),
+            }
+            Some(m)
+        })
+        .collect();
     let mut v = serde_json::json!({"part": pid, "revision": session.project().part(&pid)?.revision,
-                                   "instances": instances});
+                                   "instances": instances, "mates": mates});
     if !prefix.is_empty() {
         v["path"] = serde_json::json!(path_text(&prefix));
         v["of"] = serde_json::json!(p.id);

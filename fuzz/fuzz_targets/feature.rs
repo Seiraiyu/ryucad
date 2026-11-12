@@ -33,6 +33,7 @@
 //! assembly `asm` in a project holding that part as `fz` and an assembly
 //! `sub` placing `asm`: it must place its part or give a structured error,
 //! never an internal one, and every occurrence must be finite and sound.
+//! A mate may carry limits: what settles is within them unless driven.
 //! Features read the project's parameters `wall` (3 mm) and `gap`
 //! (`wall / 2`), as a part reads its project's. A datum built must be
 //! finite; seeds build datums on `s`, `t` and `b`'s edges, and a sketch
@@ -208,7 +209,30 @@ fn seeded() -> &'static ryucad::doc::project::ImportFile {
                 .collect(),
             occurrences: Vec::new(),
         };
-        let bytes = ryustep::write_styled(&model, &[], &paints, &opts)
+        // Product s0 a material with its density and two attributes
+        // (plan 24.C): the importer reads properties wherever it reads a
+        // file. The fuzz target builds no project, so no `ryupdm.json`
+        // maps them onto properties; that runs in ryucad's tests.
+        let data = ryustep::PartData {
+            products: vec![ryustep::ProductData {
+                product: 0,
+                material: Some(ryustep::MaterialData {
+                    name: "Steel".into(),
+                    density: Some(7850.0),
+                }),
+                attributes: vec![
+                    ryustep::AttributeData {
+                        name: "Finish".into(),
+                        value: ryustep::DataValue::Text("red".into()),
+                    },
+                    ryustep::AttributeData {
+                        name: "Count".into(),
+                        value: ryustep::DataValue::Integer(4),
+                    },
+                ],
+            }],
+        };
+        let bytes = ryustep::write_with_data(&model, &[], &paints, &data, &opts)
             .unwrap()
             .bytes;
         ryucad::doc::project::ImportFile::new(bytes)
@@ -380,9 +404,32 @@ fn assemble(written: &str, after_instances: bool) {
                                 .all(|x| x.is_finite())
                         );
                     }
+                    if let Some(v) = &m.values {
+                        for x in v.angle.iter().chain(&v.distance) {
+                            assert!(x.value.is_finite(), "{v:?}");
+                        }
+                    }
                 }
                 Ok(_) => panic!("an assembly makes only instances, mates and copies"),
                 Err(e) => assert_ne!(e.code, Code::Internal, "{e:?}"),
+            }
+        }
+        if result.solve.as_ref().is_some_and(|s| s.report.converged) {
+            let asm_part = project.part(&Id::parse(asm, "part").unwrap()).unwrap();
+            for (fid, out) in &result.features {
+                let (Ok(Output::Mate(m)), Some(Ok(ryucad::doc::files::Feature::Mate(doc)))) =
+                    (out, asm_part.features.get(fid))
+                else {
+                    continue;
+                };
+                let (Some(v), Some(l)) = (m.values, &doc.limits) else { continue };
+                let lim = ryucad::mate::limits(doc);
+                if let (Some(r), Some(a), None) = (lim.angle, v.angle, &doc.angle) {
+                    assert!(r.past(a.value, 1e-8).is_none(), "{fid}: {a:?} {l:?}");
+                }
+                if let (Some(r), Some(d), None) = (lim.distance, v.distance, &doc.distance) {
+                    assert!(r.past(d.value, 1e-8).is_none(), "{fid}: {d:?} {l:?}");
+                }
             }
         }
         let part = Id::parse(asm, "part").unwrap();

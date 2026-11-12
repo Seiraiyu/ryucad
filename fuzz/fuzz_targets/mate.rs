@@ -5,7 +5,8 @@
 //! exist; an assembly that converged must solve again to the same poses,
 //! within the tolerance. Solving in pieces must converge wherever
 //! solving whole components does, and both must say the same of the
-//! poses it leaves.
+//! poses it leaves. Some mates have limits; a converged solve leaves
+//! every undriven limited value within its range.
 
 #![no_main]
 
@@ -114,8 +115,47 @@ fn assembly(b: &mut Bytes) -> Assembly {
             },
             _ => Kind::Ball,
         };
+        let range = |b: &mut Bytes, lo: f64, hi: f64| {
+            let (x, y) = (b.range(lo, hi), b.range(lo, hi));
+            match b.pick(3) {
+                0 => ryumate::Range {
+                    min: Some(x),
+                    max: None,
+                },
+                1 => ryumate::Range {
+                    min: None,
+                    max: Some(y),
+                },
+                _ => ryumate::Range {
+                    min: Some(x.min(y)),
+                    max: Some(x.max(y)),
+                },
+            }
+        };
+        let mut limits = ryumate::Limits::NONE;
+        if b.byte() < 85 {
+            match kind {
+                Kind::Revolute { .. } | Kind::Planar { .. } => {
+                    limits.angle = Some(range(b, -3.0, 3.0))
+                }
+                Kind::Slider { .. } => limits.distance = Some(range(b, -0.1, 0.1)),
+                Kind::Cylindrical { .. } => {
+                    limits.angle = Some(range(b, -3.0, 3.0));
+                    limits.distance = Some(range(b, -0.1, 0.1));
+                }
+                _ => {}
+            }
+        }
         let (a, c) = (connector(b), connector(b));
-        mates.push((id, Mate { kind, a, b: c }));
+        mates.push((
+            id,
+            Mate {
+                kind,
+                a,
+                b: c,
+                limits,
+            },
+        ));
     }
     asm.mates.extend(mates);
     asm
@@ -163,6 +203,31 @@ fuzz_target!(|data: &[u8]| {
     let whole = solve_whole(&asm).unwrap().report;
     assert!(s.report.converged || !whole.converged, "{whole:?}");
     if s.report.converged {
+        for (id, m) in &asm.mates {
+            let Some(v) = s.report.values.get(id) else {
+                continue;
+            };
+            // Driven values aren't stopped; the rest must be within.
+            let (da, dd) = match m.kind {
+                Kind::Revolute { angle } => (angle.is_some(), false),
+                Kind::Slider { distance } => (false, distance.is_some()),
+                Kind::Cylindrical { angle, distance } => (angle.is_some(), distance.is_some()),
+                Kind::Planar { angle, .. } => (angle.is_some(), true),
+                _ => (false, false),
+            };
+            for (r, x, driven) in [
+                (m.limits.angle, v.angle, da),
+                (m.limits.distance, v.distance, dd),
+            ] {
+                if let (Some(r), Some(x)) = (r, x) {
+                    assert!(x.value.is_finite());
+                    assert!(
+                        driven || r.past(x.value, 1e-8).is_none(),
+                        "{id}: {x:?} {r:?}"
+                    );
+                }
+            }
+        }
         let at = s.assembly(&asm);
         // A solve that moved a body out of the size box (or left it
         // skewed) gives an assembly that can't be solved again.

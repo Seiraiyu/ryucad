@@ -298,3 +298,51 @@ fn typing_right_after_setting_up_pdm_is_kept() {
     }));
     assert_eq!(number_on_disk(&p), "100");
 }
+
+/// A vendor's STEP file imported into a project declaring only
+/// `supplier`: the Part section lists the rest as read from the file.
+#[test]
+fn the_part_section_lists_what_the_step_file_says() {
+    let p = Project::new();
+    p.ok(&["pdm", "init"]);
+    p.ok(&[
+        "pdm",
+        "configure",
+        "--property",
+        r#"supplier={"type":"string"}"#,
+    ]);
+    let vendor = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../ryustep/tests/data/properties/vendor.stp"
+    );
+    p.ok(&["import", "--solid", vendor]);
+    let mut ws = open_part(&p, "vb-100");
+    let props = ws.props.as_ref().unwrap();
+    let names: Vec<&str> = props.file.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        names.contains(&"Batch Size") && names.contains(&"Wall-Thickness"),
+        "{names:?}"
+    );
+    assert!(!names.contains(&"Supplier"), "declared, so a property");
+    let wall = props
+        .file
+        .iter()
+        .find(|f| f.name == "Wall-Thickness")
+        .unwrap();
+    assert_eq!(wall.value, "2.5 mm");
+    assert!(
+        wall.source.starts_with("imports/") && wall.source.contains(" #"),
+        "{}",
+        wall.source
+    );
+    let _ = &mut ws;
+}
+
+/// Opens `p` with the Part section showing `part`.
+fn open_part(p: &Project, part: &str) -> Workspace {
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.part(part).is_some()));
+    ws.show_props(Some(part));
+    assert!(ws.wait_until(WAIT, |ws| ws.props.is_some()));
+    ws
+}

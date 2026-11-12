@@ -80,6 +80,33 @@ impl MeshTree {
         one.nearest(&self.tree).map(|n| (n.distance, n.b.0, n.b.1))
     }
 
+    /// [`MeshTree::nearest_to`] without building a tree for `p`: the same
+    /// distance, point and index, bit for bit, and nothing allocated.
+    pub fn nearest_point(&self, p: Point3) -> Option<(f64, Point3, u32)> {
+        self.tree.nearest_point(p)
+    }
+
+    /// The distance from `p` to triangle `k`: what [`MeshTree::nearest_to`]
+    /// gives on a tree of that triangle alone, without the tree.
+    pub fn to_triangle(&self, p: Point3, k: u32) -> f64 {
+        let t = &self.triangles[k as usize];
+        p.distance(super::prims::point_triangle(p, t))
+    }
+
+    /// The triangles whose boxes meet the box `lo`–`hi` (touching counts),
+    /// by index, sorted, into `out` (cleared first; keep it between calls
+    /// and nothing is allocated once it has grown).
+    pub fn in_box(&self, lo: Point3, hi: Point3, out: &mut Vec<u32>) {
+        self.tree.in_box(lo, hi, out)
+    }
+
+    /// Whether some triangle of `self` and one of `other` lie within `d`
+    /// of each other: what `nearest(other)`'s distance `<= d` answers,
+    /// stopped at the first pair found.
+    pub fn any_within(&self, other: &MeshTree, d: f64) -> bool {
+        self.tree.any_within(&other.tree, d)
+    }
+
     /// Every pair `(i, j)` of a triangle of `self` and one of `other`
     /// within `d` of each other, sorted.
     pub fn within(&self, other: &MeshTree, d: f64) -> Vec<(u32, u32)> {
@@ -229,5 +256,148 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Points round a block, a ball and a sheet of slivers, seeded.
+    fn probes(n: usize) -> Vec<Point3> {
+        let mut s = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        (0..n)
+            .map(|_| {
+                Point3::new(
+                    0.03 * next() - 0.01,
+                    0.03 * next() - 0.01,
+                    0.03 * next() - 0.01,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nearest_point_is_nearest_to_bit_for_bit() {
+        let (ball, _) =
+            crate::primitive::sphere(OpKey::from_bytes(b"s"), 0.005, &Rigid::IDENTITY).unwrap();
+        let slivers: Vec<[Point3; 3]> = (0..200)
+            .map(|k| {
+                let x = k as f64 * 1e-4;
+                [
+                    Point3::new(x, 0.0, 0.0),
+                    Point3::new(x + 1e-4, 0.0, 0.0),
+                    Point3::new(x, 0.02, 0.0),
+                ]
+            })
+            .collect();
+        for tris in [mesh_of(&block([0.0; 3], 0.01)), mesh_of(&ball), slivers] {
+            let m = MeshTree::new(tris);
+            for p in probes(500)
+                .into_iter()
+                .chain(m.triangles().iter().map(|t| t[1]))
+            {
+                let (d0, q0, k0) = m.nearest_to(p).unwrap();
+                let (d1, q1, k1) = m.nearest_point(p).unwrap();
+                assert_eq!(d0.to_bits(), d1.to_bits(), "{p:?}");
+                assert_eq!(
+                    [q0.x, q0.y, q0.z].map(f64::to_bits),
+                    [q1.x, q1.y, q1.z].map(f64::to_bits),
+                    "{p:?}"
+                );
+                assert_eq!(k0, k1, "{p:?}");
+            }
+        }
+        assert!(
+            MeshTree::new(Vec::new())
+                .nearest_point(Point3::ORIGIN)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn to_triangle_is_a_one_triangle_tree_bit_for_bit() {
+        let m = MeshTree::new(mesh_of(&block([0.0; 3], 0.01)));
+        for p in probes(300) {
+            for (k, t) in m.triangles().iter().enumerate() {
+                let one = MeshTree::new(vec![*t]).nearest_to(p).unwrap().0;
+                assert_eq!(
+                    m.to_triangle(p, k as u32).to_bits(),
+                    one.to_bits(),
+                    "{p:?} {k}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn in_box_matches_brute_force() {
+        let (ball, _) =
+            crate::primitive::sphere(OpKey::from_bytes(b"s"), 0.005, &Rigid::IDENTITY).unwrap();
+        let m = MeshTree::new(mesh_of(&ball));
+        let mut found = Vec::new();
+        let ps = probes(400);
+        for w in ps.chunks(2) {
+            let (lo, hi) = (w[0].min(w[1]), w[0].max(w[1]));
+            m.in_box(lo, hi, &mut found);
+            let brute: Vec<u32> = m
+                .triangles()
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| {
+                    let (a, b) = (t[0].min(t[1]).min(t[2]), t[0].max(t[1]).max(t[2]));
+                    a.x <= hi.x
+                        && lo.x <= b.x
+                        && a.y <= hi.y
+                        && lo.y <= b.y
+                        && a.z <= hi.z
+                        && lo.z <= b.z
+                })
+                .map(|(k, _)| k as u32)
+                .collect();
+            assert_eq!(found, brute, "{lo:?} {hi:?}");
+        }
+        // A flat box on a face's plane still finds that face's triangles.
+        let b = MeshTree::new(mesh_of(&block([0.0; 3], 0.01)));
+        b.in_box(
+            Point3::new(0.002, 0.002, 0.01),
+            Point3::new(0.003, 0.003, 0.01),
+            &mut found,
+        );
+        assert!(!found.is_empty());
+        MeshTree::new(Vec::new()).in_box(lo_hi().0, lo_hi().1, &mut found);
+        assert!(found.is_empty());
+    }
+
+    fn lo_hi() -> (Point3, Point3) {
+        (Point3::ORIGIN, Point3::new(1.0, 1.0, 1.0))
+    }
+
+    #[test]
+    fn any_within_answers_what_nearest_does() {
+        let (ball, _) =
+            crate::primitive::sphere(OpKey::from_bytes(b"s"), 0.005, &Rigid::IDENTITY).unwrap();
+        let ball = mesh_of(&ball);
+        let cube = mesh_of(&block([0.0; 3], 0.01));
+        let moved = |t: &[[Point3; 3]], o: Point3| -> Vec<[Point3; 3]> {
+            t.iter()
+                .map(|t| t.map(|q| Point3::new(q.x + o.x, q.y + o.y, q.z + o.z)))
+                .collect()
+        };
+        let a = MeshTree::new(cube.clone());
+        let mut checked = 0;
+        for o in probes(60) {
+            for other in [&ball, &cube] {
+                let b = MeshTree::new(moved(other, o));
+                let m = a.nearest(&b).unwrap().distance;
+                for d in [0.0, m * (1.0 - 1e-9), m, m * (1.0 + 1e-9), 1e-4, 1.0] {
+                    assert_eq!(a.any_within(&b, d), m <= d, "{o:?} {d} {m}");
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 720);
+        assert!(!MeshTree::new(Vec::new()).any_within(&a, 1.0));
     }
 }

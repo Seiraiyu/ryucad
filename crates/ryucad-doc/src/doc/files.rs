@@ -93,6 +93,7 @@ pub const FEATURE_FORMAT: u64 = {
         super::tweak::DRAFT_FORMAT,
         super::body::TOOL_FORMAT,
         super::edit::FORMAT,
+        super::mate::LIMITS_FORMAT,
     ];
     let (mut max, mut i) = (0, 0);
     while i < all.len() {
@@ -614,6 +615,7 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
             ("faces", g) => out.extend(super::body::expression_strings(g)),
             ("diameter", Value::String(s)) => out.push(s),
             ("distance", Value::String(s)) => out.push(s),
+            ("limits", l @ Value::Object(_)) => out.extend(super::mate::limit_strings(l)),
             ("a" | "b" | "axis" | "direction" | "direction2", c @ Value::Object(_)) => {
                 out.extend(super::mate::expression_strings(c));
             }
@@ -737,6 +739,9 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if v.get("type").and_then(Value::as_str) == Some("mate") && v.get("limits").is_some() {
+        return super::mate::LIMITS_FORMAT;
+    }
     let ty = v.get("type").and_then(Value::as_str);
     let retrims = v.get("topology").and_then(Value::as_str) == Some("change")
         || v.get("blends").and_then(Value::as_str) == Some("rebuild");
@@ -1088,6 +1093,11 @@ impl Feature {
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
+        if let Feature::Mate(m) = self
+            && m.limits.is_some()
+        {
+            return super::mate::LIMITS_FORMAT;
+        }
         // A tweak that may change topology or remake its blends is
         // ryucad 22's, whatever ryucad 17 wrote it at.
         if self.retrim().is_some_and(|r| !r.is_keep())

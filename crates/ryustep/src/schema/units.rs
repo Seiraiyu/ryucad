@@ -12,6 +12,8 @@ pub enum Quantity {
     Length,
     PlaneAngle,
     SolidAngle,
+    /// `MASS_UNIT`, or an SI `GRAM`.
+    Mass,
     /// Anything else (mass, time, …), or not said.
     Other,
 }
@@ -50,13 +52,14 @@ pub struct Units {
 /// Units known by name, with their exact sizes: a conversion-based unit of
 /// one of these names, within a millionth of its size, is taken as exactly
 /// it, so files that round `25.4` or `π/180` all read alike.
-const KNOWN: [(&str, f64); 6] = [
+const KNOWN: [(&str, f64); 7] = [
     ("INCH", 0.0254),
     ("FOOT", 0.3048),
     ("YARD", 0.9144),
     ("MILE", 1609.344),
     ("MIL", 2.54e-5),
     ("DEGREE", std::f64::consts::PI / 180.0),
+    ("POUND", 0.45359237),
 ];
 
 /// How deep conversion-based units may nest before it's taken for a
@@ -103,6 +106,8 @@ pub(super) fn complex(id: Id, parts: &[Part]) -> Option<Result<Entity, ImportErr
         Quantity::PlaneAngle
     } else if part("SOLID_ANGLE_UNIT").is_some() {
         Quantity::SolidAngle
+    } else if part("MASS_UNIT").is_some() {
+        Quantity::Mass
     } else {
         Quantity::Other
     };
@@ -132,6 +137,7 @@ fn si(a: &mut Args, quantity: Quantity) -> Result<Unit, ImportError> {
         (Quantity::Other, "METRE" | "METER") => Quantity::Length,
         (Quantity::Other, "RADIAN") => Quantity::PlaneAngle,
         (Quantity::Other, "STERADIAN") => Quantity::SolidAngle,
+        (Quantity::Other, "GRAM") => Quantity::Mass,
         (q, _) => q,
     };
     Ok(Unit::Si {
@@ -163,6 +169,87 @@ fn prefix_factor(prefix: &str) -> Option<f64> {
     })
 }
 
+/// The power of ten an SI prefix is.
+fn prefix_exponent(prefix: &str) -> Option<i32> {
+    Some(match prefix {
+        "EXA" => 18,
+        "PETA" => 15,
+        "TERA" => 12,
+        "GIGA" => 9,
+        "MEGA" => 6,
+        "KILO" => 3,
+        "HECTO" => 2,
+        "DECA" => 1,
+        "DECI" => -1,
+        "CENTI" => -2,
+        "MILLI" => -3,
+        "MICRO" => -6,
+        "NANO" => -9,
+        "PICO" => -12,
+        "FEMTO" => -15,
+        "ATTO" => -18,
+        _ => return None,
+    })
+}
+
+fn prefix_symbol(prefix: &str) -> &'static str {
+    match prefix {
+        "EXA" => "E",
+        "PETA" => "P",
+        "TERA" => "T",
+        "GIGA" => "G",
+        "MEGA" => "M",
+        "KILO" => "k",
+        "HECTO" => "h",
+        "DECA" => "da",
+        "DECI" => "d",
+        "CENTI" => "c",
+        "MILLI" => "m",
+        "MICRO" => "u",
+        "NANO" => "n",
+        "PICO" => "p",
+        "FEMTO" => "f",
+        "ATTO" => "a",
+        _ => "",
+    }
+}
+
+/// `value` times `10^exp10`, by moving the decimal point of its shortest
+/// decimal: exact to the nearest f64, the same on every platform, so a
+/// density in g/cm³ reads as the kg/m³ a person would write (`2.7` is
+/// `2700`, not `2700.0000000000005`).
+pub fn scaled(value: f64, exp10: i32) -> f64 {
+    if exp10 == 0 || value == 0.0 || !value.is_finite() {
+        return value;
+    }
+    let s = format!("{value:e}");
+    let (mantissa, exponent) = s.split_once('e').expect("LowerExp writes an exponent");
+    let exponent: i32 = exponent.parse().expect("an integer exponent");
+    format!("{mantissa}e{}", exponent.saturating_add(exp10))
+        .parse()
+        .unwrap_or(value)
+}
+
+/// A unit as a property's measure needs it: its powers of length, plane
+/// angle and mass (`other` when it has any other quantity), its size in
+/// SI units (metres, radians, kilograms and their products), the power of
+/// ten that size is exactly when every unit in it is SI-prefixed, how it
+/// is written (`mm`, `kg`, `g*cm^-3`, `inch`), and the instances read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MeasureUnit {
+    pub length: i8,
+    pub angle: i8,
+    pub mass: i8,
+    pub other: bool,
+    pub size: f64,
+    pub decimal: Option<i32>,
+    pub name: String,
+    pub instances: Vec<Id>,
+}
+
+/// How far a derived unit's exponents may go.
+const MAX_EXPONENT: f64 = 8.0;
+
 impl Entities {
     /// A unit's quantity and size in meters, radians or steradians.
     pub fn unit_factor(&self, from: Id, unit: Id) -> Result<(Quantity, f64), ImportError> {
@@ -184,6 +271,16 @@ impl Entities {
                 prefix,
                 name,
             }) => {
+                if &**name == "GRAM" {
+                    let scale = match prefix {
+                        None => 1.0,
+                        Some(p) => {
+                            prefix_factor(p).ok_or_else(|| malformed("unknown SI prefix"))?
+                        }
+                    };
+                    // A gram is a thousandth of the SI base, the kilogram.
+                    return Ok((Quantity::Mass, scaled(scale, -3)));
+                }
                 if !matches!(&**name, "METRE" | "METER" | "RADIAN" | "STERADIAN") {
                     return Ok((*quantity, 1.0));
                 }
@@ -222,6 +319,136 @@ impl Entities {
             }
             _ => Err(wrong(unit, "a unit")),
         }
+    }
+
+    /// Unit `unit` as a measure's (design 448, plan 24.C): a named unit,
+    /// or a `DERIVED_UNIT` of named units to whole powers.
+    pub fn measure_unit(&self, from: Id, unit: Id) -> Result<MeasureUnit, ImportError> {
+        match self.get(from, unit)? {
+            Entity::DerivedUnit { elements } => {
+                let mut out = MeasureUnit {
+                    length: 0,
+                    angle: 0,
+                    mass: 0,
+                    other: false,
+                    size: 1.0,
+                    decimal: Some(0),
+                    name: String::new(),
+                    instances: vec![unit],
+                };
+                let mut names = Vec::new();
+                // Powers summed wide: a file may repeat elements without
+                // bound, and only a sum that fits an `i8` is a unit.
+                let (mut length, mut angle, mut mass) = (0i32, 0i32, 0i32);
+                for &el in elements {
+                    let Entity::UnitElement {
+                        unit: named,
+                        exponent,
+                    } = self.get(unit, el)?
+                    else {
+                        return Err(wrong(el, "a derived unit element"));
+                    };
+                    if exponent.trunc() != *exponent
+                        || exponent.abs() > MAX_EXPONENT
+                        || *exponent == 0.0
+                    {
+                        return Err(ImportError::Malformed {
+                            instance: el,
+                            attribute: 1,
+                            what: "a derived unit's exponent must be a whole number from -8 to 8, not 0",
+                        });
+                    }
+                    let p = *exponent as i32;
+                    let u = self.named_measure_unit(el, *named)?;
+                    length = length.saturating_add(i32::from(u.length) * p);
+                    angle = angle.saturating_add(i32::from(u.angle) * p);
+                    mass = mass.saturating_add(i32::from(u.mass) * p);
+                    out.other |= u.other;
+                    for _ in 0..p.unsigned_abs() {
+                        out.size = if p > 0 {
+                            out.size * u.size
+                        } else {
+                            out.size / u.size
+                        };
+                    }
+                    out.decimal = out
+                        .decimal
+                        .zip(u.decimal)
+                        .and_then(|(a, b)| a.checked_add(b.checked_mul(p)?));
+                    names.push(if p == 1 {
+                        u.name
+                    } else {
+                        format!("{}^{p}", u.name)
+                    });
+                    out.instances.push(el);
+                    out.instances.extend(u.instances);
+                }
+                let power = |x: i32| {
+                    i8::try_from(x).map_err(|_| ImportError::Malformed {
+                        instance: unit,
+                        attribute: 0,
+                        what: "a derived unit's powers must be from -128 to 127",
+                    })
+                };
+                (out.length, out.angle, out.mass) = (power(length)?, power(angle)?, power(mass)?);
+                if let Some(d) = out.decimal {
+                    out.size = scaled(1.0, d);
+                }
+                out.name = names.join("*");
+                out.instances.sort_unstable();
+                out.instances.dedup();
+                Ok(out)
+            }
+            _ => self.named_measure_unit(from, unit),
+        }
+    }
+
+    fn named_measure_unit(&self, from: Id, unit: Id) -> Result<MeasureUnit, ImportError> {
+        let (quantity, size) = self.unit_factor(from, unit)?;
+        let (length, angle, mass, other) = match quantity {
+            Quantity::Length => (1, 0, 0, false),
+            Quantity::PlaneAngle => (0, 1, 0, false),
+            Quantity::Mass => (0, 0, 1, false),
+            Quantity::SolidAngle | Quantity::Other => (0, 0, 0, true),
+        };
+        let mut instances = vec![unit];
+        let (decimal, name, size) = match self.get(from, unit)? {
+            Entity::Unit(Unit::Si { prefix, name, .. }) => {
+                let p = match prefix {
+                    None => Some(0),
+                    Some(p) => prefix_exponent(p),
+                };
+                let gram = &**name == "GRAM";
+                let d = p.map(|p| if gram { p - 3 } else { p });
+                let symbol = match &**name {
+                    "METRE" | "METER" => "m".to_owned(),
+                    "GRAM" => "g".to_owned(),
+                    "RADIAN" => "rad".to_owned(),
+                    "STERADIAN" => "sr".to_owned(),
+                    "SECOND" => "s".to_owned(),
+                    n => n.to_ascii_lowercase(),
+                };
+                let text = format!("{}{symbol}", prefix.as_deref().map_or("", prefix_symbol));
+                // An SI unit other than a metre, radian, steradian or gram
+                // is sized by its prefix alone (`unit_factor` gives 1).
+                (d, text, d.map_or(size, |d| scaled(1.0, d)))
+            }
+            Entity::Unit(Unit::Conversion { name, factor, .. }) => {
+                instances.push(*factor);
+                (None, name.to_ascii_lowercase(), size)
+            }
+            _ => return Err(wrong(unit, "a unit")),
+        };
+        Ok(MeasureUnit {
+            length,
+            angle,
+            mass,
+            other,
+            size,
+            decimal,
+            name,
+            instances,
+        })
     }
 
     /// The units of representation context `context`. A context without a
@@ -395,5 +622,83 @@ mod tests {
         let e = entities("#1=SI_UNIT(*,.KILO.,.METRE.);#2=SI_UNIT(*,$,.SECOND.);");
         assert_eq!(e.unit_factor(0, 1), Ok((Quantity::Length, 1e3)));
         assert_eq!(e.unit_factor(0, 2), Ok((Quantity::Other, 1.0)));
+    }
+
+    #[test]
+    fn measure_units_in_si() {
+        let e = crate::schema::tests::entities(
+            "#1=(MASS_UNIT()NAMED_UNIT(*)SI_UNIT($,.GRAM.));\
+             #2=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.CENTI.,.METRE.));\
+             #3=DERIVED_UNIT_ELEMENT(#1,1.);\
+             #4=DERIVED_UNIT_ELEMENT(#2,-3.);\
+             #5=DERIVED_UNIT((#3,#4));\
+             #6=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.));\
+             #7=(CONVERSION_BASED_UNIT('INCH',#8)LENGTH_UNIT()NAMED_UNIT(*));\
+             #8=LENGTH_MEASURE_WITH_UNIT(25.4,#6);\
+             #9=(MASS_UNIT()NAMED_UNIT(*)SI_UNIT(.KILO.,.GRAM.));\
+             #10=DERIVED_UNIT_ELEMENT(#1,0.5);\
+             #11=DERIVED_UNIT((#10));\
+             #12=(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.));\
+             #13=(CONVERSION_BASED_UNIT('POUND',#14)MASS_UNIT()NAMED_UNIT(*));\
+             #14=MEASURE_WITH_UNIT(MASS_MEASURE(0.45359237),#9);",
+        );
+        let density = e.measure_unit(0, 5).unwrap();
+        assert_eq!(
+            (density.length, density.angle, density.mass, density.other),
+            (-3, 0, 1, false)
+        );
+        assert_eq!(density.decimal, Some(3), "g/cm³ is 10³ kg/m³");
+        assert_eq!(scaled(2.7, 3), 2700.0);
+        assert_eq!(scaled(7.85, 3), 7850.0);
+        assert_eq!(scaled(0.001, 3), 1.0);
+        assert_eq!(density.name, "g*cm^-3");
+        assert_eq!(density.instances, vec![1, 2, 3, 4, 5]);
+        let mm = e.measure_unit(0, 6).unwrap();
+        assert_eq!(
+            (mm.length, mm.decimal, mm.size, mm.name.as_str()),
+            (1, Some(-3), 0.001, "mm")
+        );
+        let inch = e.measure_unit(0, 7).unwrap();
+        assert_eq!((inch.length, inch.decimal, inch.size), (1, None, 0.0254));
+        let kg = e.measure_unit(0, 9).unwrap();
+        assert_eq!(
+            (kg.mass, kg.size, kg.decimal, kg.name.as_str()),
+            (1, 1.0, Some(0), "kg")
+        );
+        assert!(e.measure_unit(0, 11).is_err(), "a half power isn't a unit");
+        let rad = e.measure_unit(0, 12).unwrap();
+        assert_eq!((rad.angle, rad.size, rad.name.as_str()), (1, 1.0, "rad"));
+        let lb = e.measure_unit(0, 13).unwrap();
+        assert_eq!((lb.mass, lb.size, lb.decimal), (1, 0.45359237, None));
+        assert_eq!(e.unit_factor(0, 9).unwrap(), (Quantity::Mass, 1.0));
+        // Lengths keep their bits.
+        assert_eq!(e.unit_factor(0, 6).unwrap(), (Quantity::Length, 1e-3));
+    }
+
+    /// A `DERIVED_UNIT` repeating an element until its powers pass an
+    /// `i8` is refused as malformed, never a panic or a wrapped power
+    /// (24.C's review).
+    #[test]
+    fn a_derived_units_powers_that_overflow_are_refused() {
+        let refs = |n: usize| vec!["#2"; n].join(",");
+        let e = crate::schema::tests::entities(&format!(
+            "#1=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.));\
+             #2=DERIVED_UNIT_ELEMENT(#1,8.);\
+             #3=DERIVED_UNIT(({}));\
+             #4=DERIVED_UNIT(({}));",
+            refs(16),
+            refs(15)
+        ));
+        assert!(
+            matches!(
+                e.measure_unit(0, 3),
+                Err(ImportError::Malformed { instance: 3, .. })
+            ),
+            "{:?}",
+            e.measure_unit(0, 3)
+        );
+        let fits = e.measure_unit(0, 4).unwrap();
+        assert_eq!((fits.length, fits.decimal), (120, Some(-360)));
+        assert_eq!(scaled(2.5, i32::MAX), f64::INFINITY);
     }
 }

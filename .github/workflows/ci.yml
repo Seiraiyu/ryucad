@@ -108,7 +108,7 @@ jobs:
             os: windows-latest
             tests: --workspace --lib --bins --test determinism --partition hash:3/3
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install

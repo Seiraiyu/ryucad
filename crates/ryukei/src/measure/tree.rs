@@ -126,6 +126,55 @@ impl Tree {
         best
     }
 
+    /// The piece nearest `p`: the distance, its nearest point and its tag.
+    /// The same answer, ties included, as [`Tree::nearest`] of a tree
+    /// holding `p` alone against this one, which descends in this order,
+    /// without building that tree or allocating: a node pops, its children
+    /// are pushed farther first (the nearer on a tie of their gaps is the
+    /// second), and a tree of `n` pieces is under `log2(n) + 1` deep, so the
+    /// stack never holds more than 64.
+    pub(crate) fn nearest_point(&self, p: Point3) -> Option<(f64, Point3, u32)> {
+        if self.is_empty() {
+            return None;
+        }
+        let gap = |n: &Node| box_gap([p, p], [n.lo, n.hi]);
+        let mut best: Option<(f64, Point3, u32)> = None;
+        let mut stack = [0usize; 64];
+        let mut top = 1;
+        while top > 0 {
+            top -= 1;
+            let n = &self.nodes[stack[top]];
+            if best.is_some_and(|b| gap(n) >= b.0) {
+                continue;
+            }
+            match n.kids {
+                None => {
+                    for q in &self.pieces[n.range[0]..n.range[1]] {
+                        let (d, _, y) = between(&Prim::Point(p), &q.prim);
+                        if best.is_none_or(|b| d < b.0) {
+                            best = Some((d, y, q.tag));
+                        }
+                    }
+                }
+                Some([k0, k1]) => {
+                    assert!(top + 2 <= stack.len(), "a box tree deeper than 63");
+                    // `nearest` sorts [k0, k1] farther first, stably, then
+                    // pushes in that order.
+                    let (g0, g1) = (gap(&self.nodes[k0]), gap(&self.nodes[k1]));
+                    let (first, second) = if g1.total_cmp(&g0) == std::cmp::Ordering::Greater {
+                        (k1, k0)
+                    } else {
+                        (k0, k1)
+                    };
+                    stack[top] = first;
+                    stack[top + 1] = second;
+                    top += 2;
+                }
+            }
+        }
+        best
+    }
+
     /// The root's box, `None` for an empty tree.
     pub(crate) fn bounds(&self) -> Option<(Point3, Point3)> {
         self.nodes.first().map(|n| (n.lo, n.hi))
@@ -164,6 +213,55 @@ impl Tree {
         out.sort_unstable();
         out.dedup();
         out
+    }
+
+    /// Whether some pair of pieces of `self` and `other` lies within `d`
+    /// of each other: [`Tree::within`]'s test, stopped at the first pair
+    /// found, the nearer boxes searched first as [`Tree::nearest`] does.
+    pub(crate) fn any_within(&self, other: &Tree, d: f64) -> bool {
+        if self.is_empty() || other.is_empty() {
+            return false;
+        }
+        let mut stack = vec![(0usize, 0usize)];
+        while let Some((i, j)) = stack.pop() {
+            let (a, b) = (&self.nodes[i], &other.nodes[j]);
+            if box_gap([a.lo, a.hi], [b.lo, b.hi]) > d {
+                continue;
+            }
+            match (a.kids, b.kids) {
+                (None, None) => {
+                    for p in &self.pieces[a.range[0]..a.range[1]] {
+                        for q in &other.pieces[b.range[0]..b.range[1]] {
+                            if between(&p.prim, &q.prim).0 <= d {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    let size = |n: &Node| (n.hi - n.lo).length();
+                    let split_a = b.kids.is_none() || (a.kids.is_some() && size(a) >= size(b));
+                    let next = if split_a {
+                        let [k0, k1] = a.kids.expect("an inner node");
+                        [(k0, j), (k1, j)]
+                    } else {
+                        let [k0, k1] = b.kids.expect("an inner node");
+                        [(i, k0), (i, k1)]
+                    };
+                    let gap_of = |&(x, y): &(usize, usize)| {
+                        let (p, q) = (&self.nodes[x], &other.nodes[y]);
+                        box_gap([p.lo, p.hi], [q.lo, q.hi])
+                    };
+                    // Farther first on the stack, so the nearer pops first.
+                    if gap_of(&next[1]) > gap_of(&next[0]) {
+                        stack.extend([next[1], next[0]]);
+                    } else {
+                        stack.extend(next);
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// The tags of the pieces in leaves whose boxes the segment `p`–`q`
@@ -210,6 +308,49 @@ impl Tree {
         }
         out.sort_unstable();
         out
+    }
+
+    /// The tags of the pieces whose own boxes meet the box `lo`–`hi`
+    /// (touching counts), sorted, into `out`, which is cleared first. A
+    /// caller asking many times keeps `out`, so once it has grown nothing
+    /// is allocated: the walk's stack is 64 nodes (see `nearest_point`).
+    pub(crate) fn in_box(&self, lo: Point3, hi: Point3, out: &mut Vec<u32>) {
+        out.clear();
+        if self.is_empty() {
+            return;
+        }
+        let meets = |a: Point3, b: Point3| {
+            a.x <= hi.x && lo.x <= b.x && a.y <= hi.y && lo.y <= b.y && a.z <= hi.z && lo.z <= b.z
+        };
+        let mut stack = [0usize; 64];
+        let mut top = 1;
+        while top > 0 {
+            top -= 1;
+            let n = &self.nodes[stack[top]];
+            if !meets(n.lo, n.hi) {
+                continue;
+            }
+            match n.kids {
+                Some([a, b]) => {
+                    assert!(top + 2 <= stack.len(), "a box tree deeper than 63");
+                    stack[top] = a;
+                    stack[top + 1] = b;
+                    top += 2;
+                }
+                None => {
+                    for p in &self.pieces[n.range[0]..n.range[1]] {
+                        let pts = p.prim.points();
+                        let (a, b) = pts[1..]
+                            .iter()
+                            .fold((pts[0], pts[0]), |(a, b), q| (a.min(*q), b.max(*q)));
+                        if meets(a, b) {
+                            out.push(p.tag);
+                        }
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
     }
 }
 

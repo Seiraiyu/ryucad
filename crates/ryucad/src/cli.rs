@@ -191,6 +191,10 @@ enum Command {
         /// appearance renders show is written as STEP styles).
         #[arg(long)]
         no_appearance: bool,
+        /// STEP: write no materials or properties (by default the part's
+        /// material, with its density, and every set property is written).
+        #[arg(long)]
+        no_properties: bool,
         /// DXF: the sheet metal solid (the part's one unless named).
         #[arg(long)]
         solid: Option<String>,
@@ -1293,7 +1297,8 @@ enum FeatureCmd {
     /// --angle) or mirror (--plane), skipping instances (--skip); or, in an
     /// assembly, an instance (--of, --rev, --origin, --z, --x, --fixed), a mate
     /// (--form fastened, revolute, slider, cylindrical, planar or ball, --a, --b,
-    /// --a-offset, --b-offset, --angle, --distance) or an instance pattern (--instance,
+    /// --a-offset, --b-offset, --angle, --distance, and stops --angle-min, --angle-max,
+    /// --distance-min, --distance-max) or an instance pattern (--instance,
     /// --form linear or circular, as a pattern's, its directions and axis x, y, z or a
     /// connector).
     Add {
@@ -2981,6 +2986,18 @@ struct FieldArgs {
     /// A slider's, cylindrical or planar mate's distance along --a's z ("" to let it go).
     #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
     distance: Option<String>,
+    /// A mate's stop below its free angle, an angle: -6deg ("" to clear it).
+    #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
+    angle_min: Option<String>,
+    /// A mate's stop above its free angle ("" to clear it).
+    #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
+    angle_max: Option<String>,
+    /// A slider's or cylindrical mate's stop below its free distance ("" to clear it).
+    #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
+    distance_min: Option<String>,
+    /// A slider's or cylindrical mate's stop above its free distance ("" to clear it).
+    #[arg(long, value_name = "QUANTITY", allow_hyphen_values = true)]
+    distance_max: Option<String>,
     /// An instance an instance pattern copies; repeat for several.
     #[arg(long = "instance", value_name = "INSTANCE")]
     instances: Vec<String>,
@@ -3682,6 +3699,25 @@ impl FieldArgs {
             a_offset: self.a_offset.clone(),
             b_offset: self.b_offset.clone(),
             distance: self.distance.clone().map(Value::String),
+            limits: {
+                let mut l = Map::new();
+                for (value, lo, hi) in [
+                    ("angle", &self.angle_min, &self.angle_max),
+                    ("distance", &self.distance_min, &self.distance_max),
+                ] {
+                    let mut r = Map::new();
+                    if let Some(x) = lo {
+                        r.insert("min".into(), json!(x));
+                    }
+                    if let Some(x) = hi {
+                        r.insert("max".into(), json!(x));
+                    }
+                    if !r.is_empty() {
+                        l.insert(value.into(), Value::Object(r));
+                    }
+                }
+                (!l.is_empty()).then_some(Value::Object(l))
+            },
             instances: (!self.instances.is_empty()).then(|| self.instances.clone()),
             point: None,
             by: self.by.clone(),
@@ -4880,6 +4916,7 @@ fn request(cmd: &Command) -> Option<Request> {
             pipe_tolerance,
             skip_failing,
             no_appearance,
+            no_properties,
             solid,
             no_notes,
             fixed,
@@ -4910,6 +4947,7 @@ fn request(cmd: &Command) -> Option<Request> {
             pipe_tolerance: pipe_tolerance.clone(),
             skip_failing: *skip_failing,
             appearance: no_appearance.then_some(false),
+            properties: no_properties.then_some(false),
             solid: solid.clone(),
             notes: no_notes.then_some(false),
             fixed: fixed.clone(),

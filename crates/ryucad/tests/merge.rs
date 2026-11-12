@@ -1500,3 +1500,52 @@ fn a_file_layer_turned_off_and_a_colour_merge() {
     assert_eq!(got["solids"][0]["colour"], "#123456");
     assert!(got["solids"][0].get("faces").is_none(), "{got}");
 }
+
+/// One branch re-imports the vendor's next file (its supplier and wall
+/// thickness change) and the other sets an imported property the file
+/// doesn't change by hand: the merge keeps both (design 448, plan 24.C),
+/// with no conflict record and `check` clean. (Setting the wall thickness
+/// on the other branch would be a true conflict: both branches change it.)
+#[test]
+fn a_reimported_property_and_a_hand_set_one_merge() {
+    let r = Repo::new("");
+    let fixture = |name: &str| {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../ryustep/tests/data/properties")
+            .join(name)
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+    r.ryucad(&[
+        "pdm",
+        "configure",
+        "--property",
+        r#"supplier={"type":"string"}"#,
+        "--property",
+        r#"wall_thickness={"type":"quantity","dim":"length"}"#,
+        "--property",
+        r#"yield={"type":"number"}"#,
+    ]);
+    let made = r.ryucad(&["import", "--solid", &fixture("vendor.stp")]);
+    let part = made["parts"][0]["part"].as_str().unwrap().to_owned();
+    let stored = made["file"]["path"].as_str().unwrap().to_owned();
+    r.commit("the vendor's bracket");
+    let file = format!("parts/{part}/properties.json");
+    assert_eq!(r.json(&file)["supplier"], "ACME Metals");
+    r.git(&["checkout", "-q", "-b", "a"]);
+    r.ryucad(&["import", "--update", &stored, &fixture("vendor_v2.stp")]);
+    r.commit("a: the vendor's next version");
+    r.git(&["checkout", "-q", "main"]);
+    r.ryucad(&["props", "set", &part, "yield=0.9"]);
+    r.commit("main: a lower yield");
+    r.git(&["checkout", "-q", "a"]);
+    r.git(&["merge", "-q", "--no-edit", "main"]);
+    let v = r.json(&file);
+    assert_eq!(v["supplier"], "Globex", "{v}");
+    assert_eq!(v["wall_thickness"], "3 mm", "the file's, taken on a: {v}");
+    assert_eq!(v["yield"], 0.9, "{v}");
+    assert!(r.canonical(&file));
+    let (code, out) = r.ryucad_status(&["check"]);
+    assert_eq!(code, 0, "{out}");
+}
