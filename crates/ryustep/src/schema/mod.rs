@@ -33,7 +33,7 @@ pub use property::{ItemValue, ValueForm};
 pub use style::Side;
 pub use surface::Surface;
 pub use topology::{Brep, Edge, Face, Loop};
-pub use units::{Quantity, Unit, Units};
+pub use units::{MeasureUnit, Quantity, Unit, Units, scaled};
 
 use crate::part21::{File, Header, Instance, Param, Part, Record};
 use crate::{ImportError, StepError};
