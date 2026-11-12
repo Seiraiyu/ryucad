@@ -729,4 +729,28 @@ mod tests {
         assert_eq!(j.unlocked, [(sub, id("asm"), "B".to_owned())]);
         assert!(j.unused.is_empty());
     }
+
+    #[test]
+    fn another_projects_part_inserted_is_wanted() {
+        // A part (not an assembly) inserting the library's p at A.
+        let mut files = project();
+        files.insert(
+            "parts/enc/part.json".into(),
+            canonical::to_string(&json!({"features": ["b"], "format": 1, "kind": "ryucad.part"}))
+                .into_bytes(),
+        );
+        files.insert(
+            "parts/enc/features/b.json".into(),
+            canonical::to_string(
+                &json!({"format": 21, "kind": "ryucad.feature", "type": "insert",
+                "project": lib(), "part": "p", "rev": {"label": "A"}}),
+            )
+            .into_bytes(),
+        );
+        let p = Project::load_from(Path::new(""), &files).unwrap();
+        assert_eq!(
+            wanted(&p),
+            BTreeSet::from([(lib(), id("p"), "A".to_owned())])
+        );
+    }
 }

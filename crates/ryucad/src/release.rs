@@ -272,6 +272,9 @@ fn readiness(session: &mut Session, part: &Id, config: &Config) -> Result<Vec<Va
     {
         problems.extend(unreleased(session, &p, &[])?.into_iter().map(|e| json!(e)));
     }
+    // A part releases its inserts pinned: each at an official label that
+    // isn't obsolete (design 521).
+    problems.extend(uninserted(session, &p)?.into_iter().map(|e| json!(e)));
     // Its item numbers, which the release pins: complete and unique.
     problems.extend(
         ryupdm::items::faults(part, &p)
@@ -280,6 +283,54 @@ fn readiness(session: &mut Session, part: &Id, config: &Config) -> Result<Vec<Va
             .map(|e| json!(e)),
     );
     Ok(problems)
+}
+
+/// `insert_not_released` for each insert of `p` that a release can't pin:
+/// at `working`, at a label that doesn't resolve or isn't official, or at
+/// an obsolete one (design 521).
+fn uninserted(session: &mut Session, p: &crate::doc::project::Part) -> Result<Vec<Error>> {
+    let mut out = Vec::new();
+    for fid in p.order() {
+        let Some(Ok(crate::doc::files::Feature::Insert(i))) = p.features.get(fid) else {
+            continue;
+        };
+        let at = format!("{}/{fid}", p.id);
+        let refuse = |why: String| {
+            Error::new(Code::InsertNotReleased, format!("insert {at} {why}"))
+                .with("insert", &at)
+                .with("part", &i.part)
+                .with("rev", i.rev.to_json())
+        };
+        let l = match &i.rev {
+            Rev::Working => {
+                out.push(refuse(format!(
+                    "inserts {} as it is (working); pin it to an official release",
+                    i.part
+                )));
+                continue;
+            }
+            Rev::Label(l) => l.clone(),
+            Rev::Foreign { project, label } => format!("{label} of {project}"),
+        };
+        match pinned_rev(session, &i.part, &i.rev) {
+            // Another project's label that can't be read says why itself.
+            Err(e) if i.rev.project().is_some() => out.push(
+                e.with("insert", &at)
+                    .with("part", &i.part)
+                    .with("rev", i.rev.to_json()),
+            ),
+            Err(e) => out.push(refuse(format!("inserts {}@{l}: {}", i.part, e.message))),
+            Ok(pin) if pin.pin.commit.is_none() => out.push(refuse(format!(
+                "inserts {}@{l}, which isn't official yet",
+                i.part
+            ))),
+            Ok(pin) if pin.pin.obsolete => {
+                out.push(refuse(format!("inserts {}@{l}, which is obsolete", i.part)))
+            }
+            Ok(_) => {}
+        }
+    }
+    Ok(out)
 }
 
 /// `instance_not_released` for each instance of assembly `p` (reached
@@ -1938,5 +1989,42 @@ pub(crate) mod tests {
         git(root, &["tag", "-d", "ryupdm/p/A"]);
         attest(root, "releases/p/A.json", Kind::Release, &official, true);
         assert_eq!(status(&mut s), "approved");
+    }
+
+    #[test]
+    fn a_part_releases_only_with_its_inserts_at_official_labels() {
+        // Enclosure inserts pcb at A; A and B are official.
+        let (dir, mut s) = crate::insert::tests::released_board();
+        let commit = |s: &mut Session, m: &str| {
+            crate::git::tests::git(dir.path(), &["add", "-A"]);
+            crate::git::tests::git(dir.path(), &["commit", "-q", "-m", m]);
+            s.reload().unwrap();
+        };
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "enclosure", "properties": {"number": "100-0002"}}),
+        )
+        .unwrap();
+        commit(&mut s, "numbered");
+        let dry = |s: &mut Session| {
+            call(
+                s,
+                "release.propose",
+                json!({"part": "enclosure", "dry_run": true}),
+            )
+            .unwrap()
+        };
+        assert_eq!(dry(&mut s)["problems"], json!([]));
+        call(
+            &mut s,
+            "insert.update",
+            json!({"part": "enclosure", "feature": "pcb", "to": "working"}),
+        )
+        .unwrap();
+        commit(&mut s, "working");
+        let v = dry(&mut s);
+        assert_eq!(v["problems"][0]["code"], "insert_not_released", "{v}");
+        assert_eq!(v["problems"][0]["details"]["insert"], "enclosure/pcb");
     }
 }
