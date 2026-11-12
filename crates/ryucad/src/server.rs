@@ -959,6 +959,22 @@ pub(crate) fn dispatch(
             expected_revision.as_deref(),
         ),
         Request::DepsParts { name, part } => crate::deps::parts(session, &name, part.as_deref()),
+        Request::InsertUpdate {
+            part,
+            feature,
+            to,
+            dry_run,
+            expected_revision,
+        } => crate::insert::update(
+            session,
+            crate::insert::Update {
+                part: &part,
+                feature: &feature,
+                to: to.as_deref(),
+                dry_run,
+            },
+            expected_revision.as_deref(),
+        ),
         Request::MaterialsList {} => crate::materials::list(session),
         Request::EquationsList { part, all, rev } => crate::equations::list(
             session,

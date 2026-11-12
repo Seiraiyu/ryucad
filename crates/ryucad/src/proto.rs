@@ -1283,6 +1283,21 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Moves an insert's pin (design 521): to `working`, `label:L` (or
+    /// `L`), or the source's newest official label (`newest`, the
+    /// default); answers what moving it changes, and with `dry_run`
+    /// writes nothing.
+    #[serde(rename = "insert.update")]
+    InsertUpdate {
+        part: String,
+        feature: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// What dependency `name` (a name or project ID) has released on its
     /// release branch as fetched, offline: each part (or only `part`) with
     /// its number, name, kind and labels, latest first.
@@ -2395,6 +2410,7 @@ impl Request {
                 | Request::AppearanceClear { .. }
                 | Request::DepsAdd { .. }
                 | Request::DepsUpdate { dry_run: false, .. }
+                | Request::InsertUpdate { dry_run: false, .. }
                 | Request::DepsRemove { .. }
                 | Request::ViewSave { .. }
                 | Request::ViewDelete { .. }

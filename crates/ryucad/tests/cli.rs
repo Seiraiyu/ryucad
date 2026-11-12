@@ -1090,6 +1090,7 @@ fn every_protocol_method_has_a_command() {
         ("feature.move", &["feature", "move"]),
         ("feature.list", &["feature", "list"]),
         ("feature.show", &["feature", "show"]),
+        ("insert.update", &["insert", "update"]),
         ("param.list", &["param", "list"]),
         ("param.set", &["param", "set"]),
         ("param.delete", &["param", "delete"]),

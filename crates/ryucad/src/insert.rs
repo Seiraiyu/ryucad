@@ -283,6 +283,144 @@ pub fn build_checked(part: &Part, id: &Id, ins: &Insert, children: &Children) ->
     build(part, id, ins, children)
 }
 
+/// What `insert.update` is asked.
+pub struct Update<'a> {
+    pub part: &'a str,
+    pub feature: &'a str,
+    pub to: Option<&'a str>,
+    pub dry_run: bool,
+}
+
+/// Moves an insert's pin as one logged change, answering before it
+/// writes what moving it changes: the inserted solids `added`, `removed`
+/// and `changed` (by key), and every feature of the part that fails after
+/// the move and didn't before, with its error (its `candidates` where it
+/// has them). A dry run rebuilds over the proposed files and writes
+/// nothing.
+pub fn update(
+    session: &mut crate::session::Session,
+    ask: Update<'_>,
+    expected: Option<&str>,
+) -> Result<serde_json::Value> {
+    use crate::doc::files::Feature;
+    use serde_json::json;
+    use std::collections::BTreeSet;
+    session.check_project_revision(expected)?;
+    let pid = crate::server::part_id(ask.part)?;
+    let fid = Id::parse(ask.feature, "feature").map_err(|e| e.with("param", "feature"))?;
+    let p = session.project().part(&pid)?.clone();
+    let Some(Ok(Feature::Insert(ins))) = p.features.get(&fid) else {
+        return Err(
+            Error::new(Code::NotFound, format!("{pid} has no insert {fid}"))
+                .with("part", &pid)
+                .with("feature", &fid),
+        );
+    };
+    let to = match ask.to.unwrap_or("newest") {
+        "working" if ins.rev.project().is_none() => Rev::Working,
+        "working" => {
+            return Err(Error::new(
+                Code::InstanceForeignWorking,
+                format!(
+                    "{} is another project's: insert one of its official release labels",
+                    ins.part
+                ),
+            )
+            .with("param", "to"));
+        }
+        "newest" => match crate::release::newest_official(session, &ins.part, ins.rev.project())? {
+            Some(l) => relabel(&ins.rev, l),
+            None => {
+                return Err(Error::new(
+                    Code::LabelNotFound,
+                    format!("{} has no official release to update {fid} to", ins.part),
+                )
+                .with("part", &ins.part)
+                .with("param", "to"));
+            }
+        },
+        l => relabel(
+            &ins.rev,
+            crate::doc::assembly::label_text(l.strip_prefix("label:").unwrap_or(l))
+                .map_err(|e| e.with("param", "to"))?,
+        ),
+    };
+    let mut moved = (**ins).clone();
+    moved.rev = to.clone();
+    let rel = format!("parts/{pid}/features/{fid}.json");
+    let bytes =
+        crate::doc::canonical::to_string(&Feature::Insert(Box::new(moved)).to_json()).into_bytes();
+    let writes = BTreeMap::from([(rel.clone(), Some(bytes.clone()))]);
+    let before = session.rebuilt(&pid)?.clone();
+    let failed_before: BTreeSet<Id> = before
+        .features
+        .iter()
+        .filter(|(_, r)| r.is_err())
+        .map(|(f, _)| f.clone())
+        .collect();
+    let mut proposed = session.proposed(&writes)?;
+    let after = proposed.rebuilt(&pid)?.clone();
+    // A label that doesn't resolve fails the insert itself: that is the
+    // answer's error, not a reader's.
+    if let Some((_, Err(e))) = after.features.iter().find(|(f, _)| *f == fid) {
+        return Err(e.clone());
+    }
+    let keys = |r: &crate::rebuild::PartResult| -> BTreeMap<Id, String> {
+        r.output(&fid)
+            .map(|o| {
+                o.solids()
+                    .iter()
+                    .map(|(k, b)| (k.clone(), b.hash.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (a, b) = (keys(&before), keys(&after));
+    let added: Vec<&Id> = b.keys().filter(|k| !a.contains_key(*k)).collect();
+    let removed: Vec<&Id> = a.keys().filter(|k| !b.contains_key(*k)).collect();
+    let changed: Vec<&Id> = b
+        .iter()
+        .filter(|(k, h)| a.get(*k).is_some_and(|x| x != *h))
+        .map(|(k, _)| k)
+        .collect();
+    let failing: Vec<serde_json::Value> = after
+        .features
+        .iter()
+        .filter(|(f, r)| r.is_err() && !failed_before.contains(f))
+        .map(|(f, r)| json!({"feature": f, "error": r.as_ref().err()}))
+        .collect();
+    let mut v = json!({"part": pid, "feature": fid, "from": ins.rev.to_json(),
+        "to": to.to_json(),
+        "solids": {"added": added, "removed": removed, "changed": changed},
+        "failing": failing, "written": false});
+    if ask.dry_run {
+        return Ok(v);
+    }
+    let current = crate::mate::current(session, &pid)?;
+    let at = session.root().join(&rel);
+    session.write_bytes(&at, &bytes)?;
+    session.reload()?;
+    crate::deps::keep_lock(session)?;
+    let assemblies = crate::mate::keep_current(session, &current)?;
+    v["written"] = json!(true);
+    v["project_revision"] = json!(session.project_revision()?);
+    if !assemblies.is_empty() {
+        v["assemblies"] = json!(assemblies);
+    }
+    Ok(v)
+}
+
+/// `rev` at label `l`, keeping its project.
+fn relabel(rev: &Rev, l: String) -> Rev {
+    match rev.project() {
+        Some(p) => Rev::Foreign {
+            project: p.clone(),
+            label: l,
+        },
+        None => Rev::Label(l),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -563,6 +701,154 @@ pub(crate) mod tests {
                 .unwrap()
                 .iter()
                 .all(|b| !b["feature"].as_str().unwrap().contains('/'))
+        );
+    }
+
+    /// [`boarded`] in a Git repository: pcb released at A, then changed by
+    /// `change` and released at B, both committed; enclosure's insert
+    /// pinned to A.
+    fn released_with(
+        change: impl FnOnce(&mut crate::session::Session),
+    ) -> (tempfile::TempDir, crate::session::Session) {
+        use crate::git::tests::git;
+        let (dir, mut s) = boarded();
+        let r = dir.path().to_owned();
+        git(&r, &["init", "-q", "-b", "main"]);
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "pcb", "properties": {"number": "100-0001"}}),
+        )
+        .unwrap();
+        call(&mut s, "release.propose", json!({"part": "pcb"})).unwrap();
+        git(&r, &["add", "."]);
+        git(&r, &["commit", "-q", "-m", "pcb A"]);
+        change(&mut s);
+        call(&mut s, "release.propose", json!({"part": "pcb"})).unwrap();
+        git(&r, &["add", "."]);
+        git(&r, &["commit", "-q", "-m", "pcb B"]);
+        s.reload().unwrap();
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "enclosure", "id": "pcb", "rev": "A"}),
+        )
+        .unwrap();
+        (dir, s)
+    }
+
+    /// The board widened at B.
+    fn released_board() -> (tempfile::TempDir, crate::session::Session) {
+        released_with(|s| {
+            call(
+                s,
+                "feature.edit",
+                json!({"part": "pcb", "id": "board", "params": {"x": "12 mm"}}),
+            )
+            .unwrap();
+        })
+    }
+
+    /// The reference text of some edge of shown solid `key` of `part`.
+    fn an_edge_of(s: &mut crate::session::Session, part: &str, key: &str) -> String {
+        let (insert, _) = key.split_once('/').unwrap();
+        let v = call(s, "inspect", json!({"part": part, "feature": insert})).unwrap();
+        let body = v["bodies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["solid"] == key)
+            .unwrap();
+        format!(
+            "{part}/{key}/{}",
+            body["edges"][0]["name"].as_str().unwrap()
+        )
+    }
+
+    #[test]
+    fn an_update_says_what_moving_the_pin_changes_before_it_writes() {
+        let (_dir, mut s) = released_board();
+        let rev = |s: &crate::session::Session| {
+            s.project().part(&id("enclosure")).unwrap().features[&id("pcb")]
+                .as_ref()
+                .unwrap()
+                .insert()
+                .unwrap()
+                .rev
+                .clone()
+        };
+        // A dry run writes nothing and answers the change.
+        let v = call(
+            &mut s,
+            "insert.update",
+            json!({"part": "enclosure", "feature": "pcb", "dry_run": true}),
+        )
+        .unwrap();
+        assert_eq!(v["from"], json!({"label": "A"}), "{v}");
+        assert_eq!(v["to"], json!({"label": "B"}));
+        assert_eq!(v["solids"]["changed"], json!(["pcb/board"]));
+        assert_eq!(v["solids"]["added"], json!([]));
+        assert_eq!(v["failing"], json!([]));
+        assert_eq!(v["written"], false);
+        assert_eq!(rev(&s), Rev::Label("A".into()));
+        // Writing it.
+        let v = call(
+            &mut s,
+            "insert.update",
+            json!({"part": "enclosure", "feature": "pcb"}),
+        )
+        .unwrap();
+        assert_eq!(v["written"], true);
+        assert_eq!(rev(&s), Rev::Label("B".into()));
+        // To working, and to a label that isn't there.
+        let v = call(
+            &mut s,
+            "insert.update",
+            json!({"part": "enclosure", "feature": "pcb", "to": "working", "dry_run": true}),
+        )
+        .unwrap();
+        assert_eq!(v["to"], "working");
+        let e = call(
+            &mut s,
+            "insert.update",
+            json!({"part": "enclosure", "feature": "pcb", "to": "label:Z"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::LabelNotFound, "{e:?}");
+        let e = call(
+            &mut s,
+            "insert.update",
+            json!({"part": "enclosure", "feature": "nope"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+    }
+
+    #[test]
+    fn an_update_that_breaks_a_reader_names_it_with_candidates() {
+        let (_dir, mut s) = released_with(|s| {
+            call(s, "feature.delete", json!({"part": "pcb", "id": "u1"})).unwrap();
+        });
+        let edge = an_edge_of(&mut s, "enclosure", "pcb/u1");
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "enclosure", "type": "fillet", "id": "f",
+            "groups": [{"radius": "0.2 mm", "edges": [edge]}]}),
+        )
+        .unwrap();
+        let v = call(
+            &mut s,
+            "insert.update",
+            json!({"part": "enclosure", "feature": "pcb", "dry_run": true}),
+        )
+        .unwrap();
+        assert_eq!(v["solids"]["removed"], json!(["pcb/u1"]), "{v}");
+        assert_eq!(v["failing"][0]["feature"], "f", "{v}");
+        assert_eq!(v["failing"][0]["error"]["code"], "not_found", "{v}");
+        assert!(
+            v["failing"][0]["error"]["details"].get("solids").is_some(),
+            "{v}"
         );
     }
 }

@@ -83,6 +83,9 @@ enum Command {
     /// Only `deps add` and `deps fetch` reach the network.
     #[command(subcommand)]
     Deps(DepsCmd),
+    /// Inserts of other parts' solids: move one's pin.
+    #[command(subcommand)]
+    Insert(InsertCmd),
     /// The project's material library: densities (and colours) that mass properties read,
     /// each part's named by its PDM `material` property.
     #[command(subcommand)]
@@ -1527,6 +1530,28 @@ enum PdmCmd {
         /// Write even if parts' properties stop fitting the settings.
         #[arg(long)]
         force: bool,
+        /// Fail with `conflict` unless the project is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum InsertCmd {
+    /// Move an insert's pin to its source's newest official label (or --to working,
+    /// --to label:L), saying first what it changes: the inserted solids added, removed
+    /// and changed, and the features that would fail.
+    Update {
+        /// The part holding the insert.
+        part: String,
+        /// The insert's ID.
+        insert: String,
+        /// working, label:L (or L), or newest (the default).
+        #[arg(long, value_name = "working|label:L|newest")]
+        to: Option<String>,
+        /// Say what would change, writing nothing.
+        #[arg(long)]
+        dry_run: bool,
         /// Fail with `conflict` unless the project is still at this revision.
         #[arg(long = "expect", value_name = "REVISION")]
         expect: Option<String>,
@@ -4378,6 +4403,19 @@ fn request(cmd: &Command) -> Option<Request> {
             part: part.clone(),
             to: to.clone(),
             offline: *offline,
+            dry_run: *dry_run,
+            expected_revision: expect.clone(),
+        },
+        Command::Insert(InsertCmd::Update {
+            part,
+            insert,
+            to,
+            dry_run,
+            expect,
+        }) => Request::InsertUpdate {
+            part: part.clone(),
+            feature: insert.clone(),
+            to: to.clone(),
             dry_run: *dry_run,
             expected_revision: expect.clone(),
         },
