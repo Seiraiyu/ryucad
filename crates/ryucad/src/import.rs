@@ -3551,7 +3551,6 @@ pub(crate) mod tests {
     /// rebuild warns nothing, doctor finds nothing misplaced, and its
     /// in-place repair of the assembly file deletes nothing.
     #[test]
-    #[ignore = "passes once Task 14 lands"]
     fn instances_of_external_parts_are_their_usages() {
         let (dir, mut s) = crate::server::tests::fresh();
         import_call(&mut s, json!({"path": set_path("asm.stp")})).unwrap();

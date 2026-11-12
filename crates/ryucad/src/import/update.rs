@@ -919,15 +919,63 @@ pub fn products_diff(path: &str, from: Option<&[u8]>, to: Option<&[u8]>) -> Valu
 /// A held group's bodies, and the mode its first feature has.
 type Held = (Vec<u32>, Option<crate::doc::import::Mode>);
 
-/// Each externally defined definition of `new` whose usage the project's
-/// instances of `path` placed in `old`: the part placed (Task 14).
-pub fn external_parts(_project: &Project, _path: &str, _old: &Opened, _new: &Opened) -> BTreeMap<usize, Id> {
-    BTreeMap::new()
+/// Each externally defined definition of `new` (a file's new version, or
+/// the same bytes) whose product `old`'s usages placed through the
+/// project's instances of `path`: the part those instances place (design
+/// 448, plan 24.D). Derived from files alone: an instance names its usage
+/// (parent product, id, ordinal), whose child in `old` is externally
+/// defined; that child's product is matched with `new`'s as an update
+/// matches products.
+pub fn external_parts(project: &Project, path: &str, old: &Opened, new: &Opened) -> BTreeMap<usize, Id> {
+    let (_, instances) = made_of(project, path);
+    let defs = &old.products.definitions;
+    let refs: Vec<ProductRef> = (0..defs.len()).map(|k| plan::product_of(old, k)).collect();
+    let mut by_ref: BTreeMap<ProductRef, Id> = BTreeMap::new();
+    for (_, _, inst) in &instances {
+        let Some(u) = &inst.import else {
+            continue;
+        };
+        let Some(usage) = &u.usage else {
+            continue;
+        };
+        let Some(kp) = refs.iter().position(|r| *r == u.product) else {
+            continue;
+        };
+        let children = &defs[kp].children;
+        let hits: BTreeSet<usize> = (0..children.len())
+            .filter(|&n| &*children[n].id == usage.as_str() && plan::usage_ordinal(old, kp, n) == u.ordinal)
+            .map(|n| children[n].definition)
+            .filter(|&c| defs[c].externally_defined())
+            .collect();
+        if hits.len() == 1 {
+            let c = *hits.iter().next().expect("one");
+            by_ref.entry(refs[c].clone()).or_insert_with(|| inst.part.clone());
+        }
+    }
+    let olds: BTreeSet<ProductRef> = by_ref.keys().cloned().collect();
+    match_products(new, &olds)
+        .into_iter()
+        .filter(|(_, k)| new.products.definitions[*k].externally_defined())
+        .filter_map(|(r, k)| Some((k, by_ref.get(&r)?.clone())))
+        .collect()
 }
 
-/// The file `part` was made from (Task 14).
-pub fn file_of(_project: &Project, _part: &Id) -> Option<String> {
-    None
+/// The file `part` was made from: its first import feature's, else its
+/// first imported instance's (an assembly an import made).
+pub fn file_of(project: &Project, part: &Id) -> Option<String> {
+    let p = project.parts.get(part)?;
+    let features = || p.order().iter().filter_map(|f| p.features.get(f)?.as_ref().ok());
+    features()
+        .find_map(|f| match f {
+            Feature::Import(i) => Some(i.file.path.clone()),
+            _ => None,
+        })
+        .or_else(|| {
+            features().find_map(|f| match f {
+                Feature::Instance(i) => i.import.as_ref().map(|u| u.file.clone()),
+                _ => None,
+            })
+        })
 }
 
 #[cfg(test)]
@@ -1772,5 +1820,28 @@ mod tests {
             .map(|f| (f["id"].as_str().unwrap(), f["ok"] == true))
             .collect();
         assert_eq!(state, [("body", true), ("low", true), ("high", false)]);
+    }
+
+    /// From the files alone (design 448, 24.D): each externally defined
+    /// product of the assembly file is the part its usage's instance
+    /// places, and that part's file is its import features'.
+    #[test]
+    fn each_external_usage_finds_the_part_it_placed() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "import", json!({"path": crate::import::tests::set_path("asm.stp")})).unwrap();
+        let p = s.project();
+        let f = p.imports.get("imports/asm.step").unwrap();
+        let o = crate::import::opened(f).unwrap();
+        let got = super::external_parts(p, "imports/asm.step", &o, &o);
+        let defs = &o.products.definitions;
+        let named: Vec<(&str, &str)> = got
+            .iter()
+            .map(|(k, part)| (&*defs[*k].product_id, part.as_str()))
+            .collect();
+        assert_eq!(named, [("BOX", "box"), ("PIN", "pin")]);
+        let box_ = crate::doc::id::Id::parse("box", "part").unwrap();
+        assert_eq!(super::file_of(p, &box_).as_deref(), Some("imports/box.step"));
+        let asm = crate::doc::id::Id::parse("asm", "part").unwrap();
+        assert_eq!(super::file_of(p, &asm).as_deref(), Some("imports/asm.step"));
     }
 }
