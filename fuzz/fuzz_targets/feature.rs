@@ -383,7 +383,8 @@ fn assemble(written: &str, after_instances: bool) {
     for asm in ["asm", "sub"] {
         let result = r
             .result(&Id::parse(asm, "part").unwrap())
-            .expect("assemblies rebuild");
+            .expect("assemblies rebuild")
+            .clone();
         let sound = |p: &ryucad::assembly::Placed| {
             for o in &p.model.occurrences {
                 let pose = ryucad::assembly::rigid_pose(&o.pose);
