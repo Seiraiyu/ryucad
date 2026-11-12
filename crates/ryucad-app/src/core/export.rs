@@ -308,6 +308,7 @@ impl Export {
             mesh: usd.then_some(c.mesh),
             pipe_tolerance: None,
             skip_failing: c.skip_failing,
+            appearance: None,
             solid: self.sheet.clone().filter(|s| dxf && !s.is_empty()),
             notes: dxf.then_some(c.notes),
             fixed: None,

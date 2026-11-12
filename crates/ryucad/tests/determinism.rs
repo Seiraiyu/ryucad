@@ -6169,6 +6169,136 @@ fn transfer_section(golden: &mut Golden) {
     }
 }
 
+/// Appearance exchange (design 448, plan 24.B): ryustep's painted
+/// fixtures imported (the block; the rack as an assembly and flattened),
+/// each part's `appearance.get` solids; the showcase coloured as the
+/// `appearance` section colours it, exported to STEP, its bytes hashed.
+/// On one thread and on four.
+fn styles_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("styles");
+    let data =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/styles");
+    let mut runs = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let req =
+            |m: &str, p: serde_json::Value| ryucad::proto::Request::from_rpc(m, Some(p)).unwrap();
+        let mut out = Vec::new();
+        for (file, flatten) in [
+            ("painted.stp", false),
+            ("painted_assembly.stp", false),
+            ("painted_assembly.stp", true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            ryucad::server::init(dir.path(), None).unwrap();
+            let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+            let v = pool
+                .install(|| {
+                    ryucad::server::handle(
+                        &mut session,
+                        req(
+                            "import",
+                            json!({"path": data.join(file), "solid": true, "flatten": flatten}),
+                        ),
+                    )
+                })
+                .unwrap();
+            out.push(ryucad::doc::canonical::to_string(&v["transfer"]));
+            for p in v["parts"].as_array().unwrap() {
+                let a = pool
+                    .install(|| {
+                        ryucad::server::handle(
+                            &mut session,
+                            req("appearance.get", json!({"part": p["part"]})),
+                        )
+                    })
+                    .unwrap();
+                out.push(ryucad::doc::canonical::to_string(&a["solids"]));
+            }
+        }
+        let (_dir, mut session) = showcase();
+        for (entities, look) in [
+            (json!(["show"]), json!({"colour": "#4a78c2"})),
+            (json!(["show/sphere"]), json!({"opacity": 0.35})),
+        ] {
+            let mut p = look;
+            p["entities"] = entities;
+            ryucad::server::handle(&mut session, req("appearance.set", p)).unwrap();
+        }
+        let params = json!({"part": "show", "time_stamp": "2026-11-11T00:00:00",
+                            "file_name": "show.step"});
+        let a = pool
+            .install(|| {
+                ryucad::server::answer_live(&mut session, None, None, req("export", params))
+            })
+            .unwrap();
+        out.push(format!(
+            "{:x}",
+            md(
+                ryukei_testkit::unversioned(std::str::from_utf8(&a.binary.unwrap()).unwrap())
+                    .as_bytes()
+            )
+        ));
+        runs.push(out);
+    }
+    assert_eq!(runs[0], runs[1], "one thread and four");
+    for x in &runs[0] {
+        s.str(x);
+    }
+}
+
+/// Every export fixture of the `exports` section, its parts coloured: the
+/// STEP file with its appearance holds every instance the file without it
+/// has, numbered as it numbers them (design 448: geometry never moves).
+#[test]
+fn styles_move_no_geometry_instance() {
+    type Fixture = fn() -> (tempfile::TempDir, ryucad::session::Session);
+    let fixtures: [(Fixture, &str); 3] = [(assembled, "frame"), (blended, "bl"), (swept, "sw")];
+    for (make, part) in fixtures {
+        let (_dir, mut session) = make();
+        let parts: Vec<String> = session
+            .project()
+            .parts
+            .iter()
+            .filter(|(_, p)| {
+                !p.file
+                    .as_ref()
+                    .is_ok_and(|f| f.kind == ryucad::doc::files::PartKind::Assembly)
+            })
+            .map(|(id, _)| id.to_string())
+            .collect();
+        for p in &parts {
+            let req = ryucad::proto::Request::from_rpc(
+                "appearance.set",
+                Some(serde_json::json!({"entities": [p], "colour": "#808080", "opacity": 0.75})),
+            )
+            .unwrap();
+            ryucad::server::handle(&mut session, req).unwrap();
+        }
+        let export = |session: &mut ryucad::session::Session, appearance: bool| {
+            let params = serde_json::json!({"part": part, "time_stamp": "2026-10-27T00:00:00",
+                                            "file_name": "x.step", "appearance": appearance});
+            let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
+            ryucad::server::answer_live(session, None, None, req)
+                .unwrap()
+                .binary
+                .unwrap()
+        };
+        let plain = ryustep::part21::parse(&export(&mut session, false)).unwrap();
+        let styled = ryustep::part21::parse(&export(&mut session, true)).unwrap();
+        assert!(styled.instances.len() > plain.instances.len(), "{part}");
+        assert_eq!(
+            format!("{:?}", &styled.instances[..plain.instances.len()]),
+            format!("{:?}", plain.instances),
+            "{part}"
+        );
+    }
+}
+
 sections! {
     golden;
     units => units_section(&mut golden),
@@ -6213,6 +6343,7 @@ sections! {
     flatten => flatten_section(&mut golden),
     exports => exports_section(&mut golden),
     transfer => transfer_section(&mut golden),
+    styles => styles_section(&mut golden),
     formats => formats_section(&mut golden),
     views => views_section(&mut golden),
     appearance => appearance_section(&mut golden),

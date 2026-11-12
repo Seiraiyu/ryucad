@@ -387,8 +387,10 @@ impl Writer {
                     },
                 );
             }
+            // An offset past its base's focal surface (only the global
+            // offset's envelope makes one) is tag 13, rebuilt as such.
             Surface::Offset(o) => {
-                self.u8(10);
+                self.u8(if o.passes_focal() { 13 } else { 10 });
                 self.shared(
                     o,
                     |w| &mut w.offsets,
@@ -939,6 +941,20 @@ impl<'a> Reader<'a> {
                     let x = [r.f64()?, r.f64()?, r.f64()?, r.f64()?];
                     let base = r.surface()?;
                     Offset::new(base, d, [[x[0], x[1]], [x[2], x[3]]]).map_err(bad)
+                },
+            )?),
+            13 => Surface::Offset(self.shared(
+                |r| &mut r.offsets,
+                |r| {
+                    let d = r.finite()?;
+                    let x = [r.f64()?, r.f64()?, r.f64()?, r.f64()?];
+                    let base = r.surface()?;
+                    let o =
+                        Offset::inverted_new(base, d, [[x[0], x[1]], [x[2], x[3]]]).map_err(bad)?;
+                    if !o.passes_focal() {
+                        return Err(invalid("a regular offset under tag 13"));
+                    }
+                    Ok(o)
                 },
             )?),
             12 => Surface::Bent(self.shared(

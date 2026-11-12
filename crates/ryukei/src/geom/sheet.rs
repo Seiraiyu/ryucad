@@ -233,7 +233,8 @@ impl Sheet<'_> {
     /// A positive multiple of the natural normal as jets, for silhouettes
     /// (design 326): `S_u × S_v` from third-order jets where the surface
     /// has them, a pipe's unit normal, a torus's `cos v radial(u) + sin v
-    /// z`, an offset's base's. `None` for the others (planes, cylinders,
+    /// z`, an offset's base's (turned over where the offset is
+    /// [`crate::geom::Offset::turned`]). `None` for the others (planes, cylinders,
     /// cones and spheres, whose silhouettes are closed forms).
     pub(crate) fn normal_jets_at(&self, u: f64, v: f64) -> Option<JVec<f64>> {
         match self {
@@ -245,7 +246,14 @@ impl Sheet<'_> {
                 Some(torus_normal(f, (cu, su), (cv, sv)))
             }
             Self::Analytic(_) => None,
-            Self::Offset(o) => Sheet::of(o.base()).normal_jets_at(u, v),
+            Self::Offset(o) => {
+                let n = Sheet::of(o.base()).normal_jets_at(u, v)?;
+                Some(if o.turned() {
+                    n.map(|j| j.scale(-1.0))
+                } else {
+                    n
+                })
+            }
             _ => Some(crossed(&self.jets3_at(u, v)?)),
         }
     }
@@ -259,7 +267,14 @@ impl Sheet<'_> {
                 Some(torus_normal(f, trig_box(cell[0]), trig_box(cell[1])))
             }
             Self::Analytic(_) => None,
-            Self::Offset(o) => Sheet::of(o.base()).normal_jet_box(cell),
+            Self::Offset(o) => {
+                let n = Sheet::of(o.base()).normal_jet_box(cell)?;
+                Some(if o.turned() {
+                    n.map(|j| j.scale(-1.0))
+                } else {
+                    n
+                })
+            }
             _ => Some(crossed(&self.jet3_box(cell)?)),
         }
     }

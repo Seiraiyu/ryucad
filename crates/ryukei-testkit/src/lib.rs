@@ -168,6 +168,7 @@ pub mod nurbs_race;
 pub mod offset_bytes;
 pub mod projection;
 pub mod race;
+pub mod rings;
 pub mod sheet_bytes;
 pub mod sheet_metal;
 pub mod sheet_metal_bytes;

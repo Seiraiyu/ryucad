@@ -1070,6 +1070,7 @@ impl Workspace {
             opacity: (field == "opacity")
                 .then_some((f64::from(self.appearance.opacity) * 1000.0).round() / 1000.0),
             unset: Vec::new(),
+            file_styles: None,
             expected_revision: None,
         };
         self.send(req, Pending::AppearanceWritten);

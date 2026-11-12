@@ -14,15 +14,19 @@
 //! unit by one division, and the header's time stamp is the caller's.
 
 mod body;
+mod style;
 
 use crate::WriteError;
 use crate::part21::{self, File, Header, Instance, Param, Part, Record};
 use crate::schema::Schema;
 use rayon::prelude::*;
 use ryukei::geom::{Point3, Rigid, Vector3};
-use ryukei::heal::seamed;
+use ryukei::heal::{Origins, seamed_with_origins};
 use ryukei::name::Name;
 use ryukei::topo::Body;
+use std::collections::BTreeMap;
+
+pub use style::{BodyPaint, OccurrencePaint, Paint, Paints};
 
 /// A product to write: its identifier, name and description, its
 /// revision (the `PRODUCT_DEFINITION_FORMATION`'s identifier; empty for
@@ -248,6 +252,33 @@ pub fn write_with(
     write_report(model, passed, opts).map(|w| w.bytes)
 }
 
+/// What the writer wrote of one body: its B-rep items (a solid's, or a
+/// sheet's surface model) and each face's instance, by name.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WrittenBody {
+    pub(crate) items: Vec<u64>,
+    pub(crate) faces: BTreeMap<Name, u64>,
+}
+
+/// What the writer wrote of one usage: its
+/// `NEXT_ASSEMBLY_USAGE_OCCURRENCE`, the `PRODUCT_DEFINITION_SHAPE` of it,
+/// and the axis placement in its parent's representation the child is
+/// placed at.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WrittenUsage {
+    pub(crate) usage: u64,
+    pub(crate) shape: u64,
+    pub(crate) axis: u64,
+}
+
+/// Each body's faces' names, by the shape's face index.
+fn face_names(b: &Body, o: &Origins) -> Vec<Name> {
+    o.faces
+        .iter()
+        .map(|&f| b.face(f).expect("live").name)
+        .collect()
+}
+
 /// [`write_with`], with what it wrote counted (design 448): every
 /// instance by category and entity name, and each body written as an
 /// approximation.
@@ -256,15 +287,50 @@ pub fn write_report(
     passed: &[Passed],
     opts: &WriteOptions,
 ) -> Result<Written, WriteError> {
+    write_inner(model, passed, opts).map(|(w, _, _)| w)
+}
+
+/// [`write_report`], with `paints`: each body's, face's and occurrence's
+/// style (design 448, plan 24.B), written after everything else.
+pub fn write_styled(
+    model: &WriteModel,
+    passed: &[Passed],
+    paints: &Paints,
+    opts: &WriteOptions,
+) -> Result<Written, WriteError> {
+    write_inner_styled(model, passed, paints, opts).map(|(w, _, _)| w)
+}
+
+/// [`write_report`], with what it wrote of each product's bodies and of
+/// each product's usages.
+#[allow(clippy::type_complexity)]
+pub(crate) fn write_inner(
+    model: &WriteModel,
+    passed: &[Passed],
+    opts: &WriteOptions,
+) -> Result<(Written, Vec<Vec<WrittenBody>>, Vec<Vec<WrittenUsage>>), WriteError> {
+    write_inner_styled(model, passed, &Paints::default(), opts)
+}
+
+/// [`write_inner`], with `paints` written after everything else.
+#[allow(clippy::type_complexity)]
+pub(crate) fn write_inner_styled(
+    model: &WriteModel,
+    passed: &[Passed],
+    paints: &Paints,
+    opts: &WriteOptions,
+) -> Result<(Written, Vec<Vec<WrittenBody>>, Vec<Vec<WrittenUsage>>), WriteError> {
     // Each body as a file must describe it, in parallel; the first body
     // that can't be fails, whatever the number of threads.
     let all: Vec<&Body> = model.products.iter().flat_map(|p| &p.bodies).collect();
     let mut seamed_all = all
         .par_iter()
-        .map(|b| seamed(b, opts.pipe_tolerance).map_err(|err| not_representable(b, err)))
+        .map(|b| {
+            seamed_with_origins(b, opts.pipe_tolerance).map_err(|err| not_representable(b, err))
+        })
         .collect::<Vec<_>>()
         .into_iter();
-    let shapes: Vec<Vec<ryukei::heal::Shape>> = model
+    let shapes: Vec<Vec<(ryukei::heal::Shape, Origins)>> = model
         .products
         .iter()
         .map(|p| {
@@ -278,15 +344,18 @@ pub fn write_report(
         .iter()
         .enumerate()
         .flat_map(|(product, bodies)| {
-            bodies.iter().enumerate().filter_map(move |(body, sh)| {
-                let faces = sh.faces.iter().filter(|f| f.tolerance > 0.0).count();
-                (faces > 0).then(|| Approximated {
-                    product,
-                    body,
-                    faces,
-                    bound: sh.faces.iter().map(|f| f.tolerance).fold(0.0, f64::max),
+            bodies
+                .iter()
+                .enumerate()
+                .filter_map(move |(body, (sh, _))| {
+                    let faces = sh.faces.iter().filter(|f| f.tolerance > 0.0).count();
+                    (faces > 0).then(|| Approximated {
+                        product,
+                        body,
+                        faces,
+                        bound: sh.faces.iter().map(|f| f.tolerance).fold(0.0, f64::max),
+                    })
                 })
-            })
         })
         .collect();
     let mut out = Out::default();
@@ -299,14 +368,26 @@ pub fn write_report(
             shapes
                 .iter()
                 .flatten()
-                .flat_map(|s| s.faces.iter().map(|f| f.tolerance)),
+                .flat_map(|(s, _)| s.faces.iter().map(|f| f.tolerance)),
         )
         .fold(ryukei::tol::LINEAR_RESOLUTION, f64::max);
     let cx = contexts(&mut out, opts, uncertainty);
     // Products: each one's definition and representation, then its
     // bodies; the usages after, once every product has its number.
     let mut defs = Vec::with_capacity(model.products.len());
+    let mut bodies: Vec<Vec<WrittenBody>> = Vec::with_capacity(model.products.len());
+    let mut usages: Vec<Vec<WrittenUsage>> = vec![Vec::new(); model.products.len()];
     for (k, p) in model.products.iter().enumerate() {
+        let names: Vec<Vec<Name>> = p
+            .bodies
+            .iter()
+            .zip(&shapes[k])
+            .map(|(b, (_, o))| face_names(b, o))
+            .collect();
+        let named = |n: usize, faces: BTreeMap<usize, u64>| -> BTreeMap<Name, u64> {
+            faces.into_iter().map(|(i, id)| (names[n][i], id)).collect()
+        };
+        let mut written = Vec::with_capacity(p.bodies.len());
         let product = out.add(
             "PRODUCT",
             vec![s(&p.id), s(&p.name), s(&p.description), refs([cx.product])],
@@ -348,16 +429,17 @@ pub fn write_report(
         let kind = match shapes[k].len() {
             0 => "SHAPE_REPRESENTATION",
             1 => {
-                items.extend(body::solid_items(
-                    &mut out,
-                    &cx,
-                    &shapes[k][0],
-                    p.body_name(0),
-                ));
-                representation(&shapes[k][0])
+                let (got, faces) =
+                    body::solid_items(&mut out, &cx, &shapes[k][0].0, p.body_name(0));
+                items.extend(&got);
+                written.push(WrittenBody {
+                    items: got,
+                    faces: named(0, faces),
+                });
+                representation(&shapes[k][0].0)
             }
             _ => {
-                for (n, sh) in shapes[k].iter().enumerate() {
+                for (n, (sh, _)) in shapes[k].iter().enumerate() {
                     let own = placement(
                         &mut out,
                         &cx,
@@ -366,7 +448,12 @@ pub fn write_report(
                         Vector3::new(1.0, 0.0, 0.0),
                     );
                     let mut body_items = vec![own];
-                    body_items.extend(body::solid_items(&mut out, &cx, sh, p.body_name(n)));
+                    let (got, faces) = body::solid_items(&mut out, &cx, sh, p.body_name(n));
+                    body_items.extend(&got);
+                    written.push(WrittenBody {
+                        items: got,
+                        faces: named(n, faces),
+                    });
                     let body_rep = out.add(
                         representation(sh),
                         vec![s(p.body_name(n)), refs(body_items), r(cx.geometric)],
@@ -381,6 +468,7 @@ pub fn write_report(
         };
         out.fill(rep, kind, vec![s(""), refs(items), r(cx.geometric)]);
         defs.push((definition, rep, origin, child_axes));
+        bodies.push(written);
     }
     for p in passed {
         let (_, rep, _, _) = defs[p.product];
@@ -424,6 +512,11 @@ pub fn write_report(
                 "PRODUCT_DEFINITION_SHAPE",
                 vec![s("Placement"), s("Placement of an item"), r(usage)],
             );
+            usages[k].push(WrittenUsage {
+                usage,
+                shape,
+                axis: axes[n],
+            });
             let transform = out.add(
                 "ITEM_DEFINED_TRANSFORMATION",
                 vec![s(""), s(""), r(child_origin), r(axes[n])],
@@ -445,16 +538,21 @@ pub fn write_report(
             );
         }
     }
+    style::write(&mut out, &cx, model, &bodies, &usages, paints);
     let file = File {
         header: header(opts),
         instances: out.instances,
     };
     let counts = crate::census::count(&file.instances);
-    Ok(Written {
-        bytes: part21::write(&file)?,
-        counts,
-        approximated,
-    })
+    Ok((
+        Written {
+            bytes: part21::write(&file)?,
+            counts,
+            approximated,
+        },
+        bodies,
+        usages,
+    ))
 }
 
 /// The representation a body's items go in: a sheet's surface model in a
@@ -636,5 +734,297 @@ fn header(opts: &WriteOptions) -> Header {
                 params: vec![Param::List(vec![s(schema)])],
             },
         ],
+    }
+}
+
+#[cfg(test)]
+mod written_tests {
+    use super::*;
+    use ryukei::name::OpKey;
+
+    fn block() -> Body {
+        ryukei::primitive::block(OpKey(1), 0.01, 0.02, 0.03, &Rigid::IDENTITY)
+            .unwrap()
+            .0
+    }
+
+    /// Every face of every body is written once, under its name; the
+    /// bytes are `write_with`'s.
+    #[test]
+    fn faces_are_kept_by_name_and_bytes_do_not_move() {
+        let model = WriteModel {
+            products: vec![Product {
+                id: "b".into(),
+                bodies: vec![block(), block()],
+                ..Default::default()
+            }],
+        };
+        let opts = WriteOptions::default();
+        let (w, bodies, _) = write_inner(&model, &[], &opts).unwrap();
+        assert_eq!(w.bytes, write_with(&model, &[], &opts).unwrap());
+        let b = &model.products[0].bodies[0];
+        let names: std::collections::BTreeSet<Name> =
+            b.faces().map(|f| b.face(f).unwrap().name).collect();
+        assert_eq!(bodies[0].len(), 2);
+        for wb in &bodies[0] {
+            assert_eq!(
+                wb.faces
+                    .keys()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                names
+            );
+            assert_eq!(wb.items.len(), 1);
+        }
+        let file = crate::part21::parse(&w.bytes).unwrap();
+        let kind = |id: u64| {
+            file.instances
+                .iter()
+                .find(|i| i.id == id)
+                .map(|i| crate::census::joined(i.record.parts()))
+                .unwrap()
+        };
+        for wb in &bodies[0] {
+            assert_eq!(kind(wb.items[0]), "MANIFOLD_SOLID_BREP");
+            assert!(wb.faces.values().all(|&f| kind(f) == "ADVANCED_FACE"));
+        }
+    }
+
+    #[test]
+    fn body_and_face_styles_are_written_after_the_geometry_and_shared() {
+        let b = block();
+        let names: Vec<Name> = b.faces().map(|f| b.face(f).unwrap().name).collect();
+        let model = WriteModel {
+            products: vec![Product {
+                id: "b".into(),
+                bodies: vec![b],
+                ..Default::default()
+            }],
+        };
+        let red = Paint {
+            colour: [255, 0, 0],
+            opacity: 1.0,
+        };
+        let glass = Paint {
+            colour: [0, 0, 255],
+            opacity: 0.25,
+        };
+        let paints = Paints {
+            bodies: vec![BodyPaint {
+                product: 0,
+                body: 0,
+                base: Some(red),
+                faces: vec![(names[0], glass), (names[1], glass)],
+            }],
+            occurrences: Vec::new(),
+        };
+        let opts = WriteOptions::default();
+        let plain = crate::part21::parse(&write(&model, &opts).unwrap()).unwrap();
+        let w = write_styled(&model, &[], &paints, &opts).unwrap();
+        let styled = crate::part21::parse(&w.bytes).unwrap();
+        // Every instance the plain file has, as it has it.
+        assert_eq!(
+            format!("{:?}", &styled.instances[..plain.instances.len()]),
+            format!("{:?}", plain.instances)
+        );
+        let count = |n: &str| {
+            styled
+                .instances
+                .iter()
+                .filter(|i| crate::census::joined(i.record.parts()) == n)
+                .count()
+        };
+        assert_eq!(count("STYLED_ITEM"), 3);
+        // Two styles, written once each; the glass one transparent.
+        assert_eq!(count("PRESENTATION_STYLE_ASSIGNMENT"), 2);
+        assert_eq!(count("COLOUR_RGB"), 2);
+        assert_eq!(count("SURFACE_STYLE_TRANSPARENT"), 1);
+        assert_eq!(
+            count("MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION"),
+            1
+        );
+        // And they read back.
+        let o = crate::open(&w.bytes).unwrap();
+        let s = o.body_styles(0);
+        assert_eq!(s.body.unwrap().colour, Some([255, 0, 0]));
+        let faces: Vec<_> = s.faces.values().collect();
+        assert_eq!(faces.len(), 2);
+        assert!(
+            faces
+                .iter()
+                .all(|f| f.colour == Some([0, 0, 255]) && f.opacity == Some(0.25))
+        );
+        // No paint, the bytes `write_with` writes.
+        assert_eq!(
+            write_styled(&model, &[], &Paints::default(), &opts)
+                .unwrap()
+                .bytes,
+            write(&model, &opts).unwrap()
+        );
+    }
+
+    /// A block placed twice in a root, the second painted green in that
+    /// occurrence only, one usage deep: written as OCCT's XDE writes a
+    /// component's colour, a style by context, with nothing to override.
+    #[test]
+    fn an_occurrence_override_reads_back_in_its_usage() {
+        let place = |x: f64| Rigid::translation(ryukei::geom::Vector3::new(x, 0.0, 0.0));
+        let model = WriteModel {
+            products: vec![
+                Product {
+                    id: "root".into(),
+                    children: vec![
+                        Child {
+                            product: 1,
+                            place: place(0.0),
+                            id: "a".into(),
+                        },
+                        Child {
+                            product: 1,
+                            place: place(0.1),
+                            id: "b".into(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                Product {
+                    id: "block".into(),
+                    bodies: vec![block()],
+                    ..Default::default()
+                },
+            ],
+        };
+        let green = Paint {
+            colour: [0, 255, 0],
+            opacity: 1.0,
+        };
+        let paints = Paints {
+            bodies: Vec::new(),
+            occurrences: vec![OccurrencePaint {
+                path: vec![(0, 1)],
+                body: 0,
+                paint: green,
+            }],
+        };
+        let w = write_styled(&model, &[], &paints, &WriteOptions::default()).unwrap();
+        let o = crate::open(&w.bytes).unwrap();
+        // The block has no style of its own.
+        let k = o
+            .held
+            .iter()
+            .position(|h| {
+                h.definition
+                    .is_some_and(|d| &*o.products.definitions[d].product_id == "block")
+            })
+            .unwrap();
+        assert_eq!(o.body_styles(k).body, None);
+        let occ = o.occurrence_styles();
+        assert_eq!(occ.len(), 1, "{occ:?}");
+        let root = o.products.roots[0];
+        let second = o.products.definitions[root]
+            .children
+            .iter()
+            .position(|c| &*c.id == "b")
+            .unwrap();
+        assert_eq!(occ[0].path, [(root, second)]);
+        assert_eq!(occ[0].target, crate::styles::Target::Body(k));
+        assert_eq!(occ[0].style.colour, Some([0, 255, 0]));
+        assert!(o.styles().retained.is_empty());
+        let text = String::from_utf8_lossy(&w.bytes);
+        assert!(text.contains("PRESENTATION_STYLE_BY_CONTEXT"));
+        assert!(!text.contains("CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM"));
+    }
+
+    /// Two usages deep (a root placing a sub-assembly placing the block),
+    /// the override is a context dependent over-riding styled item in its
+    /// usages, over a `NULL_STYLE` one where the block has no style.
+    #[test]
+    fn a_deeper_override_is_context_dependent() {
+        let at = |x: f64| Rigid::translation(ryukei::geom::Vector3::new(x, 0.0, 0.0));
+        let child = |product, x, id: &str| Child {
+            product,
+            place: at(x),
+            id: id.into(),
+        };
+        let model = WriteModel {
+            products: vec![
+                Product {
+                    id: "root".into(),
+                    children: vec![child(1, 0.0, "s")],
+                    ..Default::default()
+                },
+                Product {
+                    id: "sub".into(),
+                    children: vec![child(2, 0.0, "a"), child(2, 0.1, "b")],
+                    ..Default::default()
+                },
+                Product {
+                    id: "block".into(),
+                    bodies: vec![block()],
+                    ..Default::default()
+                },
+            ],
+        };
+        let paints = Paints {
+            bodies: Vec::new(),
+            occurrences: vec![OccurrencePaint {
+                path: vec![(0, 0), (1, 1)],
+                body: 0,
+                paint: Paint {
+                    colour: [0, 255, 0],
+                    opacity: 1.0,
+                },
+            }],
+        };
+        let w = write_styled(&model, &[], &paints, &WriteOptions::default()).unwrap();
+        let o = crate::open(&w.bytes).unwrap();
+        let occ = o.occurrence_styles();
+        assert_eq!(occ.len(), 1, "{occ:?}");
+        assert_eq!(occ[0].path.len(), 2);
+        assert_eq!(occ[0].style.colour, Some([0, 255, 0]));
+        // The NULL_STYLE item is retained: it styles nothing.
+        assert_eq!(o.styles().retained.len(), 1);
+        let text = String::from_utf8_lossy(&w.bytes);
+        assert!(text.contains("CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM"));
+    }
+
+    /// A transparency is written where an opacity differs from the one
+    /// its item inherits, and only there: an opaque face on a translucent
+    /// body says 1, a face as translucent as its body says nothing.
+    #[test]
+    fn transparency_is_written_against_what_is_inherited() {
+        let b = block();
+        let mut names: Vec<Name> = b.faces().map(|f| b.face(f).unwrap().name).collect();
+        names.sort();
+        let model = WriteModel {
+            products: vec![Product {
+                id: "b".into(),
+                bodies: vec![b],
+                ..Default::default()
+            }],
+        };
+        let p = |c: [u8; 3], opacity| Paint { colour: c, opacity };
+        let paints = Paints {
+            bodies: vec![BodyPaint {
+                product: 0,
+                body: 0,
+                base: Some(p([255, 0, 0], 0.5)),
+                faces: vec![
+                    (names[0], p([0, 0, 255], 1.0)),
+                    (names[1], p([0, 255, 0], 0.5)),
+                ],
+            }],
+            occurrences: Vec::new(),
+        };
+        let w = write_styled(&model, &[], &paints, &WriteOptions::default()).unwrap();
+        let o = crate::open(&w.bytes).unwrap();
+        let s = o.body_styles(0);
+        assert_eq!(s.body.unwrap().opacity, Some(0.5));
+        let mut faces: Vec<_> = s.faces.values().map(|f| (f.colour, f.opacity)).collect();
+        faces.sort_by_key(|f| f.0);
+        assert_eq!(
+            faces,
+            [(Some([0, 0, 255]), Some(1.0)), (Some([0, 255, 0]), None)]
+        );
     }
 }

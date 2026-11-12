@@ -137,6 +137,20 @@ impl<'a> Args<'a> {
             .collect()
     }
 
+    /// A list's references, leaving out what isn't one: a select's typed
+    /// value, such as a presentation style assignment's
+    /// `NULL_STYLE(.NULL.)`.
+    pub fn refs(&mut self) -> Result<Vec<Id>, ImportError> {
+        let items = self.list()?;
+        Ok(items
+            .iter()
+            .filter_map(|p| match p {
+                Param::Ref(r) => Some(*r),
+                _ => None,
+            })
+            .collect())
+    }
+
     pub fn reals(&mut self) -> Result<Vec<f64>, ImportError> {
         let items = self.list()?;
         items

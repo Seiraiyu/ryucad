@@ -35,12 +35,9 @@ const KNOWN_SLOW: &[u64] = &[];
 
 /// Seeds whose result the mesher refuses at a thousandth of its size,
 /// each with its issue: their volume and angles aren't judged, the rest
-/// is.
-///
-/// - 4: an offset of a closed revolution's one face, which
-///   `offset_body` makes bit for bit alike; its offset face's box is four
-///   times the base's and the mesh estimate refuses it (#599).
-const KNOWN_UNMESHED: &[u64] = &[4];
+/// is. Empty since plan 17.A bounded offsets' enclosures by their
+/// distance and halved their derivative bounds where loose (#599).
+const KNOWN_UNMESHED: &[u64] = &[];
 
 /// How long a case may run before it is cancelled.
 const DEADLINE: Duration = Duration::from_secs(120);

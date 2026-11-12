@@ -1365,6 +1365,10 @@ pub enum Request {
         opacity: Option<f64>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         unset: Vec<String>,
+        /// The part entry's `file_styles` (design 448): `false` draws the
+        /// part without its imported files' colours, `true` with them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_styles: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -1499,6 +1503,9 @@ pub enum Request {
         pipe_tolerance: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         skip_failing: bool,
+        /// STEP: `false` writes no styles (design 448).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        appearance: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         solid: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

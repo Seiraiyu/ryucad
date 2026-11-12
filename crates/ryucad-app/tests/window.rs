@@ -6648,3 +6648,28 @@ fn file_switch_branch_lists_the_branches_in_the_palette() {
     });
     shown(&mut h, "Switch to leg");
 }
+
+#[test]
+fn tools_appearance_says_a_colour_came_from_the_step_file() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new();
+    let painted = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../ryustep/tests/data/styles/painted.stp"
+    );
+    p.ok(&["import", "--solid", painted]);
+    let mut h = window(&p);
+    // The painted block is the project's one solid (`loaded` waits for
+    // the two of `with_part`'s).
+    frames(&mut h, |app| match &app.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => o.ws.idle() && o.ws.model.meshes.len() == 1,
+        _ => false,
+    });
+    menu(&mut h, "Tools", "Appearance");
+    shown(&mut h, "Colour what");
+    shown(&mut h, "From the STEP file");
+    assert!(h.state().opened().ws.appearance.from_file);
+}

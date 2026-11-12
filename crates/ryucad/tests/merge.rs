@@ -1469,3 +1469,34 @@ fn a_clean_merge_of_one_sides_bytes_and_the_others_pose_is_misplaced() {
     r.git(&["add", "-A"]);
     assert_eq!(r.ryucad(&["merge", "status"])["clean"], true);
 }
+
+/// One branch turns an imported part's file colours off and the other
+/// colours its solid: the merge keeps both, at appearance.json format 2.
+#[test]
+fn a_file_layer_turned_off_and_a_colour_merge() {
+    let r = Repo::new("");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ryustep/tests/data/styles/painted.stp");
+    let made = r.ryucad(&["import", "--solid", fixture.to_str().unwrap()]);
+    let part = made["parts"][0]["part"].as_str().unwrap().to_owned();
+    r.commit("painted block");
+    let file = format!("parts/{part}/appearance.json");
+    r.git(&["checkout", "-q", "-b", "theirs"]);
+    r.ryucad(&["colour", &part, "--colour", "#123456"]);
+    r.commit("theirs: a colour");
+    r.git(&["checkout", "-q", "main"]);
+    r.ryucad(&["colour", &part, "--no-file-styles"]);
+    r.commit("ours: no file colours");
+    r.preview_matches_merge("theirs");
+    r.git(&["merge", "-q", "--no-edit", "theirs"]);
+    let v = r.json(&file);
+    assert_eq!(
+        v,
+        json!({"format": 2, "kind": "ryucad.appearance",
+               "part": {"colour": "#123456", "file_styles": false}})
+    );
+    assert!(r.canonical(&file));
+    let got = r.ryucad(&["appearance", &part]);
+    assert_eq!(got["solids"][0]["colour"], "#123456");
+    assert!(got["solids"][0].get("faces").is_none(), "{got}");
+}
