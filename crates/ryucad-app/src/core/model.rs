@@ -1340,7 +1340,9 @@ impl Model {
             .and_then(|f| f.instance.as_ref())
             .ok_or_else(|| format!("{instance} isn't an instance of {}", p.id))?;
         if placed.fixed {
-            return Err(format!("{instance} is fixed"));
+            return Err(format!(
+                "{instance} is fixed: free it with --fixed false to move it"
+            ));
         }
         if placed.solve.as_ref().is_some_and(|(_, dof)| *dof == 0) {
             return Err(format!("{instance} has no freedom left: its mates hold it"));
@@ -1365,6 +1367,19 @@ impl Model {
                     .map(|s| (p.id.clone(), s.id.clone()))
             })
             .collect()
+    }
+
+    /// The part the Part section, Parameters and Releases follow (#741):
+    /// the chosen feature's, else the one part the window shows, else the
+    /// first.
+    pub fn followed_part(&self, chosen: Option<&BodyKey>) -> Option<String> {
+        chosen
+            .map(|k| k.0.clone())
+            .or_else(|| match self.shown().as_slice() {
+                [one] => Some((*one).to_owned()),
+                _ => None,
+            })
+            .or_else(|| self.parts.keys().next().cloned())
     }
 
     /// The parts the window shows: its focus, else the project's one root
@@ -1565,6 +1580,21 @@ mod tests {
         );
     }
     use serde_json::json;
+
+    #[test]
+    fn the_followed_part_is_the_chosen_ones_else_the_shown_one() {
+        let mut m = Model::default();
+        for id in ["ann-block", "bolt"] {
+            m.apply_part(&json!({"part": id, "revision": "r", "features": []}));
+        }
+        m.focus = Some("bolt".into());
+        assert_eq!(m.followed_part(None).as_deref(), Some("bolt"));
+        let k = ("ann-block".to_owned(), "b".to_owned());
+        assert_eq!(m.followed_part(Some(&k)).as_deref(), Some("ann-block"));
+        m.focus = None;
+        // Both shown: no one part, so the first.
+        assert_eq!(m.followed_part(None).as_deref(), Some("ann-block"));
+    }
 
     #[test]
     fn marks_follow_reports_and_answers() {
@@ -2227,7 +2257,11 @@ mod tests {
         m.apply_part(&a);
         let key = |s: &str| ("frame".to_owned(), s.to_owned());
         assert_eq!(m.movable(&key("b2/s")), Ok(("frame".into(), "b2".into())));
-        assert_eq!(m.movable(&key("b1/s")).unwrap_err(), "b1 is fixed");
+        assert!(
+            m.movable(&key("b1/s"))
+                .unwrap_err()
+                .starts_with("b1 is fixed")
+        );
         assert!(m.movable(&key("ring:1/b2/s")).unwrap_err().contains("copy"));
         assert!(m.movable(&("p".into(), "s".into())).is_err());
         // Dragged 2 m along y: its occurrence goes with it, turned as it was.

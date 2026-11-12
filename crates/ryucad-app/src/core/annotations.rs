@@ -85,6 +85,18 @@ fn three(v: &Value) -> Option<[f64; 3]> {
 }
 
 impl Entry {
+    /// What a screen reader says of its row (#749): number, author,
+    /// state, comment.
+    pub fn spoken(&self, number: Option<usize>) -> String {
+        let tag = number.map_or_else(|| "·".to_owned(), |n| format!("#{n}"));
+        format!(
+            "{tag} by {}, {}: {}",
+            self.by,
+            self.status.replace('_', " "),
+            self.comment
+        )
+    }
+
     pub fn from_json(v: &Value) -> Option<Entry> {
         let (by, agent) = author(&v["by"]);
         let pins = v["pins"]
@@ -487,6 +499,24 @@ impl Annotations {
     }
 }
 
+/// What a toast says of one of the person's annotations someone closed:
+/// `applied` (a suggestion whose change went in), `resolved` or
+/// `rejected`, then its comment's start, else the number it had while
+/// open (#744), else nothing more.
+pub fn closed_text(e: &Entry, number: Option<usize>) -> String {
+    let what = match e.status.as_str() {
+        "done" if e.resolution.as_ref().is_some_and(|r| r.applied) => "applied",
+        "done" => "resolved",
+        _ => "rejected",
+    };
+    let short: String = e.comment.trim().chars().take(40).collect();
+    match (short.is_empty(), number) {
+        (false, _) => format!("{what} “{short}”"),
+        (true, Some(n)) => format!("{what} #{n}"),
+        (true, None) => what.to_owned(),
+    }
+}
+
 /// A face stroke as the window draws it: in the shown model's frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stroke {
@@ -590,6 +620,47 @@ mod tests {
         let mut a = Annotations::default();
         a.reset(&json!({"schema": 1, "annotations": [mine, change, gone, done]}));
         a
+    }
+
+    #[test]
+    fn a_rows_name_says_who_and_what() {
+        let e = Entry::from_json(&entry(
+            "aaaaaaaaaa",
+            "dana (window 1)",
+            "2026-11-05T14:00:00Z",
+            "in_progress",
+        ))
+        .unwrap();
+        assert_eq!(
+            e.spoken(Some(9)),
+            "#9 by dana (window 1), in progress: about aaaaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn a_closing_is_told_by_its_comment_else_by_its_number() {
+        let mut a = sample();
+        let numbers = a.numbers();
+        // #744: an applied suggestion without a comment or a note.
+        let mut applied = a.all["bbbbbbbbbb"].raw.clone();
+        applied["comment"] = json!("");
+        applied["status"] = json!("done");
+        applied["resolution"] = json!({"by": {"participant": "agent", "kind": "agent"},
+                                       "at": "2026-11-05T17:00:00Z", "applied": true});
+        let mut rejected = a.all["aaaaaaaaaa"].raw.clone();
+        rejected["status"] = json!("rejected");
+        rejected["resolution"] = json!({"by": {"participant": "agent", "kind": "agent"},
+                                        "at": "2026-11-05T17:00:00Z", "note": "no"});
+        let news = a.changed(
+            &json!({"annotations": [applied, rejected]}),
+            "dana (window 1)",
+        );
+        assert_eq!(news.closed.len(), 2);
+        let text = |id: &str| closed_text(&a.all[id], numbers.get(id).copied());
+        assert_eq!(text("bbbbbbbbbb"), "applied #3");
+        assert_eq!(text("aaaaaaaaaa"), "rejected “about aaaaaaaaaa”");
+        // No number known and no comment: the verb alone, never empty quotes.
+        assert_eq!(closed_text(&a.all["bbbbbbbbbb"], None), "applied");
     }
 
     #[test]

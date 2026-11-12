@@ -531,7 +531,9 @@ impl crate::Opened {
                 }
                 out
             }
-            Ok(Entity::Brep(Brep::Shells(s))) | Ok(Entity::Brep(Brep::Faces(s))) => s.clone(),
+            Ok(Entity::Brep(Brep::Shells { shells: s, .. })) | Ok(Entity::Brep(Brep::Faces(s))) => {
+                s.clone()
+            }
             _ => Vec::new(),
         }
     }
