@@ -4,7 +4,9 @@
 //! among them), that no file is left unmerged in Git's index, that every
 //! feature builds, that every body passes ryukei's intersection check and
 //! meshes without faults, that the session's cached results are what a
-//! rebuild from nothing gives, and ryupdm's release checks. Interference
+//! rebuild from nothing gives, that every saved motion of an assembly
+//! sweeps (solve-only; with interference under `--interference`), and
+//! ryupdm's release checks. Interference
 //! runs only when asked (`interference`, design 525): without it, each
 //! assembly checked gets an `interference_not_checked` note. CI and hosted
 //! review run it.
@@ -27,7 +29,7 @@ use ryu_session::job::Phase;
 use serde_json::{Value, json};
 
 /// Every finding's code and severity: `doctor`'s issues keep their own.
-pub const CODES: [(&str, &str); 18] = [
+pub const CODES: [(&str, &str); 22] = [
     ("feature_failed", "error"),
     ("assembly_unsolved", "error"),
     ("mate_out_of_limits", "error"),
@@ -46,6 +48,10 @@ pub const CODES: [(&str, &str); 18] = [
     ("reference_faces_split", "warning"),
     ("reference_unoriented", "warning"),
     ("interference_not_checked", "info"),
+    ("motion_unresolved", "warning"),
+    ("motion_past_limit", "warning"),
+    ("motion_blocked", "warning"),
+    ("motion_interferes", "warning"),
 ];
 
 fn severity(code: &str) -> &'static str {
@@ -356,6 +362,7 @@ pub fn run(
     // From nothing: no cache, so the files alone decide.
     let project = session.project().clone();
     let pins = session.pins()?;
+    let unit = project.manifest.default_unit;
     let mut from_nothing = Rebuild::new(&project, &pins, Store::default());
     from_nothing.job = job.clone();
     from_nothing.heal_budget = session.heal_budget;
@@ -413,6 +420,29 @@ pub fn run(
                 found.extend(unsolved(&a, &placed));
                 if let Ok(ap) = project.part(&a) {
                     found.extend(limit_findings(&a, ap));
+                    if !ap.motions.is_empty()
+                        && let Ok(model) =
+                            from_nothing.model(&a, &crate::doc::assembly::Rev::Working)
+                    {
+                        let input = crate::motion::Input {
+                            asm: &a,
+                            part: ap,
+                            result: &placed,
+                            model: &model,
+                            unit,
+                        };
+                        let (mut i, mut c) = (Default::default(), Default::default());
+                        let caches = crate::motion::Caches {
+                            interference: &mut i,
+                            clearance: &mut c,
+                        };
+                        for mut f in
+                            crate::motion::check_findings(&input, interference, caches, &job)?
+                        {
+                            f["severity"] = json!(severity(f["code"].as_str().unwrap_or_default()));
+                            found.push(f);
+                        }
+                    }
                 }
                 for mut f in found {
                     f["in"] = json!(id);
@@ -471,7 +501,16 @@ pub fn run(
         // intersect can't be checked.
         let assembly = crate::server::part_kind(&p) == crate::doc::files::PartKind::Assembly;
         if assembly && !interference {
-            findings.push(interference_not_checked(id));
+            let mut f = interference_not_checked(id);
+            let n = p.motions.len();
+            if n > 0 {
+                let m = f["message"].as_str().unwrap_or_default().to_owned();
+                f["message"] = json!(format!(
+                    "{m} (and sweeps its {n} saved motion(s) with interference)"
+                ));
+                f["motions"] = json!(n);
+            }
+            findings.push(f);
         }
         if assembly
             && interference
@@ -507,6 +546,29 @@ pub fn run(
                     "pairs": unchecked,
                     "message": format!("{id}: {} pair(s) of instances could not be checked for interference", unchecked.len()),
                 }));
+            }
+        }
+        // Each saved motion swept from nothing (plan 26.B): solve-only,
+        // and with interference only under --interference.
+        if crate::server::part_kind(&p) == crate::doc::files::PartKind::Assembly
+            && !p.motions.is_empty()
+            && let Ok(model) = from_nothing.model(id, &crate::doc::assembly::Rev::Working)
+        {
+            let input = crate::motion::Input {
+                asm: id,
+                part: &p,
+                result: &fresh,
+                model: &model,
+                unit,
+            };
+            let (mut i, mut c) = (Default::default(), Default::default());
+            let caches = crate::motion::Caches {
+                interference: &mut i,
+                clearance: &mut c,
+            };
+            for mut f in crate::motion::check_findings(&input, interference, caches, &job)? {
+                f["severity"] = json!(severity(f["code"].as_str().unwrap_or_default()));
+                findings.push(f);
             }
         }
         // Each solid as the model shows it, by founder, and the feature

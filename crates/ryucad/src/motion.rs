@@ -1404,6 +1404,105 @@ pub fn sweep_request(session: &mut Session, ask: SweepAsk) -> Result<Value> {
     Ok(v)
 }
 
+/// What sweeping each saved motion of `input`'s assembly finds, for
+/// `check`: `motion_unresolved` and `motion_past_limit` from reading it,
+/// `motion_blocked` from its solve-only sweep, and only with
+/// `interference`, `motion_interferes` (the first collision, refined)
+/// and `cannot_check` (pairs ryukei couldn't intersect). Without
+/// `interference`, no pair is intersected. Findings carry `code`,
+/// `part`, `motion` and `message`; check adds the severity.
+pub fn check_findings(
+    input: &Input<'_>,
+    interference: bool,
+    caches: Caches<'_>,
+    job: &Job,
+) -> Result<Vec<Value>> {
+    let Caches {
+        interference: icache,
+        clearance: ccache,
+    } = caches;
+    let asm = input.asm;
+    let rest = Rest::of(input.result);
+    let mut out = Vec::new();
+    let finding = |code: Code, mid: &Id, message: String| json!({"code": code, "part": asm, "motion": mid, "message": message});
+    for (mid, file) in &input.part.motions {
+        // A file that doesn't read is doctor's `invalid_document`.
+        let Ok(file) = file else { continue };
+        let resolved = match resolve(asm, input.part, &rest, mid.as_str(), file) {
+            Ok(r) => r,
+            Err(e) if e.code == Code::MotionUnresolved => {
+                let mut f = finding(Code::MotionUnresolved, mid, e.message.clone());
+                f["pointer"] = e.details["pointer"].clone();
+                out.push(f);
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        for w in &resolved.warnings {
+            let mut f = finding(
+                Code::MotionPastLimit,
+                mid,
+                w["message"].as_str().unwrap_or_default().to_owned(),
+            );
+            f["mate"] = w["mate"].clone();
+            f["limit"] = w["limit"].clone();
+            out.push(f);
+        }
+        // An assembly that doesn't hold is `assembly_unsolved` already.
+        if !rest.holds {
+            continue;
+        }
+        let opts = Options {
+            interference,
+            refine: 10,
+            ..Options::default()
+        };
+        let caches = Caches {
+            interference: &mut *icache,
+            clearance: &mut *ccache,
+        };
+        let v = sweep(input, Some(mid), &resolved, &opts, caches, job)?;
+        let b = &v["first_blocked"];
+        if !b.is_null() {
+            let mut f = finding(
+                Code::MotionBlocked,
+                mid,
+                format!(
+                    "{asm}'s motion {mid} is blocked from step {} of {}",
+                    b["index"], resolved.steps
+                ),
+            );
+            f["first_blocked"] = b.clone();
+            out.push(f);
+        }
+        if interference {
+            let c = &v["first_collision"];
+            if !c.is_null() {
+                let mut f = finding(
+                    Code::MotionInterferes,
+                    mid,
+                    format!(
+                        "{asm}'s motion {mid} makes {} and {} collide at step {}",
+                        c["pair"][0].as_str().unwrap_or_default(),
+                        c["pair"][1].as_str().unwrap_or_default(),
+                        c["index"]
+                    ),
+                );
+                f["first_collision"] = c.clone();
+                out.push(f);
+            }
+            let unchecked = v["unchecked"].as_array().cloned().unwrap_or_default();
+            if !unchecked.is_empty() {
+                let mut f = json!({"code": "cannot_check", "part": asm, "motion": mid,
+                    "message": format!("{asm}'s motion {mid}: {} pair(s) could not be checked for interference", unchecked.len())});
+                f["pairs"] = json!(unchecked);
+                out.push(f);
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -2226,5 +2325,150 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::AssemblyUnsolved);
+    }
+
+    fn input_of<'a>(
+        s: &mut Session,
+        asm: &'a Id,
+        part: &'a mut Option<Part>,
+        result: &'a mut Option<PartResult>,
+        model: &'a mut Option<std::sync::Arc<Model>>,
+    ) -> Input<'a> {
+        *part = Some(s.project().part(asm).unwrap().clone());
+        *result = Some(s.rebuilt(asm).unwrap().clone());
+        *model = Some(s.model(asm, &crate::doc::assembly::Rev::Working).unwrap());
+        Input {
+            asm,
+            part: part.as_ref().unwrap(),
+            result: result.as_ref().unwrap(),
+            model: model.as_ref().unwrap(),
+            unit: s.project().manifest.default_unit,
+        }
+    }
+
+    #[test]
+    fn check_sweeps_saved_motions_and_intersects_only_when_asked() {
+        let (_dir, mut s) = swing(false);
+        call(
+            &mut s,
+            "motion.save",
+            json!({"part": "swing", "motion": "sweep", "drives": turning("45 deg"), "steps": 46}),
+        )
+        .unwrap();
+        let asm = id("swing");
+        let (mut p, mut r, mut m) = (None, None, None);
+        let input = input_of(&mut s, &asm, &mut p, &mut r, &mut m);
+        let (mut i, mut c) = (Default::default(), Default::default());
+        let plain = check_findings(
+            &input,
+            false,
+            Caches {
+                interference: &mut i,
+                clearance: &mut c,
+            },
+            &Job::default(),
+        )
+        .unwrap();
+        assert!(plain.is_empty(), "{plain:?}");
+        assert!(
+            i.is_empty() && c.is_empty(),
+            "plain check intersects nothing"
+        );
+        let asked = check_findings(
+            &input,
+            true,
+            Caches {
+                interference: &mut i,
+                clearance: &mut c,
+            },
+            &Job::default(),
+        )
+        .unwrap();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert_eq!(asked[0]["code"], "motion_interferes");
+        assert_eq!(asked[0]["motion"], "sweep");
+        assert_eq!(asked[0]["first_collision"]["index"], 22);
+        assert!(asked[0]["first_collision"]["contact"]["t"].is_f64());
+    }
+
+    #[test]
+    fn check_warns_of_blocked_and_past_limit_motions_and_passes() {
+        let (_dir, mut s) = stopped();
+        call(
+            &mut s,
+            "motion.save",
+            json!({"part": "frame", "motion": "swing", "steps": 11,
+            "drives": [{"mate": "m1", "angle": {"from": "0 deg", "to": "10 deg"}}]}),
+        )
+        .unwrap();
+        let report = call(&mut s, "check", json!({"part": "frame"})).unwrap();
+        let codes: Vec<&str> = report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["motion"] == "swing")
+            .map(|f| f["code"].as_str().unwrap())
+            .collect();
+        assert_eq!(codes, ["motion_past_limit", "motion_blocked"], "{report}");
+        assert!(
+            report["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|f| f["motion"] == "swing")
+                .all(|f| f["severity"] == "warning")
+        );
+        assert_eq!(report["passed"], true);
+        // A motion whose mate is gone: unresolved, a warning.
+        let m1 = crate::doc::project::part_dir(_dir.path(), &id("frame")).join("motions/gone.json");
+        crate::doc::project::write_json(
+            &m1,
+            &json!({"format": 1, "kind": "ryucad.motion",
+            "steps": 3, "drives": [{"mate": "m9", "angle": {"from": 0, "to": 1}}]}),
+        )
+        .unwrap();
+        s.refresh().unwrap();
+        let report = call(&mut s, "check", json!({"part": "frame"})).unwrap();
+        assert!(
+            report["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "motion_unresolved" && f["motion"] == "gone"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn check_with_interference_sweeps_with_it() {
+        let (_dir, mut s) = swing(false);
+        call(
+            &mut s,
+            "motion.save",
+            json!({"part": "swing", "motion": "sweep", "drives": turning("45 deg"), "steps": 46}),
+        )
+        .unwrap();
+        let plain = call(&mut s, "check", json!({"part": "swing"})).unwrap();
+        assert!(
+            !plain["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "motion_interferes")
+        );
+        let asked = call(
+            &mut s,
+            "check",
+            json!({"part": "swing", "interference": true}),
+        )
+        .unwrap();
+        assert!(
+            asked["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "motion_interferes" && f["motion"] == "sweep"),
+            "{asked}"
+        );
     }
 }
