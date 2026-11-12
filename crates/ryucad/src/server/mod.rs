@@ -6754,7 +6754,7 @@ fn render_parts(session: &Session, part: Option<&str>) -> Result<Vec<Id>> {
 /// must stop before it holds more than the session may.
 pub(crate) fn render_budget() -> usize {
     #[cfg(test)]
-    if let Some(b) = tests::RENDER_BUDGET.with(|b| b.get()) {
+    if let Some(b) = crate::testing::RENDER_BUDGET.with(|b| b.get()) {
         return b;
     }
     let max = config::user("session.max_memory")
