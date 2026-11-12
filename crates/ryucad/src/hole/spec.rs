@@ -1035,6 +1035,117 @@ pub fn canonical(h: &Hole, project: Unit) -> String {
     Spec::of(h, project).text()
 }
 
+/// A spec of any shape the grammar holds, from `seed` (xorshift):
+/// every one `text` writes and `parse` reads back.
+/// The fuzz target `hole_spec` and the identity test use it.
+#[doc(hidden)]
+pub fn arbitrary(seed: &mut u64) -> Spec {
+    let mut next = |n: usize| {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        (*seed % n as u64) as usize
+    };
+    fn pick(next: &mut dyn FnMut(usize) -> usize, xs: &[&str]) -> String {
+        xs[next(xs.len())].to_owned()
+    }
+    const LENS: [&str; 7] = ["6", "0.5", "12.25", ".5", "0.25 in", "(2 * d)", "20"];
+    const ANGLES: [&str; 3] = ["118", "90", "(a + 1)"];
+    let len = |next: &mut dyn FnMut(usize) -> usize| Len(pick(next, &LENS));
+    let opt = |next: &mut dyn FnMut(usize) -> usize| next(2) == 0;
+    let what = match next(7) {
+        0 => What::Thread {
+            kind: ThreadKind::Metric,
+            size: pick(&mut next, &["M6", "M8", "M1.6"]),
+            pitch: opt(&mut next).then(|| Len(pick(&mut next, &["1.0", "1.25", "0.35"]))),
+            class: opt(&mut next).then(|| pick(&mut next, &["6H", "5G"])),
+            left: opt(&mut next),
+        },
+        1 => What::Thread {
+            kind: ThreadKind::Unified(pick(&mut next, &["UNC", "UNF", "UNEF", "UN"])),
+            size: pick(&mut next, &["1/4", "#10", "1-1/2"]),
+            pitch: Some(Len(pick(&mut next, &["20", "32", "6"]))),
+            class: opt(&mut next).then(|| pick(&mut next, &["2B", "3B"])),
+            left: opt(&mut next),
+        },
+        2 => What::Thread {
+            kind: ThreadKind::Pipe(pick(&mut next, &["NPT", "NPTF", "NPSM"])),
+            size: pick(&mut next, &["1/8", "1"]),
+            pitch: Some(Len(pick(&mut next, &["27", "11.5"]))),
+            class: None,
+            left: opt(&mut next),
+        },
+        3 => What::Thread {
+            kind: ThreadKind::British,
+            size: pick(&mut next, &["Rc1/4", "Rp1/2", "G3/8"]),
+            pitch: None,
+            class: None,
+            left: opt(&mut next),
+        },
+        4 => What::Thread {
+            kind: ThreadKind::House(pick(&mut next, &["house_acme", "t2"])),
+            size: pick(&mut next, &["T10", "X-1"]),
+            pitch: None,
+            class: opt(&mut next).then(|| pick(&mut next, &["2G", "6H"])),
+            left: opt(&mut next),
+        },
+        5 => What::Fastener {
+            mouth: [None, Some(MouthKind::Cbore), Some(MouthKind::Csk)][next(3)],
+            standard: pick(&mut next, &["iso4762", "house_cap"]),
+            size: pick(&mut next, &["M5", "#10"]),
+            fit: [None, Some(FastenerFit::Close), Some(FastenerFit::Loose)][next(3)],
+        },
+        _ => What::Dia {
+            diameter: len(&mut next),
+            class: opt(&mut next).then(|| pick(&mut next, &["H7", "G6"])),
+        },
+    };
+    let tapped = matches!(what, What::Thread { .. });
+    let starts = (tapped && opt(&mut next)).then(|| 2 + next(4) as u32);
+    let depth = match next(if tapped { 4 } else { 3 }) {
+        0 => None,
+        1 => Some(Depth::Thru),
+        2 => Some(Depth::Deep(len(&mut next))),
+        _ => Some(Depth::Full),
+    };
+    let angle = (opt(&mut next) && (tapped || matches!(depth, Some(Depth::Deep(_)))))
+        .then(|| Len(pick(&mut next, &ANGLES)));
+    let drill = match &what {
+        What::Dia { .. } => None,
+        _ if opt(&mut next) => None,
+        What::Fastener { .. } => Some(Drill {
+            diameter: Some(len(&mut next)),
+            depth: None,
+        }),
+        _ => {
+            let diameter = opt(&mut next).then(|| len(&mut next));
+            let depth = (diameter.is_none() || opt(&mut next)).then(|| len(&mut next));
+            Some(Drill { diameter, depth })
+        }
+    };
+    let kind = match &what {
+        What::Fastener { mouth: None, .. } => None,
+        What::Fastener { mouth: Some(k), .. } => opt(&mut next).then_some(*k),
+        _ => [None, Some(MouthKind::Cbore), Some(MouthKind::Csk)][next(3)],
+    };
+    let mouth = kind.map(|kind| Mouth {
+        kind,
+        diameter: opt(&mut next).then(|| len(&mut next)),
+        second: opt(&mut next).then(|| match kind {
+            MouthKind::Cbore => len(&mut next),
+            MouthKind::Csk => Len(pick(&mut next, &ANGLES)),
+        }),
+    });
+    Spec {
+        what,
+        starts,
+        depth,
+        angle,
+        drill,
+        mouth,
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1241,115 +1352,6 @@ pub(crate) mod tests {
                 s,
                 "{t}"
             );
-        }
-    }
-
-    /// A spec of any shape the grammar holds, from `seed` (xorshift):
-    /// every one `text` writes and `parse` reads back.
-    pub(crate) fn arbitrary(seed: &mut u64) -> Spec {
-        let mut next = |n: usize| {
-            *seed ^= *seed << 13;
-            *seed ^= *seed >> 7;
-            *seed ^= *seed << 17;
-            (*seed % n as u64) as usize
-        };
-        fn pick(next: &mut dyn FnMut(usize) -> usize, xs: &[&str]) -> String {
-            xs[next(xs.len())].to_owned()
-        }
-        const LENS: [&str; 7] = ["6", "0.5", "12.25", ".5", "0.25 in", "(2 * d)", "20"];
-        const ANGLES: [&str; 3] = ["118", "90", "(a + 1)"];
-        let len = |next: &mut dyn FnMut(usize) -> usize| Len(pick(next, &LENS));
-        let opt = |next: &mut dyn FnMut(usize) -> usize| next(2) == 0;
-        let what = match next(7) {
-            0 => What::Thread {
-                kind: ThreadKind::Metric,
-                size: pick(&mut next, &["M6", "M8", "M1.6"]),
-                pitch: opt(&mut next).then(|| Len(pick(&mut next, &["1.0", "1.25", "0.35"]))),
-                class: opt(&mut next).then(|| pick(&mut next, &["6H", "5G"])),
-                left: opt(&mut next),
-            },
-            1 => What::Thread {
-                kind: ThreadKind::Unified(pick(&mut next, &["UNC", "UNF", "UNEF", "UN"])),
-                size: pick(&mut next, &["1/4", "#10", "1-1/2"]),
-                pitch: Some(Len(pick(&mut next, &["20", "32", "6"]))),
-                class: opt(&mut next).then(|| pick(&mut next, &["2B", "3B"])),
-                left: opt(&mut next),
-            },
-            2 => What::Thread {
-                kind: ThreadKind::Pipe(pick(&mut next, &["NPT", "NPTF", "NPSM"])),
-                size: pick(&mut next, &["1/8", "1"]),
-                pitch: Some(Len(pick(&mut next, &["27", "11.5"]))),
-                class: None,
-                left: opt(&mut next),
-            },
-            3 => What::Thread {
-                kind: ThreadKind::British,
-                size: pick(&mut next, &["Rc1/4", "Rp1/2", "G3/8"]),
-                pitch: None,
-                class: None,
-                left: opt(&mut next),
-            },
-            4 => What::Thread {
-                kind: ThreadKind::House(pick(&mut next, &["house_acme", "t2"])),
-                size: pick(&mut next, &["T10", "X-1"]),
-                pitch: None,
-                class: opt(&mut next).then(|| pick(&mut next, &["2G", "6H"])),
-                left: opt(&mut next),
-            },
-            5 => What::Fastener {
-                mouth: [None, Some(MouthKind::Cbore), Some(MouthKind::Csk)][next(3)],
-                standard: pick(&mut next, &["iso4762", "house_cap"]),
-                size: pick(&mut next, &["M5", "#10"]),
-                fit: [None, Some(FastenerFit::Close), Some(FastenerFit::Loose)][next(3)],
-            },
-            _ => What::Dia {
-                diameter: len(&mut next),
-                class: opt(&mut next).then(|| pick(&mut next, &["H7", "G6"])),
-            },
-        };
-        let tapped = matches!(what, What::Thread { .. });
-        let starts = (tapped && opt(&mut next)).then(|| 2 + next(4) as u32);
-        let depth = match next(if tapped { 4 } else { 3 }) {
-            0 => None,
-            1 => Some(Depth::Thru),
-            2 => Some(Depth::Deep(len(&mut next))),
-            _ => Some(Depth::Full),
-        };
-        let angle = (opt(&mut next) && (tapped || matches!(depth, Some(Depth::Deep(_)))))
-            .then(|| Len(pick(&mut next, &ANGLES)));
-        let drill = match &what {
-            What::Dia { .. } => None,
-            _ if opt(&mut next) => None,
-            What::Fastener { .. } => Some(Drill {
-                diameter: Some(len(&mut next)),
-                depth: None,
-            }),
-            _ => {
-                let diameter = opt(&mut next).then(|| len(&mut next));
-                let depth = (diameter.is_none() || opt(&mut next)).then(|| len(&mut next));
-                Some(Drill { diameter, depth })
-            }
-        };
-        let kind = match &what {
-            What::Fastener { mouth: None, .. } => None,
-            What::Fastener { mouth: Some(k), .. } => opt(&mut next).then_some(*k),
-            _ => [None, Some(MouthKind::Cbore), Some(MouthKind::Csk)][next(3)],
-        };
-        let mouth = kind.map(|kind| Mouth {
-            kind,
-            diameter: opt(&mut next).then(|| len(&mut next)),
-            second: opt(&mut next).then(|| match kind {
-                MouthKind::Cbore => len(&mut next),
-                MouthKind::Csk => Len(pick(&mut next, &ANGLES)),
-            }),
-        });
-        Spec {
-            what,
-            starts,
-            depth,
-            angle,
-            drill,
-            mouth,
         }
     }
 }
