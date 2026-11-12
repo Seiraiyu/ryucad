@@ -86,26 +86,6 @@ impl Prepared {
         }
     }
 
-    /// Its box moved by `r`, without a tree: the same bits as
-    /// `self.placed(r).bounds()`, the points folded in the same order as a
-    /// tree's root box folds them.
-    pub fn placed_bounds(&self, r: &Rigid) -> Option<Box3> {
-        let tris = self.tree.triangles();
-        if tris.is_empty() {
-            return None;
-        }
-        let mut lo = Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
-        let mut hi = Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-        for t in tris {
-            for p in t {
-                let q = r.apply_point(*p);
-                lo = lo.min(q);
-                hi = hi.max(q);
-            }
-        }
-        Some(Box3::new(lo, hi))
-    }
-
     /// Its box.
     pub fn bounds(&self) -> Option<Box3> {
         self.tree.bounds().map(|(lo, hi)| Box3::new(lo, hi))
@@ -463,49 +443,26 @@ pub fn verdict(
     rel: &Rigid,
     search: &mut Search,
 ) -> Result<Verdict, Halt> {
-    verdict_placing(a, b, rel, true, search)
-}
-
-/// [`verdict`], placing the side with fewer triangles where `smaller`
-/// (else always `b`, as before 29.A): the searches run in the placed
-/// side's frame, the box and the reach in `a`'s.
-fn verdict_placing(
-    a: &Prepared,
-    b: &Prepared,
-    rel: &Rigid,
-    smaller: bool,
-    search: &mut Search,
-) -> Result<Verdict, Halt> {
-    let (Some(ba), Some(bb)) = (a.bounds(), b.placed_bounds(rel)) else {
+    let bp = b.placed(rel);
+    let (Some(ba), Some(bb)) = (a.bounds(), bp.bounds()) else {
         return Ok(Verdict::Clear);
     };
     let (reach, margin) = reach(a, b, &ba.union(&bb));
-    let move_a = smaller && a.tree.triangles().len() < b.tree.triangles().len();
-    // `a2` and `b2` are `a` and `b` in one frame: `b`'s moved into `a`'s,
-    // or `a`'s into `b`'s.
-    let moved;
-    let (a2, b2) = if move_a {
-        moved = a.placed(&rel.inverse());
-        (&moved, b)
-    } else {
-        moved = b.placed(rel);
-        (a, &moved)
-    };
-    let nearest = a2
+    let nearest = a
         .tree
-        .nearest(&b2.tree)
+        .nearest(&bp.tree)
         .map_or(f64::INFINITY, |n| n.distance);
     let mut deep = None;
     if a.closed {
-        deep = deep_point(&a2.tree, b2.tree.triangles(), reach, margin, search)?;
+        deep = deep_point(&a.tree, bp.tree.triangles(), reach, margin, search)?;
     }
-    if deep.is_none() && b.closed {
-        deep = deep_point(&b2.tree, a2.tree.triangles(), reach, margin, search)?;
+    if deep.is_none() && bp.closed {
+        deep = deep_point(&bp.tree, a.tree.triangles(), reach, margin, search)?;
     }
-    if deep.is_none() && a.closed && b.closed && nearest <= reach {
-        deep = interior_point(&a2.tree, &b2.tree, reach, search)?;
+    if deep.is_none() && a.closed && bp.closed && nearest <= reach {
+        deep = interior_point(&a.tree, &bp.tree, reach, search)?;
         if deep.is_none() {
-            deep = interior_point(&b2.tree, &a2.tree, reach, search)?;
+            deep = interior_point(&bp.tree, &a.tree, reach, search)?;
         }
     }
     if deep.is_some() {
@@ -513,7 +470,7 @@ fn verdict_placing(
             std::collections::BTreeSet::new(),
             std::collections::BTreeSet::new(),
         );
-        for (i, j) in a2.tree.within(&b2.tree, reach) {
+        for (i, j) in a.tree.within(&bp.tree, reach) {
             if faces_a.len() < FACES {
                 faces_a.insert(a.faces[i as usize]);
             }
@@ -1231,56 +1188,6 @@ mod tests {
                 granted,
                 "{gap}"
             );
-        }
-    }
-
-    #[test]
-    fn placed_bounds_are_the_placed_trees_bit_for_bit() {
-        let mut g = ryukei_testkit::Lcg::new(29);
-        let b = Prepared::new(&pin(0.003, 0.02)).unwrap();
-        for _ in 0..16 {
-            let r = at(
-                g.next_f64(-1.0, 1.0),
-                g.next_f64(-1.0, 1.0),
-                g.next_f64(-1.0, 1.0),
-            )
-            .then_after(&Rigid::rotation(
-                ryukei::geom::UnitVector3::Y,
-                g.next_f64(0.0, 6.2),
-            ));
-            let (x, y) = (b.placed_bounds(&r).unwrap(), b.placed(&r).bounds().unwrap());
-            let bits = |q: Point3| [q.x, q.y, q.z].map(f64::to_bits);
-            assert_eq!(bits(x.min()), bits(y.min()));
-            assert_eq!(bits(x.max()), bits(y.max()));
-        }
-    }
-
-    #[test]
-    fn placing_either_side_gives_one_verdict() {
-        let mut g = ryukei_testkit::Lcg::new(2915);
-        let plate = Prepared::new(&drilled_plate(&Rigid::IDENTITY)).unwrap();
-        let small = [
-            Prepared::new(&block(0.01)).unwrap(),
-            Prepared::new(&pin(0.003, 0.02)).unwrap(),
-            Prepared::new(&header()).unwrap(),
-        ];
-        let job = Job::default();
-        for k in 0..48 {
-            let other = &small[k % 3];
-            let rel = at(
-                g.next_f64(-0.01, 0.06),
-                g.next_f64(-0.01, 0.02),
-                g.next_f64(-0.01, 0.004),
-            )
-            .then_after(&Rigid::rotation(
-                ryukei::geom::UnitVector3::Z,
-                g.next_f64(0.0, 0.3),
-            ));
-            for (a, b, r) in [(&plate, other, rel), (other, &plate, rel.inverse())] {
-                let second = verdict_placing(a, b, &r, false, &mut Search::new(&job));
-                let smaller = verdict_placing(a, b, &r, true, &mut Search::new(&job));
-                assert_eq!(second, smaller, "{k}");
-            }
         }
     }
 
