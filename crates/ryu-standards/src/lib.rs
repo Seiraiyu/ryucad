@@ -28,7 +28,9 @@
 #[allow(dead_code)]
 pub(crate) mod exact;
 pub mod fit;
+pub mod iso_metric;
 pub mod source;
+pub mod thread;
 
 pub use source::{Source, Valued};
 
