@@ -36,6 +36,9 @@ pub struct Mated {
     pub a: ryumate::Pose,
     pub b: ryumate::Pose,
     pub hash: String,
+    /// Its free values where the solve left it, and the stops they rest
+    /// on; `None` for a mate whose form has none (fastened, ball).
+    pub values: Option<ryumate::MateValues>,
 }
 
 /// One copy an instance pattern places: its index, the seed it copies,
@@ -549,6 +552,98 @@ fn angle_ok(id: &Id, param: &str, a: f64) -> Result<()> {
     .with("param", param))
 }
 
+/// The solver's limits for a mate: radians and meters.
+pub(crate) fn limits(m: &Mate) -> ryumate::Limits {
+    let range = |r: &Option<crate::doc::mate::Range>, si: fn(&crate::units::Quantity) -> f64| {
+        r.as_ref().map(|r| ryumate::Range {
+            min: r.min.as_ref().map(si),
+            max: r.max.as_ref().map(si),
+        })
+    };
+    match &m.limits {
+        None => ryumate::Limits::NONE,
+        Some(l) => ryumate::Limits {
+            angle: range(&l.angle, crate::units::Quantity::radians),
+            distance: range(&l.distance, crate::units::Quantity::meters),
+        },
+    }
+}
+
+/// Refuses mate `id`'s limit bounds the solver can't take: a distance
+/// bound past `ryumate::MAX_LENGTH`, an angle bound that isn't finite.
+fn limit_values(id: &Id, m: &Mate) -> Result<()> {
+    let l = limits(m);
+    for r in l.distance.iter() {
+        for (k, b) in [("min", r.min), ("max", r.max)] {
+            if let Some(b) = b {
+                length_ok(id, &format!("limits.distance.{k}"), b)?;
+            }
+        }
+    }
+    for r in l.angle.iter() {
+        for (k, b) in [("min", r.min), ("max", r.max)] {
+            if let Some(b) = b {
+                angle_ok(id, &format!("limits.angle.{k}"), b)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `mate_out_of_limits` when mate `id`'s driven angle or distance lies
+/// outside its own limits (an angle read about its range), if it does.
+pub fn out_of_limits(id: &Id, m: &Mate) -> Option<Error> {
+    let l = limits(m);
+    let doc = m.limits.as_ref()?;
+    let found = |param: &str,
+                 driven: Option<&crate::units::Quantity>,
+                 r: Option<ryumate::Range>,
+                 text: Option<&crate::doc::mate::Range>,
+                 angle: bool|
+     -> Option<Error> {
+        let (q, r, text) = (driven?, r?, text?);
+        let v = if angle {
+            ryumate::unwrap_angle(q.radians(), &r)
+        } else {
+            q.meters()
+        };
+        let tol = if angle {
+            ryusketch::ANGLE_TOL
+        } else {
+            ryusketch::SOLVE_TOL
+        };
+        let stop = r.past(v, tol)?;
+        let (name, bound) = match stop {
+            ryumate::Stop::Min => ("min", text.min.as_ref()?),
+            ryumate::Stop::Max => ("max", text.max.as_ref()?),
+        };
+        Some(
+            Error::new(
+                Code::MateOutOfLimits,
+                format!(
+                    "{id}: its {param} {} is past its {name} {}",
+                    q.text(),
+                    bound.text()
+                ),
+            )
+            .with("feature", id)
+            .with("param", param)
+            .with("value", q.text())
+            .with("limit", name)
+            .with("bound", bound.text()),
+        )
+    };
+    found("angle", m.angle.as_ref(), l.angle, doc.angle.as_ref(), true).or_else(|| {
+        found(
+            "distance",
+            m.distance.as_ref(),
+            l.distance,
+            doc.distance.as_ref(),
+            false,
+        )
+    })
+}
+
 /// Refuses mate `id`'s values the solver can't take, as `ryumate`'s
 /// validation would: its distance and angle.
 fn mate_values(id: &Id, m: &Mate) -> Result<()> {
@@ -736,6 +831,7 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
                 // What it names comes before it; what it is, resolving says.
                 crate::graph::check_order(part, order, id, feature(id))?;
                 mate_values(id, m)?;
+                limit_values(id, m)?;
                 let a = resolve(id, "a", &m.a, &scope)?;
                 let b = resolve(id, "b", &m.b, &scope)?;
                 frame_ok(id, "a", &a.frame)?;
@@ -750,7 +846,7 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
                         kind: kind(m),
                         a: on(a, &body_of, &pattern_of),
                         b: on(b, &body_of, &pattern_of),
-                        limits: ryumate::Limits::NONE,
+                        limits: limits(m),
                     },
                 );
                 solved_mates.push(id.clone());
@@ -923,15 +1019,25 @@ pub fn settle(part: &Part, features: &mut BTreeMap<Id, Result<Output>>) -> Optio
                     .with("part", &part.id)
                     .with("conflicting", sets))
             }
-            Ok((_, state, None, a, b)) => {
+            Ok((k, state, None, a, b)) => {
+                let values = report.values.get(&k).copied();
                 let mut h = blake3::Hasher::new();
                 h.update(mate_state(state).as_bytes());
                 hash_pose(&mut h, &a);
                 hash_pose(&mut h, &b);
+                // A mate with limits hashes the stops its values rest on;
+                // one without hashes as it always has.
+                let doc = feature(&id).mate().expect("a mate");
+                if doc.limits.is_some() {
+                    let stop = |x: Option<ryumate::Measured>| format!("{:?}", x.and_then(|x| x.at));
+                    let v = values.unwrap_or_default();
+                    h.update(format!("limits {} {}", stop(v.angle), stop(v.distance)).as_bytes());
+                }
                 Ok(Output::Mate(Arc::new(Mated {
                     state,
                     a,
                     b,
+                    values,
                     hash: h.finalize().to_hex()[..32].to_owned(),
                 })))
             }
@@ -1429,6 +1535,68 @@ pub(crate) mod tests {
     use crate::sketch::tests::face_along;
     use serde_json::Value;
     use std::path::Path;
+
+    #[test]
+    fn a_limited_hinge_settles_at_its_stop() {
+        let (dir, mut s) = hinged();
+        // A whole turn free, then stopped at ±6°: wherever the hinge sat,
+        // the settled angle is within.
+        let m1 = feature_path(dir.path(), &id("frame"), &id("m1"));
+        let mut v = crate::doc::canonical::parse(&std::fs::read_to_string(&m1).unwrap()).unwrap();
+        v["format"] = json!(crate::doc::mate::LIMITS_FORMAT);
+        v["limits"] = json!({"angle": {"min": "-6 deg", "max": "6 deg"}});
+        write_json(&m1, &v).unwrap();
+        s.refresh().unwrap();
+        let r = s.rebuilt(&id("frame")).unwrap().clone();
+        let solve = r.solve.as_ref().unwrap();
+        assert!(solve.report.converged);
+        let crate::rebuild::Output::Mate(m) = r.output(&id("m1")).unwrap() else {
+            panic!()
+        };
+        let a = m.values.unwrap().angle.unwrap();
+        assert!(a.value.abs() <= 6f64.to_radians() + 1e-11, "{a:?}");
+        // A mate without limits still reports its value, unstopped; its
+        // hash is unchanged (Step 4's golden run proves it).
+        let (_d2, mut plain) = hinged();
+        let rp = plain.rebuilt(&id("frame")).unwrap().clone();
+        let crate::rebuild::Output::Mate(p) = rp.output(&id("m1")).unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.values.unwrap().angle.unwrap().at, None);
+    }
+
+    #[test]
+    fn a_driven_value_outside_its_limits_is_found() {
+        use crate::doc::files::Feature;
+        let (_dir, s) = hinged();
+        let p = s.project().part(&id("frame")).unwrap().clone();
+        let Some(Ok(Feature::Mate(m))) = p.features.get(&id("m1")) else {
+            panic!()
+        };
+        let mut m = (**m).clone();
+        let q = |t: &str| {
+            crate::units::Quantity::from_json_as(
+                &json!(t),
+                crate::units::Field::Angle,
+                &crate::expr::no_parameters,
+            )
+            .unwrap()
+        };
+        m.angle = Some(q("20 deg"));
+        m.limits = Some(crate::doc::mate::Limits {
+            angle: Some(crate::doc::mate::Range {
+                min: Some(q("-6 deg")),
+                max: Some(q("6 deg")),
+            }),
+            distance: None,
+        });
+        let e = out_of_limits(&id("m1"), &m).unwrap();
+        assert_eq!(e.code, Code::MateOutOfLimits);
+        assert_eq!(e.details["limit"], "max");
+        m.angle = Some(q("-366 deg"));
+        // -366° reads as -6° about the range's middle: within.
+        assert!(out_of_limits(&id("m1"), &m).is_none());
+    }
 
     #[test]
     fn an_assemblys_occurrences_are_counted_without_gathering_them() {
