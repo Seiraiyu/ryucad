@@ -13,7 +13,7 @@ use std::path::Path;
 
 pub use ryu_session::activity::{
     Bytes, Entry, EntryKind, FileChange, Files, Log, MAX_BULKY_BYTES, MAX_BYTES, MAX_ENTRIES, diff,
-    record, record_external,
+    record, record_external, record_switch,
 };
 
 /// Reads every file the project's state depends on.
