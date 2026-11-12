@@ -571,6 +571,27 @@ fn once(refs: Vec<(String, &Reference)>) -> Result<()> {
     Ok(())
 }
 
+/// A `delete_body` feature: the solids it takes out of the part's result
+/// (keys; an insert's ID for every solid it founded), each once. Features
+/// listed before it read them as they always did; nothing after it may
+/// name them (design 521).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeleteBody {
+    pub solids: Vec<Id>,
+}
+
+impl DeleteBody {
+    pub fn fields(&self) -> Value {
+        json!({"solids": self.solids})
+    }
+
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj) -> Result<DeleteBody> {
+        let solids = targets_from_json(&o.take("solids")?, "/solids")?;
+        Ok(DeleteBody { solids })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -947,6 +968,35 @@ mod tests {
                 (code, Some(pointer)),
                 "{v}"
             );
+        }
+    }
+
+    #[test]
+    fn a_delete_lists_solids_each_once() {
+        use crate::doc::files::Feature;
+        let f = |v: Value| Feature::from_json(&v, Unit::Mm, &Env::empty());
+        let h = |mut v: Value| {
+            v["format"] = json!(crate::doc::insert::FORMAT);
+            v["kind"] = json!("ryucad.feature");
+            v["type"] = json!("delete_body");
+            v
+        };
+        let v = h(json!({"solids": ["board", "box1", "cut/u3"]}));
+        let d = f(v.clone()).unwrap();
+        assert_eq!(d.type_name(), "delete_body");
+        assert_eq!(
+            d.deletes().iter().map(Id::as_str).collect::<Vec<_>>(),
+            ["board", "box1", "cut/u3"]
+        );
+        assert_eq!(d.to_json(), v);
+        assert!(d.targets().is_empty());
+        for (v, pointer) in [
+            (h(json!({})), "/solids"),
+            (h(json!({"solids": []})), "/solids"),
+            (h(json!({"solids": ["a", "a"]})), "/solids/1"),
+            (h(json!({"solids": ["a/B"]})), "/solids/0"),
+        ] {
+            assert_eq!(f(v.clone()).unwrap_err().details["pointer"], pointer, "{v}");
         }
     }
 }

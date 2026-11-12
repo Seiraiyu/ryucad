@@ -194,6 +194,8 @@ static NEW: Combine = Combine::NEW;
 pub enum Feature {
     /// Another part's solids, founded in this part's frame (ryucad 25).
     Insert(Box<super::insert::Insert>),
+    /// Solids taken out of the part's result (ryucad 25).
+    DeleteBody(Box<super::body::DeleteBody>),
     Primitive(Primitive),
     Sketch(Sketch),
     Extrude(Extrude),
@@ -1069,7 +1071,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, insert, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold, fill, extract, sew, thicken, move_face, replace_face, draft, delete_face, delete_blend, resize_blend"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, insert, delete_body, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold, fill, extract, sew, thicken, move_face, replace_face, draft, delete_face, delete_blend, resize_blend"),
     )
     .with("type", s)
 }
@@ -1089,6 +1091,7 @@ impl Feature {
             Feature::Pattern(_) => "pattern",
             Feature::Instance(_) => "instance",
             Feature::Insert(_) => "insert",
+            Feature::DeleteBody(_) => "delete_body",
             Feature::Mate(_) => "mate",
             Feature::InstancePattern(_) => "instance_pattern",
             Feature::Import(_) => "import",
@@ -1153,7 +1156,9 @@ impl Feature {
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
-        if matches!(self, Feature::Insert(_)) || solid_paths(&self.fields()) {
+        if matches!(self, Feature::Insert(_) | Feature::DeleteBody(_))
+            || solid_paths(&self.fields())
+        {
             return super::insert::FORMAT;
         }
         // A tweak that may change topology or remake its blends is
@@ -1221,7 +1226,7 @@ impl Feature {
             Feature::Instance(i) if i.import.is_some() => 5,
             Feature::Instance(_) | Feature::Mate(_) | Feature::InstancePattern(_) => 4,
             Feature::Import(i) => i.format(),
-            Feature::Insert(_) => super::insert::FORMAT,
+            Feature::Insert(_) | Feature::DeleteBody(_) => super::insert::FORMAT,
             Feature::Datum(_) => super::datum::FORMAT,
             Feature::Path(_) => super::path::FORMAT,
             Feature::Sweep(_) | Feature::Loft(_) => super::sweep::FORMAT,
@@ -1262,6 +1267,7 @@ impl Feature {
             Feature::Pattern(p) => p.fields(),
             Feature::Instance(i) => i.fields(),
             Feature::Insert(i) => i.fields(),
+            Feature::DeleteBody(d) => d.fields(),
             Feature::Mate(m) => m.fields(),
             Feature::InstancePattern(p) => p.fields(),
             Feature::Import(i) => i.fields(),
@@ -1342,6 +1348,9 @@ impl Feature {
                 &mut o, default, env,
             )?)),
             "import" => Feature::Import(Import::from_fields(&mut o)?),
+            "delete_body" => {
+                Feature::DeleteBody(Box::new(super::body::DeleteBody::from_fields(&mut o)?))
+            }
             "plane" | "axis" | "point" => {
                 Feature::Datum(Box::new(Datum::from_fields(ty, &mut o, default, env)?))
             }
@@ -1397,6 +1406,7 @@ impl Feature {
             | Feature::Pattern(_)
             | Feature::Instance(_)
             | Feature::Insert(_)
+            | Feature::DeleteBody(_)
             | Feature::Mate(_)
             | Feature::InstancePattern(_)
             | Feature::Datum(_)
@@ -1472,7 +1482,10 @@ impl Feature {
 
     /// The solids a `delete_body` ends, by key; none for anything else.
     pub fn deletes(&self) -> &[Id] {
-        &[]
+        match self {
+            Feature::DeleteBody(d) => &d.solids,
+            _ => &[],
+        }
     }
 
     /// Whether it founds a solid of its own, named by its ID: a body-making
