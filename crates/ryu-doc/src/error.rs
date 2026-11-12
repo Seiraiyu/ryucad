@@ -231,6 +231,11 @@ pub enum Code {
     /// A write that would leave an assembly's mates unable to all hold.
     /// The conflicting mates are in the details.
     AssemblyOverconstrained,
+    /// A mate's driven angle or distance outside its own limits: refused
+    /// when written, and a `check` finding when a parameter moved it
+    /// there. The mate, the value and the bound it passed are in the
+    /// details.
+    MateOutOfLimits,
     /// An import feature names a file under `imports/` that isn't there.
     ImportFileMissing,
     /// An import feature's file isn't the bytes it was written against:
@@ -1443,6 +1448,8 @@ mod tests {
             json!(Code::AssemblyOverconstrained),
             json!("assembly_overconstrained")
         );
+        assert_eq!(json!(Code::MateOutOfLimits), json!("mate_out_of_limits"));
+        assert_eq!(Code::MateOutOfLimits.exit_code(), 1);
     }
 
     #[test]
