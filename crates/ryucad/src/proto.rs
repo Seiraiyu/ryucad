@@ -1430,6 +1430,11 @@ pub enum Request {
         /// the file's assemblies put it (#499).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         flatten: bool,
+        /// Folders to look in for the files an assembly's parts are kept
+        /// in (design 448, 24.D), after the folder of the file naming
+        /// each: absolute, or relative to the project.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        search: Vec<String>,
     },
     /// Sets an import feature's mode (`feature`), or every import feature
     /// of `part`'s: a healed solid, or with `reference` a reference
@@ -2503,6 +2508,22 @@ pub fn parse_rpc_request(line: &str) -> (Value, Result<Request>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_takes_search_folders() {
+        let r = Request::from_rpc(
+            "import",
+            Some(json!({"path": "/a/asm.stp", "search": ["/lib", "parts"]})),
+        )
+        .unwrap();
+        let Request::Import { search, .. } = r else {
+            panic!("{r:?}")
+        };
+        assert_eq!(search, ["/lib", "parts"]);
+        // Left out, it is empty and not written.
+        let r = Request::from_rpc("import", Some(json!({"path": "/a/asm.stp"}))).unwrap();
+        assert!(!serde_json::to_string(&r).unwrap().contains("search"));
+    }
 
     #[test]
     fn requests_round_trip_through_rpc() {

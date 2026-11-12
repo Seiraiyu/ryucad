@@ -1089,6 +1089,7 @@ pub(crate) fn dispatch(
             update,
             solid,
             flatten,
+            search,
         } => crate::import::import(
             session,
             crate::import::Ask {
@@ -1101,7 +1102,7 @@ pub(crate) fn dispatch(
                 update,
                 solid,
                 flatten,
-                search: Vec::new(),
+                search,
             },
         ),
         Request::ImportReport { file, detail } => {

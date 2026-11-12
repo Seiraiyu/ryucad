@@ -5560,6 +5560,7 @@ fn import_request(path: &str, update: Option<String>, dry_run: bool, solid: bool
         update,
         solid,
         flatten: false,
+        search: Vec::new(),
     }
 }
 
