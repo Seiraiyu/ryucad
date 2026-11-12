@@ -27,7 +27,7 @@ use ryu_session::job::Phase;
 use serde_json::{Value, json};
 
 /// Every finding's code and severity: `doctor`'s issues keep their own.
-pub const CODES: [(&str, &str); 15] = [
+pub const CODES: [(&str, &str); 18] = [
     ("feature_failed", "error"),
     ("assembly_unsolved", "error"),
     ("mate_out_of_limits", "error"),
@@ -37,6 +37,9 @@ pub const CODES: [(&str, &str); 15] = [
     ("cache_mismatch", "error"),
     ("unmerged_path", "error"),
     ("instance_obsolete", "warning"),
+    ("insert_behind", "warning"),
+    ("insert_obsolete", "warning"),
+    ("insert_source_failed", "warning"),
     ("instances_interfere", "warning"),
     ("reference_faces_unmeshed", "warning"),
     ("reference_faces_dropped", "warning"),
@@ -434,6 +437,22 @@ pub fn run(
                 f["rev"] = w["rev"].clone();
                 findings.push(f);
             }
+            // An insert's warnings (design 521): its source failed, or its
+            // label is obsolete.
+            if let Some(code @ ("insert_obsolete" | "insert_source_failed")) = w["code"].as_str()
+                && let Some(fid) = w["feature"]
+                    .as_str()
+                    .and_then(|f| Id::parse(f, "feature").ok())
+            {
+                let message = w["message"].as_str().unwrap_or_default().to_owned();
+                let mut f = finding(code, id, &fid, message);
+                for k in ["of", "rev", "failing"] {
+                    if let Some(x) = w.get(k) {
+                        f[k] = x.clone();
+                    }
+                }
+                findings.push(f);
+            }
             // What a reference's import couldn't lay out or orient.
             if let Some(code) = w["code"].as_str()
                 && code.starts_with("reference_")
@@ -495,6 +514,12 @@ pub fn run(
         let solids = crate::solid::Solids::of(&p);
         for shown in fresh.shown(&solids) {
             if let Some((f, b)) = shown.state {
+                // An inserted solid nothing here acted on is its source's,
+                // checked in the source: a board of hundreds of bodies
+                // isn't checked again in every part inserting it.
+                if shown.solid.is_path() && f.as_str() == shown.solid.founder_str() {
+                    continue;
+                }
                 bodies.push((shown.solid.clone(), f.clone(), b.clone()));
             }
         }
@@ -1096,5 +1121,30 @@ mod tests {
         // A part's issue is its own: checking `p` alone doesn't report it.
         let p = call(&mut s, "check", json!({"part": "p"})).unwrap();
         assert!(codes(&p).is_empty(), "{p}");
+    }
+
+    #[test]
+    fn check_reports_an_inserts_warnings_and_its_failures() {
+        let (dir, mut s) = crate::insert::tests::boarded();
+        // The source fails: a warning on the inserting part.
+        let f = dir.path().join("parts/pcb/features/u1.json");
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
+        v["params"]["x"] = json!("-1 mm");
+        std::fs::write(&f, crate::doc::canonical::to_string(&v)).unwrap();
+        s.reload().unwrap();
+        let r = call(&mut s, "check", json!({"part": "enclosure"})).unwrap();
+        let codes = codes(&r);
+        assert!(
+            codes.iter().any(|c| c == "insert_source_failed pcb"),
+            "{codes:?}"
+        );
+        // The inserted solids aren't checked again in the inserting part.
+        let checked = &r["parts"][0];
+        assert!(
+            checked["solids"]
+                .as_array()
+                .is_none_or(|a| a.iter().all(|x| x["solid"] != "pcb/board")),
+            "{r}"
+        );
     }
 }

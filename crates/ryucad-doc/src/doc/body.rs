@@ -206,9 +206,9 @@ impl Split {
             (None, Some(t)) => {
                 let mut f = Obj::new(&t, "/tool")?;
                 let by = match (f.take_opt("body"), f.take_opt("faces")) {
-                    (Some(Value::String(b)), None) => SplitBy::Body(
-                        Id::parse(&b, "feature").map_err(|e| e.with("pointer", "/tool/body"))?,
-                    ),
+                    (Some(Value::String(b)), None) => {
+                        SplitBy::Body(super::solid::SolidRef::parse(&b, "/tool/body")?)
+                    }
                     (None, Some(faces)) => {
                         let faces = refs(&faces, "/tool/faces")?;
                         for (k, r) in faces.iter().enumerate() {
@@ -458,14 +458,9 @@ fn target(o: &mut Obj) -> Result<Id> {
     solid_id(o, "target")
 }
 
-/// A field naming a solid by its founder.
+/// A field naming a solid by its key ([`super::solid::SolidRef`]).
 pub(super) fn solid_id(o: &mut Obj, key: &str) -> Result<Id> {
-    let at = format!("/{key}");
-    let t = o.take(key)?;
-    let t = t
-        .as_str()
-        .ok_or_else(|| invalid(&at, &format!("{key} is a solid's feature ID")))?;
-    Id::parse(t, "feature").map_err(|e| e.with("pointer", at))
+    super::solid::SolidRef::from_json(&o.take(key)?, &format!("/{key}"))
 }
 
 /// A length, of either sign.
@@ -574,6 +569,27 @@ fn once(refs: Vec<(String, &Reference)>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A `delete_body` feature: the solids it takes out of the part's result
+/// (keys; an insert's ID for every solid it founded), each once. Features
+/// listed before it read them as they always did; nothing after it may
+/// name them (design 521).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeleteBody {
+    pub solids: Vec<Id>,
+}
+
+impl DeleteBody {
+    pub fn fields(&self) -> Value {
+        json!({"solids": self.solids})
+    }
+
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj) -> Result<DeleteBody> {
+        let solids = targets_from_json(&o.take("solids")?, "/solids")?;
+        Ok(DeleteBody { solids })
+    }
 }
 
 #[cfg(test)]
@@ -771,6 +787,22 @@ mod tests {
         assert_eq!(strings, ["t + 1 mm"]);
     }
 
+    #[test]
+    fn a_mirror_copies_and_a_shell_hollows_an_inserted_solid() {
+        let f =
+            |v: Value| crate::doc::files::Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        let m = f(
+            json!({"format": crate::doc::files::FEATURE_FORMAT, "kind": "ryucad.feature", "type": "mirror",
+                         "solid": "board/u1", "plane": "xy", "operation": "new"}),
+        );
+        assert_eq!(m.source().unwrap().as_str(), "board/u1");
+        let s = f(
+            json!({"format": crate::doc::files::FEATURE_FORMAT, "kind": "ryucad.feature", "type": "shell",
+                         "target": "board/u1", "thickness": "1 mm"}),
+        );
+        assert_eq!(s.targets()[0].as_str(), "board/u1");
+    }
+
     fn mirror(v: Value) -> Result<Mirror> {
         let mut o = Obj::new(&v, "")?;
         let m = Mirror::from_fields(&mut o)?;
@@ -936,6 +968,35 @@ mod tests {
                 (code, Some(pointer)),
                 "{v}"
             );
+        }
+    }
+
+    #[test]
+    fn a_delete_lists_solids_each_once() {
+        use crate::doc::files::Feature;
+        let f = |v: Value| Feature::from_json(&v, Unit::Mm, &Env::empty());
+        let h = |mut v: Value| {
+            v["format"] = json!(crate::doc::insert::FORMAT);
+            v["kind"] = json!("ryucad.feature");
+            v["type"] = json!("delete_body");
+            v
+        };
+        let v = h(json!({"solids": ["board", "box1", "cut/u3"]}));
+        let d = f(v.clone()).unwrap();
+        assert_eq!(d.type_name(), "delete_body");
+        assert_eq!(
+            d.deletes().iter().map(Id::as_str).collect::<Vec<_>>(),
+            ["board", "box1", "cut/u3"]
+        );
+        assert_eq!(d.to_json(), v);
+        assert!(d.targets().is_empty());
+        for (v, pointer) in [
+            (h(json!({})), "/solids"),
+            (h(json!({"solids": []})), "/solids"),
+            (h(json!({"solids": ["a", "a"]})), "/solids/1"),
+            (h(json!({"solids": ["a/B"]})), "/solids/0"),
+        ] {
+            assert_eq!(f(v.clone()).unwrap_err().details["pointer"], pointer, "{v}");
         }
     }
 }
