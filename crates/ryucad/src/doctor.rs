@@ -59,7 +59,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 45] = [
+pub const CODES: [(&str, &str); 47] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -76,6 +76,8 @@ pub const CODES: [(&str, &str); 45] = [
     ("cloud_sync_folder", "warning"),
     ("sketch_stale", "warning"),
     ("assembly_stale", "warning"),
+    ("insert_behind", "warning"),
+    ("not_found", "error"),
     ("gitattributes_missing", "warning"),
     ("git_drivers_missing", "warning"),
     ("merge_conflict", "error"),
@@ -526,6 +528,7 @@ fn diagnose_in(builds: &mut Builds) -> Vec<Issue> {
     }
     drop(stage);
     diagnose_assemblies(builds, &part_ids, &mut issues);
+    diagnose_inserts(builds, &mut issues);
     diagnose_followed(builds, &part_ids, &mut issues);
     diagnose_unused(root, &mut issues);
     diagnose_items(&mut issues, root);
@@ -738,6 +741,68 @@ fn diagnose_assemblies(builds: &mut Builds, parts: &[&str], issues: &mut Vec<Iss
             files,
             format!("parts/{part}: its stored poses don't satisfy its mates"),
         ));
+    }
+}
+
+/// `insert_behind`: an insert pinned to a label older than its source's
+/// newest official one, repaired by `insert_update`; `not_found` for an
+/// insert whose source part is gone, with no repair (design 521).
+fn diagnose_inserts(builds: &mut Builds, issues: &mut Vec<Issue>) {
+    let Some(s) = builds.session() else {
+        return;
+    };
+    let inserts: Vec<(Id, Id, crate::doc::insert::Insert)> = s
+        .project()
+        .parts
+        .iter()
+        .flat_map(|(pid, p)| {
+            p.order()
+                .iter()
+                .filter_map(move |fid| match p.features.get(fid) {
+                    Some(Ok(Feature::Insert(i))) => Some((pid.clone(), fid.clone(), (**i).clone())),
+                    _ => None,
+                })
+        })
+        .collect();
+    for (pid, fid, ins) in inserts {
+        let file = format!("parts/{pid}/features/{fid}.json");
+        if ins.rev.project().is_none() && !s.project().parts.contains_key(&ins.part) {
+            issues.push(
+                issue(
+                    "not_found",
+                    vec![file],
+                    format!(
+                        "{pid}/{fid} inserts {}, which isn't a part of the project",
+                        ins.part
+                    ),
+                )
+                .with("insert", json!(format!("{pid}/{fid}")))
+                .with("part", json!(ins.part)),
+            );
+            continue;
+        }
+        let Some(label) = ins.rev.label() else {
+            continue;
+        };
+        let Ok(Some(newest)) = crate::release::newest_official(s, &ins.part, ins.rev.project())
+        else {
+            continue;
+        };
+        if crate::release::is_newer(s, &newest, label).unwrap_or(false) {
+            issues.push(
+                issue(
+                    "insert_behind",
+                    vec![file],
+                    format!(
+                        "{pid}/{fid} inserts {} at label {label}; {newest} is official",
+                        ins.part
+                    ),
+                )
+                .with("insert", json!(format!("{pid}/{fid}")))
+                .with("rev", ins.rev.to_json())
+                .with("newest", json!(newest)),
+            );
+        }
     }
 }
 
@@ -1816,8 +1881,10 @@ fn stale_in_part(builds: &mut Builds, part: &str) -> BTreeMap<String, Vec<String
                 continue;
             };
             for i in crate::graph::inputs(feature) {
+                // A solid key below an insert is read through the insert.
+                let i = i.founder();
                 if seen.insert(i.clone()) {
-                    todo.push(i.clone());
+                    todo.push(i);
                 }
             }
         }
@@ -2358,6 +2425,32 @@ fn plan(
                     id: id("use-copy"),
                     summary: format!("replace {original} with {copy}, then delete the copy"),
                     changes: vec![write(original, bytes), delete(copy)],
+                    params: Vec::new(),
+                });
+            }
+        }
+        "insert_behind" => {
+            let (pid, fid) = i.details["insert"]
+                .as_str()
+                .and_then(|s| s.split_once('/'))
+                .unwrap_or_default();
+            let ask = crate::insert::Update {
+                part: pid,
+                feature: fid,
+                to: None,
+                dry_run: true,
+            };
+            if let Some(s) = builds.session()
+                && let Ok(v) = crate::insert::update(s, ask, None)
+                && let Some(bytes) = crate::insert::moved_bytes(s, pid, fid, &v["to"])
+            {
+                out.push(Repair {
+                    id: id("insert_update"),
+                    summary: format!(
+                        "pin {pid}/{fid} to label {}",
+                        v["to"]["label"].as_str().unwrap_or_default()
+                    ),
+                    changes: vec![write(first, bytes)],
                     params: Vec::new(),
                 });
             }
@@ -4140,5 +4233,73 @@ pub(crate) mod tests {
                 "steps": [{"instances": ["one"], "translate": ["0 mm", "0 mm", "lift"]}]})),
         );
         assert!(codes(r).is_empty(), "{:?}", codes(r));
+    }
+
+    #[test]
+    fn an_insert_behind_a_newer_release_is_a_warning_with_an_update() {
+        use crate::doc::assembly::Rev;
+        // Pinned at A, B official.
+        let (dir, s) = crate::insert::tests::released_board();
+        drop(s);
+        let r = dir.path();
+        let file = "parts/enclosure/features/pcb.json";
+        let issues = diagnose(r);
+        let i = issues
+            .iter()
+            .find(|i| i.code == "insert_behind")
+            .unwrap_or_else(|| panic!("{:?}", codes(r)));
+        assert_eq!(i.severity, "warning");
+        assert_eq!(i.files, [file]);
+        assert_eq!(i.details["insert"], "enclosure/pcb");
+        assert_eq!(i.details["rev"], json!({"label": "A"}));
+        assert_eq!(i.details["newest"], "B");
+        let v = report(r).unwrap();
+        let behind = v["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["code"] == "insert_behind")
+            .unwrap();
+        let id = behind["repairs"][0]["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            id.split('@').next().unwrap(),
+            format!("insert_behind:insert_update:{file}"),
+            "{behind}"
+        );
+        fix(r, &[&id], Params::default());
+        let s = crate::session::Session::open(r).unwrap();
+        let f = s
+            .project()
+            .part(&Id::parse("enclosure", "part").unwrap())
+            .unwrap()
+            .features[&Id::parse("pcb", "feature").unwrap()]
+            .clone()
+            .unwrap();
+        assert_eq!(f.insert().unwrap().rev, Rev::Label("B".into()));
+        assert!(diagnose(r).iter().all(|i| i.code != "insert_behind"));
+    }
+
+    #[test]
+    fn an_insert_whose_source_is_gone_is_not_found_with_no_repair() {
+        let (dir, s) = crate::insert::tests::boarded();
+        drop(s);
+        let r = dir.path();
+        fs::remove_dir_all(r.join("parts/pcb")).unwrap();
+        let i = diagnose(r)
+            .into_iter()
+            .find(|i| i.code == "not_found")
+            .unwrap_or_else(|| panic!("{:?}", codes(r)));
+        assert_eq!(i.files, ["parts/enclosure/features/pcb.json"]);
+        let v = report(r).unwrap();
+        let gone = v["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["code"] == "not_found")
+            .unwrap();
+        assert!(
+            gone["repairs"].as_array().is_none_or(Vec::is_empty),
+            "{gone}"
+        );
     }
 }

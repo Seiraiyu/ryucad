@@ -1343,9 +1343,19 @@ fn new_project_and_open_sample_from_the_start_window() {
         .unwrap();
     let checked: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(checked["ok"], true, "{checked}");
-    assert_eq!(
-        checked["result"]["findings"],
-        serde_json::json!([]),
+    // Interference isn't run unasked (design 525): the sample's assembly
+    // says so, and nothing else is found.
+    let findings = checked["result"]["findings"].as_array().unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f["code"] == "interference_not_checked"),
+        "{checked}"
+    );
+    assert!(
+        findings
+            .iter()
+            .all(|f| f["code"] == "interference_not_checked" && f["severity"] == "info"),
         "{checked}"
     );
 }
@@ -7040,6 +7050,36 @@ fn markup_waits_for_words_esc_leaves_the_mark_then_the_tool_and_view_cant_open_i
         .set_mode(ryucad_app::core::modes::Mode::View);
     h.run_steps(2);
     assert!(h.get_by_label("Markup").accesskit_node().is_disabled());
+}
+
+#[test]
+fn the_part_section_shows_from_the_step_file() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new();
+    p.ok(&["pdm", "init"]);
+    let vendor = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../ryustep/tests/data/properties/vendor.stp"
+    );
+    p.ok(&["import", "--solid", vendor]);
+    let mut h = sized(&p, 1200.0);
+    frames(&mut h, |app| match &app.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => o.ws.idle() && o.ws.model.meshes.len() == 1,
+        _ => false,
+    });
+    show_tab(&mut h, "part");
+    frames(&mut h, |app| match &app.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => {
+            o.ws.props.as_ref().is_some_and(|p| !p.file.is_empty())
+        }
+        _ => false,
+    });
+    h.step();
+    shown(&mut h, "From the STEP file");
+    shown(&mut h, "Supplier");
 }
 
 #[test]

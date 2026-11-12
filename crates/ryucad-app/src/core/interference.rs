@@ -1,7 +1,9 @@
 //! Interference as the window shows it: the last `interference` report of
 //! the assembly it shows, read from the daemon, never worked out here.
 //! Each pair that shares a volume is listed, and the faces of both sides
-//! it touches are painted in the removed colour.
+//! it touches are painted in the removed colour. When the assembly
+//! changes, the report goes stale: still listed, painted no more, and
+//! asked again only when someone asks (design 525).
 
 use ryucad::error::Error;
 use serde_json::Value;
@@ -60,6 +62,9 @@ pub struct Interference {
     pub touching: usize,
     pub unchecked: Vec<(String, String)>,
     pub error: Option<Error>,
+    /// The assembly changed since this was asked: still listed, but
+    /// painted no more, until it is asked again (design 525).
+    pub stale: bool,
 }
 
 impl Interference {
@@ -69,6 +74,12 @@ impl Interference {
             part: part.to_owned(),
             ..Interference::default()
         }
+    }
+
+    /// The assembly changed: the list stays, marked, and nothing is
+    /// painted until it is asked again.
+    pub fn mark_stale(&mut self) {
+        self.stale = true;
     }
 
     /// From an `interference` answer.
@@ -106,14 +117,17 @@ impl Interference {
         *self = Interference {
             part: std::mem::take(&mut self.part),
             loaded: true,
+            stale: self.stale,
             error: Some(e),
             ..Interference::default()
         };
     }
 
     /// Every face the pairs touch, as entity references: what is painted.
+    /// None while stale: the faces may be gone.
     pub fn faces(&self) -> impl Iterator<Item = &String> {
-        self.pairs.iter().flat_map(|p| &p.faces)
+        let pairs: &[Pair] = if self.stale { &[] } else { &self.pairs };
+        pairs.iter().flat_map(|p| &p.faces)
     }
 }
 
@@ -163,5 +177,29 @@ mod tests {
         assert_eq!(p.volume_m3, None);
         assert!(p.approximate);
         assert_eq!(p.label("rig"), "a/r and c/r: overlap (approximate)");
+    }
+
+    #[test]
+    fn a_changed_assembly_goes_stale_and_paints_nothing() {
+        let mut i = Interference::asked("frame");
+        i.take(&json!({
+            "part": "frame",
+            "interferences": [{"a": "frame/p1/slab", "b": "frame/b1/shank",
+                               "volume_m3": 1e-7,
+                               "faces": {"a": ["frame/p1/slab/aa"], "b": ["frame/b1/shank/bb"]}}],
+            "touching": [], "unchecked": [],
+        }));
+        assert_eq!(i.faces().count(), 2);
+        i.mark_stale();
+        assert!(i.stale);
+        assert_eq!(i.pairs.len(), 1, "still listed");
+        assert_eq!(i.faces().count(), 0, "painted no more");
+        // An answer still in flight leaves it stale, as does a failure:
+        // only asking anew clears it.
+        i.take(&json!({"interferences": [], "touching": [], "unchecked": []}));
+        assert!(i.stale);
+        i.failed(Error::new(ryucad::error::Code::WrongPartKind, "a part"));
+        assert!(i.stale);
+        assert!(!Interference::asked("frame").stale);
     }
 }

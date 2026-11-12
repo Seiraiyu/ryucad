@@ -315,3 +315,114 @@ fn styles_round_trip() {
         assert_eq!(got, want, "seed {seed}");
     }
 }
+
+/// Seeded materials and attributes (design 448, plan 24.C), written over
+/// a seeded body with styles, read back as written; the file with them
+/// starts with every instance the file with the styles alone has.
+#[test]
+fn properties_round_trip() {
+    use ryustep::properties::Value;
+    use ryustep::{AttributeData, DataValue, MaterialData, PartData, ProductData};
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for seed in 0..64u64 {
+        let body = ryukei::primitive::block(
+            ryukei::name::OpKey(seed as u128 + 1),
+            0.01 + (next() % 50) as f64 * 1e-3,
+            0.02,
+            0.03,
+            &ryukei::geom::Rigid::IDENTITY,
+        )
+        .unwrap()
+        .0;
+        let model = ryustep::WriteModel {
+            products: vec![ryustep::Product {
+                id: format!("p{seed}"),
+                name: format!("p{seed}"),
+                bodies: vec![body],
+                ..Default::default()
+            }],
+        };
+        let n = 1 + (next() % 6) as usize;
+        let attributes: Vec<AttributeData> = (0..n)
+            .map(|i| {
+                let value = match next() % 5 {
+                    0 => DataValue::Text(format!("t{}", next() % 1000)),
+                    1 => DataValue::Integer((next() % 100_000) as i64 - 50_000),
+                    2 => DataValue::Number((next() % 1_000_000) as f64 / 997.0),
+                    3 => DataValue::Boolean(next() % 2 == 0),
+                    _ => DataValue::Length((next() % 10_000) as f64 * 1e-4),
+                };
+                AttributeData {
+                    name: format!("a{i}"),
+                    value,
+                }
+            })
+            .collect();
+        let density = (next() % 2 == 0).then(|| 1000.0 + (next() % 20_000) as f64 / 2.0);
+        let data = PartData {
+            products: vec![ProductData {
+                product: 0,
+                material: Some(MaterialData {
+                    name: format!("m{}", next() % 9),
+                    density,
+                }),
+                attributes: attributes.clone(),
+            }],
+        };
+        let paints = ryustep::Paints {
+            bodies: vec![ryustep::BodyPaint {
+                product: 0,
+                body: 0,
+                base: Some(ryustep::Paint {
+                    colour: [200, 10, 10],
+                    opacity: 1.0,
+                }),
+                faces: Vec::new(),
+            }],
+            occurrences: Vec::new(),
+        };
+        let opts = ryustep::WriteOptions {
+            unit: ryustep::LengthUnit::Millimeter,
+            ..Default::default()
+        };
+        let styled = ryustep::write_styled(&model, &[], &paints, &opts)
+            .unwrap()
+            .bytes;
+        let both = ryustep::write_with_data(&model, &[], &paints, &data, &opts)
+            .unwrap()
+            .bytes;
+        let (a, b) = (
+            ryustep::part21::parse(&styled).unwrap(),
+            ryustep::part21::parse(&both).unwrap(),
+        );
+        assert_eq!(
+            format!("{:?}", &b.instances[..a.instances.len()]),
+            format!("{:?}", a.instances),
+            "seed {seed}: the styled file's instances first, unmoved"
+        );
+        let o = ryustep::open(&both).unwrap();
+        let p = &o.properties().products[&0];
+        let m = p.material.as_ref().unwrap();
+        assert_eq!(m.density, density, "seed {seed}");
+        assert_eq!(p.attributes.len(), attributes.len(), "seed {seed}");
+        for (got, want) in p.attributes.iter().zip(&attributes) {
+            let ok = match (&got.value, &want.value) {
+                (Value::Text(a), DataValue::Text(b)) => a == b,
+                (Value::Integer(a), DataValue::Integer(b)) => a == b,
+                (Value::Number(a), DataValue::Number(b)) => a == b,
+                (Value::Boolean(a), DataValue::Boolean(b)) => a == b,
+                (Value::Measure { value, unit }, DataValue::Length(m)) => {
+                    unit.name == "mm" && (value * 1e-3 - m).abs() <= 1e-15
+                }
+                _ => false,
+            };
+            assert!(ok, "seed {seed}: {got:?} against {want:?}");
+        }
+    }
+}

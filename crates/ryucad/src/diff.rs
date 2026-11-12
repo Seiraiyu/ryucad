@@ -195,6 +195,24 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                     lines.push(format!("{k} = {}", connector(&c)));
                 }
             }
+            // A mate's stops on one line: `limits = angle -6 deg .. 6 deg,
+            // distance .. 10 mm`.
+            if let Some(Value::Object(l)) = rest.remove("limits") {
+                let range = |r: &Value| {
+                    let lo = r.get("min").map(scalar);
+                    let hi = r.get("max").map(scalar);
+                    [lo, Some("..".to_owned()), hi]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                let parts: Vec<String> = ["angle", "distance"]
+                    .into_iter()
+                    .filter_map(|k| l.get(k).map(|r| format!("{k} {}", range(r))))
+                    .collect();
+                lines.push(format!("limits = {}", parts.join(", ")));
+            }
         }
         // A path's segments one line each, in order: the reference, and
         // whether it grows to its tangent chain.
@@ -494,6 +512,38 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                     list("origin_m"),
                     list("z"),
                     list("x")
+                ));
+            }
+        }
+        // An insert's source and pin on one line, its placement on another
+        // (design 521).
+        Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("insert") => {
+            let project = rest.remove("project");
+            let part = rest.remove("part").map(|p| scalar(&p)).unwrap_or_default();
+            let of = match &project {
+                Some(p) => format!("{}:{part}", named(p.as_str().unwrap_or_default())),
+                None => part,
+            };
+            let rev = match rest.remove("rev") {
+                Some(r) => match r.get("label").and_then(Value::as_str) {
+                    Some(l) => format!("label {l}"),
+                    None => scalar(&r),
+                },
+                None => String::new(),
+            };
+            lines.push(format!("insert = {of} @ {rev}"));
+            if let Some(p) = rest.remove("placement") {
+                let three = |k: &str| -> String {
+                    p.get(k)
+                        .and_then(Value::as_array)
+                        .map(|a| a.iter().map(scalar).collect::<Vec<_>>().join(", "))
+                        .unwrap_or_default()
+                };
+                lines.push(format!(
+                    "placement = origin ({}), z [{}], x [{}]",
+                    three("origin"),
+                    three("z"),
+                    three("x")
                 ));
             }
         }
@@ -1107,6 +1157,11 @@ fn reference(v: &Value) -> Option<String> {
         2 => {
             let n = o.get("name").or_else(|| o.get("entity"))?.as_str()?;
             Some(format!("{f}/{n}"))
+        }
+        // An inserted solid's entity: `<insert>/<solid>/<name>`.
+        3 => {
+            let (solid, n) = (o.get("solid")?.as_str()?, o.get("name")?.as_str()?);
+            Some(format!("{f}/{solid}/{n}"))
         }
         _ => None,
     }
@@ -2951,6 +3006,27 @@ mod tests {
     }
 
     #[test]
+    fn a_mates_limits_change_by_bound() {
+        let before = json!({"format": 22, "kind": "ryucad.feature", "type": "mate",
+                            "form": "cylindrical",
+                            "a": {"instance": ["base"], "at": "origin"},
+                            "b": {"instance": ["pin"], "at": "origin"},
+                            "limits": {"angle": {"min": "-6 deg", "max": "6 deg"}}});
+        let mut after = before.clone();
+        after["limits"]["angle"]["max"] = json!("8 deg");
+        after["limits"]["distance"] = json!({"max": "5 mm"});
+        let mut out = Vec::new();
+        changes("", Some(&before), Some(&after), &mut out);
+        assert_eq!(
+            out,
+            [
+                json!({"at": "/limits/angle/max", "from": "6 deg", "to": "8 deg"}),
+                json!({"at": "/limits/distance", "to": {"max": "5 mm"}}),
+            ]
+        );
+    }
+
+    #[test]
     fn a_tweaks_changes_are_by_field() {
         let n = |k: u8| json!({"feature": "b", "name": format!("{k:032x}")});
         let before = json!({"format": 16, "kind": "ryucad.feature", "type": "move_face",
@@ -3506,6 +3582,24 @@ mod tests {
         .unwrap();
         assert_eq!(names_near(&dir.path().join("parts/a")), names);
         assert!(names_near(std::path::Path::new("/")).is_empty());
+    }
+
+    #[test]
+    fn a_mates_limits_are_one_line() {
+        let v = json!({"format": 22, "kind": "ryucad.feature", "type": "mate",
+                       "form": "cylindrical",
+                       "a": {"instance": ["base"], "at": "origin"},
+                       "b": {"instance": ["pin"], "at": "origin"},
+                       "limits": {"angle": {"min": "-6 deg", "max": "6 deg"},
+                                  "distance": {"max": "10 mm"}}});
+        assert_eq!(
+            text(v),
+            "ryucad.feature mate (format 22)\n\
+             a = base : origin\n\
+             b = pin : origin\n\
+             form = cylindrical\n\
+             limits = angle -6 deg .. 6 deg, distance .. 10 mm\n"
+        );
     }
 
     #[test]
@@ -5137,5 +5231,53 @@ mod tests {
         ] {
             assert!(t.lines().any(|l| l == line), "{line}: {t}");
         }
+    }
+
+    #[test]
+    fn an_insert_and_a_delete_read_a_line_per_field() {
+        let insert = json!({"format": 21, "kind": "ryucad.feature", "type": "insert", "part": "pcb",
+            "rev": {"label": "B"},
+            "placement": {"origin": ["0 mm", "0 mm", "1.6 mm"], "x": [1, 0, 0], "z": [0, 0, 1]}});
+        let t = String::from_utf8(textconv(insert.to_string().as_bytes())).unwrap();
+        assert!(t.contains("insert = pcb @ label B\n"), "{t}");
+        assert!(
+            t.contains("placement = origin (0 mm, 0 mm, 1.6 mm), z [0, 0, 1], x [1, 0, 0]\n"),
+            "{t}"
+        );
+        let working = json!({"format": 21, "kind": "ryucad.feature", "type": "insert",
+            "part": "pcb", "rev": "working"});
+        let t = String::from_utf8(textconv(working.to_string().as_bytes())).unwrap();
+        assert!(t.contains("insert = pcb @ working\n"), "{t}");
+        assert!(!t.contains("placement"), "{t}");
+        let delete = json!({"format": 21, "kind": "ryucad.feature", "type": "delete_body",
+            "solids": ["board", "lid"]});
+        let t = String::from_utf8(textconv(delete.to_string().as_bytes())).unwrap();
+        assert!(t.contains("solids = [board, lid]\n"), "{t}");
+        let n = "0123456789abcdef0123456789abcdef";
+        let fillet = json!({"format": 21, "kind": "ryucad.feature", "type": "fillet",
+            "groups": [{"radius": "1 mm", "edges": [{"feature": "board", "solid": "u1", "name": n}]}]});
+        let t = String::from_utf8(textconv(fillet.to_string().as_bytes())).unwrap();
+        assert!(t.contains(&format!("board/u1/{n}")), "{t}");
+    }
+
+    #[test]
+    fn a_pin_moved_shows_as_inserted_solids_changed() {
+        let (dir, mut s) = crate::insert::tests::released_board();
+        // The pin at A committed, then moved to B.
+        crate::git::tests::git(dir.path(), &["add", "."]);
+        crate::git::tests::git(dir.path(), &["commit", "-q", "-m", "pin A"]);
+        s.reload().unwrap();
+        crate::server::tests::call(
+            &mut s,
+            "insert.update",
+            json!({"part": "enclosure", "feature": "pcb"}),
+        )
+        .unwrap();
+        let v = crate::server::tests::call(&mut s, "diff", json!({"model": true})).unwrap();
+        let p = &v["parts"]["enclosure"];
+        let change = &p["features"]["pcb"]["changes"][0];
+        assert_eq!(change["at"], "/rev/label", "{v}");
+        assert_eq!((&change["from"], &change["to"]), (&json!("A"), &json!("B")));
+        assert!(p["solids"].get("pcb/board").is_some(), "{v}");
     }
 }

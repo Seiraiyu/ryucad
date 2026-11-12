@@ -252,6 +252,7 @@ pub fn plan(
                 features: Vec::new(),
                 removed: Vec::new(),
                 properties: BTreeMap::new(),
+                props_of: None,
             });
         };
     // Import features: the new hash, the product as it is now, and the
@@ -472,6 +473,7 @@ pub fn plan(
                                 ),
                                 removed: Vec::new(),
                                 properties: BTreeMap::new(),
+                                props_of: None,
                             },
                         );
                         let usage = ImportUsage {
@@ -513,6 +515,16 @@ pub fn plan(
             (r.clone(), parts)
         })
         .collect();
+    let assemblies: BTreeSet<usize> = planned
+        .values()
+        .filter(|p| p.kind == PartKind::Assembly)
+        .filter_map(|p| p.definition)
+        .collect();
+    for p in planned.values_mut() {
+        p.props_of = p
+            .definition
+            .filter(|k| p.kind == PartKind::Assembly || !assemblies.contains(k));
+    }
     Ok(Update {
         planned: planned.into_values().chain(made).chain(flattened).collect(),
         vanished,
@@ -621,6 +633,20 @@ fn reflatten(
             features,
             removed,
             properties: BTreeMap::new(),
+            props_of: {
+                let makes = plan::makes(opened);
+                let roots: Vec<usize> = opened
+                    .products
+                    .roots
+                    .iter()
+                    .copied()
+                    .filter(|&k| makes[k])
+                    .collect();
+                match roots.as_slice() {
+                    [k] => Some(*k),
+                    _ => None,
+                }
+            },
         },
         kept,
     ))
@@ -1721,5 +1747,23 @@ mod tests {
             .map(|f| (f["id"].as_str().unwrap(), f["ok"] == true))
             .collect();
         assert_eq!(state, [("body", true), ("low", true), ("high", false)]);
+    }
+
+    /// Design 525: interference runs only when asked. An assembly
+    /// imported as references, rebuilt, updated to a new version and
+    /// rebuilt again leaves the session's interference cache empty.
+    #[test]
+    fn import_and_update_never_run_interference() {
+        let (src, path) = outside(&frame_version(1));
+        let (_dir, mut s) = fresh();
+        call(&mut s, "import", json!({"path": path})).unwrap();
+        drop(src);
+        // A part of the second version may fail (its product is gone):
+        // what the rebuild answers doesn't matter here, only that it ran.
+        let _ = call(&mut s, "rebuild", json!({}));
+        assert!(s.interference.is_empty(), "the import ran interference");
+        update(&mut s, &frame_version(2), json!({"solid": false})).unwrap();
+        let _ = call(&mut s, "rebuild", json!({}));
+        assert!(s.interference.is_empty(), "the update ran interference");
     }
 }

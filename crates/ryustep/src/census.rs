@@ -1421,6 +1421,14 @@ mod tests {
             "SURFACE_STYLE_RENDERING_WITH_PROPERTIES",
             "SURFACE_STYLE_TRANSPARENT",
             "SPECIFIED_HIGHER_USAGE_OCCURRENCE",
+            "MATERIAL_DESIGNATION",
+            "MEASURE_REPRESENTATION_ITEM",
+            "VALUE_REPRESENTATION_ITEM",
+            "INTEGER_REPRESENTATION_ITEM",
+            "REAL_REPRESENTATION_ITEM",
+            "BOOLEAN_REPRESENTATION_ITEM",
+            "DERIVED_UNIT",
+            "DERIVED_UNIT_ELEMENT",
         ] {
             assert_ne!(category_of(n), Unknown, "{n}");
         }

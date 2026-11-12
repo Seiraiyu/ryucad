@@ -57,6 +57,29 @@ fn mechanisms(golden: &mut Golden) {
     }
 }
 
+/// Mechanisms with stops a few hundredths either side of where they were
+/// built, jostled past them: poses, the report, and each mate's values
+/// and stops.
+fn limits(golden: &mut Golden) {
+    let mut s = golden.section("limits");
+    let mut g = Lcg::new(0x6c69_6d69);
+    for i in 0..64 {
+        let size = g.next_f64(0.001, 50.0);
+        let (mut asm, _) = mechanism(&mut g, 2 + i % 9, size);
+        common::limit(&mut asm, &mut g, size, 0.02);
+        jostle(&mut asm, &mut g, 0.05, size * 0.01);
+        let r = solve(&asm).unwrap();
+        record(&mut s, &r);
+        for (id, v) in &r.report.values {
+            s.u64(u64::from(*id));
+            for m in v.angle.iter().chain(&v.distance) {
+                s.f64(m.value);
+                s.str(&format!("{:?}", m.at));
+            }
+        }
+    }
+}
+
 /// Chains of 19 links on driven revolutes, each started up to a radian
 /// and 3 mm off.
 fn chains(golden: &mut Golden) {
@@ -89,6 +112,7 @@ fn chains(golden: &mut Golden) {
                     },
                     a: on(k - 1, off),
                     b: on(k, Pose::IDENTITY),
+                    limits: ryumate::Limits::NONE,
                 },
             );
         }
@@ -106,5 +130,6 @@ fn determinism() {
     ));
     mechanisms(&mut golden);
     chains(&mut golden);
+    limits(&mut golden);
     golden.finish();
 }

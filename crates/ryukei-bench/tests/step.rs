@@ -1318,3 +1318,302 @@ fn occt_reads_ryucads_colours() {
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
+
+/// The instance `#id` of `f`, its only part's name and parameters.
+fn p21_simple(f: &ryustep::part21::File, id: u64) -> (&str, &[ryustep::part21::Param]) {
+    let p = &f.get(id).unwrap().record.parts()[0];
+    (&p.name, &p.params)
+}
+
+/// Every simple instance of `f` named `name`, its id and parameters.
+fn instances_named<'f>(
+    f: &'f ryustep::part21::File,
+    name: &'f str,
+) -> impl Iterator<Item = (u64, &'f [ryustep::part21::Param])> {
+    f.instances.iter().filter_map(move |i| match &i.record {
+        ryustep::part21::Record::Simple(p) if &*p.name == name => Some((i.id, &p.params[..])),
+        _ => None,
+    })
+}
+
+/// The material and the user-defined attributes of ryucad's export of
+/// one part, checked by hand against CAx-IF's *Material and Density* and
+/// *User Defined Attributes* practices with the Part 21 parser alone
+/// (never ryustep's reader): the designation (a set of definitions in
+/// AP242, one in AP214) over the part's `PRODUCT_DEFINITION_SHAPE`; the
+/// `material name` and `density` properties over its
+/// `PRODUCT_DEFINITION`, where OCCT's XDE writes and reads them, the
+/// density in kg/m³; and one `user defined attributes` property over the
+/// `PRODUCT_DEFINITION` with each item typed as the schema types it.
+fn check_by_hand(bytes: &[u8], ap242: bool) -> Vec<String> {
+    use ryustep::part21::Param as P;
+    let f = ryustep::part21::parse(bytes).unwrap();
+    let mut wrong = Vec::new();
+    let mut want = |ok: bool, what: &str| {
+        if !ok {
+            wrong.push(what.to_owned());
+        }
+    };
+    let pd = instances_named(&f, "PRODUCT_DEFINITION")
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+    let pds = instances_named(&f, "PRODUCT_DEFINITION_SHAPE")
+        .filter(|(_, p)| p.get(2) == Some(&P::Ref(pd[0])))
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+    want(
+        pd.len() == 1 && pds.len() == 1,
+        "one definition and its shape",
+    );
+    let (pd, pds) = (pd[0], pds[0]);
+    let designations: Vec<_> = instances_named(&f, "MATERIAL_DESIGNATION").collect();
+    let of = if ap242 {
+        P::List(vec![P::Ref(pds)])
+    } else {
+        P::Ref(pds)
+    };
+    want(
+        designations.len() == 1 && designations[0].1 == [P::Str("Steel".into()), of],
+        "MATERIAL_DESIGNATION('Steel', the shape's)",
+    );
+    // A property's items: through its PROPERTY_DEFINITION_REPRESENTATION
+    // to the REPRESENTATION's items.
+    let items = |prop: u64| -> Vec<(&str, &[P])> {
+        instances_named(&f, "PROPERTY_DEFINITION_REPRESENTATION")
+            .filter(|(_, p)| p[0] == P::Ref(prop))
+            .flat_map(|(_, p)| {
+                let P::Ref(rep) = p[1] else { return Vec::new() };
+                let (n, rp) = p21_simple(&f, rep);
+                assert_eq!(n, "REPRESENTATION");
+                let P::List(l) = &rp[1] else {
+                    return Vec::new();
+                };
+                l.iter()
+                    .map(|x| match x {
+                        P::Ref(i) => p21_simple(&f, *i),
+                        _ => panic!("an item reference"),
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    let props: Vec<_> = instances_named(&f, "PROPERTY_DEFINITION").collect();
+    let prop = |name: &str, desc: &str, of: u64| {
+        props
+            .iter()
+            .filter(|(_, p)| p[..] == [P::Str(name.into()), P::Str(desc.into()), P::Ref(of)])
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>()
+    };
+    let name = prop("material property", "material name", pd);
+    want(
+        name.len() == 1
+            && items(name[0])
+                == [(
+                    "DESCRIPTIVE_REPRESENTATION_ITEM",
+                    &[P::Str("Steel".into()), P::Str("Steel".into())][..],
+                )],
+        "the material name property",
+    );
+    let density = prop("material property", "density", pd);
+    let d = density.first().map(|&d| items(d)).unwrap_or_default();
+    let unit_ok = d.first().is_some_and(|(n, p)| {
+        let P::Ref(u) = p[2] else { return false };
+        let (un, up) = p21_simple(&f, u);
+        let P::List(els) = &up[0] else { return false };
+        let mut found: Vec<(String, f64)> = els
+            .iter()
+            .map(|e| {
+                let P::Ref(e) = e else { panic!() };
+                let (_, ep) = p21_simple(&f, *e);
+                let (P::Ref(nu), P::Real(x)) = (&ep[0], &ep[1]) else {
+                    panic!()
+                };
+                let parts = &f.get(*nu).unwrap().record.parts();
+                let si = parts.iter().find(|p| &*p.name == "SI_UNIT").unwrap();
+                (format!("{:?}", si.params), *x)
+            })
+            .collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        *n == "MEASURE_REPRESENTATION_ITEM"
+            && p[..2]
+                == [
+                    P::Str("density".into()),
+                    P::Typed("POSITIVE_RATIO_MEASURE".into(), Box::new(P::Real(7850.0))),
+                ]
+            && un == "DERIVED_UNIT"
+            && found
+                == [
+                    (r#"[Enum("KILO"), Enum("GRAM")]"#.to_owned(), 1.0),
+                    (r#"[Unset, Enum("METRE")]"#.to_owned(), -3.0),
+                ]
+    });
+    want(
+        density.len() == 1 && d.len() == 1 && unit_ok,
+        "the density property: 7850 in kg*m^-3",
+    );
+    let uda = prop("user defined attributes", "", pd);
+    want(uda.len() == 1, "one user defined attributes property");
+    let mut got = uda.first().map(|&u| items(u)).unwrap_or_default();
+    got.sort_by(|a, b| format!("{:?}", a.1[0]).cmp(&format!("{:?}", b.1[0])));
+    let mm = instances_named(&f, "UNCERTAINTY_MEASURE_WITH_UNIT")
+        .next()
+        .unwrap()
+        .1[1]
+        .clone();
+    let rohs = if ap242 {
+        (
+            "BOOLEAN_REPRESENTATION_ITEM",
+            vec![P::Str("rohs".into()), P::Enum("T".into())],
+        )
+    } else {
+        (
+            "DESCRIPTIVE_REPRESENTATION_ITEM",
+            vec![P::Str("rohs".into()), P::Str("true".into())],
+        )
+    };
+    let expect: Vec<(&str, Vec<P>)> = vec![
+        (
+            "VALUE_REPRESENTATION_ITEM",
+            vec![
+                P::Str("count".into()),
+                P::Typed("COUNT_MEASURE".into(), Box::new(P::Real(4.0))),
+            ],
+        ),
+        (
+            "DESCRIPTIVE_REPRESENTATION_ITEM",
+            vec![P::Str("finish".into()), P::Str("red".into())],
+        ),
+        rohs,
+        (
+            "MEASURE_REPRESENTATION_ITEM",
+            vec![
+                P::Str("wall".into()),
+                P::Typed("LENGTH_MEASURE".into(), Box::new(P::Real(2.0))),
+                mm,
+            ],
+        ),
+    ];
+    let got: Vec<(&str, Vec<P>)> = got.into_iter().map(|(n, p)| (n, p.to_vec())).collect();
+    if got != expect {
+        wrong.push(format!("attributes {got:?}, want {expect:?}"));
+    }
+    wrong
+}
+
+/// OCCT 7.8's XDE, material mode on, against the materials and
+/// user-defined attributes ryucad exports (design 448, plan 24.C), in
+/// AP242 and AP214, millimetres. What OCCT 7.8.1 was found to read:
+///
+/// - **Materials.** OCCT reads a material only from `material property`
+///   definitions over a `PRODUCT_DEFINITION` (where its writer puts them)
+///   and never reads `MATERIAL_DESIGNATION`. With ryucad's properties
+///   over the `PRODUCT_DEFINITION_SHAPE`, as first written, it read no
+///   material; with the same entities moved onto the definition, it read
+///   `Steel` at 0.00785 g/mm³ (grams per cubic model unit), 7850 kg/m³
+///   exactly. ryucad now writes them over the definition. That OCCT reads
+///   `Steel` from the file as written, and prefers it to the attributes'
+///   pseudo-material below, is not yet run: #772.
+/// - **Attributes: no reader.** OCCT 7.8's `STEPCAFControl_Reader` has
+///   no metadata mode, so nothing reaches `TDataStd_NamedData`. Its
+///   material reader takes any property over the definition with a
+///   descriptive item as a material: ryucad's `user defined attributes`
+///   came back as a material named after their last descriptive item
+///   (`finish` in AP242, `rohs` in AP214) with `wall`'s length as its
+///   density.
+///
+/// So the forms are checked by hand ([`check_by_hand`], the Part 21
+/// parser alone) in `ryucads_materials_and_attributes_by_hand`, and this
+/// test, OCCT's read of the file as written, waits on #772.
+#[test]
+#[ignore = "#772: OCCT reading ryucad's material as now written is unverified"]
+fn occt_reads_ryucads_materials_and_attributes() {
+    use occt::XdeValue;
+    let (dir, files) = attributed_exports();
+    let mut wrong = Vec::new();
+    for (schema, bytes) in files {
+        let path = dir.path().join(format!("props-{schema}.stp"));
+        std::fs::write(&path, &bytes).unwrap();
+        let got = occt::xde_properties(&path).unwrap();
+        println!("{schema}, as written: OCCT reads {got:?}");
+        let ok = matches!(
+            &got[..],
+            [(l, k, XdeValue::Material { density, density_name })]
+                if l == "block" && k == "Steel"
+                    && (density - 0.00785).abs() < 1e-12
+                    && density_name == "density POSITIVE_RATIO_MEASURE"
+        );
+        if !ok {
+            wrong.push(format!(
+                "{schema}: OCCT read {got:?}, want only Steel at 0.00785 g/mm³"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// ryucad's exports of one part with a material and attributes
+/// ([`attributed_exports`]) hold the forms CAx-IF's practices and OCCT's
+/// XDE give them, read with the Part 21 parser alone ([`check_by_hand`]).
+#[test]
+fn ryucads_materials_and_attributes_by_hand() {
+    let (_dir, files) = attributed_exports();
+    let mut wrong = Vec::new();
+    for (schema, bytes) in files {
+        for w in check_by_hand(&bytes, schema == "ap242") {
+            wrong.push(format!("{schema} by hand: {w}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// A block with a material (Steel, 7850 kg/m³) and four attributes of
+/// every type, exported in AP242 and AP214, millimetres; the temporary
+/// project folder beside them.
+fn attributed_exports() -> (tempfile::TempDir, Vec<(&'static str, Vec<u8>)>) {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let mut call = |m: &str, p: serde_json::Value| {
+        let req = ryucad::proto::Request::from_rpc(m, Some(p)).unwrap();
+        ryucad::server::handle(&mut s, req).unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    call("part.create", json!({"part": "block"}));
+    call(
+        "feature.add",
+        json!({"part": "block", "type": "box", "id": "slab",
+               "params": {"x": 40, "y": 20, "z": 5}}),
+    );
+    call(
+        "pdm.configure",
+        json!({"properties": {
+            "finish": {"type": "string"},
+            "count": {"type": "integer"},
+            "wall": {"type": "quantity", "dim": "length"},
+            "rohs": {"type": "boolean"},
+        }}),
+    );
+    call(
+        "materials.set",
+        json!({"name": "Steel", "density": "7850 kg/m^3"}),
+    );
+    call(
+        "props.set",
+        json!({"part": "block", "properties": {
+            "material": "Steel", "finish": "red", "count": 4, "wall": "2 mm", "rohs": true,
+        }}),
+    );
+    let files = ["ap242", "ap214"]
+        .into_iter()
+        .map(|schema| {
+            let params = json!({"part": "block", "schema": schema, "unit": "mm",
+                                "time_stamp": "2026-11-11T00:00:00"});
+            let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
+            let a = ryucad::server::answer_live(&mut s, None, None, req).unwrap();
+            (schema, a.binary.unwrap())
+        })
+        .collect();
+    drop(s);
+    (dir, files)
+}

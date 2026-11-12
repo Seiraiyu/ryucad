@@ -78,7 +78,9 @@ pub const MANIFEST_FORMAT: u64 = 4;
 /// 13 reference imports (ryucad 21), 14 unfolds and refolds (ryucad
 /// 16.B), 15 fills, extracts, sews and thickens (ryucad 18), 16 face
 /// tweaks (ryucad 17), 17 a flattened import's place (ryucad 21.D), 18
-/// drafts (ryucad 17.B), 19 splits by a body or faces (ryucad 18.C), 20 direct edits (ryucad 22). A
+/// drafts (ryucad 17.B), 19 splits by a body or faces (ryucad 18.C), 20 direct edits (ryucad 22), 21
+/// inserts, deletes of bodies and solid paths (ryucad 25), 22 a mate's
+/// limits (ryucad 26). A
 /// feature is written at the lowest format that holds it, so one with
 /// only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
@@ -93,6 +95,8 @@ pub const FEATURE_FORMAT: u64 = {
         super::tweak::DRAFT_FORMAT,
         super::body::TOOL_FORMAT,
         super::edit::FORMAT,
+        super::insert::FORMAT,
+        super::mate::LIMITS_FORMAT,
     ];
     let (mut max, mut i) = (0, 0);
     while i < all.len() {
@@ -190,6 +194,10 @@ static NEW: Combine = Combine::NEW;
 /// A feature, `parts/<part>/features/<id>.json`: its `type` says which.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Feature {
+    /// Another part's solids, founded in this part's frame (ryucad 25).
+    Insert(Box<super::insert::Insert>),
+    /// Solids taken out of the part's result (ryucad 25).
+    DeleteBody(Box<super::body::DeleteBody>),
     Primitive(Primitive),
     Sketch(Sketch),
     Extrude(Extrude),
@@ -314,6 +322,14 @@ impl PrimitiveType {
 }
 
 impl Placement {
+    /// Whether it is the frame it sits in: a zero origin (literals) and
+    /// the axes as they are.
+    pub fn is_identity(&self) -> bool {
+        self.origin.iter().all(|q| q.is_literal() && q.si() == 0.0)
+            && self.z == [0.0, 0.0, 1.0]
+            && self.x == [1.0, 0.0, 0.0]
+    }
+
     /// The world frame, with the origin written in `unit`.
     pub fn identity(unit: Unit) -> Placement {
         let zero = Quantity::parse("0", unit).expect("0 parses");
@@ -614,6 +630,7 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
             ("faces", g) => out.extend(super::body::expression_strings(g)),
             ("diameter", Value::String(s)) => out.push(s),
             ("distance", Value::String(s)) => out.push(s),
+            ("limits", l @ Value::Object(_)) => out.extend(super::mate::limit_strings(l)),
             ("a" | "b" | "axis" | "direction" | "direction2", c @ Value::Object(_)) => {
                 out.extend(super::mate::expression_strings(c));
             }
@@ -737,6 +754,17 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    // Highest first: a mate with limits that names a solid path needs 22.
+    if v.get("type").and_then(Value::as_str) == Some("mate") && v.get("limits").is_some() {
+        return super::mate::LIMITS_FORMAT;
+    }
+    if matches!(
+        v.get("type").and_then(Value::as_str),
+        Some("insert" | "delete_body")
+    ) || solid_paths(v)
+    {
+        return super::insert::FORMAT;
+    }
     let ty = v.get("type").and_then(Value::as_str);
     let retrims = v.get("topology").and_then(Value::as_str) == Some("change")
         || v.get("blends").and_then(Value::as_str) == Some("rebuild");
@@ -850,6 +878,35 @@ pub fn feature_format(v: &Value) -> u64 {
     if literal { 1 } else { 2 }
 }
 
+/// Whether a feature's JSON names a solid by a path (a `/` in a solid
+/// field) or holds a reference with `solid`: new in format 21.
+fn solid_paths(v: &Value) -> bool {
+    fn walk(v: &Value) -> bool {
+        match v {
+            Value::Object(m) => {
+                (m.contains_key("solid") && m.contains_key("feature") && m.contains_key("name"))
+                    || m.values().any(walk)
+            }
+            Value::Array(a) => a.iter().any(walk),
+            _ => false,
+        }
+    }
+    let path = |k: &str| match v.get(k) {
+        Some(Value::String(s)) => s.contains('/'),
+        Some(Value::Array(a)) => a
+            .iter()
+            .any(|x| x.as_str().is_some_and(|s| s.contains('/'))),
+        _ => false,
+    };
+    ["targets", "target", "tools", "solid", "solids"]
+        .into_iter()
+        .any(path)
+        || v.pointer("/tool/body")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s.contains('/'))
+        || walk(v)
+}
+
 /// Whether a feature's JSON holds a geometric reference whose form is new
 /// in format 7: `{"feature"}` or `{"feature", "entity"}` anywhere, a
 /// plane as a pattern's direction, or a word as an up-to target.
@@ -891,6 +948,12 @@ pub struct Acts {
     /// The bodies it consumes: a boolean's tools, a sew's sheets, a
     /// thicken's sheet.
     pub consumes: Vec<Id>,
+    /// Whether it is an insert: it founds a family of solids, one per
+    /// solid its source shows, keyed `<insert>/<source key>`.
+    pub inserts: bool,
+    /// The solids (keys; an insert's ID for every solid it founded) a
+    /// `delete_body` ends.
+    pub deletes: Vec<Id>,
 }
 
 /// [`Acts`] from a feature's JSON, as [`Feature::targets`] and
@@ -898,7 +961,7 @@ pub struct Acts {
 /// out.
 pub fn feature_acts(v: &Value) -> Acts {
     let ids = |v: Option<&Value>| -> Vec<Id> {
-        let one = |v: &Value| v.as_str().and_then(|s| Id::parse(s, "feature").ok());
+        let one = |v: &Value| v.as_str().and_then(|s| Id::solid_key(s, "feature").ok());
         match v {
             Some(Value::Array(a)) => a.iter().filter_map(one).collect(),
             Some(v) => one(v).into_iter().collect(),
@@ -908,6 +971,8 @@ pub fn feature_acts(v: &Value) -> Acts {
     let mut out = Acts::default();
     match v.get("type").and_then(Value::as_str) {
         Some("import" | "planar" | "fill" | "extract") => out.founds = true,
+        Some("insert") => out.inserts = true,
+        Some("delete_body") => out.deletes = ids(v.get("solids")),
         Some("sew") => {
             out.founds = true;
             out.consumes = ids(v.get("sheets"));
@@ -945,7 +1010,15 @@ pub fn feature_acts(v: &Value) -> Acts {
             for g in groups.into_iter().flatten() {
                 let edges = g.get("edges").and_then(Value::as_array);
                 let named = edges.into_iter().flatten().chain(g.get("face"));
-                for id in named.flat_map(|r| ids(r.get("feature"))) {
+                for id in named.flat_map(|r| {
+                    let f = r.get("feature").and_then(Value::as_str);
+                    let key = match (f, r.get("solid").and_then(Value::as_str)) {
+                        (Some(f), Some(s)) => Id::solid_key(&format!("{f}/{s}"), "feature").ok(),
+                        (Some(f), None) => Id::parse(f, "feature").ok(),
+                        _ => None,
+                    };
+                    key.into_iter()
+                }) {
                     if !out.acts_on.contains(&id) {
                         out.acts_on.push(id);
                     }
@@ -1005,7 +1078,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold, fill, extract, sew, thicken, move_face, replace_face, draft, delete_face, delete_blend, resize_blend"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, insert, delete_body, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split, base_flange, flange, unfold, refold, fill, extract, sew, thicken, move_face, replace_face, draft, delete_face, delete_blend, resize_blend"),
     )
     .with("type", s)
 }
@@ -1024,6 +1097,8 @@ impl Feature {
             Feature::Hole(_) => "hole",
             Feature::Pattern(_) => "pattern",
             Feature::Instance(_) => "instance",
+            Feature::Insert(_) => "insert",
+            Feature::DeleteBody(_) => "delete_body",
             Feature::Mate(_) => "mate",
             Feature::InstancePattern(_) => "instance_pattern",
             Feature::Import(_) => "import",
@@ -1088,6 +1163,17 @@ impl Feature {
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
+        // Highest first, as `feature_format`.
+        if let Feature::Mate(m) = self
+            && m.limits.is_some()
+        {
+            return super::mate::LIMITS_FORMAT;
+        }
+        if matches!(self, Feature::Insert(_) | Feature::DeleteBody(_))
+            || solid_paths(&self.fields())
+        {
+            return super::insert::FORMAT;
+        }
         // A tweak that may change topology or remake its blends is
         // ryucad 22's, whatever ryucad 17 wrote it at.
         if self.retrim().is_some_and(|r| !r.is_keep())
@@ -1153,6 +1239,7 @@ impl Feature {
             Feature::Instance(i) if i.import.is_some() => 5,
             Feature::Instance(_) | Feature::Mate(_) | Feature::InstancePattern(_) => 4,
             Feature::Import(i) => i.format(),
+            Feature::Insert(_) | Feature::DeleteBody(_) => super::insert::FORMAT,
             Feature::Datum(_) => super::datum::FORMAT,
             Feature::Path(_) => super::path::FORMAT,
             Feature::Sweep(_) | Feature::Loft(_) => super::sweep::FORMAT,
@@ -1192,6 +1279,8 @@ impl Feature {
             Feature::Hole(h) => h.fields(),
             Feature::Pattern(p) => p.fields(),
             Feature::Instance(i) => i.fields(),
+            Feature::Insert(i) => i.fields(),
+            Feature::DeleteBody(d) => d.fields(),
             Feature::Mate(m) => m.fields(),
             Feature::InstancePattern(p) => p.fields(),
             Feature::Import(i) => i.fields(),
@@ -1268,7 +1357,13 @@ impl Feature {
             "hole" => Feature::Hole(Hole::from_fields(&mut o, default, env)?),
             "pattern" => Feature::Pattern(Pattern::from_fields(&mut o, default, env)?),
             "instance" => Feature::Instance(Instance::from_fields(&mut o)?),
+            "insert" => Feature::Insert(Box::new(super::insert::Insert::from_fields(
+                &mut o, default, env,
+            )?)),
             "import" => Feature::Import(Import::from_fields(&mut o)?),
+            "delete_body" => {
+                Feature::DeleteBody(Box::new(super::body::DeleteBody::from_fields(&mut o)?))
+            }
             "plane" | "axis" | "point" => {
                 Feature::Datum(Box::new(Datum::from_fields(ty, &mut o, default, env)?))
             }
@@ -1323,6 +1418,8 @@ impl Feature {
             | Feature::Hole(_)
             | Feature::Pattern(_)
             | Feature::Instance(_)
+            | Feature::Insert(_)
+            | Feature::DeleteBody(_)
             | Feature::Mate(_)
             | Feature::InstancePattern(_)
             | Feature::Datum(_)
@@ -1380,6 +1477,27 @@ impl Feature {
             f => f
                 .combine()
                 .map_or(Vec::new(), |c| c.targets.iter().collect()),
+        }
+    }
+
+    /// Whether it is an insert, founding a family of solids.
+    pub fn inserts(&self) -> bool {
+        matches!(self, Feature::Insert(_))
+    }
+
+    /// The insert, if it is one.
+    pub fn insert(&self) -> Option<&super::insert::Insert> {
+        match self {
+            Feature::Insert(i) => Some(i),
+            _ => None,
+        }
+    }
+
+    /// The solids a `delete_body` ends, by key; none for anything else.
+    pub fn deletes(&self) -> &[Id] {
+        match self {
+            Feature::DeleteBody(d) => &d.solids,
+            _ => &[],
         }
     }
 
@@ -1904,7 +2022,8 @@ mod tests {
             Acts {
                 founds: false,
                 acts_on: vec![base.clone()],
-                consumes: vec![]
+                consumes: vec![],
+                ..Default::default()
             }
         );
         let v = json!({"format": 9, "kind": FEATURE_KIND, "type": "offset", "target": "base",
@@ -1963,7 +2082,8 @@ mod tests {
             Acts {
                 founds: false,
                 acts_on: vec![id("plate")],
-                consumes: vec![]
+                consumes: vec![],
+                ..Default::default()
             }
         );
         // Every quantity is an expression an equations table lists.
@@ -2011,7 +2131,8 @@ mod tests {
             Acts {
                 founds: false,
                 acts_on: vec![id("tray")],
-                consumes: vec![]
+                consumes: vec![],
+                ..Default::default()
             }
         );
         let fields: Vec<String> = expression_fields(&v).into_iter().map(|(p, _)| p).collect();
@@ -2028,7 +2149,8 @@ mod tests {
             Acts {
                 founds: false,
                 acts_on: vec![id("tray")],
-                consumes: vec![]
+                consumes: vec![],
+                ..Default::default()
             }
         );
         const { assert!(FEATURE_FORMAT >= super::super::sheet_metal::UNFOLD_FORMAT) };
@@ -2085,7 +2207,8 @@ mod tests {
             Acts {
                 founds: false,
                 acts_on: vec![id("half")],
-                consumes: vec![]
+                consumes: vec![],
+                ..Default::default()
             }
         );
         // A new copy founds a solid and acts on nothing.
@@ -2113,7 +2236,8 @@ mod tests {
             Acts {
                 founds: true,
                 acts_on: vec![id("h")],
-                consumes: vec![]
+                consumes: vec![],
+                ..Default::default()
             }
         );
         let mut v = v;
@@ -2871,5 +2995,60 @@ mod tests {
                 .code,
             Code::FormatTooNew
         );
+    }
+
+    #[test]
+    fn solid_paths_are_format_21_and_nothing_else_moves() {
+        use super::super::insert::FORMAT;
+        assert_eq!(FORMAT, 21);
+        // ryucad 26's mate limits are 22, so the newest is past it.
+        const { assert!(FEATURE_FORMAT >= FORMAT) };
+        let n = "0123456789abcdef0123456789abcdef";
+        for (v, want) in [
+            (
+                json!({"type": "box", "operation": "cut", "targets": ["board/u1"]}),
+                FORMAT,
+            ),
+            (
+                json!({"type": "boolean", "op": "subtract", "target": "a", "tools": ["b/c"]}),
+                FORMAT,
+            ),
+            (json!({"type": "shell", "target": "board/u1"}), FORMAT),
+            (json!({"type": "mirror", "solid": "board/u1"}), FORMAT),
+            (
+                json!({"type": "fillet", "groups": [{"edges": [{"feature": "board", "solid": "u1", "name": n}]}]}),
+                FORMAT,
+            ),
+            (
+                json!({"type": "sketch", "plane": {"face": {"feature": "board", "solid": "u1", "name": n}}}),
+                FORMAT,
+            ),
+            (
+                json!({"type": "insert", "part": "pcb", "rev": "working"}),
+                FORMAT,
+            ),
+            (json!({"type": "delete_body", "solids": ["a"]}), FORMAT),
+            // The higher of two formats wins.
+            (
+                json!({"type": "mate", "a": {"feature": "board", "solid": "u1", "name": n},
+                       "limits": {"angle": {"min": "0 deg"}}}),
+                super::super::mate::LIMITS_FORMAT,
+            ),
+            // Founders' keys stay where they were.
+            (
+                json!({"type": "box", "operation": "cut", "targets": ["a"]}),
+                3,
+            ),
+            (
+                json!({"type": "shell", "target": "a"}),
+                super::super::body::FORMAT,
+            ),
+            (
+                json!({"type": "mirror", "solid": "a"}),
+                super::super::body::MIRROR_FORMAT,
+            ),
+        ] {
+            assert_eq!(feature_format(&v), want, "{v}");
+        }
     }
 }

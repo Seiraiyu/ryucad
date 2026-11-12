@@ -67,8 +67,9 @@ pub enum Verdict {
         faces_a: Vec<Name>,
         faces_b: Vec<Name>,
     },
-    /// ryukei couldn't decide: its refusal.
-    CannotCheck { kernel: String },
+    /// ryukei couldn't decide: its refusal; for a mesh search past its
+    /// budget, the pieces it visited.
+    CannotCheck { kernel: String, spent: Option<u64> },
 }
 
 /// Verdicts by the two bodies' hashes and the second's pose in the
@@ -236,7 +237,8 @@ fn thin(points: &[Point3], normals: &[[f64; 3]]) -> bool {
 /// [`mesh::verdict`] of two prepared meshes, `None` past its budget: how
 /// a pair with a reference side is judged, public for tests.
 pub fn mesh_verdict(a: &Prepared, b: &Prepared, rel: &Rigid) -> Option<Verdict> {
-    mesh::verdict(a, b, rel, &mut 0)
+    let job = Job::default();
+    mesh::verdict(a, b, rel, &mut mesh::Search::new(&job)).ok()
 }
 
 /// [`verdict`] for a request's `job`: a cancel stops the kernel inside the
@@ -261,6 +263,7 @@ pub fn verdict_for(a: &Body, b: &Body, rel: Rigid, job: &Job) -> Result<Verdict>
                 }
                 return Ok(Verdict::CannotCheck {
                     kernel: format!("{e:?}"),
+                    spent: None,
                 });
             }
         };
@@ -283,6 +286,7 @@ pub fn verdict_for(a: &Body, b: &Body, rel: Rigid, job: &Job) -> Result<Verdict>
             }
             return Ok(Verdict::CannotCheck {
                 kernel: format!("{e:?}"),
+                spent: None,
             });
         }
     };
@@ -366,6 +370,16 @@ pub(crate) fn under(o: &Occurrence, only: &[Vec<Id>]) -> bool {
 /// which must place something (`not_found` otherwise).
 pub fn find(asm: &Id, model: &Model, only: &[Vec<Id>], cache: &mut Cache) -> Result<Value> {
     find_for(asm, model, only, cache, &Job::default())
+}
+
+/// An `unchecked` entry: the pair, why, and for a mesh search past its
+/// budget the pieces it visited.
+fn unchecked_entry(a: &str, b: &str, kernel: &str, spent: Option<u64>) -> Value {
+    let mut u = json!({"a": a, "b": b, "kernel": kernel});
+    if let Some(n) = spent {
+        u["spent"] = json!(n);
+    }
+    u
 }
 
 /// [`find`] for a request's `job`: each pair it intersects is a
@@ -480,11 +494,23 @@ pub fn find_for(
                 let get = |b: &Built| prepared[&(b as *const Built as usize)].clone();
                 match (get(x.built), get(y.built)) {
                     (Ok(ma), Ok(mb)) => {
-                        mesh::verdict(&ma, &mb, &rel, &mut 0).unwrap_or(Verdict::CannotCheck {
-                            kernel: "mesh search past its budget".to_owned(),
-                        })
+                        let mut search = mesh::Search::new(job);
+                        match mesh::verdict(&ma, &mb, &rel, &mut search) {
+                            Ok(v) => v,
+                            Err(mesh::Halt::OverBudget) => Verdict::CannotCheck {
+                                kernel: "mesh search past its budget".to_owned(),
+                                spent: Some(search.spent),
+                            },
+                            Err(mesh::Halt::Cancelled) => {
+                                return Err(crate::work::stopped(&ryukei::Error::Cancelled, job)
+                                    .expect("a cancel is stopped"));
+                            }
+                        }
                     }
-                    (Err(e), _) | (_, Err(e)) => Verdict::CannotCheck { kernel: e },
+                    (Err(e), _) | (_, Err(e)) => Verdict::CannotCheck {
+                        kernel: e,
+                        spent: None,
+                    },
                 }
             } else {
                 verdict_for(&x.built.body, &y.built.body, rel, job)?
@@ -516,8 +542,8 @@ pub fn find_for(
         match cache.verdicts[k].as_ref() {
             Verdict::Clear => clear += 1,
             Verdict::Touching => touching.push(json!({"a": sa, "b": sb})),
-            Verdict::CannotCheck { kernel } => {
-                unchecked.push(json!({"a": sa, "b": sb, "kernel": kernel}));
+            Verdict::CannotCheck { kernel, spent } => {
+                unchecked.push(unchecked_entry(&sa, &sb, kernel, *spent));
             }
             Verdict::Approximate {
                 min,
@@ -1049,5 +1075,17 @@ mod tests {
         assert_eq!(e.code, Code::NotFound);
         let e = find_in(&mut s, "bolt", &[]).unwrap_err();
         assert_eq!(e.code, Code::WrongPartKind);
+    }
+
+    #[test]
+    fn an_unchecked_entry_says_what_its_search_spent() {
+        assert_eq!(
+            unchecked_entry("a", "b", "mesh search past its budget", Some(1_048_577)),
+            json!({"a": "a", "b": "b", "kernel": "mesh search past its budget", "spent": 1_048_577})
+        );
+        assert_eq!(
+            unchecked_entry("a", "b", "Degenerate", None),
+            json!({"a": "a", "b": "b", "kernel": "Degenerate"})
+        );
     }
 }

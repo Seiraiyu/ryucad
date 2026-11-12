@@ -220,6 +220,26 @@ pub enum Code {
     /// at a release label, or (releasing an assembly) at `working`, at a
     /// label that isn't official, or at an obsolete one.
     InstanceNotReleased,
+    /// A part inserts, through inserts and instances at any depth, itself
+    /// (design 521). The details give `part`, `child` and the `path`.
+    InsertCycle,
+    /// An insert's source shows no solid: nothing to insert.
+    InsertSourceEmpty,
+    /// A warning: an insert's source part failed to rebuild, so it
+    /// inserts each solid as the source shows it (`failing`: the source's
+    /// failed features).
+    InsertSourceFailed,
+    /// A warning: an insert pinned to a label an obsolete record names.
+    InsertObsolete,
+    /// A warning: a newer official release of an insert's source exists
+    /// than the label it is pinned to (`insert`, `rev`, `newest`).
+    InsertBehind,
+    /// An insert at `working` in a part being released, or read at a
+    /// release label, or at a label that isn't official or is obsolete.
+    InsertNotReleased,
+    /// A feature names a solid a `delete_body` before it deleted
+    /// (`solid`, `by`).
+    BodyDeleted,
     /// A move of an instance that is fixed where it is.
     InstanceFixed,
     /// A connector on an entity no frame is defined from: a NURBS or
@@ -231,6 +251,11 @@ pub enum Code {
     /// A write that would leave an assembly's mates unable to all hold.
     /// The conflicting mates are in the details.
     AssemblyOverconstrained,
+    /// A mate's driven angle or distance outside its own limits: refused
+    /// when written, and a `check` finding when a parameter moved it
+    /// there. The mate, the value and the bound it passed are in the
+    /// details.
+    MateOutOfLimits,
     /// An import feature names a file under `imports/` that isn't there.
     ImportFileMissing,
     /// An import feature's file isn't the bytes it was written against:
@@ -1109,6 +1134,22 @@ mod tests {
     }
 
     #[test]
+    fn insert_codes() {
+        for (c, name) in [
+            (Code::InsertCycle, "insert_cycle"),
+            (Code::InsertSourceEmpty, "insert_source_empty"),
+            (Code::InsertSourceFailed, "insert_source_failed"),
+            (Code::InsertObsolete, "insert_obsolete"),
+            (Code::InsertBehind, "insert_behind"),
+            (Code::InsertNotReleased, "insert_not_released"),
+            (Code::BodyDeleted, "body_deleted"),
+        ] {
+            assert_eq!(json!(c), json!(name));
+            assert_eq!(c.exit_code(), 1, "{name}");
+        }
+    }
+
+    #[test]
     fn reference_codes() {
         for (c, name) in [
             (Code::ReferenceSplit, "reference_split"),
@@ -1443,6 +1484,8 @@ mod tests {
             json!(Code::AssemblyOverconstrained),
             json!("assembly_overconstrained")
         );
+        assert_eq!(json!(Code::MateOutOfLimits), json!("mate_out_of_limits"));
+        assert_eq!(Code::MateOutOfLimits.exit_code(), 1);
     }
 
     #[test]

@@ -51,6 +51,8 @@
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <cmath>
+#include <XCAFDoc_MaterialTool.hxx>
+#include <TCollection_HAsciiString.hxx>
 
 static void write(const TopoDS_Shape& s, const char* file, int schema, const char* unit) {
   Interface_Static::SetIVal("write.step.schema", schema);
@@ -69,6 +71,30 @@ static void write_doc(const Handle(TDocStd_Document)& doc, const char* file) {
   cw.SetColorMode(Standard_True);
   cw.Transfer(doc, STEPControl_AsIs);
   cw.Write(file);
+}
+
+// A box with a material (ryucad 24.C): XDE's material tool, Aluminium
+// at 2.7 (XCAFDoc_Material's density is in g/cm³), written by
+// STEPCAFControl_Writer with its material mode on, in mm and the schema
+// the other XDE files use.
+static void material() {
+  Handle(TDocStd_Document) doc;
+  XCAFApp_Application::GetApplication()->NewDocument("MDTV-XCAF", doc);
+  Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+  Handle(XCAFDoc_MaterialTool) mats = XCAFDoc_DocumentTool::MaterialTool(doc->Main());
+  TDF_Label box = shapes->AddShape(BRepPrimAPI_MakeBox(40.0, 20.0, 5.0).Shape(), Standard_False);
+  TDataStd_Name::Set(box, "block");
+  TDF_Label mat = mats->AddMaterial(
+      new TCollection_HAsciiString("Aluminium"), new TCollection_HAsciiString("6061 alloy"),
+      2.7, new TCollection_HAsciiString("density"),
+      new TCollection_HAsciiString("POSITIVE_RATIO_MEASURE"));
+  mats->SetMaterial(box, mat);
+  Interface_Static::SetIVal("write.step.schema", 5);
+  Interface_Static::SetCVal("write.step.unit", "MM");
+  STEPCAFControl_Writer w;
+  w.SetMaterialMode(Standard_True);
+  w.Transfer(doc, STEPControl_AsIs);
+  w.Write("material.stp");
 }
 
 int main() {
@@ -193,5 +219,6 @@ int main() {
     t->UpdateAssemblies();
     write_doc(d, "colour_assembly.stp");
   }
+  material();
   return 0;
 }
