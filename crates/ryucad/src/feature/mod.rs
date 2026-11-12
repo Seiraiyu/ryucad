@@ -259,6 +259,14 @@ pub(crate) static KINDS: &[&dyn FeatureKind] = &[
     &insert::Inserts,
     &delete_body::Deletes,
     &import::Imports,
+    &crate::tweak::Tweaks,
+    &crate::datum::Datums,
+    &crate::path::Paths,
+    &crate::along::Sweeps,
+    &crate::loft::Lofts,
+    &crate::surface::Surfaces,
+    &crate::body::WholeBodies,
+    &crate::sheet_metal::SheetMetal,
 ];
 
 /// The kind that owns feature type `ty`, if any does.

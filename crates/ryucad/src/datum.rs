@@ -14,7 +14,9 @@
 
 use crate::doc::datum::{Along, AxisBy, CurveAt, Datum, End, PlaneBy, PointBy};
 use crate::doc::geometry::GeomRef;
+use crate::doc::project::Part;
 use crate::error::{Code, Error, Result};
+use crate::feature::{BodyUse, Check, FeatureKind, Write};
 use crate::geometry::{
     At, Bounded, Chain, Geom, Line, Plane, Want, default_frame, one, plane_of, resolve,
 };
@@ -991,6 +993,56 @@ pub fn report(part: &crate::doc::id::Id, d: &Datum) -> Value {
         }
     }
     v
+}
+
+/// Datum planes, axes and points.
+pub(crate) struct Datums;
+
+fn datum_of(f: &crate::doc::files::Feature) -> &Datum {
+    match f {
+        crate::doc::files::Feature::Datum(d) => d,
+        _ => unreachable!("a datum"),
+    }
+}
+
+impl FeatureKind for Datums {
+    fn types(&self) -> &'static [&'static str] {
+        &["plane", "axis", "point"]
+    }
+
+    fn fields(&self, ty: &str) -> &'static [&'static str] {
+        crate::datum::request_fields(ty)
+    }
+
+    fn body(&self, _ty: &str) -> BodyUse {
+        BodyUse::NONE
+    }
+
+    fn from_given(
+        &self,
+        ty: &str,
+        current: Option<&crate::doc::files::Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<crate::doc::files::Feature> {
+        crate::datum::from_given(
+            ty,
+            current.map(datum_of),
+            &cx.given.fields,
+            cx.part,
+            cx.unit,
+            cx.env,
+        )
+    }
+
+    fn report(&self, part: &Part, f: &crate::doc::files::Feature) -> Value {
+        crate::datum::report(&part.id, datum_of(f))
+    }
+
+    // That each reference is the kind its field wants; what they make of
+    // each other (parallel, collinear) only rebuild can tell.
+    fn check(&self, cx: &Check<'_>, f: &crate::doc::files::Feature) -> Result<()> {
+        crate::datum::check(cx.part, cx.order, cx.id, datum_of(f), cx.results)
+    }
 }
 
 #[cfg(test)]

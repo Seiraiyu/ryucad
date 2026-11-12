@@ -11,6 +11,7 @@ use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::doc::surface::{Extract, Fill, Side};
 use crate::error::{Code, Error, Result};
+use crate::feature::{BodyUse, Check, FeatureKind, Write};
 use crate::rebuild::{Built, Origins, Results, Run};
 use ryukei::fill::{FillBoundary, FillOptions, FillReport, FillSide};
 use ryukei::name::{FillRole, Name, OpKey, Role};
@@ -1029,6 +1030,63 @@ pub fn from_given(
     };
     r.finish()?;
     Ok(out)
+}
+
+/// Fills, extracts, sews and thickens (ryucad 18).
+pub(crate) struct Surfaces;
+
+impl FeatureKind for Surfaces {
+    fn types(&self) -> &'static [&'static str] {
+        &["fill", "extract", "sew", "thicken"]
+    }
+
+    fn fields(&self, ty: &str) -> &'static [&'static str] {
+        crate::doc::surface::request_fields(ty)
+    }
+
+    fn body(&self, ty: &str) -> BodyUse {
+        match ty {
+            "sew" => BodyUse {
+                needs: Some(crate::kind::Want::Sheet),
+                founds: crate::feature::Founds::Always,
+            },
+            "thicken" => BodyUse::WHEN_NEW,
+            _ => BodyUse::FOUNDS,
+        }
+    }
+
+    fn from_given(
+        &self,
+        ty: &str,
+        current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<Feature> {
+        crate::surface::from_given(ty, current, &cx.given.fields, cx.part, cx.unit, cx.env)
+    }
+
+    fn report(&self, part: &Part, f: &Feature) -> Value {
+        crate::surface::report(&part.id, f)
+    }
+
+    fn rechecks(&self, old: &Feature, new: &Feature) -> bool {
+        new != old
+    }
+
+    // Its sides edges and curves, its faces of one body; whether they
+    // close up, or extract cleanly, only rebuild can tell. A sew's sheets
+    // are judged by kind and order already.
+    fn check(&self, cx: &Check<'_>, f: &Feature) -> Result<()> {
+        match f {
+            Feature::Fill(x) => crate::surface::check_fill(&cx.proposed(f), cx.id, x, cx.results),
+            Feature::Extract(x) => {
+                crate::surface::check_extract(&cx.proposed(f), cx.id, x, cx.results)
+            }
+            Feature::Thicken(x) => {
+                crate::surface::check_thicken(&cx.proposed(f), cx.id, x, cx.results)
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]

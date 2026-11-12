@@ -11,6 +11,7 @@ use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::doc::reference::Reference;
 use crate::error::{Code, Error, Result};
+use crate::feature::{BodyUse, Check, FeatureKind, Place, Write};
 use crate::rebuild::{Built, Made, Origins, Results, Run};
 use crate::solid::Solids;
 use ryukei::geom::{Frame, Point3, Rigid, Vector3};
@@ -1141,6 +1142,137 @@ pub fn delete_report(d: &crate::doc::body::DeleteBody, results: &dyn Results) ->
         }
     }
     json!({"solids": out})
+}
+
+/// Shells, offsets, mirrors and splits: operations on a whole body.
+pub(crate) struct WholeBodies;
+
+impl FeatureKind for WholeBodies {
+    fn types(&self) -> &'static [&'static str] {
+        &["shell", "offset", "mirror", "split"]
+    }
+
+    fn fields(&self, ty: &str) -> &'static [&'static str] {
+        crate::doc::body::request_fields(ty)
+    }
+
+    fn body(&self, ty: &str) -> BodyUse {
+        match ty {
+            "shell" => BodyUse::SOLID,
+            "mirror" => BodyUse::WHEN_NEW,
+            "split" => BodyUse {
+                needs: None,
+                founds: crate::feature::Founds::WhenBothKept,
+            },
+            _ => BodyUse::NONE,
+        }
+    }
+
+    fn before_targets(&self, ty: &str, cx: &mut Write<'_>) -> Result<()> {
+        if ty != "mirror" {
+            return Ok(());
+        }
+        // A mirror whose operation is left out joins its own source
+        // (design 327, question 20); one with no solid copies the part's
+        // one solid. The file names both all the same.
+        if cx.given.fields.solid.is_none() {
+            let before = cx.solids_before()?;
+            match before.as_slice() {
+                [one] => cx.given.fields.solid = Some(one.to_string()),
+                _ => {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        format!(
+                            "a mirror names the solid it copies (solid): the part has {} before it",
+                            before.len()
+                        ),
+                    )
+                    .with("param", "solid")
+                    .with("solids", before));
+                }
+            }
+        }
+        // A sheet's copy can't be joined: left out, its operation is new
+        // (design 388).
+        if cx.given.fields.operation.is_none() {
+            let Place::New { order, at, .. } = cx.place else {
+                unreachable!("a new mirror's defaults")
+            };
+            let x = cx
+                .given
+                .fields
+                .solid
+                .as_deref()
+                .and_then(|x| Id::parse(x, "feature").ok());
+            let sheet = x.is_some_and(|x| {
+                crate::feature::source_is_sheet(cx.session, cx.part, order, at, &x)
+            });
+            if sheet {
+                cx.given.fields.operation = Some("new".into());
+            } else {
+                cx.given.fields.operation = Some("join".into());
+                if cx.given.fields.targets.is_none() {
+                    cx.given.fields.targets = cx.given.fields.solid.clone().map(|s| vec![s]);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // A shell, offset or split with no target acts on the part's one
+    // solid; the file names it all the same.
+    fn default_target(&self, ty: &str, cx: &mut Write<'_>) -> Result<()> {
+        if !matches!(ty, "shell" | "offset" | "split")
+            || cx.given.fields.target.is_some()
+            || cx.given.fields.targets.is_some()
+        {
+            return Ok(());
+        }
+        let before = cx.solids_before()?;
+        match before.as_slice() {
+            [one] => cx.given.fields.target = Some(one.to_string()),
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "a {ty} names the solid it acts on (target): the part has {} before it",
+                        before.len()
+                    ),
+                )
+                .with("param", "target")
+                .with("solids", before));
+            }
+        }
+        Ok(())
+    }
+
+    fn from_given(
+        &self,
+        ty: &str,
+        current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<Feature> {
+        crate::body::from_given(ty, current, &cx.given.fields, cx.part, cx.unit, cx.env)
+    }
+
+    fn report(&self, part: &Part, f: &Feature) -> Value {
+        crate::body::report(&part.id, f)
+    }
+
+    fn rechecks(&self, old: &Feature, new: &Feature) -> bool {
+        new.targets() != old.targets()
+    }
+
+    // A split by a body, not a plane, is judged against the rebuild.
+    fn always_checked(&self, f: &Feature) -> bool {
+        matches!(f, Feature::Split(s) if s.plane().is_none())
+    }
+
+    // Faces of its target, each once; what the kernel makes of them only
+    // rebuild can tell.
+    fn check(&self, cx: &Check<'_>, f: &Feature) -> Result<()> {
+        crate::body::check(&cx.proposed(f), cx.id, f, cx.results)
+    }
 }
 
 #[cfg(test)]

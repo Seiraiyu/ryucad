@@ -12,6 +12,7 @@ use crate::doc::project::Part;
 use crate::doc::reference::Reference;
 use crate::doc::tweak::{Draft, DraftHinge, MoveBy, MoveFace};
 use crate::error::{Code, Error, Result};
+use crate::feature::{BodyUse, Check, FeatureKind, Given, Write};
 use crate::geometry::{At, Geom, Line, Want};
 use crate::proto::FeatureFields;
 use crate::rebuild::{Built, Made, Results, Run};
@@ -2429,6 +2430,66 @@ pub fn feature_faces_get(
         v["commit"] = json!(c);
     }
     Ok(v)
+}
+
+/// Face tweaks and direct edits (ryucad 17 and 22).
+pub(crate) struct Tweaks;
+
+impl FeatureKind for Tweaks {
+    fn types(&self) -> &'static [&'static str] {
+        &TYPES
+    }
+
+    fn fields(&self, ty: &str) -> &'static [&'static str] {
+        crate::tweak::request_fields(ty)
+    }
+
+    fn body(&self, _ty: &str) -> BodyUse {
+        BodyUse::NONE
+    }
+
+    fn take_given(&self, ty: &str, given: &mut Given) -> Result<()> {
+        crate::tweak::take_given(ty, &mut given.fields)
+    }
+
+    // With no target it acts on the part's one solid, else the one its
+    // faces name. The file names it all the same.
+    fn default_target(&self, ty: &str, cx: &mut Write<'_>) -> Result<()> {
+        if cx.given.fields.target.is_some() || cx.given.fields.targets.is_some() {
+            return Ok(());
+        }
+        let before = cx.solids_before()?;
+        cx.given.fields.target = Some(crate::tweak::default_target(
+            ty,
+            &cx.given.fields,
+            &before,
+            cx.part,
+        )?);
+        Ok(())
+    }
+
+    fn from_given(
+        &self,
+        ty: &str,
+        current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<Feature> {
+        crate::tweak::from_given(ty, current, &cx.given.fields, cx.part, cx.unit, cx.env)
+    }
+
+    fn report(&self, part: &Part, f: &Feature) -> Value {
+        crate::tweak::report(&part.id, f)
+    }
+
+    fn rechecks(&self, old: &Feature, new: &Feature) -> bool {
+        new.targets() != old.targets()
+    }
+
+    // Faces of its target, its direction, axis or surfaces their kinds;
+    // what the kernel makes of them only rebuild can tell.
+    fn check(&self, cx: &Check<'_>, f: &Feature) -> Result<()> {
+        crate::tweak::check(&cx.proposed(f), cx.id, f, cx.results)
+    }
 }
 
 #[cfg(test)]

@@ -15,7 +15,9 @@
 use crate::doc::geometry::GeomRef;
 use crate::doc::id::Id;
 use crate::doc::path::{Hand, Helix, Path, PathFeature, Start};
+use crate::doc::project::Part;
 use crate::error::{Code, Error, Result};
+use crate::feature::{BodyUse, Check, FeatureKind, Write};
 use crate::geometry::{At, Bounded, Chain, Line, Want, one};
 use crate::rebuild::Output;
 use ryukei::geom::{Curve, Frame, Point3, Vector3};
@@ -1169,6 +1171,54 @@ pub fn get(
         "closed": made.closed,
         "polyline": crate::render::path_polyline(&chain, params.chord, params.angle),
     }))
+}
+
+/// Paths and helices.
+pub(crate) struct Paths;
+
+fn path_of(f: &crate::doc::files::Feature) -> &PathFeature {
+    match f {
+        crate::doc::files::Feature::Path(x) => x,
+        _ => unreachable!("a path or a helix"),
+    }
+}
+
+impl FeatureKind for Paths {
+    fn types(&self) -> &'static [&'static str] {
+        &["path", "helix"]
+    }
+
+    fn fields(&self, ty: &str) -> &'static [&'static str] {
+        crate::doc::path::request_fields(ty)
+    }
+
+    fn body(&self, _ty: &str) -> BodyUse {
+        BodyUse::NONE
+    }
+
+    fn from_given(
+        &self,
+        ty: &str,
+        current: Option<&crate::doc::files::Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<crate::doc::files::Feature> {
+        crate::path::from_given(
+            ty,
+            current.map(path_of),
+            &cx.given.fields,
+            cx.part,
+            cx.unit,
+            cx.env,
+        )
+    }
+
+    fn report(&self, part: &Part, f: &crate::doc::files::Feature) -> Value {
+        crate::path::report(&part.id, path_of(f))
+    }
+
+    fn check(&self, cx: &Check<'_>, f: &crate::doc::files::Feature) -> Result<()> {
+        crate::path::check(cx.part, cx.order, cx.id, path_of(f), cx.results)
+    }
 }
 
 #[cfg(test)]
