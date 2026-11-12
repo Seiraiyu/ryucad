@@ -345,11 +345,8 @@ pub fn update(
                 .map_err(|e| e.with("param", "to"))?,
         ),
     };
-    let mut moved = (**ins).clone();
-    moved.rev = to.clone();
     let rel = format!("parts/{pid}/features/{fid}.json");
-    let bytes =
-        crate::doc::canonical::to_string(&Feature::Insert(Box::new(moved)).to_json()).into_bytes();
+    let bytes = pinned_bytes(ins, &to);
     let writes = BTreeMap::from([(rel.clone(), Some(bytes.clone()))]);
     let before = session.rebuilt(&pid)?.clone();
     let failed_before: BTreeSet<Id> = before
@@ -408,6 +405,41 @@ pub fn update(
         v["assemblies"] = json!(assemblies);
     }
     Ok(v)
+}
+
+/// Insert `ins`'s file pinned to `to`, canonical: what an update writes.
+fn pinned_bytes(ins: &Insert, to: &Rev) -> Vec<u8> {
+    let mut moved = ins.clone();
+    moved.rev = to.clone();
+    let f = crate::doc::files::Feature::Insert(Box::new(moved));
+    crate::doc::canonical::to_string(&f.to_json()).into_bytes()
+}
+
+/// Insert `fid` of `pid`'s file pinned to `to` as an update answers it
+/// (`"working"`, `{label}` or `{label, project}`): what doctor's
+/// `insert_update` repair writes.
+pub(crate) fn moved_bytes(
+    session: &crate::session::Session,
+    pid: &str,
+    fid: &str,
+    to: &serde_json::Value,
+) -> Option<Vec<u8>> {
+    let p = session.project().parts.get(&Id::parse(pid, "part").ok()?)?;
+    let ins = p
+        .features
+        .get(&Id::parse(fid, "feature").ok()?)?
+        .as_ref()
+        .ok()?
+        .insert()?;
+    let to = match (to, ins.rev.project()) {
+        (serde_json::Value::String(w), _) if w == "working" => Rev::Working,
+        (v, Some(project)) => Rev::Foreign {
+            project: project.clone(),
+            label: v["label"].as_str()?.to_owned(),
+        },
+        (v, None) => Rev::Label(v["label"].as_str()?.to_owned()),
+    };
+    Some(pinned_bytes(ins, &to))
 }
 
 /// `rev` at label `l`, keeping its project.
@@ -707,7 +739,7 @@ pub(crate) mod tests {
     /// [`boarded`] in a Git repository: pcb released at A, then changed by
     /// `change` and released at B, both committed; enclosure's insert
     /// pinned to A.
-    fn released_with(
+    pub(crate) fn released_with(
         change: impl FnOnce(&mut crate::session::Session),
     ) -> (tempfile::TempDir, crate::session::Session) {
         use crate::git::tests::git;
@@ -738,7 +770,7 @@ pub(crate) mod tests {
     }
 
     /// The board widened at B.
-    fn released_board() -> (tempfile::TempDir, crate::session::Session) {
+    pub(crate) fn released_board() -> (tempfile::TempDir, crate::session::Session) {
         released_with(|s| {
             call(
                 s,

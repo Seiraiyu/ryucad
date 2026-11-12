@@ -24,7 +24,7 @@ use ryu_session::job::Phase;
 use serde_json::{Value, json};
 
 /// Every finding's code and severity: `doctor`'s issues keep their own.
-pub const CODES: [(&str, &str); 13] = [
+pub const CODES: [(&str, &str); 16] = [
     ("feature_failed", "error"),
     ("assembly_unsolved", "error"),
     ("faces_intersect", "error"),
@@ -33,6 +33,9 @@ pub const CODES: [(&str, &str); 13] = [
     ("cache_mismatch", "error"),
     ("unmerged_path", "error"),
     ("instance_obsolete", "warning"),
+    ("insert_behind", "warning"),
+    ("insert_obsolete", "warning"),
+    ("insert_source_failed", "warning"),
     ("instances_interfere", "warning"),
     ("reference_faces_unmeshed", "warning"),
     ("reference_faces_dropped", "warning"),

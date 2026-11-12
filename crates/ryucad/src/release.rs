@@ -194,6 +194,14 @@ pub(crate) fn newest_official(
         .max_by_key(order))
 }
 
+/// Whether label `a` comes after label `b` in the project's revision
+/// scheme.
+pub(crate) fn is_newer(session: &Session, a: &str, b: &str) -> Result<bool> {
+    let config = Config::read(session)?;
+    let order = |l: &str| ryupdm::bom::rev_order(config.revisions, &Rev::Label(l.to_owned()));
+    Ok(order(a) > order(b))
+}
+
 /// Who is writing a record: Git's author identity, and the participant.
 fn released_by(repo: &crate::git::Repo, participant: &str) -> ReleasedBy {
     let author = repo.gix().author().and_then(|a| a.ok());
