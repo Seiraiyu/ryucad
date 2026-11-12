@@ -1144,6 +1144,11 @@ pub(crate) mod tests {
                 if !rel.ends_with(".rs") || FREE.iter().any(|(f, _)| *f == rel) {
                     continue;
                 }
+                // A test module in a file of its own (`server/tests.rs`)
+                // and the tests' harness are test code throughout.
+                if rel.ends_with("/tests.rs") || rel == "testing.rs" {
+                    continue;
+                }
                 let text = std::fs::read_to_string(&p).unwrap();
                 // Up to the tests module, not a lone `#[cfg(test)]` item.
                 let end = ["\n#[cfg(test)]\nmod ", "\n#[cfg(test)]\npub(crate) mod "]
