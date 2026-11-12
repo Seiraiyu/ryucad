@@ -232,6 +232,14 @@ impl Ledger {
 mod tests {
     use super::*;
 
+    /// The committed ledger parses: `step-hunt run` refuses one with a
+    /// case listed twice, as FTC 10's surface model (#708) and ctc_02's
+    /// construction sheets (#695) each were.
+    #[test]
+    fn the_committed_ledger_parses() {
+        Ledger::parse(include_str!("../known.txt")).unwrap();
+    }
+
     const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 

@@ -11,7 +11,9 @@
 //! three rounds). Last, the pieces are assembled in ID order.
 //!
 //! A face that can't be meshed within the guarantees is left out and
-//! reported as a [`FaceFault`]; every other face is still meshed.
+//! reported as a [`FaceFault`]; every other face is still meshed. A face
+//! narrower than the chord whose loops make no region, after one round of
+//! its requests, is drawn as a strip between its sides instead ([`strip`]).
 //!
 //! Edges, and then faces, are meshed in parallel on the current rayon
 //! pool (a caller picks the threads with `ThreadPool::install`). Each is a
@@ -27,6 +29,7 @@ mod domain;
 mod edge;
 mod params;
 mod refine;
+mod strip;
 pub(crate) mod uv;
 
 pub use check::{MeshCheckFault, check_mesh};
@@ -84,6 +87,9 @@ pub struct FaceMesh {
     pub face: FaceId,
     pub corners: Range<u32>,
     pub triangles: Range<u32>,
+    /// Drawn as a strip between its sides ([`strip`]), not from a domain:
+    /// [`check_mesh`] excuses this face's inverted slivers, and no other's.
+    pub strip: bool,
 }
 
 /// The positions along an edge, from its start vertex to its end, and
@@ -126,6 +132,14 @@ impl BodyMesh {
     }
 }
 
+/// The round from which a face narrower than the chord whose loops make
+/// no region is drawn as a strip ([`strip`]): after one round of its
+/// boundary requests, so a face they settle meshes as before (a tolerant
+/// face of the `tolerant_booleans` golden section does), and a coil's
+/// big face beside two wire-end slivers is meshed twice, not twelve times
+/// (#598).
+const STRIP_AFTER: usize = 1;
+
 /// The round after which an edge still asked for samples is halved all
 /// along rather than split where asked.
 const HALVE_AFTER: usize = 3;
@@ -139,6 +153,8 @@ const ROUNDS: usize = 12;
 /// One face's state between rounds.
 struct FaceWork {
     domain: Option<Domain>,
+    /// A face narrower than the chord drawn as a strip ([`strip`]).
+    strip: Option<strip::Strip>,
     fault: Option<MeshFaultKind>,
     requests: Vec<(EdgeId, f64)>,
     too_large: bool,
@@ -202,7 +218,16 @@ pub(crate) fn tessellate_in(
             let g = geoms[f.index()].as_ref().expect("live face");
             (
                 f,
-                mesh_face(body, g, &samples, &targets, params.max_triangles, &split, m),
+                mesh_face(
+                    body,
+                    g,
+                    &samples,
+                    &targets,
+                    params.max_triangles,
+                    &split,
+                    round >= STRIP_AFTER,
+                    m,
+                ),
             )
         });
         // A face whose loops graze its surface's seam is cut there into
@@ -503,6 +528,8 @@ fn shared_chords(body: &Body, work: &[Option<FaceWork>]) -> Vec<(Chord, Vec<Face
     out
 }
 
+// the round's state, passed as it is
+#[allow(clippy::too_many_arguments)]
 fn mesh_face(
     b: &Body,
     g: &FaceGeom,
@@ -510,10 +537,12 @@ fn mesh_face(
     t: &Targets,
     cap: u64,
     split: &[Chord],
+    strips: bool,
     m: &Meter,
 ) -> FaceWork {
     let mut w = FaceWork {
         domain: None,
+        strip: None,
         fault: None,
         requests: Vec::new(),
         too_large: false,
@@ -542,22 +571,32 @@ fn mesh_face(
     // A face whose loops make no region as gathered tries once more with
     // its tolerant corners at the arriving edges' ends (#483); every face
     // that built its region builds it as before.
+    let gathered = gather(b, g, samples);
     let built: Result<Domain, BadDomain> =
-        Domain::with_requests(g, &gather(b, g, samples), &reach, &mut w.requests).or_else(|e| {
+        Domain::with_requests(g, &gathered, &reach, &mut w.requests).or_else(|e| {
             let loops: Loops = gather_at_corners(b, g, samples).ok_or(e)?;
             let mut requests = Vec::new();
             let d = Domain::with_requests(g, &loops, &reach, &mut requests)?;
             w.requests.clear();
             Ok(d)
         });
-    let Ok(mut d) = built else {
-        w.fault = Some(MeshFaultKind::BadDomain);
-        return w;
-    };
     let fixed = |a: Anchor| match a {
         Anchor::Vertex(v) => b.vertices[v].point,
         Anchor::Sample(e, k) => samples[e.index()].as_ref().expect("sampled").points[k as usize],
         Anchor::Free => unreachable!("free points have no fixed position"),
+    };
+    let Ok(mut d) = built else {
+        // A face narrower than the chord whose loops make no region is
+        // drawn as a strip, once a round of its requests hasn't settled
+        // it (#598).
+        if strips && let Some(s) = strip::strip(g, &gathered, &fixed, t) {
+            w.requests.clear();
+            w.triangles = s.triangles.len() as u64;
+            w.strip = Some(s);
+            return w;
+        }
+        w.fault = Some(MeshFaultKind::BadDomain);
+        return w;
     };
     // A tolerant boundary point's tube, for the angle test's waiver: an
     // edge's samples take its tolerance, a vertex its own, each only where
