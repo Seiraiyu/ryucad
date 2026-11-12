@@ -89,6 +89,16 @@ enum Command {
     /// Hole tools that need no model.
     #[command(subcommand)]
     Hole(HoleCmd),
+    /// What the hole standards hold, built in and the project's, each value with its
+    /// source: ryucad standards threads|fasteners|drills [STANDARD] [SIZE].
+    Standards {
+        #[arg(value_parser = ["threads", "fasteners", "drills"])]
+        table: String,
+        /// A standard's key (iso_metric, unc, npt, ...), or a drill series
+        /// (metric, fractional, number, letter).
+        standard: Option<String>,
+        size: Option<String>,
+    },
     /// The project's material library: densities (and colours) that mass properties read,
     /// each part's named by its PDM `material` property.
     #[command(subcommand)]
@@ -4572,6 +4582,15 @@ fn request(cmd: &Command) -> Option<Request> {
             offline: *offline,
             dry_run: *dry_run,
             expected_revision: expect.clone(),
+        },
+        Command::Standards {
+            table,
+            standard,
+            size,
+        } => Request::StandardsList {
+            table: table.clone(),
+            standard: standard.clone(),
+            size: size.clone(),
         },
         Command::Hole(HoleCmd::Derive { spec, fields, part }) => Request::HoleDerive {
             spec: Some(spec.clone()),

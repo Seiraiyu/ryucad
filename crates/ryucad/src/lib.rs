@@ -125,6 +125,7 @@ pub mod sheet_metal;
 pub mod sketch;
 pub mod sketch_view;
 pub mod solid;
+pub mod standards;
 pub mod surface;
 pub mod sweep_view;
 #[cfg(test)]

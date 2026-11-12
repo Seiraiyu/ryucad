@@ -1180,6 +1180,17 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         depth: Option<u32>,
     },
+    /// What the hole standards hold: `threads`, `fasteners` or `drills`,
+    /// optionally one standard (or drill series) and size, each value
+    /// with its source.
+    #[serde(rename = "standards.list")]
+    StandardsList {
+        table: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        standard: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<String>,
+    },
     /// A hole's every size, limit and source, and its canonical spec, for
     /// a spec or fields with no model (`hole derive`). Reads the project's
     /// hole_standards.json, and `part`'s parameters when given.

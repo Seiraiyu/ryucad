@@ -1112,6 +1112,84 @@ fn hole_derive_answers_with_no_model() {
 }
 
 #[test]
+fn standards_say_what_they_hold_and_where_it_came_from() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let all = p.ok(&["standards", "threads"]);
+    let keys: Vec<&str> = all["standards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["standard"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "iso_metric",
+            "unc",
+            "unf",
+            "unef",
+            "un",
+            "npt",
+            "nptf",
+            "nps",
+            "bspt",
+            "bspp"
+        ]
+    );
+    let m = p.ok(&["standards", "threads", "iso_metric"]);
+    let m6 = m["sizes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["size"] == "M6")
+        .unwrap();
+    assert_eq!(m6["pitches"], json!(["1.0", "0.75"]));
+    let m6 = p.ok(&["standards", "threads", "iso_metric", "M6"]);
+    assert_eq!(m6["major"], json!({"value": "6 mm", "source": "fact"}));
+    let h6 = m6["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["class"] == "6H")
+        .unwrap();
+    assert_eq!(
+        h6["minor"][1],
+        json!({"value": "5.153 mm", "source": "formula: ISO 965-1"}),
+        "{m6}"
+    );
+    assert_eq!(
+        m6["tap_drill"],
+        json!({"value": "5 mm", "source": "rule", "drill": "5"})
+    );
+    let npt = p.ok(&["standards", "threads", "npt", "1/8"]);
+    assert_eq!(
+        npt["tpi"],
+        json!({"value": "27", "source": "fact"}),
+        "{npt}"
+    );
+    assert_eq!(
+        npt["tap_drill"],
+        Value::Null,
+        "a pipe thread's tap drill is a project's"
+    );
+    let f = p.ok(&["standards", "fasteners"]);
+    assert_eq!(f["standards"], json!([]), "no fastener is built in");
+    let e = p.fails(&["standards", "fasteners", "iso4762"], "not_found", 1);
+    assert_eq!(e["details"]["file"], "hole_standards.json");
+    let d = p.ok(&["standards", "drills", "number"]);
+    assert_eq!(
+        d["drills"][6],
+        json!({"name": "#7", "value": "0.201 in", "source": "fact"})
+    );
+    p.fails(
+        &["standards", "threads", "iso_metric", "M6.3"],
+        "not_found",
+        1,
+    );
+}
+
+#[test]
 fn every_protocol_method_has_a_command() {
     let commands: &[(&str, &[&str])] = &[
         ("project.init", &["init"]),
@@ -1159,6 +1237,7 @@ fn every_protocol_method_has_a_command() {
         ("interference", &["interference"]),
         ("measure", &["measure"]),
         ("hole.derive", &["hole", "derive"]),
+        ("standards.list", &["standards"]),
         ("mass", &["mass"]),
         ("sheet.get", &["sheet"]),
         ("feature_faces.get", &["feature-faces"]),
