@@ -6551,6 +6551,86 @@ fn mates_from_the_cli() {
 }
 
 #[test]
+fn mate_limits_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let (top, foot) = plate_and_bolt(&p);
+    p.ok(&[
+        "feature",
+        "add",
+        "frame",
+        "mate",
+        "--id",
+        "m1",
+        "--form",
+        "revolute",
+        "--a",
+        &top,
+        "--a-offset",
+        r#"{"origin": ["20 mm", "10 mm", "0 mm"]}"#,
+        "--b",
+        &foot,
+        "--b-offset",
+        r#"{"flip": true}"#,
+    ]);
+    p.ok(&[
+        "feature",
+        "edit",
+        "frame",
+        "m1",
+        "--angle-min",
+        "-6deg",
+        "--angle-max",
+        "6deg",
+    ]);
+    p.ok(&[
+        "assembly", "move", "frame", "pin", "--axis", "0,0,1", "--angle", "30deg",
+    ]);
+    let tree = p.ok(&["assembly", "tree", "frame"]);
+    let m1 = &tree["mates"][0];
+    assert_eq!(m1["id"], "m1");
+    let deg = m1["value"]["angle_deg"].as_f64().unwrap();
+    assert!((deg.abs() - 6.0).abs() < 1e-6, "{m1}");
+    assert!(
+        m1["limit"]["angle"] == "min" || m1["limit"]["angle"] == "max",
+        "{m1}"
+    );
+    // Driving past the stop is refused; within it writes.
+    p.fails(
+        &["feature", "edit", "frame", "m1", "--angle", "45deg"],
+        "mate_out_of_limits",
+        1,
+    );
+    p.ok(&["feature", "edit", "frame", "m1", "--angle", "3deg"]);
+    // A bound cleared; then undone.
+    p.ok(&[
+        "feature",
+        "edit",
+        "frame",
+        "m1",
+        "--angle",
+        "",
+        "--angle-max",
+        "",
+    ]);
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(p.direct.join("parts/frame/features/m1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v["limits"], serde_json::json!({"angle": {"min": "-6 deg"}}));
+    // Undo is the daemon's: the cleared bound comes back there.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(p.daemon.join("parts/frame/features/m1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v["limits"]["angle"]["max"], "6 deg", "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["check", "frame"]);
+    assert_eq!(code, 0, "{v}");
+}
+
+#[test]
 fn a_failing_mate_warns_from_the_cli() {
     // Issues #155 and #158: the slot grown into a skim over the plate's
     // whole top takes away the face m1 stands on, in frame, which top
