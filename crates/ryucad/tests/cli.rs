@@ -8444,3 +8444,103 @@ fn colours_in_and_out_from_the_cli() {
             .any(|w| w.starts_with("export_metadata_omitted"))
     );
 }
+
+#[test]
+fn properties_in_and_out_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    // Both projects get one ID, so the two ways answer alike.
+    let id = "0123456789abcdef0123456789abcdef";
+    p.write(
+        "ryucad.json",
+        &format!(
+            "{{\n  \"default_unit\": \"mm\",\n  \"format\": 2,\n  \"kind\": \"ryucad.project\",\n  \"project\": \"{id}\"\n}}\n"
+        ),
+    );
+    p.ok(&["pdm", "init"]);
+    p.ok(&[
+        "pdm",
+        "configure",
+        "--property",
+        r#"supplier={"type":"string"}"#,
+        "--property",
+        r#"wall_thickness={"type":"quantity","dim":"length"}"#,
+    ]);
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/properties");
+    let beside = p.direct.parent().unwrap();
+    fs::copy(data.join("vendor.stp"), beside.join("vendor.stp")).unwrap();
+    // In: declared attributes become properties, the material too; the
+    // library is left alone and the command to add it is given.
+    let (code, envelope) = p.both_from("", &["import", "--solid", "../vendor.stp"]);
+    assert_eq!(
+        (code, &envelope["ok"]),
+        (0, &Value::Bool(true)),
+        "{envelope}"
+    );
+    let made = &envelope["result"];
+    let part = made["parts"][0]["part"].as_str().unwrap().to_owned();
+    let warned: Vec<&str> = envelope["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|w| w.as_str())
+        .collect();
+    assert!(
+        warned
+            .iter()
+            .any(|w| w.starts_with("import_material_unknown:")
+                && w.contains("ryucad materials set 6061-T6")),
+        "{warned:?}"
+    );
+    let shown = p.ok(&["props", "show", &part]);
+    let value = |name: &str| {
+        shown["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["name"] == name)
+            .and_then(|x| x.get("value").cloned())
+    };
+    assert_eq!(value("supplier"), Some(json!("ACME Metals")));
+    assert_eq!(value("wall_thickness"), Some(json!("2.5 mm")));
+    assert_eq!(value("material"), Some(json!("6061-T6")));
+    let file: Vec<&str> = shown["file"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert!(file.contains(&"Batch Size"), "{file:?}");
+    // The command the warning gave works.
+    p.ok(&["materials", "set", "6061-T6", "--density", "2700 kg/m^3"]);
+    // Out: the export carries them; --no-properties leaves them out.
+    let export = |out: &str, extra: &[&str]| {
+        let mut args = vec![
+            "export",
+            part.as_str(),
+            "--out",
+            out,
+            "--time-stamp",
+            "2026-11-11T00:00:00",
+        ];
+        args.extend(extra);
+        let (code, v) = p.both_from("", &args);
+        assert_eq!((code, &v["ok"]), (0, &Value::Bool(true)), "{v}");
+        v
+    };
+    export("../out.step", &[]);
+    let written = fs::read_to_string(beside.join("out.step")).unwrap();
+    assert!(written.contains("MATERIAL_DESIGNATION('6061-T6'"));
+    assert!(written.contains("'user defined attributes'"));
+    let v = export("../plain.step", &["--no-properties"]);
+    let plain = fs::read_to_string(beside.join("plain.step")).unwrap();
+    assert!(!plain.contains("MATERIAL_DESIGNATION") && !plain.contains("user defined attributes"));
+    assert!(
+        v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|w| w.as_str())
+            .any(|w| w.starts_with("export_metadata_omitted"))
+    );
+}
