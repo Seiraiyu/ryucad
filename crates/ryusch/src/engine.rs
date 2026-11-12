@@ -6386,7 +6386,9 @@ mod tests {
         );
         let l = &out.layout;
         let titles: Vec<&str> = l.regions.values().map(|r| r.title.as_str()).collect();
-        assert_eq!(titles, ["TPS54331 converter", "U1 LAN8710A", "J1", "F1"]);
+        // C9 and R9 on F1 are no idiom: untitled, never the net's name (plan
+        // 3.A).
+        assert_eq!(titles, ["TPS54331 converter", "U1 LAN8710A", "J1", ""]);
         assert_eq!(
             l.regions.keys().collect::<Vec<_>>(),
             ["r1", "r2", "r3", "r4"]

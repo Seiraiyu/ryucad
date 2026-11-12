@@ -411,9 +411,11 @@ fn draw(c: &mut Canvas, origin: Point, it: &Item) {
                 c.stroke();
                 c.dash(&[]);
             }
-            fill(c, *paper);
-            rect_path(c, title_tab);
-            c.fill_and_stroke();
+            if let Some(tab) = title_tab {
+                fill(c, *paper);
+                rect_path(c, tab);
+                c.fill_and_stroke();
+            }
         }
         Item::Bezier {
             points,

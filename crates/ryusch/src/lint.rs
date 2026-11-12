@@ -338,7 +338,7 @@ pub const RULES: &[Rule] = &[
         code: "sch_region_untitled",
         weight: 2,
         unit: "a region",
-        what: "A region titled Misc: nothing in it names its function.",
+        what: "A region with no title, or titled Misc (files written before plan 3.A): nothing in it names its function.",
         why: "A region's title is what a reader scans for; Misc says nothing about what the parts do.",
         fix: "Give it a title (region REGION title TITLE), or a function property to its main component.",
         evidence: "Design 348: every region is titled by its function. The references title their panels (the ESP32-PoE's ETHERNET, Mitayi-Pico-D1's power and USB blocks). In round 3's blind review (plan 2.G, three judges a pair), the judges named the sessions' titled regions (\"I2C header and pull-ups\", \"Output clamps\") among what read better, and engine titles such as \"Misc\", \"SCL\" and \"N_J2_A5\" among what read worse.",
@@ -1688,10 +1688,12 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             }
         }
         for (id, g) in layout.regions.iter().filter(|(_, g)| &g.sheet == sid) {
-            if g.title == "Misc" {
+            if g.title.is_empty() || g.title == "Misc" {
                 found.push(f(
                     "sch_region_untitled",
-                    format!("region {id} is titled Misc: give it its function's title"),
+                    format!(
+                        "region {id} has no title: give it its function's (region {id} title TITLE)"
+                    ),
                     vec![id.clone()],
                     json!({"fix": format!("region {id} title TITLE")}),
                 ));
@@ -2395,12 +2397,26 @@ mod tests {
         let mut out = crate::engine::lay_out(&block).unwrap();
         let (found, _) = lint(&block, &out);
         assert!(
-            !found.iter().any(|f| matches!(
-                f.code,
-                "sch_paper_fit" | "sch_function_split" | "sch_region_untitled"
-            )),
+            !found
+                .iter()
+                .any(|f| matches!(f.code, "sch_paper_fit" | "sch_function_split")),
             "{found:#?}"
         );
+        // Untitled only where nothing names the function (plan 3.A): C9
+        // and R9 on F1 are no idiom.
+        let untitled: Vec<&Vec<String>> = found
+            .iter()
+            .filter(|f| f.code == "sch_region_untitled")
+            .map(|f| &f.refs)
+            .collect();
+        let bare: Vec<String> = out
+            .layout
+            .regions
+            .iter()
+            .filter(|(_, g)| g.title.is_empty())
+            .map(|(id, _)| id.clone())
+            .collect();
+        assert_eq!(untitled.len(), bare.len(), "{found:#?}");
         let f = fill(&block, &out.layout, "s1");
         assert!(f > 0 && f <= 1000);
         // On A3 by hand, it would fit A4: sch_paper_fit, fixed by a relayout.
@@ -2441,6 +2457,17 @@ mod tests {
         let (found, _) = lint(&block, &split);
         assert!(found.iter().any(|f| f.code == "sch_function_split"));
         assert!(found.iter().any(|f| f.code == "sch_region_untitled"));
+        // Untitled (plan 3.A): no function or idiom names it.
+        split.layout.regions.get_mut("r9").unwrap().title = String::new();
+        let (found, _) = lint(&block, &split);
+        let f = found
+            .iter()
+            .find(|f| f.code == "sch_region_untitled" && f.refs == ["r9"])
+            .expect("an untitled region is found");
+        assert_eq!(
+            f.message,
+            "region r9 has no title: give it its function's (region r9 title TITLE)"
+        );
     }
 
     /// Every rule says what it means, what a reader loses, how to fix it
