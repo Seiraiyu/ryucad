@@ -5,12 +5,16 @@
 //! - Sizes, their major diameters (number sizes 0.060 + 0.013 n in) and
 //!   each series' threads per inch are facts, as FED-STD-H28/2B (public
 //!   domain) tabulates them.
-//! - Internal limits are FED-STD-H28/2B's formulas: the minimum minor
-//!   diameter is the basic minor diameter D − 5√3/8 · p, the minimum
-//!   major diameter is D, and the maximum minor diameter adds the class's
-//!   minor-diameter tolerance (H28/2B's section on it). They are checked
-//!   against H28/2B's printed limits (`tests/h28_2b.rs`), and `PRINTED`
-//!   holds its value where it prints otherwise.
+//! - Internal limits are formulas: the minimum minor diameter is the
+//!   basic minor diameter D − 5√3/8 · p, the minimum major diameter is D,
+//!   and the maximum minor diameter adds the class's published
+//!   minor-diameter tolerance (`minor_tolerance`). H28/2B adopts them from
+//!   ASME B1.1 without restating them; its own printed limits (Appendix A,
+//!   Tables II.A.1 and II.A.2) fix the bounds and the rounding, and every
+//!   one of their 340 rows to 1-3/4 in is checked (`tests/h28_2b.rs`).
+//!   `PRINTED` holds the one value it prints otherwise.
+//! - Sizes above 1-3/4 in are not built in (from 2 in, UNC has 4.5
+//!   threads per inch); a project's table adds them.
 //!
 //! External classes (1A, 2A, 3A) arrive with ryucad 28.B.
 
@@ -55,8 +59,8 @@ macro_rules! s {
     };
 }
 
-/// Every size, by major diameter. Reconcile with H28/2B's tables before
-/// committing: a size or TPI it lists that this lacks is added.
+/// Every size to 1-3/4 in, by major diameter, as H28/2B's Tables II.A.1
+/// and II.A.2 list them (`tests/h28_2b.rs`).
 pub const SIZES: &[Size] = &[
     s!("#0", number(0), None, Some(80), None),
     s!("#1", number(1), Some(64), Some(72), None),
@@ -89,6 +93,12 @@ pub const SIZES: &[Size] = &[
     s!("1-3/8", frac(11, 8), Some(6), Some(12), Some(18)),
     s!("1-7/16", frac(23, 16), None, None, Some(18)),
     s!("1-1/2", frac(3, 2), Some(6), Some(12), Some(18)),
+    s!("1-9/16", frac(25, 16), None, None, Some(18)),
+    s!("1-5/8", frac(13, 8), None, None, Some(18)),
+    s!("1-11/16", frac(27, 16), None, None, Some(18)),
+    s!("1-3/4", frac(7, 4), Some(5), None, None),
+    // Larger sizes are not built in: from 2 in, UNC's 4.5 threads per inch
+    // is not a whole number. A project's table adds them.
 ];
 
 /// The constant-pitch series' threads per inch.
@@ -138,9 +148,29 @@ impl Class {
 
 pub use crate::iso_metric_limits::{Limits, Which};
 
-/// H28/2B's printed values where the formulas round otherwise. Empty
-/// until Task 8's oracle names one.
-pub const PRINTED: &[(&str, u16, &str, Which, Nm, &str)] = &[];
+/// H28/2B's printed values where the formulas round otherwise: size,
+/// threads per inch, class, which limit, the printed value, the table.
+/// 1-1/2-18 UNEF's maximum works out to 1.4399 + 0.0127 = 1.4526 in,
+/// printed 1.453 by the rule every other row follows; H28/2B prints
+/// 1.452 (and a percent of thread to match).
+pub const PRINTED: &[(&str, u16, &str, Which, Nm, &str)] = &[
+    (
+        "1-1/2",
+        18,
+        "1B",
+        Which::MinorMax,
+        36_880_800,
+        "FED-STD-H28/2B Table II.A.1",
+    ),
+    (
+        "1-1/2",
+        18,
+        "2B",
+        Which::MinorMax,
+        36_880_800,
+        "FED-STD-H28/2B Table II.A.1",
+    ),
+];
 
 /// The basic minor diameter D − 5√3/8 · p, with p = 1/tpi in, to the
 /// nanometre (the floor of an irrational number is never a tie).
@@ -154,7 +184,9 @@ pub fn basic_minor(major: Nm, tpi: u16) -> Nm {
 const TENTH_MIL: Nm = 2_540;
 
 /// The class's minor-diameter tolerance in ten-thousandths of an inch.
-/// Reconcile each coefficient with H28/2B's text before committing.
+/// H28/2B states no formula of its own (it refers to ASME B1.1); the
+/// formulas here are the published ones, and their bounds are the ones
+/// H28/2B's printed limits (Tables II.A.1 and II.A.2) all agree with.
 fn minor_tolerance(major: Nm, tpi: u16, class: Class) -> i128 {
     let n = i128::from(tpi);
     let quarter = major >= NM_PER_IN / 4;
@@ -168,7 +200,15 @@ fn minor_tolerance(major: Nm, tpi: u16, class: Class) -> i128 {
                 round_div(2_500 * n - 4_000, n * n)
             }
         }
-        _ => small_tolerance(major, tpi),
+        // Never more than 0.394 p (the printed limits of #0 to #2 hold the
+        // formula to it; 0.394 is the only third decimal they all agree
+        // with), nor less than 0.23 p - 1.5 p² or 0.120 p, whichever is
+        // greater (3B from 3/8 in: the first at 14 threads per inch and
+        // finer, the second at 13 and coarser).
+        _ => small_tolerance(major, tpi)
+            .min(round_div(3_940, n))
+            .max(round_div(2_300 * n - 15_000, n * n))
+            .max(round_div(1_200, n)),
     }
 }
 
@@ -202,15 +242,32 @@ fn small_tolerance(major: Nm, tpi: u16) -> i128 {
 /// The limits of `size` at `tpi` in `class`.
 pub fn internal_limits(size: &Size, tpi: u16, class: Class) -> Limits {
     let formula = Source::Formula("FED-STD-H28/2B");
-    let min = basic_minor(size.major, tpi);
+    // H28/2B's printed limits round so (each rule fixed by its rows):
+    // - the minimum is the basic minor diameter to 0.0001 in, printed to
+    //   0.001 in from #6 (0.138 in) up, for every class;
+    // - 1B and 2B's maximum is that 0.0001 in minimum plus the tolerance
+    //   (1/4-20: 0.1959 + 0.0115 = 0.2074, printed 0.207), printed as the
+    //   minimum is;
+    // - 3B's maximum is the unrounded basic minor diameter plus the
+    //   tolerance, to 0.0001 in (#8-32: 0.130171 + 0.0087 = 0.1389), and
+    //   always printed so.
+    let tenth = |nm: Nm| round_div(i128::from(nm), i128::from(TENTH_MIL)) as Nm * TENTH_MIL;
+    let thou = |nm: Nm| {
+        if size.major < number(6) {
+            nm
+        } else {
+            round_div(i128::from(nm), 25_400) as Nm * 25_400
+        }
+    };
+    let basic = basic_minor(size.major, tpi);
     let tol = minor_tolerance(size.major, tpi, class) as Nm * TENTH_MIL;
-    // Printed to 0.001 in (25,400 nm), halves up.
-    let thou = |nm: Nm| round_div(i128::from(nm), 25_400) as Nm * 25_400;
+    let min = tenth(basic);
+    let max = match class {
+        Class::B3 => tenth(basic + tol),
+        Class::B1 | Class::B2 => thou(min + tol),
+    };
     let mut out = Limits {
-        minor: (
-            Valued::new(thou(min), formula),
-            Valued::new(thou(min + tol), formula),
-        ),
+        minor: (Valued::new(thou(min), formula), Valued::new(max, formula)),
         major_min: Valued::new(size.major, formula),
     };
     for &(name, t, c, which, value, table) in PRINTED {
