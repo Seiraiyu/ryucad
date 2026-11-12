@@ -7,7 +7,7 @@
 
 use crate::interference::Verdict;
 use ryu_session::job::Job;
-use ryukei::geom::{Box3, Point3, Rigid};
+use ryukei::geom::{Box3, Point3, Rigid, Vector3};
 use ryukei::measure::MeshTree;
 use ryukei::name::Name;
 use ryukei::topo::Body;
@@ -113,6 +113,67 @@ fn reach(a: &Prepared, b: &Prepared, both: &Box3) -> f64 {
 fn to_triangle(p: Point3, t: &[Point3; 3]) -> f64 {
     let one = MeshTree::new(vec![*t]);
     one.nearest_to(p).map_or(f64::INFINITY, |(d, _, _)| d)
+}
+
+/// Whether the prism triangle `t` sweeps from `s0·v` to `s1·v` and the
+/// triangle `u` lie apart: some axis among both shapes' face normals (the
+/// caps', the three sides', `u`'s) and the cross products of `u`'s edges
+/// with the prism's edge directions (`t`'s edges and `v`) on which their
+/// projections lie more than `margin` apart along the axis. Both are
+/// convex, so these axes suffice; and any axis that separates proves them
+/// apart, so one of no length is skipped and one rounded off its true
+/// direction is still an axis. The margin, a part in 10⁹ of the pair's
+/// size, stands far above the dot products' rounding, so rounding can only
+/// withhold the answer, never give it (design 525).
+#[cfg_attr(not(test), allow(dead_code))]
+fn prism_misses(
+    t: &[Point3; 3],
+    v: Vector3,
+    s0: f64,
+    s1: f64,
+    u: &[Point3; 3],
+    margin: f64,
+) -> bool {
+    let prism = [
+        t[0] + v * s0,
+        t[1] + v * s0,
+        t[2] + v * s0,
+        t[0] + v * s1,
+        t[1] + v * s1,
+        t[2] + v * s1,
+    ];
+    let e = [t[1] - t[0], t[2] - t[1], t[0] - t[2]];
+    let f = [u[1] - u[0], u[2] - u[1], u[0] - u[2]];
+    let mut axes = [Vector3::ZERO; 17];
+    axes[0] = e[0].cross(e[1]);
+    axes[1] = v.cross(e[0]);
+    axes[2] = v.cross(e[1]);
+    axes[3] = v.cross(e[2]);
+    axes[4] = f[0].cross(f[1]);
+    let mut k = 5;
+    for d in [e[0], e[1], e[2], v] {
+        for g in f {
+            axes[k] = d.cross(g);
+            k += 1;
+        }
+    }
+    let span = |pts: &[Point3], a: Vector3| {
+        pts.iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), q| {
+                let d = q.to_vector().dot(a);
+                (lo.min(d), hi.max(d))
+            })
+    };
+    axes.iter().any(|&a| {
+        let len2 = a.dot(a);
+        if !(len2 > 0.0 && len2.is_finite()) {
+            return false;
+        }
+        let gap = margin * len2.sqrt();
+        let (p0, p1) = span(&prism, a);
+        let (q0, q1) = span(u, a);
+        p1 + gap < q0 || q1 + gap < p0
+    })
 }
 
 /// Why a pair's search stopped before it decided.
@@ -501,5 +562,84 @@ mod tests {
         // Two sheets crossing only touch.
         let v = judge(&s, &s, &at(0.002, 0.002, 0.0));
         assert!(matches!(v, Verdict::Touching | Verdict::Clear), "{v:?}");
+    }
+
+    fn p(x: f64, y: f64, z: f64) -> Point3 {
+        Point3::new(x, y, z)
+    }
+
+    /// A millimetre triangle in z = 0 swept down from 10 µm to 1 cm.
+    fn prism_case() -> ([Point3; 3], ryukei::geom::Vector3, f64, f64, f64) {
+        let t = [p(0.0, 0.0, 0.0), p(0.001, 0.0, 0.0), p(0.0, 0.001, 0.0)];
+        (
+            t,
+            ryukei::geom::Vector3::new(0.0, 0.0, -1.0),
+            1e-5,
+            0.01,
+            1e-12,
+        )
+    }
+
+    fn moved(t: &[Point3; 3], x: f64, y: f64, z: f64) -> [Point3; 3] {
+        t.map(|q| p(q.x + x, q.y + y, q.z + z))
+    }
+
+    #[test]
+    fn a_prism_misses_only_what_lies_apart_by_more_than_the_margin() {
+        let (t, v, s0, s1, mu) = prism_case();
+        // Above the swept triangle (the side the prism leaves from).
+        assert!(prism_misses(
+            &t,
+            v,
+            s0,
+            s1,
+            &moved(&t, 0.0, 0.0, 0.0005),
+            mu
+        ));
+        // Just above the prism's top cap (z = -s0), by half the margin and
+        // by twice it.
+        assert!(!prism_misses(
+            &t,
+            v,
+            s0,
+            s1,
+            &moved(&t, 0.0, 0.0, -s0 + 0.5e-12),
+            mu
+        ));
+        assert!(prism_misses(
+            &t,
+            v,
+            s0,
+            s1,
+            &moved(&t, 0.0, 0.0, -s0 + 2e-12),
+            mu
+        ));
+        // Standing across the prism.
+        let across = [
+            p(0.0002, 0.0002, -0.005),
+            p(0.0003, 0.0002, -0.005),
+            p(0.0002, 0.0002, 0.005),
+        ];
+        assert!(!prism_misses(&t, v, s0, s1, &across, mu));
+        // Parallel edges (zero-length axes skipped): a copy inside it, and
+        // one beside its slanted side.
+        assert!(!prism_misses(
+            &t,
+            v,
+            s0,
+            s1,
+            &moved(&t, 0.0, 0.0, -0.005),
+            mu
+        ));
+        assert!(prism_misses(
+            &t,
+            v,
+            s0,
+            s1,
+            &moved(&t, 0.002, 0.0, -0.005),
+            mu
+        ));
+        // Past its far end.
+        assert!(prism_misses(&t, v, s0, s1, &moved(&t, 0.0, 0.0, -0.02), mu));
     }
 }
