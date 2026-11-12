@@ -5046,6 +5046,7 @@ dependencies = [
  "resvg",
  "ryu-doc",
  "ryu-draw",
+ "ryu-git",
  "ryu-math",
  "ryu-part21",
  "ryu-session",
