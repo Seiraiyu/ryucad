@@ -97,9 +97,22 @@ impl Watches {
     }
 
     /// Forgets the watches of `dir` and the folders under it (moved away:
-    /// if moved within the tree, its new place is watched again).
+    /// if moved within the tree, its new place is watched again), in the
+    /// kernel too: a folder moved out of the project would otherwise keep
+    /// its watches, counted against `max_user_watches`, while the daemon
+    /// runs.
     fn forget(&mut self, dir: &Path) {
-        self.paths.retain(|_, (p, _)| !p.starts_with(dir));
+        let gone: Vec<WatchDescriptor> = self
+            .paths
+            .iter()
+            .filter(|(_, (p, _))| p.starts_with(dir))
+            .map(|(wd, _)| wd.clone())
+            .collect();
+        for wd in gone {
+            self.paths.remove(&wd);
+            // Already gone if the folder was deleted since: nothing to do.
+            let _ = self.inotify.watches().remove(wd);
+        }
     }
 }
 
@@ -226,5 +239,36 @@ fn run(mut w: Watches, stop: &AtomicBool, on: &mut dyn FnMut(Raw)) {
                 on(Raw::Path(&path));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The kernel's watches on `w`'s descriptor, as `/proc` lists them.
+    fn kernel_watches(w: &Watches) -> usize {
+        let fdinfo = format!("/proc/self/fdinfo/{}", w.inotify.as_raw_fd());
+        fs::read_to_string(fdinfo)
+            .unwrap()
+            .lines()
+            .filter(|l| l.starts_with("inotify wd:"))
+            .count()
+    }
+
+    #[test]
+    fn a_folder_moved_away_leaves_no_kernel_watches() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir_all(sub.join("a").join("b")).unwrap();
+        fs::create_dir_all(dir.path().join("kept")).unwrap();
+        let mut w = Watches {
+            inotify: Inotify::init().unwrap(),
+            paths: HashMap::new(),
+        };
+        w.add_tree(dir.path(), true, true).unwrap();
+        assert_eq!((w.paths.len(), kernel_watches(&w)), (5, 5));
+        w.forget(&sub);
+        assert_eq!((w.paths.len(), kernel_watches(&w)), (2, 2));
     }
 }
