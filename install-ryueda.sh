@@ -173,6 +173,12 @@ main() {
     mv -f "$bin/.ryueda.new" "$bin/ryueda"
     # Daemons from the old version must not keep running.
     "$bin/ryueda" daemon stop --all >/dev/null 2>&1 || true
+    # git diff reads ryueda's files through ryueda: its textconv, in the
+    # user's Git config.
+    if command -v git >/dev/null 2>&1; then
+        "$bin/ryueda" git install --global >/dev/null 2>&1 ||
+            say "warning: couldn't register ryueda with Git; run: ryueda git install --global"
+    fi
 
     # PATH.
     case ":$PATH:" in

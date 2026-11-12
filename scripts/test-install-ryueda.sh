@@ -129,6 +129,9 @@ check "a fresh install says it added the PATH line" 'grep -q "added .*/.ryueda/b
 check ".profile gets the PATH line" '[ "$(markers "$work/home-fresh/.profile")" = 1 ]'
 check ".bashrc gets the PATH line" '[ "$(markers "$work/home-fresh/.bashrc")" = 1 ]'
 check ".bash_profile is not created" '[ ! -e "$work/home-fresh/.bash_profile" ]'
+if command -v git >/dev/null 2>&1; then
+    check "registers ryueda's textconv with Git" 'git config -f "$work/home-fresh/.gitconfig" diff.ryueda.textconv | grep -q "/.ryueda/bin/ryueda'"'"' git textconv$"'
+fi
 if command -v zsh >/dev/null 2>&1; then
     check ".zshenv gets the PATH line" '[ "$(markers "$work/home-fresh/.zshenv")" = 1 ]'
 else

@@ -138,6 +138,14 @@ function Install-Ryueda {
         if (Test-Path $exe) { Move-Item -Force $exe $old }
         Copy-Item (Join-Path $tmp "ryueda-$version-$target\ryueda.exe") $exe
         Remove-Item -Force $old -ErrorAction SilentlyContinue
+        # git diff reads ryueda's files through ryueda: its textconv, in
+        # the user's Git config.
+        if (Get-Command git -ErrorAction SilentlyContinue) {
+            & $exe git install --global *> $null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host 'ryueda-install: warning: couldn''t register ryueda with Git; run: ryueda git install --global'
+            }
+        }
 
         # PATH: the user's, which needs no admin rights, and this session's.
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
