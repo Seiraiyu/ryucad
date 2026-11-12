@@ -805,6 +805,11 @@ pub enum Request {
         design: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layers: Option<crate::output::Layers>,
+        /// Page only the sheets that changed since this Git revision, each
+        /// marked as `render`'s compare marks it; none changed answers
+        /// `unchanged` with no bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compare: Option<String>,
         /// The revision to read (`working`, the files on disk, by
         /// default): any Git revision expression.
         #[serde(default, skip_serializing_if = "Option::is_none")]

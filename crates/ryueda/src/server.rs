@@ -295,6 +295,26 @@ fn working(
             symbol.as_deref(),
             &crate::symlint::Listing { summary, codes },
         ),
+        Request::Output {
+            design,
+            layers,
+            compare: Some(rev),
+            ..
+        } => {
+            let (commit, then) = session.at(&rev)?;
+            let (mut v, bytes) = crate::output::compare(
+                session.project(),
+                &then,
+                &rev,
+                design.as_deref(),
+                layers.unwrap_or_default(),
+            )?;
+            v["compare"] = json!({"rev": rev, "commit": commit});
+            Ok(match bytes {
+                Some(b) => Answer::bytes(v, "application/pdf", b),
+                None => Answer::json(v),
+            })
+        }
         Request::Output { design, layers, .. } => crate::output::output(
             session.project(),
             design.as_deref(),
@@ -331,6 +351,9 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
         } => crate::schemcmd::describe(p, design.as_deref(), block.as_deref(), sheet.as_deref())
             .map(Answer::json),
         Request::Render {
+            compare: Some(_), ..
+        }
+        | Request::Output {
             compare: Some(_), ..
         } => Err(Error::new(
             Code::InvalidParam,

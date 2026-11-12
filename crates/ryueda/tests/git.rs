@@ -698,3 +698,43 @@ fn render_compare_paints_what_changed() {
         }
     }
 }
+
+#[test]
+fn output_compare_pages_only_changed_sheets() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = edited_breakout(&top, &run);
+    let (_, all) = ryueda(&board, &run, false, &["output", "--out", "all.pdf"]);
+    let (code, v) = ryueda(
+        &board,
+        &run,
+        false,
+        &["output", "--compare", "HEAD", "--out", "c.pdf"],
+    );
+    assert_eq!(code, 0, "{v}");
+    let pages = v["result"]["pages"].as_array().unwrap();
+    assert!(!pages.is_empty());
+    assert!(
+        pages.len() < all["result"]["pages"].as_array().unwrap().len(),
+        "the sensor's sheet is the same"
+    );
+    assert!(pages.iter().all(|p| p["block"] == "breakout"), "{pages:?}");
+    assert!(
+        std::fs::read(board.join("c.pdf"))
+            .unwrap()
+            .starts_with(b"%PDF")
+    );
+    // Nothing changed since the working files' own commit: no file.
+    git(&top, &["add", "."]);
+    git(&top, &["commit", "-q", "-m", "edits"]);
+    let (code, v) = ryueda(
+        &board,
+        &run,
+        false,
+        &["output", "--compare", "HEAD", "--out", "none.pdf"],
+    );
+    assert_eq!((code, &v["result"]["unchanged"]), (0, &json!(true)), "{v}");
+    assert!(!board.join("none.pdf").exists());
+}

@@ -393,6 +393,10 @@ enum Command {
         /// listed.
         #[arg(long)]
         layers: Option<String>,
+        /// Page only the sheets that changed since this Git revision,
+        /// each marked (new, changed, moved, gone).
+        #[arg(long, value_name = "REV")]
+        compare: Option<String>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
         #[command(flatten)]
@@ -2419,10 +2423,12 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Output {
             design,
             layers,
+            compare,
             out: _,
             rev,
         } => Request::Output {
             design: design.clone(),
+            compare: compare.clone(),
             rev: rev.rev.clone(),
             layers: match layers.as_deref() {
                 None => None,
