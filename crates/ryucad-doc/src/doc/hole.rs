@@ -13,6 +13,13 @@ use crate::units::{Field, Quantity, Unit};
 use ryu_standards::thread::{self as builtin, Pitch, Standard, Unknown};
 use serde_json::{Value, json};
 
+/// The feature format that holds a hole's thread, fastener, fit or
+/// tolerance (ryucad 28). A hole holding none of them stays at 3, or 7
+/// with a geometric up-to. Taken in the order stages merge: if another
+/// stage holds 23 when this merges, move this to the next free number;
+/// nothing else names it.
+pub const INTENT_FORMAT: u64 = 23;
+
 /// A hole at each of a sketch's points.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hole {
@@ -1218,7 +1225,7 @@ mod tests {
     }
 
     fn tapped() -> Value {
-        json!({"format": 3, "kind": "ryucad.feature", "type": "hole", "sketch": "s3",
+        json!({"format": 23, "kind": "ryucad.feature", "type": "hole", "sketch": "s3",
                "form": "simple",
                "thread": {"standard": "iso_metric", "size": "M8", "pitch": "1 mm",
                           "class": "5H", "hand": "left", "starts": 2,
@@ -1260,7 +1267,7 @@ mod tests {
         assert_eq!(read(&f.to_json()).unwrap(), f);
         // Defaults go unwritten: a normal fit, the rule's drill, full depth
         // on a through hole, a right hand, one start.
-        let v = json!({"format": 3, "kind": "ryucad.feature", "type": "hole", "sketch": "s3",
+        let v = json!({"format": 23, "kind": "ryucad.feature", "type": "hole", "sketch": "s3",
                        "form": "simple", "thread": {"standard": "iso_metric", "size": "M6",
                        "depth": "full"}, "depth": "through_all", "targets": ["box1"]});
         let w = read(&v).unwrap().to_json();
@@ -1295,7 +1302,7 @@ mod tests {
         v.as_object_mut().unwrap().remove("diameter");
         assert_eq!(read(&v).unwrap_err().details["pointer"], "/diameter");
         v["fastener"] = json!({"standard": "house_cap", "size": "M5"});
-        v["format"] = json!(3); // 23 from Task 18
+        v["format"] = json!(23);
         v["counterbore"] = json!({"depth": "6 mm"}); // the diameter from the fastener
         let f = read(&v).unwrap();
         let Feature::Hole(h) = &f else { panic!() };
@@ -1314,7 +1321,7 @@ mod tests {
     #[test]
     fn intent_refusals_say_what_to_do() {
         let base = || {
-            json!({"format": 3, "kind": "ryucad.feature", "type": "hole",
+            json!({"format": 23, "kind": "ryucad.feature", "type": "hole",
                              "sketch": "s3", "form": "simple", "depth": "through_all",
                              "targets": ["box1"]})
         };

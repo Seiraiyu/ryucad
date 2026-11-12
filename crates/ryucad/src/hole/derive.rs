@@ -271,7 +271,7 @@ mod tests {
     use serde_json::json;
 
     pub(crate) fn hole(fields: Value) -> Hole {
-        let mut v = json!({"format": 3, "kind": "ryucad.feature", "type": "hole",
+        let mut v = json!({"format": 23, "kind": "ryucad.feature", "type": "hole",
                            "sketch": "s", "form": "simple", "depth": "through_all",
                            "targets": ["b"]});
         for (k, x) in fields.as_object().unwrap() {

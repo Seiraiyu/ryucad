@@ -78,7 +78,8 @@ pub const MANIFEST_FORMAT: u64 = 4;
 /// 13 reference imports (ryucad 21), 14 unfolds and refolds (ryucad
 /// 16.B), 15 fills, extracts, sews and thickens (ryucad 18), 16 face
 /// tweaks (ryucad 17), 17 a flattened import's place (ryucad 21.D), 18
-/// drafts (ryucad 17.B), 19 splits by a body or faces (ryucad 18.C), 20 direct edits (ryucad 22). A
+/// drafts (ryucad 17.B), 19 splits by a body or faces (ryucad 18.C), 20 direct edits (ryucad 22),
+/// 23 a hole's thread, fastener, fit and tolerance (ryucad 28). A
 /// feature is written at the lowest format that holds it, so one with
 /// only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
@@ -93,6 +94,7 @@ pub const FEATURE_FORMAT: u64 = {
         super::tweak::DRAFT_FORMAT,
         super::body::TOOL_FORMAT,
         super::edit::FORMAT,
+        super::hole::INTENT_FORMAT,
     ];
     let (mut max, mut i) = (0, 0);
     while i < all.len() {
@@ -742,6 +744,13 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
     let ty = v.get("type").and_then(Value::as_str);
+    if ty == Some("hole")
+        && ["thread", "fastener", "fit", "tolerance"]
+            .iter()
+            .any(|k| v.get(*k).is_some())
+    {
+        return super::hole::INTENT_FORMAT;
+    }
     let retrims = v.get("topology").and_then(Value::as_str) == Some("change")
         || v.get("blends").and_then(Value::as_str) == Some("rebuild");
     if ty.is_some_and(|t| super::edit::TYPES.contains(&t))
@@ -1092,6 +1101,11 @@ impl Feature {
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
+        if let Feature::Hole(h) = self
+            && h.has_intent()
+        {
+            return super::hole::INTENT_FORMAT;
+        }
         // A tweak that may change topology or remake its blends is
         // ryucad 22's, whatever ryucad 17 wrote it at.
         if self.retrim().is_some_and(|r| !r.is_keep())
@@ -2875,5 +2889,31 @@ mod tests {
                 .code,
             Code::FormatTooNew
         );
+    }
+
+    #[test]
+    fn a_hole_with_intent_is_format_23_and_one_without_keeps_its_own() {
+        const { assert!(FEATURE_FORMAT >= super::super::hole::INTENT_FORMAT) };
+        let plain = json!({"format": 3, "kind": FEATURE_KIND, "type": "hole", "sketch": "s",
+                           "form": "simple", "diameter": "5 mm", "depth": "through_all",
+                           "targets": ["b"]});
+        let f = Feature::from_json(&plain, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!((f.format(), feature_format(&plain)), (3, 3));
+        assert_eq!(
+            canonical::to_string(&f.to_json()),
+            canonical::to_string(&plain)
+        );
+        for (k, x) in [
+            ("thread", json!({"standard": "iso_metric", "size": "M6"})),
+            ("fastener", json!({"standard": "house_cap", "size": "M5"})),
+            ("fit", json!("H7")),
+            ("tolerance", json!({"symmetric": "0.01 mm"})),
+        ] {
+            let mut v = plain.clone();
+            v[k] = x;
+            v["format"] = json!(super::super::hole::INTENT_FORMAT);
+            let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+            assert_eq!((f.format(), feature_format(&v)), (23, 23), "{k}");
+        }
     }
 }
