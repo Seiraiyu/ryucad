@@ -98,7 +98,7 @@ fn one_to_one(qa: &Bernstein, qb: &Bernstein) -> bool {
         let v = Vector2::new((x.lo() + x.hi()) / 2.0, (y.lo() + y.hi()) / 2.0);
         let l = v.length();
         if l > 0.0 {
-            d = d + v / l;
+            d += v / l;
         }
     }
     if d.length() == 0.0 {

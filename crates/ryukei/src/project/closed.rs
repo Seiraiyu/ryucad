@@ -89,6 +89,10 @@ fn idot(p: Vector3, d: Vector3) -> Interval {
     i(p.x) * i(d.x) + i(p.y) * i(d.y) + i(p.z) * i(d.z)
 }
 
+/// A revolution's folds in increasing `v`, and whether its contour has
+/// points between each two (one more than the folds).
+type Folds = (Vec<f64>, Vec<bool>);
+
 /// Where a revolution's contour turns back over `[v0, v1]` of its
 /// profile, seen along unit `t`, and whether it has points between each
 /// two: with `ρ(v)`, `h(v)` the profile's distance from the axis and
@@ -107,7 +111,7 @@ fn revolved_folds(
     t: Vector3,
     [v0, v1]: [f64; 2],
     m: &Meter,
-) -> Result<Option<(Vec<f64>, Vec<bool>)>, Failure> {
+) -> Result<Option<Folds>, Failure> {
     let i = Interval::point;
     let (x, y, z) = (frame.x().get(), frame.y().get(), frame.z().get());
     let (tx, ty, tz) = (idot(t, x), idot(t, y), idot(t, z));
