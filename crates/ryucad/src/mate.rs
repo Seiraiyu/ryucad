@@ -3179,6 +3179,53 @@ mod doctor_tests {
     use crate::server::tests::call;
     use serde_json::{Value, json};
 
+    #[test]
+    fn check_finds_a_driven_value_a_parameter_moved_past_its_stop() {
+        let (_dir, mut s) = hinged();
+        call(
+            &mut s,
+            "param.set",
+            json!({"part": "frame", "parameters": {"swing": "3 deg"}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "angle": "swing",
+             "limits": {"angle": {"min": "-6 deg", "max": "6 deg"}}}),
+        )
+        .unwrap();
+        let c = call(&mut s, "check", json!({"part": "frame"})).unwrap();
+        assert!(
+            !c["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "mate_out_of_limits")
+        );
+        // A parameter moves it past: the write is the parameter's, so it
+        // isn't refused, and check finds it.
+        call(
+            &mut s,
+            "param.set",
+            json!({"part": "frame", "parameters": {"swing": "20 deg"}}),
+        )
+        .unwrap();
+        // An error finding fails the check: the findings are in its
+        // details.
+        let e = call(&mut s, "check", json!({"part": "frame"})).unwrap_err();
+        assert_eq!(e.code, crate::error::Code::CheckFailed);
+        let f = e.details["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["code"] == "mate_out_of_limits")
+            .expect("found");
+        assert_eq!(f["feature"], "m1");
+        assert_eq!(f["severity"], "error");
+        assert_eq!(f["error"]["details"]["limit"], "max");
+    }
+
     fn issue<'a>(r: &'a Value, code: &str) -> Option<&'a Value> {
         r["issues"]
             .as_array()
