@@ -92,3 +92,10 @@ The design is document 484 in the Coxswain planning project `ryucad-ryukei`; thi
   - ryucad's corpus test holds every committed drawing view to drawing and to at most a tenth uncertain (`views_certify`, with `KNOWN_UNCERTAIN` for the crankcase's three views).
   - The `cusp_images` and `closed_silhouettes` golden sections; no other ryukei section moved.
   - The `projection` fuzz target views a quarter of its cases square to a torus.
+- **Bars** (cox-worker-2, AMD Ryzen 7 9700X, release, one thread, 2026-11-12, each run started below load 1.5):
+  - The race's refusals (`RYUKEI_BARS=1 race_views_refuse_quickly`): **the ≤ 10 s bar isn't met** (#767). Revolutions 16, 56 and 229 refuse in 153, 187 and 50 s. The ruled NURBS refuse in 0.02 to 5.1 s. 359 bodies drew; the views took 1,219 s in all. The slowest drawn were revolutions: 252 in 175 s, 305 in 139 s.
+  - #746's cancel stops 0.001 s after it (bar 0.1 s).
+  - `cargo bench -p ryukei-bench --bench projection` medians against plan 10.C's (the same machine):
+    - **plates over the bar:** 1 hole 7.84 ms (6.95), 100 holes 364 ms (335), 1,000 holes 6.90 s (6.49). That is 6 to 13 % slower; 17.B changes no code a plate's view runs.
+    - sphere 27.1 ms (27.4), torus askew 320 ms (322), a drilled plate's section 2.69 ms.
+  - The radial engine's crankcase drawing (`ryucad drawing get crankcase main --no-daemon`): 183 s.
