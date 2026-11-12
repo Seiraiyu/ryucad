@@ -7,6 +7,7 @@
 //! changes the library. Every other attribute is a *file property*, read
 //! from the committed bytes each time it is asked for (`props.get`).
 
+use crate::doc::materials::Materials;
 use crate::doc::project::Project;
 use crate::doc::source::Source;
 use crate::import::plan::Planned;
@@ -210,6 +211,52 @@ pub fn mapped(opened: &Opened, k: usize, config: &Config, unit: Unit, path: &str
     m
 }
 
+/// A material name as a shell word: as it is when it is only letters,
+/// digits and `-_.`, else single-quoted.
+fn shell_word(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    {
+        s.to_owned()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
+/// What the library says of a file's material `name` with `density`
+/// (kg/m³): `import_material_conflict` for a different density (relative
+/// 1e-9), `import_material_unknown` with the command that would add it
+/// for a name the library lacks; `None` when they agree or the file gives
+/// no density. The library is never changed (#592).
+pub fn library_warning(
+    lib: &Materials,
+    name: &str,
+    density: Option<f64>,
+    path: &str,
+) -> Option<String> {
+    let d = density?;
+    match lib.materials.get(name) {
+        Some(m) => {
+            let have = m.density.si();
+            ((d - have).abs() > 1e-9 * have.abs()).then(|| {
+                format!(
+                    "import_material_conflict: {path} gives {name} a density of {} kg/m^3, the library {} ({} kg/m^3): the library is unchanged",
+                    decimal(d),
+                    m.density.text(),
+                    decimal(have)
+                )
+            })
+        }
+        None => Some(format!(
+            "import_material_unknown: {path} names material {name}, which the library hasn't, with a density of {} kg/m^3: ryucad materials set {} --density \"{} kg/m^3\" adds it",
+            decimal(d),
+            shell_word(name),
+            decimal(d)
+        )),
+    }
+}
+
 /// What kind of import a plan is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -251,12 +298,20 @@ pub fn apply(
         return out;
     };
     let unit = project.manifest.default_unit;
+    let lib = crate::doc::materials::read(files)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     for pl in plan.iter_mut() {
         let Some(k) = pl.props_of else {
             continue;
         };
         let new = mapped(opened, k, &config, unit, path);
         out.warnings.extend(new.invalid.iter().cloned());
+        if let Some(name) = new.values.get("material").and_then(Value::as_str) {
+            out.warnings
+                .extend(library_warning(&lib, name, new.density, path));
+        }
         if pl.new {
             pl.properties = new.values.clone();
             for v in new.instances.values() {
@@ -557,5 +612,79 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(v["parts"][0].get("properties").is_none(), "{v}");
+    }
+
+    #[test]
+    fn the_library_is_compared_and_never_changed() {
+        let unknown = |s: &mut Session| {
+            let v = call(
+                s,
+                "import",
+                json!({"path": vendor_path(false), "solid": true}),
+            )
+            .unwrap();
+            warnings(&v)
+        };
+        // Not in the library: the command that would add it.
+        let (_dir, mut s) = declared(&[]);
+        let w = unknown(&mut s);
+        let u: Vec<&String> = w
+            .iter()
+            .filter(|w| w.starts_with("import_material_unknown:"))
+            .collect();
+        assert_eq!(u.len(), 1, "{w:?}");
+        assert!(
+            u[0].contains("ryucad materials set 6061-T6 --density \"2700 kg/m^3\""),
+            "{}",
+            u[0]
+        );
+        let lib = call(&mut s, "materials.list", json!({})).unwrap();
+        assert_eq!(lib["materials"], json!([]), "the library is unchanged");
+        // The same density: nothing to say.
+        let (_dir, mut s) = declared(&[]);
+        call(
+            &mut s,
+            "materials.set",
+            json!({"name": "6061-T6", "density": "2.7 g/cm^3"}),
+        )
+        .unwrap();
+        assert!(
+            unknown(&mut s)
+                .iter()
+                .all(|w| !w.starts_with("import_material")),
+            "2.7 g/cm³ is 2700 kg/m³"
+        );
+        // Another density: both named, the library as it was.
+        let (_dir, mut s) = declared(&[]);
+        call(
+            &mut s,
+            "materials.set",
+            json!({"name": "6061-T6", "density": "2650 kg/m^3"}),
+        )
+        .unwrap();
+        let w = unknown(&mut s);
+        let c: Vec<&String> = w
+            .iter()
+            .filter(|w| w.starts_with("import_material_conflict:"))
+            .collect();
+        assert_eq!(c.len(), 1, "{w:?}");
+        assert!(
+            c[0].contains("2700 kg/m^3") && c[0].contains("2650 kg/m^3"),
+            "{}",
+            c[0]
+        );
+        let lib = call(&mut s, "materials.list", json!({})).unwrap();
+        assert_eq!(lib["materials"][0]["density"]["value"], "2650 kg/m^3");
+        assert_eq!(
+            values(&mut s, "vb-100")["material"],
+            "6061-T6",
+            "set either way"
+        );
+    }
+
+    #[test]
+    fn a_name_without_a_density_says_nothing() {
+        let lib = Materials::default();
+        assert_eq!(library_warning(&lib, "Steel", None, "imports/x.step"), None);
     }
 }
