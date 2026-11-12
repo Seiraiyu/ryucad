@@ -873,6 +873,10 @@ pub enum Request {
         /// yet.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         offline: bool,
+        /// Add `diff --netlist` from this revision to the working files
+        /// (`against` in the report).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        against: Option<String>,
         /// The revision to read (`working`, the files on disk, by
         /// default): any Git revision expression.
         #[serde(default, skip_serializing_if = "Option::is_none")]

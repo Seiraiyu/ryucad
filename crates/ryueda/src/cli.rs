@@ -221,6 +221,10 @@ enum Command {
         /// Stay off the network (check never fetches).
         #[arg(long)]
         offline: bool,
+        /// Also say what changed electrically since this revision
+        /// (diff --netlist from it to the working files).
+        #[arg(long, value_name = "REV")]
+        against: Option<String>,
         #[command(flatten)]
         rev: Rev,
     },
@@ -2288,8 +2292,13 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 .collect(),
             expected_revision: expect.expect.clone(),
         },
-        Command::Check { offline, rev } => Request::Check {
+        Command::Check {
+            offline,
+            against,
+            rev,
+        } => Request::Check {
             offline: *offline,
+            against: against.clone(),
             rev: rev.rev.clone(),
         },
         Command::Diff { from, to, design, block, netlist, layout, library, all } => Request::Diff {

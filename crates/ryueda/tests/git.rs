@@ -497,3 +497,43 @@ fn diff_says_what_changed_both_ways() {
         }
     }
 }
+
+#[test]
+fn check_against_a_revision_says_what_changed_electrically() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = edited_breakout(&top, &run);
+        let (code, v) = ryueda(&board, &run, daemon, &["check", "--against", "HEAD"]);
+        let report = if code == 0 {
+            v["result"].clone()
+        } else {
+            v["error"]["details"]["report"].clone()
+        };
+        assert!(code == 0 || v["error"]["code"] == "check_failed", "{v}");
+        let a = &report["against"];
+        assert_eq!(a["from"]["rev"], "HEAD");
+        assert!(
+            !a["netlist"][0]["occurrences"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{a}"
+        );
+        assert_eq!(
+            ryueda(
+                &board,
+                &run,
+                daemon,
+                &["check", "--rev", "HEAD", "--against", "HEAD~1"]
+            )
+            .1["error"]["code"],
+            "invalid_param"
+        );
+        if daemon {
+            ryueda(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}

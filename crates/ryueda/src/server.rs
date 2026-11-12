@@ -284,6 +284,13 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
             crate::netlist::netlist(p, design.as_deref()).map(Answer::json)
         }
         Request::Erc { design, .. } => crate::erc::erc(p, design.as_deref()).map(Answer::json),
+        Request::Check {
+            against: Some(_), ..
+        } => Err(Error::new(
+            Code::InvalidParam,
+            "--against compares the working files with a revision; leave out --rev",
+        )
+        .with("param", "against")),
         Request::Check { .. } => {
             let cats = session.catalogues()?;
             crate::erc::check_project(p, &cats, &[]).map(Answer::json)
@@ -953,9 +960,31 @@ fn dispatch(
                 all,
             },
         ),
-        Request::Check { .. } => {
+        Request::Check { against, .. } => {
+            let diff = match &against {
+                Some(rev) => Some(crate::diff::between(
+                    session,
+                    rev,
+                    "working",
+                    &crate::diff::Options {
+                        netlist: true,
+                        ..crate::diff::Options::default()
+                    },
+                )?),
+                None => None,
+            };
             let cats = session.catalogues()?;
-            crate::erc::check(session.root(), &cats)
+            match (crate::erc::check(session.root(), &cats), diff) {
+                (Ok(mut v), Some(d)) => {
+                    v["against"] = d;
+                    Ok(v)
+                }
+                (Err(mut e), Some(d)) if e.code == Code::CheckFailed => {
+                    e.details["report"]["against"] = d;
+                    Err(e)
+                }
+                (r, _) => r,
+            }
         }
         Request::LintGet { explain } => crate::lint::get(session.project(), explain.as_deref()),
         Request::LintConfigure {
