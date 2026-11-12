@@ -249,6 +249,48 @@ impl<L: Layout> Repo<L> {
         }
     }
 
+    /// The blob at `path` (relative to the work tree's root, `/`-separated)
+    /// in the commit `commit` (hex), or `None` when there is none or it is a
+    /// folder.
+    pub fn file_at(&self, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        let tree = self.commit(commit)?.tree().map_err(git_error)?;
+        let Some(id) = self.entry(&tree, path)? else {
+            return Ok(None);
+        };
+        let obj = self.repo.find_object(id).map_err(git_error)?;
+        if obj.kind != gix::object::Kind::Blob {
+            return Ok(None);
+        }
+        Ok(Some(obj.data.clone()))
+    }
+
+    /// Every blob under the folder `path` (relative to the work tree's root)
+    /// in the commit `commit`, by path below it; empty when there is no such
+    /// folder.
+    pub fn files_at(&self, commit: &str, path: &str) -> Result<BTreeMap<String, Vec<u8>>> {
+        let tree = self.commit(commit)?.tree().map_err(git_error)?;
+        let mut ids = BTreeMap::new();
+        if let Some(id) = self.entry(&tree, path)?
+            && self.repo.find_object(id).map_err(git_error)?.kind == gix::object::Kind::Tree
+        {
+            self.blobs(id, "", &mut ids)?;
+        }
+        ids.into_iter()
+            .map(|(p, id)| Ok((p, self.read(id)?)))
+            .collect()
+    }
+
+    /// The tree of the folder `path` (relative to the work tree's root) in
+    /// the commit `commit`, in hex; `None` when it isn't a folder there.
+    pub fn tree_at(&self, commit: &str, path: &str) -> Result<Option<String>> {
+        let tree = self.commit(commit)?.tree().map_err(git_error)?;
+        let Some(id) = self.entry(&tree, path)? else {
+            return Ok(None);
+        };
+        let kind = self.repo.find_object(id).map_err(git_error)?.kind;
+        Ok((kind == gix::object::Kind::Tree).then(|| id.to_string()))
+    }
+
     /// The project's files that differ from `HEAD`.
     pub fn uncommitted(&self, files: &Files) -> Result<Vec<Value>> {
         let head = self.head().map(|c| c.id.to_string());
@@ -1007,6 +1049,40 @@ mod tests {
             "{}",
             e.message
         );
+    }
+
+    #[test]
+    fn any_folder_of_a_commit_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path();
+        git(top, &["init", "-q"]);
+        write(top, "board/toy.json", "{}\n");
+        write(top, "lib/toy.json", "{\"lib\": true}\n");
+        write(top, "lib/things/x.json", "x\n");
+        write(top, "lib/things/deep/y.json", "y\n");
+        git(top, &["add", "."]);
+        git(top, &["commit", "-q", "-m", "one"]);
+        let repo = Repo::<Toy>::open(&top.join("board")).unwrap().unwrap();
+        let commit = repo.locate("HEAD").unwrap().0;
+        assert_eq!(
+            repo.file_at(&commit, "lib/toy.json").unwrap().unwrap(),
+            b"{\"lib\": true}\n"
+        );
+        assert!(repo.file_at(&commit, "lib/none.json").unwrap().is_none());
+        assert!(
+            repo.file_at(&commit, "lib/things").unwrap().is_none(),
+            "a folder is no file"
+        );
+        let all = repo.files_at(&commit, "lib/things").unwrap();
+        assert_eq!(all.keys().collect::<Vec<_>>(), ["deep/y.json", "x.json"]);
+        assert!(repo.files_at(&commit, "nowhere").unwrap().is_empty());
+        let t = repo.tree_at(&commit, "lib").unwrap().unwrap();
+        assert_eq!(t.len(), 40);
+        assert!(
+            repo.tree_at(&commit, "lib/toy.json").unwrap().is_none(),
+            "a file is no tree"
+        );
+        assert!(repo.tree_at(&commit, "nowhere").unwrap().is_none());
     }
 
     #[test]
