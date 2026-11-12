@@ -443,7 +443,7 @@ impl Entity {
             Entity::Brep(Brep::Solid { faceted: true, .. }) => "FACETED_BREP",
             Entity::Brep(Brep::Solid { voids, .. }) if !voids.is_empty() => "BREP_WITH_VOIDS",
             Entity::Brep(Brep::Solid { .. }) => "MANIFOLD_SOLID_BREP",
-            Entity::Brep(Brep::Shells(_)) => "SHELL_BASED_SURFACE_MODEL",
+            Entity::Brep(Brep::Shells { .. }) => "SHELL_BASED_SURFACE_MODEL",
             Entity::Brep(Brep::Faces(_)) => "FACE_BASED_SURFACE_MODEL",
             Entity::Representation { kind, .. } => kind,
             Entity::MappedItem { .. } => "MAPPED_ITEM",

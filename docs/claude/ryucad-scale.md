@@ -146,3 +146,22 @@ Issue #533: `ryucad rebuild` with no part named answers every part's report (89 
 - **Answers as text.** `ryu_session::rpc::Answer` gains `raw: Option<Raw>`: a result (`Raw::Result`) or a failure (`Raw::Error`: code, message and details) already written as JSON text, `result` then null. The daemon writes its response line around the text (`rpc::write_raw_response`, through a buffered writer under the write lock), never copying it; the bytes are those `rpc_response` gives for the same `Value` (sorted keys, compact), so clients, the CLI's envelope and the hosted review service see no change. A raw failure is a failure: settling a cancel leaves it as it leaves an `Err`. `Answer::into_json` reads raw text back, for callers that read answers rather than send them: `handle_live`, `handle_job` (the CLI in process, tests) do; only the daemon calls `handle_job_raw`.
 - **The rebuild's report.** `server::rebuild` writes `{commit?, parts, placed?, warnings?}` part by part, each part's report serialized as it is made, an assembly's occurrences apart from its report and written one at a time into it in their sorted place (`object_text`), so the largest `Value` held is one part's report less its occurrences. `rebuild <part>` takes the same path.
 - **Measured.** `tests/answer_peak.rs` (release, `--features bench`, its own step in full.yml) counts live bytes with a global allocator over a generated 1,000-part project (races off) on a warm second rebuild: the answer 8.6 MiB, held 18.7 MiB as text (2.2 times: the `String`'s doubling), against 342 MiB through a `Value` as before (39.9 times: the tree, its clone in the response and the line), on cox-worker-2 (AMD Ryzen 7 9700X). It asserts under 4 times, and that the line is the `Value`'s, byte for byte. The CLI still parses the line into a `Value` in its own process.
+
+## File events at scale on Linux (decided in release 9.C, #755)
+
+- **Why.** notify 8.2.1's inotify backend watches every folder for `IN_OPEN`, which its configuration can't turn off. A full check lists every folder in parallel, and each `opendir` raises an event on the folder and on its parent: about 40,000 events at the benchmark's 20,445 folders, against `fs.inotify.max_queued_events`' 16,384. Every full check overflowed the queue, and the overflow forced the next request into a full check of its own, so the daemon never settled and every request checked all 107,500 files: a request that builds nothing took 195.8 ms. CI's scale bar (1,000 parts, about 2,000 folders) never overflowed, and macOS's FSEvents reports no opens.
+- **The rule.** On Linux, `ryu_session::fresh::Watch` uses the `inotify` crate (0.11.5, the version notify already brings) directly (`fresh/linux.rs`): notify's mask less `IN_OPEN`, watches added for folders made or moved in and dropped for those moved away, overflows and failures reported as before, and `ENOSPC`/`EMFILE` messages naming the sysctl to raise. Reading the project raises no event. Other OSes keep notify, unchanged.
+- **The guard.** `tests/scale_bar.rs` refuses to measure a daemon that isn't watching its folder, or one that makes more than one full check over its five requests that build nothing.
+- **Measured** on cox-worker-3 (Intel Core Ultra 5 250K Plus, 18 threads, 30 GB, Ubuntu 26.04.1, Linux 7.0.0-42), the 10,000-part benchmark in a tmpfs folder, `RYUCAD_BARS=1`, 2026-11-12, before (802d49ca) and after (a43bd11e). The before run's starting load wasn't recorded (it followed that commit's build; load 7.2 at its end); the after run's was 5.7 to 5.3.
+
+  | Bar | Before | After |
+  |---|---|---|
+  | A request that builds nothing, 20 ms | 195.8 ms (missed) | 1.1 ms |
+  | `part.list`, an open connection / the CLI | 224.3 ms / 446 ms | 29.6 ms / 53 ms |
+  | A daemon over the warm cache, 10 s | 4.1 s | 3.9 s |
+  | One feature edited until heard, first / median, 300 ms | 112 / 112 ms | 112 / 120 ms |
+  | Interference from nothing / after one move | 3.3 s / 0.8 s | 2.7 s / 0.4 s |
+  | Peak memory, 4,710 MiB / opening the window | 4,642 / 4,887 MiB | 4,625 / 4,897 MiB |
+  | Full checks at the end | 9 (file events overflowed), none narrowed | 1 (the watch started), 8 narrowed |
+
+- **Testing.** `fresh`'s `listing_and_reading_every_folder_raises_no_event` (20,000 folders listed and read on rayon: overflowed under notify, debug and release) and `a_folder_moved_inside_the_project_is_watched_where_it_went`, Linux only; ryucad's `a_watched_daemon_s_requests_check_only_what_events_name`; `scale_bar`'s guard.

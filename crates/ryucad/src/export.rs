@@ -448,19 +448,37 @@ pub(crate) fn out_path(out: &str, root: &std::path::Path) -> Result<std::path::P
         .with("path", dir));
     }
     let file = path.file_name().expect("checked above");
-    let rel = match (dir.canonicalize(), root.canonicalize()) {
-        (Ok(d), Ok(r)) => d.strip_prefix(&r).ok().map(|p| p.join(file)),
+    let root_c = root.canonicalize().ok();
+    // Judged as spelled (the folder resolved, the name as given) ...
+    let spelled = match (dir.canonicalize(), &root_c) {
+        (Ok(d), Some(r)) => d.strip_prefix(r).ok().map(|p| p.join(file)),
         _ => dir.strip_prefix(root).ok().map(|p| p.join(file)),
+    };
+    // ... and, when `out` already names a file, as the file system
+    // resolves it (#581): an 8.3 short name (`RYUCAD~1.JSO`) or a Unicode
+    // case fold (`ryucad.jſon` on APFS) finds `ryucad.json`, and the
+    // atomic rename would replace that entry. A new name aliases nothing.
+    let resolved = match (path.canonicalize(), &root_c) {
+        (Ok(p), Some(r)) => p.strip_prefix(r).ok().map(std::path::Path::to_path_buf),
+        _ => None,
     };
     // Folded as the file systems that would write it there fold: ASCII
     // case (Windows and macOS find `RYUCAD.JSON` and `Parts/p` the same),
-    // and trailing dots and spaces (Windows drops them from a name). Judged
-    // so on every platform, so one rule holds wherever the daemon runs.
-    let rel = rel.map(|p| {
+    // trailing dots and spaces (Windows drops them from a name), and an
+    // NTFS stream (`ryucad.json::$DATA` is `ryucad.json`: no project file
+    // has a colon in its name). Judged so on every platform, so one rule
+    // holds wherever the daemon runs.
+    let fold = |p: std::path::PathBuf| -> Vec<String> {
         p.components()
-            .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
-            .collect::<Vec<_>>()
-    });
+            .map(|c| {
+                let s = c.as_os_str().to_string_lossy().to_ascii_lowercase();
+                match s.split_once(':') {
+                    Some((name, _)) => name.to_owned(),
+                    None => s,
+                }
+            })
+            .collect()
+    };
     let refused = |parts: &[String]| {
         let folded = parts
             .iter()
@@ -469,7 +487,13 @@ pub(crate) fn out_path(out: &str, root: &std::path::Path) -> Result<std::path::P
             .join("/");
         crate::session::tracked(&folded) || parts.iter().any(|s| s.starts_with('.'))
     };
-    if let Some(rel) = rel.filter(|r| refused(r)).map(|r| r.join("/")) {
+    if let Some(rel) = [spelled, resolved]
+        .into_iter()
+        .flatten()
+        .map(fold)
+        .find(|r| refused(r))
+        .map(|r| r.join("/"))
+    {
         return Err(Error::new(
             Code::InvalidParam,
             format!(
@@ -2547,6 +2571,56 @@ pub(crate) mod tests {
         assert_eq!(utc(951_782_400), "2000-02-29T00:00:00");
         assert_eq!(utc(1_761_573_470), "2025-10-27T13:57:50");
         assert_eq!(utc(-1), "1969-12-31T23:59:59");
+    }
+
+    #[test]
+    fn a_sheet_reads_back_as_its_founder() {
+        // #675: a sheet's SHELL_BASED_SURFACE_MODEL carries its founder, as
+        // a solid's MANIFOLD_SOLID_BREP does (#412).
+        let (_d, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        add(
+            &mut s,
+            "p",
+            json!({"type": "box", "id": "h", "params": {"x": 5, "y": 5, "z": 5},
+                   "placement": {"origin": [20, 0, 0]}}),
+        );
+        add(
+            &mut s,
+            "p",
+            json!({"type": "sketch", "id": "s", "plane": "xy"}),
+        );
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
+                {"op": "add", "id": "a", "type": "point", "at": [0, 0]},
+                {"op": "add", "id": "b", "type": "point", "at": [10, 0]},
+                {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}]}),
+        )
+        .unwrap();
+        add(
+            &mut s,
+            "p",
+            json!({"type": "extrude", "id": "w", "sketch": "s", "surface": true,
+                   "extent": {"type": "blind", "length": "20 mm"}}),
+        );
+        let (_, bytes) = exported(&mut s, json!({"part": "p"})).unwrap();
+        let mut names: Vec<String> = opened(&bytes).held.iter().map(|h| h.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, ["h", "w"]);
+        // Imported again, the sheet keeps its ID as the solid does.
+        let (_out, out) = outside(&bytes, "p.step");
+        let (_dir2, mut s2) = fresh();
+        let v = call(&mut s2, "import", json!({"solid": true, "path": out})).unwrap();
+        let mut ids: Vec<&str> = v["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["id"].as_str().unwrap())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["h", "w"], "{v}");
     }
 
     #[test]

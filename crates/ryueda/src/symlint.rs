@@ -262,7 +262,7 @@ fn length(
     }
     let want = cx.standards.pin_length_nm;
     for (n, p) in scoped(s, only) {
-        if p.length_nm == want {
+        if p.length_nm == want || reaching_supply(s, class, p, want) {
             continue;
         }
         let (b, d) = (base(p), dir(p.side));
@@ -283,6 +283,25 @@ fn length(
             json!({"op": "move", "pin": n, "at": at}),
         ]);
         out.push(r);
+    }
+}
+
+/// An op-amp's supply that runs from the triangle's slanted edge to the
+/// standard length past its body's box (plan 3.A, #758): the supplies end
+/// in one row outside the box, as KiCad's op-amps' do, so it is longer
+/// than the standard where the edge is lower.
+fn reaching_supply(s: &Symbol, class: Class, p: &Pin, want: i64) -> bool {
+    if class != Class::Opamp
+        || !matches!(p.ty, PinType::PowerIn | PinType::PowerOut)
+        || p.length_nm < want
+    {
+        return false;
+    }
+    let b = body(s, p.unit.unwrap_or_else(|| home(s)));
+    match p.side {
+        Side::Up => p.at[1] == b.max[1] + want,
+        Side::Down => p.at[1] == b.min[1] - want,
+        _ => false,
     }
 }
 
@@ -1222,6 +1241,7 @@ mod tests {
                 number: i.to_string(),
                 name: format!("IN{i}"),
                 ty: PinType::Input,
+                unit: None,
             })
             .collect()
     }
@@ -1332,21 +1352,25 @@ mod tests {
                 number: "1".into(),
                 name: "VDD".into(),
                 ty: PinType::PowerIn,
+                unit: None,
             },
             PinSpec {
                 number: "2".into(),
                 name: "GND".into(),
                 ty: PinType::PowerIn,
+                unit: None,
             },
             PinSpec {
                 number: "3".into(),
                 name: "EN".into(),
                 ty: PinType::Input,
+                unit: None,
             },
             PinSpec {
                 number: "4".into(),
                 name: "OUT".into(),
                 ty: PinType::Output,
+                unit: None,
             },
         ];
         let mut s = template("U", Class::Ic, &pins, &st).unwrap();
@@ -1385,6 +1409,7 @@ mod tests {
             number: n.into(),
             name: format!("GPIO{i}"),
             ty: PinType::Bidirectional,
+            unit: None,
         };
         let pins = vec![gpio("1", 0), gpio("2", 1), gpio("3", 2), gpio("4", 3)];
         let clean = template("U", Class::Ic, &pins, &st).unwrap();
@@ -1481,16 +1506,19 @@ mod tests {
                 number: "1".into(),
                 name: "RESET_N_LONG_NAME".into(),
                 ty: PinType::Input,
+                unit: None,
             },
             PinSpec {
                 number: "2".into(),
                 name: "IRQ".into(),
                 ty: PinType::Output,
+                unit: None,
             },
             PinSpec {
                 number: "3".into(),
                 name: "VDD".into(),
                 ty: PinType::PowerIn,
+                unit: None,
             },
         ];
         let clean = template("U", Class::Ic, &wide, &st).unwrap();
@@ -1652,6 +1680,7 @@ mod tests {
             number: n.into(),
             name: name.into(),
             ty: PinType::Bidirectional,
+            unit: None,
         };
         let s = template(
             "U",
@@ -1664,6 +1693,44 @@ mod tests {
             lint(&s, Some(Class::Ic), &cx)
                 .iter()
                 .all(|f| f.fixes.iter().all(|o| !o.is_empty()))
+        );
+    }
+
+    /// Plan 3.A: an op-amp's supply may run from the triangle's edge to a
+    /// pin length past its box; one that stops elsewhere is judged.
+    #[test]
+    fn an_op_amps_supply_reaches_past_its_box() {
+        let st = Standards::default();
+        let prefs = Prefs::default();
+        let cx = Context {
+            standards: &st,
+            prefs: &prefs,
+            from: "self",
+        };
+        let pins: Vec<PinSpec> = [
+            ("2", "-", PinType::Input),
+            ("3", "+", PinType::Input),
+            ("1", "~", PinType::Output),
+            ("8", "V+", PinType::PowerIn),
+            ("4", "V-", PinType::PowerIn),
+        ]
+        .iter()
+        .map(|(n, name, ty)| PinSpec {
+            number: (*n).into(),
+            name: (*name).into(),
+            ty: *ty,
+            unit: None,
+        })
+        .collect();
+        let mut s = template("A", Class::Opamp, &pins, &st).unwrap();
+        assert!(s.pins["8"].length_nm > st.pin_length_nm);
+        assert!(lint(&s, Some(Class::Opamp), &cx).is_empty());
+        let p = s.pins.get_mut("8").unwrap();
+        p.length_nm += st.grid_nm;
+        p.at[1] += st.grid_nm;
+        assert_eq!(
+            codes(&lint(&s, Some(Class::Opamp), &cx)),
+            [("sym_pin_length", vec!["8".to_owned()])]
         );
     }
 
@@ -1692,12 +1759,36 @@ mod tests {
             number: (*n).into(),
             name: (*name).into(),
             ty: *ty,
+            unit: None,
         })
         .chain((0..30).map(|i| PinSpec {
             number: format!("{}", 15 + i),
             name: format!("GPIO{}", 29 - i),
             ty: PinType::Bidirectional,
+            unit: None,
         }))
+        .collect();
+        // #758: the OPA1622, the worst case: an enable, two V- and GND.
+        let amp: Vec<PinSpec> = [
+            ("10", "IN-", PinType::Input, Some(1)),
+            ("1", "IN+", PinType::Input, Some(1)),
+            ("9", "OUT", PinType::Output, Some(1)),
+            ("8", "EN", PinType::Input, Some(1)),
+            ("6", "-", PinType::Input, Some(2)),
+            ("5", "+", PinType::Input, Some(2)),
+            ("7", "~", PinType::Output, Some(2)),
+            ("2", "V+", PinType::PowerIn, None),
+            ("4", "V-", PinType::PowerIn, None),
+            ("11", "V-", PinType::PowerIn, None),
+            ("3", "GND", PinType::PowerIn, None),
+        ]
+        .iter()
+        .map(|(n, name, ty, unit)| PinSpec {
+            number: (*n).into(),
+            name: (*name).into(),
+            ty: *ty,
+            unit: *unit,
+        })
         .collect();
         let prefs = Prefs::default();
         for shapes in [
@@ -1714,11 +1805,12 @@ mod tests {
                 from: "self",
             };
             for class in crate::template::TEMPLATES {
-                let pins: &[PinSpec] = match class {
-                    Class::Ic | Class::Regulator | Class::Connector => &mcu,
-                    _ => &[],
+                let (pins, units): (&[PinSpec], u32) = match class {
+                    Class::Ic | Class::Regulator | Class::Connector => (&mcu, 1),
+                    Class::Opamp => (&amp, 2),
+                    _ => (&[], 1),
                 };
-                let s = template("T", class, pins, &st).unwrap();
+                let s = crate::template::template_units("T", class, units, pins, &st).unwrap();
                 let found = lint(&s, Some(class), &cx);
                 assert!(found.is_empty(), "{class:?} {shapes:?}: {found:?}");
             }

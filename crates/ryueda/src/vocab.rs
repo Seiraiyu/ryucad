@@ -170,6 +170,18 @@ impl Names<'_> {
         .with("regions", list))
     }
 
+    /// The region a title instruction names: an ID (`r3`) as given, since
+    /// the batch may make it, else a title one region has.
+    pub fn region_id(&self, text: &str) -> Result<String> {
+        let id = text
+            .strip_prefix('r')
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        if id {
+            return Ok(text.to_owned());
+        }
+        self.region(text)
+    }
+
     /// The pin `text` (`U3.VDD`, `U3.4`) names: `<part key>/<number>`.
     pub fn pin(&self, text: &str) -> Result<String> {
         let (part, pin) = text
@@ -477,6 +489,9 @@ impl Names<'_> {
                 format!("region {} {}", Self::quote(title), parts(l))
             }
             Instruction::RegionNone { parts: l } => format!("region none {}", parts(l)),
+            Instruction::Title { region, title } => {
+                format!("region {region} title {}", Self::quote(title))
+            }
             Instruction::Paper {
                 sheet,
                 size,
@@ -527,12 +542,6 @@ pub enum Said {
         from: String,
         to: String,
     },
-    /// `region rename R TITLE`: a region (by ID) given a title, as a
-    /// lasting `region` instruction over its parts.
-    RenameRegion {
-        region: String,
-        title: String,
-    },
 }
 
 /// What `release` names: a part (every instruction naming it), one
@@ -570,7 +579,7 @@ pub const FORMS: &[&str] = &[
     "flow X... reversed",
     "shift X... up|down|left|right STEPS (a move only)",
     "release X...|ID|net:N",
-    "region TITLE X... | region none X... | region rename REGION TITLE (X may be a region)",
+    "region TITLE X... | region none X... | region REGION title TITLE (region rename REGION TITLE reads so) (X may be a region)",
     "paper SHEET SIZE [landscape|portrait]",
 ];
 
@@ -618,14 +627,25 @@ impl Names<'_> {
                 }
                 return Ok(Said::Release(out));
             }
+            // A region's title by its ID (plan 3.A): lasting, applied after
+            // the batch's regions are made.
+            "region" if rest.get(1).is_some_and(|w| w == "title") => {
+                let [region, _, title] = rest else {
+                    return Err(usage(text, "region REGION title TITLE"));
+                };
+                Instruction::Title {
+                    region: self.region_id(region)?,
+                    title: title.clone(),
+                }
+            }
             "region" if rest.first().is_some_and(|w| w == "rename") => {
                 let [_, region, title] = rest else {
                     return Err(usage(text, "region rename REGION TITLE"));
                 };
-                return Ok(Said::RenameRegion {
-                    region: self.region(region)?,
+                Instruction::Title {
+                    region: self.region_id(region)?,
                     title: title.clone(),
-                });
+                }
             }
             "region" if rest.first().is_some_and(|w| w == "none") => Instruction::RegionNone {
                 parts: many(&rest[1..])?,

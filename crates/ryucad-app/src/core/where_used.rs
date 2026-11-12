@@ -146,10 +146,40 @@ impl Use {
     }
 }
 
+/// What Where used says of a failed organization-wide ask (#751):
+/// nothing without a token; plainly, when no review service answers for
+/// the project (none knows it, it has no remote, or the service isn't
+/// installed on its repository); else the refusal.
+pub fn org_failure(e: &Error) -> Option<String> {
+    use ryucad::error::Code;
+    match e.code {
+        Code::ReviewUnauthenticated => None,
+        Code::ReviewNotFound | Code::ReviewNoRemote | Code::ReviewNotInstalled => Some(
+            "Organization: not connected to a review service that knows this project".to_owned(),
+        ),
+        _ => Some(format!("Organization: {}", e.message)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_organization_with_no_review_service_says_so_plainly() {
+        use ryucad::error::Code;
+        assert_eq!(
+            org_failure(&Error::new(Code::ReviewUnauthenticated, "no token")),
+            None
+        );
+        let none = org_failure(&Error::new(Code::ReviewNotFound, "no such API route")).unwrap();
+        assert!(!none.contains("route"), "{none}");
+        assert_eq!(
+            org_failure(&Error::new(Code::ReviewUnreachable, "timed out")).as_deref(),
+            Some("Organization: timed out")
+        );
+    }
 
     #[test]
     fn other_projects_uses_are_told_apart() {

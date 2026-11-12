@@ -941,6 +941,19 @@ fn signal_on_top(block: &Block, p: usize, k: usize, want: Side) -> (u16, bool) {
     turn_for(block, p, k, want)
 }
 
+/// How far above a stage amplifier's top supply its capacitor's top end
+/// stands, in grid steps: the capacitor and its ground under it (plan 3.A).
+/// The stage's feedback stands as far again over the supply's end, its
+/// first row four steps over that, clear of the rail's port.
+const CAP_LIFT: Nm = 6;
+
+/// How far apart, body to body, a lifted op-amp stage's feedback elements
+/// stand in their column (plan 3.A): the lower one's text goes beside it,
+/// so the upper one stays within the idiom's reach (`lint::IDIOM_REACH`)
+/// of the amplifier. Two rows four steps apart with the text between would
+/// put the upper one past it.
+const STACK: Nm = 3 * GRID;
+
 /// The place putting pin `k` of part `p`, turned so, at `at`.
 fn put(block: &Block, p: usize, (rot, mirror): (u16, bool), k: usize, at: Point) -> Place {
     let place = Place::new([0, 0], rot, mirror);
@@ -1160,6 +1173,40 @@ pub fn clusters(
                 .push((k, i.parts.len()));
         }
     }
+    // The pins of an op-amp stage's amplifier that a divider reads (plan
+    // 3.A, a difference amplifier's non-inverting input): what hangs off
+    // such a pin hangs from its own line, and the divider's top runs on
+    // along it, in one column with the stage's input element; standing up,
+    // it would cross the inverting input's line.
+    let stage_amps: BTreeSet<usize> = idioms
+        .iter()
+        .filter(|i| i.kind == IdiomKind::OpampStage)
+        .filter_map(|i| i.anchor.map(|(a, _)| a))
+        .collect();
+    let divided: BTreeSet<(usize, usize)> = idioms
+        .iter()
+        .filter(|i| i.kind == IdiomKind::Divider)
+        .filter_map(|i| i.anchor)
+        .filter(|(a, _)| stage_amps.contains(a))
+        .collect();
+    // The columns of what hangs from a divided pin's line, one a slot apart:
+    // as wide as the widest drop's room (its text beside it) and a step.
+    let mut drop_slot: BTreeMap<(usize, usize), Nm> = BTreeMap::new();
+    for i in idioms {
+        let Some(at) = i.anchor.filter(|at| divided.contains(at)) else {
+            continue;
+        };
+        let q = match i.kind {
+            IdiomKind::PullUp | IdiomKind::PullDown => i.parts[0],
+            IdiomKind::Divider => i.parts[1],
+            _ => continue,
+        };
+        let pl = put(block, q, turn_for(block, q, 0, Side::Up), 0, [0, 0]);
+        let r = Cluster::single(q, pl).room(block, [0, 0]);
+        let w = (r.max[0] - r.min[0] + GRID - 1) / GRID + 1;
+        let e = drop_slot.entry(at).or_insert(3);
+        *e = (*e).max(w);
+    }
     // Each pin's decoupling capacitors.
     let mut served_caps: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
     for i in idioms.iter().filter(|i| i.kind == IdiomKind::Decoupling) {
@@ -1256,6 +1303,16 @@ pub fn clusters(
                 let mut adds: Vec<(usize, Place)> = Vec::new();
                 // The way a part is moved to clear the others.
                 let mut clear = side;
+                // Parts moved another way than `clear` to clear the others:
+                // an op-amp stage's feedback column upwards, a drop from a
+                // divided pin's line downwards (plan 3.A).
+                let mut clear_part: BTreeMap<usize, Side> = BTreeMap::new();
+                // Drops from a divided pin's line clear the others' bodies
+                // only: their text finds its own place once wired.
+                let mut bare: BTreeSet<usize> = BTreeSet::new();
+                // A lifted stage's feedback elements, a stack apart: each
+                // clears the rest but not the others in its column.
+                let mut stacked: BTreeSet<usize> = BTreeSet::new();
                 match idiom.kind {
                     IdiomKind::Decoupling => {
                         let c = idiom.parts[0];
@@ -1371,12 +1428,26 @@ pub fn clusters(
                             let j = *n;
                             *n += 1;
                             clear = Side::Right;
-                            let x = snap(body.max[0]) + (3 + 3 * j) * GRID;
-                            let y = match side {
-                                Side::Up => pin.end[1] + GRID,
-                                _ => pin.end[1] - 3 * GRID,
-                            };
-                            [x, y]
+                            // A supply on top of an op-amp stage's own
+                            // amplifier (plan 3.A: the template's supplies
+                            // are on the amplifier) is inside the stage's
+                            // feedback loop: its capacitor stands there too,
+                            // beside the pin above its end, under the
+                            // feedback the stage lifts over it; outside, its
+                            // wire would cross the loop.
+                            if side == Side::Up && stage_amps.contains(&a) {
+                                [
+                                    pin.end[0] + (4 + 3 * j) * GRID,
+                                    pin.end[1] + CAP_LIFT * GRID,
+                                ]
+                            } else {
+                                let x = snap(body.max[0]) + (3 + 3 * j) * GRID;
+                                let y = match side {
+                                    Side::Up => pin.end[1] + GRID,
+                                    _ => pin.end[1] - 3 * GRID,
+                                };
+                                [x, y]
+                            }
                         };
                         adds.push((c, put(block, c, turn_for(block, c, top, Side::Up), top, at)));
                     }
@@ -1403,7 +1474,12 @@ pub fn clusters(
                         } else {
                             shape.extent.min[1]
                         });
-                        let y = edge + dir.step()[1] / GRID * 3 * GRID;
+                        let on_line = side.horizontal() && divided.contains(&(a, k));
+                        let y = if on_line {
+                            pin.end[1] + dir.step()[1]
+                        } else {
+                            edge + dir.step()[1] / GRID * 3 * GRID
+                        };
                         // From a pin pointing sideways, in stairs: the pin
                         // nearest the rail's side (the lowest for a
                         // pull-down) nearest the part, each further pin's a
@@ -1426,12 +1502,24 @@ pub fn clusters(
                         } else {
                             i
                         };
-                        let out_x = if side.horizontal() {
+                        let out_x = if on_line {
+                            // Hanging from the pin's own line, one column
+                            // each, the nearest three steps out.
+                            let n = on_pin.entry((a, k)).or_default();
+                            let j = *n;
+                            *n += 1;
+                            let slot = drop_slot.get(&(a, k)).copied().unwrap_or(3);
+                            pin.end[0] + side.step()[0] / GRID * (3 + slot * j) * GRID
+                        } else if side.horizontal() {
                             pin.end[0] + side.step()[0] / GRID * (5 + 3 * col) * GRID
                         } else {
                             pin.end[0] + (2 + 3 * i) * GRID
                         };
                         let rplace = put(block, r, turn, sig, [out_x, y]);
+                        if on_line {
+                            bare.insert(r);
+                            clear_part.insert(r, dir);
+                        }
                         adds.push((r, rplace));
                         // Jumpers strapping the same pin to the same rail,
                         // pins towards the part, the signal pin uppermost:
@@ -1488,6 +1576,84 @@ pub fn clusters(
                         let mid = snap((body.min[0] + body.max[0]) / 2);
                         let at = [mid - 3 * GRID, snap(body.max[1]) + 4 * GRID + i * 4 * GRID];
                         adds.push((r, put(block, r, turn, 0, at)));
+                    }
+                    IdiomKind::Divider if side.horizontal() && divided.contains(&(a, k)) => {
+                        // From a stage amplifier's sideways pin: the bottom
+                        // hangs from the pin's line past the pin's pulls,
+                        // the top runs on along the line past it (see
+                        // `divided`).
+                        let (top, bottom) = (idiom.parts[0], idiom.parts[1]);
+                        let mid = block.parts[a].pins[k].net;
+                        let tk = pin_on(block, top, mid);
+                        let bk = pin_on(block, bottom, mid);
+                        let hung: Nm = [IdiomKind::PullDown, IdiomKind::PullUp]
+                            .iter()
+                            .filter_map(|kind| pulls.get(&(a, *kind)))
+                            .flatten()
+                            .filter(|(kk, _)| *kk == k)
+                            .map(|(_, np)| *np as Nm)
+                            .sum();
+                        let slot = drop_slot.get(&(a, k)).copied().unwrap_or(3);
+                        let x = step(pin.end, side, (3 + slot * hung) * GRID);
+                        clear_part.insert(bottom, Side::Down);
+                        bare.insert(bottom);
+                        adds.push((
+                            bottom,
+                            put(
+                                block,
+                                bottom,
+                                turn_for(block, bottom, bk, Side::Up),
+                                bk,
+                                [x[0], x[1] - GRID],
+                            ),
+                        ));
+                        let mut tplace = put(
+                            block,
+                            top,
+                            turn_for(block, top, tk, side.opposite()),
+                            tk,
+                            step(x, side, 2 * GRID),
+                        );
+                        // In one column with the series part on the
+                        // nearest line of the same side (an op-amp
+                        // stage's input resistor), whichever is further
+                        // out, so the two inputs read as a pair.
+                        let centre = |q: usize, pl: Place| {
+                            let b = Shape::of(&block.parts[q], pl).body;
+                            [(b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2]
+                        };
+                        let pair = members
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, (q, pl))| {
+                                *q != a
+                                    && block.parts[*q].pins.len() == 2
+                                    && pl.rotation % 180 == 90
+                                    && (0..shape.pins.len()).any(|kk| {
+                                        kk != k
+                                            && shape.pins[kk].side == side
+                                            && shape.pins[kk].end[1] == centre(*q, *pl)[1]
+                                            && block.parts[*q].pins.iter().any(|x| {
+                                                x.net.is_some()
+                                                    && x.net == block.parts[a].pins[kk].net
+                                            })
+                                    })
+                            })
+                            .min_by_key(|(_, (q, pl))| (centre(*q, *pl)[1] - pin.end[1]).abs())
+                            .map(|(i, _)| i);
+                        if let Some(i) = pair {
+                            let (q, pl) = members[i];
+                            let (cq, ct) = (centre(q, pl)[0], centre(top, tplace)[0]);
+                            let out = if side == Side::Left {
+                                cq.min(ct)
+                            } else {
+                                cq.max(ct)
+                            };
+                            members[i].1.at[0] += snap(out - cq);
+                            tplace.at[0] += snap(out - ct);
+                        }
+                        bare.insert(top);
+                        adds.push((top, tplace));
                     }
                     IdiomKind::Divider => {
                         let (top, bottom) = (idiom.parts[0], idiom.parts[1]);
@@ -1639,7 +1805,22 @@ pub fn clusters(
                             .and_then(|o| pins[o].net);
                         let inn = pins[k].net;
                         let mid = snap((body.min[0] + body.max[0]) / 2);
+                        // Over the capacitors of the supplies on top.
+                        let lift = if (0..shape.pins.len()).any(|kk| {
+                            shape.pins[kk].side == Side::Up && served_caps.contains_key(&(a, kk))
+                        }) {
+                            CAP_LIFT
+                        } else {
+                            0
+                        };
                         let mut row = 0;
+                        // The feedback elements stand in one column, each
+                        // centred on the first, each cleared upwards (plan
+                        // 3.A): cleared sideways, a part's text pushed the
+                        // row out of line with the rest. Over the supply
+                        // capacitors they stand a stack apart instead.
+                        let mut column: Option<Nm> = None;
+                        let mut below_top: Option<Nm> = None;
                         for &q in &idiom.parts {
                             if ends(block, q).contains(&on) {
                                 // Its inverting-side end towards the
@@ -1649,10 +1830,30 @@ pub fn clusters(
                                 let dx = if side == Side::Right { 3 } else { -3 };
                                 let at = [
                                     mid + dx * GRID,
-                                    snap(shape.extent.max[1]) + (4 + 4 * row) * GRID,
+                                    snap(shape.extent.max[1]) + (4 + lift + 4 * row) * GRID,
                                 ];
                                 row += 1;
-                                adds.push((q, put(block, q, turn_for(block, q, qi, side), qi, at)));
+                                let mut place = put(block, q, turn_for(block, q, qi, side), qi, at);
+                                let body = Shape::of(&block.parts[q], place).body;
+                                let cx = (body.min[0] + body.max[0]) / 2;
+                                match column {
+                                    Some(c) => place.at[0] += snap(c - cx),
+                                    None => column = Some(cx),
+                                }
+                                // Over supply capacitors, a stack over the
+                                // row below, so the outer is within reach.
+                                if lift > 0 {
+                                    if let Some(top) = below_top {
+                                        let b = Shape::of(&block.parts[q], place).body;
+                                        let want = top + STACK;
+                                        place.at[1] +=
+                                            (want - b.min[1] + GRID - 1).div_euclid(GRID) * GRID;
+                                    }
+                                    below_top = Some(Shape::of(&block.parts[q], place).body.max[1]);
+                                    stacked.insert(q);
+                                }
+                                clear_part.insert(q, Side::Up);
+                                adds.push((q, place));
                             } else {
                                 let qi = pin_on(block, q, inn);
                                 adds.push((
@@ -1674,7 +1875,19 @@ pub fn clusters(
                     | IdiomKind::Connector => {}
                 }
                 for (p, place) in adds {
-                    let place = clear_of(block, &members, p, place, clear);
+                    let way = clear_part.get(&p).copied().unwrap_or(clear);
+                    let place = if stacked.contains(&p) {
+                        let others: Vec<(usize, Place)> = members
+                            .iter()
+                            .filter(|(q, _)| !stacked.contains(q))
+                            .copied()
+                            .collect();
+                        clear_of(block, &others, p, place, way)
+                    } else if bare.contains(&p) {
+                        clear_of_bodies(block, &members, p, place, way)
+                    } else {
+                        clear_of(block, &members, p, place, way)
+                    };
                     if let Some(old) = of.get(&p).copied()
                         && old != ci
                     {
@@ -2420,6 +2633,33 @@ fn clear_of(
     place
 }
 
+/// [`clear_of`] judged by the parts' extents alone, a step apart.
+fn clear_of_bodies(
+    block: &Block,
+    members: &[(usize, Place)],
+    p: usize,
+    place: Place,
+    side: Side,
+) -> Place {
+    let others: Vec<Rect> = members
+        .iter()
+        .map(|(q, pl)| Shape::of(&block.parts[*q], *pl).extent)
+        .collect();
+    for k in 0..40 {
+        let off = side.step();
+        let pl = Place::new(
+            [place.at[0] + off[0] * k, place.at[1] + off[1] * k],
+            place.rotation,
+            place.mirror,
+        );
+        let own = Shape::of(&block.parts[p], pl).extent.grow(GRID);
+        if !others.iter().any(|o| o.overlaps(&own)) {
+            return pl;
+        }
+    }
+    place
+}
+
 /// An idiom of its own: an LED and its resistor in a column, a filter's
 /// series part and its capacitor below its output, a connector alone.
 fn standalone(block: &Block, idiom: &Idiom) -> Option<Cluster> {
@@ -2709,6 +2949,122 @@ mod tests {
         let r2 = Shape::of(&block.parts[3], at(3));
         assert_eq!(r2.pins[0].end[1], r2.pins[1].end[1], "R2 across");
         assert!((r2.body.min[0] + r2.body.max[0]) / 2 < amp.pins[0].end[0]);
+    }
+
+    /// A difference amplifier (plan 3.A, the front end's baldiff): U1's
+    /// IN- fed by R2, its IN+ by R3 from another input, R4 and C2 from IN+
+    /// to ground, R1 and C1 the feedback, and V+ on top with its bypass
+    /// capacitor C3.
+    fn difference_amplifier() -> Block {
+        let mut u1 = ic(
+            "u1",
+            "U1",
+            "OPA",
+            // IN- and IN+ four steps apart, as the template draws them.
+            &[
+                ("IN-", PinKind::Input, Some(1)),
+                ("NC", PinKind::Passive, None),
+                ("IN+", PinKind::Input, Some(2)),
+            ],
+            &[("OUT", PinKind::Output, Some(0))],
+        );
+        let mut vplus = u1.pins[0].clone();
+        vplus.number = "4".into();
+        vplus.name = "V+".into();
+        vplus.kind = PinKind::PowerIn;
+        vplus.side = Side::Up;
+        vplus.at = [0, 3 * GRID + 3 * GRID];
+        vplus.net = Some(5);
+        u1.pins.push(vplus);
+        Block {
+            nets: vec![
+                net("out", "OUT", NetKind::Signal),
+                net("inn", "INN", NetKind::Signal),
+                net("inp", "INP", NetKind::Signal),
+                net("ina", "INA", NetKind::Signal),
+                net("inb", "INB", NetKind::Signal),
+                net("rail:v", "5V", NetKind::Supply),
+                net("rail:gnd", "GND", NetKind::Ground),
+            ],
+            parts: vec![
+                u1,
+                resistor("r1", "R1", "10k", [Some(1), Some(0)]),
+                capacitor("c1", "C1", "100p", [Some(0), Some(1)]),
+                resistor("r2", "R2", "1k", [Some(3), Some(1)]),
+                resistor("r3", "R3", "1k", [Some(4), Some(2)]),
+                resistor("r4", "R4", "10k", [Some(2), Some(6)]),
+                capacitor("c2", "C2", "100p", [Some(2), Some(6)]),
+                capacitor("c3", "C3", "100n", [Some(5), Some(6)]),
+            ],
+            ..Block::default()
+        }
+    }
+
+    #[test]
+    fn a_difference_amplifier_is_drawn_round_its_amplifier() {
+        let block = difference_amplifier();
+        let idioms = find(&block, &BTreeMap::new());
+        let kinds: Vec<(IdiomKind, Vec<&str>)> = idioms
+            .iter()
+            .map(|i| {
+                (
+                    i.kind,
+                    i.parts
+                        .iter()
+                        .map(|p| block.parts[*p].key.as_str())
+                        .collect(),
+                )
+            })
+            .collect();
+        assert!(
+            kinds.contains(&(IdiomKind::Divider, vec!["r3", "r4"])),
+            "{kinds:?}"
+        );
+        let singles = (0..block.parts.len())
+            .map(|p| Cluster::single(p, Place::new([0, 0], 0, false)))
+            .collect();
+        let c = clusters(&block, &idioms, singles, &Asks::default());
+        let u = c
+            .iter()
+            .find(|c| c.members.iter().any(|(p, _)| *p == 0))
+            .unwrap();
+        let at = |p: usize| u.members.iter().find(|(q, _)| *q == p).unwrap().1;
+        let shape = |p: usize| Shape::of(&block.parts[p], at(p));
+        let amp = shape(0);
+        let (inn, inp) = (amp.pins[0].end, amp.pins[2].end);
+        let mid = |p: usize| shape(p).body.center();
+        // The stage's feedback and input, and what hangs from IN+, within
+        // the lint's reach of the amplifier: the feedback over C3, a stack
+        // apart. (R3, past the drops, is within it with the template's
+        // smaller capacitors: the corpus's front end checks it.)
+        for p in [1, 2, 3, 5, 6, 7] {
+            assert!(
+                shape(p)
+                    .extent
+                    .grow(crate::lint::IDIOM_REACH)
+                    .overlaps(&amp.extent),
+                "{} drawn far from U1",
+                block.parts[p].key
+            );
+        }
+        // R3 runs on IN+'s line, in one column with R2 on IN-'s.
+        let r3 = shape(4);
+        assert_eq!(r3.pins[0].end[1], inp[1], "R3 on IN+'s line");
+        assert_eq!(r3.pins[1].end[1], inp[1], "R3 across the page");
+        assert_eq!(shape(3).pins[0].end[1], inn[1], "R2 on IN-'s line");
+        assert_eq!(mid(3)[0], mid(4)[0], "R2 and R3 in one column");
+        // R4 and C2 hang below IN+'s line, between the pin and R3.
+        for p in [5, 6] {
+            let sh = shape(p);
+            assert!(sh.body.max[1] < inp[1], "{p} below IN+");
+            assert!(
+                mid(p)[0] < inp[0] && mid(p)[0] > r3.extent.max[0],
+                "{p} between"
+            );
+        }
+        // R1 and C1 over C3, in one column.
+        assert_eq!(mid(1)[0], mid(2)[0], "the feedback in one column");
+        assert!(shape(2).body.min[1] > shape(7).extent.max[1], "C1 over C3");
     }
 
     #[test]

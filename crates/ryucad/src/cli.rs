@@ -3395,9 +3395,31 @@ fn fill_sides(args: &[String]) -> Result<Vec<Value>> {
             i += step;
             continue;
         }
-        if a == "--tangent" {
+        // --tangent [<BOOL>] or --tangent=<BOOL>: a fill side's after its
+        // --edge, a face tweak's (clap reads it) when no --edge is given
+        // (#674).
+        let tangent = if a == "--tangent" {
+            match args.get(i + 1).map(String::as_str) {
+                Some(v @ ("true" | "false")) => Some((v == "true", 2)),
+                _ => Some((true, 1)),
+            }
+        } else {
+            a.strip_prefix("--tangent=").map(|v| (v == "true", 1))
+        };
+        if let Some((on, step)) = tangent {
+            let edge_later = || {
+                args[i + step..]
+                    .iter()
+                    .take_while(|x| *x != "--")
+                    .any(|x| x == "--edge" || x.starts_with("--edge="))
+            };
             match out.last_mut() {
-                Some(last) if last.get("edge").is_some() => last["tangent"] = json!(true),
+                Some(last) if last.get("edge").is_some() => {
+                    if on {
+                        last["tangent"] = json!(true);
+                    }
+                }
+                None if !edge_later() => {}
                 _ => {
                     return Err(Error::new(
                         Code::Usage,
@@ -3405,10 +3427,26 @@ fn fill_sides(args: &[String]) -> Result<Vec<Value>> {
                     ));
                 }
             }
+            i += step;
+            continue;
         }
         i += 1;
     }
     Ok(out)
+}
+
+/// The passes over a feature write's command line as written, which clap
+/// can't make: grown edges, a loft's loops, a fill's sides, --with groups.
+fn read_in_order(args: &[String], fields: &mut FieldArgs) -> Result<()> {
+    fields.grown = grown(args)?;
+    fields.section_loops = section_loops(args)?;
+    fields.fill_sides = fill_sides(args)?;
+    // A fill's --tangent is its sides', not a face tweak's.
+    if !fields.fill_sides.is_empty() {
+        fields.tangent = None;
+    }
+    fields.with_groups = with_groups(args)?;
+    Ok(())
 }
 
 fn section_loops(args: &[String]) -> Result<Vec<Vec<String>>> {
@@ -6433,27 +6471,9 @@ pub fn main() -> ExitCode {
     };
     if let Command::Feature(FeatureCmd::Add { fields, .. } | FeatureCmd::Edit { fields, .. }) =
         &mut cli.command
+        && let Err(e) = read_in_order(&args, fields)
     {
-        match grown(&args) {
-            Ok(g) => fields.grown = g,
-            Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
-        }
-        match section_loops(&args) {
-            Ok(l) => fields.section_loops = l,
-            Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
-        }
-        match fill_sides(&args) {
-            Ok(s) => fields.fill_sides = s,
-            Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
-        }
-        // A fill's --tangent is its sides', not a face tweak's.
-        if !fields.fill_sides.is_empty() {
-            fields.tangent = None;
-        }
-        match with_groups(&args) {
-            Ok(w) => fields.with_groups = w,
-            Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
-        }
+        return finish(Err(e), Vec::new(), cli.pretty);
     }
     // Git reads a textconv's output as the file's text, not JSON.
     if let Command::Git(GitCmd::Textconv { file }) = &cli.command {
@@ -6821,6 +6841,57 @@ mod tests {
             .map(str::to_owned)
             .collect();
         assert_eq!(fill_sides(&early).unwrap_err().code, Code::Usage);
+        // #674: --tangent takes a value, after an --edge as on a face tweak.
+        let valued: Vec<String> = [
+            "--edge",
+            "a",
+            "--tangent",
+            "false",
+            "--edge",
+            "b",
+            "--tangent=true",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(
+            fill_sides(&valued).unwrap(),
+            vec![json!({"edge": "a"}), json!({"edge": "b", "tangent": true})]
+        );
+        let tweak: Vec<String> = ["--face", "p/b/a", "--tangent", "true"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert!(fill_sides(&tweak).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_face_tweaks_tangent_takes_a_value() {
+        on_cli_stack(|| {
+            // #674: `--tangent true|false` on a draft or a move is the
+            // tweak's, not a fill side's.
+            for (v, want) in [("true", Some(true)), ("false", Some(false))] {
+                let f = sent(&["ryucad", "feature", "edit", "p", "d", "--tangent", v])
+                    .unwrap_or_else(|e| panic!("--tangent {v}: {e:?}"));
+                assert_eq!(f.tangent, want, "--tangent {v}");
+            }
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "draft",
+                "--neutral",
+                "xy",
+                "--angle",
+                "2deg",
+                "--face",
+                "p/b/a",
+                "--tangent",
+            ])
+            .unwrap();
+            assert_eq!(f.tangent, Some(true));
+        });
     }
 
     #[test]
@@ -6930,7 +7001,7 @@ mod tests {
         if let Command::Feature(FeatureCmd::Add { fields, .. } | FeatureCmd::Edit { fields, .. }) =
             &mut cli.command
         {
-            fields.with_groups = with_groups(&args)?;
+            read_in_order(&args, fields)?;
         }
         match request(&cli.command) {
             Some(Request::FeatureAdd { fields, .. } | Request::FeatureEdit { fields, .. }) => {

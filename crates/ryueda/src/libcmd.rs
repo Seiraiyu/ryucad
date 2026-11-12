@@ -250,15 +250,15 @@ pub fn symbol_create(
             let Some(tc) = class_param(t, false)? else {
                 unreachable!("none is refused")
             };
-            if class.is_some_and(|c| c != tc) || units.is_some_and(|u| u != 1) {
+            if class.is_some_and(|c| c != tc) {
                 return Err(Error::new(
                     Code::InvalidParam,
-                    format!("a {t} template draws one unit of class {t}"),
+                    format!("a {t} template draws a symbol of class {t}"),
                 )
                 .with("param", "template"));
             }
             let (st, _) = p.standards_for(SELF)?;
-            crate::template::template(name, tc, pins, &st)?
+            crate::template::template_units(name, tc, units.unwrap_or(1), pins, &st)?
         }
         None => Symbol {
             name: name.to_owned(),

@@ -274,7 +274,7 @@ pub struct Watch {
     seen: Arc<(Mutex<Seen>, Condvar)>,
     next: u64,
     // Dropped last: it stops the event thread.
-    _watcher: notify::RecommendedWatcher,
+    _watcher: Watcher,
 }
 
 #[derive(Debug)]
@@ -317,34 +317,19 @@ impl Watch {
         let (watched, marked) = (roots[1].clone(), marks[1].clone());
         let own = roots.clone();
         ryu_doc::source::note_writes();
-        let handler = move |res: notify::Result<notify::Event>| {
+        // One handler for both backends: what an event says, noted under
+        // the lock, and anyone waiting on a marker woken.
+        let on = move |raw: Raw| {
             let (lock, ready) = &*into;
             let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
-            match res {
-                Err(_) => full(&mut s, "file events failed"),
-                Ok(ev) => {
-                    if ev.need_rescan() {
-                        full(&mut s, "file events overflowed");
-                    }
-                    // Opening and reading change nothing, and the
-                    // session's own reads would come back as events.
-                    if !matches!(ev.kind, notify::EventKind::Access(_)) {
-                        for p in &ev.paths {
-                            note(&mut s, p, &roots, &marks, keep);
-                        }
-                    }
-                }
+            match raw {
+                Raw::Failed => full(&mut s, "file events failed"),
+                Raw::Overflow => full(&mut s, "file events overflowed"),
+                Raw::Path(p) => note(&mut s, p, &roots, &marks, keep),
             }
             ready.notify_all();
         };
-        let mut watcher = notify::recommended_watcher(handler).map_err(|e| e.to_string())?;
-        use notify::Watcher;
-        watcher
-            .watch(&watched, notify::RecursiveMode::Recursive)
-            .map_err(|e| e.to_string())?;
-        watcher
-            .watch(&marked, notify::RecursiveMode::NonRecursive)
-            .map_err(|e| e.to_string())?;
+        let watcher = watch_folders(&watched, &marked, on)?;
         Ok(Watch {
             markers: marked,
             roots: own,
@@ -398,6 +383,73 @@ impl Watch {
             None => Changes::Paths(paths),
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux::{Raw, Watcher};
+
+/// What an event says, whichever backend heard it.
+#[cfg(not(target_os = "linux"))]
+enum Raw<'a> {
+    Overflow,
+    Failed,
+    Path(&'a Path),
+}
+
+/// Watches the project folder recursively and the markers' folder alone,
+/// through inotify without `IN_OPEN` (#755: see `linux`).
+#[cfg(target_os = "linux")]
+fn watch_folders(
+    project: &Path,
+    markers: &Path,
+    on: impl FnMut(Raw) + Send + 'static,
+) -> std::result::Result<Watcher, String> {
+    Watcher::start(
+        &[
+            (project.to_path_buf(), true),
+            (markers.to_path_buf(), false),
+        ],
+        on,
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+type Watcher = notify::RecommendedWatcher;
+
+/// Watches the project folder recursively and the markers' folder alone,
+/// through notify (FSEvents, ReadDirectoryChangesW).
+#[cfg(not(target_os = "linux"))]
+fn watch_folders(
+    project: &Path,
+    markers: &Path,
+    mut on: impl FnMut(Raw) + Send + 'static,
+) -> std::result::Result<Watcher, String> {
+    use notify::Watcher as _;
+    let handler = move |res: notify::Result<notify::Event>| match res {
+        Err(_) => on(Raw::Failed),
+        Ok(ev) => {
+            if ev.need_rescan() {
+                on(Raw::Overflow);
+            }
+            // Opening and reading change nothing, and the session's own
+            // reads would come back as events.
+            if !matches!(ev.kind, notify::EventKind::Access(_)) {
+                for p in &ev.paths {
+                    on(Raw::Path(p));
+                }
+            }
+        }
+    };
+    let mut watcher = notify::recommended_watcher(handler).map_err(|e| e.to_string())?;
+    watcher
+        .watch(project, notify::RecursiveMode::Recursive)
+        .map_err(|e| e.to_string())?;
+    watcher
+        .watch(markers, notify::RecursiveMode::NonRecursive)
+        .map_err(|e| e.to_string())?;
+    Ok(watcher)
 }
 
 /// Asks for a full check, for `why`, unless one is asked for already:
@@ -735,6 +787,82 @@ mod tests {
         assert!(got.contains("parts"), "{got:?}");
         // Outside what it keeps: nothing.
         fs::write(root.join("notes.txt"), "3").unwrap();
+        assert!(paths(w.changes()).is_empty());
+    }
+
+    /// #755: a full check lists every folder, and a watch that heard its
+    /// own opens (notify's inotify mask holds `IN_OPEN`) overflowed the
+    /// kernel's queue (`max_queued_events`, 16,384 by default) at 20,000
+    /// folders, two events a folder: every full check caused the next.
+    /// Reading the project must raise no event at all.
+    // Linux's own watcher (`linux`); notify's elsewhere.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn listing_and_reading_every_folder_raises_no_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("p");
+        let folders = 20_000;
+        for k in 0..folders {
+            let d = root.join(format!("parts/p{:02}/f{k}", k % 50));
+            fs::create_dir_all(&d).unwrap();
+            if k % 10 == 0 {
+                fs::write(d.join("x.json"), "1").unwrap();
+            }
+        }
+        let mut w = Watch::start(&root, &dir.path().join("marks"), keep_all).unwrap();
+        assert_eq!(w.changes(), Changes::All("the watch started"));
+        // Listed side by side, as ryucad lists a project's parts.
+        fn walk(d: &Path) {
+            use rayon::prelude::*;
+            read_dir(d).unwrap().par_iter().for_each(|(p, m)| {
+                if m.is_dir() {
+                    walk(p);
+                } else {
+                    fs::read(p).unwrap();
+                }
+            });
+        }
+        for _ in 0..3 {
+            walk(&root);
+            assert!(paths(w.changes()).is_empty());
+        }
+        // Still hearing what changes.
+        fs::write(root.join("parts/p00/f0/x.json"), "2").unwrap();
+        assert!(paths(w.changes()).contains("parts/p00/f0/x.json"));
+    }
+
+    /// A folder made, moved within the project, and written into in its
+    /// new place is still heard, and its old place not taken for it.
+    // Linux's own watcher (`linux`); notify's elsewhere.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_moved_inside_the_project_is_watched_where_it_went() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("p");
+        fs::create_dir_all(root.join("parts")).unwrap();
+        let mut w = Watch::start(&root, &dir.path().join("marks"), keep_all).unwrap();
+        w.changes();
+        fs::create_dir_all(root.join("parts/a/features")).unwrap();
+        let got = paths(w.changes());
+        assert!(got.contains("parts/a"), "{got:?}");
+        fs::write(root.join("parts/a/features/f.json"), "1").unwrap();
+        let got = paths(w.changes());
+        assert!(got.contains("parts/a/features/f.json"), "{got:?}");
+        fs::rename(root.join("parts/a"), root.join("parts/b")).unwrap();
+        let got = paths(w.changes());
+        assert!(
+            got.contains("parts/a") && got.contains("parts/b"),
+            "{got:?}"
+        );
+        fs::write(root.join("parts/b/features/g.json"), "2").unwrap();
+        assert_eq!(
+            paths(w.changes()),
+            BTreeSet::from(["parts/b/features/g.json".to_owned()])
+        );
+        // Moved out of the project and written there: nothing.
+        fs::rename(root.join("parts/b"), dir.path().join("away")).unwrap();
+        assert!(paths(w.changes()).contains("parts/b"));
+        fs::write(dir.path().join("away/features/h.json"), "3").unwrap();
         assert!(paths(w.changes()).is_empty());
     }
 

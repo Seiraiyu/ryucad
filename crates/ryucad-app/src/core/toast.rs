@@ -17,6 +17,10 @@ pub const LIFE: Duration = Duration::from_secs(6);
 /// One participant's changes this close together are one toast.
 pub const BATCH: Duration = Duration::from_secs(1);
 
+/// The lost daemon's toast: an error, kept until the window is connected
+/// again (#732).
+pub const LOST: &str = "Lost the daemon: reconnecting";
+
 /// `ui.notify`: which toasts show.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Notify {
@@ -282,6 +286,18 @@ impl Toasts {
         });
     }
 
+    /// The daemon lost: a failure, kept until [`Toasts::found`].
+    pub fn lost(&mut self, now: Instant) {
+        self.note(LOST, true, now);
+    }
+
+    /// Connected again: every lost toast goes, and a note says so.
+    pub fn found(&mut self, now: Instant) {
+        self.list
+            .retain(|t| !(t.kind == Kind::Error && t.text == LOST));
+        self.note("Connected to the daemon again", false, now);
+    }
+
     /// The pointer is over toast `id`: it stays a [`LIFE`] from now.
     pub fn hover(&mut self, id: u64, now: Instant) {
         if let Some(t) = self.list.iter_mut().find(|t| t.id == id) {
@@ -408,6 +424,32 @@ mod tests {
         let files: Vec<Value> = files.iter().map(|p| json!({"path": p})).collect();
         json!({"seq": seq, "kind": "change", "method": method, "undone_by": null,
                "participant": {"id": who, "kind": "agent", "name": "agent"}, "files": files})
+    }
+
+    /// #732: connected again, the lost toast goes, however often it was
+    /// lost; the window's own errors stay.
+    #[test]
+    fn the_lost_toast_goes_once_connected_again() {
+        let t0 = Instant::now();
+        let mut t = Toasts::default();
+        let e = Error::new(Code::UnitMismatch, "length takes a length, not an angle");
+        t.error("Unit mismatch", &e, 0, t0);
+        for _ in 0..2 {
+            t.lost(t0);
+            assert_eq!(t.shown().last().unwrap().text, LOST);
+            t.found(t0);
+            let texts: Vec<&str> = t.shown().iter().map(|t| t.text.as_str()).collect();
+            assert!(!texts.contains(&LOST), "{texts:?}");
+            assert_eq!(texts.first(), Some(&"Unit mismatch"));
+            assert_eq!(texts.last(), Some(&"Connected to the daemon again"));
+        }
+        let mut quiet = Toasts {
+            notify: Notify::Errors,
+            ..Toasts::default()
+        };
+        quiet.lost(t0);
+        quiet.found(t0);
+        assert!(quiet.shown().iter().all(|t| t.text != LOST));
     }
 
     #[test]

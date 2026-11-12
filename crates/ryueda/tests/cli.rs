@@ -228,8 +228,10 @@ fn projects_and_library_projects_from_the_cli() {
     let id = v["result"]["project"].as_str().unwrap().to_owned();
     assert_eq!(id.len(), 32);
     for d in ["board", "passives"] {
-        let m = fs::read(p.direct.join(d).join("ryueda.json")).unwrap();
-        fs::write(p.daemon.join(d).join("ryueda.json"), m).unwrap();
+        for f in ["ryueda.json", ".gitattributes"] {
+            let m = fs::read(p.direct.join(d).join(f)).unwrap();
+            fs::write(p.daemon.join(d).join(f), m).unwrap();
+        }
     }
     assert_ne!(
         p.run_in(&p.daemon, "board", &["info"]).1["result"]["project"],
@@ -492,6 +494,8 @@ fn every_protocol_method_has_a_command() {
         ("standards.get", &["standards"]),
         ("standards.set", &["standards", "set"]),
         ("check", &["check"]),
+        ("doctor", &["doctor"]),
+        ("doctor.repair", &["doctor"]),
         ("layout", &["layout"]),
         ("layout.place", &["place"]),
         ("layout.instructions", &["place"]),
@@ -535,8 +539,10 @@ impl Pair {
         assert_eq!(p.run_in(&p.direct, "board", &["init"]).0, 0);
         assert_eq!(p.run_in(&p.direct, "passives", &["init", "--library"]).0, 0);
         for d in ["board", "passives"] {
-            let m = fs::read(p.direct.join(d).join("ryueda.json")).unwrap();
-            fs::write(p.daemon.join(d).join("ryueda.json"), m).unwrap();
+            for f in ["ryueda.json", ".gitattributes"] {
+                let m = fs::read(p.direct.join(d).join(f)).unwrap();
+                fs::write(p.daemon.join(d).join(f), m).unwrap();
+            }
         }
         p.ok(&["lib", "add", "passives", "../passives"]);
         p
@@ -1881,7 +1887,6 @@ fn kicad_import_from_the_cli() {
     assert_eq!(
         r["files"],
         json!([
-            "../passives/.gitattributes",
             "../passives/library/components/ryu_test_nand2.json",
             "../passives/library/components/ryu_test_r.json",
             "../passives/library/components/ryu_test_r_10k.json",
@@ -1922,14 +1927,14 @@ fn kicad_import_from_the_cli() {
         .iter()
         .map(|f| f["path"].as_str().unwrap())
         .collect();
-    assert_eq!(paths.len(), 12, "{paths:?}");
+    assert_eq!(paths.len(), 11, "{paths:?}");
     assert!(
         paths.iter().all(|f| f.starts_with("../passives/")),
         "{paths:?}"
     );
     let (code, u) = run(&["undo"]);
     assert_eq!(code, 0, "{u}");
-    assert_eq!(files_under(&passives), ["ryueda.json"]);
+    assert_eq!(files_under(&passives), [".gitattributes", "ryueda.json"]);
     let (code, r) = run(&["redo"]);
     assert_eq!(code, 0, "{r}");
     assert_eq!(files_under(&passives), written);
@@ -2207,6 +2212,47 @@ fn symbols_from_templates() {
         (&json!("up"), &json!("down"))
     );
     assert_eq!(u["added"], json!(["g2"]));
+    // #758: the op-amp template, a dual with its supplies on unit 1.
+    let amp = p.ok(&[
+        "symbol",
+        "create",
+        "OPA1612",
+        "--template",
+        "opamp",
+        "--units",
+        "2",
+        "--pins",
+        r#"[{"number": "2", "name": "-", "type": "input", "unit": 1},
+            {"number": "3", "name": "+", "type": "input", "unit": 1},
+            {"number": "1", "name": "~", "type": "output", "unit": 1},
+            {"number": "6", "name": "-", "type": "input", "unit": 2},
+            {"number": "5", "name": "+", "type": "input", "unit": 2},
+            {"number": "7", "name": "~", "type": "output", "unit": 2},
+            {"number": "8", "name": "V+", "type": "power_in"},
+            {"number": "4", "name": "V-", "type": "power_in"}]"#,
+    ]);
+    assert_eq!(
+        (&amp["symbol"]["class"], &amp["symbol"]["units"]),
+        (&json!("opamp"), &json!(2)),
+        "{amp}"
+    );
+    assert_eq!(amp["symbol"]["pins"]["8"]["side"], "up");
+    let lint = p.ok(&["lib", "check", "--symbol", "opa1612"]);
+    let found = &lint["symbols"][0]["findings"];
+    assert_eq!(found, &json!([]), "the op-amp template lints clean: {lint}");
+    p.fails(
+        &[
+            "symbol",
+            "create",
+            "R2",
+            "--template",
+            "resistor",
+            "--units",
+            "2",
+        ],
+        "invalid_param",
+        1,
+    );
     // Refusals.
     p.fails(
         &["symbol", "create", "Q", "--template", "transistor"],
@@ -2581,16 +2627,83 @@ fn schematics_from_the_cli() {
     assert_eq!(placed["added"], json!(["i1", "i2"]));
     let list = p.ok(&["place", "breakout", "--list"]);
     assert_eq!(list["instructions"][0]["text"], json!("beside R1 J1 right"));
-    // R1 is on J1's right but past the lint's reach (round 1, F1: holds
-    // judged the side alone), so it doesn't hold, and says why.
-    assert_eq!(list["instructions"][0]["holds"], json!(false));
+    // Round 1 (F1) saw R1 on J1's right but past the lint's reach reported
+    // held; plan 2.G reported it not held while the engine, judging the
+    // side alone, left it. Since plan 3.A the engine judges as the report
+    // does: R1 is brought within the reach, and it holds.
+    assert_eq!(list["instructions"][0]["holds"], json!(true), "{list}");
+    assert_eq!(list["instructions"][0]["state"], "held", "{list}");
+    assert!(list["instructions"][0]["why"].is_null(), "{list}");
+    // Every part crowded beside J1 (design 519): left of it they come
+    // nearer but not within the reach, so it is pulled and says how far is
+    // left; below it nothing comes nearer, so it is laid out without, moves
+    // nothing, and is noted.
+    let state = |side: &str| {
+        let text = format!("beside C2 C3 R2 U2 J1 {side}");
+        let dry = p.ok(&["place", "breakout", "--dry-run", &text]);
+        let ins = dry["instructions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["text"] == text.as_str())
+            .unwrap_or_else(|| panic!("{dry}"))
+            .clone();
+        (dry, ins)
+    };
+    let (_, pulled) = state("left");
+    assert_eq!(pulled["state"], "pulled", "{pulled}");
     assert!(
-        list["instructions"][0]["why"]
+        pulled["why"]
             .as_str()
             .unwrap()
-            .contains("mm from J1; beside means within"),
+            .contains("nearer than before it"),
+        "{pulled}"
+    );
+    let (dry, short) = state("below");
+    assert_eq!(short["state"], "not_held", "{short}");
+    assert_eq!(short["unchanged"], true, "{short}");
+    assert!(
+        dry["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["code"] == "instruction_unresolved"),
+        "{dry}"
+    );
+    // A region titled by its ID (plan 3.A): lasting, listed, held; a
+    // second title for it conflicts; `region rename` reads as it.
+    let titled = p.ok(&["place", "breakout", "region r1 title \"I2C header\""]);
+    let id = titled["added"][0].as_str().unwrap().to_owned();
+    let list = p.ok(&["place", "breakout", "--list"]);
+    let ins = list["instructions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id.as_str())
+        .unwrap_or_else(|| panic!("{list}"));
+    assert_eq!(ins["text"], "region r1 title \"I2C header\"", "{ins}");
+    assert_eq!(ins["state"], "held", "{ins}");
+    let e = p.fails(
+        &["place", "breakout", "region rename r1 Header"],
+        "instruction_conflict",
+        1,
+    );
+    assert!(e["message"].as_str().unwrap().contains(&id), "{e}");
+    p.ok(&["place", "breakout", &format!("release {id}")]);
+    let renamed = p.ok(&["place", "breakout", "region rename r1 Header"]);
+    let id = renamed["added"][0].as_str().unwrap().to_owned();
+    let list = p.ok(&["place", "breakout", "--list"]);
+    assert!(
+        list["instructions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == id.as_str() && i["text"] == "region r1 title Header"),
         "{list}"
     );
+    let d = p.ok(&["describe", "--block", "breakout"]);
+    assert!(d.to_string().contains("\"title\":\"Header\""), "{d}");
+    p.ok(&["place", "breakout", &format!("release {id}")]);
     // Repeating one changes nothing; a conflict is refused with fixes.
     assert_eq!(
         p.ok(&["place", "breakout", "net SDA label"])["added"],
@@ -2789,16 +2902,14 @@ fn regions_from_the_cli() {
         "sensor",
         &format!("region rename {id} \"Sensor core\""),
     ]);
+    // Since plan 3.A a rename is the lasting title instruction, by ID.
     let list = p.ok(&["place", "sensor", "--list"]);
     assert!(
         list["instructions"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|i| i["text"]
-                .as_str()
-                .unwrap()
-                .starts_with("region \"Sensor core\" ")),
+            .any(|i| i["text"] == format!("region {id} title \"Sensor core\"").as_str()),
         "{list}"
     );
     let d = p.ok(&["describe", "--block", "sensor"]);
@@ -2807,7 +2918,7 @@ fn regions_from_the_cli() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|r| r["title"] == "Sensor core" && r["named"] == true),
+            .any(|r| r["id"] == id.as_str() && r["title"] == "Sensor core"),
         "{d}"
     );
     let refused = p.fails(
@@ -3866,4 +3977,28 @@ fn annotate_from_the_cli() {
     assert_eq!(code, 0, "{u}");
     let (_, d) = run(&["annotate", "--reset", "all", "--dry-run"]);
     assert_eq!(d["result"]["changes"], a["result"]["changes"]);
+}
+
+/// Every instruction form the vocabulary reads is in `place --help`
+/// (round 3: three sessions never found `region`; plan 3.A).
+#[test]
+fn place_help_lists_every_form() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = ryueda(&dir.path().join("run"))
+        .args(["place", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8(out.stdout).unwrap();
+    let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    for form in ryueda::vocab::FORMS {
+        for alt in form.split(" | ") {
+            let head: String = alt
+                .split(' ')
+                .take_while(|w| !w.starts_with('('))
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(flat.contains(&head), "place --help lacks {head:?} ({form})");
+        }
+    }
 }

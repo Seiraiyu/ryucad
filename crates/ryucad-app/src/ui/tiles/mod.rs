@@ -77,12 +77,7 @@ pub fn show(
     if o.ws.lost && id != "viewport" {
         ui.disable();
     }
-    let part = o
-        .view
-        .chosen
-        .as_ref()
-        .map(|k| k.0.clone())
-        .or_else(|| o.ws.model.parts.keys().next().cloned());
+    let part = o.ws.model.followed_part(o.view.chosen.as_ref());
     let scroll = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| {
         egui::ScrollArea::vertical()
             .id_salt(("tile", ui.scope_id()))

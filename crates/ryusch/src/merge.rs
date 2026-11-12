@@ -618,7 +618,7 @@ mod tests {
         let id = base
             .regions
             .iter()
-            .find(|(_, r)| r.title == "F1")
+            .find(|(_, r)| r.parts.iter().any(|k| k == "r9"))
             .map(|(id, _)| id.clone())
             .unwrap();
         let mut ours = base.clone();
