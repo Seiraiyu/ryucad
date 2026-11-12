@@ -43,6 +43,7 @@ pub mod pdf;
 pub mod project;
 pub mod props;
 pub mod proto;
+pub mod refs;
 pub mod schem;
 pub mod schemcmd;
 pub mod server;
