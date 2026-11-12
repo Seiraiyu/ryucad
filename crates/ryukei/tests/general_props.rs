@@ -302,3 +302,19 @@ fn passing_a_spline_pole() {
     let b = spline(&Surface::Sphere(ball), [[0.0, tau], [-1.5, 1.5]]);
     agrees(&a, &b).unwrap();
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+
+    /// NURBS sides crossing along an isoline edge at a random angle
+    /// (#303's crossing certificate): the prism is convex, so sampling any
+    /// pair of its faces finds them meeting only along the edge they
+    /// share, and the check must say so.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "slow in a debug build: CI runs it in release")]
+    fn nurbs_sides_crossing_at_any_angle_check_clean(deg in 2.0f64..178.0) {
+        let b = ryukei_testkit::nurbs::isoline_wedge(deg * core::f64::consts::PI / 180.0);
+        prop_assert_eq!(ryukei::check::check(&b), vec![]);
+        prop_assert_eq!(ryukei::check::check_intersections(&b), vec![]);
+    }
+}
