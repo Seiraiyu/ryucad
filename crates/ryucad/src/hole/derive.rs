@@ -646,7 +646,7 @@ pub fn at_rebuild(e: Error) -> Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::doc::files::Feature;
     use crate::expr::Env;
