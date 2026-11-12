@@ -1152,6 +1152,13 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
     let bytes = std::fs::read(&source).map_err(|e| Error::io(&source, &e))?;
     let file = ImportFile::new(bytes);
     let opened = opened(&file).map_err(|e| unreadable(&ask.path, &e))?;
+    let search = search_dirs(&root, &ask.search);
+    let tree = external::resolve(&source, file.clone(), opened.clone(), &search, &ask.path)
+        .map_err(|e| refused(e, &opened, &ask.path))?;
+    if tree.nodes.len() > 1 {
+        return import_tree(session, &ask, root, &tree, Some(&target))
+            .map_err(|e| refused(e, &opened, &ask.path));
+    }
     reimport_opened(session, &ask, root, target, old, file, &opened)
         .map_err(|e| refused(e, &opened, &ask.path))
 }
@@ -3582,6 +3589,83 @@ pub(crate) mod tests {
         assert!(!dir.path().join("imports/asm.step").exists());
         let r = crate::server::tests::call(&mut s, "rebuild", json!({"part": "rig"})).unwrap();
         assert!(r["parts"][0]["solids"].as_array().unwrap().iter().all(|x| x["ok"] == true), "{r}");
+    }
+
+    /// The first version: BOX (10 mm) at the origin and PIN at 50 mm.
+    fn version_one() -> tempfile::TempDir {
+        folder(&[
+            ("asm.stp", external_assembly("ASM", &[("BOX", "box.stp", [0.0; 3]), ("PIN", "pin.stp", [50.0, 0.0, 0.0])])),
+            ("box.stp", part_file("BOX", 10.0)),
+            ("pin.stp", part_file("PIN", 2.0)),
+        ])
+    }
+
+    /// A new version of the assembly and one of its part files (design
+    /// 448, 24.D): the box's features take its new bytes, the pin's file
+    /// (the same bytes) is left alone, the pin moves, a new part file
+    /// makes a part, and the answer lists only the files that changed.
+    #[test]
+    fn an_update_follows_the_assembly_and_its_changed_part_files() {
+        let one = version_one();
+        let (dir, mut s) = crate::server::tests::fresh();
+        import_call(&mut s, json!({"path": one.path().join("asm.stp")})).unwrap();
+        let pin_before = std::fs::read(dir.path().join("imports/pin.step")).unwrap();
+        let two = folder(&[
+            ("asm.stp", external_assembly("ASM", &[
+                ("BOX", "box.stp", [0.0; 3]),
+                ("PIN", "pin.stp", [60.0, 0.0, 0.0]),
+                ("NUT", "nut.stp", [0.0, 30.0, 0.0]),
+            ])),
+            ("box.stp", part_file("BOX", 12.0)),
+            ("pin.stp", part_file("PIN", 2.0)),
+            ("nut.stp", part_file("NUT", 4.0)),
+        ]);
+        let v = import_call(&mut s, json!({"path": two.path().join("asm.stp"), "update": "imports/asm.step"})).unwrap();
+        assert_eq!(v["update"], true);
+        let ext: Vec<(&str, bool)> = v["external"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| (x["path"].as_str().unwrap(), x.get("from").is_some()))
+            .collect();
+        assert_eq!(ext, [("imports/box.step", true), ("imports/nut.step", false)]);
+        let new_box = ImportFile::new(part_file("BOX", 12.0)).blake3;
+        assert!(listed(dir.path(), "box").iter().all(|(_, f)| f["file"]["blake3"] == new_box.as_str()));
+        assert_eq!(std::fs::read(dir.path().join("imports/pin.step")).unwrap(), pin_before);
+        let asm = listed(dir.path(), "asm");
+        let of: Vec<&str> = asm.iter().map(|(_, f)| f["part"].as_str().unwrap()).collect();
+        assert_eq!(of, ["box", "pin", "nut"]);
+        let x = asm[1].1["pose"]["origin_m"][0].as_f64().unwrap();
+        assert!((x - 0.06).abs() < 1e-12, "the pin moved: {x}");
+    }
+
+    /// A part file updated alone, as any imported file is: its part
+    /// follows, the assembly is untouched.
+    #[test]
+    fn a_part_file_updates_alone() {
+        let one = version_one();
+        let (dir, mut s) = crate::server::tests::fresh();
+        import_call(&mut s, json!({"path": one.path().join("asm.stp")})).unwrap();
+        let asm_before = listed(dir.path(), "asm");
+        let three = folder(&[("box.stp", part_file("BOX", 14.0))]);
+        import_call(&mut s, json!({"path": three.path().join("box.stp"), "update": "imports/box.step"})).unwrap();
+        let new_box = ImportFile::new(part_file("BOX", 14.0)).blake3;
+        assert!(listed(dir.path(), "box").iter().all(|(_, f)| f["file"]["blake3"] == new_box.as_str()));
+        assert_eq!(listed(dir.path(), "asm"), asm_before);
+    }
+
+    /// An update whose new version names a file that isn't there is
+    /// refused before anything is written.
+    #[test]
+    fn an_update_missing_a_part_file_writes_nothing() {
+        let one = version_one();
+        let (dir, mut s) = crate::server::tests::fresh();
+        import_call(&mut s, json!({"path": one.path().join("asm.stp")})).unwrap();
+        let before = crate::session::files(dir.path()).unwrap();
+        let two = folder(&[("asm.stp", external_assembly("ASM", &[("BOX", "box.stp", [0.0; 3])]))]);
+        let e = import_call(&mut s, json!({"path": two.path().join("asm.stp"), "update": "imports/asm.step"})).unwrap_err();
+        assert_eq!(e.code, Code::ImportExternalMissing);
+        assert_eq!(crate::session::files(dir.path()).unwrap(), before);
     }
 
     /// A frame (`F-1`) with a plate of its own, a sub-assembly (`S-1`) of
