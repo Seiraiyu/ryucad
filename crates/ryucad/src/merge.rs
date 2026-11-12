@@ -371,6 +371,7 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
             crate::doc::lock::KIND => Some(lock_atom),
             crate::doc::annotation::KIND => Some(annotation_atom),
             crate::doc::drawing::KIND => Some(drawing_atom),
+            crate::doc::files::FEATURE_KIND => Some(feature_atom),
             _ => None,
         },
         ..Walk::default()
@@ -467,6 +468,14 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
             .unwrap_or_else(|| ours.clone()),
         _ => walk.whole(base, ours, theirs),
     }
+}
+
+/// A mate's limit on one value is one value: its min and max go
+/// together, so two sides changing different bounds of one range
+/// conflict.
+fn feature_atom(at: &str) -> bool {
+    let seg: Vec<&str> = at.split('/').collect();
+    matches!(seg.as_slice(), ["", "limits", "angle" | "distance"])
 }
 
 /// A drawing view's `orient` and `rev` are one value each: a standard
@@ -2261,6 +2270,55 @@ mod tests {
         let (b, c) = ("1".repeat(32), "2".repeat(32));
         let m = merge(Some(&at(&a)), &at(&b), &at(&c));
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/extent/target"]);
+    }
+
+    #[test]
+    fn a_mates_limits_merge_per_value_each_range_as_one() {
+        let mate = |limits: Value, angle: Option<&str>| {
+            let mut v = json!({
+                "format": 22, "kind": "ryucad.feature", "type": "mate", "form": "cylindrical",
+                "a": {"instance": ["base"], "at": "origin"},
+                "b": {"instance": ["pin"], "at": "origin"}, "limits": limits,
+            });
+            if let Some(a) = angle {
+                v["angle"] = json!(a);
+            }
+            v
+        };
+        let base = mate(json!({"angle": {"min": "-6 deg", "max": "6 deg"}}), None);
+        // Different bounds of one range: a conflict there.
+        let m = merge(
+            Some(&base),
+            &mate(json!({"angle": {"min": "-6 deg", "max": "8 deg"}}), None),
+            &mate(json!({"angle": {"min": "-8 deg", "max": "6 deg"}}), None),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/limits/angle"]);
+        // A range on one side, the other value's range on the other: both.
+        let m = merge(
+            Some(&base),
+            &mate(json!({"angle": {"min": "-6 deg", "max": "8 deg"}}), None),
+            &mate(
+                json!({"angle": {"min": "-6 deg", "max": "6 deg"},
+                         "distance": {"max": "5 mm"}}),
+                None,
+            ),
+        );
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            m.value["limits"],
+            json!({"angle": {"min": "-6 deg", "max": "8 deg"}, "distance": {"max": "5 mm"}})
+        );
+        // Limits added on one side, an angle on the other: format 22.
+        let mut plain = base.clone();
+        plain.as_object_mut().unwrap().remove("limits");
+        plain["format"] = json!(4);
+        let m = merge(Some(&plain), &base, &{
+            let mut t = plain.clone();
+            t["angle"] = json!("3 deg");
+            t
+        });
+        assert!(m.is_clean());
+        assert_eq!(m.value["format"], 22);
     }
 
     #[test]

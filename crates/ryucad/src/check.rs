@@ -24,9 +24,10 @@ use ryu_session::job::Phase;
 use serde_json::{Value, json};
 
 /// Every finding's code and severity: `doctor`'s issues keep their own.
-pub const CODES: [(&str, &str); 16] = [
+pub const CODES: [(&str, &str); 17] = [
     ("feature_failed", "error"),
     ("assembly_unsolved", "error"),
+    ("mate_out_of_limits", "error"),
     ("faces_intersect", "error"),
     ("cannot_check", "warning"),
     ("mesh_faults", "error"),
@@ -54,6 +55,22 @@ fn severity(code: &str) -> &'static str {
 fn finding(code: &str, part: &Id, feature: &Id, message: String) -> Value {
     json!({"code": code, "severity": severity(code), "part": part, "feature": feature,
            "message": message})
+}
+
+/// `mate_out_of_limits` for each mate of assembly `p` whose driven value
+/// lies outside its own limits: a parameter moved it there after the
+/// write. A mate resting on a stop is normal and says nothing.
+fn limit_findings(id: &Id, p: &crate::doc::project::Part) -> Vec<Value> {
+    p.order()
+        .iter()
+        .filter_map(|fid| {
+            let m = p.features.get(fid)?.as_ref().ok()?.mate()?;
+            let e = crate::mate::out_of_limits(fid, m)?;
+            let mut f = finding("mate_out_of_limits", id, fid, e.message.clone());
+            f["error"] = json!(e);
+            Some(f)
+        })
+        .collect()
 }
 
 /// What ryukei finds wrong with one built body: faces that meet where they
@@ -357,6 +374,7 @@ pub fn run(
             findings.extend(failed(session, id, fid, r));
         }
         findings.extend(unsolved(id, &fresh));
+        findings.extend(limit_findings(id, &p));
         // A part's check takes in what fails in every assembly it places,
         // at any depth (issue #158): its occurrences aren't where those
         // assemblies' mates say. The whole project's has them already.
@@ -372,6 +390,9 @@ pub fn run(
                     .filter_map(|(fid, r)| failed(session, &a, fid, r))
                     .collect();
                 found.extend(unsolved(&a, &placed));
+                if let Ok(ap) = project.part(&a) {
+                    found.extend(limit_findings(&a, ap));
+                }
                 for mut f in found {
                     f["in"] = json!(id);
                     findings.push(f);

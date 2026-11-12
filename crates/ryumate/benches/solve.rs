@@ -33,6 +33,7 @@ fn bolts(n: u32) -> Assembly {
                 kind: Kind::Fastened,
                 a: on(0, at),
                 b: on(k, Pose::IDENTITY),
+                limits: ryumate::Limits::NONE,
             },
         );
     }
@@ -65,6 +66,7 @@ fn chain(n: u32) -> Assembly {
                 },
                 a: on(k - 1, off),
                 b: on(k, Pose::IDENTITY),
+                limits: ryumate::Limits::NONE,
             },
         );
     }
@@ -96,4 +98,42 @@ fn chain_held(b: Bencher, n: u32) {
     let asm = chain(n);
     let held = solve(&asm).unwrap().assembly(&asm);
     b.bench(|| solve(&held).unwrap());
+}
+
+/// `n` bolts on hinges round z, each stopped at ±6°, stored turned 0.2
+/// rad: every one pinned in the second round.
+fn bolts_with_stops(n: u32) -> Assembly {
+    let mut asm = Assembly::default();
+    asm.bodies.insert(0, fixed(Pose::IDENTITY));
+    let stop = 6.0 * (core::f64::consts::PI / 180.0);
+    for k in 1..=n {
+        let o = [0.01 * f64::from(k % 40), 0.01 * f64::from(k / 40), 0.0];
+        let at = Pose {
+            origin: o,
+            ..Pose::IDENTITY
+        };
+        asm.bodies.insert(k, free(turned([0.0, 0.0, 1.0], 0.2, o)));
+        asm.mates.insert(
+            k,
+            Mate {
+                kind: Kind::Revolute { angle: None },
+                a: on(0, at),
+                b: on(k, Pose::IDENTITY),
+                limits: ryumate::Limits {
+                    angle: Some(ryumate::Range {
+                        min: Some(-stop),
+                        max: Some(stop),
+                    }),
+                    distance: None,
+                },
+            },
+        );
+    }
+    asm
+}
+
+#[divan::bench(args = [10, 100, 1000], sample_count = 10)]
+fn bolts_stopped(b: Bencher, n: u32) {
+    let asm = bolts_with_stops(n);
+    b.bench(|| solve(&asm).unwrap());
 }

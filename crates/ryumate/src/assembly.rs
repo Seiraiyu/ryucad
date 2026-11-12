@@ -1,6 +1,7 @@
 //! What the solver solves: rigid bodies, the connectors on them, the mates
 //! between connectors, and patterns that place copies of bodies.
 
+use crate::limits::Limits;
 use crate::pose::{Pose, norm};
 use std::collections::BTreeMap;
 
@@ -70,6 +71,8 @@ pub struct Mate {
     pub kind: Kind,
     pub a: Connector,
     pub b: Connector,
+    /// Stops on the values it leaves free; [`Limits::NONE`] for none.
+    pub limits: Limits,
 }
 
 /// A pattern's direction or axis: a fixed unit direction in assembly
@@ -136,6 +139,11 @@ pub enum MateError {
     /// A position outside ryukei's size box, or a distance past
     /// [`MAX_LENGTH`].
     OutsideSizeBox { what: String },
+    /// A limit on a value the mate's kind doesn't leave free, an empty
+    /// range, a min past its max, an angle range of a whole turn or
+    /// more, a bound that isn't finite, or a distance past
+    /// [`MAX_LENGTH`].
+    BadLimit { mate: Id, what: String },
 }
 
 impl std::fmt::Display for MateError {
@@ -164,6 +172,7 @@ impl std::fmt::Display for MateError {
             }
             MateError::BadGeometry { what } => write!(f, "bad geometry: {what}"),
             MateError::OutsideSizeBox { what } => write!(f, "outside the size box: {what}"),
+            MateError::BadLimit { mate, what } => write!(f, "mate {mate}'s limit: {what}"),
         }
     }
 }
@@ -295,6 +304,49 @@ impl Assembly {
                 } => {
                     angle(a)?;
                     distance(&Some(*d))?;
+                }
+            }
+            self.limits_ok(*mid, m)?;
+        }
+        Ok(())
+    }
+
+    /// Refuses mate `mid`'s limits unless each is on a value its kind
+    /// leaves free (a planar mate's distance is always driven) and is a
+    /// usable range.
+    fn limits_ok(&self, mid: Id, m: &Mate) -> Result<(), MateError> {
+        let bad = |what: String| Err(MateError::BadLimit { mate: mid, what });
+        let (turns, slides) = match m.kind {
+            Kind::Revolute { .. } | Kind::Planar { .. } => (true, false),
+            Kind::Slider { .. } => (false, true),
+            Kind::Cylindrical { .. } => (true, true),
+            Kind::Fastened | Kind::Ball => (false, false),
+        };
+        for (name, r, free) in [
+            ("angle", m.limits.angle, turns),
+            ("distance", m.limits.distance, slides),
+        ] {
+            let Some(r) = r else { continue };
+            if !free {
+                return bad(format!("its kind leaves no {name} to limit"));
+            }
+            if r.min.is_none() && r.max.is_none() {
+                return bad(format!("its {name} range has neither a min nor a max"));
+            }
+            for b in r.min.iter().chain(&r.max) {
+                if !b.is_finite() {
+                    return bad(format!("its {name} bound isn't finite"));
+                }
+                if name == "distance" && b.abs() > MAX_LENGTH {
+                    return bad(format!("its distance bound is longer than {MAX_LENGTH} m"));
+                }
+            }
+            if let (Some(lo), Some(hi)) = (r.min, r.max) {
+                if lo > hi {
+                    return bad(format!("its {name} min is past its max"));
+                }
+                if name == "angle" && hi - lo >= core::f64::consts::TAU {
+                    return bad("its angle range is a whole turn or more".to_owned());
                 }
             }
         }
@@ -473,6 +525,7 @@ mod tests {
                 kind: Kind::Ball,
                 a: connector(On::Body(1)),
                 b: connector(On::Body(2)),
+                limits: Limits::NONE,
             },
         );
         assert_eq!(
@@ -540,6 +593,7 @@ mod tests {
                 },
                 a: connector(On::Body(1)),
                 b: connector(On::Body(2)),
+                limits: Limits::NONE,
             },
         );
         assert!(matches!(
@@ -558,5 +612,78 @@ mod tests {
             },
         );
         assert!(matches!(a.validate(), Err(MateError::BadGeometry { .. })));
+    }
+
+    #[test]
+    fn limits_must_fit_their_kind() {
+        use crate::limits::{Limits, Range};
+        let mut a = Assembly::default();
+        a.bodies.insert(1, body());
+        a.bodies.insert(2, body());
+        let mate = |kind, limits| Mate {
+            kind,
+            a: connector(On::Body(1)),
+            b: connector(On::Body(2)),
+            limits,
+        };
+        let angle = |min, max| Limits {
+            angle: Some(Range { min, max }),
+            distance: None,
+        };
+        let distance = |min, max| Limits {
+            angle: None,
+            distance: Some(Range { min, max }),
+        };
+        let bad = |a: &mut Assembly, kind, limits| {
+            a.mates.insert(10, mate(kind, limits));
+            assert!(
+                matches!(a.validate(), Err(MateError::BadLimit { mate: 10, .. })),
+                "{kind:?} {limits:?}"
+            );
+        };
+        let revolute = Kind::Revolute { angle: None };
+        let slider = Kind::Slider { distance: None };
+        let planar = Kind::Planar {
+            angle: None,
+            distance: 0.0,
+        };
+        // A value the kind doesn't have: no turn on a slider, no slide on a
+        // revolute, a planar mate's distance always driven.
+        bad(&mut a, slider, angle(Some(-0.1), Some(0.1)));
+        bad(&mut a, revolute, distance(None, Some(0.01)));
+        bad(&mut a, planar, distance(None, Some(0.01)));
+        bad(&mut a, Kind::Fastened, angle(Some(0.0), None));
+        // An empty range, min past max, a whole turn, not finite, too long.
+        bad(&mut a, revolute, angle(None, None));
+        bad(&mut a, revolute, angle(Some(0.2), Some(0.1)));
+        bad(&mut a, revolute, angle(Some(-3.2), Some(3.2)));
+        bad(&mut a, revolute, angle(Some(f64::NAN), None));
+        bad(&mut a, slider, distance(Some(0.0), Some(2000.0)));
+        // What fits is fine, one-sided included.
+        for (kind, limits) in [
+            (revolute, angle(Some(-0.1), Some(0.1))),
+            (revolute, angle(None, Some(0.1))),
+            (slider, distance(Some(0.0), None)),
+            (planar, angle(Some(-1.0), Some(1.0))),
+            (
+                Kind::Cylindrical {
+                    angle: None,
+                    distance: None,
+                },
+                Limits {
+                    angle: Some(Range {
+                        min: Some(-1.0),
+                        max: Some(1.0),
+                    }),
+                    distance: Some(Range {
+                        min: Some(0.0),
+                        max: Some(0.1),
+                    }),
+                },
+            ),
+        ] {
+            a.mates.insert(10, mate(kind, limits));
+            assert_eq!(a.validate(), Ok(()), "{kind:?} {limits:?}");
+        }
     }
 }

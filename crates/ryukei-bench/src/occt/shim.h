@@ -10,6 +10,7 @@
 namespace ryukei_occt {
 
 struct OcctMesh;
+struct XdeProp;
 
 // An OCCT shape held for Rust.
 class Shape {
@@ -52,6 +53,9 @@ std::unique_ptr<Shape> chamfer(const Shape &s, rust::Slice<const double> edges,
                                rust::Slice<const double> faces);
 std::unique_ptr<Shape> step_read(rust::Str path, bool fix);
 rust::Vec<double> xde_colours(rust::Str path);
+// Every label's material and named data, XDE's material mode on (OCCT
+// 7.8 has no metadata mode).
+rust::Vec<XdeProp> xde_properties(rust::Str path);
 void step_write(const Shape &s, rust::Str path, bool ap242);
 OcctMesh stl_read(rust::Str path);
 rust::Vec<double> mesh_stl(const Shape &s, double chord, double angle,

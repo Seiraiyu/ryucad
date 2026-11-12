@@ -28,6 +28,7 @@ holes ad955e972c9cdf98
 imports 51b4bb06f2c160a6
 inserts 7e44d307e6c9e832
 interference b3a04774fcaeb4fe
+limits a80f41b6adea49f4
 lofts 97c8ae8c328b3d66
 mates 7914a3d0a9b8c32d
 measure 5ce1e4b8e6385622
@@ -40,6 +41,7 @@ patterns 3a2ccdd69e784d14
 pdm 634d72f32565f931
 pdm_teams 8ccac42afcfdacca
 placement ff1d621ede04abf2
+properties 4581f79e666a0beb
 rebuild f95f3bea0fc4987d
 redlines be765d16aa282317
 reference_imports 053f9feeef8ddca6
