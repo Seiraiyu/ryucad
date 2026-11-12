@@ -99,14 +99,16 @@ pub const BUDGET: u64 = 1 << 20;
 /// Faces of each side named at most.
 const FACES: usize = 64;
 
-/// The pair's reach: both sides' chords and tolerances, and a part in
-/// 10⁹ of the coordinates' size for rounding.
-fn reach(a: &Prepared, b: &Prepared, both: &Box3) -> f64 {
+/// The pair's reach and its rounding margin: both sides' chords and
+/// tolerances, and a part in 10⁹ of the coordinates' size for rounding,
+/// which is also the escape certificate's margin.
+fn reach(a: &Prepared, b: &Prepared, both: &Box3) -> (f64, f64) {
     let (lo, hi) = (both.min(), both.max());
     let size = [lo.x, lo.y, lo.z, hi.x, hi.y, hi.z]
         .iter()
         .fold(0.0f64, |m, x| m.max(x.abs()));
-    a.reach + b.reach + 1e-9 * size.max(1e-3)
+    let margin = 1e-9 * size.max(1e-3);
+    (a.reach + b.reach + margin, margin)
 }
 
 /// The distance from `p` to triangle `t`.
@@ -125,7 +127,6 @@ fn to_triangle(p: Point3, t: &[Point3; 3]) -> f64 {
 /// direction is still an axis. The margin, a part in 10⁹ of the pair's
 /// size, stands far above the dot products' rounding, so rounding can only
 /// withhold the answer, never give it (design 525).
-#[cfg_attr(not(test), allow(dead_code))]
 fn prism_misses(
     t: &[Point3; 3],
     v: Vector3,
@@ -177,23 +178,28 @@ fn prism_misses(
 }
 
 /// Whether no point of piece `t` can be deep in the closed mesh `inside`
-/// (design 525, the escape certificate): for `t`'s inward normal, then its
-/// outward one, as a unit direction `v`, no triangle of `inside` meets the
-/// prism `t ⊕ [reach/2, far]·v`, where `far` takes all of `t` out past
-/// `inside`'s box grown by `reach`. Then a ray along `v` from a point of
-/// `t` farther than `reach` from the mesh crosses none of it: within
-/// `reach/2·|v|` of its start (under `reach`, though `v`'s rounded length
-/// may pass 1), then inside the prism, then outside the box. So the point
-/// winds zero, and every point of `t` is within `reach` of the mesh or
-/// outside it. A degenerate piece has no normal and no certificate.
-/// `found` is the box query's buffer, kept by the caller.
-#[cfg_attr(not(test), allow(dead_code))]
+/// (design 525, the escape certificate): for some unit direction `v`, no
+/// triangle of `inside` meets the prism `t ⊕ [reach/2, far]·v`, where
+/// `far` takes all of `t` out past `inside`'s box grown by `reach`. Then a
+/// ray along `v` from a point of `t` farther than `reach` from the mesh
+/// crosses none of it: within `reach/2·|v|` of its start (under `reach`,
+/// though `v`'s rounded length may pass 1), then inside the prism, then
+/// outside the box. So the point winds zero, and every point of `t` is
+/// within `reach` of the mesh or outside it. The directions tried are
+/// `t`'s inward normal, its outward one, then (where it isn't parallel to
+/// `t`'s) the normal of `inside`'s triangle `nearest` both ways: a wall
+/// whose edge stands on the other side's flush face grazes that face along
+/// its own normal, but leaves it along the face's (a departure from the
+/// design's wording, 29.A; the proof holds for any direction). A
+/// degenerate piece has no normal and no certificate. `found` is the box
+/// query's buffer, kept by the caller.
 fn escapes(
     inside: &MeshTree,
     t: &[Point3; 3],
     reach: f64,
     margin: f64,
     found: &mut Vec<u32>,
+    nearest: u32,
 ) -> bool {
     let Some((lo, hi)) = inside.bounds() else {
         return false;
@@ -215,7 +221,16 @@ fn escapes(
     // box's half diagonal for every point q of t, and for every s ≥ far.
     let far = reach + (ghi - glo).length() + out;
     let near = reach / 2.0;
-    for v in [n * (-1.0 / len), n * (1.0 / len)] {
+    let n = n * (1.0 / len);
+    let u = &inside.triangles()[nearest as usize];
+    let m = (u[1] - u[0]).cross(u[2] - u[0]);
+    let l = m.length();
+    // The face's normal, unless it has none or lies within about a
+    // thousandth of a radian of `t`'s (then it adds nothing).
+    let m = (l > 0.0 && l.is_finite() && (m * (1.0 / l)).dot(n).abs() < 1.0 - 1e-6)
+        .then(|| m * (1.0 / l));
+    let dirs = [Some(n * -1.0), Some(n), m, m.map(|m| m * -1.0)];
+    for v in dirs.into_iter().flatten() {
         let ends = [
             t[0] + v * near,
             t[1] + v * near,
@@ -298,6 +313,9 @@ impl<'j> Search<'j> {
 ///   and the middle winds zero (the piece is wholly outside);
 /// - once it is an eighth of `reach` across (what it may still hold lies
 ///   within about the reach of the mesh: not deep).
+/// - where it escapes ([`escapes`]): no triangle of `inside` meets its
+///   prism along its normal either way, so no point of it is deep
+///   (design 525).
 ///
 /// A piece wholly inside (its ball misses the mesh, its middle winds) is
 /// deep when its middle lies farther than `reach`. [`Halt::OverBudget`]
@@ -306,12 +324,14 @@ pub fn deep_point(
     inside: &MeshTree,
     tris: &[[Point3; 3]],
     reach: f64,
+    margin: f64,
     search: &mut Search,
 ) -> Result<Option<Point3>, Halt> {
     let Some((lo, hi)) = inside.bounds() else {
         return Ok(None);
     };
     let near = Box3::new(lo, hi).grow(reach);
+    let mut found = Vec::new();
     let mut stack: Vec<[Point3; 3]> = tris
         .iter()
         .filter(|t| Box3::from_points(t.iter().copied()).is_some_and(|b| b.intersects(&near)))
@@ -339,6 +359,9 @@ pub fn deep_point(
             _ => {}
         }
         if r < reach / 8.0 {
+            continue;
+        }
+        if escapes(inside, &t, reach, margin, &mut found, k) {
             continue;
         }
         let m = |p: Point3, q: Point3| {
@@ -417,17 +440,17 @@ pub fn verdict(
     let (Some(ba), Some(bb)) = (a.bounds(), bp.bounds()) else {
         return Ok(Verdict::Clear);
     };
-    let reach = reach(a, b, &ba.union(&bb));
+    let (reach, margin) = reach(a, b, &ba.union(&bb));
     let nearest = a
         .tree
         .nearest(&bp.tree)
         .map_or(f64::INFINITY, |n| n.distance);
     let mut deep = None;
     if a.closed {
-        deep = deep_point(&a.tree, bp.tree.triangles(), reach, search)?;
+        deep = deep_point(&a.tree, bp.tree.triangles(), reach, margin, search)?;
     }
     if deep.is_none() && bp.closed {
-        deep = deep_point(&bp.tree, a.tree.triangles(), reach, search)?;
+        deep = deep_point(&bp.tree, a.tree.triangles(), reach, margin, search)?;
     }
     if deep.is_none() && a.closed && bp.closed && nearest <= reach {
         deep = interior_point(&a.tree, &bp.tree, reach, search)?;
@@ -727,24 +750,146 @@ mod tests {
             p(0.07, -0.01, 0.0016),
             p(-0.01, 0.03, 0.0016),
         ];
-        assert!(escapes(&c.tree, &wide, reach, margin, &mut found));
+        assert!(escapes(
+            &c.tree,
+            &wide,
+            reach,
+            margin,
+            &mut found,
+            nearest(&c.tree, &wide)
+        ));
         // The same piece wound the other way still escapes (a sheet's
         // triangles carry no front: both directions are tried).
         let back = [wide[0], wide[2], wide[1]];
-        assert!(escapes(&c.tree, &back, reach, margin, &mut found));
+        assert!(escapes(
+            &c.tree,
+            &back,
+            reach,
+            margin,
+            &mut found,
+            nearest(&c.tree, &back)
+        ));
         // Inside the block: its bottom face below, its top above.
         let inside = [
             p(0.01, 0.008, 0.005),
             p(0.02, 0.008, 0.005),
             p(0.01, 0.012, 0.005),
         ];
-        assert!(!escapes(&c.tree, &inside, reach, margin, &mut found));
+        assert!(!escapes(
+            &c.tree,
+            &inside,
+            reach,
+            margin,
+            &mut found,
+            nearest(&c.tree, &inside)
+        ));
         // A degenerate piece has no normal and no certificate.
         let line = [
             p(0.0, 0.0, 0.0016),
             p(0.001, 0.0, 0.0016),
             p(0.002, 0.0, 0.0016),
         ];
-        assert!(!escapes(&c.tree, &line, reach, margin, &mut found));
+        assert!(!escapes(
+            &c.tree,
+            &line,
+            reach,
+            margin,
+            &mut found,
+            nearest(&c.tree, &line)
+        ));
+    }
+
+    #[test]
+    fn a_block_flush_on_a_plate_is_decided_in_few_pieces() {
+        let plate = Prepared::new(
+            &ryukei::primitive::block(
+                OpKey::from_bytes(b"pl"),
+                0.06,
+                0.02,
+                0.0016,
+                &Rigid::IDENTITY,
+            )
+            .unwrap()
+            .0,
+        )
+        .unwrap();
+        let comp = Prepared::new(
+            &ryukei::primitive::block(
+                OpKey::from_bytes(b"c"),
+                0.048,
+                0.005,
+                0.0085,
+                &Rigid::IDENTITY,
+            )
+            .unwrap()
+            .0,
+        )
+        .unwrap();
+        let on = at(0.006, 0.0075, 0.0016);
+        let (v, spent) = judged(&plate, &comp, &on);
+        println!("flush block on a plate: {spent} pieces");
+        assert_eq!(v, Verdict::Touching);
+        assert!(spent < 1 << 10, "{spent}");
+    }
+
+    /// The index of `inside`'s triangle nearest `t`'s middle.
+    fn nearest(inside: &MeshTree, t: &[Point3; 3]) -> u32 {
+        let c = Point3::new(
+            (t[0].x + t[1].x + t[2].x) / 3.0,
+            (t[0].y + t[1].y + t[2].y) / 3.0,
+            (t[0].z + t[1].z + t[2].z) / 3.0,
+        );
+        inside.nearest_point(c).unwrap().2
+    }
+
+    #[test]
+    fn a_wall_on_a_face_escapes_along_it_only_past_the_margin() {
+        // A wall piece in x = 2 mm, its top edge on block A's bottom face
+        // (z = 0): its own normal (±x) grazes that face, and the face's
+        // normal leads down, out of A. Block B stands beside that downward
+        // prism, `gap` off its plane: apart by half the margin it must be
+        // withheld (the exact shapes miss, but not by the margin), by twice
+        // it granted.
+        let margin = 1e-12;
+        let reach = 1e-5;
+        let wall = [
+            p(0.002, 0.001, 0.0),
+            p(0.002, 0.003, 0.0),
+            p(0.002, 0.002, -0.001),
+        ];
+        let cube = |at: Rigid| {
+            ryukei::primitive::block(OpKey::from_bytes(b"q"), 0.01, 0.01, 0.01, &at)
+                .unwrap()
+                .0
+        };
+        let a = Prepared::new(&cube(Rigid::IDENTITY)).unwrap();
+        let mut found = Vec::new();
+        // A alone: the wall escapes downward, along A's face's normal.
+        assert!(escapes(
+            &a.tree,
+            &wall,
+            reach,
+            margin,
+            &mut found,
+            nearest(&a.tree, &wall)
+        ));
+        for (gap, granted) in [(0.5 * margin, false), (2.0 * margin, true)] {
+            let b = Prepared::new(&cube(at(0.002 + gap, 0.0, -0.012))).unwrap();
+            let both = MeshTree::new(
+                a.tree
+                    .triangles()
+                    .iter()
+                    .chain(b.tree.triangles())
+                    .copied()
+                    .collect(),
+            );
+            let k = nearest(&both, &wall);
+            assert!(k < 12, "the nearest is A's bottom");
+            assert_eq!(
+                escapes(&both, &wall, reach, margin, &mut found, k),
+                granted,
+                "{gap}"
+            );
+        }
     }
 }
