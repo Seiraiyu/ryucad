@@ -252,6 +252,7 @@ pub fn plan(
                 features: Vec::new(),
                 removed: Vec::new(),
                 properties: BTreeMap::new(),
+                props_of: None,
             });
         };
     // Import features: the new hash, the product as it is now, and the
@@ -472,6 +473,7 @@ pub fn plan(
                                 ),
                                 removed: Vec::new(),
                                 properties: BTreeMap::new(),
+                                props_of: None,
                             },
                         );
                         let usage = ImportUsage {
@@ -621,6 +623,7 @@ fn reflatten(
             features,
             removed,
             properties: BTreeMap::new(),
+            props_of: None,
         },
         kept,
     ))

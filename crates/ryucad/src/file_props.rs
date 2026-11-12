@@ -7,6 +7,9 @@
 //! changes the library. Every other attribute is a *file property*, read
 //! from the committed bytes each time it is asked for (`props.get`).
 
+use crate::doc::project::Project;
+use crate::doc::source::Source;
+use crate::import::plan::Planned;
 use crate::units::Unit;
 use ryupdm::config::{Config, Decl, Type};
 use ryustep::Opened;
@@ -207,6 +210,65 @@ pub fn mapped(opened: &Opened, k: usize, config: &Config, unit: Unit, path: &str
     m
 }
 
+/// What kind of import a plan is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// A file imported whole, or flattened: new parts.
+    Fresh,
+    /// One product `--into` an existing part.
+    Into,
+    /// `import --update`: the old bytes are judged against.
+    Update,
+}
+
+/// What [`apply`] did beyond the plan's properties: its warnings, and the
+/// instances whose values the parts end up holding (the transfer's
+/// `interpreted`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Applied {
+    pub warnings: Vec<String>,
+    pub instances: Vec<u64>,
+}
+
+/// Fills `plan`'s properties from `opened` (stored at `path`) where the
+/// project uses PDM: a new part takes every mapped value. `files` are the
+/// project's files now.
+pub fn apply(
+    project: &Project,
+    files: &dyn Source,
+    opened: &Opened,
+    _old: Option<&Opened>,
+    path: &str,
+    plan: &mut [Planned],
+    _mode: Mode,
+) -> Applied {
+    let mut out = Applied::default();
+    if !project.root.join(crate::doc::project::PDM_CONFIG).is_file() {
+        return out;
+    }
+    // A settings file that doesn't read is ryupdm's fault to report.
+    let Ok(config) = Config::read(files) else {
+        return out;
+    };
+    let unit = project.manifest.default_unit;
+    for pl in plan.iter_mut() {
+        let Some(k) = pl.props_of else {
+            continue;
+        };
+        let new = mapped(opened, k, &config, unit, path);
+        out.warnings.extend(new.invalid.iter().cloned());
+        if pl.new {
+            pl.properties = new.values.clone();
+            for v in new.instances.values() {
+                out.instances.extend(v);
+            }
+        }
+    }
+    out.instances.sort_unstable();
+    out.instances.dedup();
+    out
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -398,5 +460,102 @@ pub(crate) mod tests {
             m.instances.get("name").is_none(),
             "the product's name is the tree's"
         );
+    }
+
+    use crate::server::tests::{call, fresh};
+    use crate::session::Session;
+
+    /// The vendor's attributes as a project would declare them.
+    const DECLARED: [(&str, &str); 7] = [
+        ("supplier", r#"{"type": "string"}"#),
+        ("batch_size", r#"{"type": "integer"}"#),
+        ("yield", r#"{"type": "number"}"#),
+        ("rohs", r#"{"type": "boolean"}"#),
+        ("wall_thickness", r#"{"type": "quantity", "dim": "length"}"#),
+        ("net_mass", r#"{"type": "number"}"#),
+        ("revision_count", r#"{"type": "integer"}"#),
+    ];
+
+    /// A fresh project using PDM, the vendor's attributes declared but
+    /// `undeclared`.
+    pub(crate) fn declared(undeclared: &[&str]) -> (tempfile::TempDir, Session) {
+        let (dir, mut s) = fresh();
+        let props: serde_json::Map<String, Value> = DECLARED
+            .iter()
+            .filter(|(k, _)| !undeclared.contains(k))
+            .map(|(k, d)| ((*k).to_owned(), serde_json::from_str(d).unwrap()))
+            .collect();
+        call(&mut s, "pdm.configure", json!({"properties": props})).unwrap();
+        (dir, s)
+    }
+
+    /// Part `part`'s properties as `props.get` gives their values.
+    pub(crate) fn values(s: &mut Session, part: &str) -> BTreeMap<String, Value> {
+        let v = call(s, "props.get", json!({"part": part})).unwrap();
+        v["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| Some((p["name"].as_str()?.to_owned(), p.get("value")?.clone())))
+            .collect()
+    }
+
+    fn warnings(v: &Value) -> Vec<String> {
+        v["warnings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|w| w.as_str().map(str::to_owned))
+            .collect()
+    }
+
+    #[test]
+    fn a_fresh_import_maps_the_vendors_material_and_declared_properties() {
+        let (_dir, mut s) = declared(&[]);
+        let v = call(
+            &mut s,
+            "import",
+            json!({"path": vendor_path(false), "solid": true}),
+        )
+        .unwrap();
+        let part = v["parts"][0]["part"].as_str().unwrap().to_owned();
+        let got = values(&mut s, &part);
+        for (k, want) in [
+            ("name", json!("vendor bracket")),
+            ("material", json!("6061-T6")),
+            ("supplier", json!("ACME Metals")),
+            ("batch_size", json!(250)),
+            ("yield", json!(0.95)),
+            ("rohs", json!(true)),
+            ("wall_thickness", json!("2.5 mm")),
+            ("net_mass", json!(0.12)),
+            ("revision_count", json!(3)),
+        ] {
+            assert_eq!(got.get(k), Some(&want), "{k}: {got:?}");
+        }
+        assert!(got.get("number").is_none(), "never the number");
+        // The dry run says the same and writes nothing.
+        let (_dir, mut s) = declared(&[]);
+        let dry = call(
+            &mut s,
+            "import",
+            json!({"path": vendor_path(false), "solid": true, "dry_run": true}),
+        )
+        .unwrap();
+        assert_eq!(dry["parts"][0]["properties"]["supplier"], "ACME Metals");
+        assert!(!s.root().join("parts").join(&part).exists());
+        let _ = warnings(&dry);
+    }
+
+    #[test]
+    fn without_pdm_nothing_is_mapped() {
+        let (_dir, mut s) = fresh();
+        let v = call(
+            &mut s,
+            "import",
+            json!({"path": vendor_path(false), "solid": true}),
+        )
+        .unwrap();
+        assert!(v["parts"][0].get("properties").is_none(), "{v}");
     }
 }

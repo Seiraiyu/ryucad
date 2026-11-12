@@ -969,7 +969,7 @@ fn import_opened(
             "flatten makes a part of the whole file: leave out into and product",
         ));
     }
-    let plan: Vec<Planned> = match &ask.into {
+    let mut plan: Vec<Planned> = match &ask.into {
         Some(into) => {
             if ask.part.is_some() {
                 return Err(Error::new(
@@ -1034,7 +1034,21 @@ fn import_opened(
             }
         }
     };
-    let warnings = mapped_warnings(opened, &ask.path);
+    let applied = crate::file_props::apply(
+        project,
+        &*session,
+        opened,
+        None,
+        &stored,
+        &mut plan,
+        if ask.into.is_some() {
+            crate::file_props::Mode::Into
+        } else {
+            crate::file_props::Mode::Fresh
+        },
+    );
+    let mut warnings = mapped_warnings(opened, &ask.path);
+    warnings.extend(applied.warnings.iter().cloned());
     let mut writes = plan::writes(project, &plan)?;
     if !reused {
         writes.insert(stored.clone(), Some(file.bytes.to_vec()));
@@ -1493,6 +1507,7 @@ fn into_plan(
         features,
         removed: Vec::new(),
         properties: BTreeMap::new(),
+        props_of: k,
     })
 }
 
