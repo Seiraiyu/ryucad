@@ -941,6 +941,35 @@ fn poses_json(rest: &Rest, moved: &BTreeMap<u32, ryumate::Pose>) -> Value {
     Value::Object(out)
 }
 
+/// `n` halvings of `[lo, hi]`, where `hit(lo)` is false and `hit(hi)`
+/// true: the last bracket.
+fn bisect(
+    lo: f64,
+    hi: f64,
+    n: u32,
+    mut hit: impl FnMut(f64) -> Result<bool>,
+) -> Result<(f64, f64)> {
+    let (mut lo, mut hi) = (lo, hi);
+    for _ in 0..n {
+        let mid = lo + (hi - lo) * 0.5;
+        if hit(mid)? {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    Ok((lo, hi))
+}
+
+/// `rest` with `moved` laid over it: the poses a step left.
+fn overlay(rest: &ryumate::Assembly, moved: &BTreeMap<u32, ryumate::Pose>) -> ryumate::Assembly {
+    let mut a = rest.clone();
+    for (k, p) in moved {
+        a.bodies.get_mut(k).expect("a body").pose = *p;
+    }
+    a
+}
+
 /// Sweeps `resolved` over `input`: every step solved in turn from the
 /// last that held; with `opts.interference` each held step's collisions
 /// (pairs that interfere there and don't at rest) and the pairs ryukei
@@ -1113,6 +1142,63 @@ pub fn sweep(
         out.push(v);
     }
     drop(stage);
+    // The first collision, refined: between the last clear step and the
+    // first colliding one, each probe solved from the clear side's poses
+    // and only the colliding pair's first side intersected.
+    if opts.refine > 0
+        && let Some((k, c)) = &mut first_collision
+        && *k > 0
+        && steps[*k - 1].holds
+    {
+        let pair = (
+            c["pair"][0].as_str().unwrap_or_default().to_owned(),
+            c["pair"][1].as_str().unwrap_or_default().to_owned(),
+        );
+        let only =
+            crate::interference::instance_paths(input.asm, &[occurrence_of(&pair.0).to_owned()])?;
+        let mut clear = steps[*k - 1].moved.clone();
+        let (lo, hi) = bisect(ts[*k - 1], ts[*k], opts.refine, |t| {
+            let (s, _) = solve_at(&overlay(&rest.asm, &clear), &rest.asm, &resolved.drives, t)?;
+            if !s.holds {
+                return Ok(true);
+            }
+            let Ok((model, _)) = step_model(input.model, &rest, &s.moved) else {
+                return Ok(true);
+            };
+            let found = crate::interference::find_for(input.asm, &model, &only, interference, job)?;
+            let hit = found["interferences"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|i| pair_key(i) == pair);
+            if !hit {
+                clear = s.moved;
+            }
+            Ok(hit)
+        })?;
+        c["contact"] = json!({"t": hi, "values": values_at(&resolved.drives, hi, input.unit),
+                              "bracket": [lo, hi]});
+    }
+    // The first stop, likewise: where the steps stop holding.
+    let mut stop = None;
+    if opts.refine > 0
+        && let Some(k) = first_blocked
+        && k > 0
+        && steps[k - 1].holds
+    {
+        let mut held = steps[k - 1].moved.clone();
+        let (lo, hi) = bisect(ts[k - 1], ts[k], opts.refine, |t| {
+            let (s, _) = solve_at(&overlay(&rest.asm, &held), &rest.asm, &resolved.drives, t)?;
+            if s.holds {
+                held = s.moved;
+            }
+            Ok(!s.holds)
+        })?;
+        stop = Some(
+            json!({"t": hi, "values": values_at(&resolved.drives, hi, input.unit),
+                           "bracket": [lo, hi]}),
+        );
+    }
     let at = |k: usize| json!({"index": k, "t": ts[k], "values": values_at(&resolved.drives, ts[k], input.unit)});
     let first_collision = first_collision.map(|(k, c)| {
         let mut v = at(k);
@@ -1127,6 +1213,9 @@ pub fn sweep(
             if let Some(x) = out[k].get(key) {
                 v[key] = x.clone();
             }
+        }
+        if let Some(s) = &stop {
+            v["stop"] = s.clone();
         }
         v
     });
@@ -1790,5 +1879,72 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::Cancelled);
+    }
+
+    #[test]
+    fn the_first_collision_is_refined_well_below_a_step() {
+        let (_dir, mut s) = swing(false);
+        let opts = Options {
+            interference: true,
+            refine: 10,
+            ..Options::default()
+        };
+        let v = swept(&mut s, "swing", turning("45 deg"), 46, &opts);
+        let contact = &v["first_collision"]["contact"];
+        let [lo, hi] = [0, 1].map(|i| contact["bracket"][i].as_f64().unwrap());
+        // The true contact, as a fraction of the 45° sweep.
+        let theta = ryukei::math::atan2(20.0, 40.0) - ryukei::math::asin(4.0 / 2000f64.sqrt());
+        let truth = theta / (45f64.to_radians());
+        // A corner sunk less than interference's touch reach (#558: up to
+        // a micrometre or two) touches, so the first collision is found
+        // just past the geometric contact: the corner, √2000 mm from the
+        // axis, sunk at most 2 µm.
+        let reach = 2e-6 / (2000f64.sqrt() * 1e-3) / 45f64.to_radians();
+        assert!(truth <= hi && lo <= truth + reach, "{lo} {truth} {hi}");
+        // Ten halvings of one step (1/45).
+        assert!(hi - lo <= 1.0 / 45.0 / 1024.0 + 1e-15, "{}", hi - lo);
+        assert_eq!(contact["t"].as_f64().unwrap(), hi);
+        let deg = contact["values"]["drives/0"]["angle_deg"].as_f64().unwrap();
+        assert!(
+            deg >= theta.to_degrees() && deg - theta.to_degrees() < 1.0 / 1024.0 + reach * 45.0,
+            "{deg}"
+        );
+        // With no refining, no contact.
+        let plain = swept(
+            &mut s,
+            "swing",
+            turning("45 deg"),
+            46,
+            &Options {
+                interference: true,
+                ..Options::default()
+            },
+        );
+        assert!(plain["first_collision"].get("contact").is_none());
+    }
+
+    #[test]
+    fn the_first_stop_is_refined_too() {
+        let (_dir, mut s) = stopped();
+        let opts = Options {
+            refine: 10,
+            ..Options::default()
+        };
+        let v = swept(
+            &mut s,
+            "frame",
+            json!([{"mate": "m1", "angle": {"from": "0 deg", "to": "10 deg"}}]),
+            11,
+            &opts,
+        );
+        let b = &v["first_blocked"];
+        assert_eq!(b["index"], 7, "{v}");
+        assert_eq!(b["limit"], json!({"mate": "m1", "at": "max"}));
+        let deg = b["stop"]["values"]["m1"]["angle_deg"].as_f64().unwrap();
+        assert!(deg > 6.0 && deg - 6.0 <= 1.0 / 1024.0 + 1e-12, "{deg}");
+        assert_eq!(
+            v["limits_reached"][0],
+            json!({"mate": "m1", "value": "angle", "at": "max", "index": 6})
+        );
     }
 }
