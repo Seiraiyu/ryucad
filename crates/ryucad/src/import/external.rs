@@ -594,9 +594,50 @@ impl<'a> Planner<'a> {
         }
     }
 
-    /// `--flatten` across files (Task 13).
+    /// `--flatten` across files (design 448, 24.D): one part of every
+    /// body of every file the walk reaches (`plan::walk_files`), each
+    /// feature naming its own file. Every file gets a path; only those a
+    /// feature names are written ([`Group::writes_bytes`]).
     pub fn flatten(&mut self) -> Result<()> {
-        Err(Error::new(Code::Usage, "flatten across files comes in Task 13"))
+        let tree = self.tree;
+        let stored: Vec<(String, bool)> = (0..tree.nodes.len()).map(|j| self.store(j)).collect();
+        let refs: Vec<FileRef> = tree
+            .nodes
+            .iter()
+            .zip(&stored)
+            .map(|(n, (p, _))| FileRef { path: p.clone(), blake3: n.file.blake3.clone() })
+            .collect();
+        let files = plan::Files {
+            opened: tree.nodes.iter().map(|n| &*n.opened).collect(),
+            paths: refs.iter().map(|r| r.path.as_str()).collect(),
+            links: tree.nodes.iter().map(|n| &n.links).collect(),
+        };
+        let stem = Path::new(&stored[0].0)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let ids = self.ids.clone();
+        let base = self.taken;
+        let taken = move |s: &str| base(s) || ids.iter().any(|t| t == s);
+        let flat = plan::Flat {
+            opened: &tree.nodes[0].opened,
+            file: &refs[0],
+            stem: &stem,
+            part: self.part.clone(),
+            taken: &taken,
+            pdm: self.pdm,
+            mode: self.mode,
+            cross: Some((&files, &refs)),
+        }
+        .plan()?;
+        self.record(0, std::slice::from_ref(&flat));
+        let mut flat = Some(flat);
+        for (j, (path, reused)) in stored.into_iter().enumerate() {
+            let planned = if j == 0 { flat.take().into_iter().collect() } else { Vec::new() };
+            self.groups.push(Group { node: j, path, reused, from: None, planned, update: None });
+            self.planned.insert(j);
+        }
+        Ok(())
     }
 
     /// Where node `j`'s bytes are kept: where the project holds them

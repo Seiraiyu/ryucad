@@ -621,13 +621,19 @@ pub struct Flat<'a> {
     pub pdm: bool,
     /// The mode its import features take (none: a solid).
     pub mode: Option<crate::doc::import::Mode>,
+    /// The files the walk crosses and each one's stored reference (design
+    /// 448, 24.D); `None` for a file alone.
+    pub cross: Option<(&'a Files<'a>, &'a [FileRef])>,
 }
 
 impl Flat<'_> {
     pub fn plan(&self) -> Result<Planned> {
         let opened = self.opened;
         let defs = &opened.products.definitions;
-        let makes = makes(opened);
+        let makes = match self.cross {
+            Some((f, _)) => makes_with(opened, &f.links[0].keys().copied().collect()),
+            None => makes(opened),
+        };
         let roots: Vec<usize> = opened
             .products
             .roots
@@ -635,7 +641,10 @@ impl Flat<'_> {
             .copied()
             .filter(|&k| makes[k])
             .collect();
-        let walked = walk(opened, &self.file.path)?;
+        let walked = match self.cross {
+            Some((f, _)) => walk_files(f)?,
+            None => walk(opened, &self.file.path)?,
+        };
         if walked.is_empty() {
             return Err(body_missing(opened, &self.file.path));
         }
@@ -653,7 +662,10 @@ impl Flat<'_> {
         let mut taken: Vec<String> = Vec::new();
         let features = walked
             .iter()
-            .map(|w| flat_feature(opened, self.file, self.mode, w, &mut taken))
+            .map(|w| match self.cross {
+                Some((f, refs)) => flat_feature(f.opened[w.file], &refs[w.file], self.mode, w, &mut taken),
+                None => flat_feature(opened, self.file, self.mode, w, &mut taken),
+            })
             .collect();
         let properties = match roots.as_slice() {
             [k] => properties(opened, Some(*k), self.pdm),
@@ -718,6 +730,7 @@ mod flat_tests {
             taken: &taken,
             pdm: false,
             mode,
+            cross: None,
         }
         .plan()
         .unwrap();

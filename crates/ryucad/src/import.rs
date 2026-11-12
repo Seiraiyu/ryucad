@@ -1056,6 +1056,7 @@ fn import_opened(
                         taken: &taken,
                         pdm: root.join(PDM_CONFIG).is_file(),
                         mode: ask.mode(),
+                        cross: None,
                     }
                     .plan()?,
                 ]
@@ -3564,6 +3565,24 @@ pub(crate) mod tests {
             "the instances stay as they are: {:?}",
             w.keys().collect::<Vec<_>>()
         );
+    }
+
+    /// `--flatten` across files (design 448): one part of every body,
+    /// each import feature naming its own file and placed through the
+    /// root's usages; the root file, which no feature reads, isn't stored.
+    #[test]
+    fn a_set_flattens_to_one_part_whose_features_name_their_files() {
+        let (dir, mut s) = crate::server::tests::fresh();
+        let v = import_call(&mut s, json!({"path": set_path("asm.stp"), "flatten": true, "part": "rig"})).unwrap();
+        assert_eq!(v["parts"].as_array().unwrap().len(), 1);
+        assert_eq!(v["file"]["stored"], false);
+        let l = listed(dir.path(), "rig");
+        let files: Vec<&str> = l.iter().map(|(_, f)| f["file"]["path"].as_str().unwrap()).collect();
+        assert_eq!(files, ["imports/box.step", "imports/cylinder.step", "imports/cylinder.step"]);
+        assert!(l.iter().all(|(_, f)| f["place"]["via"].as_array().unwrap().len() == 1));
+        assert!(!dir.path().join("imports/asm.step").exists());
+        let r = crate::server::tests::call(&mut s, "rebuild", json!({"part": "rig"})).unwrap();
+        assert!(r["parts"][0]["solids"].as_array().unwrap().iter().all(|x| x["ok"] == true), "{r}");
     }
 
     /// A frame (`F-1`) with a plate of its own, a sub-assembly (`S-1`) of
