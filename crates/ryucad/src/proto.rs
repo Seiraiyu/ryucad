@@ -1180,6 +1180,19 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         depth: Option<u32>,
     },
+    /// A hole's every size, limit and source, and its canonical spec, for
+    /// a spec or fields with no model (`hole derive`). Reads the project's
+    /// hole_standards.json, and `part`'s parameters when given.
+    #[serde(rename = "hole.derive")]
+    HoleDerive {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spec: Option<String>,
+        /// Hole fields as a file holds them, laid over the spec's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fields: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
     /// Which solids of an assembly's occurrences overlap: every pair whose
     /// boxes do, or those with a side under `instances` (instance paths
     /// under the assembly, as `s1/b2` or `holes:2/bolt`).

@@ -86,6 +86,9 @@ enum Command {
     /// Inserts of other parts' solids: move one's pin.
     #[command(subcommand)]
     Insert(InsertCmd),
+    /// Hole tools that need no model.
+    #[command(subcommand)]
+    Hole(HoleCmd),
     /// The project's material library: densities (and colours) that mass properties read,
     /// each part's named by its PDM `material` property.
     #[command(subcommand)]
@@ -1573,6 +1576,23 @@ enum InsertCmd {
         /// Fail with `conflict` unless the project is still at this revision.
         #[arg(long = "expect", value_name = "REVISION")]
         expect: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum HoleCmd {
+    /// Every size, limit and source a spec derives, and its canonical spec: what
+    /// `feature add <part> hole --spec` would build, without a model.
+    Derive {
+        /// The hole's callout, such as "M6x1.0-6H THRU" or "CBORE ISO4762 M5".
+        #[arg(long, value_name = "SPEC")]
+        spec: String,
+        /// Hole fields as JSON, laid over the spec's ('{"diameter": "6.9 mm"}').
+        #[arg(long, value_name = "JSON", value_parser = json_object)]
+        fields: Option<Value>,
+        /// Read this part's parameters.
+        #[arg(long)]
+        part: Option<String>,
     },
 }
 
@@ -4552,6 +4572,11 @@ fn request(cmd: &Command) -> Option<Request> {
             offline: *offline,
             dry_run: *dry_run,
             expected_revision: expect.clone(),
+        },
+        Command::Hole(HoleCmd::Derive { spec, fields, part }) => Request::HoleDerive {
+            spec: Some(spec.clone()),
+            fields: fields.clone(),
+            part: part.clone(),
         },
         Command::Insert(InsertCmd::Update {
             part,

@@ -265,6 +265,9 @@ pub(crate) fn dispatch(
         Request::AssemblyTree { part, path, depth } => {
             crate::assembly::tree(session, &part, path.as_deref(), depth)
         }
+        Request::HoleDerive { spec, fields, part } => {
+            crate::hole::derive::request(session, spec.as_deref(), fields.as_ref(), part.as_deref())
+        }
         Request::Interference { part, instances } => {
             crate::interference::run(session, &part, &instances)
         }

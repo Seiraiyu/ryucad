@@ -645,6 +645,70 @@ pub fn at_rebuild(e: Error) -> Error {
     e
 }
 
+/// `hole.derive`: a spec and fields to a hole, its sizes and its
+/// canonical spec. The hole needs no sketch or target: placeholders stand
+/// in, and are left out of the answer. Fields are laid over the spec's,
+/// and a field given as `""` (or `null`) takes the spec's out.
+pub fn request(
+    session: &crate::session::Session,
+    spec: Option<&str>,
+    fields: Option<&Value>,
+    part: Option<&str>,
+) -> Result<Value> {
+    let project = session.project();
+    let unit = project.manifest.default_unit;
+    let (env, tables) = match part {
+        Some(p) => {
+            let p = project.part(&crate::doc::id::Id::parse(p, "part")?)?;
+            (p.env.clone(), p.hole_standards.clone())
+        }
+        None => (project.env.clone(), project.hole_standards.clone()),
+    };
+    let mut v = Map::new();
+    for (k, x) in [
+        ("sketch", json!("s")),
+        ("form", json!("simple")),
+        ("depth", json!("through_all")),
+        ("targets", json!(["b"])),
+    ] {
+        v.insert(k.into(), x);
+    }
+    if let Some(s) = spec {
+        let (named, _) = crate::hole::spec::Spec::parse(s)?.apply(unit)?;
+        v.extend(named);
+    }
+    match fields {
+        None => {}
+        Some(Value::Object(f)) => v.extend(f.iter().map(|(k, x)| (k.clone(), x.clone()))),
+        Some(_) => {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "fields is an object of hole fields, such as {\"diameter\": \"6.9 mm\"}",
+            )
+            .with("pointer", "/fields"));
+        }
+    }
+    v.retain(|_, x| !(x.is_null() || x.as_str() == Some("")));
+    if v.get("bottom").and_then(Value::as_str) == Some("flat") {
+        v.remove("bottom");
+    }
+    let v = Value::Object(v);
+    let mut o = crate::doc::files::Obj::new(&v, "")?;
+    let h = Hole::from_fields(&mut o, unit, &env)?;
+    o.finish()?;
+    let sizes = derive(&h, tables.as_deref())?;
+    let mut shown = h.fields();
+    if let Some(o) = shown.as_object_mut() {
+        o.remove("sketch");
+        o.remove("targets");
+    }
+    Ok(json!({
+        "spec": crate::hole::spec::canonical(&h, unit),
+        "fields": shown,
+        "sizes": sizes.to_json(),
+    }))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

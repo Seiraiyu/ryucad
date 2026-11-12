@@ -1077,6 +1077,41 @@ fn protocol_methods() -> Vec<String> {
 /// Parity: nothing an agent can't do. Every protocol method has a CLI
 /// command, and each command exists.
 #[test]
+fn hole_derive_answers_with_no_model() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let d = p.ok(&["hole", "derive", "--spec", "M6x1.0-6H THRU"]);
+    assert_eq!(d["spec"], "M6x1.0-6H THRU");
+    assert_eq!(d["sizes"]["drill"]["value"], "5 mm");
+    assert_eq!(d["sizes"]["drill"]["source"], "rule");
+    assert_eq!(
+        d["fields"]["thread"],
+        json!({"standard": "iso_metric", "size": "M6"})
+    );
+    assert_eq!(d["fields"].get("sketch"), None, "placeholders are left out");
+    let minor = &d["sizes"]["thread"]["limits"]["minor"][1];
+    assert_eq!(minor["value"], "5.153 mm", "{d}");
+    let d = p.ok(&[
+        "hole",
+        "derive",
+        "--spec",
+        "M8 16 DEEP, DRILL 20 DEEP 118DEG",
+        "--fields",
+        r#"{"diameter": "6.9 mm"}"#,
+    ]);
+    assert_eq!(d["spec"], "M8x1.25-6H 16 DEEP, DRILL 6.9 20 DEEP 118DEG");
+    assert_eq!(d["sizes"]["drill"]["source"], "override");
+    let e = p.fails(
+        &["hole", "derive", "--spec", "CBORE ISO4762 M5"],
+        "invalid_param",
+        1,
+    );
+    assert_eq!(e["details"]["reason"], "needs_project_table", "{e}");
+    let e = p.fails(&["hole", "derive", "--spec", "M6x"], "invalid_param", 1);
+    assert_eq!(e["details"]["position"], 3);
+}
+
+#[test]
 fn every_protocol_method_has_a_command() {
     let commands: &[(&str, &[&str])] = &[
         ("project.init", &["init"]),
@@ -1123,6 +1158,7 @@ fn every_protocol_method_has_a_command() {
         ("assembly.solve", &["assembly", "solve"]),
         ("interference", &["interference"]),
         ("measure", &["measure"]),
+        ("hole.derive", &["hole", "derive"]),
         ("mass", &["mass"]),
         ("sheet.get", &["sheet"]),
         ("feature_faces.get", &["feature-faces"]),
