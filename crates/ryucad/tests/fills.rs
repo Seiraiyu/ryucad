@@ -4,19 +4,12 @@
 //! a box's top extracted to its area and names, the whole box extracted as
 //! a closed sheet, faces of two bodies refused.
 
+mod common;
+
+use common::{call, must, project};
 use ryucad::doc::id::Id;
-use ryucad::proto::Request;
-use ryucad::server::handle;
 use ryucad::session::Session;
 use serde_json::{Value, json};
-
-fn call(s: &mut Session, method: &str, params: Value) -> ryucad::error::Result<Value> {
-    handle(s, Request::from_rpc(method, Some(params)).unwrap())
-}
-
-fn must(s: &mut Session, method: &str, params: Value) -> Value {
-    call(s, method, params).unwrap_or_else(|e| panic!("{method}: {e}"))
-}
 
 fn add(s: &mut Session, f: Value) -> Value {
     let mut f = f;
@@ -24,15 +17,6 @@ fn add(s: &mut Session, f: Value) -> Value {
         f["part"] = json!("p");
     }
     must(s, "feature.add", f)
-}
-
-/// A project with an empty part `p`.
-fn project() -> (tempfile::TempDir, Session) {
-    let dir = tempfile::tempdir().unwrap();
-    ryucad::server::init(dir.path(), None).unwrap();
-    let mut s = Session::open(dir.path()).unwrap();
-    must(&mut s, "part.create", json!({"part": "p"}));
-    (dir, s)
 }
 
 /// Sketch `id` on `plane` with `ops`.

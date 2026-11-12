@@ -46,9 +46,30 @@ fn shared() -> &'static Path {
     })
 }
 
-/// The `ryucad` binary of this build, built if needed: `cargo test -p
-/// ryucad-app` doesn't build other packages' binaries. With
-/// `RYUCAD_TEST_PREBUILT` set, the one beside the tests is taken as it is.
+/// Whether `exe` exists and nothing under `roots` (each a file or a
+/// folder, walked to the bottom) was modified after it. A root that
+/// doesn't exist is skipped.
+pub fn built_after(exe: &Path, roots: &[PathBuf]) -> bool {
+    fn newer(p: &Path, than: std::time::SystemTime) -> bool {
+        let Ok(meta) = std::fs::symlink_metadata(p) else {
+            return false;
+        };
+        if meta.modified().is_ok_and(|t| t > than) {
+            return true;
+        }
+        meta.is_dir()
+            && std::fs::read_dir(p)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|e| newer(&e.path(), than))
+    }
+    let Ok(at) = std::fs::metadata(exe).and_then(|m| m.modified()) else {
+        return false;
+    };
+    !roots.iter().any(|r| newer(r, at))
+}
+
 /// A window's workspace in Direct edit, as every window was before
 /// ryucad 19.B: for tests of what the window writes.
 pub fn open_editing(
@@ -62,40 +83,31 @@ pub fn open_editing(
     Ok(ws)
 }
 
+/// The `ryucad` these tests start daemons from, found once per test
+/// process (#555):
+/// - with `RYUCAD_TEST_PREBUILT` set (CI's partitions, after the
+///   workspace's tests built it), `ryucad` beside the tests as it is;
+/// - else `examples/ryucad-test`, the same program, which `cargo test -p
+///   ryucad-app` and nextest build with the tests' own features, when
+///   nothing it is built from changed after it was linked
+///   ([`built_after`]) and it is of this build (`check_build`);
+/// - else `cargo build -p ryucad`, as before: a run filtered to one
+///   `--test` builds no examples.
+///
+/// With `RYUCAD_TEST_TIMING` set it says on stderr which it took, and
+/// how long finding it took.
 pub fn ryucad() -> &'static Daemon {
     static DAEMON: OnceLock<Daemon> = OnceLock::new();
     DAEMON.get_or_init(|| {
         shared();
-        // target/<triple>?/<profile>/deps/<test>: the binary goes in <profile>.
-        let exe = std::env::current_exe().unwrap();
-        let bin = exe.parent().unwrap().parent().unwrap();
-        let mut cmd = Command::new(env!("CARGO"));
-        cmd.args(["build", "-p", "ryucad", "--bin", "ryucad"]);
-        match bin.file_name().unwrap().to_str().unwrap() {
-            "debug" => {}
-            "release" => {
-                cmd.arg("--release");
-            }
-            other => {
-                cmd.args(["--profile", other]);
-            }
-        }
-        // A target folder is tagged, or at least holds Cargo's rustc
-        // cache (a build of only the ci profile may leave no tag); a target
-        // triple's folder inside it has neither.
-        let above = bin.parent().unwrap();
-        if !above.join("CACHEDIR.TAG").exists() && !above.join(".rustc_info.json").exists() {
-            cmd.arg("--target").arg(above.file_name().unwrap());
-        }
-        let path = bin.join(format!("ryucad{}", std::env::consts::EXE_SUFFIX));
-        // A run of the workspace's tests (CI's partitions) has built it
-        // already, with the dev-dependencies' features; built again here
-        // without them, every workspace crate would build a second time.
-        let prebuilt = std::env::var("RYUCAD_TEST_PREBUILT").is_ok_and(|v| !v.is_empty());
-        if prebuilt {
-            assert!(path.exists(), "RYUCAD_TEST_PREBUILT, but no {path:?}");
-        } else {
-            assert!(cmd.status().unwrap().success(), "building ryucad");
+        let started = std::time::Instant::now();
+        let (daemon, how) = find_ryucad();
+        if std::env::var_os("RYUCAD_TEST_TIMING").is_some() {
+            eprintln!(
+                "ryucad-test-timing: {how} {} in {} ms",
+                daemon.exe.display(),
+                started.elapsed().as_millis()
+            );
         }
         // The shared folder is a repository of its own with the diff driver
         // in its config, so doctor finds the same Git setup whether the
@@ -103,13 +115,130 @@ pub fn ryucad() -> &'static Daemon {
         let dir = shared();
         let init = Command::new("git").args(["init", "-q"]).arg(dir).status();
         assert!(init.unwrap().success(), "git init");
-        let install = Command::new(&path)
+        let install = Command::new(&daemon.exe)
             .args(["git", "install"])
             .current_dir(dir)
             .status();
         assert!(install.unwrap().success(), "ryucad git install");
-        Daemon::at(&path).unwrap()
+        daemon
     })
+}
+
+/// `ryucad` beside the app, as installed: the program `ryucad-app` finds
+/// itself when it starts daemons (`--smoke`). Built by Cargo unless
+/// `RYUCAD_TEST_PREBUILT` is set.
+pub fn ryucad_beside_app() -> PathBuf {
+    ryucad();
+    beside()
+}
+
+/// The program [`ryucad`] takes, and which way it found it.
+fn find_ryucad() -> (Daemon, &'static str) {
+    if prebuilt() {
+        return (Daemon::at(&beside()).unwrap(), "prebuilt");
+    }
+    let example = profile_dir()
+        .join("examples")
+        .join(format!("ryucad-test{}", std::env::consts::EXE_SUFFIX));
+    if built_after(&example, &sources())
+        && let Ok(daemon) = Daemon::at(&example)
+        && ryucad_app::core::link::check_build(&daemon).is_ok()
+    {
+        return (daemon, "example");
+    }
+    (Daemon::at(&beside()).unwrap(), "cargo build")
+}
+
+/// Whether a run of the workspace's tests (CI's partitions) has built
+/// `ryucad` already, with the dev-dependencies' features: built again here
+/// without them, every workspace crate would build a second time.
+fn prebuilt() -> bool {
+    std::env::var("RYUCAD_TEST_PREBUILT").is_ok_and(|v| !v.is_empty())
+}
+
+/// The folder this build's binaries go in: `target/<triple>?/<profile>`,
+/// above this test's `deps/<test>`.
+fn profile_dir() -> PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    exe.parent().unwrap().parent().unwrap().to_path_buf()
+}
+
+/// What `examples/ryucad-test` is built from, as far as a test can tell
+/// without Cargo: every crate's sources, build script and manifest but
+/// the app's own sources (the example doesn't link them), the example and
+/// the app's manifest, and the workspace's manifest and lock file. More
+/// than it links (ryueda's crates too), so an edit there costs a build,
+/// never a stale `ryucad`.
+fn sources() -> Vec<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut list = vec![
+        root.join("Cargo.toml"),
+        root.join("Cargo.lock"),
+        root.join("crates/ryucad-app/Cargo.toml"),
+        root.join("crates/ryucad-app/examples"),
+    ];
+    for entry in std::fs::read_dir(root.join("crates")).unwrap().flatten() {
+        let dir = entry.path();
+        if dir.file_name().is_some_and(|n| n == "ryucad-app") {
+            continue;
+        }
+        for name in ["src", "build.rs", "Cargo.toml"] {
+            list.push(dir.join(name));
+        }
+    }
+    list
+}
+
+/// `ryucad` beside the tests: as it is under `RYUCAD_TEST_PREBUILT`, else
+/// built by `cargo build -p ryucad` for this profile (and target, when the
+/// build names one). `cargo test -p ryucad-app` doesn't build other
+/// packages' binaries.
+fn beside() -> PathBuf {
+    let bin = profile_dir();
+    let path = bin.join(format!("ryucad{}", std::env::consts::EXE_SUFFIX));
+    if prebuilt() {
+        assert!(path.exists(), "RYUCAD_TEST_PREBUILT, but no {path:?}");
+        return path;
+    }
+    let mut cmd = Command::new(env!("CARGO"));
+    cmd.args(["build", "-p", "ryucad", "--bin", "ryucad"]);
+    // Not the variables `cargo test` gave this process (#555): ring's build
+    // script watches CARGO_MANIFEST_DIR, so a build that inherited the
+    // app's rebuilt ring and everything above it (ryupdm, ryucad), and the
+    // next `cargo` outside rebuilt them all again.
+    for (k, _) in std::env::vars_os() {
+        let k = k.to_string_lossy();
+        if k.starts_with("CARGO_PKG_")
+            || k.starts_with("CARGO_MANIFEST_")
+            || k.starts_with("CARGO_BIN_EXE_")
+            || [
+                "CARGO_CRATE_NAME",
+                "CARGO_PRIMARY_PACKAGE",
+                "CARGO_TARGET_TMPDIR",
+            ]
+            .contains(&&*k)
+        {
+            cmd.env_remove(&*k);
+        }
+    }
+    match bin.file_name().unwrap().to_str().unwrap() {
+        "debug" => {}
+        "release" => {
+            cmd.arg("--release");
+        }
+        other => {
+            cmd.args(["--profile", other]);
+        }
+    }
+    // A target folder is tagged, or at least holds Cargo's rustc
+    // cache (a build of only the ci profile may leave no tag); a target
+    // triple's folder inside it has neither.
+    let above = bin.parent().unwrap();
+    if !above.join("CACHEDIR.TAG").exists() && !above.join(".rustc_info.json").exists() {
+        cmd.arg("--target").arg(above.file_name().unwrap());
+    }
+    assert!(cmd.status().unwrap().success(), "building ryucad");
+    path
 }
 
 /// A graphics adapter to draw with, software ones included. Without one

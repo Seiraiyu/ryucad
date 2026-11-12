@@ -5,22 +5,19 @@
 //! trimming only costs rebuilds; and a shared cache server fills an empty
 //! cache on another machine, in a batch a depth.
 
+mod common;
+
 mod fake_cache;
 
+use common::must;
 use ryucad::cache::remote::{Options, Remote};
 use ryucad::cache::{Disk, Identity};
 use ryucad::doc::id::Id;
-use ryucad::proto::Request;
-use ryucad::server::{handle, init};
+use ryucad::server::init;
 use ryucad::session::Session;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
-
-fn must(s: &mut Session, method: &str, params: Value) -> Value {
-    handle(s, Request::from_rpc(method, Some(params)).unwrap())
-        .unwrap_or_else(|e| panic!("{method}: {e}"))
-}
 
 fn id(s: &str) -> Id {
     Id::parse(s, "part").unwrap()
