@@ -717,6 +717,65 @@ fn a_chosen_draft_looks_as_it_did() {
     looks_as_it_did(&adapter, &px, "draft");
 }
 
+/// A plate's hole deleted (design 445, The app): the delete chosen, the
+/// hosts it capped painted in the chosen colour where the hole was.
+#[test]
+fn a_chosen_delete_looks_as_it_did() {
+    let _one = one_at_a_time();
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::named("snapshot").with_direct_edits();
+    let mut ws = common::open_editing(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(120), |ws| ws.idle()
+        && ws.model.meshes.len() == 1));
+    ws.choose(Some(("p".to_owned(), "x".to_owned())));
+    assert!(ws.wait_until(Duration::from_secs(120), |ws| ws.idle()
+        && ws.made.is_some()));
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let d = [0, 1, 2].map(|k| hi[k] - lo[k]);
+    let diagonal = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    let camera = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
+    // The depth range round the whole plate: its bounding sphere.
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, diagonal / 2.0);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    let c = scene::linear(style::CHOSEN);
+    let faces: Vec<scene::PaintedFace> = ws
+        .made
+        .as_ref()
+        .unwrap()
+        .faces
+        .iter()
+        .flat_map(|((part, solid), names)| {
+            names
+                .iter()
+                .filter_map(|n| match picker.place(&format!("{part}/{solid}/{n}")) {
+                    Some(Place::Face(k, i)) => Some((k, i, c)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(!faces.is_empty());
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: theme::BACKGROUND,
+        light: scene::light(&camera),
+        edges: true,
+        faces: &faces,
+        overlay: &[],
+        glass: &[],
+    };
+    scene.render(&device, &queue, [W, H], &list);
+    let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
+    looks_as_it_did(&adapter, &px, "delete-face");
+}
+
 /// A sheet metal part in the flat view (design 346, The app): its plate
 /// and flange laid flat, the flat body drawn in place of the folded one,
 /// its bend line dashed in the colour of its direction, seen from above.

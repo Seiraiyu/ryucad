@@ -21,7 +21,7 @@ The design is document 399 in the Coxswain planning project `ryucad-ryukei`; thi
 - **Sets.** Deleted faces in sets joined across shared edges (`tweak::delete::sets`), each with its boundary edges and its host loops: loops of surviving faces the set uses all round.
 - **Holes.** A host loop is a hole when its fins' pcurves, 16 samples a fin unwrapped by periods, come back to their start, its signed area says it runs clockwise about the face's normal (an area within a part in 10¹² of its box's decides nothing: not a hole), it doesn't reach a cone's apex row, and its face keeps a loop or is a sphere or torus (`delete::hole`). A set is capped when every boundary edge lies on such a loop. A rim across two coplanar faces, a loop round a pole and a boss's top go to growth.
 - **The cap** (`delete::cap`). The body laid out again (`sheet::copy_where`, then the layout as a solid, each piece in the region its faces were in, or `build_sheet`) without the sets' faces and their hosts' holes: nothing is constructed, and every surviving face, edge and vertex keeps its geometry bit for bit; checked by `check` and by `check_pairs_in` over pairs with a capped face near the gap. A cavity's region that comes apart is `Uncertain`. It doesn't go through the re-trim, which would give the same body but re-imprint every other loop of the host (decided on plan 13.B, question 327: a departure from design 399, which made the cap the re-trim's own answer).
-- **Growth** (`delete::grow`). The re-trim with `Changes::deleted`: deleted faces are in the region but have no working face, and the deleted faces' box diagonal joins the reach. With faces deleted, a face whose pieces include one alone that uses no clipped side seeds the walk with it (a growing face's inner points lie in the strip it grew by): a rounded box's 20 blend faces, which leave no face outside the region, grow back to the box. Caps run first; the sets left grow in one re-trim on the capped body.
+- **Growth** (`delete::grow`). The re-trim with `Changes::deleted`: deleted faces are in the region but have no working face, and the deleted faces' box diagonal joins the reach. With faces deleted, a face whose pieces include one alone that uses no clipped side seeds the walk with it (a growing face's inner points lie in the strip it grew by): a rounded box's 20 blend faces, which leave no face outside the region, grow back to the box. Caps run first; the sets left grow one at a time, in order of each set's least name, each on what the sets before it left (ryukei phase 16; 13.B grew them in one re-trim).
 - **Journal.** A cap: hosts `Modified`, deleted faces and the edges and vertices that went `Deleted`. Growth: the re-trim's, each deleted face and each of its edges that went `Replaced` by the new edges between faces round its set (a fillet and its rails by the sharp edge), else `Deleted`.
 - **Measured.** On bc2 (cox-worker-3: Intel Core Ultra 5 250K Plus, debug build, 4 rayon threads): a fillet grown back in about 10 ms, a through hole capped in about 5 ms, a rounded box's 20 blends in about 11 ms; `tests/delete_faces.rs` in 1.3 s on cox-worker-4 (AMD Opteron 6380, debug, 4 rayon threads, shared at a load of about 7); `tests/work.rs`' `deleting_faces_is_bounded`: cap 4 units, grow 705 units (the same on every machine).
 - **Testing.** Unit tests in `tweak::delete::tests` (holes and hosts, the cap bit for bit, the fillet's journal, the boss's feature, refusals) and `tweak::retrim::tests` (growth, the seed rule, the slab); `tests/delete_faces.rs` (holes, a counterbore with its fillet, a boss with its foot fillet, a pocket, an edge's fillet and chamfer, a rounded box, a step, refusals, names, one thread and eight); `tests/work.rs`' `deleting_faces_is_bounded`. No golden moved; golden sections, the property test and fuzzing are 13.D's.
@@ -77,9 +77,7 @@ The design is document 399 in the Coxswain planning project `ryucad-ryukei`; thi
     | replace | 5 | 3 |
     | draft | 1 | 3 |
 
-  `KNOWN_SLOW` is seed 76 (#659). Seeded blends are recognised back: 55 judged and 5 ruled chamfers counted, in 66 s. Not read back:
-  - 32 and 92, by design (`CHAMFER_SHARE`);
-  - 39, 100 and 102 (#660).
+  `KNOWN_SLOW` was seed 76 (#659); ryukei phase 16 emptied it. Seeded blends are recognised back: 55 judged and 5 ruled chamfers counted, in 66 s. Not read back: 32 and 92, by design (`CHAMFER_SHARE`); 39, 100 and 102 (#660) are read back since phase 16.
 - **The fixes found.**
   - **A capped rim's chamfer** (`recognise::chamfer`): a support every edge of which the chamfer bounds (a disc capping a rim) has share 0. Its width had been read from its one vertex, which lies on the rail, so the chamfer was never read. No golden moved.
   - **A cancel that didn't land:**
@@ -102,7 +100,7 @@ The design is document 399 in the Coxswain planning project `ryucad-ryukei`; thi
   - CTC 04 past the deadline (#654).
 
   A rounded box written to STEP in millimetres and healed back is defeatured to the box.
-- **The pinned corpus** (`ryukei-bench`'s `pinned_bodies_defeature`, by hand in the devcontainer; cox-worker-4, load 5 to 11): `pinned corpus: 0 defeatured, 19 refused, 9 past the deadline, 5 with no blend under 2 mm, in 1360.4 s`. The refusals are the committed corpus's kinds in other editions (comments on #650 to #654), and six fitting none of them (#658):
+- **The pinned corpus** (`pinned_bodies_defeature`, then in `ryukei-bench`, since phase 16 in ryustep's `defeature.rs`; by hand in the devcontainer; cox-worker-4, load 5 to 11): `pinned corpus: 0 defeatured, 19 refused, 9 past the deadline, 5 with no blend under 2 mm, in 1360.4 s`. The refusals are the committed corpus's kinds in other editions (comments on #650 to #654), and six fitting none of them (#658):
   - FTC 06's and STC 06's AP242 editions `Uncertain`;
   - FTC 11's and STC 09's `HealAmbiguous`;
   - STC 10 `Uncertain`;
@@ -123,3 +121,45 @@ The design is document 399 in the Coxswain planning project `ryucad-ryukei`; thi
   | 3 | 6.4 → 9.2 | 0.224 s | 68.9 s | 0.0033 |
 
   OCCT's volume agrees in every run.
+
+## Blend deletes on the corpus (decided in ryukei phase 16)
+
+The design is document 444 in the Coxswain planning project `ryucad-ryukei`; this is its plan 16.C. Question 425's bar: every committed body with blends under 2 mm defeatured and checked clean within 120 s on one thread.
+
+- **Full rounds.** A face between supports whose own normals, at the middles of a rail each side, turn more than π − `FULL_ROUND` is no fillet (`recognise::fillet`). The 1.41 mm round top of a rib 0.635 mm thick in NIST CTC 03 to FTC 09 is one: one wall lies 4.7 µm inside the round's tangent, so its arc runs 0.08 rad past a half turn, which `acos` of the face's own normals folds back below it. Its walls face apart and never meet, so growth couldn't close it.
+- **One working face for a surface's faces** (`retrim::absorbed`). Region faces left as they are that share an edge with another such face on the same surface, the same way round, take the least-named one's working face; the journal merges them into it (`Merged`, the child that least name). FTC 09's hole walls, each two half cylinders carried a whole turn, gave coinciding working faces and closed two ways.
+- **Growth one set at a time** (above, under Delete faces). Separate gaps' choices multiplied in one walk: CTC 01's three fillets each grew alone in 0.7 s and together passed `CHOICES`. Grown one after another, a delete of two far-apart sets gives the bits deleting one and then the other does.
+- **The re-trim's check.** Only pairs with a face the re-trim made (`check_pairs_in`): the faces outside the region come back as they were. One whole check of CTC 04's result spends 4,790,266 units; a fillet's delete now spends 42,584. Fewer units moved ryucad's rebuild golden (`deletes`, `topology_tweaks`, `blend_edits`), whose edit reports record what they spent; with that left out, the hashes are main's.
+- **Ambiguous walks** name the first piece two closures differ on, or the seed past `CHOICES`; they had named the first seed, an unrelated outside face. `CHOICES` stays 4,096.
+- **The carry cap** (`retrim::working`). A carried bounded surface goes at most its domain's own length past each end: FTC 07's NURBS was carried from a few units to v ∈ [−37, 20], its working sheets fitted for 102 s. #647's case answers in 3.5 s (26.7 s before).
+- **Pairs met with slack** (`WorkBody::pairs`). Working faces' boxes are grown by each face's tolerance before they are overlapped, as `face_face` grows them: FTC 08's pocket wall is tangent to its corner cylinder and lies 3e-17 m outside the cylinder's box, so the pair was never met and the cylinder ran on to its clipped side.
+- **A delete's periodic faces carried less than a turn** (`working::delete_turn`). In a delete (no face moved or given a new surface), a kept periodic face is carried over its own pcurves' span and a sixteenth each way, not a whole period, when every edge it shares with a deleted face runs that whole span (so it never has to grow round its axis across one); a face standing for others on its surface keeps the whole turn. Carried whole, FTC 08's eight quarter-turn corner cylinders put their back three quarters across the pocket and the walk passed `CHOICES`.
+- **`Scope::Rung`.** Each rung of the ladder runs under its own cap, `1 << 24`: 16 times the largest rung that builds (1,009,883 units, FTC 08's pocket floor, a 33-face region at rung 0, in a pinned edition), rounded up to a power of two, measured with `work-stats` over `retrim`, `delete_faces`, `blend_edits`, `tweaks`, `drafts`, `edit_props`, `work`, `fuzz_regressions`, `tweak_props` and ryustep's `defeature` with the pinned bodies (cox-worker-2, AMD Ryzen 7 9700X, 2026-11-11). The cap binds each task of a parallel map, not a rung's sum: a rung of many uncertain pairs still spends up to the cap on each.
+- **The direct-edit fixes.**
+  - An inside-out re-trim is `FaceCollapses`, never a panic (#704): `repair::resolve` leaves an inside-out result to its caller in debug builds too, the re-trim refuses it, a self-union refuses it `Topology(Inconsistent)`, and a global offset keeps its debug assertion.
+  - A delete whose region is the whole body seeds every face it keeps by rule 3, not one face alone (#692: a drilled plate's side deleted closed from the hole's wall alone, its plug). `measure::mass` already reads each face's sense: #692's "+282.7 mm³" was that plug, the right way out.
+  - `check_intersections` decides a curved solid's orientation (#692): once no faces cross, overlap or go unchecked, one `winding_off` ray just outside a face of each solid region with a face `check` can't sum; not zero is `NotOutward`. It lives there, not in `check`, since an offset's envelope, which `check` must pass, self-intersects and winds −1 round most of its faces. No unit is charged; CTC 04's check took 3.97 to 3.99 s before and after (one thread). The re-trim refuses a curved result inside out `FaceCollapses`.
+  - A kept straight edge whose vertex would move past its other end is `EdgeVanishes`, not `Uncertain` (#687), so `Blends::Rebuild` rebuilds there.
+  - A face the table split whose pieces all merge back into one face takes its name again (#691): the groove's plate keeps its four sides' and its bottom's names. It moved the determinism golden's `retrim` section, nothing else.
+  - A chamfer's support is as wide as points along its edges reach (#660): seeds 39, 100 and 102 are read back.
+- **Measured** (cox-worker-2, AMD Ryzen 7 9700X, 8 cores, shared with other sessions; one thread a delete, release).
+  - The committed corpus (`defeature.rs`' `imported_bodies_lose_their_small_blends`, `RYUKEI_BARS=1`, load 1.9 before and 1.7 after, 200 s for the file):
+
+    | Body | Result |
+    |---|---|
+    | CTC 01 #0 | 3 blends, 139 → 136 faces, 0.43 s |
+    | CTC 03 #0 | 3 blends, 139 → 136, 0.26 s |
+    | CTC 04 #0 | 3 blends, 517 → 514, 4.35 s |
+    | CTC 05 #0 and #2 | 3 blends, 208 → 205, 13.3 s |
+    | FTC 06 #0 | 3 blends, 144 → 141, 0.48 s |
+    | FTC 07 #0 | 87 blends, refused `Uncertain` in 85 s (`KNOWN_REFUSED`, #652) |
+    | FTC 08 #0 | 33 blends, 270 → 237, 2.98 s |
+    | FTC 09 #0 and #1 | 11 blends, 158 → 143, 0.49 s |
+    | FTC 10 #0 | 86 blends, refused `Uncertain` in 65 s (`KNOWN_REFUSED`, #652) |
+
+  - The pinned corpus (`pinned_bodies_defeature`, tightening on): `pinned corpus: 17 defeatured, 9 refused, 2 past the deadline, 5 with no blend under 2 mm, in 642.3 s` (load 3.2 before, 4.6 after, beside other builds). Defeatured: CTC 01, 03, 04 and 05, FTC 06, 08 and 09 in their AP203 editions, CTC 01 and 03 to 05 with PMI, and the AP242 CTC 05, FTC 06, FTC 08, STC 06, STC 08 and STC 09 (0.14 to 5.4 s). Refused: FTC 07 and 10, and STC 07 and 10, their AP242 twins (`Uncertain`, 30 to 97 s; FTC 07's AP242 edition past the deadline: #652's tangent seams); CTC 02 in two editions (`Uncertain`, 2.9 and 67 s); FTC 09's AP242 edition (`Uncertain`, 1.1 s); FTC 11's AP242 edition (`GapNotHealed`, 0.8 s); OCCT's `linkrods.step` past the deadline (#658 holds each).
+  - #647's bytes refuse `Uncertain` in 3.5 s (3,489,400 units); `edit_props`' seed 76 refuses `RegionTooSmall` in 24.0 s; `edit_props` builds 40 of 78 edits, none past the deadline.
+- **Limits.**
+  - FTC 07 and FTC 10 (#652): every refusal is a pair of kept region faces tangent along a shared edge (a pipe-like round's straight run against its corner torus; cylinders and spheres against a NURBS), whose working faces, carried past that seam, meet tangentially along it; the trace can't certify that within its cap. It needs a rule for kept faces tangent along a seam.
+  - A hole whose wall is two half cylinders can't have its rim filleted or chamfered (`blend` refuses `Topology(Inconsistent)`, #723).
+- **Testing.** `blend_recognition.rs`' `a_ribs_full_round_is_no_fillet`; `delete_faces.rs`' `far_apart_sets_grow_as_one_after_another` and `deleting_a_drilled_plates_side_is_refused`; `retrim.rs`' `an_offset_past_the_opposite_side_collapses` and the groove's names; `drafts.rs`' `a_wall_drafted_past_its_neighbour_keeping_topology_loses_an_edge`; `fuzz_regressions.rs`' `the_edit_targets_first_find_answers`; unit tests in `tweak::retrim::{walk, working, body}`, `work` and `check`; ryustep's `defeature.rs`: `ftc_09s_split_holes_lose_their_countersinks`, `a_delete_checks_only_its_own_pairs`, `ftc_08s_pocket_floor_loses_its_fillets`, `ftc_07s_and_ftc_10s_blends_are_deleted` (ignored, #652), the committed corpus's bar with `KNOWN_REFUSED`, and `pinned_bodies_defeature` (ignored until the corpus is fetched).

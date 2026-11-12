@@ -65,6 +65,10 @@ pub enum Request {
         /// The papers paper fit takes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sizes: Option<Vec<crate::project::PaperSize>>,
+        /// The library alias whose style.json is the organisation's
+        /// style; "" for none (plan 2.E).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style_from: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -87,6 +91,12 @@ pub enum Request {
         library: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         symbol: Option<String>,
+        /// Counts by code, no findings (#711).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        summary: bool,
+        /// Only these codes' findings, and the symbols holding them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        codes: Vec<String>,
     },
     /// A symbol called `name`, its ID from the name unless given, with
     /// `units` (1 by default) and a batch of ops applied.
@@ -260,6 +270,19 @@ pub enum Request {
         id: Option<String>,
         #[serde(default, flatten)]
         intent: crate::topcmd::IntentArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Adds and removes tags on a component, a net or a rail (plan 2.E).
+    #[serde(rename = "tag")]
+    Tag {
+        target: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        add: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remove: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -571,6 +594,62 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         dry_run: bool,
     },
+    /// The style: the project's, the organisation's, the built-in one.
+    #[serde(rename = "style.get")]
+    StyleGet {},
+    /// One object's properties and where each came from.
+    #[serde(rename = "style.explain")]
+    StyleExplain {
+        target: String,
+        block: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<String>,
+    },
+    /// Properties on an object's override, or on a selector's rule.
+    #[serde(rename = "style.set")]
+    StyleSet {
+        /// The agent's name for an object (with `block`), `rail:NAME`, or
+        /// a selector `key=value,…` (a rule).
+        target: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+        /// Property to its text, in order.
+        set: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Properties off an object's override or a selector's rule.
+    #[serde(rename = "style.unset")]
+    StyleUnset {
+        target: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+        names: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// `add` a rule (`select`, `set`) at the end, or `remove` the one at
+    /// `index`.
+    #[serde(rename = "style.rule")]
+    StyleRule {
+        op: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        select: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        set: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A palette entry: `#light/#dark`, or `default` to remove it.
+    #[serde(rename = "style.palette")]
+    StylePalette {
+        name: String,
+        value: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// The standards that judge a library's symbols (this project's own by
     /// default), whole, and where they come from.
     #[serde(rename = "standards.get")]
@@ -658,6 +737,9 @@ pub enum Request {
         /// Crop the view to what is drawn.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         fit: bool,
+        /// light (the default) or dark (plan 2.E).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        theme: Option<ryusch::style::Theme>,
     },
     /// A design's canvases paged into a PDF, its bytes after the answer:
     /// a page per sheet, a stack's sheets per layer (`all`) or once
@@ -668,6 +750,41 @@ pub enum Request {
         design: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layers: Option<crate::output::Layers>,
+    },
+    /// A design's designators numbered in canvas order (plan 2.F): the
+    /// unannotated ones (`unannotated`, by default) or every unlocked one
+    /// (`all`), down each column (`down`, by default) or across each row.
+    #[serde(rename = "annotate")]
+    Annotate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        order: Option<crate::annotate::Order>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reset: Option<crate::annotate::Reset>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Components `annotate` never renumbers, by designator or
+    /// `<block>/<component>`.
+    #[serde(rename = "annotate.lock")]
+    AnnotateLock {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        refs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Components `annotate` may renumber again.
+    #[serde(rename = "annotate.unlock")]
+    AnnotateUnlock {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        refs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
     },
     /// The project loaded from nothing: every file's faults and every
     /// design's ERC; `check_failed` on any error.
@@ -771,6 +888,14 @@ impl Request {
                 | Request::ImportKicad { .. }
                 | Request::RailAdd { .. }
                 | Request::RailEdit { .. }
+                | Request::Tag { .. }
+                | Request::Annotate { .. }
+                | Request::AnnotateLock { .. }
+                | Request::AnnotateUnlock { .. }
+                | Request::StyleSet { .. }
+                | Request::StyleUnset { .. }
+                | Request::StyleRule { .. }
+                | Request::StylePalette { .. }
                 | Request::RailDelete { .. }
                 | Request::ClassAdd { .. }
                 | Request::ClassEdit { .. }

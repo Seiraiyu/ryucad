@@ -900,12 +900,11 @@ fn deletes_build_alike_on_one_thread_and_eight() {
     assert_eq!(on(1).hash, on(8).hash);
 }
 
-/// A drilled plate's side deleted: like a box's, nothing closes the gap.
-/// ryukei builds the hole's plug instead (#692: inside out from a
-/// cylinder's cut, the right way out from a hole feature's, as here), so
-/// this waits on the kernel's fix.
+/// A drilled plate's side deleted: like a box's, nothing closes the gap,
+/// so a typed refusal, `gap_not_healed` or `heal_ambiguous` (ryukei's
+/// whole-body delete seeds every face it keeps since ryukei 16.C, #692;
+/// it had built the hole's plug).
 #[test]
-#[ignore = "ryukei builds the hole's plug (#692)"]
 fn a_drilled_plates_side_is_not_healed() {
     let (_dir, mut s) = drilled();
     let side = plane(&body(&mut s, "b"), "b", 0, 1.0, 40.0);
@@ -914,16 +913,22 @@ fn a_drilled_plates_side_is_not_healed() {
         json!({"type": "delete_face", "id": "d", "faces": [side]}),
     );
     let e = failure(&mut s, "d");
-    assert_eq!(e.details["reason"], "gap_not_healed", "{e}");
+    assert!(
+        matches!(
+            e.details["reason"].as_str(),
+            Some("gap_not_healed" | "heal_ambiguous")
+        ),
+        "{e}"
+    );
 }
 
-/// Until then, ryucad's guard refuses an inside-out result, typed, so an
-/// agent never gets a solid of negative volume: a plate 40 × 30 × 10 mm
-/// with a 6 mm cylinder cut through it, its side deleted. (A hole
-/// feature's plate gives the plug the right way out, which only the
-/// kernel's fix refuses: the case above.)
+/// The same with a 6 mm cylinder cut through a plate 40 × 30 × 10 mm,
+/// whose plug ryukei had built inside out: ryucad's guard refused it
+/// `inside_out`. Since ryukei 16.C (#692) the kernel refuses the delete
+/// itself, typed, before the guard sees a body; the guard stays for any
+/// other inside-out result.
 #[test]
-fn an_inside_out_result_is_refused() {
+fn a_cut_plates_side_is_refused_by_the_kernel() {
     let dir = tempfile::tempdir().unwrap();
     ryucad::server::init(dir.path(), None).unwrap();
     let mut s = Session::open(dir.path()).unwrap();
@@ -943,13 +948,14 @@ fn an_inside_out_result_is_refused() {
         json!({"type": "delete_face", "id": "d", "faces": [side]}),
     );
     let e = failure(&mut s, "d");
-    assert_eq!(
-        (e.code, e.details["reason"].as_str()),
-        (Code::TweakFailed, Some("inside_out")),
+    assert_eq!(e.code, Code::TweakFailed, "{e}");
+    assert!(
+        matches!(
+            e.details["reason"].as_str(),
+            Some("gap_not_healed" | "heal_ambiguous")
+        ),
         "{e}"
     );
-    assert!(e.details["volume_mm3"].as_f64().unwrap() < 0.0, "{e}");
-    assert!(e.details["hint"].as_str().unwrap().contains("heal"), "{e}");
 }
 
 /// Every edge of the box `b` filleted at `r` mm, in one fillet `f`: a

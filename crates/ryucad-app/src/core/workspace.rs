@@ -300,7 +300,8 @@ pub struct Made {
 
 impl Made {
     /// The faces of an `inspect` of the model whose origin is `feature`;
-    /// of a tweak's own `inspect`, the faces it modified.
+    /// of a tweak's or direct edit's own `inspect`, the faces it modified
+    /// and made (`tweaks::modified`).
     pub fn from_inspect(feature: &BodyKey, revision: &str, v: &Value) -> Made {
         if let Some(kind) = crate::core::tweaks::KINDS
             .into_iter()
@@ -2925,8 +2926,9 @@ impl Workspace {
             return;
         }
         let revision = p.revision.clone();
-        // A tweak makes nothing an origin names: what it modified comes
-        // from inspect of the feature itself.
+        // A tweak makes nothing an origin names, and a direct edit's
+        // healed hosts keep their makers': what each modified and made
+        // comes from inspect of the feature itself.
         let tweak = p.feature(&key.1).is_some_and(|f| f.tweak.is_some());
         let req = Request::Inspect {
             part: key.0.clone(),
@@ -5672,5 +5674,27 @@ mod tests {
         let b = ("p".to_owned(), "b".to_owned());
         assert_eq!(m.faces[&b], BTreeSet::from(["t".to_owned()]));
         assert!(m.rims.is_empty());
+    }
+
+    #[test]
+    fn a_deletes_made_faces_are_the_hosts_it_healed_and_what_it_made() {
+        let key = ("p".to_owned(), "x".to_owned());
+        let v = json!({"bodies": [{"feature": "x", "solid": "b",
+            "faces": [{"name": "t", "origin": {"feature": "b"}},
+                      {"name": "c", "origin": {"feature": "x"}},
+                      {"name": "s", "origin": {"feature": "b"}}],
+            "edges": []}],
+            "delete_face": {
+                "modified": {"faces": 1, "edges": 0, "vertices": 0, "references": ["p/b/t"]},
+                "created": {"faces": 1, "edges": 0, "vertices": 0, "references": ["p/b/c"]},
+                "deleted": {"faces": 2, "edges": 0, "vertices": 0,
+                            "references": ["p/b/h1", "p/b/h2"]}}});
+        let m = Made::from_inspect(&key, "r1", &v);
+        let b = ("p".to_owned(), "b".to_owned());
+        assert_eq!(
+            m.faces[&b],
+            BTreeSet::from(["c".to_owned(), "t".to_owned()])
+        );
+        assert!(m.rims.is_empty() && m.lines.is_empty() && m.walls.is_empty());
     }
 }

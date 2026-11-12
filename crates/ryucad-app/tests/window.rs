@@ -3192,6 +3192,18 @@ fn file_import_step_plans_then_imports() {
             .is_some_and(|i| i.current().is_some())
     });
     shown(&mut h, "part-2 (new part, product part 2)");
+    let first = h
+        .state()
+        .opened()
+        .ws
+        .import
+        .as_ref()
+        .and_then(|i| i.current())
+        .map(|p| p.transfer[0].clone())
+        .unwrap();
+    assert!(first.starts_with("geometry: "), "{first}");
+    shown(&mut h, "What the file holds:");
+    shown(&mut h, &format!("    {first}"));
     assert!(!p.root.join("imports").exists(), "a plan writes nothing");
     h.get_by_label("Import").click();
     frames(&mut h, |a| {
@@ -5946,6 +5958,75 @@ fn a_drafts_angle_and_a_moves_distance_are_edited_from_their_forms() {
     save(&mut h);
     let shown = p.ok(&["feature", "show", "p", "m"]);
     assert_eq!(shown["distance"]["value"], "2 mm");
+}
+
+#[test]
+fn a_deletes_heal_and_a_resizes_radius_are_edited_from_their_forms() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_direct_edits();
+    let mut h = window(&p);
+    // One solid, so one mesh; every edit built.
+    frames(&mut h, |a| {
+        let ws = &a.opened().ws;
+        ws.idle()
+            && ws.model.meshes.len() == 1
+            && ["r", "db", "x"].iter().all(|f| {
+                ws.model.parts["p"]
+                    .feature(f)
+                    .is_some_and(|f| f.hash.is_some())
+            })
+    });
+    h.step();
+    let save = |h: &mut Harness<'static, App>| {
+        h.get_by_label("Apply").click();
+        frames(h, |a| {
+            a.opened()
+                .ws
+                .form
+                .as_ref()
+                .is_some_and(|f| !f.saving && !f.dirty())
+        });
+    };
+    h.get_by_label("x (delete_face)").click();
+    frames(&mut h, |a| {
+        a.opened().ws.form.as_ref().is_some_and(|f| {
+            matches!(
+                f.tweak,
+                Some(ryucad_app::core::edit::TweakForm::DeleteFace(_))
+            )
+        })
+    });
+    h.step();
+    // Its heal is a choice: cap, as the agent wrote it, then auto.
+    h.get_by(|n| {
+        n.role() == egui::accesskit::Role::ComboBox && n.label().as_deref() == Some("heal")
+    })
+    .click();
+    h.run_steps(2);
+    h.get_all_by_label("auto").last().unwrap().click();
+    h.run_steps(2);
+    save(&mut h);
+    let shown = p.ok(&["feature", "show", "p", "x"]);
+    assert_eq!(shown["heal"], "auto");
+    h.get_by_label("r (resize_blend)").click();
+    frames(&mut h, |a| {
+        a.opened().ws.form.as_ref().is_some_and(|f| {
+            matches!(
+                f.tweak,
+                Some(ryucad_app::core::edit::TweakForm::ResizeBlend(_))
+            )
+        })
+    });
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "radius")
+        .set_text_value_accesskit("2 mm");
+    h.step();
+    save(&mut h);
+    let shown = p.ok(&["feature", "show", "p", "r"]);
+    assert_eq!(shown["groups"][0]["radius"]["value"], "2 mm");
 }
 
 /// The sides split `sp`'s report gives, behind first.

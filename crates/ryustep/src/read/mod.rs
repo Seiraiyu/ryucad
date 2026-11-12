@@ -146,6 +146,9 @@ pub struct Opened {
     /// same context: the one whose body it is.
     first: Vec<usize>,
     entities: Entities,
+    /// Every instance of the file by category (design 448): what a
+    /// transfer report counts.
+    pub census: crate::census::Census,
 }
 
 /// Parses and decodes the STEP file `bytes` and reads its product tree,
@@ -153,7 +156,7 @@ pub struct Opened {
 pub fn open(bytes: &[u8]) -> Result<Opened, StepError> {
     let file = part21::parse(bytes)?;
     let schema = Schema::of(&file.header)?;
-    let entities = Entities::decode(&file);
+    let (entities, census) = Entities::decode_counted(&file);
     let products = Products::build(&entities);
     // Every representation holding B-rep items, once, with its context,
     // definition and items.
@@ -211,6 +214,7 @@ pub fn open(bytes: &[u8]) -> Result<Opened, StepError> {
         held,
         first,
         entities,
+        census,
     })
 }
 
@@ -223,6 +227,15 @@ impl Imported {
 }
 
 impl Opened {
+    /// What body `k` of `held` reads: its representation, its context
+    /// and its items, the roots a transfer report follows.
+    pub fn roots(&self, k: usize) -> Vec<Id> {
+        let h = &self.held[k];
+        let mut r = vec![h.representation, h.context];
+        r.extend(&h.items);
+        r
+    }
+
     /// The body of `held[k]`, read under `opts`: the same as [`read`]
     /// gives it.
     pub fn body(&self, k: usize, opts: &ReadOptions) -> Imported {

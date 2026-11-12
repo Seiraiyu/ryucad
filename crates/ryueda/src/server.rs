@@ -163,6 +163,7 @@ pub fn answer(
             format,
             scale,
             fit,
+            theme,
         } => crate::schemcmd::render(
             session.project(),
             design.as_deref(),
@@ -172,6 +173,7 @@ pub fn answer(
             format.unwrap_or(crate::schemcmd::Format::Svg),
             scale,
             fit,
+            theme.unwrap_or_default(),
         ),
         Request::LayoutPlace {
             block,
@@ -204,6 +206,17 @@ pub fn answer(
             dry_run,
             expected_revision.as_deref(),
             render,
+        ),
+        Request::LibCheck {
+            library,
+            symbol,
+            summary,
+            codes,
+        } => crate::symlint::library_check(
+            session.project(),
+            library.as_deref(),
+            symbol.as_deref(),
+            &crate::symlint::Listing { summary, codes },
         ),
         Request::Output { design, layers } => crate::output::output(
             session.project(),
@@ -252,15 +265,13 @@ fn dispatch(
             expected_revision,
         } => lib_add(session, &alias, &path, expected_revision.as_deref()),
         Request::LibList {} => Ok(lib_list(session.project())),
-        Request::LibCheck { library, symbol } => {
-            crate::symlint::library_check(session.project(), library.as_deref(), symbol.as_deref())
-        }
         Request::ProjectEdit {
             properties,
             sheet_size,
             orientation,
             fit,
             sizes,
+            style_from,
             expected_revision,
         } => topcmd::project_edit(
             session,
@@ -269,6 +280,7 @@ fn dispatch(
             orientation,
             fit,
             sizes,
+            style_from.as_deref(),
             expected_revision.as_deref(),
         ),
         Request::SymbolCreate {
@@ -473,6 +485,56 @@ fn dispatch(
             rail,
             expected_revision,
         } => topcmd::rail_delete(session, &rail, expected_revision.as_deref()),
+        Request::Annotate {
+            design,
+            order,
+            reset,
+            dry_run,
+            expected_revision,
+        } => crate::annotate::annotate(
+            session,
+            design.as_deref(),
+            order.unwrap_or_default(),
+            reset.unwrap_or_default(),
+            dry_run,
+            expected_revision.as_deref(),
+        ),
+        Request::AnnotateLock {
+            design,
+            refs,
+            expected_revision,
+        } => crate::annotate::lock(
+            session,
+            design.as_deref(),
+            &refs,
+            true,
+            expected_revision.as_deref(),
+        ),
+        Request::AnnotateUnlock {
+            design,
+            refs,
+            expected_revision,
+        } => crate::annotate::lock(
+            session,
+            design.as_deref(),
+            &refs,
+            false,
+            expected_revision.as_deref(),
+        ),
+        Request::Tag {
+            target,
+            block,
+            add,
+            remove,
+            expected_revision,
+        } => crate::partcmd::tag(
+            session,
+            &target,
+            block.as_deref(),
+            &add,
+            &remove,
+            expected_revision.as_deref(),
+        ),
         Request::RailList {} => Ok(topcmd::rail_list(session.project())),
         Request::ClassAdd {
             name,
@@ -735,6 +797,75 @@ fn dispatch(
             expected_revision.as_deref(),
             dry_run,
         ),
+        Request::StyleGet {} => crate::style::get(session.project()),
+        Request::StyleSet {
+            target,
+            block,
+            set,
+            expected_revision,
+        } => crate::style::write(
+            session,
+            crate::style::Edit::Set {
+                target: &target,
+                block: block.as_deref(),
+                props: &set,
+            },
+            expected_revision.as_deref(),
+        ),
+        Request::StyleUnset {
+            target,
+            block,
+            names,
+            expected_revision,
+        } => crate::style::write(
+            session,
+            crate::style::Edit::Unset {
+                target: &target,
+                block: block.as_deref(),
+                names: &names,
+            },
+            expected_revision.as_deref(),
+        ),
+        Request::StyleRule {
+            op,
+            select,
+            set,
+            index,
+            expected_revision,
+        } => {
+            let edit = match (op.as_str(), select.as_deref(), index) {
+                ("add", Some(select), _) => crate::style::Edit::RuleAdd {
+                    select,
+                    props: &set,
+                },
+                ("remove", _, Some(index)) => crate::style::Edit::RuleRemove { index },
+                _ => {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        "op is add (with select and set) or remove (with index)",
+                    )
+                    .with("param", "op"));
+                }
+            };
+            crate::style::write(session, edit, expected_revision.as_deref())
+        }
+        Request::StylePalette {
+            name,
+            value,
+            expected_revision,
+        } => crate::style::write(
+            session,
+            crate::style::Edit::Palette {
+                name: &name,
+                value: &value,
+            },
+            expected_revision.as_deref(),
+        ),
+        Request::StyleExplain {
+            target,
+            block,
+            sheet,
+        } => crate::style::explain(session.project(), &block, &target, sheet.as_deref()),
         Request::StandardsGet { library } => {
             crate::standards::get(session.project(), library.as_deref())
         }
@@ -757,6 +888,7 @@ fn dispatch(
         ),
         Request::Render { .. }
         | Request::Output { .. }
+        | Request::LibCheck { .. }
         | Request::LayoutPlace { .. }
         | Request::Layout { .. } => {
             unreachable!("answered before dispatch")
@@ -866,6 +998,29 @@ pub fn revisions(p: &Project) -> BTreeMap<String, Value> {
         )
     });
     out.insert("standards".into(), standards);
+    // The organisation's and the project's style files (plan 2.E): a
+    // viewer redraws when the look changes.
+    let text = |s: &crate::style::Style| {
+        crate::doc::to_string(s, crate::style::KIND, crate::style::FORMAT)
+    };
+    let org = p
+        .org_style
+        .as_ref()
+        .map(|o| o.style.item.as_ref().map(text));
+    let style = match (org, p.style.item.as_ref().map(text)) {
+        (Some(Err(_)), _) | (_, Err(_)) => Value::Null,
+        (o, Ok(own)) => {
+            let mut h = blake3::Hasher::new();
+            h.update(b"ryueda.style.1");
+            if let Some(Ok(o)) = o {
+                h.update(o.as_bytes());
+            }
+            h.update(b"\0");
+            h.update(own.as_bytes());
+            json!(h.finalize().to_hex()[..32])
+        }
+    };
+    out.insert("style".into(), style);
     out
 }
 

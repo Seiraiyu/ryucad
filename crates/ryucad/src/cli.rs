@@ -2655,6 +2655,16 @@ enum ImportCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// What a STEP file the project has imported holds, and what the project made
+    /// of it: interpreted, retained, unreferenced and failed instances by category
+    /// (design 448). Reads only.
+    Report {
+        /// The imported file: imports/<name>.step.
+        file: String,
+        /// Every entity name with its first 64 instances, not only the 8 largest.
+        #[arg(long)]
+        detail: bool,
+    },
 }
 
 #[derive(Args)]
@@ -4766,6 +4776,13 @@ fn request(cmd: &Command) -> Option<Request> {
                 expected_revision: expect.revision.clone(),
             }
         }
+        Command::Import {
+            cmd: Some(ImportCmd::Report { file, detail }),
+            ..
+        } => Request::ImportReport {
+            file: file.clone(),
+            detail: *detail,
+        },
         Command::Import {
             cmd: None,
             args:

@@ -116,11 +116,16 @@ pub(crate) fn delete_faces_in(
     if !caps.is_empty() {
         (out, journal) = cap::cap(key, body, &caps, m)?;
     }
-    if !grows.is_empty() {
-        let names: BTreeSet<Name> = grows
-            .iter()
-            .flat_map(|s| s.faces.iter().map(|&f| body.faces[f].name))
-            .collect();
+    // Each set grows on its own, in order of its least name, on what the
+    // sets before it left: separate gaps' choices would otherwise multiply
+    // in one walk (NIST CTC 01's three fillets, each grown alone in
+    // 0.7 s, together passed its 4,096 choices).
+    let mut order: Vec<BTreeSet<Name>> = grows
+        .iter()
+        .map(|s| s.faces.iter().map(|&f| body.faces[f].name).collect())
+        .collect();
+    order.sort_by_key(|names: &BTreeSet<Name>| names.iter().next().copied());
+    for names in order {
         let ids: BTreeSet<FaceId> = out
             .faces()
             .filter(|&f| names.contains(&out.faces[f].name))

@@ -46,7 +46,7 @@ pub(crate) use face::coarse_box;
 pub(crate) use face::face_face_in;
 pub use face::{Contact, FaceMeet, Rim, Stretch, face_box, face_face};
 pub(crate) use face::{
-    face_face_over, face_face_within, face_rect, region_outside, shifted, shifts,
+    face_face_over, face_face_within, face_rect, max_tolerance, region_outside, shifted, shifts,
 };
 pub(crate) use fit::{
     fit_along, fit_on, fit_on_feet, fit_pcurve, fit_pcurve_by, fit_pcurve_tolerant,

@@ -22,7 +22,7 @@ use crate::props::Properties;
 use crate::symbol::{pin_number_ok, pointer_escape};
 use crate::units::{Dim, Quantity};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const DESIGNS: &str = "designs";
 pub const BLOCKS: &str = "blocks";
@@ -42,26 +42,34 @@ pub const INSTANCE_KIND: &str = "ryueda.instance";
 pub const RAIL_KIND: &str = "ryueda.rail";
 pub const CLASS_KIND: &str = "ryueda.class";
 /// Connectivity files are at format 1 but for blocks and instances with
-/// properties or a designator format, which are format 2.
+/// properties or a designator format, and components, nets and rails with
+/// tags, which are format 2.
 pub const FORMAT: u64 = 1;
-/// The newest format of blocks and instances.
+/// The newest format of blocks, instances, components, nets and rails.
 pub const FORMAT_2: u64 = 2;
 
 /// The newest format of a file of `kind` this build reads.
 pub fn newest(kind: &str) -> u64 {
     match kind {
-        BLOCK_KIND | INSTANCE_KIND => FORMAT_2,
+        BLOCK_KIND | INSTANCE_KIND | COMPONENT_KIND | NET_KIND | RAIL_KIND => FORMAT_2,
         _ => FORMAT,
     }
 }
 
 /// The format a file of `kind` is written at: 2 for a block or an
-/// instance holding properties or a designator format, else 1, so files
-/// phase 0 could write stay readable by it.
+/// instance holding properties or a designator format, or a component,
+/// net or rail with tags, else 1, so files phase 0 could write stay
+/// readable by it.
 pub fn format_of(kind: &str, v: &serde_json::Value) -> u64 {
     let newer = match kind {
         BLOCK_KIND => v.get("properties").is_some(),
         INSTANCE_KIND => v.get("properties").is_some() || v.get("refdes").is_some(),
+        COMPONENT_KIND => {
+            v.get("tags").is_some()
+                || v.get("refdes_locked").is_some()
+                || v["refdes"].as_str().is_some_and(refdes_placeholder)
+        }
+        NET_KIND | RAIL_KIND => v.get("tags").is_some(),
         _ => false,
     };
     if newer { FORMAT_2 } else { FORMAT }
@@ -207,6 +215,13 @@ pub struct Component {
     /// By pin number. A pin left out is unconnected.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pins: BTreeMap<String, Node>,
+    /// Tags the style gives meaning (`critical`, `hv`, `dnp`; plan 2.E):
+    /// a sorted set, format 2.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tags: BTreeSet<String>,
+    /// Never renumbered by `annotate` (plan 2.F): format 2.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refdes_locked: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +257,10 @@ pub struct Net {
     pub impedance: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pair: Option<Pair>,
+    /// Tags the style gives meaning (`critical`, `hv`, `dnp`; plan 2.E):
+    /// a sorted set, format 2.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tags: BTreeSet<String>,
 }
 
 /// A project-wide net (`GND`, `3V3`): any component in any block connects
@@ -258,6 +277,10 @@ pub struct Rail {
     pub current: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impedance: Option<String>,
+    /// Tags the style gives meaning (`critical`, `hv`, `dnp`; plan 2.E):
+    /// a sorted set, format 2.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tags: BTreeSet<String>,
 }
 
 /// A net class: a label intent names. Its rules arrive in stage 7.
@@ -364,6 +387,26 @@ pub fn refdes_ok(text: &str) -> bool {
         && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
 }
 
+/// Whether `text` is a placeholder for a designator `annotate` will
+/// number: a designator's letters and `?` (`R?`), at most 32 in all.
+pub fn refdes_placeholder(text: &str) -> bool {
+    text.strip_suffix('?').is_some_and(|l| {
+        !l.is_empty() && l.len() < 32 && l.bytes().all(|c| c.is_ascii_alphabetic())
+    })
+}
+
+/// A numbered designator's parts (`R5_A`: `R`, 5, `_A`), or `None` for
+/// one with no digits after its letters (`TP_GND`), which names rather
+/// than numbers, and for a placeholder.
+pub fn numbered(text: &str) -> Option<(&str, u64, &str)> {
+    let letters = text.find(|c: char| !c.is_ascii_alphabetic())?;
+    if !text[letters..].starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let (prefix, n, rest) = refdes_parts(text);
+    (prefix.len() == letters && n > 0).then_some((prefix, n, rest))
+}
+
 /// A reference designator's parts: its leading letters, the number after
 /// them (0 when it has none) and the rest (`R5_A` is `R`, 5, `_A`).
 pub fn refdes_parts(text: &str) -> (&str, u64, &str) {
@@ -384,6 +427,26 @@ pub fn refdes_parts(text: &str) -> (&str, u64, &str) {
 
 fn bad(code: Code, ptr: String, msg: String) -> Fault {
     Fault::error(code, msg).with("pointer", ptr)
+}
+
+/// Whether `t` can be a tag: 1 to 32 of `a-z`, `0-9`, `_`, `-`.
+pub fn tag_ok(t: &str) -> bool {
+    (1..=32).contains(&t.len())
+        && t.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+fn tag_faults(tags: &BTreeSet<String>) -> Vec<Fault> {
+    tags.iter()
+        .filter(|t| !tag_ok(t))
+        .map(|t| {
+            bad(
+                Code::InvalidDocument,
+                "/tags".into(),
+                format!("{t:?} isn't a tag: 1 to 32 of a-z, 0-9, _ and -"),
+            )
+        })
+        .collect()
 }
 
 fn name_fault(name: &str, ptr: &str) -> Option<Fault> {
@@ -490,6 +553,7 @@ impl Component {
         let mut out = Vec::new();
         if let Some(r) = &self.refdes
             && !refdes_ok(r)
+            && !refdes_placeholder(r)
         {
             out.push(bad(
                 Code::InvalidDocument,
@@ -506,6 +570,7 @@ impl Component {
                 ));
             }
         }
+        out.extend(tag_faults(&self.tags));
         out
     }
 }
@@ -518,6 +583,7 @@ impl Net {
             &self.current,
             &self.impedance,
         ]));
+        out.extend(tag_faults(&self.tags));
         out
     }
 }
@@ -530,6 +596,7 @@ impl Rail {
             &self.current,
             &self.impedance,
         ]));
+        out.extend(tag_faults(&self.tags));
         out
     }
 }
@@ -696,6 +763,7 @@ pub(crate) mod tests {
             current: Some("20 mA".into()),
             impedance: Some("90 Ohm".into()),
             pair: None,
+            tags: BTreeSet::new(),
         };
         let found: Vec<(Code, String)> = net
             .check()
@@ -721,6 +789,8 @@ pub(crate) mod tests {
             value: None,
             parameters: BTreeMap::new(),
             pins: BTreeMap::new(),
+            tags: BTreeSet::new(),
+            refdes_locked: false,
         };
         assert_eq!(c.check().len(), 1);
         c.refdes = Some("R5_A".into());
@@ -764,6 +834,13 @@ pub(crate) mod tests {
             ("R", 0, "99999999999999999999x")
         );
         assert!(refdes_ok("SW1") && !refdes_ok("1R") && !refdes_ok("R-1") && !refdes_ok(""));
+        assert!(refdes_placeholder("R?") && refdes_placeholder("SW?"));
+        assert!(!refdes_placeholder("?") && !refdes_placeholder("R1?") && !refdes_placeholder("R"));
+        assert_eq!(numbered("R5_A"), Some(("R", 5, "_A")));
+        assert_eq!(numbered("U12"), Some(("U", 12, "")));
+        assert_eq!(numbered("TP_GND"), None);
+        assert_eq!(numbered("R?"), None);
+        assert_eq!(numbered("R0"), None);
     }
 
     #[test]
@@ -778,5 +855,32 @@ pub(crate) mod tests {
         assert_ne!(v("3.3 V"), v("3.31 V"));
         assert_eq!(v("3.3 A"), None);
         assert_eq!(exact_value("90 Ohm", Dim::RESISTANCE), Some((9, 1)));
+    }
+
+    #[test]
+    fn tags_are_a_sorted_set_written_at_format_2() {
+        let v = json!({"name": "SDA", "tags": ["critical", "hv", "critical"]});
+        let n: Net = serde_json::from_value(v).unwrap();
+        assert_eq!(n.tags.iter().collect::<Vec<_>>(), ["critical", "hv"]);
+        assert_eq!(
+            format_of(NET_KIND, &serde_json::to_value(&n).unwrap()),
+            FORMAT_2
+        );
+        let plain: Net = serde_json::from_value(json!({"name": "SDA"})).unwrap();
+        assert_eq!(
+            format_of(NET_KIND, &serde_json::to_value(&plain).unwrap()),
+            FORMAT
+        );
+        assert_eq!(newest(COMPONENT_KIND), FORMAT_2);
+        assert_eq!(newest(RAIL_KIND), FORMAT_2);
+        let bad: Net =
+            serde_json::from_value(json!({"name": "SDA", "tags": ["High Voltage"]})).unwrap();
+        let f = bad.check();
+        assert!(
+            f.iter()
+                .any(|f| f.error.code == Code::InvalidDocument
+                    && f.error.details["pointer"] == "/tags"),
+            "{f:?}"
+        );
     }
 }

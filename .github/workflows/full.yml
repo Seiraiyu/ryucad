@@ -193,6 +193,8 @@ jobs:
       - run: cargo test -p ryucad --features bench --release --test answer_peak -- --nocapture
       - run: cargo test -p ryueda --release --test bar -- --nocapture
       - run: cargo test -p ryusch --release --test layout_props
+      # Plan 2.G: the schematic fuzz case over 400 seeded inputs (#664, #665).
+      - run: cargo test -p ryusch --release --test seeded_sweep
       - run: cargo test -p ryueda --release --test schematic_corpus the_corpus_from_nothing
       - run: cargo test -p ryucad-app --release --test lazy -- --nocapture
       # #400: the window's open keeps its daemon within its budget.

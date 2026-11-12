@@ -1,6 +1,6 @@
 //! `ryusch` measures text with Inter's advance widths, a table generated
-//! from the font every ryu drawing bundles (`ryu_draw::font::INTER`,
-//! `crates/ryu-draw/fonts/Inter-Regular.ttf`), so it reads
+//! from the font every ryu drawing bundles (`ryu_draw::font::INTER` and
+//! `INTER_SEMIBOLD`, `crates/ryu-draw/fonts/Inter-*.ttf`), so it reads
 //! no font itself. The table must be the font's: after changing the font,
 //! regenerate it with `UPDATE_WIDTHS=1 cargo test -p ryueda --test
 //! font_widths` and review the diff.
@@ -18,8 +18,8 @@ fn characters() -> Vec<char> {
     out
 }
 
-fn table() -> String {
-    let face = ttf_parser::Face::parse(ryu_draw::font::INTER, 0).unwrap();
+fn table(bytes: &[u8], file: &str, title: &str) -> String {
+    let face = ttf_parser::Face::parse(bytes, 0).unwrap();
     let mut rows = String::new();
     for c in characters() {
         let Some(g) = face.glyph_index(c) else {
@@ -29,8 +29,8 @@ fn table() -> String {
         rows.push_str(&format!("    ({:?}, {adv}),\n", c));
     }
     format!(
-        "//! Inter Regular's advance widths, in font units: generated from\n\
-         //! `crates/ryu-draw/fonts/Inter-Regular.ttf` by `UPDATE_WIDTHS=1 cargo test\n\
+        "//! {title}'s advance widths, in font units: generated from\n\
+         //! `crates/ryu-draw/fonts/{file}` by `UPDATE_WIDTHS=1 cargo test\n\
          //! -p ryueda --test font_widths`. Don't edit by hand.\n\
          \n\
          /// The font's units per em.\n\
@@ -42,10 +42,7 @@ fn table() -> String {
     )
 }
 
-#[test]
-fn ryusch_measures_with_the_bundled_font() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../ryusch/src/widths.rs");
-    let want = table();
+fn check(path: &str, want: String) {
     if std::env::var("UPDATE_WIDTHS").is_ok_and(|v| v == "1") {
         std::fs::write(path, &want).unwrap();
         return;
@@ -53,6 +50,29 @@ fn ryusch_measures_with_the_bundled_font() {
     let have = std::fs::read_to_string(path).unwrap_or_default();
     assert!(
         have == want,
-        "ryusch's widths aren't the bundled font's; regenerate with UPDATE_WIDTHS=1"
+        "{path} isn't the bundled font's; regenerate with UPDATE_WIDTHS=1"
+    );
+}
+
+#[test]
+fn ryusch_measures_with_the_bundled_font() {
+    check(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../ryusch/src/widths.rs"),
+        table(ryu_draw::font::INTER, "Inter-Regular.ttf", "Inter Regular"),
+    );
+}
+
+#[test]
+fn ryusch_measures_semibold_with_the_bundled_font() {
+    check(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../ryusch/src/widths_semibold.rs"
+        ),
+        table(
+            ryu_draw::font::INTER_SEMIBOLD,
+            "Inter-SemiBold.ttf",
+            "Inter SemiBold",
+        ),
     );
 }

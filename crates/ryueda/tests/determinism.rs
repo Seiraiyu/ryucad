@@ -163,6 +163,7 @@ fn netlists_and_erc_are_bit_exact() {
     // rest of the corpus, each one thread and eight; their layout files,
     // SVG, descriptions, stacked layers and PDFs.
     schematic(&mut golden, &board, "breakout");
+    styled(&mut golden, &board);
     let pico = dir.path().join("pico");
     std::fs::create_dir_all(&pico).unwrap();
     ryueda(&pico, 1, &["init"]);
@@ -397,6 +398,17 @@ fn schematic(golden: &mut Golden, dir: &Path, name: &str) {
             format!("schematic.{name}.{b}.svg"),
             blake3::hash(&svg).to_hex()[..32].to_owned(),
         );
+        // The dark theme (plan 2.E).
+        ryueda(
+            dir,
+            1,
+            &["render", "--block", &b, "--theme", "dark", "--out", "x.svg"],
+        );
+        let svg = std::fs::read(dir.join("x.svg")).unwrap();
+        golden.got.insert(
+            format!("schematic.{name}.{b}.dark.svg"),
+            blake3::hash(&svg).to_hex()[..32].to_owned(),
+        );
         let d = ryueda(dir, 1, &["describe", "--block", &b]);
         golden.json(&format!("schematic.{name}.{b}.describe"), &d);
         // A stacked block: each layer drawn with its own designators.
@@ -425,6 +437,113 @@ fn schematic(golden: &mut Golden, dir: &Path, name: &str) {
     assert_eq!(std::fs::read(dir.join("x.pdf")).unwrap(), pdf, "{name}");
     golden.got.insert(
         format!("schematic.{name}.pdf"),
+        blake3::hash(&pdf).to_hex()[..32].to_owned(),
+    );
+    // Each block's first component as the style draws it (plan 2.E).
+    for b in &blocks_of(dir) {
+        let shown = ryueda(dir, 1, &["block", "show", b]);
+        let first = shown["components"]
+            .as_array()
+            .and_then(|c| c.iter().find_map(|c| c["refdes"].as_str()))
+            .map(str::to_owned);
+        if let Some(r) = first {
+            let e = ryueda(dir, 1, &["style", "explain", &r, "--block", b]);
+            golden.json(&format!("schematic.{name}.{b}.explain"), &e);
+        }
+    }
+    // What annotate would number, each order, alike on one thread and
+    // eight (plan 2.F); a dry run, so nothing above moves.
+    for order in ["down", "across"] {
+        let args = ["annotate", "--reset", "all", "--order", order, "--dry-run"];
+        let mut a = ryueda(dir, 1, &args);
+        assert_eq!(ryueda(dir, 8, &args), a, "{name} {order}");
+        // Annotate's revision hashes the project's, which hashes the
+        // manifest, whose project ID `init` draws at random (the golden
+        // seed is only for objects' IDs): every run has its own.
+        a.as_object_mut().unwrap().remove("revision");
+        golden.json(&format!("schematic.{name}.annotate.{order}"), &a);
+    }
+}
+
+/// The blocks a project lays out, by ID.
+fn blocks_of(dir: &Path) -> Vec<String> {
+    ryueda(dir, 1, &["layout", "--dry-run"])["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["block"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The breakout styled (plan 2.E): a palette entry, a rule by tag, an
+/// override and a tagged part, its layout file, SVG light and dark and
+/// PDF under `schematic.breakout.styled.*`.
+fn styled(golden: &mut Golden, dir: &Path) {
+    let b = blocks_of(dir)[0].clone();
+    let shown = ryueda(dir, 1, &["block", "show", &b]);
+    let refs: Vec<String> = shown["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["refdes"].as_str().map(str::to_owned))
+        .collect();
+    ryueda(
+        dir,
+        1,
+        &["style", "palette", "set", "brand", "#0055aa/#66aaff"],
+    );
+    ryueda(
+        dir,
+        1,
+        &[
+            "style",
+            "rule",
+            "add",
+            "tag=critical",
+            "colour=brand",
+            "emphasis=true",
+        ],
+    );
+    ryueda(
+        dir,
+        1,
+        &["tag", &refs[0], "--block", &b, "--add", "critical"],
+    );
+    ryueda(
+        dir,
+        1,
+        &[
+            "style",
+            "set",
+            &refs[1],
+            "line_weight=heavy",
+            "dash=true",
+            "--block",
+            &b,
+        ],
+    );
+    ryueda(dir, 1, &["layout"]);
+    let file = std::fs::read(dir.join(format!("blocks/{b}/layout.json"))).unwrap();
+    golden.got.insert(
+        format!("schematic.breakout.styled.{b}.layout"),
+        blake3::hash(&file).to_hex()[..32].to_owned(),
+    );
+    for theme in ["light", "dark"] {
+        ryueda(
+            dir,
+            1,
+            &["render", "--block", &b, "--theme", theme, "--out", "x.svg"],
+        );
+        let svg = std::fs::read(dir.join("x.svg")).unwrap();
+        golden.got.insert(
+            format!("schematic.breakout.styled.{b}.{theme}.svg"),
+            blake3::hash(&svg).to_hex()[..32].to_owned(),
+        );
+    }
+    ryueda(dir, 1, &["output", "--out", "x.pdf"]);
+    let pdf = std::fs::read(dir.join("x.pdf")).unwrap();
+    golden.got.insert(
+        "schematic.breakout.styled.pdf".to_owned(),
         blake3::hash(&pdf).to_hex()[..32].to_owned(),
     );
 }

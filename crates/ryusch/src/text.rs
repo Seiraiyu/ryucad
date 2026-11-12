@@ -1,12 +1,39 @@
 //! Where a part's designator and value go: the first free place of a
 //! fixed list round its body (right, above, below, left, then each a step
-//! further out), every line upright and on the grid.
+//! further out), every line upright and on the grid, each measured in its
+//! own font (plan 2.E: designators SemiBold, sizes from the style).
 
-use crate::font::{self, Anchor, SIZE};
+use crate::font::{self, Anchor, Font, SIZE};
 use crate::geom::{GRID, Nm, Point, Rect};
 
 /// From one line's baseline to the next.
 pub const LINE: Nm = 2 * GRID;
+
+/// One line of text and its font.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Line<'a> {
+    pub text: &'a str,
+    pub font: Font,
+}
+
+impl<'a> Line<'a> {
+    /// In Regular at the normal size.
+    pub fn regular(text: &'a str) -> Line<'a> {
+        Line {
+            text,
+            font: Font::REGULAR,
+        }
+    }
+
+    /// Its box with its baseline's start at `at`.
+    pub fn boxed(&self, at: Point) -> Rect {
+        font::text_box_in(self.text, self.font, at, Anchor::Start)
+    }
+
+    pub fn width(&self) -> Nm {
+        font::width_in(self.text, self.font)
+    }
+}
 
 fn up(v: Nm) -> Nm {
     v.div_euclid(GRID) * GRID + if v.rem_euclid(GRID) == 0 { 0 } else { GRID }
@@ -18,17 +45,17 @@ fn down(v: Nm) -> Nm {
 
 /// The boxes of `lines` with the first's baseline starting at `at`, each
 /// below the last.
-pub fn boxes(lines: &[&str], at: Point) -> Vec<Rect> {
+pub fn boxes(lines: &[Line], at: Point) -> Vec<Rect> {
     lines
         .iter()
         .enumerate()
-        .map(|(i, t)| font::text_box(t, SIZE, [at[0], at[1] - LINE * i as Nm], Anchor::Start))
+        .map(|(i, l)| l.boxed([at[0], at[1] - LINE * i as Nm]))
         .collect()
 }
 
 /// One line of text from `at`: the first field there, each next one a
 /// step past the last's end, on the grid.
-pub fn row_line<const N: usize>(lines: &[&str; N], at: Point) -> [Point; N] {
+pub fn row_line<const N: usize>(lines: &[Line; N], at: Point) -> [Point; N] {
     let mut out = [at; N];
     for (o, p) in out.iter_mut().zip(row_points(lines, at)) {
         *o = p;
@@ -37,36 +64,33 @@ pub fn row_line<const N: usize>(lines: &[&str; N], at: Point) -> [Point; N] {
 }
 
 /// `row_line` of any number of lines.
-pub fn row_points(lines: &[&str], at: Point) -> Vec<Point> {
+pub fn row_points(lines: &[Line], at: Point) -> Vec<Point> {
     let mut out = Vec::new();
     let mut x = at[0];
-    for t in lines {
+    for l in lines {
         out.push([x, at[1]]);
-        x = up(x + font::width(t, SIZE)) + GRID;
+        x = up(x + l.width()) + GRID;
     }
     out
 }
 
 /// How far `row_points` reaches from its start: its last line's end.
-pub fn row_width(lines: &[&str]) -> Nm {
+pub fn row_width(lines: &[Line]) -> Nm {
     let pts = row_points(lines, [0, 0]);
     match (pts.last(), lines.last()) {
-        (Some(p), Some(t)) => p[0] + font::width(t, SIZE),
+        (Some(p), Some(l)) => p[0] + l.width(),
         _ => 0,
     }
 }
 
 /// Where a block of `lines` may start, best first, round `body`.
-pub fn candidates(body: Rect, lines: &[&str]) -> Vec<Point> {
-    let w = lines
-        .iter()
-        .map(|t| font::width(t, SIZE))
-        .max()
-        .unwrap_or(0);
+pub fn candidates(body: Rect, lines: &[Line]) -> Vec<Point> {
+    let w = lines.iter().map(Line::width).max().unwrap_or(0);
+    let size = lines.first().map_or(SIZE, |l| l.font.size);
     let n = lines.len() as Nm;
     let right = [up(body.max[0] + GRID), down(body.max[1]) - GRID];
     let above = [down(body.min[0]), up(body.max[1] + GRID) + (n - 1) * LINE];
-    let below = [down(body.min[0]), down(body.min[1] - GRID - SIZE)];
+    let below = [down(body.min[0]), down(body.min[1] - GRID - size)];
     let left = [down(body.min[0] - GRID - w), right[1]];
     let mut out = Vec::new();
     for k in 0..=24 {
@@ -85,7 +109,7 @@ pub fn candidates(body: Rect, lines: &[&str]) -> Vec<Point> {
 
 /// Where a block of `lines` may start on one side of `body`, best first:
 /// `candidates`' places on that side (and further out), sliding along it.
-pub fn candidates_on(body: Rect, lines: &[&str], side: crate::geom::Side) -> Vec<Point> {
+pub fn candidates_on(body: Rect, lines: &[Line], side: crate::geom::Side) -> Vec<Point> {
     use crate::geom::Side;
     let on = |at: &Point| {
         boxes(lines, *at).iter().all(|b| match side {
@@ -121,10 +145,10 @@ mod tests {
     #[test]
     fn text_goes_right_of_its_body_first_on_the_grid() {
         let body = Rect::new([0, 0], [3 * GRID, 6 * GRID]);
-        let c = candidates(body, &["R1", "10k"]);
+        let c = candidates(body, &[Line::regular("R1"), Line::regular("10k")]);
         assert_eq!(c[0], [4 * GRID, 5 * GRID]);
         assert!(c.iter().all(|p| p[0] % GRID == 0 && p[1] % GRID == 0));
-        let b = boxes(&["R1", "10k"], c[0]);
+        let b = boxes(&[Line::regular("R1"), Line::regular("10k")], c[0]);
         assert!(b[1].max[1] < b[0].min[1]);
         assert!(!b[0].overlaps(&body));
     }
@@ -134,12 +158,12 @@ mod tests {
     #[test]
     fn a_row_line_puts_the_value_after_the_designator() {
         let at = [10 * GRID, -4 * GRID];
-        let [r, v] = row_line(&["RM1A", "2.2k"], at);
+        let [r, v] = row_line(&[Line::regular("RM1A"), Line::regular("2.2k")], at);
         assert_eq!(r, at);
         assert_eq!(v[1], at[1]);
         assert!(v[0] % GRID == 0);
-        let rb = boxes(&["RM1A"], r)[0];
-        let vb = boxes(&["2.2k"], v)[0];
+        let rb = boxes(&[Line::regular("RM1A")], r)[0];
+        let vb = boxes(&[Line::regular("2.2k")], v)[0];
         assert!(rb.max[0] < vb.min[0], "apart: {rb:?} {vb:?}");
     }
 
@@ -147,7 +171,7 @@ mod tests {
     #[test]
     fn candidates_on_a_side_stay_on_it() {
         let body = Rect::new([0, 0], [3 * GRID, 6 * GRID]);
-        let lines = ["R1", "10k"];
+        let lines = [Line::regular("R1"), Line::regular("10k")];
         for side in crate::geom::Side::ALL {
             let c = candidates_on(body, &lines, side);
             assert!(!c.is_empty());
@@ -163,5 +187,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_line_measures_in_its_font() {
+        use crate::font::{Font, Weight};
+        let r = Line::regular("U12");
+        let b = Line {
+            text: "U12",
+            font: Font::DESIGNATOR,
+        };
+        assert!(b.boxed([0, 0]).width() > r.boxed([0, 0]).width());
+        let big = Line {
+            text: "U12",
+            font: Font {
+                size: 1_778_000,
+                weight: Weight::SemiBold,
+            },
+        };
+        let body = Rect::new([0, 0], [3 * GRID, 6 * GRID]);
+        // Below the body, a large line stands lower than a normal one.
+        let c = candidates(body, &[big]);
+        assert!(c[2][1] < candidates(body, &[r])[2][1]);
     }
 }

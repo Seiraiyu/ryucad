@@ -88,6 +88,35 @@ fn ten_thousand_occurrences_flatten_and_check_within_the_bars() {
     assert!(worst < bar(Duration::from_millis(50)), "{worst:?}");
 }
 
+/// Design 348's bar for plan 2.F: annotating a design of 10,000
+/// component occurrences (every unlocked designator, its blocks laid out
+/// in memory to order them) takes under a second, the project loaded.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: cargo test -p ryueda --release --test bar"
+)]
+fn annotating_ten_thousand_occurrences_is_within_its_bar() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = dir.path().join("board");
+    generated::write(&board, 100, 100);
+    let p = ryueda::project::Project::load(&board).unwrap();
+    let start = Instant::now();
+    let plan = ryueda::annotate::plan(
+        &p,
+        Some("d"),
+        ryueda::annotate::Order::Down,
+        ryueda::annotate::Reset::All,
+    )
+    .unwrap();
+    let took = start.elapsed();
+    println!(
+        "annotate --reset all over 10,000 occurrences: {} changes in {took:?}",
+        plan.changes.len()
+    );
+    assert!(took < bar(Duration::from_secs(1)), "{took:?}");
+}
+
 /// Design 347's bar: a search over 10,000 library components takes under
 /// 50 ms on one thread (the project already loaded).
 #[test]

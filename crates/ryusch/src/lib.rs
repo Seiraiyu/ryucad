@@ -29,9 +29,11 @@ pub mod region;
 pub mod route;
 pub mod rules;
 pub mod shape;
+pub mod style;
 pub mod svg;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod text;
 pub mod topology;
 mod widths;
+mod widths_semibold;

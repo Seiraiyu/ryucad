@@ -1148,6 +1148,7 @@ fn every_protocol_method_has_a_command() {
         ("appearance.clear", &["colour"]),
         ("import", &["import"]),
         ("import.convert", &["import", "convert"]),
+        ("import.report", &["import", "report"]),
         ("export", &["export"]),
         ("rebuild", &["rebuild"]),
         ("inspect", &["inspect"]),
@@ -6679,6 +6680,69 @@ fn a_failing_mate_warns_from_the_cli() {
     );
     p.fails(&["rebuild", "top"], "rebuild_failed", 1);
     p.fails(&["check", "top"], "check_failed", 1);
+}
+
+/// The transfer report both ways (design 448): an import's answer and
+/// `import report` agree, `--detail` lists instances, an assembly of
+/// external parts is refused naming its files, and a STEP export says
+/// what it wrote and warns of a colour it leaves out.
+#[test]
+fn transfer_reports_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data");
+    let beside = p.direct.parent().unwrap();
+    fs::copy(data.join("occt/assembly.stp"), beside.join("asm.stp")).unwrap();
+    fs::copy(data.join("external/occt_style.stp"), beside.join("ext.stp")).unwrap();
+    let made = p.ok(&["import", "../asm.stp"]);
+    let stored = made["file"]["path"].as_str().unwrap().to_owned();
+    let again = p.ok(&["import", "report", &stored]);
+    assert_eq!(
+        again["transfer"]["categories"],
+        made["transfer"]["categories"]
+    );
+    let detail = p.ok(&["import", "report", &stored, "--detail"]);
+    assert_eq!(detail["transfer"]["detail"], true);
+    assert!(detail["transfer"]["categories"][0]["interpreted"]["names"][0]["instances"].is_array());
+    let e = p.fails(&["import", "../ext.stp"], "import_body_missing", 1);
+    assert_eq!(e["details"]["external"][0]["file"], "bracket.stp", "{e}");
+    assert!(e["details"]["transfer"]["categories"].is_array());
+    p.fails(&["import", "report", "imports/none.step"], "not_found", 1);
+    // An export of a part whose colour STEP doesn't carry yet.
+    let part = made["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["kind"] == "part")
+        .and_then(|x| x["part"].as_str())
+        .unwrap()
+        .to_owned();
+    p.ok(&["colour", &part, "--colour", "#ff0000"]);
+    let (code, v) = p.both_from(
+        "",
+        &[
+            "export",
+            &part,
+            "--out",
+            "../out.step",
+            "--time-stamp",
+            "2026-11-10T00:00:00",
+        ],
+    );
+    assert_eq!((code, &v["ok"]), (0, &Value::Bool(true)), "{v}");
+    assert!(v["result"]["transfer"]["written"].is_array(), "{v}");
+    let codes: Vec<&str> = v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|w| w.as_str())
+        .collect();
+    assert!(
+        codes
+            .iter()
+            .any(|w| w.starts_with("export_metadata_omitted")),
+        "{codes:?}"
+    );
 }
 
 #[test]

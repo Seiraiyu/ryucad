@@ -149,6 +149,12 @@ fn outcome(ui: &mut egui::Ui, e: &Export, ws: &Workspace) -> Option<Vec<String>>
                 ui.label(f);
             }
         }
+        if !w.omitted.is_empty() {
+            ui.label("Not written to STEP:");
+            for o in &w.omitted {
+                ui.label(format!("    {o}"));
+            }
+        }
     }
     show
 }

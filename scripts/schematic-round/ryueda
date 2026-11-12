@@ -27,7 +27,12 @@ def refusal(message):
 
 # Flags that take a value (`--flag VALUE` or `--flag=VALUE`), so the value
 # isn't read as a positional.
-VALUED = ("--move", "--expect", "--as", "-C", "--render", "--format", "--scale")
+VALUED = (
+    "--move", "--expect", "--as", "-C", "--render", "--format", "--scale",
+    # Round 3 (plan 2.G): flags plans 2.A to 2.F added.
+    "--sheet", "--theme", "--block", "--out", "--order", "--reset", "--design",
+    "--layer", "--layers",
+)
 
 
 def positionals(args):

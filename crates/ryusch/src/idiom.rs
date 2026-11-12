@@ -1931,9 +1931,13 @@ fn place_networks(
         for (_, _, k) in &served {
             let name = block.label_text(a, *k);
             if !name.is_empty() {
-                let r = crate::label::label_box(
+                let intent = block.parts[a].pins[*k].drawn_net().map_or("", |n| {
+                    crate::label::intent_on(&block.nets[n], crate::layout::LabelKind::Net)
+                });
+                let r = crate::label::label_box_with(
                     crate::layout::LabelKind::Net,
                     &name,
+                    intent,
                     shape.pins[*k].end,
                     side,
                 );
@@ -2046,7 +2050,16 @@ fn place_bank(
         let pin = shape.pins[*k];
         let name = block.label_text(a, *k);
         if !name.is_empty() {
-            let r = crate::label::label_box(crate::layout::LabelKind::Net, &name, pin.end, side);
+            let intent = block.parts[a].pins[*k].drawn_net().map_or("", |n| {
+                crate::label::intent_on(&block.nets[n], crate::layout::LabelKind::Net)
+            });
+            let r = crate::label::label_box_with(
+                crate::layout::LabelKind::Net,
+                &name,
+                intent,
+                pin.end,
+                side,
+            );
             reach = reach
                 .max(away(r.min[0], pin.end[0]))
                 .max(away(r.max[0], pin.end[0]));
@@ -2118,12 +2131,11 @@ fn place_bank(
             })
             .collect()
     };
-    let mut far: Option<Option<usize>> = None;
-    // Where the far rows' hanging members stand: past the near members'
-    // rooms, two steps out.
-    let mut hang_x: Nm = x_sig;
-    if rails.len() == 2 {
-        // How many of the other rail's rows lie inside each rail's span:
+    // Where each far rail's rows' hanging members stand: past the nearer
+    // columns' rooms, two steps out.
+    let mut hang_at: BTreeMap<Option<usize>, Nm> = BTreeMap::new();
+    if rails.len() >= 2 {
+        // How many of the other rails' rows lie inside each rail's span:
         // the nearer bar is crossed by those.
         let crossed = |rail: Option<usize>| {
             let ys: Vec<Nm> = placed.iter().filter(|x| x.2 == rail).map(|x| x.3).collect();
@@ -2133,9 +2145,9 @@ fn place_bank(
                 .filter(|x| x.2 != rail && x.3 < t && x.3 > b)
                 .count()
         };
-        // The other rail's rows just past this rail's port (a supply's
-        // above its top row, ground's below its bottom one): its port
-        // stands in their way.
+        // Other rails' rows just past this rail's port (a supply's above
+        // its top row, ground's below its bottom one): its port stands in
+        // their way.
         let blocked = |rail: Option<usize>| {
             let ys: Vec<Nm> = placed.iter().filter(|x| x.2 == rail).map(|x| x.3).collect();
             let ground = kind_of(block, rail) == Some(NetKind::Ground);
@@ -2171,44 +2183,45 @@ fn place_bank(
                 kind_of(block, *r) != Some(NetKind::Ground),
             )
         });
-        let f = list[1];
-        far = Some(f);
-        // The far members stand one column further out: past the near
-        // members' rooms (their text beside them), what hangs off the far
-        // rows, and two steps.
-        let near_reach = placed
-            .iter()
-            .filter(|x| x.2 != f)
-            .map(|x| {
-                // Its extent, then its text on one line on its row a step
-                // and a grid's rounding past its rail end.
-                let part = &block.parts[x.0];
-                let e = Shape::of(part, x.1).extent;
-                let lines: Vec<&str> = [part.refdes.as_str(), part.value.as_str()]
-                    .into_iter()
-                    .filter(|t| !t.is_empty())
-                    .collect();
-                let rail = away(e.min[0], x_sig).max(away(e.max[0], x_sig));
-                rail + 2 * GRID + crate::text::row_width(&lines)
-            })
-            .max()
-            .unwrap_or(0);
-        let near_col = (up_steps(near_reach) + 2) * GRID;
-        hang_x = x_sig + side.step()[0] / GRID * near_col;
-        let mut hung: Nm = 0;
-        for ((_, list), x) in bank.rows.iter().zip(&placed) {
-            if x.2 != f {
-                continue;
+        // Each further rail a column of its own (#666: with three, every
+        // far end stood in one column): its members one column past the
+        // nearer members' rooms (their text beside them), what hangs off
+        // its rows, and two steps.
+        for i in 1..list.len() {
+            let f = list[i];
+            let near = &list[..i];
+            let near_reach = placed
+                .iter()
+                .filter(|x| near.contains(&x.2))
+                .map(|x| {
+                    // Its extent, then its text on one line on its row a
+                    // step and a grid's rounding past its rail end.
+                    let part = &block.parts[x.0];
+                    let e = Shape::of(part, x.1).extent;
+                    let lines: Vec<crate::text::Line> =
+                        part.lines().into_iter().map(|(_, l)| l).collect();
+                    let rail = away(e.min[0], x_sig).max(away(e.max[0], x_sig));
+                    rail + 2 * GRID + crate::text::row_width(&lines)
+                })
+                .max()
+                .unwrap_or(0);
+            let near_col = (up_steps(near_reach) + 2) * GRID;
+            hang_at.insert(f, x_sig + side.step()[0] / GRID * near_col);
+            let mut hung: Nm = 0;
+            for ((_, list), x) in bank.rows.iter().zip(&placed) {
+                if x.2 != f {
+                    continue;
+                }
+                for (q, sig, want) in hangs(list) {
+                    let pl = put(block, q, turn_for(block, q, 1 - sig, want), sig, [0, 0]);
+                    let r = Cluster::single(q, pl).room(block, [0, 0]);
+                    hung = hung.max(up_steps(r.max[0] - r.min[0]) + 2);
+                }
             }
-            for (q, sig, want) in hangs(list) {
-                let pl = put(block, q, turn_for(block, q, 1 - sig, want), sig, [0, 0]);
-                let r = Cluster::single(q, pl).room(block, [0, 0]);
-                hung = hung.max(up_steps(r.max[0] - r.min[0]) + 2);
+            let by = (near_col + hung * GRID) * side.step()[0] / GRID;
+            for x in placed.iter_mut().filter(|x| x.2 == f) {
+                x.1 = Place::new([x.1.at[0] + by, x.1.at[1]], x.1.rotation, x.1.mirror);
             }
-        }
-        let by = (near_col + hung * GRID) * side.step()[0] / GRID;
-        for x in placed.iter_mut().filter(|x| x.2 == f) {
-            x.1 = Place::new([x.1.at[0] + by, x.1.at[1]], x.1.rotation, x.1.mirror);
         }
     }
     let mut adds: Vec<(usize, Place)> = placed.iter().map(|x| (x.0, x.1)).collect();
@@ -2221,7 +2234,7 @@ fn place_bank(
             // Two steps off the row, so its wire drops into its pin.
             let y = row + want.step()[1] / GRID * 2 * GRID;
             let dx = side.step()[0] / GRID * 3 * j as Nm * GRID;
-            let at = if far == Some(first.2) {
+            let at = if let Some(&hang_x) = hang_at.get(&first.2) {
                 let r = Cluster::single(
                     q,
                     put(block, q, turn_for(block, q, 1 - sig, want), sig, [0, 0]),
