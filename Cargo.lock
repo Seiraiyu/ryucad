@@ -4925,6 +4925,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu-standards"
+version = "0.0.0"
+
+[[package]]
 name = "ryucad"
 version = "0.0.0"
 dependencies = [
