@@ -249,6 +249,16 @@ pub enum Code {
     ImportProductMissing,
     /// An import feature names a body its product doesn't have.
     ImportBodyMissing,
+    /// An assembly whose products' shapes are in other files that weren't
+    /// found (design 448, plan 24.D): every document that didn't resolve
+    /// is in the details (`missing`: file, products, referenced_by,
+    /// searched, reason `not_found` or `format`). Nothing was written.
+    ImportExternalMissing,
+    /// An external file that doesn't say which of its roots a referencing
+    /// product is: several roots and none alone has its id or name, or no
+    /// root that makes anything. The file, the referencing file, the
+    /// product and the roots are in the details.
+    ImportExternalAmbiguous,
     /// A body of an imported file that can't be read or healed. Its
     /// reason and the STEP instances involved are in the details.
     ImportFailed,
@@ -1022,6 +1032,17 @@ pub type Result<T, E = Error> = core::result::Result<T, E>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_reference_codes() {
+        for (c, name) in [
+            (Code::ImportExternalMissing, "import_external_missing"),
+            (Code::ImportExternalAmbiguous, "import_external_ambiguous"),
+        ] {
+            assert_eq!(json!(c), json!(name));
+            assert_eq!(c.exit_code(), 1, "{name}");
+        }
+    }
 
     #[test]
     fn part_data_codes() {
