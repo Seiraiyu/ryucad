@@ -222,3 +222,22 @@ fn a_document_lists_the_instances_it_is_read_through() {
     assert_eq!(d.external.len(), 1);
     assert_eq!(d.external[0].related, (100..=111).collect::<Vec<u64>>());
 }
+
+/// OCCT's multi-file assembly (24.D): every externally defined product
+/// names a file OCCT wrote beside it.
+#[test]
+fn occts_multi_file_assembly_names_files_beside_it() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/occt/multi");
+    let o = ryustep::open(&std::fs::read(dir.join("assembly.stp")).unwrap()).unwrap();
+    let named: Vec<String> = o
+        .products
+        .definitions
+        .iter()
+        .filter(|d| d.externally_defined())
+        .map(|d| d.external[0].name.clone())
+        .collect();
+    assert_eq!(named.len(), 2, "{named:?}");
+    for n in &named {
+        assert!(dir.join(n).is_file(), "{n}");
+    }
+}

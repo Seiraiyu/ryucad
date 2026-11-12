@@ -3698,6 +3698,27 @@ pub(crate) mod tests {
         assert!(update_in_place(dir.path(), "imports/box.step").unwrap().is_none());
     }
 
+    /// OCCT's multi-file assembly imports as its one-file twin does: the
+    /// same instances at the same poses, the same bodies.
+    #[test]
+    fn occts_multi_file_assembly_matches_its_one_file_twin() {
+        use crate::doc::assembly::Rev;
+        let poses = |path: String| {
+            let (_d, mut s) = crate::server::tests::fresh();
+            let v = import_call(&mut s, json!({"path": path})).unwrap();
+            let asm = Id::parse(v["parts"][0]["part"].as_str().unwrap(), "part").unwrap();
+            let m = s.model(&asm, &Rev::Working).unwrap();
+            let mut p: Vec<String> = m
+                .occurrences
+                .iter()
+                .map(|o| format!("{:?}", crate::assembly::rigid_pose(&o.pose)))
+                .collect();
+            p.sort();
+            p
+        };
+        assert_eq!(poses(occt_path("multi/assembly.stp")), poses(occt_path("assembly.stp")));
+    }
+
     /// A frame (`F-1`) with a plate of its own, a sub-assembly (`S-1`) of
     /// two pins (`P-1`) and one pin more; and a loose block (`L-1`) no
     /// product uses: two roots. Every usage of the sub-assembly's and the
