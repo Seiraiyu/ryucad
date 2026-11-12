@@ -28,6 +28,7 @@ pub(crate) mod exact;
 pub mod fit;
 pub mod iso_metric;
 pub mod iso_metric_limits;
+pub mod pipe;
 pub mod source;
 pub mod thread;
 pub mod unified;
