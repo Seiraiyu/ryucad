@@ -287,7 +287,7 @@ pub fn apply(
     _old: Option<&Opened>,
     path: &str,
     plan: &mut [Planned],
-    _mode: Mode,
+    mode: Mode,
 ) -> Applied {
     let mut out = Applied::default();
     if !project.root.join(crate::doc::project::PDM_CONFIG).is_file() {
@@ -317,6 +317,27 @@ pub fn apply(
             for v in new.instances.values() {
                 out.instances.extend(v);
             }
+            continue;
+        }
+        let current: BTreeMap<String, Value> = ryupdm::props::read(files, &pl.part)
+            .map(|p| p.values)
+            .unwrap_or_default();
+        let mut merged = current.clone();
+        if mode == Mode::Into {
+            for (key, v) in &new.values {
+                if !current.contains_key(key) {
+                    merged.insert(key.clone(), v.clone());
+                }
+            }
+        }
+        for (key, v) in &new.values {
+            if merged.get(key) == Some(v) {
+                out.instances
+                    .extend(new.instances.get(key).into_iter().flatten());
+            }
+        }
+        if merged != current {
+            pl.properties = merged;
         }
     }
     out.instances.sort_unstable();
@@ -686,5 +707,28 @@ pub(crate) mod tests {
     fn a_name_without_a_density_says_nothing() {
         let lib = Materials::default();
         assert_eq!(library_warning(&lib, "Steel", None, "imports/x.step"), None);
+    }
+
+    #[test]
+    fn into_a_part_fills_only_what_it_lacks() {
+        let (_dir, mut s) = declared(&[]);
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "p", "properties": {"supplier": "Mine", "name": "mine"}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "import",
+            json!({"path": vendor_path(false), "into": "p", "solid": true}),
+        )
+        .unwrap();
+        let got = values(&mut s, "p");
+        assert_eq!(got["supplier"], "Mine");
+        assert_eq!(got["name"], "mine");
+        assert_eq!(got["batch_size"], 250);
+        assert_eq!(got["material"], "6061-T6");
     }
 }
