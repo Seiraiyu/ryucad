@@ -1041,4 +1041,40 @@ pub(crate) mod tests {
         assert_eq!(got["batch_size"], 250, "gone from the file: kept");
         assert_eq!(got["material"], "6061-T6");
     }
+
+    #[test]
+    fn an_update_says_what_it_kept_and_why() {
+        let (_dir, _s, u) = updated(&|s| {
+            call(
+                s,
+                "props.set",
+                json!({"part": "vb-100", "properties": {"wall_thickness": "4 mm"}}),
+            )
+            .unwrap();
+            call(
+                s,
+                "materials.set",
+                json!({"name": "6061-T6", "density": "2700 kg/m^3"}),
+            )
+            .unwrap();
+        });
+        let w = warnings(&u);
+        let one = |code: &str| -> String {
+            let found: Vec<&String> = w.iter().filter(|x| x.starts_with(code)).collect();
+            assert_eq!(found.len(), 1, "{code}: {w:?}");
+            found[0].clone()
+        };
+        let conflict = one("import_property_conflict:");
+        assert!(conflict.contains("vb-100/wall_thickness"), "{conflict}");
+        for v in ["\"2.5 mm\"", "\"3 mm\"", "\"4 mm\""] {
+            assert!(conflict.contains(v), "{v}: {conflict}");
+        }
+        let dropped = one("import_property_dropped:");
+        assert!(
+            dropped.contains("vb-100/batch_size") && dropped.contains("250"),
+            "{dropped}"
+        );
+        let lib = one("import_material_conflict:");
+        assert!(lib.contains("2710 kg/m^3"), "{lib}");
+    }
 }
