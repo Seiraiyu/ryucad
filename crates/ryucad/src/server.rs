@@ -7643,26 +7643,28 @@ fn assembly_meshes(
         .with("occurrence", p));
     }
     let mut seen = std::collections::BTreeSet::new();
-    let mut solids: Vec<(String, &crate::assembly::Solid)> = Vec::new();
+    let mut solids: Vec<(String, &Id, &crate::assembly::Solid)> = Vec::new();
     for o in &chosen {
         for s in &o.solids {
             if seen.insert(s.built.hash.clone()) {
                 let path = crate::assembly::path_text(&o.path);
-                solids.push((format!("{path}/{}", s.founder), s));
+                solids.push((format!("{path}/{}", s.founder), &o.part, s));
             }
         }
     }
-    let refs: Vec<&crate::assembly::Solid> = solids.iter().map(|(_, s)| *s).collect();
+    let refs: Vec<&crate::assembly::Solid> = solids.iter().map(|(_, _, s)| *s).collect();
     let made = occurrence_meshes(session, &refs, quality)?;
     let bodies = solids
         .into_iter()
         .zip(made)
-        .map(|((label, s), m)| {
+        .map(|((label, part, s), mesh)| {
+            // A reference's holes are warned of, as a part's are (#676).
+            let warning = mesh::unmeshed_warning(part, &s.founder, &s.built, &mesh);
             let m = mesh::Meshed {
                 body: s.built.body.clone(),
                 hash: s.built.hash.clone(),
-                mesh: m,
-                warning: None,
+                mesh,
+                warning,
             };
             (label, Ok(m))
         })
@@ -7677,6 +7679,22 @@ fn is_assembly(session: &Session, part: &str) -> bool {
         .ok()
         .and_then(|id| session.project().parts.get(&id).map(part_kind))
         == Some(PartKind::Assembly)
+}
+
+/// The warnings bodies' meshes carry (a reference's unmeshed faces), in
+/// body order.
+fn mesh_warnings<K>(bodies: &[(K, Result<mesh::Meshed>)]) -> Vec<Value> {
+    bodies
+        .iter()
+        .filter_map(|(_, m)| m.as_ref().ok()?.warning.clone())
+        .collect()
+}
+
+/// Puts `warnings` into `result` when there are any.
+fn with_warnings(result: &mut Value, warnings: Vec<Value>) {
+    if !warnings.is_empty() {
+        result["warnings"] = json!(warnings);
+    }
 }
 
 /// Meshes as bytes: `ryucad.mesh.1`, or `ryucad.mesh.2` when `compact`.
@@ -7699,13 +7717,16 @@ fn mesh_binary(
     if is_assembly(session, part) {
         let (pid, _, quality) = mesh_args(part, None, quality)?;
         let (bodies, occurrences) = assembly_meshes(session, &pid, only, quality)?;
-        let result = json!({"part": pid, "quality": quality.as_str(), "occurrences": occurrences});
+        let mut result =
+            json!({"part": pid, "quality": quality.as_str(), "occurrences": occurrences});
+        with_warnings(&mut result, mesh_warnings(&bodies));
         let (encoding, b) = bytes(&bodies, compact);
         return Ok(Answer::bytes(result, encoding, b));
     }
     let (pid, only, quality) = mesh_args(part, one_of(only)?, quality)?;
     let bodies = meshes(session, &pid, only.as_ref(), quality)?;
-    let result = json!({"part": pid, "quality": quality.as_str()});
+    let mut result = json!({"part": pid, "quality": quality.as_str()});
+    with_warnings(&mut result, mesh_warnings(&bodies));
     let (encoding, b) = bytes(&bodies, compact);
     Ok(Answer::bytes(result, encoding, b))
 }
@@ -7719,6 +7740,7 @@ fn mesh_get(
     if is_assembly(session, part) {
         let (pid, _, quality) = mesh_args(part, None, quality)?;
         let (bodies, occurrences) = assembly_meshes(session, &pid, only, quality)?;
+        let warnings = mesh_warnings(&bodies);
         let bodies: Vec<Value> = bodies
             .into_iter()
             .filter_map(|(label, m)| {
@@ -7729,10 +7751,10 @@ fn mesh_get(
                 Some(v)
             })
             .collect();
-        return Ok(
-            json!({"part": pid, "quality": quality.as_str(), "bodies": bodies,
-                         "occurrences": occurrences}),
-        );
+        let mut v = json!({"part": pid, "quality": quality.as_str(), "bodies": bodies,
+                           "occurrences": occurrences});
+        with_warnings(&mut v, warnings);
+        return Ok(v);
     }
     let (pid, only, quality) = mesh_args(part, one_of(only)?, quality)?;
     let mut warnings = Vec::new();
@@ -7752,9 +7774,7 @@ fn mesh_get(
     // Each body is a solid, by its founder (`feature`, as entity
     // references name it); a reference's holes are warned of.
     let mut v = json!({"part": pid, "quality": quality.as_str(), "bodies": bodies});
-    if !warnings.is_empty() {
-        v["warnings"] = json!(warnings);
-    }
+    with_warnings(&mut v, warnings);
     Ok(v)
 }
 
@@ -8301,6 +8321,43 @@ pub(crate) mod tests {
     /// #400: a render stops once its geometry passes its budget, naming
     /// how many occurrences it drew; under a budget that holds it, it
     /// draws as before.
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "a large file: tests/step.rs reads it in release"
+    )]
+    fn every_mesh_answer_warns_of_a_references_unmeshed_faces() {
+        // #676: NIST FTC 07 kept as a reference has faces that don't mesh;
+        // the JSON answer warned of them, binary and compact (`--out`) didn't.
+        let (_dir, mut s) = fresh();
+        let file = format!(
+            "{}/../ryustep/tests/corpus/nist_ftc_07_asme1_rd.stp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        call(&mut s, "import", json!({"path": file, "part": "f"})).unwrap();
+        let unmeshed = |v: &Value| -> Vec<Value> {
+            v["warnings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|w| w["code"] == "reference_faces_unmeshed")
+                .cloned()
+                .collect()
+        };
+        let want = unmeshed(&call(&mut s, "mesh.get", json!({"part": "f"})).unwrap());
+        assert!(
+            !want.is_empty(),
+            "FTC 07's reference meshes whole now: pick another file"
+        );
+        for transfer in ["binary", "compact"] {
+            let req =
+                Request::from_rpc("mesh.get", Some(json!({"part": "f", "transfer": transfer})))
+                    .unwrap();
+            let a = answer_live(&mut s, None, None, req).unwrap();
+            assert_eq!(unmeshed(&a.result), want, "{transfer}");
+        }
+    }
+
     #[test]
     fn a_render_past_its_budget_is_refused_and_one_within_it_draws() {
         let (dir, mut s) = crate::assembly::tests::project();
