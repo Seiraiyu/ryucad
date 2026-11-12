@@ -592,7 +592,7 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
         .as_deref()
         .map(|o| out_path(o, session.root()))
         .transpose()?;
-    let part = crate::server::part_id(&ask.part)?;
+    let part = crate::part::part_id(&ask.part)?;
     if let Options::Dxf(o) = options {
         return dxf(session, &ask, part, o, out.as_deref());
     }
@@ -929,7 +929,7 @@ fn dxf(
     }
     let (_, s) = session.at(ask.rev.as_deref())?;
     let p = s.project().part(&part)?;
-    if crate::server::part_kind(p) == crate::doc::files::PartKind::Assembly {
+    if crate::part::part_kind(p) == crate::doc::files::PartKind::Assembly {
         return Err(Error::new(
             Code::InvalidParam,
             format!("{part} is an assembly: a DXF is one sheet metal solid's flat"),
@@ -1065,7 +1065,7 @@ fn meshed_with(
     let job = s.job.clone();
     let made =
         s.meshes
-            .export_all_for(&builts, &opts.params, crate::server::mesh_budget(), &job)?;
+            .export_all_for(&builts, &opts.params, crate::budget::mesh_budget(), &job)?;
     let mut meshes: BTreeMap<&str, Arc<ryukei::mesh::BodyMesh>> = BTreeMap::new();
     let mut faults = Vec::new();
     let mut warnings = Vec::new();
@@ -2243,7 +2243,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::assembly::tests::{place_in, project, released};
     use crate::mate::tests::add_in;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
 
     /// The answer to an export with `params`.
     pub(crate) fn answered(s: &mut Session, params: Value) -> Result<Answer> {
@@ -2420,7 +2420,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_sheet_is_written_to_usd_as_its_mesh_alone() {
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (_d, mut s) = fresh();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
         call(

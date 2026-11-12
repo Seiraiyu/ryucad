@@ -1806,7 +1806,7 @@ mod tests {
 
     #[test]
     fn a_delete_takes_solids_out_and_what_follows_cant_name_them() {
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (_dir, mut s) = fresh();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
         for (id_, x) in [("a", "0 mm"), ("c", "5 mm")] {
@@ -1865,7 +1865,7 @@ mod tests {
 
     #[test]
     fn deleting_a_body_rebuilds_nothing_else() {
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (_dir, mut s) = fresh();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
         for id_ in ["a", "c"] {
@@ -1890,7 +1890,7 @@ mod tests {
 
     #[test]
     fn a_deletes_solids_are_edited_whole() {
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (_dir, mut s) = fresh();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
         for id_ in ["a", "b", "c"] {

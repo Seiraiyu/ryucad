@@ -17,8 +17,8 @@ use crate::assembly::{Pin, Pinned};
 use crate::doc::assembly::Rev;
 use crate::doc::id::Id;
 use crate::error::{Code, Error, Result};
+use crate::part::{check_revision, part_id};
 use crate::proto::VersionInfo;
-use crate::server::{check_revision, part_id};
 use crate::session::Session;
 use ryupdm::approvals::Rule;
 use ryupdm::attest::Verdict;
@@ -1108,7 +1108,7 @@ pub fn check(session: &mut Session, results: bool) -> Result<Value> {
 pub(crate) mod tests {
     use super::*;
     use crate::git::tests::git;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
 
     /// A project in a repository on `main` with a part `p` holding a box,
     /// numbered, committed.
@@ -1559,7 +1559,7 @@ pub(crate) mod tests {
     #[test]
     fn writes_are_logged_and_only_files_are_undone() {
         use crate::live::Live;
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (dir, mut s) = released_project();
         let root = dir.path();
         let mut live = Live::new();

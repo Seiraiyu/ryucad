@@ -771,8 +771,8 @@ pub(crate) mod tests {
         );
     }
 
-    use crate::server::tests::{call, fresh};
     use crate::session::Session;
+    use crate::testing::{call, fresh};
 
     /// The vendor's attributes as a project would declare them.
     const DECLARED: [(&str, &str); 7] = [

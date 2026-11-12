@@ -4,8 +4,13 @@
 //! and sketch entity, and what changed in PDM (properties, release records
 //! and release states); [`model`] adds what that did to the rebuilt bodies.
 
-use crate::activity::Files;
+use crate::activity::{self, Files};
+use crate::doc::id::Id;
 use crate::doc::reads::{self, ReadBy};
+use crate::error::Result;
+use crate::part::part_id;
+use crate::session::Session;
+use ryu_session::job::Phase;
 use ryupdm::history::Releases;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2230,7 +2235,7 @@ impl Built {
     /// A part's rebuild, with its solids as `part`'s list makes them.
     pub fn of(part: &crate::doc::project::Part, r: &crate::rebuild::PartResult) -> Built {
         let solids = crate::solid::Solids::of(part);
-        let assembly = crate::server::part_kind(part) == crate::doc::files::PartKind::Assembly;
+        let assembly = crate::part::part_kind(part) == crate::doc::files::PartKind::Assembly;
         Built {
             occurrences: match assembly {
                 true => crate::assembly::Model::of_assembly(r).occurrences,
@@ -2800,6 +2805,121 @@ fn occurrences(a: &Built, b: &Built, all: bool) -> Option<Value> {
         json!({"added": added, "removed": removed, "moved": moved, "changed": changed,
                 "sides": sides, "bodies": differ}),
     )
+}
+
+/// A revision's files, and how the answer names it: the working files
+/// (`working`), another worktree's (`worktree:<path>`, with its branch and
+/// head) or a commit.
+pub(crate) fn files_at(session: &mut Session, rev: &str) -> Result<(Value, activity::Files)> {
+    if rev == "working" {
+        return Ok((json!({"rev": rev}), session.snapshot()));
+    }
+    if let Some((named, files, stale)) = session.annotation_files(rev)? {
+        if !stale.is_empty() {
+            session
+                .rev_warnings
+                .push(crate::session::stale_warning(rev, &stale));
+        }
+        return Ok((named, files));
+    }
+    if let Some((named, files)) = session.draft_files(rev)? {
+        return Ok((named, files));
+    }
+    if let Some((w, files, _)) = session.worktree_files(rev)? {
+        let named = json!({"rev": rev, "worktree": w.root, "branch": w.branch, "head": w.head});
+        return Ok((named, files));
+    }
+    let r = crate::git::revision(session.root(), rev)?;
+    Ok((json!({"rev": rev, "commit": r.commit}), r.files))
+}
+
+/// Every part of a revision, rebuilt.
+fn rebuilt_at(session: &mut Session, rev: &str) -> Result<BTreeMap<String, crate::diff::Built>> {
+    let (_, s) = session.at(Some(rev))?;
+    let ids: Vec<Id> = s.project().parts.keys().cloned().collect();
+    let mut out = BTreeMap::new();
+    for id in ids {
+        let part = s.project().part(&id)?.clone();
+        let r = s.rebuilt(&id)?;
+        out.insert(id.to_string(), crate::diff::Built::of(&part, r));
+    }
+    Ok(out)
+}
+
+/// Each drawing of every part at `rev`, built: by part and drawing, each
+/// view's fingerprint by key, or why it didn't build.
+fn drawn_at(session: &mut Session, rev: &str) -> Result<crate::diff::Drawn> {
+    let (_, s) = session.at(Some(rev))?;
+    let mut out = crate::diff::Drawn::new();
+    let ids: Vec<(Id, Vec<Id>)> = s
+        .project()
+        .parts
+        .iter()
+        .map(|(id, p)| (id.clone(), p.drawings.keys().cloned().collect()))
+        .collect();
+    for (pid, drawings) in ids {
+        for d in drawings {
+            let views = match crate::drawing::build(s, &pid, &d) {
+                Ok(b) => Ok(b
+                    .sheets
+                    .iter()
+                    .flat_map(|sh| {
+                        sh.views
+                            .iter()
+                            .map(move |v| (v.key.to_string(), v.fingerprint(sh)))
+                    })
+                    .collect()),
+                Err(e) => Err(e.code),
+            };
+            out.insert((pid.to_string(), d.to_string()), views);
+        }
+    }
+    Ok(out)
+}
+
+/// `diff`: what changed from one revision to another.
+pub(crate) fn diff(
+    session: &mut Session,
+    from: &str,
+    to: &str,
+    model: bool,
+    opts: &crate::diff::Options,
+) -> Result<Value> {
+    if let Some(p) = &opts.part {
+        part_id(p)?;
+    }
+    let (a, fa) = files_at(session, from)?;
+    let (b, fb) = files_at(session, to)?;
+    let (a_rev, b_rev) = (from.to_owned(), to.to_owned());
+    let releases = crate::release::history(session)
+        .map(|(_, r)| r)
+        .unwrap_or_default();
+    let mut v = crate::diff::structural(&fa, &fb, opts, &releases);
+    v["from"] = a;
+    v["to"] = b;
+    if model {
+        let job = session.job.clone();
+        let stage = job.begin(Phase::Rebuild, "revisions", 2);
+        stage.step(|| from.to_owned())?;
+        let from = rebuilt_at(session, from)?;
+        stage.step(|| to.to_owned())?;
+        let to = rebuilt_at(session, to)?;
+        drop(stage);
+        crate::diff::model(&mut v, &from, &to, opts);
+        // Each drawing whose built views differ (design 417).
+        let (dfrom, dto) = (drawn_at(session, &a_rev)?, drawn_at(session, &b_rev)?);
+        crate::diff::drawings_model(&mut v, &dfrom, &dto, opts);
+        // Each imported file that differs, by product.
+        if let Some(Value::Array(files)) = v.get_mut("imports") {
+            for f in files {
+                let path = f["path"].as_str().unwrap_or_default().to_owned();
+                let (a, b) = (fa.get(&path), fb.get(&path));
+                f["products"] =
+                    crate::import::products_diff(&path, a.map(|x| &x[..]), b.map(|x| &x[..]));
+            }
+        }
+    }
+    Ok(v)
 }
 
 #[cfg(test)]
@@ -3459,7 +3579,7 @@ mod tests {
     #[test]
     fn a_model_diff_says_how_a_path_moved() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
@@ -3497,7 +3617,7 @@ mod tests {
     #[test]
     fn a_model_diff_says_how_an_unfolds_pattern_moved() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
@@ -4762,7 +4882,7 @@ mod tests {
     #[test]
     fn a_models_change_shows_in_the_drawings_views_it_moves() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
@@ -4807,7 +4927,7 @@ mod tests {
     #[test]
     fn diff_compares_revisions_and_the_working_files() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         // Outside a repository there is no HEAD to compare with.
@@ -4856,7 +4976,7 @@ mod tests {
     #[test]
     fn a_model_diff_says_what_the_bodies_did() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
@@ -4939,7 +5059,7 @@ mod tests {
     #[test]
     fn a_model_diff_says_what_each_solid_did() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
@@ -4988,7 +5108,7 @@ mod tests {
     #[test]
     fn a_model_diff_says_what_kind_each_body_is() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
@@ -5033,7 +5153,7 @@ mod tests {
     #[test]
     fn a_split_whose_plane_moved_changes_both_its_sides() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
@@ -5073,7 +5193,7 @@ mod tests {
     #[test]
     fn a_split_whose_tool_sheet_moved_changes_both_its_sides() {
         use crate::git::tests::git;
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
@@ -5267,13 +5387,13 @@ mod tests {
         crate::git::tests::git(dir.path(), &["add", "."]);
         crate::git::tests::git(dir.path(), &["commit", "-q", "-m", "pin A"]);
         s.reload().unwrap();
-        crate::server::tests::call(
+        crate::testing::call(
             &mut s,
             "insert.update",
             json!({"part": "enclosure", "feature": "pcb"}),
         )
         .unwrap();
-        let v = crate::server::tests::call(&mut s, "diff", json!({"model": true})).unwrap();
+        let v = crate::testing::call(&mut s, "diff", json!({"model": true})).unwrap();
         let p = &v["parts"]["enclosure"];
         let change = &p["features"]["pcb"]["changes"][0];
         assert_eq!(change["at"], "/rev/label", "{v}");
