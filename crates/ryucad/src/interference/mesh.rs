@@ -187,10 +187,12 @@ fn prism_misses(
 /// outside the box. So the point winds zero, and every point of `t` is
 /// within `reach` of the mesh or outside it. The directions tried are
 /// `t`'s inward normal, its outward one, then (where it isn't parallel to
-/// `t`'s) the normal of `inside`'s triangle `nearest` both ways: a wall
-/// whose edge stands on the other side's flush face grazes that face along
-/// its own normal, but leaves it along the face's (a departure from the
-/// design's wording, 29.A; the proof holds for any direction). A
+/// `t`'s) the normal `m` of `inside`'s triangle `nearest` both ways, and
+/// `t`'s normal across `m` both ways: a wall whose edge stands on the
+/// other side's flush face grazes that face along its own normal, but
+/// leaves it along the face's; a pin in a hole leaves it only along the
+/// hole, across both (departures from the design's wording, 29.A; the
+/// proof holds for any direction). A
 /// degenerate piece has no normal and no certificate. `found` is the box
 /// query's buffer, kept by the caller.
 fn escapes(
@@ -229,7 +231,19 @@ fn escapes(
     // thousandth of a radian of `t`'s (then it adds nothing).
     let m = (l > 0.0 && l.is_finite() && (m * (1.0 / l)).dot(n).abs() < 1.0 - 1e-6)
         .then(|| m * (1.0 / l));
-    let dirs = [Some(n * -1.0), Some(n), m, m.map(|m| m * -1.0)];
+    // Along both faces: out of a hole along its axis.
+    let w = m.map(|m| {
+        let w = n.cross(m);
+        w * (1.0 / w.length())
+    });
+    let dirs = [
+        Some(n * -1.0),
+        Some(n),
+        m,
+        m.map(|m| m * -1.0),
+        w,
+        w.map(|w| w * -1.0),
+    ];
     for v in dirs.into_iter().flatten() {
         let ends = [
             t[0] + v * near,
@@ -958,5 +972,229 @@ mod tests {
         println!("header, plate: {spent} pieces");
         assert_eq!(v, Verdict::Touching);
         assert!(spent < 1 << 14, "{spent}");
+    }
+
+    fn united(key: &[u8], body: &Body, parts: &[(Body, Rigid)]) -> Body {
+        let tools: Vec<Tool> = parts
+            .iter()
+            .enumerate()
+            .map(|(k, (b, place))| Tool {
+                key: ToolKey(OpKey::from_bytes(format!("{k}").as_bytes()).0),
+                body: b,
+                place: *place,
+            })
+            .collect();
+        ryukei::boolean::boolean(OpKey::from_bytes(key), BooleanOp::Unite, body, &tools)
+            .unwrap()
+            .0
+    }
+
+    /// The header with 38 square pins of 0.64 mm through its holes, from
+    /// 3 mm under the plate's bottom to its top.
+    fn pinned_header() -> Body {
+        let mut pins = Vec::new();
+        for i in 0..19 {
+            for y in [0.0025 - 0.00127, 0.0025 + 0.00127] {
+                let pin = ryukei::primitive::block(
+                    OpKey::from_bytes(format!("pin{i}{y}").as_bytes()),
+                    0.00064,
+                    0.00064,
+                    0.0131,
+                    &Rigid::IDENTITY,
+                )
+                .unwrap()
+                .0;
+                pins.push((
+                    pin,
+                    at(0.00127 + i as f64 * 0.00254 - 0.00032, y - 0.00032, -0.0046),
+                ));
+            }
+        }
+        united(b"pinned", &header(), &pins)
+    }
+
+    /// A 10 × 10 × 1.5 mm body on 0.2 mm feet, four a side, flush on the
+    /// plate where its feet stand (its own frame's z = 0).
+    fn gull_wing() -> Body {
+        let body = ryukei::primitive::block(
+            OpKey::from_bytes(b"smd"),
+            0.01,
+            0.01,
+            0.0015,
+            &at(0.0, 0.0, 0.0002),
+        )
+        .unwrap()
+        .0;
+        let mut feet = Vec::new();
+        for k in 0..4 {
+            let y = 0.0015 + k as f64 * 0.0022;
+            for x in [-0.001, 0.0095] {
+                let foot = ryukei::primitive::block(
+                    OpKey::from_bytes(format!("foot{k}{x}").as_bytes()),
+                    0.0015,
+                    0.0003,
+                    0.0002,
+                    &Rigid::IDENTITY,
+                )
+                .unwrap()
+                .0;
+                feet.push((foot, at(x, y, 0.0)));
+            }
+        }
+        united(b"gull", &body, &feet)
+    }
+
+    #[test]
+    fn pins_through_holes_and_gull_wing_feet_only_touch() {
+        let plate = Prepared::new(&drilled_plate(&Rigid::IDENTITY)).unwrap();
+        let pinned = Prepared::new(&pinned_header()).unwrap();
+        let smd = Prepared::new(&gull_wing()).unwrap();
+        for (what, other, rel) in [
+            ("pins", &pinned, on_plate()),
+            ("gull wing", &smd, at(0.02, 0.005, 0.0016)),
+        ] {
+            let (v, spent) = judged(&plate, other, &rel);
+            println!("plate, {what}: {spent} pieces");
+            assert_eq!(v, Verdict::Touching, "{what}");
+            assert!(spent < 1 << 15, "{what}: {spent}");
+            let (v, spent) = judged(other, &plate, &rel.inverse());
+            println!("{what}, plate: {spent} pieces");
+            assert_eq!(v, Verdict::Touching, "{what}, swapped");
+            assert!(spent < 1 << 15, "{what}, swapped: {spent}");
+        }
+    }
+
+    #[test]
+    fn a_header_sunk_raised_or_apart_is_judged_by_its_depth() {
+        let plate = Prepared::new(&drilled_plate(&Rigid::IDENTITY)).unwrap();
+        let hdr = Prepared::new(&header()).unwrap();
+        let rho = plate.reach + hdr.reach;
+        for (dz, sunk) in [
+            (-2.0 * rho, true),
+            (-0.25 * rho, false),
+            (0.5 * rho, false),
+            (2.0 * rho, false),
+        ] {
+            let rel = at(0.006, 0.0075, 0.0016 + dz);
+            for (v, side) in [
+                (judge(&plate, &hdr, &rel), "plate first"),
+                (judge(&hdr, &plate, &rel.inverse()), "header first"),
+            ] {
+                match (sunk, dz > rho) {
+                    (true, _) => assert!(
+                        matches!(v, Verdict::Approximate { open: false, .. }),
+                        "{dz} {side}: {v:?}"
+                    ),
+                    (false, true) => assert_eq!(v, Verdict::Clear, "{dz} {side}"),
+                    (false, false) => assert_eq!(v, Verdict::Touching, "{dz} {side}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_flush_sheet_only_touches() {
+        // The header's bottom face as a sheet (open: no front to trust).
+        let h = header();
+        let prepared = Prepared::new(&h).unwrap();
+        let bottom = prepared
+            .tree
+            .triangles()
+            .iter()
+            .position(|t| t.iter().all(|q| q.z == 0.0))
+            .map(|k| prepared.faces[k])
+            .expect("a face on z = 0");
+        let (sheet, _) = ryukei::sheet::extract(OpKey::from_bytes(b"sh"), &h, &[bottom]).unwrap();
+        let s = Prepared::new(&sheet).unwrap();
+        assert!(!s.closed);
+        let plate = Prepared::new(&drilled_plate(&Rigid::IDENTITY)).unwrap();
+        let (v, spent) = judged(&plate, &s, &on_plate());
+        assert!(matches!(v, Verdict::Touching), "{v:?}");
+        assert!(spent < 1 << 14, "{spent}");
+        let (v, _) = judged(&s, &plate, &on_plate().inverse());
+        assert!(matches!(v, Verdict::Touching), "{v:?}");
+    }
+
+    #[test]
+    fn a_flush_header_on_a_turned_plate_is_decided() {
+        let mut g = ryukei_testkit::Lcg::new(525);
+        let hdr = header();
+        for k in 0..3 {
+            let turn =
+                Rigid::rotation(ryukei::geom::UnitVector3::Z, g.next_f64(0.0, 6.2)).then_after(
+                    &Rigid::rotation(ryukei::geom::UnitVector3::X, g.next_f64(-0.5, 0.5)),
+                );
+            let pose = at(
+                g.next_f64(-0.05, 0.05),
+                g.next_f64(-0.05, 0.05),
+                g.next_f64(-0.05, 0.05),
+            )
+            .then_after(&turn);
+            let plate = Prepared::new(&drilled_plate(&pose)).unwrap();
+            let h = Prepared::new(&hdr).unwrap();
+            let rel = pose.then_after(&on_plate());
+            let (v, spent) = judged(&plate, &h, &rel);
+            assert_eq!(v, Verdict::Touching, "pose {k}");
+            assert!(spent < 1 << 15, "pose {k}: {spent}");
+            let (v, _) = judged(&h, &plate, &rel.inverse());
+            assert_eq!(v, Verdict::Touching, "pose {k}, swapped");
+        }
+    }
+
+    #[test]
+    fn a_piece_in_a_hole_escapes_along_it_only_past_the_margin() {
+        // A wall piece in x = 2 mm, in a tube of blocks open only upwards:
+        // its own normal (±x) and the nearest face's (±y, block A's at
+        // y = 0.95 mm) meet blocks, and so does down; up, along both
+        // faces (the hole's axis), block B stands beside the prism, `gap`
+        // off its plane: withheld at half the margin, granted at twice it.
+        let margin = 1e-12;
+        let reach = 1e-5;
+        let mm = 1e-3;
+        let wall = [
+            p(2.0 * mm, mm, mm),
+            p(2.0 * mm, 3.0 * mm, mm),
+            p(2.0 * mm, 2.0 * mm, 2.0 * mm),
+        ];
+        let cube = |lo: [f64; 3], hi: [f64; 3]| {
+            ryukei::primitive::block(
+                OpKey::from_bytes(b"q"),
+                (hi[0] - lo[0]) * mm,
+                (hi[1] - lo[1]) * mm,
+                (hi[2] - lo[2]) * mm,
+                &at(lo[0] * mm, lo[1] * mm, lo[2] * mm),
+            )
+            .unwrap()
+            .0
+        };
+        let tube = [
+            cube([0.0, -1.0, 0.0], [4.0, 0.95, 3.0]), // A, -y
+            cube([0.0, 4.0, 0.0], [4.0, 5.0, 3.0]),   // +y
+            cube([0.0, 0.95, 0.0], [1.0, 4.0, 3.0]),  // -x
+            cube([3.0, 0.95, 0.0], [4.0, 4.0, 3.0]),  // +x
+            cube([0.0, 0.95, -1.0], [4.0, 4.0, 0.5]), // below
+        ];
+        let mut tris: Vec<[Point3; 3]> = Vec::new();
+        for b in &tube {
+            tris.extend(Prepared::new(b).unwrap().tree.triangles());
+        }
+        let face = tris
+            .iter()
+            .position(|t| t.iter().all(|q| (q.y - 0.95 * mm).abs() < 1e-12))
+            .expect("A's face at y = 0.95 mm") as u32;
+        let mut found = Vec::new();
+        let open = MeshTree::new(tris.clone());
+        assert!(escapes(&open, &wall, reach, margin, &mut found, face));
+        for (gap, granted) in [(0.5 * margin, false), (2.0 * margin, true)] {
+            let b = cube([2.0 + gap / mm, 0.95, 2.1], [2.5, 4.0, 3.0]);
+            let mut all = tris.clone();
+            all.extend(Prepared::new(&b).unwrap().tree.triangles());
+            let m = MeshTree::new(all);
+            assert_eq!(
+                escapes(&m, &wall, reach, margin, &mut found, face),
+                granted,
+                "{gap}"
+            );
+        }
     }
 }
