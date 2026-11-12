@@ -195,6 +195,7 @@ What each phase decided is recorded per area under `docs/claude/`. Read the guid
 - `docs/claude/ryucad-scale.md` — the benchmark project, file events, the memory budget, the window at scale
 - `docs/claude/ryucad-formats.md` — export formats: the scene, STL, 3MF, USD, and their references
 - `docs/claude/ryucad-reference.md` — geometric references, the resolver, datum planes, axes and points and their uses
+- `docs/claude/ryucad-inserts.md` — inserts and deleted bodies: solid keys, pins and updates, Git and PDM
 - `docs/claude/ryucad-surfaces.md` — sheets in the model, surface sweeps, planar faces
 - `docs/claude/ryucad-annotations.md` — annotations: files, proposed changes and their capture, annotation revisions, apply, the lifecycle, participant modes
 - `docs/claude/ryucad-drawings.md` — drawings: ryu-draw, drawing and template files, views through ryukei's projection, layout, PDF, SVG and PNG
