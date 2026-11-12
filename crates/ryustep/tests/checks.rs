@@ -418,6 +418,36 @@ fn coilcraft_coils_mesh_whole_as_references() {
     }
 }
 
+/// #303: KiCad's MSOP-8-1EP. Four NURBS–NURBS pairs sharing an edge, not
+/// tangent, each spent 1.8M to 2M units (6 to 15 s) as the general trace's
+/// face search recursed along the shared edge (#529's case): 46 s on the
+/// bar machine, 8.2M units. Under 30 s on one thread with `RYUKEI_BARS=1`.
+#[test]
+#[ignore = "needs the KiCad corpus (scripts/fetch-kicad.sh)"]
+fn msop_8_1ep_checks_in_time() {
+    let _serial = serial();
+    let Some(path) =
+        kicad("Package_SO.3dshapes/MSOP-8-1EP_3x3mm_P0.65mm_EP2.5x3mm_Mask1.73x2.36mm.step")
+    else {
+        return;
+    };
+    let key = OpKey::from_bytes(b"ryucad.feature\0body\0body");
+    let (_, body) = bodies_keyed(&path, key).remove(0);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let work = ryukei::work::Work::unlimited();
+    let t = std::time::Instant::now();
+    let faults = pool
+        .install(|| ryukei::check::check_intersections_with(&body, &work))
+        .unwrap();
+    let secs = t.elapsed().as_secs_f64();
+    eprintln!("MSOP-8-1EP: {secs:.1} s");
+    assert_eq!(named(&body, &faults), []);
+    assert!(!bars() || secs < 30.0, "{secs:.1} s");
+}
+
 /// #550: KiCad's L_Wurth_WE-HCFT-2012 inductor. Its four solids overlap,
 /// so ryustep heals each alone and unites them; one face pair (the coil's
 /// spline face against a lead's cylinder) traced 23.5M units in 25 s on
