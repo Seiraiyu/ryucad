@@ -1238,6 +1238,7 @@ fn every_protocol_method_has_a_command() {
         ("measure", &["measure"]),
         ("hole.derive", &["hole", "derive"]),
         ("standards.list", &["standards"]),
+        ("holes.list", &["holes"]),
         ("mass", &["mass"]),
         ("sheet.get", &["sheet"]),
         ("feature_faces.get", &["feature-faces"]),
@@ -3332,6 +3333,95 @@ fn review_against_a_fake_service() {
     assert_eq!(
         serde_json::from_str::<Value>(&posted.body).unwrap(),
         serde_json::json!({"ref": "p/b/0123456789abcdef0123456789abcdef", "body": "too thin here"})
+    );
+}
+
+#[test]
+fn holes_as_json_csv_and_groups() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=20", "--param", "y=10", "--param",
+        "z=5",
+    ]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--origin", "0,0,5",
+    ]);
+    let ops = r#"[
+        {"op": "add", "type": "point", "at": [10, 5]},
+        {"op": "add", "type": "fix", "a": "p1"},
+        {"op": "add", "type": "point", "at": [4, 5]},
+        {"op": "add", "type": "fix", "a": "p2"}
+    ]"#;
+    p.ok(&["sketch", "edit", "p", "s", ops]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "hole",
+        "--id",
+        "h",
+        "--sketch",
+        "s",
+        "--point",
+        "p1",
+        "--point",
+        "p2",
+        "--spec",
+        "M2x0.4-6H THRU",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "pattern",
+        "--id",
+        "row",
+        "--seed",
+        "h",
+        "--direction",
+        "y",
+        "--spacing",
+        "3",
+        "--count",
+        "2",
+    ]);
+    let all = p.ok(&["holes", "p"]);
+    let rows = all["holes"].as_array().unwrap();
+    assert_eq!(rows.len(), 4, "{all}");
+    let r = &rows[2];
+    assert_eq!(r["ref"], "p/row/h/p1/1");
+    assert_eq!(r["spec"], "M2x0.4-6H THRU");
+    assert_eq!(r["type"], "tapped");
+    assert_eq!(
+        r["pattern"],
+        json!({"feature": "row", "seed": "h", "instance": [1]})
+    );
+    assert_eq!(r["axis"], json!([0.0, 0.0, -1.0]));
+    assert_eq!(r["position"]["value"], "(10 mm, 8 mm, 5 mm)", "{r}");
+    assert!(r["faces"]["wall"].as_str().unwrap().starts_with("p/b/"));
+    assert_eq!(r["thread"]["designation"], "M2x0.4-6H");
+    assert_eq!(all["gone"], json!([]));
+    let g = p.ok(&["holes", "p", "--group"]);
+    assert_eq!(
+        g["groups"],
+        json!([{"spec": "M2x0.4-6H THRU", "count": 4,
+                "refs": ["p/h/p1", "p/h/p2", "p/row/h/p1/1", "p/row/h/p2/1"]}])
+    );
+    let one = p.ok(&["holes", "p", "--ref", "p/row/h/p2/1"]);
+    assert_eq!(one["holes"].as_array().unwrap().len(), 1);
+    p.fails(&["holes", "p", "--ref", "p/row/h/p9/1"], "not_found", 1);
+    let csv = p.ok(&["holes", "p", "--csv"]);
+    let text = csv["csv"].as_str().unwrap();
+    let mut lines = text.lines();
+    assert_eq!(
+        lines.next().unwrap(),
+        "ref,spec,type,x_m,y_m,z_m,axis_x,axis_y,axis_z,drill_m,depth_m,thread_depth_m,feature,pattern,instance,mirror_of,solid"
+    );
+    assert_eq!(
+        lines.nth(2).unwrap(),
+        "p/row/h/p1/1,M2x0.4-6H THRU,tapped,0.01,0.008,0.005,0,0,-1,0.0016,0.005,0.005,h,row,1,,b"
     );
 }
 

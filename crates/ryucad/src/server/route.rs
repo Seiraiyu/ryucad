@@ -265,6 +265,22 @@ pub(crate) fn dispatch(
         Request::AssemblyTree { part, path, depth } => {
             crate::assembly::tree(session, &part, path.as_deref(), depth)
         }
+        Request::HolesList {
+            part,
+            solid,
+            csv,
+            group,
+            reference,
+            rev,
+        } => crate::holes::request(
+            session,
+            &part,
+            solid.as_deref(),
+            csv,
+            group,
+            reference.as_deref(),
+            rev.as_deref(),
+        ),
         Request::StandardsList {
             table,
             standard,

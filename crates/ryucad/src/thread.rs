@@ -3,7 +3,7 @@
 //! geometry: derived from the holes the rebuild made, cached with them,
 //! never on disk.
 
-use crate::holes::Holes;
+use crate::holes::{Holes, Row};
 use ryukei::geom::{Point3, Vector3};
 use serde_json::{Value, json};
 
@@ -50,39 +50,38 @@ impl Thread {
 
 /// Every tapped hole's thread, in the holes' order.
 pub fn of(holes: &Holes) -> Vec<Thread> {
-    holes
-        .rows
-        .iter()
-        .filter_map(|r| {
-            let t = r.sizes.thread.as_ref()?;
-            let start = r.sizes.mouth_depth().unwrap_or(0.0);
-            let length = r.depth.2.unwrap_or(r.depth.0);
-            Some(Thread {
-                hole: r.reference.clone(),
-                spec: r.spec.clone(),
-                designation: t.designation.clone(),
-                standard: t.standard.clone(),
-                major: t.major.as_ref().map_or(r.sizes.drill.si, |m| m.si),
-                minor: t.minor.as_ref().map(|[a, b]| [a.si, b.si]),
-                pitch: t.pitch.si,
-                lead: t.lead.si,
-                left: r.left,
-                starts: t.starts,
-                class: t.class.clone(),
-                internal: true,
-                faces: r
-                    .faces
-                    .get("wall")
-                    .into_iter()
-                    .flatten()
-                    .map(|n| format!("{}/{}/{n}", r.part, r.solid))
-                    .collect(),
-                axis: r.axis,
-                mouth: r.position + r.axis * start,
-                end: r.position + r.axis * length,
-            })
-        })
-        .collect()
+    holes.rows.iter().filter_map(of_row).collect()
+}
+
+/// A row's thread, if it is tapped.
+pub fn of_row(r: &Row) -> Option<Thread> {
+    let t = r.sizes.thread.as_ref()?;
+    let start = r.sizes.mouth_depth().unwrap_or(0.0);
+    let length = r.depth.2.unwrap_or(r.depth.0);
+    Some(Thread {
+        hole: r.reference.clone(),
+        spec: r.spec.clone(),
+        designation: t.designation.clone(),
+        standard: t.standard.clone(),
+        major: t.major.as_ref().map_or(r.sizes.drill.si, |m| m.si),
+        minor: t.minor.as_ref().map(|[a, b]| [a.si, b.si]),
+        pitch: t.pitch.si,
+        lead: t.lead.si,
+        left: r.left,
+        starts: t.starts,
+        class: t.class.clone(),
+        internal: true,
+        faces: r
+            .faces
+            .get("wall")
+            .into_iter()
+            .flatten()
+            .map(|n| format!("{}/{}/{n}", r.part, r.solid))
+            .collect(),
+        axis: r.axis,
+        mouth: r.position + r.axis * start,
+        end: r.position + r.axis * length,
+    })
 }
 
 #[cfg(test)]

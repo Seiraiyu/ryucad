@@ -89,6 +89,24 @@ enum Command {
     /// Hole tools that need no model.
     #[command(subcommand)]
     Hole(HoleCmd),
+    /// Every hole of a part, patterns and mirrors expanded: its ref, spec, type,
+    /// position, axis, sizes, depths, thread, faces and feature.
+    Holes {
+        part: String,
+        /// Only this solid's holes.
+        solid: Option<String>,
+        /// One row per hole as CSV.
+        #[arg(long)]
+        csv: bool,
+        /// Holes of one spec together, with their count.
+        #[arg(long, conflicts_with = "csv")]
+        group: bool,
+        /// One hole by its reference (p/h/p1, p/row/h/p1/1).
+        #[arg(long = "ref", value_name = "REF")]
+        reference: Option<String>,
+        #[command(flatten)]
+        rev: RevArg,
+    },
     /// What the hole standards hold, built in and the project's, each value with its
     /// source: ryucad standards threads|fasteners|drills [STANDARD] [SIZE].
     Standards {
@@ -4582,6 +4600,21 @@ fn request(cmd: &Command) -> Option<Request> {
             offline: *offline,
             dry_run: *dry_run,
             expected_revision: expect.clone(),
+        },
+        Command::Holes {
+            part,
+            solid,
+            csv,
+            group,
+            reference,
+            rev,
+        } => Request::HolesList {
+            part: part.clone(),
+            solid: solid.clone(),
+            csv: *csv,
+            group: *group,
+            reference: reference.clone(),
+            rev: rev.rev.clone(),
         },
         Command::Standards {
             table,

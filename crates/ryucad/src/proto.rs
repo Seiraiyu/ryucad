@@ -1180,6 +1180,26 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         depth: Option<u32>,
     },
+    /// Every hole of a part (`holes`): each place of each hole feature,
+    /// with patterns and mirrors expanded, in a fixed order; or one by its
+    /// reference, as CSV, or grouped by spec.
+    #[serde(rename = "holes.list")]
+    HolesList {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        solid: Option<String>,
+        /// One row per hole as CSV text, in `csv`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        csv: bool,
+        /// Rows of one spec together: `{spec, count, refs}`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        group: bool,
+        /// One hole by its reference.
+        #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     /// What the hole standards hold: `threads`, `fasteners` or `drills`,
     /// optionally one standard (or drill series) and size, each value
     /// with its source.

@@ -11,14 +11,14 @@ use crate::doc::files::Feature;
 use crate::doc::hole::{Bottom, Depth, Hole};
 use crate::doc::id::Id;
 use crate::doc::project::Part;
-use crate::error::Result;
+use crate::error::{Code, Error, Result};
 use crate::hole::derive::Sizes;
 use crate::pattern::Motion;
 use crate::rebuild::{Built, PartResult, Results};
 use crate::session::Session;
 use crate::solid::Solids;
 use ryukei::geom::{Mirror, Plane, Point3, Vector3};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -233,6 +233,191 @@ fn build(p: &Part, result: &PartResult, unit: crate::units::Unit) -> Result<Hole
         }
     }
     Ok(Holes { rows, gone })
+}
+
+impl Row {
+    /// `tapped`, `clearance`, `fitted` or `plain`.
+    pub fn kind(&self) -> &'static str {
+        if self.sizes.thread.is_some() {
+            "tapped"
+        } else if ["CBORE ", "CSK ", "CLEAR "]
+            .iter()
+            .any(|w| self.spec.starts_with(w))
+        {
+            "clearance"
+        } else if self.sizes.fit.is_some() {
+            "fitted"
+        } else {
+            "plain"
+        }
+    }
+
+    /// A face's reference, `<part>/<solid>/<name>`.
+    fn face_ref(&self, name: &str) -> String {
+        format!("{}/{}/{name}", self.part, self.solid)
+    }
+
+    pub fn to_json(&self, unit: crate::units::Unit) -> Value {
+        let face = |names: &Vec<String>| -> Value {
+            let refs: Vec<String> = names.iter().map(|n| self.face_ref(n)).collect();
+            match refs.as_slice() {
+                [one] => json!(one),
+                _ => json!(refs),
+            }
+        };
+        let faces: serde_json::Map<String, Value> = self
+            .faces
+            .iter()
+            .map(|(k, n)| (k.clone(), face(n)))
+            .collect();
+        let mut v = json!({
+            "ref": self.reference,
+            "spec": self.spec,
+            "type": self.kind(),
+            "position": crate::measure::point(self.position, unit),
+            "axis": [self.axis.x, self.axis.y, self.axis.z],
+            "sizes": self.sizes.to_json(),
+            "depth": {"drill": self.depth.0, "tip": self.depth.1, "thread": self.depth.2},
+            "faces": faces,
+            "feature": self.feature,
+            "solid": self.solid,
+        });
+        if let Some((p, i)) = &self.pattern {
+            v["pattern"] = json!({"feature": p, "seed": self.feature, "instance": i});
+        }
+        if let Some(m) = &self.mirror {
+            v["mirror_of"] = json!(m);
+        }
+        if let Some(t) = crate::thread::of_row(self) {
+            v["thread"] = t.to_json();
+        }
+        v
+    }
+
+    /// Its line of `holes --csv`.
+    fn csv(&self) -> String {
+        let n = crate::measure::number;
+        let field = |s: &str| {
+            if s.contains([',', '"', '\n']) {
+                format!("\"{}\"", s.replace('"', "\"\""))
+            } else {
+                s.to_owned()
+            }
+        };
+        let (pattern, instance) = match &self.pattern {
+            Some((p, i)) => (
+                p.to_string(),
+                i.as_array()
+                    .map(|a| a.iter().map(Value::to_string).collect::<Vec<_>>().join(";"))
+                    .unwrap_or_default(),
+            ),
+            None => (String::new(), String::new()),
+        };
+        [
+            field(&self.reference),
+            field(&self.spec),
+            self.kind().to_owned(),
+            n(self.position.x),
+            n(self.position.y),
+            n(self.position.z),
+            n(self.axis.x),
+            n(self.axis.y),
+            n(self.axis.z),
+            n(self.sizes.drill.si),
+            n(self.depth.0),
+            self.depth.2.map(n).unwrap_or_default(),
+            self.feature.to_string(),
+            pattern,
+            instance,
+            self.mirror.as_ref().map(Id::to_string).unwrap_or_default(),
+            self.solid.to_string(),
+        ]
+        .join(",")
+    }
+}
+
+/// `holes --csv`'s header.
+const CSV_HEADER: &str = "ref,spec,type,x_m,y_m,z_m,axis_x,axis_y,axis_z,drill_m,depth_m,thread_depth_m,feature,pattern,instance,mirror_of,solid";
+
+impl Gone {
+    pub fn to_json(&self) -> Value {
+        json!({"ref": self.reference, "feature": self.feature, "solid": self.solid,
+               "removed_by": self.removed_by})
+    }
+}
+
+/// `holes.list`: a part's holes as rows, CSV or groups by spec, or one
+/// by its reference; `solid` keeps one solid's.
+pub fn request(
+    session: &mut Session,
+    part: &str,
+    solid: Option<&str>,
+    csv: bool,
+    group: bool,
+    reference: Option<&str>,
+    rev: Option<&str>,
+) -> Result<Value> {
+    let pid = Id::parse(part, "part")?;
+    let unit = session.project().manifest.default_unit;
+    let holes = list(session, &pid, rev)?;
+    let mut rows: Vec<&Row> = holes
+        .rows
+        .iter()
+        .filter(|r| solid.is_none_or(|s| r.solid.as_str() == s))
+        .collect();
+    if let Some(want) = reference {
+        rows.retain(|r| r.reference == want);
+        if rows.is_empty() {
+            let e =
+                Error::new(Code::NotFound, format!("{part} has no hole {want}")).with("ref", want);
+            return Err(match holes.gone.iter().find(|g| g.reference == want) {
+                Some(g) => Error::new(
+                    Code::NotFound,
+                    match &g.removed_by {
+                        Some(by) => format!("hole {want} is gone: {by} took it away"),
+                        None => format!("hole {want} is gone"),
+                    },
+                )
+                .with("ref", want)
+                .with("removed_by", &g.removed_by),
+                None => e,
+            });
+        }
+    }
+    if group {
+        let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+        for r in &rows {
+            match groups.iter_mut().find(|(s, _)| *s == r.spec) {
+                Some((_, refs)) => refs.push(r.reference.clone()),
+                None => groups.push((r.spec.clone(), vec![r.reference.clone()])),
+            }
+        }
+        let groups: Vec<Value> = groups
+            .into_iter()
+            .map(|(spec, refs)| json!({"spec": spec, "count": refs.len(), "refs": refs}))
+            .collect();
+        return Ok(json!({"groups": groups}));
+    }
+    if csv {
+        let mut text = String::from(CSV_HEADER);
+        text.push('\n');
+        for r in &rows {
+            text.push_str(&r.csv());
+            text.push('\n');
+        }
+        return Ok(json!({"csv": text}));
+    }
+    let gone: Vec<Value> = holes
+        .gone
+        .iter()
+        .filter(|g| solid.is_none_or(|s| g.solid.as_str() == s))
+        .filter(|g| reference.is_none_or(|r| g.reference == r))
+        .map(Gone::to_json)
+        .collect();
+    Ok(json!({
+        "holes": rows.iter().map(|r| r.to_json(unit)).collect::<Vec<_>>(),
+        "gone": gone,
+    }))
 }
 
 fn row_key(r: &Row) -> Key {
