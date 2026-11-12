@@ -1,12 +1,15 @@
 //! Deleted bodies: solids taken out of the part's result (ryucad 27.C).
 
 use super::Given;
+use super::{BodyUse, FeatureKind, Write};
 use crate::doc::files::Feature;
 use crate::doc::id::Id;
+use crate::doc::project::Part;
 use crate::error::{Code, Error, Result};
 use crate::part::proposed;
 use crate::session::Session;
 use crate::solid::Solids;
+use serde_json::Value;
 use serde_json::json;
 
 pub(crate) const DELETE_BODY: [&str; 2] = ["solids", "solid"];
@@ -57,4 +60,42 @@ pub(crate) fn check_delete(
     let solids = Solids::of(&q);
     let r = session.rebuilt(pid)?;
     crate::body::delete_body(&q, &solids, id, d, r).map(|_| ())
+}
+
+/// Deletes: solids taken out of the part's result (ryucad 25).
+pub(crate) struct Deletes;
+
+impl FeatureKind for Deletes {
+    fn types(&self) -> &'static [&'static str] {
+        &["delete_body"]
+    }
+
+    fn fields(&self, _ty: &str) -> &'static [&'static str] {
+        &DELETE_BODY
+    }
+
+    fn body(&self, _ty: &str) -> BodyUse {
+        BodyUse::NONE
+    }
+
+    fn from_given(
+        &self,
+        _ty: &str,
+        current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<Feature> {
+        let named = cx.given.fields.solids.is_some() || cx.given.fields.solid.is_some();
+        match current {
+            // An edit naming no solids keeps them.
+            Some(Feature::DeleteBody(d)) if !named => Ok(Feature::DeleteBody(d.clone())),
+            _ => Ok(Feature::DeleteBody(Box::new(delete_from(&cx.given)?))),
+        }
+    }
+
+    fn report(&self, _part: &Part, f: &Feature) -> Value {
+        let Feature::DeleteBody(d) = f else {
+            unreachable!("a delete_body")
+        };
+        d.fields()
+    }
 }

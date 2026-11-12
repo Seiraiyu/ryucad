@@ -1,14 +1,17 @@
 //! Instances: a part placed in an assembly (ryucad 27.C).
 
 use super::Given;
+use super::{BodyUse, FeatureKind, Write};
 use crate::doc::assembly::{Instance, Pose, Rev};
 use crate::doc::files::Feature;
 use crate::doc::id::Id;
+use crate::doc::project::Part;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use crate::part::proposed;
 use crate::session::Session;
 use crate::units::{Quantity, Unit};
+use serde_json::Value;
 
 pub(crate) const INSTANCE: [&str; 4] = ["of", "rev", "placement", "fixed"];
 
@@ -162,4 +165,38 @@ pub(crate) fn check_instance(
         Rev::Foreign { .. } => unreachable!("judged above"),
     }
     Ok(())
+}
+
+/// Instances: a part placed in an assembly.
+pub(crate) struct Instances;
+
+impl FeatureKind for Instances {
+    fn types(&self) -> &'static [&'static str] {
+        &["instance"]
+    }
+
+    fn fields(&self, _ty: &str) -> &'static [&'static str] {
+        &INSTANCE
+    }
+
+    fn body(&self, _ty: &str) -> BodyUse {
+        BodyUse::NONE
+    }
+
+    fn from_given(
+        &self,
+        _ty: &str,
+        current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<Feature> {
+        let deps = cx.session.project().manifest.dependencies.clone();
+        let current = current.and_then(Feature::instance);
+        Ok(Feature::Instance(instance_from(
+            current, &cx.given, cx.unit, cx.env, &deps,
+        )?))
+    }
+
+    fn report(&self, _part: &Part, f: &Feature) -> Value {
+        f.instance().expect("an instance").fields()
+    }
 }

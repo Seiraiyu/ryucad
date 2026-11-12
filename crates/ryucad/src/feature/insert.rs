@@ -1,9 +1,11 @@
 //! Inserts: another part's solids, founded in this part's frame (ryucad 27.C).
 
+use super::{BodyUse, FeatureKind, Write};
 use super::{Given, apply_placement, new_placement};
 use crate::doc::assembly::Rev;
 use crate::doc::files::{Feature, PartKind, Placement};
 use crate::doc::id::Id;
+use crate::doc::project::Part;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use crate::part::{part_kind, proposed};
@@ -190,4 +192,54 @@ pub(crate) fn check_insert(
         .with("part", &ins.part));
     }
     Ok(())
+}
+
+/// Inserts: another part's solids, founded as a family in this part's
+/// frame (ryucad 25).
+pub(crate) struct Inserts;
+
+impl FeatureKind for Inserts {
+    fn types(&self) -> &'static [&'static str] {
+        &["insert"]
+    }
+
+    fn fields(&self, _ty: &str) -> &'static [&'static str] {
+        &INSERT
+    }
+
+    fn body(&self, _ty: &str) -> BodyUse {
+        BodyUse::FOUNDS
+    }
+
+    // A new insert may look up its source's newest label: read it before
+    // the part is borrowed for the rest.
+    fn before_targets(&self, ty: &str, cx: &mut Write<'_>) -> Result<()> {
+        cx.given.only(ty, &INSERT)?;
+        let (ins, took) = insert_from(cx.session, None, &cx.given, cx.unit, cx.env)?;
+        cx.read = Some(Feature::Insert(Box::new(ins)));
+        cx.took = took;
+        Ok(())
+    }
+
+    // So may an edit: read before the part's revision is checked.
+    fn before_revision(&self, ty: &str, current: &Feature, cx: &mut Write<'_>) -> Result<()> {
+        let i = current.insert().expect("an insert").clone();
+        cx.given.only(ty, &INSERT)?;
+        let (ins, _) = insert_from(cx.session, Some(&i), &cx.given, cx.unit, cx.env)?;
+        cx.read = Some(Feature::Insert(Box::new(ins)));
+        Ok(())
+    }
+
+    fn from_given(
+        &self,
+        _ty: &str,
+        _current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<Feature> {
+        Ok(cx.read.take().expect("read before the part was borrowed"))
+    }
+
+    fn report(&self, _part: &Part, f: &Feature) -> Value {
+        f.insert().expect("an insert").fields()
+    }
 }

@@ -253,6 +253,12 @@ pub(crate) static KINDS: &[&dyn FeatureKind] = &[
     &blend::Blends,
     &hole::Holes,
     &pattern::Patterns,
+    &instance::Instances,
+    &mate::Mates,
+    &instance_pattern::InstancePatterns,
+    &insert::Inserts,
+    &delete_body::Deletes,
+    &import::Imports,
 ];
 
 /// The kind that owns feature type `ty`, if any does.

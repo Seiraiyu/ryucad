@@ -1,8 +1,10 @@
 //! Mates: two connectors of an assembly joined (ryucad 27.C).
 
 use super::Given;
+use super::{BodyUse, FeatureKind, Write};
 use crate::doc::files::{Feature, PartKind};
 use crate::doc::id::Id;
+use crate::doc::project::Part;
 use crate::entity::EntityRef;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
@@ -238,4 +240,52 @@ pub(crate) fn mate_from(
     let m = Mate::from_fields(&mut o, unit, env)?;
     o.finish()?;
     Ok(Feature::Mate(Box::new(m)))
+}
+
+/// Mates.
+pub(crate) struct Mates;
+
+impl FeatureKind for Mates {
+    fn types(&self) -> &'static [&'static str] {
+        &["mate"]
+    }
+
+    fn fields(&self, _ty: &str) -> &'static [&'static str] {
+        &MATE
+    }
+
+    fn body(&self, _ty: &str) -> BodyUse {
+        BodyUse::NONE
+    }
+
+    fn from_given(
+        &self,
+        _ty: &str,
+        current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<Feature> {
+        mate_from(
+            current.and_then(Feature::mate),
+            &cx.given,
+            (cx.session.project(), cx.part),
+            cx.unit,
+            cx.env,
+        )
+    }
+
+    fn report(&self, part: &Part, f: &Feature) -> Value {
+        let m = f.mate().expect("a mate");
+        let part = &part.id;
+        let mut v = m.fields();
+        for (side, c) in [("a", &m.a), ("b", &m.b)] {
+            v[side]["text"] = json!(crate::part::connector_text(part, c));
+        }
+        if let Some(q) = &m.angle {
+            v["angle"] = q.report();
+        }
+        if let Some(q) = &m.distance {
+            v["distance"] = q.report();
+        }
+        v
+    }
 }

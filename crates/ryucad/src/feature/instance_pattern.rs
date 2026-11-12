@@ -2,11 +2,14 @@
 
 use super::Given;
 use super::mate::connector_json;
+use super::{BodyUse, FeatureKind, Write};
 use crate::doc::files::Feature;
 use crate::doc::id::Id;
+use crate::doc::project::Part;
 use crate::error::Result;
 use crate::expr::Env;
 use crate::units::Unit;
+use serde_json::Value;
 use serde_json::json;
 
 pub(crate) const INSTANCE_PATTERN: [&str; 13] = [
@@ -116,4 +119,45 @@ pub(crate) fn instance_pattern_from(
     let p = InstancePattern::from_fields(&mut o, unit, env)?;
     o.finish()?;
     Ok(Feature::InstancePattern(Box::new(p)))
+}
+
+/// Instance patterns.
+pub(crate) struct InstancePatterns;
+
+impl FeatureKind for InstancePatterns {
+    fn types(&self) -> &'static [&'static str] {
+        &["instance_pattern"]
+    }
+
+    fn fields(&self, _ty: &str) -> &'static [&'static str] {
+        &INSTANCE_PATTERN
+    }
+
+    fn body(&self, _ty: &str) -> BodyUse {
+        BodyUse::NONE
+    }
+
+    fn from_given(
+        &self,
+        _ty: &str,
+        current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<Feature> {
+        instance_pattern_from(
+            current.and_then(Feature::instance_pattern),
+            &cx.given,
+            cx.part,
+            cx.unit,
+            cx.env,
+        )
+    }
+
+    fn report(&self, part: &Part, f: &Feature) -> Value {
+        let x = f.instance_pattern().expect("an instance pattern");
+        let mut v = x.fields();
+        for (role, c) in x.connectors() {
+            v[role]["text"] = json!(crate::part::connector_text(&part.id, c));
+        }
+        v
+    }
 }
