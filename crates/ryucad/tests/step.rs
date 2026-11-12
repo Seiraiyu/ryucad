@@ -255,6 +255,20 @@ fn occt_files_import_and_check_clean() {
     }
     let v = call(&mut s, "check", json!({})).unwrap();
     assert_eq!(v["passed"], true, "{v}");
-    assert_eq!(v["findings"], json!([]), "{v}");
+    // Interference isn't run unasked (design 525): the file's assembly
+    // says so, and nothing else is found.
+    let findings = v["findings"].as_array().unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f["code"] == "interference_not_checked"),
+        "{v}"
+    );
+    assert!(
+        findings
+            .iter()
+            .all(|f| f["code"] == "interference_not_checked" && f["severity"] == "info"),
+        "{v}"
+    );
     exports_import_again(&mut s, &[]);
 }

@@ -8747,3 +8747,80 @@ fn properties_in_and_out_from_the_cli() {
             .any(|w| w.starts_with("export_metadata_omitted"))
     );
 }
+
+/// Design 525: plain `check` leaves interference out and notes where it
+/// went; `check --interference` reports it, with no note.
+#[test]
+fn check_runs_interference_only_when_asked() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "bolt"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bolt",
+        "cylinder",
+        "--id",
+        "shank",
+        "--param",
+        "radius=3",
+        "--param",
+        "height=20",
+    ]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b1", "--of", "bolt", "--fixed",
+    ]);
+    // 4 mm from the first: the two shanks, 3 mm in radius, overlap.
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "b2", "--of", "bolt", "--origin", "4,0,0",
+    ]);
+    let codes = |v: &Value| -> Vec<String> {
+        v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["code"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let plain = p.ok(&["check"]);
+    assert_eq!(plain["passed"], true, "{plain}");
+    let found = codes(&plain);
+    assert!(!found.iter().any(|c| c == "instances_interfere"), "{plain}");
+    let note = plain["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "interference_not_checked")
+        .unwrap_or_else(|| panic!("{plain}"));
+    assert_eq!(
+        (
+            &note["part"],
+            &note["severity"],
+            &note["details"]["command"]
+        ),
+        (
+            &json!("frame"),
+            &json!("info"),
+            &json!("ryucad interference frame")
+        )
+    );
+    let asked = p.ok(&["check", "--interference"]);
+    assert_eq!(asked["passed"], true, "{asked}");
+    assert!(
+        !codes(&asked)
+            .iter()
+            .any(|c| c == "interference_not_checked"),
+        "{asked}"
+    );
+    let pair = asked["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "instances_interfere")
+        .unwrap_or_else(|| panic!("{asked}"));
+    assert_eq!(
+        (&pair["a"], &pair["b"]),
+        (&json!("frame/b1/shank"), &json!("frame/b2/shank"))
+    );
+}

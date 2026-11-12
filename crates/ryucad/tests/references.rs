@@ -336,7 +336,11 @@ fn references_interfere_on_their_meshes() {
             .any(|i| i["volume_m3"].is_f64()),
         "{v}"
     );
-    let v = must(&mut s, "check", json!({"part": "rig"}));
+    let v = must(
+        &mut s,
+        "check",
+        json!({"part": "rig", "interference": true}),
+    );
     assert!(
         v["findings"]
             .as_array()
@@ -371,7 +375,21 @@ fn check_and_clearance_read_reference_pairs() {
             json!({"part": "rig", "type": "instance", "id": id, "of": "p", "fixed": true}),
         );
     }
+    // Unasked, check runs no interference (design 525): a note says how.
     let v = must(&mut s, "check", json!({"part": "rig"}));
+    let codes: Vec<&Value> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| &f["code"])
+        .collect();
+    assert!(!codes.contains(&&json!("instances_interfere")), "{v}");
+    assert!(codes.contains(&&json!("interference_not_checked")), "{v}");
+    let v = must(
+        &mut s,
+        "check",
+        json!({"part": "rig", "interference": true}),
+    );
     let f = v["findings"]
         .as_array()
         .unwrap()

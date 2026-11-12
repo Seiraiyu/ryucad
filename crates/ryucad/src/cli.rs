@@ -241,7 +241,7 @@ enum Command {
     /// Rebuild the project from its files alone, with nothing reused, and
     /// verify it: doctor's issues, every feature builds, sketches are
     /// current, bodies don't intersect themselves and mesh cleanly. Exits
-    /// 1 when anything fails.
+    /// 1 when anything fails. Interference only with --interference.
     Check {
         /// Only this part (and the project's own issues).
         part: Option<String>,
@@ -253,6 +253,11 @@ enum Command {
         /// (slower).
         #[arg(long)]
         results: bool,
+        /// Also find which instances of each assembly interfere (slower:
+        /// on reference imports, minutes). Without it interference isn't
+        /// run, and each assembly says so.
+        #[arg(long)]
+        interference: bool,
     },
     /// An assembly's bill of materials, from its files alone: indented (each
     /// assembly's children with how many it places), or flat (every part
@@ -5196,10 +5201,12 @@ fn request(cmd: &Command) -> Option<Request> {
             part,
             against,
             results,
+            interference,
         } => Request::Check {
             part: part.clone(),
             against: against.clone(),
             results: *results,
+            interference: *interference,
         },
         Command::Diff {
             from,
