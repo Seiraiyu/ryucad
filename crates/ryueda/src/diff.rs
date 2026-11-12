@@ -357,6 +357,95 @@ fn members(
         .collect()
 }
 
+/// A block's layout, as its file reads on each side: `status`, the
+/// counts by change and the instructions added and dropped, and with
+/// `opts.layout` each key that differs (`<section>/<key>`, its reference
+/// path and sheet) and the instructions as text.
+fn layout(from: &Side, to: &Side, block: &Id, opts: &Options) -> Value {
+    use ryusch::diff::Change;
+    fn get<'a>(s: &Side<'a>, block: &Id) -> Option<&'a Result<ryusch::layout::Layout>> {
+        s.project.conn.blocks.get(block)?.layout.as_ref()
+    }
+    let (a, b) = (get(from, block), get(to, block));
+    let empty = ryusch::layout::Layout::default();
+    let (la, lb) = match (a, b) {
+        (None, None) => return json!({"status": "same"}),
+        (Some(Err(_)), _) | (_, Some(Err(_))) => {
+            let bad: Vec<&str> = [
+                ("from", matches!(a, Some(Err(_)))),
+                ("to", matches!(b, Some(Err(_)))),
+            ]
+            .into_iter()
+            .filter_map(|(s, x)| x.then_some(s))
+            .collect();
+            return json!({"status": "invalid", "invalid": bad});
+        }
+        (a, b) => (
+            a.and_then(|x| x.as_ref().ok()).unwrap_or(&empty),
+            b.and_then(|x| x.as_ref().ok()).unwrap_or(&empty),
+        ),
+    };
+    let entries = ryusch::diff::layouts(la, lb);
+    let (added, dropped) = ryusch::diff::instructions(la, lb);
+    let count = |c: Change| entries.iter().filter(|e| e.change == c).count();
+    let st = status(
+        a.is_some(),
+        b.is_some(),
+        !entries.is_empty() || !added.is_empty() || !dropped.is_empty(),
+    );
+    let mut v = json!({
+        "status": st,
+        "counts": {
+            "added": count(Change::Added),
+            "removed": count(Change::Removed),
+            "changed": count(Change::Changed),
+            "moved": count(Change::Moved),
+            "instructions": {"added": added.len(), "dropped": dropped.len()},
+        },
+    });
+    if opts.layout {
+        v["changes"] = entries
+            .iter()
+            .map(|e| {
+                let owner = match e.key.section {
+                    "labels" => format!("label:{}", e.key.key.replacen('|', "@", 1)),
+                    "routes" | "buses" => {
+                        e.key.key.split('|').next().unwrap_or_default().to_owned()
+                    }
+                    "regions" => format!("region:{}", e.key.key),
+                    "notes" => format!("note:{}", e.key.key),
+                    _ => e.key.key.clone(),
+                };
+                let mut x = json!(e);
+                x["key"] = json!(e.key.to_string());
+                if e.key.section != "sheets" {
+                    x["ref"] = json!(crate::schem::ref_path(block, &owner));
+                }
+                x
+            })
+            .collect();
+        let text = |s: &Side, list: &[(String, ryusch::layout::Instruction)]| -> Vec<Value> {
+            let bf = s.project.conn.blocks.get(block);
+            let built = bf.and_then(|b| crate::schem::build(s.project, b).ok());
+            list.iter()
+                .map(|(id, i)| match (bf, &built) {
+                    (Some(b), Some(built)) => {
+                        let names = crate::vocab::Names {
+                            p: s.project,
+                            b,
+                            built,
+                        };
+                        json!({"id": id, "text": names.text(i)})
+                    }
+                    _ => json!({"id": id, "instruction": i}),
+                })
+                .collect()
+        };
+        v["instructions"] = json!({"added": text(to, &added), "dropped": text(from, &dropped)});
+    }
+    v
+}
+
 /// The blocks on either side, by ID: every folder under `blocks/`.
 fn block_ids(from: &Files, to: &Files) -> BTreeSet<String> {
     let prefix = format!("{BLOCKS}/");
@@ -412,6 +501,9 @@ fn blocks(from: &Side, to: &Side, opts: &Options) -> Vec<Value> {
             any |= list.iter().any(|x| x["status"] != "same");
             e[key] = json!(list);
         }
+        let l = layout(from, to, &id, opts);
+        any |= l["status"] != "same";
+        e["layout"] = l;
         // The block's file's own changes, less the members listed above.
         if let Some(Value::Array(c)) = e.get_mut("changes") {
             c.retain(|x| {
@@ -609,6 +701,10 @@ mod tests {
             (&json!("top/sda"), &json!("SDA_3V3"))
         );
         assert_eq!(nets[0]["changes"][0]["at"], "/name");
+        assert_eq!(
+            top["layout"]["status"], "same",
+            "design_in lays nothing out"
+        );
         // The same files: nothing, unless --all.
         let same = diff(&to, &to, &Options::default()).unwrap();
         assert_eq!(same["blocks"], json!([]));
