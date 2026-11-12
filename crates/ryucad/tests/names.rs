@@ -241,6 +241,46 @@ fn a_holes_new_form_renames_only_its_new_segments() {
     assert!(wall(&before).is_some());
 }
 
+#[test]
+fn tapping_a_blind_hole_renames_only_where_its_wall_met_its_bottom() {
+    let (_dir, mut s) = plate(&[[10.0, 10.0]]);
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "h", "sketch": "t", "diameter": 5, "depth": {"blind": 8}}),
+    );
+    let before = names(&mut s);
+    // M6's drill by the rule is the 5 mm it had; its thread stops 2 mm
+    // short of the bottom.
+    edit(&mut s, "h", json!({"spec": "M6 6 DEEP, DRILL 8 DEEP"}));
+    builds(&mut s);
+    let after = names(&mut s);
+    let (new, gone) = changed(&before, &after);
+    // An edge or vertex is named by the segments either side of it, so
+    // the circle where the wall met the bottom (and its vertex) is now
+    // the drill wall's: those two, and nothing else, go (a departure from
+    // the plan, which said nothing would).
+    let wall_bottom = json!({"feature": "h", "point": "p1", "segments": ["wall", "bottom"]});
+    assert_eq!(gone, [wall_bottom.clone(), wall_bottom]);
+    // What is new is the drill wall's: its face, the circle where the
+    // thread ends, the circle at the bottom, and their vertices.
+    assert!(!new.is_empty());
+    for o in &new {
+        let of_drill = o["segment"] == "drill_wall"
+            || o["segments"]
+                .as_array()
+                .is_some_and(|s| s.contains(&json!("drill_wall")));
+        assert!(of_drill && o["feature"] == "h", "{o}");
+    }
+    // The wall's face keeps its name.
+    let face = |m: &BTreeMap<String, Value>| {
+        m.iter()
+            .find(|(_, o)| o["segment"] == "wall")
+            .map(|(n, _)| n.clone())
+    };
+    assert!(face(&before).is_some());
+    assert_eq!(face(&before), face(&after));
+}
+
 /// Instances that `origins` came from, sorted.
 fn instances(origins: &[Value]) -> Vec<Value> {
     let mut out: Vec<Value> = origins.iter().map(|o| o["instance"].clone()).collect();

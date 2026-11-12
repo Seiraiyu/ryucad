@@ -6,8 +6,9 @@
 //! key of its own.
 //!
 //! A segment's key is SipHash of `ryucad.hole\0<part>\0<feature>\0<segment>`
-//! (`top`, `counterbore_wall`, `counterbore_floor`, `countersink`, `wall`,
-//! `bottom`, `tip`, `axis`), never of a size, so resizing a hole renames
+//! (`top`, `counterbore_wall`, `counterbore_floor`, `countersink`, `wall`
+//! (the threaded length, when tapped), `drill_wall` (a blind tapped hole's
+//! drill below its thread), `bottom`, `tip`, `axis`), never of a size, so resizing a hole renames
 //! nothing and switching its form renames only what its new segments
 //! touch. A point's tool key is `ryucad.tool\0<part>\0<feature>\0<point>`.
 
@@ -132,6 +133,20 @@ fn depth(
     targets: &[&Built],
     before: &dyn Results,
 ) -> Result<f64> {
+    if let Some(t) = s.thread.as_ref().and_then(|t| t.depth.as_ref())
+        && s.mouth_depth().is_some_and(|m| t.si <= m)
+    {
+        return Err(Error::new(
+            Code::InvalidExtent,
+            format!(
+                "hole {id}: its thread ends at {}, inside its {}",
+                t.text,
+                h.form.type_name()
+            ),
+        )
+        .with("feature", id)
+        .with("pointer", "/thread/depth"));
+    }
     let d = match &h.depth {
         Depth::Blind(q) => return Ok(q.meters()),
         Depth::ThroughAll => crate::rebuild::through_all("hole", id, from, dir, false, targets)?.1,
@@ -185,6 +200,16 @@ fn corners(h: &Hole, s: &Sizes, depth: f64) -> Vec<((f64, f64), &'static str)> {
             out.push(((r, d), "wall"));
         }
         (None, None) => out.push(((r, 0.0), "wall")),
+    }
+    // A blind thread that stops short of its drill: the wall ends where
+    // the thread does, and the drill's own wall goes on to the bottom.
+    let mouth = s.mouth_depth().unwrap_or(0.0);
+    if matches!(h.depth, Depth::Blind(_))
+        && let Some(t) = s.thread.as_ref().and_then(|t| t.depth.as_ref())
+        && t.si > mouth
+        && t.si < depth
+    {
+        out.push(((r, t.si), "drill_wall"));
     }
     match &h.bottom {
         Bottom::Flat => {
@@ -303,6 +328,7 @@ pub(crate) mod tests {
     use crate::units::Unit;
     use core::f64::consts::PI;
     use serde_json::{Value, json};
+    use std::collections::BTreeSet;
 
     fn id(s: &str) -> Id {
         Id::parse(s, "feature").unwrap()
@@ -381,6 +407,55 @@ pub(crate) mod tests {
 
     fn near(got: f64, want: f64) {
         assert!((got - want).abs() < 2e-4 * want, "{got} mm³ != {want} mm³");
+    }
+
+    #[test]
+    fn a_blind_thread_splits_the_wall_where_it_ends() {
+        let (_dir, mut s) = drilled();
+        let tapped = |thread_depth: &str| {
+            json!({"format": 23, "points": ["p1"], "form": "simple",
+                   "thread": {"standard": "iso_metric", "size": "M3", "depth": thread_depth},
+                   "depth": {"blind": "4 mm"}, "bottom": {"drill": "118 deg"}})
+        };
+        let segments = |b: &Built| -> BTreeSet<String> {
+            b.origins
+                .values()
+                .filter(|o| o["feature"] == "h")
+                .filter_map(|o| o["segment"].as_str().map(str::to_owned))
+                .collect()
+        };
+        put(&mut s, "h", tapped("2.5 mm"));
+        let b = after(&mut s, "h").unwrap();
+        assert_eq!(
+            segments(&b),
+            ["drill_wall", "tip", "wall"].map(String::from).into()
+        );
+        // The same volume as one wall: a 2.5 mm bore (M3's rule) 4 mm
+        // deep, and its point.
+        let tip = 1.25 / ryukei::math::tan(59f64.to_radians());
+        near(
+            volume(&b),
+            1000.0 - PI * 1.25 * 1.25 * 4.0 - PI * 1.25 * 1.25 * tip / 3.0,
+        );
+        let names = |b: &Built| b.origins.keys().cloned().collect::<BTreeSet<_>>();
+        let before = names(&b);
+        put(&mut s, "h", tapped("3 mm"));
+        assert_eq!(
+            names(&after(&mut s, "h").unwrap()),
+            before,
+            "a deeper thread renames nothing"
+        );
+        // Full depth: no split.
+        put(&mut s, "h", tapped("full"));
+        let b = after(&mut s, "h").unwrap();
+        assert!(!segments(&b).contains("drill_wall"));
+        // A thread that ends inside its counterbore is refused.
+        let mut v = tapped("1 mm");
+        v["form"] = json!("counterbore");
+        v["counterbore"] = json!({"diameter": "6 mm", "depth": "1.5 mm"});
+        put(&mut s, "h", v);
+        let e = after(&mut s, "h").unwrap_err();
+        assert_eq!(e.details["pointer"], "/thread/depth", "{e}");
     }
 
     #[test]
