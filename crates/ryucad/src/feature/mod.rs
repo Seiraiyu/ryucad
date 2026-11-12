@@ -243,12 +243,17 @@ impl Check<'_> {
     }
 }
 
-/// Every kind, in the order `feature.types` lists them.
+/// Every kind, in the order `feature.types` lists them: `feature.add`'s
+/// first types (primitives to datums), then paths, the whole-body
+/// operations, sheet metal, the tweaks and imports.
 pub(crate) static KINDS: &[&dyn FeatureKind] = &[
     &primitive::Primitives,
     &sketch::Sketches,
     &extrude::Extrusions,
+    &crate::along::Sweeps,
+    &crate::loft::Lofts,
     &planar::Planars,
+    &crate::surface::Surfaces,
     &boolean::Booleans,
     &blend::Blends,
     &hole::Holes,
@@ -258,15 +263,12 @@ pub(crate) static KINDS: &[&dyn FeatureKind] = &[
     &instance_pattern::InstancePatterns,
     &insert::Inserts,
     &delete_body::Deletes,
-    &import::Imports,
-    &crate::tweak::Tweaks,
     &crate::datum::Datums,
     &crate::path::Paths,
-    &crate::along::Sweeps,
-    &crate::loft::Lofts,
-    &crate::surface::Surfaces,
     &crate::body::WholeBodies,
     &crate::sheet_metal::SheetMetal,
+    &crate::tweak::Tweaks,
+    &import::Imports,
 ];
 
 /// The kind that owns feature type `ty`, if any does.
@@ -731,5 +733,43 @@ mod tests {
             let k = kind(ty).unwrap_or_else(|| panic!("no kind owns {ty}"));
             assert_eq!(k.body(ty), BodyUse { needs, founds }, "{ty}");
         }
+    }
+
+    #[test]
+    fn the_registry_lists_add_s_first_types_first() {
+        let first: Vec<&str> = owned().into_iter().take(28).collect();
+        assert_eq!(
+            first,
+            [
+                "box",
+                "cylinder",
+                "cone",
+                "sphere",
+                "torus",
+                "sketch",
+                "extrude",
+                "revolve",
+                "sweep",
+                "loft",
+                "planar",
+                "fill",
+                "extract",
+                "sew",
+                "thicken",
+                "boolean",
+                "fillet",
+                "chamfer",
+                "hole",
+                "pattern",
+                "instance",
+                "mate",
+                "instance_pattern",
+                "insert",
+                "delete_body",
+                "plane",
+                "axis",
+                "point"
+            ]
+        );
     }
 }
