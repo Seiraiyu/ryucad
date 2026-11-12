@@ -367,4 +367,21 @@ fn another_projects_release_is_inserted_at_its_newest_label() {
         .map(|x| x["key"].as_str().unwrap())
         .collect();
     assert_eq!(keys, ["lib/plate"], "{r}");
+    // Where-used finds it inserted.
+    let w = ok(&product, &cache, &["where-used", "lib:bracket"]);
+    let rows: Vec<&Value> = w["working"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "insert")
+        .collect();
+    assert_eq!(rows.len(), 1, "{w}");
+    assert_eq!(
+        (&rows[0]["part"], &rows[0]["feature"]),
+        (&json!("enc"), &json!("lib"))
+    );
+    // And deps uses lists it beside the assemblies' places.
+    let u = ok(&product, &cache, &["deps", "uses"]);
+    assert_eq!(u["inserts"][0]["part"], "enc", "{u}");
+    assert_eq!(u["inserts"][0]["label"], "A", "{u}");
 }
