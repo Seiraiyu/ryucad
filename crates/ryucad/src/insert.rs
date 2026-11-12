@@ -182,8 +182,11 @@ pub fn report(ins: &Insert, out: Option<&Made>) -> serde_json::Value {
     v
 }
 
-/// An inserted entity's origin: `{feature: <insert>, solid, from: <the
-/// source origin>}` (design 521).
+/// A moved insert's origins: `{feature: <insert>, from: <the source
+/// origin>}` (design 521), with no `solid`: the source origin already
+/// names where it came from in the source part. At the identity placement
+/// the source's origins are shared as they are (one `Arc`, the plan's
+/// decision), so this is only for an insert that moves its solid.
 fn moved_origins(id: &Id, source: &Built) -> crate::rebuild::Origins {
     source
         .origins

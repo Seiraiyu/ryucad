@@ -192,6 +192,11 @@ pub struct Cache {
     /// design 521): evicted before any mesh the kernel made, since moving
     /// the source's again costs a transform, and making it a mesh.
     derived: std::collections::BTreeSet<(String, Key)>,
+    /// How many bodies this cache has sent to be meshed (made, or read
+    /// from the disk): what tests read to show a mesh was moved, not made.
+    /// Per cache, unlike [`kernel_meshes`], so tests running beside each
+    /// other in one process don't move it.
+    made: u64,
 }
 
 impl Cache {
@@ -278,6 +283,7 @@ impl Cache {
         }
         let disk = self.disk.as_deref();
         prefetch(disk, missing.iter().map(|(f, b)| disk_key(f, b, quality)));
+        self.made += missing.len() as u64;
         let stage = job.begin(Phase::Mesh, "bodies", missing.len());
         let made: Vec<Result<(String, Arc<DisplayMesh>)>> = missing
             .par_iter()
@@ -408,6 +414,7 @@ impl Cache {
         }
         let disk = self.disk.as_deref();
         prefetch(disk, missing.values().map(|b| (b.hash.as_str(), *params)));
+        self.made += missing.len() as u64;
         let stage = job.begin(Phase::Mesh, "bodies", missing.len());
         let made: Vec<Result<(String, Arc<DisplayMesh>)>> = missing
             .into_values()
@@ -498,6 +505,11 @@ impl Cache {
                 }
             }
         }
+    }
+
+    /// How many bodies this cache has sent to be meshed.
+    pub fn made(&self) -> u64 {
+        self.made
     }
 
     /// Whether the mesh of the body with `hash` at `quality` is held.
@@ -596,8 +608,9 @@ fn prefetch<'a>(
     }
 }
 
-/// How many bodies the kernel has meshed in this process: what tests
-/// and the insert bar read to show a mesh was moved, not made.
+/// How many bodies the kernel has meshed in this process: what the insert
+/// bar (a binary of one test) reads to show a mesh was moved, not made.
+/// Tests in a binary of many read [`Cache::made`] instead.
 static KERNEL_MESHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// How many bodies the kernel has meshed in this process.
@@ -1313,10 +1326,10 @@ mod tests {
         ));
         let m = &b.moved.as_ref().unwrap();
         let source = cache.get(&m.feature, &src, Quality::Normal, usize::MAX);
-        let before = kernel_meshes();
+        let before = cache.made();
         let moved = cache.get(&f, b, Quality::Normal, usize::MAX);
         assert_eq!(
-            kernel_meshes(),
+            cache.made(),
             before,
             "the source's mesh is moved, not made again"
         );
@@ -1362,9 +1375,9 @@ mod tests {
         assert!(cache.has(&src.hash, Quality::Normal));
         assert!(!cache.has(&one.hash, Quality::Normal));
         // So a placement moved again meshes nothing.
-        let before = kernel_meshes();
+        let before = cache.made();
         cache.get(&ins, &two, Quality::Normal, budget);
-        assert_eq!(kernel_meshes(), before, "the source was meshed again");
+        assert_eq!(cache.made(), before, "the source was meshed again");
     }
 
     #[test]

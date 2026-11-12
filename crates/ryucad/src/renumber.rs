@@ -514,6 +514,9 @@ fn bodies(
 ) -> Option<BTreeMap<(String, String), ryukei::topo::Body>> {
     let project = Project::load_from(root, files).ok()?;
     let p = project.parts.get(&Id::parse(part, "part").ok()?)?;
+    // With no children, an insert fails here, and so does every feature
+    // reading its keys. That is harmless: failed states are left out on
+    // both sides alike, so only the inserted readers' name maps are lost.
     let built = crate::rebuild::rebuild_part(p);
     Some(
         built

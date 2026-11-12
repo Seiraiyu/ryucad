@@ -1030,8 +1030,7 @@ pub fn sync(session: &mut Session) -> Result<Value> {
 /// Rebuilds released content for `release_result_changed`, once per
 /// content hash in a session.
 struct Rebuilds<'a> {
-    root: std::path::PathBuf,
-    cache: &'a mut std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    session: &'a mut Session,
 }
 
 impl ryupdm::check::Results for Rebuilds<'_> {
@@ -1041,17 +1040,22 @@ impl ryupdm::check::Results for Rebuilds<'_> {
         part: &Id,
         content: &str,
     ) -> Result<std::collections::BTreeMap<String, String>> {
-        if let Some(b) = self.cache.get(content) {
+        if let Some(b) = self.session.release_results.get(content) {
             return Ok(b.clone());
         }
-        let project = crate::doc::project::Project::load_from(&self.root, src)?;
-        let built = crate::rebuild::rebuild_part(project.part(part)?);
+        let project = crate::doc::project::Project::load_from(self.session.root(), src)?;
+        // Through the session, as `propose` rebuilt it: an insert's pin is
+        // looked up and its source built, where a part rebuilt alone has
+        // no children and every insert would fail.
+        let built = self.session.rebuilt_as(project.part(part)?.clone())?;
         let bodies: std::collections::BTreeMap<String, String> = built
             .features
             .iter()
             .filter_map(|(fid, r)| Some((fid.to_string(), r.as_ref().ok()?.body()?.hash.clone())))
             .collect();
-        self.cache.insert(content.to_owned(), bodies.clone());
+        self.session
+            .release_results
+            .insert(content.to_owned(), bodies.clone());
         Ok(bodies)
     }
 }
@@ -1067,11 +1071,7 @@ pub(crate) fn findings(session: &mut Session, results: bool) -> Result<Vec<Value
                 prefix: repo.prefix(),
                 releases: &releases,
             };
-            let root = session.root().to_path_buf();
-            let mut rebuilds = Rebuilds {
-                root,
-                cache: &mut session.release_results,
-            };
+            let mut rebuilds = Rebuilds { session };
             let r: Option<&mut dyn ryupdm::check::Results> =
                 if results { Some(&mut rebuilds) } else { None };
             ryupdm::check::run(&files, Some(h), r)?
@@ -1404,6 +1404,48 @@ pub(crate) mod tests {
             (&v["repository"], &v["branch"]),
             (&json!(false), &Value::Null)
         );
+    }
+
+    #[test]
+    fn a_released_insert_rebuilds_as_it_was_proposed() {
+        // The insert is pinned at A: rebuilt for `results`, it reads that
+        // pin, so its body and its readers' are what the record says.
+        let (dir, mut s) = crate::insert::tests::released_board();
+        // A reader of an inserted key, which has a body of its own: the lid,
+        // cut by the chip.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "enclosure", "type": "box", "id": "lid",
+            "params": {"x": "12 mm", "y": "12 mm", "z": "1 mm"},
+            "placement": {"origin": ["-1 mm", "-1 mm", "3 mm"]}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "enclosure", "type": "boolean", "id": "b",
+            "op": "subtract", "target": "lid", "tools": ["pcb/u1"]}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "enclosure", "properties": {"number": "200-0001"}}),
+        )
+        .unwrap();
+        let v = call(&mut s, "release.propose", json!({"part": "enclosure"})).unwrap();
+        assert!(v["record"]["results"]["b"].is_string(), "{v}");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "enclosure A"]);
+        let v = call(&mut s, "release.check", json!({"results": true})).unwrap();
+        let changed: Vec<&Value> = v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["code"] == "release_result_changed")
+            .collect();
+        assert!(changed.is_empty(), "{v}");
     }
 
     #[test]
