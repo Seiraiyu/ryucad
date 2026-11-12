@@ -12,6 +12,7 @@
 //! with `interference` and `check --interference`, never `motion.list`,
 //! `motion.save` or plain `check`.
 
+use crate::assembly::Model;
 use crate::doc::files::{Feature, PartKind};
 use crate::doc::id::Id;
 use crate::doc::motion::{Driven, MotionFile};
@@ -19,6 +20,7 @@ use crate::doc::project::Part;
 use crate::error::{Code, Error, Result};
 use crate::rebuild::{Output, PartResult};
 use crate::session::Session;
+use ryukei::geom::Rigid;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -722,6 +724,75 @@ pub fn steps(
     Ok(out)
 }
 
+/// A ryumate pose as an occurrence's placement, snapped as a rebuild
+/// snaps a solved pose.
+fn placement(p: &ryumate::Pose) -> Result<Rigid> {
+    crate::assembly::pose_rigid(&crate::connector::doc_pose(p))
+}
+
+/// The rest model with each occurrence under a body in `moved` (a
+/// top-level instance, or a copy of a moved seed) placed where the step
+/// puts it, and for each occurrence the body that moved it.
+pub fn step_model(
+    rest_model: &Model,
+    rest: &Rest,
+    moved: &BTreeMap<u32, ryumate::Pose>,
+) -> Result<(Model, Vec<Option<u32>>)> {
+    let pattern_of = |p: &Id| rest.patterns.iter().position(|x| x == p).map(|k| k as u32);
+    // Each copy of a moved seed, where the step's poses put it.
+    let mut full = rest.asm.clone();
+    for (k, p) in moved {
+        full.bodies.get_mut(k).expect("a body").pose = *p;
+    }
+    let mut copies: Vec<(u32, u32, [u32; 2])> = Vec::new();
+    for o in &rest_model.occurrences {
+        if let Some((pattern, index)) = o.path[0].copy_of()
+            && let Some(seed) = o.path.get(1).and_then(|s| rest.body(s))
+            && moved.contains_key(&seed)
+            && let Some(k) = pattern_of(&pattern)
+        {
+            copies.push((k, seed, index));
+        }
+    }
+    copies.sort_unstable();
+    copies.dedup();
+    let copy_at: BTreeMap<(u32, u32, [u32; 2]), ryumate::Pose> = copies
+        .iter()
+        .copied()
+        .zip(ryumate::copy_poses(&full, &copies))
+        .collect();
+    let mut occurrences = Vec::with_capacity(rest_model.occurrences.len());
+    let mut movers = Vec::with_capacity(rest_model.occurrences.len());
+    for o in &rest_model.occurrences {
+        let top = match o.path[0].copy_of() {
+            Some((pattern, index)) => {
+                match (
+                    pattern_of(&pattern),
+                    o.path.get(1).and_then(|s| rest.body(s)),
+                ) {
+                    (Some(k), Some(seed)) => copy_at.get(&(k, seed, index)).map(|p| (seed, *p)),
+                    _ => None,
+                }
+            }
+            None => rest
+                .body(&o.path[0])
+                .and_then(|k| moved.get(&k).map(|p| (k, *p))),
+        };
+        let Some((k, pose)) = top else {
+            occurrences.push(o.clone());
+            movers.push(None);
+            continue;
+        };
+        let child = o.within.get(1).copied().unwrap_or(Rigid::IDENTITY);
+        let mut n = o.clone();
+        n.pose = placement(&pose)?.then_after(&child);
+        n.within[0] = n.pose;
+        occurrences.push(n);
+        movers.push(Some(k));
+    }
+    Ok((Model::new(occurrences), movers))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1140,5 +1211,39 @@ pub(crate) mod tests {
             "{o:?}"
         );
         assert!(steps[0].moved.is_empty(), "{:?}", steps[0].moved);
+    }
+
+    #[test]
+    fn a_step_model_moves_what_the_step_moved_and_nothing_else() {
+        let (_dir, mut s) = crate::explode::tests::project();
+        let pid = id("frame");
+        let result = s.rebuilt(&pid).unwrap().clone();
+        let rest = Rest::of(&result);
+        let model = s.model(&pid, &crate::doc::assembly::Rev::Working).unwrap();
+        let pin = rest.body(&id("pin")).unwrap();
+        let mut lifted = rest.asm.bodies[&pin].pose;
+        lifted.origin[2] += 0.01;
+        let moved = BTreeMap::from([(pin, lifted)]);
+        let (m, movers) = step_model(&model, &rest, &moved).unwrap();
+        for ((o, n), mover) in model.occurrences.iter().zip(&m.occurrences).zip(&movers) {
+            let path = crate::assembly::path_text(&o.path);
+            let (a, b) = (o.pose.translation_part(), n.pose.translation_part());
+            if ["pin", "row:1/pin", "row:2/pin"].contains(&path.as_str()) {
+                assert_eq!(*mover, Some(pin), "{path}");
+                assert!(
+                    (b.z - a.z - 0.01).abs() < 1e-15 && (b.x - a.x).abs() < 1e-15,
+                    "{path}"
+                );
+            } else {
+                assert_eq!(*mover, None, "{path}");
+                assert_eq!(o.pose, n.pose, "{path}: unmoved keeps its bits");
+            }
+        }
+        assert_ne!(m.hash, model.hash);
+        // Nothing moved: the rest model, hash and all.
+        assert_eq!(
+            step_model(&model, &rest, &BTreeMap::new()).unwrap().0.hash,
+            model.hash
+        );
     }
 }
