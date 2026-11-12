@@ -127,6 +127,59 @@ pub(crate) fn pinned(session: &mut Session, part: &Id, label: &str) -> Result<Pi
     })
 }
 
+/// The newest official release label of `part`, in the revision scheme's
+/// order, that no obsolete record names: what a new insert pins by
+/// default (design 521, question 624) and what `insert_behind` compares
+/// with. For another project's part (`project`), the newest label the
+/// lock holds for it. `None` outside a repository or with no such label.
+pub(crate) fn newest_official(
+    session: &mut Session,
+    part: &Id,
+    project: Option<&crate::doc::id::ProjectId>,
+) -> Result<Option<String>> {
+    let config = Config::read(&*session)?;
+    let order = |l: &String| ryupdm::bom::rev_order(config.revisions, &Rev::Label(l.clone()));
+    if let Some(project) = project {
+        let lock = match &session.project().lock {
+            Some(Ok(l)) => l,
+            _ => return Ok(None),
+        };
+        let labels = lock.projects.get(project).map(|p| {
+            p.labels
+                .keys()
+                .filter(|(p, _)| p == part)
+                .map(|(_, l)| l.clone())
+                .collect::<Vec<_>>()
+        });
+        return Ok(labels.unwrap_or_default().into_iter().max_by_key(order));
+    }
+    let releases = match history(session) {
+        Ok((_, r)) => r,
+        Err(e) if e.code == Code::NotAGitRepo => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut released = Vec::new();
+    let mut obsolete = std::collections::BTreeSet::new();
+    for path in releases.official.keys() {
+        let Some((p, label, kind)) = ryupdm::history::record_at(path) else {
+            continue;
+        };
+        if p != *part {
+            continue;
+        }
+        match kind {
+            ryupdm::record::Kind::Release => released.push(label),
+            ryupdm::record::Kind::Obsolete => {
+                obsolete.insert(label);
+            }
+        }
+    }
+    Ok(released
+        .into_iter()
+        .filter(|l| !obsolete.contains(l))
+        .max_by_key(order))
+}
+
 /// Who is writing a record: Git's author identity, and the participant.
 fn released_by(repo: &crate::git::Repo, participant: &str) -> ReleasedBy {
     let author = repo.gix().author().and_then(|a| a.ok());

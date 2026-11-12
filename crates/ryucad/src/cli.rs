@@ -1290,8 +1290,10 @@ enum FeatureCmd {
     /// countersink, --bottom) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
-    /// --angle) or mirror (--plane), skipping instances (--skip); or, in an
-    /// assembly, an instance (--of, --rev, --origin, --z, --x, --fixed), a mate
+    /// --angle) or mirror (--plane), skipping instances (--skip); an insert of
+    /// another part's solids (--of <part>, --rev working|label:L, --origin,
+    /// --z, --x); or, in an assembly, an instance (--of, --rev, --origin, --z,
+    /// --x, --fixed), a mate
     /// (--form fastened, revolute, slider, cylindrical, planar or ball, --a, --b,
     /// --a-offset, --b-offset, --angle, --distance) or an instance pattern (--instance,
     /// --form linear or circular, as a pattern's, its directions and axis x, y, z or a
@@ -2954,10 +2956,13 @@ struct FieldArgs {
     /// Leave no instance out again, when editing.
     #[arg(long, conflicts_with = "skip")]
     no_skip: bool,
-    /// The part an instance places.
+    /// The part an instance places or an insert inserts (another project's as
+    /// <dependency>:<part>).
     #[arg(long, value_name = "PART")]
     of: Option<String>,
-    /// The revision an instance places: working (the default) or a release label.
+    /// The revision an instance places or an insert pins: working, or a release
+    /// label (L or label:L). An instance defaults to working; an insert to its
+    /// source's newest official label, else working.
     #[arg(long, value_name = "REV")]
     rev: Option<String>,
     /// Hold an instance where it is when mates are solved (--fixed false to free it).
@@ -3637,7 +3642,10 @@ impl FieldArgs {
                 (!self.skip.is_empty()).then(|| json!(self.skip))
             },
             of: self.of.clone(),
-            rev: self.rev.clone(),
+            rev: self
+                .rev
+                .as_deref()
+                .map(|r| r.strip_prefix("label:").unwrap_or(r).to_owned()),
             fixed: self.fixed,
             a: self.a.clone(),
             b: self.b.clone(),
@@ -6651,6 +6659,37 @@ mod tests {
             .expect("a thread")
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
+    #[test]
+    fn an_insert_is_added_from_the_command_line() {
+        on_cli_stack(|| {
+            let c = Cli::try_parse_from([
+                "ryucad",
+                "feature",
+                "add",
+                "enclosure",
+                "insert",
+                "--id",
+                "board",
+                "--of",
+                "pcb",
+                "--rev",
+                "label:B",
+                "--origin",
+                "0,0,board_z",
+            ])
+            .unwrap();
+            let r = request(&c.command).unwrap();
+            let v = serde_json::to_value(&r).unwrap();
+            assert_eq!(v["params"]["of"], "pcb", "{v}");
+            assert_eq!(v["params"]["rev"], "B");
+            assert_eq!(
+                v["params"]["placement"]["origin"],
+                json!(["0", "0", "board_z"])
+            );
+            assert_eq!(v["params"]["type"], "insert");
+        });
     }
 
     #[test]

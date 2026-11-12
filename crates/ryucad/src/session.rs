@@ -930,7 +930,8 @@ impl Session {
         self.epoch
     }
 
-    /// Each assembly's key for subscribers, for those that build: its
+    /// Each assembly's (and each part inserting another's) key for
+    /// subscribers, for those that build: its
     /// revision, its rebuild's hash and the pins of the labels it places,
     /// all from one rebuild.
     pub(crate) fn assembly_keys(&mut self) -> BTreeMap<Id, String> {
@@ -938,11 +939,7 @@ impl Session {
             .project
             .parts
             .iter()
-            .filter(|(_, p)| {
-                p.file
-                    .as_ref()
-                    .is_ok_and(|f| f.kind == crate::doc::files::PartKind::Assembly)
-            })
+            .filter(|(_, p)| crate::assembly::reads_parts(p))
             .map(|(id, _)| id.clone())
             .collect();
         let mut out = BTreeMap::new();
@@ -953,7 +950,13 @@ impl Session {
                 let pins: Vec<String> = res
                     .features
                     .iter()
-                    .filter_map(|(_, o)| o.as_ref().ok()?.instance()?.model.pin.as_ref())
+                    .filter_map(|(_, o)| {
+                        let o = o.as_ref().ok()?;
+                        match o.instance() {
+                            Some(i) => i.model.pin.as_ref(),
+                            None => o.inserted()?.pin.as_ref(),
+                        }
+                    })
                     .map(|p| format!("{p:?}"))
                     .collect();
                 out.insert(id.clone(), format!("{rev}+{}+{}", res.hash, pins.join(",")));
@@ -1169,7 +1172,7 @@ impl Session {
                 // again (issue #235).
                 let edges = crate::assembly::edges(&self.project, &pins);
                 let c = match &self.cycles {
-                    Some((_, _, c)) if *c.edges() == edges => Arc::clone(c),
+                    Some((_, _, c)) if c.found_over(&edges) => Arc::clone(c),
                     _ => Arc::new(crate::assembly::Cycles::from_edges(edges)),
                 };
                 self.cycles = Some((self.epoch, key, Arc::clone(&c)));
@@ -1234,6 +1237,8 @@ impl Session {
                     p.features.values().any(|f| {
                         matches!(f, Ok(crate::doc::files::Feature::Instance(i))
                             if i.rev != Rev::Working)
+                            || matches!(f, Ok(crate::doc::files::Feature::Insert(i))
+                                if i.rev != Rev::Working)
                     })
                 });
                 self.labels = Some((self.epoch, any));

@@ -81,6 +81,7 @@ pub mod git;
 pub mod graph;
 pub mod hole;
 pub mod import;
+pub mod insert;
 pub mod inspect;
 pub mod interference;
 pub mod kind;

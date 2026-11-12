@@ -1816,8 +1816,10 @@ fn stale_in_part(builds: &mut Builds, part: &str) -> BTreeMap<String, Vec<String
                 continue;
             };
             for i in crate::graph::inputs(feature) {
+                // A solid key below an insert is read through the insert.
+                let i = i.founder();
                 if seen.insert(i.clone()) {
-                    todo.push(i.clone());
+                    todo.push(i);
                 }
             }
         }
