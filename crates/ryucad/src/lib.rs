@@ -122,6 +122,8 @@ pub mod sketch_view;
 pub mod solid;
 pub mod surface;
 pub mod sweep_view;
+#[cfg(test)]
+pub(crate) mod testing;
 pub mod transfer;
 pub mod tweak;
 pub mod validate;
