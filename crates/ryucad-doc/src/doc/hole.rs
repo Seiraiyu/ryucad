@@ -10,6 +10,7 @@ use super::solid::targets_from_json;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use crate::units::{Field, Quantity, Unit};
+use ryu_standards::thread::{self as builtin, Pitch, Standard, Unknown};
 use serde_json::{Value, json};
 
 /// A hole at each of a sketch's points.
@@ -500,6 +501,90 @@ impl Bottom {
     }
 }
 
+fn refuse(at: &str, reason: &str, msg: String) -> Error {
+    Error::new(Code::InvalidParam, msg)
+        .with("pointer", at)
+        .with("reason", reason)
+}
+
+/// A thread's pitch as the built-in lookup takes it: millimetres for ISO
+/// metric, a whole TPI for unified, tenths for pipe threads.
+fn pitch_of(standard: Standard, t: &Thread) -> Result<Option<Pitch>> {
+    match (standard.inch(), &t.pitch, &t.tpi) {
+        (_, None, None) => Ok(None),
+        (false, Some(p), None) => Ok(Some(Pitch::Mm((p.meters() * 1e9).round() as i64))),
+        (true, None, Some(n)) if standard.is_pipe() => {
+            Ok(Some(Pitch::Tpi10((n.number() * 10.0).round() as u32)))
+        }
+        (true, None, Some(n)) if n.number().fract() == 0.0 => {
+            Ok(Some(Pitch::Tpi(n.number() as u16)))
+        }
+        (inch, ..) => {
+            let (at, what) = if inch {
+                ("/thread/pitch", "a TPI (tpi)")
+            } else {
+                ("/thread/tpi", "a pitch (pitch)")
+            };
+            Err(refuse(
+                at,
+                "pitch_not_standard",
+                format!("{} threads take {what}", standard.key()),
+            ))
+        }
+    }
+}
+
+/// The built-in thread a hole's thread names, or `None` for a project
+/// standard; a size, pitch or class the built-in doesn't have is refused
+/// with what it does have.
+pub fn resolve(t: &Thread) -> Result<Option<builtin::Thread>> {
+    let Some(standard) = Standard::parse(&t.standard) else {
+        return Ok(None);
+    };
+    let pitch = pitch_of(standard, t)?;
+    builtin::lookup(standard, &t.size, pitch, t.class.as_deref())
+        .map(Some)
+        .map_err(|u| match u {
+            Unknown::Size { known } => refuse(
+                "/thread/size",
+                "unknown_thread_size",
+                format!(
+                    "{} has no size {}; the nearest are {}",
+                    t.standard,
+                    t.size,
+                    known.join(", ")
+                ),
+            )
+            .with("known", known),
+            Unknown::Pitch { listed } => refuse(
+                if t.tpi.is_some() {
+                    "/thread/tpi"
+                } else {
+                    "/thread/pitch"
+                },
+                "pitch_not_standard",
+                format!("{} {} lists {}", t.standard, t.size, listed.join(", ")),
+            )
+            .with("listed", listed),
+            Unknown::Class { known } => refuse(
+                "/thread/class",
+                "unknown_thread_class",
+                format!(
+                    "{} has no class {:?}; it has {}",
+                    t.standard,
+                    t.class.as_deref().unwrap_or(""),
+                    known.join(", ")
+                ),
+            )
+            .with("known", known),
+            Unknown::ClassNotTaken => refuse(
+                "/thread/class",
+                "class_not_taken",
+                format!("{} threads take no class: take it out", t.standard),
+            ),
+        })
+}
+
 fn invalid_extent(at: &str, msg: String) -> Error {
     Error::new(Code::InvalidExtent, msg).with("pointer", at)
 }
@@ -721,6 +806,70 @@ impl Hole {
                     hole.form.type_name()
                 ),
             ));
+        }
+        if hole.thread.is_some() && hole.fastener.is_some() {
+            return Err(refuse(
+                "/fastener",
+                "thread_and_fastener",
+                "a hole is tapped (thread) or a clearance hole (fastener), not both".into(),
+            ));
+        }
+        match &hole.bore {
+            Some(_) if hole.thread.is_some() => {
+                return Err(refuse(
+                    "/fit",
+                    "fit_on_thread",
+                    "a tapped hole's class is its tolerance: give the thread a class instead"
+                        .into(),
+                ));
+            }
+            Some(BoreTolerance::Fit(f)) => match ryu_standards::fit::Class::parse(f) {
+                Some(c) if c.member == ryu_standards::fit::Member::Hole => {}
+                _ => {
+                    return Err(refuse(
+                        "/fit",
+                        "fit_undefined",
+                        format!("{f:?} is no ISO 286 hole class, such as \"H7\""),
+                    ));
+                }
+            },
+            _ => {}
+        }
+        if let Some(t) = &hole.thread {
+            let built = resolve(t)?;
+            if let Depth::Blind(drill) = &hole.depth {
+                match &t.depth {
+                    None => {
+                        let mut e = refuse(
+                            "/thread/depth",
+                            "thread_depth_needed",
+                            "a blind tapped hole gives its thread's depth: \"full\" or a length"
+                                .into(),
+                        );
+                        if let Some(b) = &built
+                            && drill.is_literal()
+                        {
+                            let (pn, pd) = b.pitch.value.nm();
+                            let nm = (drill.meters() * 1e9).round() as i128 - 3 * pn / pd;
+                            if nm > 0 {
+                                e = e.with(
+                                    "suggested",
+                                    format!("{} mm", ryu_standards::mm_decimal(nm as i64)),
+                                );
+                            }
+                        }
+                        return Err(e);
+                    }
+                    Some(ThreadDepth::Length(q)) if q.meters() > drill.meters() => {
+                        return Err(refuse(
+                            "/thread/depth",
+                            "thread_past_drill",
+                            format!("the thread runs {q}, past the drill's {drill}"),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
         }
         Ok(hole)
     }
@@ -1160,5 +1309,83 @@ mod tests {
         ));
         assert_eq!(h.mouth_depth(), Some((0.006, "/counterbore/depth")));
         assert_eq!(read(&f.to_json()).unwrap(), f);
+    }
+
+    #[test]
+    fn intent_refusals_say_what_to_do() {
+        let base = || {
+            json!({"format": 3, "kind": "ryucad.feature", "type": "hole",
+                             "sketch": "s3", "form": "simple", "depth": "through_all",
+                             "targets": ["box1"]})
+        };
+        let with = |k: &str, x: Value| {
+            let mut v = base();
+            v[k] = x;
+            v
+        };
+        let err = |v: Value| read(&v).unwrap_err();
+        // A thread and a fastener together.
+        let mut v = with("thread", json!({"standard": "iso_metric", "size": "M6"}));
+        v["fastener"] = json!({"standard": "house_cap", "size": "M5"});
+        assert_eq!(err(v).details["reason"], "thread_and_fastener");
+        // A fit on a tapped hole: its class is its tolerance.
+        let mut v = with("thread", json!({"standard": "iso_metric", "size": "M6"}));
+        v["fit"] = json!("H7");
+        assert_eq!(err(v).details["reason"], "fit_on_thread");
+        // An unknown size, with the nearest.
+        let e = err(with(
+            "thread",
+            json!({"standard": "iso_metric", "size": "M6.5"}),
+        ));
+        assert_eq!(
+            (e.code, e.details["reason"].as_str()),
+            (Code::InvalidParam, Some("unknown_thread_size"))
+        );
+        assert_eq!(e.details["known"], json!(["M5", "M6", "M7", "M8"]));
+        assert_eq!(e.details["pointer"], "/thread/size");
+        // A pitch the size doesn't list.
+        let e = err(with(
+            "thread",
+            json!({"standard": "iso_metric", "size": "M6", "pitch": "1.25 mm"}),
+        ));
+        assert_eq!(e.details["reason"], "pitch_not_standard");
+        assert_eq!(e.details["listed"], json!(["1.0", "0.75"]));
+        let e = err(with(
+            "thread",
+            json!({"standard": "iso_metric", "size": "M6", "class": "6g"}),
+        ));
+        assert_eq!(e.details["reason"], "unknown_thread_class");
+        let e = err(with(
+            "thread",
+            json!({"standard": "npt", "size": "1/8", "class": "2B"}),
+        ));
+        assert_eq!(e.details["reason"], "class_not_taken");
+        let e = err(with(
+            "thread",
+            json!({"standard": "iso_metric", "size": "M6", "tpi": 20}),
+        ));
+        assert_eq!(e.details["pointer"], "/thread/tpi");
+        // A blind tapped hole without its thread depth: the fix.
+        let mut v = with("thread", json!({"standard": "iso_metric", "size": "M8"}));
+        v["depth"] = json!({"blind": "20 mm"});
+        let e = err(v);
+        assert_eq!(e.details["reason"], "thread_depth_needed");
+        assert_eq!(e.details["suggested"], "16.25 mm"); // 20 - 3 × 1.25
+        // A thread past its drill.
+        let mut v = with(
+            "thread",
+            json!({"standard": "iso_metric", "size": "M8", "depth": "22 mm"}),
+        );
+        v["depth"] = json!({"blind": "20 mm"});
+        assert_eq!(err(v).details["reason"], "thread_past_drill");
+        // A fit that isn't an ISO 286 hole class.
+        // (A plain hole gives its diameter.)
+        let mut v = with("fit", json!("g6"));
+        v["diameter"] = json!("6 mm");
+        let e = err(v);
+        assert_eq!(e.details["reason"], "fit_undefined");
+        // A project standard reads: its sizes are checked when written.
+        let v = with("thread", json!({"standard": "house_acme", "size": "T10"}));
+        assert!(read(&v).is_ok());
     }
 }
