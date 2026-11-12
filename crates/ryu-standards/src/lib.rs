@@ -24,11 +24,10 @@
 //! whole. Formulas with fractional powers are decided by exact integer
 //! comparisons (`exact`).
 
-// The thread formulas (next) use it; until then it is only tested.
-#[allow(dead_code)]
 pub(crate) mod exact;
 pub mod fit;
 pub mod iso_metric;
+pub mod iso_metric_limits;
 pub mod source;
 pub mod thread;
 
