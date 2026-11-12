@@ -911,6 +911,17 @@ pub fn products_diff(path: &str, from: Option<&[u8]>, to: Option<&[u8]>) -> Valu
 /// A held group's bodies, and the mode its first feature has.
 type Held = (Vec<u32>, Option<crate::doc::import::Mode>);
 
+/// Each externally defined definition of `new` whose usage the project's
+/// instances of `path` placed in `old`: the part placed (Task 14).
+pub fn external_parts(_project: &Project, _path: &str, _old: &Opened, _new: &Opened) -> BTreeMap<usize, Id> {
+    BTreeMap::new()
+}
+
+/// The file `part` was made from (Task 14).
+pub fn file_of(_project: &Project, _part: &Id) -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use crate::error::Code;

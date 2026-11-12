@@ -3141,6 +3141,17 @@ pub(crate) mod tests {
         assert_eq!(p.held.len(), 1);
     }
 
+    /// An import feature of `imports/<name>.step`, body 0, no product.
+    pub(crate) fn import_of(name: &str) -> Import {
+        Import {
+            file: FileRef { path: format!("imports/{name}.step"), blake3: "0".repeat(64) },
+            product: None,
+            body: 0,
+            mode: None,
+            place: None,
+        }
+    }
+
     /// A frame (`F-1`) with a plate of its own, a sub-assembly (`S-1`) of
     /// two pins (`P-1`) and one pin more; and a loose block (`L-1`) no
     /// product uses: two roots. Every usage of the sub-assembly's and the

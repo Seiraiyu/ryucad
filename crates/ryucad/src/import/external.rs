@@ -20,6 +20,12 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use super::plan::{self, Planned};
+use super::update::{self, Update};
+use super::{free, id_from};
+use crate::doc::id::Id;
+use crate::doc::import::{FileRef, Mode};
+use crate::doc::project::{IMPORTS, Project};
 
 /// A document's names as written, `\` read as `/`: its location, then
 /// its name.
@@ -446,6 +452,300 @@ impl Resolver<'_> {
     }
 }
 
+impl Tree {
+    /// The definitions of node `j` that other files' documents stand for.
+    pub fn roots_into(&self, j: usize) -> BTreeSet<usize> {
+        self.nodes
+            .iter()
+            .flat_map(|n| n.links.values())
+            .filter(|(c, _)| *c == j)
+            .map(|(_, r)| *r)
+            .collect()
+    }
+
+    /// The ID node `j`'s definition `r`'s part starts from: the first
+    /// referencing product's id, else its name.
+    pub fn base(&self, j: usize, r: usize) -> Option<Id> {
+        self.nodes
+            .iter()
+            .find_map(|n| {
+                n.links
+                    .iter()
+                    .find(|(_, l)| **l == (j, r))
+                    .map(|(&k, _)| &n.opened.products.definitions[k])
+            })
+            .and_then(|d| id_from(&d.product_id).or_else(|| id_from(&d.name)))
+    }
+
+    /// Node `j`'s definitions that `roots` reach through usages within
+    /// its file.
+    pub fn reach(&self, j: usize, roots: &BTreeSet<usize>) -> BTreeSet<usize> {
+        let defs = &self.nodes[j].opened.products.definitions;
+        let mut out = BTreeSet::new();
+        let mut todo: Vec<usize> = roots.iter().copied().collect();
+        while let Some(k) = todo.pop() {
+            if out.insert(k) {
+                todo.extend(defs[k].children.iter().map(|c| c.definition));
+            }
+        }
+        out
+    }
+}
+
+/// Whether a planned import feature or imported instance names `path`.
+pub fn names(all: &[Planned], path: &str) -> bool {
+    use crate::doc::files::Feature;
+    all.iter().flat_map(|pl| &pl.features).any(|(_, f)| match f {
+        Feature::Import(i) => i.file.path == path,
+        Feature::Instance(i) => i.import.as_ref().is_some_and(|u| u.file == path),
+        _ => false,
+    })
+}
+
+/// `planned` with each part once: the features, removals and properties
+/// of a part several files plan, in order.
+pub fn merge(planned: Vec<Planned>) -> Vec<Planned> {
+    let mut out: Vec<Planned> = Vec::new();
+    for pl in planned {
+        match out.iter_mut().find(|o| o.part == pl.part) {
+            Some(o) => {
+                for f in pl.features {
+                    if !o.features.iter().any(|(id, _)| *id == f.0) {
+                        o.features.push(f);
+                    }
+                }
+                o.removed.extend(pl.removed);
+                for (k, v) in pl.properties {
+                    o.properties.entry(k).or_insert(v);
+                }
+            }
+            None => out.push(pl),
+        }
+    }
+    out
+}
+
+/// One file's share of an import across files.
+pub struct Group {
+    pub node: usize,
+    /// Its path under `imports/`.
+    pub path: String,
+    /// A fresh file whose bytes the project held there already.
+    pub reused: bool,
+    /// An update's: the BLAKE3 the stored file had.
+    pub from: Option<String>,
+    pub planned: Vec<Planned>,
+    /// An update's own account (its `planned` moved to the group's).
+    pub update: Option<Update>,
+}
+
+impl Group {
+    /// Whether the import writes this file's bytes (`blake3` the node's):
+    /// a fresh file some planned feature names that the project doesn't
+    /// hold, or an update's changed file.
+    pub fn writes_bytes(&self, all: &[Planned], blake3: &str) -> bool {
+        match &self.from {
+            Some(old) => old != blake3,
+            None => !self.reused && names(all, &self.path),
+        }
+    }
+}
+
+/// Plans every file of a [`Tree`] as an import of its own, leaves first,
+/// each externally defined definition placing the part its file made.
+pub struct Planner<'a> {
+    pub project: &'a Project,
+    pub tree: &'a Tree,
+    pub mode: Option<Mode>,
+    pub pdm: bool,
+    /// `--part`: the first file's one root.
+    pub part: Option<Id>,
+    /// Whether an ID is taken in the project: by a part, or retired.
+    pub taken: &'a dyn Fn(&str) -> bool,
+    /// What each file plans, in the order planned.
+    pub groups: Vec<Group>,
+    paths: Vec<String>,
+    ids: Vec<String>,
+    planned: BTreeSet<usize>,
+    part_of: BTreeMap<(usize, usize), Id>,
+}
+
+impl<'a> Planner<'a> {
+    pub fn new(
+        project: &'a Project,
+        tree: &'a Tree,
+        mode: Option<Mode>,
+        pdm: bool,
+        part: Option<Id>,
+        taken: &'a dyn Fn(&str) -> bool,
+    ) -> Planner<'a> {
+        Planner {
+            project,
+            tree,
+            mode,
+            pdm,
+            ids: part.iter().map(|p| p.to_string()).collect(),
+            part,
+            taken,
+            groups: Vec::new(),
+            paths: Vec::new(),
+            planned: BTreeSet::new(),
+            part_of: BTreeMap::new(),
+        }
+    }
+
+    /// Where node `j`'s bytes are kept: where the project holds them
+    /// already, else `imports/<stem>.step` free in the project and this
+    /// import.
+    fn store(&mut self, j: usize) -> (String, bool) {
+        let node = &self.tree.nodes[j];
+        if let Some((p, _)) = self
+            .project
+            .imports
+            .iter()
+            .find(|(_, f)| f.blake3 == node.file.blake3)
+        {
+            return (p.clone(), true);
+        }
+        let stem = node
+            .source
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned());
+        let base = stem
+            .as_deref()
+            .and_then(id_from)
+            .unwrap_or_else(|| Id::parse("step", "file").expect("an ID"));
+        let root = &self.project.root;
+        let id = free(&base, |s| {
+            let p = format!("{IMPORTS}/{s}.step");
+            self.project.imports.contains_key(&p) || root.join(&p).exists() || self.paths.contains(&p)
+        });
+        let p = format!("{IMPORTS}/{id}.step");
+        self.paths.push(p.clone());
+        (p, false)
+    }
+
+    fn record(&mut self, j: usize, planned: &[Planned]) {
+        for pl in planned {
+            self.ids.push(pl.part.to_string());
+            if let Some(r) = pl.definition {
+                self.part_of.entry((j, r)).or_insert_with(|| pl.part.clone());
+            }
+        }
+    }
+
+    /// Plans node `j` and, first, every file it references: an update of
+    /// the stored file `old` with node `j`'s bytes, or a fresh import.
+    /// An update of a referenced file whose bytes the project holds
+    /// already plans nothing for it.
+    pub fn visit(&mut self, j: usize, old: Option<String>) -> Result<()> {
+        if !self.planned.insert(j) {
+            return Ok(());
+        }
+        let tree = self.tree;
+        let node = &tree.nodes[j];
+        let olds: BTreeMap<usize, Id> = match &old {
+            Some(p) => self
+                .project
+                .imports
+                .get(p)
+                .and_then(|f| super::opened(f).ok())
+                .map(|o| update::external_parts(self.project, p, &o, &node.opened))
+                .unwrap_or_default(),
+            None => BTreeMap::new(),
+        };
+        let mut external = BTreeMap::new();
+        for (&k, &(c, r)) in &node.links {
+            let held = olds
+                .get(&k)
+                .and_then(|p| Some((p.clone(), update::file_of(self.project, p)?)));
+            let part = match held {
+                Some((p, stored)) => {
+                    self.visit(c, Some(stored))?;
+                    self.part_of.entry((c, r)).or_insert_with(|| p.clone());
+                    p
+                }
+                None => {
+                    self.visit(c, None)?;
+                    self.part_of.get(&(c, r)).cloned().ok_or_else(|| {
+                        Error::new(
+                            Code::ImportExternalAmbiguous,
+                            format!(
+                                "{} makes nothing for product {:?}",
+                                tree.nodes[c].source.display(),
+                                &*node.opened.products.definitions[k].product_id
+                            ),
+                        )
+                    })?
+                }
+            };
+            external.insert(k, part);
+        }
+        let blake3 = node.file.blake3.clone();
+        let stem_of = |path: &str| {
+            Path::new(path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let ids = self.ids.clone();
+        let base = self.taken;
+        let taken = move |s: &str| base(s) || ids.iter().any(|t| t == s);
+        match old {
+            Some(path) => {
+                let from = self.project.imports.get(&path).map(|f| f.blake3.clone());
+                if j != 0 && from.as_deref() == Some(blake3.as_str()) {
+                    return Ok(());
+                }
+                let file_ref = FileRef { path: path.clone(), blake3 };
+                let stem = stem_of(&path);
+                let fresh = plan::Fresh {
+                    opened: &node.opened,
+                    file: &file_ref,
+                    stem: &stem,
+                    part: None,
+                    taken: &taken,
+                    pdm: self.pdm,
+                    mode: self.mode,
+                    cross: plan::Cross { external, ..Default::default() },
+                };
+                let mut u = update::plan(self.project, &node.opened, &file_ref, &fresh)?;
+                let planned = std::mem::take(&mut u.planned);
+                self.record(j, &planned);
+                self.groups.push(Group { node: j, path, reused: false, from, planned, update: Some(u) });
+            }
+            None => {
+                let (path, reused) = self.store(j);
+                let file_ref = FileRef { path: path.clone(), blake3 };
+                let stem = stem_of(&path);
+                let into = tree.roots_into(j);
+                let fresh = plan::Fresh {
+                    opened: &node.opened,
+                    file: &file_ref,
+                    stem: &stem,
+                    part: if j == 0 { self.part.clone() } else { None },
+                    taken: &taken,
+                    pdm: self.pdm,
+                    mode: self.mode,
+                    cross: plan::Cross {
+                        external,
+                        scope: (j != 0).then(|| tree.reach(j, &into)),
+                        bases: into.iter().filter_map(|&r| Some((r, tree.base(j, r)?))).collect(),
+                    },
+                };
+                let planned = if j == 0 {
+                    fresh.plan()?
+                } else {
+                    fresh.make(&BTreeMap::new(), false, &[])?
+                };
+                self.record(j, &planned);
+                self.groups.push(Group { node: j, path, reused, from: None, planned, update: None });
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,5 +983,52 @@ mod tests {
         assert_eq!(e.code, Code::ImportExternalMissing);
         assert_eq!(e.details["missing"][0]["reason"], "format");
         assert_eq!(e.details["missing"][0]["format"], "SLDPRT");
+    }
+
+    #[test]
+    fn the_set_plans_two_parts_then_the_assembly_placing_them() {
+        let (_dir, s) = crate::server::tests::fresh();
+        let set = PathBuf::from(crate::import::tests::set_path(""));
+        let t = tree(&set, "asm.stp", &[]).unwrap();
+        let taken = |_: &str| false;
+        let mut p = Planner::new(s.project(), &t, None, false, None, &taken);
+        p.visit(0, None).unwrap();
+        let order: Vec<(usize, &str, Vec<&str>)> = p
+            .groups
+            .iter()
+            .map(|g| (g.node, g.path.as_str(), g.planned.iter().map(|pl| pl.part.as_str()).collect()))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                (1, "imports/box.step", vec!["box"]),
+                (2, "imports/cylinder.step", vec!["pin"]),
+                (0, "imports/asm.step", vec!["asm"]),
+            ]
+        );
+        let all: Vec<Planned> = p.groups.iter().flat_map(|g| g.planned.clone()).collect();
+        for path in ["imports/box.step", "imports/cylinder.step", "imports/asm.step"] {
+            assert!(names(&all, path), "{path}");
+        }
+    }
+
+    #[test]
+    fn merge_keeps_one_entry_per_part() {
+        use crate::doc::files::PartKind;
+        let pl = |part: &str, f: &str| Planned {
+            part: Id::parse(part, "part").unwrap(),
+            new: false,
+            kind: PartKind::Part,
+            definition: None,
+            features: vec![(Id::parse(f, "feature").unwrap(), crate::doc::files::Feature::Import(
+                crate::import::tests::import_of(f),
+            ))],
+            removed: Vec::new(),
+            properties: Default::default(),
+            props_of: None,
+        };
+        let m = merge(vec![pl("a", "x"), pl("b", "y"), pl("a", "z")]);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0].features.len(), 2);
     }
 }
