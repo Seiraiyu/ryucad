@@ -6234,6 +6234,11 @@ mod tests {
             .push(resistor("r2", "R2", "4k7", [Some(0), Some(2)]));
         grown.previous = Some(before.layout.clone());
         let after = lay(&grown);
+        eprintln!(
+            "DBG notes {:?} sheets {:?}",
+            after.notes.iter().map(|n| &n.message).collect::<Vec<_>>(),
+            after.layout.sheets
+        );
         assert_eq!(crate::rules::check(&grown, &after.layout), []);
         let u1 = |l: &Layout| {
             l.regions

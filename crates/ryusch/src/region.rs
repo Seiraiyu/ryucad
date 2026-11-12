@@ -258,6 +258,48 @@ pub fn propose(block: &Block, idioms: &[Idiom], r: &instr::Resolved) -> Vec<Prop
             }
         }
     }
+    // A leftover region of one part (design 519) joins the region it
+    // shares most signal nets with, on its sheet, unless an edge holds
+    // it; ties go to the earlier. Repeated until none joins. A connector's,
+    // an IC's or a circuit's region of one part names a function: it stays.
+    let signal = |p: usize| -> BTreeSet<usize> {
+        block.parts[p]
+            .pins
+            .iter()
+            .flat_map(|x| x.nets())
+            .filter(|n| block.nets[*n].kind == NetKind::Signal)
+            .collect()
+    };
+    loop {
+        let lone = out.iter().enumerate().find_map(|(i, g)| {
+            let p = *g.parts.first()?;
+            if g.parts.len() != 1 || g.basis != Basis::Rest || r.edge.contains_key(&p) {
+                return None;
+            }
+            let mine = signal(p);
+            out.iter()
+                .enumerate()
+                .filter(|(j, h)| {
+                    *j != i
+                        && !h.parts.is_empty()
+                        && h.parts.iter().all(|q| r.sheet.get(q) == r.sheet.get(&p))
+                })
+                .map(|(j, h)| {
+                    let shared: usize = h
+                        .parts
+                        .iter()
+                        .map(|q| signal(*q).intersection(&mine).count())
+                        .sum();
+                    (shared, j)
+                })
+                .filter(|(n, _)| *n > 0)
+                .max_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)))
+                .map(|(_, j)| (i, j, p))
+        });
+        let Some((i, j, p)) = lone else { break };
+        out[j].parts.insert(p);
+        out[i].parts.clear();
+    }
     out.retain(|g| !g.parts.is_empty());
     out
 }
@@ -535,6 +577,48 @@ mod tests {
                     g.title
                 );
                 assert_ne!(g.title, "Misc", "seed {seed}");
+            }
+        }
+    }
+
+    /// Design 519: no leftover region (`Basis::Rest`) holds one part,
+    /// unless an edge holds it or it shares no signal with any other
+    /// region on its sheet. A connector's, an IC's or a circuit's region
+    /// of one part names a function and stays (plan 3.A: joining those
+    /// took the RP2040's first sheet from 43 to 5).
+    #[test]
+    fn a_region_of_one_part_joins_its_neighbour() {
+        for seed in 1..=24 {
+            let block = crate::testing::seeded(seed, 1 + seed as usize % 4);
+            let r = crate::instr::resolve(&block).unwrap();
+            let idioms = crate::idiom::find(&block, &r.idiom);
+            let out = propose(&block, &idioms, &r);
+            let sig = |p: usize| -> BTreeSet<usize> {
+                block.parts[p]
+                    .pins
+                    .iter()
+                    .flat_map(|x| x.nets())
+                    .filter(|n| block.nets[*n].kind == NetKind::Signal)
+                    .collect()
+            };
+            for (i, g) in out.iter().enumerate() {
+                if g.parts.len() != 1 || g.basis != Basis::Rest {
+                    continue;
+                }
+                let p = *g.parts.first().unwrap();
+                if r.edge.contains_key(&p) {
+                    continue;
+                }
+                let shares = out.iter().enumerate().any(|(j, h)| {
+                    j != i
+                        && h.parts.iter().all(|q| r.sheet.get(q) == r.sheet.get(&p))
+                        && h.parts.iter().any(|q| !sig(*q).is_disjoint(&sig(p)))
+                });
+                assert!(
+                    !shares,
+                    "seed {seed}: {} stands alone though it shares a net",
+                    block.parts[p].key
+                );
             }
         }
     }

@@ -183,6 +183,38 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
                     .map(|s| (&s.sheet, s.score))
                     .collect::<Vec<_>>()
             );
+            // Plan 3.A: a region of one part with no title (one no
+            // function, connector or IC names) shares no signal net with
+            // another region on its sheet: else it would have joined it.
+            let input = &laid.built.input;
+            let signal = |k: &str| -> BTreeSet<usize> {
+                input.part(k).map_or_else(BTreeSet::new, |p| {
+                    input.parts[p]
+                        .pins
+                        .iter()
+                        .flat_map(|x| x.nets())
+                        .filter(|n| input.nets[*n].kind == ryusch::input::NetKind::Signal)
+                        .collect()
+                })
+            };
+            let regions = &laid.outcome.layout.regions;
+            eprintln!("regions {name}/{}: {}", b.id, regions.len());
+            for (id, g) in regions {
+                if g.parts.len() != 1 || !g.title.is_empty() || g.named {
+                    continue;
+                }
+                let mine = signal(&g.parts[0]);
+                let shares = regions.iter().any(|(j, h)| {
+                    j != id
+                        && h.sheet == g.sheet
+                        && h.parts.iter().any(|k| !signal(k).is_disjoint(&mine))
+                });
+                assert!(
+                    !shares,
+                    "{name}/{}: region {id} ({}) stands alone though it shares a net",
+                    b.id, g.parts[0]
+                );
+            }
             // Plan 2.A: each sheet's paper, extent and fill.
             let l = &laid.outcome.layout;
             for (sid, sh) in &l.sheets {
