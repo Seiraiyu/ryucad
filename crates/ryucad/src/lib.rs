@@ -86,6 +86,7 @@ pub mod geometry;
 pub mod git;
 pub mod graph;
 pub mod hole;
+pub mod holes;
 pub mod import;
 pub mod insert;
 pub mod inspect;

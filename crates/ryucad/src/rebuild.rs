@@ -725,6 +725,22 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
     }
 }
 
+/// A pattern instance as its origins name it: `[i, j]` for a linear
+/// pattern in two directions, else `[i]`.
+pub(crate) fn instance_json(p: &crate::doc::pattern::Pattern, [i, j]: [u32; 2]) -> Value {
+    if matches!(
+        &p.kind,
+        crate::doc::pattern::Kind::Linear {
+            second: Some(_),
+            ..
+        }
+    ) {
+        json!([i, j])
+    } else {
+        json!([i])
+    }
+}
+
 /// The solved sketch a sweep reads: listed before it, a sketch, and
 /// rebuilt.
 pub(crate) fn sketch_input<'a>(
@@ -1541,17 +1557,7 @@ fn build_pattern(
     let mut images = mirrored.iter();
     let mut tools: Vec<ToolBody> = Vec::new();
     for ([i, j], m) in &motions {
-        let instance = if matches!(
-            &p.kind,
-            crate::doc::pattern::Kind::Linear {
-                second: Some(_),
-                ..
-            }
-        ) {
-            json!([i, j])
-        } else {
-            json!([i])
-        };
+        let instance = instance_json(p, [*i, *j]);
         for (seed, a) in &seeds {
             for (point, place) in &a.places {
                 let mut label = json!({"feature": id, "seed": seed, "instance": instance});
