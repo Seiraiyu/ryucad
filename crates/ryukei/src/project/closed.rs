@@ -1,15 +1,19 @@
-//! Silhouettes in closed form: planes, cylinders, cones, spheres, and
-//! tori seen along or square to their axis (design 326, design 484).
+//! Silhouettes in closed form: planes, cylinders, cones, spheres, tori
+//! seen along or square to their axis, and revolutions (design 326,
+//! design 484).
 
 use crate::geom::bernstein::{Bernstein, Root};
 use crate::geom::chain3::Chain3;
-use crate::geom::{Circle, Curve, Curve2, Frame, Line, Line2, Point2, Surface, Vector2, Vector3};
-use crate::intersect::Failure;
+use crate::geom::{
+    Circle, Curve, Curve2, Frame, Line, Line2, Point2, Revolution, Surface, Vector2, Vector3,
+};
+use crate::intersect::{Failure, Traced, fit_contour};
 use crate::interval::Interval;
 use crate::math;
 use crate::tol::{ANGULAR_RESOLUTION, LINEAR_RESOLUTION};
 use crate::work::Meter;
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
+use std::sync::Arc;
 
 /// A silhouette branch before trimming: a curve over a range covering the
 /// face, its pcurve with the affine map from the curve's parameter, and
@@ -97,7 +101,6 @@ fn idot(p: Vector3, d: Vector3) -> Interval {
 /// the signs those of `G` at each stretch's middle. `None` where a root
 /// isn't certified simple (a view along or square to the axis gives
 /// double roots) or a stretch's sign isn't certified: the face is traced.
-#[cfg_attr(not(test), allow(dead_code))]
 fn revolved_folds(
     profile: &Curve,
     frame: &Frame,
@@ -166,6 +169,159 @@ fn revolved_folds(
     Ok(Some((folds, signs)))
 }
 
+/// Samples taken along each stretch of a revolution's contour, at
+/// Chebyshev's spacing: densest at the folds, where `u` turns fastest.
+const REVOLVED_SAMPLES: usize = 48;
+
+/// A revolution's silhouette over the parameter box `rect` from its
+/// formula (design 484): `u = ψ ± acos(k)`, `k = ρ' t_z / (h' s)`, over
+/// the stretches of `v` where [`revolved_folds`] finds `G` positive. A
+/// stretch between two folds is one closed branch (out along `+`, back
+/// along `−`); one between a fold and an end of the range one open
+/// branch through the fold; one between both ends two branches; a
+/// periodic profile whose face covers its period joins the stretches
+/// either side of its seam, and with no folds at all gives two closed
+/// branches. Each branch is sampled from the formula and fitted and
+/// certified as a traced one ([`fit_contour`]), so no cell, crossing or
+/// cluster is needed. `None` (traced instead) where the range leaves the
+/// profile's domain, the profile has a crease inside it, the folds or
+/// their signs aren't certified, or a fit can't certify.
+fn revolved(
+    r: &Revolution,
+    surface: &Surface,
+    t: Vector3,
+    rect: [[f64; 2]; 2],
+    m: &Meter,
+) -> Result<Option<Vec<Raw>>, Failure> {
+    let profile = r.curve();
+    let [d0, d1] = profile.domain();
+    let [v0, v1] = rect[1];
+    if !(v0 >= d0 && v1 <= d1 && v0 < v1) {
+        return Ok(None);
+    }
+    if let Curve::Nurbs(n) = profile
+        && crate::geom::creases(n.knots())
+            .iter()
+            .any(|&c| c > v0 && c < v1)
+    {
+        return Ok(None);
+    }
+    let f = r.frame();
+    let Some((folds, signs)) = revolved_folds(profile, f, t, [v0, v1], m)? else {
+        return Ok(None);
+    };
+    let (x, y, z) = (f.x().get(), f.y().get(), f.z().get());
+    let (tx, ty, tz) = (t.dot(x), t.dot(y), t.dot(z));
+    let s = math::sqrt(tx * tx + ty * ty);
+    let psi = math::atan2(ty, tx);
+    // `acos(k)` at `v`; `None` where `h' s` is zero.
+    let half = |v: f64| -> Option<f64> {
+        let d1 = profile.eval(v).d1;
+        let k = d1.dot(x) * tz / (d1.dot(z) * s);
+        k.is_finite().then(|| math::acos(k.clamp(-1.0, 1.0)))
+    };
+    let nodes = |a: f64, b: f64| -> Vec<f64> {
+        (0..=REVOLVED_SAMPLES)
+            .map(|j| {
+                let c = math::cos(PI * j as f64 / REVOLVED_SAMPLES as f64);
+                a + (b - a) * (1.0 - c) / 2.0
+            })
+            .collect()
+    };
+    let mut ends = vec![v0];
+    ends.extend(&folds);
+    ends.push(v1);
+    let last = ends.len() - 2;
+    // Each stretch of positive `G`: its spans of `v`, and whether it
+    // starts and ends at a fold.
+    let mut stretches: Vec<(Vec<[f64; 2]>, bool, bool)> = Vec::new();
+    for (j, w) in ends.windows(2).enumerate() {
+        if signs[j] {
+            stretches.push((vec![[w[0], w[1]]], j > 0, j < last));
+        }
+    }
+    let whole = profile.period().is_some() && v0 == d0 && v1 == d1;
+    if whole && !folds.is_empty() && signs[0] && signs[last] {
+        let after = stretches.pop().expect("the last stretch is positive");
+        let before = stretches.remove(0);
+        let spans = after.0.into_iter().chain(before.0).collect();
+        stretches.insert(0, (spans, after.1, before.2));
+    }
+    let mut traced = Vec::new();
+    for (spans, start_fold, end_fold) in stretches {
+        let mut vs: Vec<f64> = Vec::new();
+        for [a, b] in spans {
+            for v in nodes(a, b) {
+                if vs.last() != Some(&v) {
+                    vs.push(v);
+                }
+            }
+        }
+        let side = |sign: f64| -> Option<Vec<[f64; 2]>> {
+            vs.iter()
+                .map(|&v| half(v).map(|a| [psi + sign * a, v]))
+                .collect()
+        };
+        let (Some(plus), Some(minus)) = (side(1.0), side(-1.0)) else {
+            return Ok(None);
+        };
+        let n = plus.len();
+        let back = |p: &[[f64; 2]]| p.iter().rev().copied().collect::<Vec<_>>();
+        let runs: Vec<(Vec<[f64; 2]>, bool)> = match (start_fold, end_fold) {
+            (true, true) => {
+                let mut p = plus.clone();
+                p.extend(back(&minus[1..n - 1]));
+                vec![(p, true)]
+            }
+            (true, false) => {
+                let mut p = back(&minus);
+                p.extend(&plus[1..]);
+                vec![(p, false)]
+            }
+            (false, true) => {
+                let mut p = plus.clone();
+                p.extend(back(&minus[..n - 1]));
+                vec![(p, false)]
+            }
+            (false, false) if whole && folds.is_empty() => {
+                vec![
+                    (plus[..n - 1].to_vec(), true),
+                    (minus[..n - 1].to_vec(), true),
+                ]
+            }
+            (false, false) => vec![(plus, false), (minus, false)],
+        };
+        for (params, closed) in runs {
+            let points = params.iter().map(|&[u, v]| surface.point(u, v)).collect();
+            traced.push(Traced {
+                points,
+                closed,
+                params,
+            });
+        }
+    }
+    let mut out = Vec::new();
+    for b in &traced {
+        let span: f64 = b.points.windows(2).map(|w| w[0].distance(w[1])).sum();
+        if span <= 10.0 * LINEAR_RESOLUTION {
+            continue;
+        }
+        let fit = match fit_contour(surface, t, b, m) {
+            Ok(fit) => fit,
+            Err(Failure::Uncertain) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let range = fit.curve.domain();
+        out.push(Raw {
+            curve: Curve::Nurbs(Arc::new(fit.curve)),
+            range,
+            pcurve: (Curve2::Nurbs2(Arc::new(fit.pcurve)), [0.0, 1.0]),
+            tolerance: fit.tolerance,
+        });
+    }
+    Ok(Some(out))
+}
+
 /// The silhouette of `surface` seen along unit `t` over the parameter box
 /// `rect`, where it has a closed form; `None` where it must be traced.
 pub(super) fn closed_form(
@@ -174,6 +330,9 @@ pub(super) fn closed_form(
     rect: [[f64; 2]; 2],
     m: &Meter,
 ) -> Result<Option<Closed>, Failure> {
+    if let Surface::Revolution(r) = surface {
+        return Ok(revolved(r, surface, t, rect, m)?.map(Closed::Branches));
+    }
     let Some(f) = surface.frame() else {
         return Ok(None);
     };
@@ -535,5 +694,30 @@ mod tests {
         )
         .unwrap();
         assert!(along.is_none());
+    }
+
+    /// The wavy revolution's silhouette in closed form, seen askew: on
+    /// the surface and square to the view along every branch.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "the fit certifies in release only")]
+    fn a_revolutions_silhouette_comes_from_its_formula() {
+        let s = Surface::Revolution(std::sync::Arc::new(
+            Revolution::new(Frame::WORLD, wavy()).unwrap(),
+        ));
+        let t = Vector3::new(0.3, -1.0, 0.4);
+        let t = t / t.length();
+        let b = branches(&s, t, [[0.0, TAU], [0.0, 1.0]]);
+        assert!(!b.is_empty());
+        for raw in &b {
+            for i in 0..=32 {
+                let x = raw.range[0] + (raw.range[1] - raw.range[0]) * i as f64 / 32.0;
+                let (c2, map) = &raw.pcurve;
+                let q = c2.point(map[0] + map[1] * x);
+                assert!(s.point(q.x, q.y).distance(raw.curve.point(x)) <= raw.tolerance);
+                if let Some(n) = s.normal(q.x, q.y) {
+                    assert!(n.get().dot(t).abs() <= 1e-6, "{x}");
+                }
+            }
+        }
     }
 }
