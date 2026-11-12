@@ -1,7 +1,10 @@
 //! Sketches: their plane, as a request gives it (ryucad 27.C).
 
+use super::{BodyUse, Check, FeatureKind, Write};
 use super::{Given, apply_placement, new_placement, placement_report};
+use crate::doc::files::Feature;
 use crate::doc::id::Id;
+use crate::doc::project::Part;
 use crate::doc::reference::Reference;
 use crate::doc::sketch::{OnFace, OriginPlane, Plane, Sketch};
 use crate::error::{Code, Error, Result};
@@ -117,5 +120,56 @@ pub(crate) fn sketch_plane(
             ))
         }
         p => Ok(p),
+    }
+}
+
+/// Sketches. Their geometry changes through `sketch.edit`; an edit here
+/// moves the plane without changing the solve.
+pub(crate) struct Sketches;
+
+impl FeatureKind for Sketches {
+    fn types(&self) -> &'static [&'static str] {
+        &["sketch"]
+    }
+
+    fn fields(&self, _ty: &str) -> &'static [&'static str] {
+        &SKETCH
+    }
+
+    fn body(&self, _ty: &str) -> BodyUse {
+        BodyUse::NONE
+    }
+
+    fn from_given(
+        &self,
+        _ty: &str,
+        current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<Feature> {
+        match current {
+            None => Ok(Feature::Sketch(Sketch::new(sketch_plane(
+                None, &cx.given, cx.part, cx.unit, cx.env,
+            )?))),
+            Some(Feature::Sketch(s)) => {
+                let mut s = s.clone();
+                s.plane = sketch_plane(Some(&s.plane), &cx.given, cx.part, cx.unit, cx.env)?;
+                Ok(Feature::Sketch(s))
+            }
+            Some(_) => unreachable!("a sketch"),
+        }
+    }
+
+    fn report(&self, part: &Part, f: &Feature) -> Value {
+        let Feature::Sketch(s) = f else {
+            unreachable!("a sketch")
+        };
+        sketch_report(&part.id, s)
+    }
+
+    fn check(&self, cx: &Check<'_>, f: &Feature) -> Result<()> {
+        let Feature::Sketch(s) = f else {
+            unreachable!("a sketch")
+        };
+        crate::sketch::context(cx.part, cx.order, cx.id, s, cx.results).map(|_| ())
     }
 }

@@ -1,8 +1,12 @@
 //! Booleans of whole solids (ryucad 27.C).
 
 use super::Given;
+use super::{BodyUse, FeatureKind, Write};
+use crate::doc::files::Feature;
+use crate::doc::project::Part;
 use crate::doc::solid::Boolean;
 use crate::error::{Code, Error, Result};
+use serde_json::Value;
 use serde_json::json;
 
 pub(crate) const BOOLEAN: [&str; 4] = ["op", "target", "targets", "tools"];
@@ -43,4 +47,37 @@ pub(crate) fn boolean_from(current: Option<&Boolean>, given: &Given) -> Result<B
     let b = Boolean::from_fields(&mut o)?;
     o.finish()?;
     Ok(b)
+}
+
+/// Booleans of whole solids.
+pub(crate) struct Booleans;
+
+impl FeatureKind for Booleans {
+    fn types(&self) -> &'static [&'static str] {
+        &["boolean"]
+    }
+
+    fn fields(&self, _ty: &str) -> &'static [&'static str] {
+        &BOOLEAN
+    }
+
+    fn body(&self, _ty: &str) -> BodyUse {
+        BodyUse::NONE
+    }
+
+    fn from_given(
+        &self,
+        _ty: &str,
+        current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<Feature> {
+        Ok(Feature::Boolean(boolean_from(
+            current.and_then(Feature::boolean),
+            &cx.given,
+        )?))
+    }
+
+    fn report(&self, _part: &Part, f: &Feature) -> Value {
+        f.boolean().expect("a boolean").fields()
+    }
 }

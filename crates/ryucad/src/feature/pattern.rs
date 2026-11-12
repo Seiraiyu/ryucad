@@ -1,8 +1,10 @@
 //! Patterns of joins, cuts and holes (ryucad 27.C).
 
 use super::Given;
+use super::{BodyUse, Check, FeatureKind, Place, Write};
 use crate::doc::files::Feature;
 use crate::doc::id::Id;
+use crate::doc::project::Part;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use crate::geometry::geom_json;
@@ -191,4 +193,94 @@ pub(crate) fn pattern_from(
     let p = Pattern::from_fields(&mut o, unit, env)?;
     o.finish()?;
     Ok(Feature::Pattern(p))
+}
+
+/// Patterns of joins, cuts and holes.
+pub(crate) struct Patterns;
+
+impl FeatureKind for Patterns {
+    fn types(&self) -> &'static [&'static str] {
+        &["pattern"]
+    }
+
+    fn fields(&self, _ty: &str) -> &'static [&'static str] {
+        &PATTERN
+    }
+
+    fn body(&self, _ty: &str) -> BodyUse {
+        BodyUse::NONE
+    }
+
+    // A pattern with no targets acts on its first seed's.
+    fn before_targets(&self, _ty: &str, cx: &mut Write<'_>) -> Result<()> {
+        if cx.given.fields.targets.is_some() {
+            return Ok(());
+        }
+        let Place::New { id, .. } = cx.place else {
+            return Ok(());
+        };
+        let pid = cx.part;
+        let p = cx.session.project().part(pid)?;
+        let seed = cx.given.fields.features.as_ref().and_then(|s| s.first());
+        let theirs = seed
+            .and_then(|s| Id::parse(s, "feature").ok())
+            .and_then(|s| p.features.get(&s).cloned())
+            .and_then(|f| f.ok());
+        match (seed, theirs) {
+            (_, Some(f)) if !f.targets().is_empty() => {
+                cx.given.fields.targets = Some(f.targets().iter().map(|t| t.to_string()).collect());
+            }
+            // Its seed's own fault says what's wrong with it.
+            (Some(seed), Some(f)) => {
+                return Err(Error::new(
+                    Code::ReferenceWrongKind,
+                    format!(
+                        "{}its seed {seed} is a {} that joins or cuts nothing; a pattern repeats joins, cuts and holes",
+                        id.map(|i| format!("pattern {i}: ")).unwrap_or_default(),
+                        f.type_name()
+                    ),
+                )
+                .with("seed", seed)
+                .with("pointer", "/features/0"));
+            }
+            (Some(seed), None)
+                if Id::parse(seed, "feature").is_ok_and(|s| !p.features.contains_key(&s)) =>
+            {
+                return Err(Error::new(
+                    Code::NotFound,
+                    format!("a pattern's seed {seed} isn't a feature of part {pid}"),
+                )
+                .with("seed", seed)
+                .with("pointer", "/features/0"));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn from_given(
+        &self,
+        _ty: &str,
+        current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<Feature> {
+        pattern_from(
+            current.and_then(Feature::pattern),
+            &cx.given,
+            cx.part,
+            cx.unit,
+            cx.env,
+        )
+    }
+
+    fn report(&self, part: &Part, f: &Feature) -> Value {
+        pattern_report(&part.id, f.pattern().expect("a pattern"))
+    }
+
+    // What its directions, axis and plane are; where the instances land
+    // only rebuild can tell.
+    fn check(&self, cx: &Check<'_>, f: &Feature) -> Result<()> {
+        let x = f.pattern().expect("a pattern");
+        crate::pattern::motions(&cx.proposed(f), cx.id, x, cx.results).map(|_| ())
+    }
 }

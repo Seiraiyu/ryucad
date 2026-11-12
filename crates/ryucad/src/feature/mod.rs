@@ -1,3 +1,4 @@
+#![allow(dead_code)] // ryucad 27.C: until feature.types (Task 12) uses every item
 //! Feature kinds (ryucad 27.C, design 541): what ryucad does with each
 //! feature type a request names, one module per kind, registered in
 //! `KINDS`. The file formats stay in `ryucad-doc`, which ryupdm reads.
@@ -17,18 +18,262 @@ pub(crate) mod planar;
 pub(crate) mod primitive;
 pub(crate) mod sketch;
 
-use crate::doc::files::{Feature, Placement, number};
+use crate::doc::files::{Feature, Placement, PrimitiveType, number};
 use crate::doc::id::Id;
 use crate::doc::project::Part;
 use crate::doc::sweep::RevolveAxis;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
+use crate::kind::Want;
 use crate::proto::{FeatureFields, PlacementArg};
 use crate::rebuild;
 use crate::session::Session;
 use crate::solid::Solids;
 use crate::units::{Quantity, Unit};
 use serde_json::{Map, Value, json};
+
+/// What ryucad does with one kind of feature: one or several `type`s
+/// sharing a module (`fillet` and `chamfer`, the five primitives).
+/// `feature.add` and `feature.edit` keep their shared steps and call the
+/// kind where they matched on the type. Every method after `report` does
+/// nothing unless its kind needs it.
+pub(crate) trait FeatureKind: Sync {
+    /// The `type` strings this kind owns, as `feature.add` takes them.
+    fn types(&self) -> &'static [&'static str];
+
+    /// The request fields `ty` takes (`given.only`'s list): `params` and
+    /// `placement` besides `FeatureFields`' own.
+    fn fields(&self, ty: &str) -> &'static [&'static str];
+
+    /// The body `ty` needs and whether it founds one (`feature.types`).
+    fn body(&self, ty: &str) -> BodyUse;
+
+    /// The feature a request makes: a new one (`current` `None`) or an
+    /// edit of `current`, from `cx.given`, which `refuse_others` passed.
+    /// (Named for the modules' own `from_given`, which it calls.)
+    #[allow(clippy::wrong_self_convention)]
+    fn from_given(
+        &self,
+        ty: &str,
+        current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<Feature>;
+
+    /// Its part of `report`: its file's fields, every quantity as written
+    /// and in meters, every reference as `<part>/<feature>/<name>`.
+    fn report(&self, part: &Part, f: &Feature) -> Value;
+
+    /// What a new feature fills in, or reads, before the shared target
+    /// default (`one_target`): a pattern's targets, a mirror's solid and
+    /// operation, an insert's newest label.
+    fn before_targets(&self, _ty: &str, _cx: &mut Write<'_>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Whether it acts on targets whatever its operation (a hole), so a
+    /// new one naming none acts on the part's one solid.
+    fn acts_without_operation(&self) -> bool {
+        false
+    }
+
+    /// What a request sends in other fields, read as this kind's own: a
+    /// tweak's `face`, a flange's extent length, a primitive's `radius`.
+    fn take_given(&self, _ty: &str, _given: &mut Given) -> Result<()> {
+        Ok(())
+    }
+
+    /// The target a new feature takes when it names none (a tweak, a
+    /// shell, a flange), after the shared default.
+    fn default_target(&self, _ty: &str, _cx: &mut Write<'_>) -> Result<()> {
+        Ok(())
+    }
+
+    /// What an edit of `current` reads of the session before its part's
+    /// revision is checked: an insert's newest label.
+    fn before_revision(&self, _ty: &str, _current: &Feature, _cx: &mut Write<'_>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Refuses the fields `ty` doesn't take.
+    fn refuse_others(&self, ty: &str, given: &Given) -> Result<()> {
+        given.only(ty, self.fields(ty))
+    }
+
+    /// Whether an edit from `old` to `new` has its references checked
+    /// again, besides a change of its references, geometry or source.
+    fn rechecks(&self, _old: &Feature, _new: &Feature) -> bool {
+        false
+    }
+
+    /// Whether `f` is checked against the rebuild even when it names no
+    /// reference, geometry or body (a loft's sections, an unfold).
+    fn always_checked(&self, _f: &Feature) -> bool {
+        false
+    }
+
+    /// Checks of `f` against the current rebuild beyond the shared ones:
+    /// what its references are; what the kernel makes of them only
+    /// rebuild can tell.
+    fn check(&self, _cx: &Check<'_>, _f: &Feature) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// The body a feature type needs and whether it founds one, whatever its
+/// fields say (`feature.types`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BodyUse {
+    /// What every body it acts on must be; `None` when that depends on
+    /// its fields (a join wants a solid, a cut either) or it acts on none.
+    pub(crate) needs: Option<Want>,
+    pub(crate) founds: Founds,
+}
+
+impl BodyUse {
+    /// Needs nothing, founds nothing.
+    pub(crate) const NONE: BodyUse = BodyUse {
+        needs: None,
+        founds: Founds::Never,
+    };
+    /// Always founds its own body.
+    pub(crate) const FOUNDS: BodyUse = BodyUse {
+        needs: None,
+        founds: Founds::Always,
+    };
+    /// Founds a body when its operation is `new` (the default).
+    pub(crate) const WHEN_NEW: BodyUse = BodyUse {
+        needs: None,
+        founds: Founds::WhenNew,
+    };
+    /// Acts on solids only.
+    pub(crate) const SOLID: BodyUse = BodyUse {
+        needs: Some(Want::Solid),
+        founds: Founds::Never,
+    };
+}
+
+/// Whether a feature type founds a body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Founds {
+    Always,
+    /// When its operation is `new`, the default.
+    WhenNew,
+    /// A split, when it keeps both sides.
+    WhenBothKept,
+    Never,
+}
+
+impl Founds {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Founds::Always => "always",
+            Founds::WhenNew => "when_new",
+            Founds::WhenBothKept => "when_both_kept",
+            Founds::Never => "never",
+        }
+    }
+}
+
+/// Where a request's feature goes.
+#[derive(Clone, Copy)]
+pub(crate) enum Place<'a> {
+    /// A new feature, to go at `at` in `order`, with the ID it was given.
+    New {
+        order: &'a [Id],
+        at: usize,
+        id: Option<&'a str>,
+    },
+    /// An edit of feature `id`.
+    Edit { id: &'a Id },
+}
+
+/// A `feature.add` or `feature.edit` as a kind reads it.
+pub(crate) struct Write<'a> {
+    pub(crate) session: &'a mut Session,
+    pub(crate) part: &'a Id,
+    pub(crate) unit: Unit,
+    pub(crate) env: &'a Env,
+    pub(crate) given: Given,
+    pub(crate) place: Place<'a>,
+    /// A feature read before the part was borrowed for the rest (an
+    /// insert, which may look up its source's newest label).
+    pub(crate) read: Option<Feature>,
+    /// What a new insert took for its revision, and why (design 521).
+    pub(crate) took: Option<Value>,
+}
+
+impl Write<'_> {
+    /// The solids a new feature could act on: founded before it and not
+    /// consumed. Only a new feature's defaults ask.
+    pub(crate) fn solids_before(&self) -> Result<Vec<Id>> {
+        let Place::New { order, at, .. } = self.place else {
+            unreachable!("only a new feature's defaults ask what is before it")
+        };
+        Ok(solids_before(
+            self.session.project().part(self.part)?,
+            order,
+            at,
+        ))
+    }
+
+    /// For an edit, refuses `f` whose profile names what isn't there
+    /// ([`check_sweep`]); a new feature's is checked once it has an ID.
+    pub(crate) fn check_profile(&self, f: &Feature) -> Result<()> {
+        let Place::Edit { id } = self.place else {
+            return Ok(());
+        };
+        let p = self.session.project().part(self.part)?;
+        check_sweep(p, &crate::part::order(p)?, id, f)
+    }
+}
+
+/// A feature as the reference checks see it: in `part`, with the list
+/// as the write leaves it (`order`), against the current rebuild.
+pub(crate) struct Check<'a> {
+    pub(crate) part: &'a Part,
+    pub(crate) order: &'a [Id],
+    pub(crate) id: &'a Id,
+    pub(crate) results: &'a crate::rebuild::PartResult,
+}
+
+impl Check<'_> {
+    /// The part as writing `f` would leave it.
+    pub(crate) fn proposed(&self, f: &Feature) -> Part {
+        crate::part::proposed(self.part, self.order, &[(self.id, f)])
+    }
+}
+
+/// Every kind, in the order `feature.types` lists them.
+pub(crate) static KINDS: &[&dyn FeatureKind] = &[
+    &primitive::Primitives,
+    &sketch::Sketches,
+    &extrude::Extrusions,
+    &planar::Planars,
+    &boolean::Booleans,
+    &blend::Blends,
+    &hole::Holes,
+    &pattern::Patterns,
+];
+
+/// The kind that owns feature type `ty`, if any does.
+pub(crate) fn kind(ty: &str) -> Option<&'static dyn FeatureKind> {
+    KINDS.iter().copied().find(|k| k.types().contains(&ty))
+}
+
+/// The kind of a feature a file holds: every type has one (the
+/// registry's tests).
+pub(crate) fn kind_of(f: &Feature) -> &'static dyn FeatureKind {
+    kind(f.type_name()).expect("every feature type has a kind")
+}
+
+/// `unknown_feature_type` for a type no kind owns: ryucad-doc's own
+/// refusal, as `feature.add` has always given it.
+pub(crate) fn unknown_type(ty: &str) -> Error {
+    match PrimitiveType::parse(ty) {
+        Err(e) => e,
+        Ok(_) => unreachable!("the primitives have a kind"),
+    }
+}
 
 /// A placement as output reports it: quantities as written and in meters.
 pub(crate) fn placement_report(p: &Placement) -> Value {
@@ -313,4 +558,164 @@ pub(crate) fn check_up_to(
         results,
     };
     resolve(&at, role, target, &[Want::Point, Want::Plane]).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kind::Want;
+    use std::collections::BTreeSet;
+
+    /// Every type ryucad-doc knows, from its own refusal of one it
+    /// doesn't (`unknown_feature_type` lists them).
+    fn doc_types() -> Vec<String> {
+        let e = PrimitiveType::parse("no such type").unwrap_err();
+        let (_, known) = e
+            .message
+            .split_once("known: ")
+            .expect("the refusal lists the known types");
+        known.split(", ").map(str::to_owned).collect()
+    }
+
+    /// Every field a request's `FeatureFields` takes, by its wire name,
+    /// from serde's refusal of one it doesn't (`deny_unknown_fields`
+    /// lists them all, renames included).
+    fn wire_fields() -> Vec<String> {
+        let e = serde_json::from_value::<FeatureFields>(json!({"no such field": 0}))
+            .unwrap_err()
+            .to_string();
+        let (_, expected) = e
+            .split_once("expected one of ")
+            .expect("serde lists the fields");
+        expected
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn owned() -> Vec<&'static str> {
+        KINDS
+            .iter()
+            .flat_map(|k| k.types().iter().copied())
+            .collect()
+    }
+
+    #[test]
+    fn every_type_has_exactly_one_kind() {
+        let mut owned = owned();
+        let n = owned.len();
+        owned.sort_unstable();
+        owned.dedup();
+        assert_eq!(owned.len(), n, "a type two kinds own");
+        let mut known = doc_types();
+        known.sort();
+        assert_eq!(owned, known, "the registry against ryucad-doc's types");
+    }
+
+    #[test]
+    fn every_type_a_kind_owns_parses_as_that_type() {
+        for ty in owned() {
+            let v = json!({"format": crate::doc::files::FEATURE_FORMAT,
+                           "kind": "ryucad.feature", "type": ty});
+            match Feature::from_json(&v, Unit::Mm, &Env::empty()) {
+                Ok(f) => assert_eq!(f.type_name(), ty),
+                Err(e) => assert_ne!(e.code, Code::UnknownFeatureType, "{ty}: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn every_field_a_kind_lists_is_a_request_field() {
+        let wire = wire_fields();
+        for k in KINDS {
+            for ty in k.types() {
+                for f in k.fields(ty) {
+                    assert!(
+                        wire.iter().any(|w| w == f) || ["params", "placement"].contains(f),
+                        "{ty} lists {f}, which no request has"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_request_field_is_taken_by_some_kind() {
+        let taken: BTreeSet<&str> = KINDS
+            .iter()
+            .flat_map(|k| {
+                k.types()
+                    .iter()
+                    .flat_map(move |t| k.fields(t).iter().copied())
+            })
+            .collect();
+        let unread: Vec<String> = wire_fields()
+            .into_iter()
+            .filter(|f| !taken.contains(f.as_str()))
+            .collect();
+        assert!(unread.is_empty(), "FeatureFields no kind takes: {unread:?}");
+    }
+
+    /// What `feature.types` says each type needs of a body and whether it
+    /// founds one, whatever its fields say (design 388's table, read in
+    /// `kind::bodies_read`, `Feature::combine` and `Feature::founds`).
+    #[test]
+    fn what_each_type_needs_and_founds() {
+        use Founds::*;
+        let (solid, sheet) = (Some(Want::Solid), Some(Want::Sheet));
+        let rows = [
+            ("box", None, WhenNew),
+            ("cylinder", None, WhenNew),
+            ("cone", None, WhenNew),
+            ("sphere", None, WhenNew),
+            ("torus", None, WhenNew),
+            ("sketch", None, Never),
+            ("extrude", None, WhenNew),
+            ("revolve", None, WhenNew),
+            ("sweep", None, WhenNew),
+            ("loft", None, WhenNew),
+            ("planar", None, Always),
+            ("fill", None, Always),
+            ("extract", None, Always),
+            ("sew", sheet, Always),
+            ("thicken", None, WhenNew),
+            ("boolean", None, Never),
+            ("fillet", None, Never),
+            ("chamfer", None, Never),
+            ("hole", None, Never),
+            ("pattern", None, Never),
+            ("instance", None, Never),
+            ("mate", None, Never),
+            ("instance_pattern", None, Never),
+            ("insert", None, Always),
+            ("delete_body", None, Never),
+            ("plane", None, Never),
+            ("axis", None, Never),
+            ("point", None, Never),
+            ("path", None, Never),
+            ("helix", None, Never),
+            ("shell", solid, Never),
+            ("offset", None, Never),
+            ("mirror", None, WhenNew),
+            ("split", None, WhenBothKept),
+            ("base_flange", None, Always),
+            ("flange", solid, Never),
+            ("unfold", solid, Never),
+            ("refold", solid, Never),
+            ("move_face", None, Never),
+            ("replace_face", None, Never),
+            ("draft", None, Never),
+            ("delete_face", None, Never),
+            ("delete_blend", None, Never),
+            ("resize_blend", None, Never),
+            ("import", None, Always),
+        ];
+        assert_eq!(rows.len(), doc_types().len(), "a row for every type");
+        for (ty, needs, founds) in rows {
+            let k = kind(ty).unwrap_or_else(|| panic!("no kind owns {ty}"));
+            assert_eq!(k.body(ty), BodyUse { needs, founds }, "{ty}");
+        }
+    }
 }

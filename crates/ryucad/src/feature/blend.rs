@@ -1,8 +1,10 @@
 //! Fillets and chamfers (ryucad 27.C).
 
 use super::Given;
+use super::{BodyUse, Check, FeatureKind, Write};
 use crate::doc::files::Feature;
 use crate::doc::id::Id;
+use crate::doc::project::Part;
 use crate::doc::reference::Reference;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
@@ -178,4 +180,54 @@ pub(crate) fn blend_from(
     };
     o.finish()?;
     Ok(out)
+}
+
+/// Fillets and chamfers.
+pub(crate) struct Blends;
+
+/// Whether a fillet or chamfer grows its edges along tangent ones.
+fn propagates(f: &Feature) -> bool {
+    match f {
+        Feature::Fillet(x) => x.propagate,
+        Feature::Chamfer(x) => x.propagate,
+        _ => false,
+    }
+}
+
+impl FeatureKind for Blends {
+    fn types(&self) -> &'static [&'static str] {
+        &["fillet", "chamfer"]
+    }
+
+    fn fields(&self, ty: &str) -> &'static [&'static str] {
+        if ty == "fillet" { &FILLET } else { &CHAMFER }
+    }
+
+    fn body(&self, _ty: &str) -> BodyUse {
+        BodyUse::NONE
+    }
+
+    fn from_given(
+        &self,
+        ty: &str,
+        current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<Feature> {
+        blend_from(ty, current, &cx.given, cx.part, cx.unit, cx.env)
+    }
+
+    fn report(&self, part: &Part, f: &Feature) -> Value {
+        blend_report(&part.id, f)
+    }
+
+    // One that now grows its edges, or stops, may reach an edge twice.
+    fn rechecks(&self, old: &Feature, new: &Feature) -> bool {
+        propagates(old) != propagates(new)
+    }
+
+    // Edges of one solid, a face where a face goes, no edge twice; what
+    // the kernel makes of them only rebuild can tell.
+    fn check(&self, cx: &Check<'_>, f: &Feature) -> Result<()> {
+        crate::rebuild::check_blend(&cx.proposed(f), cx.id, f, cx.results)
+    }
 }

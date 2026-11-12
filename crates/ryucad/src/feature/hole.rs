@@ -1,8 +1,10 @@
 //! Holes drilled at a sketch's points (ryucad 27.C).
 
 use super::Given;
+use super::{BodyUse, Check, FeatureKind, Write};
 use crate::doc::files::Feature;
 use crate::doc::id::Id;
+use crate::doc::project::Part;
 use crate::error::Result;
 use crate::expr::Env;
 use crate::geometry::geom_json;
@@ -127,4 +129,56 @@ pub(crate) fn hole_from(
     let h = Hole::from_fields(&mut o, unit, env)?;
     o.finish()?;
     Ok(Feature::Hole(h))
+}
+
+/// Holes.
+pub(crate) struct Holes;
+
+impl FeatureKind for Holes {
+    fn types(&self) -> &'static [&'static str] {
+        &["hole"]
+    }
+
+    fn fields(&self, _ty: &str) -> &'static [&'static str] {
+        &HOLE
+    }
+
+    fn body(&self, _ty: &str) -> BodyUse {
+        BodyUse::NONE
+    }
+
+    fn acts_without_operation(&self) -> bool {
+        true
+    }
+
+    fn from_given(
+        &self,
+        _ty: &str,
+        current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<Feature> {
+        let f = hole_from(
+            current.and_then(Feature::hole),
+            &cx.given,
+            cx.part,
+            cx.unit,
+            cx.env,
+        )?;
+        cx.check_profile(&f)?;
+        Ok(f)
+    }
+
+    fn report(&self, part: &Part, f: &Feature) -> Value {
+        hole_report(&part.id, f.hole().expect("a hole"))
+    }
+
+    // What the target is; how far it is only rebuild can tell.
+    fn check(&self, cx: &Check<'_>, f: &Feature) -> Result<()> {
+        match &f.hole().expect("a hole").depth {
+            crate::doc::hole::Depth::UpTo { target, .. } => {
+                super::check_up_to(cx.part, cx.order, cx.id, "depth", target, cx.results)
+            }
+            _ => Ok(()),
+        }
+    }
 }

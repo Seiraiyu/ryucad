@@ -1,8 +1,12 @@
 //! Extrudes and revolves: a sketch's loops swept straight or round (ryucad 27.C).
 
 use super::Given;
+use super::check_up_to;
+use super::{BodyUse, Check, FeatureKind, Write};
 use crate::doc::files::Feature;
 use crate::doc::id::Id;
+use crate::doc::project::Part;
+use crate::doc::sweep::{Angle, Extent, RevolveAxis};
 use crate::doc::sweep::{Extrude, Revolve};
 use crate::error::Result;
 use crate::expr::Env;
@@ -97,4 +101,96 @@ pub(crate) fn sweep_from(
     };
     o.finish()?;
     Ok(f)
+}
+
+/// Extrudes and revolves.
+pub(crate) struct Extrusions;
+
+impl FeatureKind for Extrusions {
+    fn types(&self) -> &'static [&'static str] {
+        &["extrude", "revolve"]
+    }
+
+    fn fields(&self, ty: &str) -> &'static [&'static str] {
+        if ty == "extrude" { &EXTRUDE } else { &REVOLVE }
+    }
+
+    fn body(&self, _ty: &str) -> BodyUse {
+        BodyUse::WHEN_NEW
+    }
+
+    fn from_given(
+        &self,
+        ty: &str,
+        current: Option<&Feature>,
+        cx: &mut Write<'_>,
+    ) -> Result<Feature> {
+        let fields = match current {
+            None => None,
+            Some(Feature::Extrude(e)) => Some(e.fields()),
+            Some(Feature::Revolve(r)) => Some(r.fields()),
+            Some(_) => unreachable!("a sweep"),
+        };
+        let f = sweep_from(ty, fields, &cx.given, cx.part, cx.unit, cx.env)?;
+        cx.check_profile(&f)?;
+        Ok(f)
+    }
+
+    fn report(&self, part: &Part, f: &Feature) -> Value {
+        let part = &part.id;
+        match f {
+            Feature::Extrude(e) => {
+                let mut v = e.fields();
+                match &e.extent {
+                    Extent::Blind(q) | Extent::Symmetric(q) => v["extent"]["length"] = q.report(),
+                    Extent::ThroughAll { .. } => {}
+                    Extent::UpTo { target, offset } => {
+                        v["extent"]["target"] = json!(target.text(part));
+                        if let Some(q) = offset {
+                            v["extent"]["offset"] = q.report();
+                        }
+                    }
+                }
+                v
+            }
+            Feature::Revolve(r) => {
+                let mut v = r.fields();
+                if let Angle::Of(q) = &r.angle {
+                    v["angle"] = q.report();
+                }
+                if let RevolveAxis::Ref(e) = &r.axis {
+                    v["axis"] = json!(e.text(part));
+                }
+                v
+            }
+            _ => unreachable!("an extrude or a revolve"),
+        }
+    }
+
+    fn check(&self, cx: &Check<'_>, f: &Feature) -> Result<()> {
+        match f {
+            // What the target is; how far it is only rebuild can tell.
+            Feature::Extrude(e) => match &e.extent {
+                Extent::UpTo { target, .. } => {
+                    check_up_to(cx.part, cx.order, cx.id, "target", target, cx.results)
+                }
+                _ => Ok(()),
+            },
+            // That it is an axis; whether it lies in the sketch's plane
+            // only rebuild can tell.
+            Feature::Revolve(r) => match &r.axis {
+                RevolveAxis::Ref(g) => {
+                    let at = crate::geometry::At {
+                        part: cx.part,
+                        order: cx.order,
+                        owner: cx.id,
+                        results: cx.results,
+                    };
+                    crate::geometry::one(&at, "axis", g, crate::geometry::Want::Axis).map(|_| ())
+                }
+                RevolveAxis::Line(_) => Ok(()),
+            },
+            _ => unreachable!("an extrude or a revolve"),
+        }
+    }
 }

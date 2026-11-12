@@ -37,7 +37,7 @@ use crate::feature::instance_pattern::{INSTANCE_PATTERN, instance_pattern_from};
 use crate::feature::mate::{MATE, mate_from};
 use crate::feature::pattern::{PATTERN, pattern_from, pattern_report};
 use crate::feature::planar::planar_from;
-use crate::feature::primitive::{combine_from, primitive_fields, primitive_report};
+use crate::feature::primitive::{combine_from, primitive_report, radius_param, refuse_sizes};
 use crate::feature::sketch::{SKETCH, sketch_plane, sketch_report};
 
 /// How a feature appears in output: every quantity as written and in
@@ -657,7 +657,8 @@ pub(crate) fn feature_add(
         }
         _ => {
             let ty = PrimitiveType::parse(ty)?;
-            primitive_fields(ty, &mut given)?;
+            radius_param(ty, &mut given)?;
+            refuse_sizes(ty, &given)?;
             let combine = combine_from(&Combine::NEW, &given)?;
             Feature::Primitive(Primitive {
                 ty,
@@ -811,7 +812,8 @@ pub(crate) fn feature_edit(
     } else {
         match old.clone() {
             Feature::Primitive(mut f) => {
-                primitive_fields(f.ty, &mut given)?;
+                radius_param(f.ty, &mut given)?;
+                refuse_sizes(f.ty, &given)?;
                 f.combine = combine_from(&f.combine, &given)?;
                 let mut merged: Map<String, Value> = f
                     .params
