@@ -7,6 +7,8 @@
 //! changes the library. Every other attribute is a *file property*, read
 //! from the committed bytes each time it is asked for (`props.get`).
 
+use crate::doc::files::Feature;
+use crate::doc::id::Id;
 use crate::doc::materials::Materials;
 use crate::doc::project::Project;
 use crate::doc::source::Source;
@@ -342,6 +344,99 @@ pub fn apply(
     }
     out.instances.sort_unstable();
     out.instances.dedup();
+    out
+}
+
+/// The property items of `opened` that don't read, as the transfer's
+/// `failed` (`import_property_invalid`), PDM or not.
+pub fn failed(opened: &Opened) -> Vec<ryustep::census::Failed> {
+    opened
+        .properties()
+        .failed
+        .iter()
+        .map(|(instance, _)| ryustep::census::Failed {
+            instance: *instance,
+            code: "import_property_invalid".to_owned(),
+        })
+        .collect()
+}
+
+/// The definition of `opened` (stored at `path`) part `part`'s
+/// properties come from: the product of its first import feature of
+/// `path` without a place, else its first instance imported from
+/// `path` (an imported assembly's own product), else, for a flattened
+/// part, the file's one root.
+pub fn source_definition(
+    project: &Project,
+    part: &Id,
+    path: &str,
+    opened: &Opened,
+) -> Option<usize> {
+    let p = project.parts.get(part)?;
+    let named = p.order().iter().find_map(|fid| match p.features.get(fid) {
+        Some(Ok(Feature::Import(i))) if i.file.path == path && i.place.is_none() => {
+            i.product.as_ref()
+        }
+        Some(Ok(Feature::Instance(i))) => i
+            .import
+            .as_ref()
+            .filter(|u| u.file == path)
+            .map(|u| &u.product),
+        _ => None,
+    });
+    if let Some(r) = named {
+        return crate::file_styles::definition_of(opened, r);
+    }
+    let flat = p.order().iter().any(|fid| {
+        matches!(p.features.get(fid), Some(Ok(Feature::Import(i))) if i.file.path == path && i.place.is_some())
+    });
+    let makes = crate::import::plan::makes(opened);
+    let roots: Vec<usize> = opened
+        .products
+        .roots
+        .iter()
+        .copied()
+        .filter(|&k| makes[k])
+        .collect();
+    match (flat, roots.as_slice()) {
+        (true, [k]) => Some(*k),
+        _ => None,
+    }
+}
+
+/// The instances of `opened` (at `path`) whose mapped values `parts`
+/// hold now: `import.report`'s `interpreted`.
+pub fn held(
+    project: &Project,
+    files: &dyn Source,
+    opened: &Opened,
+    path: &str,
+    parts: &[Id],
+) -> Vec<u64> {
+    let mut out = Vec::new();
+    if !project.root.join(crate::doc::project::PDM_CONFIG).is_file() {
+        return out;
+    }
+    let Ok(config) = Config::read(files) else {
+        return out;
+    };
+    let unit = project.manifest.default_unit;
+    for part in parts {
+        let Some(k) = source_definition(project, part, path, opened) else {
+            continue;
+        };
+        let now = ryupdm::props::read(files, part)
+            .map(|p| p.values)
+            .unwrap_or_default();
+        let m = mapped(opened, k, &config, unit, path);
+        for (key, v) in &m.values {
+            if now.get(key) == Some(v) {
+                out.extend(m.instances.get(key).into_iter().flatten());
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
     out
 }
 
@@ -730,5 +825,64 @@ pub(crate) mod tests {
         assert_eq!(got["name"], "mine");
         assert_eq!(got["batch_size"], 250);
         assert_eq!(got["material"], "6061-T6");
+    }
+
+    fn bucket(v: &Value, category: &str, bucket: &str) -> u64 {
+        v["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["category"] == category)
+            .map_or(0, |c| c[bucket]["count"].as_u64().unwrap())
+    }
+
+    #[test]
+    fn mapped_values_are_interpreted_and_what_doesnt_read_failed() {
+        let (_dir, mut s) = declared(&[]);
+        let v = call(
+            &mut s,
+            "import",
+            json!({"path": vendor_path(false), "solid": true}),
+        )
+        .unwrap();
+        let t = &v["transfer"];
+        assert!(bucket(t, "materials", "interpreted") >= 5, "{t}");
+        let props = bucket(t, "properties", "interpreted");
+        assert!(props >= 9, "{t}");
+        assert_eq!(bucket(t, "properties", "failed"), 1, "Broken: {t}");
+        let codes = t["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["category"] == "properties")
+            .unwrap()["codes"]
+            .clone();
+        assert_eq!(
+            codes,
+            json!([{"code": "import_property_invalid", "count": 1}])
+        );
+        // import.report says the same of what the parts hold now, and
+        // less once a person changes a value.
+        let stored = v["file"]["path"].as_str().unwrap().to_owned();
+        let r = call(&mut s, "import.report", json!({"file": stored})).unwrap();
+        assert_eq!(bucket(&r["transfer"], "properties", "interpreted"), props);
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "vb-100", "properties": {"supplier": "Other"}}),
+        )
+        .unwrap();
+        let r = call(&mut s, "import.report", json!({"file": stored})).unwrap();
+        assert!(bucket(&r["transfer"], "properties", "interpreted") < props);
+        // Without PDM: kept, not interpreted, and still failed.
+        let (_dir, mut s) = fresh();
+        let v = call(
+            &mut s,
+            "import",
+            json!({"path": vendor_path(false), "solid": true}),
+        )
+        .unwrap();
+        assert_eq!(bucket(&v["transfer"], "properties", "interpreted"), 0);
+        assert_eq!(bucket(&v["transfer"], "properties", "failed"), 1);
     }
 }
