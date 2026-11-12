@@ -1003,6 +1003,30 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         refs: Vec<String>,
     },
+    /// What a participant's window shows (`design`, `block`, `sheet`,
+    /// `layer`, `camera`, `shown_by`): `participant`, else the one human.
+    /// Needs the daemon.
+    #[serde(rename = "view.get")]
+    ViewGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// The caller's window's view as it navigates: a block (a design's
+    /// root unless named), its sheet (the first unless named), the layer
+    /// and the camera. Needs the daemon.
+    #[serde(rename = "view.set")]
+    ViewSet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        camera: Option<crate::view::Camera>,
+    },
     #[serde(rename = "subscribe")]
     Subscribe {
         #[serde(default)]

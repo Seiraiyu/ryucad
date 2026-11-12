@@ -498,6 +498,16 @@ enum Command {
         #[arg(long = "ref", value_name = "REF")]
         refs: Vec<String>,
     },
+    /// What a window shows (the one person attached by default); `view
+    /// set` sets yours, `view show` shows a person a reference. Through
+    /// the daemon.
+    View {
+        #[command(subcommand)]
+        cmd: Option<ViewCmd>,
+        /// A participant's ID (`participants` lists them).
+        #[arg(long)]
+        of: Option<String>,
+    },
     /// Undo your latest change, or the entry given.
     Undo { entry: Option<u64> },
     /// Redo your latest undo, or the entry given.
@@ -529,6 +539,38 @@ enum Command {
     },
     #[command(subcommand)]
     Daemon(DaemonCmd),
+}
+
+#[derive(Subcommand)]
+enum ViewCmd {
+    /// Set your own view, as a window does while it navigates: a block's
+    /// sheet (the first unless --sheet), its layer, and the camera
+    /// (--centre X,Y and --zoom, nanometres, as the app sends them).
+    Set {
+        #[arg(long)]
+        design: Option<String>,
+        #[arg(long)]
+        block: Option<String>,
+        #[arg(long)]
+        sheet: Option<String>,
+        #[arg(long)]
+        layer: Option<String>,
+        #[arg(long, value_name = "X,Y", requires = "zoom")]
+        centre: Option<String>,
+        /// Nanometres a point.
+        #[arg(long, value_name = "NM", requires = "centre")]
+        zoom: Option<i64>,
+    },
+}
+
+/// `X,Y` in nanometres.
+fn point_nm(text: &str) -> Result<[i64; 2]> {
+    let bad = || Error::new(Code::Usage, format!("{text} isn't X,Y in nanometres"));
+    let (x, y) = text.split_once(',').ok_or_else(bad)?;
+    Ok([
+        x.trim().parse().map_err(|_| bad())?,
+        y.trim().parse().map_err(|_| bad())?,
+    ])
 }
 
 #[derive(Subcommand)]
@@ -1895,6 +1937,33 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Status { text, refs } => Request::ActivitySet {
             status: text.clone(),
             refs: refs.clone(),
+        },
+        Command::View { cmd: None, of } => Request::ViewGet {
+            participant: of.clone(),
+        },
+        Command::View {
+            cmd:
+                Some(ViewCmd::Set {
+                    design,
+                    block,
+                    sheet,
+                    layer,
+                    centre,
+                    zoom,
+                }),
+            ..
+        } => Request::ViewSet {
+            design: design.clone(),
+            block: block.clone(),
+            sheet: sheet.clone(),
+            layer: layer.clone(),
+            camera: match (centre, zoom) {
+                (Some(c), Some(z)) => Some(ryueda::view::Camera {
+                    centre_nm: point_nm(c)?,
+                    zoom_nm_per_pt: *z,
+                }),
+                _ => None,
+            },
         },
         Command::Undo { entry } => Request::Undo { entry: *entry },
         Command::Redo { entry } => Request::Redo { entry: *entry },

@@ -1296,6 +1296,58 @@ fn dispatch(
             live.set_status(&id, &status, refs)?;
             Ok(json!({"participant": id, "status": live.get(&id)?.status}))
         }
+        Request::ViewGet { participant } => {
+            let live = live.ok_or_else(|| live::no_live_session("view.get"))?;
+            Ok(match live.target(participant.as_deref())? {
+                Some(p) => json!({"participant": p.id, "view": crate::view::to_json(&p.view)}),
+                None => json!({"participant": null, "view": null}),
+            })
+        }
+        Request::ViewSet {
+            design,
+            block,
+            sheet,
+            layer,
+            camera,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("view.set"))?;
+            if let Some(c) = &camera {
+                c.check()?;
+            }
+            let id = live.caller(me);
+            let now = live.get(&id)?.view.clone();
+            // A camera moving on the sheet shown is looked up no further.
+            let same = block.is_some()
+                && block == now.block
+                && layer == now.layer
+                && design
+                    .as_ref()
+                    .is_none_or(|d| now.design.as_ref() == Some(d))
+                && sheet.as_ref().is_none_or(|s| now.sheet.as_ref() == Some(s));
+            let shown = match (same, now.block, now.sheet) {
+                (true, Some(block), Some(sheet)) => crate::scene::Shown {
+                    design: now.design,
+                    block,
+                    sheet,
+                    layer: now.layer,
+                },
+                _ => crate::scene::place(
+                    session.project(),
+                    design.as_deref(),
+                    block.as_deref(),
+                    sheet.as_deref(),
+                    layer.as_deref(),
+                )?,
+            };
+            let v = &mut live.get_mut(&id)?.view;
+            v.design = shown.design;
+            v.block = Some(shown.block);
+            v.sheet = Some(shown.sheet);
+            v.layer = shown.layer;
+            v.camera = camera;
+            v.shown_by = Some(id.clone());
+            Ok(json!({"participant": id, "view": crate::view::to_json(v)}))
+        }
         Request::Subscribe { .. } => match live {
             None => Err(live::no_live_session("subscribe")),
             Some(_) => Err(Error::new(Code::Usage, "subscribe needs a connection")),

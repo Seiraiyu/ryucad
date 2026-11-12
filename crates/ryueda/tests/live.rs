@@ -227,3 +227,55 @@ fn an_agent_says_what_it_is_doing() {
         Value::Null
     );
 }
+
+#[test]
+fn a_window_says_where_it_looks() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Here::open(&breakout(dir.path()));
+    let dana = h.human("Dana");
+    // A block alone: its first sheet, the design that places it.
+    let v = h
+        .ask(Some(&dana), "view.set", json!({"block": "sensor"}))
+        .unwrap();
+    let sheet = v["view"]["sheet"].as_str().unwrap().to_owned();
+    assert_eq!(v["view"]["block"], "sensor");
+    assert!(v["view"]["design"].is_string(), "{v}");
+    assert_eq!(v["view"]["shown_by"], json!(dana));
+    // The camera moves on the same sheet.
+    let cam = json!({"centre_nm": [10_000_000, 5_000_000], "zoom_nm_per_pt": 20_000});
+    h.ask(
+        Some(&dana),
+        "view.set",
+        json!({"block": "sensor", "sheet": sheet, "camera": cam}),
+    )
+    .unwrap();
+    // An agent reads the person's view.
+    let got = h.ask(None, "view.get", json!({})).unwrap();
+    assert_eq!(
+        (&got["participant"], &got["view"]["camera"]),
+        (&json!(dana), &cam)
+    );
+    let e = h
+        .ask(
+            Some(&dana),
+            "view.set",
+            json!({"block": "sensor", "sheet": "nope"}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, Code::SheetNotFound);
+    assert_eq!(e.details["sheets"][0]["sheet"], json!(sheet));
+    let e = h
+        .ask(
+            Some(&dana),
+            "view.set",
+            json!({"block": "sensor", "camera": {"centre_nm": [0, 0], "zoom_nm_per_pt": 0}}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, Code::InvalidParam);
+    assert_eq!(
+        h.ask(Some(&dana), "view.set", json!({"block": "nope"}))
+            .unwrap_err()
+            .code,
+        Code::NotFound
+    );
+}

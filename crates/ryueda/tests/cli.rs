@@ -694,6 +694,8 @@ fn every_protocol_method_has_a_command() {
         ("highlight.set", &["highlight"]),
         ("highlight.clear", &["highlight"]),
         ("activity.set", &["status"]),
+        ("view.get", &["view"]),
+        ("view.set", &["view", "set"]),
         ("subscribe", &["watch"]),
         ("request.cancel", &["cancel"]),
         ("daemon.status", &["daemon", "status"]),

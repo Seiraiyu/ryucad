@@ -708,6 +708,45 @@ pub fn answer(session: &mut crate::session::Session, ask: &Ask) -> Result<crate:
     )))
 }
 
+/// Where a view is (plan 3.B): the design whose layer is drawn, the
+/// block, its sheet's ID and the layer as asked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shown {
+    pub design: Option<String>,
+    pub block: String,
+    pub sheet: String,
+    pub layer: Option<String>,
+}
+
+/// The [`Shown`] a view asks for: a design's root block unless `block`,
+/// its first sheet in canvas order unless `sheet` (an ID or a name), the
+/// layer `layer` names (`not_found` if none). Sheets come from the
+/// block's layout file where it reads, else from laying it out.
+pub fn place(
+    p: &Project,
+    design: Option<&str>,
+    block: Option<&str>,
+    sheet: Option<&str>,
+    layer: Option<&str>,
+) -> Result<Shown> {
+    let b = crate::schemcmd::blocks(p, design, block)?[0];
+    let (_, chosen) = crate::schemcmd::pick_layer(p, b, layer)?;
+    let sheets = match &b.layout {
+        Some(Ok(l)) => sheets_of(l),
+        _ => sheets_of(
+            &schem::lay(p, b, None, &[], ryusch::input::Relayout::None)?
+                .outcome
+                .layout,
+        ),
+    };
+    Ok(Shown {
+        design: chosen.map(|l| l.design.to_string()),
+        block: b.id.to_string(),
+        sheet: sheet_named(&b.id, &sheets, sheet)?,
+        layer: layer.map(str::to_owned),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
