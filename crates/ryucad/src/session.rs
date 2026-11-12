@@ -878,6 +878,30 @@ impl Session {
         Ok(changes)
     }
 
+    /// [`Session::refresh_changes`] over every file the project depends
+    /// on, not only those file events named: after ryucad itself had Git
+    /// write the working tree (`branch.switch`), before any event came.
+    /// A capture or frozen session is refreshed as usual.
+    pub fn rescan(&mut self) -> Result<Vec<(String, &'static str)>> {
+        if self.frozen || !matches!(self.sink, Sink::Disk) {
+            return self.refresh_changes();
+        }
+        let root = self.project.root.clone();
+        // Every file is read anyway: drop what this process noted.
+        let _ = crate::doc::source::take_written(std::slice::from_ref(&root));
+        let changes = self.stamps.scan(&root, listed(&root)?)?;
+        if !changes.is_empty() {
+            let paths: Vec<String> = changes.iter().map(|(p, _)| p.clone()).collect();
+            let held = Held {
+                root: &root,
+                stamps: &self.stamps,
+            };
+            self.project.reload_from(&held, &paths)?;
+            self.after_change();
+        }
+        Ok(changes)
+    }
+
     /// What a change to the files lets go: the results their writes made
     /// stale, from the folder or a capture alike.
     fn after_change(&mut self) {
@@ -2016,6 +2040,23 @@ pub fn edit_budget() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_rescan_takes_in_every_file_at_once() {
+        use crate::server::tests::{call, fresh};
+        let (dir, mut s) = fresh();
+        // Written behind the session's back, as `git switch` writes.
+        let mut other = Session::open(dir.path()).unwrap();
+        call(&mut other, "part.create", serde_json::json!({"part": "q"})).unwrap();
+        let seen = s.rescan().unwrap();
+        assert!(
+            seen.iter()
+                .any(|(p, c)| p == "parts/q/part.json" && *c == "created"),
+            "{seen:?}"
+        );
+        assert!(s.project().parts.keys().any(|id| id.to_string() == "q"));
+        assert!(s.rescan().unwrap().is_empty());
+    }
+
     use crate::doc::files::{Feature, Manifest, PartFile, Placement, Primitive, PrimitiveType};
     use crate::doc::project::{MANIFEST, feature_path, part_path, write_json};
     use crate::error::Code;

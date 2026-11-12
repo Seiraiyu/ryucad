@@ -53,6 +53,7 @@ pub mod bench;
 pub mod blends;
 pub mod body;
 pub mod bom;
+pub mod branch;
 pub mod budget;
 pub mod cache;
 pub mod cancel;

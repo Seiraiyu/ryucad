@@ -63,6 +63,97 @@ pub enum FaceMark {
     Changed,
 }
 
+/// Why a write is off while the compared revision is drawn: the model on
+/// screen isn't the files (design 447, Blink). Commands, controls and
+/// sends all give it.
+pub const SWAPPED: &str = "Showing the compared revision: swap back to edit.";
+
+/// Which side of a compare is drawn solid.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Front {
+    /// The working files, the revision ghosted: a compare as it starts.
+    #[default]
+    Working,
+    /// The compared revision, the working files ghosted.
+    Rev,
+}
+
+/// How the window shows a compare with a revision (design 447, Blink):
+/// which side is solid, and whether the other is drawn at all. The
+/// window's own view, like its camera: never sent to the session, so an
+/// agent sets what is compared (`ryucad compare REV`) and the person
+/// blinks.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Blink {
+    /// The participant's compare this is for (`HEAD`, `worktree:<path>`);
+    /// `None` while the window compares with no revision.
+    pub of: Option<String>,
+    pub front: Front,
+    /// One side alone: no ghost and no paint.
+    pub alone: bool,
+}
+
+impl Blink {
+    /// Follows the participant's compare: another revision, or none,
+    /// starts again from both sides with the working files in front.
+    /// Returns whether anything changed.
+    pub fn follow(&mut self, rev: Option<&str>) -> bool {
+        if self.of.as_deref() == rev {
+            return false;
+        }
+        *self = Blink {
+            of: rev.map(str::to_owned),
+            ..Blink::default()
+        };
+        true
+    }
+
+    /// Whether the compared revision is drawn: the model is read there.
+    pub fn draws_rev(&self) -> bool {
+        self.of.is_some() && self.front == Front::Rev
+    }
+
+    /// Swaps the sides (`B`); with one side alone, the other alone.
+    pub fn swap(&mut self) {
+        if self.of.is_some() {
+            self.front = match self.front {
+                Front::Working => Front::Rev,
+                Front::Rev => Front::Working,
+            };
+        }
+    }
+
+    /// Shows `front` alone, or, when it is shown alone already, both
+    /// sides with it in front.
+    pub fn only(&mut self, front: Front) {
+        if self.of.is_none() {
+            return;
+        }
+        if self.alone && self.front == front {
+            self.alone = false;
+        } else {
+            self.front = front;
+            self.alone = true;
+        }
+    }
+
+    /// Both sides again, whichever is in front.
+    pub fn both(&mut self) {
+        self.alone = false;
+    }
+
+    /// What the compare bar says is drawn, for the revision `rev` (and
+    /// its commit as ` (1a2b3c4d5e)`, or empty).
+    pub fn says(&self, rev: &str, commit: &str) -> String {
+        match (self.alone, self.front) {
+            (false, Front::Working) => format!("Comparing with {rev}{commit}"),
+            (false, Front::Rev) => format!("Showing {rev} · working ghosted"),
+            (true, Front::Rev) => format!("Showing only {rev}"),
+            (true, Front::Working) => "Showing only the working files".to_owned(),
+        }
+    }
+}
+
 /// How a part's PDM differs in a compare: the records it adds, as the
 /// tree marks them (`proposes B`, `obsoletes A`), and one line for each
 /// property and the state.
@@ -123,6 +214,10 @@ pub struct Compare {
     /// The side compared to: the working files (`None`), or the person's
     /// draft (`draft:<name>`, while they annotate).
     pub to: Option<String>,
+    /// While the compared revision is drawn (swapped): that revision as
+    /// the participant gave it (`HEAD`). `rev` is then `working` and `to`
+    /// the revision, so the diff runs from the working files to it.
+    pub swapped: Option<String>,
     /// The commit it named when the diff was made.
     pub commit: Option<String>,
     /// The diff has come.
@@ -363,6 +458,12 @@ impl Compare {
         }
     }
 
+    /// The revision compared with, as people know it: the participant's,
+    /// whichever side is drawn.
+    pub fn named(&self) -> &str {
+        self.swapped.as_deref().unwrap_or(&self.rev)
+    }
+
     /// Takes a `diff --model` answer from the revision to the working
     /// files. Ghosts of bodies that still differ at the same hash are
     /// kept; the rest go.
@@ -523,8 +624,15 @@ impl Compare {
 
     /// The diff failed: nothing is marked.
     pub fn failed(&mut self, e: Error) {
-        let rev = std::mem::take(&mut self.rev);
-        *self = Compare::new(&rev);
+        let (rev, to, swapped) = (
+            std::mem::take(&mut self.rev),
+            self.to.take(),
+            self.swapped.take(),
+        );
+        *self = Compare {
+            swapped,
+            ..Compare::between(&rev, to)
+        };
         self.loaded = true;
         self.error = Some(e);
         self.generation += 1;
@@ -615,6 +723,102 @@ mod tests {
 
     fn hex(c: char) -> String {
         c.to_string().repeat(32)
+    }
+
+    #[test]
+    fn a_blink_swaps_shows_one_side_and_starts_again_with_a_new_compare() {
+        let mut b = Blink::default();
+        // Not comparing with a revision: nothing to swap or show alone.
+        b.swap();
+        b.only(Front::Rev);
+        assert_eq!(b, Blink::default());
+        assert!(b.follow(Some("HEAD")));
+        assert!(!b.follow(Some("HEAD")));
+        assert!(!b.draws_rev());
+        assert_eq!(
+            b.says("HEAD", " (1a2b3c4d5e)"),
+            "Comparing with HEAD (1a2b3c4d5e)"
+        );
+        b.swap();
+        assert!(b.draws_rev() && !b.alone);
+        assert_eq!(b.says("HEAD", ""), "Showing HEAD · working ghosted");
+        b.only(Front::Rev);
+        assert!(b.draws_rev() && b.alone);
+        assert_eq!(b.says("HEAD", ""), "Showing only HEAD");
+        // B with one side alone blinks to the other alone.
+        b.swap();
+        assert!(!b.draws_rev() && b.alone);
+        assert_eq!(b.says("HEAD", ""), "Showing only the working files");
+        // Only working again: both sides, the working files in front.
+        b.only(Front::Working);
+        assert!(!b.alone && b.front == Front::Working);
+        b.swap();
+        b.only(Front::Rev);
+        b.both();
+        assert!(b.draws_rev() && !b.alone);
+        // Another compare, or none, starts again.
+        assert!(b.follow(Some("main")));
+        assert_eq!(
+            b,
+            Blink {
+                of: Some("main".into()),
+                ..Blink::default()
+            }
+        );
+        assert!(b.follow(None));
+        assert_eq!(b, Blink::default());
+    }
+
+    #[test]
+    fn a_swapped_compare_paints_the_revision_against_the_working_files() {
+        // `diff --model --from working --to HEAD`: HEAD's box is shorter
+        // (one face new there, one changed, one only the working files
+        // have), HEAD has the cylinder the working files lost, and the
+        // working files' sphere is gone from HEAD.
+        let v = json!({
+            "from": {"rev": "working"},
+            "to": {"rev": "HEAD", "commit": "c0ffee"},
+            "parts": {"p": {
+                "features": {
+                    "base": {"status": "changed", "changes": [], "model": {}},
+                    "boss": {"status": "added"},
+                    "ball": {"status": "removed"},
+                },
+                "solids": {
+                    "base": {"from": {"ok": true, "hash": "w1"}, "to": {"ok": true, "hash": "h1"},
+                             "body": {"faces": {"new": [hex('a')], "changed": [hex('b')],
+                                                "gone": [hex('c')]}}},
+                    "boss": {"from": {}, "to": {"ok": true, "hash": "h2"}},
+                    "ball": {"from": {"ok": true, "hash": "w3"}, "to": {}},
+                },
+            }},
+        });
+        let mut c = Compare {
+            swapped: Some("HEAD".into()),
+            ..Compare::between("working", Some("HEAD".into()))
+        };
+        c.take_diff(&v);
+        assert_eq!(c.named(), "HEAD");
+        // The working side has no commit: ghosts are asked for at `working`.
+        assert_eq!(c.commit, None);
+        let k = |f: &str| ("p".to_owned(), f.to_owned());
+        // HEAD's model is painted: its new face new, its changed one
+        // changed, the cylinder new as a whole.
+        assert_eq!(c.faces[&k("base")][&hex('a')], FaceMark::New);
+        assert_eq!(c.faces[&k("base")][&hex('b')], FaceMark::Changed);
+        assert!(c.new_bodies.contains(&k("boss")));
+        // The working files are ghosted: the longer box, and the sphere,
+        // gone from HEAD, in the removed colour.
+        assert_eq!(
+            c.wanted,
+            BTreeMap::from([(k("ball"), "w3".to_owned()), (k("base"), "w1".to_owned())])
+        );
+        assert!(c.is_gone(&k("base"), &hex('c')));
+        assert!(c.gone_bodies.contains(&k("ball")));
+        assert_eq!(c.features[&k("boss")].change, Change::Added);
+        assert_eq!(c.features[&k("ball")].change, Change::Removed);
+        // Unswapped, a compare is named by its own revision.
+        assert_eq!(Compare::new("HEAD").named(), "HEAD");
     }
 
     /// A diff from `HEAD`: box `b` grew (one face changed, one new, one
