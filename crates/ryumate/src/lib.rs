@@ -35,7 +35,7 @@ pub use assembly::{
     AXIS_TOL, Assembly, Body, Connector, Direction, Id, Kind, MAX_LENGTH, Mate, MateError, Motion,
     On, Pattern,
 };
-pub use limits::{Limits, Range, Stop, unwrap_angle};
+pub use limits::{Limits, Range, Stop, Values, unwrap_angle, values};
 pub use pose::Pose;
 pub use report::{Axis, BodyReport, BodyState, Freedom, MateState, Report, State};
 pub use solve::{Solved, solve, solve_whole};

@@ -384,3 +384,38 @@ fn a_component_solves_as_the_whole_does() {
     assert_eq!(lone.component(&[7]).bodies.len(), 1);
     assert!(lone.component(&[7]).mates.is_empty());
 }
+
+/// A hinge about z between the fixed base and body 2, turned `at`.
+fn turned_hinge(at: f64) -> ryumate::Assembly {
+    common::pair(
+        Kind::Revolute { angle: None },
+        Pose::IDENTITY,
+        Pose::IDENTITY,
+        common::turned([0.0, 0.0, 1.0], at, [0.0; 3]),
+    )
+}
+
+#[test]
+fn a_mates_values_are_read_at_the_poses() {
+    let v = ryumate::values(&turned_hinge(0.3)).unwrap();
+    let a = v[&10].angle.unwrap();
+    assert!((a - 0.3).abs() < 1e-15, "{a}");
+    assert_eq!(v[&10].distance, None);
+    // A slider's distance is b's origin along a's z.
+    let s = common::pair(
+        Kind::Slider { distance: None },
+        Pose::IDENTITY,
+        Pose::IDENTITY,
+        common::moved([0.0, 0.0, 0.05]),
+    );
+    let d = ryumate::values(&s).unwrap()[&10].distance.unwrap();
+    assert!((d - 0.05).abs() < 1e-17, "{d}");
+    // A fastened mate has no free value.
+    let f = common::pair(
+        Kind::Fastened,
+        Pose::IDENTITY,
+        Pose::IDENTITY,
+        Pose::IDENTITY,
+    );
+    assert!(!ryumate::values(&f).unwrap().contains_key(&10));
+}

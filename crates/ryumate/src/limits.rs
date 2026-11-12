@@ -4,7 +4,12 @@
 //! value within its stops by pinning the ones it finds past a bound at
 //! that bound (the driven row the kind already has) and solving again.
 
+use crate::assembly::{Assembly, Id, Kind, Mate, MateError};
+use crate::pose::{dot, sub};
+use crate::rot::V;
+use crate::system::System;
 use core::f64::consts::{PI, TAU};
+use std::collections::BTreeMap;
 
 /// A range a mate's free value stays within, radians or meters. Either
 /// bound may be missing (a one-sided stop), never both.
@@ -100,6 +105,53 @@ pub fn unwrap_angle(a: f64, range: &Range) -> f64 {
         out -= TAU;
     }
     out
+}
+
+/// A mate's free values at the bodies' poses: the turn about `a`'s z
+/// from `a`'s x to `b`'s x (radians, in `(-π, π]`), and `b`'s origin
+/// along `a`'s z (meters). Each is there when the kind has it, driven or
+/// not.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Values {
+    pub angle: Option<f64>,
+    pub distance: Option<f64>,
+}
+
+/// Whether a kind has an angle and a distance (free or driven).
+pub(crate) fn has(kind: &Kind) -> (bool, bool) {
+    match kind {
+        Kind::Revolute { .. } => (true, false),
+        Kind::Slider { .. } => (false, true),
+        Kind::Cylindrical { .. } | Kind::Planar { .. } => (true, true),
+        Kind::Fastened | Kind::Ball => (false, false),
+    }
+}
+
+/// Mate `m`'s values in `sys` at `x` (all zero: the stored poses).
+pub(crate) fn measure(sys: &System, x: &[f64], m: &Mate) -> Values {
+    let (oa, a) = sys.frame::<1>(&m.a, &[], x);
+    let (ob, b) = sys.frame::<1>(&m.b, &[], x);
+    let v = |p: V<1>| p.map(|d| d.v);
+    let (a, b, oa, ob) = (a.map(v), b.map(v), v(oa), v(ob));
+    let (turns, slides) = has(&m.kind);
+    Values {
+        angle: turns.then(|| ryukei::math::atan2(dot(b[0], a[1]), dot(b[0], a[0]))),
+        distance: slides.then(|| dot(sub(ob, oa), a[2]) * sys.scale),
+    }
+}
+
+/// Every mate's values at the bodies' stored poses, for the mates whose
+/// kind has any.
+pub fn values(asm: &Assembly) -> Result<BTreeMap<Id, Values>, MateError> {
+    asm.validate()?;
+    let sys = System::new(asm);
+    let x = vec![0.0; sys.owner.len()];
+    Ok(asm
+        .mates
+        .iter()
+        .map(|(id, m)| (*id, measure(&sys, &x, m)))
+        .filter(|(_, v)| v.angle.is_some() || v.distance.is_some())
+        .collect())
 }
 
 #[cfg(test)]
