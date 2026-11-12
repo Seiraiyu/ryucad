@@ -366,6 +366,41 @@ fn with_commit(mut a: Answer, commit: &str) -> Answer {
     a
 }
 
+/// Applies doctor's repairs as one change: every project file written or
+/// deleted, then the session reloaded, so the daemon logs them as one
+/// entry undo reverts; `git_install` sets the clone up (not a file).
+fn doctor_repair(session: &mut Session, ids: &[String]) -> Result<Value> {
+    let root = session.root().to_path_buf();
+    let plan = crate::doctor::planned(&root, session.project(), ids)?;
+    let mut changes = Vec::new();
+    for r in &plan {
+        for c in &r.changes {
+            if c.path == crate::doctor::GIT_INSTALL {
+                crate::drivers::install(&root, true)?;
+                changes.push(json!({"change": "git_install"}));
+                continue;
+            }
+            let at = path_of(&root, &c.path);
+            match &c.content {
+                Some(bytes) => {
+                    write_atomic(&at, bytes)?;
+                    changes.push(json!({"path": c.path, "change": "written"}));
+                }
+                None => {
+                    crate::source::remove_file(&at)?;
+                    changes.push(json!({"path": c.path, "change": "deleted"}));
+                }
+            }
+        }
+    }
+    session.reload()?;
+    Ok(json!({
+        "applied": ids,
+        "changes": changes,
+        "report": crate::doctor::report(&root, session.project()),
+    }))
+}
+
 fn dispatch(
     session: &mut Session,
     live: Option<&mut Live<Eda>>,
@@ -375,6 +410,8 @@ fn dispatch(
 ) -> Result<Value> {
     match req {
         Request::ProjectInfo {} => Ok(info(session.project())),
+        Request::Doctor {} => Ok(crate::doctor::report(session.root(), session.project())),
+        Request::DoctorRepair { repairs } => doctor_repair(session, &repairs),
         Request::LibAdd {
             alias,
             path,

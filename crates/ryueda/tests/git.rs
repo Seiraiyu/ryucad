@@ -272,3 +272,69 @@ fn git_diff_reads_values() {
             .starts_with("ryueda.component format ")
     );
 }
+
+#[test]
+fn doctor_repairs_are_logged_and_undone() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    // A model the library holds and no footprint names, and lost lines.
+    std::fs::create_dir_all(board.join("library/models")).unwrap();
+    std::fs::write(board.join("library/models/old.step"), "ISO-10303-21;\n").unwrap();
+    std::fs::write(board.join(".gitattributes"), "*.png binary\n").unwrap();
+    for daemon in [false, true] {
+        let (code, v) = ryueda(&board, &run, daemon, &["doctor"]);
+        assert_eq!(code, 0, "{v}");
+        let codes: Vec<&str> = v["result"]["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["code"].as_str().unwrap())
+            .collect();
+        assert!(
+            codes.contains(&"gitattributes_missing") && codes.contains(&"model_orphaned"),
+            "{v}"
+        );
+    }
+    let (_, v) = ryueda(&board, &run, true, &["doctor"]);
+    let ids: Vec<String> = v["result"]["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["code"] == "gitattributes_missing" || i["code"] == "model_orphaned")
+        .map(|i| i["repairs"][0]["id"].as_str().unwrap().to_owned())
+        .collect();
+    let mut args = vec!["doctor"];
+    for id in &ids {
+        args.extend(["--repair", id.as_str()]);
+    }
+    let (code, v) = ryueda(&board, &run, true, &args);
+    assert_eq!(code, 0, "{v}");
+    let left: Vec<&Value> = v["result"]["report"]["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["code"] == "gitattributes_missing" || i["code"] == "model_orphaned")
+        .collect();
+    assert!(left.is_empty(), "{v}");
+    assert!(!board.join("library/models/old.step").exists());
+    // One logged change, undone whole.
+    let (code, u) = ryueda(&board, &run, true, &["undo"]);
+    assert_eq!(code, 0, "{u}");
+    assert!(board.join("library/models/old.step").exists());
+    assert_eq!(
+        std::fs::read_to_string(board.join(".gitattributes")).unwrap(),
+        "*.png binary\n"
+    );
+    // A stale repair is refused.
+    let (code, v) = ryueda(
+        &board,
+        &run,
+        true,
+        &["doctor", "--repair", "model_orphaned:remove:x@00000000"],
+    );
+    assert_eq!((code, &v["error"]["code"]), (1, &json!("repair_conflict")));
+    ryueda(&board, &run, true, &["daemon", "stop"]);
+}

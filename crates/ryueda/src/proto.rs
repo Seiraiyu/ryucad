@@ -854,6 +854,12 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// What the project folder needs that no one file says, with repairs.
+    #[serde(rename = "doctor")]
+    Doctor {},
+    /// Applies doctor's repairs by ID, in order, as one change.
+    #[serde(rename = "doctor.repair")]
+    DoctorRepair { repairs: Vec<String> },
     #[serde(rename = "activity.log")]
     ActivityLog {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -956,6 +962,7 @@ impl Request {
         matches!(
             self,
             Request::LibAdd { .. }
+                | Request::DoctorRepair { .. }
                 | Request::ProjectEdit { .. }
                 | Request::SymbolCreate { .. }
                 | Request::SymbolEdit { .. }

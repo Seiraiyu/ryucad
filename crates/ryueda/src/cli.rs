@@ -400,6 +400,15 @@ enum Command {
     /// Register ryueda with Git: `git install`.
     #[command(subcommand)]
     Git(GitCmd),
+    /// What the project folder needs that no one file says (Git's setup,
+    /// files Git left unmerged, hand-written files, files no kind holds,
+    /// model files no footprint names), and with --repair those fixes.
+    Doctor {
+        /// A repair's ID from a doctor report; repeat for several, applied
+        /// in order as one change.
+        #[arg(long = "repair", value_name = "ID")]
+        repairs: Vec<String>,
+    },
     #[command(subcommand)]
     Daemon(DaemonCmd),
 }
@@ -2521,6 +2530,10 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             expected_revision: expect.expect.clone(),
         },
         Command::Design(DesignCmd::List) => Request::DesignList {},
+        Command::Doctor { repairs } if repairs.is_empty() => Request::Doctor {},
+        Command::Doctor { repairs } => Request::DoctorRepair {
+            repairs: repairs.clone(),
+        },
         Command::Version
         | Command::Init { .. }
         | Command::Watch { .. }
