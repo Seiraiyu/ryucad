@@ -6,20 +6,13 @@
 //! fillet keeps the fillet on its corner, and the sketch drawn again from
 //! scratch fails the fillet loudly, naming what it lost.
 
+mod common;
+
+use common::{must, project};
 use ryucad::doc::id::Id;
-use ryucad::proto::Request;
-use ryucad::server::handle;
 use ryucad::session::Session;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-
-fn call(s: &mut Session, method: &str, params: Value) -> ryucad::error::Result<Value> {
-    handle(s, Request::from_rpc(method, Some(params)).unwrap())
-}
-
-fn must(s: &mut Session, method: &str, params: Value) -> Value {
-    call(s, method, params).unwrap_or_else(|e| panic!("{method}: {e}"))
-}
 
 fn add(s: &mut Session, f: Value) -> Value {
     let mut f = f;
@@ -32,15 +25,6 @@ fn edit(s: &mut Session, id: &str, f: Value) -> Value {
     f["part"] = json!("p");
     f["id"] = json!(id);
     must(s, "feature.edit", f)
-}
-
-/// A project with part `p`, in millimetres.
-fn project() -> (tempfile::TempDir, Session) {
-    let dir = tempfile::tempdir().unwrap();
-    ryucad::server::init(dir.path(), None).unwrap();
-    let mut s = Session::open(dir.path()).unwrap();
-    must(&mut s, "part.create", json!({"part": "p"}));
-    (dir, s)
 }
 
 /// Part `p` with a plate `b` 40 × 30 × 10 mm and a sketch `t` on its top
