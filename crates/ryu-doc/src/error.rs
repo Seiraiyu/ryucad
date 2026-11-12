@@ -917,6 +917,19 @@ pub enum Code {
     /// ryueda: two components locked with one designator, which
     /// `annotate` can't number round; both are in the details (plan 2.F).
     AnnotateConflict,
+    /// The project's `.gitattributes` lacks a product's lines (ryueda's
+    /// doctor; ryucad's doctor says it by name).
+    GitattributesMissing,
+    /// Git's config lacks a product's driver entries, or follows renames.
+    GitDriversMissing,
+    /// A project file not written canonically (edited by hand?).
+    NonCanonical,
+    /// A file in a project's folders that no file kind holds.
+    UnknownFile,
+    /// A file under `library/models/` that no footprint names.
+    ModelOrphaned,
+    /// A project file Git left unmerged in the index.
+    UnmergedPath,
 }
 
 impl Code {
@@ -1313,6 +1326,21 @@ mod tests {
         assert_eq!(Code::SweepFailed.exit_code(), 1);
         assert_eq!(json!(Code::LoftFailed), json!("loft_failed"));
         assert_eq!(Code::LoftFailed.exit_code(), 1);
+    }
+
+    #[test]
+    fn eda_doctor_codes() {
+        for (c, s) in [
+            (Code::GitattributesMissing, "gitattributes_missing"),
+            (Code::GitDriversMissing, "git_drivers_missing"),
+            (Code::NonCanonical, "non_canonical"),
+            (Code::UnknownFile, "unknown_file"),
+            (Code::ModelOrphaned, "model_orphaned"),
+            (Code::UnmergedPath, "unmerged_path"),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), 1);
+        }
     }
 
     #[test]
