@@ -532,24 +532,33 @@ pub const COMMANDS: &[Command] = &[
         .toolbar(),
     cmd("view.compare_with", "Compare with…", View),
     cmd("view.compare_stop", "Stop comparing", View),
-    // A compare's blink (design 447): the window's own view.
+    // A compare's blink (design 447): the window's own view. Not in the
+    // View menu, which has no room left (its last items would fall off a
+    // 1000-point window): `B` over the viewport, the compare bar, a
+    // ghost's context menu and the palette.
     cmd("view.compare_swap", "Swap compared sides", View)
         .icon("arrows-left-right")
         .keys(&["B"])
         .viewport()
-        .toggle(),
+        .toggle()
+        .hidden()
+        .context(&[Context::Ghost]),
     cmd(
         "view.compare_only_rev",
         "Show only the compared revision",
         View,
     )
-    .toggle(),
+    .toggle()
+    .hidden()
+    .context(&[Context::Ghost]),
     cmd(
         "view.compare_only_working",
         "Show only the working files",
         View,
     )
-    .toggle(),
+    .toggle()
+    .hidden()
+    .context(&[Context::Ghost]),
     cmd("section.edit", "Section view", View).icon("knife"),
     cmd("section.clear", "Remove section planes", View),
     cmd("explode.edit", "Exploded view", View).icon("arrows-out-cardinal"),
@@ -1498,7 +1507,15 @@ mod tests {
             }
             assert_eq!(ids(Context::Entity(k)), want, "{k:?}");
         }
-        assert_eq!(ids(Context::Ghost), ["edit.copy_reference"]);
+        assert_eq!(
+            ids(Context::Ghost),
+            [
+                "edit.copy_reference",
+                "view.compare_swap",
+                "view.compare_only_rev",
+                "view.compare_only_working"
+            ]
+        );
         assert_eq!(
             ids(Context::Viewport),
             ["view.fit", "view.show_all", "annotation.here"]
