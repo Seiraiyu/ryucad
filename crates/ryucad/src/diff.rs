@@ -2969,6 +2969,27 @@ mod tests {
     }
 
     #[test]
+    fn a_mates_limits_change_by_bound() {
+        let before = json!({"format": 22, "kind": "ryucad.feature", "type": "mate",
+                            "form": "cylindrical",
+                            "a": {"instance": ["base"], "at": "origin"},
+                            "b": {"instance": ["pin"], "at": "origin"},
+                            "limits": {"angle": {"min": "-6 deg", "max": "6 deg"}}});
+        let mut after = before.clone();
+        after["limits"]["angle"]["max"] = json!("8 deg");
+        after["limits"]["distance"] = json!({"max": "5 mm"});
+        let mut out = Vec::new();
+        changes("", Some(&before), Some(&after), &mut out);
+        assert_eq!(
+            out,
+            [
+                json!({"at": "/limits/angle/max", "from": "6 deg", "to": "8 deg"}),
+                json!({"at": "/limits/distance", "to": {"max": "5 mm"}}),
+            ]
+        );
+    }
+
+    #[test]
     fn a_tweaks_changes_are_by_field() {
         let n = |k: u8| json!({"feature": "b", "name": format!("{k:032x}")});
         let before = json!({"format": 16, "kind": "ryucad.feature", "type": "move_face",
