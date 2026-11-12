@@ -584,7 +584,9 @@ fn documents(e: &Entities, p: &mut Products) {
                     }
                 }
             }
-            Ok(Entity::PropertyDefinition { name, definition }) => {
+            Ok(Entity::PropertyDefinition {
+                name, definition, ..
+            }) => {
                 props.push((id, name.clone(), *definition));
             }
             Ok(Entity::PropertyRepresentation {

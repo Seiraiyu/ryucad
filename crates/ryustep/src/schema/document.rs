@@ -63,9 +63,15 @@ pub(super) fn simple(id: Id, name: &str, params: &[Param]) -> Option<Result<Enti
         "PROPERTY_DEFINITION" => (|| {
             let mut a = Args::new(id, params, 3)?;
             let name = a.string()?;
-            a.skip();
+            // A description that isn't a string is read as none: it was
+            // skipped before 24.C, and no file failed on it.
+            let description = match a.param() {
+                crate::part21::Param::Str(s) => s.clone(),
+                _ => "".into(),
+            };
             Ok(Entity::PropertyDefinition {
                 name,
+                description,
                 definition: a.id()?,
             })
         })(),

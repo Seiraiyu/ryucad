@@ -191,6 +191,10 @@ enum Command {
         /// appearance renders show is written as STEP styles).
         #[arg(long)]
         no_appearance: bool,
+        /// STEP: write no materials or properties (by default the part's
+        /// material, with its density, and every set property is written).
+        #[arg(long)]
+        no_properties: bool,
         /// DXF: the sheet metal solid (the part's one unless named).
         #[arg(long)]
         solid: Option<String>,
@@ -4880,6 +4884,7 @@ fn request(cmd: &Command) -> Option<Request> {
             pipe_tolerance,
             skip_failing,
             no_appearance,
+            no_properties,
             solid,
             no_notes,
             fixed,
@@ -4910,6 +4915,7 @@ fn request(cmd: &Command) -> Option<Request> {
             pipe_tolerance: pipe_tolerance.clone(),
             skip_failing: *skip_failing,
             appearance: no_appearance.then_some(false),
+            properties: no_properties.then_some(false),
             solid: solid.clone(),
             notes: no_notes.then_some(false),
             fixed: fixed.clone(),

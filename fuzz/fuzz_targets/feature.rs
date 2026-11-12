@@ -208,7 +208,30 @@ fn seeded() -> &'static ryucad::doc::project::ImportFile {
                 .collect(),
             occurrences: Vec::new(),
         };
-        let bytes = ryustep::write_styled(&model, &[], &paints, &opts)
+        // Product s0 a material with its density and two attributes
+        // (plan 24.C): the importer reads properties wherever it reads a
+        // file. The fuzz target builds no project, so no `ryupdm.json`
+        // maps them onto properties; that runs in ryucad's tests.
+        let data = ryustep::PartData {
+            products: vec![ryustep::ProductData {
+                product: 0,
+                material: Some(ryustep::MaterialData {
+                    name: "Steel".into(),
+                    density: Some(7850.0),
+                }),
+                attributes: vec![
+                    ryustep::AttributeData {
+                        name: "Finish".into(),
+                        value: ryustep::DataValue::Text("red".into()),
+                    },
+                    ryustep::AttributeData {
+                        name: "Count".into(),
+                        value: ryustep::DataValue::Integer(4),
+                    },
+                ],
+            }],
+        };
+        let bytes = ryustep::write_with_data(&model, &[], &paints, &data, &opts)
             .unwrap()
             .bytes;
         ryucad::doc::project::ImportFile::new(bytes)

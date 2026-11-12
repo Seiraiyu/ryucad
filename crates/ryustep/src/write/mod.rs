@@ -14,6 +14,7 @@
 //! unit by one division, and the header's time stamp is the caller's.
 
 mod body;
+mod data;
 mod style;
 
 use crate::WriteError;
@@ -26,6 +27,7 @@ use ryukei::name::Name;
 use ryukei::topo::Body;
 use std::collections::BTreeMap;
 
+pub use data::{AttributeData, DataValue, MaterialData, PartData, ProductData};
 pub use style::{BodyPaint, OccurrencePaint, Paint, Paints};
 
 /// A product to write: its identifier, name and description, its
@@ -198,6 +200,10 @@ pub(crate) struct Contexts {
     pub(crate) parametric: u64,
     /// Meters per file length unit.
     pub(crate) unit: f64,
+    /// The length and plane angle units the geometric context names
+    /// (property measures refer to them).
+    pub(crate) length: u64,
+    pub(crate) angle: u64,
 }
 
 /// A representation written as another file has it (a reference import's,
@@ -298,7 +304,20 @@ pub fn write_styled(
     paints: &Paints,
     opts: &WriteOptions,
 ) -> Result<Written, WriteError> {
-    write_inner_styled(model, passed, paints, opts).map(|(w, _, _)| w)
+    write_inner_styled(model, passed, paints, &PartData::default(), opts).map(|(w, _, _)| w)
+}
+
+/// [`write_styled`], with `data`: each product's material, density and
+/// user-defined attributes (design 448, plan 24.C), written after the
+/// styles.
+pub fn write_with_data(
+    model: &WriteModel,
+    passed: &[Passed],
+    paints: &Paints,
+    data: &PartData,
+    opts: &WriteOptions,
+) -> Result<Written, WriteError> {
+    write_inner_styled(model, passed, paints, data, opts).map(|(w, _, _)| w)
 }
 
 /// [`write_report`], with what it wrote of each product's bodies and of
@@ -309,7 +328,13 @@ pub(crate) fn write_inner(
     passed: &[Passed],
     opts: &WriteOptions,
 ) -> Result<(Written, Vec<Vec<WrittenBody>>, Vec<Vec<WrittenUsage>>), WriteError> {
-    write_inner_styled(model, passed, &Paints::default(), opts)
+    write_inner_styled(
+        model,
+        passed,
+        &Paints::default(),
+        &PartData::default(),
+        opts,
+    )
 }
 
 /// [`write_inner`], with `paints` written after everything else.
@@ -318,6 +343,7 @@ pub(crate) fn write_inner_styled(
     model: &WriteModel,
     passed: &[Passed],
     paints: &Paints,
+    data: &PartData,
     opts: &WriteOptions,
 ) -> Result<(Written, Vec<Vec<WrittenBody>>, Vec<Vec<WrittenUsage>>), WriteError> {
     // Each body as a file must describe it, in parallel; the first body
@@ -375,6 +401,7 @@ pub(crate) fn write_inner_styled(
     // Products: each one's definition and representation, then its
     // bodies; the usages after, once every product has its number.
     let mut defs = Vec::with_capacity(model.products.len());
+    let mut products: Vec<(u64, u64)> = Vec::with_capacity(model.products.len());
     let mut bodies: Vec<Vec<WrittenBody>> = Vec::with_capacity(model.products.len());
     let mut usages: Vec<Vec<WrittenUsage>> = vec![Vec::new(); model.products.len()];
     for (k, p) in model.products.iter().enumerate() {
@@ -468,6 +495,7 @@ pub(crate) fn write_inner_styled(
         };
         out.fill(rep, kind, vec![s(""), refs(items), r(cx.geometric)]);
         defs.push((definition, rep, origin, child_axes));
+        products.push((definition, shape));
         bodies.push(written);
     }
     for p in passed {
@@ -539,6 +567,7 @@ pub(crate) fn write_inner_styled(
         }
     }
     style::write(&mut out, &cx, model, &bodies, &usages, paints);
+    data::write(&mut out, &cx, opts.schema, &products, data);
     let file = File {
         header: header(opts),
         instances: out.instances,
@@ -675,6 +704,8 @@ fn contexts(out: &mut Out, opts: &WriteOptions, uncertainty: f64) -> Contexts {
         geometric,
         parametric,
         unit,
+        length,
+        angle,
     }
 }
 

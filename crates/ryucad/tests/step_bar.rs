@@ -389,3 +389,104 @@ fn painted_race() -> Vec<u8> {
     std::fs::write(&kept, &bytes).unwrap();
     bytes
 }
+
+/// Reading materials and attributes (design 448, plan 24.C) adds at most
+/// 5% to opening the race's file with every product given a material, a
+/// density and six attributes. `Opened::properties` against
+/// `ryustep::open`, the best of five each.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
+fn properties_add_at_most_five_percent_to_opening() {
+    let bytes = attributed_race();
+    let time = |f: &dyn Fn()| {
+        let t = Instant::now();
+        f();
+        t.elapsed().as_secs_f64()
+    };
+    let (mut open, mut read) = (f64::INFINITY, f64::INFINITY);
+    for _ in 0..5 {
+        open = open.min(time(&|| {
+            std::hint::black_box(ryustep::open(&bytes).unwrap());
+        }));
+        let o = ryustep::open(&bytes).unwrap();
+        read = read.min(time(&|| {
+            std::hint::black_box(o.properties());
+        }));
+    }
+    let o = ryustep::open(&bytes).unwrap();
+    let products = o.properties().products.len();
+    eprintln!(
+        "properties: {products} products read; open {open:.2} s, properties {read:.3} s ({:+.1}%)",
+        read / open * 100.0
+    );
+    assert!(products > 0);
+    assert!(
+        read <= open * 0.05 * slack(),
+        "{read:.3} s against {open:.2} s"
+    );
+}
+
+/// The race's bodies, each product given a material, a density and six
+/// attributes, kept in the target folder after the first run.
+fn attributed_race() -> Vec<u8> {
+    use ryustep::{AttributeData, DataValue, MaterialData, PartData, ProductData};
+    let kept = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("step-bar-attributed.step");
+    if let Ok(b) = std::fs::read(&kept) {
+        return b;
+    }
+    let plain = ryustep::read(&race(), &read_options()).unwrap();
+    let bodies: Vec<ryukei::topo::Body> = plain
+        .bodies
+        .iter()
+        .filter_map(|b| b.result.as_ref().ok().map(|(body, _, _)| body.clone()))
+        .collect();
+    let m = model(bodies);
+    let data = PartData {
+        products: (0..m.products.len())
+            .map(|k| ProductData {
+                product: k,
+                material: Some(MaterialData {
+                    name: format!("alloy-{}", k % 7),
+                    density: Some(2700.0 + k as f64),
+                }),
+                attributes: vec![
+                    AttributeData {
+                        name: "supplier".into(),
+                        value: DataValue::Text(format!("s{k}")),
+                    },
+                    AttributeData {
+                        name: "batch".into(),
+                        value: DataValue::Integer(k as i64),
+                    },
+                    AttributeData {
+                        name: "yield".into(),
+                        value: DataValue::Number(0.5),
+                    },
+                    AttributeData {
+                        name: "rohs".into(),
+                        value: DataValue::Boolean(true),
+                    },
+                    AttributeData {
+                        name: "wall".into(),
+                        value: DataValue::Length(0.002),
+                    },
+                    AttributeData {
+                        name: "draft".into(),
+                        value: DataValue::Angle(0.01),
+                    },
+                ],
+            })
+            .collect(),
+    };
+    let bytes = ryustep::write_with_data(
+        &m,
+        &[],
+        &ryustep::Paints::default(),
+        &data,
+        &write_options(),
+    )
+    .unwrap()
+    .bytes;
+    std::fs::write(&kept, &bytes).unwrap();
+    bytes
+}

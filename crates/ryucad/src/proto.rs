@@ -852,7 +852,9 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
-    /// A part's properties: every core and declared one, set or not.
+    /// A part's properties: every core and declared one, set or not;
+    /// and `file`, the attributes its imported STEP files give it that no
+    /// declared property takes (design 448, plan 24.C), read-only.
     #[serde(rename = "props.get")]
     PropsGet {
         part: String,
@@ -1506,6 +1508,9 @@ pub enum Request {
         /// STEP: `false` writes no styles (design 448).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         appearance: Option<bool>,
+        /// STEP: `false` writes no materials or properties (design 448).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        properties: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         solid: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

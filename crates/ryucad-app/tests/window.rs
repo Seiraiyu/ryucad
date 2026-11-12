@@ -7043,6 +7043,36 @@ fn markup_waits_for_words_esc_leaves_the_mark_then_the_tool_and_view_cant_open_i
 }
 
 #[test]
+fn the_part_section_shows_from_the_step_file() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new();
+    p.ok(&["pdm", "init"]);
+    let vendor = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../ryustep/tests/data/properties/vendor.stp"
+    );
+    p.ok(&["import", "--solid", vendor]);
+    let mut h = sized(&p, 1200.0);
+    frames(&mut h, |app| match &app.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => o.ws.idle() && o.ws.model.meshes.len() == 1,
+        _ => false,
+    });
+    show_tab(&mut h, "part");
+    frames(&mut h, |app| match &app.screen {
+        ryucad_app::ui::app::Screen::Opened(o) => {
+            o.ws.props.as_ref().is_some_and(|p| !p.file.is_empty())
+        }
+        _ => false,
+    });
+    h.step();
+    shown(&mut h, "From the STEP file");
+    shown(&mut h, "Supplier");
+}
+
+#[test]
 fn file_switch_branch_lists_the_branches_in_the_palette() {
     let _one = one_at_a_time();
     if !gpu() {
