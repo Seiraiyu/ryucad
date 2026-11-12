@@ -379,3 +379,26 @@ fn attributes_are_written_typed_as_the_schema_types_them() {
     assert_eq!(old[3].value, Value::Text("true".into()));
     assert_eq!(old[2].value, Value::Number(0.95));
 }
+
+/// OCCT's XDE writes a material with its density (gen.cpp's
+/// `material.stp`): ryustep reads the name and the density in kg/m³.
+#[test]
+fn occts_material_reads_as_occt_wrote_it() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/occt/material.stp");
+    let o = ryustep::open(&std::fs::read(path).unwrap()).unwrap();
+    let mats: Vec<&ryustep::properties::Material> = o
+        .properties()
+        .products
+        .values()
+        .filter_map(|p| p.material.as_ref())
+        .collect();
+    assert_eq!(mats.len(), 1, "{:?}", o.properties());
+    assert_eq!(mats[0].name, "Aluminium");
+    assert_eq!(mats[0].density, Some(2700.0), "OCCT's density, in kg/m³");
+    assert!(
+        o.properties().failed.is_empty(),
+        "{:?}",
+        o.properties().failed
+    );
+}
