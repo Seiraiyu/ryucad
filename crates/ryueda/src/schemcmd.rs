@@ -661,16 +661,17 @@ fn listing(names: &Names, laid: &Laid) -> Vec<Value> {
         .instructions
         .iter()
         .map(|(id, i)| {
-            let verdict = ryusch::instr::judge(&laid.built.input, &laid.outcome.layout, i);
+            let verdict = ryusch::instr::verdict(&laid.built.input, &laid.outcome.layout, id, i);
             let mut v = json!({
                 "id": id,
                 "text": names.text(i),
-                "holds": verdict.is_ok(),
+                "holds": verdict == ryusch::instr::Verdict::Held,
+                "state": verdict.state(),
             });
-            if let Err(why) = verdict {
+            if let Some(why) = verdict.why() {
                 v["why"] = json!(match blocker(laid, i) {
                     Some(b) => format!("{why}; {b}"),
-                    None => why,
+                    None => why.to_owned(),
                 });
             }
             v

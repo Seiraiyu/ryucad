@@ -339,13 +339,14 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
         .instructions
         .iter()
         .map(|(id, i)| {
-            let verdict = instr::judge(block, layout, i);
+            let verdict = instr::verdict(block, layout, id, i);
             let mut v = json!({
                 "id": id,
                 "instruction": i,
-                "holds": verdict.is_ok(),
+                "holds": verdict == instr::Verdict::Held,
+                "state": verdict.state(),
             });
-            if let Err(why) = verdict {
+            if let Some(why) = verdict.why() {
                 v["why"] = json!(why);
             }
             v

@@ -2625,6 +2625,7 @@ fn schematics_from_the_cli() {
     // R1 is on J1's right but past the lint's reach (round 1, F1: holds
     // judged the side alone), so it doesn't hold, and says why.
     assert_eq!(list["instructions"][0]["holds"], json!(false));
+    assert_eq!(list["instructions"][0]["state"], "not_held", "{list}");
     assert!(
         list["instructions"][0]["why"]
             .as_str()

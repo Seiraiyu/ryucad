@@ -1,9 +1,9 @@
 # ryusch's golden hashes: UPDATE_GOLDEN=1 cargo test -p ryusch --test determinism
-edited.describe 632aa00f07cd6601d29a9d6bc1d9510c
+edited.describe 2afe1ca9c43a43f2db704d8951d6e978
 edited.layout 891dc221564b979cb425c980aa9fd172
 edited.lint 06d06a034af678910d542db54d059eaa
 edited.svg 0aae4f3cde1fd65628420729532c8b16
-instructed.describe 9a0ec0f3f0c8f0d88af30fd2800dd088
+instructed.describe edf8f8a4e3607863b94cb2008fbd985b
 instructed.layout 891dc221564b979cb425c980aa9fd172
 instructed.lint 06d06a034af678910d542db54d059eaa
 instructed.svg e7ba3462811256a00deafa1956c133b1
