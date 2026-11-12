@@ -14,7 +14,9 @@
 
 pub mod annotate;
 pub mod curves;
-pub mod fit;
+/// ISO 286 limits and fits, in `ryu-standards` since ryucad 28 (holes
+/// read them too); the path drawings always used.
+pub use ryu_standards::fit;
 pub mod lint;
 pub mod output;
 pub mod request;

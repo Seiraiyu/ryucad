@@ -24,6 +24,7 @@
 //! whole. Formulas with fractional powers are decided by exact integer
 //! comparisons (`exact`).
 
+pub mod fit;
 pub mod source;
 
 pub use source::{Source, Valued};
