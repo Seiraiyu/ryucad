@@ -133,7 +133,7 @@ fn views_agree_with_a_fine_mesh() {
 /// none wrong, and of the square views at most a tenth of pieces
 /// uncertain. Views along an edge's tangent stack its pieces in the
 /// image, where rays meet edges exactly (#643): their uncertain share is
-/// printed, not held (164 of 1,222 pieces on cox-worker-4, plan 17.B).
+/// printed, not held (164 of 694 pieces on cox-worker-4, plan 17.B).
 #[test]
 #[cfg_attr(debug_assertions, ignore = "release only")]
 fn square_and_cusp_views_agree_with_a_fine_mesh() {
