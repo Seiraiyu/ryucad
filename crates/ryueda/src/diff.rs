@@ -11,10 +11,11 @@ use crate::conn::{BLOCKS, Node};
 use crate::design::Part;
 use crate::error::Result;
 use crate::id::Id;
+use crate::netlist::{Netlist, flatten};
 use crate::project::{ERC, LINT, MANIFEST, PARTS, Project, STYLE};
 use ryu_session::fresh::Files;
 use serde_json::{Map, Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One side of a diff: the revision as asked (`working` for the files on
 /// disk), the commit it named (none for the working files), its files as
@@ -204,6 +205,9 @@ pub fn diff(from: &Side, to: &Side, opts: &Options) -> Result<Value> {
     out.insert("to".into(), to.to_json());
     root(from.files, to.files, opts.all, &mut out);
     out.insert("blocks".into(), json!(blocks(from, to, opts)));
+    if opts.netlist {
+        out.insert("netlist".into(), json!(netlist(from, to, opts)?));
+    }
     Ok(Value::Object(out))
 }
 /// What a pin or an instance's port connects to, named on one side:
@@ -522,6 +526,175 @@ fn blocks(from: &Side, to: &Side, opts: &Options) -> Vec<Value> {
     out
 }
 
+/// Occurrences by reference: `added`, `removed`, and `changed` with their
+/// `refdes`, `value` and `footprint` changes.
+fn occurrences(a: Option<&Netlist>, b: Option<&Netlist>) -> Vec<Value> {
+    fn by(n: Option<&Netlist>) -> BTreeMap<String, &crate::netlist::Occurrence> {
+        n.map(|n| {
+            n.occurrences
+                .iter()
+                .map(|o| (o.reference.clone(), o))
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+    let (x, y) = (by(a), by(b));
+    let refs: BTreeSet<&String> = x.keys().chain(y.keys()).collect();
+    let mut out = Vec::new();
+    for r in refs {
+        match (x.get(r), y.get(r)) {
+            (None, Some(o)) => out.push(
+                json!({"occurrence": r, "status": "added", "refdes": o.refdes, "value": o.value}),
+            ),
+            (Some(o), None) => out.push(
+                json!({"occurrence": r, "status": "removed", "refdes": o.refdes, "value": o.value}),
+            ),
+            (Some(p), Some(q)) => {
+                let mut c = Map::new();
+                for (k, f, t) in [
+                    ("refdes", &p.refdes, &q.refdes),
+                    ("value", &p.value, &q.value),
+                    ("footprint", &p.footprint, &q.footprint),
+                ] {
+                    if f != t {
+                        c.insert(k.into(), json!({"from": f, "to": t}));
+                    }
+                }
+                if !c.is_empty() {
+                    out.push(json!({"occurrence": r, "status": "changed", "refdes": q.refdes, "changes": c}));
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    out
+}
+
+/// Nets by their highest node: `added`, `removed`, and `changed` when
+/// renamed or when pins `joined` or `left` them.
+fn nets(a: Option<&Netlist>, b: Option<&Netlist>) -> Vec<Value> {
+    let by = |n: Option<&Netlist>| -> BTreeMap<String, (String, BTreeSet<String>)> {
+        let Some(n) = n else {
+            return BTreeMap::new();
+        };
+        n.nets
+            .iter()
+            .map(|f| {
+                let pins = f.members.iter().map(|&(c, i)| n.pin_ref(c, i)).collect();
+                (f.id.clone(), (f.name.clone(), pins))
+            })
+            .collect()
+    };
+    let (x, y) = (by(a), by(b));
+    let ids: BTreeSet<&String> = x.keys().chain(y.keys()).collect();
+    let mut out = Vec::new();
+    for id in ids {
+        match (x.get(id), y.get(id)) {
+            (None, Some((name, pins))) => {
+                out.push(json!({"net": id, "status": "added", "name": name, "pins": pins}))
+            }
+            (Some((name, pins)), None) => {
+                out.push(json!({"net": id, "status": "removed", "name": name, "pins": pins}))
+            }
+            (Some((na, pa)), Some((nb, pb))) => {
+                let joined: Vec<&String> = pb.difference(pa).collect();
+                let left: Vec<&String> = pa.difference(pb).collect();
+                if na == nb && joined.is_empty() && left.is_empty() {
+                    continue;
+                }
+                let mut e = json!({"net": id, "status": "changed", "name": nb});
+                if na != nb {
+                    e["renamed"] = json!({"from": na, "to": nb});
+                }
+                if !joined.is_empty() {
+                    e["joined"] = json!(joined);
+                }
+                if !left.is_empty() {
+                    e["left"] = json!(left);
+                }
+                out.push(e);
+            }
+            (None, None) => {}
+        }
+    }
+    out
+}
+
+/// ERC findings that came and went, by finding ID.
+fn erc(from: &Side, to: &Side, design: &Id) -> Value {
+    let found = |s: &Side| -> BTreeMap<String, crate::erc::Finding> {
+        crate::erc::check_design(s.project, design)
+            .map(|f| f.into_iter().map(|x| (x.id.clone(), x)).collect())
+            .unwrap_or_default()
+    };
+    let (a, b) = (found(from), found(to));
+    let brief = |f: &crate::erc::Finding| json!({"id": f.id, "code": f.code, "severity": f.severity, "message": f.message});
+    json!({
+        "appeared": b.iter().filter(|(k, _)| !a.contains_key(*k)).map(|(_, f)| brief(f)).collect::<Vec<_>>(),
+        "gone": a.iter().filter(|(k, _)| !b.contains_key(*k)).map(|(_, f)| brief(f)).collect::<Vec<_>>(),
+    })
+}
+
+/// `diff --netlist`: each design (or `opts.design`) flattened on both
+/// sides and compared. A design that doesn't flatten on a side is
+/// `invalid`, with that side's error.
+fn netlist(from: &Side, to: &Side, opts: &Options) -> Result<Vec<Value>> {
+    let designs: BTreeSet<Id> = match &opts.design {
+        Some(d) => BTreeSet::from([crate::netlist::one_design(to.project, Some(d))
+            .or_else(|_| crate::netlist::one_design(from.project, Some(d)))?]),
+        None => from
+            .project
+            .conn
+            .designs
+            .keys()
+            .chain(to.project.conn.designs.keys())
+            .cloned()
+            .collect(),
+    };
+    let mut out = Vec::new();
+    for d in designs {
+        let flat = |s: &Side| {
+            s.project
+                .conn
+                .designs
+                .contains_key(&d)
+                .then(|| flatten(s.project, &d))
+        };
+        let (a, b) = (flat(from), flat(to));
+        let mut v = json!({"design": d, "status": status(a.is_some(), b.is_some(), true)});
+        let mut errors = Map::new();
+        let mut ok = |side: &str, r: Option<Result<Netlist>>| match r {
+            Some(Ok(n)) => Some(n),
+            Some(Err(e)) => {
+                errors.insert(side.into(), json!(e));
+                None
+            }
+            None => None,
+        };
+        let (na, nb) = (ok("from", a), ok("to", b));
+        if !errors.is_empty() {
+            v["status"] = json!("invalid");
+            v["errors"] = Value::Object(errors);
+            out.push(v);
+            continue;
+        }
+        v["occurrences"] = json!(occurrences(na.as_ref(), nb.as_ref()));
+        v["nets"] = json!(nets(na.as_ref(), nb.as_ref()));
+        v["erc"] = erc(from, to, &d);
+        let quiet = v["occurrences"] == json!([])
+            && v["nets"] == json!([])
+            && v["erc"]["appeared"] == json!([])
+            && v["erc"]["gone"] == json!([]);
+        if v["status"] == "changed" && quiet {
+            v["status"] = json!("same");
+        }
+        if v["status"] != "same" || opts.all {
+            out.push(v);
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,5 +891,75 @@ mod tests {
         )
         .unwrap();
         assert_eq!(all["blocks"][0]["status"], "same");
+    }
+
+    #[test]
+    fn the_netlist_diff_is_electrical() {
+        use crate::project::ProjectKind;
+        use crate::project::tests::{design_in, library_in, manifest};
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("board");
+        manifest(&board, ProjectKind::Design, &[]);
+        library_in(&board);
+        design_in(&board);
+        let (fa, pa) = loaded(&board);
+        // R1's pin 1 leaves SDA for GND.
+        let r1 = board.join("blocks/top/components/r1.json");
+        let mut c: Value = serde_json::from_slice(&std::fs::read(&r1).unwrap()).unwrap();
+        c["pins"]["1"] = json!({"rail": "gnd"});
+        std::fs::write(&r1, crate::canonical::to_string(&c)).unwrap();
+        let (fb, pb) = loaded(&board);
+        let from = Side {
+            rev: "HEAD",
+            commit: None,
+            files: &fa,
+            project: &pa,
+        };
+        let to = Side {
+            rev: "working",
+            commit: None,
+            files: &fb,
+            project: &pb,
+        };
+        let v = diff(
+            &from,
+            &to,
+            &Options {
+                netlist: true,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let d = &v["netlist"][0];
+        let nets = d["nets"].as_array().unwrap();
+        let gnd = nets
+            .iter()
+            .find(|n| n["net"] == "d:rail:gnd")
+            .unwrap_or_else(|| panic!("{nets:?}"));
+        assert_eq!(gnd["status"], "changed");
+        assert!(
+            gnd["joined"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p.as_str().unwrap().ends_with("r1/1"))
+        );
+        assert!(
+            nets.iter()
+                .any(|n| n["left"].as_array().is_some_and(|l| !l.is_empty())
+                    || n["status"] == "removed"),
+            "SDA lost R1.1 (or went, if R1.1 was its only pin)"
+        );
+        assert!(
+            d["occurrences"].as_array().unwrap().is_empty(),
+            "no part changed"
+        );
+        assert!(v.get("netlist").is_some());
+        assert!(
+            diff(&from, &to, &Options::default())
+                .unwrap()
+                .get("netlist")
+                .is_none()
+        );
     }
 }
