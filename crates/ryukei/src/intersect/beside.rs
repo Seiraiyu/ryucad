@@ -21,8 +21,10 @@ use super::implicit::Implicit;
 use super::inface::{Place, point_in_face};
 use super::pipe::{Cell, Field, Form, signed};
 use crate::geom::chain2::Chain2;
+use crate::geom::jet::{JVec, Jet};
 use crate::geom::sheet::Sheet;
-use crate::geom::{Box2, Curve2, Point2, Point3, Surface, Vector2};
+use crate::geom::{Box2, Box3, Curve2, Point2, Point3, Surface, Vector2};
+use crate::interval::Interval;
 use crate::predicates::Sign;
 use crate::topo::{Body, EdgeId, FaceId, Pcurve, VertexId};
 use crate::work::{Meter, Scope};
@@ -274,6 +276,181 @@ pub(crate) fn face_off_ball(
         m,
     )?;
     Ok(!negative)
+}
+
+/// What a face's surface does near a box: the hull of its unit normals
+/// and a bound on its normal curvature over every part of the face whose
+/// surface's box meets the box ([`normal_cone`]). The check's crossing
+/// certificate (#303) bounds the angle two faces cross at, and how fast
+/// either bends away from its tangent plane, from these.
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)] // 18.A: used from Task 3
+pub(crate) struct Cone {
+    /// Holds `S_u × S_v / |S_u × S_v|` at every such point.
+    pub(crate) n: [Interval; 3],
+    /// At least `|κ_n|`, the normal curvature in any direction, at every
+    /// such point.
+    pub(crate) k: f64,
+}
+
+/// The most parts [`normal_cone`] examines.
+#[allow(dead_code)] // 18.A: used from Task 3
+pub(crate) const CONE_PARTS: usize = 1 << 10;
+
+/// The deepest [`normal_cone`] halves a part.
+#[allow(dead_code)] // 18.A: used from Task 3
+const CONE_DEPTH: u32 = 24;
+
+#[allow(dead_code)] // 18.A: used from Task 3
+fn dot3(a: &[Interval; 3], b: &[Interval; 3]) -> Interval {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+#[allow(dead_code)] // 18.A: used from Task 3
+fn cross3(a: &[Interval; 3], b: &[Interval; 3]) -> [Interval; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// The box a part's point enclosure spans in model space.
+#[allow(dead_code)] // 18.A: used from Task 3
+fn image_box(j: &JVec<Interval>) -> Box3 {
+    Box3::new(
+        Point3::new(j[0].v.lo(), j[1].v.lo(), j[2].v.lo()),
+        Point3::new(j[0].v.hi(), j[1].v.hi(), j[2].v.hi()),
+    )
+}
+
+/// The cone of one part from its enclosed jets: the unit normal
+/// `n = S_u × S_v / |S_u × S_v|`, and `|κ_n| ≤ ‖II‖_F / λ_min(I)` with
+/// `II = [S_uu·n, S_uv·n; S_uv·n, S_vv·n]` and `I` the first fundamental
+/// form, whose least eigenvalue is `(E + G)/2 - sqrt(((E - G)/2)² + F²)`.
+/// Every step is outward-rounded interval arithmetic. `None` where the
+/// normal or `λ_min` can't be bounded away from zero.
+#[allow(dead_code)] // 18.A: used from Task 3
+fn cell_cone(j: &JVec<Interval>) -> Option<Cone> {
+    let col = |f: &dyn Fn(&Jet<Interval>) -> Interval| -> [Interval; 3] {
+        core::array::from_fn(|i| f(&j[i]))
+    };
+    let su = col(&|x| x.d[0]);
+    let sv = col(&|x| x.d[1]);
+    let (suu, suv, svv) = (col(&|x| x.h[0]), col(&|x| x.h[1]), col(&|x| x.h[2]));
+    let n = cross3(&su, &sv);
+    let len = dot3(&n, &n).sqrt()?;
+    if len.lo() <= 0.0 {
+        return None;
+    }
+    let unit = [
+        n[0].checked_div(len)?,
+        n[1].checked_div(len)?,
+        n[2].checked_div(len)?,
+    ];
+    let (e, f, g) = (dot3(&su, &su), dot3(&su, &sv), dot3(&sv, &sv));
+    let half = Interval::point(0.5);
+    let least = half * (e + g) - ((half * (e - g)).square() + f.square()).sqrt()?;
+    if least.lo() <= 0.0 {
+        return None;
+    }
+    let (l, mm, nn) = (dot3(&suu, &unit), dot3(&suv, &unit), dot3(&svv, &unit));
+    let top = (l.square() + Interval::point(2.0) * mm.square() + nn.square()).sqrt()?;
+    let k = top.hi() / least.lo();
+    Some(Cone {
+        n: unit,
+        k: if k == 0.0 { 0.0 } else { k.next_up() },
+    })
+}
+
+/// The cone of a face's surface near `near` ([`Cone`]): its parameter
+/// box, breadth first, each part halved across its longer side in model
+/// space until its surface's box is no wider than half of `near`'s; parts
+/// whose box misses `near`, or certified outside the face ([`outside`]),
+/// are left out. `Ok(None)` when no part of the face meets `near`.
+/// `Err(Uncertain)` past `parts` parts or [`CONE_DEPTH`] halvings, or for
+/// a face with a fin that has no pcurve.
+#[allow(dead_code)] // 18.A: used from Task 3
+pub(crate) fn normal_cone(
+    body: &Body,
+    face: FaceId,
+    near: &Box3,
+    parts: usize,
+    m: &Meter,
+) -> Result<Option<Cone>, Failure> {
+    let surface = &body.surfaces[body.faces[face].surface];
+    let boundary = boundary_of(body, face).ok_or(Failure::Uncertain)?;
+    let periods = surface.periods();
+    let sheet = Sheet::of(surface);
+    let fine = (near.max() - near.min()).length() / 2.0;
+    let mut cone: Option<Cone> = None;
+    let mut budget = parts;
+    let mut queue = VecDeque::from([(parameter_box(body, face), 0u32)]);
+    while let Some((c, depth)) = queue.pop_front() {
+        budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
+        m.charge(sheet.cost())?;
+        let j = sheet.jet_box_in(c, m.enclosures());
+        if let Some(j) = &j {
+            let bx = image_box(j);
+            if !bx.intersects(near) || outside(body, face, &boundary, periods, c) {
+                continue;
+            }
+            if (bx.max() - bx.min()).length() <= fine
+                && let Some(here) = cell_cone(j)
+            {
+                cone = Some(match cone {
+                    None => here,
+                    Some(k) => Cone {
+                        n: core::array::from_fn(|i| k.n[i].hull(here.n[i])),
+                        k: k.k.max(here.k),
+                    },
+                });
+                continue;
+            }
+        }
+        if depth == CONE_DEPTH {
+            return Err(Failure::Uncertain);
+        }
+        let [[u0, u1], [v0, v1]] = c;
+        let across_u = match &j {
+            Some(j) => {
+                let len = |k: usize| (0..3).map(|i| j[i].d[k].mag()).fold(0.0, f64::max);
+                len(0) * (u1 - u0) >= len(1) * (v1 - v0)
+            }
+            None => u1 - u0 >= v1 - v0,
+        };
+        if across_u {
+            let mid = (u0 + u1) / 2.0;
+            queue.push_back(([[u0, mid], [v0, v1]], depth + 1));
+            queue.push_back(([[mid, u1], [v0, v1]], depth + 1));
+        } else {
+            let mid = (v0 + v1) / 2.0;
+            queue.push_back(([[u0, u1], [v0, mid]], depth + 1));
+            queue.push_back(([[u0, u1], [mid, v1]], depth + 1));
+        }
+    }
+    Ok(cone)
+}
+
+/// A lower bound on `|p × q|` over every `p` in `a` and `q` in `b`: for
+/// unit vectors, the sine of the least angle between lines along them.
+/// Each component of the enclosed cross product is at least its least
+/// magnitude, zero where it may vanish.
+#[allow(dead_code)] // 18.A: used from Task 3
+pub(crate) fn sine_apart(a: &[Interval; 3], b: &[Interval; 3]) -> f64 {
+    let least = |x: Interval| {
+        if x.lo() > 0.0 {
+            x.lo()
+        } else if x.hi() < 0.0 {
+            -x.hi()
+        } else {
+            0.0
+        }
+    };
+    let sum = cross3(a, b).iter().fold(Interval::point(0.0), |acc, &x| {
+        acc + Interval::point(least(x)).square()
+    });
+    sum.sqrt().map_or(0.0, |r| r.lo().max(0.0))
 }
 
 /// Whether a part of a face's parameter plane is certified outside the
@@ -843,5 +1020,91 @@ mod tests {
         assert_eq!(face_off_ball(&b, top, above, 1.1, &m), Ok(false));
         let beside = Point3::new(3.0, 0.5, 1.0);
         assert_eq!(face_off_ball(&b, top, beside, 1.5, &m), Ok(true));
+    }
+}
+
+#[cfg(test)]
+mod cone_tests {
+    use super::*;
+    use crate::geom::{Box3, Rigid};
+    use crate::intersect::face_box;
+    use crate::name::OpKey;
+    use crate::primitive;
+
+    fn cube(c: Point3, half: f64) -> Box3 {
+        Box3::new(
+            Point3::new(c.x - half, c.y - half, c.z - half),
+            Point3::new(c.x + half, c.y + half, c.z + half),
+        )
+    }
+
+    /// A block's top: one normal, no bend; a box away from it holds none
+    /// of it. A cylinder's side: normals square to its axis, bent at
+    /// least `1 / r`.
+    #[test]
+    fn normal_cones_hold_normals_and_bound_the_bend() {
+        let m = Meter::free();
+        let (block, _) = primitive::block(OpKey(1), 1.0, 1.0, 1.0, &Rigid::IDENTITY).unwrap();
+        let top = block
+            .faces()
+            .find(|&f| {
+                matches!(&block.surfaces[block.faces[f].surface], Surface::Plane(_))
+                    && face_box(&block, f).min().z > 0.99
+            })
+            .unwrap();
+        let mid = face_box(&block, top).min()
+            + (face_box(&block, top).max() - face_box(&block, top).min()) * 0.5;
+        let cone = normal_cone(&block, top, &cube(mid, 0.1), CONE_PARTS, &m)
+            .unwrap()
+            .expect("the top meets the box");
+        // A certified bound of an exact zero is `√TINY` at most (#301).
+        assert!(cone.k <= 1e-60, "{}", cone.k);
+        let z = [
+            Interval::point(0.0),
+            Interval::point(0.0),
+            Interval::point(1.0),
+        ];
+        assert_eq!(sine_apart(&cone.n, &z), 0.0);
+        let far = cube(Point3::new(5.0, 5.0, 5.0), 0.1);
+        assert!(
+            normal_cone(&block, top, &far, CONE_PARTS, &m)
+                .unwrap()
+                .is_none()
+        );
+
+        let (rod, _) = primitive::cylinder(OpKey(2), 0.5, 1.0, &Rigid::IDENTITY).unwrap();
+        let side = rod
+            .faces()
+            .find(|&f| matches!(&rod.surfaces[rod.faces[f].surface], Surface::Cylinder(_)))
+            .unwrap();
+        let cone = normal_cone(
+            &rod,
+            side,
+            &cube(Point3::new(0.5, 0.0, 0.5), 0.05),
+            CONE_PARTS,
+            &m,
+        )
+        .unwrap()
+        .expect("the side meets the box");
+        assert!(cone.k >= 2.0 * (1.0 - 1e-9), "{}", cone.k);
+        assert!(cone.k <= 20.0, "{}", cone.k);
+        assert!(sine_apart(&cone.n, &z) > 0.9);
+    }
+
+    /// Parallel lines have no angle between them; square ones a sine of 1.
+    #[test]
+    fn the_sine_apart_is_a_lower_bound() {
+        let p =
+            |x: f64, y: f64, z: f64| [Interval::point(x), Interval::point(y), Interval::point(z)];
+        assert_eq!(sine_apart(&p(0.0, 0.0, 1.0), &p(0.0, 0.0, -1.0)), 0.0);
+        let s = sine_apart(&p(1.0, 0.0, 0.0), &p(0.0, 1.0, 0.0));
+        assert!(s <= 1.0 && s > 1.0 - 1e-12, "{s}");
+        // A cone wide enough to hold the other direction: no bound.
+        let wide = [
+            Interval::new(-0.1, 0.1).unwrap(),
+            Interval::point(0.0),
+            Interval::new(0.99, 1.0).unwrap(),
+        ];
+        assert_eq!(sine_apart(&wide, &p(0.0, 0.0, 1.0)), 0.0);
     }
 }

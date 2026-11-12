@@ -37,7 +37,11 @@ mod winding;
 
 pub(crate) use beside::CELLS as BESIDE_CELLS;
 pub use beside::beside;
-pub(crate) use beside::{face_beside, face_off_ball, faces_apart, section_plane};
+#[allow(unused_imports)] // 18.A: used from Task 3
+pub(crate) use beside::{
+    CONE_PARTS, Cone, face_beside, face_off_ball, faces_apart, normal_cone, section_plane,
+    sine_apart,
+};
 pub(crate) use coincide::{coincident, common, covering};
 pub(crate) use contour::fit_contour;
 pub(crate) use cs::curve_surface_in;
