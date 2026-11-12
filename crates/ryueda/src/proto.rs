@@ -994,6 +994,15 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         style: Option<ryu_session::live::Style>,
     },
+    /// The caller's one-line status (at most 200 characters; empty clears
+    /// it) and the references it is working on, shown under every
+    /// window's People strip. Needs the daemon.
+    #[serde(rename = "activity.set")]
+    ActivitySet {
+        status: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        refs: Vec<String>,
+    },
     #[serde(rename = "subscribe")]
     Subscribe {
         #[serde(default)]

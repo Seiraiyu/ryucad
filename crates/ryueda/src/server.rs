@@ -1289,6 +1289,13 @@ fn dispatch(
             let highlights = live.clear_highlights(&id, style)?.to_vec();
             Ok(json!({"participant": id, "highlights": highlights}))
         }
+        Request::ActivitySet { status, refs } => {
+            let live = live.ok_or_else(|| live::no_live_session("activity.set"))?;
+            crate::refs::resolve_all(session.project(), &refs)?;
+            let id = live.caller(me);
+            live.set_status(&id, &status, refs)?;
+            Ok(json!({"participant": id, "status": live.get(&id)?.status}))
+        }
         Request::Subscribe { .. } => match live {
             None => Err(live::no_live_session("subscribe")),
             Some(_) => Err(Error::new(Code::Usage, "subscribe needs a connection")),

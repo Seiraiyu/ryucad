@@ -502,6 +502,26 @@ fn highlights_from_the_cli() {
 }
 
 #[test]
+fn status_from_the_cli() {
+    let p = Pair::breakout();
+    let run = |args: &[&str]| p.run_in(&p.daemon, "board", args);
+    let (code, v) = p.run_in(&p.direct, "board", &["--no-daemon", "status", "routing"]);
+    assert_eq!((code, &v["error"]["code"]), (1, &json!("no_live_session")));
+    let (code, v) = run(&["status", "placing the regulator", "--ref", "breakout/u2"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, list) = run(&["participants"]);
+    let me = list["result"]["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["name"] == "agent")
+        .unwrap()
+        .clone();
+    assert_eq!(me["status"]["text"], "placing the regulator");
+    assert_eq!(run(&["status", ""]).1["result"]["status"], Value::Null);
+}
+
+#[test]
 fn watchers_hear_of_library_changes() {
     let p = Pair::new();
     for (sub, args) in [
@@ -673,6 +693,7 @@ fn every_protocol_method_has_a_command() {
         ("selection.set", &["select"]),
         ("highlight.set", &["highlight"]),
         ("highlight.clear", &["highlight"]),
+        ("activity.set", &["status"]),
         ("subscribe", &["watch"]),
         ("request.cancel", &["cancel"]),
         ("daemon.status", &["daemon", "status"]),

@@ -194,3 +194,36 @@ fn an_agents_highlights_are_everyones_to_see() {
         json!([])
     );
 }
+
+#[test]
+fn an_agent_says_what_it_is_doing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Here::open(&breakout(dir.path()));
+    let v = h
+        .ask(
+            None,
+            "activity.set",
+            json!({"status": "pulling up SDA", "refs": ["breakout/r1"]}),
+        )
+        .unwrap();
+    assert_eq!(
+        v["status"],
+        json!({"text": "pulling up SDA", "entities": ["breakout/r1"]})
+    );
+    let e = h
+        .ask(None, "activity.set", json!({"status": "x".repeat(201)}))
+        .unwrap_err();
+    assert_eq!(e.code, Code::InvalidParam);
+    let e = h
+        .ask(
+            None,
+            "activity.set",
+            json!({"status": "x", "refs": ["breakout/zz"]}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, Code::RefUnresolved);
+    assert_eq!(
+        h.ask(None, "activity.set", json!({"status": ""})).unwrap()["status"],
+        Value::Null
+    );
+}

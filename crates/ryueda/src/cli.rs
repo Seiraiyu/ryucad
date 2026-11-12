@@ -490,6 +490,14 @@ enum Command {
         #[arg(long, conflicts_with = "label")]
         clear: bool,
     },
+    /// Say what you are doing, in one line under every window's People
+    /// strip, with --ref for what you are working on; "" clears it.
+    /// Through the daemon.
+    Status {
+        text: String,
+        #[arg(long = "ref", value_name = "REF")]
+        refs: Vec<String>,
+    },
     /// Undo your latest change, or the entry given.
     Undo { entry: Option<u64> },
     /// Redo your latest undo, or the entry given.
@@ -1884,6 +1892,10 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 }
             }
         }
+        Command::Status { text, refs } => Request::ActivitySet {
+            status: text.clone(),
+            refs: refs.clone(),
+        },
         Command::Undo { entry } => Request::Undo { entry: *entry },
         Command::Redo { entry } => Request::Redo { entry: *entry },
         Command::Footprint(FootprintCmd::Show { footprint }) => Request::FootprintShow {
