@@ -1139,7 +1139,14 @@ pub(crate) fn dispatch(
             part,
             against,
             results,
-        } => crate::check::run(session, part.as_deref(), against.as_deref(), results),
+            interference,
+        } => crate::check::run(
+            session,
+            part.as_deref(),
+            against.as_deref(),
+            results,
+            interference,
+        ),
         Request::Diff {
             from,
             to,

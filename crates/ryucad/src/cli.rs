@@ -5148,6 +5148,7 @@ fn request(cmd: &Command) -> Option<Request> {
             part: part.clone(),
             against: against.clone(),
             results: *results,
+            interference: false,
         },
         Command::Diff {
             from,

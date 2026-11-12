@@ -4,7 +4,9 @@
 //! among them), that no file is left unmerged in Git's index, that every
 //! feature builds, that every body passes ryukei's intersection check and
 //! meshes without faults, that the session's cached results are what a
-//! rebuild from nothing gives, and ryupdm's release checks. CI and hosted
+//! rebuild from nothing gives, and ryupdm's release checks. Interference
+//! runs only when asked (`interference`, design 525): without it, each
+//! assembly checked gets an `interference_not_checked` note. CI and hosted
 //! review run it.
 //!
 //! The report is versioned (`schema`, [`ryupdm::check::SCHEMA`]): each
@@ -220,7 +222,9 @@ fn result(r: &Result<Output>) -> Value {
 /// issues). With `against`, the report adds what changed from that
 /// revision to the working files, the model included (a pull request's
 /// check reads as what the branch did); with `results`, official releases
-/// are rebuilt and compared with their records. Fails with
+/// are rebuilt and compared with their records. With `interference`, each
+/// assembly's instances are intersected (`instances_interfere`,
+/// `cannot_check`). Fails with
 /// `check_failed`, the report in its details, when any finding is an
 /// error.
 pub fn run(
@@ -228,6 +232,7 @@ pub fn run(
     part: Option<&str>,
     against: Option<&str>,
     results: bool,
+    interference: bool,
 ) -> Result<Value> {
     // A revision that isn't there fails before anything is built.
     let changes = match against {
@@ -426,9 +431,12 @@ pub fn run(
                 findings.push(f);
             }
         }
-        // Instances that share a volume: a warning, since a press fit is
-        // meant; pairs ryukei can't intersect can't be checked.
-        if crate::server::part_kind(&p) == crate::doc::files::PartKind::Assembly
+        // Instances that share a volume, only when asked (design 525): a
+        // warning, since a press fit is meant; pairs ryukei can't
+        // intersect can't be checked.
+        let assembly = crate::server::part_kind(&p) == crate::doc::files::PartKind::Assembly;
+        if assembly
+            && interference
             && let Ok(model) = from_nothing.model(id, &crate::doc::assembly::Rev::Working)
         {
             let mut cache = crate::interference::Cache::default();
@@ -787,7 +795,18 @@ mod tests {
             [0.03, 0.01, 0.005],
         );
         s.refresh().unwrap();
-        let v = run(&mut s, None, None, false).unwrap();
+        // Unasked, check runs no interference (design 525).
+        let v = run(&mut s, None, None, false, false).unwrap();
+        assert!(
+            !v["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["code"] == "instances_interfere"),
+            "{v}"
+        );
+        // Asked, it reports each pair that shares a volume.
+        let v = run(&mut s, None, None, false, true).unwrap();
         let found: Vec<&Value> = v["findings"]
             .as_array()
             .unwrap()
@@ -805,7 +824,7 @@ mod tests {
         );
         assert!(v["passed"].as_bool().unwrap(), "{v}");
         // One part checked alone isn't an assembly's.
-        let v = run(&mut s, Some("bolt"), None, false).unwrap();
+        let v = run(&mut s, Some("bolt"), None, false, true).unwrap();
         assert!(
             !v["findings"]
                 .as_array()

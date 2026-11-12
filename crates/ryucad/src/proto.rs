@@ -1558,6 +1558,12 @@ pub enum Request {
         /// Also rebuild official releases and compare their bodies.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         results: bool,
+        /// Also find which instances of each assembly checked interfere
+        /// (`instances_interfere`, `cannot_check`). Without it, interference
+        /// isn't run (design 525) and each assembly gets an
+        /// `interference_not_checked` note.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        interference: bool,
     },
     /// What changed between two revisions (`HEAD` and the working files by
     /// default): files as ryucad reads them, and with `model` the bodies.
