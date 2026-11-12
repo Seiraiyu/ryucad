@@ -925,3 +925,78 @@ fn flat_sided_threads_up_a_helix() {
         assert!((got - want).abs() <= 2e-3 * want, "{got} against {want}");
     }
 }
+
+/// #698: the triangular thread of `flat_sided_threads_up_a_helix` cut
+/// from a 5 mm shank 20 mm tall, as ryucad's
+/// `a_flat_sided_thread_up_a_helix_sweeps` cuts it, in ryukei alone. The
+/// cut takes the triangle's tip inside the shank, by Pappus, and checks
+/// clean. Until ryukei 18.A one pair, the triangle's two swept flat
+/// sides crossing at 48° along the helical edge they share, was
+/// `CannotCheck`; each fault's faces are printed.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_flat_sided_thread_cut_from_a_shank_checks_clean() {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::Rigid;
+    let mm = 1e-3;
+    let thread = thread(&[(3.6, 5.5), (4.4, 5.5), (4.0, 4.6)]).unwrap();
+    let (shank, _) =
+        ryukei::primitive::cylinder(OpKey(0xa2), 5.0 * mm, 20.0 * mm, &Rigid::IDENTITY).unwrap();
+    let tools = [Tool {
+        key: ToolKey(1),
+        body: &thread,
+        place: Rigid::IDENTITY,
+    }];
+    let (cut, _) = boolean(OpKey(0xa3), BooleanOp::Subtract, &shank, &tools).unwrap();
+    assert_eq!(check(&cut), []);
+    let faults = check_intersections(&cut);
+    for f in &faults {
+        if let ryukei::check::Fault::CannotCheck { a, b } = *f {
+            for x in [a, b] {
+                let face = cut.face(x).unwrap();
+                eprintln!(
+                    "face {} {:032x} {:?}",
+                    x.index(),
+                    face.name.to_u128(),
+                    cut.surface(face.surface).unwrap()
+                );
+                for l in cut.face_loops(x) {
+                    for fin in cut.loop_fins(l) {
+                        let e = cut.fin(fin).unwrap().edge;
+                        let edge = cut.edge(e).unwrap();
+                        let c = cut.curve(edge.curve).unwrap();
+                        let [t0, t1] = edge.interval;
+                        eprintln!(
+                            "  edge {} tol {:e} from {:?} to {:?} {}",
+                            e.index(),
+                            edge.tolerance.get(),
+                            c.point(t0),
+                            c.point(t1),
+                            format!("{c:?}").chars().take(40).collect::<String>()
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(faults, []);
+    // The triangle's tip inside x = 5 mm: apex at 4.6 mm, 0.8 mm wide at
+    // 5.5 mm, so 0.4 mm tall and 0.8 × 0.4 / 0.9 mm wide at the shank,
+    // its centroid two thirds of the way from the apex; round three turns.
+    let (tall, wide) = (0.4 * mm, 0.8 * 0.4 / 0.9 * mm);
+    let x = (4.6 + 2.0 * 0.4 / 3.0) * mm;
+    let want =
+        core::f64::consts::PI * 25.0 * 20.0 * mm * mm * mm - 0.5 * tall * wide * TAU * x * 3.0;
+    let m = tessellate(&cut, &MeshParams::new(2e-6, 0.3)).unwrap();
+    assert!(m.faults.is_empty(), "{:?}", m.faults);
+    let got = volume_and_area(&m).0;
+    // The mesh of the shank's cylinder alone is about 1e-4 short of its
+    // volume, so the whole is held to 2e-4: a twentieth of what the cut
+    // takes away.
+    let cut_away = 0.5 * tall * wide * TAU * x * 3.0;
+    assert!(20.0 * 2e-4 * want <= cut_away);
+    assert!((got - want).abs() <= 2e-4 * want, "{got} against {want}");
+}
