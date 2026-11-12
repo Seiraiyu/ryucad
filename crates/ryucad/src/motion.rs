@@ -20,9 +20,10 @@ use crate::doc::project::Part;
 use crate::error::{Code, Error, Result};
 use crate::rebuild::{Output, PartResult};
 use crate::session::Session;
+use ryu_session::job::Phase;
 use ryukei::geom::Rigid;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub use ryu_session::job::Job;
 
@@ -730,6 +731,15 @@ fn placement(p: &ryumate::Pose) -> Result<Rigid> {
     crate::assembly::pose_rigid(&crate::connector::doc_pose(p))
 }
 
+/// The body an occurrence's path sits under: its top-level instance, or
+/// a copy's seed.
+fn top_body(rest: &Rest, path: &[Id]) -> Option<u32> {
+    match path[0].copy_of() {
+        Some(_) => path.get(1).and_then(|s| rest.body(s)),
+        None => rest.body(&path[0]),
+    }
+}
+
 /// The rest model with each occurrence under a body in `moved` (a
 /// top-level instance, or a copy of a moved seed) placed where the step
 /// puts it, and for each occurrence the body that moved it.
@@ -791,6 +801,354 @@ pub fn step_model(
         movers.push(Some(k));
     }
     Ok((Model::new(occurrences), movers))
+}
+
+/// What a sweep finds besides its solve.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Options {
+    /// Intersect pairs at each step and report what collides that
+    /// doesn't at rest.
+    pub interference: bool,
+    /// Report the closest pair whose relative pose moved, at each step.
+    pub clearance: bool,
+    /// Clearance's reach in meters (`None`: clearance's own default).
+    pub below: Option<f64>,
+    /// Give each step's moved instances' poses.
+    pub poses: bool,
+    /// Bisections of the first collision and the first stop (0: none).
+    pub refine: u32,
+}
+
+impl Options {
+    fn to_json(&self) -> Value {
+        json!({"interference": self.interference, "clearance": self.clearance,
+               "below": self.below.map(f64::to_bits), "poses": self.poses,
+               "refine": self.refine})
+    }
+}
+
+/// What a sweep runs over: the assembly as some rebuild has it.
+pub struct Input<'a> {
+    pub asm: &'a Id,
+    pub part: &'a Part,
+    pub result: &'a PartResult,
+    pub model: &'a Model,
+    /// The project's default unit, for distances.
+    pub unit: crate::units::Unit,
+}
+
+/// The caches a sweep fills: the session's, or check's own.
+pub struct Caches<'c> {
+    pub interference: &'c mut crate::interference::Cache,
+    pub clearance: &'c mut crate::clearance::Cache,
+}
+
+/// `assembly_unsolved` for a sweep from an assembly that doesn't hold.
+fn unsolved(asm: &Id) -> Error {
+    Error::new(
+        Code::AssemblyUnsolved,
+        format!("{asm}'s mates can't all hold: settle them before sweeping"),
+    )
+    .with("part", asm.as_str())
+}
+
+/// The value of each drive at `t`: a mate's by its ID, a move's as
+/// `drives/<i>`; angles in degrees, lengths in `unit`.
+fn values_at(drives: &[Drive], t: f64, unit: crate::units::Unit) -> Value {
+    let deg = |r: f64| r * (180.0 / core::f64::consts::PI);
+    let len = |m: f64| json!(format!("{} {}", m / unit.factor(), unit.as_str()));
+    let mut out = serde_json::Map::new();
+    for (i, d) in drives.iter().enumerate() {
+        match d {
+            Drive::Mate {
+                mate,
+                driven,
+                from,
+                to,
+                ..
+            } => {
+                let v = lerp(*from, *to, t);
+                let entry = match driven {
+                    Driven::Angle => json!({"angle_deg": deg(v)}),
+                    Driven::Distance => json!({"distance": len(v)}),
+                };
+                out.insert(mate.to_string(), entry);
+            }
+            Drive::Move {
+                rotate, translate, ..
+            } => {
+                let mut v = json!({});
+                if let Some(r) = rotate {
+                    v["angle_deg"] = json!(deg(lerp(r.from, r.to, t)));
+                }
+                if let Some(s) = translate {
+                    v["distance"] = len(lerp(s.from, s.to, t));
+                }
+                out.insert(format!("drives/{i}"), v);
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+/// Which group each body moves with: a move drive's bodies together.
+fn groups(drives: &[Drive]) -> BTreeMap<u32, u32> {
+    let mut g = BTreeMap::new();
+    for (i, d) in drives.iter().enumerate() {
+        if let Drive::Move { bodies, .. } = d {
+            for b in bodies {
+                g.insert(*b, u32::MAX - i as u32);
+            }
+        }
+    }
+    g
+}
+
+/// The occurrence path of an interference or clearance name
+/// `<asm>/<path>/<solid>`.
+fn occurrence_of(name: &str) -> &str {
+    let rest = name.split_once('/').map_or("", |x| x.1);
+    rest.rsplit_once('/').map_or(rest, |x| x.0)
+}
+
+/// A pair's two names.
+fn pair_key(v: &Value) -> (String, String) {
+    (
+        v["a"].as_str().unwrap_or_default().to_owned(),
+        v["b"].as_str().unwrap_or_default().to_owned(),
+    )
+}
+
+/// An interference entry as a sweep gives a collision.
+fn collision(i: &Value) -> Value {
+    let mut c = json!({"pair": [i["a"], i["b"]], "volume_m3": i["volume_m3"], "box": i["box"],
+                       "faces_a": i["faces"]["a"], "faces_b": i["faces"]["b"]});
+    if i["approximate"] == true {
+        c["approximate"] = json!(true);
+    }
+    c
+}
+
+/// Each moved instance's pose, as a file would hold it.
+fn poses_json(rest: &Rest, moved: &BTreeMap<u32, ryumate::Pose>) -> Value {
+    let mut out = serde_json::Map::new();
+    for (k, p) in moved {
+        out.insert(
+            rest.instances[*k as usize].to_string(),
+            crate::connector::doc_pose(p).to_json(),
+        );
+    }
+    Value::Object(out)
+}
+
+/// Sweeps `resolved` over `input`: every step solved in turn from the
+/// last that held; with `opts.interference` each held step's collisions
+/// (pairs that interfere there and don't at rest) and the pairs ryukei
+/// can't intersect; with `opts.clearance` each held step's closest pair
+/// whose relative pose moved. `motion` is the saved motion's ID, if any.
+pub fn sweep(
+    input: &Input<'_>,
+    motion: Option<&Id>,
+    resolved: &Resolved,
+    opts: &Options,
+    caches: Caches<'_>,
+    job: &Job,
+) -> Result<Value> {
+    let Caches {
+        interference,
+        clearance,
+    } = caches;
+    let rest = Rest::of(input.result);
+    if !rest.holds {
+        return Err(unsolved(input.asm));
+    }
+    let n = resolved.steps;
+    let ts: Vec<f64> = (0..n).map(|k| t_of(k, n)).collect();
+    let steps = steps(&rest.asm, &resolved.drives, &ts, job)?;
+    let groups = groups(&resolved.drives);
+    // Which group each occurrence moves with over the whole sweep (`None`
+    // for what no step moves), so a moving pair is one even at a step
+    // where nothing has moved yet.
+    let moving: BTreeSet<u32> = steps
+        .iter()
+        .flat_map(|s| s.moved.keys().copied())
+        .chain(groups.keys().copied())
+        .collect();
+    let group: BTreeMap<String, Option<u32>> = input
+        .model
+        .occurrences
+        .iter()
+        .map(|o| {
+            let b = top_body(&rest, &o.path).filter(|b| moving.contains(b));
+            (
+                crate::assembly::path_text(&o.path),
+                b.map(|b| groups.get(&b).copied().unwrap_or(b)),
+            )
+        })
+        .collect();
+    let rest_found = if opts.interference {
+        Some(crate::interference::find_for(
+            input.asm,
+            input.model,
+            &[],
+            interference,
+            job,
+        )?)
+    } else {
+        None
+    };
+    let at_rest: BTreeSet<(String, String)> = rest_found
+        .iter()
+        .flat_map(|f| f["interferences"].as_array().into_iter().flatten())
+        .map(pair_key)
+        .collect();
+    let mut out = Vec::with_capacity(n);
+    let mut unchecked = Vec::new();
+    let mut seen_unchecked = BTreeSet::new();
+    let mut first_collision: Option<(usize, Value)> = None;
+    let mut first_blocked: Option<usize> = None;
+    let mut limits_reached = Vec::new();
+    let mut seen_limits = BTreeSet::new();
+    let stage = job.begin(Phase::Intersect, "steps", n);
+    for (k, s) in steps.iter().enumerate() {
+        stage.step(|| format!("step {k}"))?;
+        let mut v = json!({"index": k, "t": s.t,
+                           "values": values_at(&resolved.drives, s.t, input.unit),
+                           "state": if s.holds { "holds" } else { "blocked" }});
+        if !s.holds {
+            let sets: Vec<Vec<&Id>> = s
+                .conflicting
+                .iter()
+                .map(|set| set.iter().map(|m| &rest.mates[*m as usize]).collect())
+                .collect();
+            v["conflicting"] = json!(sets);
+            if let Some((m, stop)) = s.past {
+                v["limit"] = json!({"mate": rest.mates[m as usize], "at": stop_text(stop)});
+            }
+            if let Some(r) = &s.refused {
+                v["refused"] = json!(r);
+            }
+            first_blocked.get_or_insert(k);
+            out.push(v);
+            continue;
+        }
+        for (m, vals) in &s.values {
+            let stops = [
+                ("angle", vals.angle.and_then(|x| x.at)),
+                ("distance", vals.distance.and_then(|x| x.at)),
+            ];
+            for (what, at) in stops {
+                if let Some(at) = at
+                    && seen_limits.insert((*m, what, stop_text(at)))
+                {
+                    limits_reached.push(json!({"mate": rest.mates[*m as usize], "value": what,
+                                               "at": stop_text(at), "index": k}));
+                }
+            }
+        }
+        if opts.poses {
+            v["poses"] = poses_json(&rest, &s.moved);
+        }
+        if opts.interference || opts.clearance {
+            let (model, _) = match step_model(input.model, &rest, &s.moved) {
+                Ok(x) => x,
+                Err(e) => {
+                    v["state"] = json!("blocked");
+                    v["refused"] = json!(e.message);
+                    first_blocked.get_or_insert(k);
+                    out.push(v);
+                    continue;
+                }
+            };
+            if opts.interference {
+                let found =
+                    crate::interference::find_for(input.asm, &model, &[], interference, job)?;
+                let collisions: Vec<Value> = found["interferences"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|i| !at_rest.contains(&pair_key(i)))
+                    .map(collision)
+                    .collect();
+                if first_collision.is_none()
+                    && let Some(c) = collisions.first()
+                {
+                    first_collision = Some((k, c.clone()));
+                }
+                v["collisions"] = json!(collisions);
+                for u in found["unchecked"].as_array().into_iter().flatten() {
+                    if seen_unchecked.insert(pair_key(u)) {
+                        let mut u = u.clone();
+                        u["index"] = json!(k);
+                        unchecked.push(u);
+                    }
+                }
+            }
+            if opts.clearance {
+                let of = |name: &Value| {
+                    group
+                        .get(occurrence_of(name.as_str().unwrap_or_default()))
+                        .copied()
+                        .flatten()
+                };
+                let found = crate::clearance::find(
+                    input.asm,
+                    &model,
+                    &[],
+                    opts.below,
+                    input.unit,
+                    clearance,
+                )?;
+                v["clearance"] = found["clearances"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|c| of(&c["a"]) != of(&c["b"]))
+                    .map_or(Value::Null, |c| {
+                        json!({"pair": [c["a"], c["b"]], "distance": c["distance"],
+                               "points": c["points"]})
+                    });
+            }
+        }
+        out.push(v);
+    }
+    drop(stage);
+    let at = |k: usize| json!({"index": k, "t": ts[k], "values": values_at(&resolved.drives, ts[k], input.unit)});
+    let first_collision = first_collision.map(|(k, c)| {
+        let mut v = at(k);
+        for (key, x) in c.as_object().into_iter().flatten() {
+            v[key] = x.clone();
+        }
+        v
+    });
+    let first_blocked = first_blocked.map(|k| {
+        let mut v = at(k);
+        for key in ["conflicting", "limit", "refused"] {
+            if let Some(x) = out[k].get(key) {
+                v[key] = x.clone();
+            }
+        }
+        v
+    });
+    let mut answer = json!({
+        "motion": motion,
+        "steps": out,
+        "first_collision": first_collision,
+        "first_blocked": first_blocked,
+        "limits_reached": limits_reached,
+    });
+    if let Some(f) = rest_found {
+        answer["at_rest"] = json!(
+            f["interferences"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|i| json!({"pair": [i["a"], i["b"]], "volume_m3": i["volume_m3"]}))
+                .collect::<Vec<_>>()
+        );
+        answer["unchecked"] = json!(unchecked);
+    }
+    Ok(answer)
 }
 
 #[cfg(test)]
@@ -1245,5 +1603,192 @@ pub(crate) mod tests {
             step_model(&model, &rest, &BTreeMap::new()).unwrap().0.hash,
             model.hash
         );
+    }
+
+    /// Parts `arm` (a 50 × 4 × 4 mm bar from the origin along x), `block`
+    /// (10 × 10 × 4 mm) and `cube` (2 mm), and assembly `swing`: the arm
+    /// at the origin, the block fixed at (30, 20, 0) mm and, with `nub`, a
+    /// cube fixed at (10, 1, 1) mm, sunk into the arm at rest. Turning the
+    /// arm about z, its leading face first meets the block's corner
+    /// (40, 20) at atan2(20, 40) - asin(4 / √2000), about 21.43°.
+    pub(crate) fn swing(nub: bool) -> (tempfile::TempDir, Session) {
+        let (dir, mut s) = crate::server::tests::fresh();
+        let mut ok = |m: &str, v: Value| {
+            call(&mut s, m, v).unwrap_or_else(|e| panic!("{m}: {e}"));
+        };
+        for (part, x, y, z) in [("arm", 50, 4, 4), ("block", 10, 10, 4), ("cube", 2, 2, 2)] {
+            ok("part.create", json!({"part": part}));
+            ok(
+                "feature.add",
+                json!({"part": part, "type": "box", "id": "body", "params":
+                    {"x": format!("{x} mm"), "y": format!("{y} mm"), "z": format!("{z} mm")}}),
+            );
+        }
+        ok("part.create", json!({"part": "swing", "kind": "assembly"}));
+        ok(
+            "feature.add",
+            json!({"part": "swing", "type": "instance", "id": "arm", "of": "arm"}),
+        );
+        ok(
+            "feature.add",
+            json!({"part": "swing", "type": "instance", "id": "block", "of": "block",
+                   "fixed": true, "placement": {"origin": ["30 mm", "20 mm", "0 mm"]}}),
+        );
+        if nub {
+            ok(
+                "feature.add",
+                json!({"part": "swing", "type": "instance", "id": "nub", "of": "cube",
+                       "fixed": true, "placement": {"origin": ["10 mm", "1 mm", "1 mm"]}}),
+            );
+        }
+        (dir, s)
+    }
+
+    pub(crate) fn turning(to: &str) -> Value {
+        json!([{"instances": ["arm"], "rotate":
+            {"axis": {"origin": ["0 mm", "0 mm", "0 mm"], "direction": "z"},
+             "from": "0 deg", "to": to}}])
+    }
+
+    /// A sweep of `drives` over `steps` with the session's caches.
+    pub(crate) fn swept(
+        s: &mut Session,
+        asm: &str,
+        drives: Value,
+        steps: u32,
+        opts: &Options,
+    ) -> Value {
+        let f = file(s, asm, drives, steps);
+        let r = resolved(s, asm, &f).unwrap();
+        let pid = id(asm);
+        let part = s.project().part(&pid).unwrap().clone();
+        let result = s.rebuilt(&pid).unwrap().clone();
+        let model = s.model(&pid, &crate::doc::assembly::Rev::Working).unwrap();
+        let unit = s.project().manifest.default_unit;
+        let input = Input {
+            asm: &pid,
+            part: &part,
+            result: &result,
+            model: &model,
+            unit,
+        };
+        let caches = Caches {
+            interference: &mut s.interference,
+            clearance: &mut s.clearance,
+        };
+        sweep(&input, None, &r, opts, caches, &Job::default()).unwrap()
+    }
+
+    fn names(pair: &Value) -> BTreeSet<String> {
+        pair.as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn collisions_are_what_rest_does_not_have() {
+        let (_dir, mut s) = swing(true);
+        let opts = Options {
+            interference: true,
+            ..Options::default()
+        };
+        let v = swept(&mut s, "swing", turning("45 deg"), 46, &opts);
+        // The nub sits in the arm at rest: reported once, never a collision.
+        assert_eq!(v["at_rest"].as_array().unwrap().len(), 1, "{v}");
+        assert!(
+            names(&v["at_rest"][0]["pair"]).contains("swing/nub/body"),
+            "{v}"
+        );
+        // Contact is at about 21.43°: step 21 is clear, step 22 collides.
+        assert_eq!(
+            v["steps"][21]["collisions"],
+            json!([]),
+            "{}",
+            v["steps"][21]
+        );
+        let c = &v["steps"][22]["collisions"][0];
+        assert_eq!(
+            names(&c["pair"]),
+            BTreeSet::from(["swing/arm/body".to_owned(), "swing/block/body".to_owned()])
+        );
+        assert!(c["volume_m3"].as_f64().unwrap() > 0.0);
+        assert!(!c["faces_a"].as_array().unwrap().is_empty());
+        assert_eq!(v["first_collision"]["index"], 22);
+        assert_eq!(v["steps"][22]["values"]["drives/0"]["angle_deg"], 22.0);
+        for st in v["steps"].as_array().unwrap() {
+            for c in st["collisions"].as_array().unwrap() {
+                assert!(!names(&c["pair"]).contains("swing/nub/body"), "{st}");
+            }
+        }
+        // Asked again with what it cached: the same answer, and the
+        // pairs whose relative pose didn't change were never intersected
+        // again (the cache holds one verdict per distinct pose).
+        let cached = s.interference.len();
+        assert_eq!(swept(&mut s, "swing", turning("45 deg"), 46, &opts), v);
+        assert_eq!(s.interference.len(), cached);
+    }
+
+    #[test]
+    fn without_interference_nothing_is_intersected() {
+        let (_dir, mut s) = swing(true);
+        let v = swept(&mut s, "swing", turning("45 deg"), 46, &Options::default());
+        assert!(s.interference.is_empty());
+        assert!(
+            v.get("at_rest").is_none() && v["first_collision"].is_null(),
+            "{v}"
+        );
+        assert!(v["steps"][30].get("collisions").is_none());
+    }
+
+    #[test]
+    fn clearance_follows_the_closest_moving_pair() {
+        let (_dir, mut s) = swing(false);
+        let opts = Options {
+            clearance: true,
+            below: Some(0.05),
+            ..Options::default()
+        };
+        let v = swept(&mut s, "swing", turning("20 deg"), 3, &opts);
+        let c = &v["steps"][0]["clearance"];
+        assert_eq!(
+            names(&c["pair"]),
+            BTreeSet::from(["swing/arm/body".to_owned(), "swing/block/body".to_owned()]),
+            "{v}"
+        );
+        assert!(!v["steps"][2]["clearance"].is_null());
+    }
+
+    #[test]
+    fn a_cancelled_sweep_says_so() {
+        let (_dir, mut s) = swing(false);
+        let f = file(&s, "swing", turning("45 deg"), 46);
+        let r = resolved(&mut s, "swing", &f).unwrap();
+        let pid = id("swing");
+        let part = s.project().part(&pid).unwrap().clone();
+        let result = s.rebuilt(&pid).unwrap().clone();
+        let model = s.model(&pid, &crate::doc::assembly::Rev::Working).unwrap();
+        let input = Input {
+            asm: &pid,
+            part: &part,
+            result: &result,
+            model: &model,
+            unit: crate::units::Unit::Mm,
+        };
+        let caches = Caches {
+            interference: &mut s.interference,
+            clearance: &mut s.clearance,
+        };
+        let e = sweep(
+            &input,
+            None,
+            &r,
+            &Options::default(),
+            caches,
+            &Job::cancelled_at(0),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Cancelled);
     }
 }
