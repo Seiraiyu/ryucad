@@ -4900,6 +4900,7 @@ name = "ryu-session"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "inotify",
  "interprocess",
  "libc",
  "notify",
