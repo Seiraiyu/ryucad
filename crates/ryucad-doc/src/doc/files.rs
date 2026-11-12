@@ -898,7 +898,7 @@ pub struct Acts {
 /// out.
 pub fn feature_acts(v: &Value) -> Acts {
     let ids = |v: Option<&Value>| -> Vec<Id> {
-        let one = |v: &Value| v.as_str().and_then(|s| Id::parse(s, "feature").ok());
+        let one = |v: &Value| v.as_str().and_then(|s| Id::solid_key(s, "feature").ok());
         match v {
             Some(Value::Array(a)) => a.iter().filter_map(one).collect(),
             Some(v) => one(v).into_iter().collect(),
@@ -945,7 +945,15 @@ pub fn feature_acts(v: &Value) -> Acts {
             for g in groups.into_iter().flatten() {
                 let edges = g.get("edges").and_then(Value::as_array);
                 let named = edges.into_iter().flatten().chain(g.get("face"));
-                for id in named.flat_map(|r| ids(r.get("feature"))) {
+                for id in named.flat_map(|r| {
+                    let f = r.get("feature").and_then(Value::as_str);
+                    let key = match (f, r.get("solid").and_then(Value::as_str)) {
+                        (Some(f), Some(s)) => Id::solid_key(&format!("{f}/{s}"), "feature").ok(),
+                        (Some(f), None) => Id::parse(f, "feature").ok(),
+                        _ => None,
+                    };
+                    key.into_iter()
+                }) {
                     if !out.acts_on.contains(&id) {
                         out.acts_on.push(id);
                     }

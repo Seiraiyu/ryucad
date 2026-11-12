@@ -206,9 +206,9 @@ impl Split {
             (None, Some(t)) => {
                 let mut f = Obj::new(&t, "/tool")?;
                 let by = match (f.take_opt("body"), f.take_opt("faces")) {
-                    (Some(Value::String(b)), None) => SplitBy::Body(
-                        Id::parse(&b, "feature").map_err(|e| e.with("pointer", "/tool/body"))?,
-                    ),
+                    (Some(Value::String(b)), None) => {
+                        SplitBy::Body(super::solid::SolidRef::parse(&b, "/tool/body")?)
+                    }
                     (None, Some(faces)) => {
                         let faces = refs(&faces, "/tool/faces")?;
                         for (k, r) in faces.iter().enumerate() {
@@ -458,14 +458,9 @@ fn target(o: &mut Obj) -> Result<Id> {
     solid_id(o, "target")
 }
 
-/// A field naming a solid by its founder.
+/// A field naming a solid by its key ([`super::solid::SolidRef`]).
 pub(super) fn solid_id(o: &mut Obj, key: &str) -> Result<Id> {
-    let at = format!("/{key}");
-    let t = o.take(key)?;
-    let t = t
-        .as_str()
-        .ok_or_else(|| invalid(&at, &format!("{key} is a solid's feature ID")))?;
-    Id::parse(t, "feature").map_err(|e| e.with("pointer", at))
+    super::solid::SolidRef::from_json(&o.take(key)?, &format!("/{key}"))
 }
 
 /// A length, of either sign.
@@ -769,6 +764,22 @@ mod tests {
             .map(|s| s.clone())
             .collect();
         assert_eq!(strings, ["t + 1 mm"]);
+    }
+
+    #[test]
+    fn a_mirror_copies_and_a_shell_hollows_an_inserted_solid() {
+        let f =
+            |v: Value| crate::doc::files::Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        let m = f(
+            json!({"format": crate::doc::files::FEATURE_FORMAT, "kind": "ryucad.feature", "type": "mirror",
+                         "solid": "board/u1", "plane": "xy", "operation": "new"}),
+        );
+        assert_eq!(m.source().unwrap().as_str(), "board/u1");
+        let s = f(
+            json!({"format": crate::doc::files::FEATURE_FORMAT, "kind": "ryucad.feature", "type": "shell",
+                         "target": "board/u1", "thickness": "1 mm"}),
+        );
+        assert_eq!(s.targets()[0].as_str(), "board/u1");
     }
 
     fn mirror(v: Value) -> Result<Mirror> {
