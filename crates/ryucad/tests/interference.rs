@@ -413,3 +413,105 @@ fn mesh_verdicts_agree_with_booleans_on_solids() {
     assert!(judged >= 24, "{judged}");
     assert_eq!(agreed, judged);
 }
+
+#[test]
+fn mesh_verdicts_on_drilled_plates_agree_with_booleans() {
+    use ryucad::interference::{Prepared, Verdict, mesh_verdict, verdict};
+    use ryukei::boolean::{BooleanOp, Tool};
+    use ryukei::geom::{Rigid, UnitVector3, Vector3};
+    use ryukei::name::{OpKey, ToolKey};
+    let at = |x: f64, y: f64, z: f64| Rigid::translation(Vector3::new(x, y, z));
+    // A 20 × 10 × 1.6 mm plate with ten 1 mm holes on a 2.54 mm pitch.
+    let plate0 = ryukei::primitive::block(
+        OpKey::from_bytes(b"pl"),
+        0.02,
+        0.01,
+        0.0016,
+        &Rigid::IDENTITY,
+    )
+    .unwrap()
+    .0;
+    let hole =
+        ryukei::primitive::cylinder(OpKey::from_bytes(b"h"), 0.0005, 0.004, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+    let places: Vec<Rigid> = (0..5)
+        .flat_map(|i| {
+            [0.005 - 0.00127, 0.005 + 0.00127].map(|y| at(0.004 + i as f64 * 0.00254, y, -0.001))
+        })
+        .collect();
+    let tools: Vec<Tool> = places
+        .iter()
+        .enumerate()
+        .map(|(k, p)| Tool {
+            key: ToolKey(OpKey::from_bytes(format!("h{k}").as_bytes()).0),
+            body: &hole,
+            place: *p,
+        })
+        .collect();
+    let plate = ryukei::boolean::boolean(
+        OpKey::from_bytes(b"d"),
+        BooleanOp::Subtract,
+        &plate0,
+        &tools,
+    )
+    .unwrap()
+    .0;
+    let comp = ryukei::primitive::block(
+        OpKey::from_bytes(b"c"),
+        0.012,
+        0.005,
+        0.003,
+        &Rigid::IDENTITY,
+    )
+    .unwrap()
+    .0;
+    let (pp, pc) = (
+        Prepared::new(&plate).unwrap(),
+        Prepared::new(&comp).unwrap(),
+    );
+    let mut g = ryukei_testkit::Lcg::new(5250);
+    let (mut agreed, mut judged) = (0, 0);
+    for k in 0..6 {
+        let turn = Rigid::rotation(UnitVector3::Z, g.next_f64(0.0, 0.4));
+        for dz in [0.0, -0.0005, 0.0005] {
+            // The component over the holes, turned about its corner, flush,
+            // sunk half a millimetre or raised as much.
+            let rel = at(0.003, 0.0025, 0.0016 + dz).then_after(&turn);
+            let exact = verdict(&plate, &comp, rel);
+            let meshed = mesh_verdict(&pp, &pc, &rel).expect("decided within the budget");
+            match exact {
+                Verdict::Interferes { volume_m3, .. } if volume_m3 > 1e-9 => {
+                    judged += 1;
+                    assert!(
+                        matches!(meshed, Verdict::Approximate { open: false, .. }),
+                        "{k} {dz}: {meshed:?}"
+                    );
+                    agreed += 1;
+                }
+                Verdict::Clear => {
+                    judged += 1;
+                    assert!(
+                        !matches!(meshed, Verdict::Approximate { .. }),
+                        "{k} {dz}: {meshed:?}"
+                    );
+                    agreed += 1;
+                }
+                _ => {}
+            }
+            if dz == 0.0 {
+                assert_eq!(meshed, Verdict::Touching, "{k}: flush only touches");
+            }
+            let swapped =
+                mesh_verdict(&pc, &pp, &rel.inverse()).expect("decided within the budget");
+            assert_eq!(
+                std::mem::discriminant(&swapped),
+                std::mem::discriminant(&meshed),
+                "{k} {dz}: {meshed:?} {swapped:?}"
+            );
+        }
+    }
+    println!("drilled plates: {agreed} of {judged} judged agree");
+    assert!(judged >= 6, "{judged}");
+    assert_eq!(agreed, judged);
+}
