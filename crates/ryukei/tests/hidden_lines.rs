@@ -10,7 +10,7 @@ use ryukei::project::{
     Class, Piece, Placed, Projection, Source, View, ViewOptions, Visibility, view,
 };
 use ryukei::topo::Body;
-use ryukei::{primitive, sheet};
+use ryukei::{Error, ViewError, primitive, sheet};
 
 fn look(t: Vector3) -> View {
     let up = if t.cross(Vector3::new(0.0, 0.0, 1.0)).length() > 0.1 {
@@ -564,4 +564,70 @@ fn a_torus_from_the_front_draws() {
             p.pieces.len()
         );
     }
+}
+
+/// The kind of surface of the face a refusal names, or of the edge's
+/// first face.
+fn refused_at(body: &Body, e: &Error) -> String {
+    let at = match e {
+        Error::InvalidView(ViewError::Uncertain { at } | ViewError::Image { at }) => *at,
+        _ => return format!("{e:?}"),
+    };
+    for f in body.faces() {
+        let face = body.face(f).unwrap();
+        if face.name == at {
+            let s = format!("{:?}", body.surface(face.surface).unwrap());
+            return format!("face {at:?}: {}", s.split('(').next().unwrap_or(""));
+        }
+    }
+    format!("edge {at:?}")
+}
+
+/// The race bodies' isometric views on one thread (design 484's bar):
+/// every refusal takes at most 10 s with `RYUKEI_BARS=1` on the bar
+/// machine (cox-worker-2), 100 s otherwise; each is printed with what it
+/// refused on and its time, and the total. Minutes: plan 17.B's bars
+/// run it with `--ignored`.
+#[test]
+#[ignore = "minutes: the bars run it"]
+fn race_views_refuse_quickly() {
+    let bar = if std::env::var("RYUKEI_BARS").as_deref() == Ok("1") {
+        10.0
+    } else {
+        100.0
+    };
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let v = look(Vector3::new(1.0, -1.0, 1.0));
+    let (mut drawn, mut total, mut slow) = (0, 0.0, Vec::new());
+    pool.install(|| {
+        for (i, body) in ryukei_testkit::race::bodies(200).iter().enumerate() {
+            let start = std::time::Instant::now();
+            let r = view(&[at(body)], &v, &ViewOptions::default());
+            let secs = start.elapsed().as_secs_f64();
+            total += secs;
+            if secs > 10.0 {
+                eprintln!(
+                    "race {i}: {} in {secs:.2} s",
+                    if r.is_ok() { "drawn" } else { "refused" }
+                );
+            }
+            match r {
+                Ok(_) => drawn += 1,
+                Err(e) => {
+                    eprintln!(
+                        "race {i}: refused on {} in {secs:.2} s",
+                        refused_at(body, &e)
+                    );
+                    if secs > bar {
+                        slow.push((i, secs));
+                    }
+                }
+            }
+        }
+    });
+    eprintln!("race bodies iso, one thread: {drawn} drawn, {total:.1} s in all");
+    assert!(slow.is_empty(), "refusals past {bar} s: {slow:?}");
 }
