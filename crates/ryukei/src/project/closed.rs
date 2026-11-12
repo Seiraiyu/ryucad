@@ -1,5 +1,5 @@
 //! Silhouettes in closed form: planes, cylinders, cones, spheres, and
-//! tori seen along their axis (design 326).
+//! tori seen along or square to their axis (design 326, design 484).
 
 use crate::geom::{Circle, Curve, Curve2, Frame, Line, Line2, Point2, Surface, Vector2, Vector3};
 use crate::intersect::Failure;
@@ -56,6 +56,20 @@ fn along_u(v: f64) -> Result<Curve2, Failure> {
     Ok(Curve2::Line2(
         Line2::new(Point2::new(0.0, v), Vector2::new(1.0, 0.0)).map_err(uncertain)?,
     ))
+}
+
+/// `[start, start + 2π]` cut at `cuts` (each moved into it): the arcs
+/// between, in order.
+fn arcs(start: f64, cuts: [f64; 2]) -> Vec<[f64; 2]> {
+    let mut at = vec![start];
+    at.extend(cuts.iter().map(|&c| into(c, start, TAU)));
+    at.push(start + TAU);
+    at.sort_by(f64::total_cmp);
+    at.dedup();
+    at.windows(2)
+        .filter(|w| w[1] > w[0])
+        .map(|w| [w[0], w[1]])
+        .collect()
 }
 
 /// The silhouette of `surface` seen along unit `t` over the parameter box
@@ -184,6 +198,47 @@ pub(super) fn closed_form(
             }
             Closed::Branches(out)
         }
+        Surface::Torus(tr) if tz.abs() <= ANGULAR_RESOLUTION => {
+            // Square to the axis: `n · t = cos v (radial(u) · t) + sin v
+            // t_z`, zero on the meridians where `radial(u) ⊥ t` and the
+            // parallels where `cos v = 0`. Within the resolution of
+            // square the true contour pinches into a hyperbola
+            // `δu δv ≈ t_z` at the four crossings, about `(R + r) √|t_z|`
+            // off these circles.
+            let (big, small) = (tr.major(), tr.minor());
+            let tolerance = LINEAR_RESOLUTION + 2.0 * (big + small) * math::sqrt(tz.abs());
+            let us = [into(u0, rect[0][0], TAU), into(u0 + PI, rect[0][0], TAU)];
+            let vs = [FRAC_PI_2, PI + FRAC_PI_2];
+            let mut out = Vec::new();
+            for u in us {
+                let radial = f.radial(u);
+                let centre = f.origin() + radial * big;
+                let frame = Frame::new(centre, radial.cross(z), radial).map_err(uncertain)?;
+                let circle = Curve::Circle(Circle::new(frame, small).map_err(uncertain)?);
+                for range in arcs(rect[1][0], vs) {
+                    out.push(Raw {
+                        curve: circle.clone(),
+                        range,
+                        pcurve: (along_v(u)?, [0.0, 1.0]),
+                        tolerance,
+                    });
+                }
+            }
+            for v in vs {
+                let (sv, _) = math::sin_cos(v);
+                let frame = Frame::new(f.origin() + z * (small * sv), z, x).map_err(uncertain)?;
+                let circle = Curve::Circle(Circle::new(frame, big).map_err(uncertain)?);
+                for range in arcs(rect[0][0], us) {
+                    out.push(Raw {
+                        curve: circle.clone(),
+                        range,
+                        pcurve: (along_u(into(v, rect[1][0], TAU))?, [0.0, 1.0]),
+                        tolerance,
+                    });
+                }
+            }
+            Closed::Branches(out)
+        }
         _ => return Ok(None),
     }))
 }
@@ -277,5 +332,62 @@ mod tests {
         // unmetered: a unit test
         let askew = closed_form(&s, Vector3::new(0.0, 0.6, 0.8), rect(), &Meter::free()).unwrap();
         assert!(askew.is_none());
+    }
+
+    /// Seen square to its axis, a torus's silhouette is its two meridian
+    /// circles in the plane of the axis and the view and its two
+    /// parallels at `v = ±π/2`, each cut where they cross (design 484).
+    #[test]
+    fn a_torus_square_to_the_view_has_two_meridians_and_two_parallels() {
+        let (big, small) = (1.0, 0.25);
+        let s = Surface::Torus(Torus::new(Frame::WORLD, big, small).unwrap());
+        let rect = [[0.0, TAU], [0.0, TAU]];
+        for t in [
+            Vector3::new(0.0, -1.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.6, 0.8, 0.0),
+        ] {
+            let b = branches(&s, t, rect);
+            sound(&s, t, &b);
+            let total: f64 = b.iter().map(|r| r.range[1] - r.range[0]).sum::<f64>();
+            // Meridians turn through their angle at the minor radius,
+            // parallels at the major: angles sum to 2π a circle.
+            let length: f64 = b
+                .iter()
+                .map(|r| {
+                    let radius = r.curve.point(r.range[0]).distance(match &r.curve {
+                        Curve::Circle(c) => c.frame().origin(),
+                        _ => panic!("{r:?}"),
+                    });
+                    radius * (r.range[1] - r.range[0])
+                })
+                .sum();
+            assert!((total - 4.0 * TAU).abs() < 1e-12, "{total}");
+            assert!(
+                (length - 2.0 * TAU * (big + small)).abs() < 1e-12,
+                "{length}"
+            );
+            // No branch passes a crossing: inside a branch, no point lies
+            // on another circle than its own.
+            let on = |c: &Circle, q: crate::geom::Point3| {
+                let d = q - c.frame().origin();
+                (d.length() - c.radius()).abs() < 1e-12 && d.dot(c.frame().z().get()).abs() < 1e-12
+            };
+            for r in &b {
+                for x in [0.25, 0.5, 0.75] {
+                    let q = r.curve.point(r.range[0] + (r.range[1] - r.range[0]) * x);
+                    let circles = b
+                        .iter()
+                        .filter(|o| matches!(&o.curve, Curve::Circle(c) if on(c, q)))
+                        .map(|o| format!("{:?}", o.curve))
+                        .collect::<std::collections::BTreeSet<_>>();
+                    assert_eq!(circles.len(), 1, "{r:?} at {x}");
+                }
+            }
+        }
+        // Tilted off square by more than the resolution: traced.
+        // unmetered: a unit test
+        let tilted = closed_form(&s, Vector3::new(0.0, -1.0, 1e-9), rect, &Meter::free()).unwrap();
+        assert!(tilted.is_none());
     }
 }
