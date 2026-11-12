@@ -110,7 +110,7 @@ pub fn of(
     o: &Options,
 ) -> Result<(Option<String>, Arc<FlatOf>)> {
     let (commit, s) = session.at(rev)?;
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let p = s.project().part(&pid)?.clone();
     let solids = Solids::of(&p);
     let r = s.rebuilt(&pid)?.clone();

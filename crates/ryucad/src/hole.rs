@@ -286,8 +286,8 @@ pub(crate) mod tests {
     use crate::doc::id::Id;
     use crate::error::Code;
     use crate::rebuild::Built;
-    use crate::server::tests::call;
     use crate::session::Session;
+    use crate::testing::call;
     use crate::units::Unit;
     use core::f64::consts::PI;
     use serde_json::{Value, json};
@@ -340,11 +340,11 @@ pub(crate) mod tests {
         }
         let f = Feature::from_json(&v, Unit::Mm, &crate::expr::Env::empty()).unwrap();
         let pid = id("p");
-        let mut list = crate::server::order(s.project().part(&pid).unwrap()).unwrap();
+        let mut list = crate::part::order(s.project().part(&pid).unwrap()).unwrap();
         if !list.contains(&id(h)) {
             list.push(id(h));
         }
-        crate::server::save(s, &pid, &[(&id(h), &f)], list).unwrap();
+        crate::save::save(s, &pid, &[(&id(h), &f)], list).unwrap();
     }
 
     /// What hole `h` left of box `b`, or why it failed.

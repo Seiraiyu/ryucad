@@ -873,7 +873,7 @@ pub fn from_given(
     unit: crate::units::Unit,
     env: &crate::expr::Env,
 ) -> Result<crate::doc::files::Feature> {
-    let geom = |t: &str, at: &str| crate::server::geom_json(t, part, at);
+    let geom = |t: &str, at: &str| crate::geometry::geom_json(t, part, at);
     let mut v = current.map_or_else(|| json!({}), PathFeature::fields);
     let o = v.as_object_mut().expect("fields are an object");
     let bad = |param: &str, msg: String| Error::new(Code::InvalidParam, msg).with("param", param);
@@ -1137,10 +1137,7 @@ pub fn get(
     path: &str,
     quality: crate::mesh::Quality,
 ) -> Result<Value> {
-    let (pid, fid) = (
-        crate::server::part_id(part)?,
-        crate::server::feature_id(path)?,
-    );
+    let (pid, fid) = (crate::part::part_id(part)?, crate::part::feature_id(path)?);
     let revision = session.project().part(&pid)?.revision.clone();
     let built = session.rebuilt(&pid)?;
     let made = match built.features.iter().find(|(id, _)| *id == fid) {

@@ -211,6 +211,34 @@ fn working(
             scale,
             fit,
             theme,
+            compare: Some(rev),
+            ..
+        } => {
+            let (commit, then) = session.at(&rev)?;
+            crate::compare::render(
+                session.project(),
+                &then,
+                &rev,
+                &commit,
+                design.as_deref(),
+                block.as_deref(),
+                sheet.as_deref(),
+                layer.as_deref(),
+                format.unwrap_or(crate::schemcmd::Format::Svg),
+                scale,
+                fit,
+                theme.unwrap_or_default(),
+            )
+        }
+        Request::Render {
+            design,
+            block,
+            sheet,
+            layer,
+            format,
+            scale,
+            fit,
+            theme,
             ..
         } => crate::schemcmd::render(
             session.project(),
@@ -267,6 +295,26 @@ fn working(
             symbol.as_deref(),
             &crate::symlint::Listing { summary, codes },
         ),
+        Request::Output {
+            design,
+            layers,
+            compare: Some(rev),
+            ..
+        } => {
+            let (commit, then) = session.at(&rev)?;
+            let (mut v, bytes) = crate::output::compare(
+                session.project(),
+                &then,
+                &rev,
+                design.as_deref(),
+                layers.unwrap_or_default(),
+            )?;
+            v["compare"] = json!({"rev": rev, "commit": commit});
+            Ok(match bytes {
+                Some(b) => Answer::bytes(v, "application/pdf", b),
+                None => Answer::json(v),
+            })
+        }
         Request::Output { design, layers, .. } => crate::output::output(
             session.project(),
             design.as_deref(),
@@ -284,6 +332,13 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
             crate::netlist::netlist(p, design.as_deref()).map(Answer::json)
         }
         Request::Erc { design, .. } => crate::erc::erc(p, design.as_deref()).map(Answer::json),
+        Request::Check {
+            against: Some(_), ..
+        } => Err(Error::new(
+            Code::InvalidParam,
+            "--against compares the working files with a revision; leave out --rev",
+        )
+        .with("param", "against")),
         Request::Check { .. } => {
             let cats = session.catalogues()?;
             crate::erc::check_project(p, &cats, &[]).map(Answer::json)
@@ -295,6 +350,16 @@ fn read_at(session: &mut Session, p: &Project, req: Request) -> Result<Answer> {
             ..
         } => crate::schemcmd::describe(p, design.as_deref(), block.as_deref(), sheet.as_deref())
             .map(Answer::json),
+        Request::Render {
+            compare: Some(_), ..
+        }
+        | Request::Output {
+            compare: Some(_), ..
+        } => Err(Error::new(
+            Code::InvalidParam,
+            "--compare draws the working files against a revision; leave out --rev",
+        )
+        .with("param", "compare")),
         Request::Render {
             design,
             block,
@@ -931,9 +996,53 @@ fn dispatch(
             severity,
             expected_revision,
         } => crate::erc::configure(session, &severity, expected_revision.as_deref()),
-        Request::Check { .. } => {
+        Request::Diff {
+            from,
+            to,
+            design,
+            block,
+            netlist,
+            layout,
+            library,
+            all,
+        } => crate::diff::between(
+            session,
+            from.as_deref().unwrap_or("HEAD"),
+            to.as_deref().unwrap_or("working"),
+            &crate::diff::Options {
+                design,
+                block,
+                netlist,
+                layout,
+                library,
+                all,
+            },
+        ),
+        Request::Check { against, .. } => {
+            let diff = match &against {
+                Some(rev) => Some(crate::diff::between(
+                    session,
+                    rev,
+                    "working",
+                    &crate::diff::Options {
+                        netlist: true,
+                        ..crate::diff::Options::default()
+                    },
+                )?),
+                None => None,
+            };
             let cats = session.catalogues()?;
-            crate::erc::check(session.root(), &cats)
+            match (crate::erc::check(session.root(), &cats), diff) {
+                (Ok(mut v), Some(d)) => {
+                    v["against"] = d;
+                    Ok(v)
+                }
+                (Err(mut e), Some(d)) if e.code == Code::CheckFailed => {
+                    e.details["report"]["against"] = d;
+                    Err(e)
+                }
+                (r, _) => r,
+            }
         }
         Request::LintGet { explain } => crate::lint::get(session.project(), explain.as_deref()),
         Request::LintConfigure {
@@ -1073,6 +1182,61 @@ fn dispatch(
         // With no daemon, nobody is attached.
         Request::ParticipantList {} => {
             Ok(live.map_or_else(|| json!({"participants": []}), |l| l.list()))
+        }
+        Request::CompareGet { participant } => {
+            // Whose compare.set would change: `participant`, else the one
+            // human, else the caller.
+            let target = match live {
+                Some(l) => {
+                    let id = l.compare_target(participant.as_deref(), me)?;
+                    let rev = l.get(&id)?.view.compare.clone();
+                    Some((id, rev))
+                }
+                None => None,
+            };
+            let Some((id, rev)) = target else {
+                return Ok(json!({"participant": null, "compare": null}));
+            };
+            // The commit the revision names now; none if it names none.
+            let compare = rev.map(|rev| {
+                let commit = crate::git::key(session.root(), &rev).ok().map(|(c, _)| c);
+                json!({"rev": rev, "commit": commit})
+            });
+            Ok(json!({"participant": id, "compare": compare}))
+        }
+        Request::CompareSet {
+            rev,
+            off,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("compare.set"))?;
+            let rev = match (rev, off) {
+                (Some(r), false) => Some(r),
+                (None, true) => None,
+                _ => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "give a revision to compare with, or --off, not both",
+                    ));
+                }
+            };
+            if rev.as_deref() == Some("working") {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "a compare is against a Git revision: the working files are what it compares",
+                )
+                .with("rev", "working"));
+            }
+            let id = live.compare_target(participant.as_deref(), me)?;
+            // Refused unless the revision holds the project; read now, it
+            // is ready for the renders asked next.
+            let commit = match &rev {
+                Some(r) => Some(session.at(r)?.0),
+                None => None,
+            };
+            live.get_mut(&id)?.view.compare = rev.clone();
+            let compare = rev.map(|rev| json!({"rev": rev, "commit": commit}));
+            Ok(json!({"participant": id, "compare": compare}))
         }
         Request::Subscribe { .. } => match live {
             None => Err(live::no_live_session("subscribe")),

@@ -725,8 +725,8 @@ mod tests {
     /// view at (100, 100) and its right view `at` mm right of it, at 1:1.
     fn view_overlaps(right_at: f64) -> usize {
         use crate::doc::id::Id;
-        let (dir, mut s) = crate::server::tests::fresh();
-        let call = crate::server::tests::call;
+        let (dir, mut s) = crate::testing::fresh();
+        let call = crate::testing::call;
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
         call(
             &mut s,

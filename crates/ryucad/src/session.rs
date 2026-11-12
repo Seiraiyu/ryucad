@@ -2072,7 +2072,7 @@ mod tests {
     use super::*;
     #[test]
     fn a_rescan_takes_in_every_file_at_once() {
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         // Written behind the session's back, as `git switch` writes.
         let mut other = Session::open(dir.path()).unwrap();
@@ -2197,7 +2197,7 @@ mod tests {
 
     #[test]
     fn cycles_are_found_again_only_when_the_instances_change() {
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (_dir, mut s) = fresh();
         for p in ["a", "b"] {
             call(&mut s, "part.create", serde_json::json!({"part": p})).unwrap();
@@ -2491,7 +2491,7 @@ mod tests {
 
     #[test]
     fn only_what_a_change_touches_is_rebuilt() {
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         use serde_json::json;
         let (_dir, mut s) = fresh();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
@@ -2596,7 +2596,7 @@ mod tests {
     #[test]
     fn any_revision_rebuilds_from_its_own_files() {
         use crate::git::tests::git;
-        use crate::server::tests::call;
+        use crate::testing::call;
         use serde_json::json;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -2671,7 +2671,7 @@ mod tests {
         assert_eq!(at(&mut s, "HEAD~1").unwrap()["parts"][0]["hash"], hashes[4]);
         let e = at(&mut s, "nowhere").unwrap_err();
         assert_eq!(e.code, Code::RevNotFound);
-        let (outside, mut t) = crate::server::tests::fresh();
+        let (outside, mut t) = crate::testing::fresh();
         let e = call(&mut t, "rebuild", json!({"rev": "HEAD"})).unwrap_err();
         assert_eq!(e.code, Code::NotAGitRepo);
         drop(outside);
@@ -2680,7 +2680,7 @@ mod tests {
     #[test]
     fn another_worktrees_working_files_read_as_a_revision() {
         use crate::git::tests::git;
-        use crate::server::tests::call;
+        use crate::testing::call;
         use serde_json::json;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("main");

@@ -266,13 +266,13 @@ pub fn run(
                 part: part.map(str::to_owned),
                 ..Default::default()
             };
-            Some(crate::server::diff(session, rev, "working", true, &opts)?)
+            Some(crate::diff::diff(session, rev, "working", true, &opts)?)
         }
         None => None,
     };
     let ids: Vec<Id> = match part {
         Some(p) => {
-            let id = crate::server::part_id(p)?;
+            let id = crate::part::part_id(p)?;
             session.project().part(&id)?;
             vec![id]
         }
@@ -334,7 +334,7 @@ pub fn run(
     }
     // A part's release findings belong to it, whether or not the part is
     // still there.
-    let one = part.map(crate::server::part_id).transpose()?;
+    let one = part.map(crate::part::part_id).transpose()?;
     findings.extend(
         crate::release::findings(session, results)?
             .into_iter()
@@ -499,7 +499,7 @@ pub fn run(
         // Instances that share a volume, only when asked (design 525): a
         // warning, since a press fit is meant; pairs ryukei can't
         // intersect can't be checked.
-        let assembly = crate::server::part_kind(&p) == crate::doc::files::PartKind::Assembly;
+        let assembly = crate::part::part_kind(&p) == crate::doc::files::PartKind::Assembly;
         if assembly && !interference {
             let mut f = interference_not_checked(id);
             let n = p.motions.len();
@@ -550,7 +550,7 @@ pub fn run(
         }
         // Each saved motion swept from nothing (plan 26.B): solve-only,
         // and with interference only under --interference.
-        if crate::server::part_kind(&p) == crate::doc::files::PartKind::Assembly
+        if crate::part::part_kind(&p) == crate::doc::files::PartKind::Assembly
             && !p.motions.is_empty()
             && let Ok(model) = from_nothing.model(id, &crate::doc::assembly::Rev::Working)
         {
@@ -641,7 +641,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
 
     fn id(s: &str) -> Id {
         Id::parse(s, "feature").unwrap()

@@ -1289,7 +1289,7 @@ mod tests {
     #[test]
     fn an_inserted_solid_is_meshed_as_its_source_moved() {
         let (_dir, mut s) = crate::insert::tests::boarded();
-        crate::server::tests::call(
+        crate::testing::call(
             &mut s,
             "feature.edit",
             serde_json::json!({"part": "enclosure",
@@ -1355,7 +1355,7 @@ mod tests {
             .unwrap()
             .clone();
         let at = |s: &mut crate::session::Session, z: &str| {
-            crate::server::tests::call(
+            crate::testing::call(
                 s,
                 "feature.edit",
                 serde_json::json!({"part": "enclosure", "id": "pcb",

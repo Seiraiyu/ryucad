@@ -1894,7 +1894,7 @@ fn diagnose_appearance(builds: &mut Builds, part: &str, issues: &mut Vec<Issue>)
     let Some(p) = s.project().parts.get(&id) else {
         return;
     };
-    let assembly = crate::server::part_kind(p) == crate::doc::files::PartKind::Assembly;
+    let assembly = crate::part::part_kind(p) == crate::doc::files::PartKind::Assembly;
     if let Err(e) = file.check_kind(assembly) {
         return issues.push(document_issue(&rel, &e));
     }
@@ -2749,7 +2749,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_reference_that_follows_a_split_face_is_a_warning() {
-        use crate::server::tests::call;
+        use crate::testing::call;
         use serde_json::json;
         let (dir, mut s, body) = crate::sketch::tests::with_box();
         let top = format!(
@@ -2786,7 +2786,7 @@ pub(crate) mod tests {
 
     #[test]
     fn annotations_that_dont_read_are_reported() {
-        let (dir, _s) = crate::server::tests::fresh();
+        let (dir, _s) = crate::testing::fresh();
         let root = dir.path();
         let a = root.join("annotations");
         std::fs::create_dir_all(&a).unwrap();
@@ -2850,8 +2850,8 @@ pub(crate) mod tests {
     #[test]
     fn drawings_and_templates_that_dont_read_are_reported() {
         use crate::doc::drawing::{DrawingFile, Size};
-        let (dir, mut s) = crate::server::tests::fresh();
-        crate::server::tests::call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let (dir, mut s) = crate::testing::fresh();
+        crate::testing::call(&mut s, "part.create", json!({"part": "p"})).unwrap();
         let root = dir.path();
         let d = root.join("parts/p/drawings");
         std::fs::create_dir_all(&d).unwrap();
@@ -2895,7 +2895,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_basis_is_the_same_from_the_disk_or_from_files() {
-        let (dir, s) = crate::server::tests::fresh();
+        let (dir, s) = crate::testing::fresh();
         let root = dir.path();
         let paths = vec![MANIFEST.to_owned(), "parts/gone/part.json".to_owned()];
         assert_eq!(basis(root, &paths), basis_of(&s.files(), &paths));
@@ -2903,7 +2903,7 @@ pub(crate) mod tests {
         other.insert("parts/gone/part.json".into(), b"{}".to_vec().into());
         assert_ne!(basis(root, &paths), basis_of(&other, &paths));
     }
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
 
     /// A healthy project: part `p` with features `a` and `b`.
     pub(crate) fn healthy() -> tempfile::TempDir {
@@ -3071,7 +3071,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_stale_projection_is_solved_in_its_part() {
-        use crate::server::tests::{call, fresh};
+        use crate::testing::{call, fresh};
         let (dir, mut s) = fresh();
         let r = dir.path();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();

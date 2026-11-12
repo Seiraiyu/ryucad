@@ -378,7 +378,7 @@ pub fn parse_spec(text: &str) -> std::result::Result<PlaneArg, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
     use serde_json::json;
 
     fn arg(v: Value) -> PlaneArg {
@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn a_participants_window_cuts_what_it_is_told() {
         use crate::live::{Kind, Live};
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (_dir, mut s) = project();
         let mut live = Live::new();
         let set =

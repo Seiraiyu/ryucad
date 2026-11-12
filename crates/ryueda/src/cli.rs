@@ -221,8 +221,40 @@ enum Command {
         /// Stay off the network (check never fetches).
         #[arg(long)]
         offline: bool,
+        /// Also say what changed electrically since this revision
+        /// (diff --netlist from it to the working files).
+        #[arg(long, value_name = "REV")]
+        against: Option<String>,
         #[command(flatten)]
         rev: Rev,
+    },
+    /// What changed between two revisions, as values (HEAD and the
+    /// working files by default): files by JSON pointer, each block's
+    /// components, nets, instances, ports and buses by reference path,
+    /// layouts and the library counted (--layout, --library for each
+    /// key), and with --netlist each design flattened and compared.
+    Diff {
+        /// The older revision (HEAD by default; `working` is the files on disk).
+        #[arg(long, value_name = "REV")]
+        from: Option<String>,
+        /// The newer revision (`working` by default).
+        #[arg(long, value_name = "REV")]
+        to: Option<String>,
+        /// Only this design's netlist.
+        #[arg(long)]
+        design: Option<String>,
+        /// Only this block.
+        #[arg(long)]
+        block: Option<String>,
+        #[arg(long)]
+        netlist: bool,
+        #[arg(long)]
+        layout: bool,
+        #[arg(long)]
+        library: bool,
+        /// List what is the same too.
+        #[arg(long)]
+        all: bool,
     },
     /// Lay out a design's schematics (the project's one design, or
     /// --design), or one --block, over their layout files, writing those
@@ -343,6 +375,10 @@ enum Command {
         /// light (the default) or dark.
         #[arg(long, value_parser = ["light", "dark"])]
         theme: Option<String>,
+        /// Mark what changed since this Git revision (new, changed,
+        /// moved, gone), each item keyed by its reference path.
+        #[arg(long, value_name = "REV")]
+        compare: Option<String>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
         #[command(flatten)]
@@ -357,6 +393,10 @@ enum Command {
         /// listed.
         #[arg(long)]
         layers: Option<String>,
+        /// Page only the sheets that changed since this Git revision,
+        /// each marked (new, changed, moved, gone).
+        #[arg(long, value_name = "REV")]
+        compare: Option<String>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
         #[command(flatten)]
@@ -385,6 +425,17 @@ enum Command {
     },
     /// Who is attached to the project's daemon.
     Participants,
+    /// Show a participant the working files against a Git revision (the
+    /// one person attached, else you), or with --off stop; with neither,
+    /// what it compares against now. Through the daemon.
+    Compare {
+        rev: Option<String>,
+        #[arg(long)]
+        off: bool,
+        /// A participant's ID (`participants` lists them).
+        #[arg(long)]
+        participant: Option<String>,
+    },
     /// Undo your latest change, or the entry given.
     Undo { entry: Option<u64> },
     /// Redo your latest undo, or the entry given.
@@ -1720,6 +1771,14 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             before: *before,
         },
         Command::Participants => Request::ParticipantList {},
+        Command::Compare { rev: None, off: false, participant } => Request::CompareGet {
+            participant: participant.clone(),
+        },
+        Command::Compare { rev, off, participant } => Request::CompareSet {
+            rev: rev.clone(),
+            off: *off,
+            participant: participant.clone(),
+        },
         Command::Undo { entry } => Request::Undo { entry: *entry },
         Command::Redo { entry } => Request::Redo { entry: *entry },
         Command::Footprint(FootprintCmd::Show { footprint }) => Request::FootprintShow {
@@ -2260,9 +2319,24 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 .collect(),
             expected_revision: expect.expect.clone(),
         },
-        Command::Check { offline, rev } => Request::Check {
+        Command::Check {
+            offline,
+            against,
+            rev,
+        } => Request::Check {
             offline: *offline,
+            against: against.clone(),
             rev: rev.rev.clone(),
+        },
+        Command::Diff { from, to, design, block, netlist, layout, library, all } => Request::Diff {
+            from: from.clone(),
+            to: to.clone(),
+            design: design.clone(),
+            block: block.clone(),
+            netlist: *netlist,
+            layout: *layout,
+            library: *library,
+            all: *all,
         },
         Command::Layout {
             design,
@@ -2344,11 +2418,13 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             scale,
             fit,
             theme,
+            compare,
             out,
             rev,
         } => {
             let format = picture_format(format.as_deref(), out)?;
             Request::Render {
+                compare: compare.clone(),
                 design: design.clone(),
                 block: block.clone(),
                 sheet: sheet.clone(),
@@ -2366,10 +2442,12 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Output {
             design,
             layers,
+            compare,
             out: _,
             rev,
         } => Request::Output {
             design: design.clone(),
+            compare: compare.clone(),
             rev: rev.rev.clone(),
             layers: match layers.as_deref() {
                 None => None,

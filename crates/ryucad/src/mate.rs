@@ -265,7 +265,7 @@ pub fn failing_warnings(
         let Ok(p) = session.project().part(a) else {
             continue;
         };
-        if crate::server::part_kind(p) != crate::doc::files::PartKind::Assembly {
+        if crate::part::part_kind(p) != crate::doc::files::PartKind::Assembly {
             continue;
         }
         let p = p.clone();
@@ -1292,7 +1292,7 @@ pub(crate) fn reached(project: &crate::doc::project::Project, part: &Id) -> Vec<
         project
             .parts
             .get(id)
-            .is_some_and(|p| crate::server::part_kind(p) == crate::doc::files::PartKind::Assembly)
+            .is_some_and(|p| crate::part::part_kind(p) == crate::doc::files::PartKind::Assembly)
     };
     // Who places each part at `working`, in one pass over the parts, each
     // part's placers in the parts' order as the walk below meets them
@@ -1386,7 +1386,7 @@ pub fn keep_current(session: &mut crate::session::Session, before: &[Id]) -> Res
         };
         let writes = moved.writes(&p);
         let refs: Vec<(&Id, &Feature)> = writes.iter().map(|(id, f)| (id, f)).collect();
-        crate::server::save(session, a, &refs, crate::server::order(&p)?)?;
+        crate::save::save(session, a, &refs, crate::part::order(&p)?)?;
         let ids: Vec<&Id> = writes.iter().map(|(id, _)| id).collect();
         out.push(json!({"part": a, "ok": true, "moved": ids}));
     }
@@ -1426,10 +1426,10 @@ pub fn solve_request(
     moves: Vec<(String, crate::assembly::Move)>,
     component: bool,
 ) -> Result<Value> {
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let unit = session.project().manifest.default_unit;
     let p = session.project().part(&pid)?.clone();
-    if crate::server::part_kind(&p) != crate::doc::files::PartKind::Assembly {
+    if crate::part::part_kind(&p) != crate::doc::files::PartKind::Assembly {
         return Err(Error::new(
             Code::WrongPartKind,
             format!("{pid} is a part, not an assembly"),
@@ -1438,7 +1438,7 @@ pub fn solve_request(
     }
     let mut at = Vec::new();
     for (i, how) in moves {
-        let iid = crate::server::feature_id(&i)?;
+        let iid = crate::part::feature_id(&i)?;
         let inst = crate::assembly::movable(&p, &iid)?;
         at.push((iid, crate::assembly::move_pose(&inst, how, unit, &p.env)?));
     }
@@ -1595,9 +1595,9 @@ pub(crate) mod tests {
     use crate::assembly::tests::{id, place_in, project};
     use crate::doc::files::PartFile;
     use crate::doc::project::{feature_path, part_path, write_json};
-    use crate::server::tests::call;
     use crate::session::Session;
     use crate::sketch::tests::face_along;
+    use crate::testing::call;
     use serde_json::Value;
     use std::path::Path;
 
@@ -1683,7 +1683,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_write_reaches_every_assembly_placing_its_part_nearest_first() {
-        use crate::server::tests::fresh;
+        use crate::testing::fresh;
         let (_dir, mut s) = fresh();
         call(&mut s, "part.create", json!({"part": "a"})).unwrap();
         call(
@@ -2379,7 +2379,7 @@ mod protocol_tests {
     use super::tests::{face, near_pose};
     use crate::assembly::tests::project;
     use crate::error::Code;
-    use crate::server::tests::call;
+    use crate::testing::call;
     use serde_json::json;
 
     #[test]
@@ -2684,7 +2684,7 @@ mod move_tests {
     use crate::assembly::tests::{id, place_in};
     use crate::doc::project::feature_path;
     use crate::error::Code;
-    use crate::server::tests::call;
+    use crate::testing::call;
     use serde_json::json;
 
     #[test]
@@ -2760,8 +2760,8 @@ mod move_tests {
         let p = s.project().part(&id("frame")).unwrap().clone();
         let writes = solved.writes(&p);
         let refs: Vec<_> = writes.iter().map(|(i, f)| (i, f)).collect();
-        let list = crate::server::order(&p).unwrap();
-        crate::server::save(&mut s, &id("frame"), &refs, list).unwrap();
+        let list = crate::part::order(&p).unwrap();
+        crate::save::save(&mut s, &id("frame"), &refs, list).unwrap();
         assert!(
             !s.rebuilt(&id("frame"))
                 .unwrap()
@@ -2836,7 +2836,7 @@ mod move_tests {
         assert_eq!(files(dir.path()), before, "nothing written");
         let frame = s.project().part(&id("frame")).unwrap();
         assert!(
-            crate::server::feature(frame, &id("m1")).is_err(),
+            crate::part::feature(frame, &id("m1")).is_err(),
             "no mate in the working files"
         );
         // A mate the daemon can't take is feature.add's own refusal, at its place.
@@ -2939,8 +2939,8 @@ mod move_tests {
         let p = s.project().part(&id("frame")).unwrap().clone();
         let writes = solved.writes(&p);
         let refs: Vec<_> = writes.iter().map(|(i, f)| (i, f)).collect();
-        let list = crate::server::order(&p).unwrap();
-        crate::server::save(&mut s, &id("frame"), &refs, list).unwrap();
+        let list = crate::part::order(&p).unwrap();
+        crate::save::save(&mut s, &id("frame"), &refs, list).unwrap();
         (dir, s)
     }
 
@@ -3018,7 +3018,7 @@ mod move_tests {
     #[test]
     fn a_move_writes_what_follows_in_one_change() {
         use crate::live::Live;
-        use crate::server::tests::call_live;
+        use crate::testing::call_live;
         let (_dir, mut s) = hinged_with_cap();
         let show = call(
             &mut s,
@@ -3070,7 +3070,7 @@ pub(crate) mod current_tests {
     use super::tests::face;
     use crate::assembly::tests::{id, project};
     use crate::error::Code;
-    use crate::server::tests::call;
+    use crate::testing::call;
     use serde_json::json;
 
     /// The plate fixed and the bolt free in `frame`, and the faces a
@@ -3181,7 +3181,7 @@ pub(crate) mod current_tests {
 mod doctor_tests {
     use super::tests::{add_in, face, hinged};
     use crate::assembly::tests::id;
-    use crate::server::tests::call;
+    use crate::testing::call;
     use serde_json::{Value, json};
 
     #[test]
@@ -3339,7 +3339,7 @@ mod doctor_tests {
 #[cfg(test)]
 mod diff_tests {
     use super::tests::hinged;
-    use crate::server::tests::call;
+    use crate::testing::call;
     use serde_json::json;
 
     #[test]

@@ -288,8 +288,8 @@ pub fn interpreted(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::server::tests::{call, fresh};
     use crate::session::Session;
+    use crate::testing::{call, fresh};
     use serde_json::json;
 
     /// A file of ryustep's styled fixtures (`painted.stp`,

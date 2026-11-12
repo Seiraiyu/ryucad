@@ -1,6 +1,6 @@
 use crate::error::Code;
-use crate::server::tests::call;
 use crate::session::Session;
+use crate::testing::call;
 use serde_json::{Value, json};
 
 /// A project with an empty part `p`.

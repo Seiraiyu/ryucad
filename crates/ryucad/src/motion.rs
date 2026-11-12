@@ -343,7 +343,7 @@ pub fn not_found(session: &Session, asm: &Id, id: &str) -> Error {
 /// Motion `id` of assembly `asm` as the working files have it.
 pub fn file_of(session: &Session, asm: &Id, id: &str) -> Result<MotionFile> {
     let part = session.project().part(asm)?;
-    if crate::server::part_kind(part) != PartKind::Assembly {
+    if crate::part::part_kind(part) != PartKind::Assembly {
         return Err(crate::doc::motion::not_an_assembly(asm.as_str()));
     }
     match Id::parse(id, "motion")
@@ -389,9 +389,9 @@ fn entry(session: &mut Session, part: &Id, id: &Id) -> Value {
 pub fn list(session: &mut Session, part: Option<&str>) -> Result<Value> {
     let parts: Vec<Id> = match part {
         Some(p) => {
-            let id = crate::server::part_id(p)?;
+            let id = crate::part::part_id(p)?;
             let found = session.project().part(&id)?;
-            if crate::server::part_kind(found) != PartKind::Assembly {
+            if crate::part::part_kind(found) != PartKind::Assembly {
                 return Err(crate::doc::motion::not_an_assembly(p));
             }
             vec![id]
@@ -421,12 +421,12 @@ fn path(session: &Session, part: &Id, motion: &Id) -> std::path::PathBuf {
 /// The assembly `part`, refusing a part (`wrong_part_kind`) and a stale
 /// revision.
 fn assembly(session: &Session, part: &str, expected: Option<&str>) -> Result<Id> {
-    let pid = crate::server::part_id(part)?;
+    let pid = crate::part::part_id(part)?;
     let p = session.project().part(&pid)?;
-    if crate::server::part_kind(p) != PartKind::Assembly {
+    if crate::part::part_kind(p) != PartKind::Assembly {
         return Err(crate::doc::motion::not_an_assembly(part));
     }
-    crate::server::check_revision(p, expected)?;
+    crate::part::check_revision(p, expected)?;
     Ok(pid)
 }
 
@@ -1624,7 +1624,7 @@ pub(crate) mod tests {
         }
     }
 
-    use crate::server::tests::call;
+    use crate::testing::call;
 
     #[test]
     fn motions_save_list_and_delete_as_explodes_do() {
@@ -1964,7 +1964,7 @@ pub(crate) mod tests {
     /// arm about z, its leading face first meets the block's corner
     /// (40, 20) at atan2(20, 40) - asin(4 / √2000), about 21.43°.
     pub(crate) fn swing(nub: bool) -> (tempfile::TempDir, Session) {
-        let (dir, mut s) = crate::server::tests::fresh();
+        let (dir, mut s) = crate::testing::fresh();
         let mut ok = |m: &str, v: Value| {
             call(&mut s, m, v).unwrap_or_else(|e| panic!("{m}: {e}"));
         };

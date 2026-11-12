@@ -36,8 +36,8 @@ use crate::doc::id::Id;
 use crate::doc::materials::check_colour;
 use crate::doc::project::part_dir;
 use crate::error::{Code, Error, Result};
+use crate::part::{check_revision, part_id, part_kind};
 use crate::rebuild::Built;
-use crate::server::{check_revision, part_id, part_kind};
 use crate::session::Session;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1203,7 +1203,7 @@ pub(crate) mod tests {
         }
     }
 
-    use crate::server::tests::{call, fresh, render_pixels};
+    use crate::testing::{call, fresh, render_pixels};
 
     /// A plate (a box `base` and a cylinder `boss`), a bolt (`shank`), a
     /// pair of bolts, and a frame placing the plate and two pairs.

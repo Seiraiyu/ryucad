@@ -141,7 +141,7 @@ pub fn delete(session: &mut Session, name: &str, expected: Option<&str>) -> Resu
 #[cfg(test)]
 mod tests {
     use crate::error::Code;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
     use serde_json::json;
 
     #[test]

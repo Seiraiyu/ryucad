@@ -741,9 +741,9 @@ pub fn line(
 #[cfg(test)]
 mod tests {
     use crate::error::Code;
-    use crate::server::tests::call;
     use crate::session::Session;
     use crate::sketch::tests::{edge_between, face_along, rectangle_ops, vertex_at, with_box};
+    use crate::testing::call;
     use serde_json::{Value, json};
 
     /// The box `b` with the rectangle sketch `s` on xy beside it, and the

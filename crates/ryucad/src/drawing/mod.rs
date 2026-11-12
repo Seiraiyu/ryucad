@@ -518,7 +518,7 @@ fn orient(session: &mut Session, of: &Id, rev: &Rev, o: &Orient) -> Result<([f64
             }
         }
         // A face of the view's own part, at the revision it is drawn at.
-        Orient::NormalTo(r) => crate::server::normal_to_face_at(
+        Orient::NormalTo(r) => crate::geometry::normal_to_face_at(
             session,
             &format!("{}/{}/{}", of, r.feature, r.name),
             rev,
@@ -622,7 +622,7 @@ fn plans(
                 ) => {
                     let p = &out[i].0;
                     let text = format!("{}/{}/{}", p.of, normal_to.feature, normal_to.name);
-                    let (n, _) = crate::server::normal_to_face_at(session, &text, &p.rev)?;
+                    let (n, _) = crate::geometry::normal_to_face_at(session, &text, &p.rev)?;
                     // Along the normal's image in the parent: it must lie
                     // in the parent's plane, or the view is foreshortened.
                     let img = p.frame.image(n);
@@ -2138,7 +2138,7 @@ fn release_of(session: &mut Session, part: &Id) -> (String, String) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::server::tests::{call, fresh};
+    use crate::testing::{call, fresh};
 
     /// A project with part `p`, a box `b` of `x` × `y` × `z` mm at the
     /// origin, and drawing `d` of `views` on one ANSI B sheet.
