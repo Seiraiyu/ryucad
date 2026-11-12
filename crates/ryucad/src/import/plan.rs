@@ -69,27 +69,39 @@ pub fn bodies(opened: &Opened, k: Option<usize>) -> usize {
     opened.held.iter().filter(|h| h.definition == k).count()
 }
 
-/// Whether each definition makes anything: it has bodies, or a child
-/// that makes something. The tree has no cycles (ryustep drops them).
-pub fn makes(opened: &Opened) -> Vec<bool> {
+/// Whether each definition makes anything: it has bodies, its shape is
+/// in another file (`external`: [`Cross::external`]'s), or it has a
+/// child that makes something. The tree has no cycles (ryustep drops
+/// them).
+pub fn makes_with(opened: &Opened, external: &std::collections::BTreeSet<usize>) -> Vec<bool> {
     let defs = &opened.products.definitions;
     let mut out: Vec<Option<bool>> = vec![None; defs.len()];
-    fn visit(k: usize, opened: &Opened, out: &mut Vec<Option<bool>>) -> bool {
+    fn visit(
+        k: usize,
+        opened: &Opened,
+        external: &std::collections::BTreeSet<usize>,
+        out: &mut Vec<Option<bool>>,
+    ) -> bool {
         if let Some(m) = out[k] {
             return m;
         }
         // Marked first, so a cycle ryustep missed can't recurse forever.
         out[k] = Some(false);
-        let mut m = bodies(opened, Some(k)) > 0;
+        let mut m = bodies(opened, Some(k)) > 0 || external.contains(&k);
         for c in &opened.products.definitions[k].children {
-            m |= visit(c.definition, opened, out);
+            m |= visit(c.definition, opened, external, out);
         }
         out[k] = Some(m);
         m
     }
     (0..defs.len())
-        .map(|k| visit(k, opened, &mut out))
+        .map(|k| visit(k, opened, external, &mut out))
         .collect()
+}
+
+/// [`makes_with`] for a file alone.
+pub fn makes(opened: &Opened) -> Vec<bool> {
+    makes_with(opened, &std::collections::BTreeSet::new())
 }
 
 /// Whether definition `k` is an assembly: it uses a child that makes

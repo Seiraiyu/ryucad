@@ -12,8 +12,14 @@
 //! [`Planner`] then plans each file as an import of its own, leaves
 //! first, the referencing definitions placing the parts their files make.
 
-use ryustep::products::External;
+use crate::doc::project::ImportFile;
+use crate::error::{Code, Error, Result};
+use ryustep::Opened;
+use ryustep::products::{Definition, External};
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// A document's names as written, `\` read as `/`: its location, then
 /// its name.
@@ -113,6 +119,333 @@ pub fn is_step(format: Option<&str>) -> bool {
     })
 }
 
+/// How deep external files may reference further files.
+pub const MAX_DEPTH: usize = 32;
+
+/// One file an import reads.
+pub struct Node {
+    /// Where it was read: the path given for the first, else the file a
+    /// document resolved to.
+    pub source: PathBuf,
+    pub file: ImportFile,
+    pub opened: Arc<Opened>,
+    /// Each externally defined definition of this file: the node its
+    /// shape is in, and that file's definition it is.
+    pub links: BTreeMap<usize, (usize, usize)>,
+    /// The documents that resolved to it, as written, in the order met.
+    pub documents: Vec<String>,
+    /// The instances of this file's documents that resolved: interpreted
+    /// in `external_references` (design 448).
+    pub interpreted: Vec<u64>,
+}
+
+/// Every file an import reads: the file given first, then each file a
+/// document resolved to, depth first in definition and document order.
+pub struct Tree {
+    pub nodes: Vec<Node>,
+}
+
+/// A document that didn't resolve.
+struct Missing {
+    file: String,
+    location: Option<String>,
+    format: Option<String>,
+    reason: &'static str,
+    products: Vec<String>,
+    referenced_by: String,
+    searched: Vec<String>,
+}
+
+struct Resolver<'a> {
+    search: &'a [PathBuf],
+    /// The first file as the agent gave it.
+    shown: &'a str,
+    nodes: Vec<Node>,
+    by_hash: BTreeMap<String, usize>,
+    missing: Vec<Missing>,
+}
+
+/// Every file `file` (read from `source`, `shown` as the agent gave it)
+/// needs: the file itself, then depth first each file its externally
+/// defined definitions' documents resolve to, looked for as [`locate`]
+/// looks, each from the folder of the file naming it, then in `search`.
+/// Refusals: `import_external_missing` (every document that didn't
+/// resolve), `import_external_ambiguous`, `assembly_cycle`,
+/// `invalid_param` (more than [`MAX_DEPTH`] deep), `step_unreadable`
+/// (an external file ryustep can't read, with `referenced_by`).
+pub fn resolve(
+    source: &Path,
+    file: ImportFile,
+    opened: Arc<Opened>,
+    search: &[PathBuf],
+    shown: &str,
+) -> Result<Tree> {
+    let mut r = Resolver {
+        search,
+        shown,
+        nodes: Vec::new(),
+        by_hash: BTreeMap::new(),
+        missing: Vec::new(),
+    };
+    r.add(source.to_path_buf(), file, opened);
+    r.visit(0, &mut Vec::new())?;
+    if !r.missing.is_empty() {
+        return Err(r.missing_error());
+    }
+    Ok(Tree { nodes: r.nodes })
+}
+
+/// The definition of `node`'s file a referencing definition `d` stands
+/// for: its one root that makes something, else the one whose product id
+/// equals `d`'s, else whose name does. `Err` with the roots otherwise.
+fn root_for(node: &Node, d: &Definition) -> std::result::Result<usize, Vec<usize>> {
+    let o = &node.opened;
+    let linked: BTreeSet<usize> = node.links.keys().copied().collect();
+    let makes = crate::import::plan::makes_with(o, &linked);
+    let roots: Vec<usize> = o
+        .products
+        .roots
+        .iter()
+        .copied()
+        .filter(|&k| makes[k])
+        .collect();
+    if let [r] = roots[..] {
+        return Ok(r);
+    }
+    let passes: [fn(&Definition, &Definition) -> bool; 2] = [
+        |a, b| !b.product_id.is_empty() && a.product_id == b.product_id,
+        |a, b| !b.name.is_empty() && a.name == b.name,
+    ];
+    for same in passes {
+        let hits: Vec<usize> = roots
+            .iter()
+            .copied()
+            .filter(|&r| same(&o.products.definitions[r], d))
+            .collect();
+        if let [r] = hits[..] {
+            return Ok(r);
+        }
+    }
+    Err(roots)
+}
+
+impl Resolver<'_> {
+    fn add(&mut self, source: PathBuf, file: ImportFile, opened: Arc<Opened>) -> usize {
+        let j = self.nodes.len();
+        self.by_hash.insert(file.blake3.clone(), j);
+        self.nodes.push(Node {
+            source,
+            file,
+            opened,
+            links: BTreeMap::new(),
+            documents: Vec::new(),
+            interpreted: Vec::new(),
+        });
+        j
+    }
+
+    /// Node `i` as answers name it: the path the agent gave for the first.
+    fn shown(&self, i: usize) -> String {
+        if i == 0 {
+            self.shown.to_owned()
+        } else {
+            self.nodes[i].source.display().to_string()
+        }
+    }
+
+    /// Resolves node `i`'s documents, and theirs, depth first; `stack`
+    /// holds the nodes being followed above it.
+    fn visit(&mut self, i: usize, stack: &mut Vec<usize>) -> Result<()> {
+        if stack.len() > MAX_DEPTH {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "{} references files more than {MAX_DEPTH} deep: import a file nearer the parts",
+                    self.shown
+                ),
+            )
+            .with("param", "external")
+            .with("depth", MAX_DEPTH));
+        }
+        stack.push(i);
+        let opened = self.nodes[i].opened.clone();
+        let folder = self.nodes[i]
+            .source
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        for (k, d) in opened.products.definitions.iter().enumerate() {
+            if !d.externally_defined() {
+                continue;
+            }
+            let Some((path, x)) = self.find(i, d, &folder) else {
+                continue;
+            };
+            let bytes = std::fs::read(&path).map_err(|e| Error::io(&path, &e))?;
+            let file = ImportFile::new(bytes);
+            let before = self.missing.len();
+            let j = match self.by_hash.get(&file.blake3).copied() {
+                Some(j) if stack.contains(&j) => return Err(self.cycle(stack, j)),
+                Some(j) => j,
+                None => {
+                    let o = super::opened(&file).map_err(|e| {
+                        super::unreadable(&path.display().to_string(), &e)
+                            .with("referenced_by", self.shown(i))
+                    })?;
+                    let j = self.add(path.clone(), file, o);
+                    self.visit(j, stack)?;
+                    j
+                }
+            };
+            // A file with documents of its own missing is refused for them.
+            if self.missing.len() > before {
+                continue;
+            }
+            let r = root_for(&self.nodes[j], d).map_err(|roots| self.ambiguous(i, j, d, &roots))?;
+            self.nodes[i].links.insert(k, (j, r));
+            if !self.nodes[j].documents.contains(&x.name) {
+                self.nodes[j].documents.push(x.name.clone());
+            }
+            self.nodes[i].interpreted.extend(x.related.iter().copied());
+        }
+        self.nodes[i].interpreted.sort_unstable();
+        self.nodes[i].interpreted.dedup();
+        stack.pop();
+        Ok(())
+    }
+
+    /// The file `d`'s first STEP document that resolves, else `None`
+    /// with each of its documents recorded missing.
+    fn find(&mut self, i: usize, d: &Definition, folder: &Path) -> Option<(PathBuf, External)> {
+        for x in &d.external {
+            if is_step(x.format.as_deref())
+                && let Some(p) = locate(x, folder, self.search)
+            {
+                return Some((p, x.clone()));
+            }
+        }
+        let product = if d.product_id.is_empty() {
+            d.name.to_string()
+        } else {
+            d.product_id.to_string()
+        };
+        let referenced_by = self.shown(i);
+        let mut searched: Vec<String> = Vec::new();
+        for p in std::iter::once(folder).chain(self.search.iter().map(PathBuf::as_path)) {
+            let s = p.display().to_string();
+            if !searched.contains(&s) {
+                searched.push(s);
+            }
+        }
+        for x in &d.external {
+            let reason = if is_step(x.format.as_deref()) {
+                "not_found"
+            } else {
+                "format"
+            };
+            match self
+                .missing
+                .iter_mut()
+                .find(|m| m.file == x.name && m.referenced_by == referenced_by)
+            {
+                Some(m) => {
+                    if !m.products.contains(&product) {
+                        m.products.push(product.clone());
+                    }
+                }
+                None => self.missing.push(Missing {
+                    file: x.name.clone(),
+                    location: x.location.clone(),
+                    format: x.format.clone(),
+                    reason,
+                    products: vec![product.clone()],
+                    referenced_by: referenced_by.clone(),
+                    searched: searched.clone(),
+                }),
+            }
+        }
+        None
+    }
+
+    fn missing_error(&self) -> Error {
+        let mut names: Vec<&str> = Vec::new();
+        for m in &self.missing {
+            if !names.contains(&m.file.as_str()) {
+                names.push(&m.file);
+            }
+        }
+        let list: Vec<Value> = self
+            .missing
+            .iter()
+            .map(|m| {
+                let mut v = json!({"file": m.file, "products": m.products,
+                                   "referenced_by": m.referenced_by,
+                                   "searched": m.searched, "reason": m.reason});
+                if let Some(l) = &m.location {
+                    v["location"] = json!(l);
+                }
+                if let Some(f) = &m.format {
+                    v["format"] = json!(f);
+                }
+                v
+            })
+            .collect();
+        Error::new(
+            Code::ImportExternalMissing,
+            format!(
+                "{} places parts kept in other files that weren't found: {}. Put each beside the file naming it, or give the folders holding them with --search",
+                self.shown,
+                names.join(", ")
+            ),
+        )
+        .with("path", self.shown)
+        .with("missing", list)
+    }
+
+    fn cycle(&self, stack: &[usize], j: usize) -> Error {
+        let from = stack.iter().position(|&s| s == j).unwrap_or(0);
+        let files: Vec<String> = stack[from..]
+            .iter()
+            .map(|&s| self.shown(s))
+            .chain([self.shown(j)])
+            .collect();
+        Error::new(
+            Code::AssemblyCycle,
+            format!("files reference each other in a loop: {}", files.join(" > ")),
+        )
+        .with("files", files)
+    }
+
+    fn ambiguous(&self, i: usize, j: usize, d: &Definition, roots: &[usize]) -> Error {
+        let o = &self.nodes[j].opened;
+        let listed: Vec<Value> = roots
+            .iter()
+            .map(|&r| {
+                let x = &o.products.definitions[r];
+                json!({"id": &*x.product_id, "name": &*x.name})
+            })
+            .collect();
+        let (file, by) = (self.shown(j), self.shown(i));
+        let message = if roots.is_empty() {
+            format!(
+                "{file}, which {by} names for product {:?}, holds nothing to import",
+                &*d.product_id
+            )
+        } else {
+            format!(
+                "{file} has {} roots and none alone is product {:?} that {by} names: import the file whole, or the product --into a part",
+                roots.len(),
+                &*d.product_id
+            )
+        };
+        Error::new(Code::ImportExternalAmbiguous, message)
+            .with("file", file)
+            .with("referenced_by", by)
+            .with("product", json!({"id": &*d.product_id, "name": &*d.name}))
+            .with("roots", listed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +458,79 @@ mod tests {
             instance: 1,
             related: vec![1],
         }
+    }
+
+    use crate::import::tests::{external_assembly, folder, part_file};
+
+    /// Resolves `name` under `dir` as an import of it would.
+    fn tree(dir: &Path, name: &str, search: &[PathBuf]) -> crate::error::Result<Tree> {
+        let source = dir.join(name);
+        let file = ImportFile::new(std::fs::read(&source).unwrap());
+        let opened = crate::import::opened(&file).unwrap();
+        resolve(&source, file, opened, search, name)
+    }
+
+    #[test]
+    fn the_committed_set_resolves_to_three_files() {
+        let set = PathBuf::from(crate::import::tests::set_path(""));
+        let t = tree(&set, "asm.stp", &[]).unwrap();
+        assert_eq!(t.nodes.len(), 3);
+        let names: Vec<Vec<String>> = t.nodes.iter().map(|n| n.documents.clone()).collect();
+        assert_eq!(names, [vec![], vec!["box.stp".to_owned()], vec!["cylinder.stp".to_owned()]]);
+        assert!(t.nodes[2].source.ends_with("parts/cylinder.stp"));
+        // Both placed products link to their files' one root.
+        let o = &t.nodes[0].opened;
+        let k = |id: &str| o.products.definitions.iter().position(|d| &*d.product_id == id).unwrap();
+        assert_eq!(t.nodes[0].links.get(&k("BOX")).map(|l| l.0), Some(1));
+        assert_eq!(t.nodes[0].links.get(&k("PIN")).map(|l| l.0), Some(2));
+        // The documents' instances are interpreted.
+        for i in [100, 103, 110, 116, 117] {
+            assert!(t.nodes[0].interpreted.contains(&i), "#{i}");
+        }
+    }
+
+    #[test]
+    fn files_of_the_same_bytes_are_one_node_named_both_ways() {
+        let pin = part_file("PIN", 2.0);
+        let d = folder(&[
+            ("asm.stp", external_assembly("ASM", &[("A", "a.stp", [0.0; 3]), ("B", "b.stp", [20.0, 0.0, 0.0])])),
+            ("a.stp", pin.clone()),
+            ("b.stp", pin),
+        ]);
+        let t = tree(d.path(), "asm.stp", &[]).unwrap();
+        assert_eq!(t.nodes.len(), 2);
+        assert_eq!(t.nodes[1].documents, ["a.stp", "b.stp"]);
+    }
+
+    #[test]
+    fn a_nested_assembly_is_followed_from_its_own_folder() {
+        let d = folder(&[
+            ("top.stp", external_assembly("TOP", &[("SUB", "sub/sub.stp", [0.0; 3])])),
+            ("sub/sub.stp", external_assembly("SUB", &[("PIN", "pin.stp", [5.0, 0.0, 0.0])])),
+            ("sub/pin.stp", part_file("PIN", 2.0)),
+        ]);
+        let t = tree(d.path(), "top.stp", &[]).unwrap();
+        assert_eq!(t.nodes.len(), 3);
+        assert!(t.nodes[2].source.ends_with("sub/pin.stp"));
+        assert_eq!(t.nodes[1].links.len(), 1, "the sub-assembly links its pin");
+    }
+
+    #[test]
+    fn search_folders_are_looked_in_after_the_files_own() {
+        let d = folder(&[
+            ("a/asm.stp", external_assembly("ASM", &[("BOX", "box.stp", [0.0; 3])])),
+            ("lib/box.stp", part_file("BOX", 10.0)),
+        ]);
+        let t = tree(&d.path().join("a"), "asm.stp", &[d.path().join("lib")]).unwrap();
+        assert_eq!(t.nodes.len(), 2);
+    }
+
+    #[test]
+    fn a_file_alone_is_a_tree_of_one() {
+        let d = folder(&[("box.stp", part_file("BOX", 10.0))]);
+        let t = tree(d.path(), "box.stp", &[]).unwrap();
+        assert_eq!(t.nodes.len(), 1);
+        assert!(t.nodes[0].links.is_empty());
     }
 
     #[test]
