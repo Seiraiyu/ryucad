@@ -1504,6 +1504,9 @@ enum GitCmd {
         #[arg(long)]
         global: bool,
     },
+    /// Print a ryueda file as one line per value, for `git diff` (Git's
+    /// textconv): plain text, not JSON.
+    Textconv { file: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -2559,6 +2562,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         }
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
         Command::Git(GitCmd::Install { global }) => ryueda::drivers::install(&here, !global),
+        Command::Git(GitCmd::Textconv { .. }) => unreachable!("answered in main"),
         // Keys go straight to the user's config folder: never through a
         // daemon, a request or a log.
         Command::Parts(PartsCmd::Login { distributor }) => {
@@ -2763,6 +2767,20 @@ pub fn main() -> ExitCode {
             return finish(Err(err), Vec::new(), args.iter().any(|a| a == "--pretty"));
         }
     };
+    // Git reads a textconv's output as the file's text, not JSON.
+    if let Command::Git(GitCmd::Textconv { file }) = &cli.command {
+        return match std::fs::read(file) {
+            Ok(bytes) => {
+                use std::io::Write;
+                let text = ryueda::textconv::textconv(&bytes);
+                match std::io::stdout().lock().write_all(&text) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(_) => ExitCode::from(Code::Io.exit_code()),
+                }
+            }
+            Err(e) => finish(Err(Error::io(file, &e)), Vec::new(), cli.pretty),
+        };
+    }
     let mut warnings = Vec::new();
     let outcome = run(&cli, &mut warnings);
     finish(outcome, warnings, cli.pretty)

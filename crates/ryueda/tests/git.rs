@@ -214,3 +214,61 @@ fn init_in_a_repository_sets_the_clone_up_and_install_is_idempotent() {
         "{global}"
     );
 }
+
+#[test]
+fn git_diff_reads_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    // The installed textconv runs this test's ryueda.
+    let exe = assert_cmd::cargo::cargo_bin("ryueda");
+    let exe = exe.to_string_lossy().replace('\\', "/");
+    git(
+        &top,
+        &[
+            "config",
+            "diff.ryueda.textconv",
+            &format!("'{exe}' git textconv"),
+        ],
+    );
+    let comp = std::fs::read_dir(board.join("blocks"))
+        .unwrap()
+        .flat_map(|b| {
+            std::fs::read_dir(b.unwrap().path().join("components"))
+                .into_iter()
+                .flatten()
+        })
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let text = std::fs::read_to_string(&comp).unwrap();
+    let v: Value = serde_json::from_str(&text).unwrap();
+    let old = v["value"].as_str().unwrap_or_default().to_owned();
+    let mut edited = v.clone();
+    edited["value"] = json!("47k");
+    std::fs::write(&comp, serde_json::to_string_pretty(&edited).unwrap() + "\n").unwrap();
+    let out = git_command(&top)
+        .args(["diff", "--no-color", "--", comp.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let diff = String::from_utf8(out.stdout).unwrap();
+    assert!(diff.contains("+value = 47k"), "{diff}");
+    if !old.is_empty() {
+        assert!(diff.contains(&format!("-value = {old}")), "{diff}");
+    }
+    assert!(!diff.contains('{'), "values, not JSON: {diff}");
+    // Printed as Git reads it: plain text, never the JSON envelope.
+    let printed = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryueda"))
+        .args(["git", "textconv", comp.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(printed.status.success());
+    assert!(
+        String::from_utf8(printed.stdout)
+            .unwrap()
+            .starts_with("ryueda.component format ")
+    );
+}
