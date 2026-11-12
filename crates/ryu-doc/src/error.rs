@@ -496,6 +496,21 @@ pub enum Code {
     /// `worktree remove` of a worktree with changes Git would lose,
     /// without `--force`.
     WorktreeDirty,
+    /// `branch.switch` while project files differ from `HEAD`, staged or
+    /// not (design 447): the files are in the details (`files`). ryucad
+    /// never stages, commits or stashes; the person or agent does, in Git.
+    CheckoutDirty,
+    /// `branch.switch` to a branch another worktree has checked out: the
+    /// `branch` and that worktree's project folder (`worktree`) are in
+    /// the details.
+    BranchInWorktree,
+    /// `branch.switch` while Git is in a merge, cherry-pick, revert or
+    /// rebase step: the `step`, as `merge.status` names it.
+    MergeInProgress,
+    /// A Git command ryucad ran to write the working tree failed (`git
+    /// switch`): what it ran (`git`) and what Git said (`stderr`) are in
+    /// the details.
+    GitFailed,
     /// A dependency in `ryucad.json` with a bad name, URL or path.
     DependencyInvalid,
     /// An instance naming a project that is neither a dependency nor one
@@ -1061,6 +1076,19 @@ mod tests {
             (Code::PackageFailed, "package_failed"),
             (Code::PackageInvalid, "package_invalid"),
             (Code::ReleaseObsolete, "release_obsolete"),
+        ] {
+            assert_eq!(json!(c), json!(name));
+            assert_eq!(c.exit_code(), 1, "{name}");
+        }
+    }
+
+    #[test]
+    fn branch_codes_are_the_agents_to_fix() {
+        for (c, name) in [
+            (Code::CheckoutDirty, "checkout_dirty"),
+            (Code::BranchInWorktree, "branch_in_worktree"),
+            (Code::MergeInProgress, "merge_in_progress"),
+            (Code::GitFailed, "git_failed"),
         ] {
             assert_eq!(json!(c), json!(name));
             assert_eq!(c.exit_code(), 1, "{name}");

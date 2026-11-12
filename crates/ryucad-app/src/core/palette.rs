@@ -11,6 +11,10 @@ use std::collections::BTreeMap;
 /// How many recently run commands the palette remembers.
 pub const RECENT: usize = 8;
 
+/// What the palette's query starts with to list the other branches
+/// (File > Switch branch…): Enter opens the Check out dialog.
+pub const BRANCHES: &str = "branch:";
+
 /// How well `query` matches `text`: its characters in order, ignoring
 /// case, `None` if they aren't all there. Higher is better: runs of
 /// characters together, matches at the start of a word, and a match at

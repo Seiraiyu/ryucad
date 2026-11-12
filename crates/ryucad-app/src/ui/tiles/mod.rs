@@ -101,7 +101,12 @@ pub fn show(
         "viewport" => {
             // The compare bar stays above the viewport, inside its tile.
             // Not over a draft: the mode bar says what is drawn.
-            if o.compare_with.is_some() || o.ws.compare.as_ref().is_some_and(|c| c.to.is_none()) {
+            if o.compare_with.is_some()
+                || o.ws
+                    .compare
+                    .as_ref()
+                    .is_some_and(|c| c.to.is_none() || c.swapped.is_some())
+            {
                 panels::compare_bar(ui, &mut o.ws, &mut o.compare_with);
                 ui.separator();
             }

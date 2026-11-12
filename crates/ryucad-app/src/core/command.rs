@@ -378,6 +378,9 @@ pub const COMMANDS: &[Command] = &[
         .keys(&["Mod+O"])
         .in_text(),
     cmd("file.open_recent", "Open recent", File).choices(),
+    // The Branches tab's list in the palette (design 447); a project
+    // command, in the File menu as the design has it.
+    cmd("project.switch_branch", "Switch branch…", File),
     cmd("file.import_step", "Import STEP…", File).icon("file-arrow-down"),
     cmd("file.update_import", "Update import…", File),
     cmd("file.export", "Export…", File).icon("export"),
@@ -529,6 +532,33 @@ pub const COMMANDS: &[Command] = &[
         .toolbar(),
     cmd("view.compare_with", "Compare with…", View),
     cmd("view.compare_stop", "Stop comparing", View),
+    // A compare's blink (design 447): the window's own view. Not in the
+    // View menu, which has no room left (its last items would fall off a
+    // 1000-point window): `B` over the viewport, the compare bar, a
+    // ghost's context menu and the palette.
+    cmd("view.compare_swap", "Swap compared sides", View)
+        .icon("arrows-left-right")
+        .keys(&["B"])
+        .viewport()
+        .toggle()
+        .hidden()
+        .context(&[Context::Ghost]),
+    cmd(
+        "view.compare_only_rev",
+        "Show only the compared revision",
+        View,
+    )
+    .toggle()
+    .hidden()
+    .context(&[Context::Ghost]),
+    cmd(
+        "view.compare_only_working",
+        "Show only the working files",
+        View,
+    )
+    .toggle()
+    .hidden()
+    .context(&[Context::Ghost]),
     cmd("section.edit", "Section view", View).icon("knife"),
     cmd("section.clear", "Remove section planes", View),
     cmd("explode.edit", "Exploded view", View).icon("arrows-out-cardinal"),
@@ -749,6 +779,8 @@ pub struct State {
     pub weighable: bool,
     /// The revision being compared with.
     pub comparing: Option<String>,
+    /// The compare's blink: which side is drawn, and whether alone.
+    pub blink: crate::core::compare::Blink,
     /// Display toggles and the Measure tool, as they stand.
     pub edges: bool,
     pub sketches: bool,
@@ -819,10 +851,30 @@ const CAMERA: [&str; 27] = [
     "view.farther",
 ];
 
+/// The commands that write, off while a compare's revision is drawn
+/// (design 447): the model on screen isn't the files.
+const WRITES: [&str; 12] = [
+    "edit.undo",
+    "edit.redo",
+    "edit.move",
+    "edit.mate",
+    "file.import_step",
+    "file.update_import",
+    "import.to_solid",
+    "import.to_reference",
+    "annotation.add",
+    "annotation.here",
+    "annotation.markup",
+    "deps.place",
+];
+
 /// Whether the window's mode allows `id`, or which mode would: the part
 /// of [`enabled`] that holds whatever was right-clicked, so a context
 /// menu's targeted entries are gated by mode too.
 pub fn mode_allows(id: &str, s: &State) -> Result<(), &'static str> {
+    if s.blink.draws_rev() && WRITES.contains(&id) {
+        return Err(crate::core::compare::SWAPPED);
+    }
     let need = |ok: bool, why: &'static str| if ok { Ok(()) } else { Err(why) };
     match id {
         "annotation.add" | "annotation.here" => need(
@@ -886,6 +938,9 @@ pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
             s.comparing.as_deref() != Some("HEAD"),
             "Already comparing with HEAD.",
         ),
+        "view.compare_swap" | "view.compare_only_rev" | "view.compare_only_working" => {
+            need(s.blink.of.is_some(), "Not comparing with a revision.")
+        }
         "view.compare_stop" => need(s.comparing.is_some(), "Not comparing."),
         "section.clear" => need(s.sectioned, "The view isn't cut."),
         "explode.edit" => need(s.assembly_shown, "Show an assembly first (View > Show)."),
@@ -978,6 +1033,13 @@ pub fn checked(id: &str, s: &State) -> Option<bool> {
             let t = crate::core::markup::Tool::of_command(id)?;
             s.marking == Some(t)
         }
+        "view.compare_swap" => s.blink.front == crate::core::compare::Front::Rev,
+        "view.compare_only_rev" => {
+            s.blink.alone && s.blink.front == crate::core::compare::Front::Rev
+        }
+        "view.compare_only_working" => {
+            s.blink.alone && s.blink.front == crate::core::compare::Front::Working
+        }
         _ => return None,
     })
 }
@@ -1001,6 +1063,95 @@ pub fn toolbar() -> impl Iterator<Item = &'static Command> {
 mod tests {
     use super::*;
     use crate::core::keys::Chord;
+
+    #[test]
+    fn switch_branch_is_in_the_file_menu() {
+        let ids: Vec<&str> = menu(Category::File).map(|c| c.id).collect();
+        assert_eq!(
+            ids[..3],
+            ["file.open", "file.open_recent", "project.switch_branch"]
+        );
+        assert_eq!(
+            get("project.switch_branch").unwrap().title,
+            "Switch branch…"
+        );
+        assert!(enabled("project.switch_branch", &State::default()).is_ok());
+    }
+
+    #[test]
+    fn swap_and_one_side_need_a_revision_and_say_whether_they_are_on() {
+        use crate::core::compare::{Blink, Front};
+        let mut s = State::default();
+        for id in [
+            "view.compare_swap",
+            "view.compare_only_rev",
+            "view.compare_only_working",
+        ] {
+            assert_eq!(
+                enabled(id, &s),
+                Err("Not comparing with a revision."),
+                "{id}"
+            );
+            assert_eq!(get(id).unwrap().category, Category::View, "{id}");
+        }
+        let swap = get("view.compare_swap").unwrap();
+        assert_eq!(swap.keys, ["B"]);
+        assert_eq!(swap.scope, Scope::Viewport);
+        s.blink = Blink {
+            of: Some("HEAD".into()),
+            ..Blink::default()
+        };
+        assert!(enabled("view.compare_swap", &s).is_ok());
+        assert_eq!(checked("view.compare_swap", &s), Some(false));
+        s.blink.front = Front::Rev;
+        assert_eq!(checked("view.compare_swap", &s), Some(true));
+        assert_eq!(checked("view.compare_only_rev", &s), Some(false));
+        s.blink.alone = true;
+        assert_eq!(checked("view.compare_only_rev", &s), Some(true));
+        assert_eq!(checked("view.compare_only_working", &s), Some(false));
+    }
+
+    #[test]
+    fn writes_wait_while_the_compared_revision_is_drawn() {
+        use crate::core::compare::{Blink, Front, SWAPPED};
+        use crate::core::modes::Mode;
+        let mut s = State {
+            mode: Mode::Edit,
+            ..State::default()
+        };
+        assert!(enabled("edit.undo", &s).is_ok());
+        s.blink = Blink {
+            of: Some("HEAD".into()),
+            front: Front::Rev,
+            alone: false,
+        };
+        for id in WRITES {
+            assert_eq!(enabled(id, &s), Err(SWAPPED), "{id}");
+            assert_eq!(mode_allows(id, &s), Err(SWAPPED), "{id}");
+        }
+        // Looking, measuring and cutting stay on.
+        for id in [
+            "view.fit",
+            "measure.tool",
+            "section.edit",
+            "view.compare_stop",
+        ] {
+            assert!(
+                enabled(
+                    id,
+                    &State {
+                        comparing: Some("HEAD".into()),
+                        ..s.clone()
+                    }
+                )
+                .is_ok(),
+                "{id}"
+            );
+        }
+        // The working files in front: writes are back.
+        s.blink.front = Front::Working;
+        assert!(enabled("edit.undo", &s).is_ok());
+    }
 
     #[test]
     fn move_needs_one_movable_instance_and_a_mode_that_edits() {
@@ -1179,6 +1330,10 @@ mod tests {
             planar_face: true,
             weighable: true,
             comparing: Some("main".into()),
+            blink: crate::core::compare::Blink {
+                of: Some("main".into()),
+                ..Default::default()
+            },
             sectioned: true,
             exploded: true,
             scale: 1.0,
@@ -1352,7 +1507,15 @@ mod tests {
             }
             assert_eq!(ids(Context::Entity(k)), want, "{k:?}");
         }
-        assert_eq!(ids(Context::Ghost), ["edit.copy_reference"]);
+        assert_eq!(
+            ids(Context::Ghost),
+            [
+                "edit.copy_reference",
+                "view.compare_swap",
+                "view.compare_only_rev",
+                "view.compare_only_working"
+            ]
+        );
         assert_eq!(
             ids(Context::Viewport),
             ["view.fit", "view.show_all", "annotation.here"]

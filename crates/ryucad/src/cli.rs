@@ -793,6 +793,25 @@ enum Command {
     /// folder with its own daemon, all sharing this machine's cache.
     #[command(subcommand)]
     Worktree(WorktreeCmd),
+    /// The repository's branches: local ones, and remote-tracking ones
+    /// with no local branch of their name, with their upstream, how far
+    /// they are ahead of and behind this worktree's head, and the
+    /// worktree each is checked out in. Read-only.
+    #[command(subcommand)]
+    Branch(BranchCmd),
+    /// Check out another branch in this project's folder (`git switch`;
+    /// a remote's branch gets a local one tracking it): refused while
+    /// project files differ from HEAD (commit or stash them in Git first:
+    /// ryucad never commits) or a merge is in progress. Everyone attached
+    /// sees the files change; the activity log records the switch, which
+    /// undo can't take back.
+    Switch {
+        branch: String,
+        /// Fail with `conflict` unless the project is still at this
+        /// revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
     /// The project's Git commits (or one part's), and what is
     /// uncommitted. Read-only.
     History {
@@ -935,6 +954,12 @@ enum WorktreeCmd {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum BranchCmd {
+    /// Every branch, the one checked out here marked `current`.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -5355,6 +5380,11 @@ fn request(cmd: &Command) -> Option<Request> {
             },
         },
         Command::Worktree(WorktreeCmd::List) => Request::WorktreeList {},
+        Command::Branch(BranchCmd::List) => Request::BranchList {},
+        Command::Switch { branch, expect } => Request::BranchSwitch {
+            branch: branch.clone(),
+            expected_revision: expect.clone(),
+        },
         Command::Merge(MergeCmd::Resolve {
             conflict,
             ours,
