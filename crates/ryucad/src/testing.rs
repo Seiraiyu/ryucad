@@ -192,7 +192,14 @@ fn server_names(code: &str) -> Vec<String> {
         let names: Vec<&str> = match rest.strip_prefix('{') {
             Some(group) => group[..group.find('}').unwrap_or(group.len())]
                 .split(',')
-                .map(|n| n.split("::").next().unwrap_or("").split(" as ").next().unwrap_or(""))
+                .map(|n| {
+                    n.split("::")
+                        .next()
+                        .unwrap_or("")
+                        .split(" as ")
+                        .next()
+                        .unwrap_or("")
+                })
                 .map(str::trim)
                 .collect(),
             None => vec![&rest[..rest.find(|c: char| !word(c)).unwrap_or(rest.len())]],
@@ -231,7 +238,10 @@ fn the_scan_reads_paths_groups_and_bare_imports() {
          {s}::init(p);\n\
          let a = ryucad::{s}::meshes;\n"
     );
-    assert_eq!(server_names(&code), ["handle", "part_id", "tests", "init", "meshes"]);
+    assert_eq!(
+        server_names(&code),
+        ["handle", "part_id", "tests", "init", "meshes"]
+    );
 }
 
 /// Design 541: the dependency points one way. Nothing outside `server/`
@@ -250,7 +260,8 @@ fn nothing_outside_the_server_names_more_than_its_entry_points() {
         for n in server_names(&text) {
             if !SERVER_ENTRY.contains(&n.as_str()) {
                 let at = f.strip_prefix(&src).unwrap().display();
-                found.push(format!("{at}: server::{n}"));
+                // Spliced, so this file names nothing either.
+                found.push(format!("{at}: {}::{n}", "server"));
             }
         }
     }
