@@ -188,6 +188,15 @@ pub struct Cache {
     /// While a request notes what it adds ([`Cache::note`]): the keys it
     /// added and their bytes.
     noted: Option<(Vec<(String, Key)>, usize)>,
+    /// The entries that are another's mesh moved (an inserted body's,
+    /// design 521): evicted before any mesh the kernel made, since moving
+    /// the source's again costs a transform, and making it a mesh.
+    derived: std::collections::BTreeSet<(String, Key)>,
+    /// How many bodies this cache has sent to be meshed (made, or read
+    /// from the disk): what tests read to show a mesh was moved, not made.
+    /// Per cache, unlike [`kernel_meshes`], so tests running beside each
+    /// other in one process don't move it.
+    made: u64,
 }
 
 impl Cache {
@@ -244,13 +253,37 @@ impl Cache {
                     .contains_key(&(b.hash.clone(), Key::Display(quality)))
             })
             .collect();
+        // An inserted body whose source's mesh the cache holds is moved
+        // from it here; the rest are made (design 521).
+        let mut moved: Vec<(String, Arc<DisplayMesh>)> = Vec::new();
+        let missing: Vec<&(&Feature, &Built)> = missing
+            .into_iter()
+            .filter(|(_, b)| {
+                let Some(m) = &b.moved else {
+                    return true;
+                };
+                self.clock += 1;
+                match self
+                    .entries
+                    .get_mut(&(m.source.hash.clone(), Key::Display(quality)))
+                {
+                    // The source is used: it outlives what is moved from it.
+                    Some((used, source)) => {
+                        *used = self.clock;
+                        moved.push((b.hash.clone(), Arc::new(moved_mesh(source, &m.pose))));
+                        false
+                    }
+                    None => true,
+                }
+            })
+            .collect();
+        for (hash, m) in moved {
+            self.add(&hash, Key::Display(quality), &m);
+            self.derived.insert((hash, Key::Display(quality)));
+        }
         let disk = self.disk.as_deref();
-        prefetch(
-            disk,
-            missing
-                .iter()
-                .map(|(f, b)| (b.hash.as_str(), quality.params(diagonal(f, &b.body)))),
-        );
+        prefetch(disk, missing.iter().map(|(f, b)| disk_key(f, b, quality)));
+        self.made += missing.len() as u64;
         let stage = job.begin(Phase::Mesh, "bodies", missing.len());
         let made: Vec<Result<(String, Arc<DisplayMesh>)>> = missing
             .par_iter()
@@ -381,6 +414,7 @@ impl Cache {
         }
         let disk = self.disk.as_deref();
         prefetch(disk, missing.values().map(|b| (b.hash.as_str(), *params)));
+        self.made += missing.len() as u64;
         let stage = job.begin(Phase::Mesh, "bodies", missing.len());
         let made: Vec<Result<(String, Arc<DisplayMesh>)>> = missing
             .into_values()
@@ -428,14 +462,16 @@ impl Cache {
     /// Drops the least recently used meshes until the cache fits `budget`,
     /// keeping at least one.
     fn evict(&mut self, budget: usize) {
+        // Moved meshes first, oldest first; then the kernel's, oldest first.
         while self.bytes > budget && self.entries.len() > 1 {
             let oldest = self
                 .entries
                 .iter()
-                .min_by_key(|(_, (used, _))| *used)
+                .min_by_key(|(k, (used, _))| (!self.derived.contains(*k), *used))
                 .map(|(k, _)| k.clone())
                 .expect("not empty");
             let (_, gone) = self.entries.remove(&oldest).expect("present");
+            self.derived.remove(&oldest);
             self.bytes -= gone.bytes();
         }
     }
@@ -464,10 +500,16 @@ impl Cache {
         if forget {
             for k in keys {
                 if let Some((_, gone)) = self.entries.remove(&k) {
+                    self.derived.remove(&k);
                     self.bytes -= gone.bytes();
                 }
             }
         }
+    }
+
+    /// How many bodies this cache has sent to be meshed.
+    pub fn made(&self) -> u64 {
+        self.made
     }
 
     /// Whether the mesh of the body with `hash` at `quality` is held.
@@ -514,9 +556,7 @@ impl Pending {
         let (disk, quality) = (self.disk.as_deref(), self.quality);
         prefetch(
             disk,
-            self.items
-                .iter()
-                .map(|(f, b)| (b.hash.as_str(), quality.params(diagonal(f, &b.body)))),
+            self.items.iter().map(|(f, b)| disk_key(f, b, quality)),
         );
         let stage = job.begin(Phase::Mesh, "bodies", self.items.len());
         let meshes = self
@@ -568,7 +608,42 @@ fn prefetch<'a>(
     }
 }
 
-/// The display mesh of `built` (feature `f`) at `quality`.
+/// How many bodies the kernel has meshed in this process: what the insert
+/// bar (a binary of one test) reads to show a mesh was moved, not made.
+/// Tests in a binary of many read [`Cache::made`] instead.
+static KERNEL_MESHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many bodies the kernel has meshed in this process.
+pub fn kernel_meshes() -> u64 {
+    KERNEL_MESHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `m` moved by `pose`: every position and corner normal, the
+/// triangles, faces and edges as they are. Deterministic: `Rigid`'s
+/// products, nothing else.
+fn moved_mesh(m: &DisplayMesh, pose: &ryukei::geom::Rigid) -> DisplayMesh {
+    let mesh = match &m.mesh {
+        Ok(b) => {
+            let mut out = BodyMesh::clone(b);
+            for p in &mut out.positions {
+                *p = pose.apply_point(*p);
+            }
+            for c in &mut out.corners {
+                c.normal = pose.apply_unit(c.normal);
+            }
+            Ok(Arc::new(out))
+        }
+        Err(e) => Err(e.clone()),
+    };
+    DisplayMesh {
+        params: m.params,
+        mesh,
+    }
+}
+
+/// The display mesh of `built` (feature `f`) at `quality`. An inserted
+/// body's is its source's, from the disk by the source's own key, moved
+/// (design 521).
 fn make(
     disk: Option<&crate::cache::Disk>,
     f: &Feature,
@@ -576,7 +651,20 @@ fn make(
     quality: Quality,
     job: &Job,
 ) -> DisplayMesh {
+    if let Some(m) = &built.moved {
+        let source = make(disk, &m.feature, &m.source, quality, job);
+        return moved_mesh(&source, &m.pose);
+    }
     make_with(disk, built, quality.params(diagonal(f, &built.body)), job)
+}
+
+/// The hash and mesh parameters a body's mesh is kept under on disk: an
+/// inserted body's are its source's.
+fn disk_key<'a>(f: &'a Feature, b: &'a Built, quality: Quality) -> (&'a str, MeshParams) {
+    match &b.moved {
+        Some(m) => disk_key(&m.feature, &m.source, quality),
+        None => (b.hash.as_str(), quality.params(diagonal(f, &b.body))),
+    }
 }
 
 /// The request's `cancelled` for a mesh a cancel stopped inside the
@@ -613,6 +701,7 @@ fn make_with(
         }
     }
     let work = crate::work::work(job);
+    KERNEL_MESHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mesh = ryukei::mesh::tessellate_with(&built.body, &params, &work).map_err(|e| {
         if let Some(stopped) = crate::work::stopped(&e, job) {
             return stopped;
@@ -1195,6 +1284,100 @@ mod tests {
         let id = Id::parse("s", "feature").unwrap();
         let b = build_feature(&id, &id, &f).unwrap();
         (f, b)
+    }
+
+    #[test]
+    fn an_inserted_solid_is_meshed_as_its_source_moved() {
+        let (_dir, mut s) = crate::insert::tests::boarded();
+        crate::server::tests::call(
+            &mut s,
+            "feature.edit",
+            serde_json::json!({"part": "enclosure",
+            "id": "pcb", "placement": {"origin": ["0 mm", "0 mm", "5 mm"]}}),
+        )
+        .unwrap();
+        let src = s
+            .rebuilt(&crate::assembly::tests::id("pcb"))
+            .unwrap()
+            .output(&crate::assembly::tests::id("board"))
+            .unwrap()
+            .solids()[0]
+            .1
+            .clone();
+        let r = s
+            .rebuilt(&crate::assembly::tests::id("enclosure"))
+            .unwrap()
+            .clone();
+        let (_, b) = &r
+            .output(&crate::assembly::tests::id("pcb"))
+            .unwrap()
+            .solids()[0];
+        let mut cache = Cache::with_disk(None);
+        let f = crate::doc::files::Feature::Insert(Box::new(
+            s.project()
+                .part(&crate::assembly::tests::id("enclosure"))
+                .unwrap()
+                .features[&crate::assembly::tests::id("pcb")]
+                .as_ref()
+                .unwrap()
+                .insert()
+                .unwrap()
+                .clone(),
+        ));
+        let m = &b.moved.as_ref().unwrap();
+        let source = cache.get(&m.feature, &src, Quality::Normal, usize::MAX);
+        let before = cache.made();
+        let moved = cache.get(&f, b, Quality::Normal, usize::MAX);
+        assert_eq!(
+            cache.made(),
+            before,
+            "the source's mesh is moved, not made again"
+        );
+        let (a, z) = (source.mesh.as_ref().unwrap(), moved.mesh.as_ref().unwrap());
+        assert_eq!(a.triangles, z.triangles);
+        assert_eq!(z.positions[0], m.pose.apply_point(a.positions[0]));
+    }
+
+    #[test]
+    fn a_moved_mesh_is_evicted_before_its_source() {
+        let (_dir, mut s) = crate::insert::tests::boarded();
+        let id = crate::assembly::tests::id;
+        let src = s
+            .rebuilt(&id("pcb"))
+            .unwrap()
+            .output(&id("board"))
+            .unwrap()
+            .solids()[0]
+            .1
+            .clone();
+        let ins = s.project().part(&id("enclosure")).unwrap().features[&id("pcb")]
+            .as_ref()
+            .unwrap()
+            .clone();
+        let at = |s: &mut crate::session::Session, z: &str| {
+            crate::server::tests::call(
+                s,
+                "feature.edit",
+                serde_json::json!({"part": "enclosure", "id": "pcb",
+                "placement": {"origin": ["0 mm", "0 mm", z]}}),
+            )
+            .unwrap();
+            let r = s.rebuilt(&id("enclosure")).unwrap().clone();
+            r.output(&id("pcb")).unwrap().solids()[0].1.clone()
+        };
+        let (one, two) = (at(&mut s, "5 mm"), at(&mut s, "6 mm"));
+        let feature = one.moved.as_ref().unwrap().feature.clone();
+        let mut cache = Cache::with_disk(None);
+        let source = cache.get(&feature, &src, Quality::Normal, usize::MAX);
+        // A budget for the source alone: the moved mesh goes, the source stays.
+        let budget = source.bytes();
+        cache.get(&ins, &one, Quality::Normal, budget);
+        assert!(cache.has(&src.hash, Quality::Normal));
+        assert!(!cache.has(&one.hash, Quality::Normal));
+        // So a placement moved again meshes nothing.
+        let before = cache.made();
+        cache.get(&ins, &two, Quality::Normal, budget);
+        assert_eq!(cache.made(), before, "the source was meshed again");
     }
 
     #[test]

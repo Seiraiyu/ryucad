@@ -544,7 +544,8 @@ pub struct Workspace {
     /// The last doctor report, once asked for.
     pub doctor: Option<Value>,
     /// The shown assembly's interference, once asked for (Tools > Check
-    /// interference); asked again as the assembly changes.
+    /// interference); marked stale when the assembly changes, and asked
+    /// again only by Check again (design 525).
     pub interference: Option<Interference>,
     /// Tools > Measure: on or off, its picks and what they measured.
     pub measure: Tool,
@@ -5293,13 +5294,15 @@ impl Workspace {
         {
             self.read_views();
         }
-        // Interference found for this assembly is found again.
-        if self
+        // Interference found for this assembly goes stale: it is asked
+        // again only when someone asks (design 525).
+        if let Some(i) = self
             .interference
-            .as_ref()
-            .is_some_and(|i| report["part"] == i.part.as_str())
+            .as_mut()
+            .filter(|i| report["part"] == i.part.as_str())
         {
-            self.check_interference();
+            i.mark_stale();
+            self.model.generation += 1;
         }
         // So are clearances, a weight and the Measure tool's picks that
         // read the part.

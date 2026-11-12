@@ -3681,6 +3681,8 @@ sections! {
     delete_faces => delete_faces_section,
     blend_recognition => blend_recognition_section,
     inverted_offsets => inverted_offsets_section,
+    cusp_images => cusp_images_section,
+    closed_silhouettes => closed_silhouettes_section,
 }
 
 /// Offsets past their focal surfaces (design 484, plan 17.A): a spline
@@ -4952,4 +4954,78 @@ fn blend_recognition_section(golden: &mut Golden) {
     )
     .unwrap();
     hash_body(&mut s, &o, &j);
+}
+
+/// Images near cusps (design 484, plan 17.B): a cubic seen along its
+/// tangent at its middle and tilted off it, cut into one-to-one pieces
+/// and points.
+fn cusp_images_section(golden: &mut Golden) {
+    use ryukei::geom::{KnotVector, NurbsCurve};
+    use ryukei::project::{View, project_curve};
+    let mut s = golden.section("cusp_images");
+    let kv = KnotVector::clamped(3, &[0.0, 1.0], &[4, 4]).unwrap();
+    let pts = vec![
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(0.01, 0.02, 0.005),
+        Point3::new(0.02, 0.01, 0.02),
+        Point3::new(0.03, 0.04, 0.01),
+    ];
+    let c = Curve::Nurbs(std::sync::Arc::new(NurbsCurve::new(kv, pts, None).unwrap()));
+    let tangent = c.tangent(0.5).unwrap().get();
+    let side = tangent
+        .cross(Vector3::new(0.0, 0.0, 1.0))
+        .normalize()
+        .unwrap()
+        .get();
+    for tilt in [0.0, 1e-12, 1e-9, 1e-7, 1e-6, 1e-5, 1e-3] {
+        let v = View::new(tangent + side * tilt, Vector3::new(0.0, 0.0, 1.0)).unwrap();
+        for piece in project_curve(&c, [0.0, 1.0], &v).unwrap() {
+            s.str(&format!("{piece:?}"));
+        }
+    }
+}
+
+/// Closed forms new in plan 17.B: a torus seen square to its axis, and a
+/// revolution of a spline seen askew, on one thread and eight.
+fn closed_silhouettes_section(golden: &mut Golden) {
+    use core::f64::consts::TAU;
+    use ryukei::geom::{KnotVector, NurbsCurve, Revolution};
+    use ryukei::project::{View, silhouettes};
+    use std::sync::Arc;
+    let mut s = golden.section("closed_silhouettes");
+    let torus = primitive::torus(OpKey(0x5114), 0.03, 0.01, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let kv = KnotVector::clamped(3, &[0.0, 1.0], &[4, 4]).unwrap();
+    let profile = Curve::Nurbs(Arc::new(
+        NurbsCurve::new(
+            kv,
+            vec![
+                Point3::new(0.02, 0.0, 0.0),
+                Point3::new(0.03, 0.0, 0.01),
+                Point3::new(0.012, 0.0, 0.025),
+                Point3::new(0.025, 0.0, 0.04),
+            ],
+            None,
+        )
+        .unwrap(),
+    ));
+    let rev = Surface::Revolution(Arc::new(Revolution::new(Frame::WORLD, profile).unwrap()));
+    let rev = ryukei::sheet::from_surface(OpKey(0x5115), &rev, [[0.0, TAU], [0.0, 1.0]])
+        .unwrap()
+        .0;
+    for threads in [1, 8] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            for t in [Vector3::new(0.0, -1.0, 0.0), Vector3::new(1.0, 1.0, 0.0)] {
+                let v = View::new(t, Vector3::new(0.0, 0.0, 1.0)).unwrap();
+                s.str(&format!("{:?}", silhouettes(&torus, &v).unwrap()));
+            }
+            let v = View::new(Vector3::new(0.3, -1.0, 0.4), Vector3::new(0.0, 0.0, 1.0)).unwrap();
+            s.str(&format!("{:?}", silhouettes(&rev, &v).unwrap()));
+        });
+    }
 }

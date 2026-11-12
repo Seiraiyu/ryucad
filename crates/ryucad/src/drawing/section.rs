@@ -303,6 +303,7 @@ fn decode(bytes: &[u8], hash: &str, origins: &Arc<crate::rebuild::Origins>) -> O
             origins: origins.clone(),
             hash: hash.to_owned(),
             reference: false,
+            moved: None,
         }),
         caps,
     })
@@ -552,6 +553,7 @@ pub(super) fn cut_all(session: &mut Session, plans: &mut [(super::Plan, Source)]
                         origins: b.origins.clone(),
                         hash: j.key.clone(),
                         reference: false,
+                        moved: None,
                     }),
                     caps,
                 });

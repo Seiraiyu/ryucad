@@ -13,8 +13,9 @@ use crate::label;
 use crate::record::{Kind, parse_name};
 use crate::structure::Reader;
 use ryucad_doc::doc::assembly::Rev;
-use ryucad_doc::doc::files::PartKind;
+use ryucad_doc::doc::files::{Feature, PartKind};
 use ryucad_doc::doc::id::{Id, ProjectId};
+use ryucad_doc::doc::project::Part;
 use ryucad_doc::error::Error;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -58,6 +59,14 @@ impl Query {
         row.part == self.part && row.project() == self.project.as_ref()
     }
 
+    /// Whether an insert of `part` at `rev` (design 521) inserts the part
+    /// asked about, at the revision asked about if one is.
+    fn is_insert_of(&self, part: &Id, rev: &Rev) -> bool {
+        *part == self.part
+            && rev.project() == self.project.as_ref()
+            && self.rev.as_ref().is_none_or(|r| r == rev)
+    }
+
     /// Whether the reading project's own part `part` is the one asked
     /// about.
     fn is_own(&self, part: &Id) -> bool {
@@ -84,6 +93,44 @@ fn official(reader: &Reader, config: &Config) -> Vec<(Id, String)> {
         .unwrap_or_default();
     let place = |l: &str| label::index(config.revisions, l);
     out.sort_by_key(|(p, l)| (p.clone(), place(l), l.clone()));
+    out
+}
+
+/// Each insert of `p` the query asks about (design 521), by feature, in
+/// feature order: `(feature, rev)`. An insert is geometry, never a
+/// component, so BOMs don't count it: it is used where it is inserted.
+fn inserts_of(p: &Part, q: &Query) -> Vec<(Id, Rev)> {
+    let mut out: Vec<(Id, Rev)> = p
+        .features
+        .iter()
+        .filter_map(|(fid, f)| match f {
+            Ok(Feature::Insert(i)) if q.is_insert_of(&i.part, &i.rev) => {
+                Some((fid.clone(), i.rev.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Each insert of `p` of another project's part at a label: `(feature,
+/// project, part, label)`, in feature order.
+fn foreign_inserts(p: &Part) -> Vec<(Id, ProjectId, Id, String)> {
+    let mut out: Vec<_> = p
+        .features
+        .iter()
+        .filter_map(|(fid, f)| match f {
+            Ok(Feature::Insert(i)) => match &i.rev {
+                Rev::Foreign { project, label } => {
+                    Some((fid.clone(), project.clone(), i.part.clone(), label.clone()))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    out.sort();
     out
 }
 
@@ -132,7 +179,10 @@ fn foreign_list(reader: &Reader, root: &Row) -> Vec<Value> {
 /// the reader's files as they are with what it places from other
 /// projects (`{assembly, places}`, `places` [`foreign_list`]'s); `released`,
 /// each official release of an assembly that places any, with its label
-/// and commit; `problems`, what couldn't be read. The service indexes it.
+/// and commit; `inserts`, each part inserting another project's part
+/// (`{kind: insert, part, feature, project, dependency, of, label}`, and
+/// `release`, `commit` for one in a release; left out when none);
+/// `problems`, what couldn't be read. The service indexes it.
 pub fn placed_from_others(reader: &mut Reader, config: &Config) -> Value {
     let mut working = Vec::new();
     let mut problems: Vec<Error> = Vec::new();
@@ -155,11 +205,41 @@ pub fn placed_from_others(reader: &mut Reader, config: &Config) -> Value {
             Err(e) => problems.push(e),
         }
     }
+    // Each part that inserts another project's part (design 521).
+    let insert_row =
+        |reader: &Reader, pid: &Id, (fid, project, part, label): (Id, ProjectId, Id, String)| {
+            json!({"kind": "insert", "part": pid, "feature": fid, "project": project,
+               "dependency": reader.name(&project).unwrap_or(project.as_str()),
+               "of": part, "label": label})
+        };
+    let parts: Vec<(Id, Part)> = reader
+        .project
+        .parts
+        .iter()
+        .map(|(id, p)| (id.clone(), p.clone()))
+        .collect();
+    // Beside the assemblies' rows, not among them: the service indexes
+    // those by assembly.
+    let mut inserts = Vec::new();
+    for (pid, p) in &parts {
+        for i in foreign_inserts(p) {
+            inserts.push(insert_row(reader, pid, i));
+        }
+    }
     let mut released = Vec::new();
     for (a, l) in official(reader, config) {
         let rev = Rev::Label(l.clone());
         let root = match reader.node(&a, &rev) {
-            Ok(n) if n.kind() != Some(PartKind::Assembly) => continue,
+            Ok(n) if n.kind() != Some(PartKind::Assembly) => {
+                let (part, commit) = (n.part.clone(), n.commit.clone());
+                for i in foreign_inserts(&part) {
+                    let mut row = insert_row(reader, &a, i);
+                    row["release"] = json!(l);
+                    row["commit"] = json!(commit);
+                    inserts.push(row);
+                }
+                continue;
+            }
             Ok(_) => tree(reader, &a, &rev, None),
             Err(e) => Err(e),
         };
@@ -185,6 +265,11 @@ pub fn placed_from_others(reader: &mut Reader, config: &Config) -> Value {
         "released": released,
         "problems": problems,
     });
+    // Each part inserting another project's part (design 521), working and
+    // in its official releases (`release`, `commit`).
+    if !inserts.is_empty() {
+        v["inserts"] = json!(inserts);
+    }
     if reader.releases.and_then(|r| r.branch.as_ref()).is_none() {
         v["released_note"] =
             json!("no release branch was read, so no released assembly was searched");
@@ -225,6 +310,14 @@ pub fn where_used(reader: &mut Reader, q: &Query, config: &Config) -> Value {
             Err(e) => problems.push(e),
         }
     }
+    // Each working part that inserts it (design 521), read from the files
+    // alone as placements are, by part then feature.
+    for (pid, p) in &reader.project.parts {
+        for (fid, rev) in inserts_of(p, q) {
+            working.push(json!({"kind": "insert", "part": pid, "feature": fid,
+                                "rev": rev.to_json()}));
+        }
+    }
     let official = official(reader, config);
     let place = |l: &str| label::index(config.revisions, l);
     let mut released = Vec::new();
@@ -240,6 +333,24 @@ pub fn where_used(reader: &mut Reader, q: &Query, config: &Config) -> Value {
                 continue;
             }
         };
+        let later = official
+            .iter()
+            .any(|(p, other)| p == a && place(other) > place(l));
+        let state = if node.obsolete {
+            "obsolete"
+        } else if later {
+            "superseded"
+        } else {
+            "released"
+        };
+        // A release of any part that inserts it, at the commit that made
+        // it official.
+        for (fid, r) in inserts_of(&node.part, q) {
+            released.push(
+                json!({"kind": "insert", "part": a, "label": l, "state": state,
+                                 "commit": node.commit, "feature": fid, "rev": r.to_json()}),
+            );
+        }
         if node.kind() != Some(PartKind::Assembly) {
             continue;
         }
@@ -254,16 +365,6 @@ pub fn where_used(reader: &mut Reader, q: &Query, config: &Config) -> Value {
         if u.is_empty() {
             continue;
         }
-        let later = official
-            .iter()
-            .any(|(p, other)| p == a && place(other) > place(l));
-        let state = if node.obsolete {
-            "obsolete"
-        } else if later {
-            "superseded"
-        } else {
-            "released"
-        };
         released.push(json!({"assembly": a, "label": l, "state": state,
                              "commit": node.commit, "count": total(&u), "uses": u}));
     }
@@ -411,5 +512,67 @@ mod tests {
             placed_from_others(&mut r, &Config::default())["working"],
             json!([])
         );
+    }
+
+    #[test]
+    fn a_part_inserted_is_used_where_it_is_inserted() {
+        let mut f = frame();
+        let put = |f: &mut std::collections::BTreeMap<String, Vec<u8>>, p: &str, v: Value| {
+            f.insert(
+                p.to_owned(),
+                ryucad_doc::doc::canonical::to_string(&v).into_bytes(),
+            );
+        };
+        for (part, rev) in [
+            ("enclosure", json!("working")),
+            ("case", json!({"label": "A"})),
+        ] {
+            put(
+                &mut f,
+                &format!("parts/{part}/part.json"),
+                json!({"features": ["board"], "format": 1, "kind": "ryucad.part"}),
+            );
+            put(
+                &mut f,
+                &format!("parts/{part}/features/board.json"),
+                json!({"format": 21, "kind": "ryucad.feature", "type": "insert",
+                       "part": "bolt", "rev": rev}),
+            );
+        }
+        let project = Project::load_from(Path::new(""), &f).unwrap();
+        let mut cache = Cache::new();
+        let mut r = Reader::new(&f, &project, None, None, &mut cache);
+        let q = Query {
+            part: id("bolt"),
+            project: None,
+            rev: None,
+            direct: false,
+        };
+        let v = where_used(&mut r, &q, &Config::default());
+        let w = v["working"].as_array().unwrap();
+        let inserts: Vec<&Value> = w.iter().filter(|r| r["kind"] == "insert").collect();
+        assert_eq!(inserts.len(), 2, "{v}");
+        assert_eq!(
+            *inserts[0],
+            json!({"kind": "insert", "part": "case", "feature": "board", "rev": {"label": "A"}})
+        );
+        assert_eq!(inserts[1]["part"], "enclosure");
+        assert!(w.iter().any(|r| r["assembly"] == "frame"));
+        // At working only: the enclosure's.
+        let q = Query {
+            part: id("bolt"),
+            project: None,
+            rev: Some(Rev::Working),
+            direct: false,
+        };
+        let v = where_used(&mut r, &q, &Config::default());
+        let parts: Vec<&Value> = v["working"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["kind"] == "insert")
+            .map(|r| &r["part"])
+            .collect();
+        assert_eq!(parts, [&json!("enclosure")]);
     }
 }

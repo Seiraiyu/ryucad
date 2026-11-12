@@ -83,6 +83,9 @@ enum Command {
     /// Only `deps add` and `deps fetch` reach the network.
     #[command(subcommand)]
     Deps(DepsCmd),
+    /// Inserts of other parts' solids: move one's pin.
+    #[command(subcommand)]
+    Insert(InsertCmd),
     /// The project's material library: densities (and colours) that mass properties read,
     /// each part's named by its PDM `material` property.
     #[command(subcommand)]
@@ -238,7 +241,7 @@ enum Command {
     /// Rebuild the project from its files alone, with nothing reused, and
     /// verify it: doctor's issues, every feature builds, sketches are
     /// current, bodies don't intersect themselves and mesh cleanly. Exits
-    /// 1 when anything fails.
+    /// 1 when anything fails. Interference only with --interference.
     Check {
         /// Only this part (and the project's own issues).
         part: Option<String>,
@@ -250,6 +253,11 @@ enum Command {
         /// (slower).
         #[arg(long)]
         results: bool,
+        /// Also find which instances of each assembly interfere (slower:
+        /// on reference imports, minutes). Without it interference isn't
+        /// run, and each assembly says so.
+        #[arg(long)]
+        interference: bool,
     },
     /// An assembly's bill of materials, from its files alone: indented (each
     /// assembly's children with how many it places), or flat (every part
@@ -1294,8 +1302,11 @@ enum FeatureCmd {
     /// countersink, --bottom) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
-    /// --angle) or mirror (--plane), skipping instances (--skip); or, in an
-    /// assembly, an instance (--of, --rev, --origin, --z, --x, --fixed), a mate
+    /// --angle) or mirror (--plane), skipping instances (--skip); an insert of
+    /// another part's solids (--of <part>, --rev working|label:L, --origin,
+    /// --z, --x); a delete_body (--solid, repeated) taking solids out of the
+    /// part's result; or, in an assembly, an instance (--of, --rev, --origin, --z,
+    /// --x, --fixed), a mate
     /// (--form fastened, revolute, slider, cylindrical, planar or ball, --a, --b,
     /// --a-offset, --b-offset, --angle, --distance, and stops --angle-min, --angle-max,
     /// --distance-min, --distance-max) or an instance pattern (--instance,
@@ -1529,6 +1540,28 @@ enum PdmCmd {
         /// Write even if parts' properties stop fitting the settings.
         #[arg(long)]
         force: bool,
+        /// Fail with `conflict` unless the project is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum InsertCmd {
+    /// Move an insert's pin to its source's newest official label (or --to working,
+    /// --to label:L), saying first what it changes: the inserted solids added, removed
+    /// and changed, and the features that would fail.
+    Update {
+        /// The part holding the insert.
+        part: String,
+        /// The insert's ID.
+        insert: String,
+        /// working, label:L (or L), or newest (the default).
+        #[arg(long, value_name = "working|label:L|newest")]
+        to: Option<String>,
+        /// Say what would change, writing nothing.
+        #[arg(long)]
+        dry_run: bool,
         /// Fail with `conflict` unless the project is still at this revision.
         #[arg(long = "expect", value_name = "REVISION")]
         expect: Option<String>,
@@ -2963,10 +2996,13 @@ struct FieldArgs {
     /// Leave no instance out again, when editing.
     #[arg(long, conflicts_with = "skip")]
     no_skip: bool,
-    /// The part an instance places.
+    /// The part an instance places or an insert inserts (another project's as
+    /// <dependency>:<part>).
     #[arg(long, value_name = "PART")]
     of: Option<String>,
-    /// The revision an instance places: working (the default) or a release label.
+    /// The revision an instance places or an insert pins: working, or a release
+    /// label (L or label:L). An instance defaults to working; an insert to its
+    /// source's newest official label, else working.
     #[arg(long, value_name = "REV")]
     rev: Option<String>,
     /// Hold an instance where it is when mates are solved (--fixed false to free it).
@@ -3261,9 +3297,11 @@ struct FieldArgs {
     #[arg(skip)]
     with_groups: Vec<(String, Vec<String>)>,
     /// The solid a mirror copies, by the feature that founded it (the part's one solid
-    /// when left out). Left without --operation, its copy joins this solid.
-    #[arg(long, value_name = "SOLID")]
-    solid: Option<String>,
+    /// when left out). Left without --operation, its copy joins this solid. A
+    /// delete_body's solids, repeated: a founder, <insert>/<solid>, or an insert for
+    /// every solid it inserted.
+    #[arg(long = "solid", value_name = "SOLID")]
+    solid: Vec<String>,
     /// Which sides of its plane a split keeps: both (the side in front founds a solid
     /// named by the split, the default) or behind (a trim).
     #[arg(long, value_name = "SIDES")]
@@ -3696,7 +3734,10 @@ impl FieldArgs {
                 (!self.skip.is_empty()).then(|| json!(self.skip))
             },
             of: self.of.clone(),
-            rev: self.rev.clone(),
+            rev: self
+                .rev
+                .as_deref()
+                .map(|r| r.strip_prefix("label:").unwrap_or(r).to_owned()),
             fixed: self.fixed,
             a: self.a.clone(),
             b: self.b.clone(),
@@ -3805,7 +3846,10 @@ impl FieldArgs {
                 list.extend(groups.as_array().into_iter().flatten().cloned());
                 (!list.is_empty()).then_some(Value::Array(list))
             },
-            solid: self.solid.clone(),
+            solid: (self.solid.len() == 1).then(|| self.solid[0].clone()),
+            // Two or more are a delete_body's; one goes as `solid`, which a
+            // delete takes as its one.
+            solids: (self.solid.len() > 1).then(|| self.solid.clone()),
             keep: self.keep.clone(),
             allowance: self
                 .k_factor
@@ -4442,6 +4486,19 @@ fn request(cmd: &Command) -> Option<Request> {
             part: part.clone(),
             to: to.clone(),
             offline: *offline,
+            dry_run: *dry_run,
+            expected_revision: expect.clone(),
+        },
+        Command::Insert(InsertCmd::Update {
+            part,
+            insert,
+            to,
+            dry_run,
+            expect,
+        }) => Request::InsertUpdate {
+            part: part.clone(),
+            feature: insert.clone(),
+            to: to.clone(),
             dry_run: *dry_run,
             expected_revision: expect.clone(),
         },
@@ -5159,10 +5216,12 @@ fn request(cmd: &Command) -> Option<Request> {
             part,
             against,
             results,
+            interference,
         } => Request::Check {
             part: part.clone(),
             against: against.clone(),
             results: *results,
+            interference: *interference,
         },
         Command::Diff {
             from,
@@ -6724,6 +6783,60 @@ mod tests {
             .expect("a thread")
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
+    #[test]
+    fn an_insert_is_added_from_the_command_line() {
+        on_cli_stack(|| {
+            let c = Cli::try_parse_from([
+                "ryucad",
+                "feature",
+                "add",
+                "enclosure",
+                "insert",
+                "--id",
+                "board",
+                "--of",
+                "pcb",
+                "--rev",
+                "label:B",
+                "--origin",
+                "0,0,board_z",
+            ])
+            .unwrap();
+            let r = request(&c.command).unwrap();
+            let v = serde_json::to_value(&r).unwrap();
+            assert_eq!(v["params"]["of"], "pcb", "{v}");
+            assert_eq!(v["params"]["rev"], "B");
+            assert_eq!(
+                v["params"]["placement"]["origin"],
+                json!(["0", "0", "board_z"])
+            );
+            assert_eq!(v["params"]["type"], "insert");
+        });
+    }
+
+    #[test]
+    fn a_delete_takes_solid_repeated() {
+        on_cli_stack(|| {
+            let c = Cli::try_parse_from([
+                "ryucad",
+                "feature",
+                "add",
+                "enclosure",
+                "delete_body",
+                "--id",
+                "drop-board",
+                "--solid",
+                "board",
+                "--solid",
+                "lid",
+            ])
+            .unwrap();
+            let v = serde_json::to_value(request(&c.command).unwrap()).unwrap();
+            assert_eq!(v["params"]["solids"], json!(["board", "lid"]), "{v}");
+            assert!(v["params"].get("solid").is_none());
+        });
     }
 
     #[test]

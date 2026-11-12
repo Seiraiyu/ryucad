@@ -677,21 +677,19 @@
     "radial-engine": {
       "check": {
         "codes": {
-          "drawing_view_failed": 2,
-          "drawing_view_uncertain": 4,
+          "drawing_view_uncertain": 6,
           "dwg_balloon_missing": 13
         },
-        "errors": 2,
-        "warnings": 17
+        "errors": 0,
+        "warnings": 19
       },
       "drawings": {
         "crankcase/main": {
           "annotations": {},
           "findings": {
-            "drawing_view_failed": 1,
-            "drawing_view_uncertain": 3
+            "drawing_view_uncertain": 4
           },
-          "pdf": "86f39645cdf2b08b1731b8283e58c041f1fd2bdbd1109b1b5d6987f1cbf5bfa5",
+          "pdf": "e319413ab81bb309949fe08d560544ee5e51518c30a5bf2ce667298edc012df7",
           "scores": {
             "s1": 100
           },
@@ -727,11 +725,11 @@
               "type": "projected"
             },
             "v4": {
-              "failed": "drawing_view_failed",
+              "failed": null,
               "pieces": {
                 "hidden": 0,
-                "uncertain": 0,
-                "visible": 0
+                "uncertain": 1,
+                "visible": 510
               },
               "scale": "1:2",
               "type": "projected"
@@ -743,20 +741,20 @@
             "t1": "BOM of engine, 13 rows"
           },
           "findings": {
-            "drawing_view_failed": 1,
+            "drawing_view_uncertain": 1,
             "dwg_balloon_missing": 13
           },
-          "pdf": "34aa170b7139026e2eb715303764e321da77ca91f625aac72bbee77e49095164",
+          "pdf": "428442c6791db60accf3082a5d22ee39997987763ea131113a5a9551f01feaac",
           "scores": {
             "s1": 74
           },
           "views": {
             "v1": {
-              "failed": "drawing_view_failed",
+              "failed": null,
               "pieces": {
                 "hidden": 0,
-                "uncertain": 0,
-                "visible": 0
+                "uncertain": 681,
+                "visible": 67686
               },
               "scale": "1:2",
               "type": "base"

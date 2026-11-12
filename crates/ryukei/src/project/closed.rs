@@ -1,12 +1,19 @@
-//! Silhouettes in closed form: planes, cylinders, cones, spheres, and
-//! tori seen along their axis (design 326).
+//! Silhouettes in closed form: planes, cylinders, cones, spheres, tori
+//! seen along or square to their axis, and revolutions (design 326,
+//! design 484).
 
-use crate::geom::{Circle, Curve, Curve2, Frame, Line, Line2, Point2, Surface, Vector2, Vector3};
-use crate::intersect::Failure;
+use crate::geom::bernstein::{Bernstein, Root};
+use crate::geom::chain3::Chain3;
+use crate::geom::{
+    Circle, Curve, Curve2, Frame, Line, Line2, Point2, Revolution, Surface, Vector2, Vector3,
+};
+use crate::intersect::{Failure, Traced, fit_contour};
+use crate::interval::Interval;
 use crate::math;
 use crate::tol::{ANGULAR_RESOLUTION, LINEAR_RESOLUTION};
 use crate::work::Meter;
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
+use std::sync::Arc;
 
 /// A silhouette branch before trimming: a curve over a range covering the
 /// face, its pcurve with the affine map from the curve's parameter, and
@@ -58,6 +65,267 @@ fn along_u(v: f64) -> Result<Curve2, Failure> {
     ))
 }
 
+/// `[start, start + 2π]` cut at `cuts` (each moved into it): the arcs
+/// between, in order.
+fn arcs(start: f64, cuts: [f64; 2]) -> Vec<[f64; 2]> {
+    let mut at = vec![start];
+    at.extend(cuts.iter().map(|&c| into(c, start, TAU)));
+    at.push(start + TAU);
+    at.sort_by(f64::total_cmp);
+    at.dedup();
+    at.windows(2)
+        .filter(|w| w[1] > w[0])
+        .map(|w| [w[0], w[1]])
+        .collect()
+}
+
+/// Roots of a revolution's fold polynomial are bracketed this finely
+/// (local parameter).
+const FOLD_WIDTH: f64 = 1e-12;
+
+/// `p · d` with every product and sum rounded outward.
+fn idot(p: Vector3, d: Vector3) -> Interval {
+    let i = Interval::point;
+    i(p.x) * i(d.x) + i(p.y) * i(d.y) + i(p.z) * i(d.z)
+}
+
+/// A revolution's folds in increasing `v`, and whether its contour has
+/// points between each two (one more than the folds).
+type Folds = (Vec<f64>, Vec<bool>);
+
+/// Where a revolution's contour turns back over `[v0, v1]` of its
+/// profile, seen along unit `t`, and whether it has points between each
+/// two: with `ρ(v)`, `h(v)` the profile's distance from the axis and
+/// height in `frame`, `n · t = h' s cos(u − ψ) − ρ' t_z` (`s² = t_x² +
+/// t_y²`), which has zeros at `v` exactly where `G = (h' s)² − (ρ' t_z)²`
+/// is positive, and they meet where `G` changes sign. `G w⁴` is a
+/// polynomial on each Bézier piece (`w` the piece's weight), its
+/// coefficients and `s²`, `t_z²` rounded outward, its roots isolated by
+/// [`Bernstein::roots`]. The folds are the roots inside the range, and
+/// the signs those of `G` at each stretch's middle. `None` where a root
+/// isn't certified simple (a view along or square to the axis gives
+/// double roots) or a stretch's sign isn't certified: the face is traced.
+fn revolved_folds(
+    profile: &Curve,
+    frame: &Frame,
+    t: Vector3,
+    [v0, v1]: [f64; 2],
+    m: &Meter,
+) -> Result<Option<Folds>, Failure> {
+    let i = Interval::point;
+    let (x, y, z) = (frame.x().get(), frame.y().get(), frame.z().get());
+    let (tx, ty, tz) = (idot(t, x), idot(t, y), idot(t, z));
+    let (s2, tz2) = (tx * tx + ty * ty, tz * tz);
+    let o = frame.origin().to_vector();
+    let (ox, oz) = (idot(o, x), idot(o, z));
+    let chain = Chain3::new(profile, v0, v1);
+    let mut gs = Vec::with_capacity(chain.pieces.len());
+    let mut folds = Vec::new();
+    for (k, piece) in chain.pieces.iter().enumerate() {
+        // A piece of the profile's fold polynomial.
+        m.charge(1)?;
+        let w = Bernstein::new(piece.pts.iter().map(|h| i(h.w)).collect());
+        let num = |d: Vector3, od: Interval| {
+            Bernstein::new(
+                piece
+                    .pts
+                    .iter()
+                    .map(|h| (idot(h.p, d) - od) * i(h.w))
+                    .collect(),
+            )
+        };
+        let rate = |n: Bernstein| n.deriv().mul(&w).sub(&n.mul(&w.deriv()));
+        let (rd, hd) = (rate(num(x, ox)), rate(num(z, oz)));
+        let g = hd.mul(&hd).scale(s2).sub(&rd.mul(&rd).scale(tz2));
+        for root in g.roots(FOLD_WIDTH) {
+            let Root::Simple { lo, hi, .. } = root else {
+                return Ok(None);
+            };
+            folds.push(chain.param(k, (lo + hi) / 2.0));
+        }
+        gs.push(g);
+    }
+    folds.sort_by(f64::total_cmp);
+    // A root at a piece's end is found by both pieces.
+    let near = 4.0 * FOLD_WIDTH * (v1 - v0);
+    folds.dedup_by(|a, b| (*a - *b).abs() <= near);
+    folds.retain(|&v| v - v0 > near && v1 - v > near);
+    let mut ends = vec![v0];
+    ends.extend(&folds);
+    ends.push(v1);
+    let mut signs = Vec::with_capacity(ends.len() - 1);
+    for w in ends.windows(2) {
+        let mid = (w[0] + w[1]) / 2.0;
+        let k = chain
+            .pieces
+            .iter()
+            .position(|p| mid <= p.range[1])
+            .unwrap_or(chain.pieces.len() - 1);
+        let g = gs[k].eval(chain.local(k, mid));
+        if g.lo() > 0.0 {
+            signs.push(true);
+        } else if g.hi() < 0.0 {
+            signs.push(false);
+        } else {
+            return Ok(None);
+        }
+    }
+    Ok(Some((folds, signs)))
+}
+
+/// Samples taken along each stretch of a revolution's contour, at
+/// Chebyshev's spacing: densest at the folds, where `u` turns fastest.
+const REVOLVED_SAMPLES: usize = 48;
+
+/// A revolution's silhouette over the parameter box `rect` from its
+/// formula (design 484): `u = ψ ± acos(k)`, `k = ρ' t_z / (h' s)`, over
+/// the stretches of `v` where [`revolved_folds`] finds `G` positive. A
+/// stretch between two folds is one closed branch (out along `+`, back
+/// along `−`); one between a fold and an end of the range one open
+/// branch through the fold; one between both ends two branches; a
+/// periodic profile whose face covers its period joins the stretches
+/// either side of its seam, and with no folds at all gives two closed
+/// branches. Each branch is sampled from the formula and fitted and
+/// certified as a traced one ([`fit_contour`]), so no cell, crossing or
+/// cluster is needed. `None` (traced instead) where the range leaves the
+/// profile's domain, the profile has a crease inside it, the folds or
+/// their signs aren't certified, or a fit can't certify.
+fn revolved(
+    r: &Revolution,
+    surface: &Surface,
+    t: Vector3,
+    rect: [[f64; 2]; 2],
+    m: &Meter,
+) -> Result<Option<Vec<Raw>>, Failure> {
+    let profile = r.curve();
+    let [d0, d1] = profile.domain();
+    let [v0, v1] = rect[1];
+    if !(v0 >= d0 && v1 <= d1 && v0 < v1) {
+        return Ok(None);
+    }
+    if let Curve::Nurbs(n) = profile
+        && crate::geom::creases(n.knots())
+            .iter()
+            .any(|&c| c > v0 && c < v1)
+    {
+        return Ok(None);
+    }
+    let f = r.frame();
+    let Some((folds, signs)) = revolved_folds(profile, f, t, [v0, v1], m)? else {
+        return Ok(None);
+    };
+    let (x, y, z) = (f.x().get(), f.y().get(), f.z().get());
+    let (tx, ty, tz) = (t.dot(x), t.dot(y), t.dot(z));
+    let s = math::sqrt(tx * tx + ty * ty);
+    let psi = math::atan2(ty, tx);
+    // `acos(k)` at `v`; `None` where `h' s` is zero.
+    let half = |v: f64| -> Option<f64> {
+        let d1 = profile.eval(v).d1;
+        let k = d1.dot(x) * tz / (d1.dot(z) * s);
+        k.is_finite().then(|| math::acos(k.clamp(-1.0, 1.0)))
+    };
+    let nodes = |a: f64, b: f64| -> Vec<f64> {
+        (0..=REVOLVED_SAMPLES)
+            .map(|j| {
+                let c = math::cos(PI * j as f64 / REVOLVED_SAMPLES as f64);
+                a + (b - a) * (1.0 - c) / 2.0
+            })
+            .collect()
+    };
+    let mut ends = vec![v0];
+    ends.extend(&folds);
+    ends.push(v1);
+    let last = ends.len() - 2;
+    // Each stretch of positive `G`: its spans of `v`, and whether it
+    // starts and ends at a fold.
+    let mut stretches: Vec<(Vec<[f64; 2]>, bool, bool)> = Vec::new();
+    for (j, w) in ends.windows(2).enumerate() {
+        if signs[j] {
+            stretches.push((vec![[w[0], w[1]]], j > 0, j < last));
+        }
+    }
+    let whole = profile.period().is_some() && v0 == d0 && v1 == d1;
+    if whole && !folds.is_empty() && signs[0] && signs[last] {
+        let after = stretches.pop().expect("the last stretch is positive");
+        let before = stretches.remove(0);
+        let spans = after.0.into_iter().chain(before.0).collect();
+        stretches.insert(0, (spans, after.1, before.2));
+    }
+    let mut traced = Vec::new();
+    for (spans, start_fold, end_fold) in stretches {
+        let mut vs: Vec<f64> = Vec::new();
+        for [a, b] in spans {
+            for v in nodes(a, b) {
+                if vs.last() != Some(&v) {
+                    vs.push(v);
+                }
+            }
+        }
+        let side = |sign: f64| -> Option<Vec<[f64; 2]>> {
+            vs.iter()
+                .map(|&v| half(v).map(|a| [psi + sign * a, v]))
+                .collect()
+        };
+        let (Some(plus), Some(minus)) = (side(1.0), side(-1.0)) else {
+            return Ok(None);
+        };
+        let n = plus.len();
+        let back = |p: &[[f64; 2]]| p.iter().rev().copied().collect::<Vec<_>>();
+        let runs: Vec<(Vec<[f64; 2]>, bool)> = match (start_fold, end_fold) {
+            (true, true) => {
+                let mut p = plus.clone();
+                p.extend(back(&minus[1..n - 1]));
+                vec![(p, true)]
+            }
+            (true, false) => {
+                let mut p = back(&minus);
+                p.extend(&plus[1..]);
+                vec![(p, false)]
+            }
+            (false, true) => {
+                let mut p = plus.clone();
+                p.extend(back(&minus[..n - 1]));
+                vec![(p, false)]
+            }
+            (false, false) if whole && folds.is_empty() => {
+                vec![
+                    (plus[..n - 1].to_vec(), true),
+                    (minus[..n - 1].to_vec(), true),
+                ]
+            }
+            (false, false) => vec![(plus, false), (minus, false)],
+        };
+        for (params, closed) in runs {
+            let points = params.iter().map(|&[u, v]| surface.point(u, v)).collect();
+            traced.push(Traced {
+                points,
+                closed,
+                params,
+            });
+        }
+    }
+    let mut out = Vec::new();
+    for b in &traced {
+        let span: f64 = b.points.windows(2).map(|w| w[0].distance(w[1])).sum();
+        if span <= 10.0 * LINEAR_RESOLUTION {
+            continue;
+        }
+        let fit = match fit_contour(surface, t, b, m) {
+            Ok(fit) => fit,
+            Err(Failure::Uncertain) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let range = fit.curve.domain();
+        out.push(Raw {
+            curve: Curve::Nurbs(Arc::new(fit.curve)),
+            range,
+            pcurve: (Curve2::Nurbs2(Arc::new(fit.pcurve)), [0.0, 1.0]),
+            tolerance: fit.tolerance,
+        });
+    }
+    Ok(Some(out))
+}
+
 /// The silhouette of `surface` seen along unit `t` over the parameter box
 /// `rect`, where it has a closed form; `None` where it must be traced.
 pub(super) fn closed_form(
@@ -66,6 +334,9 @@ pub(super) fn closed_form(
     rect: [[f64; 2]; 2],
     m: &Meter,
 ) -> Result<Option<Closed>, Failure> {
+    if let Surface::Revolution(r) = surface {
+        return Ok(revolved(r, surface, t, rect, m)?.map(Closed::Branches));
+    }
     let Some(f) = surface.frame() else {
         return Ok(None);
     };
@@ -184,6 +455,47 @@ pub(super) fn closed_form(
             }
             Closed::Branches(out)
         }
+        Surface::Torus(tr) if tz.abs() <= ANGULAR_RESOLUTION => {
+            // Square to the axis: `n · t = cos v (radial(u) · t) + sin v
+            // t_z`, zero on the meridians where `radial(u) ⊥ t` and the
+            // parallels where `cos v = 0`. Within the resolution of
+            // square the true contour pinches into a hyperbola
+            // `δu δv ≈ t_z` at the four crossings, about `(R + r) √|t_z|`
+            // off these circles.
+            let (big, small) = (tr.major(), tr.minor());
+            let tolerance = LINEAR_RESOLUTION + 2.0 * (big + small) * math::sqrt(tz.abs());
+            let us = [into(u0, rect[0][0], TAU), into(u0 + PI, rect[0][0], TAU)];
+            let vs = [FRAC_PI_2, PI + FRAC_PI_2];
+            let mut out = Vec::new();
+            for u in us {
+                let radial = f.radial(u);
+                let centre = f.origin() + radial * big;
+                let frame = Frame::new(centre, radial.cross(z), radial).map_err(uncertain)?;
+                let circle = Curve::Circle(Circle::new(frame, small).map_err(uncertain)?);
+                for range in arcs(rect[1][0], vs) {
+                    out.push(Raw {
+                        curve: circle.clone(),
+                        range,
+                        pcurve: (along_v(u)?, [0.0, 1.0]),
+                        tolerance,
+                    });
+                }
+            }
+            for v in vs {
+                let (sv, _) = math::sin_cos(v);
+                let frame = Frame::new(f.origin() + z * (small * sv), z, x).map_err(uncertain)?;
+                let circle = Curve::Circle(Circle::new(frame, big).map_err(uncertain)?);
+                for range in arcs(rect[0][0], us) {
+                    out.push(Raw {
+                        curve: circle.clone(),
+                        range,
+                        pcurve: (along_u(into(v, rect[1][0], TAU))?, [0.0, 1.0]),
+                        tolerance,
+                    });
+                }
+            }
+            Closed::Branches(out)
+        }
         _ => return Ok(None),
     }))
 }
@@ -277,5 +589,139 @@ mod tests {
         // unmetered: a unit test
         let askew = closed_form(&s, Vector3::new(0.0, 0.6, 0.8), rect(), &Meter::free()).unwrap();
         assert!(askew.is_none());
+    }
+
+    /// Seen square to its axis, a torus's silhouette is its two meridian
+    /// circles in the plane of the axis and the view and its two
+    /// parallels at `v = ±π/2`, each cut where they cross (design 484).
+    #[test]
+    fn a_torus_square_to_the_view_has_two_meridians_and_two_parallels() {
+        let (big, small) = (1.0, 0.25);
+        let s = Surface::Torus(Torus::new(Frame::WORLD, big, small).unwrap());
+        let rect = [[0.0, TAU], [0.0, TAU]];
+        for t in [
+            Vector3::new(0.0, -1.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.6, 0.8, 0.0),
+        ] {
+            let b = branches(&s, t, rect);
+            sound(&s, t, &b);
+            let total: f64 = b.iter().map(|r| r.range[1] - r.range[0]).sum::<f64>();
+            // Meridians turn through their angle at the minor radius,
+            // parallels at the major: angles sum to 2π a circle.
+            let length: f64 = b
+                .iter()
+                .map(|r| {
+                    let radius = r.curve.point(r.range[0]).distance(match &r.curve {
+                        Curve::Circle(c) => c.frame().origin(),
+                        _ => panic!("{r:?}"),
+                    });
+                    radius * (r.range[1] - r.range[0])
+                })
+                .sum();
+            assert!((total - 4.0 * TAU).abs() < 1e-12, "{total}");
+            assert!(
+                (length - 2.0 * TAU * (big + small)).abs() < 1e-12,
+                "{length}"
+            );
+            // No branch passes a crossing: inside a branch, no point lies
+            // on another circle than its own.
+            let on = |c: &Circle, q: crate::geom::Point3| {
+                let d = q - c.frame().origin();
+                (d.length() - c.radius()).abs() < 1e-12 && d.dot(c.frame().z().get()).abs() < 1e-12
+            };
+            for r in &b {
+                for x in [0.25, 0.5, 0.75] {
+                    let q = r.curve.point(r.range[0] + (r.range[1] - r.range[0]) * x);
+                    let circles = b
+                        .iter()
+                        .filter(|o| matches!(&o.curve, Curve::Circle(c) if on(c, q)))
+                        .map(|o| format!("{:?}", o.curve))
+                        .collect::<std::collections::BTreeSet<_>>();
+                    assert_eq!(circles.len(), 1, "{r:?} at {x}");
+                }
+            }
+        }
+        // Tilted off square by more than the resolution: traced.
+        // unmetered: a unit test
+        let tilted = closed_form(&s, Vector3::new(0.0, -1.0, 1e-9), rect, &Meter::free()).unwrap();
+        assert!(tilted.is_none());
+    }
+
+    /// A wavy cubic profile off the axis, in the xz half-plane.
+    fn wavy() -> Curve {
+        use crate::geom::{KnotVector, NurbsCurve, Point3};
+        let kv = KnotVector::clamped(3, &[0.0, 1.0], &[4, 4]).unwrap();
+        let pts = vec![
+            Point3::new(0.02, 0.0, 0.0),
+            Point3::new(0.03, 0.0, 0.01),
+            Point3::new(0.012, 0.0, 0.025),
+            Point3::new(0.025, 0.0, 0.04),
+        ];
+        Curve::Nurbs(std::sync::Arc::new(NurbsCurve::new(kv, pts, None).unwrap()))
+    }
+
+    /// `G` changes sign at its folds and has the sign sampled between
+    /// them; a view along the axis gives no certified folds.
+    #[test]
+    fn a_revolutions_folds_are_where_its_contour_turns_back() {
+        let p = wavy();
+        let t = Vector3::new(0.3, -1.0, 0.4);
+        let t = t / t.length();
+        // unmetered: a unit test
+        let m = Meter::free();
+        let (folds, signs) = revolved_folds(&p, &Frame::WORLD, t, [0.0, 1.0], &m)
+            .unwrap()
+            .unwrap();
+        assert_eq!(signs.len(), folds.len() + 1);
+        let g = |v: f64| {
+            let d1 = p.eval(v).d1;
+            let (rho, h) = (d1.x, d1.z);
+            (h * h) * (t.x * t.x + t.y * t.y) - (rho * t.z) * (rho * t.z)
+        };
+        let mut ends = vec![0.0];
+        ends.extend(&folds);
+        ends.push(1.0);
+        for (w, &positive) in ends.windows(2).zip(&signs) {
+            for k in 1..8 {
+                let v = w[0] + (w[1] - w[0]) * k as f64 / 8.0;
+                assert_eq!(g(v) > 0.0, positive, "at {v}");
+            }
+        }
+        // Along the axis `G = -(ρ' t_z)²` has double roots: traced.
+        let along = revolved_folds(
+            &p,
+            &Frame::WORLD,
+            Vector3::new(0.0, 0.0, 1.0),
+            [0.0, 1.0],
+            &m,
+        )
+        .unwrap();
+        assert!(along.is_none());
+    }
+
+    /// The wavy revolution's silhouette in closed form, seen askew: on
+    /// the surface and square to the view along every branch.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "the fit certifies in release only")]
+    fn a_revolutions_silhouette_comes_from_its_formula() {
+        let s = Surface::Revolution(std::sync::Arc::new(
+            Revolution::new(Frame::WORLD, wavy()).unwrap(),
+        ));
+        let t = Vector3::new(0.3, -1.0, 0.4);
+        let t = t / t.length();
+        let b = branches(&s, t, [[0.0, TAU], [0.0, 1.0]]);
+        assert!(!b.is_empty());
+        for raw in &b {
+            for i in 0..=32 {
+                let x = raw.range[0] + (raw.range[1] - raw.range[0]) * i as f64 / 32.0;
+                let (c2, map) = &raw.pcurve;
+                let q = c2.point(map[0] + map[1] * x);
+                assert!(s.point(q.x, q.y).distance(raw.curve.point(x)) <= raw.tolerance);
+                if let Some(n) = s.normal(q.x, q.y) {
+                    assert!(n.get().dot(t).abs() <= 1e-6, "{x}");
+                }
+            }
+        }
     }
 }

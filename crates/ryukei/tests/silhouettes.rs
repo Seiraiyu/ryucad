@@ -270,3 +270,81 @@ fn a_sweep_an_offset_and_a_bent_surface_are_traced() {
         sound(&b, &v, &s);
     }
 }
+
+/// Seen from the front, a torus about `z` has its two meridian circles
+/// and two parallels (design 484, plan 17.B): `4π (R + r)` long.
+#[test]
+fn a_torus_from_the_front_has_two_meridians_and_two_parallels() {
+    let (b, _) = primitive::torus(OpKey(6), 0.03, 0.01, &Rigid::IDENTITY).unwrap();
+    for t in [Vector3::new(0.0, -1.0, 0.0), Vector3::new(1.0, 1.0, 0.0)] {
+        let v = view(t);
+        let s = silhouettes(&b, &v).unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        sound(&b, &v, &s);
+        assert!(
+            (length(&s) - 2.0 * TAU * 0.04).abs() < 1e-9,
+            "{}",
+            length(&s)
+        );
+    }
+}
+
+/// Tilted off square by 1e-9 to 1e-3 rad, the contour pinches but is
+/// regular: traced, it certifies or refuses `Uncertain` within the
+/// trace's cap, never anything else, and what it gives is sound.
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn a_torus_nearly_square_to_the_view_certifies_or_refuses_within_the_cap() {
+    let (b, _) = primitive::torus(OpKey(7), 0.03, 0.01, &Rigid::IDENTITY).unwrap();
+    for tilt in [1e-9, 1e-7, 1e-5, 1e-3] {
+        let v = view(Vector3::new(0.0, -1.0, tilt));
+        let start = std::time::Instant::now();
+        match silhouettes(&b, &v) {
+            Ok(s) => {
+                sound(&b, &v, &s);
+                eprintln!(
+                    "tilt {tilt}: certified in {:.2} s",
+                    start.elapsed().as_secs_f64()
+                );
+            }
+            Err(ryukei::Error::InvalidView(ryukei::ViewError::Uncertain { .. })) => {
+                eprintln!(
+                    "tilt {tilt}: refused in {:.2} s",
+                    start.elapsed().as_secs_f64()
+                );
+            }
+            Err(e) => panic!("tilt {tilt}: {e:?}"),
+        }
+    }
+}
+
+/// A spline half circle from pole to pole turned about `z` (design 484,
+/// plan 17.B): its silhouette comes from the formula, sound, and as long
+/// as the sphere's great circle.
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn revolutions_have_their_silhouettes_in_closed_form() {
+    let sphere_like = {
+        // A rational quadratic half circle from pole to pole in the xz
+        // half-plane: turned, the sphere of radius 0.02.
+        let r = 0.02;
+        let kv = KnotVector::clamped(2, &[0.0, 0.5, 1.0], &[3, 2, 3]).unwrap();
+        let pts = vec![
+            Point3::new(0.0, 0.0, -r),
+            Point3::new(r, 0.0, -r),
+            Point3::new(r, 0.0, 0.0),
+            Point3::new(r, 0.0, r),
+            Point3::new(0.0, 0.0, r),
+        ];
+        let h = core::f64::consts::FRAC_1_SQRT_2;
+        let w = vec![1.0, h, 1.0, h, 1.0];
+        Curve::Nurbs(Arc::new(NurbsCurve::new(kv, pts, Some(w)).unwrap()))
+    };
+    let rev = |c: Curve| Surface::Revolution(Arc::new(Revolution::new(Frame::WORLD, c).unwrap()));
+    let v = view(Vector3::new(0.3, -1.0, 0.4));
+    let sphere = rev(sphere_like);
+    let b = one_face(&sphere, sphere.domain());
+    let s = silhouettes(&b, &v).unwrap();
+    sound(&b, &v, &s);
+    // A sphere's silhouette is a great circle.
+    assert!((length(&s) - TAU * 0.02).abs() < 1e-7, "{}", length(&s));
+}

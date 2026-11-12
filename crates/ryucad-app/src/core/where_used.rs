@@ -50,33 +50,52 @@ fn uses(v: &Value) -> Vec<Use> {
     v.as_array()
         .into_iter()
         .flatten()
-        .map(|u| Use {
-            assembly: u["assembly"].as_str().unwrap_or_default().to_owned(),
-            label: u["label"].as_str().map(str::to_owned),
-            state: u["state"].as_str().map(str::to_owned),
-            count: u["count"].as_u64().unwrap_or(0),
-            paths: u["uses"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|w| {
-                    let via: Vec<&str> = w["via"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .collect();
-                    format!(
-                        "{}: {} at {}",
-                        via.join(" > "),
-                        w["count"],
-                        crate::core::bom::rev_text(&w["rev"])
-                    )
-                })
-                .collect(),
-            folder: u["folder"].as_str().map(str::to_owned),
-            project_name: u["name"].as_str().map(str::to_owned),
-            repo: u["repo"].as_str().map(str::to_owned),
+        .map(|u| {
+            let paths = if u["kind"] == "insert" {
+                // A part inserting it (design 521): the insert and its pin.
+                vec![format!(
+                    "inserted as {} at {}",
+                    u["feature"].as_str().unwrap_or_default(),
+                    crate::core::bom::rev_text(&u["rev"])
+                )]
+            } else {
+                u["uses"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|w| {
+                        let via: Vec<&str> = w["via"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .collect();
+                        format!(
+                            "{}: {} at {}",
+                            via.join(" > "),
+                            w["count"],
+                            crate::core::bom::rev_text(&w["rev"])
+                        )
+                    })
+                    .collect()
+            };
+            Use {
+                // An insert's row names the part inserting it.
+                assembly: u["assembly"]
+                    .as_str()
+                    .or_else(|| u["part"].as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+                label: u["label"].as_str().map(str::to_owned),
+                state: u["state"].as_str().map(str::to_owned),
+                count: u["count"]
+                    .as_u64()
+                    .unwrap_or(u64::from(u["kind"] == "insert")),
+                paths,
+                folder: u["folder"].as_str().map(str::to_owned),
+                project_name: u["name"].as_str().map(str::to_owned),
+                repo: u["repo"].as_str().map(str::to_owned),
+            }
         })
         .collect()
 }
@@ -200,6 +219,21 @@ mod tests {
         assert_eq!(w.others[0].folder.as_deref(), Some("/work/rig"));
         assert_eq!(w.searched, ["/work/rig"]);
         assert_eq!(w.problems, ["/x can't be read"]);
+    }
+
+    #[test]
+    fn a_part_inserting_it_is_a_use() {
+        let v = json!({"schema": 1, "part": "pcb", "problems": [],
+            "working": [{"kind": "insert", "part": "enclosure", "feature": "board",
+                         "rev": "working"}],
+            "released": [{"kind": "insert", "part": "case", "feature": "board", "label": "A",
+                          "state": "released", "commit": "c", "rev": {"label": "B"}}]});
+        let w = WhereUsed::from_answer("pcb", &v);
+        assert_eq!(w.working[0].assembly, "enclosure");
+        assert_eq!(w.working[0].count, 1);
+        assert_eq!(w.working[0].paths, ["inserted as board at working"]);
+        assert_eq!(w.released[0].assembly, "case");
+        assert_eq!(w.released[0].label.as_deref(), Some("A"));
     }
 
     #[test]

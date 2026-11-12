@@ -318,3 +318,70 @@ fn a_part_at_a_label_places_its_releases_foreign_instances() {
     // sub@A was released over bracket@A: top still places it.
     assert_eq!(occurrences(&product, &cache, "top"), 1);
 }
+
+#[test]
+fn another_projects_release_is_inserted_at_its_newest_label() {
+    let top = tempfile::tempdir().unwrap();
+    let cache = top.path().join("machine");
+    let (lib, product) = (top.path().join("lib"), top.path().join("enclosures"));
+    // The library: a bracket, released as A.
+    repo(&lib, &cache);
+    ok(&lib, &cache, &["part", "create", "bracket"]);
+    ok(
+        &lib,
+        &cache,
+        &[
+            "feature", "add", "bracket", "box", "--id", "plate", "--param", "x=20", "--param",
+            "y=10", "--param", "z=2",
+        ],
+    );
+    ok(&lib, &cache, &["props", "set", "bracket", "number=BR-1"]);
+    commit(&lib, "bracket");
+    release(&lib, &cache, "bracket");
+    // The product inserts it: the newest official label, through the lock.
+    repo(&product, &cache);
+    ok(&product, &cache, &["deps", "add", &url(&lib)]);
+    ok(&product, &cache, &["part", "create", "enc"]);
+    let v = ok(
+        &product,
+        &cache,
+        &[
+            "feature",
+            "add",
+            "enc",
+            "insert",
+            "--id",
+            "lib",
+            "--of",
+            "lib:bracket",
+        ],
+    );
+    assert_eq!(v["took"]["rev"], json!({"label": "A"}), "{v}");
+    assert!(v["feature"]["project"].is_string(), "{v}");
+    let r = ok(&product, &cache, &["rebuild", "enc"]);
+    assert_eq!(r["parts"][0]["failed"], 0, "{r}");
+    let keys: Vec<&str> = r["parts"][0]["features"][0]["insert"]["solids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys, ["lib/plate"], "{r}");
+    // Where-used finds it inserted.
+    let w = ok(&product, &cache, &["where-used", "lib:bracket"]);
+    let rows: Vec<&Value> = w["working"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "insert")
+        .collect();
+    assert_eq!(rows.len(), 1, "{w}");
+    assert_eq!(
+        (&rows[0]["part"], &rows[0]["feature"]),
+        (&json!("enc"), &json!("lib"))
+    );
+    // And deps uses lists it beside the assemblies' places.
+    let u = ok(&product, &cache, &["deps", "uses"]);
+    assert_eq!(u["inserts"][0]["part"], "enc", "{u}");
+    assert_eq!(u["inserts"][0]["label"], "A", "{u}");
+}
