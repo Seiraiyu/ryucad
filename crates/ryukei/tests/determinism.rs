@@ -3589,6 +3589,23 @@ fn swept_sheets_section(golden: &mut Golden) {
     }
 }
 
+/// ryukei 18.A's crossing certificate (#303, #698): NURBS prisms whose
+/// sides cross along an isoline edge, at 90° and 10°, checked: their
+/// faults and the units the check spends. Their traces settle, so this
+/// guards that the certificate, which runs only where a pair was
+/// `CannotCheck`, moves nothing that settled before.
+fn crossing_beside_section(golden: &mut Golden) {
+    use ryukei::work::Work;
+    let mut s = golden.section("crossing_beside");
+    for deg in [90.0f64, 10.0] {
+        let b = ryukei_testkit::nurbs::isoline_wedge(deg * core::f64::consts::PI / 180.0);
+        let w = Work::unlimited();
+        let faults = ryukei::check::check_intersections_with(&b, &w).unwrap();
+        s.u64(faults.len() as u64);
+        s.u64(w.spent());
+    }
+}
+
 /// The golden file every section's line is in.
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/determinism.txt");
 
@@ -3681,6 +3698,7 @@ sections! {
     delete_faces => delete_faces_section,
     blend_recognition => blend_recognition_section,
     inverted_offsets => inverted_offsets_section,
+    crossing_beside => crossing_beside_section,
 }
 
 /// Offsets past their focal surfaces (design 484, plan 17.A): a spline
