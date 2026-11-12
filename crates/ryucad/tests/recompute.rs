@@ -2069,3 +2069,51 @@ fn blend_edits_recompute_as_from_nothing() {
         }
     }
 }
+
+/// Issue #630: a countersink edit after a two-distance bevel, at each
+/// size the random edits draw, timed (incremental, then from nothing),
+/// and the two compared.
+///
+/// ```text
+/// cargo test -p ryucad --release --test recompute countersink_after_a_two_distance_bevel -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "#630's diagnosis: run by name"]
+fn countersink_after_a_two_distance_bevel() {
+    use std::time::Instant;
+    let part = Id::parse("p", "part").unwrap();
+    for d1 in ["1 mm", "1.5 mm", "2 mm"] {
+        for diameter in ["1 mm", "1.5 mm", "2 mm"] {
+            let (_dir, mut s) = project();
+            s.rebuilt(&part).unwrap();
+            let front = face(&mut s, "b", [0.0, -1.0, 0.0]);
+            let t = Instant::now();
+            let _ = call(
+                &mut s,
+                "feature.edit",
+                json!({"part": "p", "id": "bevel", "form": "distances", "d1": d1,
+                       "d2": "0.5 mm", "face": front}),
+            );
+            s.rebuilt(&part).unwrap();
+            let bevel_s = t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            let _ = call(
+                &mut s,
+                "feature.edit",
+                json!({"part": "p", "id": "drill", "diameter": diameter, "form": "countersink",
+                       "countersink": {"diameter": "2.5 mm", "angle": "90 deg"}}),
+            );
+            let r = s.rebuilt(&part).unwrap();
+            let (incremental, built) = ((r.hash.clone(), summary(r)), r.built.clone());
+            let edit_s = t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            let one = full(&s, 1);
+            println!(
+                "d1 {d1}, diameter {diameter}: bevel {bevel_s:.2} s, countersink {edit_s:.2} s \
+                 (built {built:?}), from nothing {:.2} s",
+                t.elapsed().as_secs_f64()
+            );
+            assert_eq!(incremental, one, "d1 {d1}, diameter {diameter}");
+        }
+    }
+}

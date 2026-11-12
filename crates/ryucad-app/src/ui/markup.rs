@@ -44,7 +44,10 @@ pub fn bar(
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.horizontal(|ui| {
+                // Never wider than the viewport: the row wraps (#742).
+                let room = (at.width() - 32.0).max(160.0);
+                ui.set_max_width(room);
+                ui.horizontal_wrapped(|ui| {
                     for t in Tool::ALL {
                         let c = command::get(t.command()).expect("a markup command");
                         let tip = match shown.keys.get(c.id) {
@@ -83,7 +86,7 @@ pub fn bar(
                     let r = ui.add(
                         egui::TextEdit::singleline(&mut comment)
                             .hint_text("What should change?")
-                            .desired_width(260.0),
+                            .desired_width(260.0f32.min(room * 0.5)),
                     );
                     r.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Comment")
@@ -103,7 +106,7 @@ pub fn bar(
                         ran.push("annotation.markup");
                     }
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.weak("The camera is locked to this view while you mark up.");
                     if let Some(why) = &note {
                         ui.colored_label(ui.visuals().warn_fg_color, why);

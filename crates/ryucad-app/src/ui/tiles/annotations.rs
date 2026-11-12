@@ -43,7 +43,7 @@ pub fn annotations(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
 }
 
 fn filters(ui: &mut egui::Ui, ws: &mut Workspace) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let f = &mut ws.annotation_filter;
         egui::ComboBox::from_label("Show")
             .selected_text(match f.show {
@@ -87,10 +87,11 @@ fn one(
     let colour = style::color32(style::participant(&e.by));
     ui.horizontal_wrapped(|ui| {
         let tag = number.map_or_else(|| "·".to_owned(), |n| format!("#{n}"));
-        if ui
-            .selectable_label(chosen, RichText::new(tag).strong().color(colour))
-            .clicked()
-        {
+        let r = ui.selectable_label(chosen, RichText::new(tag).strong().color(colour));
+        // Named for a screen reader: who, its state and what (#749).
+        let spoken = e.spoken(number);
+        r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, chosen, &spoken));
+        if r.clicked() {
             ws.choose_annotation((!chosen).then_some(e.id.as_str()));
         }
         ui.label(RichText::new(&e.by).color(colour));
@@ -224,11 +225,24 @@ fn one(
         ));
     }
     let open_mine = e.is_open() && e.by == me && e.claimed_by.is_none();
-    ui.horizontal(|ui| {
+    // The reply box fills a row of its own and the buttons wrap beneath
+    // it: one over-wide row widens every row after it (#733).
+    if e.is_open() {
+        let typed = ws.annotation_ui.replies.entry(e.id.clone()).or_default();
+        ui.add(
+            egui::TextEdit::singleline(typed)
+                .hint_text("Reply")
+                .desired_width(f32::INFINITY),
+        );
+    }
+    ui.horizontal_wrapped(|ui| {
         if e.is_open() {
-            let typed = ws.annotation_ui.replies.entry(e.id.clone()).or_default();
-            ui.add(egui::TextEdit::singleline(typed).hint_text("Reply"));
-            let text = typed.clone();
+            let text = ws
+                .annotation_ui
+                .replies
+                .get(&e.id)
+                .cloned()
+                .unwrap_or_default();
             if modes::button(ui, ws, "annotation.reply", "Reply").clicked()
                 && !text.trim().is_empty()
             {

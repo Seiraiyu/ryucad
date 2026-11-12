@@ -341,10 +341,12 @@ pub fn where_used(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
                 });
             }
         }
-        // No token: nothing to sign in with, so no section.
-        Some(Err(e)) if e.code == ryucad::error::Code::ReviewUnauthenticated => {}
+        // No token: nothing to sign in with, so no section; no service
+        // for the project said plainly (#751).
         Some(Err(e)) => {
-            ui.weak(format!("Organization: {}", e.message));
+            if let Some(line) = crate::core::where_used::org_failure(e) {
+                ui.weak(line);
+            }
         }
         None => {}
     }

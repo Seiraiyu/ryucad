@@ -287,7 +287,9 @@ jobs:
       # The image's pinned .debs (KiCad's, from snapshot.debian.org) from
       # an Actions cache keyed by their SHA-256s, fetched with retries
       # only when the cache lacks them and saved at once, so a run never
-      # waits on the snapshot service answering (#557).
+      # waits on the snapshot service answering (#557). main saves it for
+      # every tag (debs.yml); a tag's own save serves only re-runs of that
+      # tag (#677).
       - id: debs
         uses: actions/cache/restore@v4
         with:

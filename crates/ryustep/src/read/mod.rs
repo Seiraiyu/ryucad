@@ -128,7 +128,8 @@ pub struct Held {
     pub definition: Option<usize>,
     /// Its B-rep items' instance numbers, ascending.
     pub items: Vec<Id>,
-    /// The name of its first solid item that has one (empty for none):
+    /// The name of its first solid or surface model item that has one
+    /// (empty for none):
     /// ryucad writes each solid's ID there (#412).
     pub name: String,
 }
@@ -192,9 +193,10 @@ pub fn open(bytes: &[u8]) -> Result<Opened, StepError> {
                 .items
                 .iter()
                 .find_map(|&i| match entities.get(i, i) {
-                    Ok(crate::schema::Entity::Brep(crate::schema::Brep::Solid {
-                        name, ..
-                    })) if !name.is_empty() => Some(name.clone()),
+                    Ok(crate::schema::Entity::Brep(
+                        crate::schema::Brep::Solid { name, .. }
+                        | crate::schema::Brep::Shells { name, .. },
+                    )) if !name.is_empty() => Some(name.clone()),
                     _ => None,
                 })
                 .unwrap_or_default();

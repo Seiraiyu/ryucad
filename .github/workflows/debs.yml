@@ -1,0 +1,38 @@
+name: Devcontainer debs
+
+# Saves the devcontainer's pinned .debs (.devcontainer/debs.txt, fetched
+# from snapshot.debian.org) to an Actions cache under main's ref. A cache
+# is restorable only from the ref that saved it and the default branch, so
+# the copy full.yml saves on a tag's run serves that tag alone (#677); this
+# one serves every tag. Same path, key and runner as full.yml's restore: a
+# cache's version includes its path and its compression. Runs when the
+# list changes on main, and by hand (`gh workflow run debs.yml --ref main`).
+on:
+  push:
+    branches: [main]
+    paths:
+      - .devcontainer/debs.txt
+      - .devcontainer/fetch-debs.sh
+      - .github/workflows/debs.yml
+  workflow_dispatch:
+
+jobs:
+  debs:
+    name: debs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - id: debs
+        uses: actions/cache/restore@v4
+        with:
+          path: .devcontainer/debs/*.deb
+          key: devcontainer-debs-${{ hashFiles('.devcontainer/debs.txt') }}
+          lookup-only: true
+      - if: steps.debs.outputs.cache-hit != 'true'
+        run: sh .devcontainer/fetch-debs.sh .devcontainer/debs amd64
+      - if: steps.debs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .devcontainer/debs/*.deb
+          key: devcontainer-debs-${{ hashFiles('.devcontainer/debs.txt') }}
