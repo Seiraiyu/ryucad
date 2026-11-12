@@ -33,6 +33,7 @@
 //! assembly `asm` in a project holding that part as `fz` and an assembly
 //! `sub` placing `asm`: it must place its part or give a structured error,
 //! never an internal one, and every occurrence must be finite and sound.
+//! A mate may carry limits: what settles is within them unless driven.
 //! Features read the project's parameters `wall` (3 mm) and `gap`
 //! (`wall / 2`), as a part reads its project's. A datum built must be
 //! finite; seeds build datums on `s`, `t` and `b`'s edges, and a sketch
@@ -380,9 +381,32 @@ fn assemble(written: &str, after_instances: bool) {
                                 .all(|x| x.is_finite())
                         );
                     }
+                    if let Some(v) = &m.values {
+                        for x in v.angle.iter().chain(&v.distance) {
+                            assert!(x.value.is_finite(), "{v:?}");
+                        }
+                    }
                 }
                 Ok(_) => panic!("an assembly makes only instances, mates and copies"),
                 Err(e) => assert_ne!(e.code, Code::Internal, "{e:?}"),
+            }
+        }
+        if result.solve.as_ref().is_some_and(|s| s.report.converged) {
+            let asm_part = project.part(&Id::parse(asm, "part").unwrap()).unwrap();
+            for (fid, out) in &result.features {
+                let (Ok(Output::Mate(m)), Some(Ok(ryucad::doc::files::Feature::Mate(doc)))) =
+                    (out, asm_part.features.get(fid))
+                else {
+                    continue;
+                };
+                let (Some(v), Some(l)) = (m.values, &doc.limits) else { continue };
+                let lim = ryucad::mate::limits(doc);
+                if let (Some(r), Some(a), None) = (lim.angle, v.angle, &doc.angle) {
+                    assert!(r.past(a.value, 1e-8).is_none(), "{fid}: {a:?} {l:?}");
+                }
+                if let (Some(r), Some(d), None) = (lim.distance, v.distance, &doc.distance) {
+                    assert!(r.past(d.value, 1e-8).is_none(), "{fid}: {d:?} {l:?}");
+                }
             }
         }
         let part = Id::parse(asm, "part").unwrap();

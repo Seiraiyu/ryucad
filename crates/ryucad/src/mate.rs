@@ -609,7 +609,7 @@ fn angle_ok(id: &Id, param: &str, a: f64) -> Result<()> {
 }
 
 /// The solver's limits for a mate: radians and meters.
-pub(crate) fn limits(m: &Mate) -> ryumate::Limits {
+pub fn limits(m: &Mate) -> ryumate::Limits {
     let range = |r: &Option<crate::doc::mate::Range>, si: fn(&crate::units::Quantity) -> f64| {
         r.as_ref().map(|r| ryumate::Range {
             min: r.min.as_ref().map(si),
