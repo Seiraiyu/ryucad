@@ -4,11 +4,18 @@
 //! and title block; the sheet's pins and lint findings. Written as JSON
 //! text, never a `Value` tree, so a 500-part sheet answers without one.
 
+use crate::design::BlockFiles;
+use crate::error::{Code, Error, Result};
 use crate::id::Id;
+use crate::project::Project;
+use crate::schem::{self, Laid};
 use ryusch::font::{Anchor, Font, Weight};
 use ryusch::geom::{Nm, Point, Rect};
 use ryusch::paint::{Item, Painted};
 use ryusch::style::Rgb;
+use ryusch::style::Theme;
+use serde::Serialize;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
@@ -348,6 +355,336 @@ pub fn owned(
     }
 }
 
+/// What `scene` is asked: a design's root block unless `block`, its
+/// first sheet in canvas order unless `sheet` (an ID or a name), a
+/// layer's designators (an instance or stack path; the first), a theme.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Ask {
+    pub design: Option<String>,
+    pub block: Option<String>,
+    pub sheet: Option<String>,
+    pub layer: Option<String>,
+    pub theme: Theme,
+}
+
+/// `sheet_not_found`: block `block` has no sheet `s`; its sheets listed.
+pub fn sheet_not_found(block: &Id, s: &str, sheets: &[(String, String)]) -> Error {
+    Error::new(
+        Code::SheetNotFound,
+        format!("block {block} has no sheet {s}"),
+    )
+    .with("block", block)
+    .with("sheet", s)
+    .with("sheets", sheet_list(sheets))
+}
+
+fn sheet_list(sheets: &[(String, String)]) -> Vec<Value> {
+    sheets
+        .iter()
+        .map(|(k, n)| json!({"sheet": k, "name": n}))
+        .collect()
+}
+
+/// A layout's sheets in canvas order, `(ID, name)`.
+pub fn sheets_of(layout: &ryusch::layout::Layout) -> Vec<(String, String)> {
+    ryusch::canvas::order(layout)
+        .into_iter()
+        .map(|k| {
+            let name = layout.sheets[&k].name.clone();
+            (k, name)
+        })
+        .collect()
+}
+
+/// The sheet `asked` names (an ID or a name), else the first.
+pub fn sheet_named(block: &Id, sheets: &[(String, String)], asked: Option<&str>) -> Result<String> {
+    match asked {
+        Some(s) => sheets
+            .iter()
+            .find(|(k, n)| k == s || n == s)
+            .map(|(k, _)| k.clone())
+            .ok_or_else(|| sheet_not_found(block, s, sheets)),
+        None => sheets
+            .first()
+            .map(|(k, _)| k.clone())
+            .ok_or_else(|| sheet_not_found(block, "", sheets)),
+    }
+}
+
+/// The blocks block `b`'s drawing reads: itself, those it places (their
+/// symbols' ports and names) and those that place it along every layer
+/// (their designator formats).
+fn drawn_from(p: &Project, b: &BlockFiles) -> BTreeSet<String> {
+    let mut out = BTreeSet::from([b.id.to_string()]);
+    out.extend(
+        b.instances
+            .values()
+            .filter_map(|i| i.item.as_ref().ok())
+            .map(|i| i.of.to_string()),
+    );
+    for l in schem::layers(p, &b.id) {
+        let Some(root) = p
+            .conn
+            .designs
+            .get(&l.design)
+            .and_then(|d| d.item.as_ref().ok())
+            .map(|d| d.root.clone())
+        else {
+            continue;
+        };
+        let mut at = root;
+        for iid in &l.path {
+            out.insert(at.to_string());
+            match p
+                .conn
+                .blocks
+                .get(&at)
+                .and_then(|x| x.instances.get(iid))
+                .and_then(|i| i.item.as_ref().ok())
+            {
+                Some(i) => at = i.of.clone(),
+                None => break,
+            }
+        }
+    }
+    out
+}
+
+/// The revisions block `b`'s scene is drawn from, as `project.changed`
+/// names them: `project`, `style`, `standards`, every `lib/<alias>`, and
+/// `block/<id>` and `layout/<id>` of each block [`drawn_from`] gives. A
+/// window draws a sheet again only when one of these moves.
+pub fn revisions(p: &Project, b: &BlockFiles) -> BTreeMap<String, Value> {
+    let blocks = drawn_from(p, b);
+    crate::server::revisions(p)
+        .into_iter()
+        .filter(|(k, _)| {
+            matches!(k.as_str(), "project" | "style" | "standards")
+                || k.starts_with("lib/")
+                || k.strip_prefix("block/")
+                    .or_else(|| k.strip_prefix("layout/"))
+                    .is_some_and(|id| blocks.contains(id))
+        })
+        .collect()
+}
+
+/// One token for [`revisions`]: BLAKE3 of their canonical JSON, 32 hex.
+pub fn revision(revs: &BTreeMap<String, Value>) -> String {
+    let text = crate::canonical::to_string(&json!(revs));
+    blake3::hash(text.as_bytes()).to_hex()[..32].to_owned()
+}
+
+/// A pin as the scene lists it.
+#[derive(Serialize)]
+struct Pin<'a> {
+    #[serde(rename = "ref")]
+    reference: String,
+    owner: Option<usize>,
+    at: Point,
+    base: Point,
+    number: &'a str,
+    name: &'a str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    net: Option<String>,
+    nc: bool,
+}
+
+fn pin_kind(k: ryusch::input::PinKind) -> &'static str {
+    use ryusch::input::PinKind as K;
+    match k {
+        K::Input => "input",
+        K::Output => "output",
+        K::Bidirectional => "bidirectional",
+        K::TriState => "tri_state",
+        K::Passive => "passive",
+        K::Free => "free",
+        K::Unspecified => "unspecified",
+        K::PowerIn => "power_in",
+        K::PowerOut => "power_out",
+        K::OpenCollector => "open_collector",
+        K::OpenEmitter => "open_emitter",
+        K::NoConnect => "no_connect",
+    }
+}
+
+/// Every component pin on sheet `sid`: its reference path, where wires
+/// meet it and where it meets the body, and its net's reference path.
+fn pins<'a>(
+    block: &Id,
+    laid: &'a Laid,
+    sid: &str,
+    index: &BTreeMap<String, usize>,
+) -> Vec<Pin<'a>> {
+    let layout = &laid.outcome.layout;
+    let input = &laid.built.input;
+    let mut out = Vec::new();
+    for (part, of) in input.parts.iter().zip(&laid.built.of) {
+        let schem::Of::Unit { component, .. } = of else {
+            continue;
+        };
+        let Some(x) = layout.placed.get(&part.key).filter(|x| x.sheet == sid) else {
+            continue;
+        };
+        let shape =
+            ryusch::shape::Shape::of(part, ryusch::geom::Place::new(x.at, x.rotation, x.mirror));
+        let owner_ref = format!("{block}/{component}");
+        let owner = index.get(&owner_ref).copied();
+        for (pin, at) in part.pins.iter().zip(&shape.pins) {
+            out.push(Pin {
+                reference: format!("{owner_ref}/{}", pin.number),
+                owner,
+                at: at.end,
+                base: at.base,
+                number: &pin.number,
+                name: &pin.name,
+                kind: pin_kind(pin.kind),
+                net: pin
+                    .net
+                    .and_then(|n| input.nets.get(n))
+                    .map(|n| schem::ref_path(block, &n.key)),
+                nc: pin.nc,
+            });
+        }
+    }
+    out
+}
+
+/// A finding as the scene lists it: the sheet's lint, its references as
+/// reference paths.
+#[derive(Serialize)]
+struct Finding<'a> {
+    code: &'a str,
+    severity: ryusch::lint::Severity,
+    message: &'a str,
+    refs: Vec<String>,
+}
+
+/// What the scene says besides its items and owners.
+#[derive(Serialize)]
+struct Head<'a> {
+    block: &'a Id,
+    design: Option<String>,
+    layer: Option<Value>,
+    layers: Vec<Value>,
+    sheet: &'a str,
+    name: &'a str,
+    sheets: Vec<Value>,
+    theme: Theme,
+    revision: String,
+    revisions: BTreeMap<String, Value>,
+    paper: Value,
+    score: Option<u32>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    stale: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    invalid: Option<&'a Error>,
+    findings: Vec<Finding<'a>>,
+    pins: Vec<Pin<'a>>,
+}
+
+/// One sheet of a block as a window draws it (design 519), as JSON text:
+/// laid out in memory exactly as `render` lays it out (nothing written),
+/// a layer's designators, the sheet's look in `ask.theme`; `items` (the
+/// paper's border, zone marks and title block first, then the sheet's,
+/// in the sheet's frame, nanometres, y up), `owners`, `pins`, the sheet's
+/// lint `findings` and `score`, the `paper` (`size`, its `rect` in the
+/// sheet's frame, `colour`, `canvas`), and the `revisions` it is drawn
+/// from with their `revision`.
+pub fn scene(p: &Project, ask: &Ask) -> Result<String> {
+    let b = crate::schemcmd::blocks(p, ask.design.as_deref(), ask.block.as_deref())?[0];
+    let mut laid = schem::lay(p, b, None, &[], ryusch::input::Relayout::None)?;
+    let (layers, shown) = crate::schemcmd::show_layer(p, b, &mut laid, ask.layer.as_deref())?;
+    let layout = &laid.outcome.layout;
+    let sheets = sheets_of(layout);
+    let sid = sheet_named(&b.id, &sheets, ask.sheet.as_deref())?;
+    let place = sheets.iter().position(|(k, _)| *k == sid).unwrap_or(0);
+    let name = sheets[place].1.as_str();
+    let looks = crate::schemcmd::looks(p, b, &laid.built, layout, ask.theme);
+    let look = looks.get(&sid).cloned().unwrap_or_default();
+    let painted = ryusch::paint::sheet_in(&laid.built.input, layout, &sid, &look);
+    let parts: BTreeSet<&str> = laid
+        .built
+        .input
+        .parts
+        .iter()
+        .zip(&laid.built.of)
+        .filter(|(_, of)| matches!(of, schem::Of::Unit { .. }))
+        .map(|(part, _)| part.key.as_str())
+        .collect();
+    // The paper as the PDF pages it, in the sheet's frame.
+    let area = laid.built.input.area_in(layout, &sid);
+    let paper = [
+        area[0] + 2 * schem::BORDER,
+        area[1] + 2 * schem::BORDER + schem::TITLE_BAND,
+    ];
+    let origin = [schem::BORDER, schem::BORDER + schem::TITLE_BAND];
+    let design = shown.as_ref().map(|l| l.design.to_string());
+    let design_name = shown
+        .as_ref()
+        .and_then(|l| p.conn.designs.get(&l.design))
+        .and_then(|d| d.item.as_ref().ok())
+        .map(|d| d.name.clone())
+        .or_else(|| design.clone())
+        .unwrap_or_default();
+    let title = crate::output::title_block(
+        p,
+        &crate::cascade::Layers::of(p),
+        b,
+        &design_name,
+        shown.as_ref().map_or("", |l| l.stack_path.as_str()),
+        name,
+        sheets.len(),
+        format!("{}/{}", place + 1, sheets.len()),
+    );
+    let under = crate::pdf::paper_items(paper, &title, &look);
+    let owned = owned(&b.id, &under, [-origin[0], -origin[1]], &painted, &parts);
+    let (found, scores) =
+        ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
+    let revs = revisions(p, b);
+    let head = Head {
+        block: &b.id,
+        design,
+        layer: shown.as_ref().map(schem::Layer::to_json),
+        layers: layers.iter().map(schem::Layer::to_json).collect(),
+        sheet: &sid,
+        name,
+        sheets: sheet_list(&sheets),
+        theme: ask.theme,
+        revision: revision(&revs),
+        revisions: revs,
+        paper: json!({
+            "size": paper,
+            "rect": [[-origin[0], -origin[1]], [paper[0] - origin[0], paper[1] - origin[1]]],
+            "colour": look.role(ryusch::style::Role::Paper).hex(),
+            "canvas": look.role(ryusch::style::Role::Canvas).hex(),
+        }),
+        score: scores.iter().find(|s| s.sheet == sid).map(|s| s.score),
+        stale: laid.stale,
+        invalid: laid.invalid.as_ref(),
+        findings: found
+            .iter()
+            .filter(|f| f.sheet == sid)
+            .map(|f| Finding {
+                code: f.code,
+                severity: f.severity,
+                message: &f.message,
+                refs: f.refs.iter().map(|k| schem::ref_path(&b.id, k)).collect(),
+            })
+            .collect(),
+        pins: pins(&b.id, &laid, &sid, &owned.index),
+    };
+    let mut text = serde_json::to_string(&head)
+        .map_err(|e| Error::new(Code::Internal, format!("a scene's head: {e}")))?;
+    text.pop();
+    let _ = write!(
+        text,
+        r#","items":{},"owners":{}}}"#,
+        owned.items, owned.owners
+    );
+    Ok(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,5 +821,74 @@ mod tests {
         let b = &owners[0]["box"];
         assert!(b[1][1].as_i64().unwrap() >= w, "{b}");
         assert!(b[0][0].as_i64().unwrap() < 0, "{b}");
+    }
+
+    #[test]
+    fn a_projects_sheet_is_a_whole_scene() {
+        use crate::project::tests::{design_in, library_in, manifest};
+        use crate::project::{Project, ProjectKind};
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("board");
+        manifest(&board, ProjectKind::Design, &[]);
+        library_in(&board);
+        design_in(&board);
+        let p = Project::load(&board).unwrap();
+        let ask = Ask {
+            block: Some("top".into()),
+            ..Ask::default()
+        };
+        let text = scene(&p, &ask).unwrap();
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["block"], "top");
+        assert_eq!(v["theme"], "light");
+        assert_eq!(v["sheet"], v["sheets"][0]["sheet"]);
+        let owners = v["owners"].as_array().unwrap();
+        let items = v["items"].as_array().unwrap();
+        for it in items {
+            if let Some(i) = it["owner"].as_u64() {
+                assert!((i as usize) < owners.len(), "{it}");
+            }
+        }
+        // The paper's items come first and belong to no one.
+        assert!(items[0]["owner"].is_null() && items[0]["type"] == "polyline");
+        let refs: Vec<&str> = owners.iter().map(|o| o["ref"].as_str().unwrap()).collect();
+        assert!(refs.contains(&"top/r1"), "{refs:?}");
+        let pin = v["pins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["ref"] == "top/r1/1")
+            .unwrap();
+        assert_eq!(pin["net"], "top/sda");
+        assert_eq!(
+            owners[pin["owner"].as_u64().unwrap() as usize]["ref"],
+            "top/r1"
+        );
+        assert!(v["revisions"]["block/top"].is_string());
+        assert_eq!(v["revision"].as_str().unwrap().len(), 32);
+        // The same files, the same text; dark another paper.
+        assert_eq!(scene(&p, &ask).unwrap(), text);
+        let dark = scene(
+            &p,
+            &Ask {
+                theme: Theme::Dark,
+                ..ask.clone()
+            },
+        )
+        .unwrap();
+        let d: Value = serde_json::from_str(&dark).unwrap();
+        assert_ne!(d["paper"]["colour"], v["paper"]["colour"]);
+        assert_eq!(d["owners"].as_array().unwrap().len(), owners.len());
+        // A sheet the block hasn't.
+        let e = scene(
+            &p,
+            &Ask {
+                sheet: Some("nope".into()),
+                ..ask
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::SheetNotFound);
+        assert_eq!(e.details["sheets"], v["sheets"]);
     }
 }
