@@ -917,6 +917,44 @@ pub fn plan(
             }
         }
     }
+    // Motions theirs wrote (plan 26.B): the instances and the mate
+    // their drives name, through a renumbered feature. A file's drives
+    // are one value, as the merge takes them.
+    if let Rename::Feature { from, to, .. } = &r {
+        let dir = format!("parts/{part}/{}/", crate::doc::motion::MOTIONS);
+        for (p, b) in working {
+            if !p.starts_with(&dir) {
+                continue;
+            }
+            let (Ok(v), Some(t), o) = (
+                serde_json::from_slice::<Value>(b),
+                json_of(theirs, p),
+                json_of(ours, p),
+            ) else {
+                continue;
+            };
+            if v["drives"] != t["drives"] || o.as_ref().is_some_and(|o| o["drives"] == v["drives"])
+            {
+                continue;
+            }
+            let mut new = v.clone();
+            for d in new["drives"].as_array_mut().into_iter().flatten() {
+                if d.get("mate").and_then(Value::as_str) == Some(from.as_str()) {
+                    d["mate"] = json!(to);
+                }
+                if let Some(list) = d.get_mut("instances").and_then(Value::as_array_mut) {
+                    for i in list {
+                        if i.as_str() == Some(from.as_str()) {
+                            *i = json!(to);
+                        }
+                    }
+                }
+            }
+            if new != v {
+                files.insert(p.clone(), bytes(&new));
+            }
+        }
+    }
     match &r {
         Rename::Feature { from, to, .. } => {
             // Ours' file as it is, theirs' under the new ID.

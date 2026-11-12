@@ -682,4 +682,39 @@ pub(crate) mod tests {
         .unwrap();
         assert!(!dir.path().join("parts/frame/motions/swing.json").exists());
     }
+
+    #[test]
+    fn a_parameter_rename_reaches_motions() {
+        let (dir, mut s) = stopped();
+        call(
+            &mut s,
+            "param.set",
+            json!({"part": "frame", "parameters": {"swing": "3 deg"}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "motion.save",
+            json!({"part": "frame", "motion": "swing",
+                   "drives": [{"mate": "m1", "angle": {"from": "-swing", "to": "swing"}}]}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "param.rename",
+            json!({"part": "frame", "from": "swing", "to": "reach"}),
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("parts/frame/motions/swing.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            v["drives"][0]["angle"],
+            json!({"from": "-reach", "to": "reach"})
+        );
+        // The parameter is read, so not unused.
+        let list = call(&mut s, "param.list", json!({"part": "frame"})).unwrap();
+        assert_ne!(list["parameters"]["reach"]["unused"], true, "{list}");
+    }
 }

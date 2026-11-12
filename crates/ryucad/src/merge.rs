@@ -324,6 +324,7 @@ pub fn newest(kind: &str) -> Option<u64> {
         crate::doc::appearance::KIND => Some(crate::doc::appearance::FORMAT),
         crate::doc::lock::KIND => Some(crate::doc::lock::FORMAT),
         crate::doc::explode::KIND => Some(crate::doc::explode::FORMAT),
+        crate::doc::motion::KIND => Some(crate::doc::motion::FORMAT),
         crate::doc::annotation::KIND => Some(crate::doc::annotation::FORMAT),
         crate::doc::drawing::KIND => Some(crate::doc::drawing::FORMAT),
         crate::doc::drawing_template::KIND => Some(crate::doc::drawing_template::FORMAT),
@@ -3115,6 +3116,37 @@ mod tests {
         let (_, o) = bytes(&canonical(&base), &canonical(&ours), &canonical(&theirs));
         assert_eq!(o, Outcome::Conflicts(1));
         let newer = json!({"format": 2, "kind": "ryucad.explode"});
+        assert!(matches!(
+            bytes(&canonical(&base), &canonical(&newer), &canonical(&ours)).1,
+            Outcome::Text(_)
+        ));
+    }
+
+    #[test]
+    fn motions_merge_their_drives_as_one_value() {
+        let file = |to: &str, steps: u32| {
+            json!({"format": 1, "kind": "ryucad.motion", "steps": steps, "drives": [
+                {"mate": "hinge", "angle": {"from": "-6 deg", "to": to}}
+            ]})
+        };
+        let base = file("6 deg", 13);
+        let ours = file("8 deg", 13);
+        let (out, o) = bytes(&canonical(&base), &canonical(&ours), &canonical(&base));
+        assert_eq!(o, Outcome::Clean);
+        assert_eq!(out, canonical(&ours));
+        // Steps and drives are separate values: both sides' changes merge.
+        let theirs = file("6 deg", 25);
+        let (out, o) = bytes(&canonical(&base), &canonical(&ours), &canonical(&theirs));
+        assert_eq!(o, Outcome::Clean);
+        assert_eq!(out, canonical(&file("8 deg", 25)));
+        // Both changing the drives is one conflict.
+        let (_, o) = bytes(
+            &canonical(&base),
+            &canonical(&ours),
+            &canonical(&file("7 deg", 13)),
+        );
+        assert_eq!(o, Outcome::Conflicts(1));
+        let newer = json!({"format": 2, "kind": "ryucad.motion"});
         assert!(matches!(
             bytes(&canonical(&base), &canonical(&newer), &canonical(&ours)).1,
             Outcome::Text(_)
