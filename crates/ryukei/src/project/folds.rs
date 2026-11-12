@@ -35,18 +35,25 @@ pub(super) fn nurbs(
         .map_err(|_| Failure::Uncertain)?;
     let curve = Curve2::Nurbs2(Arc::new(image));
     let lift = |d: Vector2| view.x().get() * d.x + view.y().get() * d.y;
-    let folds = folds(&Curve::Nurbs(n.clone()), [t0, t1], lift(a), lift(b))?;
+    let Folds { cuts, points } = folds(&Curve::Nurbs(n.clone()), [t0, t1], lift(a), lift(b))?;
     let mut ends = vec![t0];
-    ends.extend(folds);
+    ends.extend(cuts);
     ends.push(t1);
     Ok(ends
         .windows(2)
-        .map(|w| ImageCurve {
-            image: Image::Curve {
-                curve: curve.clone(),
-                map: ImageMap::Affine([0.0, 1.0]),
-            },
-            range: [w[0], w[1]],
+        .map(|w| {
+            let point = points.iter().any(|p| p[0] <= w[0] && w[1] <= p[1]);
+            ImageCurve {
+                image: if point {
+                    Image::Point(view.image(n.point((w[0] + w[1]) / 2.0)))
+                } else {
+                    Image::Curve {
+                        curve: curve.clone(),
+                        map: ImageMap::Affine([0.0, 1.0]),
+                    }
+                },
+                range: [w[0], w[1]],
+            }
         })
         .collect())
 }
@@ -84,7 +91,6 @@ fn idot(p: Vector3, d: Vector3) -> Interval {
 /// coefficient of `d · (qa, qb)` positive (rounded outward), so the image
 /// moves strictly along `d`. `d` is the sum of the coefficients' unit
 /// directions (their midpoints'): any `d` that passes proves it.
-#[cfg_attr(not(test), allow(dead_code))]
 fn one_to_one(qa: &Bernstein, qb: &Bernstein) -> bool {
     let (ca, cb) = (qa.coefficients(), qb.coefficients());
     let mut d = Vector2::ZERO;
@@ -108,7 +114,6 @@ fn one_to_one(qa: &Bernstein, qb: &Bernstein) -> bool {
 /// within [`LINEAR_RESOLUTION`] of a point: the box of the control points
 /// (rounded outward; positive weights keep the curve in their hull) has
 /// a diagonal no longer. The rule `nurbs` applies to a whole curve.
-#[cfg_attr(not(test), allow(dead_code))]
 fn point_like(w: &Bernstein, na: &Bernstein, nb: &Bernstein) -> bool {
     let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
     for ((x, y), wk) in na
@@ -127,11 +132,33 @@ fn point_like(w: &Bernstein, na: &Bernstein, nb: &Bernstein) -> bool {
     dx * dx + dy * dy <= LINEAR_RESOLUTION * LINEAR_RESOLUTION
 }
 
+/// Where a NURBS's image is cut: its folds, and the ends of stretches
+/// [`settle`] cut; `points` are the stretches whose image is a point.
+#[derive(Default)]
+struct Folds {
+    cuts: Vec<f64>,
+    points: Vec<[f64; 2]>,
+}
+
+/// One Bézier piece's image, as [`settle`] reads it: the weight, the
+/// numerators along the image's axes, and their hodographs' numerators.
+struct Hodograph {
+    w: Bernstein,
+    na: Bernstein,
+    nb: Bernstein,
+    qa: Bernstein,
+    qb: Bernstein,
+}
+
 /// The folds of `curve` over `(t0, t1)`: parameters where the image's
 /// derivative along `a` vanishes and along `b` isn't certified non-zero.
-fn folds(curve: &Curve, [t0, t1]: [f64; 2], a: Vector3, b: Vector3) -> Result<Vec<f64>, Failure> {
+/// A root along `a` that can't be resolved over more than [`STRETCH`]
+/// (the tangent nearly along the view, near a cusp of the image) is
+/// [`settle`]d: cut into stretches each one to one or a point. Elsewhere
+/// the folds are today's, so views that drew before are cut the same.
+fn folds(curve: &Curve, [t0, t1]: [f64; 2], a: Vector3, b: Vector3) -> Result<Folds, Failure> {
     let chain = Chain3::new(curve, t0, t1);
-    let mut out = Vec::new();
+    let mut out = Folds::default();
     for (i, piece) in chain.pieces.iter().enumerate() {
         let w = Bernstein::new(piece.pts.iter().map(|h| Interval::point(h.w)).collect());
         let num = |d: Vector3| {
@@ -143,28 +170,62 @@ fn folds(curve: &Curve, [t0, t1]: [f64; 2], a: Vector3, b: Vector3) -> Result<Ve
                     .collect(),
             )
         };
-        let hodograph = |n: Bernstein| n.deriv().mul(&w).sub(&n.mul(&w.deriv()));
-        let (qa, qb) = (hodograph(num(a)), hodograph(num(b)));
-        for r in qa.roots(FOLD_WIDTH) {
+        let hodograph = |n: &Bernstein| n.deriv().mul(&w).sub(&n.mul(&w.deriv()));
+        let (na, nb) = (num(a), num(b));
+        let (qa, qb) = (hodograph(&na), hodograph(&nb));
+        let h = Hodograph { w, na, nb, qa, qb };
+        for r in h.qa.roots(FOLD_WIDTH) {
             let [lo, hi] = r.range();
             let other = if hi > lo {
-                qb.part(lo, hi).range()
+                h.qb.part(lo, hi).range()
             } else {
-                qb.eval(lo)
+                h.qb.eval(lo)
             };
             if other.lo() > 0.0 || other.hi() < 0.0 {
                 continue;
             }
             if matches!(r, Root::Unresolved { .. }) && hi - lo > STRETCH {
-                return Err(Failure::Uncertain);
+                let mut parts = Vec::new();
+                settle(&h, lo, hi, &mut parts)?;
+                for (s, point) in parts {
+                    let at = [chain.param(i, s[0]), chain.param(i, s[1])];
+                    out.cuts.extend(at);
+                    if point {
+                        out.points.push(at);
+                    }
+                }
+                continue;
             }
-            out.push(chain.param(i, (lo + hi) / 2.0));
+            out.cuts.push(chain.param(i, (lo + hi) / 2.0));
         }
     }
-    out.retain(|&t| t > t0 && t < t1);
-    out.sort_by(f64::total_cmp);
-    out.dedup();
+    out.cuts.retain(|&t| t > t0 && t < t1);
+    out.cuts.sort_by(f64::total_cmp);
+    out.cuts.dedup();
     Ok(out)
+}
+
+/// The stretch `[lo, hi]` of a piece (local parameter) cut into parts
+/// each one to one ([`one_to_one`]) or a point ([`point_like`]), each
+/// with whether it is a point. A part neither, under [`STRETCH`] long,
+/// runs along the view and refuses, as before. Halving only nears the
+/// one or two cusp points in a stretch, so the parts are few: about two
+/// a level, at most 20 levels.
+fn settle(h: &Hodograph, lo: f64, hi: f64, out: &mut Vec<([f64; 2], bool)>) -> Result<(), Failure> {
+    if one_to_one(&h.qa.part(lo, hi), &h.qb.part(lo, hi)) {
+        out.push(([lo, hi], false));
+        return Ok(());
+    }
+    if point_like(&h.w.part(lo, hi), &h.na.part(lo, hi), &h.nb.part(lo, hi)) {
+        out.push(([lo, hi], true));
+        return Ok(());
+    }
+    if hi - lo < STRETCH {
+        return Err(Failure::Uncertain);
+    }
+    let mid = (lo + hi) / 2.0;
+    settle(h, lo, mid, out)?;
+    settle(h, mid, hi, out)
 }
 
 #[cfg(test)]
