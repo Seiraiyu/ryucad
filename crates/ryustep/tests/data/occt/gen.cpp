@@ -232,7 +232,11 @@ int main() {
     Interface_Static::SetCVal("write.step.unit", "MM");
     STEPCAFControl_Writer mw;
     mw.Transfer(doc, STEPControl_AsIs, "");
-    mw.Write("multi/assembly.stp");
+    // XDE writes the part files into the current folder, not beside the
+    // assembly, so it writes from inside multi/.
+    std::filesystem::current_path("multi");
+    mw.Write("assembly.stp");
+    std::filesystem::current_path("..");
   }
   material();
   return 0;
