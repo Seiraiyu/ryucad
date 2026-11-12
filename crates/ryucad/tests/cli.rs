@@ -8894,12 +8894,21 @@ fn a_motion_against_a_stop_from_the_cli_both_ways_with_undo() {
         "frame",
         "swing",
         "--drives",
-        r#"[{"mate": "m1", "angle": {"from": "0 deg", "to": "6 deg"}}]"#,
+        r#"[{"mate": "m1", "angle": {"from": "0 deg", "to": "10 deg"}}]"#,
         "--steps",
         "11",
     ]);
     assert_eq!(saved["warnings"][0]["code"], "motion_past_limit", "{saved}");
-    let swept = p.ok(&["assembly", "sweep", "frame", "swing"]);
+    // A sweep lifts its `motion_past_limit` warning into the envelope.
+    let (code, env) = p.both_from("", &["assembly", "sweep", "frame", "swing"]);
+    assert_eq!(code, 0, "{env}");
+    assert!(
+        env["warnings"][0]
+            .as_str()
+            .is_some_and(|w| w.contains("past its max stop")),
+        "{env}"
+    );
+    let swept = env["result"].clone();
     assert_eq!(swept["first_blocked"]["index"], 7, "{swept}");
     assert_eq!(swept["first_blocked"]["limit"]["at"], "max");
     let deg = swept["first_blocked"]["stop"]["values"]["m1"]["angle_deg"]
