@@ -9,6 +9,7 @@
 
 use ryu_doc::error::{Code, Error, Result};
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// What one product registers with Git.
@@ -230,7 +231,16 @@ pub fn install(here: &Path, local: bool, d: &Drivers, isolated: bool) -> Result<
     Ok(json!({"scope": "local", "config": config, "hooks": hooks}))
 }
 
-// HOOKS-BEGIN
+/// Every ryu product that writes a line in the shared hook: a line of
+/// someone's own hook whose program is one of them is that product's.
+pub const PRODUCTS: [&str; 2] = ["ryucad", "ryueda"];
+
+/// The line that marks the shared hook.
+const HEADER: &str = "# ryu: refuse a merge commit while a ryu project's merge is unresolved (`ryucad git install`, `ryueda git install`)";
+
+/// The line that marked ryucad's own hook before the shared one.
+const RYUCAD_HEADER: &str = "# ryucad: refuse a merge commit while a ryucad project's merge is unresolved (`ryucad git install`)";
+
 /// A clone's hook as it stands for one product.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Hook {
@@ -245,15 +255,163 @@ pub enum Hook {
     HooksPath(PathBuf),
 }
 
-fn hook(repo: &gix::Repository, name: &str, _: &str) -> Hook {
-    // Task 6 judges what is there.
-    Hook::Missing(repo.common_dir().join("hooks").join(name))
+/// Where Git looks for the clone's hooks, and whether that is
+/// `core.hooksPath` rather than the repository's own folder.
+fn hooks_dir(repo: &gix::Repository) -> (PathBuf, bool) {
+    let snapshot = repo.config_snapshot();
+    match snapshot.string("core.hooksPath") {
+        Some(p) => {
+            let p = PathBuf::from(p.to_string());
+            let base = repo.workdir().unwrap_or(repo.git_dir());
+            (if p.is_absolute() { p } else { base.join(p) }, true)
+        }
+        None => (repo.common_dir().join("hooks"), false),
+    }
 }
 
-fn install_hooks(_: &gix::Repository, _: &str) -> Result<Map<String, Value>> {
-    unimplemented!("Task 6")
+/// The product lines of a shared hook (or of ryucad's own, before it),
+/// product to the command naming its binary as the hook has it; `None`
+/// for a hook that is neither.
+fn managed(text: &str) -> Option<BTreeMap<String, String>> {
+    let lines: Vec<&str> = text.lines().collect();
+    let command = |l: &str| {
+        let l = l.trim();
+        let l = l.strip_prefix("exec ").unwrap_or(l);
+        let l = l.strip_suffix(" || exit 1").unwrap_or(l);
+        l.strip_suffix(&format!(" {HOOK_CHECK}")).map(str::to_owned)
+    };
+    if lines.contains(&HEADER) {
+        let mut out = BTreeMap::new();
+        for w in lines.windows(2) {
+            if let Some(p) = w[0].strip_prefix("# ")
+                && PRODUCTS.contains(&p)
+                && let Some(exe) = command(w[1])
+            {
+                out.insert(p.to_owned(), exe);
+            }
+        }
+        return Some(out);
+    }
+    if lines.contains(&RYUCAD_HEADER) {
+        let exe = lines.iter().find_map(|l| command(l));
+        return Some(exe.map(|e| ("ryucad".to_owned(), e)).into_iter().collect());
+    }
+    None
 }
-// HOOKS-END
+
+/// The program a hook line runs: its first word, unquoted, as a file
+/// name without `.exe`.
+fn program(line: &str) -> String {
+    let l = line.trim();
+    let l = l.strip_prefix("exec ").unwrap_or(l);
+    let word = match l.chars().next() {
+        Some(q @ ('\'' | '"')) => l[1..].split(q).next().unwrap_or_default(),
+        _ => l.split_whitespace().next().unwrap_or_default(),
+    };
+    let name = word.rsplit(['/', '\\']).next().unwrap_or_default();
+    name.strip_suffix(".exe").unwrap_or(name).to_owned()
+}
+
+/// Whether someone's own hook runs `product`'s check: a line running
+/// [`HOOK_CHECK`] whose program isn't another ryu product.
+fn runs_check(text: &str, product: &str) -> bool {
+    text.lines().any(|l| {
+        l.contains(HOOK_CHECK) && {
+            let p = program(l);
+            p == product || !PRODUCTS.contains(&p.as_str())
+        }
+    })
+}
+
+/// The hook `name` of `repo`, as it stands for `product`.
+fn hook(repo: &gix::Repository, name: &str, product: &str) -> Hook {
+    let (dir, shared) = hooks_dir(repo);
+    let path = dir.join(name);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match managed(&text) {
+            Some(lines) if lines.contains_key(product) => Hook::Installed(path),
+            Some(_) if shared => Hook::HooksPath(path),
+            Some(_) => Hook::Missing(path),
+            None if runs_check(&text, product) => Hook::Installed(path),
+            None if shared => Hook::HooksPath(path),
+            None => Hook::Foreign(path),
+        },
+        Err(_) if shared => Hook::HooksPath(path),
+        Err(_) => Hook::Missing(path),
+    }
+}
+
+/// The shared hook holding `lines` (product to its command), in name
+/// order: every line but the last stops the hook on failure, and the last
+/// is `exec`'d.
+fn script(lines: &BTreeMap<String, String>) -> String {
+    let mut out = format!("#!/bin/sh\n{HEADER}\n");
+    let n = lines.len();
+    for (i, (product, exe)) in lines.iter().enumerate() {
+        out.push_str(&format!("# {product}\n"));
+        if i + 1 == n {
+            out.push_str(&format!("exec {exe} {HOOK_CHECK}\n"));
+        } else {
+            out.push_str(&format!("{exe} {HOOK_CHECK} || exit 1\n"));
+        }
+    }
+    out
+}
+
+/// The shared hook a clone with no hook gets from `product`'s install.
+pub fn hook_script(product: &str) -> Result<String> {
+    Ok(script(
+        &[(product.to_owned(), exe(product)?)].into_iter().collect(),
+    ))
+}
+
+/// Writes a hook at `path`, executable.
+fn write_hook(path: &Path, text: &str) -> Result<()> {
+    ryu_doc::source::write_atomic(path, text)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| Error::io(path, &e))?;
+    }
+    Ok(())
+}
+
+/// Puts `product`'s line in each of the clone's [`HOOKS`]: the shared hook
+/// written or brought up to date (another product's lines kept, ryucad's
+/// old hook taken in), someone else's left alone with the line to add.
+fn install_hooks(repo: &gix::Repository, product: &str) -> Result<Map<String, Value>> {
+    let mut hooks = Map::new();
+    for name in HOOKS {
+        let v = match hook(repo, name, product) {
+            Hook::Installed(p) | Hook::Missing(p) => {
+                let text = std::fs::read_to_string(&p).ok();
+                // Only the shared hook (or none) is written: someone's own
+                // that runs the check stays as it is.
+                let ours = match text.as_deref() {
+                    None => Some(BTreeMap::new()),
+                    Some(t) => managed(t),
+                };
+                if let Some(mut lines) = ours {
+                    lines.insert(product.to_owned(), exe(product)?);
+                    let new = script(&lines);
+                    if text.as_deref() != Some(new.as_str()) {
+                        write_hook(&p, &new)?;
+                    }
+                }
+                json!({"path": p, "status": "installed"})
+            }
+            Hook::Foreign(p) => {
+                json!({"path": p, "status": "foreign", "line": hook_line(product)?})
+            }
+            Hook::HooksPath(p) => {
+                json!({"path": p, "status": "hooks_path", "line": hook_line(product)?})
+            }
+        };
+        hooks.insert(name.to_owned(), v);
+    }
+    Ok(hooks)
+}
 
 #[cfg(test)]
 mod tests {
@@ -323,5 +481,147 @@ mod tests {
                 .unwrap()
                 .contains("renames = false")
         );
+    }
+
+    fn hook_at(r: &Path) -> PathBuf {
+        r.join(".git/hooks/pre-merge-commit")
+    }
+
+    fn cad() -> Drivers {
+        Drivers {
+            product: "ryucad",
+            textconv: "diff.ryucad.textconv",
+            merge: None,
+            hook: true,
+        }
+    }
+
+    fn eda() -> Drivers {
+        Drivers {
+            product: "ryueda",
+            textconv: "diff.ryueda.textconv",
+            merge: None,
+            hook: true,
+        }
+    }
+
+    #[test]
+    fn one_hook_holds_every_products_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        git(r, &["init", "-q"]);
+        let (cad, eda) = (cad(), eda());
+        install(r, true, &cad, true).unwrap();
+        let one = std::fs::read_to_string(hook_at(r)).unwrap();
+        assert_eq!(one, hook_script("ryucad").unwrap());
+        assert!(
+            one.starts_with(&format!("#!/bin/sh\n{HEADER}\n# ryucad\nexec '")),
+            "{one}"
+        );
+        assert!(one.ends_with("' merge status --hook\n"), "{one}");
+        assert!(matches!(
+            setup(r, &eda, true).unwrap().hooks[0].1,
+            Hook::Missing(_)
+        ));
+        install(r, true, &eda, true).unwrap();
+        let both = std::fs::read_to_string(hook_at(r)).unwrap();
+        let lines: Vec<&str> = both.lines().collect();
+        assert_eq!(lines[2], "# ryucad");
+        assert!(
+            lines[3].ends_with("' merge status --hook || exit 1"),
+            "{both}"
+        );
+        assert_eq!(lines[4], "# ryueda");
+        assert!(
+            lines[5].starts_with("exec '") && lines[5].ends_with("' merge status --hook"),
+            "{both}"
+        );
+        for d in [&cad, &eda] {
+            assert!(matches!(
+                setup(r, d, true).unwrap().hooks[0].1,
+                Hook::Installed(_)
+            ));
+        }
+        // Installing again changes nothing.
+        install(r, true, &cad, true).unwrap();
+        assert_eq!(std::fs::read_to_string(hook_at(r)).unwrap(), both);
+    }
+
+    #[test]
+    fn ryucads_own_hook_is_rewritten_into_the_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        git(r, &["init", "-q"]);
+        std::fs::create_dir_all(r.join(".git/hooks")).unwrap();
+        let old = format!("#!/bin/sh\n{RYUCAD_HEADER}\nexec '/opt/ryucad' merge status --hook\n");
+        std::fs::write(hook_at(r), &old).unwrap();
+        let (cad, eda) = (cad(), eda());
+        assert!(matches!(
+            setup(r, &cad, true).unwrap().hooks[0].1,
+            Hook::Installed(_)
+        ));
+        assert!(matches!(
+            setup(r, &eda, true).unwrap().hooks[0].1,
+            Hook::Missing(_)
+        ));
+        install(r, true, &eda, true).unwrap();
+        let text = std::fs::read_to_string(hook_at(r)).unwrap();
+        assert!(
+            text.contains(
+                "# ryucad\n'/opt/ryucad' merge status --hook || exit 1\n# ryueda\nexec '"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn someone_elses_hook_and_hooks_path_are_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        git(r, &["init", "-q"]);
+        std::fs::create_dir_all(r.join(".git/hooks")).unwrap();
+        let (cad, eda) = (cad(), eda());
+        std::fs::write(hook_at(r), "#!/bin/sh\necho mine\n").unwrap();
+        let out = install(r, true, &cad, true).unwrap();
+        assert_eq!(out["hooks"]["pre-merge-commit"]["status"], "foreign");
+        assert_eq!(
+            std::fs::read_to_string(hook_at(r)).unwrap(),
+            "#!/bin/sh\necho mine\n"
+        );
+        // A line of someone's own that runs a check counts for that product
+        // only: a bare check counts as ryucad's, as it always did.
+        std::fs::write(
+            hook_at(r),
+            "#!/bin/sh\n\"$HOME/.ryueda/bin/ryueda\" merge status --hook || exit 1\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            setup(r, &eda, true).unwrap().hooks[0].1,
+            Hook::Installed(_)
+        ));
+        assert!(matches!(
+            setup(r, &cad, true).unwrap().hooks[0].1,
+            Hook::Foreign(_)
+        ));
+        std::fs::write(hook_at(r), "#!/bin/sh\nmytool merge status --hook\n").unwrap();
+        assert!(matches!(
+            setup(r, &cad, true).unwrap().hooks[0].1,
+            Hook::Installed(_)
+        ));
+        git(r, &["config", "core.hooksPath", "githooks"]);
+        assert_eq!(
+            setup(r, &cad, true).unwrap().hooks[0].1,
+            Hook::HooksPath(r.join("githooks/pre-merge-commit"))
+        );
+    }
+
+    #[test]
+    fn a_hook_lines_program() {
+        assert_eq!(program("exec '/a b/ryucad' merge status --hook"), "ryucad");
+        assert_eq!(
+            program("\"C:\\x\\ryueda.exe\" merge status --hook"),
+            "ryueda"
+        );
+        assert_eq!(program("  mytool merge status --hook"), "mytool");
     }
 }
