@@ -1384,8 +1384,11 @@ fn import_tree(
             (Some(p), None) => {
                 let pid = crate::server::part_id(p)?;
                 if project.parts.contains_key(&pid) {
-                    return Err(Error::new(Code::DuplicateId, format!("part {pid} already exists"))
-                        .with("part", &pid));
+                    return Err(Error::new(
+                        Code::DuplicateId,
+                        format!("part {pid} already exists"),
+                    )
+                    .with("part", &pid));
                 }
                 crate::pdm::check_not_retired(&root, &pid)?;
                 Some(pid)
@@ -1394,7 +1397,8 @@ fn import_tree(
         };
         let taken = |s: &str| {
             Id::parse(s, "part").is_ok_and(|id| {
-                project.parts.contains_key(&id) || crate::pdm::check_not_retired(&root, &id).is_err()
+                project.parts.contains_key(&id)
+                    || crate::pdm::check_not_retired(&root, &id).is_err()
             })
         };
         let mut planner = external::Planner::new(
@@ -1454,13 +1458,19 @@ fn import_tree(
                     kept.push(json!({"part": p, "feature": f}));
                 }
                 for (r, parts) in &u.vanished {
-                    vanished.push(json!({"file": g.path, "product": product_json(r), "parts": parts}));
+                    vanished
+                        .push(json!({"file": g.path, "product": product_json(r), "parts": parts}));
                 }
             }
             warnings.extend(applied.warnings.iter().cloned());
             interpreted[g.node].extend(applied.instances.iter().copied());
         }
-        let all = external::merge(groups.iter().flat_map(|g| g.planned.iter().cloned()).collect());
+        let all = external::merge(
+            groups
+                .iter()
+                .flat_map(|g| g.planned.iter().cloned())
+                .collect(),
+        );
         let mut writes = plan::writes(project, &all)?;
         for g in &groups {
             let node = &tree.nodes[g.node];
@@ -1472,7 +1482,10 @@ fn import_tree(
     };
     let opened0 = &tree.nodes[0].opened;
     let g0 = &groups[0];
-    let all: Vec<Planned> = groups.iter().flat_map(|g| g.planned.iter().cloned()).collect();
+    let all: Vec<Planned> = groups
+        .iter()
+        .flat_map(|g| g.planned.iter().cloned())
+        .collect();
     let mut head = json!({"path": g0.path, "blake3": tree.nodes[0].file.blake3,
                           "schema": schema_name(opened0.schema)});
     match &g0.from {
@@ -1518,7 +1531,11 @@ fn import_tree(
     if ask.dry_run {
         let mut s = session.proposed(&writes)?;
         let (parts, transfer, listed) = tree_report(&mut s, tree, &groups, &interpreted)?;
-        return Ok(extra(answer(head, opened0, parts, warnings, true, transfer), listed, None));
+        return Ok(extra(
+            answer(head, opened0, parts, warnings, true, transfer),
+            listed,
+            None,
+        ));
     }
     // Assemblies kept current until now stay so (an update).
     let mut current = Vec::new();
@@ -1545,7 +1562,11 @@ fn import_tree(
         None => None,
     };
     let (parts, transfer, listed) = tree_report(session, tree, &groups, &interpreted)?;
-    Ok(extra(answer(head, opened0, parts, warnings, false, transfer), listed, assemblies))
+    Ok(extra(
+        answer(head, opened0, parts, warnings, false, transfer),
+        listed,
+        assemblies,
+    ))
 }
 
 /// A refusal once the file is read gains the file's transfer report,
@@ -2839,13 +2860,26 @@ pub(crate) mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|m| (m["file"].as_str().unwrap(), &m["products"], m["reason"].as_str().unwrap()))
+            .map(|m| {
+                (
+                    m["file"].as_str().unwrap(),
+                    &m["products"],
+                    m["reason"].as_str().unwrap(),
+                )
+            })
             .collect();
         assert_eq!(
             files,
-            [("bracket.stp", &json!(["P1"]), "not_found"), ("parts/plate.stp", &json!(["P2"]), "not_found")]
+            [
+                ("bracket.stp", &json!(["P1"]), "not_found"),
+                ("parts/plate.stp", &json!(["P2"]), "not_found")
+            ]
         );
-        assert!(e.message.contains("bracket.stp") && e.message.contains("parts/plate.stp"), "{}", e.message);
+        assert!(
+            e.message.contains("bracket.stp") && e.message.contains("parts/plate.stp"),
+            "{}",
+            e.message
+        );
         let docs = e.details["transfer"]["categories"]
             .as_array()
             .unwrap()
@@ -2854,7 +2888,11 @@ pub(crate) mod tests {
             .unwrap()
             .clone();
         assert!(docs["retained"]["count"].as_u64().unwrap() > 0, "{docs}");
-        assert_eq!(crate::session::files(dir.path()).unwrap(), before, "nothing written");
+        assert_eq!(
+            crate::session::files(dir.path()).unwrap(),
+            before,
+            "nothing written"
+        );
     }
 
     /// An assembly of a sub-assembly file of part files: an assembly per
@@ -2862,8 +2900,20 @@ pub(crate) mod tests {
     #[test]
     fn a_nested_external_assembly_imports_file_by_file() {
         let d = folder(&[
-            ("top.stp", external_assembly("TOP", &[("SUB", "sub/sub.stp", [0.0; 3]), ("SUB", "sub/sub.stp", [0.0, 40.0, 0.0])])),
-            ("sub/sub.stp", external_assembly("SUB", &[("PIN", "pin.stp", [5.0, 0.0, 0.0])])),
+            (
+                "top.stp",
+                external_assembly(
+                    "TOP",
+                    &[
+                        ("SUB", "sub/sub.stp", [0.0; 3]),
+                        ("SUB", "sub/sub.stp", [0.0, 40.0, 0.0]),
+                    ],
+                ),
+            ),
+            (
+                "sub/sub.stp",
+                external_assembly("SUB", &[("PIN", "pin.stp", [5.0, 0.0, 0.0])]),
+            ),
             ("sub/pin.stp", part_file("PIN", 2.0)),
         ]);
         let (_dir, mut s) = crate::server::tests::fresh();
@@ -2874,12 +2924,24 @@ pub(crate) mod tests {
             .iter()
             .map(|p| (p["part"].as_str().unwrap(), p["kind"].as_str().unwrap()))
             .collect();
-        assert_eq!(parts, [("top", "assembly"), ("sub", "assembly"), ("pin", "part")]);
-        let m = s.model(&Id::parse("top", "part").unwrap(), &crate::doc::assembly::Rev::Working).unwrap();
+        assert_eq!(
+            parts,
+            [("top", "assembly"), ("sub", "assembly"), ("pin", "part")]
+        );
+        let m = s
+            .model(
+                &Id::parse("top", "part").unwrap(),
+                &crate::doc::assembly::Rev::Working,
+            )
+            .unwrap();
         let pins = m.occurrences.iter().filter(|o| o.path.len() == 2).count();
         assert_eq!(pins, 2, "one pin in each sub-assembly");
         let sub = listed(_dir.path(), "sub");
-        assert!(sub.iter().all(|(_, f)| f["import"]["file"] == "imports/sub.step"), "{sub:?}");
+        assert!(
+            sub.iter()
+                .all(|(_, f)| f["import"]["file"] == "imports/sub.step"),
+            "{sub:?}"
+        );
     }
 
     /// --part names the first file's root; into and product don't take
@@ -2890,7 +2952,11 @@ pub(crate) mod tests {
         let v = import_call(&mut s, json!({"path": set_path("asm.stp"), "part": "rig"})).unwrap();
         assert_eq!(v["parts"][0]["part"], "rig");
         crate::server::tests::call(&mut s, "part.create", json!({"part": "holder"})).unwrap();
-        let e = import_call(&mut s, json!({"path": set_path("asm.stp"), "into": "holder"})).unwrap_err();
+        let e = import_call(
+            &mut s,
+            json!({"path": set_path("asm.stp"), "into": "holder"}),
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::Usage);
     }
 
@@ -2899,13 +2965,27 @@ pub(crate) mod tests {
     #[test]
     fn files_of_one_stem_are_stored_apart() {
         let d = folder(&[
-            ("asm.stp", external_assembly("ASM", &[("A", "a/part.stp", [0.0; 3]), ("B", "b/part.stp", [20.0, 0.0, 0.0])])),
+            (
+                "asm.stp",
+                external_assembly(
+                    "ASM",
+                    &[
+                        ("A", "a/part.stp", [0.0; 3]),
+                        ("B", "b/part.stp", [20.0, 0.0, 0.0]),
+                    ],
+                ),
+            ),
             ("a/part.stp", part_file("A", 2.0)),
             ("b/part.stp", part_file("B", 3.0)),
         ]);
         let (_dir, mut s) = crate::server::tests::fresh();
         let v = import_call(&mut s, json!({"path": d.path().join("asm.stp")})).unwrap();
-        let paths: Vec<&str> = v["external"].as_array().unwrap().iter().map(|x| x["path"].as_str().unwrap()).collect();
+        let paths: Vec<&str> = v["external"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["path"].as_str().unwrap())
+            .collect();
         assert_eq!(paths, ["imports/part.step", "imports/part-2.step"]);
     }
 
@@ -3369,26 +3449,68 @@ pub(crate) mod tests {
         s.push_str("#21=PRODUCT_DEFINITION_FORMATION('','',#20);\n");
         s.push_str("#22=PRODUCT_DEFINITION('design','',#21,#4);\n");
         s.push_str("#23=PRODUCT_DEFINITION_SHAPE('','',#22);\n");
-        writeln!(s, "#24=SHAPE_REPRESENTATION('',(#13,{}),#5);", targets.join(",")).unwrap();
+        writeln!(
+            s,
+            "#24=SHAPE_REPRESENTATION('',(#13,{}),#5);",
+            targets.join(",")
+        )
+        .unwrap();
         s.push_str("#25=SHAPE_DEFINITION_REPRESENTATION(#23,#24);\n");
         for (i, (id, file)) in products.iter().enumerate() {
             let b = 200 + 20 * i;
             writeln!(s, "#{b}=PRODUCT('{id}','{id}','',(#3));").unwrap();
             writeln!(s, "#{}=PRODUCT_DEFINITION_FORMATION('','',#{b});", b + 1).unwrap();
-            writeln!(s, "#{}=PRODUCT_DEFINITION('design','',#{},#4);", b + 2, b + 1).unwrap();
+            writeln!(
+                s,
+                "#{}=PRODUCT_DEFINITION('design','',#{},#4);",
+                b + 2,
+                b + 1
+            )
+            .unwrap();
             writeln!(s, "#{}=PRODUCT_DEFINITION_SHAPE('','',#{});", b + 3, b + 2).unwrap();
             writeln!(s, "#{}=SHAPE_REPRESENTATION('',(#13),#5);", b + 4).unwrap();
-            writeln!(s, "#{}=SHAPE_DEFINITION_REPRESENTATION(#{},#{});", b + 5, b + 3, b + 4).unwrap();
-            writeln!(s, "#{}=DOCUMENT_FILE('{file}','',$,#{},'',$);", b + 6, b + 7).unwrap();
+            writeln!(
+                s,
+                "#{}=SHAPE_DEFINITION_REPRESENTATION(#{},#{});",
+                b + 5,
+                b + 3,
+                b + 4
+            )
+            .unwrap();
+            writeln!(
+                s,
+                "#{}=DOCUMENT_FILE('{file}','',$,#{},'',$);",
+                b + 6,
+                b + 7
+            )
+            .unwrap();
             writeln!(s, "#{}=DOCUMENT_TYPE('');", b + 7).unwrap();
-            writeln!(s, "#{}=DOCUMENT_REPRESENTATION_TYPE('digital',#{});", b + 8, b + 6).unwrap();
-            writeln!(s, "#{}=APPLIED_DOCUMENT_REFERENCE(#{},'',(#{}));", b + 9, b + 6, b + 2).unwrap();
+            writeln!(
+                s,
+                "#{}=DOCUMENT_REPRESENTATION_TYPE('digital',#{});",
+                b + 8,
+                b + 6
+            )
+            .unwrap();
+            writeln!(
+                s,
+                "#{}=APPLIED_DOCUMENT_REFERENCE(#{},'',(#{}));",
+                b + 9,
+                b + 6,
+                b + 2
+            )
+            .unwrap();
         }
         for (j, &(id, _, at)) in uses.iter().enumerate() {
             let u = 1000 + 10 * j;
             let i = products.iter().position(|(p, _)| *p == id).unwrap();
             let (pd, rep) = (200 + 20 * i + 2, 200 + 20 * i + 4);
-            writeln!(s, "#{u}=CARTESIAN_POINT('',({:?},{:?},{:?}));", at[0], at[1], at[2]).unwrap();
+            writeln!(
+                s,
+                "#{u}=CARTESIAN_POINT('',({:?},{:?},{:?}));",
+                at[0], at[1], at[2]
+            )
+            .unwrap();
             writeln!(s, "#{}=AXIS2_PLACEMENT_3D('',#{u},#11,#12);", u + 1).unwrap();
             writeln!(
                 s,
@@ -3398,7 +3520,13 @@ pub(crate) mod tests {
             )
             .unwrap();
             writeln!(s, "#{}=PRODUCT_DEFINITION_SHAPE('','',#{});", u + 3, u + 2).unwrap();
-            writeln!(s, "#{}=ITEM_DEFINED_TRANSFORMATION('','',#13,#{});", u + 4, u + 1).unwrap();
+            writeln!(
+                s,
+                "#{}=ITEM_DEFINED_TRANSFORMATION('','',#13,#{});",
+                u + 4,
+                u + 1
+            )
+            .unwrap();
             writeln!(
                 s,
                 "#{}=(REPRESENTATION_RELATIONSHIP('','',#{rep},#24)REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#{})SHAPE_REPRESENTATION_RELATIONSHIP());",
@@ -3406,7 +3534,14 @@ pub(crate) mod tests {
                 u + 4
             )
             .unwrap();
-            writeln!(s, "#{}=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#{},#{});", u + 6, u + 5, u + 3).unwrap();
+            writeln!(
+                s,
+                "#{}=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#{},#{});",
+                u + 6,
+                u + 5,
+                u + 3
+            )
+            .unwrap();
         }
         s.push_str("ENDSEC;\nEND-ISO-10303-21;\n");
         s.into_bytes()
@@ -3466,18 +3601,36 @@ pub(crate) mod tests {
                 .definitions
                 .iter()
                 .filter(|d| !d.external.is_empty())
-                .map(|d| (d.product_id.to_string(), d.external[0].name.clone(), d.externally_defined()))
+                .map(|d| {
+                    (
+                        d.product_id.to_string(),
+                        d.external[0].name.clone(),
+                        d.externally_defined(),
+                    )
+                })
                 .collect()
         };
-        let made = external_assembly("ASM", &[("BOX", "box.stp", [0.0; 3]), ("PIN", "pin.stp", [50.0, 0.0, 0.0])]);
+        let made = external_assembly(
+            "ASM",
+            &[
+                ("BOX", "box.stp", [0.0; 3]),
+                ("PIN", "pin.stp", [50.0, 0.0, 0.0]),
+            ],
+        );
         assert_eq!(
             docs(made),
-            [("BOX".into(), "box.stp".into(), true), ("PIN".into(), "pin.stp".into(), true)]
+            [
+                ("BOX".into(), "box.stp".into(), true),
+                ("PIN".into(), "pin.stp".into(), true)
+            ]
         );
         let set = std::fs::read(set_path("asm.stp")).unwrap();
         assert_eq!(
             docs(set),
-            [("BOX".into(), "box.stp".into(), true), ("PIN".into(), "cylinder.stp".into(), true)]
+            [
+                ("BOX".into(), "box.stp".into(), true),
+                ("PIN".into(), "cylinder.stp".into(), true)
+            ]
         );
         let p = ryustep::open(&part_file("BOX", 10.0)).unwrap();
         assert_eq!(p.products.roots.len(), 1);
@@ -3487,7 +3640,10 @@ pub(crate) mod tests {
     /// An import feature of `imports/<name>.step`, body 0, no product.
     pub(crate) fn import_of(name: &str) -> Import {
         Import {
-            file: FileRef { path: format!("imports/{name}.step"), blake3: "0".repeat(64) },
+            file: FileRef {
+                path: format!("imports/{name}.step"),
+                blake3: "0".repeat(64),
+            },
             product: None,
             body: 0,
             mode: None,
@@ -3510,9 +3666,17 @@ pub(crate) mod tests {
             .iter()
             .map(|p| (p["part"].as_str().unwrap(), p["kind"].as_str().unwrap()))
             .collect();
-        assert_eq!(parts, [("asm", "assembly"), ("box", "part"), ("pin", "part")]);
+        assert_eq!(
+            parts,
+            [("asm", "assembly"), ("box", "part"), ("pin", "part")]
+        );
         let asm = &v["parts"][0]["features"];
-        let of: Vec<&str> = asm.as_array().unwrap().iter().map(|f| f["of"].as_str().unwrap()).collect();
+        let of: Vec<&str> = asm
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["of"].as_str().unwrap())
+            .collect();
         assert_eq!(of, ["box", "pin", "pin"]);
         let ext: Vec<(&str, &Value)> = v["external"]
             .as_array()
@@ -3522,7 +3686,10 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             ext,
-            [("imports/box.step", &json!(["box.stp"])), ("imports/cylinder.step", &json!(["cylinder.stp"]))]
+            [
+                ("imports/box.step", &json!(["box.stp"])),
+                ("imports/cylinder.step", &json!(["cylinder.stp"]))
+            ]
         );
         for x in v["external"].as_array().unwrap() {
             assert_eq!(x["stored"], true);
@@ -3539,12 +3706,24 @@ pub(crate) mod tests {
         assert_eq!(refs["interpreted"]["count"], 16, "{refs}");
         assert_eq!(refs["retained"]["count"], 0, "{refs}");
         for f in ["asm", "box", "cylinder"] {
-            assert!(dir.path().join(format!("imports/{f}.step")).is_file(), "{f}");
+            assert!(
+                dir.path().join(format!("imports/{f}.step")).is_file(),
+                "{f}"
+            );
         }
         // Every part builds, and the assembly places the pin twice.
         let r = crate::server::tests::call(&mut s, "rebuild", json!({"part": "asm"})).unwrap();
-        assert!(r.get("warnings").is_none_or(|w| w.as_array().unwrap().is_empty()), "{r}");
-        let m = s.model(&Id::parse("asm", "part").unwrap(), &crate::doc::assembly::Rev::Working).unwrap();
+        assert!(
+            r.get("warnings")
+                .is_none_or(|w| w.as_array().unwrap().is_empty()),
+            "{r}"
+        );
+        let m = s
+            .model(
+                &Id::parse("asm", "part").unwrap(),
+                &crate::doc::assembly::Rev::Working,
+            )
+            .unwrap();
         assert_eq!(m.occurrences.len(), 3);
     }
 
@@ -3552,7 +3731,11 @@ pub(crate) mod tests {
     fn a_dry_run_across_files_writes_nothing() {
         let (dir, mut s) = crate::server::tests::fresh();
         let before = crate::session::files(dir.path()).unwrap();
-        let v = import_call(&mut s, json!({"path": set_path("asm.stp"), "dry_run": true})).unwrap();
+        let v = import_call(
+            &mut s,
+            json!({"path": set_path("asm.stp"), "dry_run": true}),
+        )
+        .unwrap();
         assert_eq!(v["dry_run"], true);
         assert_eq!(v["external"].as_array().unwrap().len(), 2);
         assert_eq!(crate::session::files(dir.path()).unwrap(), before);
@@ -3564,7 +3747,13 @@ pub(crate) mod tests {
         import_call(&mut s, json!({"path": set_path("asm.stp")})).unwrap();
         let v = import_call(&mut s, json!({"path": set_path("asm.stp")})).unwrap();
         assert_eq!(v["file"]["reused"], true);
-        assert!(v["external"].as_array().unwrap().iter().all(|x| x["reused"] == true));
+        assert!(
+            v["external"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|x| x["reused"] == true)
+        );
         assert_eq!(v["parts"][0]["part"], "asm-2");
     }
 
@@ -3576,10 +3765,19 @@ pub(crate) mod tests {
         let (dir, mut s) = crate::server::tests::fresh();
         import_call(&mut s, json!({"path": set_path("asm.stp")})).unwrap();
         let asm = Id::parse("asm", "part").unwrap();
-        assert_eq!(update::usage_warnings(s.project(), &asm), Vec::<Value>::new());
+        assert_eq!(
+            update::usage_warnings(s.project(), &asm),
+            Vec::<Value>::new()
+        );
         assert!(misplaced(s.project()).is_empty());
-        let w = update_in_place(dir.path(), "imports/asm.step").unwrap().unwrap();
-        assert!(w.values().all(Option::is_some), "{:?}", w.keys().collect::<Vec<_>>());
+        let w = update_in_place(dir.path(), "imports/asm.step")
+            .unwrap()
+            .unwrap();
+        assert!(
+            w.values().all(Option::is_some),
+            "{:?}",
+            w.keys().collect::<Vec<_>>()
+        );
         assert!(
             !w.keys().any(|k| k.starts_with("parts/asm/features/")),
             "the instances stay as they are: {:?}",
@@ -3593,22 +3791,55 @@ pub(crate) mod tests {
     #[test]
     fn a_set_flattens_to_one_part_whose_features_name_their_files() {
         let (dir, mut s) = crate::server::tests::fresh();
-        let v = import_call(&mut s, json!({"path": set_path("asm.stp"), "flatten": true, "part": "rig"})).unwrap();
+        let v = import_call(
+            &mut s,
+            json!({"path": set_path("asm.stp"), "flatten": true, "part": "rig"}),
+        )
+        .unwrap();
         assert_eq!(v["parts"].as_array().unwrap().len(), 1);
         assert_eq!(v["file"]["stored"], false);
         let l = listed(dir.path(), "rig");
-        let files: Vec<&str> = l.iter().map(|(_, f)| f["file"]["path"].as_str().unwrap()).collect();
-        assert_eq!(files, ["imports/box.step", "imports/cylinder.step", "imports/cylinder.step"]);
-        assert!(l.iter().all(|(_, f)| f["place"]["via"].as_array().unwrap().len() == 1));
+        let files: Vec<&str> = l
+            .iter()
+            .map(|(_, f)| f["file"]["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            files,
+            [
+                "imports/box.step",
+                "imports/cylinder.step",
+                "imports/cylinder.step"
+            ]
+        );
+        assert!(
+            l.iter()
+                .all(|(_, f)| f["place"]["via"].as_array().unwrap().len() == 1)
+        );
         assert!(!dir.path().join("imports/asm.step").exists());
         let r = crate::server::tests::call(&mut s, "rebuild", json!({"part": "rig"})).unwrap();
-        assert!(r["parts"][0]["solids"].as_array().unwrap().iter().all(|x| x["ok"] == true), "{r}");
+        assert!(
+            r["parts"][0]["solids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|x| x["ok"] == true),
+            "{r}"
+        );
     }
 
     /// The first version: BOX (10 mm) at the origin and PIN at 50 mm.
     fn version_one() -> tempfile::TempDir {
         folder(&[
-            ("asm.stp", external_assembly("ASM", &[("BOX", "box.stp", [0.0; 3]), ("PIN", "pin.stp", [50.0, 0.0, 0.0])])),
+            (
+                "asm.stp",
+                external_assembly(
+                    "ASM",
+                    &[
+                        ("BOX", "box.stp", [0.0; 3]),
+                        ("PIN", "pin.stp", [50.0, 0.0, 0.0]),
+                    ],
+                ),
+            ),
             ("box.stp", part_file("BOX", 10.0)),
             ("pin.stp", part_file("PIN", 2.0)),
         ])
@@ -3625,16 +3856,26 @@ pub(crate) mod tests {
         import_call(&mut s, json!({"path": one.path().join("asm.stp")})).unwrap();
         let pin_before = std::fs::read(dir.path().join("imports/pin.step")).unwrap();
         let two = folder(&[
-            ("asm.stp", external_assembly("ASM", &[
-                ("BOX", "box.stp", [0.0; 3]),
-                ("PIN", "pin.stp", [60.0, 0.0, 0.0]),
-                ("NUT", "nut.stp", [0.0, 30.0, 0.0]),
-            ])),
+            (
+                "asm.stp",
+                external_assembly(
+                    "ASM",
+                    &[
+                        ("BOX", "box.stp", [0.0; 3]),
+                        ("PIN", "pin.stp", [60.0, 0.0, 0.0]),
+                        ("NUT", "nut.stp", [0.0, 30.0, 0.0]),
+                    ],
+                ),
+            ),
             ("box.stp", part_file("BOX", 12.0)),
             ("pin.stp", part_file("PIN", 2.0)),
             ("nut.stp", part_file("NUT", 4.0)),
         ]);
-        let v = import_call(&mut s, json!({"path": two.path().join("asm.stp"), "update": "imports/asm.step"})).unwrap();
+        let v = import_call(
+            &mut s,
+            json!({"path": two.path().join("asm.stp"), "update": "imports/asm.step"}),
+        )
+        .unwrap();
         assert_eq!(v["update"], true);
         let ext: Vec<(&str, bool)> = v["external"]
             .as_array()
@@ -3642,12 +3883,25 @@ pub(crate) mod tests {
             .iter()
             .map(|x| (x["path"].as_str().unwrap(), x.get("from").is_some()))
             .collect();
-        assert_eq!(ext, [("imports/box.step", true), ("imports/nut.step", false)]);
+        assert_eq!(
+            ext,
+            [("imports/box.step", true), ("imports/nut.step", false)]
+        );
         let new_box = ImportFile::new(part_file("BOX", 12.0)).blake3;
-        assert!(listed(dir.path(), "box").iter().all(|(_, f)| f["file"]["blake3"] == new_box.as_str()));
-        assert_eq!(std::fs::read(dir.path().join("imports/pin.step")).unwrap(), pin_before);
+        assert!(
+            listed(dir.path(), "box")
+                .iter()
+                .all(|(_, f)| f["file"]["blake3"] == new_box.as_str())
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("imports/pin.step")).unwrap(),
+            pin_before
+        );
         let asm = listed(dir.path(), "asm");
-        let of: Vec<&str> = asm.iter().map(|(_, f)| f["part"].as_str().unwrap()).collect();
+        let of: Vec<&str> = asm
+            .iter()
+            .map(|(_, f)| f["part"].as_str().unwrap())
+            .collect();
         assert_eq!(of, ["box", "pin", "nut"]);
         let x = asm[1].1["pose"]["origin_m"][0].as_f64().unwrap();
         assert!((x - 0.06).abs() < 1e-12, "the pin moved: {x}");
@@ -3662,9 +3916,17 @@ pub(crate) mod tests {
         import_call(&mut s, json!({"path": one.path().join("asm.stp")})).unwrap();
         let asm_before = listed(dir.path(), "asm");
         let three = folder(&[("box.stp", part_file("BOX", 14.0))]);
-        import_call(&mut s, json!({"path": three.path().join("box.stp"), "update": "imports/box.step"})).unwrap();
+        import_call(
+            &mut s,
+            json!({"path": three.path().join("box.stp"), "update": "imports/box.step"}),
+        )
+        .unwrap();
         let new_box = ImportFile::new(part_file("BOX", 14.0)).blake3;
-        assert!(listed(dir.path(), "box").iter().all(|(_, f)| f["file"]["blake3"] == new_box.as_str()));
+        assert!(
+            listed(dir.path(), "box")
+                .iter()
+                .all(|(_, f)| f["file"]["blake3"] == new_box.as_str())
+        );
         assert_eq!(listed(dir.path(), "asm"), asm_before);
     }
 
@@ -3676,8 +3938,15 @@ pub(crate) mod tests {
         let (dir, mut s) = crate::server::tests::fresh();
         import_call(&mut s, json!({"path": one.path().join("asm.stp")})).unwrap();
         let before = crate::session::files(dir.path()).unwrap();
-        let two = folder(&[("asm.stp", external_assembly("ASM", &[("BOX", "box.stp", [0.0; 3])]))]);
-        let e = import_call(&mut s, json!({"path": two.path().join("asm.stp"), "update": "imports/asm.step"})).unwrap_err();
+        let two = folder(&[(
+            "asm.stp",
+            external_assembly("ASM", &[("BOX", "box.stp", [0.0; 3])]),
+        )]);
+        let e = import_call(
+            &mut s,
+            json!({"path": two.path().join("asm.stp"), "update": "imports/asm.step"}),
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::ImportExternalMissing);
         assert_eq!(crate::session::files(dir.path()).unwrap(), before);
     }
@@ -3690,12 +3959,24 @@ pub(crate) mod tests {
     fn a_part_flattened_across_files_refuses_updates() {
         let one = version_one();
         let (dir, mut s) = crate::server::tests::fresh();
-        import_call(&mut s, json!({"path": one.path().join("asm.stp"), "flatten": true, "part": "rig"})).unwrap();
+        import_call(
+            &mut s,
+            json!({"path": one.path().join("asm.stp"), "flatten": true, "part": "rig"}),
+        )
+        .unwrap();
         let three = folder(&[("box.stp", part_file("BOX", 14.0))]);
-        let e = import_call(&mut s, json!({"path": three.path().join("box.stp"), "update": "imports/box.step"})).unwrap_err();
+        let e = import_call(
+            &mut s,
+            json!({"path": three.path().join("box.stp"), "update": "imports/box.step"}),
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::Usage);
         assert_eq!(e.details["part"], "rig");
-        assert!(update_in_place(dir.path(), "imports/box.step").unwrap().is_none());
+        assert!(
+            update_in_place(dir.path(), "imports/box.step")
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// OCCT's multi-file assembly imports as its one-file twin does: the
@@ -3716,7 +3997,10 @@ pub(crate) mod tests {
             p.sort();
             p
         };
-        assert_eq!(poses(occt_path("multi/assembly.stp")), poses(occt_path("assembly.stp")));
+        assert_eq!(
+            poses(occt_path("multi/assembly.stp")),
+            poses(occt_path("assembly.stp"))
+        );
     }
 
     /// A frame (`F-1`) with a plate of its own, a sub-assembly (`S-1`) of

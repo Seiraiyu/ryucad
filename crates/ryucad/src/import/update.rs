@@ -926,7 +926,12 @@ type Held = (Vec<u32>, Option<crate::doc::import::Mode>);
 /// (parent product, id, ordinal), whose child in `old` is externally
 /// defined; that child's product is matched with `new`'s as an update
 /// matches products.
-pub fn external_parts(project: &Project, path: &str, old: &Opened, new: &Opened) -> BTreeMap<usize, Id> {
+pub fn external_parts(
+    project: &Project,
+    path: &str,
+    old: &Opened,
+    new: &Opened,
+) -> BTreeMap<usize, Id> {
     let (_, instances) = made_of(project, path);
     let defs = &old.products.definitions;
     let refs: Vec<ProductRef> = (0..defs.len()).map(|k| plan::product_of(old, k)).collect();
@@ -943,13 +948,17 @@ pub fn external_parts(project: &Project, path: &str, old: &Opened, new: &Opened)
         };
         let children = &defs[kp].children;
         let hits: BTreeSet<usize> = (0..children.len())
-            .filter(|&n| &*children[n].id == usage.as_str() && plan::usage_ordinal(old, kp, n) == u.ordinal)
+            .filter(|&n| {
+                &*children[n].id == usage.as_str() && plan::usage_ordinal(old, kp, n) == u.ordinal
+            })
             .map(|n| children[n].definition)
             .filter(|&c| defs[c].externally_defined())
             .collect();
         if hits.len() == 1 {
             let c = *hits.iter().next().expect("one");
-            by_ref.entry(refs[c].clone()).or_insert_with(|| inst.part.clone());
+            by_ref
+                .entry(refs[c].clone())
+                .or_insert_with(|| inst.part.clone());
         }
     }
     let olds: BTreeSet<ProductRef> = by_ref.keys().cloned().collect();
@@ -964,7 +973,11 @@ pub fn external_parts(project: &Project, path: &str, old: &Opened, new: &Opened)
 /// first imported instance's (an assembly an import made).
 pub fn file_of(project: &Project, part: &Id) -> Option<String> {
     let p = project.parts.get(part)?;
-    let features = || p.order().iter().filter_map(|f| p.features.get(f)?.as_ref().ok());
+    let features = || {
+        p.order()
+            .iter()
+            .filter_map(|f| p.features.get(f)?.as_ref().ok())
+    };
     features()
         .find_map(|f| match f {
             Feature::Import(i) => Some(i.file.path.clone()),
@@ -1008,7 +1021,9 @@ pub fn cross_flattened(project: &Project, path: &str) -> Option<(Id, Vec<String>
                 _ => None,
             })
             .collect();
-        if !imports.iter().any(|i| i.place.is_some()) || !imports.iter().any(|i| i.file.path == path) {
+        if !imports.iter().any(|i| i.place.is_some())
+            || !imports.iter().any(|i| i.file.path == path)
+        {
             continue;
         }
         let mut files: Vec<String> = imports.iter().map(|i| i.file.path.clone()).collect();
@@ -1022,9 +1037,12 @@ pub fn cross_flattened(project: &Project, path: &str) -> Option<(Id, Vec<String>
             let Some(first) = i.place.as_ref().and_then(|pl| pl.via.first()) else {
                 continue;
             };
-            let o = open
-                .entry(i.file.path.clone())
-                .or_insert_with(|| project.imports.get(&i.file.path).and_then(|f| super::opened(f).ok()));
+            let o = open.entry(i.file.path.clone()).or_insert_with(|| {
+                project
+                    .imports
+                    .get(&i.file.path)
+                    .and_then(|f| super::opened(f).ok())
+            });
             if let Some(o) = o {
                 foreign = !from_a_root(o, first);
             }
@@ -1886,7 +1904,12 @@ mod tests {
     #[test]
     fn each_external_usage_finds_the_part_it_placed() {
         let (_dir, mut s) = fresh();
-        call(&mut s, "import", json!({"path": crate::import::tests::set_path("asm.stp")})).unwrap();
+        call(
+            &mut s,
+            "import",
+            json!({"path": crate::import::tests::set_path("asm.stp")}),
+        )
+        .unwrap();
         let p = s.project();
         let f = p.imports.get("imports/asm.step").unwrap();
         let o = crate::import::opened(f).unwrap();
@@ -1898,7 +1921,10 @@ mod tests {
             .collect();
         assert_eq!(named, [("BOX", "box"), ("PIN", "pin")]);
         let box_ = crate::doc::id::Id::parse("box", "part").unwrap();
-        assert_eq!(super::file_of(p, &box_).as_deref(), Some("imports/box.step"));
+        assert_eq!(
+            super::file_of(p, &box_).as_deref(),
+            Some("imports/box.step")
+        );
         let asm = crate::doc::id::Id::parse("asm", "part").unwrap();
         assert_eq!(super::file_of(p, &asm).as_deref(), Some("imports/asm.step"));
     }

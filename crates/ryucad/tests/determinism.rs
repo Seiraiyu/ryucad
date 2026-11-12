@@ -6230,7 +6230,10 @@ fn external_imports_section(golden: &mut Golden) {
         .join("../ryustep/tests/data/external/set/asm.stp");
     let mut runs = Vec::new();
     for threads in [1, 4] {
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
         let dir = tempfile::tempdir().unwrap();
         ryucad::server::init(dir.path(), None).unwrap();
         let mut session = ryucad::session::Session::open(dir.path()).unwrap();
@@ -6240,7 +6243,9 @@ fn external_imports_section(golden: &mut Golden) {
             serde_json::json!({"path": set, "flatten": true, "part": "rig"}),
         ] {
             let req = ryucad::proto::Request::from_rpc("import", Some(params)).unwrap();
-            let mut v = pool.install(|| ryucad::server::handle(&mut session, req)).unwrap();
+            let mut v = pool
+                .install(|| ryucad::server::handle(&mut session, req))
+                .unwrap();
             for x in v["external"].as_array_mut().unwrap() {
                 x["source"] = serde_json::json!("…");
             }

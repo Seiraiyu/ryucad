@@ -6774,7 +6774,11 @@ fn external_assemblies_from_the_cli() {
     let beside = p.direct.parent().unwrap();
     fs::create_dir_all(beside.join("alone")).unwrap();
     fs::copy(set.join("asm.stp"), beside.join("alone/asm.stp")).unwrap();
-    let e = p.fails(&["import", "../alone/asm.stp"], "import_external_missing", 1);
+    let e = p.fails(
+        &["import", "../alone/asm.stp"],
+        "import_external_missing",
+        1,
+    );
     let files: Vec<&str> = e["details"]["missing"]
         .as_array()
         .unwrap()
@@ -6782,21 +6786,38 @@ fn external_assemblies_from_the_cli() {
         .map(|m| m["file"].as_str().unwrap())
         .collect();
     assert_eq!(files, ["box.stp", "cylinder.stp"], "{e}");
-    let (lib, parts) = (set.to_str().unwrap().to_owned(), set.join("parts").to_str().unwrap().to_owned());
-    let made = p.ok(&["import", "../alone/asm.stp", "--search", &lib, "--search", &parts]);
+    let (lib, parts) = (
+        set.to_str().unwrap().to_owned(),
+        set.join("parts").to_str().unwrap().to_owned(),
+    );
+    let made = p.ok(&[
+        "import",
+        "../alone/asm.stp",
+        "--search",
+        &lib,
+        "--search",
+        &parts,
+    ]);
     let kinds: Vec<(&str, &str)> = made["parts"]
         .as_array()
         .unwrap()
         .iter()
         .map(|x| (x["part"].as_str().unwrap(), x["kind"].as_str().unwrap()))
         .collect();
-    assert_eq!(kinds, [("asm", "assembly"), ("box", "part"), ("pin", "part")]);
+    assert_eq!(
+        kinds,
+        [("asm", "assembly"), ("box", "part"), ("pin", "part")]
+    );
     assert_eq!(made["external"].as_array().unwrap().len(), 2);
     // A new version: the same assembly, the box written by OCCT in AP242
     // (its product named as the AP214 box's is, so it is the same product).
     fs::create_dir_all(beside.join("v2/parts")).unwrap();
     fs::copy(set.join("asm.stp"), beside.join("v2/asm.stp")).unwrap();
-    fs::copy(set.join("parts/cylinder.stp"), beside.join("v2/parts/cylinder.stp")).unwrap();
+    fs::copy(
+        set.join("parts/cylinder.stp"),
+        beside.join("v2/parts/cylinder.stp"),
+    )
+    .unwrap();
     let ap242 = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/occt/box_ap242.stp"),
     )

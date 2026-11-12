@@ -663,7 +663,9 @@ impl Flat<'_> {
         let features = walked
             .iter()
             .map(|w| match self.cross {
-                Some((f, refs)) => flat_feature(f.opened[w.file], &refs[w.file], self.mode, w, &mut taken),
+                Some((f, refs)) => {
+                    flat_feature(f.opened[w.file], &refs[w.file], self.mode, w, &mut taken)
+                }
                 None => flat_feature(opened, self.file, self.mode, w, &mut taken),
             })
             .collect();
@@ -852,15 +854,37 @@ mod flat_tests {
         let t = crate::import::external::resolve(&source, file, opened, &[], "asm.stp").unwrap();
         let files = Files {
             opened: t.nodes.iter().map(|n| &*n.opened).collect(),
-            paths: vec!["imports/asm.step", "imports/box.step", "imports/cylinder.step"],
+            paths: vec![
+                "imports/asm.step",
+                "imports/box.step",
+                "imports/cylinder.step",
+            ],
             links: t.nodes.iter().map(|n| &n.links).collect(),
         };
         let w = walk_files(&files).unwrap();
         let seen: Vec<(usize, Vec<String>)> = w
             .iter()
-            .map(|w| (w.file, w.place.as_ref().unwrap().via.iter().map(|v| v.usage.clone()).collect()))
+            .map(|w| {
+                (
+                    w.file,
+                    w.place
+                        .as_ref()
+                        .unwrap()
+                        .via
+                        .iter()
+                        .map(|v| v.usage.clone())
+                        .collect(),
+                )
+            })
             .collect();
-        assert_eq!(seen, [(1, vec!["1".into()]), (2, vec!["2".into()]), (2, vec!["3".into()])]);
+        assert_eq!(
+            seen,
+            [
+                (1, vec!["1".into()]),
+                (2, vec!["2".into()]),
+                (2, vec!["3".into()])
+            ]
+        );
         let x = w[1].place.as_ref().unwrap().pose.origin_m[0];
         assert!((x - 0.05).abs() < 1e-12);
     }
@@ -990,11 +1014,18 @@ mod tests {
         use crate::doc::import::FileRef;
         let bytes = crate::import::tests::external_assembly(
             "ASM",
-            &[("BOX", "box.stp", [0.0; 3]), ("PIN", "pin.stp", [50.0, 0.0, 0.0]), ("PIN", "pin.stp", [0.0, 50.0, 0.0])],
+            &[
+                ("BOX", "box.stp", [0.0; 3]),
+                ("PIN", "pin.stp", [50.0, 0.0, 0.0]),
+                ("PIN", "pin.stp", [0.0, 50.0, 0.0]),
+            ],
         );
         let file = crate::doc::project::ImportFile::new(bytes);
         let opened = crate::import::opened(&file).unwrap();
-        let fr = FileRef { path: "imports/asm.step".into(), blake3: file.blake3.clone() };
+        let fr = FileRef {
+            path: "imports/asm.step".into(),
+            blake3: file.blake3.clone(),
+        };
         let defs = &opened.products.definitions;
         let k = |id: &str| defs.iter().position(|d| &*d.product_id == id).unwrap();
         let taken = |_: &str| false;
@@ -1011,17 +1042,26 @@ mod tests {
             taken: &taken,
             pdm: false,
             mode: None,
-            cross: Cross { external, ..Default::default() },
+            cross: Cross {
+                external,
+                ..Default::default()
+            },
         };
         let planned = fresh.plan().unwrap();
-        assert_eq!(planned.len(), 1, "only the assembly: its parts are other files'");
+        assert_eq!(
+            planned.len(),
+            1,
+            "only the assembly: its parts are other files'"
+        );
         let a = &planned[0];
         assert_eq!((a.part.as_str(), a.kind), ("asm", PartKind::Assembly));
         let placed: Vec<(String, f64, f64)> = a
             .features
             .iter()
             .map(|(_, f)| match f {
-                Feature::Instance(i) => (i.part.to_string(), i.pose.origin_m[0], i.pose.origin_m[1]),
+                Feature::Instance(i) => {
+                    (i.part.to_string(), i.pose.origin_m[0], i.pose.origin_m[1])
+                }
                 _ => panic!("{f:?}"),
             })
             .collect();
@@ -1030,7 +1070,10 @@ mod tests {
         assert!(placed[1].0 == "pin" && (placed[1].1 - 0.05).abs() < 1e-12);
         assert!(placed[2].0 == "pin" && (placed[2].2 - 0.05).abs() < 1e-12);
         // Without them, as 24.A left it: nothing to import.
-        let alone = Fresh { cross: Cross::default(), ..fresh };
+        let alone = Fresh {
+            cross: Cross::default(),
+            ..fresh
+        };
         assert_eq!(alone.plan().unwrap_err().code, Code::ImportBodyMissing);
     }
 
@@ -1041,7 +1084,10 @@ mod tests {
         use crate::doc::import::FileRef;
         let file = crate::doc::project::ImportFile::new(crate::import::tests::frame_file());
         let opened = crate::import::opened(&file).unwrap();
-        let fr = FileRef { path: "imports/frame.step".into(), blake3: file.blake3.clone() };
+        let fr = FileRef {
+            path: "imports/frame.step".into(),
+            blake3: file.blake3.clone(),
+        };
         let defs = &opened.products.definitions;
         let pin = defs.iter().position(|d| &*d.product_id == "P-1").unwrap();
         let taken = |_: &str| false;

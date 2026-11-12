@@ -196,7 +196,11 @@ impl Plan {
                     } else {
                         "new"
                     };
-                    format!("{}, from {} ({how})", text(&x["path"]), strings(&x["documents"]).join(", "))
+                    format!(
+                        "{}, from {} ({how})",
+                        text(&x["path"]),
+                        strings(&x["documents"]).join(", ")
+                    )
                 })
                 .collect(),
         }
@@ -268,7 +272,10 @@ mod tests {
         });
         assert_eq!(
             Plan::from_answer(&v).external,
-            ["imports/box.step, from box.stp (new)", "imports/pin.step, from pin.stp (updated)"]
+            [
+                "imports/box.step, from box.stp (new)",
+                "imports/pin.step, from pin.stp (updated)"
+            ]
         );
     }
     use serde_json::json;

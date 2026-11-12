@@ -12,7 +12,13 @@
 //! [`Planner`] then plans each file as an import of its own, leaves
 //! first, the referencing definitions placing the parts their files make.
 
+use super::plan::{self, Planned};
+use super::update::{self, Update};
+use super::{free, id_from};
+use crate::doc::id::Id;
+use crate::doc::import::{FileRef, Mode};
 use crate::doc::project::ImportFile;
+use crate::doc::project::{IMPORTS, Project};
 use crate::error::{Code, Error, Result};
 use ryustep::Opened;
 use ryustep::products::{Definition, External};
@@ -20,12 +26,6 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use super::plan::{self, Planned};
-use super::update::{self, Update};
-use super::{free, id_from};
-use crate::doc::id::Id;
-use crate::doc::import::{FileRef, Mode};
-use crate::doc::project::{IMPORTS, Project};
 
 /// A document's names as written, `\` read as `/`: its location, then
 /// its name.
@@ -89,7 +89,10 @@ pub fn candidates(x: &External, folder: &Path, search: &[PathBuf]) -> Vec<PathBu
 /// else, in `folder` and then each of `search`, the one file whose name
 /// matches a file name of it ignoring ASCII case.
 pub fn locate(x: &External, folder: &Path, search: &[PathBuf]) -> Option<PathBuf> {
-    if let Some(p) = candidates(x, folder, search).into_iter().find(|p| p.is_file()) {
+    if let Some(p) = candidates(x, folder, search)
+        .into_iter()
+        .find(|p| p.is_file())
+    {
         return Some(p);
     }
     let names = file_names(x);
@@ -417,7 +420,10 @@ impl Resolver<'_> {
             .collect();
         Error::new(
             Code::AssemblyCycle,
-            format!("files reference each other in a loop: {}", files.join(" > ")),
+            format!(
+                "files reference each other in a loop: {}",
+                files.join(" > ")
+            ),
         )
         .with("files", files)
     }
@@ -495,11 +501,13 @@ impl Tree {
 /// Whether a planned import feature or imported instance names `path`.
 pub fn names(all: &[Planned], path: &str) -> bool {
     use crate::doc::files::Feature;
-    all.iter().flat_map(|pl| &pl.features).any(|(_, f)| match f {
-        Feature::Import(i) => i.file.path == path,
-        Feature::Instance(i) => i.import.as_ref().is_some_and(|u| u.file == path),
-        _ => false,
-    })
+    all.iter()
+        .flat_map(|pl| &pl.features)
+        .any(|(_, f)| match f {
+            Feature::Import(i) => i.file.path == path,
+            Feature::Instance(i) => i.import.as_ref().is_some_and(|u| u.file == path),
+            _ => false,
+        })
 }
 
 /// `planned` with each part once: the features, removals and properties
@@ -605,7 +613,10 @@ impl<'a> Planner<'a> {
             .nodes
             .iter()
             .zip(&stored)
-            .map(|(n, (p, _))| FileRef { path: p.clone(), blake3: n.file.blake3.clone() })
+            .map(|(n, (p, _))| FileRef {
+                path: p.clone(),
+                blake3: n.file.blake3.clone(),
+            })
             .collect();
         let files = plan::Files {
             opened: tree.nodes.iter().map(|n| &*n.opened).collect(),
@@ -633,8 +644,19 @@ impl<'a> Planner<'a> {
         self.record(0, std::slice::from_ref(&flat));
         let mut flat = Some(flat);
         for (j, (path, reused)) in stored.into_iter().enumerate() {
-            let planned = if j == 0 { flat.take().into_iter().collect() } else { Vec::new() };
-            self.groups.push(Group { node: j, path, reused, from: None, planned, update: None });
+            let planned = if j == 0 {
+                flat.take().into_iter().collect()
+            } else {
+                Vec::new()
+            };
+            self.groups.push(Group {
+                node: j,
+                path,
+                reused,
+                from: None,
+                planned,
+                update: None,
+            });
             self.planned.insert(j);
         }
         Ok(())
@@ -664,7 +686,9 @@ impl<'a> Planner<'a> {
         let root = &self.project.root;
         let id = free(&base, |s| {
             let p = format!("{IMPORTS}/{s}.step");
-            self.project.imports.contains_key(&p) || root.join(&p).exists() || self.paths.contains(&p)
+            self.project.imports.contains_key(&p)
+                || root.join(&p).exists()
+                || self.paths.contains(&p)
         });
         let p = format!("{IMPORTS}/{id}.step");
         self.paths.push(p.clone());
@@ -675,7 +699,9 @@ impl<'a> Planner<'a> {
         for pl in planned {
             self.ids.push(pl.part.to_string());
             if let Some(r) = pl.definition {
-                self.part_of.entry((j, r)).or_insert_with(|| pl.part.clone());
+                self.part_of
+                    .entry((j, r))
+                    .or_insert_with(|| pl.part.clone());
             }
         }
     }
@@ -743,7 +769,10 @@ impl<'a> Planner<'a> {
                 if j != 0 && from.as_deref() == Some(blake3.as_str()) {
                     return Ok(());
                 }
-                let file_ref = FileRef { path: path.clone(), blake3 };
+                let file_ref = FileRef {
+                    path: path.clone(),
+                    blake3,
+                };
                 let stem = stem_of(&path);
                 let fresh = plan::Fresh {
                     opened: &node.opened,
@@ -753,16 +782,29 @@ impl<'a> Planner<'a> {
                     taken: &taken,
                     pdm: self.pdm,
                     mode: self.mode,
-                    cross: plan::Cross { external, ..Default::default() },
+                    cross: plan::Cross {
+                        external,
+                        ..Default::default()
+                    },
                 };
                 let mut u = update::plan(self.project, &node.opened, &file_ref, &fresh)?;
                 let planned = std::mem::take(&mut u.planned);
                 self.record(j, &planned);
-                self.groups.push(Group { node: j, path, reused: false, from, planned, update: Some(u) });
+                self.groups.push(Group {
+                    node: j,
+                    path,
+                    reused: false,
+                    from,
+                    planned,
+                    update: Some(u),
+                });
             }
             None => {
                 let (path, reused) = self.store(j);
-                let file_ref = FileRef { path: path.clone(), blake3 };
+                let file_ref = FileRef {
+                    path: path.clone(),
+                    blake3,
+                };
                 let stem = stem_of(&path);
                 let into = tree.roots_into(j);
                 let fresh = plan::Fresh {
@@ -776,7 +818,10 @@ impl<'a> Planner<'a> {
                     cross: plan::Cross {
                         external,
                         scope: (j != 0).then(|| tree.reach(j, &into)),
-                        bases: into.iter().filter_map(|&r| Some((r, tree.base(j, r)?))).collect(),
+                        bases: into
+                            .iter()
+                            .filter_map(|&r| Some((r, tree.base(j, r)?)))
+                            .collect(),
                     },
                 };
                 let planned = if j == 0 {
@@ -785,7 +830,14 @@ impl<'a> Planner<'a> {
                     fresh.make(&BTreeMap::new(), false, &[])?
                 };
                 self.record(j, &planned);
-                self.groups.push(Group { node: j, path, reused, from: None, planned, update: None });
+                self.groups.push(Group {
+                    node: j,
+                    path,
+                    reused,
+                    from: None,
+                    planned,
+                    update: None,
+                });
             }
         }
         Ok(())
@@ -822,11 +874,24 @@ mod tests {
         let t = tree(&set, "asm.stp", &[]).unwrap();
         assert_eq!(t.nodes.len(), 3);
         let names: Vec<Vec<String>> = t.nodes.iter().map(|n| n.documents.clone()).collect();
-        assert_eq!(names, [vec![], vec!["box.stp".to_owned()], vec!["cylinder.stp".to_owned()]]);
+        assert_eq!(
+            names,
+            [
+                vec![],
+                vec!["box.stp".to_owned()],
+                vec!["cylinder.stp".to_owned()]
+            ]
+        );
         assert!(t.nodes[2].source.ends_with("parts/cylinder.stp"));
         // Both placed products link to their files' one root.
         let o = &t.nodes[0].opened;
-        let k = |id: &str| o.products.definitions.iter().position(|d| &*d.product_id == id).unwrap();
+        let k = |id: &str| {
+            o.products
+                .definitions
+                .iter()
+                .position(|d| &*d.product_id == id)
+                .unwrap()
+        };
         assert_eq!(t.nodes[0].links.get(&k("BOX")).map(|l| l.0), Some(1));
         assert_eq!(t.nodes[0].links.get(&k("PIN")).map(|l| l.0), Some(2));
         // The documents' instances are interpreted.
@@ -839,7 +904,13 @@ mod tests {
     fn files_of_the_same_bytes_are_one_node_named_both_ways() {
         let pin = part_file("PIN", 2.0);
         let d = folder(&[
-            ("asm.stp", external_assembly("ASM", &[("A", "a.stp", [0.0; 3]), ("B", "b.stp", [20.0, 0.0, 0.0])])),
+            (
+                "asm.stp",
+                external_assembly(
+                    "ASM",
+                    &[("A", "a.stp", [0.0; 3]), ("B", "b.stp", [20.0, 0.0, 0.0])],
+                ),
+            ),
             ("a.stp", pin.clone()),
             ("b.stp", pin),
         ]);
@@ -851,8 +922,14 @@ mod tests {
     #[test]
     fn a_nested_assembly_is_followed_from_its_own_folder() {
         let d = folder(&[
-            ("top.stp", external_assembly("TOP", &[("SUB", "sub/sub.stp", [0.0; 3])])),
-            ("sub/sub.stp", external_assembly("SUB", &[("PIN", "pin.stp", [5.0, 0.0, 0.0])])),
+            (
+                "top.stp",
+                external_assembly("TOP", &[("SUB", "sub/sub.stp", [0.0; 3])]),
+            ),
+            (
+                "sub/sub.stp",
+                external_assembly("SUB", &[("PIN", "pin.stp", [5.0, 0.0, 0.0])]),
+            ),
             ("sub/pin.stp", part_file("PIN", 2.0)),
         ]);
         let t = tree(d.path(), "top.stp", &[]).unwrap();
@@ -864,7 +941,10 @@ mod tests {
     #[test]
     fn search_folders_are_looked_in_after_the_files_own() {
         let d = folder(&[
-            ("a/asm.stp", external_assembly("ASM", &[("BOX", "box.stp", [0.0; 3])])),
+            (
+                "a/asm.stp",
+                external_assembly("ASM", &[("BOX", "box.stp", [0.0; 3])]),
+            ),
             ("lib/box.stp", part_file("BOX", 10.0)),
         ]);
         let t = tree(&d.path().join("a"), "asm.stp", &[d.path().join("lib")]).unwrap();
@@ -912,7 +992,10 @@ mod tests {
         ]);
         let a = d.path().join("a");
         let s = [d.path().join("s")];
-        assert_eq!(locate(&doc("one.stp", None), &a, &s), Some(a.join("one.stp")));
+        assert_eq!(
+            locate(&doc("one.stp", None), &a, &s),
+            Some(a.join("one.stp"))
+        );
         assert_eq!(
             locate(&doc("PART1.STEP", None), &a, &s),
             Some(s[0].join("Part1.step"))
@@ -933,25 +1016,47 @@ mod tests {
     #[test]
     fn every_missing_document_is_named_at_once() {
         let d = folder(&[
-            ("asm.stp", external_assembly("ASM", &[
-                ("BOX", "box.stp", [0.0; 3]),
-                ("SUB", "sub.stp", [10.0, 0.0, 0.0]),
-                ("NUT", "nut.stp", [20.0, 0.0, 0.0]),
-            ])),
-            ("sub.stp", external_assembly("SUB", &[("PIN", "pin.stp", [0.0; 3])])),
+            (
+                "asm.stp",
+                external_assembly(
+                    "ASM",
+                    &[
+                        ("BOX", "box.stp", [0.0; 3]),
+                        ("SUB", "sub.stp", [10.0, 0.0, 0.0]),
+                        ("NUT", "nut.stp", [20.0, 0.0, 0.0]),
+                    ],
+                ),
+            ),
+            (
+                "sub.stp",
+                external_assembly("SUB", &[("PIN", "pin.stp", [0.0; 3])]),
+            ),
         ]);
-        let e = tree(d.path(), "asm.stp", &[d.path().join("lib")]).err().unwrap();
+        let e = tree(d.path(), "asm.stp", &[d.path().join("lib")])
+            .err()
+            .unwrap();
         assert_eq!(e.code, Code::ImportExternalMissing);
         let m = e.details["missing"].as_array().unwrap();
         let files: Vec<(&str, &str)> = m
             .iter()
             .map(|x| (x["file"].as_str().unwrap(), x["reason"].as_str().unwrap()))
             .collect();
-        assert_eq!(files, [("box.stp", "not_found"), ("pin.stp", "not_found"), ("nut.stp", "not_found")]);
+        assert_eq!(
+            files,
+            [
+                ("box.stp", "not_found"),
+                ("pin.stp", "not_found"),
+                ("nut.stp", "not_found")
+            ]
+        );
         assert_eq!(m[0]["products"], json!(["BOX"]));
         assert_eq!(m[0]["referenced_by"], "asm.stp");
         assert!(m[1]["referenced_by"].as_str().unwrap().ends_with("sub.stp"));
-        assert_eq!(m[0]["searched"].as_array().unwrap().len(), 2, "its folder and lib");
+        assert_eq!(
+            m[0]["searched"].as_array().unwrap().len(),
+            2,
+            "its folder and lib"
+        );
         for f in ["box.stp", "pin.stp", "nut.stp"] {
             assert!(e.message.contains(f), "{}", e.message);
         }
@@ -960,22 +1065,47 @@ mod tests {
     #[test]
     fn a_file_with_two_roots_needs_the_product_named() {
         let block = |x: f64| {
-            ryukei::primitive::block(ryukei::name::OpKey(1), x, 0.01, 0.01, &ryukei::geom::Rigid::IDENTITY)
-                .unwrap()
-                .0
+            ryukei::primitive::block(
+                ryukei::name::OpKey(1),
+                x,
+                0.01,
+                0.01,
+                &ryukei::geom::Rigid::IDENTITY,
+            )
+            .unwrap()
+            .0
         };
         let roots = crate::import::tests::written(vec![
-            ryustep::Product { id: "A".into(), name: "A".into(), bodies: vec![block(0.01)], ..Default::default() },
-            ryustep::Product { id: "B".into(), name: "B".into(), bodies: vec![block(0.02)], ..Default::default() },
+            ryustep::Product {
+                id: "A".into(),
+                name: "A".into(),
+                bodies: vec![block(0.01)],
+                ..Default::default()
+            },
+            ryustep::Product {
+                id: "B".into(),
+                name: "B".into(),
+                bodies: vec![block(0.02)],
+                ..Default::default()
+            },
         ]);
         let d = folder(&[
-            ("x.stp", external_assembly("ASM", &[("X", "two.stp", [0.0; 3])])),
-            ("b.stp", external_assembly("ASM", &[("B", "two.stp", [0.0; 3])])),
+            (
+                "x.stp",
+                external_assembly("ASM", &[("X", "two.stp", [0.0; 3])]),
+            ),
+            (
+                "b.stp",
+                external_assembly("ASM", &[("B", "two.stp", [0.0; 3])]),
+            ),
             ("two.stp", roots),
         ]);
         let e = tree(d.path(), "x.stp", &[]).err().unwrap();
         assert_eq!(e.code, Code::ImportExternalAmbiguous);
-        assert_eq!(e.details["roots"], json!([{"id": "A", "name": "A"}, {"id": "B", "name": "B"}]));
+        assert_eq!(
+            e.details["roots"],
+            json!([{"id": "A", "name": "A"}, {"id": "B", "name": "B"}])
+        );
         assert_eq!(e.details["product"]["id"], "X");
         // Named by id, it is that root.
         let t = tree(d.path(), "b.stp", &[]).unwrap();
@@ -991,7 +1121,12 @@ mod tests {
         ]);
         let e = tree(d.path(), "a.stp", &[]).err().unwrap();
         assert_eq!(e.code, Code::AssemblyCycle);
-        assert_eq!(e.details["files"].as_array().unwrap().len(), 3, "{}", e.details);
+        assert_eq!(
+            e.details["files"].as_array().unwrap().len(),
+            3,
+            "{}",
+            e.details
+        );
     }
 
     #[test]
@@ -1000,20 +1135,28 @@ mod tests {
             .map(|n| {
                 (
                     format!("f{n}.stp"),
-                    external_assembly(&format!("A{n}"), &[(&format!("A{}", n + 1), &format!("f{}.stp", n + 1), [0.0; 3])]),
+                    external_assembly(
+                        &format!("A{n}"),
+                        &[(&format!("A{}", n + 1), &format!("f{}.stp", n + 1), [0.0; 3])],
+                    ),
                 )
             })
             .collect();
         files.push((format!("f{}.stp", MAX_DEPTH + 2), part_file("END", 1.0)));
-        let refs: Vec<(&str, Vec<u8>)> = files.iter().map(|(p, b)| (p.as_str(), b.clone())).collect();
+        let refs: Vec<(&str, Vec<u8>)> =
+            files.iter().map(|(p, b)| (p.as_str(), b.clone())).collect();
         let d = folder(&refs);
         let e = tree(d.path(), "f0.stp", &[]).err().unwrap();
-        assert_eq!((e.code, &e.details["param"]), (Code::InvalidParam, &json!("external")));
+        assert_eq!(
+            (e.code, &e.details["param"]),
+            (Code::InvalidParam, &json!("external"))
+        );
     }
 
     #[test]
     fn a_document_of_another_format_is_missing_for_its_format() {
-        let text = String::from_utf8(external_assembly("ASM", &[("BOX", "box.sldprt", [0.0; 3])])).unwrap();
+        let text = String::from_utf8(external_assembly("ASM", &[("BOX", "box.sldprt", [0.0; 3])]))
+            .unwrap();
         // The document's format, as CAx-IF writes it.
         let text = text.replace(
             "ENDSEC;\nEND-ISO-10303-21;",
@@ -1024,7 +1167,10 @@ mod tests {
              #904=DESCRIPTIVE_REPRESENTATION_ITEM('data format','SLDPRT');\n\
              ENDSEC;\nEND-ISO-10303-21;",
         );
-        let d = folder(&[("asm.stp", text.into_bytes()), ("box.sldprt", b"binary".to_vec())]);
+        let d = folder(&[
+            ("asm.stp", text.into_bytes()),
+            ("box.sldprt", b"binary".to_vec()),
+        ]);
         let e = tree(d.path(), "asm.stp", &[]).err().unwrap();
         assert_eq!(e.code, Code::ImportExternalMissing);
         assert_eq!(e.details["missing"][0]["reason"], "format");
@@ -1042,7 +1188,13 @@ mod tests {
         let order: Vec<(usize, &str, Vec<&str>)> = p
             .groups
             .iter()
-            .map(|g| (g.node, g.path.as_str(), g.planned.iter().map(|pl| pl.part.as_str()).collect()))
+            .map(|g| {
+                (
+                    g.node,
+                    g.path.as_str(),
+                    g.planned.iter().map(|pl| pl.part.as_str()).collect(),
+                )
+            })
             .collect();
         assert_eq!(
             order,
@@ -1053,7 +1205,11 @@ mod tests {
             ]
         );
         let all: Vec<Planned> = p.groups.iter().flat_map(|g| g.planned.clone()).collect();
-        for path in ["imports/box.step", "imports/cylinder.step", "imports/asm.step"] {
+        for path in [
+            "imports/box.step",
+            "imports/cylinder.step",
+            "imports/asm.step",
+        ] {
             assert!(names(&all, path), "{path}");
         }
     }
@@ -1066,9 +1222,10 @@ mod tests {
             new: false,
             kind: PartKind::Part,
             definition: None,
-            features: vec![(Id::parse(f, "feature").unwrap(), crate::doc::files::Feature::Import(
-                crate::import::tests::import_of(f),
-            ))],
+            features: vec![(
+                Id::parse(f, "feature").unwrap(),
+                crate::doc::files::Feature::Import(crate::import::tests::import_of(f)),
+            )],
             removed: Vec::new(),
             properties: Default::default(),
             props_of: None,
