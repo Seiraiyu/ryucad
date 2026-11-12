@@ -15,6 +15,7 @@ pub mod census;
 mod error;
 pub use ryu_part21 as part21;
 pub mod products;
+pub mod properties;
 pub mod read;
 pub mod schema;
 pub mod styles;
