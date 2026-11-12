@@ -544,6 +544,140 @@ fn bus_items(
     connectors
 }
 
+/// How a compare paints one owner (plan 4.B).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mark {
+    Added,
+    Changed,
+    /// Its place alone changed on the sheet: from the revision's origin
+    /// to the working one's.
+    Moved {
+        from: Point,
+        to: Point,
+    },
+}
+
+/// What a compare paints on one sheet: each owner's mark, the revision's
+/// owners drawn ghosted, and a line of counts at its foot.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Marks {
+    pub marks: BTreeMap<String, Mark>,
+    pub ghosts: BTreeSet<String>,
+    pub strip: String,
+}
+
+impl Marks {
+    pub fn is_empty(&self) -> bool {
+        self.marks.is_empty() && self.ghosts.is_empty()
+    }
+}
+
+/// `it` in colour `c`: its lines and text; a fill that was its line's
+/// colour (an arrow's) too, a body's fill kept.
+fn recolour(it: &Item, c: Rgb) -> Item {
+    let mut it = it.clone();
+    match &mut it {
+        Item::Polyline { stroke, fill, .. } => {
+            if *fill == Some(*stroke) {
+                *fill = Some(c);
+            }
+            *stroke = c;
+        }
+        Item::Circle { stroke, fill, .. } => match stroke {
+            Some(s) => *s = c,
+            None => *fill = Some(c),
+        },
+        Item::Arc { stroke, .. }
+        | Item::Bezier { stroke, .. }
+        | Item::Bus { stroke, .. }
+        | Item::Frame { stroke, .. } => *stroke = c,
+        Item::Text { colour, .. } => *colour = c,
+        Item::Begin(_) | Item::End => {}
+    }
+    it
+}
+
+/// `it` as a ghost: recoloured, its lines dashed and its outlines unfilled.
+fn ghost(it: &Item, c: Rgb) -> Item {
+    let mut it = recolour(it, c);
+    match &mut it {
+        Item::Polyline { fill, dash, .. } => {
+            *fill = None;
+            *dash = true;
+        }
+        Item::Circle {
+            stroke: Some(_),
+            fill,
+            ..
+        } => *fill = None,
+        _ => {}
+    }
+    it
+}
+
+/// The working sheet `now` marked against the revision's `then` (plan
+/// 4.B): the revision's ghosted owners first, dashed in `diff_removed`;
+/// then `now`'s items, a marked owner's in `diff_added` or
+/// `diff_changed`; a moved part's leader from where it stood; and the
+/// strip under the sheet. Owners carry through, so SVG can key them.
+pub fn compare(now: &Painted, then: Option<&Painted>, marks: &Marks, look: &Look) -> Painted {
+    let mut out = Painted {
+        items: Vec::new(),
+        owners: Vec::new(),
+        ..now.clone()
+    };
+    let removed = look.role(Role::DiffRemoved);
+    if let Some(then) = then {
+        for (it, o) in then.items.iter().zip(&then.owners) {
+            if let Some(k) = o
+                && marks.ghosts.contains(k)
+                && !matches!(it, Item::Begin(_) | Item::End)
+            {
+                out.items.push(ghost(it, removed));
+                out.owners.push(Some(k.clone()));
+            }
+        }
+    }
+    for (it, o) in now.items.iter().zip(&now.owners) {
+        let colour = o
+            .as_ref()
+            .and_then(|k| marks.marks.get(k))
+            .map(|m| match m {
+                Mark::Added => look.role(Role::DiffAdded),
+                _ => look.role(Role::DiffChanged),
+            });
+        out.items
+            .push(colour.map_or_else(|| it.clone(), |c| recolour(it, c)));
+        out.owners.push(o.clone());
+    }
+    for (k, m) in &marks.marks {
+        if let Mark::Moved { from, to } = m
+            && from != to
+        {
+            out.items.push(Item::Polyline {
+                points: vec![*from, *to],
+                stroke: look.role(Role::DiffChanged),
+                fill: None,
+                width: LINE / 2,
+                dash: true,
+            });
+            out.owners.push(Some(k.clone()));
+        }
+    }
+    if !marks.strip.is_empty() {
+        out.items.push(text_item(
+            &marks.strip,
+            [0, -2 * GRID],
+            SIZE,
+            Anchor::Start,
+            false,
+            look.role(Role::Text),
+        ));
+        out.owners.push(None);
+    }
+    out
+}
+
 /// [`sheet_in`] in the built-in light look.
 pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
     sheet_in(block, layout, sid, &Look::default())
@@ -861,6 +995,86 @@ mod tests {
         assert!(svg.contains("stroke-dasharray"), "frames are dashed");
     }
     use crate::testing::seeded;
+
+    #[test]
+    fn a_compare_recolours_ghosts_and_leads() {
+        use crate::style::{Look, Role};
+        let b = seeded(2, 4);
+        let out = crate::engine::lay_out(&b).unwrap();
+        let sid = out.layout.sheets.keys().next().unwrap().clone();
+        let p = sheet(&b, &out.layout, &sid);
+        let look = Look::default();
+        let mut keys = out
+            .layout
+            .placed
+            .iter()
+            .filter(|(_, x)| x.sheet == sid)
+            .map(|(k, _)| k.clone());
+        let (new, gone, moved) = (
+            keys.next().unwrap(),
+            keys.next().unwrap(),
+            keys.next().unwrap(),
+        );
+        let at = out.layout.placed[&moved].at;
+        let marks = Marks {
+            marks: BTreeMap::from([
+                (new.clone(), Mark::Added),
+                (
+                    moved.clone(),
+                    Mark::Moved {
+                        from: [at[0] - GRID, at[1]],
+                        to: at,
+                    },
+                ),
+            ]),
+            ghosts: BTreeSet::from([gone.clone()]),
+            strip: "Against HEAD: 1 added, 0 changed, 1 moved, 1 removed".into(),
+        };
+        let c = compare(&p, Some(&p), &marks, &look);
+        assert_eq!(c.items.len(), c.owners.len());
+        let first = c
+            .owners
+            .iter()
+            .position(|o| o.as_deref() == Some(gone.as_str()))
+            .unwrap();
+        assert_eq!(first, 0, "ghosts first, under everything");
+        let ghosts = c
+            .items
+            .iter()
+            .zip(&c.owners)
+            .take_while(|(_, o)| o.as_deref() == Some(gone.as_str()));
+        for (it, _) in ghosts {
+            if let Item::Polyline {
+                stroke, dash, fill, ..
+            } = it
+            {
+                assert_eq!(
+                    (*stroke, *dash, *fill),
+                    (look.role(Role::DiffRemoved), true, None)
+                );
+            }
+        }
+        for (it, o) in c.items.iter().zip(&c.owners) {
+            if o.as_deref() == Some(new.as_str())
+                && let Item::Polyline { stroke, .. } = it
+            {
+                assert_eq!(*stroke, look.role(Role::DiffAdded));
+            }
+        }
+        assert!(c.items.iter().zip(&c.owners).any(|(it, o)| o.as_deref() == Some(moved.as_str())
+            && matches!(it, Item::Polyline { dash: true, points, .. } if points.len() == 2)), "a leader");
+        assert!(
+            c.items
+                .iter()
+                .any(|i| matches!(i, Item::Text { text, .. } if text.starts_with("Against HEAD")))
+        );
+        // Nothing marked: the sheet as it was.
+        let none = compare(&p, None, &Marks::default(), &look);
+        assert_eq!(
+            (none.items, none.owners),
+            (p.items.clone(), p.owners.clone())
+        );
+    }
 
     #[test]
     fn every_item_has_its_owner_beside_it() {

@@ -75,15 +75,15 @@ pub fn layouts(from: &Layout, to: &Layout) -> Vec<Entry> {
     out
 }
 
+/// An instruction with its ID.
+pub type Numbered = (String, Instruction);
+
 /// The instructions `to` has that `from` hasn't (added) and those `from`
 /// has that `to` hasn't (dropped), by what they say: a renumbered one is
 /// neither.
-pub fn instructions(
-    from: &Layout,
-    to: &Layout,
-) -> (Vec<(String, Instruction)>, Vec<(String, Instruction)>) {
+pub fn instructions(from: &Layout, to: &Layout) -> (Vec<Numbered>, Vec<Numbered>) {
     let has = |l: &Layout, i: &Instruction| l.instructions.values().any(|x| x == i);
-    let only = |a: &Layout, b: &Layout| -> Vec<(String, Instruction)> {
+    let only = |a: &Layout, b: &Layout| -> Vec<Numbered> {
         a.instructions
             .iter()
             .filter(|(_, i)| !has(b, i))
